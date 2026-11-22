@@ -4173,20 +4173,19 @@ def test_forward_grid_is_one_cta_a_block_then_whole_waves(sm_count):
 # rows per SM times the SMs, from there the fewest whole waves of 6 CTAs per
 # SM whose CTAs walk at most 2 blocks.  A row less than the cut times the SMs
 # and the cut times the SMs on 148, 152 and 212 SMs on every architecture
-# (the cuts: 6500 rows per SM on sm_100a, 5600 on sm_103a, 8192 on sm_107a),
-# and rows elsewhere.
+# (the cuts: 8192 rows per SM on sm_100a and sm_107a, 5600 on sm_103a), and
+# rows elsewhere.
 FORWARD_GRIDS = [
     (1, 148, "sm_100a", 1),
     (520 * 148 + 1, 148, "sm_100a", 4811),  # 4811 blocks, a CTA a block
-    (6500 * 148 - 1, 148, "sm_100a", 60125),  # a row below the cut: a CTA a block
-    (6500 * 148, 148, "sm_100a", 30192),  # the cut: 60125 blocks, 34 waves of 888
-    (6500 * 152 - 1, 152, "sm_100a", 61750),
-    (6500 * 152, 152, "sm_100a", 31008),  # 61750 blocks, 34 waves of 912
-    (6500 * 212 - 1, 212, "sm_100a", 86125),
-    (6500 * 212, 212, "sm_100a", 43248),  # 86125 blocks, 34 waves of 1272
-    (8192 * 148 - 1, 148, "sm_100a", 38184),  # 75776 blocks, 43 waves
+    (32737 * 48, 212, "sm_100a", 98211),  # 7412 rows per SM: a CTA a block
+    (8192 * 148 - 1, 148, "sm_100a", 75776),  # a row below the cut: a CTA a block
+    (8192 * 148, 148, "sm_100a", 38184),  # the cut: 75776 blocks, 43 waves of 888
+    (8192 * 152 - 1, 152, "sm_100a", 77824),
+    (8192 * 152, 152, "sm_100a", 39216),  # 77824 blocks, 43 waves of 912
+    (8192 * 212 - 1, 212, "sm_100a", 108544),
+    (8192 * 212, 212, "sm_100a", 54696),  # 108544 blocks, 43 waves of 1272
     (32737 * 48, 148, "sm_100a", 49728),  # 98211 blocks, 56 waves of 888
-    (32737 * 48, 212, "sm_100a", 49608),  # 7412 rows per SM: 39 waves of 1272
     (2**31 - 1, 148, "sm_100a", 67109712),  # 2**27 blocks, 75574 waves
     (1, 152, "sm_103a", 1),
     (5600 * 148 - 1, 148, "sm_103a", 51800),
@@ -4224,7 +4223,7 @@ STRIDED_FORWARD_GRIDS = [
     (500 * 152, 152, "sm_100a", 2736),  # 4750 blocks, 3 waves of 912
     (500 * 212 - 1, 212, "sm_100a", 6625),
     (500 * 212, 212, "sm_100a", 3816),  # 6625 blocks, 3 waves of 1272
-    (6500 * 148 - 1, 148, "sm_100a", 30192),  # 60125 blocks, 34 waves of 888
+    (8192 * 148 - 1, 148, "sm_100a", 38184),  # 75776 blocks, 43 waves of 888
     (400 * 148 - 1, 148, "sm_103a", 3700),
     (400 * 148, 148, "sm_103a", 2664),  # 3700 blocks, 3 waves of 888
     (400 * 152 - 1, 152, "sm_103a", 3800),  # a row below the cut: a CTA a block

@@ -649,17 +649,16 @@ def test_small_row_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_c
 # architecture ("below": one CTA a block), the fewest whole waves of
 # ``max_blocks_per_cta`` blocks per slot at or above it ("first") and four
 # times that ("last"); a slot's block is 96 rows per SM (6 slots of 16 rows).
-# On packed rows (the cut ``persistent_from_rows_per_sm``: 6500 rows per SM on
-# sm_100a, 5600 on sm_103a, 8192 on sm_107a) that is 67, 68 and 272 blocks per
-# slot on sm_100a (6432, 6528 and 26112 rows per SM), 58, 60 and 240 on
-# sm_103a (5568, 5760 and 23040) and 85, 86 and 344 on sm_107a (8160, 8256 and
-# 33024); on rows whose ``z`` is sliced from a projection (the cut
-# ``persistent_from_rows_per_sm_strided``: 500 rows per SM on sm_100a, 400 on
-# sm_103a and sm_107a) 5, 6 and 24 on sm_100a (480, 576 and 2304 rows per SM)
-# and 4, 6 and 24 on sm_103a and sm_107a (384, 576 and 2304).  The ``fwd``
-# module runs such rows at every row count (the tiny forward takes packed
-# rows only), so each probe launches it, "below" one CTA a block and "first"
-# and "last" whole waves.
+# On packed rows (the cut ``persistent_from_rows_per_sm``: 8192 rows per SM on
+# sm_100a and sm_107a, 5600 on sm_103a) that is 85, 86 and 344 blocks per slot
+# on sm_100a and sm_107a (8160, 8256 and 33024 rows per SM) and 58, 60 and 240
+# on sm_103a (5568, 5760 and 23040); on rows whose ``z`` is sliced from a
+# projection (the cut ``persistent_from_rows_per_sm_strided``: 500 rows per SM
+# on sm_100a, 400 on sm_103a and sm_107a) 5, 6 and 24 on sm_100a (480, 576
+# and 2304 rows per SM) and 4, 6 and 24 on sm_103a and sm_107a (384, 576 and
+# 2304).  The ``fwd`` module runs such rows at every row count (the tiny
+# forward takes packed rows only), so each probe launches it, "below" one CTA
+# a block and "first" and "last" whole waves.
 FORWARD_EDGES = ("below", "first", "last")
 FORWARD_LAYOUTS = ("packed", "strided")
 # The layouts whose probes compare ``_held_mean`` of ``HELD_RUNS`` alone and

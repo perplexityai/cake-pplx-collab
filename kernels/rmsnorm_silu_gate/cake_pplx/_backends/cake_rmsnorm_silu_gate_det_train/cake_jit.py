@@ -109,22 +109,18 @@ prefetches of the CTA's next block and of the first block of the CTA a wave
 later) and ``persistent_from_rows_per_sm_strided`` for other rows (strided,
 broadcast over tokens, or one token, whose token stride is passed as 0),
 which take no prefetch; the forward of packed rows only has the first.  On
-packed rows the cut is 6500 on sm_100a and 5600 on sm_103a, each the fewest
-rows per SM measured from which the whole waves are not slower than one CTA
-per block, neither with idle gaps between the calls (full clocks) nor back
-to back, and 8192 on sm_107a, unchanged.  On B200 (sm_100a, 148 SMs)
-back-to-back calls run at the GPU's 1000 W power cap: there the whole waves
-need 1 to 4 % less energy per checkpointed training step (two forwards and
-the backward) and 2 to 7 % less per forward, and run the step 2 to 3.4 %
-faster from 600 to 8000 rows per SM; with idle gaps one CTA per block is up
-to about 4 % faster below about 6500 rows per SM, and from 6500 to 8192 rows
-per SM the whole waves are within 0.5 % of it.  GB300 (sm_103a, 152 SMs)
-does not reach its power cap: the whole waves are faster both ways from 5600
-rows per SM (the step 1 to 2 %, the forward 1.4 to 5.5 %), tie from 2000 to
-4000 rows per SM and are slower with idle gaps from 1000 rows per SM down
-(the forward up to 7 % at 400).  On other rows, which run without the
-prefetches, the whole waves gain from far fewer rows per SM, so their cut is
-500 rows per SM on sm_100a and 400 on sm_103a and sm_107a: from there
+packed rows the cut is 5600 on sm_103a, the fewest rows per SM measured
+from which the whole waves are not slower than one CTA per block, neither
+with idle gaps between the calls (full clocks) nor back to back, and 8192
+on sm_100a and sm_107a, unchanged.  On GB300 (sm_103a, 152 SMs) the whole
+waves are faster both ways from 5600 rows per SM (the step 1 to 2 %, the
+forward 1.4 to 5.5 %), tie from 2000 to 4000 rows per SM and are slower
+with idle gaps from 1000 rows per SM down (the forward up to 7 % at 400).
+On B200 (sm_100a, 148 SMs) the whole waves of packed rows are up to about
+1 % slower in each call's GPU time with a cold L2 from 6500 to 8000 rows
+per SM, so sm_100a keeps the cut of 8192.  On other rows, which run without
+the prefetches, the whole waves gain from far fewer rows per SM, so their
+cut is 500 rows per SM on sm_100a and 400 on sm_103a and sm_107a: from there
 strided rows and rows broadcast over tokens are faster on whole waves, or
 within noise, in three measurements: back to back, with idle gaps (cold
 L2), and each call's GPU time with a cold L2 (CUPTI).  On B200 strided rows
@@ -224,7 +220,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "persistent_row_blocks",
             "max_blocks_per_cta": 2,
             "persistent_from_rows_per_sm": {
-                "sm_100a": 6500,
+                "sm_100a": 8192,
                 "sm_103a": 5600,
             },
             "persistent_from_rows_per_sm_strided": {

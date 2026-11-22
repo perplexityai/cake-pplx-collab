@@ -124,11 +124,13 @@ launch whole waves of CTAs from a cut of rows per SM of each architecture
 instead of from 8192 rows per SM everywhere, one CTA per 16-row block below
 it, with the same ``y`` bits on either grid; every band is unchanged.  On
 rows the kernel reads as packed (``x`` and ``z`` of head stride 128 and token
-stride ``H * 128``, which get its L2 prefetches) the cut is 6500 on SM100,
-5600 on SM103 and, unchanged, 8192 on SM107; on other rows (strided,
-broadcast over tokens or one token) of the forwards that read any layout,
-which run without the prefetches and gain from whole waves from far fewer
-rows per SM, it is 500 on SM100 and 400 on SM103 and SM107.  The backends'
+stride ``H * 128``, which get its L2 prefetches) the cut is 5600 on SM103
+and, unchanged, 8192 on SM100 (on B200 the whole waves of such rows were up
+to about 1 % slower per call with a cold L2 from 6500 to 8000 rows per SM)
+and SM107; on other rows (strided, broadcast over tokens or one token) of
+the forwards that read any layout, which run without the prefetches and
+gain from whole waves from far fewer rows per SM, it is 500 on SM100 and
+400 on SM103 and SM107.  The backends'
 ``cake_jit.launch_grid`` takes the architecture (keyword ``arch``) and
 whether the rows are read as packed (keyword ``packed``) for those
 forwards.

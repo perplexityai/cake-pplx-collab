@@ -4188,27 +4188,28 @@ STRIDED_CUT = "persistent_from_rows_per_sm_strided"
 # (rows, SMs, architecture, CTAs) of the pipelined forward of the architecture
 # (``fwd_pipe`` on sm_100a and sm_103a, ``fwd_pipe_packed`` on sm_107a) on
 # rows the kernel reads as packed: one CTA per 16-row block below the
-# architecture's cut of rows per SM times the SMs (6500 rows per SM on
-# sm_100a, 5600 on sm_103a, 8192 on sm_107a), from there the fewest whole
-# waves of 6 CTAs per SM whose CTAs walk at most 2 blocks, never more CTAs
-# than blocks.  A row less than the cut times the SMs and the cut times the
-# SMs on 148, 152 and 212 SMs on every architecture, and the rows of the
-# bands.
+# architecture's cut of rows per SM times the SMs (8192 rows per SM on
+# sm_100a and sm_107a, 5600 on sm_103a), from there the fewest whole waves of
+# 6 CTAs per SM whose CTAs walk at most 2 blocks, never more CTAs than
+# blocks.  A row less than the cut times the SMs and the cut times the SMs on
+# 148, 152 and 212 SMs on every architecture, and the rows of the bands.  On
+# sm_100a the cut lies past the bands of packed rows of the pipelined forward
+# (up to 6500 rows per SM; the mid forward runs packed rows past it), so the
+# pipelined forward runs every packed row it is routed one CTA a block there.
 PIPE_FORWARD_GRIDS = [
     (1, 148, "sm_100a", 1),
     (36 * 148 + 1, 148, "sm_100a", 334),  # B200 first pipelined band's first row
     (85 * 148, 148, "sm_100a", 787),  # its last row: 787 blocks
     (520 * 148 + 1, 148, "sm_100a", 4811),  # B200 second pipelined band's first row
-    (6500 * 148 - 1, 148, "sm_100a", 60125),  # a row below the cut: a CTA a block
-    (6500 * 148, 148, "sm_100a", 30192),  # the cut, the band's last row: 34 waves
-    (6500 * 152 - 1, 152, "sm_100a", 61750),
-    (6500 * 152, 152, "sm_100a", 31008),  # 61750 blocks, 34 waves of 912
-    (6500 * 212 - 1, 212, "sm_100a", 86125),
-    (6500 * 212, 212, "sm_100a", 43248),  # 86125 blocks, 34 waves of 1272
-    (8192 * 148 - 1, 148, "sm_100a", 38184),  # 75776 blocks, 43 waves
-    (8192 * 148, 148, "sm_100a", 38184),  # 75776 blocks, 43 waves
+    (6500 * 148, 148, "sm_100a", 60125),  # its last row: a CTA a block
+    (32737 * 48, 212, "sm_100a", 98211),  # 7412 rows per SM: a CTA a block
+    (8192 * 148 - 1, 148, "sm_100a", 75776),  # a row below the cut: a CTA a block
+    (8192 * 148, 148, "sm_100a", 38184),  # the cut: 75776 blocks, 43 waves of 888
+    (8192 * 152 - 1, 152, "sm_100a", 77824),
+    (8192 * 152, 152, "sm_100a", 39216),  # 77824 blocks, 43 waves of 912
+    (8192 * 212 - 1, 212, "sm_100a", 108544),
+    (8192 * 212, 212, "sm_100a", 54696),  # 108544 blocks, 43 waves of 1272
     (32737 * 48, 148, "sm_100a", 49728),  # 98211 blocks, 56 waves of 888
-    (32737 * 48, 212, "sm_100a", 49608),  # 7412 rows per SM: 39 waves of 1272
     (600 * 152 + 1, 152, "sm_103a", 5701),  # GB300 first pipelined band's first row
     (5600 * 148 - 1, 148, "sm_103a", 51800),
     (5600 * 148, 148, "sm_103a", 26640),  # 51800 blocks, 30 waves of 888
@@ -4247,7 +4248,7 @@ STRIDED_PIPE_FORWARD_GRIDS = [
     (500 * 212 - 1, 212, "sm_100a", 6625),
     (500 * 212, 212, "sm_100a", 3816),  # 6625 blocks, 3 waves of 1272
     (2000 * 148, 148, "sm_100a", 9768),  # 18500 blocks, 11 waves of 888
-    (6500 * 148 - 1, 148, "sm_100a", 30192),  # 60125 blocks, 34 waves of 888
+    (6500 * 148, 148, "sm_100a", 30192),  # second band's last row: 34 waves
     (600 * 152 + 1, 152, "sm_103a", 3648),  # GB300 first band's first row: 4 waves
     (400 * 148 - 1, 148, "sm_103a", 3700),
     (400 * 148, 148, "sm_103a", 2664),  # 3700 blocks, 3 waves of 888

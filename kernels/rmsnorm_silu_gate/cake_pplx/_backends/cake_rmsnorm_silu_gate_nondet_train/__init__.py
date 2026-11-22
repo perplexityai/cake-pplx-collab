@@ -115,15 +115,18 @@ of rows per SM of each architecture instead of from 8192 rows per SM
 everywhere, one CTA per 16-row block below it.  On rows the kernel reads as
 packed (``x`` and ``z`` of head stride 128 and token stride ``H * 128``, the
 rows that get its L2 prefetches; the records'
-``persistent_from_rows_per_sm``, now keyed by architecture) the cut is 6500
-on sm_100a, 5600 on sm_103a and, unchanged, 8192 on sm_107a; on other rows
-of a program that reads any layout (strided, broadcast over tokens or one
-token; a new ``persistent_from_rows_per_sm_strided``: the deterministic
-forward of rows of any layout, and the pipelined forward of sm_100a and
-sm_103a), which run without the prefetches and gain from whole waves from
-far fewer rows per SM, it is 500 on sm_100a and 400 on sm_103a and
-sm_107a.  ``y`` is the same bits on either grid, and every band is
-unchanged.
+``persistent_from_rows_per_sm``, now keyed by architecture) the cut is 5600
+on sm_103a and, unchanged, 8192 on sm_100a and sm_107a (on B200 the whole
+waves of packed rows were up to about 1 % slower per call with a cold L2
+from 6500 to 8000 rows per SM; the pipelined forward of sm_100a, whose
+bands of packed rows end at 6500 rows per SM, runs them one CTA a block as
+in 0.2.13); on other rows of a program that reads any layout (strided,
+broadcast over tokens or one token; a new
+``persistent_from_rows_per_sm_strided``: the deterministic forward of rows
+of any layout, and the pipelined forward of sm_100a and sm_103a), which run
+without the prefetches and gain from whole waves from far fewer rows per
+SM, it is 500 on sm_100a and 400 on sm_103a and sm_107a.  ``y`` is the same
+bits on either grid, and every band is unchanged.
 ``cake_jit.launch_grid`` of both packages takes the architecture (keyword
 ``arch``), which the records of those forwards need (without it, a
 ``ValueError``), and whether the kernel reads the rows as packed (keyword

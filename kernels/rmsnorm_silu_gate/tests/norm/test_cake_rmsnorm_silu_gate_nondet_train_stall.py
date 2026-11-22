@@ -34,8 +34,8 @@ of the band).  The pipelined forwards (the deterministic package's forward
 programs with a gate that does not flush) launch one 128-thread CTA per block
 of 16 rows below the deterministic package's cut of rows per SM and from
 there whole waves of 6 CTAs per SM that each walk at most 2 blocks (the cut
-of the architecture: on rows the kernel reads as packed 6500 on SM100, 5600
-on SM103 and 8192 on SM107; on other rows of the pipelined forward of SM100
+of the architecture: on rows the kernel reads as packed 5600 on SM103 and
+8192 on SM100 and SM107; on other rows of the pipelined forward of SM100
 and SM103, ``x`` or ``z`` broadcast over tokens or one token, 500 on SM100
 and 400 on SM103); the mid
 forward launches whole waves of 6 CTAs per SM that each walk at most 2 blocks
@@ -220,14 +220,19 @@ bound, in each of their bands, on packed rows and, on SM100 and SM103, on
 ``x`` and ``z`` broadcast over tokens, at its first and last rows per SM, at
 the deterministic package's probes the band holds (the most whole blocks of
 16 rows per slot below the cut of such rows, where a CTA runs one block, the
-fewest whole waves from there and four times that: on packed rows 67, 68 and
-272 on SM100, 58, 60 and 240 on SM103 and 85, 86 and 344 on SM107; on
-broadcast rows 5, 6 and 24 on SM100 and 4, 6 and 24 on SM103) and at the cut
-itself, one-head tokens whose rows are exactly the cut times the SMs (the
-first row count of whole waves: on SM100 the band of packed rows ends
-there).  The cut of broadcast rows (500 rows per SM on SM100, 400 on SM103)
-lies in the extra-long forward's band, so no pipelined forward runs such
-rows at it: on SM100 the pipelined forward runs them one CTA a block in its
+fewest whole waves from there and four times that: on packed rows 85, 86
+and 344 on SM100 and SM107 and 58, 60 and 240 on SM103; on broadcast rows
+5, 6 and 24 on SM100 and 4, 6 and 24 on SM103) and at the cut itself,
+one-head tokens whose rows are exactly the cut times the SMs (the first row
+count of whole waves).  The cut of packed rows on SM100 (8192 rows per SM)
+lies past the pipelined forward's bands of packed rows (up to 6500 rows per
+SM; the mid forward runs them past it), so the pipelined forward runs every
+packed row it is routed there one CTA a block, and none of the probes
+around that cut runs on SM100: the bands' last rows (85 and 6500 rows per
+SM) hold its most rows of one CTA a block.  The cut of broadcast rows (500
+rows per SM on SM100, 400 on SM103) lies in the extra-long forward's band,
+so no pipelined forward runs such rows at it: on SM100 the pipelined
+forward runs them one CTA a block in its
 first band (up to 85 rows per SM) and whole waves in its second (from 521),
 on SM103 whole waves in each of its bands (from 601 and from 8193).  Of the
 probes around that cut only the fewest whole waves (on SM100) and four
@@ -1615,12 +1620,15 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # ``persistent_from_rows_per_sm_strided``; ``strided`` rows (``z`` the gate
 # columns of a projection) run no pipelined forward, and on sm_107a neither do
 # broadcast rows.  The probes on packed rows, as blocks per slot (a slot's
-# block is 96 rows per SM): below, first and last 67, 68 and 272 on sm_100a
-# (6432, 6528 and 26112 rows per SM: only "below" in the second band, which
-# ends at the cut, 6500, where "cut" runs), 58, 60 and 240 on sm_103a (5568,
-# 5760 and 23040: "below", "first" and "cut", 5600, in the first band, up to
-# 6000, "last" in the last, from 8193) and 85, 86 and 344 on sm_107a (8160,
-# 8256 and 33024, and "cut", 8192, in its band from 281).  The probes on
+# block is 96 rows per SM): below, first and last 85, 86 and 344 on sm_100a
+# (8160, 8256 and 33024 rows per SM, and "cut", 8192: all past the second
+# band, which ends at 6500, where the mid forward runs packed rows, so on
+# sm_100a no probe around the cut runs and the pipelined forward's edge of
+# whole waves on packed rows is not reachable; its bands' last rows, 85 and
+# 6500, run its most rows of one CTA a block), 58, 60 and 240 on sm_103a
+# (5568, 5760 and 23040: "below", "first" and "cut", 5600, in the first band,
+# up to 6000, "last" in the last, from 8193) and 85, 86 and 344 on sm_107a
+# (8160, 8256 and 33024, and "cut", 8192, in its band from 281).  The probes on
 # broadcast rows (``FORWARD_BANDS``, the bands of packed rows, with the cut of
 # other rows): 5, 6 and 24 on sm_100a (480, 576 and 2304 rows per SM; the
 # cut 500) and 4, 6 and 24 on sm_103a (384, 576 and 2304; the cut 400).  That
