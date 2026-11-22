@@ -4232,27 +4232,29 @@ PIPE_FORWARD_GRIDS = [
 ]
 # (rows, SMs, architecture, CTAs) of ``fwd_pipe`` (sm_100a and sm_103a) on rows
 # the kernel does not read as packed (``x`` or ``z`` broadcast over tokens, or
-# one token): its cut of such rows, 1000 rows per SM on both, a row less than
-# it times the SMs and it times the SMs on 148, 152 and 212 SMs, and rows of
-# its bands.
+# one token): its cut of such rows, 500 rows per SM on sm_100a and 400 on
+# sm_103a, a row less than it times the SMs and it times the SMs on 148, 152
+# and 212 SMs, and rows of its bands (the second band of sm_100a, from 521
+# rows per SM, and the first of sm_103a, from 601, lie past the cut: whole
+# waves from their first rows on).
 STRIDED_PIPE_FORWARD_GRIDS = [
     (85 * 148, 148, "sm_100a", 787),  # B200 first pipelined band's last row
-    (520 * 148 + 1, 148, "sm_100a", 4811),  # B200 second pipelined band's first row
-    (1000 * 148 - 1, 148, "sm_100a", 9250),  # a row below the cut: a CTA a block
-    (1000 * 148, 148, "sm_100a", 5328),  # the cut: 9250 blocks, 6 waves of 888
-    (1000 * 152 - 1, 152, "sm_100a", 9500),
-    (1000 * 152, 152, "sm_100a", 5472),  # 9500 blocks, 6 waves of 912
-    (1000 * 212 - 1, 212, "sm_100a", 13250),
-    (1000 * 212, 212, "sm_100a", 7632),  # 13250 blocks, 6 waves of 1272
+    (520 * 148 + 1, 148, "sm_100a", 2664),  # B200 second band's first row: 3 waves
+    (500 * 148 - 1, 148, "sm_100a", 4625),  # a row below the cut: a CTA a block
+    (500 * 148, 148, "sm_100a", 2664),  # the cut: 4625 blocks, 3 waves of 888
+    (500 * 152 - 1, 152, "sm_100a", 4750),
+    (500 * 152, 152, "sm_100a", 2736),  # 4750 blocks, 3 waves of 912
+    (500 * 212 - 1, 212, "sm_100a", 6625),
+    (500 * 212, 212, "sm_100a", 3816),  # 6625 blocks, 3 waves of 1272
     (2000 * 148, 148, "sm_100a", 9768),  # 18500 blocks, 11 waves of 888
     (6500 * 148 - 1, 148, "sm_100a", 30192),  # 60125 blocks, 34 waves of 888
-    (600 * 152 + 1, 152, "sm_103a", 5701),  # GB300 first pipelined band's first row
-    (1000 * 148 - 1, 148, "sm_103a", 9250),
-    (1000 * 148, 148, "sm_103a", 5328),
-    (1000 * 152 - 1, 152, "sm_103a", 9500),  # a row below the cut: a CTA a block
-    (1000 * 152, 152, "sm_103a", 5472),  # the cut: 9500 blocks, 6 waves of 912
-    (1000 * 212 - 1, 212, "sm_103a", 13250),
-    (1000 * 212, 212, "sm_103a", 7632),
+    (600 * 152 + 1, 152, "sm_103a", 3648),  # GB300 first band's first row: 4 waves
+    (400 * 148 - 1, 148, "sm_103a", 3700),
+    (400 * 148, 148, "sm_103a", 2664),  # 3700 blocks, 3 waves of 888
+    (400 * 152 - 1, 152, "sm_103a", 3800),  # a row below the cut: a CTA a block
+    (400 * 152, 152, "sm_103a", 2736),  # the cut: 3800 blocks, 3 waves of 912
+    (400 * 212 - 1, 212, "sm_103a", 5300),
+    (400 * 212, 212, "sm_103a", 3816),  # 5300 blocks, 3 waves of 1272
     (2000 * 152, 152, "sm_103a", 10032),  # 19000 blocks, 11 waves of 912
     (5600 * 152 - 1, 152, "sm_103a", 27360),  # 53200 blocks, 30 waves of 912
     (6000 * 152, 152, "sm_103a", 29184),  # first band's last row: 32 waves

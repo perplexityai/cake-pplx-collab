@@ -779,8 +779,8 @@ MODULES: dict[str, dict[str, Any]] = {
                 "sm_103a": 5600,
             },
             "persistent_from_rows_per_sm_strided": {
-                "sm_100a": 1000,
-                "sm_103a": 1000,
+                "sm_100a": 500,
+                "sm_103a": 400,
             },
             "rows_per_block": 16,
         },

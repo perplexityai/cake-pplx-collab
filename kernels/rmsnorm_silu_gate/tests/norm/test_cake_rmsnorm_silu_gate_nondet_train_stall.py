@@ -36,7 +36,8 @@ of 16 rows below the deterministic package's cut of rows per SM and from
 there whole waves of 6 CTAs per SM that each walk at most 2 blocks (the cut
 of the architecture: on rows the kernel reads as packed 6500 on SM100, 5600
 on SM103 and 8192 on SM107; on other rows of the pipelined forward of SM100
-and SM103, ``x`` or ``z`` broadcast over tokens or one token, 1000); the mid
+and SM103, ``x`` or ``z`` broadcast over tokens or one token, 500 on SM100
+and 400 on SM103); the mid
 forward launches whole waves of 6 CTAs per SM that each walk at most 2 blocks
 of 16 rows; the long and the
 extra-long forward launch whole waves of 3 CTAs per SM that each walk at most
@@ -221,9 +222,19 @@ the deterministic package's probes the band holds (the most whole blocks of
 16 rows per slot below the cut of such rows, where a CTA runs one block, the
 fewest whole waves from there and four times that: on packed rows 67, 68 and
 272 on SM100, 58, 60 and 240 on SM103 and 85, 86 and 344 on SM107; on
-broadcast rows 10, 12 and 48) and at the cut itself, one-head tokens whose
-rows are exactly the cut times the SMs (the first row count of whole waves:
-on SM100 the band of packed rows ends there).  On broadcast rows busy and
+broadcast rows 5, 6 and 24 on SM100 and 4, 6 and 24 on SM103) and at the cut
+itself, one-head tokens whose rows are exactly the cut times the SMs (the
+first row count of whole waves: on SM100 the band of packed rows ends
+there).  The cut of broadcast rows (500 rows per SM on SM100, 400 on SM103)
+lies in the extra-long forward's band, so no pipelined forward runs such
+rows at it: on SM100 the pipelined forward runs them one CTA a block in its
+first band (up to 85 rows per SM) and whole waves in its second (from 521),
+on SM103 whole waves in each of its bands (from 601 and from 8193).  Of the
+probes around that cut only the fewest whole waves (on SM100) and four
+times that run; the bands' first and last rows hold the pipelined forward's
+calls nearest the cut (on SM100 its most rows of one CTA a block, 85 rows
+per SM, and its fewest of whole waves, 521; on SM103 its fewest of whole
+waves, 601).  On broadcast rows busy and
 alone are each ``_held_mean`` of ``HELD_RUNS`` samples, not a median of
 seven (``HELD_MEAN_FORWARD_LAYOUTS``): such a call reads one token and
 writes only ``y``, a few microseconds near its cut, where beside one held
@@ -1607,18 +1618,27 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # block is 96 rows per SM): below, first and last 67, 68 and 272 on sm_100a
 # (6432, 6528 and 26112 rows per SM: only "below" in the second band, which
 # ends at the cut, 6500, where "cut" runs), 58, 60 and 240 on sm_103a (5568,
-# 5760 and 23040: "below" and "first" in the first band, up to 6000, "last"
-# in the last, from 8193) and 85, 86 and 344 on sm_107a (8160, 8256 and 33024,
-# in its band from 281); on broadcast rows 10, 12 and 48 (960, 1152 and 4608
-# rows per SM: in the second band of sm_100a and the first of sm_103a).  A
-# probe outside the band skips.
+# 5760 and 23040: "below", "first" and "cut", 5600, in the first band, up to
+# 6000, "last" in the last, from 8193) and 85, 86 and 344 on sm_107a (8160,
+# 8256 and 33024, and "cut", 8192, in its band from 281).  The probes on
+# broadcast rows (``FORWARD_BANDS``, the bands of packed rows, with the cut of
+# other rows): 5, 6 and 24 on sm_100a (480, 576 and 2304 rows per SM; the
+# cut 500) and 4, 6 and 24 on sm_103a (384, 576 and 2304; the cut 400).  That
+# cut lies in the extra-long forward's band (sm_100a: 401 to 520 rows per SM;
+# sm_103a: 241 to 600), so the pipelined forward does not run broadcast rows
+# at it, and "below" and "cut" skip on both and "first" on sm_103a: on
+# sm_100a "first" and "last" run in the second band (521 to 6500), whose first
+# row is the fewest of whole waves, and the first band (37 to 85) runs one CTA
+# a block up to its last row; on sm_103a "last" runs in the first band (601 to
+# 6000), whose rows are all whole waves.  A probe outside the band skips.
 PIPELINED_FORWARD_EDGES = ("band_first", "band_last", "below", "first", "last", "cut")
 PIPELINED_FORWARD_LAYOUTS = (*FORWARD_LAYOUTS, "broadcast")
 # The layouts whose probes compare ``_held_mean`` of ``HELD_RUNS`` alone and
 # busy samples (as the first-band tests do), not the medians of
 # ``PROPORTIONAL_RUNS`` pairs, with the same bound.  A call on rows broadcast
-# over tokens reads one token and writes only ``y``, so near the cut of such
-# rows ("below", "first", "cut") it takes a few microseconds, and on SM100 and
+# over tokens reads one token and writes only ``y``, so in the first band of
+# sm_100a and near the cut of such rows (the first rows of the bands past it,
+# "band_first", and "first") it takes a few microseconds, and on SM100 and
 # SM103 the event timer reads a call that short on steps about 1 microsecond
 # apart.  There one CTA's share of the blocks is small, and beside one held SM
 # the bound is only a few percent above the ratio of the extra round of CTAs:

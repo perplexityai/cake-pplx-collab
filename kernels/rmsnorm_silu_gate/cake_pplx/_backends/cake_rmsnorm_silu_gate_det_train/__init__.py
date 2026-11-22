@@ -41,11 +41,13 @@ Host design (every control is a keyword; no environment variable):
   ``x`` and ``z`` of head stride 128 and token stride ``H * 128``, the rows
   that get its L2 prefetches; its record's ``persistent_from_rows_per_sm``)
   6500 on SM100, 5600 on SM103 and 8192 on SM107, and on other rows (a
-  record's ``persistent_from_rows_per_sm_strided``) 1000 on each.  One
-  module per architecture, and on SM107 a second one for packed rows (``x``
-  and ``z`` both read as contiguous ``[T, H, 128]``;
-  ``cake_jit.forward_module``) that computes a row with the same FP32
-  operations in the same order, so the layout changes no bits.  Up to
+  record's ``persistent_from_rows_per_sm_strided``, which run without the
+  prefetches and gain from whole waves from far fewer rows per SM) 500 on
+  SM100 and 400 on SM103 and SM107.  One module per architecture, and on
+  SM107 a second one for packed rows (``x`` and ``z`` both read as
+  contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a
+  row with the same FP32 operations in the same order, so the layout changes
+  no bits.  Up to
   ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
   rows of ``cake_jit.FWD_TINY_GAP_ROWS`` (17 to 32 on SM107), inputs whose
   rows are packed (``x`` and ``z`` both read as contiguous ``[T, H, 128]``,

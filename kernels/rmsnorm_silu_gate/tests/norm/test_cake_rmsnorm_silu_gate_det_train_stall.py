@@ -654,8 +654,12 @@ def test_small_row_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_c
 # slot on sm_100a (6432, 6528 and 26112 rows per SM), 58, 60 and 240 on
 # sm_103a (5568, 5760 and 23040) and 85, 86 and 344 on sm_107a (8160, 8256 and
 # 33024); on rows whose ``z`` is sliced from a projection (the cut
-# ``persistent_from_rows_per_sm_strided``: 1000 rows per SM on each) 10, 12
-# and 48 (960, 1152 and 4608 rows per SM) on each architecture.
+# ``persistent_from_rows_per_sm_strided``: 500 rows per SM on sm_100a, 400 on
+# sm_103a and sm_107a) 5, 6 and 24 on sm_100a (480, 576 and 2304 rows per SM)
+# and 4, 6 and 24 on sm_103a and sm_107a (384, 576 and 2304).  The ``fwd``
+# module runs such rows at every row count (the tiny forward takes packed
+# rows only), so each probe launches it, "below" one CTA a block and "first"
+# and "last" whole waves.
 FORWARD_EDGES = ("below", "first", "last")
 FORWARD_LAYOUTS = ("packed", "strided")
 # The layouts whose probes compare ``_held_mean`` of ``HELD_RUNS`` alone and

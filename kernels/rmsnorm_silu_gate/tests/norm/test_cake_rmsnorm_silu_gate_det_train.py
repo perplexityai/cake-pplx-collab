@@ -4211,32 +4211,33 @@ FORWARD_GRIDS = [
 ]
 # (rows, SMs, architecture, CTAs) of the forward of rows of any layout
 # (``fwd``) on rows the kernel does not read as packed (strided, broadcast
-# over tokens, or one token): its cut of such rows, 1000 rows per SM on every
-# architecture, a row less than it times the SMs and it times the SMs on 148,
-# 152 and 212 SMs.  The forward of packed rows only (``fwd_packed``) keeps its
-# cut of packed rows on any rows (``FORWARD_GRIDS``).
+# over tokens, or one token): its cut of such rows, 500 rows per SM on sm_100a
+# and 400 on sm_103a and sm_107a, a row less than it times the SMs and it
+# times the SMs on 148, 152 and 212 SMs.  The forward of packed rows only
+# (``fwd_packed``) keeps its cut of packed rows on any rows
+# (``FORWARD_GRIDS``).
 STRIDED_FORWARD_GRIDS = [
     (1, 148, "sm_100a", 1),
-    (1000 * 148 - 1, 148, "sm_100a", 9250),  # a row below the cut: a CTA a block
-    (1000 * 148, 148, "sm_100a", 5328),  # the cut: 9250 blocks, 6 waves of 888
-    (1000 * 152 - 1, 152, "sm_100a", 9500),
-    (1000 * 152, 152, "sm_100a", 5472),  # 9500 blocks, 6 waves of 912
-    (1000 * 212 - 1, 212, "sm_100a", 13250),
-    (1000 * 212, 212, "sm_100a", 7632),  # 13250 blocks, 6 waves of 1272
+    (500 * 148 - 1, 148, "sm_100a", 4625),  # a row below the cut: a CTA a block
+    (500 * 148, 148, "sm_100a", 2664),  # the cut: 4625 blocks, 3 waves of 888
+    (500 * 152 - 1, 152, "sm_100a", 4750),
+    (500 * 152, 152, "sm_100a", 2736),  # 4750 blocks, 3 waves of 912
+    (500 * 212 - 1, 212, "sm_100a", 6625),
+    (500 * 212, 212, "sm_100a", 3816),  # 6625 blocks, 3 waves of 1272
     (6500 * 148 - 1, 148, "sm_100a", 30192),  # 60125 blocks, 34 waves of 888
-    (1000 * 148 - 1, 148, "sm_103a", 9250),
-    (1000 * 148, 148, "sm_103a", 5328),
-    (1000 * 152 - 1, 152, "sm_103a", 9500),  # a row below the cut: a CTA a block
-    (1000 * 152, 152, "sm_103a", 5472),  # the cut: 9500 blocks, 6 waves of 912
-    (1000 * 212 - 1, 212, "sm_103a", 13250),
-    (1000 * 212, 212, "sm_103a", 7632),
+    (400 * 148 - 1, 148, "sm_103a", 3700),
+    (400 * 148, 148, "sm_103a", 2664),  # 3700 blocks, 3 waves of 888
+    (400 * 152 - 1, 152, "sm_103a", 3800),  # a row below the cut: a CTA a block
+    (400 * 152, 152, "sm_103a", 2736),  # the cut: 3800 blocks, 3 waves of 912
+    (400 * 212 - 1, 212, "sm_103a", 5300),
+    (400 * 212, 212, "sm_103a", 3816),  # 5300 blocks, 3 waves of 1272
     (5600 * 152 - 1, 152, "sm_103a", 27360),  # 53200 blocks, 30 waves of 912
-    (1000 * 148 - 1, 148, "sm_107a", 9250),
-    (1000 * 148, 148, "sm_107a", 5328),
-    (1000 * 152 - 1, 152, "sm_107a", 9500),
-    (1000 * 152, 152, "sm_107a", 5472),
-    (1000 * 212 - 1, 212, "sm_107a", 13250),  # a row below the cut: a CTA a block
-    (1000 * 212, 212, "sm_107a", 7632),  # the cut: 13250 blocks, 6 waves of 1272
+    (400 * 148 - 1, 148, "sm_107a", 3700),
+    (400 * 148, 148, "sm_107a", 2664),  # 3700 blocks, 3 waves of 888
+    (400 * 152 - 1, 152, "sm_107a", 3800),
+    (400 * 152, 152, "sm_107a", 2736),  # 3800 blocks, 3 waves of 912
+    (400 * 212 - 1, 212, "sm_107a", 5300),  # a row below the cut: a CTA a block
+    (400 * 212, 212, "sm_107a", 3816),  # the cut: 5300 blocks, 3 waves of 1272
     (32737 * 48, 212, "sm_107a", 49608),  # 7412 rows per SM: 39 waves of 1272
     (2**31 - 1, 216, "sm_107a", 67109472),
 ]
@@ -4325,8 +4326,10 @@ def test_forward_packed_is_the_kernels_packed_rows_test():
 
 
 # Inputs of ``T`` tokens of ``H`` heads past every tiny forward's cut and from
-# 1000 rows per SM on up to 220 SMs (4600 x 48 rows; one token of 220800 heads)
-# in each layout, and whether the forward kernel reads them as packed rows:
+# 1000 rows per SM on up to 220 SMs (4600 x 48 rows; one token of 220800
+# heads), past the cut of rows not read as packed (500 rows per SM on sm_100a,
+# 400 on sm_103a and sm_107a), in each layout, and whether the forward kernel
+# reads them as packed rows:
 # contiguous ``[T, H, 128]``, flat ``[T * H, 128]`` and one head ``[T, 1,
 # 128]`` (both strides as packed rows), a misaligned input (copied once to
 # packed rows); not a gate sliced from a projection, head-major rows, ``x``

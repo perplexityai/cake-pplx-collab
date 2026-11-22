@@ -126,10 +126,12 @@ it, with the same ``y`` bits on either grid; every band is unchanged.  On
 rows the kernel reads as packed (``x`` and ``z`` of head stride 128 and token
 stride ``H * 128``, which get its L2 prefetches) the cut is 6500 on SM100,
 5600 on SM103 and, unchanged, 8192 on SM107; on other rows (strided,
-broadcast over tokens or one token) of the forwards that read any layout it
-is 1000.  The backends' ``cake_jit.launch_grid`` takes the architecture
-(keyword ``arch``) and whether the rows are read as packed (keyword
-``packed``) for those forwards.
+broadcast over tokens or one token) of the forwards that read any layout,
+which run without the prefetches and gain from whole waves from far fewer
+rows per SM, it is 500 on SM100 and 400 on SM103 and SM107.  The backends'
+``cake_jit.launch_grid`` takes the architecture (keyword ``arch``) and
+whether the rows are read as packed (keyword ``packed``) for those
+forwards.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

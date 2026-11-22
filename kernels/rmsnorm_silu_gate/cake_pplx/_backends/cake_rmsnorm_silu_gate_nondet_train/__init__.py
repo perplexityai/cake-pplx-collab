@@ -120,12 +120,15 @@ on sm_100a, 5600 on sm_103a and, unchanged, 8192 on sm_107a; on other rows
 of a program that reads any layout (strided, broadcast over tokens or one
 token; a new ``persistent_from_rows_per_sm_strided``: the deterministic
 forward of rows of any layout, and the pipelined forward of sm_100a and
-sm_103a) it is 1000 on each.  ``y`` is the same bits on either grid, and
-every band is unchanged.  ``cake_jit.launch_grid`` of both packages takes
-the architecture (keyword ``arch``), which the records of those forwards
-need (without it, a ``ValueError``), and whether the kernel reads the rows
-as packed (keyword ``packed``, ``cake_jit.forward_packed``); ``run_module``
-passes the device's architecture and the call's own test.
+sm_103a), which run without the prefetches and gain from whole waves from
+far fewer rows per SM, it is 500 on sm_100a and 400 on sm_103a and
+sm_107a.  ``y`` is the same bits on either grid, and every band is
+unchanged.
+``cake_jit.launch_grid`` of both packages takes the architecture (keyword
+``arch``), which the records of those forwards need (without it, a
+``ValueError``), and whether the kernel reads the rows as packed (keyword
+``packed``, ``cake_jit.forward_packed``); ``run_module`` passes the device's
+architecture and the call's own test.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

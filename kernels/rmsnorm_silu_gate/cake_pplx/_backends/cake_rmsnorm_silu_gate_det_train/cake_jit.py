@@ -123,12 +123,20 @@ does not reach its power cap: the whole waves are faster both ways from 5600
 rows per SM (the step 1 to 2 %, the forward 1.4 to 5.5 %), tie from 2000 to
 4000 rows per SM and are slower with idle gaps from 1000 rows per SM down
 (the forward up to 7 % at 400).  On other rows, which run without the
-prefetches, the whole waves are faster from about 1000 rows per SM on every
-architecture (GB300: 2 to 9 % with idle gaps from 1000 to 6600 rows per SM,
-4 to 11 % back to back; VR200, sm_107a: 3 to 13 % back to back), so their cut
-is 1000 rows per SM on each.  The grid changes no bits: a CTA runs each of
-its blocks' rows with the same FP32 operations in the same order whatever
-the grid.  The tiny forward launches
+prefetches, the whole waves gain from far fewer rows per SM, so their cut is
+500 rows per SM on sm_100a and 400 on sm_103a and sm_107a: from there
+strided rows and rows broadcast over tokens are faster on whole waves, or
+within noise, in three measurements: back to back, with idle gaps (cold
+L2), and each call's GPU time with a cold L2 (CUPTI).  On B200 strided rows
+are faster from 300 rows per SM, broadcast rows faster or equal from 500 (at
+300 they are 1.3 % slower in GPU time and 5.3 % slower with idle gaps); on
+GB300 both are faster from 300 in GPU time and within 0.9 % with idle gaps
+from 400; on VR200 (sm_107a) both are faster from 300 in GPU time, within
+0.8 % with idle gaps at 300 and faster at 400.  Further up the gain grows
+(GB300: 2 to 9 % with idle gaps from 1000 to 6600 rows per SM, 4 to 11 %
+back to back; VR200: 3 to 13 % back to back).  The grid changes no bits: a
+CTA runs each of its blocks' rows with the same FP32 operations in the same
+order whatever the grid.  The tiny forward launches
 ``ceil(rows / rows_per_cta)`` CTAs whatever the SM count, CTA ``b`` running
 block ``b`` alone.  The backward launches
 ``min(blocks, ctas_per_sm * SMs)`` CTAs of ``rows_per_block``-row blocks; past
@@ -220,8 +228,8 @@ MODULES: dict[str, dict[str, Any]] = {
                 "sm_103a": 5600,
             },
             "persistent_from_rows_per_sm_strided": {
-                "sm_100a": 1000,
-                "sm_103a": 1000,
+                "sm_100a": 500,
+                "sm_103a": 400,
             },
             "rows_per_block": 16,
         },
@@ -284,7 +292,7 @@ MODULES: dict[str, dict[str, Any]] = {
                 "sm_107a": 8192,
             },
             "persistent_from_rows_per_sm_strided": {
-                "sm_107a": 1000,
+                "sm_107a": 400,
             },
             "rows_per_block": 16,
         },
