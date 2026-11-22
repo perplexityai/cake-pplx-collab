@@ -1037,7 +1037,12 @@ SHAPES_L2N = (
     ((2048,), 16),
     ((4000, 96), 32),
     ((5000, 3000), 64),
+    # the serial route below 16 heads: with the norm off its backward launches the
+    # separate dav program; with it the dav_l2n* records and the hinted dqkg_*l2n
+    ((300, 129), 12),
 )
+# the backward-route rows: the three middle rows of SHAPES_L2N and its 12-head row
+SHAPES_L2N_ROUTES = SHAPES_L2N[1:4] + SHAPES_L2N[5:]
 # A judged draw runs the FP64 reference and the naive tier, token by token: rows of up to this many tokens are judged
 # at any head count; a larger row keeps its exact checks only (its results finite), and the test names the row that
 # judges its route.
@@ -1294,7 +1299,7 @@ def test_l2n_is_judged_against_the_exact_reference(
 
 
 @pytest.mark.parametrize("gate", GATES)
-@pytest.mark.parametrize("shape", SHAPES_L2N[1:4], ids=_shape_id)
+@pytest.mark.parametrize("shape", SHAPES_L2N_ROUTES, ids=_shape_id)
 def test_l2n_paths_are_judged(
     shape, gate: str, record_property, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1629,6 +1634,9 @@ L2N_ARENA_ROWS = [
     ((100, 640, 77, 1000, 129), 2),
     ((20, 20, 20, 20, 20, 20, 20), 8),
     ((129, 300), 16),
+    # 9-15 heads: with the norm off a lean arena refuses them (the separate dav
+    # program); with it the dav_l2n* records write a whole dAqk the lean layouts hold
+    ((129, 300), 12),
 ]
 
 

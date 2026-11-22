@@ -687,7 +687,12 @@ SHAPES_L2N = (
     ((2048,), 16),
     ((4000, 96), 32),
     ((5000, 3000), 64),
+    # the serial route below 16 heads: with the norm off its backward launches the
+    # separate dav program; with it the dav_l2n* records and the hinted dqkg_*l2n
+    ((300, 129), 12),
 )
+# the backward-route rows: the three middle rows of SHAPES_L2N and its 12-head row
+SHAPES_L2N_ROUTES = SHAPES_L2N[1:4] + SHAPES_L2N[5:]
 # Accuracy: ``out`` and every gradient are judged by ``judge_arms`` (``test_helpers/cake_kda_naive.py``): each
 # output's error against the exact FP64 recurrence beside the naive BF16 tier's (``tests/cake_naive.py``) over the
 # judge's draws.  A row of up to about 4096 tokens is judged as it is.  A larger row runs once for its exact checks,
@@ -867,7 +872,7 @@ def test_l2n_matches_the_exact_reference(
 
 @pytest.mark.parametrize("raw_gate", [False, True], ids=["g", "raw"])
 @pytest.mark.parametrize(
-    "shape", SHAPES_L2N[1:4], ids=lambda s: f"{len(s[0])}docs-S{sum(s[0])}-H{s[1]}"
+    "shape", SHAPES_L2N_ROUTES, ids=lambda s: f"{len(s[0])}docs-S{sum(s[0])}-H{s[1]}"
 )
 def test_l2n_forward_rows_equal_the_reference_and_every_backward_route(
     shape, raw_gate: bool, l2n_hook: dict

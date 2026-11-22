@@ -3419,7 +3419,8 @@ def test_gpu_l2n_flag_off_identity_w1(record_property) -> None:
 
 # (lengths, H, W, layout): W = 1 in-process, CP2 / CP4 spawned, CP8 one process per Slurm task; documents crossing
 # ranks with boundaries inside chunks (cross-document resets), documents over >= 3 ranks, one-token documents and
-# fragments, a zero-token rank at W = 2 / 4 / 8, 4 and 64 heads.
+# fragments, a zero-token rank at W = 2 / 4 / 8, 4 and 64 heads, and 12 (the serial route below 16 heads:
+# kcp_dav_l2n and the hinted fused gradient dqkg_int_l2n, where the norm off launches kcp_dav).
 ROWS = [
     ((100, 640, 77, 1000, 129), 4, 1, "contiguous"),
     ((700, 1, 1300, 999), 64, 1, "contiguous"),
@@ -3434,6 +3435,7 @@ ROWS = [
     ((3000, 2048, 5, 1), 4, 8, "zigzag_per_document"),
     ((4000, 1003), 4, 8, "ragged:1,0,999,1000,1000,1000,1,1002"),
     ((700, 1, 1300, 999), 64, 8, "zigzag"),
+    ((100, 640, 77, 1000, 129), 12, 2, "contiguous"),
 ]
 RAW_GATE_ROWS = [
     ((100, 640, 77, 1000, 129), 4, 1, "contiguous"),
