@@ -9424,9 +9424,14 @@ def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
         assert v["n_slabs"] == plan.dx_slices_of(i) - 1
         assert v["ws_slab"] == runner.tensors["dx_ws"].stride(0)
         assert v["num_vecs"] == rows_c * DEFAULT_H // cast_vec
-        # the registry's grid rule is the kernel's: one CTA per 2048 vectors, at most 65535
+        # the registry's grid rule: one CTA per 2048 vectors, widened to one per 256 vectors (at most three an SM)
+        # while the 2048-vector grid has fewer than two CTAs an SM, at most 65535 (the one-row tail chunk's 768
+        # vectors take three CTAs)
+        sms = torch.cuda.get_device_properties(CUDA).multi_processor_count
+        ctas = -(-v["num_vecs"] // 2048)
+        wide = min(-(-v["num_vecs"] // 256), sms * 3, sms * 3 * (sms * 2 - ctas))
         assert runner.launches[("slab_sum", i)].grid == (
-            max(1, min(-(-v["num_vecs"] // 2048), 65535)),
+            max(1, min(max(ctas, wide), 65535)),
             1,
             1,
         )
