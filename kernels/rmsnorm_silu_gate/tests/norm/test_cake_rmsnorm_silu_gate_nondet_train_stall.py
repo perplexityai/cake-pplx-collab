@@ -32,9 +32,14 @@ the SMs less 16; on SM107 with 205 SMs or more, as with 212 or 216, at most 4
 CTAs per SM on all SMs but 16; fewer SMs do not keep these bounds at the end
 of the band).  The pipelined forwards (the deterministic package's forward
 programs with a gate that does not flush) launch one 128-thread CTA per block
-of 16 rows below 8192 rows per SM and from there whole waves of 6 CTAs per SM
-that each walk at most 2 blocks; the mid forward launches whole waves of 6
-CTAs per SM that each walk at most 2 blocks of 16 rows; the long and the
+of 16 rows below the deterministic package's cut of rows per SM and from
+there whole waves of 6 CTAs per SM that each walk at most 2 blocks (the cut
+of the architecture: on rows the kernel reads as packed 5600 on SM103 and
+8192 on SM100 and SM107; on other rows of the pipelined forward of SM100
+and SM103, ``x`` or ``z`` broadcast over tokens or one token, 500 on SM100
+and 400 on SM103); the mid
+forward launches whole waves of 6 CTAs per SM that each walk at most 2 blocks
+of 16 rows; the long and the
 extra-long forward launch whole waves of 3 CTAs per SM that each walk at most
 6 blocks of 32 rows.  Their bands past the tiny forwards' or the short
 forward's: packed rows on SM100 run the pipelined forward up to 85 rows per
@@ -211,12 +216,37 @@ in its second on SM103 and 1 on SM107; the long forward 2 and 4 blocks of 32
 rows on SM100; the extra-long forward of the strided layout 5 and 7 on SM100
 and 3 and 7 on SM103, of packed rows 5 on SM100, 3 and 6 on SM103 and 2 on
 SM107.  The pipelined forwards by the same
-bound, in each of their bands
-at its first and last rows per SM and at the deterministic package's probes
-the band holds: 85 blocks of 16 rows per slot (the most below 8192 rows per
-SM, where a CTA runs one block), 86 (the fewest whole waves from there) and
-344.  The forwards of the first bands, the 32-lane tiny forward of packed rows
-(at 1 and 4 rows per SM on SM100, 1 and 12 on SM103), the tiny forward of packed
+bound, in each of their bands, on packed rows and, on SM100 and SM103, on
+``x`` and ``z`` broadcast over tokens, at its first and last rows per SM, at
+the deterministic package's probes the band holds (the most whole blocks of
+16 rows per slot below the cut of such rows, where a CTA runs one block, the
+fewest whole waves from there and four times that: on packed rows 85, 86
+and 344 on SM100 and SM107 and 58, 60 and 240 on SM103; on broadcast rows
+5, 6 and 24 on SM100 and 4, 6 and 24 on SM103) and at the cut itself,
+one-head tokens whose rows are exactly the cut times the SMs (the first row
+count of whole waves).  The cut of packed rows on SM100 (8192 rows per SM)
+lies past the pipelined forward's bands of packed rows (up to 6500 rows per
+SM; the mid forward runs them past it), so the pipelined forward runs every
+packed row it is routed there one CTA a block, and none of the probes
+around that cut runs on SM100: the bands' last rows (85 and 6500 rows per
+SM) hold its most rows of one CTA a block.  The cut of broadcast rows (500
+rows per SM on SM100, 400 on SM103) lies in the extra-long forward's band,
+so no pipelined forward runs such rows at it: on SM100 the pipelined
+forward runs them one CTA a block in its
+first band (up to 85 rows per SM) and whole waves in its second (from 521),
+on SM103 whole waves in each of its bands (from 601 and from 8193).  Of the
+probes around that cut only the fewest whole waves (on SM100) and four
+times that run; the bands' first and last rows hold the pipelined forward's
+calls nearest the cut (on SM100 its most rows of one CTA a block, 85 rows
+per SM, and its fewest of whole waves, 521; on SM103 its fewest of whole
+waves, 601).  On broadcast rows busy and
+alone are each ``_held_mean`` of ``HELD_RUNS`` samples, not a median of
+seven (``HELD_MEAN_FORWARD_LAYOUTS``): such a call reads one token and
+writes only ``y``, a few microseconds near its cut, where beside one held
+SM the bound is less than one step of the event timer (about 1 microsecond
+on SM100 and SM103) above the ratio of the extra round of CTAs.  The
+forwards of the first bands, the 32-lane tiny forward of packed rows (at 1
+and 4 rows per SM on SM100, 1 and 12 on SM103), the tiny forward of packed
 rows (at 5, 12, 24, 25, 31 and 36 rows per SM on SM100, 13, 24, 32, 33 and 36
 on SM103, 1, 10, 30, 43 and 65 on SM107) and
 the short forward of the strided layout (at 1 and 12 rows per SM on SM100 and
@@ -339,20 +369,29 @@ def nondeterministic_allowed():
     torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
 
 
-def _inputs(tokens: int, layout: str = "packed"):
-    """``(x, z, w, dy)`` of ``tokens`` tokens of H heads, packed rows; with
-    ``layout="strided"`` ``z`` the gate columns of a wider projection, whose
-    rows are not packed (with more than one token)."""
+def _inputs(tokens: int, layout: str = "packed", heads: int = H):
+    """``(x, z, w, dy)`` of ``tokens`` tokens of ``heads`` heads, packed rows;
+    with ``layout="strided"`` ``z`` the gate columns of a wider projection,
+    whose rows are not packed (with more than one token); with
+    ``layout="broadcast"`` ``x`` and ``z`` one token broadcast over the
+    others (token stride 0)."""
     generator = torch.Generator(device="cuda").manual_seed(SEED + tokens)
     kwargs = dict(dtype=torch.float32, device="cuda", generator=generator)
-    x = torch.randn(tokens, H, D, **kwargs).to(torch.bfloat16)
+    if layout == "broadcast":
+        x = torch.randn(1, heads, D, **kwargs).to(torch.bfloat16)
+        z = torch.randn(1, heads, D, **kwargs).to(torch.bfloat16)
+        x, z = x.expand(tokens, heads, D), z.expand(tokens, heads, D)
+        dy = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
+        w = (1 + 0.5 * torch.randn(D, **kwargs)).to(torch.bfloat16)
+        return x, z, w, dy
+    x = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
     if layout == "packed":
-        z = torch.randn(tokens, H, D, **kwargs).to(torch.bfloat16)
+        z = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
     else:
         assert layout == "strided", layout
-        wide = torch.randn(tokens, 2 * H * D + 16, **kwargs).to(torch.bfloat16)
-        z = wide[:, H * D : 2 * H * D].view(tokens, H, D)
-    dy = torch.randn(tokens, H, D, **kwargs).to(torch.bfloat16)
+        wide = torch.randn(tokens, 2 * heads * D + 16, **kwargs).to(torch.bfloat16)
+        z = wide[:, heads * D : 2 * heads * D].view(tokens, heads, D)
+    dy = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
     w = (1 + 0.5 * torch.randn(D, **kwargs)).to(torch.bfloat16)
     return x, z, w, dy
 
@@ -1378,8 +1417,12 @@ FORWARD_LAYOUTS = ("packed", "strided")
 
 
 def _forward_bands(layout: str) -> dict:
-    """The forward bands the rows of ``layout`` run by."""
-    return loader.FORWARD_BANDS if layout == "packed" else loader.STRIDED_FORWARD_BANDS
+    """The forward bands the rows of ``layout`` run by (rows broadcast over
+    tokens count as packed rows; their pipelined forward reads the token
+    stride)."""
+    if layout in ("packed", "broadcast"):
+        return loader.FORWARD_BANDS
+    return loader.STRIDED_FORWARD_BANDS
 
 
 def _band_ordinals(role: str) -> tuple[int, ...]:
@@ -1462,7 +1505,9 @@ def _persistent_forward_tokens(
         )
     packed = layout == "packed"
     assert loader.module_for_rows(arch, "fwd", rows, sms, packed=packed) == name
-    (ctas, _, _) = loader.launch_grid(loader.MODULES[name], rows=rows, sm_count=sms)
+    (ctas, _, _) = loader.launch_grid(
+        loader.MODULES[name], rows=rows, sm_count=sms, arch=arch
+    )
     blocks = -(-rows // rows_per_block)
     return blocks / slots, tokens, -(-blocks // ctas) * slots / blocks
 
@@ -1475,11 +1520,12 @@ def _forward_slows_in_proportion(
     threads: int,
     layout: str,
     probe: tuple[float, int, float] | None = None,
+    heads: int = H,
 ) -> None:
     blocks_per_slot, tokens, cta_share = (
         _persistent_forward_tokens(role, edge, nth, layout) if probe is None else probe
     )
-    x, z, w, _dy = _inputs(tokens, layout)
+    x, z, w, _dy = _inputs(tokens, layout, heads)
     y = torch.empty_like(x)
 
     def call():
@@ -1489,24 +1535,35 @@ def _forward_slows_in_proportion(
     assert _launched(call) == [name], (role, layout, tokens)
 
     spin = _spin(None, ctas=ctas, threads=threads)
-    alone_ms, busy_ms, alone, busy = _paired_medians(call, spin, PROPORTIONAL_RUNS)
+    if layout in HELD_MEAN_FORWARD_LAYOUTS:
+        ((alone_ms, busy_ms, alone, busy),) = _interleaved_held_means(
+            (call,), spin, HELD_RUNS
+        )
+        stat = f"held_mean runs={HELD_RUNS} trim={HELD_TRIM}"
+    else:
+        alone_ms, busy_ms, alone, busy = _paired_medians(call, spin, PROPORTIONAL_RUNS)
+        stat = f"median runs={PROPORTIONAL_RUNS}"
     ideal = spin.sms / (spin.sms - ctas)
     bound = ideal + cta_share + PROPORTIONAL_SLACK
     ratio = busy_ms / alone_ms
+    alone_min_ms = min(t for t, _ in alone)
+    alone_max_ms = max(t for t, _ in alone)
     print(
-        f"HELD stage=forward tokens={tokens} heads={H} "
+        f"HELD stage=forward tokens={tokens} heads={heads} "
         f"blocks_per_slot={blocks_per_slot:g} side={ctas}x{threads} "
         f"alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} ratio={ratio:.3f} "
         f"ideal={ideal:.3f} cta_share={cta_share:.4f} "
-        f"excess={ratio - ideal - cta_share:.4f} role={role} layout={layout}"
+        f"excess={ratio - ideal - cta_share:.4f} role={role} layout={layout} "
+        f"edge={edge} alone_min_ms={alone_min_ms:.4f} "
+        f"alone_max_ms={alone_max_ms:.4f} stat={stat}"
     )
     _check_outputs("forward", tokens, alone, busy)
     assert ratio <= bound, (
         f"tokens={tokens} ({blocks_per_slot:g} row blocks per CTA slot): {role} "
         f"alone {alone_ms:.4f} ms, beside {ctas} x {threads} side CTAs "
-        f"on {ctas} SMs {busy_ms:.4f} ms: ratio {ratio:.3f} > {bound:.3f} "
-        f"(proportional {ideal:.3f} + one CTA's blocks {cta_share:.4f} + "
-        f"{PROPORTIONAL_SLACK})"
+        f"on {ctas} SMs {busy_ms:.4f} ms ({stat}): ratio {ratio:.3f} > "
+        f"{bound:.3f} (proportional {ideal:.3f} + one CTA's blocks "
+        f"{cta_share:.4f} + {PROPORTIONAL_SLACK})"
     )
 
 
@@ -1548,45 +1605,100 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 
 # The pipelined forwards (the deterministic package's forward programs with
 # a gate that does not flush: CTA
-# slots of 6 per SM, row blocks of 16 rows, one CTA a block below
-# ``persistent_from_rows_per_sm`` rows per SM, then whole waves whose CTAs walk
-# at most 2 blocks) in their ``nth`` band of ``layout``: at the band's first
-# and last row per SM ("band_first", "band_last"; the last band has no last),
-# and at the probes of the deterministic package's own test: the most whole
-# blocks per slot below ``persistent_from_rows_per_sm`` ("below"), the fewest
-# whole waves at or above it ("first") and four times that ("last").  A probe
-# outside the band skips.
-PIPELINED_FORWARD_EDGES = ("band_first", "band_last", "below", "first", "last")
+# slots of 6 per SM, row blocks of 16 rows, one CTA a block below their cut of
+# rows per SM, then whole waves whose CTAs walk at most 2 blocks) in their
+# ``nth`` band of ``layout``: at the band's first and last row per SM
+# ("band_first", "band_last"; the last band has no last), at the probes of the
+# deterministic package's own test, the most whole blocks per slot below the
+# cut ("below"), the fewest whole waves at or above it ("first") and four
+# times that ("last"), and at the cut itself ("cut": tokens of one head, so
+# that the rows are exactly the cut times the SMs, the first row count of
+# whole waves).  The cut is the record's ``persistent_from_rows_per_sm`` of
+# the architecture on packed rows and, on rows the kernel does not read as
+# packed (``broadcast``: ``x`` and ``z`` one token broadcast over the others,
+# in the bands of packed rows), ``fwd_pipe``'s
+# ``persistent_from_rows_per_sm_strided``; ``strided`` rows (``z`` the gate
+# columns of a projection) run no pipelined forward, and on sm_107a neither do
+# broadcast rows.  The probes on packed rows, as blocks per slot (a slot's
+# block is 96 rows per SM): below, first and last 85, 86 and 344 on sm_100a
+# (8160, 8256 and 33024 rows per SM, and "cut", 8192: all past the second
+# band, which ends at 6500, where the mid forward runs packed rows, so on
+# sm_100a no probe around the cut runs and the pipelined forward's edge of
+# whole waves on packed rows is not reachable; its bands' last rows, 85 and
+# 6500, run its most rows of one CTA a block), 58, 60 and 240 on sm_103a
+# (5568, 5760 and 23040: "below", "first" and "cut", 5600, in the first band,
+# up to 6000, "last" in the last, from 8193) and 85, 86 and 344 on sm_107a
+# (8160, 8256 and 33024, and "cut", 8192, in its band from 281).  The probes on
+# broadcast rows (``FORWARD_BANDS``, the bands of packed rows, with the cut of
+# other rows): 5, 6 and 24 on sm_100a (480, 576 and 2304 rows per SM; the
+# cut 500) and 4, 6 and 24 on sm_103a (384, 576 and 2304; the cut 400).  That
+# cut lies in the extra-long forward's band (sm_100a: 401 to 520 rows per SM;
+# sm_103a: 241 to 600), so the pipelined forward does not run broadcast rows
+# at it, and "below" and "cut" skip on both and "first" on sm_103a: on
+# sm_100a "first" and "last" run in the second band (521 to 6500), whose first
+# row is the fewest of whole waves, and the first band (37 to 85) runs one CTA
+# a block up to its last row; on sm_103a "last" runs in the first band (601 to
+# 6000), whose rows are all whole waves.  A probe outside the band skips.
+PIPELINED_FORWARD_EDGES = ("band_first", "band_last", "below", "first", "last", "cut")
+PIPELINED_FORWARD_LAYOUTS = (*FORWARD_LAYOUTS, "broadcast")
+# The layouts whose probes compare ``_held_mean`` of ``HELD_RUNS`` alone and
+# busy samples (as the first-band tests do), not the medians of
+# ``PROPORTIONAL_RUNS`` pairs, with the same bound.  A call on rows broadcast
+# over tokens reads one token and writes only ``y``, so in the first band of
+# sm_100a and near the cut of such rows (the first rows of the bands past it,
+# "band_first", and "first") it takes a few microseconds, and on SM100 and
+# SM103 the event timer reads a call that short on steps about 1 microsecond
+# apart.  There one CTA's share of the blocks is small, and beside one held SM
+# the bound is only a few percent above the ratio of the extra round of CTAs:
+# for such a call less than one step of the timer.  A median of seven samples
+# lands on one step or another; the mean weighs the steps as often as they
+# occur.
+HELD_MEAN_FORWARD_LAYOUTS = ("broadcast",)
 
 
 def _pipelined_forward_tokens(
     role: str, nth: int, edge: str, layout: str
-) -> tuple[float, int, float]:
-    """``(blocks_per_slot, T, cta_share)`` of :func:`_persistent_forward_tokens`
-    for the pipelined forward ``role`` (``fwd_pipe`` or ``fwd_pipe_packed``)
-    at ``edge`` of its ``nth`` band of ``layout``; skips where the
-    architecture routes no such module or band, or the probe is outside the
-    band."""
+) -> tuple[float, int, float, int]:
+    """``(blocks_per_slot, T, cta_share, heads)`` of
+    :func:`_persistent_forward_tokens` for the pipelined forward ``role``
+    (``fwd_pipe`` or ``fwd_pipe_packed``) at ``edge`` of its ``nth`` band of
+    ``layout``, and the heads of its tokens (one at "cut", else ``H``); skips
+    where the architecture routes no such module or band, or the probe is
+    outside the band.  The pipelined forward's grid rule is the deterministic
+    package's forward's on the architecture."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     name = loader.ROUTES[arch].get(role)
     if name is None:
         pytest.skip(f"{arch} routes no {role} module")
+    if layout == "broadcast" and role == "fwd_pipe_packed":
+        pytest.skip(f"{arch}: rows broadcast over tokens run no {role}")
     first, last = _forward_band(arch, role, nth, layout)
     sms = torch.cuda.get_device_properties(device_index).multi_processor_count
     rule = loader.MODULES[name]["grid_rule"]
+    det_role = "fwd_packed" if role == "fwd_pipe_packed" else "fwd"
+    det_rule = det_loader.MODULES[det_loader.route_module(arch, det_role)]["grid_rule"]
+    assert rule == det_rule, (arch, role, rule, det_rule)
     slots = int(rule["ctas_per_sm"]) * sms
     rows_per_block = int(rule["rows_per_block"])
     most = int(rule["max_blocks_per_cta"])
-    start = int(rule["persistent_from_rows_per_sm"])
+    # rows the kernel reads as packed; a broadcast is not
+    packed = layout == "packed"
+    key = "persistent_from_rows_per_sm"
+    if not packed and key + "_strided" in rule:
+        key += "_strided"
+    start = int(rule[key][arch])
     # rows per SM that give each slot of the SM one more row block
     step = int(rule["ctas_per_sm"]) * rows_per_block
+    heads = H
     if edge == "band_first":
         tokens = -(-(first * sms) // H)
     elif edge == "band_last":
         if last is None:
             pytest.skip(f"{arch} {layout} {role} band {nth} has no end")
         tokens = last * sms // H
+    elif edge == "cut":
+        heads, tokens = 1, start * sms
     else:
         if edge == "below":
             blocks_per_slot = (start - 1) // step
@@ -1595,17 +1707,21 @@ def _pipelined_forward_tokens(
             if edge == "last":
                 blocks_per_slot *= 4
         tokens = -(-(blocks_per_slot * slots * rows_per_block) // H)
-    rows = tokens * H
+    rows = tokens * heads
     if not first * sms <= rows or (last is not None and rows > last * sms):
         pytest.skip(
             f"{arch}: {edge} ({rows} rows) is outside the {layout} band {nth} of "
             f"{role} ({first} to {last} rows per SM)"
         )
-    packed = layout == "packed"
-    assert loader.module_for_rows(arch, "fwd", rows, sms, packed=packed) == name
-    (ctas, _, _) = loader.launch_grid(loader.MODULES[name], rows=rows, sm_count=sms)
+    if edge in ("below", "first", "last", "cut"):
+        assert (rows >= start * sms) == (edge != "below"), (edge, rows, start)
+    band_packed = layout != "strided"
+    assert loader.module_for_rows(arch, "fwd", rows, sms, packed=band_packed) == name
+    (ctas, _, _) = loader.launch_grid(
+        loader.MODULES[name], rows=rows, sm_count=sms, arch=arch, packed=packed
+    )
     blocks = -(-rows // rows_per_block)
-    return blocks / slots, tokens, -(-blocks // ctas) * slots / blocks
+    return blocks / slots, tokens, -(-blocks // ctas) * slots / blocks, heads
 
 
 @pytest.mark.parametrize(
@@ -1613,13 +1729,15 @@ def _pipelined_forward_tokens(
 )
 @pytest.mark.parametrize("edge", PIPELINED_FORWARD_EDGES)
 @pytest.mark.parametrize("nth", (1, 2), ids=lambda n: f"band{n}")
-@pytest.mark.parametrize("layout", FORWARD_LAYOUTS)
+@pytest.mark.parametrize("layout", PIPELINED_FORWARD_LAYOUTS)
 @pytest.mark.parametrize("role", ["fwd_pipe", "fwd_pipe_packed"])
 def test_pipelined_forward_slows_in_proportion_to_the_sms_held(
     role: str, layout: str, nth: int, edge: str, ctas: int, threads: int
 ) -> None:
-    probe = _pipelined_forward_tokens(role, nth, edge, layout)
-    _forward_slows_in_proportion(role, edge, nth, ctas, threads, layout, probe)
+    *probe, heads = _pipelined_forward_tokens(role, nth, edge, layout)
+    _forward_slows_in_proportion(
+        role, edge, nth, ctas, threads, layout, tuple(probe), heads
+    )
 
 
 # The forwards of the first forward bands: the tiny forwards (packed rows:
@@ -1663,8 +1781,9 @@ SHORT_FORWARD_SIDES = ((1, 128, None), (16, 640, None), (32, 640, None)) + (
 SHORT_EXTRA_MS = 0.0015
 # Samples per call of a held measurement (alone and beside the side kernel,
 # the compared calls interleaved round by round, an even count so that each
-# call goes first as often), and the share of the fastest and of the slowest
-# that _held_mean leaves out at each end (2 of 20).
+# call goes first as often; the pipelined forwards' probes of
+# HELD_MEAN_FORWARD_LAYOUTS take one call's), and the share of the fastest and
+# of the slowest that _held_mean leaves out at each end (2 of 20).
 HELD_RUNS = 20
 HELD_TRIM = 0.1
 # A held measurement counts when each compared call's alone mean is at most
