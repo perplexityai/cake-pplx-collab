@@ -2893,7 +2893,7 @@ ROUTES: dict[str, dict[str, str]] = {
 # one-CTA-per-block pipelined grid of 0.2.13 (one CTA per block below 8192
 # rows per SM on every architecture; the pipelined forwards now launch whole
 # waves from their cuts of each architecture, below 8192 on sm_103a, and on
-# sm_100a and sm_103a for rows broadcast over tokens): the pipelined forwards
+# sm_100a and sm_103a for broadcast and one-token rows): the pipelined forwards
 # load ``x`` and ``z`` with the L2 ``evict_first`` policy, so where the rows
 # fit in L2 the step's later kernels read them from memory again and this
 # package's own forwards make the step faster, though the pipelined forward
