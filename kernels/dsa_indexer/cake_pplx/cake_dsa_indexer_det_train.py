@@ -278,7 +278,7 @@ def cake_dsa_indexer_det_train_topk_with_candidates(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     r""":func:`cake_dsa_indexer_det_train_topk` that also returns each
     query's candidate blocks, computed from the same scores as ``indices``;
-    SM100 / SM103 only (BF16 ``q`` / ``k``, ``ratio == 1``).
+    SM100 / SM103 / SM107 only (BF16 ``q`` / ``k``, ``ratio == 1``).
 
     Block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``.  For a query
     with ``n`` visible keys (the family's visibility rule) let ``nb = ceil(n /
@@ -328,7 +328,7 @@ def cake_dsa_indexer_det_train_topk_with_candidates(
     Identical inputs give identical ``indices``, ``scores`` and
     ``candidate_blocks`` bits.  The call never materializes a ``[T, Tkv]`` matrix and never
     synchronizes with the host.  Raises ``NotImplementedError`` on an
-    architecture without a registered candidate-block program (SM107).
+    architecture without a registered candidate-block program.
     """
     if cu_seqlens_q is None or cu_seqlens_k is None:
         raise ValueError(
@@ -379,8 +379,13 @@ def cake_dsa_indexer_det_train_topk_with_candidates_workspace_size(
     ``blk_cap = ceil(W / 8) - 1`` when ``ceil(W / 8) > 2048`` and 0 otherwise,
     ``W`` being ``max_seqlen_k`` when given, else ``num_keys``.  The ``[T,
     2048]`` int32 ``candidate_blocks`` output is not part of the bound.  Pass
-    the call's ``max_seqlen_k``.  Raises ``NotImplementedError`` on an
-    architecture without a registered candidate-block program.
+    the call's ``max_seqlen_k``.  On SM107 the candidate-block programs draw
+    their work units from a 16-byte ticket block passed as an argument, like
+    the plain call's ticket-argument programs there: a prepared runner whose
+    scan draws owns that block, outside the bound; the eager call uses the
+    first 16 bytes of the workspace's ticket tail.  Raises
+    ``NotImplementedError`` on an architecture without a registered
+    candidate-block program.
 
     Parameters
     ----------
@@ -433,7 +438,7 @@ def cake_dsa_indexer_det_train_topk_in_candidates(
     return_scores: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     r""":func:`cake_dsa_indexer_det_train_topk` restricted to given candidate
-    blocks; SM100 / SM103 only (BF16 ``q`` / ``k``, ``ratio == 1``).
+    blocks; SM100 / SM103 / SM107 only (BF16 ``q`` / ``k``, ``ratio == 1``).
 
     Block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``.  For query
     row ``t`` with ``n`` visible keys (the family's visibility rule) the pool
@@ -480,7 +485,7 @@ def cake_dsa_indexer_det_train_topk_in_candidates(
         with a ``-1`` / ``-inf`` tail.  Identical inputs give identical bits.
     The call never materializes a ``[T, Tkv]`` matrix and never synchronizes
     with the host.  Raises ``NotImplementedError`` on an architecture without
-    a registered candidate-restricted program (SM107).
+    a registered candidate-restricted program.
     """
     if cu_seqlens_q is None or cu_seqlens_k is None:
         raise ValueError(
