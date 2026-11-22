@@ -623,13 +623,14 @@ fallback's replay counts `qk_l2norm` and no `qk_apply`, the launches it makes).
 
 ### Programs by stage
 
-75 records naming 73 programs from 44 kernels, 8 of them the raw gate
+107 records naming 105 programs from 62 kernels, 17 of them the raw gate
 mode's (`fwdh_v3` and `fwdh_p3` are
 one program, the two passes of the segmented walk; `bwd_prep_g8_noqg` and
 `bwd_prep_g8_noqg_nokb` are two keyword forms of one kernel, and the four
 raw prep records four keyword forms of another; the records shipped
 on some of the architectures only are `glm_intra_v14`, `glm_intra_v18`, `glm_intra`,
-`gate_epilogue`, `fwd_intra_v37_l2n`, `glm_intra_v30_l2n` and the two `_nohint` records (`sm_107a`); `wy_bwd` and `wy_fwd_rows`
+`gate_epilogue`, `fwd_intra_v37_l2n`, `glm_intra_v30_l2n`, `bwd_prep_g8_replay_saved_l2n`
+(`sm_100a` / `sm_103a`) and the four `_nohint` records (`sm_107a`); `wy_bwd` and `wy_fwd_rows`
 are one program, the WY representation from the saved `Akk` on the backward
 and on the saving forward's overlap and paired serial rows; `fwdh_p3_o_ov`,
 `fwdh_p3_o_ov_id` and their `_rows` twins are the only programs launched with
@@ -682,9 +683,12 @@ README.
   `run_module(name, values, grid=, device_index=)`.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
-  `cake-build/1`): one entry per `<library>_<arch>` (the 73 programs on the
-  architectures each ships on: 69 on all three, `glm_intra_v14` on `sm_103a`,
-  `glm_intra_v18` on `sm_107a`, `glm_intra` and `gate_epilogue` on `sm_100a`) with its two translation units, digests, nvcc flags
+  `cake-build/1`): one entry per `<library>_<arch>` (the 105 programs on the
+  architectures each ships on: 94 on all three; `glm_intra_v14`, `fwd_intra_v37_l2n`
+  and `glm_intra_v30_l2n` on `sm_103a`; `glm_intra_v18` and the four `_nohint`
+  programs on `sm_107a`; `glm_intra` and `gate_epilogue` on `sm_100a`;
+  `bwd_prep_g8_replay_saved_l2n` on `sm_100a` / `sm_103a`: 294 entries, 97 on
+  `sm_100a`, 98 on `sm_103a` and 99 on `sm_107a`) with its two translation units, digests, nvcc flags
   (`--use_fast_math`), closure digest and `aot/<name>.so` path.
   `cake_build.load_library(name)` loads the prebuilt library when `aot/` holds
   it and otherwise JIT-builds the entry through the JIT shim (`gen_jit_spec`,
@@ -696,15 +700,15 @@ README.
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include,
   shipped with the package so it compiles without another `csrc/` tree.
 * `csrc/cake_kda_det_train_<digest>_{kernel,binding}.cu` -- the generated device
-  and binding translation units of the 65 programs, shared by the
+  and binding translation units of the 105 programs, shared by the
   architectures a program ships on (per-architecture lines under `#if
   __CUDA_ARCH__`) and compiled once per architecture.  The sources are identity-checked by the
   digests in `build.json`.
 
 ## Status
 
-The registry holds the 67 records (65 programs) for `sm_100a`, `sm_103a` and
-`sm_107a` (three of them on a subset of the architectures: see the programs by
+The registry holds the 107 records (105 programs) for `sm_100a`, `sm_103a` and
+`sm_107a` (eleven of them on a subset of the architectures: see the programs by
 stage), exported from the kernel snapshot named in the pull request.
 
 Tests: `tests/experimental/test_cake_kda_det_train.py` (the backend suite: imports
