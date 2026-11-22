@@ -198,8 +198,7 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd_bias", 648, 1016): (1, 16384),
         ("bwd_dt", 520, 568): (1, 16384),
         ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 760): (1, 16384),
-        ("bwd_dt", 776, 1016): (1, 16384),
+        ("bwd_dt", 648, 1016): (1, 16384),
         ("fwd", 512, 512): (1, 2048),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
@@ -1797,7 +1796,7 @@ def _owner_tiles(record: dict, arch: str, C: int) -> int:
     entry = cake_jit.TILE_OVERRIDES.get(arch, {}).get((route, C))
     if entry is not None:
         n_ch_tiles = max(n_ch_tiles, -(-(C // geometry["vec"]) // entry[0]))
-    elif (
+    if (
         cake_jit.narrow_tile_range(arch, route, C) is not None
         and geometry["threads"] == 128
     ):
@@ -1990,8 +1989,8 @@ def test_backward_workspace_covers_every_override_row() -> None:
 
 # The C 768 rows of ``TILE_OVERRIDES`` per architecture, route -> (ct_vec, S_min, S_max): on sm_100a and sm_103a the
 # measured rows of the package's 0.2.0 release on every base route but ``bwd`` (whose C 768 runs the 32-vector tiles of
-# its ``NARROW_TILES`` key, :data:`C768_NARROW_ROUTES`), on sm_107a the ``bwd_dt`` row of every S (the route's calls
-# with FP32 and with BF16 taps plan by it).
+# its ``NARROW_TILES`` key at every S, :data:`C768_NARROW_RANGES`), on sm_107a the ``bwd_dt`` row of every S (the
+# route's calls with FP32 and with BF16 taps plan by it).
 C768_TILE_OVERRIDES = {
     "sm_100a": {
         "bwd_dt": (32, 62585, 500680),
@@ -2007,19 +2006,26 @@ C768_TILE_OVERRIDES = {
     },
     "sm_107a": {"bwd_dt": (32, 1, 2147483647)},
 }
-# The architectures whose C 768 backward rows are only those measured rows on every backward route but the routes of
-# :data:`C768_NARROW_ROUTES`: there a ``NARROW_TILES`` key of the route covers C 768 at every S (the ``bwd`` route's
-# C 520 to 1016 key), on every other route none does.
-C768_MEASURED_ONLY = ("sm_100a", "sm_103a")
-C768_NARROW_ROUTES = {"sm_100a": ("bwd",), "sm_103a": ("bwd",)}
+# The ``NARROW_TILES`` token ranges at C 768 per architecture whose C 768 backward rows are measured, route ->
+# (S_min, S_max): the ``bwd`` route's C 520 to 1016 key over every S; the ``bwd_dt`` and ``bwd_bias`` routes' own
+# C 768 keys from S 1 up to the last S at which no measured backward, step or checkpointed-step row of the route's
+# fallback ran slower with the 32-vector tiles than with the one tile (S 16384, S 8192 for sm_100a's ``bwd_dt``),
+# below the ``S_min`` of their C 768 ``TILE_OVERRIDES`` rows, so between the two those calls keep the one tile; the
+# ``bwd_fp32g`` and ``bwd_bias_fp32g`` routes have none.
+C768_NARROW_RANGES = {
+    "sm_100a": {"bwd": (1, 2147483647), "bwd_dt": (1, 8192), "bwd_bias": (1, 16384)},
+    "sm_103a": {"bwd": (1, 2147483647), "bwd_dt": (1, 16384), "bwd_bias": (1, 16384)},
+}
 
 
 @pytest.mark.cpu_only
 def test_c768_backward_rows_are_the_literal_rows() -> None:
     """The C 768 rows of the rendered ``TILE_OVERRIDES`` are the literal :data:`C768_TILE_OVERRIDES` on every
-    architecture.  On the architectures of :data:`C768_MEASURED_ONLY` the ``NARROW_TILES`` keys covering C 768 are
-    exactly one per route of :data:`C768_NARROW_ROUTES`, each over every token count, and no other backward route has
-    a narrow range at C 768."""
+    architecture.  On the architectures of :data:`C768_NARROW_RANGES` the ``NARROW_TILES`` keys covering C 768 are
+    exactly one per route of the literal, with its token range; no other backward route has a narrow range at C 768;
+    a range at a ``(route, 768)`` of ``TILE_OVERRIDES`` ends below the row's ``S_min``; and ``plan`` gives the 32-vector
+    tiles up to the range's end, the one tile from the next token to the row's ``S_min - 1``, and the row's tiles from
+    its ``S_min``."""
 
     assert set(C768_TILE_OVERRIDES) == set(ARCHES)
     for arch in ARCHES:
@@ -2029,13 +2035,35 @@ def test_c768_backward_rows_are_the_literal_rows() -> None:
             if C == 768
         }
         assert rows == C768_TILE_OVERRIDES[arch], arch
-    assert set(C768_NARROW_ROUTES) == set(C768_MEASURED_ONLY)
-    for arch in C768_MEASURED_ONLY:
-        covering = [key for key in cake_jit.NARROW_TILES.get(arch, {}) if key[1] <= 768 <= key[2]]
-        assert sorted(key[0] for key in covering) == sorted(C768_NARROW_ROUTES[arch]), (arch, covering)
+    geometry = {"threads": 128, "vec": 8}
+    narrow, one_tile = (32, 4, 3), (96, 1, 1)
+    for arch, ranges in C768_NARROW_RANGES.items():
+        keys = cake_jit.NARROW_TILES.get(arch, {})
+        covering = [key for key in keys if key[1] <= 768 <= key[2]]
+        assert sorted(key[0] for key in covering) == sorted(ranges), (arch, covering)
         for route in cake_jit.backward_kinds(arch):
-            want = (1, cake_jit.INT32_MAX) if route in C768_NARROW_ROUTES[arch] else None
+            want = ranges.get(route)
             assert cake_jit.narrow_tile_range(arch, route, 768) == want, (arch, route)
+            row = C768_TILE_OVERRIDES[arch].get(route)
+            if want is None or row is None:
+                continue
+            assert want[1] < row[1], (arch, route, want, row)
+            override = (row[0], 128 // row[0], 96 // row[0])
+            tokens = {
+                want[0]: narrow,
+                want[1]: narrow,
+                want[1] + 1: one_tile,
+                row[1] - 1: one_tile,
+                row[1]: override,
+            }
+            for S, tiles in tokens.items():
+                got = cake_jit.plan(
+                    S, 768, 1, geometry=geometry, role="bwd", arch=arch, route=route
+                )
+                split = (got["ct_vec"], got["n_sub"], got["n_ch_tiles"])
+                assert split == tiles, (arch, route, S, split)
+                inside = S <= want[1]
+                assert cake_jit.narrow_tile_row(arch, route, 768, S) == inside, (arch, S)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -2536,12 +2564,15 @@ def narrow_table(request, monkeypatch):
 
 def _covering(table: dict, arch: str, route: str, C: int):
     """The ``(S_min, S_max)`` of the first key of ``table[arch]`` on ``route`` covering ``C`` (``None``: none, or
-    a ``TILE_OVERRIDES`` row of ``(route, C)``)."""
+    a ``TILE_OVERRIDES`` row of ``(route, C)`` whose token range meets the key's)."""
 
-    if C % 8 or (route, C) in cake_jit.TILE_OVERRIDES.get(arch, {}):
+    if C % 8:
         return None
+    entry = cake_jit.TILE_OVERRIDES.get(arch, {}).get((route, C))
     for (name, c_lo, c_hi), bounds in table.get(arch, {}).items():
         if name == route and c_lo <= C <= c_hi:
+            if entry is not None and bounds[0] <= entry[2] and entry[1] <= bounds[1]:
+                return None
             return bounds
     return None
 
@@ -2554,7 +2585,8 @@ def _split3(plan: dict) -> tuple[int, int, int]:
 def test_narrow_tiles_are_backward_rows() -> None:
     """Every key of the rendered table names an exported architecture, one of its backward routes, a closed range of
     channel counts (multiples of 8) and a closed ``S`` range; no key of an architecture and route overlaps another,
-    and no ``(route, C)`` of the architecture's ``TILE_OVERRIDES`` lies inside a key."""
+    and no ``(route, C)`` of the architecture's ``TILE_OVERRIDES`` lies inside a key but a key of that one channel
+    count whose tokens end below the row's ``S_min``."""
 
     assert set(cake_jit.NARROW_TILES) <= set(ARCHES)
     for arch, rows in cake_jit.NARROW_TILES.items():
@@ -2567,8 +2599,10 @@ def test_narrow_tiles_are_backward_rows() -> None:
             for name in cake_jit.route_modules(arch, route):
                 geometry = cake_jit.MODULES[name]["grid_rule"]["geometry"]
                 assert geometry["threads"] % 32 == 0, (label, name)
-            for override_route, C in cake_jit.TILE_OVERRIDES.get(arch, {}):
-                assert not (override_route == route and c_lo <= C <= c_hi), label
+            overrides = cake_jit.TILE_OVERRIDES.get(arch, {})
+            for (override_route, C), (_, row_min, _) in overrides.items():
+                if override_route == route and c_lo <= C <= c_hi:
+                    assert c_lo == c_hi and s_max < row_min, label
             spans.setdefault(route, []).append((c_lo, c_hi))
         for route, ranges in spans.items():
             ranges.sort()

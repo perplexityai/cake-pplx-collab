@@ -5075,8 +5075,7 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd_bias", 648, 1016): (1, 16384),
         ("bwd_dt", 520, 568): (1, 16384),
         ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 760): (1, 16384),
-        ("bwd_dt", 776, 1016): (1, 16384),
+        ("bwd_dt", 648, 1016): (1, 16384),
         ("fwd", 512, 512): (1, 2048),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
@@ -6556,11 +6555,14 @@ def override_tiles(arch: str, route: str, C: int, geometry: dict[str, int]) -> i
 
 # The 32-vector channel tiles of the narrow single-tile backward rows, ``{arch:
 # {(route, C_lo, C_hi): (S_min, S_max)}}``: a backward call of ``route`` on
-# ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8 without a
-# :data:`TILE_OVERRIDES` row) and ``S_min <= S <= S_max`` tokens runs
-# ``(32, 4, ceil(C / 8 / 32))`` tiles at 128 threads where
-# :func:`channel_split` plans one tile of every channel vector
-# (:func:`narrow_tile_row`).  As at the rows of :data:`TILE_OVERRIDES`, each
+# ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8) and ``S_min
+# <= S <= S_max`` tokens, outside a :data:`TILE_OVERRIDES` row, runs ``(32, 4,
+# ceil(C / 8 / 32))`` tiles at 128 threads where :func:`channel_split` plans
+# one tile of every channel vector (:func:`narrow_tile_row`).  On sm_100a and
+# sm_103a the ``bwd_dt`` and ``bwd_bias`` routes take them at C 768 only up to
+# a token bound, below the S range of their C 768 :data:`TILE_OVERRIDES`
+# rows; between the two the call keeps the one tile.  As at the rows of
+# :data:`TILE_OVERRIDES`, each
 # tile's accumulator words take the adds of fewer CTAs; ``dx`` does not depend
 # on the tiling.  The workspace takes one ticket per tile
 # (:func:`backward_workspace_bytes` covers the row's tiles, whatever ``S``).
@@ -6573,9 +6575,11 @@ NARROW_TILES: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd", 520, 1016): (1, 2147483647),
         ("bwd_dt", 224, 224): (1, 2147483647),
         ("bwd_dt", 520, 760): (1, 2147483647),
+        ("bwd_dt", 768, 768): (1, 8192),
         ("bwd_dt", 776, 1016): (1, 2147483647),
         ("bwd_bias", 224, 224): (1, 2147483647),
         ("bwd_bias", 520, 760): (1, 2147483647),
+        ("bwd_bias", 768, 768): (1, 16384),
         ("bwd_bias", 776, 1016): (1, 2147483647),
         ("bwd_fp32g", 224, 224): (1, 2147483647),
         ("bwd_fp32g", 520, 760): (1, 2147483647),
@@ -6589,9 +6593,11 @@ NARROW_TILES: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd", 520, 1016): (1, 2147483647),
         ("bwd_dt", 224, 224): (1, 2147483647),
         ("bwd_dt", 520, 760): (1, 2147483647),
+        ("bwd_dt", 768, 768): (1, 16384),
         ("bwd_dt", 776, 1016): (1, 2147483647),
         ("bwd_bias", 224, 224): (1, 2147483647),
         ("bwd_bias", 520, 760): (1, 2147483647),
+        ("bwd_bias", 768, 768): (1, 16384),
         ("bwd_bias", 776, 1016): (1, 2147483647),
         ("bwd_fp32g", 224, 224): (1, 2147483647),
         ("bwd_fp32g", 520, 760): (1, 2147483647),
@@ -6624,15 +6630,24 @@ NARROW_THREADS = 128
 def narrow_tile_range(arch: str, route: str, C: int) -> tuple[int, int] | None:
     """The ``(S_min, S_max)`` of the :data:`NARROW_TILES` key of ``arch`` on
     ``route`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of 8,
-    the first such key), ``None`` without one or at a ``(route, C)`` of the
-    architecture's :data:`TILE_OVERRIDES` (whose rows :func:`tile_override`
-    plans)."""
+    the first such key), ``None`` without one or where the token range of the
+    architecture's :data:`TILE_OVERRIDES` row of ``(route, C)`` meets the
+    key's (whose rows :func:`tile_override` plans).  A key whose tokens end
+    below the row's ``S_min`` (the C 768 keys of the ``bwd_dt`` and
+    ``bwd_bias`` routes on sm_100a and sm_103a) gives its range."""
 
     C = int(C)
-    if C % CHANNEL_MULTIPLE or (route, C) in TILE_OVERRIDES.get(arch, {}):
+    if C % CHANNEL_MULTIPLE:
         return None
+    entry = TILE_OVERRIDES.get(arch, {}).get((route, C))
     for (name, c_lo, c_hi), (s_min, s_max) in NARROW_TILES.get(arch, {}).items():
         if name == route and int(c_lo) <= C <= int(c_hi):
+            if (
+                entry is not None
+                and int(s_min) <= int(entry[2])
+                and int(entry[1]) <= int(s_max)
+            ):
+                return None
             return int(s_min), int(s_max)
     return None
 
@@ -7078,8 +7093,9 @@ class RowPlan(NamedTuple):
     # :func:`plan`'s ``(ct_vec, n_sub, n_ch_tiles)`` outside the overrides' token ranges.
     split: tuple[int, int, int]
     # Disjoint ``(S_min, S_max, split)`` token ranges, each with its split: the backward record's
-    # :data:`TILE_OVERRIDES` row, else its :data:`NARROW_TILES` row (the two tables share no ``(route, C)``; at most
-    # one range), or the forward record's narrow row: its 32-vector tiles from its :func:`forward_narrow_min_s` floor
+    # :data:`TILE_OVERRIDES` row, then its :data:`NARROW_TILES` row (at most one of each; at a ``(route, C)`` of both
+    # tables, the C 768 rows of sm_100a and sm_103a, the narrow key's tokens end below the override's), or the forward
+    # record's narrow row: its 32-vector tiles from its :func:`forward_narrow_min_s` floor
     # up to its :data:`FORWARD_WIDTH_FLOORS` floor, and from the later of the two floors the width of a
     # :data:`FORWARD_NARROW_WIDTHS` row with no ceiling, but none inside its :func:`forward_single_tile_range` (the
     # last range's ``S_max`` is ``sys.maxsize``: the forward rule has none, so the row's plan is the per-call plan
@@ -7176,15 +7192,16 @@ def plan_row(
     else:
         split = channel_split(C, geometry=geometry, role=role)
         route = record_route(record, arch)
+        ranges = []
         entry = TILE_OVERRIDES.get(arch, {}).get((route, C))
         if entry is not None:
             ct_vec, s_min, s_max = (int(value) for value in entry)
-            overrides = ((s_min, s_max, _override_split(ct_vec, C, geometry)),)
-        else:
-            narrow = _narrow_split(arch, route, C, geometry)
-            if narrow is not None:
-                s_min, s_max = narrow_tile_range(arch, route, C)
-                overrides = ((s_min, s_max, narrow),)
+            ranges.append((s_min, s_max, _override_split(ct_vec, C, geometry)))
+        narrow = _narrow_split(arch, route, C, geometry)
+        if narrow is not None:
+            s_min, s_max = narrow_tile_range(arch, route, C)
+            ranges.append((s_min, s_max, narrow))
+        overrides = tuple(ranges)
     if bwd_grid_mult != 1:
         grid = (launch_grid(record, device_index=device_index)[0] * bwd_grid_mult, 1, 1)
     elif (rule["kind"] == "occupancy" and C % 32) or rule.get("cap") is not None:
