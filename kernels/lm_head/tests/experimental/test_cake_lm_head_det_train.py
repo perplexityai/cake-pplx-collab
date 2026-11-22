@@ -4878,16 +4878,19 @@ def test_logprob_arm_plan_keys():
     assert [k for k in bwd if k[0] == "gemm_logits_dz"] == [
         ("gemm_logits_dz", i) for i in range(3)
     ]
-    assert [k for k in bwd if k[0] not in ("gemm_logits_dz", "rlab_zero")] == [
+    assert [k for k in bwd if k[0] != "gemm_logits_dz"] == [
         k
         for k in cake_backend.recompute_keys(plain)
         if k[0] not in ("row_grad", "gemm_logits_nostats")
     ]
-    # the dz arm stores no label residual on a row with no label column: its recompute keeps the zero step, right
-    # before chunk 0's arm; ``row_grad`` writes every row of its chunk, so the plain recompute has none
-    assert bwd.count(("rlab_zero", None)) == 1
-    assert bwd[bwd.index(("rlab_zero", None)) + 1] == ("gemm_logits_dz", 0)
+    # the dz arm stores the residual of every row whose label lies in the head, the only rows a fold reads: its
+    # recompute over tiling chunks has no zero step, as the plain recompute (``row_grad`` writes every row of its chunk)
+    assert ("rlab_zero", None) not in bwd
     assert ("rlab_zero", None) not in cake_backend.recompute_keys(plain)
+    # the counted arm of the zero-gradient row skip leaves the rows past its count: the step, right before chunk 0's arm
+    ck = cake_backend.recompute_keys(replace(arms, dcnt=True))
+    assert ck.count(("rlab_zero", None)) == 1
+    assert ck[ck.index(("rlab_zero", None)) + 1] == ("gemm_logits_dz_dcnt", 0)
     assert {"gemm_logits_dz", "gemm_logits_lbl"} <= set(arms.stages)
     assert not {"row_grad", "gemm_logits", "gemm_logits_nostats"} & set(arms.stages)
     assert list(arms.stages) == [s for s in cake_jit.STAGES if s in arms.stages]
@@ -4896,7 +4899,8 @@ def test_logprob_arm_plan_keys():
     assert len(sides) == 2 and all(p > min(forks) for p in sides)
     hidden = replace(arms, hidden_count=True, hidden_stats=False)
     rk = cake_backend.recompute_keys(hidden)
-    assert rk[:3] == (("gather_rows", "d_in"), ("rlab_zero", None), ("row_grad", 0))
+    assert rk[:2] == (("gather_rows", "d_in"), ("row_grad", 0))
+    assert ("rlab_zero", None) not in rk
     assert ("gemm_logits_dz", 0) not in rk and ("gemm_logits_dz", 1) in rk
     assert "row_grad" in hidden.stages
     with pytest.raises(ValueError, match="log-probability"):
@@ -9587,11 +9591,15 @@ def test_device_logprob_arms_store_the_same_label_residual(glm_weight):
 
 
 def test_rlab_zero_step_follows_the_producers():
-    """``_rlab_zero_needed`` / ``_with_rlab_zero``: a plan computing dX whose row-gradient producers are ``row_grad``
-    alone, over chunks that tile its loop rows (the rows of ``rlab``), has no ``rlab_zero`` step: ``row_grad`` writes
-    every row of its chunk (+0 on a row with no label column).  A ``dz`` arm among the producers keeps exactly one
-    step, right before the first producer; so do chunks that leave a loop row out or start past row 0.  A plan without
-    dX has none.  The opt-in module's loss forward keys follow the same rule."""
+    """``_rlab_zero_needed`` / ``_with_rlab_zero``: a plan computing dX whose row-gradient producers store every row a
+    fold reads has no ``rlab_zero`` step -- ``row_grad`` alone over chunks that tile its loop rows (the rows of
+    ``rlab``; it writes every row of its chunk, +0 on a row with no label column), and an uncounted ``dz`` arm over
+    tiling chunks (it stores every row whose label lies in the head, the only rows a fold reads; the temperature form
+    and the hidden valid-row count's plan included).  A counted ``dz`` arm (the zero-gradient row skip; the mixed
+    temperature plan of that skip too) keeps exactly one step, right before the first producer; so do chunks that
+    leave a loop row out or start past row 0.  A plan without dX has none.  The opt-in module's loss forward keys
+    follow the same rule.  A fresh ``rlab`` of a sequence without the step is zero-filled where a ``dz`` arm leaves
+    rows (``_rlab_fresh_zero``)."""
     g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
     common = dict(
         need_dx=True,
@@ -9621,11 +9629,35 @@ def test_rlab_zero_step_follows_the_producers():
         lp, valid_rows=8265, logprob_dz=True, logprob_lbl=True, **common
     )
     rk = cake_backend.recompute_keys(arms)
-    assert rk.count(zero) == 1 and rk[rk.index(zero) + 1] == ("gemm_logits_dz", 0), rk
+    assert zero not in rk and cake_backend._rlab_rows_stored(arms), rk
+    assert cake_backend._rlab_fresh_zero(arms, rk)
     hk = cake_backend.recompute_keys(
         replace(arms, hidden_count=True, hidden_stats=False)
     )
-    assert hk.count(zero) == 1 and hk[hk.index(zero) + 1] == ("row_grad", 0), hk
+    assert zero not in hk and ("row_grad", 0) in hk, hk
+    counted = replace(arms, dcnt=True)
+    ck = cake_backend.recompute_keys(counted)
+    assert not cake_backend._rlab_rows_stored(counted)
+    assert ck.count(zero) == 1, ck
+    assert ck[ck.index(zero) + 1] == ("gemm_logits_dz_dcnt", 0), ck
+    assert not cake_backend._rlab_fresh_zero(counted, ck)
+    # the temperature forms: uncounted, mixed (counted dW, uncounted dz) and counted
+    tp = cake_backend._with_temperature(lp)
+    for dcnt, counted_dz in ((False, True), (True, False), (True, True)):
+        tplan = cake_backend.make_plan_temperature(
+            tp,
+            counted_dz=counted_dz,
+            valid_rows=8265,
+            logprob_dz=True,
+            logprob_lbl=True,
+            dcnt=dcnt,
+            **common,
+        )
+        assert tplan.dcnt is dcnt and tplan.temperature, (dcnt, counted_dz)
+        tk = cake_backend._recompute_keys_temperature(tplan)
+        assert tk.count(zero) == int(dcnt), (dcnt, counted_dz, tk)
+        if dcnt:
+            assert tk[tk.index(zero) + 1] == (tplan.recompute_stage(0), 0), tk
     no_dx = cake_backend.make_plan(
         _problem(8700, 6144, 154880, 4096), **dict(common, need_dx=False)
     )
@@ -9653,8 +9685,8 @@ def test_rlab_zero_step_follows_the_producers():
         ("slab_sum", 0),
     ]
 
-    def stub(chunks, rows=64, need_dx=True):
-        return SimpleNamespace(need_dx=need_dx, chunks=chunks, rows=rows)
+    def stub(chunks, rows=64, need_dx=True, dcnt=False):
+        return SimpleNamespace(need_dx=need_dx, chunks=chunks, rows=rows, dcnt=dcnt)
 
     assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(rg)) == rg
     assert cake_backend._with_rlab_zero(stub(((0, 40), (40, 24))), list(rg)) == rg
@@ -9671,7 +9703,15 @@ def test_rlab_zero_step_follows_the_producers():
         ), chunks
     assert cake_backend._with_rlab_zero(stub(((0, 32),), need_dx=False), list(rg)) == rg
     dz = [("gemm_logits_dz", 0), ("gemm_dx", 0), ("slab_sum", 0)]
-    assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(dz)) == [zero] + dz
+    # an uncounted dz arm over tiling chunks: no step; counted, or over chunks that leave a row: the step
+    assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(dz)) == dz
+    assert cake_backend._with_rlab_zero(stub(((0, 64),), dcnt=True), list(dz)) == [zero] + dz
+    assert cake_backend._with_rlab_zero(stub(((0, 32),)), list(dz)) == [zero] + dz
+    assert cake_backend._with_rlab_zero(stub(((0, 64),), dcnt=True), list(rg)) == rg
+    assert cake_backend._rlab_fresh_zero(stub(((0, 64),)), tuple(dz))
+    assert not cake_backend._rlab_fresh_zero(stub(((0, 64),), need_dx=False), tuple(dz))
+    assert not cake_backend._rlab_fresh_zero(stub(((0, 64),)), tuple(rg))
+    assert not cake_backend._rlab_fresh_zero(stub(((0, 64),)), tuple([zero] + dz))
 
 
 def test_device_row_grad_alone_needs_no_rlab_zero(glm_weight):
@@ -9723,6 +9763,147 @@ def test_device_row_grad_alone_needs_no_rlab_zero(glm_weight):
         assert bool((rlab[live] != 0).any()), compact
 
 
+@pytest.mark.parametrize("form", ["default", "temperature", "opt_in"])
+def test_device_logprob_runner_rlab_zeroed_once(glm_weight, form):
+    """A prepared log-probability runner whose ``dz`` arm is uncounted, over chunks that tile its rows, has no
+    ``rlab_zero`` step: its preparation zeroes ``rlab`` once and no step fills it -- the default runner (one chunk and
+    two, compacted and not), the temperature runner and the opt-in module's runner.  With ``rlab`` NaN on every row
+    before a step, the rows whose label lies in ``[0, V)`` hold finite residuals afterwards and every other row keeps
+    its NaN (no fold reads it); ``logp`` / ``lse`` / dX / dW equal a fresh runner's bit for bit.  An uncompacted
+    runner whose labels change in place between steps (rows in the head, then ignored or past ``V``, then in the head
+    again) gives each step the bits of a fresh runner of that step's labels, the rows that left the head holding an
+    earlier step's residual.  A CUDA graph of a step, replayed over a NaN ``rlab``, gives the same bits and leaves the
+    NaN rows."""
+    _require_program(entry="logprob")
+    module = opt_in if form == "opt_in" else cake_backend
+    T = 1500
+    if form == "temperature":
+        _require_tau_program()
+        prepare = module.prepare_lm_head_det_loss_temperature
+        inp = _tau_inputs(T, W=glm_weight)
+    else:
+        prepare = module.prepare_lm_head_det_loss
+        inp = make_inputs(
+            T, seed=SEED + 71, device=CUDA, W=glm_weight, ignore_frac=0.05
+        )
+    V = int(glm_weight.shape[0])
+    nan = float("nan")
+    edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 0, V - 1], device=CUDA)
+    base = inp.labels.clone()
+    base[: edge.numel()] = edge
+    base[100:120] = torch.arange(100, 120, device=CUDA)
+    # the labels of a later step: rows leave the head (ignored, at or past V) and others enter it
+    moved = base.clone()
+    moved[: edge.numel()] = torch.tensor([5, 6, 7, 8, 9, -100, V], device=CUDA)
+    moved[100:110] = -100
+    moved[110:120] = V + 1
+
+    def make(labels, chunk, compact):
+        kw = dict(entry="logprob", dlogp=inp.dlogp, chunk_size=chunk, backend="cake")
+        tau = getattr(inp, "temperature", None) if form == "temperature" else None
+        if compact:
+            index = cake_backend.valid_row_index(labels)
+            kw["compact_rows"] = index
+            if tau is not None:
+                tau = tau.index_select(0, index).contiguous()
+        if tau is not None:
+            kw["temperature"] = tau
+        return prepare(inp.X, inp.W, labels.clone(), **kw)
+
+    def outputs(r):
+        t = r.tensors
+        return [_bits(t[name]).clone() for name in ("logp", "lse", "dx_out", "dw_out")]
+
+    def run(r):
+        r.forward()
+        r.backward()
+        torch.cuda.synchronize()
+        return outputs(r)
+
+    def live_rows(r):
+        rows = r.plan.rows
+        y = r.tensors["labels"][:rows].long()
+        return (y >= 0) & (y < V)
+
+    def check_rlab(r, case):
+        live = live_rows(r)
+        rlab = r.tensors["rlab"][: r.plan.rows]
+        assert bool(live.any()) and bool((~live).any()), case
+        assert bool(torch.isfinite(rlab[live]).all()), case
+        # no step filled the rows a fold never reads
+        assert bool(torch.isnan(rlab[~live]).all()), case
+
+    def same(got, want, case):
+        for name, a, b in zip(("logp", "lse", "dX", "dW"), got, want, strict=True):
+            assert torch.equal(a, b), (case, name)
+
+    cases = ((4096, True), (4096, False), (768, True), (768, False))
+    if form != "default":
+        cases = ((4096, True), (768, False))
+    for chunk, compact in cases:
+        case = (form, chunk, compact)
+        ref = make(base, chunk, compact)
+        want = run(ref)
+        del ref
+        r = make(base, chunk, compact)
+        keys = r.forward_order + r.backward_order
+        assert ("rlab_zero", None) not in keys, case
+        assert any(
+            k[0] in cake_backend.DZ_PRODUCER_STAGES and k[0] != "row_grad"
+            for k in r.backward_order
+        ), case
+        assert not r.plan.dcnt and r.plan.compact == compact, case
+        assert r.plan.num_chunks == (1 if chunk == 4096 else 2), case
+        torch.cuda.synchronize()
+        # zeroed once, at the preparation
+        assert bool((_bits(r.tensors["rlab"]) == 0).all()), case
+        for i in range(2):
+            r.tensors["rlab"].fill_(nan)
+            got = run(r)
+            check_rlab(r, (case, i))
+            same(got, want, (case, i))
+        if not compact:
+            # the labels change in place between steps (an uncompacted runner reads them on each step)
+            fresh = {}
+            for name, labels in (("base", base), ("moved", moved)):
+                f = make(labels, chunk, compact)
+                fresh[name] = run(f)
+                del f
+            r.tensors["rlab"].fill_(nan)
+            before = live_rows(r)
+            for i, name in enumerate(("base", "moved", "base")):
+                labels = base if name == "base" else moved
+                r.tensors["labels"].copy_(labels.to(r.tensors["labels"].dtype))
+                same(run(r), fresh[name], (case, "labels", i))
+                live = live_rows(r)
+                rlab = r.tensors["rlab"][: r.plan.rows]
+                assert bool(torch.isfinite(rlab[live]).all()), (case, "labels", i)
+                if name == "moved":
+                    left = before & ~live
+                    # the rows that left the head keep the earlier step's residual (no fold reads it)
+                    assert bool(left[100:120].all()), case
+                    assert bool(torch.isfinite(rlab[left]).all()), case
+                    assert bool((rlab[left] != 0).any()), case
+                    assert bool(torch.isnan(rlab[~live & ~before]).all()), case
+            assert torch.equal(r.tensors["labels"][: r.plan.rows].long(), base), case
+        # a CUDA graph of one step: the replay over a NaN rlab fills none of it either
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            r.step()  # warm-up on the capture stream
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            r.step()
+        for i in range(2):
+            r.tensors["rlab"].fill_(nan)
+            graph.replay()
+            torch.cuda.synchronize()
+            check_rlab(r, (case, "graph", i))
+            same(outputs(r), want, (case, "graph", i))
+        del graph, r
+
+
 def _graph_rlab_node(lp: torch.Tensor):
     """The log-probability autograd node behind ``lp`` that holds the graph's label residuals (``rlab``)."""
     pending, seen = [lp.grad_fn], set()
@@ -9739,13 +9920,15 @@ def _graph_rlab_node(lp: torch.Tensor):
 
 def test_device_logprob_graph_rlab(glm_weight):
     """The log-probability autograd graph's label residuals (``_GraphRlab``): the forward leaves the holder empty; the
-    first backward takes them, zero-filled for the ``dz`` arm's recompute and uninitialized for the kept logits'
-    ``row_grad``; every later backward of a retained graph binds that tensor (no allocation, no zero fill, no
-    ``rlab_zero`` host step in the remembered sequences) with +0 on every row without a label column in the head.  dX /
-    dW of four backwards (two ``dlogp`` draws) equal those of the same backwards whose bindings allocate their own
-    ``rlab`` (``node.rlab = None``) bit for bit -- the default form (one chunk and two, compacted and not), the kept
-    form and the opt-in module's automatic form (its one-chunk kept logits); a held tensor with NaN on its rows with a
-    label column is bound and every such row is stored again; one that is not clean is not bound."""
+    first backward takes a buffer from the free list of its stream -- here one left with NaN on every row by an earlier
+    graph -- and fills none of it: the ``dz`` arm stores the rows whose label lies in the head, the only rows a fold
+    reads, and every other row (an ignored row, a label at or past ``V``) keeps its NaN; the kept logits' ``row_grad``
+    stores every row (+0 on those).  Every later backward of a retained graph binds that tensor (no allocation, no zero
+    fill, no ``rlab_zero`` host step in the remembered sequences).  dX / dW of four backwards (two ``dlogp`` draws)
+    equal those of the same backwards whose bindings allocate their own zero-filled ``rlab`` (``node.rlab = None``)
+    bit for bit -- the default form (one chunk and two, compacted and not), the kept form and the opt-in module's
+    automatic form (its one-chunk kept logits); a held tensor with NaN on its rows with a label column is bound and
+    every such row is stored again; one with NaN on every other row is bound as it is and gives the same bits."""
     _require_program(entry="logprob")
     V = int(glm_weight.shape[0])
     edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
@@ -9780,7 +9963,22 @@ def test_device_logprob_graph_rlab(glm_weight):
         labels[: edge.numel()] = edge
         dlogps = (inp.dlogp, inp.dlogp.flip(0) * 2.0) * 2
         out = {}
+        cake_backend.BINDING_CACHE.clear()
         for own in (True, False):
+            if not own:
+                # an earlier graph of the same rows puts its buffer on the stream's free list; NaN on all of it
+                cake_backend._RLAB_POOL.clear()
+                gc.collect()
+                X = inp.X.detach().requires_grad_(True)
+                W = inp.W.detach().requires_grad_(True)
+                lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact)
+                lp.backward(dlogps[0])
+                del X, W, lp
+                gc.collect()
+                poisoned = {e[3].data_ptr() for e in _pool_free(cake_backend)}
+                assert len(poisoned) == 1, case
+                for e in _pool_free(cake_backend):
+                    e[3].fill_(float("nan"))
             X = inp.X.detach().requires_grad_(True)
             W = inp.W.detach().requires_grad_(True)
             lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact)
@@ -9807,30 +10005,46 @@ def test_device_logprob_graph_rlab(glm_weight):
                     if held is None:
                         held = holder.tensor
                         assert held is not None and holder.own is not None, case
+                        assert holder.own[1][3].data_ptr() in poisoned, case
                     assert held.dtype == torch.float32, case
                     assert held.numel() == rows_labels.numel(), case
-                    # bound, not reallocated; clean after every backward
-                    assert holder.tensor is held and holder.clean, (case, i)
-                    assert bool((_bits(held)[~live] == 0).all()), (case, i)
+                    # bound, not reallocated, never filled: the rows with a label column hold this backward's residuals
+                    assert holder.tensor is held, (case, i)
+                    assert bool(torch.isfinite(held[live]).all()), (case, i)
+                    if dz:
+                        assert bool(torch.isnan(held[~live]).all()), (case, i)
+                    else:
+                        assert bool((_bits(held)[~live] == 0).all()), (case, i)
             if not own:
-                # NaN on the rows with a label column of a clean tensor: the producers store every such row again
+                # NaN on the rows with a label column: the producers store every such row again
                 held[live] = float("nan")
                 X.grad = W.grad = None
                 lp.backward(dlogps[0], retain_graph=True)
                 torch.cuda.synchronize()
                 grads.append((X.grad.clone(), W.grad.clone()))
-                assert holder.tensor is held and bool(torch.isfinite(held).all()), case
-                # a held tensor that is not clean is not bound: the call allocates a zero-filled one for the graph
+                assert holder.tensor is held, case
+                assert bool(torch.isfinite(held[live]).all()), case
+                # NaN on every other row too: bound as it is (no fold reads those rows)
                 held[~live] = float("nan")
-                holder.clean = False
                 X.grad = W.grad = None
                 lp.backward(dlogps[0], retain_graph=True)
                 torch.cuda.synchronize()
                 grads.append((X.grad.clone(), W.grad.clone()))
-                assert holder.tensor is not held and holder.clean, case
-                assert bool((_bits(holder.tensor)[~live] == 0).all()), case
+                assert holder.tensor is held, case
+                assert bool(torch.isfinite(held[live]).all()), case
+                assert not dz or bool(torch.isnan(held[~live]).all()), case
             out[own] = grads
             del lp, node, holder
+            if own:
+                # the remembered backward sequences: a dz arm (uncounted) or row_grad alone, never the zero step
+                bindings = list(cake_backend.BINDING_CACHE._bindings.values())
+                assert bindings, case
+                keys = [k for b in bindings for k in b.backward_order]
+                dz = any(
+                    k[0] in cake_backend.DZ_PRODUCER_STAGES and k[0] != "row_grad"
+                    for k in keys
+                )
+                assert not dz or entry is default, case
         bindings = list(cake_backend.BINDING_CACHE._bindings.values())
         assert bindings, case
         for b in bindings:
@@ -17680,7 +17894,7 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
         rows = int(saved[2].numel() if saved[4] is None else saved[4].numel())
         holder = node.rlab
         # the forward takes no buffer: the first backward that binds the holder takes one
-        assert holder.tensor is None and holder.own is None and not holder.clean
+        assert holder.tensor is None and holder.own is None
         return dict(X=X, W=W, lp=lp, dlogp=inp.dlogp, holder=holder, rows=rows)
 
     def backward(g, retain=False):
@@ -17704,9 +17918,9 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     takes, bound = [], []
     real_take, real_call = be._graph_rlab, be._Binding._call_rlab
 
-    def take(rows, zero, dev):
+    def take(rows, dev):
         takes.append(rows)
-        return real_take(rows, zero, dev)
+        return real_take(rows, dev)
 
     def call_rlab(self, zero, graph=None, filled=False):
         bound.append(graph)
@@ -17769,16 +17983,16 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     assert _pool_same(got_c[0], ref_a)
     del b, c, d, e
     gc.collect()
-    # the kept form (no zero fill) binds a poisoned buffer; rows past a buffer's capacity take a new, larger one,
+    # the kept form binds a poisoned buffer too; rows past a buffer's capacity take a new, larger one,
     # and a smaller call then binds the [rows] view of the larger buffer
     poisoned = set()
     for buf in _pool_free(be):
         buf[3].fill_(float("nan"))
         poisoned.add(buf[3].data_ptr())
     k = forward(keep, 16)
-    assert k["holder"].tensor is None and not k["holder"].clean
+    assert k["holder"].tensor is None
     got_k = backward(k)
-    assert owned(k)[0] in poisoned and k["holder"].clean
+    assert owned(k)[0] in poisoned
     del k
     big = forward(default, 300)
     got_big = backward(big)
@@ -17832,7 +18046,7 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         scratch = torch.zeros((16,), dtype=torch.float32, device=device)
-        assert be._graph_rlab(16, True, device) is None
+        assert be._graph_rlab(16, device) is None
     assert {k: len(v) for k, v in be._RLAB_POOL.items()} == sizes
     del graph, scratch
     # no forward takes a buffer -- a plain call, a call without a gradient, a checkpoint's first pass or its
@@ -17842,9 +18056,9 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     phase = ["forward"]
     real = be._graph_rlab
 
-    def counted(rows, zero, dev):
+    def counted(rows, dev):
         calls.append(phase[0])
-        return real(rows, zero, dev)
+        return real(rows, dev)
 
     monkeypatch.setattr(be, "_graph_rlab", counted)
     for entry in (default, keep):
@@ -17888,16 +18102,16 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     if torch.cuda.device_count() > 1:
         other = (index + 1) % torch.cuda.device_count()
         with torch.cuda.device(other):
-            own = be._graph_rlab(16, True, torch.device("cuda", other))
+            own = be._graph_rlab(16, torch.device("cuda", other))
             assert own is not None and own[1][1].device.index == other
             assert own[0] is be._RLAB_POOL[be._CUDA_GET_STREAM(other)]
             assert int(torch.count_nonzero(own[1][1])) == 0
             # a holder that owns the entry puts it back when it is freed (here at once)
-            be._GraphRlab(own[1][1], True, own)
+            be._GraphRlab(own[1][1], own)
             del own
             gc.collect()
             assert len(_pool_free(be)) == 1
-        assert be._graph_rlab(16, True, torch.device("cuda", other)) is None
+        assert be._graph_rlab(16, torch.device("cuda", other)) is None
     be._RLAB_POOL.clear()
     gc.collect()
 
@@ -17905,11 +18119,11 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
 def test_device_graph_rlab_pool(glm_weight, monkeypatch):
     """The graphs' label residual buffers come from the free list of the caller's stream (``_graph_rlab``,
     ``_RLAB_POOL``) and go back when the graph is freed -- taken by the first backward that binds the graph's holder
-    (zero-filled there for the ``dz`` arm; the kept logits' unfilled): two live graphs hold disjoint buffers; a freed
+    (zero-filled once, when it is requested; bound unfilled after): two live graphs hold disjoint buffers; a freed
     graph's buffer is the next graph's; a retained graph keeps its buffer through every backward while another graph
     meanwhile takes another; a buffer left with NaN on every row gives the bits of an ordinary tensor (``_RLAB_POOL_ON``
-    off) -- the default entry's form, whose backward fill overwrites it, and the kept form, whose backward binds it
-    unfilled; a call past a buffer's capacity takes a larger one and a smaller call then binds its view; at most
+    off) -- the default entry's form and the kept form, whose backwards bind it unfilled; a call past a buffer's
+    capacity takes a larger one and a smaller call then binds its view; at most
     ``_RLAB_POOL_MAX`` buffers stay free per stream; another stream takes its own list; a CUDA graph capture takes no
     buffer and changes no list; no forward takes one (a plain call, a call without a gradient, a checkpoint's first pass
     or recomputation), the binding backward does, with the plain step's bits; another device takes its own stream's
@@ -18949,8 +19163,8 @@ def test_device_logprob_graph_rlab_freed_by_its_backward(glm_weight, monkeypatch
     takes = []
     real_take = be._graph_rlab
 
-    def take(rows, zero, device):
-        got = real_take(rows, zero, device)
+    def take(rows, device):
+        got = real_take(rows, device)
         if got is not None:
             takes.append(got[1][3].data_ptr())
         return got
