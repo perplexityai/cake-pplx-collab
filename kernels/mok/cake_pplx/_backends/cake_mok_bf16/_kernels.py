@@ -53,7 +53,7 @@ BEFORE_DOWN_LAYOUTS = {
     (64, 6): 6,
 }
 # Targets with the router-weight-before-down kernels (top-k 6, 384-expert layouts).
-BEFORE_DOWN_TARGETS = ("sm_100a", "sm_103a")
+BEFORE_DOWN_TARGETS = ("sm_100a", "sm_103a", "sm_107a")
 SWIGLU_BWD_TILES = 8  # 128 x 128 tiles per backward SwiGLU task half.
 
 
@@ -146,7 +146,8 @@ def check_target(router_weight_position, arch):
     if router_weight_position == "before_down" and arch not in BEFORE_DOWN_TARGETS:
         raise ValueError(
             "router_weight_position='before_down' (top-k 6 and the 384-expert layouts) "
-            f"has no {arch} build in this package; use an sm_100a or sm_103a device"
+            f"has no {arch} build in this package; use an sm_100a, sm_103a or "
+            "sm_107a device"
         )
 
 
