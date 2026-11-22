@@ -511,7 +511,7 @@ def test_planned_scheduler_matches_the_unplanned_launches(ep, experts):
     tokens = 512
     generator = torch.Generator(device="cuda").manual_seed(2211)
     ids = (
-        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -572,7 +572,7 @@ def test_build_schedule_plan_matches_the_unplanned_launches(count):
     config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
     generator = torch.Generator(device=device).manual_seed(3307 + count)
     ids = (
-        torch.rand(count, ep * experts, device=device, generator=generator)
+        rand(count, ep * experts, device=device, generator=generator)
         .argsort(-1)[:, :topk]
         .contiguous()
     )
@@ -624,7 +624,7 @@ def test_build_schedule_plan_built_under_inference_mode():
     config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
     generator = torch.Generator(device=device).manual_seed(3391)
     ids = (
-        torch.rand(count, ep * experts, device=device, generator=generator)
+        rand(count, ep * experts, device=device, generator=generator)
         .argsort(-1)[:, :topk]
         .contiguous()
     )
