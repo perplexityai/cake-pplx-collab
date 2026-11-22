@@ -154,7 +154,7 @@ __device__ __forceinline__ void tcgen05_commit_cg2_multicast_leader(
 extern "C" {
 
 __global__ __launch_bounds__(320) __cluster_dims__(2,1,1) void
-kernel_cake_dense_projection_gemm_4bb8d48595972fabee12(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ out, float* __restrict__ ws, unsigned int* __restrict__ counters, int M, int N, int K, int num_l, int num_splits, int ldo, int out_l)
+kernel_cake_dense_projection_gemm_ab8e9947b1ed1debe888(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, __nv_bfloat16* __restrict__ out, float* __restrict__ ws, unsigned int* __restrict__ counters, int M, int N, int K, int num_l, int num_splits, int ldo, int out_l)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -333,7 +333,7 @@ kernel_cake_dense_projection_gemm_4bb8d48595972fabee12(const __grid_constant__ C
                     int k_begin_1 = split_1 * k_iters_m / num_splits;
                     int k_end_1 = (split_1 + 1) * k_iters_m / num_splits;
                     int kc_len = k_end_1 - k_begin_1;
-                    int kc_count = (k_end_1 - k_begin_1 + 127) / 128;
+                    int kc_count = (k_end_1 - k_begin_1 + 63) / 64;
                     int kc_lo = k_begin_1;
                     #pragma unroll 1
                     for (int kc_j = 0; kc_j < kc_count; kc_j++) {
@@ -466,7 +466,7 @@ kernel_cake_dense_projection_gemm_4bb8d48595972fabee12(const __grid_constant__ C
                         :: "r"((acc_empty_addr + (acc_buf) * 8) & 0xFEFFFFFF) : "memory");
                 }
                 #pragma unroll 1
-                for (int _chunk = 1; _chunk < (k_end_2 - k_begin_2 + 127) / 128; _chunk++) {
+                for (int _chunk = 1; _chunk < (k_end_2 - k_begin_2 + 63) / 64; _chunk++) {
                     acc_buf += 1;
                     if (acc_buf == 2) { acc_buf = 0; _phase_acc_full ^= 1; }
                     lane_addr = taddr + (unsigned int)(quarter * 32 << 16) + acc_buf * 256 + (unsigned int)(half * 64);

@@ -179,7 +179,7 @@ __device__ __forceinline__ void tmem_ld_x8(float* dst, int tmem_addr) {
 extern "C" {
 
 __global__ __launch_bounds__(320) __cluster_dims__(2,1,1) void
-kernel_cake_dense_projection_det_gemm_2cbfa33f1038f330aae5(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, const __grid_constant__ CUtensorMap OUT32, const __grid_constant__ CUtensorMap OUT16, __nv_bfloat16* __restrict__ out, float* __restrict__ out32, float* __restrict__ ws, unsigned int* __restrict__ counters, int M, int N, int m_tiles, int n_tiles, int group_m, int promo_code, int k_iters, int ldo, int out_l, int num_cluster_tiles, int num_l, int num_full, int iters_per_unit, int sk_iters)
+kernel_cake_dense_projection_det_gemm_b9ea8335d99abef1d6ed(const __grid_constant__ CUtensorMap A, const __grid_constant__ CUtensorMap B, const __grid_constant__ CUtensorMap OUT32, const __grid_constant__ CUtensorMap OUT16, __nv_bfloat16* __restrict__ out, float* __restrict__ out32, float* __restrict__ ws, unsigned int* __restrict__ counters, int M, int N, int m_tiles, int n_tiles, int group_m, int promo_code, int k_iters, int ldo, int out_l, int num_cluster_tiles, int num_l, int num_full, int iters_per_unit, int sk_iters)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -493,7 +493,7 @@ kernel_cake_dense_projection_det_gemm_2cbfa33f1038f330aae5(const __grid_constant
                         int tail_s_1 = ((us_0_1 < 0) ? -1 : t_s_1);
                         int klen_1 = kend_s_1 - kbeg_s_1;
                         mbarrier_wait(epilogue_done_addr + (mma_epi_stage) * 8, _phase_epilogue_done);
-                        int kc_count = (klen_1 + 127) / 128;
+                        int kc_count = (klen_1 + 63) / 64;
                         int kc_next = 0;
                         int kc_lo = 0;
                         int kc_hi = 0;
@@ -689,7 +689,7 @@ kernel_cake_dense_projection_det_gemm_2cbfa33f1038f330aae5(const __grid_constant
                     int row0 = off_m_1 + warp_row0;
                     int col0 = slice_col0;
                     int lane_addr = taddr + (unsigned int)(epi_warp * 32 << 16) + epi_stage * 256 + (unsigned int)(row_half * 256) + (unsigned int)tmem_col0;
-                    int kc_count_1 = (kend_s_2 - kbeg_s_2 + 127) / 128;
+                    int kc_count_1 = (kend_s_2 - kbeg_s_2 + 63) / 64;
                     if (kc_count_1 > 1) {
                         mbarrier_wait(mainloop_done_addr + (epi_stage) * 8, _phase_mainloop_done);
                         asm volatile("tcgen05.fence::after_thread_sync;");
