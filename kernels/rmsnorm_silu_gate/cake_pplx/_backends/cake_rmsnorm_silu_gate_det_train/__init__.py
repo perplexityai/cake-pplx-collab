@@ -33,13 +33,20 @@ Host design (every control is a keyword; no environment variable):
 - The forward saves nothing beyond its inputs; the backward recomputes the
   statistics and the gate from ``x`` and ``z``.
 - Forward: 128-thread CTAs of 16-row blocks (``cake_jit.launch_grid``): one
-  CTA per block below 8192 rows per SM, and from there the fewest whole waves
-  of 6 CTAs per SM that give no CTA more than 2 blocks, a CTA loading its next
-  block while it computes the current one.  One module per architecture, and
-  on SM107 a second one for packed rows (``x`` and ``z`` both read as
-  contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a row
-  with the same FP32 operations in the same order, so the layout changes no
-  bits.  Up to ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
+  CTA per block below a cut of rows per SM of the architecture, and from
+  there the fewest whole waves of 6 CTAs per SM that give no CTA more than 2
+  blocks, a CTA loading its next block while it computes the current one;
+  the grid changes no bits.  The cut depends on the architecture and the
+  layout: on rows the kernel reads as packed (``cake_jit.forward_packed``:
+  ``x`` and ``z`` of head stride 128 and token stride ``H * 128``, the rows
+  that get its L2 prefetches; its record's ``persistent_from_rows_per_sm``)
+  6500 on SM100, 5600 on SM103 and 8192 on SM107, and on other rows (a
+  record's ``persistent_from_rows_per_sm_strided``) 1000 on each.  One
+  module per architecture, and on SM107 a second one for packed rows (``x``
+  and ``z`` both read as contiguous ``[T, H, 128]``;
+  ``cake_jit.forward_module``) that computes a row with the same FP32
+  operations in the same order, so the layout changes no bits.  Up to
+  ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
   rows of ``cake_jit.FWD_TINY_GAP_ROWS`` (17 to 32 on SM107), inputs whose
   rows are packed (``x`` and ``z`` both read as contiguous ``[T, H, 128]``,
   or one token of head stride 128, whose token stride is never read) run the

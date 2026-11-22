@@ -106,10 +106,12 @@ the forward alone is about 10 % faster and the step at most about 3.5 %
 slower: 128-thread CTAs walking 16-row blocks, each thread
 loading its row of the CTA's next block into registers while it computes the
 current one, with the mid forward's L2 prefetches and the L2 ``evict_first``
-policy on the loads of ``x`` and ``z``, one CTA per block below 8192 rows per
-SM (``fwd_pipe`` on sm_100a and sm_103a; on sm_107a ``fwd_pipe_packed``, for
-packed rows, with four sum chains, ``rsqrt.approx.ftz``, ``w`` loaded behind
-the first block's loads and one 32-byte store per lane).  Each program's
+policy on the loads of ``x`` and ``z``, one CTA per block below the
+deterministic package's cut of rows per SM of the architecture and whole
+waves from there (``fwd_pipe`` on sm_100a and sm_103a; on sm_107a
+``fwd_pipe_packed``, for packed rows, with four sum chains,
+``rsqrt.approx.ftz``, ``w`` loaded behind the first block's loads and one
+32-byte store per lane).  Each program's
 arithmetic is fixed; the programs associate a row's sum of squares differently
 (the tiny and the short forward: four 2-term FMA chains of 16 lanes added in
 pairs, then folded by XOR shuffles 1, 2, 4, 8, and the 32-lane tiny forward
@@ -265,8 +267,15 @@ CTA per block of ``rows_per_cta`` rows; the extra-long, long and mid forwards
 the fewest whole waves of ``ctas_per_sm * SMs`` CTAs whose CTAs walk at most
 ``max_blocks_per_cta`` blocks of ``rows_per_block`` rows each, never more
 CTAs than blocks (CTA ``b`` walks the blocks ``b``, ``b + grid``, ...), and
-so do the pipelined forwards from ``persistent_from_rows_per_sm`` rows per SM
-on, one CTA per block below it; a
+so do the pipelined forwards from their cut of rows per SM on, one CTA per
+block below it: their rule's ``persistent_from_rows_per_sm`` and, on rows
+the kernel does not read as packed (:func:`forward_packed`: strided,
+broadcast over tokens or one token), ``fwd_pipe``'s
+``persistent_from_rows_per_sm_strided``, which ``fwd_pipe_packed``, a
+program of packed rows only, does not have; each keyed by architecture, the
+deterministic package's cuts (:func:`launch_grid` takes ``arch`` and
+``packed``, and :func:`run_module` passes the device's and the call's; the
+grid changes no bits); a
 small-row backward one cluster of ``cluster`` CTAs (``launch.cluster``)
 whatever the rows, up to its rule's ``max_rows``.  The static and the
 claimed backward cut the rows into blocks of ``rows_per_block`` rows and the
@@ -735,8 +744,10 @@ MODULES: dict[str, dict[str, Any]] = {
     # "packed_rows": 0, "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz":
     # 0, "split_gate": 1, "store_width": 128, "sum_pairs": 0, "threads": 128,
     # "w_late": 0});
-    # one CTA per block below 8192 rows per SM, whole waves of at most 2
-    # blocks per CTA from there; FORWARD_BANDS gives it its rows.
+    # one CTA per block below the deterministic package's cut of rows per SM
+    # on each architecture (persistent_from_rows_per_sm; on rows it does not
+    # read as packed persistent_from_rows_per_sm_strided), whole waves of at
+    # most 2 blocks per CTA from there; FORWARD_BANDS gives it its rows.
     "cake_rmsnorm_silu_gate_train_e6e0bf4c758851cabc99": {
         "arches": [
             "sm_100a",
@@ -763,7 +774,14 @@ MODULES: dict[str, dict[str, Any]] = {
             "ctas_per_sm": 6,
             "kind": "persistent_row_blocks",
             "max_blocks_per_cta": 2,
-            "persistent_from_rows_per_sm": 8192,
+            "persistent_from_rows_per_sm": {
+                "sm_100a": 6500,
+                "sm_103a": 5600,
+            },
+            "persistent_from_rows_per_sm_strided": {
+                "sm_100a": 1000,
+                "sm_103a": 1000,
+            },
             "rows_per_block": 16,
         },
         "kernel": "cake_rmsnorm_silu_gate_train_e6e0bf4c758851cabc99",
@@ -825,7 +843,9 @@ MODULES: dict[str, dict[str, Any]] = {
             "ctas_per_sm": 6,
             "kind": "persistent_row_blocks",
             "max_blocks_per_cta": 2,
-            "persistent_from_rows_per_sm": 8192,
+            "persistent_from_rows_per_sm": {
+                "sm_107a": 8192,
+            },
             "rows_per_block": 16,
         },
         "kernel": "cake_rmsnorm_silu_gate_train_9cb071b2dfe75474aaa7",
@@ -2869,21 +2889,25 @@ ROUTES: dict[str, dict[str, str]] = {
 # module of the first band's routed ``role`` with ``rows <= last *
 # sm_count``.  The cuts follow the checkpointed training step at each rows
 # per SM (two forwards and the backward, of a BF16 and of an FP32 weight
-# gradient; CUPTI, cold L2) on every architecture: the pipelined forwards
+# gradient; CUPTI, cold L2) on every architecture, measured with the
+# one-CTA-per-block pipelined grid of 0.2.13 (one CTA per block below 8192
+# rows per SM on every architecture; the pipelined forwards now launch whole
+# waves from their cuts of each architecture, below 8192 on sm_100a and
+# sm_103a): the pipelined forwards
 # load ``x`` and ``z`` with the L2 ``evict_first`` policy, so where the rows
 # fit in L2 the step's later kernels read them from memory again and this
 # package's own forwards make the step faster, though the pipelined forward
-# alone is faster.  On sm_100a each band runs the program of the fastest
-# step.  On sm_103a the mid forward up to 240 rows per SM and the extra-long
-# forward up to 600 make the step 4 to 10 % faster than the pipelined
-# forward, which alone is at most 4.5 % faster; past 600 the pipelined
-# forward runs, but the mid forward from 6001 to 8192 rows per SM, where the
-# pipelined forward still launches a CTA per block.  One cut is not the
-# step's: on sm_107a the pipelined forward runs past 280 rows per SM, where
-# it is about 10 % faster alone than the extra-long forward and makes the
-# step at most about 3.5 % slower.  The tiny forwards end where beside a
-# kernel holding 16 SMs they still end no later than the deterministic
-# package's forward as it routes the rows.  The 32-lane tiny forward (that
+# alone is faster.  In that measurement on sm_100a each band ran the program
+# of the fastest step; on sm_103a the mid forward up to 240 rows per SM and
+# the extra-long forward up to 600 made the step 4 to 10 % faster than the
+# pipelined forward, which alone was at most 4.5 % faster, and past 600 the
+# pipelined forward runs, but the mid forward from 6001 to 8192 rows per SM,
+# where the pipelined forward of 0.2.13 launched a CTA per block.  One cut is
+# not the step's: on sm_107a the pipelined forward runs past 280 rows per
+# SM, where it was about 10 % faster alone than the extra-long forward and
+# made the step at most about 3.5 % slower.  The tiny forwards end where
+# beside a kernel holding 16 SMs they still end no later than the
+# deterministic package's forward as it routes the rows.  The 32-lane tiny forward (that
 # package's tiny row blocks: 32 lanes a row, one 4-row block per CTA) runs on
 # sm_100a up to 4 rows per SM, one CTA per SM, past which CUDA Graph replays
 # of back-to-back calls run its twice as many CTAs up to about 1.5 % slower
@@ -2938,8 +2962,8 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # measured there (from 1000 rows per SM on sm_100a and sm_103a, from 520 on
 # sm_107a) it is the fastest forward alone and makes the step 1 to 6 %
 # faster.  No band of this table runs a pipelined forward, which makes the
-# step slower at every rows per SM measured (on sm_103a 3 to 7 % slower than
-# the mid forward from 13 to 100 rows per SM).
+# step slower at every rows per SM measured (with its grid of 0.2.13; on
+# sm_103a 3 to 7 % slower than the mid forward from 13 to 100 rows per SM).
 STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3504,19 +3528,49 @@ def workspace_bytes(name: str) -> int:
     )
 
 
+def forward_packed(
+    heads: int, x_tok: int, x_head: int, z_tok: int, z_head: int
+) -> bool:
+    """Whether the persistent forward kernels read ``x`` and ``z`` of
+    ``heads`` heads, given their token and head strides (in elements), as
+    packed rows: both head strides 128 and both token strides ``heads * 128``
+    (the kernels' own test, which turns on their L2 prefetches; a single
+    token's stride, passed as 0, a broadcast over tokens, head-major rows and
+    a gate sliced from a projection fail it).  :func:`run_module` passes it
+    to :func:`launch_grid` for a record whose rule has a cut of rows not read
+    as packed."""
+
+    row = heads * HEAD_DIM
+    return x_head == HEAD_DIM and z_head == HEAD_DIM and x_tok == row and z_tok == row
+
+
 def launch_grid(
-    record: dict[str, Any], *, rows: int, sm_count: int, ctas: int = 0
+    record: dict[str, Any],
+    *,
+    rows: int,
+    sm_count: int,
+    ctas: int = 0,
+    arch: str | None = None,
+    packed: bool = True,
 ) -> tuple[int, int, int]:
-    """The grid of one module record for ``rows`` rows on a device with
-    ``sm_count`` SMs (``ctas``: the backward's CTA count,
-    :func:`backward_ctas`).  The long and mid forwards take the fewest whole
-    waves of ``ctas_per_sm * sm_count`` CTAs whose CTAs walk at most
-    ``max_blocks_per_cta`` blocks of ``rows_per_block`` rows each, and at most
-    one CTA per block; a rule with ``persistent_from_rows_per_sm`` (the
-    pipelined forwards) takes one CTA per block below that many rows per SM.
-    A small-row backward takes one cluster of ``cluster`` CTAs; every other
-    backward (a strided program without the weight gradient among them)
-    ``ctas``."""
+    """The grid of one module record for ``rows`` rows on a device of
+    architecture ``arch`` with ``sm_count`` SMs (``ctas``: the backward's CTA
+    count, :func:`backward_ctas`; ``packed``: whether the kernel reads the
+    rows as packed, :func:`forward_packed`).  The long and mid forwards take
+    the fewest whole waves of ``ctas_per_sm * sm_count`` CTAs whose CTAs walk
+    at most ``max_blocks_per_cta`` blocks of ``rows_per_block`` rows each, and
+    at most one CTA per block; a rule with ``persistent_from_rows_per_sm``
+    (the pipelined forwards) takes one CTA per block below its cut of rows per
+    SM: that one, or, with ``packed`` False, its
+    ``persistent_from_rows_per_sm_strided`` where the rule has one (the
+    pipelined forward that reads rows of any layout).  A cut keyed by
+    architecture (the pipelined forwards') gives ``arch``'s value, and with
+    ``arch`` None or not one of its keys the call raises ``ValueError``
+    naming the record's kernel, ``arch`` and the keys (a single number serves
+    every architecture).  A small-row backward takes one cluster of
+    ``cluster`` CTAs; every other backward (a strided program without the
+    weight gradient among them) ``ctas``.  Only the pipelined forwards read
+    ``arch`` and ``packed``."""
 
     rule = record["grid_rule"]
     kind = rule["kind"]
@@ -3524,7 +3578,18 @@ def launch_grid(
         return (-(-int(rows) // int(rule["rows_per_cta"])), 1, 1)
     if kind == "persistent_row_blocks":
         blocks = -(-int(rows) // int(rule["rows_per_block"]))
-        start = rule.get("persistent_from_rows_per_sm")
+        key = "persistent_from_rows_per_sm"
+        if not packed and "persistent_from_rows_per_sm_strided" in rule:
+            key = "persistent_from_rows_per_sm_strided"
+        start = rule.get(key)
+        if isinstance(start, dict):
+            if arch not in start:
+                raise ValueError(
+                    f"Cake SiLU-gated RMSNorm module {record.get('kernel')!r}: "
+                    f"its {key} is per architecture ({sorted(start)}); "
+                    f"launch_grid got arch={arch!r}"
+                )
+            start = start[arch]
         if start is not None and int(rows) < int(start) * int(sm_count):
             return (blocks, 1, 1)
         wave = max(1, int(rule["ctas_per_sm"]) * int(sm_count))
@@ -3612,6 +3677,23 @@ def _arguments(name: str) -> tuple[tuple[bool, Any, str], ...]:
 
 
 @functools.cache
+def _packed_slots(name: str) -> tuple[str, ...]:
+    """The logical names of the ``heads``, ``x_tok``, ``x_head``, ``z_tok``
+    and ``z_head`` arguments of module record ``name`` when its rule has a
+    cut of rows not read as packed (``persistent_from_rows_per_sm_strided``),
+    else ``()``: its grid does not depend on the layout.  Cached: the module
+    records are constant."""
+
+    record = MODULES[name]
+    if "persistent_from_rows_per_sm_strided" not in record["grid_rule"]:
+        return ()
+    logical = record["logical"]
+    return tuple(
+        logical[key] for key in ("heads", "x_tok", "x_head", "z_tok", "z_head")
+    )
+
+
+@functools.cache
 def _entry(name: str, device_index: int) -> Any:
     """The tvm-ffi function of module record ``name`` on CUDA device ``device_index``."""
 
@@ -3646,16 +3728,36 @@ def run_module(
 
     ``values`` maps logical names to tensors and Python scalars; the module
     record maps its kernel parameter names onto that vocabulary.  The launch
-    grid is the module's :func:`launch_grid` on the device's SM count (the
-    backward reads ``ctas`` from ``values``), and the kernel runs on torch's
-    current stream of CUDA device ``device_index``, the device of its tensors.
+    grid is the module's :func:`launch_grid` on the device's SM count and
+    architecture (:func:`device_sm_count` and :func:`device_arch`, each read
+    once per device; the backward reads ``ctas`` from ``values``) and, for a
+    record whose rule has a cut of rows not read as packed
+    (``persistent_from_rows_per_sm_strided``), whether the kernel reads this
+    call's rows as packed: :func:`forward_packed` of the call's own
+    ``heads``, ``x_tok``, ``x_head``, ``z_tok`` and ``z_head`` arguments (the
+    kernel's test, so host and kernel agree on every call).  The kernel runs
+    on torch's current stream of CUDA device ``device_index``, the device of
+    its tensors.
     """
 
+    packed = True
+    slots = _packed_slots(name)
+    if slots:
+        heads, x_tok, x_head, z_tok, z_head = slots
+        packed = forward_packed(
+            values.get(heads, 0),
+            values.get(x_tok, 0),
+            values.get(x_head, 0),
+            values.get(z_tok, 0),
+            values.get(z_head, 0),
+        )
     grid = launch_grid(
         MODULES[name],
         rows=rows,
         sm_count=device_sm_count(device_index),
         ctas=int(values.get("ctas", 0)),
+        arch=device_arch(device_index),
+        packed=packed,
     )
     arguments = _arguments(name)
     try:
@@ -3707,6 +3809,7 @@ __all__ = [
     "current_raw_stream",
     "device_arch",
     "device_sm_count",
+    "forward_packed",
     "launch_grid",
     "library_name",
     "load",

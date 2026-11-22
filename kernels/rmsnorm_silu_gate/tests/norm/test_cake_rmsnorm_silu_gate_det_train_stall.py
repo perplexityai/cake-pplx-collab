@@ -17,11 +17,13 @@ Stall regression of the Cake SiLU-gated RMSNorm training forward and backward
 beside a kernel resident on another stream (the concurrent-launch contract).
 
 Every forward module but the tiny one (one per architecture, and one for
-packed rows where routed) has the same grid rule.  Below
-``persistent_from_rows_per_sm`` rows per SM it launches one CTA per row
-block; from there the fewest whole waves of
-``ctas_per_sm`` CTAs per SM whose CTAs each walk at most
-``max_blocks_per_cta`` row blocks (its record's grid rule).  The backward is
+packed rows where routed) has the same grid rule.  Below its cut of rows per
+SM of the architecture it launches one CTA per row block; from there the
+fewest whole waves of ``ctas_per_sm`` CTAs per SM whose CTAs each walk at
+most ``max_blocks_per_cta`` row blocks (its record's grid rule).  The cut is
+``persistent_from_rows_per_sm`` on rows the kernel reads as packed and, for
+the forward of rows of any layout, ``persistent_from_rows_per_sm_strided``
+on other rows.  The backward is
 one kernel of ``min(row blocks, ctas_per_sm * SMs)`` CTAs; past one block per
 CTA its CTAs claim chunks of row blocks from a counter, so a CTA that becomes
 resident late takes only the blocks left.  A backward with
@@ -62,10 +64,11 @@ beside a side kernel that holds ``k`` of the ``N`` SMs (1 x 128,
 16 x 640 and 32 x 640 side CTAs): busy / alone is at most
 ``N / (N - k)``, plus the share of one CTA's blocks in the call (a CTA whose
 slot the side kernel holds walks all of its blocks once it starts), plus
-``PROPORTIONAL_SLACK``, at the token counts that give each CTA slot the most
-whole row blocks below ``persistent_from_rows_per_sm`` rows per SM (one CTA a
-block, "below"), the fewest whole waves of ``max_blocks_per_cta`` row blocks
-at or above it ("first") and four times that ("last").  In these tests every
+``PROPORTIONAL_SLACK``, on packed rows and on rows whose ``z`` is the gate
+columns of a wider projection, at the token counts that give each CTA slot
+the most whole row blocks below the cut of such rows (one CTA a block,
+"below"), the fewest whole waves of ``max_blocks_per_cta`` row blocks at or
+above it ("first") and four times that ("last").  In these tests every
 side CTA records its SM and its start time, a run counts only when the side
 kernel held the intended SMs before the call started, and every output is
 bitwise that of the first call alone.  The tiny forward of packed rows
@@ -130,11 +133,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _inputs(tokens: int, heads: int = H):
+def _inputs(tokens: int, heads: int = H, layout: str = "packed"):
+    """``(x, z, w, dy)`` of ``tokens`` tokens of ``heads`` heads, packed rows;
+    with ``layout="strided"`` ``z`` the gate columns of a wider projection,
+    whose rows are not packed (with more than one token)."""
     generator = torch.Generator(device="cuda").manual_seed(SEED + tokens)
     kwargs = dict(dtype=torch.float32, device="cuda", generator=generator)
     x = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
-    z = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
+    if layout == "packed":
+        z = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
+    else:
+        assert layout == "strided", layout
+        wide = torch.randn(tokens, 2 * heads * D + 16, **kwargs).to(torch.bfloat16)
+        z = wide[:, heads * D : 2 * heads * D].view(tokens, heads, D)
     dy = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
     w = (1 + 0.5 * torch.randn(D, **kwargs)).to(torch.bfloat16)
     return x, z, w, dy
@@ -578,17 +589,29 @@ def test_small_row_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_c
 
 # The forward beside the item 1 side kernels: its CTA slots (``ctas_per_sm``
 # per SM) get row blocks of ``rows_per_block`` rows, the most whole blocks per
-# slot below ``persistent_from_rows_per_sm`` rows per SM ("below": one CTA a
-# block), the fewest whole waves of ``max_blocks_per_cta`` blocks per slot at
-# or above it ("first") and four times that ("last").
+# slot below the cut of rows per SM of the layout's rows on the device's
+# architecture ("below": one CTA a block), the fewest whole waves of
+# ``max_blocks_per_cta`` blocks per slot at or above it ("first") and four
+# times that ("last"); a slot's block is 96 rows per SM (6 slots of 16 rows).
+# On packed rows (the cut ``persistent_from_rows_per_sm``: 6500 rows per SM on
+# sm_100a, 5600 on sm_103a, 8192 on sm_107a) that is 67, 68 and 272 blocks per
+# slot on sm_100a (6432, 6528 and 26112 rows per SM), 58, 60 and 240 on
+# sm_103a (5568, 5760 and 23040) and 85, 86 and 344 on sm_107a (8160, 8256 and
+# 33024); on rows whose ``z`` is sliced from a projection (the cut
+# ``persistent_from_rows_per_sm_strided``: 1000 rows per SM on each) 10, 12
+# and 48 (960, 1152 and 4608 rows per SM) on each architecture.
 FORWARD_EDGES = ("below", "first", "last")
+FORWARD_LAYOUTS = ("packed", "strided")
 
 
-def _forward_tokens(edge: str) -> tuple[int, int, float]:
+def _forward_tokens(edge: str, layout: str = "packed") -> tuple[int, int, float]:
     """``(blocks_per_slot, T, cta_share)``: the row blocks per CTA slot of the
-    forward at ``edge``, the fewest tokens ``T`` whose ``T * H`` rows give each
-    slot that many, and the share of one CTA's blocks in the call alone
-    (blocks a CTA walks over blocks a slot runs)."""
+    forward at ``edge`` of the cut of ``layout``'s rows (``packed``: the rule's
+    ``persistent_from_rows_per_sm``; ``strided``: its
+    ``persistent_from_rows_per_sm_strided``) on this device's architecture,
+    the fewest tokens ``T`` whose ``T * H`` rows give each slot that many,
+    and the share of one CTA's blocks in the call alone (blocks a CTA walks
+    over blocks a slot runs)."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     name = loader.route_module(arch, "fwd")
@@ -597,7 +620,9 @@ def _forward_tokens(edge: str) -> tuple[int, int, float]:
     slots = int(rule["ctas_per_sm"]) * sms
     rows_per_block = int(rule["rows_per_block"])
     most = int(rule["max_blocks_per_cta"])
-    start = int(rule["persistent_from_rows_per_sm"])
+    packed = layout == "packed"
+    key = "persistent_from_rows_per_sm" + ("" if packed else "_strided")
+    start = int(rule[key][arch])
     # rows per SM that give each slot of the SM one more row block
     step = int(rule["ctas_per_sm"]) * rows_per_block
     if edge == "below":
@@ -614,7 +639,9 @@ def _forward_tokens(edge: str) -> tuple[int, int, float]:
     rows = tokens * H
     assert loader.module_for_rows(arch, "fwd", rows, sms) == name
     assert (rows >= start * sms) == (edge != "below"), (edge, rows)
-    (ctas, _, _) = loader.launch_grid(loader.MODULES[name], rows=rows, sm_count=sms)
+    (ctas, _, _) = loader.launch_grid(
+        loader.MODULES[name], rows=rows, sm_count=sms, arch=arch, packed=packed
+    )
     blocks = -(-rows // rows_per_block)
     return blocks_per_slot, tokens, -(-blocks // ctas) * slots / blocks
 
@@ -623,11 +650,12 @@ def _forward_tokens(edge: str) -> tuple[int, int, float]:
     "ctas,threads", PROPORTIONAL_SIDES, ids=["1x128", "16x640", "32x640"]
 )
 @pytest.mark.parametrize("edge", FORWARD_EDGES)
+@pytest.mark.parametrize("layout", FORWARD_LAYOUTS)
 def test_forward_slows_in_proportion_to_the_sms_held(
-    edge: str, ctas: int, threads: int
+    layout: str, edge: str, ctas: int, threads: int
 ) -> None:
-    blocks_per_slot, tokens, cta_share = _forward_tokens(edge)
-    x, z, w, _dy = _inputs(tokens)
+    blocks_per_slot, tokens, cta_share = _forward_tokens(edge, layout)
+    x, z, w, _dy = _inputs(tokens, layout=layout)
     y = torch.empty_like(x)
 
     def call():
@@ -643,15 +671,15 @@ def test_forward_slows_in_proportion_to_the_sms_held(
         f"blocks_per_slot={blocks_per_slot} side={ctas}x{threads} "
         f"alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} ratio={ratio:.3f} "
         f"ideal={ideal:.3f} cta_share={cta_share:.4f} "
-        f"excess={ratio - ideal - cta_share:.4f} edge={edge}"
+        f"excess={ratio - ideal - cta_share:.4f} edge={edge} layout={layout}"
     )
     _check_outputs("forward", tokens, alone, busy)
     assert ratio <= bound, (
-        f"tokens={tokens} ({blocks_per_slot} row blocks per CTA slot, {edge}): "
-        f"forward alone {alone_ms:.4f} ms, beside {ctas} x {threads} side CTAs "
-        f"on {ctas} SMs {busy_ms:.4f} ms: ratio {ratio:.3f} > {bound:.3f} "
-        f"(proportional {ideal:.3f} + one CTA's blocks {cta_share:.4f} + "
-        f"{PROPORTIONAL_SLACK})"
+        f"tokens={tokens} ({blocks_per_slot} row blocks per CTA slot, {edge}, "
+        f"{layout}): forward alone {alone_ms:.4f} ms, beside {ctas} x {threads} "
+        f"side CTAs on {ctas} SMs {busy_ms:.4f} ms: ratio {ratio:.3f} > "
+        f"{bound:.3f} (proportional {ideal:.3f} + one CTA's blocks "
+        f"{cta_share:.4f} + {PROPORTIONAL_SLACK})"
     )
 
 
@@ -718,7 +746,7 @@ def _tiny_forward(edge: str) -> tuple[int, str, float]:
     assert loader.forward_module(arch, rows, H, sms, tok, D, tok, D) == name, rows
     record = loader.MODULES[name]
     threads = int(record["launch"]["block"][0])
-    (ctas, _, _) = loader.launch_grid(record, rows=rows, sm_count=sms)
+    (ctas, _, _) = loader.launch_grid(record, rows=rows, sm_count=sms, arch=arch)
     most_ctas, most_threads = _sm_limits(device_index)
     slots = min(most_ctas, most_threads // threads) * sms
     return tokens, name, min(1.0, slots / ctas)

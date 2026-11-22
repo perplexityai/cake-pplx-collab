@@ -108,6 +108,24 @@ sm_100a and sm_103a and 65 on sm_107a: the tiny forward takes contiguous
 per SM its pipelined forward of packed rows read rows past the broadcast
 token.  At every other row count such a call runs, as in 0.2.11, the
 program of packed rows, which reads the token stride.
+Version 0.2.14 changes no program and no bits, only a grid: the
+deterministic package's forward and this package's pipelined forwards,
+which keep that forward's grid rule, launch whole waves of CTAs from a cut
+of rows per SM of each architecture instead of from 8192 rows per SM
+everywhere, one CTA per 16-row block below it.  On rows the kernel reads as
+packed (``x`` and ``z`` of head stride 128 and token stride ``H * 128``, the
+rows that get its L2 prefetches; the records'
+``persistent_from_rows_per_sm``, now keyed by architecture) the cut is 6500
+on sm_100a, 5600 on sm_103a and, unchanged, 8192 on sm_107a; on other rows
+of a program that reads any layout (strided, broadcast over tokens or one
+token; a new ``persistent_from_rows_per_sm_strided``: the deterministic
+forward of rows of any layout, and the pipelined forward of sm_100a and
+sm_103a) it is 1000 on each.  ``y`` is the same bits on either grid, and
+every band is unchanged.  ``cake_jit.launch_grid`` of both packages takes
+the architecture (keyword ``arch``), which the records of those forwards
+need (without it, a ``ValueError``), and whether the kernel reads the rows
+as packed (keyword ``packed``, ``cake_jit.forward_packed``); ``run_module``
+passes the device's architecture and the call's own test.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -353,9 +371,15 @@ Host design (the input layout rules are the deterministic package's):
   0 also warms the CTA's next block in L2) and the pipelined forwards (the
   deterministic package's forward programs with a gate that does not flush: the
   mid forward's schedule and L2 prefetches with the L2 ``evict_first`` policy
-  on the loads of x and z, one CTA per block below 8192 rows per SM; on sm_107a
-  its program of packed rows).  The bands past the tiny forwards' (packed
-  rows): on sm_100a the pipelined forward up to 85 rows per SM, the mid
+  on the loads of x and z, one CTA per block below that package's cut of rows
+  per SM of the architecture and whole waves from there, their records'
+  ``persistent_from_rows_per_sm``, and on sm_100a and sm_103a, for rows the
+  kernel does not read as packed (x or z broadcast over tokens, or one
+  token: ``cake_jit.forward_packed``), ``persistent_from_rows_per_sm_strided``;
+  on sm_107a its program of packed rows).
+  The bands past the tiny forwards' (packed rows; measured with the
+  pipelined forwards' grid of 0.2.13, one CTA per block below 8192 rows per
+  SM): on sm_100a the pipelined forward up to 85 rows per SM, the mid
   forward up to 160, the long forward up to 400, the extra-long forward up to
   520, the pipelined forward up to 6500 and the mid forward past it; on
   sm_103a the mid forward up to 240, the extra-long forward up to 600, the
