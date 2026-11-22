@@ -331,6 +331,8 @@ def judge_draws(
                             {tier: naive[name] for tier in TIERS},
                         )
                 del launches, expected, naive
+            # A returned triple would otherwise stay held while the next draw makes its own.
+            del result
     finally:
         random.setstate(state[0])
         torch.set_rng_state(state[1])

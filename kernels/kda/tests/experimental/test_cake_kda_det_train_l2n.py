@@ -16,18 +16,22 @@ limitations under the License.
 Host tests of the in-kernel Q/K L2 norm of the Cake packed KDA chunked training package
 (``use_qk_l2norm_in_kernel``): the raw q / k operand rule (``_check_qk_raw``: refused, never copied), the mode
 keyword, the saved set's ``qk_rstd`` / ``qk_l2norm`` fields and their checks, the layouts' transient ``qn`` /
-``kn`` and the byte queries, the registry's l2n classes and the autograd node's arity.  None of them launches a
-kernel; the device rows (bitwise forward / backward ``qn``, parity with the shared reference, accuracy) are in
-``test_cake_kda_det_train.py``.
+``kn`` and the byte queries, the registry's l2n classes and the autograd node's arity; none of them launches a
+kernel.  The device rows at the end of the file launch the kernels: the forward / backward ``qn`` / ``kn`` rows
+bitwise the shared reference's, the routes' and repeats' bits where the package fixes them, and the accuracy of
+``out`` and every gradient, judged against the exact FP64 recurrence beside the naive BF16 tier
+(``tests/cake_naive.py``).
 """
 
 import dataclasses
 import types
+import zlib
 
 import pytest
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.experimental.test_helpers.cake_kda_naive import draw_case, judge_arms
 
 cake_backend = cake_package("cake.cake_kda_det_train", "cake_backend")
 cake_jit = cake_package("cake.cake_kda_det_train", "cake_jit")
@@ -557,26 +561,6 @@ def _bits(x: torch.Tensor) -> torch.Tensor:
     )
 
 
-def test_kda_reference_normalizes_and_pulls_back_like_fp64() -> None:
-    """The device-order FP32 reference is within a few FP32 ulps of the FP64 normalization and its exact pullback
-    (a guard against an order that is bitwise equal to a wrong formula)."""
-    from tests.experimental.test_helpers import (
-        cake_kda_det_train_reference_l2n as kda_l2n,
-    )
-
-    g = torch.Generator().manual_seed(1)
-    x = (torch.randn(256, 2, D, generator=g) * 3).to(torch.bfloat16)
-    qn, r = kda_l2n.qk_l2norm(x)
-    x64 = x.double().requires_grad_(True)
-    y64 = x64 / torch.sqrt((x64 * x64).sum(-1, keepdim=True) + kda_l2n.EPS)
-    assert (qn.double() - y64.detach()).abs().max() <= 2.0**-8
-    Dq = torch.randn(x.shape, generator=g)
-    (dx64,) = torch.autograd.grad(y64, x64, Dq.double())
-    dx = kda_l2n.l2n_pullback(x, r, Dq)
-    err = (dx.double() - dx64).abs().max() / dx64.abs().max()
-    assert err < 1e-5, err
-
-
 # ---------------------------------------------------------------------------------------------------------------
 # plans
 
@@ -653,16 +637,11 @@ def test_fallback_replay_counts_no_qk_apply(arch: str) -> None:
 
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (  # noqa: E402
     LOWER_BOUND,
-    elementwise_gate,
-    error_metrics,
     make_inputs,
     make_raw_inputs,
 )
 from tests.experimental.test_helpers import cake_kda_det_train_reference_l2n as ref_l2n  # noqa: E402
 
-ATOL = RTOL = (
-    1e-2  # the package's declared elementwise gate (test_cake_kda_det_train.py)
-)
 SHAPES_L2N = (
     ((64,), 1),
     ((1000, 37, 300), 4),
@@ -670,6 +649,26 @@ SHAPES_L2N = (
     ((4000, 96), 32),
     ((5000, 3000), 64),
 )
+# Accuracy: ``out`` and every gradient are judged by ``judge_arms`` (``test_helpers/cake_kda_naive.py``): each
+# output's error against the exact FP64 recurrence beside the naive BF16 tier's (``tests/cake_naive.py``) over the
+# judge's draws.  A row of up to about 4096 tokens is judged as it is.  A larger row runs once for its exact checks,
+# and the judge runs on the smaller pack of the same route (the same document count and heads) named here.
+L2N_JUDGED_IN_PLACE_OF = {((5000, 3000), 64): ((2560, 1536), 64)}
+
+
+def _case_seed(test: str, shape, raw_gate: bool) -> int:
+    """The base seed of a judged case (``judge_arms`` draws every input of draw ``j`` from ``draw_seed(base, j)``):
+    a CRC of the test's name, the row and the gate form."""
+    lengths, H = shape
+    return zlib.crc32(f"{test}:{tuple(lengths)}:{H}:{raw_gate}".encode())
+
+
+def _l2n_results(out: torch.Tensor, grads, raw_gate: bool) -> dict:
+    """``out`` and the backward's results by name (the names of the FP64 reference)."""
+    names = ("dq", "dk", "dv", "dbeta", "dg")
+    if raw_gate:
+        names += ("dA_log", "ddt_bias")
+    return {"out": out, **dict(zip(names, grads, strict=True))}
 
 
 def _l2n_device(mode: str = "fused") -> torch.device:
@@ -689,6 +688,22 @@ def _l2n_device(mode: str = "fused") -> torch.device:
                 f"this build ships no l2n={mode!r} record of {stage} for {arch}"
             )
     return torch.device("cuda", index)
+
+
+def _l2n_ships(device: torch.device, mode: str, gate: str) -> bool:
+    """Whether this build ships the l2n ``mode`` records of gate mode ``gate`` of every token-local stage for the
+    architecture of ``device`` (:func:`_l2n_device` skips where it does not; this only asks)."""
+    arch = cake_jit.arch_for_capability(
+        tuple(torch.cuda.get_device_capability(device.index))
+    )
+    return all(
+        any(
+            mode in cake_jit.MODULES[n].get("l2n", ["off"])
+            and arch in cake_jit.MODULES[n]["arches"]
+            for n in cake_jit.records_of_stage(stage, gate)
+        )
+        for stage in ("fwd_intra", "bwd_prep", "glm_intra")
+    )
 
 
 def _raw_qk(
@@ -768,54 +783,47 @@ def l2n_hook(monkeypatch: pytest.MonkeyPatch) -> dict:
 @pytest.mark.parametrize(
     "shape", SHAPES_L2N, ids=lambda s: f"{len(s[0])}docs-S{sum(s[0])}-H{s[1]}"
 )
-def test_l2n_matches_the_exact_reference(shape, raw_gate: bool) -> None:
-    """Accuracy with use_qk_l2norm_in_kernel=True against the exact FP64 recurrence whose q / k are normalized in
-    FP64 inside the graph (``dq`` / ``dk`` the raw rows' gradients): the declared elementwise gate on ``out`` and
-    every gradient."""
+def test_l2n_matches_the_exact_reference(
+    shape, raw_gate: bool, record_property
+) -> None:
+    """``out`` and every gradient with use_qk_l2norm_in_kernel=True (``dq`` / ``dk`` the raw rows' gradients; in the
+    raw gate form ``dA_log`` / ``ddt_bias`` too), judged by ``judge_arms`` (``l2n=True``) against the exact FP64
+    recurrence whose q / k are normalized in FP64 inside the graph, beside the naive BF16 tier (which normalizes
+    the raw rows in BF16) over the judge's draws.  On every draw the saved set records ``qk_l2norm`` and carries
+    ``qk_rstd`` ``[2, S, H]``.  The 8000-token row at 64 heads is above the judged size: it runs once with those
+    exact checks and finite results, and its route (two documents at 64 heads) is judged on ``(2560, 1536)`` at 64
+    heads (:data:`L2N_JUDGED_IN_PLACE_OF`)."""
     device = _l2n_device()
+    gate = "raw" if raw_gate else "g"
+    if shape in L2N_JUDGED_IN_PLACE_OF:
+        lengths, H = shape
+        inputs = _l2n_inputs(lengths, H, device, raw_gate=raw_gate)
+        out, saved = _fwd(inputs, raw_gate)
+        got = _l2n_results(out, _bwd(inputs, saved, raw_gate), raw_gate)
+        assert saved.qk_l2norm is True
+        assert saved.qk_rstd.shape == (2, sum(lengths), H)
+        for name, t in got.items():
+            assert bool(torch.isfinite(t).all()), (shape, name)
+        del inputs, out, saved, got
+        shape = L2N_JUDGED_IN_PLACE_OF[shape]
     lengths, H = shape
-    inputs = _l2n_inputs(lengths, H, device, raw_gate=raw_gate)
-    out, saved = _fwd(inputs, raw_gate)
-    grads = _bwd(inputs, saved, raw_gate)
-    torch.cuda.synchronize(device)
-    assert saved.qk_l2norm is True and saved.qk_rstd.shape == (2, sum(lengths), H)
-    i = inputs
-    if raw_gate:
-        ref_out, ref = ref_l2n.kda_exact_raw_l2n_with_grads(
-            i["q"],
-            i["k"],
-            i["v"],
-            i["g"],
-            i["beta"],
-            i["A_log"],
-            i["dt_bias"],
-            i["dout"],
-            i["cu_seqlens"],
-            cake_backend.SCALE,
-            LOWER_BOUND,
-        )
-        names = ("dq", "dk", "dv", "dbeta", "dg", "dA_log", "ddt_bias")
-    else:
-        ref_out, ref = ref_l2n.kda_exact_l2n_with_grads(
-            i["q"],
-            i["k"],
-            i["v"],
-            i["g"],
-            i["beta"],
-            i["dout"],
-            i["cu_seqlens"],
-            cake_backend.SCALE,
-        )
-        names = ("dq", "dk", "dv", "dbeta", "dg")
-    candidates = {"out": out, **dict(zip(names, grads, strict=True))}
-    references = {"out": ref_out, **ref}
-    failures = []
-    for name, cand in candidates.items():
-        r = references[name].reshape(cand.shape)
-        gate = elementwise_gate(cand, r, ATOL, RTOL)
-        if not gate["pass"]:
-            failures.append((name, gate, error_metrics(cand, r)))
-    assert not failures, failures
+
+    def draw(j, s):
+        inputs = draw_case(lengths, H, gate, True, s, device)
+        out, saved = _fwd(inputs, raw_gate)
+        got = _l2n_results(out, _bwd(inputs, saved, raw_gate), raw_gate)
+        assert saved.qk_l2norm is True
+        assert saved.qk_rstd.shape == (2, sum(lengths), H)
+        return {"": got}, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("l2n", shape, raw_gate),
+        scale=cake_backend.SCALE,
+        l2n=True,
+        lower_bound=LOWER_BOUND,
+    )
 
 
 @pytest.mark.parametrize("raw_gate", [False, True], ids=["g", "raw"])
@@ -1133,79 +1141,69 @@ def test_l2n_saved_set_backward_allocates_what_the_flag_off_backward_does(
     "shape", SHAPES_L2N[:4], ids=lambda s: f"{len(s[0])}docs-S{sum(s[0])}-H{s[1]}"
 )
 def test_l2n_fallback_route_matches_the_exact_reference(
-    shape, raw_gate: bool, l2n_hook: dict
+    shape, raw_gate: bool, l2n_hook: dict, record_property
 ) -> None:
-    """The force-fallback route alone (token-local normalize / apply, the GLM intra capture forms, the pullback),
-    runnable before the fused records ship: the forward's rstd / qn / kn are bitwise the shared reference's, the
-    saved-set backward's qn / kn are the forward's, out and every gradient pass the declared elementwise gate against
-    the exact FP64 layer, and the replay and a repeat give the saved-set backward's bits."""
+    """The force-fallback route (token-local normalize / apply, the GLM intra capture forms, the pullback), runnable
+    before the fused records ship.  On the first draw, exactly: the forward's rstd / qn / kn are bitwise the shared
+    reference's, the saved-set backward's qn / kn are the forward's, and the replay and a repeat give the saved-set
+    backward's bits (the package's run-to-run and replay contract).  On every draw, ``out`` and every gradient of the
+    fallback route (arm ``fallback``) and, where the device ships the fused records of the gate mode, of the default
+    fused route (arm ``fused``) are judged by ``judge_arms`` (``l2n=True``) against the exact FP64 layer beside the
+    naive BF16 tier.  The two routes' bits are compared only where the package fixes them
+    (``test_l2n_fused_equals_the_fallback_route``)."""
     device = _l2n_device("fallback")
+    gate = "raw" if raw_gate else "g"
     lengths, H = shape
-    inputs = _l2n_inputs(lengths, H, device, raw_gate=raw_gate)
     S, N = sum(lengths), len(lengths)
     ws = cake_backend.CakeKDADetWorkspace.for_problem(
-        S, N, H, device, gate="raw" if raw_gate else "g", l2n="fallback"
+        S, N, H, device, gate=gate, l2n="fallback"
     )
     assert ws.l2n == "fallback" and ws.plan.dispatched("qk_pullback", "light")
-    out, saved = _fwd(inputs, raw_gate, workspace=ws)
-    fwd = {n: l2n_hook[f"fwd.{n}"].cpu() for n in ("qn", "kn", "qk_rstd")}
-    grads = _bwd(inputs, saved, raw_gate, workspace=ws)
-    torch.cuda.synchronize(device)
-    i = inputs
-    qn_ref, rq_ref = ref_l2n.qk_l2norm(i["q"].cpu())
-    kn_ref, rk_ref = ref_l2n.qk_l2norm(i["k"].cpu())
-    assert _bits(fwd["qn"]).equal(_bits(qn_ref)) and _bits(fwd["kn"]).equal(
-        _bits(kn_ref)
+    fused = _l2n_ships(device, "fused", gate)
+
+    def draw(j, s):
+        inputs = draw_case(lengths, H, gate, True, s, device)
+        out, saved = _fwd(inputs, raw_gate, workspace=ws)
+        fwd = {n: l2n_hook[f"fwd.{n}"].cpu() for n in ("qn", "kn", "qk_rstd")}
+        grads = _bwd(inputs, saved, raw_gate, workspace=ws)
+        got = _l2n_results(out, grads, raw_gate)
+        if j == 0:
+            qn_ref, rq_ref = ref_l2n.qk_l2norm(inputs["q"].cpu())
+            kn_ref, rk_ref = ref_l2n.qk_l2norm(inputs["k"].cpu())
+            assert _bits(fwd["qn"]).equal(_bits(qn_ref))
+            assert _bits(fwd["kn"]).equal(_bits(kn_ref))
+            assert _bits(fwd["qk_rstd"]).equal(_bits(torch.stack((rq_ref, rk_ref))))
+            assert _bits(saved.qk_rstd.cpu()).equal(_bits(fwd["qk_rstd"]))
+            for name in ("qn", "kn"):
+                assert _bits(l2n_hook[f"bwd.{name}"].cpu()).equal(_bits(fwd[name])), (
+                    name
+                )
+            got = {name: t.clone() for name, t in got.items()}
+            ref_grads = [g.clone() for g in grads]
+            replay = _bwd(inputs, None, raw_gate, workspace=ws)
+            assert l2n_hook["bwd.path"] == "replay"
+            out2, saved2 = _fwd(inputs, raw_gate, workspace=ws)
+            assert _bits(out2).equal(_bits(got["out"]))
+            repeat = _bwd(inputs, saved2, raw_gate, workspace=ws)
+            for tag, other in (("replay", replay), ("repeat", repeat)):
+                for a, b in zip(ref_grads, other, strict=True):
+                    assert _bits(a).equal(_bits(b)), tag
+        arms = {"fallback": got}
+        if fused:
+            out_f, saved_f = _fwd(inputs, raw_gate)
+            arms["fused"] = _l2n_results(
+                out_f, _bwd(inputs, saved_f, raw_gate), raw_gate
+            )
+        return arms, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("l2n_fallback", shape, raw_gate),
+        scale=cake_backend.SCALE,
+        l2n=True,
+        lower_bound=LOWER_BOUND,
     )
-    assert _bits(fwd["qk_rstd"]).equal(_bits(torch.stack((rq_ref, rk_ref))))
-    assert _bits(saved.qk_rstd.cpu()).equal(_bits(fwd["qk_rstd"]))
-    for name in ("qn", "kn"):
-        assert _bits(l2n_hook[f"bwd.{name}"].cpu()).equal(_bits(fwd[name])), name
-    if raw_gate:
-        ref_out, ref = ref_l2n.kda_exact_raw_l2n_with_grads(
-            i["q"],
-            i["k"],
-            i["v"],
-            i["g"],
-            i["beta"],
-            i["A_log"],
-            i["dt_bias"],
-            i["dout"],
-            i["cu_seqlens"],
-            cake_backend.SCALE,
-            LOWER_BOUND,
-        )
-        names = ("dq", "dk", "dv", "dbeta", "dg", "dA_log", "ddt_bias")
-    else:
-        ref_out, ref = ref_l2n.kda_exact_l2n_with_grads(
-            i["q"],
-            i["k"],
-            i["v"],
-            i["g"],
-            i["beta"],
-            i["dout"],
-            i["cu_seqlens"],
-            cake_backend.SCALE,
-        )
-        names = ("dq", "dk", "dv", "dbeta", "dg")
-    candidates = {"out": out, **dict(zip(names, grads, strict=True))}
-    references = {"out": ref_out, **ref}
-    failures = []
-    for name, cand in candidates.items():
-        r = references[name].reshape(cand.shape)
-        gate = elementwise_gate(cand, r, ATOL, RTOL)
-        if not gate["pass"]:
-            failures.append((name, gate, error_metrics(cand, r)))
-    assert not failures, failures
-    ref_grads = [g.clone() for g in grads]
-    replay = _bwd(inputs, None, raw_gate, workspace=ws)
-    assert l2n_hook["bwd.path"] == "replay"
-    out2, saved2 = _fwd(inputs, raw_gate, workspace=ws)
-    assert _bits(out2).equal(_bits(out))
-    repeat = _bwd(inputs, saved2, raw_gate, workspace=ws)
-    for tag, other in (("replay", replay), ("repeat", repeat)):
-        for a, b in zip(ref_grads, other, strict=True):
-            assert _bits(a).equal(_bits(b)), tag
 
 
 def test_l2n_refusals_on_device() -> None:

@@ -39,6 +39,7 @@ C = 10240 and 16384 tokens at C = 8192).  A ``CakeKDADetKcpContext`` is built wi
 
 from __future__ import annotations
 
+import functools
 import types
 
 import pytest
@@ -323,6 +324,170 @@ def test_kcp_keeps_fp32_taps_and_no_bias():
         cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx, bias=bias)
     with pytest.raises(TypeError):
         cake_causal_conv1d_det_kcp(p.x_local, p.w, p.ctx, bias)
+
+
+def test_tokens_taps_and_dweight_must_be_16_byte_aligned():
+    """The KCP programs move the token rows (``x_local``, ``dy``, ``out``, ``dx``) as 16-byte vectors and one channel's
+    four FP32 taps as one 16-byte vector, and the cooperative backward form stores one channel's four FP32 ``dweight``
+    taps with one 16-byte store (the default form's reduce program stores them one at a time; both forms take the
+    same rule): a tensor off the 16-byte grid is refused (``ValueError``) by the forward, the backward in both forms
+    and the autograd entry of a one-rank context before anything launches or exchanges (the buffers stay zero).  A
+    16-byte aligned ``dweight`` view inside a larger buffer gets ``dx`` and ``dweight`` bitwise equal to a fresh
+    one's in both forms."""
+
+    device = torch.device("cuda")
+    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
+    _, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
+    shape, n, m = tuple(p.x_local.shape), p.x_local.numel(), p.C * WIDTH
+    flat = torch.zeros(n + 1, dtype=torch.bfloat16, device=device)
+    v = flat[1:].view(shape)
+    buf = torch.zeros(m + 4, dtype=torch.float32, device=device)
+    taps = buf[1 : 1 + m].view(p.C, WIDTH)
+    assert v.data_ptr() % 16 != 0 and taps.data_ptr() % 16 != 0
+
+    def fwd(x, w, **kw):
+        return cake_causal_conv1d_det_train_kcp_forward(x, w, p.ctx, **kw)
+
+    def bwd(x, w, dy, **kw):
+        return cake_causal_conv1d_det_train_kcp_backward(x, w, p.ctx, dy, hist, **kw)
+
+    calls = [
+        ("x_local", lambda: fwd(v, p.w)),
+        ("x_local", lambda: cake_causal_conv1d_det_kcp(v, p.w, p.ctx)),
+        ("x_local", lambda: bwd(v, p.w, p.dy_local)),
+        ("out", lambda: fwd(p.x_local, p.w, out=v)),
+        ("dy", lambda: bwd(p.x_local, p.w, v)),
+        ("dx", lambda: bwd(p.x_local, p.w, p.dy_local, dx=v)),
+        ("weight", lambda: fwd(p.x_local, taps)),
+        ("weight", lambda: bwd(p.x_local, taps, p.dy_local)),
+    ]
+    for offset in (1, 2, 3):
+        dweight = buf[offset : offset + m].view(p.C, WIDTH)
+        assert dweight.data_ptr() % 16 != 0
+        for coop in (False, True):
+            call = functools.partial(
+                bwd, p.x_local, p.w, p.dy_local, dweight=dweight, cooperative=coop
+            )
+            calls.append(("dweight", call))
+    for name, call in calls:
+        with pytest.raises(ValueError, match=f"{name} must be 16-byte aligned"):
+            call()
+    torch.cuda.synchronize()
+    assert int(torch.count_nonzero(flat)) == 0 and int(torch.count_nonzero(buf)) == 0
+    aligned = buf[4:].view(p.C, WIDTH)
+    _, hist_ref = fwd(p.x_local, p.w)
+    for coop in (False, True):
+        # True: the cooperative main program stores dweight as 16-byte vectors into the view
+        dx, dw = bwd(p.x_local, p.w, p.dy_local, dweight=aligned, cooperative=coop)
+        dx_ref, dw_ref = cake_causal_conv1d_det_train_kcp_backward(
+            p.x_local, p.w, p.ctx, p.dy_local, hist_ref, cooperative=coop
+        )
+        assert dw is aligned
+        assert torch.equal(_bits(dx), _bits(dx_ref)), coop
+        assert torch.equal(_bits(dw), _bits(dw_ref)), coop
+
+
+@pytest.mark.parametrize("host_trim", [0, 1])
+def test_hist_must_be_16_byte_aligned(host_trim) -> None:
+    """Every KCP backward program reads the history pool's rows as 16-byte vectors: a ``hist`` view 1 to 7 BF16
+    elements past a 16-byte boundary is refused (``ValueError``) by the backward in both launch forms and by the multi
+    backward, on both host paths, before anything launches or exchanges (the outputs stay zero).  The same rows in a
+    view 8 elements in give ``dx`` and ``dweight`` bitwise equal to the forward's own pool in both forms."""
+    from cake_pplx._backends.cake_causal_conv1d_det_train import (
+        kcp as conv_kcp,
+    )
+
+    device = torch.device("cuda")
+    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
+    try:
+        conv_kcp._set_test_knobs({"host_trim": host_trim})
+        _, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
+        n = hist.numel()
+        assert n > 0
+        pool = torch.zeros(n + 8, dtype=torch.bfloat16, device=device)
+        assert pool.data_ptr() % 16 == 0
+        dx = torch.zeros_like(p.x_local)
+        dw = torch.zeros(p.C, WIDTH, dtype=torch.float32, device=device)
+        for k in range(1, 8):
+            hv = pool[k : k + n].view(hist.shape)
+            assert hv.data_ptr() % 16 != 0
+            for coop in (False, True):
+                with pytest.raises(ValueError, match="hist must be 16-byte aligned"):
+                    cake_causal_conv1d_det_train_kcp_backward(
+                        p.x_local,
+                        p.w,
+                        p.ctx,
+                        p.dy_local,
+                        hv,
+                        dx=dx,
+                        dweight=dw,
+                        cooperative=coop,
+                    )
+            with pytest.raises(ValueError, match="hist must be 16-byte aligned"):
+                conv_kcp.cake_causal_conv1d_det_train_kcp_multi_backward(
+                    [p.x_local],
+                    [p.w],
+                    p.ctx,
+                    [p.dy_local],
+                    [hv],
+                    dxs=[dx],
+                    dweights=[dw],
+                )
+        torch.cuda.synchronize()
+        assert int(torch.count_nonzero(dx)) == 0 and int(torch.count_nonzero(dw)) == 0
+        hv = pool[8 : 8 + n].view(hist.shape)
+        hv.copy_(hist)
+        assert hv.data_ptr() % 16 == 0
+        for coop in (False, True):
+            got = cake_causal_conv1d_det_train_kcp_backward(
+                p.x_local, p.w, p.ctx, p.dy_local, hv, cooperative=coop
+            )
+            ref = cake_causal_conv1d_det_train_kcp_backward(
+                p.x_local, p.w, p.ctx, p.dy_local, hist, cooperative=coop
+            )
+            for a, b in zip(got, ref, strict=True):
+                assert torch.equal(_bits(a), _bits(b)), coop
+    finally:
+        conv_kcp._set_test_knobs(None)
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["single", "multi"])
+def test_autograd_copies_a_misaligned_incoming_gradient(multi) -> None:
+    """Autograd can hand the KCP backward a contiguous BF16 gradient off the 16-byte grid: the backward of
+    ``torch.cat([pad, y.reshape(-1)])`` narrows its gradient one element in, 2 bytes past an aligned address.  The
+    autograd entries (single and multi) copy it, so the backward runs (no ``ValueError``) with ``dx`` and ``dweight``
+    bitwise equal to the explicit backward of the same gradient."""
+    from cake_pplx._backends.cake_causal_conv1d_det_train import (
+        kcp as conv_kcp,
+    )
+
+    device = torch.device("cuda")
+    _, lens, cuts, C = ROWS[0]
+    p = _problem(lens, cuts, C, device)
+    x = p.x_local.detach().clone().requires_grad_(True)
+    w = p.w.detach().clone().requires_grad_(True)
+    if multi:
+        (y,) = conv_kcp.cake_causal_conv1d_det_kcp_multi([x], [w], p.ctx)
+    else:
+        y = cake_causal_conv1d_det_kcp(x, w, p.ctx)
+    seen = []
+    y.register_hook(lambda g: seen.append(g.data_ptr() % 16))
+    pad = y.new_zeros(1)
+    g = torch.cat([pad, p.dy_local.reshape(-1)])
+    torch.cat([pad, y.reshape(-1)]).backward(g)
+    assert seen == [2], seen
+    _, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
+    if multi:
+        dxs, dws = conv_kcp.cake_causal_conv1d_det_train_kcp_multi_backward(
+            [p.x_local], [p.w], p.ctx, [p.dy_local], [hist]
+        )
+        dx_ref, dw_ref = dxs[0], dws[0]
+    else:
+        dx_ref, dw_ref = cake_causal_conv1d_det_train_kcp_backward(
+            p.x_local, p.w, p.ctx, p.dy_local, hist
+        )
+    assert torch.equal(_bits(x.grad), _bits(dx_ref))
+    assert torch.equal(_bits(w.grad), _bits(dw_ref))
 
 
 def test_kcp_plans_with_the_legacy_tile_rule(monkeypatch):

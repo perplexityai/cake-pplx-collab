@@ -310,7 +310,7 @@ kernel_cake_kda_det_train_e60e7ca5d88192193e61(const __grid_constant__ CUtensorM
                 int pair_e_1_0 = it_e_1_0 / num_heads;
                 int head_e_1_0 = it_e_1_0 - pair_e_1_0 * num_heads;
                 int grow_1_0 = pair_e_1_0 * 128 + quad_1_0 + lane;
-                long long out_base_1_0 = ((long long)grow_1_0 * (long long)num_heads + (long long)head_e_1_0) * 128;
+                long long out_base_1_0 = ((long long)grow_1_0 * (long long)num_heads + (long long)head_e_1_0) * 128ll;
                 int buf_col_1_0 = (int)epi_buf_1_0 * 128;
                 mbarrier_wait(acc_full_addr + (epi_buf_1_0) * 8, _phase_acc_full);
                 asm volatile("tcgen05.fence::after_thread_sync;");
@@ -459,7 +459,7 @@ kernel_cake_kda_det_train_e60e7ca5d88192193e61(const __grid_constant__ CUtensorM
                 int pair_e_1_1 = it_e_1_1 / num_heads;
                 int head_e_1_1 = it_e_1_1 - pair_e_1_1 * num_heads;
                 int grow_1_1 = pair_e_1_1 * 128 + quad_1_1 + lane;
-                long long out_base_1_1 = ((long long)grow_1_1 * (long long)num_heads + (long long)head_e_1_1) * 128;
+                long long out_base_1_1 = ((long long)grow_1_1 * (long long)num_heads + (long long)head_e_1_1) * 128ll;
                 int buf_col_1_1 = (int)epi_buf_1_1 * 128;
                 mbarrier_wait(acc_full_addr + (epi_buf_1_1) * 8, _phase_acc_full_1);
                 asm volatile("tcgen05.fence::after_thread_sync;");

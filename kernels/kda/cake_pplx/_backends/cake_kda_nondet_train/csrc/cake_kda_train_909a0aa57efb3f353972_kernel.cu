@@ -327,7 +327,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
             int m64_row_base = warp_in_wg * 32 << 16;
             float init_row[16];
             if (use_dht == 1) {
-                long long dht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long dht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 #pragma unroll
                 for (int q_0 = 0; q_0 < 4; q_0++) {
                     {
@@ -446,9 +446,9 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
             float gk_pre = 0.0f;
             float decay = 1.0f;
             if (nc > 0) {
-                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                 gk_pre = gk[gn_next];
-                long long dh_base = ((long long)(c0 + nc - 1) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long dh_base = ((long long)(c0 + nc - 1) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 float _tmem_load_0[16];
                 tmem_ld_x16(&_tmem_load_0[0], taddr + (unsigned int)m128_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -665,7 +665,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_10 = reinterpret_cast<const unsigned*>(_packed_1);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base + 16))), "r"(_raw_stv8_10[0]), "r"(_raw_stv8_10[1]), "r"(_raw_stv8_10[2]), "r"(_raw_stv8_10[3]), "r"(_raw_stv8_10[4]), "r"(_raw_stv8_10[5]), "r"(_raw_stv8_10[6]), "r"(_raw_stv8_10[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base + 16ll))), "r"(_raw_stv8_10[0]), "r"(_raw_stv8_10[1]), "r"(_raw_stv8_10[2]), "r"(_raw_stv8_10[3]), "r"(_raw_stv8_10[4]), "r"(_raw_stv8_10[5]), "r"(_raw_stv8_10[6]), "r"(_raw_stv8_10[7]) : "memory");
                     }
                 }
                 float sc_7_1[16];
@@ -723,7 +723,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_11 = reinterpret_cast<const unsigned*>(_packed_2);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base + 32))), "r"(_raw_stv8_11[0]), "r"(_raw_stv8_11[1]), "r"(_raw_stv8_11[2]), "r"(_raw_stv8_11[3]), "r"(_raw_stv8_11[4]), "r"(_raw_stv8_11[5]), "r"(_raw_stv8_11[6]), "r"(_raw_stv8_11[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base + 32ll))), "r"(_raw_stv8_11[0]), "r"(_raw_stv8_11[1]), "r"(_raw_stv8_11[2]), "r"(_raw_stv8_11[3]), "r"(_raw_stv8_11[4]), "r"(_raw_stv8_11[5]), "r"(_raw_stv8_11[6]), "r"(_raw_stv8_11[7]) : "memory");
                     }
                 }
                 float sc_7_2[16];
@@ -781,7 +781,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_12 = reinterpret_cast<const unsigned*>(_packed_3);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base + 48))), "r"(_raw_stv8_12[0]), "r"(_raw_stv8_12[1]), "r"(_raw_stv8_12[2]), "r"(_raw_stv8_12[3]), "r"(_raw_stv8_12[4]), "r"(_raw_stv8_12[5]), "r"(_raw_stv8_12[6]), "r"(_raw_stv8_12[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base + 48ll))), "r"(_raw_stv8_12[0]), "r"(_raw_stv8_12[1]), "r"(_raw_stv8_12[2]), "r"(_raw_stv8_12[3]), "r"(_raw_stv8_12[4]), "r"(_raw_stv8_12[5]), "r"(_raw_stv8_12[6]), "r"(_raw_stv8_12[7]) : "memory");
                     }
                 }
                 float sc_7_3[16];
@@ -839,7 +839,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_13 = reinterpret_cast<const unsigned*>(_packed_4);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base + 64))), "r"(_raw_stv8_13[0]), "r"(_raw_stv8_13[1]), "r"(_raw_stv8_13[2]), "r"(_raw_stv8_13[3]), "r"(_raw_stv8_13[4]), "r"(_raw_stv8_13[5]), "r"(_raw_stv8_13[6]), "r"(_raw_stv8_13[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base + 64ll))), "r"(_raw_stv8_13[0]), "r"(_raw_stv8_13[1]), "r"(_raw_stv8_13[2]), "r"(_raw_stv8_13[3]), "r"(_raw_stv8_13[4]), "r"(_raw_stv8_13[5]), "r"(_raw_stv8_13[6]), "r"(_raw_stv8_13[7]) : "memory");
                     }
                 }
                 float sc_7_4[16];
@@ -897,7 +897,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_14 = reinterpret_cast<const unsigned*>(_packed_5);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base + 80))), "r"(_raw_stv8_14[0]), "r"(_raw_stv8_14[1]), "r"(_raw_stv8_14[2]), "r"(_raw_stv8_14[3]), "r"(_raw_stv8_14[4]), "r"(_raw_stv8_14[5]), "r"(_raw_stv8_14[6]), "r"(_raw_stv8_14[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base + 80ll))), "r"(_raw_stv8_14[0]), "r"(_raw_stv8_14[1]), "r"(_raw_stv8_14[2]), "r"(_raw_stv8_14[3]), "r"(_raw_stv8_14[4]), "r"(_raw_stv8_14[5]), "r"(_raw_stv8_14[6]), "r"(_raw_stv8_14[7]) : "memory");
                     }
                 }
                 float sc_7_5[16];
@@ -955,7 +955,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_15 = reinterpret_cast<const unsigned*>(_packed_6);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base + 96))), "r"(_raw_stv8_15[0]), "r"(_raw_stv8_15[1]), "r"(_raw_stv8_15[2]), "r"(_raw_stv8_15[3]), "r"(_raw_stv8_15[4]), "r"(_raw_stv8_15[5]), "r"(_raw_stv8_15[6]), "r"(_raw_stv8_15[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base + 96ll))), "r"(_raw_stv8_15[0]), "r"(_raw_stv8_15[1]), "r"(_raw_stv8_15[2]), "r"(_raw_stv8_15[3]), "r"(_raw_stv8_15[4]), "r"(_raw_stv8_15[5]), "r"(_raw_stv8_15[6]), "r"(_raw_stv8_15[7]) : "memory");
                     }
                 }
                 float sc_7_6[16];
@@ -1013,7 +1013,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_16 = reinterpret_cast<const unsigned*>(_packed_7);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base + 112))), "r"(_raw_stv8_16[0]), "r"(_raw_stv8_16[1]), "r"(_raw_stv8_16[2]), "r"(_raw_stv8_16[3]), "r"(_raw_stv8_16[4]), "r"(_raw_stv8_16[5]), "r"(_raw_stv8_16[6]), "r"(_raw_stv8_16[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base + 112ll))), "r"(_raw_stv8_16[0]), "r"(_raw_stv8_16[1]), "r"(_raw_stv8_16[2]), "r"(_raw_stv8_16[3]), "r"(_raw_stv8_16[4]), "r"(_raw_stv8_16[5]), "r"(_raw_stv8_16[6]), "r"(_raw_stv8_16[7]) : "memory");
                     }
                 }
                 float sc_7_7[16];
@@ -1032,7 +1032,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                 _phase_dv_ready_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 int trow = row0 + c * 64 + t_row;
-                long long t_base = ((long long)trow * (long long)num_heads + (long long)head) * 128;
+                long long t_base = ((long long)trow * (long long)num_heads + (long long)head) * 128ll;
                 float tmem_load[16];
                 asm volatile(
                     "tcgen05.ld.sync.aligned.16x32bx2.x16.b32"
@@ -1306,7 +1306,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(bdv_ready_addr);
                 if (nc > rc + 1) {
-                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                     gk_pre = gk[gn_next_1];
                 }
                 mbarrier_wait(dh_ready_addr, _phase_dh_ready_0);
@@ -1315,7 +1315,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                 if (nc > rc + 1) {
                     float _exp2_21 = approx_exp2(gk_pre);
                     decay = _exp2_21;
-                    long long dh_base_1 = ((long long)(c0 + c - 1) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                    long long dh_base_1 = ((long long)(c0 + c - 1) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                     float tmem_load_9[16];
                     tmem_ld_x16(&tmem_load_9[0], taddr + (unsigned int)m128_row_base);
                     float tmem_load_1_1[16];
@@ -1595,7 +1595,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                             const unsigned* _raw_stv8_23 = reinterpret_cast<const unsigned*>(_packed_9);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(dh_out + (dh_base_1 + 16))), "r"(_raw_stv8_23[0]), "r"(_raw_stv8_23[1]), "r"(_raw_stv8_23[2]), "r"(_raw_stv8_23[3]), "r"(_raw_stv8_23[4]), "r"(_raw_stv8_23[5]), "r"(_raw_stv8_23[6]), "r"(_raw_stv8_23[7]) : "memory");
+                                :: "l"((void*)(dh_out + (dh_base_1 + 16ll))), "r"(_raw_stv8_23[0]), "r"(_raw_stv8_23[1]), "r"(_raw_stv8_23[2]), "r"(_raw_stv8_23[3]), "r"(_raw_stv8_23[4]), "r"(_raw_stv8_23[5]), "r"(_raw_stv8_23[6]), "r"(_raw_stv8_23[7]) : "memory");
                         }
                     }
                     float sc_7_9[16];
@@ -1653,7 +1653,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                             const unsigned* _raw_stv8_24 = reinterpret_cast<const unsigned*>(_packed_10);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(dh_out + (dh_base_1 + 32))), "r"(_raw_stv8_24[0]), "r"(_raw_stv8_24[1]), "r"(_raw_stv8_24[2]), "r"(_raw_stv8_24[3]), "r"(_raw_stv8_24[4]), "r"(_raw_stv8_24[5]), "r"(_raw_stv8_24[6]), "r"(_raw_stv8_24[7]) : "memory");
+                                :: "l"((void*)(dh_out + (dh_base_1 + 32ll))), "r"(_raw_stv8_24[0]), "r"(_raw_stv8_24[1]), "r"(_raw_stv8_24[2]), "r"(_raw_stv8_24[3]), "r"(_raw_stv8_24[4]), "r"(_raw_stv8_24[5]), "r"(_raw_stv8_24[6]), "r"(_raw_stv8_24[7]) : "memory");
                         }
                     }
                     float sc_7_10[16];
@@ -1711,7 +1711,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                             const unsigned* _raw_stv8_25 = reinterpret_cast<const unsigned*>(_packed_11);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(dh_out + (dh_base_1 + 48))), "r"(_raw_stv8_25[0]), "r"(_raw_stv8_25[1]), "r"(_raw_stv8_25[2]), "r"(_raw_stv8_25[3]), "r"(_raw_stv8_25[4]), "r"(_raw_stv8_25[5]), "r"(_raw_stv8_25[6]), "r"(_raw_stv8_25[7]) : "memory");
+                                :: "l"((void*)(dh_out + (dh_base_1 + 48ll))), "r"(_raw_stv8_25[0]), "r"(_raw_stv8_25[1]), "r"(_raw_stv8_25[2]), "r"(_raw_stv8_25[3]), "r"(_raw_stv8_25[4]), "r"(_raw_stv8_25[5]), "r"(_raw_stv8_25[6]), "r"(_raw_stv8_25[7]) : "memory");
                         }
                     }
                     float sc_7_11[16];
@@ -1769,7 +1769,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                             const unsigned* _raw_stv8_26 = reinterpret_cast<const unsigned*>(_packed_12);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(dh_out + (dh_base_1 + 64))), "r"(_raw_stv8_26[0]), "r"(_raw_stv8_26[1]), "r"(_raw_stv8_26[2]), "r"(_raw_stv8_26[3]), "r"(_raw_stv8_26[4]), "r"(_raw_stv8_26[5]), "r"(_raw_stv8_26[6]), "r"(_raw_stv8_26[7]) : "memory");
+                                :: "l"((void*)(dh_out + (dh_base_1 + 64ll))), "r"(_raw_stv8_26[0]), "r"(_raw_stv8_26[1]), "r"(_raw_stv8_26[2]), "r"(_raw_stv8_26[3]), "r"(_raw_stv8_26[4]), "r"(_raw_stv8_26[5]), "r"(_raw_stv8_26[6]), "r"(_raw_stv8_26[7]) : "memory");
                         }
                     }
                     float sc_7_12[16];
@@ -1827,7 +1827,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                             const unsigned* _raw_stv8_27 = reinterpret_cast<const unsigned*>(_packed_13);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(dh_out + (dh_base_1 + 80))), "r"(_raw_stv8_27[0]), "r"(_raw_stv8_27[1]), "r"(_raw_stv8_27[2]), "r"(_raw_stv8_27[3]), "r"(_raw_stv8_27[4]), "r"(_raw_stv8_27[5]), "r"(_raw_stv8_27[6]), "r"(_raw_stv8_27[7]) : "memory");
+                                :: "l"((void*)(dh_out + (dh_base_1 + 80ll))), "r"(_raw_stv8_27[0]), "r"(_raw_stv8_27[1]), "r"(_raw_stv8_27[2]), "r"(_raw_stv8_27[3]), "r"(_raw_stv8_27[4]), "r"(_raw_stv8_27[5]), "r"(_raw_stv8_27[6]), "r"(_raw_stv8_27[7]) : "memory");
                         }
                     }
                     float sc_7_13[16];
@@ -1885,7 +1885,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                             const unsigned* _raw_stv8_28 = reinterpret_cast<const unsigned*>(_packed_14);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(dh_out + (dh_base_1 + 96))), "r"(_raw_stv8_28[0]), "r"(_raw_stv8_28[1]), "r"(_raw_stv8_28[2]), "r"(_raw_stv8_28[3]), "r"(_raw_stv8_28[4]), "r"(_raw_stv8_28[5]), "r"(_raw_stv8_28[6]), "r"(_raw_stv8_28[7]) : "memory");
+                                :: "l"((void*)(dh_out + (dh_base_1 + 96ll))), "r"(_raw_stv8_28[0]), "r"(_raw_stv8_28[1]), "r"(_raw_stv8_28[2]), "r"(_raw_stv8_28[3]), "r"(_raw_stv8_28[4]), "r"(_raw_stv8_28[5]), "r"(_raw_stv8_28[6]), "r"(_raw_stv8_28[7]) : "memory");
                         }
                     }
                     float sc_7_14[16];
@@ -1943,7 +1943,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                             const unsigned* _raw_stv8_29 = reinterpret_cast<const unsigned*>(_packed_15);
                             asm volatile(
                                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                                :: "l"((void*)(dh_out + (dh_base_1 + 112))), "r"(_raw_stv8_29[0]), "r"(_raw_stv8_29[1]), "r"(_raw_stv8_29[2]), "r"(_raw_stv8_29[3]), "r"(_raw_stv8_29[4]), "r"(_raw_stv8_29[5]), "r"(_raw_stv8_29[6]), "r"(_raw_stv8_29[7]) : "memory");
+                                :: "l"((void*)(dh_out + (dh_base_1 + 112ll))), "r"(_raw_stv8_29[0]), "r"(_raw_stv8_29[1]), "r"(_raw_stv8_29[2]), "r"(_raw_stv8_29[3]), "r"(_raw_stv8_29[4]), "r"(_raw_stv8_29[5]), "r"(_raw_stv8_29[6]), "r"(_raw_stv8_29[7]) : "memory");
                         }
                     }
                     float sc_7_15[16];
@@ -2045,7 +2045,7 @@ kernel_cake_kda_train_909a0aa57efb3f353972(const __grid_constant__ CUtensorMap k
                 }
             }
             if (write_ht == 1) {
-                long long ht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long ht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 float _tmem_load_60[16];
                 tmem_ld_x16(&_tmem_load_60[0], taddr + (unsigned int)m128_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");

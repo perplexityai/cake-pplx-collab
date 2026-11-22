@@ -345,7 +345,7 @@ kernel_cake_kda_det_train_2247b401b29d959d8133(const __grid_constant__ CUtensorM
             int m64_row_base = warp_in_wg * 32 << 16;
             float init_row[16];
             if (use_dht == 1) {
-                long long dht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128 + vbase);
+                long long dht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128 + vbase);
                 #pragma unroll
                 for (int q_0 = 0; q_0 < 4; q_0++) {
                     {
@@ -416,7 +416,7 @@ kernel_cake_kda_det_train_2247b401b29d959d8133(const __grid_constant__ CUtensorM
             float gk_pre = 0.0f;
             float decay = 1.0f;
             if (nc > 0) {
-                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                 gk_pre = gk[gn_next];
                 float _tmem_load_0[16];
                 tmem_ld_x16(&_tmem_load_0[0], taddr + (unsigned int)m128_row_base);
@@ -570,7 +570,7 @@ kernel_cake_kda_det_train_2247b401b29d959d8133(const __grid_constant__ CUtensorM
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(bdv_ready_addr);
                 if (nc > rc + 1) {
-                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                     gk_pre = gk[gn_next_1];
                 }
                 if (write_tapes == 1) {
@@ -756,7 +756,7 @@ kernel_cake_kda_det_train_2247b401b29d959d8133(const __grid_constant__ CUtensorM
                 }
             }
             if (write_ht == 1) {
-                long long ht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128 + vbase);
+                long long ht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128 + vbase);
                 float _tmem_load_30[16];
                 tmem_ld_x16(&_tmem_load_30[0], taddr + (unsigned int)m128_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");

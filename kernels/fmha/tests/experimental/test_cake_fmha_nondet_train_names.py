@@ -64,6 +64,7 @@ INTERNAL = (
     "launch_bwd_pre",
     "launch_bwd_main",
     "launch_bwd_post",
+    "launch_bwd_fused",
     "device_arch",
     "arch_for_capability",
     "library_name",

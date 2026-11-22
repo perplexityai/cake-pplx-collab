@@ -15,6 +15,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest", "numpy"]
+# the second reference of the accuracy tests on a GPU (tests/experimental/test_helpers/cake_kda_fla.py)
+fla = ["flash-linear-attention[cuda]==0.6.0"]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

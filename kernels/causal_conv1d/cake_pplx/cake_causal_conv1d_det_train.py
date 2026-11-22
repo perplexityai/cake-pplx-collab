@@ -38,11 +38,13 @@ FP32,
     dbias[c]      = sum_t dpre[t, c]                            # with a bias
 
 at ``p`` chosen by ``silu_grad_preactivation``: ``"bf16"`` (default), ``p =
-bf16(pre)`` with an FP32 ``weight``, the rounded value the forward stores and
-the boundary flash-linear-attention's backward uses (``dweight`` lands within
-about 3e-5 rel-L2 of the exact FP64 gradient), and ``p = pre`` unrounded with
-a BF16 ``weight`` (there the rounding can move ``dx`` across a BF16 rounding
-midpoint); ``"fp32"``, ``p = pre`` unrounded with either ``weight`` (a slower
+pre`` unrounded with a bias (an FP32 or BF16 ``weight``), with a BF16
+``weight`` (there the rounding can move ``dx`` across a BF16 rounding
+midpoint) or with a BF16 ``dweight``, and ``p = bf16(pre)`` with an FP32
+``weight`` and ``dweight`` and no bias, the
+rounded value the forward stores and the boundary flash-linear-attention's
+backward uses (``dweight`` lands within about 3e-5 rel-L2 of the exact FP64
+gradient); ``"fp32"``, ``p = pre`` unrounded with either ``weight`` (a slower
 program).  By default (``dweight_sum="fp32"``), under both, every ``dweight``
 / ``dbias`` sum is one plain FP32 word: no compensated (two-word) sums.  The
 opt-in ``dweight_sum="fp32_pair"`` (with ``"fp32"`` only) sums them as FP32
@@ -86,6 +88,11 @@ the workspace, as in 0.2.4.  Every forward program writes the same ``y`` bits.
 Inputs and outputs are contiguous (``C`` a multiple of 8, ``S`` at most
 ``2**31 - 2**16``, ``ValueError`` beyond); ``dweight`` and
 ``dbias`` are FP32 or BF16 (the parameter's dtype when not preallocated).
+The kernels access the operands as vectors, so their addresses are aligned:
+``x``, ``dy``, ``out`` and ``dx`` 16 bytes, FP32 taps 16 and BF16 taps 8, an
+FP32 bias 32 (16 for the standalone backward) and a BF16 bias 16.  A
+misaligned tensor raises ``ValueError`` before anything launches; a fresh
+tensor or a ``.clone()`` is aligned.
 ``S``, ``C`` and the document count are runtime scalars: they may change
 between calls, the host never reads ``cu_seqlens`` (no synchronization), ``S
 == 0`` returns empty outputs without launching, and the calls are CUDA Graph
@@ -234,15 +241,22 @@ def cake_causal_conv1d_det_train_forward(
 ) -> torch.Tensor:
     r"""Packed width-4 depthwise causal convolution + SiLU, training forward.
 
+    The kernels access ``x``, ``weight``, ``bias`` and ``out`` as vectors, so
+    each address (``data_ptr()``) must be aligned as stated below; a misaligned
+    one raises ``ValueError`` before anything launches.  A fresh tensor or a
+    ``.clone()`` is aligned, and so is a view that starts at a whole row
+    (``x[1:]``, ``weight[1:]``).
+
     Parameters
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations of every
-        document; ``C`` is a multiple of 8.
+        document; ``C`` is a multiple of 8.  16-byte aligned.
     weight : torch.Tensor
         FP32 or BF16 ``[C, 4]`` contiguous taps; ``weight[c, 3]`` multiplies the
         current token, ``weight[c, 0]`` the token three positions back.  Any
-        other width is rejected.
+        other width is rejected.  FP32 taps are 16-byte aligned, BF16 taps
+        8-byte aligned.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` contiguous device prefix sums of the document
         lengths (``cu_seqlens[0] == 0``, ``cu_seqlens[-1] == S``; a repeated
@@ -250,9 +264,10 @@ def cake_causal_conv1d_det_train_forward(
         element is copied to the host and no stream is synchronized.
     bias : torch.Tensor, optional
         FP32 or BF16 ``[C]`` contiguous per-channel bias, added after the four
-        taps; its dtype is independent of ``weight``'s.
+        taps; its dtype is independent of ``weight``'s.  An FP32 bias is
+        32-byte aligned, a BF16 bias 16-byte aligned.
     out : torch.Tensor, optional
-        Preallocated BF16 output of ``x``'s shape, contiguous.
+        Preallocated BF16 output of ``x``'s shape, contiguous, 16-byte aligned.
     workspace : torch.Tensor, optional
         Caller-owned ``int32`` buffer from
         :func:`cake_causal_conv1d_det_train_forward_workspace` (the token-chunk
@@ -298,8 +313,9 @@ def cake_causal_conv1d_det_train_backward(
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward.
 
     Recomputes the FP32 preactivation from ``x``, evaluates the SiLU derivative
-    at it -- rounded to BF16 (``silu_grad_preactivation="bf16"``, the default)
-    or unrounded (``"fp32"``) -- and produces ``dx``, the weight gradient and,
+    at it -- rounded to BF16 with an FP32 ``weight`` and ``dweight`` and no bias
+    under ``silu_grad_preactivation="bf16"`` (the default), else unrounded (see
+    ``silu_grad_preactivation``) -- and produces ``dx``, the weight gradient and,
     with a bias, the bias gradient in two ordinary launches on the current
     stream: the main program writes ``dx`` and per-CTA partial rows of the
     gradients, and a reduce program launched programmatically dependent on it
@@ -320,14 +336,17 @@ def cake_causal_conv1d_det_train_backward(
     ----------
     x, weight, cu_seqlens, bias
         The forward's inputs (same contracts as
-        :func:`cake_causal_conv1d_det_train_forward`); nothing else is saved.
+        :func:`cake_causal_conv1d_det_train_forward`, except that an FP32
+        ``bias`` needs only 16-byte alignment here); nothing else is saved.
     dy : torch.Tensor
-        BF16 gradient of ``y``, ``x``'s shape, contiguous.
+        BF16 gradient of ``y``, ``x``'s shape, contiguous, 16-byte aligned.
     silu_grad_preactivation : {"bf16", "fp32"}
-        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation with an
-        FP32 ``weight`` (the boundary flash-linear-attention's backward uses;
-        ``dweight`` within about 3e-5 rel-L2 of the exact FP64 gradient), at
-        the unrounded FP32 preactivation with a BF16 ``weight``.  ``"fp32"``: SiLU' at
+        ``"bf16"``: SiLU' at the unrounded FP32 preactivation with a ``bias``
+        (FP32 or BF16 ``weight``), a BF16 ``weight`` or a BF16 ``dweight``
+        out, at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` and ``dweight`` and no ``bias`` (the
+        boundary flash-linear-attention's backward uses; ``dweight`` within
+        about 3e-5 rel-L2 of the exact FP64 gradient).  ``"fp32"``: SiLU' at
         the unrounded FP32 preactivation (a slower program).  Both sum
         ``dweight`` / ``dbias`` in plain FP32 words by default (see
         ``dweight_sum``).  ``dx`` is within one BF16 ulp of exact under both.
@@ -342,7 +361,8 @@ def cake_causal_conv1d_det_train_backward(
     dx, dweight, dbias : torch.Tensor, optional
         Preallocated outputs: BF16 of ``x``'s shape, ``[C, 4]`` and ``[C]``
         (each FP32 or BF16; the parameter's dtype when omitted), contiguous.
-        ``dbias`` needs ``bias``.
+        ``dx`` must be 16-byte aligned (``ValueError`` otherwise); ``dweight``
+        and ``dbias`` are stored per element.  ``dbias`` needs ``bias``.
     bwd_grid_mult : {1, 2, 3, 4}
         Opt-in finer static partition of the token axis; default 1 (the
         default programs, grid and bits).  The main program launches
@@ -411,13 +431,15 @@ def cake_causal_conv1d_det(
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations on a
-        supported CUDA device.
+        supported CUDA device, 16-byte aligned.
     weight : torch.Tensor
-        FP32 or BF16 ``[C, 4]`` contiguous taps.
+        FP32 (16-byte aligned) or BF16 (8-byte aligned) ``[C, 4]`` contiguous
+        taps.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` device prefix sums of the document lengths.
     bias : torch.Tensor, optional
-        FP32 or BF16 ``[C]`` contiguous per-channel bias.
+        FP32 (32-byte aligned) or BF16 (16-byte aligned) ``[C]`` contiguous
+        per-channel bias.  A misaligned tensor raises ``ValueError``.
     silu_grad_preactivation : {"bf16", "fp32"}
         The weight gradient's SiLU' policy (see
         :func:`cake_causal_conv1d_det_train_backward`).

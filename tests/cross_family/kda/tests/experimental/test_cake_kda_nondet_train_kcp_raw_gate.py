@@ -17,32 +17,33 @@ The raw gate mode of the non-deterministic context-parallel (KCP) KDA training r
 CPU rows: the keywords and their refusals, the gate-aware workspace and its byte query (one context or a list of
 contexts; the deterministic package's answer for the same partition) and their refusal of the lean local arena, the
 saved set's metadata (the single-rank mismatch rule of both packages), the recompute handle's fingerprint, the
-cross-rank reduction helper on one rank (the deterministic helper's bits), and the local stages' value dicts
-against the raw records of the non-deterministic single-rank registry (the deterministic pair ``glm_intra_raw`` /
+cross-rank reduction helper on one rank (fresh copies, its refusals), and the local stages' value dicts against the
+raw records of the non-deterministic single-rank registry (the deterministic pair ``glm_intra_raw`` /
 ``param_finalize`` on every architecture).
 
-GPU rows at W = 1: one reserved raw-mode workspace shared by four packs is bitwise one workspace per pack; under
+Accuracy: every judged output is judged by its error against the exact FP64 reference beside the naive BF16 tier
+(``tests/cake_naive.py``) over the judge's 32 draws, each path, mode or call under its own arm name.
+This package has no bit contract: no output of one call or path is compared with another's, and no output with the
+deterministic package's.
+
+GPU rows at W = 1: four raw-mode packs on one reserved raw workspace and on one workspace per pack, each pack's
+results on each form judged (the reserved bytes, the byte count and the explicit-mode refusal exact); under
 ``torch.use_deterministic_algorithms(True)`` (strict and ``warn_only``) a raw backward raises no alert and gives no
-such warning, eagerly and on a captured graph's replay, and its results are bitwise the deterministic package's.
+such warning, eagerly and on a captured graph's replay, and its results are judged.
 
 GPU rows (one process per rank; ``W = 1`` in the pytest process, ``W > 1`` spawned or one process per Slurm task as in
-``test_cake_kda_nondet_train_kcp_dist.py``): every rank runs the raw-mode KCP forward / backward in every mode and must be
-bitwise repeatable (saved == replay, repeat and ``REPEATS`` more saved passes, autograd == explicit calls,
-checkpoint == direct, checkpoint with a recompute handle of both tiers == plain checkpoint -- its recompute issuing
-no collective (the call's counter and sequence, and no torch.distributed call in the recompute phase) --, checkpoint with
-``checkpoint_handoff="on"`` (engaged) == plain checkpoint, save_transfer, ring == a2a, graph
-replay == eager, ``workspace=None``, a strided raw view == the contiguous one) on every output, the gradient of the
-raw gate and the per-rank parameter partial sums; every output, the raw gate's gradient, the per-rank partial sums
-and the reduced sums are bitwise those of the deterministic package's raw KCP route on the same rank, with the same
-launch sequence; the explicit-gate path on the same activated gate runs the same stages in the same order with the
-same collectives (``gate_epilogue`` -> ``param_finalize``); the cross-rank reduction helper gives the same bits on
-every rank for every run and under every mode, and the deterministic helper's bits on the same partials; rank 0
-compares the gathered result with the single-rank raw path and the exact FP64 reference: relative L2 error of KCP /
-single-rank <= 1.10 for ``out, dq, dk, dv, dbeta`` and the raw gate's gradient.  ``dA_log`` and ``ddt_bias`` (summed
-over the ranks by the helper) follow #7816's criterion (d) with the single-rank protocol's sanity rule against the
-explicit KCP route on the same row, with negative controls that must fail it.  The seeded statistic of the
-deterministic package's KCP raw test is not repeated here: the rows above hold this route bitwise to that route, so
-its record applies unchanged.
+``test_cake_kda_nondet_train_kcp_dist.py``), each over the judge's draws in one process group: on every draw every rank
+runs the raw-mode KCP forward / backward in every mode (saved, replay, repeat -- and on the first draw ``REPEATS``
+more saved passes --, autograd, checkpoint, checkpoint with a recompute handle of both tiers, checkpoint with
+``checkpoint_handoff="on"``, save_transfer, ``workspace=None``, a strided raw view, ring where it runs, graph replay);
+rank 0 gathers each mode's outputs (``dA_log`` / ``ddt_bias`` summed over the ranks by the helper) and judges them
+under the mode's name, and the single-rank raw path on the whole pack (arm ``single``), against the FP64 reference
+of the unsplit pack.  On the first draw, exactly: a recompute handle's recompute issues no collective (the call's
+counter and sequence, and no torch.distributed call in the recompute phase), the hand-off counters, the graph
+events, the mode refusals, the explicit-gate path on the same activated gate runs the same stages in the same order
+with the same collectives (``gate_epilogue`` -> ``param_finalize``), the deterministic package's raw KCP route on the
+same rank has the same launch sequence (its launch records only: its outputs are not used), and the reduction
+helper's documented bits: one call's result is the same on every rank, the FP32 rank-order sum of the partials.
 """
 
 from __future__ import annotations
@@ -55,18 +56,14 @@ import tempfile
 import traceback
 import types
 import warnings
+import zlib
 
 import pytest
 import torch
 import torch.distributed as dist
 
-from tests.experimental.test_cake_kda_det_train_raw_gate_accuracy import (
-    ELEMENTWISE_ATOL,
-    ELEMENTWISE_RTOL,
-    PARAM_SANITY_FACTOR,
-    _max_normalized_error,
-    torch_gate,
-)
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
+from tests.experimental.test_cake_kda_det_train_raw_gate_accuracy import torch_gate
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     _Counter,
     _bwd_sequence_first_main,
@@ -81,10 +78,15 @@ from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
 from tests.experimental.test_cake_kda_nondet_train_kcp_handoff import _handoff_delta
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
-    error_metrics,
-    kda_exact_raw_with_grads,
-    make_raw_inputs,
     raw_gate,
+)
+from tests.experimental.test_helpers.cake_kda_known_gaps import settle
+from tests.experimental.test_helpers.cake_kda_naive import (
+    draw_case,
+    fla_of,
+    judge_arms,
+    naive_of,
+    oracle_with_grads,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -93,7 +95,8 @@ cake_kcp_plan = cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_plan")
 cake_backend = cake_package("cake.cake_kda_nondet_train", "cake_backend")
 cake_jit = cake_package("cake.cake_kda_nondet_train", "cake_jit")
 cake_kcp_jit = cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_jit")
-# the deterministic package: the baseline of the bitwise rows (imported by the test, never by the package)
+# the deterministic package: its byte queries, saved sets and gate rules, the mode contracts the CPU rows compare
+# with this package's (imported by the test, never by the package; no output of it is run or compared here)
 det_kcp = cake_package("cake.cake_kda_det_train_kcp", "cake_kcp")
 det_kcp_plan = cake_package("cake.cake_kda_det_train_kcp", "cake_kcp_plan")
 det_backend = cake_package("cake.cake_kda_det_train", "cake_backend")
@@ -104,8 +107,8 @@ LB = LOWER_BOUND  # -5.0
 TOKEN_GRADS = ("dq", "dk", "dv", "dbeta", "dg")  # dg: the raw gate's gradient (BF16)
 PARAM_GRADS = ("dA_log", "ddt_bias")  # this rank's partial sums
 TENSORS = ("out",) + TOKEN_GRADS + PARAM_GRADS
-ACC_GATE = 1.10  # relative L2 error of KCP / single-rank against the FP64 reference
-REPEATS = 20  # run to run: saved passes of every row, each bitwise the first one
+TOKEN_NAMES = ("out",) + TOKEN_GRADS  # the outputs with a token axis
+REPEATS = 20  # more saved passes of every row on the first draw (arm "repeat": the worst launch kept)
 GRAPH_EVENTS = [
     ["eager", "eager"],
     ["capture", "eager"],
@@ -407,24 +410,63 @@ def test_raw_workspace_bytes_of_a_list_of_contexts() -> None:
                 )
 
 
-def test_gpu_raw_reserved_shared_workspace_matches_one_workspace_per_pack() -> None:
-    """Four raw-mode packs of one rank (different ``T_r`` / ``n_frag``) at H = 4 and 64 on ONE reserved raw
-    workspace, interleaved (saving forwards in pack order, their backwards in reverse order, replay-mode forwards
-    and backwards): every output, the raw gate's gradient and the parameter partial sums are bitwise those of one
-    raw workspace per pack; ``reserve`` returns ``cake_kda_nondet_train_kcp_workspace_bytes(ctxs, H=H, use_gate_in_kernel=True)``, the
-    schedule changes no byte count, and an explicit-mode call on the raw workspace is refused."""
-    _skip_unless_runnable(1)
-    device = torch.device("cuda", torch.cuda.current_device())
-    for H in (4, 64):
-        ctxs, ops = [], []
-        for i, lengths in enumerate(SHARED_PACKS):
-            part, cu = _partition(lengths, 1, "contiguous")
-            ctxs.append(
-                cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
-                    part, None, 0, device
-                )
-            )
-            glob = make_raw_inputs(lengths, H, device, seed=0x7816 + i)
+def _shared_schedule(ctxs: list, ops: list, wss: list) -> list[dict]:
+    """The packs ``ops`` interleaved on the workspaces ``wss`` (one per pack, or one shared): the saving forwards in
+    pack order, their backwards in reverse order, then the replay-mode forwards and backwards in reverse order.  Per
+    pack its ``"saved"`` and ``"replay"`` results by name, as they stand after the whole schedule."""
+    names = TOKEN_GRADS + PARAM_GRADS
+    n, res, saved = len(ctxs), [{} for _ in ctxs], [None] * len(ctxs)
+    for i in range(n):
+        o = ops[i]
+        out, saved[i] = cake_kcp.cake_kda_nondet_train_kcp_forward(
+            o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], workspace=wss[i], **o["GK"]
+        )  # fmt: skip
+        res[i]["saved"] = {"out": out}
+    for i in reversed(range(n)):
+        o = ops[i]
+        grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
+            o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], o["dout"], saved=saved[i],
+            workspace=wss[i], **o["GK"],
+        )  # fmt: skip
+        res[i]["saved"].update(zip(names, grads, strict=True))
+    for i in reversed(range(n)):
+        o = ops[i]
+        out, none = cake_kcp.cake_kda_nondet_train_kcp_forward(
+            o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], workspace=wss[i],
+            boundary_mode="replay", **o["GK"],
+        )  # fmt: skip
+        assert none is None
+        grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
+            o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], o["dout"], saved=None,
+            workspace=wss[i], **o["GK"],
+        )  # fmt: skip
+        res[i]["replay"] = {"out": out, **dict(zip(names, grads, strict=True))}
+    return res
+
+
+def _cloned(res: list[dict]) -> list[dict]:
+    """A copy of :func:`_shared_schedule`'s results taken when the schedule ends (the next schedule on a shared
+    workspace may reuse its storage)."""
+    return [
+        {form: {n: t.clone() for n, t in out.items()} for form, out in pack.items()}
+        for pack in res
+    ]
+
+
+def _shared_draw(H: int, ctxs: list, parts: list, device, p: int):
+    """``draw(j, s)`` of pack ``p``'s judge in
+    :func:`test_gpu_raw_reserved_shared_workspace_and_one_workspace_per_pack_are_judged`: every pack's operands drawn
+    from the draw's seed, the schedule on one raw workspace per pack, then twice on one reserved raw workspace; pack
+    ``p``'s results as the arms and its operands as the draw's inputs.  On the first draw, exactly: ``reserve``
+    returns the packs' byte query, each round leaves the byte count, and an explicit-mode call on the raw workspace
+    is refused."""
+
+    def draw(j: int, s: int):
+        globs, ops = [], []
+        for i, ((part, cu), lengths) in enumerate(
+            zip(parts, SHARED_PACKS, strict=True)
+        ):
+            glob = draw_case(lengths, H, "raw", False, s + 101 * i, device)
             o = _local_slices(
                 part, 0, cu, {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
             )
@@ -434,73 +476,93 @@ def test_gpu_raw_reserved_shared_workspace_matches_one_workspace_per_pack() -> N
                 dt_bias=glob["dt_bias"],
                 lower_bound=LB,
             )
-            ops.append(o)  # fmt: skip
-
-        def schedule(wss: list) -> list[dict]:
-            n, res, saved = len(ctxs), [{} for _ in ctxs], [None] * len(ctxs)
-            for i in range(n):
-                o = ops[i]
-                out, saved[i] = cake_kcp.cake_kda_nondet_train_kcp_forward(
-                    o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], workspace=wss[i], **o["GK"]
-                )  # fmt: skip
-                res[i]["out"] = out
-            for i in reversed(range(n)):
-                o = ops[i]
-                res[i]["grads"] = cake_kcp.cake_kda_nondet_train_kcp_backward(
-                    o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], o["dout"], saved=saved[i],
-                    workspace=wss[i], **o["GK"],
-                )  # fmt: skip
-            for i in reversed(range(n)):
-                o = ops[i]
-                out, none = cake_kcp.cake_kda_nondet_train_kcp_forward(
-                    o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], workspace=wss[i],
-                    boundary_mode="replay", **o["GK"],
-                )  # fmt: skip
-                assert none is None
-                res[i]["out_replay"] = out
-                res[i]["grads_replay"] = cake_kcp.cake_kda_nondet_train_kcp_backward(
-                    o["q"], o["k"], o["v"], o["g"], o["beta"], ctxs[i], o["dout"], saved=None,
-                    workspace=wss[i], **o["GK"],
-                )  # fmt: skip
-            return res
-
-        ref = schedule(
-            [cake_kcp.CakeKDANondetKcpWorkspace(use_gate_in_kernel=True) for _ in ctxs]
+            globs.append(glob)
+            ops.append(o)
+        own = _cloned(
+            _shared_schedule(
+                ctxs,
+                ops,
+                [
+                    cake_kcp.CakeKDANondetKcpWorkspace(use_gate_in_kernel=True)
+                    for _ in ctxs
+                ],
+            )
         )
         ws = cake_kcp.CakeKDANondetKcpWorkspace(use_gate_in_kernel=True)
         got = ws.reserve(ctxs, H)
-        assert (
-            got
-            == ws.bytes
-            == cake_kcp_plan.cake_kda_nondet_train_kcp_workspace_bytes(
-                ctxs, H=H, use_gate_in_kernel=True
-            )
-        ), H
+        if j == 0:
+            assert (
+                got
+                == ws.bytes
+                == cake_kcp_plan.cake_kda_nondet_train_kcp_workspace_bytes(
+                    ctxs, H=H, use_gate_in_kernel=True
+                )
+            ), H
+        rounds = []
         for rnd in range(2):
-            res = schedule([ws] * len(ctxs))
-            for i in range(len(ctxs)):
-                for key, val in ref[i].items():
-                    a = (val,) if isinstance(val, torch.Tensor) else tuple(val)
-                    b = (
-                        (res[i][key],)
-                        if isinstance(val, torch.Tensor)
-                        else tuple(res[i][key])
-                    )
-                    assert len(a) == len(b), (H, rnd, i, key)
-                    if isinstance(val, torch.Tensor):
-                        assert _bits_equal_counted(a[0], b[0]), (H, rnd, i, key)
-                        continue
-                    assert len(a) == len(TOKEN_GRADS + PARAM_GRADS), (key, len(a))
-                    for j, (x, y) in enumerate(zip(a, b, strict=True)):
-                        assert _bits_equal_counted(x, y), (H, rnd, i, key, j)
-            assert ws.bytes == got, (H, rnd)
-        o = ops[0]
-        with pytest.raises(ValueError, match="gate mode"):
-            cake_kcp.cake_kda_nondet_train_kcp_forward(
-                o["q"], o["k"], o["v"], torch_gate(o["g"], o["GK"]["A_log"], o["GK"]["dt_bias"]),
-                o["beta"], ctxs[0], workspace=ws,
-            )  # fmt: skip
-        del ws, ref, res
+            rounds.append(_cloned(_shared_schedule(ctxs, ops, [ws] * len(ctxs))))
+            if j == 0:
+                assert ws.bytes == got, (H, rnd)
+        if j == 0:
+            o = ops[0]
+            with pytest.raises(ValueError, match="gate mode"):
+                cake_kcp.cake_kda_nondet_train_kcp_forward(
+                    o["q"], o["k"], o["v"], torch_gate(o["g"], o["GK"]["A_log"], o["GK"]["dt_bias"]),
+                    o["beta"], ctxs[0], workspace=ws,
+                )  # fmt: skip
+        part, cu = parts[p]
+
+        def in_global_order(res: dict) -> dict:
+            return {
+                n: _to_global(part, [t], cu, cu[-1]) if n in TOKEN_NAMES else t
+                for n, t in res.items()
+            }
+
+        arm = f"h{H}_p{p}"
+        arms = {
+            arm: in_global_order(own[p]["saved"]),
+            f"{arm}_replay": in_global_order(own[p]["replay"]),
+            f"{arm}_shared": [in_global_order(r[p]["saved"]) for r in rounds],
+            f"{arm}_shared_replay": [in_global_order(r[p]["replay"]) for r in rounds],
+        }
+        return arms, globs[p]
+
+    return draw
+
+
+def test_gpu_raw_reserved_shared_workspace_and_one_workspace_per_pack_are_judged(
+    record_property,
+) -> None:
+    """Four raw-mode packs of one rank (different ``T_r`` / ``n_frag``) at H = 4 and 64, interleaved (saving forwards
+    in pack order, their backwards in reverse order, replay-mode forwards and backwards) on one raw workspace per
+    pack and, twice, on ONE reserved raw workspace.  Each pack's results on each workspace form are judged against
+    the FP64 reference beside the naive BF16 tier over the judge's draws, one judge per pack and head count (arms
+    ``h<H>_p<i>`` and ``h<H>_p<i>_replay`` on the pack's own workspace, ``..._shared`` and ``..._shared_replay`` on
+    the shared one, its two rounds judged as repeats: the worst kept; every output, the raw gate's gradient and the
+    parameter partial sums); no form is compared with another.  On the first draw, exactly: ``reserve`` returns
+    ``cake_kda_nondet_train_kcp_workspace_bytes(ctxs, H=H, use_gate_in_kernel=True)``, the schedule changes no byte
+    count, and an explicit-mode call on the raw workspace is refused."""
+    _skip_unless_runnable(1)
+    device = torch.device("cuda", torch.cuda.current_device())
+    for H in (4, 64):
+        parts, ctxs = [], []
+        for lengths in SHARED_PACKS:
+            part, cu = _partition(lengths, 1, "contiguous")
+            parts.append((part, cu))
+            ctxs.append(
+                cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
+                    part, None, 0, device
+                )
+            )
+        for p, lengths in enumerate(SHARED_PACKS):
+            judge_arms(
+                record_property,
+                _shared_draw(H, ctxs, parts, device, p),
+                seed=_row_seed("shared_ws", (lengths, H, 1, "contiguous")),
+                scale=SCALE,
+                lower_bound=LB,
+            )
+        del ctxs, parts
         gc.collect()
 
 
@@ -543,17 +605,14 @@ def test_raw_handle_fingerprint_records_the_gate() -> None:
 
 
 def test_reduce_gate_param_grads_one_rank_and_checks() -> None:
-    """On one rank the helper returns fresh copies of the inputs in their shapes (the deterministic helper's bits);
-    it refuses other dtypes and shapes, and several ranks without an initialized process group (it never returns a
-    partial sum)."""
+    """On one rank the helper returns fresh copies of the inputs in their shapes (byte copies); it refuses other
+    dtypes and shapes, and several ranks without an initialized process group (it never returns a partial sum)."""
     ctx = types.SimpleNamespace(world_size=1, group=None)
     a = torch.arange(4, dtype=torch.float32)
     for b in (torch.ones(4 * D), torch.ones(4, D)):
         ra, rb = cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(ctx, a, b)
         assert torch.equal(ra, a) and torch.equal(rb, b) and rb.shape == b.shape
         assert ra.data_ptr() != a.data_ptr() and rb.data_ptr() != b.data_ptr()
-        da, db = det_kcp.cake_kda_det_train_kcp_reduce_gate_param_grads(ctx, a, b)
-        assert _bits_equal(ra, da) and _bits_equal(rb, db)
     with pytest.raises(ValueError, match="float32"):
         cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
             ctx, a.double(), torch.ones(4 * D)
@@ -803,131 +862,68 @@ def _row_id(row) -> str:
     return "s" + "_".join(map(str, lengths)) + f"-h{H}-w{W}-{layout.split(':')[0]}"
 
 
-# the integer dtype of each element width: a floating-point tensor's bit patterns are its same-width integer view
-_BIT_DTYPES = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
-
-
-def _bit_pattern(t: torch.Tensor) -> torch.Tensor:
-    """``t``'s bit patterns as a tensor of the same shape: the same-width integer view of a floating-point tensor,
-    integer and bool tensors as they are (no tensor here is complex).  Equality of the patterns tells ``+0`` from
-    ``-0`` and holds for a NaN of the same payload, as a value compare does not."""
-    if t.dtype.is_complex:
-        raise TypeError(f"no bit-pattern compare for {t.dtype}")
-    if t.dtype.is_floating_point:
-        return t.view(_BIT_DTYPES[t.element_size()])
-    return t
-
-
-def _bits_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Same shape, same dtype and the same bit pattern in every element."""
-    return (
-        a.shape == b.shape
-        and a.dtype == b.dtype
-        and torch.equal(_bit_pattern(a), _bit_pattern(b))
-    )
-
-
-def _bits_equal_counted(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """:func:`_bits_equal` with the count explicit: the elements of equal bit patterns are counted, and the compare
-    holds only when that count is the element count and above zero (two empty tensors do not compare equal)."""
-    if a.shape != b.shape or a.dtype != b.dtype:
-        return False
-    return int((_bit_pattern(a) == _bit_pattern(b)).sum().item()) == a.numel() > 0
-
-
-def _first_mismatch(a: torch.Tensor, b: torch.Tensor) -> dict:
-    """Where two tensors that should be bitwise equal differ (reported, never gated)."""
-    if a.shape != b.shape or a.dtype != b.dtype:
-        return {
-            "shape": [list(a.shape), list(b.shape)],
-            "dtype": [str(a.dtype), str(b.dtype)],
-        }
-    diff = (a != b) & ~(torch.isnan(a) & torch.isnan(b))
-    n = int(diff.sum().item())
-    if n == 0:
-        return {"count": 0}
-    i = int(diff.reshape(-1).nonzero()[0].item())
-    return {
-        "count": n,
-        "first_flat_index": i,
-        "values": [float(a.reshape(-1)[i].item()), float(b.reshape(-1)[i].item())],
-        "max_abs": float((a.double() - b.double()).abs().max().item()),
-    }
-
-
-def _same(x: dict, y: dict, names=TENSORS) -> bool:
-    return all(_bits_equal(x[n], y[n]) for n in names)
-
-
 def _collective_seq(rec: dict) -> list:
     return [s for s in rec["sequence"] if ":" in s]
 
 
-def explicit_param_grads(
-    dg: torch.Tensor, raw: torch.Tensor, A_log: torch.Tensor, dt_bias: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """The explicit route's ``dA_log`` [H] and ``ddt_bias`` (``dt_bias``'s shape) in FP64, by the chain rule from the
-    gradient ``dg`` of the activated gate ``g = lb * sigmoid(z)``, ``z = exp(A_log) * (raw + dt_bias)``."""
-    H = raw.shape[-2]
-    a = torch.exp(A_log.double()).view(1, H, 1)
-    z = a * (raw.double() + dt_bias.double().view(1, H, D))
-    s = torch.sigmoid(z)
-    dz = dg.double().reshape(z.shape) * LB * s * (1 - s)
-    return (dz * z).sum((0, 2)), (dz * a).sum(0).reshape(dt_bias.shape)
+def _row_seed(test: str, row) -> int:
+    """The base seed of a judged row (draw ``j`` draws every input from ``draw_seed(base, j)``): a CRC of the test's
+    name and the row."""
+    return zlib.crc32(f"{test}:{_row_id(row)}".encode())
 
 
-def _param_check(cand: torch.Tensor, ref: torch.Tensor, bound: float) -> bool:
-    return (
-        bool(torch.isfinite(cand).all()) and _max_normalized_error(cand, ref) <= bound
-    )
+def _like(t: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
+    """``t`` in ``actual``'s shape where only the shape differs (``ddt_bias`` ``[H * 128]`` or ``[H, 128]``)."""
+    if t.shape != actual.shape and t.numel() == actual.numel():
+        return t.reshape(actual.shape)
+    return t
 
 
-def param_vs_explicit(cand, expl, ref, W: int, *, parts_of: str, parts: list) -> dict:
-    """Criterion (d) of #7816 for one parameter gradient of one row: the raw route is no less accurate against FP64
-    than the explicit route.  On one seed this is the sanity rule of the single-rank protocol
-    (``test_cake_kda_nondet_train_raw_gate_accuracy``): the worst normalized error ``|err| / (atol + rtol |ref|)`` is at most
-    ``max(1, PARAM_SANITY_FACTOR x`` the explicit route's ``)``; the seeded statistic is
-    :func:`test_raw_gate_kcp_param_grads_no_less_accurate_than_explicit`.  Negative controls must fail the same rule:
-    the raw error stretched to 1.5 x the bound and, at W > 1, the rank-order sum without the largest partial."""
-    ref = ref.to(torch.float64)
-    m_raw, m_exp = _max_normalized_error(cand, ref), _max_normalized_error(expl, ref)
-    bound = max(1.0, PARAM_SANITY_FACTOR * m_exp)
-    err = cand.to(torch.float64) - ref
-    scale = 1.5 * bound
-    stretched = ref + (
-        err * (scale / m_raw)
-        if m_raw > 0
-        else scale * (ELEMENTWISE_ATOL + ELEMENTWISE_RTOL * ref.abs())
-    )
-    controls = {"error_stretched_1.5x_bound": _param_check(stretched, ref, bound)}
-    if W > 1:
-        k = 0 if parts_of == "dA_log" else 1
-        drop = max(range(W), key=lambda r: float(parts[r][k].double().norm()))
-        kept = [parts[r][k] for r in range(W) if r != drop]
-        total = kept[0].clone()
-        for t in kept[1:]:
-            total += t
-        controls[f"partial_of_rank_{drop}_left_out"] = _param_check(
-            total.reshape(ref.shape), ref, bound
-        )
-    rel_r = error_metrics(cand.to(torch.float64), ref)["rel_rms"]
-    rel_e = error_metrics(expl, ref)["rel_rms"]
-    ok = _param_check(cand.reshape(ref.shape), ref, bound)
-    return {
-        "gate": "raw_vs_explicit",
-        "max_norm_raw": m_raw,
-        "max_norm_explicit": m_exp,
-        "bound": bound,
-        "explicit_rel_l2": rel_e,
-        "raw_over_explicit_rel_l2": rel_r / rel_e if rel_e > 0 else None,
-        "negative_controls_pass": controls,
-        "pass": ok and not any(controls.values()),
+def _judge_draw(
+    judge, failures: list, j: int, arms: dict, ref: dict, naive: dict, device, fla=None
+) -> None:
+    """Draw ``j`` of every arm (``{arm: {output: tensor}}``, an output judged as ``"<arm>.<output>"``): each output
+    held to its contract against the FP64 reference ``ref`` and added to ``judge`` beside the naive tier ``naive``
+    and FLA ``fla`` (``cake_kda_naive.fla_of`` of the unsplit pack)
+    (an arm added again on the same draw keeps its worst launch)."""
+    for arm, results in arms.items():
+        for name, actual in results.items():
+            actual = actual.to(device)
+            key = f"{arm}.{name}"
+            want = _like(ref[name], actual)
+            if message := contract(key, actual, want):
+                failures.append(f"draw {j}: {message}")
+                if actual.shape != want.shape:
+                    continue
+            judge.add(
+                key, j, actual, want, {"bf16": _like(naive[name], actual)}, fla=fla.value(name, actual) if fla else None
+            )
+
+
+def _finish(record_property, report: dict, lengths) -> None:
+    """Record rank 0's verdicts (``naive_tier``), hold every rank's exact checks (``pass``), then settle rank 0's
+    verdicts against the owner-accepted gaps (the row's documents are the gaps' scope).  Another rank of a
+    one-process-per-task run holds no verdicts."""
+    verdicts = report.get("verdicts") or {}
+    for verdict in verdicts.values():
+        record_property("naive_tier", verdict)
+    assert report["pass"], {
+        k: report.get(k) for k in ("row", "flags", "reduce_eq_rank_order_sum")
     }
+    if report["rank"] == 0:
+        assert verdicts, report.get("failures")
+        settle(verdicts, report["failures"], lengths=lengths)
 
 
 def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) -> dict:
-    """One rank: the raw-mode KCP passes, their bitwise flags, the explicit-mode launch comparison, the reduction
-    helper; gathered to rank 0 and compared with the single-rank raw path and the FP64 reference there."""
+    """One rank of a row over the judge's draws, all in one process group.  On every draw every rank runs the
+    raw-mode KCP forward / backward in every mode; each mode's outputs (the parameter gradients summed by the
+    reduction helper) are gathered to rank 0, which judges them under the mode's arm name, and the single-rank raw
+    path on the whole pack (arm ``single``), against the FP64 reference of the unsplit pack beside the naive BF16
+    tier.  On the first draw also: :data:`REPEATS` more saved passes (arm ``repeat``, the worst launch kept), the
+    recompute handles' collectives, the hand-off counters, the graph events, the mode refusals, the explicit-mode
+    launch comparison, the deterministic raw KCP route's launch sequence (its records only) and the reduction
+    helper's bits (one call's result on every rank; the FP32 rank-order sum of the partials)."""
     from torch.utils.checkpoint import checkpoint
 
     lengths, H, _w, layout = row
@@ -941,357 +937,337 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
         part, group, rank, device
     )
     total = cu[-1]
-    glob = make_raw_inputs(lengths, H, device)
-    A_log, dt_bias = glob["A_log"], glob["dt_bias"]
-    tokens = {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
-    ops = _local_slices(part, rank, cu, tokens)
-    q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
-    GK = dict(use_gate_in_kernel=True, A_log=A_log, dt_bias=dt_bias, lower_bound=LB)
+    cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
     ws = cake_kcp.CakeKDANondetKcpWorkspace(use_gate_in_kernel=True)
-    recs: dict = {}
-
-    def saved_pass(raw=g, workspace=ws, tag=None, **opts):
-        out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
-            q,
-            k,
-            v,
-            raw,
-            beta,
-            ctx,
-            workspace=workspace,
-            **GK,
-            **opts,
-        )
-        rec_f = dict(cake_kcp.LAST_CALL["fwd"])
-        bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
-        grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
-            q, k, v, raw, beta, ctx, dout, saved=saved, workspace=workspace, **GK, **bwd_opts
-        )  # fmt: skip
-        if tag is not None:
-            recs[tag] = (rec_f, dict(cake_kcp.LAST_CALL["bwd"]))
-        return {"out": out, **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads, strict=True))}
-
-    handle_runs: dict = {}
-
-    def autograd_pass(
-        ckpt: bool = False, handle=None, workspace=ws, handoff="auto", keep=None
-    ):
-        """With a handle (under the checkpoint) also records in ``handle_runs[keep]`` the original forward's and the
-        recompute's LAST_CALL records, the backward's, and the torch.distributed calls per phase (``_Counter``; the
-        recompute phase from the checkpoint's ``context_fn``)."""
-        leaves = [
-            x.detach().clone().requires_grad_(True)
-            for x in (q, k, v, g, beta, A_log, dt_bias)
-        ]
-        keep_kw = {} if keep is None else {"checkpoint_keep": keep}
-
-        def fn(q_, k_, v_, g_, b_, a_, d_, *h):
-            return cake_kcp.cake_kda_nondet_kcp(
-                q_, k_, v_, g_, b_, ctx, None, "light", "saved", workspace,
-                recompute_handle=h[0] if h else None, checkpoint_handoff=handoff, saved_rows="tape",
-                use_gate_in_kernel=True, A_log=a_, dt_bias=d_, lower_bound=LB, **keep_kw,
-            )  # fmt: skip
-
-        extra = (handle,) if handle is not None else ()
-        if handle is not None and ckpt:
-            with _Counter() as cc:
-                out = checkpoint(
-                    fn,
-                    *leaves,
-                    *extra,
-                    use_reentrant=False,
-                    context_fn=lambda: (contextlib.nullcontext(), cc.recompute_cm()),
-                )
-                orig = cake_kcp.LAST_CALL.pop("fwd", None)
-                cc.phase = "bwd"
-                out.backward(dout)
-                rep = cake_kcp.LAST_CALL.pop("fwd", None)
-            handle_runs[keep or "states"] = (
-                orig,
-                rep,
-                dict(cake_kcp.LAST_CALL["bwd"]),
-                cc.record(),
-            )
-        else:
-            out = (
-                checkpoint(fn, *leaves, *extra, use_reentrant=False)
-                if ckpt
-                else fn(*leaves, *extra)
-            )
-            out.backward(dout)
-        names = ("dq", "dk", "dv", "dg", "dbeta", "dA_log", "ddt_bias")
-        return {
-            "out": out.detach(),
-            **{n: lf.grad for n, lf in zip(names, leaves, strict=True)},
-        }
-
-    def reduced(res: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        return cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
-            ctx, res["dA_log"], res["ddt_bias"]
-        )
-
-    pending = bool(getattr(cake_kcp.get_backend(), "_spec3_pending", False))
-    res = saved_pass(tag="raw", spec3_probe="record")
-    spec3 = (cake_kcp.LAST_CALL.get("bwd") or {}).get("spec3")
-    handoff_stats = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
-    runs = {
-        "saved_eq_replay": saved_pass(boundary_mode="replay"),
-        "repeat": saved_pass(),
-        "autograd_eq_saved": autograd_pass(),
-        "ckpt_eq_direct": autograd_pass(ckpt=True),
-        "handle_eq_ckpt": autograd_pass(
-            ckpt=True, handle=cake_kcp.CakeKDANondetKcpRecomputeHandle()
-        ),
-        "handle_transfer_eq_ckpt": autograd_pass(
-            ckpt=True,
-            handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
-            keep="transfer",
-        ),
-        # the checkpoint hand-off forced on: the set kept by both passes and read by the backward (a rank with tokens)
-        "handoff_on_eq_ckpt": autograd_pass(ckpt=True, handoff="on"),
-    }
-    handoff_on_bwd = cake_kcp.LAST_CALL["bwd"].get("checkpoint_handoff")
-    runs["save_transfer_eq"] = saved_pass(save_transfer=False)
-    runs["ws_none_eq"] = autograd_pass(workspace=None)
-    # the counters: the three checkpointed "auto" calls (plain, and a recompute handle of each tier) decided by the
-    # raw mode's rule, the forced one engaged
-    handoff_counts = _handoff_delta(
-        handoff_stats, ctx, H, "raw", False, int(ctx.T_r), auto_calls=3
-    ) and handoff_on_bwd == ("bound" if int(ctx.T_r) > 0 else None)
-    # run to run: REPEATS more saved passes, each compared with the first as it comes (no early exit: the passes
-    # exchange, so every rank runs all of them)
-    repeats_eq = True
-    for _ in range(REPEATS):
-        repeats_eq &= _same(res, saved_pass())
-    # a strided raw view (a column slice of a wider fused projection, the single-rank rule's example) reads the same
-    # elements: the same bits, no copy
-    T = int(ctx.T_r)
-    wide = torch.zeros((T, (H + 2) * D), dtype=torch.bfloat16, device=device)
-    wide[:, 8 : 8 + H * D] = g.reshape(T, H * D)
-    view = wide[:, 8 : 8 + H * D].view(T, H, D)
-    runs["strided_eq"] = saved_pass(raw=view)
-    flags = {name: _same(res, r) for name, r in runs.items()}
-    flags.update(_handle_recompute_flags(handle_runs, W))
-    flags["repeats_eq"] = bool(repeats_eq)
-    flags["handoff_counts"] = handoff_counts
-    # the deterministic package's raw KCP route on the same operands and the same context (the context holds no mode
-    # and serves both packages): every output, the raw gate's gradient and the partial sums bitwise, the same launch
-    # sequence (the backward's in the deterministic package's order: _bwd_sequence_first_main puts back the K1 tape
-    # replay this package issues under b1 and the dm-form K3 it issues on the side stream), and the deterministic
-    # reduction helper gives the same bits
-    ws_det = det_kcp.CakeKDADetKcpWorkspace(use_gate_in_kernel=True)
-    out_d, saved_d = det_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws_det, **GK
-    )
-    rec_fd = dict(det_kcp.LAST_CALL["fwd"])
-    grads_d = det_kcp.cake_kda_det_train_kcp_backward(
-        q, k, v, g, beta, ctx, dout, saved=saved_d, workspace=ws_det, **GK
-    )
-    rec_bd = dict(det_kcp.LAST_CALL["bwd"])
-    det_res = {
-        "out": out_d,
-        **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads_d, strict=True)),
-    }
-    out_dr, _ = det_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws_det, boundary_mode="replay", **GK
-    )
-    grads_dr = det_kcp.cake_kda_det_train_kcp_backward(
-        q, k, v, g, beta, ctx, dout, saved=None, workspace=ws_det, **GK
-    )
-    det_replay = {
-        "out": out_dr,
-        **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads_dr, strict=True)),
-    }
-    flags["det_eq"] = _same(res, det_res) and _same(res, det_replay)
-    flags["det_launches_eq"] = (
-        recs["raw"][0]["sequence"] == rec_fd["sequence"]
-        and _bwd_sequence_first_main(recs["raw"][1]) == rec_bd["sequence"]
-        and rec_fd["gate"] == rec_bd["gate"] == "raw"
-    )
-    det_red = det_kcp.cake_kda_det_train_kcp_reduce_gate_param_grads(
-        ctx, det_res["dA_log"], det_res["ddt_bias"]
-    )
-    det_mism = {
-        n: _first_mismatch(res[n], det_res[n]) for n in TENSORS if not _bits_equal(res[n], det_res[n])
-    }  # fmt: skip
-    del ws_det, saved_d, det_replay
-    if W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS:
-        ring = saved_pass(exchange="ring", save_transfer=False)
-        flags["ring_eq_a2a"] = _same(runs["save_transfer_eq"], ring)
-        runs["ring_eq_a2a"] = ring
-    # graph replay: every rank captures and replays the same calls
-    cake_kcp.graph_cache_clear()
-    events = []
-    try:
-        for _ in range(len(GRAPH_EVENTS)):
-            res_graph = {n: t.clone() for n, t in saved_pass(graph="replay").items()}
-            events.append(
-                [str(cake_kcp.LAST_CALL[x].get("graph_event")) for x in ("fwd", "bwd")]
-            )
-        torch.cuda.synchronize(device)
-    except BaseException as exc:
-        traceback.clear_frames(exc.__traceback__)
-        raise
-    finally:
-        cake_kcp.graph_cache_clear()
-    flags["graph_replay"] = _graph_events_ok(events) and _same(res, res_graph)
-    runs["graph_replay"] = res_graph
-    # the mode is checked against the saved set and the workspace: symmetric on every rank, before any collective
-    _, saved_r = cake_kcp.cake_kda_nondet_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws, **GK
-    )
-    refusals = []
-    for kw, match in (
-        ({**GK, "lower_bound": -4.0}, "lower_bound"),
-        ({}, "gate mode"),
-    ):
-        try:
-            cake_kcp.cake_kda_nondet_train_kcp_backward(
-                q, k, v, (g if kw else g.float()), beta, ctx, dout, saved=saved_r,
-                workspace=ws if kw else cake_kcp.CakeKDANondetKcpWorkspace(), **kw,
-            )  # fmt: skip
-            refusals.append(False)
-        except ValueError as exc:
-            refusals.append(match in str(exc))
-    flags["mismatch_refused"] = all(refusals)
-    del saved_r
-    # the explicit mode on the same activated gate (torch FP32): the same launches in the same order with the same
-    # collectives -- gate_epilogue (a stage that launches only on sm_100a) in place of param_finalize; the backwards
-    # in the "first" / "main" order (_bwd_sequence_first_main: each decides its K1 tape replay's place and its K3's
-    # stream itself, from its own plan's fused-gradient record, arena and the table set's first K3)
-    g_exp = raw_gate(g, A_log, dt_bias, LB, torch.float32).contiguous()
-    ws_g = cake_kcp.CakeKDANondetKcpWorkspace()
-    out_e, saved_e = cake_kcp.cake_kda_nondet_train_kcp_forward(
-        q, k, v, g_exp, beta, ctx, workspace=ws_g
-    )
-    rec_fe = dict(cake_kcp.LAST_CALL["fwd"])
-    grads_e = cake_kcp.cake_kda_nondet_train_kcp_backward(
-        q,
-        k,
-        v,
-        g_exp,
-        beta,
-        ctx,
-        dout,
-        saved=saved_e,
-        workspace=ws_g,
-    )
-    rec_be = dict(cake_kcp.LAST_CALL["bwd"])
-    rec_fr, rec_br = recs["raw"]
-    mapped = [
-        "param_finalize" if s == "gate_epilogue" else s
-        for s in _bwd_sequence_first_main(rec_be)
-    ]
-    launch_cmp = {
-        "fwd_collectives": [rec_fr["n_collectives"], rec_fe["n_collectives"]],
-        "bwd_collectives": [rec_br["n_collectives"], rec_be["n_collectives"]],
-        "fwd_launches": [rec_fr["n_launches"], rec_fe["n_launches"]],
-        "bwd_launches": [rec_br["n_launches"], rec_be["n_launches"]],
-        "gates": [rec_fr["gate"], rec_br["gate"], rec_fe["gate"], rec_be["gate"]],
-    }
-    flags["collectives_eq_explicit"] = (
-        _collective_seq(rec_fr) == _collective_seq(rec_fe)
-        and _collective_seq(rec_br) == _collective_seq(rec_be)
-        and rec_fr["n_collectives"] == rec_fe["n_collectives"]
-        and rec_br["n_collectives"] == rec_be["n_collectives"]
-    )
-    flags["launches_eq_explicit"] = (
-        rec_fr["sequence"] == rec_fe["sequence"] and _bwd_sequence_first_main(rec_br) == mapped
-        and launch_cmp["gates"] == ["raw", "raw", "g", "g"]
-    )  # fmt: skip
-    explicit = {
-        "out": out_e,
-        **dict(zip(("dq", "dk", "dv", "dbeta", "dg"), grads_e, strict=True)),
-    }
-    del ws_g, saved_e
-    # the reduction helper: the same bits on every rank for every run and under every mode, the deterministic
-    # helper's bits on the same partials, and the deterministic route's reduced sums
-    red = reduced(res)
-    reds = {"res": red, **{name: reduced(r) for name, r in runs.items()}}
-    red_ok = det_helper_ok = True
-    for name, r in (("res", res), *runs.items()):
-        ra, rb = reds[name]
-        red_ok &= _bits_equal_counted(ra, red[0]) and _bits_equal_counted(rb, red[1])
-        da, db = det_kcp.cake_kda_det_train_kcp_reduce_gate_param_grads(
-            ctx, r["dA_log"], r["ddt_bias"]
-        )
-        det_helper_ok &= _bits_equal_counted(ra, da) and _bits_equal_counted(rb, db)
-    flags["reduce_eq_modes"] = bool(red_ok)
-    flags["det_reduce_eq"] = (
-        bool(det_helper_ok)
-        and _bits_equal_counted(red[0], det_red[0])
-        and _bits_equal_counted(red[1], det_red[1])
-    )
-    if W > 1:
-        every: list = [None] * W
-        mine = {name: (a.cpu(), b.cpu()) for name, (a, b) in reds.items()}
-        dist.all_gather_object(every, mine)
-        flags["reduce_eq_ranks"] = all(
-            e.keys() == mine.keys()
-            and all(
-                torch.equal(e[n][0], every[0][n][0])
-                and torch.equal(e[n][1], every[0][n][1])
-                for n in mine
-            )
-            for e in every
-        )
-    else:
-        flags["reduce_eq_ranks"] = True
-    # a backend with local stages whose probe was pending must have run it on the first pass (reported, not gated
-    # beyond 'checked': the forward's intra program writes gk row 63 alone)
-    flags["spec3"] = (
-        not pending
-        or (spec3 is None and T == 0)
-        or bool(spec3 and spec3.get("checked"))
-    )
-    # gather the token tensors and the per-rank partials
-    gathered: dict = {}
-    for n in ("out",) + TOKEN_GRADS:
-        srcs = [(res, n), (explicit, f"explicit_{n}")]
-        for src, key in srcs:
-            if W > 1:
-                objs: list = [None] * W
-                dist.all_gather_object(objs, src[n].cpu())
-            else:
-                objs = [src[n].cpu()]
-            gathered[key] = objs
-    parts: list = [None] * W
-    if W > 1:
-        dist.all_gather_object(parts, (res["dA_log"].cpu(), res["ddt_bias"].cpu()))
-    else:
-        parts = [(res["dA_log"].cpu(), res["ddt_bias"].cpu())]
-    flag_list: list = [None] * W
-    spec3_list: list = [None] * W
-    launch_list: list = [None] * W
-    det_mism_list: list = [None] * W
-    if W > 1:
-        dist.all_gather_object(flag_list, flags)
-        dist.all_gather_object(spec3_list, spec3)
-        dist.all_gather_object(launch_list, launch_cmp)
-        dist.all_gather_object(det_mism_list, det_mism)
-    else:
-        flag_list, spec3_list, launch_list = [flags], [spec3], [launch_cmp]
-        det_mism_list = [det_mism]
     report: dict = {
         "rank": rank,
         "world": W,
         "row": _row_id(row),
         "pass": True,
         "flags": {},
-        "flags_by_rank": flag_list,
-        "metrics": {},
-        "spec3_by_rank": spec3_list,
-        "launches_by_rank": launch_list,
-        "det_mismatch_by_rank": det_mism_list,
-        "graph_events": events,
         "device": torch.cuda.get_device_name(device),
         "arch": cake_jit.device_arch(device.index),
     }
-    for key in flags:
-        report["flags"][key] = all(f[key] for f in flag_list)
-        report["pass"] &= report["flags"][key]
-    if rank == 0:
-        cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
+    judge, failures = TierJudge(DRAWS), []
+
+    def gather(x) -> list:
+        if W == 1:
+            return [x]
+        objs: list = [None] * W
+        dist.all_gather_object(objs, x)
+        return objs
+
+    def one_draw(j: int, glob: dict) -> None:
+        first = j == 0
+        A_log, dt_bias = glob["A_log"], glob["dt_bias"]
+        tokens = {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
+        ops = _local_slices(part, rank, cu, tokens)
+        q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
+        GK = dict(use_gate_in_kernel=True, A_log=A_log, dt_bias=dt_bias, lower_bound=LB)
+        recs: dict = {}
+        handle_runs: dict = {}
+        flags: dict = {}
+        ref = naive = fla = None
+        if rank == 0:
+            # the exact FP64 reference of the unsplit pack, the naive tier and FLA (on this rank's device)
+            ref = oracle_with_grads(glob, SCALE, LB, False)
+            naive = naive_of(glob, SCALE, LB, False)
+            fla = fla_of(glob, SCALE, LB, False)
+
+        def saved_pass(raw=g, workspace=ws, tag=None, **opts):
+            out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                q,
+                k,
+                v,
+                raw,
+                beta,
+                ctx,
+                workspace=workspace,
+                **GK,
+                **opts,
+            )
+            rec_f = dict(cake_kcp.LAST_CALL["fwd"])
+            bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
+            grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
+                q, k, v, raw, beta, ctx, dout, saved=saved, workspace=workspace, **GK, **bwd_opts
+            )  # fmt: skip
+            if tag is not None:
+                recs[tag] = (rec_f, dict(cake_kcp.LAST_CALL["bwd"]))
+            return {
+                "out": out,
+                **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads, strict=True)),
+            }
+
+        def autograd_pass(
+            ckpt: bool = False, handle=None, workspace=ws, handoff="auto", keep=None
+        ):
+            """With a handle (under the checkpoint) also records in ``handle_runs[keep]`` the original forward's and
+            the recompute's LAST_CALL records, the backward's, and the torch.distributed calls per phase
+            (``_Counter``; the recompute phase from the checkpoint's ``context_fn``)."""
+            leaves = [
+                x.detach().clone().requires_grad_(True)
+                for x in (q, k, v, g, beta, A_log, dt_bias)
+            ]
+            keep_kw = {} if keep is None else {"checkpoint_keep": keep}
+
+            def fn(q_, k_, v_, g_, b_, a_, d_, *h):
+                return cake_kcp.cake_kda_nondet_kcp(
+                    q_, k_, v_, g_, b_, ctx, None, "light", "saved", workspace,
+                    recompute_handle=h[0] if h else None, checkpoint_handoff=handoff, saved_rows="tape",
+                    use_gate_in_kernel=True, A_log=a_, dt_bias=d_, lower_bound=LB, **keep_kw,
+                )  # fmt: skip
+
+            extra = (handle,) if handle is not None else ()
+            if handle is not None and ckpt:
+                with _Counter() as cc:
+                    out = checkpoint(
+                        fn,
+                        *leaves,
+                        *extra,
+                        use_reentrant=False,
+                        context_fn=lambda: (
+                            contextlib.nullcontext(),
+                            cc.recompute_cm(),
+                        ),
+                    )
+                    orig = cake_kcp.LAST_CALL.pop("fwd", None)
+                    cc.phase = "bwd"
+                    out.backward(dout)
+                    rep = cake_kcp.LAST_CALL.pop("fwd", None)
+                handle_runs[keep or "states"] = (
+                    orig,
+                    rep,
+                    dict(cake_kcp.LAST_CALL["bwd"]),
+                    cc.record(),
+                )
+            else:
+                out = (
+                    checkpoint(fn, *leaves, *extra, use_reentrant=False)
+                    if ckpt
+                    else fn(*leaves, *extra)
+                )
+                out.backward(dout)
+            names = ("dq", "dk", "dv", "dg", "dbeta", "dA_log", "ddt_bias")
+            return {
+                "out": out.detach(),
+                **{n: lf.grad for n, lf in zip(names, leaves, strict=True)},
+            }
+
+        def reduced(res: dict) -> tuple[torch.Tensor, torch.Tensor]:
+            return cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
+                ctx, res["dA_log"], res["ddt_bias"]
+            )
+
+        def judged(arm: str, res: dict) -> tuple[torch.Tensor, torch.Tensor]:
+            """Every rank: reduce ``res``'s parameter partials (a collective) and gather its token outputs to rank 0,
+            which judges them as arm ``arm``.  On the first draw also: the reduced sums are the same bits on every
+            rank (one call's result).  Returns the reduced sums."""
+            red = reduced(res)
+            gathered = {n: gather(res[n].cpu()) for n in ("out",) + TOKEN_GRADS}
+            if first:
+                every = gather((red[0].cpu(), red[1].cpu()))
+                flags["reduce_eq_ranks"] = flags.get("reduce_eq_ranks", True) and all(
+                    torch.equal(e[0], every[0][0]) and torch.equal(e[1], every[0][1])
+                    for e in every
+                )
+            if rank == 0:
+                got = {n: _to_global(part, gathered[n], cu, total) for n in gathered}
+                got["dA_log"], got["ddt_bias"] = red[0].cpu(), red[1].cpu()
+                _judge_draw(judge, failures, j, {arm: got}, ref, naive, device, fla)
+            return red
+
+        if first:
+            pending = bool(getattr(cake_kcp.get_backend(), "_spec3_pending", False))
+            res = saved_pass(tag="raw", spec3_probe="record")
+            spec3 = (cake_kcp.LAST_CALL.get("bwd") or {}).get("spec3")
+            handoff_stats = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+        else:
+            res = saved_pass()
+        red = judged("kcp", res)
+        if first:
+            # the helper's sum: FP32, in rank order (rank 0 first), from the per-rank partials
+            parts = gather((res["dA_log"].cpu(), res["ddt_bias"].cpu()))
+            if rank == 0:
+                sums = [torch.zeros_like(parts[0][0]), torch.zeros_like(parts[0][1])]
+                for pa, pb in parts:
+                    sums[0] += pa
+                    sums[1] += pb
+                report["reduce_eq_rank_order_sum"] = bool(
+                    torch.equal(sums[0], red[0].cpu())
+                    and torch.equal(sums[1], red[1].cpu())
+                )
+                report["pass"] &= report["reduce_eq_rank_order_sum"]
+        del res
+        # every mode on the same operands, each judged under its own name
+        judged("replay", saved_pass(boundary_mode="replay"))
+        judged("repeat", saved_pass())
+        judged("autograd", autograd_pass())
+        judged("ckpt", autograd_pass(ckpt=True))
+        judged(
+            "handle",
+            autograd_pass(ckpt=True, handle=cake_kcp.CakeKDANondetKcpRecomputeHandle()),
+        )
+        judged(
+            "handle_transfer",
+            autograd_pass(
+                ckpt=True,
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep="transfer",
+            ),
+        )
+        # the checkpoint hand-off forced on: the set kept by both passes and read by the backward (a rank with tokens)
+        handoff_on = autograd_pass(ckpt=True, handoff="on")
+        handoff_on_bwd = cake_kcp.LAST_CALL["bwd"].get("checkpoint_handoff")
+        judged("handoff_on", handoff_on)
+        del handoff_on
+        judged("save_transfer", saved_pass(save_transfer=False))
+        judged("ws_none", autograd_pass(workspace=None))
+        if first:
+            # the counters: the three checkpointed "auto" calls (plain, and a recompute handle of each tier) decided
+            # by the raw mode's rule, the forced one engaged
+            flags["handoff_counts"] = _handoff_delta(
+                handoff_stats, ctx, H, "raw", False, int(ctx.T_r), auto_calls=3
+            ) and handoff_on_bwd == ("bound" if int(ctx.T_r) > 0 else None)
+            flags.update(_handle_recompute_flags(handle_runs, W))
+            # run to run: REPEATS more saved passes on the first draw (every rank runs all of them: they exchange)
+            for _ in range(REPEATS):
+                judged("repeat", saved_pass())
+        # a strided raw view (a column slice of a wider fused projection, the single-rank rule's example): no copy
+        T = int(ctx.T_r)
+        wide = torch.zeros((T, (H + 2) * D), dtype=torch.bfloat16, device=device)
+        wide[:, 8 : 8 + H * D] = g.reshape(T, H * D)
+        view = wide[:, 8 : 8 + H * D].view(T, H, D)
+        judged("strided", saved_pass(raw=view))
+        del wide, view
+        if W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS:
+            judged("ring", saved_pass(exchange="ring", save_transfer=False))
+        # graph replay: every rank captures and replays the same calls (the last one judged: a replay)
+        cake_kcp.graph_cache_clear()
+        events = []
+        try:
+            for _ in range(len(GRAPH_EVENTS)):
+                res_graph = {
+                    n: t.clone() for n, t in saved_pass(graph="replay").items()
+                }
+                events.append(
+                    [
+                        str(cake_kcp.LAST_CALL[x].get("graph_event"))
+                        for x in ("fwd", "bwd")
+                    ]
+                )
+            torch.cuda.synchronize(device)
+        except BaseException as exc:
+            traceback.clear_frames(exc.__traceback__)
+            raise
+        finally:
+            cake_kcp.graph_cache_clear()
+        judged("graph", res_graph)
+        del res_graph
+        if first:
+            flags["graph_events"] = _graph_events_ok(events)
+            # the mode is checked against the saved set and the workspace: symmetric on every rank, before any
+            # collective
+            _, saved_r = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                q, k, v, g, beta, ctx, workspace=ws, **GK
+            )
+            refusals = []
+            for kw, match in (
+                ({**GK, "lower_bound": -4.0}, "lower_bound"),
+                ({}, "gate mode"),
+            ):
+                try:
+                    cake_kcp.cake_kda_nondet_train_kcp_backward(
+                        q, k, v, (g if kw else g.float()), beta, ctx, dout, saved=saved_r,
+                        workspace=ws if kw else cake_kcp.CakeKDANondetKcpWorkspace(), **kw,
+                    )  # fmt: skip
+                    refusals.append(False)
+                except ValueError as exc:
+                    refusals.append(match in str(exc))
+            flags["mismatch_refused"] = all(refusals)
+            del saved_r
+            # the explicit mode on the same activated gate (torch FP32): the same launches in the same order with
+            # the same collectives -- gate_epilogue (a stage that launches only on sm_100a) in place of
+            # param_finalize; the backwards in the "first" / "main" order (_bwd_sequence_first_main: each decides
+            # its K1 tape replay's place and its K3's stream itself, from its own plan's fused-gradient record,
+            # arena and the table set's first K3)
+            g_exp = raw_gate(g, A_log, dt_bias, LB, torch.float32).contiguous()
+            ws_g = cake_kcp.CakeKDANondetKcpWorkspace()
+            _, saved_e = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                q, k, v, g_exp, beta, ctx, workspace=ws_g
+            )
+            rec_fe = dict(cake_kcp.LAST_CALL["fwd"])
+            cake_kcp.cake_kda_nondet_train_kcp_backward(
+                q, k, v, g_exp, beta, ctx, dout, saved=saved_e, workspace=ws_g
+            )
+            rec_be = dict(cake_kcp.LAST_CALL["bwd"])
+            rec_fr, rec_br = recs["raw"]
+            mapped = [
+                "param_finalize" if s == "gate_epilogue" else s
+                for s in _bwd_sequence_first_main(rec_be)
+            ]
+            launch_cmp = {
+                "fwd_collectives": [rec_fr["n_collectives"], rec_fe["n_collectives"]],
+                "bwd_collectives": [rec_br["n_collectives"], rec_be["n_collectives"]],
+                "fwd_launches": [rec_fr["n_launches"], rec_fe["n_launches"]],
+                "bwd_launches": [rec_br["n_launches"], rec_be["n_launches"]],
+                "gates": [
+                    rec_fr["gate"],
+                    rec_br["gate"],
+                    rec_fe["gate"],
+                    rec_be["gate"],
+                ],
+            }
+            flags["collectives_eq_explicit"] = (
+                _collective_seq(rec_fr) == _collective_seq(rec_fe)
+                and _collective_seq(rec_br) == _collective_seq(rec_be)
+                and rec_fr["n_collectives"] == rec_fe["n_collectives"]
+                and rec_br["n_collectives"] == rec_be["n_collectives"]
+            )
+            flags["launches_eq_explicit"] = (
+                rec_fr["sequence"] == rec_fe["sequence"] and _bwd_sequence_first_main(rec_br) == mapped
+                and launch_cmp["gates"] == ["raw", "raw", "g", "g"]
+            )  # fmt: skip
+            del ws_g, saved_e
+            # the deterministic package's raw KCP route on the same operands and the same context (the context holds
+            # no mode and serves both packages): the same launch sequence, the backward's in the deterministic
+            # package's order (_bwd_sequence_first_main puts back the K1 tape replay this package issues under b1 and
+            # the dm-form K3 it issues on the side stream).  Its launch records only: its outputs are discarded.
+            ws_det = det_kcp.CakeKDADetKcpWorkspace(use_gate_in_kernel=True)
+            # mode contract: launch records only
+            _, saved_d = det_kcp.cake_kda_det_train_kcp_forward(
+                q, k, v, g, beta, ctx, workspace=ws_det, **GK
+            )
+            rec_fd = dict(det_kcp.LAST_CALL["fwd"])
+            # mode contract: launch records only
+            det_kcp.cake_kda_det_train_kcp_backward(
+                q, k, v, g, beta, ctx, dout, saved=saved_d, workspace=ws_det, **GK
+            )
+            rec_bd = dict(det_kcp.LAST_CALL["bwd"])
+            flags["det_launches_eq"] = (
+                rec_fr["sequence"] == rec_fd["sequence"]
+                and _bwd_sequence_first_main(rec_br) == rec_bd["sequence"]
+                and rec_fd["gate"] == rec_bd["gate"] == "raw"
+            )
+            del ws_det, saved_d
+            # a backend with local stages whose probe was pending must have run it on the first pass (reported,
+            # not gated beyond 'checked': the forward's intra program writes gk row 63 alone)
+            flags["spec3"] = (
+                not pending
+                or (spec3 is None and T == 0)
+                or bool(spec3 and spec3.get("checked"))
+            )
+            flag_list = gather(flags)
+            report.update(
+                flags_by_rank=flag_list,
+                spec3_by_rank=gather(spec3),
+                launches_by_rank=gather(launch_cmp),
+                graph_events=events,
+            )
+            for key in flags:
+                report["flags"][key] = all(f[key] for f in flag_list)
+                report["pass"] &= report["flags"][key]
+        if rank != 0:
+            return
         # the single-rank raw path on the whole pack
         out_s, saved_s = cake_backend.cake_kda_nondet_train_forward(
             glob["q"],
@@ -1311,64 +1287,15 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
             **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads_s, strict=True)),
         }
         del saved_s
-        # the exact FP64 reference (on this rank's device: the per-token recurrence in FP64)
-        ref_out, ref_g = kda_exact_raw_with_grads(
-            glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], A_log, dt_bias, glob["dout"], cu_t,
-            SCALE, LB,
-        )  # fmt: skip
-        refs = {n: t.cpu() for n, t in {"out": ref_out, **ref_g}.items()}
-        del ref_out, ref_g
-        cand = {
-            n: _to_global(part, gathered[n], cu, total) for n in ("out",) + TOKEN_GRADS
-        }
-        sums = [torch.zeros_like(parts[0][0]), torch.zeros_like(parts[0][1])]
-        for pa, pb in parts:  # the helper's order: FP32, rank 0 first
-            sums[0] += pa
-            sums[1] += pb
-        cand["dA_log"], cand["ddt_bias"] = red[0].cpu(), red[1].cpu()
-        report["reduce_eq_rank_order_sum"] = bool(
-            torch.equal(sums[0], cand["dA_log"])
-            and torch.equal(sums[1], cand["ddt_bias"])
-        )
-        report["pass"] &= report["reduce_eq_rank_order_sum"]
-        expl = {
-            n: _to_global(part, gathered[f"explicit_{n}"], cu, total)
-            for n in ("out",) + TOKEN_GRADS
-        }
-        # the explicit route's parameter gradients: the FP64 chain rule from its FP32 activated-gate gradient
-        expl["dA_log"], expl["ddt_bias"] = explicit_param_grads(
-            expl["dg"], glob["g"].cpu(), A_log.cpu(), dt_bias.cpu()
-        )
-        for n in TENSORS:
-            ref = refs[n]
-            c = cand[n].to(torch.float64)
-            s = single[n].cpu().to(torch.float64)
-            mk, ms = error_metrics(c, ref), error_metrics(s, ref)
-            rk, rs = mk["rel_rms"], ms["rel_rms"]
-            ratio = rk / rs if rs > 0 else (1.0 if rk == 0 else float("inf"))
-            finite = bool(torch.isfinite(c).all())
-            report["metrics"][n] = {
-                "kcp_rel_l2": rk,
-                "single_rel_l2": rs,
-                "ratio": ratio,
-                "kcp_max_abs": mk["max_abs"],
-                "single_max_abs": ms["max_abs"],
-                "bitwise_eq_single": bool(_bits_equal(cand[n].cpu(), single[n].cpu())),
-                "finite": finite,
-                "pass": finite and ratio <= ACC_GATE,
-            }
-            # criterion (d): no less accurate than the explicit route (see the module doc)
-            if n in PARAM_GRADS:
-                report["metrics"][n].update(
-                    param_vs_explicit(cand[n], expl[n], ref, W, parts_of=n, parts=parts)
-                )
-            report["pass"] &= report["metrics"][n]["pass"]
-        # report only: the explicit KCP route against the FP64 reference (``dg``: the activated gate's gradient,
-        # another quantity than the raw gate's)
-        report["explicit_rel_l2"] = {
-            n: error_metrics(expl[n].to(torch.float64), refs[n])["rel_rms"]
-            for n in ("out", "dq", "dk", "dv", "dbeta", "dA_log", "ddt_bias")
-        }
+        _judge_draw(judge, failures, j, {"single": single}, ref, naive, device, fla)
+
+    seed = _row_seed("rows", row)
+    for j in range(DRAWS):
+        one_draw(j, draw_case(lengths, H, "raw", False, draw_seed(seed, j), device))
+        gc.collect()
+    if rank == 0:
+        failures += judge.failures()
+        report["verdicts"], report["failures"] = judge.verdicts(), failures
     if W > 1:
         verdict: list = [None] * W
         dist.all_gather_object(verdict, report["pass"])
@@ -1378,7 +1305,6 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
         os.makedirs(result_dir, exist_ok=True)
         with open(os.path.join(result_dir, "raw-" + _row_id(row) + ".json"), "w") as fh:
             json.dump(report, fh, indent=1, default=str)
-    del runs, res, explicit
     gc.collect()
     return report
 
@@ -1387,7 +1313,9 @@ def _spawn_entry(rank: int, W: int, row, rdzv: str | None, result_dir: str) -> N
     try:
         report = _run_rank(rank, W, row, rdzv, result_dir)
         if not report["pass"]:
-            raise AssertionError(f"rank {rank}: {report}")
+            raise AssertionError(
+                f"rank {rank}: {report['row']} exact checks failed: {report['flags']}"
+            )
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()
@@ -1407,7 +1335,12 @@ def _skip_unless_runnable(W: int) -> None:
 
 
 @pytest.mark.parametrize("row", ROWS, ids=_row_id)
-def test_raw_gate_rows_match_single_rank_and_fp64(row) -> None:
+def test_raw_gate_rows_match_single_rank_and_fp64(row, record_property) -> None:
+    """Every mode of the row's KCP raw route (arms ``kcp``, ``replay``, ``repeat``, ``autograd``, ``ckpt``,
+    ``handle``, ``handle_transfer``, ``handoff_on``, ``save_transfer``, ``ws_none``, ``strided``, ``ring`` where it
+    runs, ``graph``) and the single-rank raw path on the whole pack (arm ``single``), every output of each judged
+    against the FP64 reference of the unsplit pack beside the naive BF16 tier over the judge's draws (no arm is
+    compared with another), and the first draw's exact checks on every rank (see the module doc)."""
     lengths, H, W, layout = row
     if (
         os.environ.get("SLURM_PROCID") is not None
@@ -1422,31 +1355,35 @@ def test_raw_gate_rows_match_single_rank_and_fp64(row) -> None:
             int(os.environ["SLURM_PROCID"]), W, row, None,
             os.environ.get("KCP_TEST_RESULT_DIR"),
         )  # fmt: skip
-        assert report["pass"], report
+        _finish(record_property, report, lengths)
         return
     _skip_unless_runnable(W)
     if W == 1:
         report = _run_rank(0, 1, row, None, os.environ.get("KCP_TEST_RESULT_DIR"))
-        assert report["pass"], report
+        _finish(record_property, report, lengths)
         return
     with tempfile.TemporaryDirectory(prefix="cake_kcp_raw_") as tmp:
         result_dir = os.environ.get("KCP_TEST_RESULT_DIR") or tmp
         _start_ranks(_spawn_entry, W, row, tmp, result_dir)
         with open(os.path.join(result_dir, "raw-" + _row_id(row) + ".json")) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    _finish(record_property, report, lengths)
 
 
 @pytest.mark.parametrize("l2n", ("off", "fused"))
 def test_gpu_raw_raises_no_alert_under_torch_deterministic_mode(
-    monkeypatch, l2n
+    l2n, record_property
 ) -> None:
     """Under ``torch.use_deterministic_algorithms(True)``, strict and with ``warn_only=True``, a raw KCP backward
     raises no non-determinism alert and gives no such warning on any architecture, with the in-kernel Q/K L2 norm off
     (``glm_intra_raw`` / ``param_finalize``) and on (``l2n="fused"``, ``use_qk_l2norm_in_kernel=True``:
     ``param_finalize_l2n``): eagerly, on a captured graph's replay, and when its graph capture fails and the call
-    prepares again to run eagerly.  Every result is bitwise the eager result with the mode off, which is bitwise the
-    deterministic package's raw KCP backward of the same mode on the same operands."""
+    prepares again to run eagerly, on every draw.  The results are judged against the FP64 reference beside the
+    naive BF16 tier over the judge's draws, each call under its own name: the forward and the eager backward with the
+    mode off (arm ``""``), the backwards under the mode (arms ``strict`` / ``warn_only``, ``strict_replay`` /
+    ``warn_only_replay`` on the captured graph, ``capture_fails`` its two calls, the worst kept); no call is compared
+    with another.  On the first draw, exactly: the captured backward's graph events, a new backward record per call,
+    the replay's graph event and the one failed capture."""
     _skip_unless_runnable(1)
     if l2n != "off":
         missing = cake_kcp_plan.qk_l2norm_missing(
@@ -1463,95 +1400,103 @@ def test_gpu_raw_raises_no_alert_under_torch_deterministic_mode(
     lengths, H = (100, 640, 77), 4
     part, cu = _partition(lengths, 1, "contiguous")
     ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
-    glob = make_raw_inputs(lengths, H, device, seed=0x7816)
-    o = _local_slices(
-        part, 0, cu, {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
-    )
-    GK = dict(
-        use_gate_in_kernel=True,
-        A_log=glob["A_log"],
-        dt_bias=glob["dt_bias"],
-        lower_bound=LB,
-    )
-    ops = tuple(o[n] for n in ("q", "k", "v", "g", "beta"))
     ws = cake_kcp.CakeKDANondetKcpWorkspace(use_gate_in_kernel=True, **L2)
     mode = (
         torch.are_deterministic_algorithms_enabled(),
         torch.is_deterministic_algorithms_warn_only_enabled(),
     )
+    names = TOKEN_GRADS + PARAM_GRADS
 
-    def bwd(saved, **kw):
-        return cake_kcp.cake_kda_nondet_train_kcp_backward(
-            *ops, ctx, o["dout"], saved=saved, workspace=ws, **GK, **L2, **kw
-        )  # fmt: skip
-
-    def check(grads, ref, tag) -> None:
-        grads = tuple(grads)
-        assert len(grads) == len(ref) == len(TOKEN_GRADS + PARAM_GRADS), tag
-        for name, x, y in zip(TOKEN_GRADS + PARAM_GRADS, grads, ref, strict=True):
-            assert _bits_equal_counted(x, y), (tag, name)
-
-    def quiet(saved, tag, **kw) -> tuple:
-        """One backward with every warning recorded: none is PyTorch's non-determinism alert; its results cloned
-        (a replay's outputs are the graph's)."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            grads = tuple(t.clone() for t in bwd(saved, **kw))
-        torch.cuda.synchronize(device)
-        ours = [str(w.message) for w in caught if alert in str(w.message)]
-        assert not ours, (tag, ours)
-        return grads
-
-    cake_kcp.graph_cache_clear()
-    try:
-        torch.use_deterministic_algorithms(False)
-        # the reference: an eager backward with the mode off, bitwise the deterministic package's raw KCP backward
-        _, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
-            *ops, ctx, workspace=ws, **GK, **L2
+    def draw(j: int, s: int):
+        glob = draw_case(lengths, H, "raw", bool(L2), s, device)
+        o = _local_slices(
+            part, 0, cu, {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
         )
-        ref = tuple(t.clone() for t in bwd(saved))
-        ws_det = det_kcp.CakeKDADetKcpWorkspace(use_gate_in_kernel=True, **L2)
-        _, saved_d = det_kcp.cake_kda_det_train_kcp_forward(
-            *ops, ctx, workspace=ws_det, **GK, **L2
+        GK = dict(
+            use_gate_in_kernel=True,
+            A_log=glob["A_log"],
+            dt_bias=glob["dt_bias"],
+            lower_bound=LB,
         )
-        grads_d = det_kcp.cake_kda_det_train_kcp_backward(
-            *ops, ctx, o["dout"], saved=saved_d, workspace=ws_det, **GK, **L2
-        )
-        check(grads_d, ref, "deterministic package")
-        del ws_det, saved_d, grads_d
-        # a captured backward to replay below
-        _, saved_g = cake_kcp.cake_kda_nondet_train_kcp_forward(
-            *ops, ctx, workspace=ws, graph="replay", **GK, **L2
-        )
-        bwd(saved_g)  # the backward arena: a graph key sees the workspace's pools
-        events = []
-        for _ in range(2):
-            bwd(saved_g, graph="replay")
-            events.append(cake_kcp.LAST_CALL["bwd"].get("graph_event"))
-        assert events == ["eager", "capture"], events
-        torch.cuda.synchronize(device)
-        for warn_only in (False, True):
-            torch.use_deterministic_algorithms(True, warn_only=warn_only)
-            tag = "warn_only" if warn_only else "strict"
-            before = cake_kcp.LAST_CALL.get("bwd")
-            check(quiet(saved, f"{tag} eager"), ref, f"{tag} eager")
-            assert cake_kcp.LAST_CALL.get("bwd") is not before, tag
-            # the captured graph's replay (its own preparation) raises none either
-            check(quiet(saved_g, f"{tag} replay", graph="replay"), ref, f"{tag} replay")
-            assert cake_kcp.LAST_CALL["bwd"].get("graph_event") == "replay", tag
-        # a new key: its first call runs eagerly, its second fails to capture (as _graph_capture records a failure)
-        # and runs eagerly after a second preparation: no warning on either preparation, the same bits
-        failed: list = []
+        ops = tuple(o[n] for n in ("q", "k", "v", "g", "beta"))
 
-        def capture_fails(kind, entry, call, body):
-            failed.append(kind)
-            entry.disabled = "test: the capture failed"
-            return None
+        def bwd(saved, **kw):
+            return cake_kcp.cake_kda_nondet_train_kcp_backward(
+                *ops, ctx, o["dout"], saved=saved, workspace=ws, **GK, **L2, **kw
+            )  # fmt: skip
 
-        monkeypatch.setattr(cake_kcp, "_graph_capture", capture_fails)
-        for i in range(2):
-            check(quiet(saved, f"capture fails {i}", graph="replay"), ref, i)
-        assert failed == ["bwd"], failed
-    finally:
-        torch.use_deterministic_algorithms(mode[0], warn_only=mode[1])
+        def quiet(saved, tag, **kw) -> dict:
+            """One backward with every warning recorded: none is PyTorch's non-determinism alert; its results by
+            name, cloned (a replay's outputs are the graph's)."""
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                grads = tuple(t.clone() for t in bwd(saved, **kw))
+            torch.cuda.synchronize(device)
+            ours = [str(w.message) for w in caught if alert in str(w.message)]
+            assert not ours, (tag, ours)
+            return dict(zip(names, grads, strict=True))
+
+        arms: dict = {}
         cake_kcp.graph_cache_clear()
+        try:
+            torch.use_deterministic_algorithms(False)
+            # the forward and the eager backward with the mode off
+            out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                *ops, ctx, workspace=ws, **GK, **L2
+            )
+            arms[""] = {
+                "out": out.clone(),
+                **{n: t.clone() for n, t in zip(names, bwd(saved), strict=True)},
+            }
+            # a captured backward to replay below
+            _, saved_g = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                *ops, ctx, workspace=ws, graph="replay", **GK, **L2
+            )
+            bwd(saved_g)  # the backward arena: a graph key sees the workspace's pools
+            events = []
+            for _ in range(2):
+                bwd(saved_g, graph="replay")
+                events.append(cake_kcp.LAST_CALL["bwd"].get("graph_event"))
+            torch.cuda.synchronize(device)
+            if j == 0:
+                assert events == ["eager", "capture"], events
+            for warn_only in (False, True):
+                torch.use_deterministic_algorithms(True, warn_only=warn_only)
+                tag = "warn_only" if warn_only else "strict"
+                before = cake_kcp.LAST_CALL.get("bwd")
+                arms[tag] = quiet(saved, f"{tag} eager")
+                if j == 0:
+                    assert cake_kcp.LAST_CALL.get("bwd") is not before, tag
+                # the captured graph's replay (its own preparation) raises none either
+                arms[f"{tag}_replay"] = quiet(saved_g, f"{tag} replay", graph="replay")
+                if j == 0:
+                    assert cake_kcp.LAST_CALL["bwd"].get("graph_event") == "replay", tag
+            # a new key: its first call runs eagerly, its second fails to capture (as _graph_capture records a
+            # failure) and runs eagerly after a second preparation: no warning on either preparation
+            failed: list = []
+
+            def capture_fails(kind, entry, call, body):
+                failed.append(kind)
+                entry.disabled = "test: the capture failed"
+                return None
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(cake_kcp, "_graph_capture", capture_fails)
+                arms["capture_fails"] = [
+                    quiet(saved, f"capture fails {i}", graph="replay") for i in range(2)
+                ]
+            if j == 0:
+                assert failed == ["bwd"], failed
+        finally:
+            torch.use_deterministic_algorithms(mode[0], warn_only=mode[1])
+            cake_kcp.graph_cache_clear()
+        return arms, glob
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_row_seed(f"no_alert_{l2n}", (lengths, H, 1, "contiguous")),
+        scale=SCALE,
+        l2n=bool(L2),
+        lower_bound=LB,
+    )
