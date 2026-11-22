@@ -90,8 +90,9 @@ range runs ahead of the other two tables where it holds the call.  From release
 key has no ``DIRECT_ROWS`` range (for example the sm_107a ``fwd_bias`` rows at
 C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over
 the key's range outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows
-at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a static
-range.  Every other call (outside a row's range, or where an architecture,
+at C = 720 to 768 have no ``DIRECT_ROWS`` range: they run the pair direct
+program from S = 16 to 1536 and the static program from S = 13824 (C = 736:
+14336).  Every other call (outside a row's range, or where an architecture,
 route and ``C`` have no row) runs the dynamic program, as in 0.2.4, which takes
 its token chunks from zeroed int32 counters.  The forward workspace size is the
 same in every case.

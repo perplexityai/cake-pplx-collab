@@ -181,7 +181,8 @@ Host design (the knobs are keywords; no environment variable):
   range (for example the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and
   632, from S = 1 to 24576), the static program runs over the key's range
   outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows at C = 720
-  to 768 start at S = 13824 (C = 736: 14336) and have only a static range.
+  to 768 have no ``DIRECT_ROWS`` range: they run the pair direct program from
+  S = 16 to 1536 and the static program from S = 13824 (C = 736: 14336).
   Outside a row's range, and where an architecture, route and C have no row,
   the forward runs the dynamic program, which takes counters, as in 0.2.4.
   ``y`` is the same bits on every forward program and plan.

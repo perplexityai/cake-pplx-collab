@@ -51,8 +51,9 @@ architecture and route has a row at each C = 512 to 1024.  For most C the first
 range starts at S = 1.  Where a key has no ``DIRECT_ROWS`` range (for example
 the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to
 24576), the static program runs over the key's range outside the ``PAIR_ROWS``
-range.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C =
-736: 14336) and have only a static range.  Outside a row's range, and where an
+range.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 have no ``DIRECT_ROWS``
+range: they run the pair direct program from S = 16 to 1536 and the static
+program from S = 13824 (C = 736: 14336).  Outside a row's range, and where an
 architecture, route and C have no row, a forward call runs the dynamic program,
 which takes ``work``, as in 0.2.4.  A backward call is ONE ordinary launch: every
 per-thread and per-CTA FP32 step and ``dx`` are those of the det program it is

@@ -75,14 +75,16 @@ of :data:`DIRECT_ROWS`, which plans its own channel tiles (:data:`DIRECT_PLANS`)
 and launches at most one CTA per token block, and ahead of both the pair direct
 program (the direct program with each thread on a pair of channels, on the
 channel tiles of :data:`PAIR_PLANS`) at the rows of :data:`PAIR_ROWS`, one range
-per architecture and route over C = 512 to 1024 at short S.  Each row gives its
+per architecture and route (two on sm_100a ``fwd_dt``) over C = 512 to 1024 at
+short S.  Each row gives its
 own token range.  Every architecture and route has a row at each C = 512 to
 1024.  For most C the first range starts at S = 1.  Where a key has no
 :data:`DIRECT_ROWS` range (for example the sm_107a ``fwd_bias`` rows at C =
 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over the
 key's range outside the :data:`PAIR_ROWS` range.  The sm_103a ``fwd_bias``
-rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a
-static range.  Outside a row's range, and where an architecture, route and C
+rows at C = 720 to 768 have no :data:`DIRECT_ROWS` range: they run the pair
+direct program from S = 16 to 1536 and the static program from S = 13824 (C =
+736: 14336).  Outside a row's range, and where an architecture, route and C
 have no row, a call runs the dynamic program its rules select, as in 0.2.4.
 Every forward program computes each ``y`` element in the same fixed order, so
 ``y`` is bitwise the same whichever program and plan a call runs.  The counters
