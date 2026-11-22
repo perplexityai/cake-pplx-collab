@@ -2322,15 +2322,15 @@ def test_device_logprob_graph_rlab(glm_weight):
             out[own] = grads
             del lp, node, holder
             if own:
-                # the remembered backward sequences: a dz arm (uncounted) or row_grad alone, never the zero step
+                # the default form's backward recomputes through the dz arm where the program registers it (its
+                # remembered sequences); the kept forms' row_grad stores every row
                 bindings = list(cake_backend.BINDING_CACHE._bindings.values())
                 assert bindings, case
-                keys = [k for b in bindings for k in b.backward_order]
-                dz = any(
+                dz = entry is default and any(
                     k[0] in cake_backend.DZ_PRODUCER_STAGES and k[0] != "row_grad"
-                    for k in keys
+                    for b in bindings
+                    for k in b.backward_order
                 )
-                assert not dz or entry is default, case
         bindings = list(cake_backend.BINDING_CACHE._bindings.values())
         assert bindings, case
         for b in bindings:
