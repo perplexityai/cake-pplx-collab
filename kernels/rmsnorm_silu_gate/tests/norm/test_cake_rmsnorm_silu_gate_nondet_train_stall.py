@@ -227,14 +227,21 @@ item 1 side kernels and 16 CTAs of 1024 threads with the max-shared carveout)
 end no later than the deterministic forward (the deterministic package's
 forward as it routes the rows, ``cake_jit.forward_module``) beside the same
 side kernel: the busy
-median is at most the deterministic forward's busy median times ``1 +
-PROPORTIONAL_SLACK``, or at most ``SHORT_EXTRA_MS`` above it: one tick of the
-event timer (about 1 microsecond on SM103) and a half, the calls taking a few
-microseconds.  The two forwards' alone / busy pairs alternate round by round
-over the same stretch of time, which does not make a slow stretch of the host
-or the GPU fall on both alike: a measurement counts only when each forward's
-alone median is at most ``SHORT_MAX_ALONE_SPREAD`` times its fastest alone
-sample of that measurement, else it is taken again, at most
+mean is at most the deterministic forward's busy mean times ``1 +
+PROPORTIONAL_SLACK``, or at most ``SHORT_EXTRA_MS`` above it: one step of the
+event timer (about 1 microsecond on SM100 and SM103) and a half, the calls
+taking a few microseconds.  Each mean is ``_held_mean`` of ``HELD_RUNS``
+samples (without the ``HELD_TRIM`` share of the fastest and of the slowest,
+rounded down to whole samples): on SM100 and SM103 the event timer reads a
+call of a few microseconds on steps about 1 microsecond apart, the step
+changing from sample to sample (an empty kernel reads the same steps; a
+longer call reads the higher steps more often), so a median of a few samples
+lands on one step or another for each call, two steps apart at times; a mean
+weighs the steps as often as they occur, for both calls alike.  The two forwards' alone / busy pairs alternate
+round by round over the same stretch of time, which does not make a slow
+stretch of the host or the GPU fall on both alike: a measurement counts only
+when each forward's alone mean is at most ``SHORT_MAX_ALONE_SPREAD`` times its
+fastest alone sample of that measurement, else it is taken again, at most
 ``SHORT_EXTRA_ATTEMPTS`` more times, and the bound applies to the first
 measurement that counts (to the last one when none does).  The small-row
 backwards (``SHORT_BACKWARD_PROBES``, BF16 and FP32 weight gradients) keep
@@ -246,7 +253,7 @@ an FP32 one the repeatable backward) by
 the short
 forward's bound and measurement rule: there a measurement
 counts only when the small-row backward's and the replaced backward's alone
-medians are each at most ``SHORT_MAX_ALONE_SPREAD`` times their fastest alone
+means are each at most ``SHORT_MAX_ALONE_SPREAD`` times their fastest alone
 sample of that measurement.
 
 In the item 1 and item 2 tests every side CTA records its SM and its start
@@ -466,7 +473,8 @@ PROPORTIONAL_BLOCKS_PER_CTA = (16, 32, 160)
 PROPORTIONAL_RUNS = 7
 # The margin for timing noise of busy / alone over N / (N - k) plus one row
 # block's share, and of the tiny forwards', the short forward's and the short
-# backward's busy medians over those of the calls they are compared with.
+# backward's busy means (_held_mean) over those of the calls they are compared
+# with.
 PROPORTIONAL_SLACK = 0.02
 
 _SPIN_KERNEL = "cake_rmsnorm_silu_gate_train_stall_spin"
@@ -705,10 +713,23 @@ def _paired_medians(call, spin: _Spin, runs: int):
     )
 
 
-def _interleaved_paired_medians(calls, spin: _Spin, runs: int):
-    """Per call of ``calls``, the medians of ``runs`` alone / beside-``spin``
-    pairs and the pairs, the calls' pairs taken round by round (their order
-    alternating)."""
+def _held_mean(times) -> float:
+    """The mean of ``times`` without the ``HELD_TRIM`` share of the fastest
+    and of the slowest (rounded down to whole samples).  On SM100 and SM103
+    the event timer reads a call of a few microseconds on steps about 1
+    microsecond apart, the step changing from sample to sample (a longer call
+    reads the higher steps more often); a median lands on one step or
+    another, this mean weighs the steps as often as they occur."""
+    ordered = sorted(times)
+    cut = int(len(ordered) * HELD_TRIM)
+    kept = ordered[cut : len(ordered) - cut]
+    return sum(kept) / len(kept)
+
+
+def _interleaved_held_means(calls, spin: _Spin, runs: int):
+    """Per call of ``calls``, the ``_held_mean`` of ``runs`` alone and of
+    ``runs`` beside-``spin`` samples and the pairs, the calls' pairs taken
+    round by round (their order alternating)."""
     side = torch.cuda.Stream()
     for call in calls:
         for _ in range(WARMUP):
@@ -728,8 +749,8 @@ def _interleaved_paired_medians(calls, spin: _Spin, runs: int):
             busy[i].append(timed)
     return [
         (
-            statistics.median(t for t, _ in alone[i]),
-            statistics.median(t for t, _ in busy[i]),
+            _held_mean([t for t, _ in alone[i]]),
+            _held_mean([t for t, _ in busy[i]]),
             alone[i],
             busy[i],
         )
@@ -1640,9 +1661,15 @@ SHORT_FORWARD_SIDES = ((1, 128, None), (16, 640, None), (32, 640, None)) + (
     (16, 1024, CARVEOUT_MAX_SHARED),
 )
 SHORT_EXTRA_MS = 0.0015
-# A held measurement counts when each compared call's alone median is at most
+# Samples per call of a held measurement (alone and beside the side kernel,
+# the compared calls interleaved round by round, an even count so that each
+# call goes first as often), and the share of the fastest and of the slowest
+# that _held_mean leaves out at each end (2 of 20).
+HELD_RUNS = 20
+HELD_TRIM = 0.1
+# A held measurement counts when each compared call's alone mean is at most
 # this many times its fastest alone sample in that measurement (a slow stretch
-# of the host or the GPU moves the median of calls of a few microseconds);
+# of the host or the GPU moves the mean of calls of a few microseconds);
 # otherwise it is taken again, at most SHORT_EXTRA_ATTEMPTS more times.
 SHORT_MAX_ALONE_SPREAD = 1.7
 SHORT_EXTRA_ATTEMPTS = 2
@@ -1778,11 +1805,11 @@ def test_first_band_forward_ends_no_later_than_the_forward_beside_held_sms(
     side = f"{ctas}x{threads}" + ("s" if carveout is not None else "")
     attempts = 1 + SHORT_EXTRA_ATTEMPTS
     for attempt in range(1, attempts + 1):
-        short_medians, det_medians = _interleaved_paired_medians(
-            (call, call_det), spin, PROPORTIONAL_RUNS
+        short_means, det_means = _interleaved_held_means(
+            (call, call_det), spin, HELD_RUNS
         )
-        alone_ms, busy_ms, alone, busy = short_medians
-        det_alone_ms, det_busy_ms, det_alone, det_busy = det_medians
+        alone_ms, busy_ms, alone, busy = short_means
+        det_alone_ms, det_busy_ms, det_alone, det_busy = det_means
         alone_min_ms = min(t for t, _ in alone)
         det_alone_min_ms = min(t for t, _ in det_alone)
         spread = max(alone_ms / alone_min_ms, det_alone_ms / det_alone_min_ms)
@@ -1794,7 +1821,7 @@ def test_first_band_forward_ends_no_later_than_the_forward_beside_held_sms(
             f"busy_vs_det={busy_ms / det_busy_ms:.3f} "
             f"alone_min_ms={alone_min_ms:.4f} det_alone_min_ms={det_alone_min_ms:.4f} "
             f"alone_spread={spread:.3f} attempt={attempt}/{attempts} "
-            f"counts={int(counts)}"
+            f"counts={int(counts)} runs={HELD_RUNS} trim={HELD_TRIM}"
         )
         # each module's and each package's y repeats its own bits: two programs
         # may associate a row's sum of squares differently, and the
@@ -2101,11 +2128,11 @@ def test_short_backward_ends_no_later_than_the_backward_beside_held_sms(
     side = f"{ctas}x{threads}" + ("s" if carveout is not None else "")
     attempts = 1 + SHORT_EXTRA_ATTEMPTS
     for attempt in range(1, attempts + 1):
-        short_medians, replaced_medians = _interleaved_paired_medians(
-            (call, call_replaced), spin, PROPORTIONAL_RUNS
+        short_means, replaced_means = _interleaved_held_means(
+            (call, call_replaced), spin, HELD_RUNS
         )
-        alone_ms, busy_ms, alone, busy = short_medians
-        rep_alone_ms, rep_busy_ms, rep_alone, rep_busy = replaced_medians
+        alone_ms, busy_ms, alone, busy = short_means
+        rep_alone_ms, rep_busy_ms, rep_alone, rep_busy = replaced_means
         alone_min_ms = min(t for t, _ in alone)
         rep_alone_min_ms = min(t for t, _ in rep_alone)
         spread = max(alone_ms / alone_min_ms, rep_alone_ms / rep_alone_min_ms)
@@ -2118,7 +2145,7 @@ def test_short_backward_ends_no_later_than_the_backward_beside_held_sms(
             f"busy_vs_replaced={busy_ms / rep_busy_ms:.3f} "
             f"alone_min_ms={alone_min_ms:.4f} replaced_alone_min_ms={rep_alone_min_ms:.4f} "
             f"alone_spread={spread:.3f} attempt={attempt}/{attempts} "
-            f"counts={int(counts)}"
+            f"counts={int(counts)} runs={HELD_RUNS} trim={HELD_TRIM}"
         )
         # each module's outputs repeat their own bits
         _check_outputs("backward", tokens, alone, busy, dw_reference, module=name)
