@@ -145,6 +145,9 @@ _STRIDE_ELEMENTS = 8
 _ALIGNMENT = 16
 # The kernels take the token count as a 32-bit integer (token offsets are 64-bit).
 _MAX_TOKENS = 2**31 - 1
+# The operand dtypes: BF16 activations, BF16 or FP32 weights.
+_BF16 = torch.bfloat16
+_WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 # Bytes of one FP32 [4, 5120] row (a partial row of the backward's weight gradients).
 _ROW_BYTES = STREAMS * HIDDEN * 4
 # The records the launches use, looked up once: the forward record of each summation and ``dw_reduce`` with its grid
@@ -488,6 +491,8 @@ def _dot_acc(dot_sum: Any) -> str:
 
 
 def _check_scalars(eps: Any, clamp_value: Any) -> tuple[float, float]:
+    if type(eps) is float and type(clamp_value) is float and 0.0 <= eps < math.inf and 0.0 <= clamp_value < math.inf:
+        return eps, clamp_value
     try:
         eps_f, clamp_f = float(eps), float(clamp_value)
     except (TypeError, ValueError):
@@ -497,6 +502,70 @@ def _check_scalars(eps: Any, clamp_value: Any) -> tuple[float, float]:
     if not (math.isfinite(clamp_f) and clamp_f >= 0.0):
         raise ValueError(f"clamp_value must be finite and non-negative, got {clamp_value}")
     return eps_f, clamp_f
+
+
+def _valid_tokens(x: Any, key: Any, value: Any, q_weight: Any, k_weight: Any, token_mask: Any) -> int:
+    """The token count ``T`` of forward tensors that pass every tensor check of :func:`_check_operands`, read in one
+    pass; -1 for anything else (the caller then runs those checks, which name the first one that fails)."""
+    tensor = torch.Tensor
+    if not (
+        isinstance(x, tensor)
+        and isinstance(key, tensor)
+        and isinstance(value, tensor)
+        and isinstance(q_weight, tensor)
+        and isinstance(k_weight, tensor)
+        and x.is_cuda
+        and x.dtype == _BF16
+        and x.dim() == 3
+    ):
+        return -1
+    T, streams, hidden = x.shape
+    index = x.get_device()
+    if not (
+        streams == STREAMS
+        and hidden == HIDDEN
+        and T <= _MAX_TOKENS
+        and x.is_contiguous()
+        and not x.data_ptr() % _ALIGNMENT
+        and key.is_cuda
+        and key.get_device() == index
+        and key.dtype == _BF16
+        and key.shape == (T, STREAMS, HIDDEN)
+        and not key.data_ptr() % _ALIGNMENT
+        and value.is_cuda
+        and value.get_device() == index
+        and value.dtype == _BF16
+        and value.shape == (T, HIDDEN)
+        and not value.data_ptr() % _ALIGNMENT
+        and q_weight.is_cuda
+        and q_weight.get_device() == index
+        and q_weight.dtype in _WEIGHT_DTYPES
+        and q_weight.shape == (STREAMS, HIDDEN)
+        and k_weight.is_cuda
+        and k_weight.get_device() == index
+        and k_weight.dtype in _WEIGHT_DTYPES
+        and k_weight.shape == (STREAMS, HIDDEN)
+    ):
+        return -1
+    if T:
+        key_stride, value_stride = key.stride(), value.stride()
+        if not (
+            key_stride[2] == 1
+            and key_stride[1] == HIDDEN
+            and not key_stride[0] % _STRIDE_ELEMENTS
+            and value_stride[1] == 1
+            and not value_stride[0] % _STRIDE_ELEMENTS
+        ):
+            return -1
+    if token_mask is not None and not (
+        isinstance(token_mask, tensor)
+        and token_mask.is_cuda
+        and token_mask.get_device() == index
+        and token_mask.dtype == torch.bool
+        and token_mask.shape == (T,)
+    ):
+        return -1
+    return T
 
 
 def _check_operands(
@@ -511,6 +580,10 @@ def _check_operands(
 ) -> tuple[int, float, float]:
     """``(T, eps, clamp_value)`` of a valid set of forward operands; ``ValueError`` otherwise.  The device checks
     come before anything that touches CUDA."""
+    T = _valid_tokens(x, key, value, q_weight, k_weight, token_mask)
+    if T >= 0:
+        eps_f, clamp_f = _check_scalars(eps, clamp_value)
+        return T, eps_f, clamp_f
     x = _tensor("x", x)
     operands = [("x", x), ("key", _tensor("key", key)), ("value", _tensor("value", value))]
     operands += [("q_weight", _tensor("q_weight", q_weight)), ("k_weight", _tensor("k_weight", k_weight))]
@@ -640,7 +713,7 @@ def _forward(
     acc = _dot_acc(dot_sum)
     T, eps_f, clamp_f = _check_operands(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value)
     if out is None:
-        out = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=x.device)
+        out = torch.empty(T, STREAMS, HIDDEN, dtype=torch.bfloat16, device=x.device)
     else:
         _check_output("out", out, T, x.device, "contiguous")
     if T == 0:
@@ -720,26 +793,27 @@ def _launch_backward(
         )
     index = device.index
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    # (Sizes as separate arguments: torch parses them faster than one tuple.)
     if dx is None:
-        dx = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=device)
+        dx = torch.empty(T, STREAMS, HIDDEN, dtype=torch.bfloat16, device=device)
     if dkey is None:
-        dkey = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=device)
+        dkey = torch.empty(T, STREAMS, HIDDEN, dtype=torch.bfloat16, device=device)
     if dvalue is None:
-        dvalue = torch.empty((T, HIDDEN), dtype=torch.bfloat16, device=device)
+        dvalue = torch.empty(T, HIDDEN, dtype=torch.bfloat16, device=device)
     # One backward for either forward sum: it recomputes P as a compensated dot product, in the program that is the
     # faster one for the call (a token mask given or not, the tokens, the architecture); both give the same bits.
     name = cake_jit.backward_record(arch, token_mask is not None, T)
     clusters = _clusters(name, T, index)
     # One row per cluster, each written in full by its cluster.
-    dw = torch.empty((clusters, STREAMS, HIDDEN), dtype=torch.float32, device=device)
-    dq = torch.empty((STREAMS, HIDDEN), dtype=dq_dtype, device=device)
-    dk = torch.empty((STREAMS, HIDDEN), dtype=dk_dtype, device=device)
+    dw = torch.empty(clusters, STREAMS, HIDDEN, dtype=torch.float32, device=device)
+    dq = torch.empty(STREAMS, HIDDEN, dtype=dq_dtype, device=device)
+    dk = torch.empty(STREAMS, HIDDEN, dtype=dk_dtype, device=device)
     # The weights as stored (their 32-bit words), the product formed in the kernels.
     qw, kw = _words(q_weight), _words(k_weight)
     wmode = _wmode(q_weight.dtype, k_weight.dtype, dq_dtype, dk_dtype)
     grid = cake_jit.CLUSTER_CTAS * clusters
     bwd = (dout, x, key, value, qw, kw, _mask(token_mask), dx, dkey, dvalue, dw, T, eps, clamp_value, wmode & 3)
-    finish = (dw, qw, kw, dq.view(torch.int32), dk.view(torch.int32), int(dw.shape[0]), wmode)
+    finish = (dw, qw, kw, dq.view(torch.int32), dk.view(torch.int32), clusters, wmode)
     _run(name, "bwd", index, (*bwd, grid, 1, 1))
     _run(_DW_REDUCE_RECORD, "dw_reduce", index, (*finish, *_DW_REDUCE_GRID))
     return dx, dkey, dvalue, dq, dk
@@ -951,7 +1025,7 @@ class CakeEngramGateNondetKvFunction(torch.autograd.Function):
     def backward(ctx: Any, dout: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor], ...]:
         x, kv, q_weight, k_weight, token_mask = ctx.saved_tensors
         key, value = _kv_views(kv)
-        dkv = torch.empty((kv.shape[0], KV_WIDTH), dtype=torch.bfloat16, device=kv.device)
+        dkv = torch.empty(kv.shape[0], KV_WIDTH, dtype=torch.bfloat16, device=kv.device)
         dkey, dvalue = _kv_views(dkv)
         dx, _, _, dq, dk = _autograd_backward(
             dout, x, key, value, q_weight, k_weight, token_mask, ctx, dkey, dvalue, "cake_engram_gate_nondet_kv"
