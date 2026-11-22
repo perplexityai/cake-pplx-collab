@@ -94,7 +94,18 @@ from . import cake_build
 # half tiles, whose split tail the tail-reduce stage of the 256-wide k tile's
 # route sums, launched in its place on the architectures of
 # ``k256_tail_archs`` when K is at most ``k256_tail_max_k`` and the groups
-# average at least ``k256_tail_min_rows`` rows.  On the architectures of
+# average at least ``k256_tail_min_rows`` rows; on sm_100a and sm_103a its
+# ``main_halves_queue`` stage (and, on the fp32 route,
+# ``main_halves_queue_acc``) is the wave-free A-collector half-release build
+# whose tiles before the split tail are claimed from one global counter in tile
+# order instead of strided over the clusters, with the split tail and tail
+# reduce of ``main_halves``: each tile keeps its k-step order, so it gives the
+# bits of the strided walk.  It takes one more workspace, ``sched``: two u32
+# words, the counter and the retired-cluster count, at zero before and after a
+# launch (the last cluster to retire sets them back to zero).  The host binds
+# it in place of ``main_halves`` / ``main_wave_halves`` (and their accumulate
+# stages) where ``queue_walk`` names the call, with ``queue_sched_words``
+# sizing its counters.  On the architectures of
 # ``domain_split_archs`` a launch of an op in ``domain_split_ops`` (the data
 # gradient) whose weight has at most ``domain_split_max_weight_elems`` elements
 # per group (``N * K``, the down projection) splits its tile queues by the
@@ -2204,6 +2215,52 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
         "launch_us": 5.0,
         "cycles_per_step": {256: 512, 512: 1024},
     },
+    # Where a 512-wide k tile weight gradient binds the queue walk
+    # (``cake_backend.wgrad_queue_walk``): the ``main_halves_queue`` stage, or
+    # ``main_halves_queue_acc`` for a fused FP32 accumulate, in place of the
+    # stage the host selects.  A call takes it when one rule names the device's
+    # architecture and SM count, the selected stage, the kind of output
+    # (``"bfloat16"`` / ``"float32"`` overwrite, ``"accumulate"`` for the
+    # fused FP32 accumulate) and a range ``[min, max]`` holding the group count;
+    # every other call keeps its stage.  The rules are the parts of the
+    # non-deterministic package's rules where this package's queue walk was
+    # timed against the stage it replaces on that part (148-SM sm_100a, 152-SM
+    # sm_103a) and no row was slower: on the 148-SM sm_100a ``main_halves``
+    # stage only the fused accumulate keeps the queue walk (a bfloat16 row
+    # there was slower than its stage).  A part with no rule here keeps its
+    # stage.
+    "queue_walk": [
+        {
+            "arch": "sm_100a",
+            "sm_counts": [148],
+            "stage": "main_wave_halves",
+            "outputs": ["bfloat16", "accumulate"],
+            "groups": [4, 32],
+        },
+        {
+            "arch": "sm_100a",
+            "sm_counts": [148],
+            "stage": "main_halves",
+            "outputs": ["accumulate"],
+            "groups": [8, 32],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_wave_halves",
+            "outputs": ["bfloat16", "accumulate"],
+            "groups": [4, 32],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_halves",
+            "outputs": ["accumulate"],
+            "groups": [8, 16],
+        },
+    ],
+    # The u32 words of the queue walk's tile counters (``queue_sched``).
+    "queue_sched_words": 2,
     "int32_elems": 2147483647,
 }
 
