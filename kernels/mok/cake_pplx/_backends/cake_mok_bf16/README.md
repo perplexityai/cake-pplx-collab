@@ -527,28 +527,26 @@ across communication-SM splits and under CUDA Graph replay.
   MXFP8 key, which has no row on B300 (40 / 40), whatever precision the
   workspace was created with.
 
-  Table: this package against the previous version (main, 40 / 40 on B300) on
-  one B300 node, EP8, one process per arm and configuration, the two arms and an
-  identical second main arm interleaved over six rounds with the order reversed
-  in every second round, eager (CUDA Graph where stated: captured once on a
-  balanced step, then replayed), no CPU binding, BF16 routed experts unless
-  stated, FP32 accumulators; the slowest rank's median of timed repetitions 1-20
-  after 3 warm-up repetitions, median over the rounds; the table prints those
-  medians and change = printed package ms / printed main ms - 1; band = the
-  noise band of the identical arms and of the round spread; 'faster' or 'slower'
-  = beyond the band in every round and on the GPU-paired interval, 'noise' =
-  inside the band, 'unresolved' = beyond the band but not in every round; steady
-  = the change of the medians of timed repetitions 41-60 of 60. Forward =
-  schedule and forward without context for the router weight before the down
-  projection (H 5120 / I 2304, clamped SwiGLU), the forward otherwise (H
-  6144 / I 2048 plain, H 4096 / I 2048 clamped); checkpointed step = schedule,
-  forward, context recompute and backward. Every configuration of the table with
-  per-rank output digests (all except the CUDA Graph row) gives the same bits at
-  main and with this row, and every line repeats its outputs bitwise. Not
-  measured: EP sizes other than 8 on B300; hottest-rank ratios other than those
-  in the table; BF16 weight-gradient accumulators; complete training steps of a
-  model; Rubin MXFP8 launches on a workspace created for BF16 at EP8, which take
-  the MXFP8 row (60 / 60) from this version (two Rubin nodes needed).
+  Table: this package against version 0.2.2, the main branch these rows measured
+  (40 / 40 on B300; the B300 GPU programs of version 0.2.3 compile to the same
+  SASS), on one B300 node, EP8, one process per arm and configuration, the two
+  arms and an identical second main arm interleaved over six rounds with the
+  order reversed in every second round, eager (CUDA Graph where stated: captured
+  once on a balanced step, then replayed), no CPU binding, BF16 routed experts
+  unless stated, FP32 accumulators; the slowest rank's median of timed
+  repetitions 1-20 after 3 warm-up repetitions, median over the rounds; the
+  table prints those medians and change = printed package ms / printed main
+  ms - 1; band = the noise band of the identical arms and of the round spread;
+  'faster' or 'slower' = beyond the band in every round and on the GPU-paired
+  interval, 'noise' = inside the band, 'unresolved' = beyond the band but not in
+  every round; steady = the change of the medians of timed repetitions 41-60 of
+  60. Forward = schedule and forward without context for the router weight
+  before the down projection (H 5120 / I 2304, clamped SwiGLU), the forward
+  otherwise (H 6144 / I 2048 plain, H 4096 / I 2048 clamped); checkpointed step
+  = schedule, forward, context recompute and backward. Every configuration of
+  the table with per-rank output digests (all except the CUDA Graph row) gives
+  the same bits at main and with this row, and every line repeats its outputs
+  bitwise.
 
   | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -582,6 +580,22 @@ across communication-SM splits and under CUDA Graph replay.
   | B300 | 8 | H 6144 / 256 experts, top 8, workspace precision mxfp8 | 2.0x hot rank | 16,384 | 18.966 | 18.143 | -4.3 % (band 2.8 %, faster; steady -3.4 %) | 69.278 | 68.779 | -0.7 % (band 0.7 %, noise; steady -0.5 %) |
   | B300 | 8 | H 6144 / 256 experts, top 8, MXFP8 weights, workspace precision bf16 | uniform | 16,384 | 7.451 | 7.447 | -0.1 % (band 2.8 %, noise; steady -0.8 %) | 26.378 | 26.349 | -0.1 % (band 1.1 %, noise; steady -0.4 %) |
   | B300 | 8 | H 6144 / 256 experts, top 8, MXFP8 weights, workspace precision bf16 | 2.0x hot rank | 16,384 | 13.684 | 13.698 | +0.1 % (band 0.7 %, noise; steady +0.4 %) | 47.841 | 47.842 | +0.0 % (band 1.0 %, noise; steady -0.2 %) |
+
+  Not measured: EP sizes other than 8 on B300; hottest-rank ratios other than
+  those in the table; BF16 weight-gradient accumulators; complete training steps
+  of a model; GB300 launches whose split this version changes: BF16 routed
+  weights on a workspace created with `precision="mxfp8"` at EP8, EP32 and EP64:
+  44 / 36 -> 20 / 24; BF16 routed weights on a workspace created with
+  `precision="mxfp8"` at EP16: 40 / 40 -> 20 / 24; MXFP8 routed weights on a
+  workspace created with `precision="bf16"` at EP8, EP32 and EP64: 20 / 24 ->
+  44 / 36; MXFP8 routed weights on a workspace created with `precision="bf16"`
+  at EP16: 20 / 24 -> 40 / 40 (one GB300 node has four GPUs); Rubin launches
+  whose split this version changes: BF16 routed weights on a workspace created
+  with `precision="mxfp8"` at EP8: 60 / 60 -> 40 / 40 (with
+  `imbalance_comm_sms=None`, and with the default imbalance row while the
+  hottest rank's load is below its threshold; above it both versions take the
+  imbalance split); MXFP8 routed weights on a workspace created with
+  `precision="bf16"` at EP8: 40 / 40 -> 60 / 60 (two Rubin nodes needed).
 
 - Mini-batches are multiples of 256; macro-batches are multiples of the
   mini-batch. Schedule capacity must hold every padded route; overflow traps.
