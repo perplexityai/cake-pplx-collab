@@ -307,7 +307,7 @@ package's prefix.
 
 ## Registry
 
-118 records naming 105 programs.  The records of the
+126 records naming 115 programs.  The records of the
 deterministic package are copied under this package's prefix, with these
 changes:
 
@@ -340,7 +340,7 @@ the hand-off twins serve `"off"` alone; the raw class's
 `_raw_l2n` twins the l2n modes; the tape WY twin serves every mode (its
 stage `wy` is no l2n stage).
 
-`build.json` has 288 entries: 95 on `sm_100a`, 96 on `sm_103a` and 97 on
+`build.json` has 314 entries: 103 on `sm_100a`, 104 on `sm_103a` and 107 on
 `sm_107a`.
 
 ## Layout of this package

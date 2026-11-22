@@ -481,7 +481,7 @@ issue and priority forms selectable for the A/B record;
 
 The files of this package:
 
-* `cake_kcp_jit.py` -- the `MODULES` registry of the sixteen shipped programs (the
+* `cake_kcp_jit.py` -- the `MODULES` registry of the seventeen shipped programs (the
   fragment walks of the forward and backward state recurrences in their
   `offset` and `tape` forms, the BF16x3 transfer walk (two CTAs per segment
   and head, each over one 64-column half of the state), the affine
@@ -523,14 +523,15 @@ The files of this package:
   tests; without the file those tests skip.  The package reads no
   environment variable.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
-  package (byte-identical copies) and the manifest of the sixteen shipped
+  package (byte-identical copies) and the manifest of the seventeen shipped
   programs (schema `cake-build/1`, one entry per `<library>_<arch>`);
   `aot/` is never tracked (`.gitignore`).
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include.
 * `csrc/cake_kda_det_train_<digest>_kcp_{kernel,binding}.cu` of the twenty
-  context-parallel-only programs and `csrc/cake_kda_det_train_<digest>_{kernel,binding}.cu`
-  of the two chunk stages (`kcp_fwd_o`, `kcp_dav`), rendered like the
-  single-rank ones (digests in `build.json` and `build.test.json`).
+  context-parallel-only programs and of the chunk stages `kcp_fwd_o` and
+  `kcp_dav_l2n`, and `csrc/cake_kda_det_train_<digest>_{kernel,binding}.cu`
+  of the chunk stage `kcp_dav`, rendered like the single-rank ones (digests
+  in `build.json` and `build.test.json`).
 
 ## Determinism
 
@@ -565,7 +566,7 @@ packages.
 
 ## Status
 
-The registry holds sixteen shipped programs (`cake_kcp_jit.MODULES`, in
+The registry holds seventeen shipped programs (`cake_kcp_jit.MODULES`, in
 `build.json`) and six test-only programs (`cake_kcp_jit.TEST_MODULES`, in
 `build.test.json`) for `sm_100a`, `sm_103a` and `sm_107a`.
 
