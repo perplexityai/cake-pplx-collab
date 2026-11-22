@@ -2365,15 +2365,16 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     # timed against the stage it replaces on that part (148-SM sm_100a, 152-SM
     # sm_103a) and no row was slower: on the 148-SM sm_100a ``main_halves``
     # stage only the fused accumulate keeps the queue walk (a bfloat16 row
-    # there was slower than its stage).  A part with no rule here keeps its
-    # stage.
+    # there was slower than its stage), and its ``main_wave_halves`` stage
+    # keeps it up to 16 groups (a 32-group bfloat16 row there was slower).  A
+    # part with no rule here keeps its stage.
     "queue_walk": [
         {
             "arch": "sm_100a",
             "sm_counts": [148],
             "stage": "main_wave_halves",
             "outputs": ["bfloat16", "accumulate"],
-            "groups": [4, 32],
+            "groups": [4, 16],
         },
         {
             "arch": "sm_100a",

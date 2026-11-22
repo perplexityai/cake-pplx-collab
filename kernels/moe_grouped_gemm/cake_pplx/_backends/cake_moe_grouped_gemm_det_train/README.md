@@ -520,9 +520,10 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   the 148-SM `sm_100a` and 152-SM `sm_103a` parts, where the queue walk was
   timed against the stage it replaces and no row was slower; on the 148-SM
   `sm_100a` part the `main_halves` stage keeps it for the fused accumulate
-  only (a bfloat16 row there was slower). An `m_indptr` row table binds the
-  queue stage of the lead route (its `_lead` twin, with `m_begin`), as every
-  other stage.
+  only (a bfloat16 row there was slower), and the `main_wave_halves` stage
+  keeps it up to 16 groups (a 32-group bfloat16 row there was slower). An
+  `m_indptr` row table binds the queue stage of the lead route (its `_lead`
+  twin, with `m_begin`), as every other stage.
 - Weight-gradient k256 tail (`wgrad_k256_tail`): on the architectures listed
   in `k256_tail_archs`, when `K` (the columns of `dW[e]` and of `x`) is at
   most `k256_tail_max_k` and the groups average at least `k256_tail_min_rows`
