@@ -24,7 +24,8 @@ the context-free forward, FP32 weight-gradient accumulation, native MXFP8), the 
 scratch lifetime, and the router weight before the down projection through the adapter on SM100a, SM103a and
 SM107a: at EP1 and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and
 (8, 48) with top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow
-multiplier, the trap of a schedule past its capacity and the bytes of separate group launches.
+multiplier, the trap of a schedule past its capacity, the bytes of separate group launches and the bytes of the
+forward source split.
 Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case (the whole
 group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
@@ -268,3 +269,19 @@ def test_before_down_run_to_run(record_property, world, local_experts):
     launches = [run_ranks(world, workers.before_down_digests, local_experts) for _ in range(2)]
     assert launches[0] == launches[1]
     record_property("digests", launches[0])
+
+
+@pytest.mark.parametrize("world,local_experts", list(TOP6_LAYOUTS.values()), ids=list(TOP6_LAYOUTS))
+def test_before_down_source_split_bitwise(record_property, world, local_experts):
+    """The forward source split (``source_split_comm_sms``) on the requester's inputs at a 384-expert layout with one
+    or two source-rich ranks and an empty rank, over random routes, the placement mix and a full skew: each split
+    (several counts and thresholds, per-rank counts, a threshold no rank reaches) gives every rank the bytes of the
+    split off, in the context and the context-free forward, and a CUDA Graph captured with the split replays them
+    after new routes are loaded."""
+    _require_before_down(world)
+    results = run_ranks(world, workers.before_down_source_split, local_experts)
+    assert [r["case"] for r in results[0]] == [
+        f"bf16-clamped-before-down-source-split-{name}"
+        for name in ("random", "placement-mixed", "full-skew-last")
+    ]
+    record_property("rich_ranks", results[0][0]["rich"])

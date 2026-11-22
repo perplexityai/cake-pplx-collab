@@ -1646,3 +1646,95 @@ def before_down_digests(local_experts):
     torch.cuda.synchronize()
     dist.barrier()
     return out
+
+
+#: Source rows per rank of :func:`before_down_source_split` by group size: unaligned counts, an empty rank, and a group
+#: total whose full skew to the last rank's experts fits :func:`_skew_ids` (every expert's routes padded the most).
+SOURCE_SPLIT_COUNTS = {4: (2277, 300, 0, 1517), 8: (2277, 300, 0, 1025, 64, 1, 426, 1)}
+#: ``(name, rich_comm_sms(rank), source_split_threshold)`` of the forward source splits :func:`before_down_source_split`
+#: runs beside the split off (all below the workspace's 8 forward communication SMs); ``held`` sets a threshold no rank
+#: reaches.
+SOURCE_SPLITS = (
+    ("rich2", lambda rank: 2, 1.5),
+    ("rich4-low", lambda rank: 4, 1.1),
+    ("per-rank", lambda rank: 2 + 2 * (rank % 2), 1.25),
+    ("held", lambda rank: 2, 64.0),
+)
+
+
+def source_rich(counts, threshold):
+    """Per rank, whether the forward kernel's source split takes the rich count (host form of its rule): the rank's
+    shared rows (its source rows rounded up to 256, at least 256) less 256 exceed ``threshold`` (in 1/256 steps, as
+    the adapter rounds it) times the mean source rows of the group."""
+    total, ep, units = sum(counts), len(counts), round(threshold * 256)
+    return [total > 0 and (max(256, -(-n // 256) * 256) - 256) * ep * 256 > units * total for n in counts]
+
+
+def before_down_source_split(local_experts):
+    """The forward source split at a 384-expert layout on the requester's inputs (weights pinned at expert
+    :data:`R8_PINNED`): source rows :data:`SOURCE_SPLIT_COUNTS` (one or two source-rich ranks, an empty rank), the
+    random routes, the placement mix and the full skew to the last rank's experts.  Per routing, the step with the
+    split off, then each split of :data:`SOURCE_SPLITS` (the context forward, and the context-free forward with the
+    recompute): every output of every rank has the split-off bytes.  One step captured under CUDA Graph with the
+    ``rich2`` split and replayed after loading each routing's inputs (the kernel decides per launch from the replayed
+    schedule) gives the same bytes.  Returns per routing the ranks the host rule finds rich per split."""
+    _exact_matmul()
+    device = torch.device("cuda", torch.cuda.current_device())
+    rank, ep = dist.get_rank(), dist.get_world_size()
+    topk = kernels.BEFORE_DOWN_LAYOUTS[(ep, local_experts)]
+    counts = list(SOURCE_SPLIT_COUNTS[ep])
+    functional, config, workspace = _before_down_group(local_experts, counts)
+    off = dataclasses.replace(config, source_split_comm_sms=None, imbalance_comm_sms=None)
+    assert off.fwd_num_comm_sms == 8
+    splits = [
+        (name, dataclasses.replace(off, source_split_comm_sms=rich(rank), source_split_threshold=threshold), threshold)
+        for name, rich, threshold in SOURCE_SPLITS
+    ]
+    rich_ranks = {name: [r for r, hit in enumerate(source_rich(counts, t)) if hit] for name, _, t in splits}
+    assert all(rich_ranks[name] for name, _, _ in SOURCE_SPLITS if name != "held"), rich_ranks
+    assert not rich_ranks["held"], rich_ranks
+    shared, _, routed = _r8_weights(
+        ep, local_experts, BEFORE_DOWN_HIDDEN, BEFORE_DOWN_INTERMEDIATE, device, R8_PINNED
+    )
+    weights = (*shared, *routed)
+    accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+    torch.manual_seed(8571)
+    routings = (
+        ("random", None),
+        ("placement-mixed", _placement_ids(counts, ep, local_experts, topk, device)),
+        ("full-skew-last", _skew_ids(counts, local_experts, topk, ep - 1, device)[0]),
+    )
+    graph, records = None, []
+    for index, (name, ids) in enumerate(routings):
+        torch.manual_seed(8581 + index)
+        data = _r8_data(counts, BEFORE_DOWN_HIDDEN, topk, ep * local_experts, device, ids=ids)
+        x, local_ids, scores, dy = _section(data, counts)
+
+        def iteration(cfg, recompute=False, save_context=True, x=x, ids=local_ids, scores=scores, dy=dy):
+            return TrainingIteration(
+                cfg, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=R8_LIMIT,
+                accumulators=accumulators, recompute=recompute, save_context=save_context,
+            )  # fmt: skip
+
+        outputs = _snapshot(iteration(off).run())
+        _contract(outputs, counts[rank], BEFORE_DOWN_HIDDEN, topk)
+        dist.barrier()
+        for split, cfg, _ in splits:
+            for recompute, save_context in ((False, True), (True, False)):
+                values = _snapshot(iteration(cfg, recompute, save_context).run())
+                differs = [n for n, a, b in zip(RESULT_NAMES, outputs, values, strict=True) if not torch.equal(a, b)]
+                assert not differs, (rank, name, split, "context-free" if recompute else "context", differs)
+            dist.barrier()
+        if graph is None:
+            graph = iteration(splits[0][1])
+            graph.capture()
+        else:
+            _load(graph, data, counts)
+        replays = [_snapshot(graph.run()) for _ in range(2)]
+        assert all(_same(outputs, other) for other in replays), (rank, name, "graph replay")
+        dist.barrier()
+        records.append(dict(case=f"bf16-clamped-before-down-source-split-{name}", counts=counts, rich=rich_ranks))
+    del graph
+    torch.cuda.synchronize()
+    dist.barrier()
+    return records

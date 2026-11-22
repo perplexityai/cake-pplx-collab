@@ -636,6 +636,64 @@ def _check_weight_ptrs(weight_before_down, weight_ptrs, x_ptrs):
         )
 
 
+# The source split's threshold unit: ``rich_threshold`` counts 1/256 steps of
+# the source-row ratio (384 = 1.5).
+SOURCE_SPLIT_UNIT = 256
+
+
+def _source_split_arguments(
+    comm_sms, ep_size, source_split, owner_routes=None, stand_in=None
+):
+    """The source-split kernel arguments of a router-weight-before-down
+    forward launch: ``ep_size``, ``rich_comm_sms`` and ``rich_threshold``, and
+    ``owner_routes`` when ``stand_in`` is given (an unplanned launch).
+    ``source_split`` is ``(rich_comm_sms, rich_threshold)``: an even count in
+    ``[2, comm_sms]`` and a threshold in 1/256 steps above 256. ``None``, or no
+    ``owner_routes`` on an unplanned launch, keeps ``comm_sms``: the kernel then
+    reads no route total, so ``stand_in`` takes their place. ``owner_routes``,
+    when given, is the schedule's int32 ``[ep_size]`` route totals."""
+    rich_comm_sms, rich_threshold = (
+        (comm_sms, 3 * SOURCE_SPLIT_UNIT // 2)
+        if source_split is None
+        else source_split
+    )
+    if (
+        type(rich_comm_sms) is not int
+        or type(rich_threshold) is not int
+        or rich_comm_sms <= 0
+        or rich_comm_sms % 2
+        or rich_comm_sms > comm_sms
+        or not SOURCE_SPLIT_UNIT < rich_threshold < 2**31
+    ):
+        raise ValueError(
+            "source_split must be an even communication-SM count no larger than "
+            "comm_sms and a threshold above 256 (1/256 steps)"
+        )
+    if owner_routes is not None:
+        _check_owner_routes(owner_routes, ep_size)
+    elif stand_in is not None:
+        rich_comm_sms = comm_sms
+    arguments = dict(
+        ep_size=ep_size, rich_comm_sms=rich_comm_sms, rich_threshold=rich_threshold
+    )
+    if stand_in is not None:
+        arguments["owner_routes"] = stand_in if owner_routes is None else owner_routes
+    return arguments
+
+
+def _check_owner_routes(owner_routes, ep_size):
+    import torch
+
+    if (
+        not isinstance(owner_routes, torch.Tensor)
+        or owner_routes.dtype != torch.int32
+        or owner_routes.numel() != ep_size
+    ):
+        raise ValueError(
+            "owner_routes must be the schedule's int32 [ep_size] route totals"
+        )
+
+
 class MoKForward:
     """Low-level native-signature BF16 forward; caller owns peer barriers.
 
@@ -658,7 +716,13 @@ class MoKForward:
     pointer per rank) into a per-call ``[macro_size]`` FP32 ring, the routed
     hidden is ``BF16(w * a)`` (``a`` the SwiGLU output) and the combine rows
     are the down projections of that hidden: the weighted routed outputs, to
-    be summed unweighted.
+    be summed unweighted. Its kernel also splits the SMs per launch by the
+    source rows (``source_split=(rich_comm_sms, rich_threshold)``,
+    :func:`_source_split_arguments`): a rank whose source rows exceed
+    ``rich_threshold / 256`` times the ranks' mean, which it reads from the
+    schedule's owner-rank route totals ``owner_routes``, runs
+    ``rich_comm_sms`` communication SMs instead of ``comm_sms``; no output
+    bit depends on the count.
     """
 
     def __init__(self, clamped=False, context=True, weight_before_down=False):
@@ -709,6 +773,8 @@ class MoKForward:
         *,
         layout=None,
         weight_ptrs=None,
+        owner_routes=None,
+        source_split=None,
     ):
         import torch
 
@@ -741,6 +807,14 @@ class MoKForward:
                 row_weights=torch.empty(
                     macro_size, dtype=torch.float32, device=x.device
                 ),
+                **_source_split_arguments(
+                    comm_sms, len(x_ptrs), source_split, owner_routes, num_tokens
+                ),
+            )
+        elif source_split is not None or owner_routes is not None:
+            raise ValueError(
+                "source_split and owner_routes are read only by the "
+                "router-weight-before-down forward"
             )
         options = dict(device=x.device, dtype=torch.bfloat16)
         x_routed = torch.empty((macro_size, hidden), **options)
@@ -856,6 +930,7 @@ class MoKForward:
         mini_size,
         *,
         weight_ptrs=None,
+        source_split=None,
     ):
         """Validated launch plan for one geometry, split and SwiGLU variant.
 
@@ -867,6 +942,9 @@ class MoKForward:
         checks as ``__call__`` run here, once. ``weight_ptrs``: as in
         ``__call__`` (router-weight-before-down only); the per-call FP32
         ``row_weights`` ring is allocated by :meth:`launch_planned`.
+        ``source_split``: as in ``__call__``, bound into the plan; the
+        schedule's ``owner_routes`` are a per-call argument of
+        :meth:`launch_planned`.
         """
         import torch
 
@@ -904,10 +982,20 @@ class MoKForward:
         slab, (x_ready, hidden_ready, y_ready, y_done) = _counter_slab(
             x.device, g.minis, g.shared_rows + g.routed_rows, g.minis, capacity // 128
         )
-        router_weight = {}
+        router_weight, split_ranks = {}, None
         if self.weight_before_down:
             (router_weight["weight_peers"],) = _peer_table(
                 self._peer_tables, x.device, weight_ptrs
+            )
+            router_weight.update(
+                _source_split_arguments(comm_sms, len(x_ptrs), source_split)
+            )
+            if router_weight["rich_comm_sms"] < comm_sms:
+                # Each launch of this plan reads the route totals.
+                split_ranks = len(x_ptrs)
+        elif source_split is not None:
+            raise ValueError(
+                "source_split is read only by the router-weight-before-down forward"
             )
         return _Plan(
             self.module,
@@ -955,7 +1043,7 @@ class MoKForward:
                 "schedule_token",
                 "num_tokens",
                 "counts",
-                *(("row_weights",) if self.weight_before_down else ()),
+                *(("row_weights", "owner_routes") if self.weight_before_down else ()),
             ),
             slab=slab,
             extra=(
@@ -966,6 +1054,7 @@ class MoKForward:
                 3 * experts + capacity // 256,
                 self.context,
                 macro_size if self.weight_before_down else None,
+                split_ranks,
             ),
         )
 
@@ -982,12 +1071,16 @@ class MoKForward:
         peer_token,
         num_tokens,
         layout,
+        owner_routes=None,
     ):
         """Launch a :meth:`plan` on the current stream; returns the nine
         outputs of ``__call__`` (``None`` in the four gate/up places for a
         context-free launcher). The caller resets ``plan.slab`` on this
         stream before the launch, validated the weights against the plan's
-        geometry and runs this inside ``_ffi_stream()``."""
+        geometry and runs this inside ``_ffi_stream()``. ``owner_routes``:
+        the schedule's owner-rank route totals, required by a before-down plan
+        with the source split (``rich_comm_sms`` below ``comm_sms``), which
+        reads them; otherwise unread (``num_tokens`` stands in)."""
         import torch
 
         (
@@ -998,9 +1091,12 @@ class MoKForward:
             layout_numel,
             context,
             weight_ring,
+            split_ranks,
         ) = plan.extra
         if layout.numel() != layout_numel:
             raise ValueError("layout does not match the schedule geometry")
+        if split_ranks is not None:
+            _check_owner_routes(owner_routes, split_ranks)
         x_routed = x.new_empty(routed_rows)
         if context:
             gate_shared = x.new_empty(shared_shape)
@@ -1021,7 +1117,10 @@ class MoKForward:
         row_weights = (
             ()
             if weight_ring is None
-            else (x.new_empty((weight_ring,), dtype=torch.float32),)
+            else (
+                x.new_empty((weight_ring,), dtype=torch.float32),
+                num_tokens if owner_routes is None else owner_routes,
+            )
         )
         plan.launch(
             (

@@ -48,9 +48,12 @@ RE_EXPORTS = (
     "IMBALANCE_THRESHOLDS",
     "MOK_PRECISIONS",
     "ROUTER_WEIGHT_POSITIONS",
+    "SOURCE_SPLIT_COMM_SMS",
+    "SOURCE_SPLIT_THRESHOLD",
     "resolve_comm_sms",
     "resolve_imbalance_comm_sms",
     "resolve_imbalance_threshold",
+    "resolve_source_split_comm_sms",
 )
 
 
@@ -96,6 +99,8 @@ def test_argument_errors_of_the_package_surface_unchanged():
         mok.create_mok_bf16_workspace(imbalance_threshold="fast", **kwargs)
     with pytest.raises(ValueError, match="pair"):
         mok.create_mok_bf16_workspace(imbalance_comm_sms=(24,), **kwargs)
+    with pytest.raises(ValueError, match='"auto"'):
+        mok.create_mok_bf16_workspace(source_split_comm_sms="fast", **kwargs)
     with pytest.raises(ValueError, match="precision must be one of"):
         mok.create_mok_bf16_workspace(precision="fp8", **kwargs)
     with pytest.raises(ValueError, match='both be "auto"'):
