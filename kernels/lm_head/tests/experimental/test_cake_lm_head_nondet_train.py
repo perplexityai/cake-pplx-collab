@@ -2323,11 +2323,12 @@ def _check_logprob_graph_rlab(glm_weight, cases, dz_entries, *, temperature=Fals
         if temperature
         else cake_jit.registered_stages(name)
     )
-    arm = bool(cake_backend.logprob_dz_default()) and (
+    dz_stage = (
         cake_backend.LOGPROB_DZ_TAU_STAGE
         if temperature
         else cake_backend.LOGPROB_DZ_STAGE
-    ) in registered
+    )
+    arm = bool(cake_backend.logprob_dz_default()) and dz_stage in registered
     ran_dz = []
     for entry, T, chunk, compact in cases:
         case = (entry.__name__, T, chunk, compact)
