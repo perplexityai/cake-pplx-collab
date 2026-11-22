@@ -4474,6 +4474,19 @@ def _keyed(rule):
     return any(isinstance(rule.get(key), dict) for key in (CUT, STRIDED_CUT))
 
 
+def _computes_grid(rule, arch):
+    """Whether ``run_module`` computes the grid of a forward of ``rule`` on
+    ``arch`` itself, with no call of ``launch_grid``: the rule has a cut of
+    rows read as packed, and each of its cuts is keyed by architecture, with
+    ``arch`` among the keys.  A rule without that cut, a cut of one number,
+    or one keyed without ``arch``, takes ``launch_grid``."""
+    return CUT in rule and all(
+        isinstance(rule[key], dict) and arch in rule[key]
+        for key in (CUT, STRIDED_CUT)
+        if key in rule
+    )
+
+
 def _host_launches(patch, device):
     """Patch the registry so that ``run_module`` runs no kernel: each launch
     appends ``(name, grid)`` (``_launched_grid``) to the returned list, on a
@@ -4494,6 +4507,21 @@ def _host_launches(patch, device):
         SimpleNamespace(use_raw_stream=lambda *_: contextlib.nullcontext()),
     )
     return launched
+
+
+def _launch_grid_calls(patch):
+    """Patch the registry's ``launch_grid`` so that each call adds one to the
+    returned one-item list, then gives its grid (or raises its
+    ``ValueError``)."""
+    calls = [0]
+    launch_grid = loader.launch_grid
+
+    def spy(*args, **kwargs):
+        calls[0] += 1
+        return launch_grid(*args, **kwargs)
+
+    patch.setattr(loader, "launch_grid", spy)
+    return calls
 
 
 def _host_grid_rows(rule, arch, sm_count):
@@ -4558,29 +4586,38 @@ def _grid_or_raised(record, rows, sm_count, arch, packed):
         return ValueError, str(error)
 
 
-def _check_host_grids(launched, device, name, layouts):
+def _check_host_grids(launched, calls, device, name, layouts):
     """``run_module``'s grid (or ``ValueError``) of module ``name`` is
     ``launch_grid``'s, with ``packed`` ``forward_packed`` of the strides,
     for each of ``layouts`` (``FORWARD_PACKED_STRIDES``), on each of
     ``HOST_GRID_ARCHES`` and ``HOST_GRID_SM_COUNTS`` at ``_host_grid_rows`` of
-    its rule as it is now.  Returns ``(raised, differ)``: whether some call raised
-    ``ValueError``, and the architectures on which the grids of rows read as
-    packed and of other rows differ at some row count."""
+    its rule as it is now; each ``run_module`` call calls ``launch_grid``
+    (``calls``: ``_launch_grid_calls``'s list) never where it computes a
+    forward's grid itself (``_computes_grid``), else once.  Returns ``(raised,
+    differ)``: whether some call raised ``ValueError``, and the architectures
+    on which the grids of rows read as packed and of other rows differ at some
+    row count."""
     record = loader.MODULES[name]
+    rule = record["grid_rule"]
+    forward = rule["kind"] == "persistent_row_blocks"
     raised, differ = False, set()
     for arch in HOST_GRID_ARCHES:
+        want_calls = 0 if forward and _computes_grid(rule, arch) else 1
         for sm_count in HOST_GRID_SM_COUNTS:
             device[:] = (sm_count, arch)
-            for rows in _host_grid_rows(record["grid_rule"], arch, sm_count):
+            for rows in _host_grid_rows(rule, arch, sm_count):
                 grids = {}
                 for layout in layouts:
                     strides = FORWARD_PACKED_STRIDES[layout][0]
                     packed = loader.forward_packed(*strides)
                     values = _host_values(record, strides)
+                    before = calls[0]
                     got = _launched_or_raised(launched, name, values, rows)
+                    made = calls[0] - before
                     want = _grid_or_raised(record, rows, sm_count, arch, packed)
                     what = (name, arch, sm_count, rows, layout)
                     assert got == want, (*what, got, want)
+                    assert made == want_calls, (*what, made, want_calls)
                     if want[0] is ValueError:
                         raised = True
                     else:
@@ -4602,18 +4639,24 @@ def test_run_module_launches_the_grids_of_launch_grid():
     ``ValueError`` where it does.  Every forward record raises it on an
     architecture its cuts do not key, and on each of its architectures the
     grids of the two readings differ at some row count where its rule has a
-    cut of rows not read as packed."""
+    cut of rows not read as packed.  ``run_module`` calls ``launch_grid``
+    never for a forward record on its own architectures (``_computes_grid``),
+    and once for one on an architecture its cuts do not key and for a record
+    of every other grid kind."""
     forwards = _forward_names()
     assert all(_keyed(loader.MODULES[name]["grid_rule"]) for name in forwards)
     device = [0, ""]
     with pytest.MonkeyPatch.context() as patch:
         launched = _host_launches(patch, device)
+        calls = _launch_grid_calls(patch)
         for name, record in loader.MODULES.items():
             if name in forwards:
                 layouts = tuple(FORWARD_PACKED_STRIDES)
+                for arch in record["arches"]:
+                    assert _computes_grid(record["grid_rule"], arch), (name, arch)
             else:
                 layouts = ("contiguous", "projection")
-            raised, differ = _check_host_grids(launched, device, name, layouts)
+            raised, differ = _check_host_grids(launched, calls, device, name, layouts)
             assert raised is _keyed(record["grid_rule"]), (name, raised)
             if name in forwards and STRIDED_CUT in record["grid_rule"]:
                 assert differ == set(record["arches"]), (name, differ)
@@ -4673,10 +4716,14 @@ def test_run_module_reads_the_forward_rule_at_each_call():
     then restored): ``run_module``'s grid at the next call is
     ``launch_grid``'s for the changed rule, or its ``ValueError``, on every
     architecture of ``HOST_GRID_ARCHES`` and ``HOST_GRID_SM_COUNTS`` SMs, at
-    ``_host_grid_rows`` of the changed rule, for ``VARIANT_LAYOUTS``."""
+    ``_host_grid_rows`` of the changed rule, for ``VARIANT_LAYOUTS``; it calls
+    ``launch_grid`` once where ``_computes_grid`` does not hold for the
+    changed rule (a cut of one number, or one keyed without the
+    architecture), else never."""
     device = [0, ""]
     with pytest.MonkeyPatch.context() as patch:
         launched = _host_launches(patch, device)
+        calls = _launch_grid_calls(patch)
         for name in _forward_names():
             record = loader.MODULES[name]
             rule = record["grid_rule"]
@@ -4688,10 +4735,12 @@ def test_run_module_reads_the_forward_rule_at_each_call():
                         else:
                             change.setitem(rule, key, cut)
                     raised, _ = _check_host_grids(
-                        launched, device, name, VARIANT_LAYOUTS
+                        launched, calls, device, name, VARIANT_LAYOUTS
                     )
                     assert raised is _keyed(rule), (name, variant, raised)
-            raised, _ = _check_host_grids(launched, device, name, VARIANT_LAYOUTS)
+            raised, _ = _check_host_grids(
+                launched, calls, device, name, VARIANT_LAYOUTS
+            )
             assert raised is _keyed(rule), (name, raised)
 
 
