@@ -117,7 +117,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dw_part"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "dq"], ["buffer", "dk"], ["parameter", "NP"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_engram_gate_train_eec3759c50f56c38622b",
+        "kernel_symbol": "kernel_cake_engram_gate_train_86e6b25d037311a56d45",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -125,7 +125,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 4096,
             "use_pdl": False,
         },
-        "library": "cake_engram_gate_train_eec3759c50f56c38622b",
+        "library": "cake_engram_gate_train_86e6b25d037311a56d45",
         "stage": "dw_reduce",
     },
     "fwd_dot2": {
