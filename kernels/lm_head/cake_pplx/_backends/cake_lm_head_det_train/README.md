@@ -87,19 +87,23 @@ keyword.
   counted `dz` arm of the zero-gradient skip only the rows under its count.
   A fold (the slab sum, the dX cast's fold programs, below) adds a row's
   residual only when the row's label lies in `[0, V)` and the residual is
-  nonzero.  So on a plan that is not counted and whose chunks tile the rows,
-  every row a fold reads holds the call's own residual, and the other rows
-  are never folded: such a call runs no zero fill of `rlab`.  When a `dz`
-  arm is among its producers, a prepared runner zeroes its `rlab` once, when
-  it is prepared (a row the arm does not store then keeps that zero or an
-  earlier step's residual), and a remembered binding allocates each call's
-  `rlab` zero-filled (one fill at its creation: a fold loads a row's
-  residual before its label test); a log-probability autograd graph holds
-  one `rlab` that every backward of the graph binds as it is.  A counted
-  plan (its `dz` arm counted) and a plan whose chunks do not tile the rows
-  start every call from a zeroed `rlab`: a host step zeroes it before the
-  first producer (a remembered binding allocates it zero-filled instead),
-  so a row the producers leave reads 0.  The forward takes no buffer: the first backward
+  nonzero.  A counted plan is one of the zero-gradient skip (`Plan.dcnt`), its
+  mixed temperature plan included, whose `dz` arm is uncounted but whose skip
+  orders the rows per call.  So on a plan that is not counted and whose chunks
+  tile the rows, every row a fold reads holds the call's own residual, and the
+  other rows are never folded: such a call runs no zero fill of `rlab`.  When
+  a `dz` arm is among the producers of a call that computes `dX`, a prepared
+  runner zeroes its `rlab` once, when it is prepared (a row the arm does not
+  store then keeps that zero or an earlier step's residual), and a remembered
+  binding allocates each call's `rlab` zero-filled (one fill at its creation:
+  a fold loads a row's residual before its label test); a runner or a binding
+  call without `dX` leaves its own `rlab` unfilled (no fold reads it); a
+  log-probability autograd graph holds one `rlab` that every backward of the
+  graph binds as it is.  A counted plan and a plan whose chunks do not tile
+  the rows start every call that computes `dX` from a zeroed `rlab`: a host
+  step zeroes it before the first producer (a remembered binding allocates
+  it zero-filled instead), so a row the producers leave reads 0.  The
+  forward takes no buffer: the first backward
   that binds the graph's `rlab` takes one from a free list of the caller's
   stream (a buffer the list does not hold is zero-filled once, when it is
   requested; a buffer from the list is bound as an earlier graph left it,
