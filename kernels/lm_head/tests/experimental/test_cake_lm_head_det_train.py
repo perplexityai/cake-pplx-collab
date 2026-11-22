@@ -9934,26 +9934,76 @@ def test_device_logprob_graph_rlab(glm_weight):
     stores every row (+0 on those).  Every later backward of a retained graph binds that tensor (no allocation, no zero
     fill, no ``rlab_zero`` host step in the remembered sequences).  dX / dW of four backwards (two ``dlogp`` draws)
     equal those of the same backwards whose bindings allocate their own zero-filled ``rlab`` (``node.rlab = None``)
-    bit for bit -- the default form (one chunk and two, compacted and not), the kept form and the opt-in module's
+    bit for bit -- the default form (one chunk, two and six, compacted and not), the kept form and the opt-in module's
     automatic form (its one-chunk kept logits); a held tensor with NaN on its rows with a label column is bound and
-    every such row is stored again; one with NaN on every other row is bound as it is and gives the same bits."""
+    every such row is stored again; one with NaN on every other row is bound as it is and gives the same bits.  The
+    default form's backwards run the ``dz`` arm where the program registers it, and none takes the hidden valid-row
+    count: the Function hands its forward's row index to the backward, also on a compacted call of six chunks, whose
+    forward may count on the device (``_check_logprob_graph_rlab``)."""
     _require_program(entry="logprob")
-    V = int(glm_weight.shape[0])
-    edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
     default = cake_backend.cake_lm_head_det_train_logprob
     keep = cake_backend.cake_lm_head_det_train_logprob_keep
     # the automatic memory form: here its one-chunk kept logits
     auto = opt_in.cake_lm_head_det_train_logprob
-    # (entry, T, chunk_size, compact): T = 1500 stays below the zero-gradient row skip's floor; 768-row chunks: two
+    # (entry, T, chunk_size, compact): T = 1500 stays below the zero-gradient row skip's floor; 768-row chunks: two;
+    # 256-row chunks: six
     cases = (
         (default, 1500, 4096, True),
         (default, 1500, 4096, False),
         (default, 1500, 768, True),
         (default, 1500, 768, False),
+        (default, 1500, 256, True),
+        (default, 1500, 256, False),
         (keep, 256, 4096, True),
         (keep, 256, 4096, False),
         (auto, 1500, 4096, True),
     )
+    _check_logprob_graph_rlab(glm_weight, cases, (default,))
+
+
+def test_device_logprob_temperature_graph_rlab(glm_weight):
+    """``test_device_logprob_graph_rlab`` of the temperature Function (``cake_lm_head_det_train_logprob_temperature``
+    with a per-row temperature; its remembered backward is a ``_TemperatureBinding``): the first backward binds a
+    free-list buffer left with NaN on every row and fills none of it; its ``dz`` arm (``gemm_logits_dz_tau``) stores
+    the rows whose label lies in the head, and every other row keeps its NaN; every later backward of the retained graph
+    binds the held tensor unfilled -- NaN on the rows with a label column, then on every row -- and dX / dW equal those
+    of the backwards that allocate their own zero-filled ``rlab``, bit for bit (one chunk, two and six, compacted and
+    not)."""
+    _require_tau_program()
+
+    def tau(X, W, labels, **kw):
+        return cake_backend.cake_lm_head_det_train_logprob_temperature(
+            X, W, labels, **kw
+        )
+
+    cases = tuple(
+        (tau, 1500, chunk, compact)
+        for chunk in (4096, 768, 256)
+        for compact in (True, False)
+    )
+    _check_logprob_graph_rlab(glm_weight, cases, (tau,), temperature=True)
+
+
+def _check_logprob_graph_rlab(glm_weight, cases, dz_entries, *, temperature=False):
+    """The body of the graph label-residual tests (``test_device_logprob_graph_rlab``,
+    ``test_device_logprob_temperature_graph_rlab``) over ``cases`` ``(entry, T, chunk_size, compact)``.  The
+    backwards of an entry in ``dz_entries`` (a Function that is not a kept-logits one) run the ``dz`` arm exactly
+    when the program registers it and ``logprob_dz`` is on, and at least one case runs it then.  ``temperature``:
+    every call takes a per-row temperature (``temperature=`` of the entry)."""
+    V = int(glm_weight.shape[0])
+    edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
+    name, _ = cake_backend.record_for(CUDA)
+    registered = (
+        cake_jit.registered_stages_with_temperature(name)
+        if temperature
+        else cake_jit.registered_stages(name)
+    )
+    arm = bool(cake_backend.logprob_dz_default()) and (
+        cake_backend.LOGPROB_DZ_TAU_STAGE
+        if temperature
+        else cake_backend.LOGPROB_DZ_STAGE
+    ) in registered
+    ran_dz = []
 
     def same(a, b):
         return (
@@ -9965,8 +10015,14 @@ def test_device_logprob_graph_rlab(glm_weight):
     for entry, T, chunk, compact in cases:
         case = (entry.__name__, T, chunk, compact)
         inp = make_inputs(
-            T, seed=SEED + 67 + T, device=CUDA, W=glm_weight, ignore_frac=0.05
+            T,
+            seed=SEED + 67 + T,
+            device=CUDA,
+            W=glm_weight,
+            ignore_frac=0.05,
+            **({"temperature": "hetero"} if temperature else {}),
         )
+        extra = {"temperature": inp.temperature} if temperature else {}
         labels = inp.labels.clone()
         labels[: edge.numel()] = edge
         dlogps = (inp.dlogp, inp.dlogp.flip(0) * 2.0) * 2
@@ -9980,7 +10036,9 @@ def test_device_logprob_graph_rlab(glm_weight):
                 gc.collect()
                 X = inp.X.detach().requires_grad_(True)
                 W = inp.W.detach().requires_grad_(True)
-                lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact)
+                lp = entry(
+                    X, W, labels, chunk_size=chunk, compact_rows=compact, **extra
+                )
                 lp.backward(dlogps[0])
                 del X, W, lp
                 gc.collect()
@@ -9990,7 +10048,7 @@ def test_device_logprob_graph_rlab(glm_weight):
                     e[3].fill_(float("nan"))
             X = inp.X.detach().requires_grad_(True)
             W = inp.W.detach().requires_grad_(True)
-            lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact)
+            lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact, **extra)
             node = _graph_rlab_node(lp)
             # the Function's kind: a kept-logits Function stores every row through row_grad
             kind = type(node).__name__
@@ -10047,16 +10105,16 @@ def test_device_logprob_graph_rlab(glm_weight):
             out[own] = grads
             del lp, node, holder
             if own:
-                # the default Function's backward recomputes through the dz arm where the program registers it (the
-                # remembered backward bindings' sequences); the kept-logits Functions' row_grad stores every row (the
-                # small call's staged rows included)
+                # the default (and temperature) Function's backward recomputes through the dz arm where the program
+                # registers it (the remembered backward bindings' sequences); the kept-logits Functions' row_grad
+                # stores every row (the small call's staged rows included)
                 backward = [
                     b
                     for key, b in cake_backend.BINDING_CACHE._bindings.items()
                     if key[0] == "bwd"
                 ]
                 dz = (
-                    entry is default
+                    entry in dz_entries
                     and "Keep" not in kind
                     and any(
                         k[0] in cake_backend.DZ_PRODUCER_STAGES and k[0] != "row_grad"
@@ -10064,17 +10122,157 @@ def test_device_logprob_graph_rlab(glm_weight):
                         for k in b.backward_order
                     )
                 )
-        bindings = list(cake_backend.BINDING_CACHE._bindings.values())
+                if entry in dz_entries and "Keep" not in kind:
+                    # the dz arm runs wherever the program registers it (else the row_grad model is checked)
+                    assert dz == arm, (case, kind)
+                ran_dz.append(dz)
+        bindings = list(cake_backend.BINDING_CACHE._bindings.items())
         assert bindings, case
-        for b in bindings:
+        for key, b in bindings:
             assert not any(
                 k[0] == cake_backend.RLAB_ZERO_STAGE
                 for k in b.forward_order + b.backward_order
             ), case
+            # the backward reuses the forward's row index: never the hidden valid-row count (whose chunk 0 runs
+            # row_grad, +0 on the rows without a label column), on a compacted call of six chunks too
+            assert key[0] != "bwd" or not b.plan.hidden_count, case
         ref = out[True] + [out[True][0], out[True][0]]
         assert len(out[False]) == len(ref), case
         for i, (got, want) in enumerate(zip(out[False], ref)):
             assert same(got[0], want[0]) and same(got[1], want[1]), (case, i)
+    assert any(ran_dz) == arm, ran_dz
+
+
+def test_device_logprob_recount_hidden_rlab(glm_weight, monkeypatch):
+    """The log-probability backward that recounts its valid rows (``backward_logprob`` without the forward's row index)
+    takes the hidden valid-row count on a compacted call of ``HIDDEN_COUNT_MIN_CHUNKS`` chunks or more: chunk 0's
+    recompute is the queued device-count GEMM and its ``row_grad`` stores every row of the chunk (+0 on a row
+    without a label column), the later chunks' ``dz`` arm stores the rows whose label lies in the head.  The plan is
+    not counted and its chunks tile the rows, so it has no ``rlab_zero`` step, and its remembered binding allocates
+    each call's ``rlab`` zero-filled (``_rlab_fresh_zero``).  No held buffer reaches this path: the autograd
+    Functions hand their forward's row index to the backward (``test_device_logprob_graph_rlab``) and a prepared
+    runner never takes the hidden count.  With that ``rlab`` NaN on every row, or holding the residuals a call of
+    other labels left, dX / dW equal those of the zero-filled call bit for bit (the deterministic chunk loop), and
+    the zero-filled call equals the call on the host count; afterwards every row of chunk 0 and every row whose
+    label lies in the head holds a finite residual (+0 on chunk 0's rows without a label column) and every other row
+    keeps what it held."""
+    _require_program(entry="logprob")
+    be = cake_backend
+    V = int(glm_weight.shape[0])
+    T, chunk = 1500, 256
+    inp = make_inputs(T, seed=SEED + 79, device=CUDA, W=glm_weight, ignore_frac=0.05)
+    labels = inp.labels.clone()
+    labels[:7] = torch.tensor([-1, -100, V, V + 5, 2 * V, 0, V - 1], device=CUDA)
+    # labels past the head in later chunks: the dz arm stores nothing there
+    labels[700:708] = V + 3
+    labels[1300:1304] = 2 * V
+    # the labels of an earlier call: the same valid-row count, the labels past the head in other rows
+    other = labels.roll(37)
+    lse = {
+        key: be.forward_logprob(
+            inp.X, inp.W, y, chunk_size=chunk, compact_rows=True
+        ).lse
+        for key, y in (("labels", labels), ("other", other))
+    }
+    name, record = be.record_for(CUDA)
+    stages = be.registered_stages(name)
+    # the toolchain and the program run the hidden count (``hidden_count_eligible``); else the host count's plan
+    hidden = (
+        be.toolchain_runs_hidden_count(record["arch"])
+        and be.HIDDEN_COUNT_STAGE in stages
+        and be.stage_variant("gemm_logits_nostats", count=True) in stages
+    )
+    seen, fill = [], [None]
+    real = be._Binding._call_rlab
+
+    def call_rlab(self, zero, graph=None, filled=False):
+        rlab, hand = real(self, zero, graph, filled)
+        seen.append((self, zero, graph, rlab))
+        if fill[0] is not None:
+            # the call's own rlab, zero-filled where it is allocated: now NaN, or an earlier call's residuals
+            assert zero and graph is None and not hand
+            assert int(torch.count_nonzero(rlab)) == 0
+            if isinstance(fill[0], torch.Tensor):
+                rlab.copy_(fill[0])
+            else:
+                rlab.fill_(fill[0])
+        return rlab, hand
+
+    monkeypatch.setattr(be._Binding, "_call_rlab", call_rlab)
+
+    def run(y, key, dlogp, value=None, **kw):
+        del seen[:]
+        fill[0] = value
+        try:
+            dx, dw = be.backward_logprob(
+                inp.X,
+                inp.W,
+                y,
+                lse[key],
+                dlogp,
+                chunk_size=chunk,
+                compact_rows=True,
+                **kw,
+            )
+            torch.cuda.synchronize()
+        finally:
+            fill[0] = None
+        return dx, dw, list(seen)
+
+    def same(a, b):
+        return (
+            a.dtype == b.dtype
+            and a.shape == b.shape
+            and torch.equal(_bits(a), _bits(b))
+        )
+
+    be.BINDING_CACHE.clear()
+    for attempt in range(2):  # a binding-cache miss, then a hit
+        dx0, dw0, calls = run(labels, "labels", inp.dlogp)
+        if not calls and attempt == 0 and not hidden:
+            continue  # the host count's first call runs the runner's own path
+        assert len(calls) == 1, (attempt, len(calls))
+        b, zero, graph, _ = calls[0]
+        plan = b.plan
+        assert plan.hidden_count is hidden and plan.compact and not plan.dcnt, attempt
+        assert plan.num_chunks >= be.HIDDEN_COUNT_MIN_CHUNKS, plan.chunks
+        assert be._chunks_tile_rows(plan) and zero and graph is None, attempt
+        keys = b.forward_order + b.backward_order
+        assert (be.RLAB_ZERO_STAGE, None) not in keys, keys
+        assert any(
+            k[0] in be.DZ_PRODUCER_STAGES and k[0] != "row_grad" and k[1] != 0
+            for k in b.backward_order
+        ), b.backward_order
+        assert (("row_grad", 0) in b.backward_order) is hidden, b.backward_order
+    # the host count: the same bits
+    dxh, dwh, _ = run(labels, "labels", inp.dlogp, hidden_count=False)
+    assert same(dxh, dx0) and same(dwh, dw0)
+    # the call's rows: compacted; chunk 0's (row_grad on the hidden count) and those whose label lies in the head
+    y = labels[be.valid_row_index(labels)]
+    live = (y >= 0) & (y < V)
+    first = torch.zeros_like(live)
+    if hidden:
+        first[: int(plan.chunks[0][1])] = True
+    left = ~live & ~first
+    assert bool(left.any()) and bool((first & ~live).any()) is hidden
+    stored = live | first
+    # NaN on every row before the producers
+    dx1, dw1, calls = run(labels, "labels", inp.dlogp, float("nan"))
+    rlab = calls[0][3]
+    assert same(dx1, dx0) and same(dw1, dw0)
+    assert bool(torch.isfinite(rlab[stored]).all())
+    assert bool((_bits(rlab)[first & ~live] == 0).all())
+    assert bool(torch.isnan(rlab[left]).all())
+    # the residuals of a call of other labels (its rows past the head lie elsewhere)
+    _, _, calls = run(other, "other", inp.dlogp.flip(0) * 2.0)
+    stale = calls[0][3].clone()
+    assert stale.shape == rlab.shape and bool(torch.isfinite(stale).all())
+    assert bool((stale[left] != 0).any())
+    dx2, dw2, calls = run(labels, "labels", inp.dlogp, stale)
+    rlab = calls[0][3]
+    assert same(dx2, dx0) and same(dw2, dw0)
+    assert bool(torch.isfinite(rlab[stored]).all())
+    assert torch.equal(_bits(rlab[left]), _bits(stale[left]))
 
 
 def test_reference_slab_sum_folds_the_label_residual():
@@ -18116,6 +18314,30 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
             same = all(torch.equal(x, y) for x, y in zip(out, plain))
             assert same, (entry.__name__, kind)
             del lp
+    monkeypatch.undo()
+    # a new buffer is zero-filled once, at its request, over its whole capacity: the request passes the fill
+    # (``_graph_rlab_tensor(capacity, True, device)``) and every row reads 0 -- also after a freed buffer of the same
+    # size, NaN on all of it, gave its block back to the allocator (no holder owns these entries)
+    be._RLAB_POOL.clear()
+    gc.collect()
+    requests = []
+    real_request = be._graph_rlab_tensor
+
+    def request(rows, zero, dev):
+        requests.append((rows, zero))
+        return real_request(rows, zero, dev)
+
+    monkeypatch.setattr(be, "_graph_rlab_tensor", request)
+    for i in range(3):
+        new = be._graph_rlab(16, device)
+        assert new is not None and requests == [(new[1][2], True)] * (i + 1), requests
+        assert new[1][3].numel() == new[1][2] and new[1][1].numel() == 16
+        torch.cuda.synchronize()
+        assert int(torch.count_nonzero(new[1][3])) == 0, i
+        new[1][3].fill_(float("nan"))
+        del new
+        gc.collect()
+    assert not _pool_free(be)
     monkeypatch.undo()
     # another device: its current stream's list while it is the current device; no buffer from another current device
     if torch.cuda.device_count() > 1:
