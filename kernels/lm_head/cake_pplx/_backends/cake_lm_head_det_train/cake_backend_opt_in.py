@@ -150,6 +150,7 @@ from .cake_backend import (
     _flat_fold_values,
     _dx_reduce,
     _fold_values,
+    _rlab_fresh_zero,
     _rlab_zero,
     _slab_count,
     _with_rlab_zero,
@@ -3011,8 +3012,9 @@ def prepare_lm_head_det_loss(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -3072,6 +3074,12 @@ def prepare_lm_head_det_loss(
 
     fwd = forward_keys(plan)
     bwd = _runner_backward_keys(plan, _template_only)
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it
     spare = (("row_grad", 0),) if plan.logprob_dz else ()
@@ -3500,8 +3508,9 @@ def prepare_lm_head_det_loss_temperature(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -3573,6 +3582,12 @@ def prepare_lm_head_det_loss_temperature(
         if entry == "logprob"
         else ()
     ) + cast_keys(plan)
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it.  A
     # call with a temperature never recounts on the hidden path (no temperature form of ``row_grad``)
@@ -3765,6 +3780,11 @@ class _Binding:
     owned_bytes: int = 0
     layout: dict = field(default_factory=dict, repr=False)
     memory: dict = field(default_factory=dict, repr=False)
+    # each call allocates its fresh ``rlab`` zero-filled: the plan computes dX and an uncounted ``dz`` arm of the
+    # forward / backward sequence leaves rows unwritten (:func:`.cake_backend._rlab_fresh_zero`; a sequence with the
+    # ``rlab_zero`` step zeroes it there)
+    forward_rlab_zero: bool = False
+    backward_rlab_zero: bool = False
 
     @classmethod
     def from_runner(
@@ -3835,6 +3855,8 @@ class _Binding:
             owned_bytes=sum(v.numel() * v.element_size() for v in owned.values()),
             layout=runner.layout,
             memory=memory,
+            forward_rlab_zero=_rlab_fresh_zero(plan, forward_order),
+            backward_rlab_zero=_rlab_fresh_zero(plan, backward_order),
         )
 
     def holds_no_tensor(self) -> bool:
@@ -4028,7 +4050,9 @@ class _Binding:
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
             if plan.need_dx or plan.need_dw:
-                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+                t["rlab"] = (torch.zeros if self.forward_rlab_zero else torch.empty)(
+                    (T,), dtype=torch.float32, device=self.device
+                )
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -4097,7 +4121,9 @@ class _Binding:
             t["d_in"] = dlogp
         self._scratch(t, hidden)
         if plan.need_dx or plan.need_dw:
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"] = (torch.zeros if self.backward_rlab_zero else torch.empty)(
+                (T,), dtype=torch.float32, device=self.device
+            )
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -4227,6 +4253,8 @@ class _TemperatureBinding(_Binding):
             owned_bytes=sum(v.numel() * v.element_size() for v in owned.values()),
             layout=runner.layout,
             memory=memory,
+            forward_rlab_zero=_rlab_fresh_zero(plan, forward_order),
+            backward_rlab_zero=_rlab_fresh_zero(plan, backward_order),
         )
 
     def _temperature(
@@ -4310,7 +4338,9 @@ class _TemperatureBinding(_Binding):
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
             if plan.need_dx or plan.need_dw:
-                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+                t["rlab"] = (torch.zeros if self.forward_rlab_zero else torch.empty)(
+                    (T,), dtype=torch.float32, device=self.device
+                )
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -4366,7 +4396,9 @@ class _TemperatureBinding(_Binding):
             t["d_in"] = dlogp
         self._scratch(t, hidden)
         if plan.need_dx or plan.need_dw:
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"] = (torch.zeros if self.backward_rlab_zero else torch.empty)(
+                (T,), dtype=torch.float32, device=self.device
+            )
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
