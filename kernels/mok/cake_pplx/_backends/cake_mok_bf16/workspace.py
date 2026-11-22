@@ -62,8 +62,11 @@ class MoKConfig:
     # ``bwd_num_comm_sms``. The facade's ``"auto"`` sets both from the measured
     # rows of the device and EP group size, so one workspace gives BF16 and
     # MXFP8 launches the row of their own routed precision; integer counts
-    # leave both ``None``. The imbalance split above replaces either while the
-    # load is skewed. The split changes time only, never an output bit.
+    # leave both ``None``. When set they take precedence over
+    # ``fwd_num_comm_sms`` / ``bwd_num_comm_sms``, so a ``dataclasses.replace``
+    # of those two alone changes no launch. The imbalance split above replaces
+    # either while the load is skewed. The split changes time only, never an
+    # output bit.
     bf16_comm_sms: tuple[int, int] | None = None
     mxfp8_comm_sms: tuple[int, int] | None = None
 

@@ -1379,13 +1379,6 @@ def test_select_comm_split_decision_table():
     assert select_comm_split([0, 0, 0, 0], base, hot, 1.5) == base  # every rank empty
     assert select_comm_split((), base, hot, 1.5) == base  # no observation yet
     assert select_comm_split([200, 100, 100, 100], base, None, 1.5) == base
-    # The shipped B300 BF16 EP8 row: the fixed 16 / 40 below 1.8x, the imbalance
-    # split 40 / 40 from 1.8x.
-    rows = ((16, 40), (40, 40), 1.8)
-    assert select_comm_split([10] * 8, *rows) == (16, 40)  # 1.0
-    assert select_comm_split([170] + [100] * 7, *rows) == (16, 40)  # 1.56
-    assert select_comm_split([18] + [10] * 6 + [2], *rows) == (40, 40)  # 1.8
-    assert select_comm_split([300] + [100] * 7, *rows) == (40, 40)  # 2.4
     # The shipped threshold: 3x keeps the fixed split, 5.6x switches.
     assert (
         select_comm_split([300, 100, 100, 100, 100, 100, 0, 0], base, hot, 4.0) == base
@@ -1408,8 +1401,8 @@ def test_select_comm_split_decision_table():
         ((10, 0), 148, "mxfp8", (44, 36)),
         ((10, 0), 152, "bf16", None),  # GB200: same capability, no measured row
         ((10, 0), 152, "mxfp8", None),
-        ((10, 3), 148, "bf16", (40, 40)),  # B300: back to the factory split
-        ((10, 3), 148, "mxfp8", (40, 40)),
+        ((10, 3), 148, "bf16", None),  # B300: no imbalance row
+        ((10, 3), 148, "mxfp8", None),
         ((10, 3), 152, "bf16", None),  # GB300
         ((10, 3), 152, "mxfp8", None),
         ((10, 7), 160, "bf16", None),
@@ -1448,8 +1441,8 @@ def test_imbalance_comm_sms_auto_follows_the_device(
         ((10, 0), 148, "mxfp8", 2.7),  # B200
         ((10, 0), 148, "bf16", 4.0),
         ((10, 0), 152, "bf16", 4.0),  # GB200: precision default
-        ((10, 3), 148, "bf16", 1.8),  # B300: where its 16 / 40 BF16 row stops gaining
-        ((10, 3), 148, "mxfp8", 1.8),
+        ((10, 3), 148, "bf16", 4.0),  # B300: precision default, no device threshold
+        ((10, 3), 148, "mxfp8", 2.7),
         ((10, 3), 152, "bf16", 4.0),  # GB300: precision default
     ],
 )
@@ -1492,14 +1485,10 @@ def test_imbalance_comm_sms_defaults_keep_the_fixed_split():
     # shipping change. The backend default is the BF16 threshold.
     assert api.IMBALANCE_COMM_SMS == {
         (10, 0): {148: {"bf16": (24, 28), "mxfp8": (44, 36)}},
-        (10, 3): {148: {"bf16": (40, 40), "mxfp8": (40, 40)}},
         (10, 7): {212: {"mxfp8": (72, 60)}},
     }
     assert api.IMBALANCE_THRESHOLDS == {"bf16": 4.0, "mxfp8": 2.7}
-    assert api.IMBALANCE_DEVICE_THRESHOLDS == {
-        (10, 3): {148: {"bf16": 1.8, "mxfp8": 1.8}},
-        (10, 7): {212: {"mxfp8": 1.5}},
-    }
+    assert api.IMBALANCE_DEVICE_THRESHOLDS == {(10, 7): {212: {"mxfp8": 1.5}}}
     assert api.IMBALANCE_THRESHOLDS["bf16"] == api.IMBALANCE_THRESHOLD
     assert api.resolve_imbalance_threshold("bf16") == config.imbalance_threshold
     assert api.resolve_imbalance_threshold("mxfp8") == 2.7
@@ -1544,7 +1533,7 @@ def test_imbalance_comm_sms_defaults_keep_the_fixed_split():
         ((10, 0), 152, "bf16", 8, None),
         ((10, 0), 152, "bf16", 16, None),
         ((10, 0), 152, "mxfp8", 4, None),  # the MXFP8 key: factory split
-        ((10, 3), 148, "bf16", 8, (16, 40)),  # B300 EP8
+        ((10, 3), 148, "bf16", 8, (24, 40)),  # B300 EP8: fixed, no imbalance row
         ((10, 3), 148, "bf16", 4, None),
         ((10, 3), 148, "bf16", 16, None),
         ((10, 3), 148, "mxfp8", 8, None),  # the MXFP8 key: factory split
@@ -1588,7 +1577,7 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
     assert api._FACTORY_COMM_SMS == (40, 40)
     assert api.COMM_SMS == {
         (10, 3): {
-            148: {"bf16": {8: (16, 40)}},
+            148: {"bf16": {8: (24, 40)}},
             152: {
                 "bf16": {
                     4: (20, 24),
@@ -1623,10 +1612,10 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
     [
         # (fwd_num_comm_sms / bwd_num_comm_sms, bf16_comm_sms, mxfp8_comm_sms)
         ((10, 0), 148, 8, "bf16", ((40, 40), (40, 40), (40, 40))),  # B200 EP8
-        ((10, 3), 148, 8, "mxfp8", ((40, 40), (16, 40), (40, 40))),  # B300 EP8
+        ((10, 3), 148, 8, "mxfp8", ((40, 40), (24, 40), (40, 40))),  # B300 EP8
         ((10, 0), 148, 4, "bf16", ((40, 40), (40, 40), (40, 40))),
         ((10, 0), 152, 4, "bf16", ((40, 40), (40, 40), (40, 40))),  # GB200 EP4
-        ((10, 3), 148, 8, "bf16", ((16, 40), (16, 40), (40, 40))),  # B300 EP8
+        ((10, 3), 148, 8, "bf16", ((24, 40), (24, 40), (40, 40))),  # B300 EP8
         ((10, 3), 152, 4, "bf16", ((20, 24), (20, 24), (40, 40))),  # GB300 EP4
         ((10, 3), 152, 8, "bf16", ((20, 24), (20, 24), (44, 36))),  # GB300 EP8
         ((10, 3), 152, 8, "mxfp8", ((44, 36), (20, 24), (44, 36))),
