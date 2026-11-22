@@ -64,7 +64,7 @@ and chunk for every channel count C >= 8 (``channels_at_least`` 8) and, on
 sm_107a, from a per-route channel count (C = 256 on ``fwd``, 512 on
 ``fwd_dt``, 1024 on ``fwd_bias``) the program of two stages per chunk from
 S = 65536, and a copy of it under its own name (``c_band=2048``) from C =
-2048 at every S.  At C = 576 to 768, inside the token range of a row of
+2048 at every S.  At C = 512 to 1024, inside the token range of a row of
 :data:`FALLBACK_ROWS` or :data:`DIRECT_ROWS` (the small-S rows), a call runs
 one of two programs with no counter instead: the static program (each CTA
 one fixed token stream of its channel tile; the route's fallback, the record
@@ -73,20 +73,22 @@ direct program (no shared memory, barrier or atomic; the CTAs of a channel
 tile take its token blocks in turn) at the rows of :data:`DIRECT_ROWS`, which
 plans its own channel tiles (:data:`DIRECT_PLANS`) and launches at most one
 CTA per token block.  Each row gives its own token range.  Every architecture
-and route has a row at each C = 576 to 768.  For most C the first range starts
-at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824
-(C = 736: 14336) and have only a static range.  Outside a row's range, and
-where an architecture, route and C have no row, a call runs the dynamic program
-its rules select, as in 0.2.4.  Every forward program computes each ``y``
-element in the same fixed order, so ``y`` is bitwise the same whichever program
-and plan a call runs.  The counters of the dynamic programs are the forward
-workspace ``work`` (``workspace_rule`` ``tile_counters``:
-:func:`counter_words`, two int32 words per channel tile), zero before the first
-launch; the last CTA of each tile resets them, so the buffer is zero after
-every launch and every CUDA Graph replay and serves every later launch of one
-stream.  Two launches that may run at once (two streams, two graphs replayed
-concurrently) need two buffers.  The static and direct programs take no
-``work``; a passed buffer is checked and not read.
+and route has a row at each C = 512 to 1024.  For most C the first range
+starts at S = 1.  Where a key has no :data:`DIRECT_ROWS` range (for example the
+sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to 24576),
+the static program runs over the key's whole range.  The sm_103a ``fwd_bias``
+rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a
+static range.  Outside a row's range, and where an architecture, route and C
+have no row, a call runs the dynamic program its rules select, as in 0.2.4.
+Every forward program computes each ``y`` element in the same fixed order, so
+``y`` is bitwise the same whichever program and plan a call runs.  The counters
+of the dynamic programs are the forward workspace ``work`` (``workspace_rule``
+``tile_counters``: :func:`counter_words`, two int32 words per channel tile),
+zero before the first launch; the last CTA of each tile resets them, so the
+buffer is zero after every launch and every CUDA Graph replay and serves every
+later launch of one stream.  Two launches that may run at once (two streams,
+two graphs replayed concurrently) need two buffers.  The static and direct
+programs take no ``work``; a passed buffer is checked and not read.
 
 A backward call is two ordinary launches on one stream.  The selected program
 (persistent, ``grid_mult x ctas_per_sm x SM count`` CTAs) writes ``dx`` and
@@ -4717,34 +4719,72 @@ def _admits(rule: dict[str, Any], *, arch: str, C: int, S: int | None = None) ->
 # :data:`DIRECT_ROWS` and the rules.
 FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
+        ("fwd", 512, 512): (1, 24576),
+        ("fwd", 520, 544): (1, 12288),
+        ("fwd", 552, 568): (1, 8192),
         ("fwd", 576, 576): (1, 4096),
         ("fwd", 584, 640): (1, 8192),
         ("fwd", 648, 704): (1, 12288),
         ("fwd", 712, 712): (1, 12288),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 12288),
+        ("fwd", 904, 952): (1, 8192),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_dt", 512, 512): (1, 24576),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 576): (1, 4096),
         ("fwd_dt", 584, 640): (1, 8192),
         ("fwd_dt", 648, 696): (1, 8192),
         ("fwd_dt", 704, 704): (1, 12288),
         ("fwd_dt", 712, 768): (1, 16384),
+        ("fwd_dt", 776, 896): (1, 12288),
+        ("fwd_dt", 904, 1024): (1, 12288),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 544): (1, 12288),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 4096),
         ("fwd_bias", 584, 640): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
         ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_bias", 776, 776): (1, 8192),
+        ("fwd_bias", 784, 896): (1, 8192),
+        ("fwd_bias", 904, 1024): (1, 12288),
     },
     "sm_103a": {
+        ("fwd", 512, 512): (1, 2048),
+        ("fwd", 520, 520): (1, 8192),
+        ("fwd", 528, 568): (1, 4096),
         ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 824): (1, 4096),
+        ("fwd", 832, 832): (1, 8192),
+        ("fwd", 840, 896): (1, 4096),
+        ("fwd", 904, 952): (1, 2048),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_dt", 512, 512): (1, 20480),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 640): (1, 8192),
         ("fwd_dt", 648, 704): (1, 8192),
         ("fwd_dt", 712, 752): (1, 12800),
         ("fwd_dt", 760, 760): (1, 12288),
         ("fwd_dt", 768, 768): (1, 12288),
+        ("fwd_dt", 776, 776): (1, 12288),
+        ("fwd_dt", 784, 832): (1, 12288),
+        ("fwd_dt", 840, 888): (1, 8192),
+        ("fwd_dt", 896, 896): (1, 8192),
+        ("fwd_dt", 904, 952): (1, 8192),
+        ("fwd_dt", 960, 1016): (1, 20480),
+        ("fwd_dt", 1024, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 520): (1, 12288),
+        ("fwd_bias", 528, 544): (1, 24576),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 2048),
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
@@ -4753,21 +4793,52 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd_bias", 736, 736): (14336, 16383),
         ("fwd_bias", 744, 760): (13824, 16383),
         ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 776, 896): (1, 8192),
+        ("fwd_bias", 904, 952): (1, 12288),
+        ("fwd_bias", 960, 1024): (1, 20480),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (1, 8192),
+        ("fwd", 520, 520): (1, 24575),
+        ("fwd", 528, 528): (1, 16384),
+        ("fwd", 536, 536): (1, 16384),
+        ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
         ("fwd", 768, 768): (1, 2048),
+        ("fwd", 776, 824): (1, 32768),
+        ("fwd", 832, 832): (1, 4096),
+        ("fwd", 840, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 16384),
+        ("fwd", 904, 1016): (1, 12288),
+        ("fwd", 1024, 1024): (1, 32768),
+        ("fwd_dt", 512, 512): (1, 32768),
+        ("fwd_dt", 520, 528): (1, 16384),
+        ("fwd_dt", 536, 544): (1, 16384),
+        ("fwd_dt", 552, 568): (1, 16384),
         ("fwd_dt", 576, 640): (1, 12288),
         ("fwd_dt", 648, 704): (1, 12288),
         ("fwd_dt", 712, 712): (1, 32768),
         ("fwd_dt", 720, 768): (1, 12288),
+        ("fwd_dt", 776, 824): (1, 24576),
+        ("fwd_dt", 832, 832): (1, 20480),
+        ("fwd_dt", 840, 888): (1, 20480),
+        ("fwd_dt", 896, 896): (1, 20480),
+        ("fwd_dt", 904, 1024): (1, 32768),
+        ("fwd_bias", 512, 512): (1, 32768),
+        ("fwd_bias", 520, 528): (1, 24575),
+        ("fwd_bias", 536, 568): (1, 32768),
         ("fwd_bias", 576, 576): (1, 12296),
-        ("fwd_bias", 584, 584): (1, 16392),
-        ("fwd_bias", 592, 624): (1, 16384),
-        ("fwd_bias", 632, 632): (1, 16392),
+        ("fwd_bias", 584, 584): (1, 24576),
+        ("fwd_bias", 592, 592): (1, 16384),
+        ("fwd_bias", 600, 600): (1, 24576),
+        ("fwd_bias", 608, 608): (1, 16384),
+        ("fwd_bias", 616, 616): (1, 24576),
+        ("fwd_bias", 624, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 24576),
         ("fwd_bias", 640, 696): (1, 24576),
         ("fwd_bias", 704, 768): (1, 32768),
+        ("fwd_bias", 776, 1024): (1, 32768),
     },
 }
 
@@ -4800,6 +4871,16 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
 # route, ``S`` and architecture selects by :data:`FALLBACK_ROWS` and the rules.
 DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
     "sm_100a": {
+        ("fwd", 520, 544): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 552, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 576): (
             4097,
             24576,
@@ -4824,6 +4905,26 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             8193,
             20480,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 776, 888): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 896, 896): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 952): (
+            8193,
+            20480,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd_dt", 520, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 576): (
             4097,
@@ -4850,6 +4951,26 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20480,
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 776, 896): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 904, 1024): (
+            12289,
+            20480,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_bias", 520, 544): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 552, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 576, 576): (
             4097,
             24576,
@@ -4870,8 +4991,33 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20480,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
+        ("fwd_bias", 776, 776): (
+            8193,
+            20480,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 784, 896): (
+            8193,
+            14336,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
     },
     "sm_103a": {
+        ("fwd", 512, 512): (
+            2049,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 520, 520): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 528, 568): (
+            4097,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 632): (
             2049,
             24576,
@@ -4902,6 +5048,36 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             19456,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
         ),
+        ("fwd", 776, 824): (
+            4097,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 832, 832): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 840, 896): (
+            4097,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 952): (
+            2049,
+            20480,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd_dt", 512, 512): (
+            20481,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 520, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
         ("fwd_dt", 576, 640): (
             8193,
             24576,
@@ -4927,6 +5103,41 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20480,
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 776, 776): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 784, 832): (
+            12289,
+            20480,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 840, 888): (
+            8193,
+            20480,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 896, 896): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 904, 952): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_bias", 520, 520): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 552, 568): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 576, 576): (
             2049,
             16384,
@@ -4942,8 +5153,33 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             14592,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
+        ("fwd_bias", 776, 896): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (
+            8193,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 528, 528): (
+            16385,
+            24575,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 536, 536): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 544, 568): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 704): (
             4097,
             32768,
@@ -4958,6 +5194,41 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             2049,
             24576,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 832, 832): (
+            4097,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 840, 888): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 896, 896): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 1016): (
+            12289,
+            16384,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd_dt", 520, 528): (
+            16385,
+            24575,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 536, 544): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 552, 568): (
+            16385,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 640): (
             12289,
@@ -4974,24 +5245,34 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             24576,
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 832, 832): (
+            20481,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 896, 896): (
+            20481,
+            32768,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
         ("fwd_bias", 576, 576): (
             12297,
             32768,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 584, 584): (
-            16393,
-            20480,
-            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
-        ),
-        ("fwd_bias", 592, 624): (
+        ("fwd_bias", 592, 592): (
             16385,
             24576,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 632, 632): (
-            16393,
-            20480,
+        ("fwd_bias", 608, 608): (
+            16385,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 624, 624): (
+            16385,
+            24576,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
     },

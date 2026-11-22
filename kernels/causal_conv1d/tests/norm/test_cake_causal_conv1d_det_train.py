@@ -49,13 +49,13 @@ two buffers running at once, CUDA Graph capture and replay with and without a ca
 package's per-(device, stream) buffer of the calls that pass none.  The forward's narrow rows (C 576 to 768 on
 32-vector or whole tiles; C 520 to 568 on one tile below a token floor of their own per architecture and on
 narrower tiles from it) keep ``y``'s bits: the suite checks the literal plans per route, token count and
-architecture, and at every C 520 to 568 row one token below its floor and at it the launched plan, ``y``
-bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.  Inside the token
-range of a row (C 576 to 768, ``FALLBACK_ROWS_OF_RECORD`` and ``DIRECT_ROWS_OF_RECORD``) the forward runs a static
-program, or a direct program on channel tiles of its own, and takes no counters: the suite checks the literal
-tables, the selection at every range bound, the direct plan and its token-block grid, and at the first and the
-last row of every range the launched program, ``y`` bitwise the dynamic program's and run to run, a caller-owned
-workspace left as it was, the naive-tier judge and a CUDA Graph with no fill node.
+architecture, and at every C 520 to 568 row one token below its floor and at it (the small-S rows removed) the
+launched plan, ``y`` bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.
+Inside the token range of a row (C 512 to 1024, ``FALLBACK_ROWS_OF_RECORD`` and ``DIRECT_ROWS_OF_RECORD``) the
+forward runs a static program, or a direct program on channel tiles of its own, and takes no counters: the suite
+checks the literal tables, the selection at every range bound, the direct plan and its token-block grid, and at
+the first and the last row of every range the launched program, ``y`` bitwise the dynamic program's and run to
+run, a caller-owned workspace left as it was, the naive-tier judge and a CUDA Graph with no fill node.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
@@ -337,29 +337,58 @@ FWD_NARROW_WORKSPACE_TILES = {
 # arch's ``DIRECT_PLANS_OF_RECORD`` form; outside them the dynamic program.
 FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
+        ("fwd", 512, 512): (1, 24576),
+        ("fwd", 520, 544): (1, 12288),
+        ("fwd", 552, 568): (1, 8192),
         ("fwd", 576, 576): (1, 4096),
         ("fwd", 584, 640): (1, 8192),
         ("fwd", 648, 704): (1, 12288),
         ("fwd", 712, 712): (1, 12288),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 12288),
+        ("fwd", 904, 952): (1, 8192),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 544): (1, 12288),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 4096),
         ("fwd_bias", 584, 640): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
         ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_bias", 776, 776): (1, 8192),
+        ("fwd_bias", 784, 896): (1, 8192),
+        ("fwd_bias", 904, 1024): (1, 12288),
+        ("fwd_dt", 512, 512): (1, 24576),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 576): (1, 4096),
         ("fwd_dt", 584, 640): (1, 8192),
         ("fwd_dt", 648, 696): (1, 8192),
         ("fwd_dt", 704, 704): (1, 12288),
         ("fwd_dt", 712, 768): (1, 16384),
+        ("fwd_dt", 776, 896): (1, 12288),
+        ("fwd_dt", 904, 1024): (1, 12288),
     },
     "sm_103a": {
+        ("fwd", 512, 512): (1, 2048),
+        ("fwd", 520, 520): (1, 8192),
+        ("fwd", 528, 568): (1, 4096),
         ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 824): (1, 4096),
+        ("fwd", 832, 832): (1, 8192),
+        ("fwd", 840, 896): (1, 4096),
+        ("fwd", 904, 952): (1, 2048),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 520): (1, 12288),
+        ("fwd_bias", 528, 544): (1, 24576),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 2048),
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
@@ -368,72 +397,154 @@ FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] 
         ("fwd_bias", 736, 736): (14336, 16383),
         ("fwd_bias", 744, 760): (13824, 16383),
         ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 776, 896): (1, 8192),
+        ("fwd_bias", 904, 952): (1, 12288),
+        ("fwd_bias", 960, 1024): (1, 20480),
+        ("fwd_dt", 512, 512): (1, 20480),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 640): (1, 8192),
         ("fwd_dt", 648, 704): (1, 8192),
         ("fwd_dt", 712, 752): (1, 12800),
         ("fwd_dt", 760, 760): (1, 12288),
         ("fwd_dt", 768, 768): (1, 12288),
+        ("fwd_dt", 776, 776): (1, 12288),
+        ("fwd_dt", 784, 832): (1, 12288),
+        ("fwd_dt", 840, 888): (1, 8192),
+        ("fwd_dt", 896, 896): (1, 8192),
+        ("fwd_dt", 904, 952): (1, 8192),
+        ("fwd_dt", 960, 1016): (1, 20480),
+        ("fwd_dt", 1024, 1024): (1, 24576),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (1, 8192),
+        ("fwd", 520, 520): (1, 24575),
+        ("fwd", 528, 528): (1, 16384),
+        ("fwd", 536, 536): (1, 16384),
+        ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
         ("fwd", 768, 768): (1, 2048),
+        ("fwd", 776, 824): (1, 32768),
+        ("fwd", 832, 832): (1, 4096),
+        ("fwd", 840, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 16384),
+        ("fwd", 904, 1016): (1, 12288),
+        ("fwd", 1024, 1024): (1, 32768),
+        ("fwd_bias", 512, 512): (1, 32768),
+        ("fwd_bias", 520, 528): (1, 24575),
+        ("fwd_bias", 536, 568): (1, 32768),
         ("fwd_bias", 576, 576): (1, 12296),
-        ("fwd_bias", 584, 584): (1, 16392),
-        ("fwd_bias", 592, 624): (1, 16384),
-        ("fwd_bias", 632, 632): (1, 16392),
+        ("fwd_bias", 584, 584): (1, 24576),
+        ("fwd_bias", 592, 592): (1, 16384),
+        ("fwd_bias", 600, 600): (1, 24576),
+        ("fwd_bias", 608, 608): (1, 16384),
+        ("fwd_bias", 616, 616): (1, 24576),
+        ("fwd_bias", 624, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 24576),
         ("fwd_bias", 640, 696): (1, 24576),
         ("fwd_bias", 704, 768): (1, 32768),
+        ("fwd_bias", 776, 1024): (1, 32768),
+        ("fwd_dt", 512, 512): (1, 32768),
+        ("fwd_dt", 520, 528): (1, 16384),
+        ("fwd_dt", 536, 544): (1, 16384),
+        ("fwd_dt", 552, 568): (1, 16384),
         ("fwd_dt", 576, 640): (1, 12288),
         ("fwd_dt", 648, 704): (1, 12288),
         ("fwd_dt", 712, 712): (1, 32768),
         ("fwd_dt", 720, 768): (1, 12288),
+        ("fwd_dt", 776, 824): (1, 24576),
+        ("fwd_dt", 832, 832): (1, 20480),
+        ("fwd_dt", 840, 888): (1, 20480),
+        ("fwd_dt", 896, 896): (1, 20480),
+        ("fwd_dt", 904, 1024): (1, 32768),
     },
 }
 DIRECT_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
+        ("fwd", 520, 544): (12289, 24576),
+        ("fwd", 552, 568): (8193, 24576),
         ("fwd", 576, 576): (4097, 24576),
         ("fwd", 584, 640): (8193, 24576),
         ("fwd", 648, 704): (12289, 24576),
         ("fwd", 712, 712): (12289, 20480),
         ("fwd", 720, 768): (8193, 20480),
+        ("fwd", 776, 888): (8193, 24576),
+        ("fwd", 896, 896): (12289, 24576),
+        ("fwd", 904, 952): (8193, 20480),
+        ("fwd_bias", 520, 544): (12289, 24576),
+        ("fwd_bias", 552, 568): (8193, 24576),
         ("fwd_bias", 576, 576): (4097, 24576),
         ("fwd_bias", 584, 640): (4097, 20480),
         ("fwd_bias", 648, 696): (8193, 20480),
         ("fwd_bias", 704, 704): (17409, 20480),
+        ("fwd_bias", 776, 776): (8193, 20480),
+        ("fwd_bias", 784, 896): (8193, 14336),
+        ("fwd_dt", 520, 568): (8193, 24576),
         ("fwd_dt", 576, 576): (4097, 24576),
         ("fwd_dt", 584, 640): (8193, 24576),
         ("fwd_dt", 648, 696): (8193, 20480),
         ("fwd_dt", 704, 704): (12289, 20480),
         ("fwd_dt", 712, 768): (16385, 20480),
+        ("fwd_dt", 776, 896): (12289, 24576),
+        ("fwd_dt", 904, 1024): (12289, 20480),
     },
     "sm_103a": {
+        ("fwd", 512, 512): (2049, 24576),
+        ("fwd", 520, 520): (8193, 24576),
+        ("fwd", 528, 568): (4097, 24576),
         ("fwd", 576, 632): (2049, 24576),
         ("fwd", 640, 688): (4097, 24576),
         ("fwd", 696, 696): (4097, 20480),
         ("fwd", 704, 704): (8193, 24576),
         ("fwd", 712, 712): (8193, 20479),
         ("fwd", 720, 768): (8193, 19456),
+        ("fwd", 776, 824): (4097, 24576),
+        ("fwd", 832, 832): (8193, 24576),
+        ("fwd", 840, 896): (4097, 24576),
+        ("fwd", 904, 952): (2049, 20480),
+        ("fwd_bias", 520, 520): (12289, 24576),
+        ("fwd_bias", 552, 568): (8193, 16384),
         ("fwd_bias", 576, 576): (2049, 16384),
         ("fwd_bias", 584, 640): (4105, 16384),
         ("fwd_bias", 712, 712): (12801, 14592),
+        ("fwd_bias", 776, 896): (8193, 16384),
+        ("fwd_dt", 512, 512): (20481, 24576),
+        ("fwd_dt", 520, 568): (8193, 24576),
         ("fwd_dt", 576, 640): (8193, 24576),
         ("fwd_dt", 648, 704): (8193, 18432),
         ("fwd_dt", 712, 752): (12801, 19456),
         ("fwd_dt", 760, 760): (12289, 19456),
         ("fwd_dt", 768, 768): (12289, 20480),
+        ("fwd_dt", 776, 776): (12289, 24576),
+        ("fwd_dt", 784, 832): (12289, 20480),
+        ("fwd_dt", 840, 888): (8193, 20480),
+        ("fwd_dt", 896, 896): (8193, 24576),
+        ("fwd_dt", 904, 952): (8193, 16384),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (8193, 32768),
+        ("fwd", 528, 528): (16385, 24575),
+        ("fwd", 536, 536): (16385, 32768),
+        ("fwd", 544, 568): (16385, 32768),
         ("fwd", 576, 704): (4097, 32768),
         ("fwd", 712, 760): (4097, 16384),
         ("fwd", 768, 768): (2049, 24576),
+        ("fwd", 832, 832): (4097, 32768),
+        ("fwd", 840, 888): (8193, 16384),
+        ("fwd", 896, 896): (16385, 32768),
+        ("fwd", 904, 1016): (12289, 16384),
         ("fwd_bias", 576, 576): (12297, 32768),
-        ("fwd_bias", 584, 584): (16393, 20480),
-        ("fwd_bias", 592, 624): (16385, 24576),
-        ("fwd_bias", 632, 632): (16393, 20480),
+        ("fwd_bias", 592, 592): (16385, 24576),
+        ("fwd_bias", 608, 608): (16385, 24576),
+        ("fwd_bias", 624, 624): (16385, 24576),
+        ("fwd_dt", 520, 528): (16385, 24575),
+        ("fwd_dt", 536, 544): (16385, 32768),
+        ("fwd_dt", 552, 568): (16385, 24576),
         ("fwd_dt", 576, 640): (12289, 32768),
         ("fwd_dt", 648, 704): (12289, 24576),
         ("fwd_dt", 720, 768): (12289, 24576),
+        ("fwd_dt", 832, 832): (20481, 24576),
+        ("fwd_dt", 896, 896): (20481, 32768),
     },
 }
 # The direct programs' channel tiles: arch -> route -> (ct_vec, n_sub), so a
@@ -661,6 +772,28 @@ def _fallback_program(arch: str, kind: str = "bwd") -> str:
     ]
     assert len(names) == 1, f"{arch} {kind}: fallback programs {names}"
     return names[0]
+
+
+def _program_of_record(arch: str, kind: str, C: int, S: int, ruled: str) -> str:
+    """The program route ``kind`` on ``arch`` runs at ``C`` channels and ``S`` tokens where the selection rules pick
+    ``ruled``: the route's direct program inside a range of ``DIRECT_ROWS_OF_RECORD``, its fallback (the static
+    program) inside a range of ``FALLBACK_ROWS_OF_RECORD``, ``ruled`` elsewhere."""
+
+    if _direct_of_record(arch, kind, C, S) is not None:
+        rules = {
+            name: loader.select_rule(loader.MODULES[name])
+            for name in loader.route_modules(arch, kind)
+        }
+        direct = [
+            name
+            for name, rule in rules.items()
+            if rule is not None and rule["kind"] == loader.ROWS_KIND
+        ]
+        assert len(direct) == 1, (arch, kind, direct)
+        return direct[0]
+    if _static_of_record(arch, kind, C, S):
+        return _fallback_program(arch, kind)
+    return ruled
 
 
 def _generator(*keys: int, seed: int = SEED) -> torch.Generator:
@@ -2492,7 +2625,8 @@ def test_cuda_graph_replays_match_eager_per_route(kind) -> None:
 def test_backward_launches_the_selected_program_then_its_reduce(monkeypatch) -> None:
     """A backward call is two launches: the program ``C`` selects, then that record's ``reduce`` program with
     the main grid's CTA count as its ``main_ctas`` scalar, a partial view of that grid's rows and ``ceil(C / 4)``
-    CTAs; the forward launches the one program its route selects for ``C``."""
+    CTAs; the forward (at C 384, below the forward keys) launches the one program its route selects for that ``C``,
+    with its token-chunk counters."""
 
     S, C, docs = 1000, 512, "perf"
     device = _device()
@@ -2538,18 +2672,20 @@ def test_backward_launches_the_selected_program_then_its_reduce(monkeypatch) -> 
     with pytest.raises(ValueError, match="needs the channel count"):
         loader.launch_grid(reduce, device_index=device.index)
     launched.clear()
-    cake_causal_conv1d_det_train_forward(x, w, cu)
+    # C 512 lies in the forward keys (C 512 to 1024), whose static and direct programs take no counters.
+    C_fwd = 384
+    cake_causal_conv1d_det_train_forward(*_inputs(S, C_fwd, docs)[:3])
     assert [name for name, _, _, _ in launched] == list(
-        loader.selected_modules(arch, "fwd", C=C, S=S)
+        loader.selected_modules(arch, "fwd", C=C_fwd, S=S)
     )
     # The forward passes its token-chunk counters: int32, at least two words per channel tile of its plan.
     forward = loader.MODULES[launched[0][0]]
     assert launched[0][3] == loader.launch_grid(
-        forward, device_index=device.index, C=C, S=S
+        forward, device_index=device.index, C=C_fwd, S=S
     )
     work = launched[0][1]["work"]
     _, _, fwd_tiles = loader.channel_split(
-        C, geometry=forward["grid_rule"]["geometry"], role="fwd"
+        C_fwd, geometry=forward["grid_rule"]["geometry"], role="fwd"
     )
     assert work.dtype == torch.int32 and work.numel() >= 2 * fwd_tiles
     assert loader.counter_words(forward, fwd_tiles) == 2 * fwd_tiles
@@ -3034,7 +3170,8 @@ FWD_ROW_KINDS = ("bwd", "bwd_dt-bf16", "bwd_bias", "bwd_bias-bf16")
 @pytest.mark.parametrize("kind", FWD_ROW_KINDS)
 def test_forward_row_floors_launch_and_keep_y_bits(kind, monkeypatch) -> None:
     """At every row of ``FWD_ROW_SPLIT_TABLE`` (C 520 to 568), one token below the
-    device architecture's ``FWD_ROW_FLOORS`` floor and at it, the forward of the
+    device architecture's ``FWD_ROW_FLOORS`` floor and at it, with the small-S
+    rows removed (the floors are the dynamic program's), the forward of the
     inputs of backward route ``kind`` launches one tile below the floor and the
     row's ``FWD_ROW_SPLIT_TABLE`` plan from it, with two counter words per
     channel tile; ``y`` repeats bit for bit, is bitwise the one-tile plan's and
@@ -3046,6 +3183,9 @@ def test_forward_row_floors_launch_and_keep_y_bits(kind, monkeypatch) -> None:
     fwd_kind = FORWARD_OF[kind]
     arch = _arch()
     device = _device()
+    # The forward keys (C 512 to 1024) hold many of these floors.
+    monkeypatch.setattr(loader, "DIRECT_ROWS", {})
+    monkeypatch.setattr(loader, "FALLBACK_ROWS", {})
     for C, tiles in FWD_ROW_SPLIT_TABLE.items():
         floor = FWD_ROW_FLOORS[arch][C // 8]
         one_tile = (C // 8, 128 // (C // 8), 1)
@@ -3868,7 +4008,8 @@ def test_forward_workspace_cache_per_device_and_stream() -> None:
 
     device = _device()
     cache = pkg._FORWARD_WORKSPACES
-    small = _inputs(1000, 512, "perf", key=19)[:3]
+    # C 384 and 2560 lie outside the forward keys (C 512 to 1024): both calls take counters.
+    small = _inputs(1000, 384, "perf", key=19)[:3]
     large = _inputs(4097, 2560, (1000, 0, 3, 3094), key=19)[:3]
     stream, other = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
     key = (device.index, stream.cuda_stream)
@@ -3882,7 +4023,7 @@ def test_forward_workspace_cache_per_device_and_stream() -> None:
     with torch.cuda.stream(stream):
         y1 = cake_causal_conv1d_det_train_forward(*small)
         first = cache[key]
-        assert first.dtype == torch.int32 and first.numel() == 2 * _forward_tiles(512)
+        assert first.dtype == torch.int32 and first.numel() == 2 * _forward_tiles(384)
         y2 = cake_causal_conv1d_det_train_forward(*small)
         assert cache[key] is first
         y3 = cake_causal_conv1d_det_train_forward(*large)
@@ -3910,7 +4051,7 @@ def test_forward_workspace_cache_per_device_and_stream() -> None:
         assert int(torch.count_nonzero(cache[key])) == 0
         return y
 
-    _judge_forward(1000, 512, "perf", on_stream, key=19, label="y C=512 stream buffer")
+    _judge_forward(1000, 384, "perf", on_stream, key=19, label="y C=384 stream buffer")
     _judge_forward(4097, 2560, (1000, 0, 3, 3094), on_stream, key=19, label="y C=2560 stream buffer")
 
 
@@ -4488,7 +4629,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
     # sm_107a backward has five since its 520 channel band's copy -- and at most two with one), one program
     # selected per channel count and token count -- the highest threshold at
     # most C whose token floor (if any) S meets, the floored program first at a shared one, the fallback
-    # below the lowest.
+    # below the lowest; inside a small-S row of record the row's program runs instead.
     for arch in loader.ARCHES:
         for kind in loader.KINDS:
             if kind not in loader.ROUTES[arch]:
@@ -4531,13 +4672,15 @@ def test_registry_records_reference_the_build_manifest() -> None:
                 for threshold in sorted(owners):
                     at = loader.selected_modules(arch, kind, C=threshold, S=S)
                     below = loader.selected_modules(arch, kind, C=threshold - 8, S=S)
-                    assert below == (previous,), (arch, kind, S, threshold)
+                    want = _program_of_record(arch, kind, threshold - 8, S, previous)
+                    assert below == (want,), (arch, kind, S, threshold)
                     by_floor = owners[threshold]
                     name = by_floor.get(True)
                     if name is None or floors[name][1] > S:
                         # Below its token floor a floored program never runs.
                         name = by_floor.get(False, previous)
-                    assert at == (name,), (arch, kind, S, threshold)
+                    want = _program_of_record(arch, kind, threshold, S, name)
+                    assert at == (want,), (arch, kind, S, threshold)
                     previous = name
                 top = loader.selected_modules(arch, kind, C=8192, S=S)
                 assert top == (previous,), (arch, kind, S)

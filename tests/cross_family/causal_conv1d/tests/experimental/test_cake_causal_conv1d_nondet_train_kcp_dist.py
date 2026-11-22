@@ -18,9 +18,10 @@ deterministic KCP suite's partitions (contiguous, zigzag, per-document zigzag, r
 one-token fragments, a fragment that reads its history from three predecessor ranks), plus W = 16 rows (``-k w16``) on
 the layouts any world size partitions: contiguous, zigzag and per-document zigzag (the ragged tables are written for at
 most eight ranks), the deterministic suite's ``F_ROWS`` (W = 2 / 4 at C = 528 and 568 around the forward's token
-floor of the channel count on the running architecture, ``cake_jit.FORWARD_NARROW_ROW_FLOORS``: its ``floor:`` rows take
-the ranks' token counts from that floor at run time, a rank at it and one a token below it, so on every architecture
-one rank's forward runs the narrower tiles and another's the single tile), and ``ROWS_KEYS`` (W = 2 / 4 at C = 640, the
+floor of the channel count on the running architecture, ``cake_jit.FORWARD_NARROW_ROW_FLOORS``, run as there with the
+forward's small-S rows removed, ``_small_s_rows_removed``: its ``floor:`` rows take the ranks' token counts from that
+floor at run time, a rank at it and one a token below it, so on every architecture one rank's forward runs the narrower
+tiles and another's the single tile), and ``ROWS_KEYS`` (W = 2 / 4 at C = 640, the
 ranks' token counts inside the static range and the direct range of every architecture's forward key covering C 640 and
 above the key, so the ranks of one call run the static, the direct and the dynamic program).  The outputs are judged by
 the naive judge (``tests/cake/test_helpers/cake_naive.py``): every rank draws the whole pack from each of 32 seeds (the
@@ -78,6 +79,7 @@ from tests.test_cake_causal_conv1d_det_train_kcp_dist import (
     _partition,
     _requested,
     _row_id,
+    _small_s_rows_removed,
 )
 
 # The seed of every rank's pack (draw 0 of the judges).
@@ -638,7 +640,8 @@ def _spawn_graph_cache_entry(rank: int, W: int, port: int, result_dir: str) -> N
 
 def _spawn_entry(rank: int, W: int, row, port: int, result_dir: str) -> None:
     try:
-        report = _run_rank(rank, W, row, port, result_dir, rank)
+        with _small_s_rows_removed(row):
+            report = _run_rank(rank, W, row, port, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
     finally:
@@ -667,14 +670,15 @@ def test_nondeterministic_kcp_rows(row) -> None:
             pytest.skip(
                 "the non-deterministic conv package is not rendered or does not support this device"
             )
-        report = _run_rank(
-            int(os.environ["SLURM_PROCID"]),
-            W,
-            row,
-            int(os.environ.get("MASTER_PORT", "29500")),
-            os.environ.get("KCP_TEST_RESULT_DIR"),
-            int(os.environ.get("SLURM_LOCALID", "0")),
-        )
+        with _small_s_rows_removed(row):
+            report = _run_rank(
+                int(os.environ["SLURM_PROCID"]),
+                W,
+                row,
+                int(os.environ.get("MASTER_PORT", "29500")),
+                os.environ.get("KCP_TEST_RESULT_DIR"),
+                int(os.environ.get("SLURM_LOCALID", "0")),
+            )
         assert report["pass"], report
         return
     if not _supported():
