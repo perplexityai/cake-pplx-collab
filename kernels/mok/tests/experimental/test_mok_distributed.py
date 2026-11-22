@@ -38,9 +38,12 @@ Backend suite: the package is imported only through :func:`tests.cake.test_helpe
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_package import cake_package
 from tests.experimental import _mok_dist as workers
 from tests.experimental import _mok_gaps as gaps
 from tests.experimental._mok_spawn import run_ranks, run_ranks_isolated
+
+kernels = cake_package("cake_mok_bf16", "_kernels")
 
 
 def _run(world, worker, *args):
@@ -145,11 +148,14 @@ OVERFLOW_TIMEOUT = 600
 
 
 def _require_before_down(world):
-    """Skip before any process starts unless every rank's device has the router-weight-before-down builds (SM100a,
-    SM103a and SM107a)."""
+    """Skip before any process starts unless every rank's device has the router-weight-before-down builds
+    (``BEFORE_DOWN_TARGETS``: SM100a, SM103a and SM107a have them)."""
     if torch.cuda.is_available() and torch.cuda.device_count() >= world:
-        if any(torch.cuda.get_device_capability(index) not in ((10, 0), (10, 3), (10, 7)) for index in range(world)):
-            pytest.skip("The router weight before the down projection has SM100a, SM103a and SM107a builds only")
+        for index in range(world):
+            capability = torch.cuda.get_device_capability(index)
+            arch = gaps.TARGETS.get(capability, f"sm_{capability[0]}{capability[1]}")
+            if arch not in kernels.BEFORE_DOWN_TARGETS:
+                pytest.skip(f"The router weight before the down projection has no {arch} build")
 
 
 @pytest.mark.parametrize(
