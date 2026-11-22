@@ -274,8 +274,8 @@ broadcast over tokens or one token), ``fwd_pipe``'s
 ``persistent_from_rows_per_sm_strided``, which ``fwd_pipe_packed``, a
 program of packed rows only, does not have; each keyed by architecture, the
 deterministic package's cuts (:func:`launch_grid` takes ``arch`` and
-``packed``, and :func:`run_module` passes the device's and the call's; the
-grid changes no bits); a
+``packed``, and :func:`run_module` computes the same grid for the device's
+and the call's with the fewest host operations; the grid changes no bits); a
 small-row backward one cluster of ``cluster`` CTAs (``launch.cluster``)
 whatever the rows, up to its rule's ``max_rows``.  The static and the
 claimed backward cut the rows into blocks of ``rows_per_block`` rows and the
@@ -3537,9 +3537,10 @@ def forward_packed(
     packed rows: both head strides 128 and both token strides ``heads * 128``
     (the kernels' own test, which turns on their L2 prefetches; a single
     token's stride, passed as 0, a broadcast over tokens, head-major rows and
-    a gate sliced from a projection fail it).  :func:`run_module` passes it
-    to :func:`launch_grid` for a record whose rule has a cut of rows not read
-    as packed."""
+    a gate sliced from a projection fail it).  :func:`launch_grid` takes it
+    as ``packed``, and :func:`run_module` makes the same comparisons of a
+    call's own arguments where a record's rule has a cut of rows not read as
+    packed and the rows lie between its two cuts."""
 
     row = heads * HEAD_DIM
     return x_head == HEAD_DIM and z_head == HEAD_DIM and x_tok == row and z_tok == row
@@ -3571,7 +3572,9 @@ def launch_grid(
     every architecture).  A small-row backward takes one cluster of
     ``cluster`` CTAs; every other backward (a strided program without the
     weight gradient among them) ``ctas``.  Only the pipelined forwards read
-    ``arch`` and ``packed``."""
+    ``arch`` and ``packed``.  :func:`run_module` computes the same grid of
+    every forward of whole waves itself and calls this function for the
+    other kinds."""
 
     rule = record["grid_rule"]
     kind = rule["kind"]
@@ -3628,6 +3631,14 @@ def device_arch(device_index: int) -> str:
             "Cake SiLU-gated RMSNorm target"
         )
     return arch
+
+
+@functools.cache
+def _sm_count_and_arch(device_index: int) -> tuple[int, str]:
+    """``(device_sm_count(device_index), device_arch(device_index))``, read
+    once per device: the one lookup of :func:`run_module`'s launches."""
+
+    return device_sm_count(device_index), device_arch(device_index)
 
 
 def library_name(name: str, arch: str) -> str:
@@ -3694,6 +3705,22 @@ def _packed_slots(name: str) -> tuple[str, ...]:
     )
 
 
+# The records of the forwards of whole waves (grid kind
+# ``persistent_row_blocks``), whose grid :func:`run_module` computes itself,
+# each with the logical names of its ``heads``, ``x_tok``, ``x_head``,
+# ``z_tok`` and ``z_head`` arguments (the kernels' test of packed rows,
+# :func:`forward_packed`).  Built once: the records' kinds and arguments are
+# constant (their cuts are read at each call).
+_FORWARD_SLOTS = {
+    name: tuple(
+        record["logical"][key]
+        for key in ("heads", "x_tok", "x_head", "z_tok", "z_head")
+    )
+    for name, record in MODULES.items()
+    if record["grid_rule"]["kind"] == "persistent_row_blocks"
+}
+
+
 @functools.cache
 def _entry(name: str, device_index: int) -> Any:
     """The tvm-ffi function of module record ``name`` on CUDA device ``device_index``."""
@@ -3730,36 +3757,76 @@ def run_module(
     ``values`` maps logical names to tensors and Python scalars; the module
     record maps its kernel parameter names onto that vocabulary.  The launch
     grid is the module's :func:`launch_grid` on the device's SM count and
-    architecture (:func:`device_sm_count` and :func:`device_arch`, each read
-    once per device; the backward reads ``ctas`` from ``values``) and, for a
-    record whose rule has a cut of rows not read as packed
-    (``persistent_from_rows_per_sm_strided``), whether the kernel reads this
-    call's rows as packed: :func:`forward_packed` of the call's own
-    ``heads``, ``x_tok``, ``x_head``, ``z_tok`` and ``z_head`` arguments (the
-    kernel's test, so host and kernel agree on every call).  The kernel runs
-    on torch's current stream of CUDA device ``device_index``, the device of
-    its tensors.
+    architecture (:func:`_sm_count_and_arch`, read once per device; the
+    backward reads ``ctas`` from ``values``).  The grid of a forward of whole
+    waves (kind ``persistent_row_blocks``) is computed here with the fewest
+    host operations, from the record's rule as it is at the call: its cuts
+    of the device's architecture times the SMs (a rule without a cut: whole
+    waves at any rows), one CTA per block below both and the fewest whole
+    waves from both (:func:`launch_grid`'s formula); between the two cuts of
+    a rule with a cut of rows not read as packed
+    (``persistent_from_rows_per_sm_strided``), the kernels' test of packed
+    rows (:func:`forward_packed`) of the call's own ``heads``, ``x_tok``,
+    ``x_head``, ``z_tok`` and ``z_head`` arguments picks the cut, so host and
+    kernel agree on every call.  A cut of one number or None, a cut without
+    the device's architecture (:func:`launch_grid` raises its
+    ``ValueError``) and a missing argument take :func:`launch_grid` itself.
+    The kernel runs on torch's current stream of CUDA device
+    ``device_index``, the device of its tensors.
     """
 
-    packed = True
-    slots = _packed_slots(name)
-    if slots:
-        heads, x_tok, x_head, z_tok, z_head = slots
-        packed = forward_packed(
-            values.get(heads, 0),
-            values.get(x_tok, 0),
-            values.get(x_head, 0),
-            values.get(z_tok, 0),
-            values.get(z_head, 0),
+    sm_count, arch = _sm_count_and_arch(device_index)
+    record = MODULES[name]
+    if name in _FORWARD_SLOTS:
+        rule = record["grid_rule"]
+        start = 0
+        try:
+            if "persistent_from_rows_per_sm" in rule:
+                start = rule["persistent_from_rows_per_sm"][arch] * sm_count
+            if "persistent_from_rows_per_sm_strided" in rule:
+                strided = rule["persistent_from_rows_per_sm_strided"][arch] * sm_count
+                # past one cut and below the other: the kernels' test of
+                # packed rows (forward_packed) on this call's arguments
+                # picks the cut
+                if (rows < start) != (rows < strided):
+                    heads, x_tok, x_head, z_tok, z_head = _FORWARD_SLOTS[name]
+                    row = values[heads] * HEAD_DIM
+                    if not (
+                        values[x_head] == HEAD_DIM
+                        and values[z_head] == HEAD_DIM
+                        and values[x_tok] == row
+                        and values[z_tok] == row
+                    ):
+                        start = strided
+        except (KeyError, TypeError):
+            # a cut of one number or None, a cut without this architecture
+            # (its ValueError) or a missing argument: launch_grid itself
+            grid = launch_grid(
+                record,
+                rows=rows,
+                sm_count=sm_count,
+                arch=arch,
+                packed=forward_packed(
+                    *[values.get(slot, 0) for slot in _FORWARD_SLOTS[name]]
+                ),
+            )
+        else:
+            blocks = -(-rows // rule["rows_per_block"])
+            if rows < start:
+                grid = (blocks, 1, 1)
+            else:
+                # launch_grid's whole waves: ``or 1`` is its floor of one CTA
+                # a wave; its floor of one wave never binds (no rows, no CTAs)
+                wave = rule["ctas_per_sm"] * sm_count or 1
+                ctas = -(-blocks // (wave * rule["max_blocks_per_cta"])) * wave
+                grid = (ctas if ctas < blocks else blocks, 1, 1)
+    else:
+        grid = launch_grid(
+            record,
+            rows=rows,
+            sm_count=sm_count,
+            ctas=int(values.get("ctas", 0)),
         )
-    grid = launch_grid(
-        MODULES[name],
-        rows=rows,
-        sm_count=device_sm_count(device_index),
-        ctas=int(values.get("ctas", 0)),
-        arch=device_arch(device_index),
-        packed=packed,
-    )
     arguments = _arguments(name)
     try:
         args = [grid[slot] if axis else values[slot] for axis, slot, _ in arguments]

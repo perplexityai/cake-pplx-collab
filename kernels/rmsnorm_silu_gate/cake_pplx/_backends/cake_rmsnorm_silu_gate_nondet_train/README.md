@@ -126,8 +126,9 @@ band is unchanged.
 `cake_jit.launch_grid` of both packages takes the architecture (keyword
 `arch`), which the records of those forwards need (without it, a
 `ValueError`), and whether the kernel reads the rows as packed (keyword
-`packed`, `cake_jit.forward_packed`); `run_module` passes the device's
-architecture and the call's own test.
+`packed`, `cake_jit.forward_packed`); `run_module` computes the same grid
+for the device's architecture and the call's own test, with the fewest host
+operations.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
