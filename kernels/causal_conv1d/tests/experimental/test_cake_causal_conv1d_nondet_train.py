@@ -75,12 +75,15 @@ programmatic dependent launch, through autograd and checkpointing, beside a kern
 another stream, and beside the deterministic package's SM-wide program in one process.  The forward's narrow rows of
 C 520 to 568 (every one, at the row's token floor and one token below it), the ``fwd_bias`` rows with BF16 taps (their
 own floor and single-tile ranges on sm_103a), and a CUDA Graph capture at a forward row's floor after an eager call one
-token below it.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` (C 512 to 1024, one token range per key): at
-S 1000 inside a range and on both sides of each range's ends the static, direct or dynamic program the tables name, the
-static and direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs
-too), with ``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static or direct row);
-a capture above a direct range after an eager call inside it (that call refills no pre-zeroed buffer, so the capture
-zeroes its own); and both packages in one process at a direct row.
+token below it.  The forward keys of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS`` (C 512 to 1024, one token
+range per key; a pair range runs ahead of the static and direct ranges it covers): at S 1000 inside a range and on both
+sides of each range's ends the static, direct, pair direct or dynamic program the tables name, the static, direct and
+pair direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs too),
+with ``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static, direct or pair row);
+at each pair key the pair direct program's plan and token-block grid, its ``y`` bit for bit that of the forward
+without ``PAIR_ROWS`` and of the static program; a capture above a direct range after an eager call inside it (that
+call refills no pre-zeroed buffer, so the capture zeroes its own); and both packages in one process at a direct row
+and at a pair row.
 
 This suite names its package once, through ``tests.cake.test_helpers.cake_package`` (key
 ``cake_causal_conv1d_nondet_train``).  Every test skips until the exporter has rendered the package (``build.json``
@@ -654,9 +657,10 @@ def _fallback_row_large_cases(kind: str = "bwd") -> tuple:
 
 def _expected_program(arch: str, kind: str, S: int, C: int) -> str:
     """The program route ``kind`` launches at ``(S, C)`` on ``arch``, read from the tables (asserted against
-    ``selected_modules``): inside an ``SM_WIDE_ROWS`` segment the segment's program, else inside a ``DIRECT_ROWS``
-    range the route's direct program, else inside a ``FALLBACK_ROWS`` key's token range the route's fallback program
-    (a forward route's static program), else the rules' program (the three tables emptied)."""
+    ``selected_modules``): inside an ``SM_WIDE_ROWS`` segment the segment's program, else inside a ``PAIR_ROWS``
+    range the route's pair direct program, else inside a ``DIRECT_ROWS`` range the route's direct program, else
+    inside a ``FALLBACK_ROWS`` key's token range the route's fallback program (a forward route's static program),
+    else the rules' program (the four tables emptied)."""
 
     kind = _route_of(kind)
     (selected,) = loader.selected_modules(arch, kind, C=C, S=S)
@@ -665,10 +669,13 @@ def _expected_program(arch: str, kind: str, S: int, C: int) -> str:
     with pytest.MonkeyPatch.context() as rules_only:
         rules_only.setitem(loader.FALLBACK_ROWS, arch, {})
         rules_only.setitem(loader.SM_WIDE_ROWS, arch, {})
+        rules_only.setitem(loader.PAIR_ROWS, arch, {})
         rules_only.setitem(loader.DIRECT_ROWS, arch, {})
         (by_rules,) = loader.selected_modules(arch, kind, C=C, S=S)
     if segment:
         expected = segment[0]
+    elif loader.pair_row(arch, kind, C, S):
+        expected = _forward_program(arch, kind, "pair")
     elif loader.direct_row(arch, kind, C, S):
         expected = _forward_program(arch, kind, "direct")
     elif bounds is not None and bounds[0] <= S <= bounds[1]:
@@ -679,15 +686,22 @@ def _expected_program(arch: str, kind: str, S: int, C: int) -> str:
     return selected
 
 
-def _forward_program(arch: str, kind: str, form: str) -> str | None:
-    """The static (``form`` ``"static"``: the record without a selection rule) or direct (``"direct"``: the record of
-    selection-rule kind ``rows``) program of forward route ``kind`` on ``arch``; ``None`` when the route lists none."""
+# The geometry ``vec`` (channels per thread) of each forward program form: the pair direct program runs two.
+FORM_VEC = {"static": 8, "direct": 8, "pair": 2}
 
-    want = {"static": None, "direct": loader.ROWS_KIND}[form]
+
+def _forward_program(arch: str, kind: str, form: str) -> str | None:
+    """The static (``form`` ``"static"``: the record without a selection rule), direct (``"direct"``: the record of
+    selection-rule kind ``rows`` with eight channels per thread) or pair direct (``"pair"``: the record of
+    selection-rule kind ``rows`` with two channels per thread) program of forward route ``kind`` on ``arch``; ``None``
+    when the route lists none."""
+
+    want = {"static": None, "direct": loader.ROWS_KIND, "pair": loader.ROWS_KIND}[form]
     names = [
         name
         for name in loader.route_modules(arch, kind)
         if (loader.select_rule(loader.MODULES[name]) or {"kind": None})["kind"] == want
+        and int(loader.MODULES[name]["grid_rule"]["geometry"]["vec"]) == FORM_VEC[form]
     ]
     assert len(names) <= 1, (arch, kind, form, names)
     return names[0] if names else None
@@ -695,7 +709,8 @@ def _forward_program(arch: str, kind: str, form: str) -> str | None:
 
 def _forward_keys(arch: str) -> list[tuple[str, int, int, int, int, str]]:
     """``(route, C_lo, C_hi, S_lo, S_hi, form)`` of the forward keys of ``arch``: each ``FALLBACK_ROWS`` key of a
-    forward route (form ``"static"``) and each ``DIRECT_ROWS`` key (form ``"direct"``)."""
+    forward route (form ``"static"``), each ``DIRECT_ROWS`` key (form ``"direct"``) and each ``PAIR_ROWS`` key (form
+    ``"pair"``)."""
 
     keys = [
         (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), "static")
@@ -704,12 +719,11 @@ def _forward_keys(arch: str) -> list[tuple[str, int, int, int, int, str]]:
         ).items()
         if loader.route_role(route) == "fwd"
     ]
-    keys += [
-        (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), "direct")
-        for (route, c_lo, c_hi), (s_lo, s_hi, _) in loader.DIRECT_ROWS.get(
-            arch, {}
-        ).items()
-    ]
+    for form, table in (("direct", loader.DIRECT_ROWS), ("pair", loader.PAIR_ROWS)):
+        keys += [
+            (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), form)
+            for (route, c_lo, c_hi), (s_lo, s_hi, _) in table.get(arch, {}).items()
+        ]
     return sorted(keys)
 
 
@@ -717,10 +731,11 @@ def _forward_keys(arch: str) -> list[tuple[str, int, int, int, int, str]]:
 def _forward_rules_only(
     arch: str, route: str | None = None, static_from: tuple[int, int] | None = None
 ):
-    """Inside the block the forward keys of ``arch`` are gone (``DIRECT_ROWS`` emptied, ``FALLBACK_ROWS`` without its
-    forward keys), so every forward call selects by the rules (the dynamic programs, which run every call above the
-    keys); with ``route`` and ``static_from`` (``(C_lo, C_hi)``) one key over every token count puts the route's
-    static program on those channel counts instead.  The host's row plans are dropped on entry and on exit."""
+    """Inside the block the forward keys of ``arch`` are gone (``PAIR_ROWS`` and ``DIRECT_ROWS`` emptied,
+    ``FALLBACK_ROWS`` without its forward keys), so every forward call selects by the rules (the dynamic programs,
+    which run every call above the keys); with ``route`` and ``static_from`` (``(C_lo, C_hi)``) one key over every
+    token count puts the route's static program on those channel counts instead.  The host's row plans are dropped
+    on entry and on exit."""
 
     rows = {
         key: value
@@ -732,6 +747,7 @@ def _forward_rules_only(
     pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
     try:
         with pytest.MonkeyPatch.context() as m:
+            m.setitem(loader.PAIR_ROWS, arch, {})
             m.setitem(loader.DIRECT_ROWS, arch, {})
             m.setitem(loader.FALLBACK_ROWS, arch, rows)
             yield
@@ -1635,9 +1651,9 @@ def test_forward_narrow_row(kind, C, tiles, taps, monkeypatch, record_property) 
     ``forward_narrow_min_s`` floor, the row's ``FORWARD_NARROW_WIDTHS`` tiles at its width floor, one tile of ``C /
     vec`` vectors one token below the floor and inside a single-tile range -- once on a caller-owned forward workspace
     of the public size and once on the package's, each holding the launch's counters and zero after the call; ``y``
-    of both launches judged against the naive tier.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` are
-    removed for the test (:func:`_forward_rules_only`): these are the dynamic program's rows, which it runs outside the
-    keys' token ranges (the keys' own programs: :func:`test_forward_small_s_row`)."""
+    of both launches judged against the naive tier.  The forward keys of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and
+    ``PAIR_ROWS`` are removed for the test (:func:`_forward_rules_only`): these are the dynamic program's rows, which
+    it runs outside the keys' token ranges (the keys' own programs: :func:`test_forward_small_s_row`)."""
 
     _require_route(kind)
     with _forward_rules_only(_arch()):
@@ -1736,15 +1752,16 @@ def _small_s_docs(S: int):
     "kind, taps", tuple(FORWARD_SETTINGS), ids=[f"{k}-{t}" for k, t in FORWARD_SETTINGS]
 )
 def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
-    """Every forward key of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` of route ``kind`` on the device's architecture
-    (:func:`_small_s_rows`: S 1000 inside the range, both sides of the range's first and last token count, at the
-    key's channel ends): the public forward launches the program the tables name (the static program inside a static
-    range, the direct program inside a direct range, the dynamic program elsewhere), the static and direct programs
-    with no ``work`` counters (a passed forward workspace is checked, not passed on, and stays zero).  On each of the
-    32 draws every ``y`` is judged against the naive tier: 3 launches with and without a caller workspace, the route's
-    static program on the same inputs (one key over every token count of the key's channel counts), a launch with
-    ``enable_pdl`` 0 and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured after
-    one eager warm-up, whose capture at a static or direct row has no fill node and counts no capture fallback.  A row
+    """Every forward key of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS`` of route ``kind`` on the device's
+    architecture (:func:`_small_s_rows`: S 1000 inside the range, both sides of the range's first and last token
+    count, at the key's channel ends): the public forward launches the program the tables name (the pair direct
+    program inside a pair range, else the direct program inside a direct range, else the static program inside a
+    static range, the dynamic program elsewhere), the static, direct and pair direct programs with no ``work``
+    counters (a passed forward workspace is checked, not passed on, and stays zero).  On each of the 32 draws every
+    ``y`` is judged against the naive tier: 3 launches with and without a caller workspace, the route's static program
+    on the same inputs (one key over every token count of the key's channel counts), a launch with ``enable_pdl`` 0
+    and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured after one eager
+    warm-up, whose capture at a static, direct or pair row has no fill node and counts no capture fallback.  A row
     packs the ``"perf"`` documents, or one document below the packing's minimum (:func:`_small_s_docs`)."""
 
     _require_route(kind)
@@ -1756,9 +1773,10 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
         )
         == kind
     )
-    static, direct = (
+    static, direct, pair = (
         _forward_program(arch, kind, "static"),
         _forward_program(arch, kind, "direct"),
+        _forward_program(arch, kind, "pair"),
     )
     rows = _small_s_rows(arch, kind)
     assert static is not None and rows, f"{arch} {kind}: no forward key"
@@ -1774,7 +1792,7 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     forms = set()
     for S, C, c_lo, c_hi in rows:
         name = _expected_program(arch, kind, S, C)
-        form = "direct" if name == direct else "static" if name == static else "dynamic"
+        form = {direct: "direct", pair: "pair", static: "static"}.get(name, "dynamic")
         forms.add(form)
         no_work = form != "dynamic"
         docs = _small_s_docs(S)
@@ -1888,6 +1906,130 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     assert {"static", "dynamic"} <= forms and ("direct" in forms) is (
         direct is not None
     ), (arch, kind, forms)
+    assert ("pair" in forms) is (pair is not None), (arch, kind, forms)
+
+
+# The channel counts of the pair rows' launch test besides both ends of each pair key: C 512 to 1024 and C 776, whose
+# last pair tile is partial.
+PAIR_ROW_CHANNELS = (512, 776, 1024)
+
+
+@pytest.mark.parametrize(
+    "kind, taps", tuple(FORWARD_SETTINGS), ids=[f"{k}-{t}" for k, t in FORWARD_SETTINGS]
+)
+def test_pair_rows_launch_and_keep_y_bits(kind, taps, monkeypatch) -> None:
+    """At each ``PAIR_ROWS`` key of forward route ``kind`` on the device's architecture, at both ends of its C range
+    and at each C of :data:`PAIR_ROW_CHANNELS` it holds: at the range's first token count on one document, at S 1000
+    and at its last token count the public forward launches the route's pair direct program on its ``PAIR_PLANS``
+    form (16 channel pairs per tile, 8 token sub-tiles, ``ceil(C / 2 / 16)`` tiles), its token-block grid
+    (``min(ctas_per_sm x SMs, n_ch_tiles x ceil(S / (8 x n_sub)))`` CTAs) and no ``work`` counters; one token outside
+    the range it launches another program.  Where the route has two pair keys, each key's C also runs at the other
+    key's last token count and one token beyond it.  On each draw ``y`` repeats bit for bit, equals bit for bit the
+    forward's without ``PAIR_ROWS`` (the static, direct or dynamic program the other tables and the rules pick) and
+    the route's static program's (one key over every token count of the channel count, :func:`_forward_rules_only`),
+    and every ``y`` is judged against the naive tier."""
+
+    _require_route(kind)
+    arch, device = _arch(), _device()
+    weight_dtype, bias_dtype = FORWARD_SETTINGS[(kind, taps)]
+    keys = [key for key in _forward_keys(arch) if key[0] == kind and key[5] == "pair"]
+    assert keys, (arch, kind)
+    ends = sorted({key[4] for key in keys})
+    cases = []
+    for _, c_lo, c_hi, s_lo, s_hi, _ in keys:
+        rows = [
+            (s_lo, None),
+            (1000, "perf"),
+            (s_hi, "perf"),
+            (s_lo - 1, _small_s_docs(s_lo - 1)),
+            (s_hi + 1, "perf"),
+        ]
+        rows += [(S, "perf") for end in ends if end != s_hi for S in (end, end + 1)]
+        held = {C for C in PAIR_ROW_CHANNELS if c_lo <= C <= c_hi}
+        cases += [(C, (s_lo, s_hi), rows) for C in sorted({c_lo, c_hi} | held)]
+    pair = _forward_program(arch, kind, "pair")
+    static = _forward_program(arch, kind, "static")
+    assert pair is not None and static is not None, (arch, kind, pair, static)
+    record = loader.MODULES[pair]
+    geometry = record["grid_rule"]["geometry"]
+    assert geometry == {"threads": 128, "vec": 2}, (pair, geometry)
+    form = tuple(loader.PAIR_PLANS[arch][kind])
+    assert form == (16, 8), (arch, kind, form)
+    sms = loader.sm_count(device.index)
+    split_keys = ("ct_vec", "n_sub", "n_ch_tiles")
+    seen = []
+    launch = pkg.run_module
+
+    def record_launch(name, values, *, device_index, grid=None):
+        split = tuple(int(values[key]) for key in split_keys)
+        shape = None if grid is None else tuple(grid)
+        seen.append((name, split, values.get("work"), shape))
+        return launch(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record_launch)
+    for C, (s_lo, s_hi), rows in cases:
+        for S, docs in rows:
+            if S < 1:
+                continue
+            inside = s_lo <= S <= s_hi
+            label = f"{arch} {kind} taps={taps} pair S={S} C={C} docs={docs or 'one'}"
+            tiles = -(-(C // 2) // 16)
+            ctas = int(record["grid_rule"]["ctas_per_sm"]) * sms
+            blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * 8))
+            want_grid = (min(ctas, tiles * blocks), 1, 1)
+
+            def call(
+                x,
+                w,
+                cu,
+                dy,
+                b,
+                policy,
+                C=C,
+                inside=inside,
+                label=label,
+                want_grid=want_grid,
+            ):
+                seen.clear()
+                y = _forward(x, w, cu, bias=b)
+                assert len(seen) == 1, (label, seen)
+                name, split, work, grid = seen[0]
+                if inside:
+                    assert name == pair, (label, name)
+                    assert split == (16, 8, -(-(C // 2) // 16)), (label, split)
+                    assert grid == want_grid, (label, grid, want_grid)
+                    assert work is None, label
+                else:
+                    assert name != pair, (label, name)
+                again = _forward(x, w, cu, bias=b)
+                assert torch.equal(_bits(again), _bits(y)), (label, "repeat")
+                try:
+                    with pytest.MonkeyPatch.context() as m:
+                        m.setitem(loader.PAIR_ROWS, arch, {})
+                        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                        seen.clear()
+                        y_rest = _forward(x, w, cu, bias=b)
+                        assert [n for n, *_ in seen] != [pair], (label, seen)
+                finally:
+                    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                assert torch.equal(_bits(y_rest), _bits(y)), (label, "no PAIR_ROWS")
+                with _forward_rules_only(arch, kind, (C, C)):
+                    seen.clear()
+                    y_static = _forward(x, w, cu, bias=b)
+                    assert [n for n, *_ in seen] == [static], (label, seen)
+                assert torch.equal(_bits(y_static), _bits(y)), (label, static)
+                return {"y": [y, again, y_rest, y_static]}
+
+            _judge(
+                S,
+                C,
+                docs,
+                call,
+                weight_dtype=weight_dtype,
+                bias_dtype=bias_dtype,
+                key=229,
+                label=label,
+            )
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
@@ -2879,9 +3021,9 @@ def test_forward_capture_after_an_eager_call_inside_a_forward_key(
     program: no counters) refills no pre-zeroed forward buffer.  A CUDA Graph capture of the forward one token above
     the range (the dynamic program, with counters) then finds none and zeroes its own (one fill node, counted in
     ``_CAPTURE_FILL_FALLBACKS``); a capture inside the range has no fill node; a capture one token below the range
-    has none when the static program runs there, else (the dynamic program, the pool still empty) one; after an eager
-    call one token above the range a capture there takes a pre-zeroed buffer (no fill node, no fallback).  Every
-    replay is judged against the naive tier."""
+    has none when the static or the pair direct program runs there, else (the dynamic program, the pool still empty)
+    one; after an eager call one token above the range a capture there takes a pre-zeroed buffer (no fill node, no
+    fallback).  Every replay is judged against the naive tier."""
 
     _require_route("bwd")
     arch, device = _arch(), _device()
@@ -2893,6 +3035,7 @@ def test_forward_capture_after_an_eager_call_inside_a_forward_key(
     no_work = {
         _forward_program(arch, "fwd", "static"),
         _forward_program(arch, "fwd", "direct"),
+        _forward_program(arch, "fwd", "pair"),
     }
     inside = _draw_inputs(s_hi, C, "perf", "bwd", key=227)
     _forward(inside[0], inside[1], inside[2])
@@ -4688,11 +4831,13 @@ def test_det_and_nondet_sm_wide_programs_in_one_process(monkeypatch) -> None:
 
 def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     """The deterministic and the non-deterministic packages loaded in one process, their calls interleaved on one
-    stream (policy forced on), at :data:`PDL_CASE` and at the first token count of the default route's first
-    ``DIRECT_ROWS`` range (where both packages launch the direct program): the non-deterministic launches are of
-    records with ``launch.use_pdl`` ``"runtime"`` and pass ``enable_pdl`` 1; each forward program both packages launch
-    has two names, and the deterministic record of it launches without PDL.  Every output of both packages is judged
-    against the naive tier (no comparison between them)."""
+    stream (policy forced on), at :data:`PDL_CASE`, at the first token count of the default route's first
+    ``DIRECT_ROWS`` range outside every ``PAIR_ROWS`` range (where both packages launch the direct program) and at a
+    token count of the default route's first ``PAIR_ROWS`` range (S 1000 when the range holds it, where both packages
+    launch the pair direct program): the non-deterministic launches are of records with ``launch.use_pdl``
+    ``"runtime"`` and pass ``enable_pdl`` 1; each forward program both packages launch has two names, and the
+    deterministic record of it launches without PDL.  Every output of both packages is judged against the naive tier
+    (no comparison between them)."""
 
     _pdl_mode("eager", monkeypatch)
     seen = _record_pdl(monkeypatch)
@@ -4713,10 +4858,20 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     monkeypatch.setattr(det, "run_modules", det_record_many)
     arch = _arch()
     direct = [
-        key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "direct"
+        key
+        for key in _forward_keys(arch)
+        if key[0] == "fwd"
+        and key[5] == "direct"
+        and not loader.pair_row(arch, "fwd", key[1], key[3])
     ]
-    assert direct, f"{arch}: no DIRECT_ROWS key on route fwd"
+    assert direct, (
+        f"{arch}: no DIRECT_ROWS key on route fwd outside the PAIR_ROWS ranges"
+    )
     _, c_lo, _, s_lo, _, _ = direct[0]
+    pair = [key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "pair"]
+    assert pair, f"{arch}: no PAIR_ROWS key on route fwd"
+    _, pair_c, _, pair_lo, pair_hi, _ = pair[0]
+    pair_s = 1000 if pair_lo <= 1000 <= pair_hi else pair_lo
 
     def call(x, w, cu, dy, b, policy):
         found = {"y": [], "dx": [], "dweight": []}
@@ -4729,7 +4884,7 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
             found["dweight"] += [dw, det_dw]
         return found
 
-    for S, C, docs in (PDL_CASE, (s_lo, c_lo, "perf")):
+    for S, C, docs in (PDL_CASE, (s_lo, c_lo, "perf"), (pair_s, pair_c, "perf")):
         _route_judge(
             S,
             C,
@@ -4742,6 +4897,8 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     _assert_pdl(seen, 1, "nondet")
     assert _forward_program(arch, "fwd", "direct") in {name for name, _ in seen}, seen
     assert det_jit.direct_module(arch, "fwd", c_lo, s_lo) in det_seen, det_seen
+    assert _forward_program(arch, "fwd", "pair") in {name for name, _ in seen}, seen
+    assert det_jit.pair_module(arch, "fwd", pair_c, pair_s) in det_seen, det_seen
     # the programs both packages launch (the forward: one program, two names and bindings)
     shared = [
         (name, det_name)

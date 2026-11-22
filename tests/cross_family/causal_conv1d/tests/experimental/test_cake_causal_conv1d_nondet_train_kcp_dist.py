@@ -21,14 +21,14 @@ most eight ranks), the deterministic suite's ``F_ROWS`` (W = 2 / 4 at C = 528 an
 floor of the channel count on the running architecture, ``cake_jit.FORWARD_NARROW_ROW_FLOORS``, run as there with the
 forward's small-S rows removed, ``_small_s_rows_removed``: its ``floor:`` rows take the ranks' token counts from that
 floor at run time, a rank at it and one a token below it, so on every architecture one rank's forward runs the narrower
-tiles and another's the single tile), and ``ROWS_KEYS`` (W = 2 / 4 at C = 640, the
-ranks' token counts inside the static range and the direct range of every architecture's forward key covering C 640 and
-above the key, so the ranks of one call run the static, the direct and the dynamic program).  The outputs are judged by
-the naive judge (``tests/cake/test_helpers/cake_naive.py``): every rank draws the whole pack from each of 32 seeds (the
-same on every rank), runs the call on its tokens and judges its ``y`` / ``dx`` rows and the sum of the ranks'
-``dweight`` partials (all-gathered and added in rank order) against the float64 oracle of the whole pack and PyTorch's
-BF16 naive convolution.  No bit rule holds the package: its outputs are never compared bit for bit with another launch
-and never with the deterministic package.  Per row and rank:
+tiles and another's the single tile), and ``ROWS_KEYS`` (W = 2 / 4 at C = 640, the ranks' token counts inside the
+static range, the pair direct range and the direct range of every architecture's forward keys covering C 640 and above
+the keys, so the ranks of one call run the static, the pair direct, the direct and the dynamic program).  The outputs
+are judged by the naive judge (``tests/cake/test_helpers/cake_naive.py``): every rank draws the whole pack from each of
+32 seeds (the same on every rank), runs the call on its tokens and judges its ``y`` / ``dx`` rows and the sum of the
+ranks' ``dweight`` partials (all-gathered and added in rank order) against the float64 oracle of the whole pack and
+PyTorch's BF16 naive convolution.  No bit rule holds the package: its outputs are never compared bit for bit with
+another launch and never with the deterministic package.  Per row and rank:
 
 - ``REPEATS`` launches of the direct pass on each draw, every launch judged;
 - checkpoints with and without a recompute handle (``use_reentrant`` False and True; 2 x forward + backward) and
@@ -85,11 +85,14 @@ from tests.test_cake_causal_conv1d_det_train_kcp_dist import (
 # The seed of every rank's pack (draw 0 of the judges).
 SEED = 7815
 REPEATS = 20
-# W = 2 / 4 at C = 640 with ragged ranks of 3003 tokens (inside every architecture's static range of the ``fwd`` key
-# covering C 640), 12003 (inside its direct range), 40003 (above the key: the dynamic program) and 1.
+# W = 2 / 4 at C = 640 with ragged ranks of 3103 tokens (inside every architecture's static range of the ``fwd`` key
+# covering C 640, above its pair direct range), 12003 (inside its direct range), 40003 (above the keys: the dynamic
+# program) and 1; and W = 4 with ranks of 63 tokens (the static program, one token below every architecture's pair
+# direct range), 64 and 2560 (inside it: the pair direct program) and 3073 (above it: the static program).
 ROWS_KEYS = [
-    ((10000, 5006), 2, "ragged:3003,12003", 640),
-    ((30000, 20000, 5010), 4, "ragged:3003,12003,40003,1", 640),
+    ((10000, 5106), 2, "ragged:3103,12003", 640),
+    ((30000, 20000, 5110), 4, "ragged:3103,12003,40003,1", 640),
+    ((4000, 1760), 4, "ragged:63,64,2560,3073", 640),
 ]
 # W = 16 (16-way context parallelism) on the deterministic rows' packs, for the layouts any world size partitions.
 ROWS_W16 = [

@@ -93,9 +93,9 @@ Two-launch forward (the deterministic KCP package's forward): the forward can ru
 program that reads no received row and the ``kcp_fwd_halo`` history-row program.  The main program writes every row,
 a continuing fragment's first rows as at a document start: either this package's zero-history registry's single-rank
 ``fwd`` route program (``cake_jit.selected_modules(arch, "fwd", C=C, S=S)``, the program the single-rank forward
-runs, by the rank's local token count: inside a forward row's token range the route's static or direct program) on the
-rank's fragments, each a document of its own (``cu = ctx.cu_seqlens_local``, ``num_docs = n_frag``; the record's grid
-and token-chunk counters as in the single-rank forward), or, in the overlapped form
+runs, by the rank's local token count: inside a forward row's token range the route's static, direct or pair direct
+program) on the rank's fragments, each a document of its own (``cu = ctx.cu_seqlens_local``, ``num_docs = n_frag``;
+the record's grid and token-chunk counters as in the single-rank forward), or, in the overlapped form
 only, the ``kcp_fwd`` program with every ``hist_row_off`` entry ``-1``.  The history-row program then writes ``y`` of
 the first ``min(3, len)`` rows of every fragment with a history row again from the received pool, with the
 ``kcp_fwd`` program's instructions, so ``y`` is bitwise the one-launch forward's; it runs only when the rank receives
@@ -1503,13 +1503,14 @@ def _sr_main(
 ) -> tuple[str, dict[str, int], tuple[int, int, int], int]:
     """The two-launch forward's single-rank main program of a call: ``(record name, plan scalars, grid, counter
     words)`` of the zero-history registry's ``fwd`` route record ``cake_jit.selected_modules`` picks for ``C`` and
-    ``S`` (the rank's local token count: inside the token range of a row of ``cake_jit.FALLBACK_ROWS`` or
-    ``cake_jit.DIRECT_ROWS`` the route's static or direct program) -- the single-rank forward's plan (its role, route
-    and architecture, so a direct row runs the route's ``cake_jit.DIRECT_PLANS`` tiles) over the rank's ``n_frag``
+    ``S`` (the rank's local token count: inside the token range of a row of ``cake_jit.FALLBACK_ROWS``,
+    ``cake_jit.DIRECT_ROWS`` or ``cake_jit.PAIR_ROWS`` the route's static, direct or pair direct program) -- the
+    single-rank forward's plan (its role, route and architecture, so a direct row runs the route's
+    ``cake_jit.DIRECT_PLANS`` tiles and a pair row its ``cake_jit.PAIR_PLANS`` tiles) over the rank's ``n_frag``
     fragments as documents,
-    its record's grid for the call (the full co-resident grid; a direct program's capped at its token blocks) and its
-    token-chunk counter words (0 for the static and direct programs, which take no counters); a ``ValueError`` when
-    ``C`` spans more channel tiles than that grid holds."""
+    its record's grid for the call (the full co-resident grid; a direct or pair direct program's capped at its token
+    blocks) and its token-chunk counter words (0 for the static, direct and pair direct programs, which take no
+    counters); a ``ValueError`` when ``C`` spans more channel tiles than that grid holds."""
     (name,) = _zero_history.selected_modules(arch, FWD_MAIN_ROUTE, C=C, S=S)
     record = _zero_history.MODULES[name]
     scalars = plan(

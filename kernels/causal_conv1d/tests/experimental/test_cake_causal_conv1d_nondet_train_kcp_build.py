@@ -162,12 +162,13 @@ def test_two_launch_forward_programs() -> None:
     route's one record and takes the arguments the host passes (``kcp._fwd_repair``); the single-rank main program is
     a record of this package's zero-history registry's ``fwd`` route (``kcp.FWD_MAIN_ROUTE``) on every architecture,
     the det package's zero-history record of the same route position, each record of that route takes only ``x``,
-    ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``; none, and no ``workspace_rule``, for the static and
-    the direct program of the small-S rows), the plan scalars and, exactly when its ``launch.use_pdl`` is
-    ``"runtime"``, the ``enable_pdl`` launch scalar (``kcp._fwd_main`` passes 0), and launches the co-resident grid
-    (no reserved SM; the direct program's capped at its token blocks), so the host can launch whichever record
-    ``cake_jit.selected_modules`` picks for the call's ``C`` and token count: at C = 640 the static program at 3003
-    tokens and the direct program at 12003 on every architecture."""
+    ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``; none, and no ``workspace_rule``, for the static,
+    the direct and the pair direct program of the small-S rows), the plan scalars and, exactly when its
+    ``launch.use_pdl`` is ``"runtime"``, the ``enable_pdl`` launch scalar (``kcp._fwd_main`` passes 0), and launches
+    the co-resident grid (no reserved SM; the direct and the pair direct program's capped at their token blocks), so
+    the host can launch whichever record ``cake_jit.selected_modules`` picks for the call's ``C`` and token count: at
+    C = 640 the pair direct program (two channels per thread) at 1003 tokens, the static program at 3103 and the
+    direct program at 12003 on every architecture."""
 
     kcp = cake_package(KEY, "kcp")
     det_cake_jit = cake_package("cake_causal_conv1d_det_train", "cake_jit")
@@ -193,7 +194,12 @@ def test_two_launch_forward_programs() -> None:
             assert record["grid_rule"]["kind"] == "co_resident", (arch, name)
             assert "reserve_sms" not in record["grid_rule"], (arch, name)
             assert not record["grid_rule"]["cooperative"], (arch, name)
-        small_s = {(640, 3003): None, (640, 12003): cake_jit.ROWS_KIND}
+        # (C, S) -> the selection-rule kind and the geometry ``vec`` of the program the call selects
+        small_s = {
+            (640, 1003): (cake_jit.ROWS_KIND, 2),
+            (640, 3103): (None, 8),
+            (640, 12003): (cake_jit.ROWS_KIND, 8),
+        }
         for C, S in (
             (256, 1),
             (256, 65536),
@@ -206,7 +212,8 @@ def test_two_launch_forward_programs() -> None:
             assert name in names, (arch, C, S)
             if (C, S) in small_s:
                 rule = cake_jit.select_rule(cake_jit.MODULES[name])
-                assert (rule or {"kind": None})["kind"] == small_s[C, S], (
+                vec = cake_jit.MODULES[name]["grid_rule"]["geometry"]["vec"]
+                assert ((rule or {"kind": None})["kind"], vec) == small_s[C, S], (
                     arch,
                     C,
                     S,
