@@ -191,6 +191,65 @@ the replay path it recomputes the states, `h` and `v_new` in its workspace
 The gradients are bitwise the same on every path; the backward writes nothing
 into the saved set.
 
+### Choosing `save_mode`
+
+`save_mode` trades saved-set memory against backward time. The choice is the
+caller's; the default is `"light"`. `"light"` keeps `Aqk` / `Akk`, `qg` and,
+where the size rule saves them, the segment-boundary states. Its backward
+recomputes the recurrence, either in full (path `light`) or its second pass
+alone from the saved states (path `light_states`, which is picked
+automatically and is not a mode). `"tape"` keeps `Aqk` / `Akk` with the
+forward's state tape `h` and `v_new` (768 B more per internal token-head)
+and the segment transfers. Its backward skips the recurrence recompute.
+Those 768 B leave the arena: a workspace sized with `save_mode="tape"` is
+768 B per internal token-head smaller (12.6-17.1 % on the rows below) and
+makes `"tape"` the default of the calls on it. The gradients are bitwise the
+same in both modes (measured on every row below, both packages, the three
+GPUs and every lower-memory arena option).
+
+Without checkpointing, every layer holds its saved set until its backward,
+so the saved-set change is paid once per layer. Under non-reentrant
+`torch.utils.checkpoint` the forward keeps no saved set (see Workspace
+below). The replayed forward writes it just before that layer's backward,
+so it is live for one layer at a time.
+
+| row (`D = 128`) | light path | saved set per layer (MiB), light -> tape | peak, step (%) | peak, ckpt step (%) | fwd time | bwd time | step time | ckpt step time |
+|---|---|---|---|---|---|---|---|---|
+| 16384 tokens, 3 docs, 4 heads | `light` | 32.3-32.8 -> 120.3-144.8 | +8.4 to +12.9 | +8.4 to +12.7 | 1.005-1.023 | 0.676-0.777 | 0.801-0.856 | 0.856-0.898 |
+| 65536 tokens, 3 docs, 4 heads | `light_states` | 211.5-249.5 -> 312.3-338.3 | -6.0 to -5.3 | -6.0 to -5.3 | 1.028-1.054 | 0.966-0.986 | 0.990-1.007 | 1.001-1.017 |
+| 239718 tokens (16313, 221356, 2049), 4 heads | `light_states` | 551.8-595.1 -> 992.8-1024.1 | -4.6 to -4.3 | -4.6 to -4.3 | 1.098-1.138 | 0.971-0.993 | 1.012-1.036 | 1.032-1.058 |
+| 65536 tokens, 3 docs, 64 heads | `light` | 2052.0-2084.0 -> 4108.0-4140.0 | -4.1 to -3.9 | -4.1 to -3.9 | 1.058-1.106 | 0.931-0.981 | 0.968-1.013 | 0.989-1.026 |
+
+* Measured with KDA 0.2.1 (CUDA 13.5.37 JIT build, torch 2.14.1) on B200
+  (`sm_100a`, 148 SMs), GB300 (`sm_103a`, 152 SMs) and VR200 (`sm_107a`,
+  212 SMs), with a caller-owned workspace and the default arena. Each cell is
+  the range over the three GPUs and eight configurations: both packages,
+  gate `g` and raw, and in-kernel Q/K L2 norm off and on. MiB is 2^20 bytes. The
+  "ckpt step" is the forward under `torch.utils.checkpoint(use_reentrant=False)`
+  and the backward: two forwards and one backward. Times are tape / light
+  ratios of summed GPU kernel time (CUPTI), median of interleaved rounds,
+  paired within one timing process; a ratio below 1 means tape is faster.
+  Two identical arms differed by up to 3.1-4.1 % on B200 and GB300, and by
+  up to 1.5 % (deterministic package) and 7.8 % (non-deterministic package)
+  on VR200, so a ratio within a few percent of 1 is not a reliable
+  difference. A serial control (one timing process per node, gate `g`, L2
+  norm off) on the three GPUs reproduced the ratios (step 0.802-0.839 on the 16384-token row,
+  0.968-0.993 at 64 heads).
+* 16384-token row (the light backward recomputes the whole recurrence):
+  tape made the step 14-20 % faster and the checkpointed step 10-14 % faster.
+  It cost 88-112 MiB more saved set per layer and an 8-13 % higher peak.
+* The other rows (segment states saved, or 64 heads): tape made the forward
+  3-14 % slower and the backward 1-7 % faster. The step stayed within about
+  ±4 %, which is no reliable gain. The checkpointed step, which runs the
+  forward twice, was 0.989-1.058. The saved set per layer grew (at 64 heads
+  it doubled, about 2 GiB more), while the peak fell 4-6 % because the arena
+  is smaller. Without checkpointing, that growth is paid once per layer and
+  the arena saving once per workspace.
+* Other shapes: `cake_kda_det_train_saved_bytes(S, H, num_docs, save_mode=...)`,
+  `cake_kda_det_train_workspace_bytes(S, num_docs, H, backward=True, save_mode=...)`
+  and `cake_backend.memory_report(S, num_docs, H, save_mode)` give the memory
+  of both modes. Times were measured only on the rows above.
+
 ### Workspace (`CakeKDADetWorkspace`)
 
 A workspace is one arena (a `uint8` tensor) holding the internal-layout
