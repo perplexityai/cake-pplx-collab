@@ -21,10 +21,13 @@ of an architecture whose registry lacks the programs (CPU), then on an SM100 / S
 against the FP64 oracle (``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs, the Gaussian rule,
 the containment of every id in a returned block, bitwise repetition and the equality with the plain top-k call's bits (also at
 ``top_k`` 2044 and 2047), a prepared runner that draws its work units on a poisoned caller-owned workspace, the caller-owned
-workspace and outputs, and the absence of host synchronization.
+workspace and outputs, and the absence of host synchronization; where every row keeps all its blocks (``iota``),
+the plain call's plan, the FP64 oracle's rows and the ``scan_blocks`` programs' result, a CUDA graph replaying new
+segment boundaries, and no allocation or host synchronization in a run.
 """
 
 import contextlib
+import functools
 import math
 import random
 import warnings
@@ -87,9 +90,9 @@ SHAPES = {
     "packed8": (P1_SEG_Q, P1_SEG_K),
 }
 # the ``scan_blocks`` program of each request shape on sm_107a, on both grids, with and without ``max_seqlen_k``
+# (tail16k keeps every block of every row: the plain call's plan, ``iota``)
 CB_KEYS_AT_THE_REQUEST_SHAPES = {
     "sm_107a": {
-        "tail16k": f"{CB_ROLE}:l6:u1:s0:f1",
         "tail64k": f"{CB_ROLE}:l6:u1:s0:f0",
         "tail256k": f"{CB_ROLE}:l6:u1:s0:f0",
         "packed8": f"{CB_ROLE}:l6:u1:s0:f0",
@@ -301,42 +304,47 @@ def test_registry_ships_the_candidate_block_programs():
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("bound", ["max_seqlen_k", "num_keys"])
 def test_plan_at_the_request_shapes(arch, shape, bound):
-    """Per grid of the architecture: the plan runs a registered ``scan_blocks`` program unsplit and unpaired (on
-    sm_107a the program of ``CB_KEYS_AT_THE_REQUEST_SHAPES``); the block entries are ``ceil(W / 8) - 1`` per query
-    slot when ``ceil(W / 8) > 2048`` (``W``: ``max_seqlen_k`` when given, else ``Tkv``), else none; the call's
-    workspace is the scan's (candidate buffers and ticket tail) plus the block entries; the bound is the larger plan
-    of the two sampling modes."""
+    """Per grid of the architecture, where ``ceil(W / 8) > 2048`` (``W``: ``max_seqlen_k`` when given, else ``Tkv``):
+    the plan runs a registered ``scan_blocks`` program unsplit and unpaired (on sm_107a the program of
+    ``CB_KEYS_AT_THE_REQUEST_SHAPES``), the block entries are ``ceil(W / 8) - 1`` per query slot and the call's
+    workspace is the scan's (candidate buffers and ticket tail) plus the block entries.  Elsewhere (tail16k) every row
+    keeps all its blocks: the plan is the plain call's (``iota``) with its workspace and no block entries.  The bound
+    is the larger plan of the two sampling modes."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     seg_q, seg_k = SHAPES[shape]
     T, Tkv, S = sum(seg_q), sum(seg_k), len(seg_q)
     msk = max(seg_k) if bound == "max_seqlen_k" else None
     W = Tkv if msk is None else msk
+    nb = -(-W // 8)
     expected = CB_KEYS_AT_THE_REQUEST_SHAPES.get(arch, {}).get(shape)
     for grid in GRIDS[arch]:
         kw = dict(top_k=TOP_K, arch=arch, num_sms=grid, max_seqlen_k=msk)
         plan = plan_with_candidates(T, Tkv, S, **kw)
         assert isinstance(plan, CandidateBlocksChoice)
         c = plan.choice
-        assert (
-            c.scan_key in CB_KEYS[arch] and c.scan_key in cake_jit.PROGRAM_KEYS[arch]
-        ), (
-            grid,
-            c.scan_key,
-        )
-        assert expected is None or c.scan_key == expected, (grid, c.scan_key)
-        assert c.n_split == 1 and not c.split and not c.pair and c.merge_key is None, (
-            grid
-        )
-        assert (
-            c.workspace_bytes
-            == c.grid_ctas * c.block_q * c.cand_cap * 8 + TICKET_TAIL_BYTES
-        ), grid
-        nb = -(-W // 8)
-        assert plan.blk_cap == (nb - 1 if nb > CB_SLOTS else 0), grid
-        assert plan.blk_bytes == c.grid_ctas * c.block_q * plan.blk_cap * 8, grid
-        assert plan.workspace_bytes == c.workspace_bytes + plan.blk_bytes, grid
-        assert plan.blocks_at == c.workspace_bytes, grid
+        assert plan.iota == (nb <= CB_SLOTS) == (shape == "tail16k"), grid
+        if plan.iota:
+            assert c == cake_backend.plan_dsa_indexer_det_topk(T, Tkv, S, **kw), grid
+            assert (plan.blk_cap, plan.blk_bytes) == (0, 0), grid
+            assert plan.workspace_bytes == c.workspace_bytes, grid
+        else:
+            assert (
+                c.scan_key in CB_KEYS[arch]
+                and c.scan_key in cake_jit.PROGRAM_KEYS[arch]
+            ), (grid, c.scan_key)
+            assert expected is None or c.scan_key == expected, (grid, c.scan_key)
+            assert (
+                c.n_split == 1 and not c.split and not c.pair and c.merge_key is None
+            ), grid
+            assert (
+                c.workspace_bytes
+                == c.grid_ctas * c.block_q * c.cand_cap * 8 + TICKET_TAIL_BYTES
+            ), grid
+            assert plan.blk_cap == nb - 1, grid
+            assert plan.blk_bytes == c.grid_ctas * c.block_q * plan.blk_cap * 8, grid
+            assert plan.workspace_bytes == c.workspace_bytes + plan.blk_bytes, grid
+            assert plan.blocks_at == c.workspace_bytes, grid
         unsampled = plan_with_candidates(T, Tkv, S, sample_tiles_max=0, **kw)
         bound_bytes = with_candidates_workspace_size(T, Tkv, S, **kw)
         assert bound_bytes == max(plan.workspace_bytes, unsampled.workspace_bytes), grid
@@ -351,14 +359,15 @@ def test_candidate_block_plans_run_registered_programs_on_a_dense_grid(arch):
     segment), both sampling modes and every grid of the architecture.
     The host fails closed by name on an unregistered program, so a selectable but unregistered ``scan_blocks`` or
     finalize program would fail in production (the backend suite's dense-grid test does the same for the plain
-    call).  Every plan runs one ``scan_blocks`` program unsplit and without a merge."""
+    call).  Every plan with ``ceil(W / 8) > 2048`` runs one ``scan_blocks`` program unsplit and without a merge;
+    every other plan is the plain call's (``iota``)."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     keys = cake_jit.PROGRAM_KEYS[arch]
     tile = cake_backend.policy_for(arch).tile_keys
     queries = sorted({1, 3, 6018} | {int(round(2 ** (17 * i / 10))) for i in range(11)})
     tiles = sorted({0, 1} | {int(round(2 ** (13 * i / 8))) for i in range(9)})
-    chosen = set()
+    chosen, iota = set(), 0
     for grid in GRIDS[arch]:
         for S in (1, 8, 64):
             for T in queries:
@@ -387,12 +396,20 @@ def test_candidate_block_plans_run_registered_programs_on_a_dense_grid(arch):
                                     bound,
                                     sample_tiles_max,
                                 )
-                                assert c.scan_key.startswith(f"{CB_ROLE}:"), where
-                                assert c.n_split == 1 and c.merge_key is None, where
+                                W = Tkv if bound is None else bound
+                                assert plan.iota == (-(-W // 8) <= CB_SLOTS), where
                                 for key in plan.keys:
                                     assert key in keys, (*where, key)
+                                if plan.iota:
+                                    assert not c.scan_key.startswith(f"{CB_ROLE}:")
+                                    assert plan.blk_cap == 0, where
+                                    iota += 1
+                                    continue
+                                assert c.scan_key.startswith(f"{CB_ROLE}:"), where
+                                assert c.n_split == 1 and c.merge_key is None, where
                                 chosen.add(c.scan_key)
     assert chosen <= set(CB_KEYS[arch]), sorted(chosen)
+    assert iota > 0
 
 
 @pytest.mark.cpu_only
@@ -400,7 +417,8 @@ def test_candidate_block_plans_run_registered_programs_on_a_dense_grid(arch):
 def test_architecture_without_candidate_block_programs_is_refused(arch, monkeypatch):
     """An architecture whose registry has no ``scan_blocks`` program (here the registry of ``arch`` without its
     ``scan_blocks:`` keys): the plan and the workspace bound raise the candidate-block dispatch's
-    ``NotImplementedError``, and the plain call's plan is unaffected."""
+    ``NotImplementedError`` (also where every row keeps all its blocks and the plain programs would run), and the
+    plain call's plan is unaffected."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     keys = cake_backend.PROGRAM_KEYS[arch]
@@ -411,8 +429,9 @@ def test_architecture_without_candidate_block_programs_is_refused(arch, monkeypa
     monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, stripped)
     grid = GRIDS[arch][0]
     for fn in (plan_with_candidates, with_candidates_workspace_size):
-        with pytest.raises(NotImplementedError, match=CB_REFUSAL):
-            fn(16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid)
+        for Tkv in (262144, 16384):
+            with pytest.raises(NotImplementedError, match=CB_REFUSAL):
+                fn(16384, Tkv, 1, top_k=TOP_K, arch=arch, num_sms=grid)
     plain = cake_backend.plan_dsa_indexer_det_topk(
         16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid
     )
@@ -827,3 +846,219 @@ def test_torch_deterministic_mode_is_not_consulted():
         out = topk_with_candidates(*args, **inputs.kwargs())
         prepare_with_candidates(*args, **inputs.kwargs())()
     assert len(out) == 3
+
+
+# ---------------------------------------------------------------------------
+# Rows that keep all their blocks (``iota``): the plain plan and the rows written after it
+# ---------------------------------------------------------------------------
+
+# the longest key segment whose rows keep all their blocks (2048 blocks of 8 keys)
+IOTA_W = CB_SLOTS * cake_policy.CB_BLOCK
+# exact layouts whose longest key segment holds at most 2048 blocks: default offsets (rows with 2041 .. 2048 visible
+# blocks, n % 8 != 0, unequal query and key lengths, an empty query segment, a segment without keys) and explicit
+# offsets (positive, beyond the keys, negative: rows without visible keys), packed beyond 16384 keys with
+# ``max_seqlen_k`` 16384, and a call of 16384 keys without ``max_seqlen_k`` (an empty segment, a negative default
+# offset)
+IOTA_LAYOUTS = {
+    "default_offsets": (
+        (64, 40, 0, 16, 24),
+        (IOTA_W, 300, 100, 0, 16376),
+        None,
+        IOTA_W,
+    ),
+    "explicit_offsets": (
+        (48, 24, 16, 16),
+        (IOTA_W, 9000, 500, 64),
+        (16370, 9000, 600, -8),
+        IOTA_W,
+    ),
+    "unbounded": ((40, 0, 8), (16377, 0, 7), None, None),
+}
+# plan geometries on both sides of the bound: (seg_q, seg_k, max_seqlen_k)
+IOTA_PLAN_SHAPES = (
+    ((16384,), (IOTA_W,), None),
+    ((16384,), (IOTA_W,), IOTA_W),
+    ((1,), (8,), None),
+    ((64, 40, 0, 16, 24), (IOTA_W, 300, 100, 0, 16376), IOTA_W),
+    ((4096,) * 4, (IOTA_W,) * 4, IOTA_W),
+    ((2048,), (IOTA_W + 1,), None),
+    ((2048, 2048), (IOTA_W + 1, 100), IOTA_W + 1),
+    ((2048, 2048), (IOTA_W, 100), None),
+)
+
+
+def _scan_blocks_only(monkeypatch):
+    """The dispatch of the package before ``iota``: every candidate-block call runs its ``scan_blocks`` program."""
+    monkeypatch.setattr(
+        cake_backend,
+        "select_cb_program",
+        functools.partial(cake_policy.select_cb_program, iota=False),
+    )
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", CB_ARCHES)
+def test_iota_plan_is_the_plain_plan(arch):
+    """Where the longest key segment ``W`` (``max_seqlen_k`` when given, else ``Tkv``) holds at most 2048 blocks the
+    plan is the plain call's plan of the same arguments (its programs, split, pair, order, finalize and workspace) with
+    ``iota`` set, no block entries and the plain workspace, at every ``top_k`` and in both sampling modes, and the
+    workspace bound is the plain plans'; one block more runs the ``scan_blocks`` program with ``ceil(W / 8) - 1``
+    entries per query slot."""
+    if not cake_jit.PROGRAM_KEYS:
+        pytest.skip("placeholder registry")
+    for grid in GRIDS[arch]:
+        for seg_q, seg_k, bound in IOTA_PLAN_SHAPES:
+            T, Tkv, S = sum(seg_q), sum(seg_k), len(seg_q)
+            nb = -(-(Tkv if bound is None else bound) // 8)
+            where = (grid, seg_q, seg_k, bound)
+            for top_k in (1, TOP_K, 1025, CB_MAX_TOP_K):
+                kw = dict(top_k=top_k, arch=arch, num_sms=grid, max_seqlen_k=bound)
+                plain = [
+                    cake_backend.plan_dsa_indexer_det_topk(
+                        T, Tkv, S, sample_tiles_max=sample, **kw
+                    )
+                    for sample in (None, 0)
+                ]
+                for sample, want in zip((None, 0), plain):
+                    plan = plan_with_candidates(
+                        T, Tkv, S, sample_tiles_max=sample, **kw
+                    )
+                    assert plan.iota == (nb <= CB_SLOTS), (*where, top_k)
+                    assert plan.as_dict()["cb_iota"] == plan.iota
+                    if plan.iota:
+                        assert plan.choice == want, (*where, top_k, sample)
+                        assert plan.keys == want.keys
+                        assert (plan.blk_cap, plan.blk_bytes) == (0, 0)
+                        assert plan.workspace_bytes == want.workspace_bytes
+                    else:
+                        assert plan.choice.scan_key.startswith(f"{CB_ROLE}:"), where
+                        assert plan.blk_cap == nb - 1, where
+                bound_bytes = with_candidates_workspace_size(T, Tkv, S, **kw)
+                if nb <= CB_SLOTS:
+                    assert bound_bytes == max(p.workspace_bytes for p in plain), where
+
+
+@pytest.mark.parametrize("layout", sorted(IOTA_LAYOUTS))
+def test_iota_rows_are_the_scan_blocks_programs_rows(layout, monkeypatch):
+    """Exact inputs on layouts whose longest key segment holds at most 2048 blocks: the call runs the plain programs
+    and then the rows (stage ``cb_iota``, no ``scan_blocks`` program); every row's ``indices`` and
+    ``candidate_blocks`` equal the FP64 oracle's sets with the FP64 scores of the ids, a prepared runner returns the
+    eager result, ``indices`` / ``scores`` are the plain call's, and the ``scan_blocks`` program of the same call (the
+    dispatch before ``iota``) returns the same bits of all three outputs."""
+    _require_cb_program()
+    seg_q, seg_k, offsets, bound = IOTA_LAYOUTS[layout]
+    seed = 7810 + sorted(IOTA_LAYOUTS).index(layout)
+    q, k, w, cq, ck = cb.exact_inputs(
+        "MXFP4-grid", seg_q, seg_k, seed=seed, device="cuda"
+    )
+    off = _offsets_tensor(offsets, q.device)
+    extra = {} if bound is None else {"max_seqlen_k": bound}
+    args = (q, k, w, cq, ck)
+    kw = dict(top_k=TOP_K, softmax_scale=cb.EXACT_SCALE, q_causal_offsets=off, **extra)
+    ns = _visible_counts(cq, ck, off)
+    assert max((n + 7) // 8 for n in ns) == CB_SLOTS and min(ns) == 0
+    runner = prepare_with_candidates(*args, **kw)
+    assert runner.stages[-1] == cake_policy.CB_IOTA_STAGE, runner.stages
+    assert CB_ROLE not in runner.programs, runner.programs
+    got = _call(q, k, w, cq, ck, offsets=off, **extra)
+    failures = _structure_failures(*got, ns)
+    failures += _exact_failures(q, k, w, cq, ck, off, got)
+    if not _same_result(tuple(t.clone() for t in runner()), got):
+        failures.append(
+            "the prepared runner returns another result than the eager call"
+        )
+    if not _same_as_plain(got, naive.cloned(topk(*args, **kw))):
+        failures.append("indices / scores are not the plain call's")
+    _scan_blocks_only(monkeypatch)
+    scan_runner = prepare_with_candidates(*args, **kw)
+    assert CB_ROLE in scan_runner.programs, scan_runner.programs
+    assert cake_policy.CB_IOTA_STAGE not in scan_runner.stages
+    scan = _call(q, k, w, cq, ck, offsets=off, **extra)
+    if not _same_result(scan, got):
+        failures.append("the scan_blocks program returns another result")
+    assert not failures, f"{layout}:\n" + "\n".join(failures[:20])
+
+
+def test_iota_runner_follows_new_segments_without_allocation_or_sync():
+    """A runner whose rows keep all their blocks, on a caller-owned workspace of the bound and caller-owned outputs: a
+    run allocates nothing and completes under ``torch.cuda.set_sync_debug_mode("error")``; captured in a CUDA graph,
+    a replay rewrites the rows, and after new segment boundaries and new ``q`` / ``k`` / ``w`` values are written into
+    the bound tensors (the same ``T``, ``Tkv`` and ``S``) a replay returns the eager call's result for the new
+    values."""
+    _require_cb_program()
+    seg_q, seg_k, _, bound = IOTA_LAYOUTS["default_offsets"]
+    new_q, new_k = (24, 0, 80, 16, 24), (16376, 100, 300, IOTA_W, 0)
+    assert sum(new_q) == sum(seg_q) and sum(new_k) == sum(seg_k)
+    q, k, w, cq, ck = cb.exact_inputs(
+        "MXFP4-grid", seg_q, seg_k, seed=7820, device="cuda"
+    )
+    T, Tkv, S = int(q.shape[0]), int(k.shape[0]), len(seg_q)
+    device = q.device
+    kw = dict(top_k=TOP_K, softmax_scale=cb.EXACT_SCALE, max_seqlen_k=bound)
+    nbytes = with_candidates_workspace_size(
+        T, Tkv, S, top_k=TOP_K, max_seqlen_k=bound, device=device
+    )
+    workspace = torch.empty(nbytes, dtype=torch.uint8, device=device)
+    indices = torch.empty((T, TOP_K), dtype=torch.int32, device=device)
+    scores = torch.empty((T, TOP_K), dtype=torch.float32, device=device)
+    blocks = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
+    runner = prepare_with_candidates(
+        q,
+        k,
+        w,
+        cq,
+        ck,
+        **kw,
+        workspace_buffer=workspace,
+        indices=indices,
+        scores=scores,
+        candidate_blocks=blocks,
+    )
+    assert runner.stages[-1] == cake_policy.CB_IOTA_STAGE, runner.stages
+    expected = _call(q, k, w, cq, ck, max_seqlen_k=bound)
+    runner()
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_stats()["allocation.all.allocated"]
+    previous = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        out = runner()
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+    torch.cuda.synchronize()
+    assert torch.cuda.memory_stats()["allocation.all.allocated"] == before, (
+        "the prepared launch allocated"
+    )
+    assert [t.data_ptr() for t in out] == [
+        indices.data_ptr(),
+        scores.data_ptr(),
+        blocks.data_ptr(),
+    ]
+    assert _same_result(tuple(t.clone() for t in out), expected)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        runner()
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        runner()
+    blocks.fill_(7)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert _same_result((indices.clone(), scores.clone(), blocks.clone()), expected)
+    fresh = cb.exact_inputs("MXFP4-grid", new_q, new_k, seed=7821, device="cuda")
+    for dst, src in zip((q, k, w, cq, ck), fresh):
+        dst.copy_(src)
+    blocks.fill_(7)
+    graph.replay()
+    torch.cuda.synchronize()
+    got = (indices.clone(), scores.clone(), blocks.clone())
+    want = _call(*fresh, max_seqlen_k=bound)
+    failures = _structure_failures(*got, _visible_counts(cq, ck, None))
+    if not _same_result(got, want):
+        failures.append(
+            "the replay after new segments returns another result than the eager call"
+        )
+    assert not failures, "\n".join(failures[:20])

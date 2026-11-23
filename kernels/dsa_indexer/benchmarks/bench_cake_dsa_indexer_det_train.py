@@ -54,6 +54,12 @@ peaked variant):
   ``cake``, the plain call of the same ``top_k``; ``same_bits`` holds their
   ``indices`` / ``scores`` bit for bit, and ``candidate_blocks`` records each
   candidate-block arm's block structure (counts, newest block, containment).
+  ``cake_cb_scan`` runs the same call on its ``scan_blocks`` program where
+  every row keeps all its blocks (the dispatch before ``iota``, which runs the
+  plain programs and writes the rows after them: ``plan`` records ``cb_iota``),
+  and ``cake_main_cb`` / ``cake_main_cb_aa`` / ``cake_main_in`` are the
+  candidate-block and candidate-restricted calls of the ``--main-package``
+  copy.
   ``cake_in`` / ``cake_in_aa`` time ``prepare_dsa_indexer_det_topk_in_candidates``
   (the top-k restricted to the row's own candidate blocks, computed once by
   the candidate-block call outside the timed span; its workspace bound from
@@ -161,6 +167,7 @@ Usage::
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import importlib
 import importlib.util
@@ -722,6 +729,20 @@ def forced_policy(backend, overrides: dict):
 
 
 @contextlib.contextmanager
+def scan_blocks_only(backend):
+    """The candidate-block dispatch before the plain-plan rows (``iota``) for an arm built inside this scope: every
+    candidate-block call of ``backend`` runs its ``scan_blocks`` program (``select_cb_program(..., iota=False)``,
+    which ``plan_dsa_indexer_det_topk_with_candidates`` looks up on the module at every call; the same rows); the
+    original function is restored on exit."""
+    original = backend.select_cb_program
+    backend.select_cb_program = functools.partial(original, iota=False)
+    try:
+        yield
+    finally:
+        backend.select_cb_program = original
+
+
+@contextlib.contextmanager
 def forced_fp8_fallback(backend, overrides: dict):
     """The previous FP8 dispatch for an arm built inside this scope: entries of the FP8 kind fallback
     (``cake_policy.FP8_KIND_FALLBACK``) replaced, and the fallback program run with the decided kind's sampled first
@@ -778,6 +799,7 @@ class CakeArm(Arm):
         fp8_hidden=None,
         with_candidates=False,
         in_candidates=False,
+        cb_scan=False,
     ):
         super().__init__(inputs)
         self.backend = cake_backend if backend is None else backend
@@ -804,6 +826,10 @@ class CakeArm(Arm):
             scope.enter_context(forced_fp8_fallback(self.backend, self.fp8_fallback))
         if self.fp8_hidden:
             scope.enter_context(hidden_fp8_kinds(self.backend, self.fp8_hidden))
+        # the candidate-block call on its scan_blocks program where every row keeps all its blocks (before iota)
+        self.cb_scan = bool(cb_scan)
+        if self.cb_scan:
+            scope.enter_context(scan_blocks_only(self.backend))
         with scope:  # one scope: the workspace bound, the plan record and prepare see the same policy
             if self.with_candidates:
                 self._prepare_with_candidates(inputs)
@@ -902,6 +928,8 @@ class CakeArm(Arm):
             sample_fit=bool(c.sample_fit),
             blk_cap=int(plan.blk_cap),
             blk_bytes=int(plan.blk_bytes),
+            # None: a main package without the plain-plan rows
+            cb_iota=getattr(plan, "iota", None),
         )
         self.runner = self.backend.prepare_dsa_indexer_det_topk_with_candidates(
             inputs.q,
@@ -1083,6 +1111,7 @@ def _cake(
     fp8_hidden=None,
     with_candidates=False,
     in_candidates=False,
+    cb_scan=False,
 ):
     def make(inputs):
         return CakeArm(
@@ -1095,6 +1124,7 @@ def _cake(
             fp8_hidden=fp8_hidden,
             with_candidates=with_candidates,
             in_candidates=in_candidates,
+            cb_scan=cb_scan,
         )
 
     return make
@@ -1154,13 +1184,26 @@ ARMS = {
     # the candidate-block call of the same top_k (``--rows candidates``) and its A/A twin
     "cake_cb": _cake("cake_cb", with_candidates=True),
     "cake_cb_aa": _cake("cake_cb_aa", with_candidates=True),
+    # the same call on its scan_blocks program where every row keeps all its blocks (the dispatch before iota)
+    "cake_cb_scan": _cake("cake_cb_scan", with_candidates=True, cb_scan=True),
+    # the candidate-block and candidate-restricted calls of the --main-package copy
+    "cake_main_cb": _cake("cake_main_cb", backend="main", with_candidates=True),
+    "cake_main_cb_aa": _cake("cake_main_cb_aa", backend="main", with_candidates=True),
+    "cake_main_in": _cake("cake_main_in", backend="main", in_candidates=True),
     # the candidate-restricted call over the row's own candidate blocks (``--rows candidates``) and its A/A twin
     "cake_in": _cake("cake_in", in_candidates=True),
     "cake_in_aa": _cake("cake_in_aa", in_candidates=True),
 }
 # the candidate-restricted arms: compared bitwise with each other only
-IN_ARMS = ("cake_in", "cake_in_aa")
-MAIN_ARMS = ("cake_main", "cake_main_nosample", "cake_main_aa")
+IN_ARMS = ("cake_in", "cake_in_aa", "cake_main_in")
+MAIN_ARMS = (
+    "cake_main",
+    "cake_main_nosample",
+    "cake_main_aa",
+    "cake_main_cb",
+    "cake_main_cb_aa",
+    "cake_main_in",
+)
 # arms that take the FP8 inputs in ``--form fp8``; every other arm takes the same data dequantized to BF16
 FP8_ARMS = (
     "cake_fp8",

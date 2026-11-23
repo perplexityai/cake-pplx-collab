@@ -2333,7 +2333,12 @@ def select_fp8_program(
 # ``CB_KIND_FALLBACK`` maps the decided physical kind to (a wide unit, a CTA pair and a key-range split run their unit
 # geometry's unpaired, unsplit program; a split call runs narrow, the unit of more work units per query), with
 # ``n_split = 1``.  ``top_k`` is at most ``CB_MAX_TOP_K``: then every returned id lies in a returned block.
+# A call whose longest key segment holds at most ``CB_SLOTS`` blocks (``cb_block_cap`` 0) keeps every block of every
+# row, so no block score decides a row: it runs the plain call's plan as dispatched (any unit, pair, split, order and
+# finalize) and the backend writes each row's ``0 .. nb - 1`` and ``-1`` tail on the device after it (stage
+# ``CB_IOTA_STAGE``; ``CandidateBlocksChoice.iota``).
 CB_ROLE = "scan_blocks"
+CB_IOTA_STAGE = "cb_iota"
 CB_SLOTS = 2048
 CB_BLOCK = 8
 CB_MAX_TOP_K = CB_SLOTS - 1
@@ -2355,8 +2360,8 @@ _CB_KEY = re.compile(r"scan_blocks:(narrow|l6):u([0-9]+):s0:f([01])")
 def cb_block_cap(num_keys: int, max_seqlen_k: Optional[int] = None) -> int:
     """Block entries per query slot of a ``scan_blocks`` launch: ``ceil(W / 8) - 1`` older blocks of the longest key
     segment ``W`` (``max_seqlen_k`` when given, else ``Tkv``) when ``ceil(W / 8) > CB_SLOTS``, else 0 (every row keeps
-    all its blocks and stores none).  ``max_seqlen_k`` must bound every key segment of the call: a row with more older
-    blocks than this traps on the device."""
+    all its blocks and stores none: the call runs the plain plan, ``CandidateBlocksChoice.iota``).  ``max_seqlen_k``
+    must bound every key segment of the call: a row with more older blocks than this traps on the device."""
     w = int(num_keys if max_seqlen_k is None else max_seqlen_k)
     blocks = (w + CB_BLOCK - 1) // CB_BLOCK
     return blocks - 1 if blocks > CB_SLOTS else 0
@@ -2368,12 +2373,15 @@ class CandidateBlocksChoice:
     (``choice.scan_key``) with its workspace (``choice.workspace_bytes``: the candidate buffers and the ticket tail);
     ``blk_cap`` block entries per query slot follow it (``blk_bytes`` = ``grid_ctas x block_q x blk_cap x 8``), so
     the call's workspace is ``workspace_bytes`` = ``choice.workspace_bytes + blk_bytes``.  The ``[T, CB_SLOTS]``
-    int32 output is the caller's and not part of it."""
+    int32 output is the caller's and not part of it.  ``iota`` (``blk_cap`` 0: every row keeps all its blocks):
+    ``choice`` is the plain call's plan (``select_program``: its scan, merge and finalize programs) with its
+    workspace, no block entries, and the backend writes the rows after its launches (``CB_IOTA_STAGE``)."""
 
     choice: ProgramChoice
     blk_cap: int
     blk_bytes: int
     workspace_bytes: int
+    iota: bool = False
 
     @property
     def keys(self) -> tuple:
@@ -2390,6 +2398,7 @@ class CandidateBlocksChoice:
             "blk_cap": self.blk_cap,
             "blk_bytes": self.blk_bytes,
             "cb_workspace_bytes": self.workspace_bytes,
+            "cb_iota": self.iota,
         }
 
 
@@ -2404,16 +2413,37 @@ def cb_scan_programs(scan_keys: Collection[str]) -> dict:
 
 
 def select_cb_program(
-    policy: DispatchPolicy, *, scan_keys: Collection[str], **call: Any
+    policy: DispatchPolicy,
+    *,
+    scan_keys: Collection[str],
+    iota: bool = True,
+    **call: Any,
 ) -> CandidateBlocksChoice:
     """The host dispatch of one call that also returns candidate blocks: the decision procedure of ``select_program``
     (``call``: its keywords), run by the ``scan_blocks`` program of the decided kind's ``CB_KIND_FALLBACK`` unit,
     unsplit and unpaired on the requested grid, without the snake and longest-first orders, with that unit's sampled
     first threshold and check period where the kind changed (``fallback_knobs``), the sample-fit form of its unit and
     the decided tile unroll where its program is registered, else the smallest registered one.  The block entries
-    follow ``cb_block_cap(num_keys, max_seqlen_k)``.  Raises ``NotImplementedError`` when ``scan_keys`` registers no
-    ``scan_blocks`` program of the unit."""
+    follow ``cb_block_cap(num_keys, max_seqlen_k)``.  When that is 0 (every row keeps all its blocks) the plan is
+    ``select_program``'s own with ``iota`` set: the plain call's programs, workspace and launches, and the rows written
+    by the backend (``iota=False``: the ``scan_blocks`` program writes them, the plan of the package before ``iota``,
+    the same rows; measurements only).  Raises ``NotImplementedError`` when ``scan_keys`` registers no
+    ``scan_blocks`` program of the unit (an ``iota`` plan: no ``scan_blocks`` program at all)."""
     choice = select_program(policy, scan_keys=scan_keys, **call)
+    programs = cb_scan_programs(scan_keys)
+    if iota and cb_block_cap(choice.num_keys, call.get("max_seqlen_k")) == 0:
+        if not programs:
+            raise NotImplementedError(
+                "the candidate-block call needs an architecture with scan_blocks programs: no registered scan_blocks "
+                "program serves this registry"
+            )
+        return CandidateBlocksChoice(
+            choice=choice,
+            blk_cap=0,
+            blk_bytes=0,
+            workspace_bytes=int(choice.workspace_bytes),
+            iota=True,
+        )
     physical = CB_KIND_FALLBACK[choice.physical_kind]
     if physical != choice.physical_kind:
         choice = fallback_knobs(policy, choice, physical, call)
@@ -2425,7 +2455,6 @@ def select_cb_program(
     )
     block_q = policy.block_q_narrow if physical == "narrow" else policy.block_q_l6
     fit = policy.sample_fit_for(T, Tkv, S, r, choice.cand_cap, physical)
-    programs = cb_scan_programs(scan_keys)
     unrolls = programs.get((physical, fit))
     if not unrolls:
         raise NotImplementedError(
@@ -2599,6 +2628,7 @@ __all__ = [
     "CAND_WIDTH_MAX",
     "CB_BLOCK",
     "CB_ENTRY_BYTES",
+    "CB_IOTA_STAGE",
     "CB_KIND_FALLBACK",
     "CB_MAX_TOP_K",
     "CB_ROLE",

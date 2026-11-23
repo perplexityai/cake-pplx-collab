@@ -311,7 +311,7 @@ slots, in no specified order (all `-1` when `n == 0`), and every id of
 `torch.use_deterministic_algorithms(True)` the call raises as the plain call
 does.
 
-The call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
+Any other call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
 `scan_blocks:<narrow|l6>:u<n>:s0:f<fit>`): the deterministic package's
 candidate-block scan program under this package's prefix.  Only the unsplit,
 unpaired narrow and l6 units carry it, so the host maps the decided kind to
@@ -325,6 +325,17 @@ follow the scan's candidate buffers and ticket tail in the workspace:
 `Tkv`.  With candidate blocks `max_seqlen_k` therefore bounds every key
 segment of the call: a row with more older blocks than `blk_cap` stops the
 kernel with a device-side trap.
+
+A call whose longest key segment holds at most 2048 blocks (`ceil(W / 8) <=
+2048`, `W` as above) keeps every block of every row, so no block score
+decides a row: it runs the plain call's programs as dispatched (any unit, CTA
+pair, key-range split with its merge and unit order, with the plain
+call's workspace) and then writes each row's `0 .. nb - 1` and `-1` tail on the
+device (stage `cb_iota`: a few small launches over the rows and one copy of
+the rows, reading the bound segment boundaries and offsets on every run, no
+host synchronization, graph-capturable; plan field `iota`).  A row past
+2048 blocks there (a `max_seqlen_k` below one of its key segments) stops with
+a device-side assert, where the `scan_blocks` programs trap.
 `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` reports
 the bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
 `scan_blocks` programs are listed in `ticket_arg_arches` and draw from a

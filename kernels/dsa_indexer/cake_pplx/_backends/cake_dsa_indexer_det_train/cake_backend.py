@@ -99,13 +99,19 @@ Candidate blocks (``cake_dsa_indexer_det_train_topk_with_candidates``)
   slots (all ``-1`` when ``n == 0``).  Every id of ``indices`` lies in a block
   of its row.  Rows are in ascending block id order with the ``-1`` tail and repeat
   bit for bit.
-* The scan of such a call is the unsplit, unpaired narrow or l6 program of
+* A call whose longest key segment ``W`` (below) holds at most 2048 blocks
+  keeps every block of every row: it runs the plain call's programs as
+  dispatched, with the plain call's workspace, and writes each row's
+  ``0 .. nb - 1`` and ``-1`` tail on the device after them (stage
+  ``cb_iota``: a few small launches over the rows and one row copy, no host
+  synchronization, graph-capturable; ``CandidateBlocksChoice.iota``).
+* The scan of any other such call is the unsplit, unpaired narrow or l6 program of
   the decided unit (``cake_policy.select_cb_program``).  Its workspace is
   :func:`cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` bytes:
   the scan's candidate buffers and ticket tail, then ``grid x block_q x
   blk_cap x 8`` bytes of block entries (``blk_cap = ceil(W / 8) - 1`` for the
-  longest key segment ``W`` when it holds more than 2048 blocks, else 0),
-  separate from the caller's ``[T, 2048]`` output.  ``W`` is ``max_seqlen_k``
+  longest key segment ``W``, which holds more than 2048 blocks), separate
+  from the caller's ``[T, 2048]`` output.  ``W`` is ``max_seqlen_k``
   when given, else ``Tkv``: with candidate blocks ``max_seqlen_k`` is a
   correctness bound, and a row with more older blocks than the workspace holds
   stops the kernel with a device trap.
@@ -151,6 +157,7 @@ from .cake_policy import (
     CAND_ROLE,
     CAND_TICKET_BYTES,
     CAND_WIDTH_MAX,
+    CB_IOTA_STAGE,
     CB_MAX_TOP_K,
     CB_ROLE,
     CB_SLOTS,
@@ -867,7 +874,9 @@ def plan_dsa_indexer_det_topk_with_candidates(
     """The host dispatch of a call that also returns candidate blocks (BF16, ``ratio == 1``, ``1 <= top_k <= 2047``):
     the plan of :func:`plan_dsa_indexer_det_topk` run by the ``scan_blocks`` program of its unit
     (``cake_policy.select_cb_program``), with the block entries of ``cake_policy.cb_block_cap(num_keys,
-    max_seqlen_k)``.  Raises ``NotImplementedError`` where the architecture registers no ``scan_blocks`` program."""
+    max_seqlen_k)``; where that is 0 (every row keeps all its blocks) the plan of :func:`plan_dsa_indexer_det_topk`
+    itself with ``iota`` set (the backend writes the rows after its launches).  Raises ``NotImplementedError``
+    where the architecture registers no ``scan_blocks`` program."""
     _check_int("top_k", top_k, 1, CB_MAX_TOP_K)
     if isinstance(ratio, bool) or not isinstance(ratio, int) or ratio != 1:
         raise ValueError(
@@ -964,7 +973,8 @@ def cake_dsa_indexer_det_train_topk_with_candidates_workspace_size(
 ) -> int:
     """Explicit workspace bound in bytes of one candidate-block call's geometry on ``device``: the ``scan_blocks``
     program's candidate buffers and ticket tail plus its block entries ``grid x block_q x blk_cap x 8``
-    (:func:`plan_dsa_indexer_det_topk_with_candidates`), the larger of the two sampling modes.  The ``[T, 2048]``
+    (:func:`plan_dsa_indexer_det_topk_with_candidates`), or, where every row keeps all its blocks (``blk_cap`` 0),
+    the workspace of the plain call's plan; the larger of the two sampling modes.  The ``[T, 2048]``
     int32 ``candidate_blocks`` output is not part of it.  Pass the call's ``max_seqlen_k``: without it the block
     entries are sized for ``Tkv``."""
     return max(
@@ -1106,6 +1116,104 @@ def _offsets_placeholder(index: int) -> torch.Tensor:
     return _unread_placeholder(index, torch.int64)
 
 
+# row ``nb`` (``0 .. CB_SLOTS``) of the int32 ``[CB_SLOTS + 1, CB_SLOTS]`` table: ``0 .. nb - 1`` and a ``-1`` tail
+_IOTA_ROWS: dict[int, torch.Tensor] = {}
+# the row base of the rows outside every query segment: their visible count clamps to 0
+_IOTA_NO_SEGMENT = -(1 << 62)
+
+
+def _iota_rows(index: int) -> torch.Tensor:
+    """The candidate-block rows of every block count on device ``index``: row ``nb`` of the int32 ``[CB_SLOTS + 1,
+    CB_SLOTS]`` table holds ``0 .. nb - 1`` and a ``-1`` tail.  One table per device (16 MiB), made on first use;
+    made during a CUDA graph capture, it is the call's own (the capture's pool) and not kept."""
+    rows = _IOTA_ROWS.get(index)
+    if rows is None:
+        device = f"cuda:{index}"
+        slots = torch.arange(CB_SLOTS, dtype=torch.int32, device=device)
+        counts = torch.arange(CB_SLOTS + 1, dtype=torch.int32, device=device)
+        rows = torch.where(slots[None, :] < counts[:, None], slots[None, :], PAD_ID)
+        if not torch.cuda.is_current_stream_capturing():
+            _IOTA_ROWS[index] = rows
+    return rows
+
+
+class _IotaBlocks:
+    """The ``candidate_blocks`` rows of a call whose rows keep all their blocks (``CandidateBlocksChoice.iota``), on
+    the device after the plain call's launches: row ``t`` holds ``0 .. nb - 1`` and a ``-1`` tail, ``nb = ceil(n /
+    8)`` for its ``n`` visible keys (:func:`visible_key_count` at ``ratio == 1``, the rule of the ``scan_blocks``
+    programs), all ``-1`` for a row outside every query segment.  Every run reads the bound ``cu_seqlens_q`` /
+    ``cu_seqlens_k`` / ``q_causal_offsets`` (new values written into them are followed, also by a CUDA graph
+    capturing the run), with no host synchronization and no allocation: the per-segment and per-row scratch is made
+    here.  Per segment ``s`` (``q0 / q1`` its query bounds, ``L`` its keys) ``base[s]`` and ``lim[s]`` give ``n + 7 =
+    clamp(t + 8 + base[s], 7, lim[s])``: with offsets ``base = offset - q0`` and ``lim = L + 7``; without them
+    ``base = L - q1`` (the default offset ``L - (q1 - q0)``), and no row of the segment reaches the upper clamp, so
+    it is skipped.  ``searchsorted`` over ``q1`` maps a row to its segment (``S``, the
+    sentinel whose base clamps the count to 0, for a row outside every segment); ``nb`` indexes the rows of
+    :func:`_iota_rows`.  A row with ``nb > CB_SLOTS`` (a ``max_seqlen_k`` below one of its key segments) indexes past
+    the table and stops with ``index_select``'s device-side assert, where the ``scan_blocks`` programs trap."""
+
+    def __init__(
+        self,
+        blocks: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        q_causal_offsets: Optional[torch.Tensor],
+        num_segments: int,
+        device_index: int,
+    ):
+        T, S = int(blocks.shape[0]), int(num_segments)
+        device = blocks.device
+        self.blocks = blocks
+        self.num_segments = S
+        self.offsets = q_causal_offsets
+        self.q_lo, self.q_hi = cu_seqlens_q[:-1], cu_seqlens_q[1:]
+        self.k_lo, self.k_hi = cu_seqlens_k[:-1], cu_seqlens_k[1:]
+        self.rows = _iota_rows(device_index)
+        self.base = torch.full(
+            (S + 1,), _IOTA_NO_SEGMENT, dtype=torch.int64, device=device
+        )
+        self.lim = (
+            None
+            if q_causal_offsets is None
+            else torch.full((S + 1,), 7, dtype=torch.int64, device=device)
+        )
+        self.row_ids = torch.arange(T, dtype=cu_seqlens_q.dtype, device=device)
+        self.row_c = torch.arange(8, T + 8, dtype=torch.int64, device=device)
+        self.segment = torch.empty(T, dtype=torch.int64, device=device)
+        self.count = torch.empty(T, dtype=torch.int64, device=device)
+        self.row_lim = (
+            None
+            if self.lim is None
+            else torch.empty(T, dtype=torch.int64, device=device)
+        )
+
+    def __call__(self) -> None:
+        S = self.num_segments
+        if S == 0:
+            self.blocks.fill_(PAD_ID)
+            return
+        base = self.base[:S]
+        if self.lim is None:
+            torch.sub(self.k_hi, self.k_lo, out=base)
+            base.sub_(self.q_hi)
+        else:
+            torch.sub(self.offsets, self.q_lo, out=base)
+            lim = self.lim[:S]
+            torch.sub(self.k_hi, self.k_lo, out=lim)
+            lim.add_(7)
+        torch.searchsorted(self.q_hi, self.row_ids, right=True, out=self.segment)
+        torch.index_select(self.base, 0, self.segment, out=self.count)
+        self.count.add_(self.row_c)
+        if self.lim is None:
+            self.count.clamp_(min=7)
+        else:
+            torch.index_select(self.lim, 0, self.segment, out=self.row_lim)
+            self.count.clamp_(min=7)
+            torch.minimum(self.count, self.row_lim, out=self.count)
+        self.count.bitwise_right_shift_(3)
+        torch.index_select(self.rows, 0, self.count, out=self.blocks)
+
+
 def _ffi_stream_context(index: int):
     """tvm-ffi environment-stream context for torch's current stream on device ``index``."""
     device = _FFI_DEVICES.get(index)
@@ -1134,7 +1242,8 @@ class DSAIndexerDetRunner:
     radix sort, or the prefix-popcount rank scatter where the policy's
     ``finalize_rank_for`` names a bitmap window; stage role ``finalize`` /
     ``finalize_rank``) on torch's current stream and returns ``(indices,
-    scores)``.  No launch allocates or
+    scores)``; a candidate-block runner of the plain plan (``iota``) then
+    writes the ``candidate_blocks`` rows (stage ``cb_iota``).  No launch allocates or
     synchronizes; capture into a CUDA graph belongs to the caller.  Prepare a
     new runner when a shape, dtype, stride or tensor binding changes; values
     may change freely.
@@ -1269,6 +1378,22 @@ class DSAIndexerDetRunner:
         return self.tensors["Indices"], self.tensors["Scores"]
 
     __call__ = run
+
+
+def _iota_launch(
+    t: dict,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    q_causal_offsets: Optional[torch.Tensor],
+    num_segments: int,
+    device_index: int,
+) -> _Launch:
+    """The ``cb_iota`` stage of an iota candidate-block runner: :class:`_IotaBlocks` into its ``CandBlocks``."""
+    blocks = t["CandBlocks"]
+    fill = _IotaBlocks(
+        blocks, cu_seqlens_q, cu_seqlens_k, q_causal_offsets, num_segments, device_index
+    )
+    return _Launch(CB_IOTA_STAGE, "torch", fill, (), (int(blocks.shape[0]), 1, 1))
 
 
 def _padded_outputs(
@@ -1425,7 +1550,9 @@ def _prepare_runner(
             outputs_aligned=outputs_aligned,
             dtype=q.dtype,
         )
-    scan_role = CB_ROLE if with_candidates else "scan"
+    # an iota candidate-block call runs the plain call's programs; the backend writes its rows after them
+    cb_iota = cb_choice is not None and cb_choice.iota
+    scan_role = CB_ROLE if with_candidates and not cb_iota else "scan"
     # every program of the call must be registered before anything is allocated (fail closed by name)
     # a merge that finalizes its rows itself (``choice.merge_rank``, key merge:rank:w*) leaves no finalize program to bind
     fin_role = choice.finalize_role
@@ -1500,12 +1627,13 @@ def _prepare_runner(
     }
     if cb_choice is not None:
         # scan_blocks: the block entries behind the ticket tail (a never-read placeholder when no row stores any) and
-        # the caller's (or a new) [T, 2048] rows
-        t["CandBlk"] = (
-            flat[cb_choice.blocks_at : workspace_bytes].view(torch.int64)
-            if cb_choice.blk_bytes
-            else _unread_placeholder(device_index, torch.int64)
-        )
+        # the caller's (or a new) [T, 2048] rows; an iota call binds no scan_blocks program (no block entries)
+        if not cb_iota:
+            t["CandBlk"] = (
+                flat[cb_choice.blocks_at : workspace_bytes].view(torch.int64)
+                if cb_choice.blk_bytes
+                else _unread_placeholder(device_index, torch.int64)
+            )
         t["CandBlocks"] = (
             candidate_blocks
             if candidate_blocks is not None
@@ -1597,6 +1725,18 @@ def _prepare_runner(
                 bind_program(programs[fin_role], arch, fin_role, values, fin_grid)
             )
             stages.append(fin_role)
+        if cb_iota:
+            launches.append(
+                _iota_launch(
+                    t,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    q_causal_offsets,
+                    num_segments,
+                    device_index,
+                )
+            )
+            stages.append(CB_IOTA_STAGE)
     elif num_queries > 0:
         _padded_outputs(num_queries, int(top_k), device, t["Indices"], t["Scores"])
         if cb_choice is not None:

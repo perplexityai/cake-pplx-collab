@@ -46,7 +46,10 @@ top-k 512) add the arms ``nondet_cb`` / ``nondet_cb_aa`` (this package's
 ``[T, 2048]`` candidate blocks) and ``det_cb`` (the deterministic package's),
 timed next to ``nondet`` / ``det``, the plain call of the same ``top_k``;
 ``candidate_blocks`` records each candidate-block arm's block structure
-(counts, newest block, containment).  ``nondet_in`` / ``nondet_in_aa`` (this
+(counts, newest block, containment).  ``nondet_cb_scan`` runs this package's
+call on its ``scan_blocks`` program where every row keeps all its blocks (the
+dispatch before ``iota``, which runs the plain programs and writes the rows
+after them: ``plan`` records ``cb_iota``).  ``nondet_in`` / ``nondet_in_aa`` (this
 package's ``prepare_dsa_indexer_nondet_topk_in_candidates``) and ``det_in``
 (the deterministic package's) time the top-k restricted to the row's own
 candidate blocks (computed once by the package's candidate-block call outside
@@ -95,6 +98,7 @@ Usage::
 """
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import math
@@ -189,6 +193,7 @@ class NondetArm(det_bench.Arm):
         name=None,
         with_candidates=False,
         in_candidates=False,
+        cb_scan=False,
     ):
         super().__init__(inputs)
         self.knobs = dict(knobs or {})
@@ -197,7 +202,13 @@ class NondetArm(det_bench.Arm):
         self.blocks = None
         self.source_blocks = None
         if with_candidates:
-            self._prepare_with_candidates(inputs)
+            # cb_scan: the call on its scan_blocks program where every row keeps all its blocks (before iota)
+            with (
+                det_bench.scan_blocks_only(nondet_backend)
+                if cb_scan
+                else contextlib.nullcontext()
+            ):
+                self._prepare_with_candidates(inputs)
             return
         if in_candidates:
             self._prepare_in_candidates(inputs)
@@ -288,6 +299,7 @@ class NondetArm(det_bench.Arm):
             sample_fit=bool(c.sample_fit),
             blk_cap=int(plan.blk_cap),
             blk_bytes=int(plan.blk_bytes),
+            cb_iota=bool(plan.iota),
         )
         self.runner = nondet_backend.prepare_dsa_indexer_nondet_topk_with_candidates(
             inputs.q,
@@ -381,7 +393,9 @@ def _det(name, knobs=None, with_candidates=False, in_candidates=False):
     return make
 
 
-def _nondet(name, knobs=None, with_candidates=False, in_candidates=False):
+def _nondet(
+    name, knobs=None, with_candidates=False, in_candidates=False, cb_scan=False
+):
     def make(inputs):
         return NondetArm(
             inputs,
@@ -389,6 +403,7 @@ def _nondet(name, knobs=None, with_candidates=False, in_candidates=False):
             name=name,
             with_candidates=with_candidates,
             in_candidates=in_candidates,
+            cb_scan=cb_scan,
         )
 
     return make
@@ -407,6 +422,8 @@ ARMS = {
     "det_cb": _det("det_cb", with_candidates=True),
     "nondet_cb": _nondet("nondet_cb", with_candidates=True),
     "nondet_cb_aa": _nondet("nondet_cb_aa", with_candidates=True),
+    # the same call on its scan_blocks program where every row keeps all its blocks (the dispatch before iota)
+    "nondet_cb_scan": _nondet("nondet_cb_scan", with_candidates=True, cb_scan=True),
     # the candidate-restricted call over the row's own candidate blocks (``--rows candidates``)
     "det_in": _det("det_in", in_candidates=True),
     "nondet_in": _nondet("nondet_in", in_candidates=True),
