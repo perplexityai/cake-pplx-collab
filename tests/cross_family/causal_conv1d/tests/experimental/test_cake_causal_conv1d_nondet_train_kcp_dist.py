@@ -87,8 +87,9 @@ SEED = 7815
 REPEATS = 20
 # W = 2 / 4 at C = 640 with ragged ranks of 3103 tokens (inside every architecture's static range of the ``fwd`` key
 # covering C 640, above its pair direct range), 12003 (inside its direct range), 40003 (above the keys: the dynamic
-# program) and 1; and W = 4 with ranks of 63 tokens (the static program, one token below every architecture's pair
-# direct range), 64 and 2560 (inside it: the pair direct program) and 3073 (above it: the static program).
+# program) and 1; and W = 4 with ranks of 63 and 64 tokens (inside every architecture's pair direct range at C 640,
+# which starts at one token, at four on sm_107a: the pair direct program), 2560 (its last count on sm_107a) and 3073
+# (above it: the static program).
 ROWS_KEYS = [
     ((10000, 5106), 2, "ragged:3103,12003", 640),
     ((30000, 20000, 5110), 4, "ragged:3103,12003,40003,1", 640),
