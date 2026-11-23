@@ -120,8 +120,10 @@ ROW_PAD = 256
 OPS = ("fwd", "dgrad", "wgrad")
 INT_VIEW = {torch.bfloat16: torch.int16, torch.float32: torch.int32}
 
-# The host plan constants of this package alone: the keys of the one-launch split
-# tail and of the queue walk.  Every other constant is the deterministic package's.
+# The host plan constants this package states for its own programs: the keys of the
+# one-launch split tail, and the queue walk's rules and counters (each package names
+# the calls that bind its own queue-walk builds).  Every other constant is the
+# deterministic package's.
 OWN_CONSTANTS = frozenset(
     {
         "unordered_tail_archs",
@@ -131,7 +133,8 @@ OWN_CONSTANTS = frozenset(
         "queue_sched_words",
     }
 )
-# The queue walk's stages (``cake_backend.wgrad_queue_walk``): this package's alone.
+# The queue walk's stages (``cake_backend.wgrad_queue_walk``): each package's own
+# builds (this package's with the one-launch split tail).
 QUEUE_STAGES = frozenset({cb.QUEUE_STAGE, cb.QUEUE_STAGE + cb.ACC_SUFFIX})
 # Data-gradient cases of the evict-first rule (at least every architecture's
 # ``dgrad_evict_first_min_rows`` rows per group on average,
@@ -468,8 +471,8 @@ def test_routes_mirror_the_deterministic_package():
     architecture whose host plan never selects it (not in ``wave_sync_archs`` for the
     route's k tile).  The accumulate stages (``<stage>_acc``) are left out of the
     mirror on both sides; their twins are mirrored, and ``test_cake_moe_grouped_gemm_nondet_train_acc.py`` checks them against
-    their twins.  The queue walk's stages (``QUEUE_STAGES``) are this package's alone
-    and left out (``test_queue_stages_take_the_half_release_arguments``).  The L2 evict-first twins of the wide tile (``main_wide_ef``) are
+    their twins.  The queue walk's stages (``QUEUE_STAGES``) are each package's own
+    builds and left out on both sides (``test_queue_stages_take_the_half_release_arguments``).  The L2 evict-first twins of the wide tile (``main_wide_ef``) are
     copies like every other fwd / dgrad stage.  (A CPU check; it lives here because
     the backend suite imports no package but its own.)"""
     det_routes, det_programs = det_jit.ROUTES, det_jit.PROGRAMS
@@ -499,6 +502,7 @@ def test_routes_mirror_the_deterministic_package():
                 for s in det_route["stages"]
                 if arch in det_programs[s["program"]]["arches"]
                 and not s["name"].endswith(cb.ACC_SUFFIX)
+                and s["name"] not in QUEUE_STAGES
             }
             stages = {
                 s["name"]

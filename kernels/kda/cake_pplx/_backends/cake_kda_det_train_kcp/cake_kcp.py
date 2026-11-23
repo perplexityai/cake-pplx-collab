@@ -246,7 +246,12 @@ launches nothing (counted in the call's launches and ``sequence`` like the
 gate epilogue a plan fuses away).  ``LAST_CALL["bwd"]["kcp_dav"]`` records
 ``"launched"`` or ``"skipped"``; the private test knob ``kcp_dav``
 (``"auto"`` shipped, ``"always"``: launch it on every backward of the replay
-layout, the coverage record) changes no output or gradient bit.
+layout, the coverage record) changes no output or gradient bit.  In the
+in-kernel Q/K L2 norm modes the existing backend's plan dispatches ``dav``
+on every row (its fused gradient stores no ``dAqk`` there), so the dav stage
+launches on every backward, as ``kcp_dav_l2n`` (:data:`KCP_LOCAL_RECORDS_L2N`:
+the ``dAqk`` of an FP32 ``v_new`` it recomputes from ``akk_int``, ``beta``,
+``v``, ``w`` and the ``h`` tape, after the tape replay; no ``dv1``).
 
 The metadata (partition, context, head ownership, chain tables, split sizes,
 segment plan, compact-buffer addressing, byte queries) is
@@ -645,6 +650,21 @@ LOCAL_LAYOUT_FWD_ONLY = cake_kcp_plan.LOCAL_LAYOUT_FWD_ONLY
 # dA / dv programs had before its fused recurrences took them over), launched only where its ``dA_qk`` has a reader
 # (:func:`cake_kcp_plan.kcp_dav_needed`; K2 forms its own ``dv1``).
 KCP_LOCAL_RECORDS = {"fwd_o": "kcp_fwd_o", "dav": "kcp_dav"}
+# The KCP-owned local records of an in-kernel Q / K L2 norm mode (the plan's ``l2n`` other than ``"off"``): its
+# output backward ``kcp_dav_l2n`` forms ``dA_qk`` alone, from an FP32 ``v_new`` it recomputes from ``akk_int``,
+# ``beta``, ``v``, ``w`` and the ``h`` tape (the existing backend's plan dispatches ``dav`` on every row of the mode:
+# its fused gradient stores no ``dA_qk`` there), one CTA per (chunk, head) tile (:func:`kcp_local_grid`).
+KCP_LOCAL_RECORDS_L2N = {"fwd_o": "kcp_fwd_o", "dav": "kcp_dav_l2n"}
+
+
+def kcp_local_record(stage: str, p: Any) -> str:
+    """The KCP-owned local record of ``stage`` (:data:`KCP_LOCAL_RECORDS`) on plan ``p``: the in-kernel Q / K L2 norm
+    modes' (:data:`KCP_LOCAL_RECORDS_L2N`) where ``p.l2n`` is one, else the flag-off record."""
+    if getattr(p, "l2n", "off") == "off":
+        return KCP_LOCAL_RECORDS[stage]
+    return KCP_LOCAL_RECORDS_L2N[stage]
+
+
 # The WY records the KCP launches directly where the plan fuses the WY representation into a state recurrence the
 # KCP does not run (its recurrences are the K1 / K2 walks): the forward's program and the replay's.
 WY_DIRECT_RECORDS = {"wy_fwd": "wy_fwd", "wy": "wy_bwd_replay"}
@@ -1092,7 +1112,9 @@ def _tape_side(call: CakeKDADetKcpCall, launches: list) -> tuple[_TapeSide | Non
     the replay ran on the call's stream (``None``: nothing to mark).  The side stream runs only for a
     :class:`CakeKDADetKcpCall` on the trimmed host path of the kernel backend on a CUDA device, under the a2a exchange
     and the ``wait_first`` schedule, with the tape launches uncapped (no cache-config bracket: the shipped split form)
-    and no ``kcp_dav`` launch (it reads ``v_new`` right after the replay); the first replay of a table set on a device
+    and no ``kcp_dav`` launch (it reads the replay's tapes right after the replay: ``kcp_dav`` the ``v_new`` tape,
+    ``kcp_dav_l2n`` the ``h`` tape, on every backward of an in-kernel Q / K L2 norm mode); the first replay of a
+    table set on a device
     runs on the call's stream (it uploads the launches' device tables)."""
     # a test's driver call: the launches in order
     if not isinstance(call, CakeKDADetKcpCall):
@@ -1395,7 +1417,7 @@ class KernelBackend(Backend):
                 if not launch:
                     return
             self.programs().run_record(
-                KCP_LOCAL_RECORDS[name],
+                kcp_local_record(name, p),
                 {**values, **extra},
                 grid=kcp_local_grid(name, p),
                 device_index=local.device_index,
@@ -2430,10 +2452,14 @@ def kcp_local_grid(stage: str, p: Any) -> tuple[int, int, int]:
     """The launch grid of the KCP-owned local record of ``stage`` (:data:`KCP_LOCAL_RECORDS`) from the plan's
     scalars: the output program launches one CTA per (chunk, head) item, ``NC_pad * H`` CTAs (the CTAs that start
     take the items of the CTAs that have not started); the ``dA_qk`` / ``dv1`` program launches one CTA per chunk pair
-    and head, ``(NC_pad / 2, H, 1)``."""
+    and head, ``(NC_pad / 2, H, 1)``; in an in-kernel Q / K L2 norm mode the output backward ``kcp_dav_l2n``
+    (:func:`kcp_local_record`) launches one CTA per (chunk, head) tile, ``NC_pad * H`` CTAs (its grid rule
+    ``kcp_tile_items``)."""
     if stage == "fwd_o":
         return (max(1, int(p.NC_pad) * int(p.H)), 1, 1)
     if stage == "dav":
+        if getattr(p, "l2n", "off") != "off":
+            return (max(1, int(p.NC_pad) * int(p.H)), 1, 1)
         return (int(p.NC_pad) // 2, int(p.H), 1)
     raise ValueError(f"no KCP-owned local record for stage {stage!r}")
 
@@ -7753,8 +7779,9 @@ def _l2n_row_hosts(call: CakeKDADetKcpCall) -> dict[str, tuple[str, ...]]:
     ``kn`` (:data:`_L2N_ROW_HOSTS`, :func:`_qk_l2norm_begin`).  A buffer moves where the replay layout holds it alone
     in its slot, its outputs' BF16 rows cover its ``R`` rows (dq / dk and dg ``2 T_r``, dg_raw ``T_r``), no record of
     the stages of :data:`_L2N_LATE_STAGES` binds it and no record of the backward's other stages binds those
-    outputs.  The KCP's own programs bind no output (K1 / K2 write the tapes, ``kcp_dav`` reads ``v_new`` at step
-    4).  Nothing moves on a forward, on a rank without local stages or tokens, or on the lean layout.  The decision is
+    outputs.  The KCP's own programs bind no output (K1 / K2 write the tapes; at step 4 ``kcp_dav`` reads ``v_new``
+    and ``kcp_dav_l2n`` the ``h`` tape, ``w`` and the internal rows, and both write the layout's ``dAqk``).
+    Nothing moves on a forward, on a rank without local stages or tokens, or on the lean layout.  The decision is
     kept per plan, gate mode and output dtypes while the registry is the same object (:data:`_L2N_ROW_HOSTS_KEPT`);
     callers do not modify the returned dict."""
     if (

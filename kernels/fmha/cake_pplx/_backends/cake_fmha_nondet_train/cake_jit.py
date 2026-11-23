@@ -63,9 +63,9 @@ query block, and the others are KV-owners, each dk and dv of one key block;
 the kernel makes ``LSE * log2(e)`` and ``dPsum`` itself, needs no workspace
 and writes dq, dk and dv once each in one fixed order.  ``FUSED_OF`` names its
 record per (head dimension, causal) and :func:`fused_record` picks the
-one-launch route for a call inside ``FUSED_REGION``; every other call takes
-the route of :func:`variant`.  No ``RECORD_OF`` variant and no host sequence
-names a ``bwd_fused`` record.
+one-launch route for a call inside one of the pieces of ``FUSED_REGION``;
+every other call takes the route of :func:`variant`.  No ``RECORD_OF``
+variant and no host sequence names a ``bwd_fused`` record.
 """
 
 from __future__ import annotations
@@ -396,19 +396,58 @@ def variant(
 
 
 # (architecture, head dim) -> the region of the one-launch route there, or
-# None (no call takes it): (max_ctas, s_max, skv_any, skv_per_sq).  A call
-# without the mask is inside when ``B * H * (Sq / 128 + Skv / 128) <=
-# max_ctas`` (the CTAs of the one-launch grid), ``max(Sq, Skv) <= s_max`` and
-# ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq`` (:func:`fused_record`).
-# Each entry is the measured region of its architecture and head dimension,
-# where the one-launch route measured faster than the three-kernel routes.
-FUSED_REGION: dict[tuple[str, int], tuple[int, int, int, int] | None] = {
-    ("sm_100a", 128): (152, 2048, 512, 1),
-    ("sm_100a", 64): (152, 2048, 512, 2),
-    ("sm_103a", 128): (152, 2048, 512, 1),
-    ("sm_103a", 64): (204, 2048, 256, 0),
-    ("sm_107a", 128): (256, 2048, 512, 0),
-    ("sm_107a", 64): (212, 2048, 512, 2),
+# None (no call takes it): one or more pieces, each (max_ctas, s_max,
+# skv_any, skv_per_sq).  A call without the mask is inside a piece when
+# ``B * H * (Sq / 128 + Skv / 128) <= max_ctas`` (the CTAs of the one-launch
+# grid), ``max(Sq, Skv) <= s_max`` and ``Skv <= skv_any`` or ``Skv <=
+# skv_per_sq * Sq``, and inside the region when it is inside any of its
+# pieces (:func:`fused_record`).  Each entry is the measured region of its
+# architecture and head dimension, where the one-launch route measured faster
+# than the three-kernel routes; pieces may overlap, and their order does not
+# change the route.
+FUSED_REGION: dict[tuple[str, int], tuple[tuple[int, int, int, int], ...] | None] = {
+    ("sm_100a", 128): (
+        (152, 2048, 512, 1),
+        (190, 1024, 256, 0),
+        (152, 1024, 0, 3),
+        (640, 512, 256, 0),
+        (301, 1024, 128, 0),
+    ),
+    ("sm_100a", 64): (
+        (152, 2048, 512, 2),
+        (190, 1024, 256, 0),
+        (152, 1024, 0, 6),
+        (606, 256, 128, 0),
+        (212, 256, 0, 1),
+    ),
+    ("sm_103a", 128): (
+        (152, 2048, 512, 1),
+        (190, 1024, 256, 0),
+        (152, 1024, 0, 3),
+        (303, 512, 256, 0),
+        (301, 1024, 128, 0),
+    ),
+    ("sm_103a", 64): (
+        (204, 2048, 256, 0),
+        (156, 512, 0, 2),
+        (256, 1024, 128, 0),
+        (152, 1024, 512, 3),
+        (152, 2048, 0, 1),
+    ),
+    ("sm_107a", 128): (
+        (256, 2048, 512, 0),
+        (320, 1024, 256, 0),
+        (423, 512, 256, 0),
+        (210, 2048, 768, 2),
+        (423, 1024, 128, 0),
+    ),
+    ("sm_107a", 64): (
+        (212, 2048, 512, 2),
+        (210, 1024, 0, 6),
+        (423, 512, 256, 0),
+        (320, 1024, 256, 0),
+        (423, 1024, 128, 0),
+    ),
 }
 
 
@@ -416,20 +455,21 @@ def fused_record(arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: b
     """The ``bwd_fused`` record of a call on ``arch`` (one of ``ARCHES``), or
     None: the call then takes the route of :func:`variant`.  The record is
     ``FUSED_OF[(D, causal)]`` when ``FUSED_OF`` has one (no mask), the
-    region ``FUSED_REGION[(arch, D)]`` is not None and, with ``(max_ctas,
-    s_max, skv_any, skv_per_sq)`` its bounds, ``B * H * (Sq // BLOCK + Skv //
-    BLOCK) <= max_ctas`` (the CTAs of the one-launch grid), ``max(Sq, Skv) <=
-    s_max`` and ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq``.  Reads the
-    shapes and the architecture only."""
+    region ``FUSED_REGION[(arch, D)]`` is not None and the call is inside any
+    of its pieces: with ``(max_ctas, s_max, skv_any, skv_per_sq)`` the bounds
+    of a piece, ``B * H * (Sq // BLOCK + Skv // BLOCK) <= max_ctas`` (the
+    CTAs of the one-launch grid), ``max(Sq, Skv) <= s_max`` and ``Skv <=
+    skv_any`` or ``Skv <= skv_per_sq * Sq``.  Reads the shapes and the
+    architecture only."""
     record = FUSED_OF.get((D, bool(causal)))
     if record is None:
         return None
     region = FUSED_REGION.get((arch, D))
     if region is None:
         return None
-    max_ctas, s_max, skv_any, skv_per_sq = region
-    if B * H * (Sq // BLOCK + Skv // BLOCK) > max_ctas or max(Sq, Skv) > s_max:
-        return None
-    if Skv <= skv_any or Skv <= skv_per_sq * Sq:
-        return record
+    for max_ctas, s_max, skv_any, skv_per_sq in region:
+        if B * H * (Sq // BLOCK + Skv // BLOCK) > max_ctas or max(Sq, Skv) > s_max:
+            continue
+        if Skv <= skv_any or Skv <= skv_per_sq * Sq:
+            return record
     return None

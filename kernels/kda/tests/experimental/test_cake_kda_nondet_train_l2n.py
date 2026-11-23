@@ -72,8 +72,9 @@ ARCHES = tuple(cake_jit.ARCHES)
 L2N_MODES = ("off", "fused", "fallback")
 L2N_ON = ("fused", "fallback")
 GATES = ("g", "raw")
-# the fused gradient's raw and l2n classes: the deterministic dqkg records with a class suffix
-DQKG_CLASS_SUFFIXES = ("_raw", "_l2n")
+# the fused gradient's raw class: the deterministic dqkg records with the class suffix (its l2n twins: the
+# deterministic l2n records with ``_raw_l2n`` in place of ``_l2n``)
+DQKG_RAW_SUFFIX, DQKG_RAW_L2N_SUFFIX = "_raw", "_raw_l2n"
 # the tape path's w-only WY twin of this package (launched in place of its record where its rule admits it)
 TAPE_TWINS = {"wy_bwd": "wy_bwd_v9"}
 # the raw class's parameter finalize of the l2n modes -> the deterministic record it copies
@@ -103,8 +104,9 @@ def _det_name(name: str | None) -> str | None:
         if name == twin:
             return parent
     if name.startswith("dqkg"):
-        for suffix in DQKG_CLASS_SUFFIXES:
-            name = name.removesuffix(suffix)
+        if name.endswith(DQKG_RAW_L2N_SUFFIX):
+            return name.removesuffix(DQKG_RAW_L2N_SUFFIX) + "_l2n"
+        return name.removesuffix(DQKG_RAW_SUFFIX)
     return name
 
 
@@ -212,15 +214,17 @@ def test_mode_keyword_must_be_a_bool(bad) -> None:
 
 def test_l2n_vocabulary_is_the_deterministic_packages() -> None:
     """The modes, the token-local stages and the logical names of the l2n programs are the deterministic package's;
-    the l2n stages add the fused gradient (whose S1 records serve the flag-off mode alone) and the parameter finalize
-    (``param_finalize`` serves the flag-off mode, ``param_finalize_l2n`` the l2n modes: one deterministic program)."""
+    the l2n stages are the deterministic package's (the output backward and the fused gradient among them; the
+    fused gradient's S1 records serve the flag-off mode alone) and the parameter finalize (``param_finalize``
+    serves the flag-off mode, ``param_finalize_l2n`` the l2n modes: one deterministic program)."""
     assert (
         tuple(cake_backend.L2N_MODES)
         == tuple(cake_jit.L2N_MODES)
         == tuple(det_jit.L2N_MODES)
         == L2N_MODES
     )
-    nd_only = {"dqkg", "param_finalize"}
+    assert {"dav", "dqkg"} <= set(det_jit.L2N_STAGES)
+    nd_only = {"param_finalize"}
     assert set(cake_jit.L2N_STAGES) == set(det_jit.L2N_STAGES) | nd_only
     assert not nd_only & set(det_jit.L2N_STAGES)
     for stage in ("qk_l2norm", "qk_apply", "qk_pullback"):
@@ -731,6 +735,45 @@ def test_l2n_plans_refuse_an_unknown_mode_and_the_pairing_guard_refuses_s1() -> 
 
 
 @pytest.mark.parametrize("arch", ARCHES)
+def test_l2n_plans_refuse_a_backward_path_without_an_l2n_dav_record(
+    arch: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_check_l2n_dav``: the fused gradient of an l2n mode (``davq`` 0) stores no
+    ``dAqk``, so an l2n plan whose backward path launches no ``dav`` record of its mode
+    (none, or a flag-off one) is refused with ``ValueError`` naming the path; a path
+    without a ``dav`` stage (the forward) and the flag-off plans are not checked.
+    Through ``plan``: a registry whose ``dav_l2n_replay`` rule admits no problem leaves
+    the replay of an H 12 row without a ``dav`` record, and every l2n plan of the row
+    is refused in both gate modes while its flag-off plan still builds."""
+    check = cake_backend._check_l2n_dav
+    fwd = {"fwd": {"fwd_intra": "fwd_intra_l2n"}}
+    match = "path 'replay' launches no dav record"
+    for mode in L2N_ON:
+        check(fwd, arch=arch, H=12, l2n=mode)
+        check({**fwd, "replay": {"dav": "dav_l2n_replay"}}, arch=arch, H=12, l2n=mode)
+        for name in (None, "dav_serial_replay"):
+            records = {**fwd, "replay": {"dav": name}}
+            check(records, arch=arch, H=12, l2n="off")
+            with pytest.raises(ValueError, match=match):
+                check(records, arch=arch, H=12, l2n=mode)
+    narrowed = dict(cake_jit.MODULES["dav_l2n_replay"])
+    narrowed["select_rule"] = {"kind": "heads_at_least", "min": 1 << 20}
+    monkeypatch.setitem(cake_jit.MODULES, "dav_l2n_replay", narrowed)
+    cake_backend._plan.cache_clear()  # no plan of the real registry answers below
+    try:
+        for gate in GATES:
+            for mode in L2N_ON:
+                with pytest.raises(ValueError, match=match):
+                    cake_backend.plan(2000, 3, 12, 148, arch, gate=gate, l2n=mode)
+        p = cake_backend.plan(2000, 3, 12, 148, arch)
+        assert p.record("dav", "replay") == "dav_serial_replay"
+    finally:
+        monkeypatch.undo()
+        cake_backend._plan.cache_clear()  # nor a plan of the narrowed one after it
+
+
+@pytest.mark.parametrize("arch", ARCHES)
 def test_raw_l2n_plans_finish_the_parameter_gradients_with_the_deterministic_finalize(
     arch: str,
 ) -> None:
@@ -994,7 +1037,12 @@ SHAPES_L2N = (
     ((2048,), 16),
     ((4000, 96), 32),
     ((5000, 3000), 64),
+    # the serial route below 16 heads: with the norm off its backward launches the
+    # separate dav program; with it the dav_l2n* records and the hinted dqkg_*l2n
+    ((300, 129), 12),
 )
+# the backward-route rows: the three middle rows of SHAPES_L2N and its 12-head row
+SHAPES_L2N_ROUTES = SHAPES_L2N[1:4] + SHAPES_L2N[5:]
 # A judged draw runs the FP64 reference and the naive tier, token by token: rows of up to this many tokens are judged
 # at any head count; a larger row keeps its exact checks only (its results finite), and the test names the row that
 # judges its route.
@@ -1251,7 +1299,7 @@ def test_l2n_is_judged_against_the_exact_reference(
 
 
 @pytest.mark.parametrize("gate", GATES)
-@pytest.mark.parametrize("shape", SHAPES_L2N[1:4], ids=_shape_id)
+@pytest.mark.parametrize("shape", SHAPES_L2N_ROUTES, ids=_shape_id)
 def test_l2n_paths_are_judged(
     shape, gate: str, record_property, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1586,6 +1634,9 @@ L2N_ARENA_ROWS = [
     ((100, 640, 77, 1000, 129), 2),
     ((20, 20, 20, 20, 20, 20, 20), 8),
     ((129, 300), 16),
+    # 9-15 heads: with the norm off a lean arena refuses them (the separate dav
+    # program); with it the dav_l2n* records write a whole dAqk the lean layouts hold
+    ((129, 300), 12),
 ]
 
 

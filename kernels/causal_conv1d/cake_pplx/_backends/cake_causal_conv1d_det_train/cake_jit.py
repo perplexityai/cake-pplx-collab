@@ -65,20 +65,26 @@ sm_107a, from a per-route channel count (C = 256 on ``fwd``, 512 on
 ``fwd_dt``, 1024 on ``fwd_bias``) the program of two stages per chunk from
 S = 65536, and a copy of it under its own name (``c_band=2048``) from C =
 2048 at every S.  At C = 512 to 1024, inside the token range of a row of
-:data:`FALLBACK_ROWS` or :data:`DIRECT_ROWS` (the small-S rows), a call runs
-one of two programs with no counter instead: the static program (each CTA
-one fixed token stream of its channel tile; the route's fallback, the record
-without a ``select_rule``) at the rows of :data:`FALLBACK_ROWS`, and the
-direct program (no shared memory, barrier or atomic; the CTAs of a channel
-tile take its token blocks in turn) at the rows of :data:`DIRECT_ROWS`, which
-plans its own channel tiles (:data:`DIRECT_PLANS`) and launches at most one
-CTA per token block.  Each row gives its own token range.  Every architecture
-and route has a row at each C = 512 to 1024.  For most C the first range
-starts at S = 1.  Where a key has no :data:`DIRECT_ROWS` range (for example the
-sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to 24576),
-the static program runs over the key's whole range.  The sm_103a ``fwd_bias``
-rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a
-static range.  Outside a row's range, and where an architecture, route and C
+:data:`FALLBACK_ROWS`, :data:`DIRECT_ROWS` or :data:`PAIR_ROWS` (the small-S
+rows), a call runs one of three programs with no counter instead: the static
+program (each CTA one fixed token stream of its channel tile; the route's
+fallback, the record without a ``select_rule``) at the rows of
+:data:`FALLBACK_ROWS`, the direct program (no shared memory, barrier or
+atomic; the CTAs of a channel tile take its token blocks in turn) at the rows
+of :data:`DIRECT_ROWS`, which plans its own channel tiles (:data:`DIRECT_PLANS`)
+and launches at most one CTA per token block, and ahead of both the pair direct
+program (the direct program with each thread on a pair of channels, on the
+channel tiles of :data:`PAIR_PLANS`) at the rows of :data:`PAIR_ROWS`, one range
+per architecture and route (two on sm_100a ``fwd_dt``) over C = 512 to 1024 at
+short S.  Each row gives its
+own token range.  Every architecture and route has a row at each C = 512 to
+1024.  For most C the first range starts at S = 1.  Where a key has no
+:data:`DIRECT_ROWS` range (for example the sm_107a ``fwd_bias`` rows at C =
+584, 600, 616 and 632, from S = 1 to 24576), the static program runs over the
+key's range outside the :data:`PAIR_ROWS` range.  The sm_103a ``fwd_bias``
+rows at C = 720 to 768 have no :data:`DIRECT_ROWS` range: they run the pair
+direct program from S = 16 to 1536 and the static program from S = 13824 (C =
+736: 14336).  Outside a row's range, and where an architecture, route and C
 have no row, a call runs the dynamic program its rules select, as in 0.2.4.
 Every forward program computes each ``y`` element in the same fixed order, so
 ``y`` is bitwise the same whichever program and plan a call runs.  The counters
@@ -88,7 +94,8 @@ zero before the first launch; the last CTA of each tile resets them, so the
 buffer is zero after every launch and every CUDA Graph replay and serves every
 later launch of one stream.  Two launches that may run at once (two streams,
 two graphs replayed concurrently) need two buffers.  The static and direct
-programs take no ``work``; a passed buffer is checked and not read.
+programs (pair direct included) take no ``work``; a passed buffer is checked and
+not read.
 
 A backward call is two ordinary launches on one stream.  The selected program
 (persistent, ``grid_mult x ctas_per_sm x SM count`` CTAs) writes ``dx`` and
@@ -123,7 +130,8 @@ pairs in the same fixed order, rounded once; no default call selects them.
 The host plan is the three functions :func:`plan` (the kernel scalars, with
 the channel tile rule :func:`channel_split` of the record's role: the forward
 and the backward rules differ where no multiple of 32 divides the channel
-vectors; at a row of :data:`DIRECT_ROWS` the forward's :func:`direct_split`),
+vectors; at a row of :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` the forward's
+:func:`direct_split`),
 :func:`launch_grid` (the grid:
 ``co_resident`` records launch ``ctas_per_sm x SM count`` CTAs, those with a
 ``cap`` (:data:`GRID_CAPS`) at most one CTA per token block, ``occupancy``
@@ -197,7 +205,7 @@ without ``stage_pair`` (``vec=8, copy="tma2d"`` on sm_100a and sm_103a,
 from __future__ import annotations
 
 import functools
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import tvm_ffi
 
@@ -223,7 +231,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # slot (the halo rows its copy brings), not from global memory.  It runs
     # from C = 8 (``channels_at_least`` 8, so the static program is the route's
     # fallback): every channel count on sm_100a and sm_103a, and C < 256 on
-    # sm_107a, but at the small-S rows of ``FALLBACK_ROWS`` and ``DIRECT_ROWS``.
+    # sm_107a, but at the small-S rows of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and
+    # ``PAIR_ROWS``.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
     # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
@@ -847,7 +856,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # sched="dynamic", chunk_stages=1, pair_math=True``; ``work`` as the ``fwd``
     # record's.  From C = 8 (``channels_at_least`` 8): every channel count on
     # sm_100a and sm_103a, and C < 512 on sm_107a, but at the small-S rows of
-    # ``FALLBACK_ROWS`` and ``DIRECT_ROWS``.
+    # ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS``.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
     # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
@@ -930,8 +939,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # dtype_flags=True, fast=True, sched="dynamic", chunk_stages=1,
     # pair_math=True``; ``work`` as the ``fwd`` record's.  From C = 8
     # (``channels_at_least`` 8): every channel count on sm_100a and sm_103a, and
-    # C < 1024 on sm_107a, but at the small-S rows of ``FALLBACK_ROWS`` and
-    # ``DIRECT_ROWS``.
+    # C < 1024 on sm_107a, but at the small-S rows of ``FALLBACK_ROWS``,
+    # ``DIRECT_ROWS`` and ``PAIR_ROWS``.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
     # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
@@ -1895,6 +1904,219 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "b": "b",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "fwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": None,
+    },
+    # Route ``fwd``: the forward's pair direct program, built with
+    # ``sched="direct", pair_math=True, lane_ch=2``: the direct program with each
+    # thread on a pair of channels (4-byte row loads) in place of an eight-channel
+    # vector, so its geometry's ``vec`` is 2 and ``ct_vec`` counts channel pairs.  It
+    # runs at the rows of ``PAIR_ROWS`` only (``select_rule`` of kind ``rows``), on the
+    # channel tiles of ``PAIR_PLANS`` (:func:`direct_split`), and launches at most one
+    # CTA per token block (``cap`` ``token_blocks``, :func:`launch_grid`).
+    # ``ctas_per_sm`` 7: the co-resident CTAs its rows were timed at (128 threads,
+    # launch bound 4).  ``y`` is bitwise the static program's.
+    "cake_causal_conv1d_det_train_d0b237e92b28348315d0": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "y"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cap": "token_blocks",
+            "cooperative": False,
+            "ctas_per_sm": 7,
+            "geometry": {
+                "threads": 128,
+                "vec": 2,
+            },
+            "kind": "co_resident",
+        },
+        "kernel": "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "fwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": None,
+    },
+    # Route ``fwd_dt``: the forward's pair direct program, built with
+    # ``sched="direct", pair_math=True, dtype_flags=True, lane_ch=2``: the ``fwd`` pair
+    # direct program's form with the ``flags`` scalar.  It runs at the rows of
+    # ``PAIR_ROWS`` only, on the channel tiles of ``PAIR_PLANS``, with the grid cap
+    # ``token_blocks``.  ``ctas_per_sm`` 7.  ``y`` is bitwise the static program's.
+    "cake_causal_conv1d_det_train_96bf2b8aa1132598f130": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "y"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cap": "token_blocks",
+            "cooperative": False,
+            "ctas_per_sm": 7,
+            "geometry": {
+                "threads": 128,
+                "vec": 2,
+            },
+            "kind": "co_resident",
+        },
+        "kernel": "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "fwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": None,
+    },
+    # Route ``fwd_bias``: the forward's pair direct program, built with
+    # ``sched="direct", pair_math=True, bias=True, dtype_flags=True, lane_ch=2``: the
+    # ``fwd`` pair direct program's form with the bias and the ``flags`` scalar.  It
+    # runs at the rows of ``PAIR_ROWS`` only, on the channel tiles of ``PAIR_PLANS``,
+    # with the grid cap ``token_blocks``.  ``ctas_per_sm`` 6: sm_100a and sm_107a
+    # hold six such CTAs per SM, sm_103a seven; at its rows the cap launches fewer
+    # than six per SM on every architecture.  ``y`` is bitwise the static program's.
+    "cake_causal_conv1d_det_train_6cc04dd65e493836b918": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "y"],
+            ["buffer", "b"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cap": "token_blocks",
+            "cooperative": False,
+            "ctas_per_sm": 6,
+            "geometry": {
+                "threads": 128,
+                "vec": 2,
+            },
+            "kind": "co_resident",
+        },
+        "kernel": "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         "logical": {
             "C": "C",
             "S": "S",
@@ -4251,16 +4473,19 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_f193c5247980992f4f81",
             "cake_causal_conv1d_det_train_f5497330bfd286211643",
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         ],
         "fwd_bias": [
             "cake_causal_conv1d_det_train_62cb38eb8aa667d46bc1",
             "cake_causal_conv1d_det_train_08880ca12e4064bc8cdb",
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         ],
         "fwd_dt": [
             "cake_causal_conv1d_det_train_0f3982a5518f5a8696f6",
             "cake_causal_conv1d_det_train_9c1e7ee9f37e3102660e",
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
         ],
     },
     "sm_103a": {
@@ -4299,16 +4524,19 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_f193c5247980992f4f81",
             "cake_causal_conv1d_det_train_f5497330bfd286211643",
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         ],
         "fwd_bias": [
             "cake_causal_conv1d_det_train_62cb38eb8aa667d46bc1",
             "cake_causal_conv1d_det_train_08880ca12e4064bc8cdb",
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         ],
         "fwd_dt": [
             "cake_causal_conv1d_det_train_0f3982a5518f5a8696f6",
             "cake_causal_conv1d_det_train_9c1e7ee9f37e3102660e",
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
         ],
     },
     "sm_107a": {
@@ -4352,6 +4580,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_8665d0756b8240ecb4d0",
             "cake_causal_conv1d_det_train_d00a2892aa363564c673",
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         ],
         "fwd_bias": [
             "cake_causal_conv1d_det_train_62cb38eb8aa667d46bc1",
@@ -4359,6 +4588,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_d829c95e1d610bc14b23",
             "cake_causal_conv1d_det_train_77af6383ff00b1cd047c",
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         ],
         "fwd_dt": [
             "cake_causal_conv1d_det_train_0f3982a5518f5a8696f6",
@@ -4366,6 +4596,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_176ebb3e14f7ad9c94dc",
             "cake_causal_conv1d_det_train_6211cda590057b12f1a2",
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
         ],
     },
 }
@@ -4463,9 +4694,10 @@ GRID_MULT_CHOICES: tuple[int, ...] = (1, 2, 3, 4)
 # never carries one.
 SELECT_KINDS = ("channels_at_least", "channels_tokens_at_least")
 # The selection-rule kind of a record that owns no call by the rules
-# (``{"kind": "rows"}``): it runs only at the rows of :data:`DIRECT_ROWS` that
-# name it, before :data:`FALLBACK_ROWS` and the rules (the direct forward
-# programs); it is neither a candidate of the rules nor the route's fallback.
+# (``{"kind": "rows"}``): it runs only at the rows of :data:`PAIR_ROWS` or
+# :data:`DIRECT_ROWS` that name it, before :data:`FALLBACK_ROWS` and the rules
+# (the pair direct and the direct forward programs); it is neither a candidate of
+# the rules nor the route's fallback.
 ROWS_KIND = "rows"
 # The ``flags`` bit mask of the ``dtype_flags`` programs (every program of the
 # six other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
@@ -4636,8 +4868,8 @@ def select_rule(record: dict[str, Any]) -> dict[str, Any] | None:
     with the token floor is tried first; at a row of :data:`FALLBACK_ROWS` the
     route's fallback runs whatever the rules.  ``{"kind": "rows"}``
     (:data:`ROWS_KIND`) owns no call by the rules: the record runs only at the
-    rows of :data:`DIRECT_ROWS` that name it, before :data:`FALLBACK_ROWS` and
-    the rules.
+    rows of :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` that name it, before
+    :data:`FALLBACK_ROWS` and the rules.
     """
 
     return record.get("select_rule")
@@ -4714,7 +4946,8 @@ def _admits(rule: dict[str, Any], *, arch: str, C: int, S: int | None = None) ->
 # multiple of 8) and ``S_min <= S <= S_max`` tokens launches the static program
 # (:func:`selected_modules`) on the route's plan (:func:`plan`).  The keys of one
 # ``(arch, route)`` are disjoint and share no ``(C, S)`` with a
-# :data:`DIRECT_ROWS` range.  Rendered from the forward kernel generator's
+# :data:`DIRECT_ROWS` range; a :data:`PAIR_ROWS` range runs ahead of them where
+# it covers their ``(C, S)``.  Rendered from the forward kernel generator's
 # table; every other channel count, route, ``S`` and architecture selects by
 # :data:`DIRECT_ROWS` and the rules.
 FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
@@ -4847,7 +5080,8 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
     """The ``(S_min, S_max)`` of the :data:`FALLBACK_ROWS` key of ``arch`` on
     route ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of
     8), ``None`` without one: inside that token range (both bounds included)
-    the call launches the route's fallback program."""
+    the call launches the route's fallback program, but where a
+    :data:`PAIR_ROWS` range holds the call."""
 
     C = int(C)
     if C % CHANNEL_MULTIPLE:
@@ -4863,12 +5097,14 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
 # (S_lo, S_hi, module)}}``: a forward call of ``route`` on ``arch`` with ``C_lo <=
 # C <= C_hi`` channels (a multiple of 8) and ``S_lo <= S <= S_hi`` tokens launches
 # ``module`` (:func:`direct_module`), a record of the route whose ``select_rule``
-# is of kind :data:`ROWS_KIND`, on the channel tiles of :data:`DIRECT_PLANS`
-# (:func:`direct_split`).  The keys of one ``(arch, route)`` are disjoint and share
-# no ``(C, S)`` with a :data:`FALLBACK_ROWS` range; where a key of both tables
-# covers ``C``, the static range lies below the direct one.  Rendered from the
-# forward kernel generator's table; every other channel count,
-# route, ``S`` and architecture selects by :data:`FALLBACK_ROWS` and the rules.
+# is of kind :data:`ROWS_KIND` and whose geometry's ``vec`` is 8, on the channel
+# tiles of :data:`DIRECT_PLANS` (:func:`direct_split`).  The keys of one ``(arch,
+# route)`` are disjoint and share no ``(C, S)`` with a :data:`FALLBACK_ROWS`
+# range; where a key of both tables covers ``C``, the static range lies below the
+# direct one.  A :data:`PAIR_ROWS` range runs ahead of a key where it covers its
+# ``(C, S)``.  Rendered from the forward kernel generator's table; every other
+# channel count, route, ``S`` and architecture selects by :data:`FALLBACK_ROWS`
+# and the rules.
 DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
     "sm_100a": {
         ("fwd", 520, 544): (
@@ -5283,15 +5519,10 @@ def direct_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
     """The ``(S_lo, S_hi)`` of the :data:`DIRECT_ROWS` key of ``arch`` on route
     ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of 8),
     ``None`` without one: inside that token range (both bounds included) the
-    call launches the key's direct program."""
+    call launches the key's direct program, but where a :data:`PAIR_ROWS` range
+    holds the call."""
 
-    C = int(C)
-    if C % CHANNEL_MULTIPLE:
-        return None
-    for (route, c_lo, c_hi), (s_lo, s_hi, _name) in DIRECT_ROWS.get(arch, {}).items():
-        if route == kind and int(c_lo) <= C <= int(c_hi):
-            return int(s_lo), int(s_hi)
-    return None
+    return _row_range(DIRECT_ROWS, arch, kind, C)
 
 
 def direct_row(arch: str | None, kind: str | None, C: int, S: int | None) -> bool:
@@ -5299,10 +5530,7 @@ def direct_row(arch: str | None, kind: str | None, C: int, S: int | None) -> boo
     tokens lies in a :data:`DIRECT_ROWS` range (``False`` without an
     architecture, a route or ``S``)."""
 
-    if arch is None or kind is None or S is None:
-        return False
-    bounds = direct_row_range(arch, kind, C)
-    return bounds is not None and bounds[0] <= int(S) <= bounds[1]
+    return _in_rows(direct_row_range, arch, kind, C, S)
 
 
 def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
@@ -5313,15 +5541,165 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
     ``ValueError``; a module the route does not list, or whose rule is not of
     kind :data:`ROWS_KIND`, is a registry error (``RuntimeError``)."""
 
+    return _rows_module(DIRECT_ROWS, "DIRECT_ROWS", "direct", arch, kind, C, S)
+
+
+# The rows where a forward route runs its pair direct program (the direct program
+# with each thread on a pair of channels) in place of the program
+# :data:`DIRECT_ROWS`, :data:`FALLBACK_ROWS` or its selection rules pick,
+# ``{arch: {(route, C_lo, C_hi): (S_lo, S_hi, module)}}``: a forward call of
+# ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8) and
+# ``S_lo <= S <= S_hi`` tokens launches ``module`` (:func:`pair_module`), a record
+# of the route whose ``select_rule`` is of kind :data:`ROWS_KIND` and whose
+# geometry's ``vec`` is 2, on the channel tiles of :data:`PAIR_PLANS`
+# (:func:`direct_split`).  The keys of one ``(arch, route)`` are disjoint in C:
+# one key, but two on sm_100a ``fwd_dt``, whose range ends at S 1024 from C 648
+# (at most 512 CTAs of the pair grid).  A range may cover the ``(C, S)`` of
+# :data:`FALLBACK_ROWS` and :data:`DIRECT_ROWS` ranges and takes them: those
+# tables decide only outside it.  Rendered from the forward kernel generator's
+# table.
+PAIR_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
+    "sm_100a": {
+        ("fwd", 512, 1024): (
+            64,
+            3072,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd_dt", 512, 640): (
+            64,
+            1536,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_dt", 648, 1024): (
+            64,
+            1024,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_bias", 512, 1024): (
+            128,
+            1536,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+    },
+    "sm_103a": {
+        ("fwd", 512, 1024): (
+            64,
+            3072,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd_dt", 512, 1024): (
+            32,
+            1792,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_bias", 512, 1024): (
+            16,
+            1536,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+    },
+    "sm_107a": {
+        ("fwd", 512, 1024): (
+            64,
+            2560,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd_dt", 512, 1024): (
+            16,
+            1792,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_bias", 512, 1024): (
+            16,
+            1792,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+    },
+}
+
+
+def pair_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
+    """The ``(S_lo, S_hi)`` of the :data:`PAIR_ROWS` key of ``arch`` on route
+    ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of 8),
+    ``None`` without one: inside that token range (both bounds included) the
+    call launches the key's pair direct program."""
+
+    return _row_range(PAIR_ROWS, arch, kind, C)
+
+
+def pair_row(arch: str | None, kind: str | None, C: int, S: int | None) -> bool:
+    """Whether a call of route ``kind`` on ``arch`` with ``C`` channels and ``S``
+    tokens lies in a :data:`PAIR_ROWS` range (``False`` without an
+    architecture, a route or ``S``)."""
+
+    return _in_rows(pair_row_range, arch, kind, C, S)
+
+
+def pair_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
+    """The pair direct program a call of route ``kind`` on ``arch`` with ``C``
+    channels and ``S`` tokens launches: the module of the :data:`PAIR_ROWS` key
+    covering ``C`` when its range holds ``S`` (both bounds included), ``None``
+    outside it or without a key; the errors of :func:`direct_module`."""
+
+    return _rows_module(PAIR_ROWS, "PAIR_ROWS", "pair direct", arch, kind, C, S)
+
+
+def _row_range(
+    table: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]],
+    arch: str,
+    kind: str,
+    C: int,
+) -> tuple[int, int] | None:
+    """The ``(S_lo, S_hi)`` of the key of ``table`` (:data:`DIRECT_ROWS` or
+    :data:`PAIR_ROWS`) of ``arch`` on route ``kind`` covering ``C``."""
+
     C = int(C)
     if C % CHANNEL_MULTIPLE:
         return None
-    for (route, c_lo, c_hi), (s_lo, s_hi, name) in DIRECT_ROWS.get(arch, {}).items():
+    for (route, c_lo, c_hi), (s_lo, s_hi, _name) in table.get(arch, {}).items():
+        if route == kind and int(c_lo) <= C <= int(c_hi):
+            return int(s_lo), int(s_hi)
+    return None
+
+
+def _in_rows(
+    row_range: Callable[[str, str, int], tuple[int, int] | None],
+    arch: str | None,
+    kind: str | None,
+    C: int,
+    S: int | None,
+) -> bool:
+    """Whether ``S`` lies in the range ``row_range`` gives (``False`` without an
+    architecture, a route or ``S``)."""
+
+    if arch is None or kind is None or S is None:
+        return False
+    bounds = row_range(arch, kind, C)
+    return bounds is not None and bounds[0] <= int(S) <= bounds[1]
+
+
+def _rows_module(
+    table: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]],
+    table_name: str,
+    what: str,
+    arch: str,
+    kind: str,
+    C: int,
+    S: int | None,
+) -> str | None:
+    """The module of the key of ``table`` (named ``table_name``, its programs
+    ``what``) covering ``C`` when its range holds ``S``; see
+    :func:`direct_module`."""
+
+    C = int(C)
+    if C % CHANNEL_MULTIPLE:
+        return None
+    for (route, c_lo, c_hi), (s_lo, s_hi, name) in table.get(arch, {}).items():
         if route != kind or not int(c_lo) <= C <= int(c_hi):
             continue
         if S is None:
             raise ValueError(
-                f"the Cake causal conv1d training {kind!r} route on {arch} for C={C} runs its direct program "
+                f"the Cake causal conv1d training {kind!r} route on {arch} for C={C} runs its {what} program "
                 f"at S {s_lo} to {s_hi}; the selection needs S"
             )
         if not int(s_lo) <= int(S) <= int(s_hi):
@@ -5331,7 +5709,7 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
             or (select_rule(MODULES[name]) or {}).get("kind") != ROWS_KIND
         ):
             raise RuntimeError(
-                f"the DIRECT_ROWS key ({route!r}, {c_lo}, {c_hi}) on {arch} names {name}, which is no "
+                f"the {table_name} key ({route!r}, {c_lo}, {c_hi}) on {arch} names {name}, which is no "
                 f"record of the route with a {ROWS_KIND!r} selection rule"
             )
         return name
@@ -5344,28 +5722,30 @@ def selected_modules(
     """Ordered module names one public call launches on ``arch`` for ``C`` channels and ``S`` tokens.
 
     A route may carry several programs of its kernel and launches exactly one:
-    at a row of :data:`DIRECT_ROWS` (its range holds ``S``) the key's direct
-    program (:func:`direct_module`); else at a row of :data:`FALLBACK_ROWS`
-    (:func:`fallback_row_range` holds ``S``) the route's single fallback record
-    (the one without a rule); elsewhere, of the records whose
-    :func:`select_rule` admits the call on ``arch`` the one of the highest
+    at a row of :data:`PAIR_ROWS` (its range holds ``S``) the key's pair direct
+    program (:func:`pair_module`); else at a row of :data:`DIRECT_ROWS` the
+    key's direct program (:func:`direct_module`); else at a row of
+    :data:`FALLBACK_ROWS` (:func:`fallback_row_range` holds ``S``) the route's
+    single fallback record (the one without a rule); elsewhere, of the records
+    whose :func:`select_rule` admits the call on ``arch`` the one of the highest
     channel threshold (at a threshold two records share, the one with the token
     floor first), else the fallback.  The choice is a pure function of the
     architecture, the route, ``C`` and ``S`` -- ``S`` enters only through a
-    rule's token floor or a :data:`DIRECT_ROWS` or :data:`FALLBACK_ROWS` range,
-    and the host never reads the data -- so a given ``(S, C, device)`` always
-    runs the same program of a route and ``dweight`` stays bitwise
-    reproducible.  Two records of one channel threshold that both reach ``C``
-    (but for one with a token floor and one without), zero or several
-    fallbacks, or a :data:`DIRECT_ROWS` key naming no ``rows`` record of the
-    route, are registry errors (``RuntimeError``); an unknown rule kind, or
-    ``S`` of ``None`` where a token floor decides or a :data:`DIRECT_ROWS` or
-    :data:`FALLBACK_ROWS` key covers ``C``, is a ``ValueError``.
+    rule's token floor or a :data:`PAIR_ROWS`, :data:`DIRECT_ROWS` or
+    :data:`FALLBACK_ROWS` range, and the host never reads the data -- so a given
+    ``(S, C, device)`` always runs the same program of a route and ``dweight``
+    stays bitwise reproducible.  Two records of one channel threshold that both
+    reach ``C`` (but for one with a token floor and one without), zero or
+    several fallbacks, or a :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` key naming
+    no ``rows`` record of the route, are registry errors (``RuntimeError``); an
+    unknown rule kind, or ``S`` of ``None`` where a token floor decides or a
+    :data:`PAIR_ROWS`, :data:`DIRECT_ROWS` or :data:`FALLBACK_ROWS` key covers
+    ``C``, is a ``ValueError``.
     """
 
-    direct = direct_module(arch, kind, C, S)
-    if direct is not None:
-        return (direct,)
+    rows = pair_module(arch, kind, C, S) or direct_module(arch, kind, C, S)
+    if rows is not None:
+        return (rows,)
     candidates, fallback = _channel_choice(
         arch, kind, route_modules(arch, kind), int(C)
     )
@@ -6040,32 +6420,60 @@ DIRECT_PLANS: dict[str, dict[str, tuple[int, int]]] = {
 }
 
 
+# The channel tiles of the pair direct programs, per architecture and forward route:
+# ``{arch: {route: (ct_vec, n_sub)}}`` as :data:`DIRECT_PLANS`, ``ct_vec`` counted
+# in channel pairs (a pair record's ``vec`` is 2): ``(16, 8)`` gives each CTA 32
+# channels and 64 tokens, ``ceil(C / 32)`` tiles, at every row of
+# :data:`PAIR_ROWS`.  The plan never changes ``y``.  Kept in sync with the forward
+# kernel generator's pair plans.
+PAIR_PLANS: dict[str, dict[str, tuple[int, int]]] = {
+    "sm_100a": {
+        "fwd": (16, 8),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (16, 8),
+    },
+    "sm_103a": {
+        "fwd": (16, 8),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (16, 8),
+    },
+    "sm_107a": {
+        "fwd": (16, 8),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (16, 8),
+    },
+}
+
+
 def direct_split(
     C: int,
     *,
     geometry: dict[str, int],
     route: str,
     arch: str,
+    pair: bool = False,
 ) -> tuple[int, int, int]:
     """``(ct_vec, n_sub, n_ch_tiles)`` of the direct program of ``route`` on
     ``arch`` for ``C`` channels: the :data:`DIRECT_PLANS` form ``(ct_vec,
-    n_sub)`` and ``ceil(C / vec / ct_vec)`` channel tiles (the last tile
-    partial).  ``ValueError`` for an architecture or route without a form, or
-    a form beyond the geometry's threads."""
+    n_sub)`` (with ``pair``, the pair direct program's :data:`PAIR_PLANS`
+    form) and ``ceil(C / vec / ct_vec)`` channel tiles of the geometry's
+    ``vec`` (the last tile partial).  ``ValueError`` for an architecture or
+    route without a form, or a form beyond the geometry's threads."""
 
     if arch not in ARCHES:
         raise ValueError(f"arch must be one of {ARCHES}, got {arch!r}")
-    form = DIRECT_PLANS.get(arch, {}).get(route)
+    what, plans = ("pair", PAIR_PLANS) if pair else ("direct", DIRECT_PLANS)
+    form = plans.get(arch, {}).get(route)
     if form is None:
         raise ValueError(
-            f"the {route!r} route on {arch} has no direct plan (DIRECT_PLANS names "
-            f"{sorted(DIRECT_PLANS.get(arch, {}))})"
+            f"the {route!r} route on {arch} has no {what} plan ({what.upper()}_PLANS names "
+            f"{sorted(plans.get(arch, {}))})"
         )
     ct_vec, n_sub = (int(value) for value in form)
     threads = int(geometry["threads"])
     if ct_vec < 1 or n_sub < 1 or ct_vec * n_sub > threads:
         raise ValueError(
-            f"the direct plan {form!r} of route {route!r} on {arch} does not fit {threads} threads"
+            f"the {what} plan {form!r} of route {route!r} on {arch} does not fit {threads} threads"
         )
     return _channel_split(
         int(C),
@@ -6090,11 +6498,14 @@ def _plan_split(
     arch: str | None = None,
 ) -> tuple[int, int, int]:
     """:func:`plan`'s ``(ct_vec, n_sub, n_ch_tiles)``: :func:`direct_split` for
-    a forward call (not ``legacy``) at a row of :data:`DIRECT_ROWS` of ``arch``
-    and ``route``, else :func:`channel_split`'s."""
+    a forward call (not ``legacy``) at a row of :data:`PAIR_ROWS` (the pair
+    form) or of :data:`DIRECT_ROWS` of ``arch`` and ``route``, else
+    :func:`channel_split`'s."""
 
-    if role == "fwd" and not legacy and direct_row(arch, route, C, S):
-        return direct_split(C, geometry=geometry, route=route, arch=arch)
+    if role == "fwd" and not legacy:
+        pair = pair_row(arch, route, C, S)
+        if pair or direct_row(arch, route, C, S):
+            return direct_split(C, geometry=geometry, route=route, arch=arch, pair=pair)
     return channel_split(
         C, geometry=geometry, role=role, legacy=legacy, route=route, S=S, arch=arch
     )
@@ -6121,8 +6532,9 @@ def plan(
     :data:`NARROW_TILE_WIDTHS` runs its width from its token floor on
     ``arch``, and the 32-vector tiles below it or without ``arch``; a row of
     :data:`NARROW_ROW_FLOORS` runs one tile below its own floor; a forward
-    call at a row of :data:`DIRECT_ROWS` of ``arch`` and ``route``, where the
-    direct program runs, takes :func:`direct_split` instead) and
+    call at a row of :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` of ``arch`` and
+    ``route``, where the pair direct or the direct program runs, takes
+    :func:`direct_split` instead) and
     ``search_steps``, the number of halvings of the device-side binary
     search over ``cu_seqlens`` (``max(1, ceil(log2 num_docs))``).  Every
     value is a pure function of ``(S, C, num_docs)``, the geometry, the role,
@@ -6771,7 +7183,9 @@ __all__ = [
     "LOGICAL_SCALARS",
     "LOGICAL_TENSORS",
     "MODULES",
+    "PAIR_PLANS",
     "PAIR_ROUTES",
+    "PAIR_ROWS",
     "PLAN_SCALARS",
     "REQUIRED_KINDS",
     "ROLES",
@@ -6808,6 +7222,9 @@ __all__ = [
     "library_name",
     "load",
     "main_grid",
+    "pair_module",
+    "pair_row",
+    "pair_row_range",
     "partial_bytes",
     "partial_rows",
     "plan",

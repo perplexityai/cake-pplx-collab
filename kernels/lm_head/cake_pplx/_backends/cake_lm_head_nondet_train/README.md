@@ -929,8 +929,10 @@ one-chunk explicit-budget case, and a few short calls and one call per entry at
 the production vocabulary of 154880) and the candidate-support
 entries at their own shapes.  Calls at the production shape keep their
 contract, exact zeros and the one-feature bit checks documented above (one
-option against another on the same inputs); no test asserts run-to-run bit
-equality.  No test compares an output with the deterministic package.  Each
+option against another on the same inputs); no accuracy test asserts
+run-to-run bit equality (the label-residual fill tests compare repeated calls
+of the chunk loop, whose outputs are summed in one fixed order, bit for bit).
+No test compares an output with the deterministic package.  Each
 verdict prints a `TIER` line in pytest's terminal summary.  The outputs that
 miss the tier today are listed per architecture in
 `tests/experimental/test_helpers/cake_lm_head_known_misses.py`, each with a

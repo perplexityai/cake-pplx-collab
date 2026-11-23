@@ -119,17 +119,17 @@ history-row program.  The main program writes every row, a continuing fragment's
 either the zero-history registry's single-rank ``fwd`` route program (``cake_jit.selected_modules(arch, "fwd", C=C,
 S=S)``, the program the single-rank forward runs) on the rank's fragments, each a document of its own (``cu =
 ctx.cu_seqlens_local``, ``num_docs = n_frag``; the record's plan, grid and token-chunk counters as in the
-single-rank forward: at a rank's token count of a small-S row, ``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``, the
-static or the direct program, which takes no counters; the multi entry's one counter buffer then serves its other
-tensors), or, in the overlapped form only, the ``kcp_fwd`` program with every ``hist_row_off`` entry
-``-1``.  The history-row program then writes ``y`` of the first ``min(3, len)`` rows of every fragment with a history
-row again from the received pool, with the ``kcp_fwd`` program's instructions, so ``y`` is bitwise the one-launch
-forward's; it runs only when the rank receives history rows.  With an exchange in flight (more than one rank) the
-overlapped form launches the main program before the exchange's wait and the history-row program after it.  The
-waiting form launches after the wait: the single-rank main program and the history-row program, or, with the
-``kcp_fwd`` program as main, the one-launch forward (the ``kcp_fwd`` program with the context's table, no history-row
-program).  ``FWD_MAIN_ARCHS`` names the architectures whose forward runs the single-rank main program (else the
-``kcp_fwd`` program), ``FWD_OVERLAP_ARCHS`` those whose forward overlaps; ``MULTI_FWD_MAIN_ARCHS`` and
+single-rank forward: at a rank's token count of a small-S row, ``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS`` /
+``PAIR_ROWS``, the static, the direct or the pair direct program, which takes no counters; the multi entry's one
+counter buffer then serves its other tensors), or, in the overlapped form only, the ``kcp_fwd`` program with every
+``hist_row_off`` entry ``-1``.  The history-row program then writes ``y`` of the first ``min(3, len)`` rows of every
+fragment with a history row again from the received pool, with the ``kcp_fwd`` program's instructions, so ``y`` is
+bitwise the one-launch forward's; it runs only when the rank receives history rows.  With an exchange in flight (more
+than one rank) the overlapped form launches the main program before the exchange's wait and the history-row program
+after it.  The waiting form launches after the wait: the single-rank main program and the history-row program, or,
+with the ``kcp_fwd`` program as main, the one-launch forward (the ``kcp_fwd`` program with the context's table, no
+history-row program).  ``FWD_MAIN_ARCHS`` names the architectures whose forward runs the single-rank main program
+(else the ``kcp_fwd`` program), ``FWD_OVERLAP_ARCHS`` those whose forward overlaps; ``MULTI_FWD_MAIN_ARCHS`` and
 ``MULTI_FWD_OVERLAP_ARCHS`` are the multi entry's, which overlaps its first tensor only (the other tensors take the
 waiting form after the wait).  The sets come from measurements against the one-launch forward (their comment): every
 architecture's single call runs the single-rank main program after the wait, and so does the multi entry on sm_100a
