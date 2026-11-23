@@ -4617,31 +4617,49 @@ class _KeptPlan(Plan):
 
 
 # The padded A extent of a small compacted one-chunk call, per architecture: the logits GEMMs (every arm: the plain
-# and statistics-free forms, the label-column and ``dz`` arms, their temperature forms) of a chunk of fewer valid rows
-# read their A operand -- the gathered rows -- through a tensor map of this many rows, the rows past the chunk zero;
-# on the architectures of :data:`DX_A_EXTENT_ROWS_BY_ARCH` the dX GEMM reads the chunk's ``dz`` the same way from
-# :data:`DX_A_EXTENT_MIN_ROWS` rows on.  The shipped programs run a chunk of a few rows slower than one of this many
-# (the A operand's row extent, not the row count, sets their time there).  ``M`` (the epilogues' row bound), ``C``,
-# the statistics, every per-row operand, the grid and the K slices keep the chunk's rows, so the extra rows only
-# form accumulator rows that no epilogue stores and no per-row read reaches: every output keeps its bits.  At most a
-# chunk (``rows <= chunk``).
-A_EXTENT_ROWS_BY_ARCH = {"sm_100a": 16, "sm_103a": 16, "sm_107a": 256}
+# and statistics-free forms, the label-column and ``dz`` arms, their temperature forms) of a chunk of
+# :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` valid rows read their A operand -- the gathered rows -- through
+# a tensor map of this many rows, the rows past the chunk zero; on the architectures of
+# :data:`DX_A_EXTENT_ROWS_BY_ARCH` the dX GEMM reads the chunk's ``dz`` the same way (from :data:`DX_A_EXTENT_MIN_ROWS`
+# rows on).  On R200 (sm_107a) the shipped programs run a chunk of a few rows slower than one of 256 rows: the A
+# operand's row extent, not the row count, sets their time there (CUPTI, us, the logits GEMM of a log-probability
+# forward + backward step at 14 / 182 / 242 valid rows: 325.6 -> 167.2 / 237.7 -> 175.2 / 178.6 -> 178.6; the step at
+# T = 16 / 192, 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3).  The row window is the measured one: the
+# forward at 242 valid rows measured slower with the extent, and no call below 14 valid rows was measured.  B200 and
+# GB300 keep the chunk's rows (a 16-row extent made no call faster there).  ``M`` (the epilogues' row bound), ``C``, the
+# statistics, every per-row operand, the grid and the K slices keep the chunk's rows, so the extra rows only form
+# accumulator rows that no epilogue stores and no per-row read reaches: every output keeps its bits.  At most a chunk
+# (``pad <= chunk``).
+A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
 DX_A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
+A_EXTENT_MIN_ROWS = 14
+A_EXTENT_MAX_ROWS = 182
 DX_A_EXTENT_MIN_ROWS = 2
+
+
+def a_extent_pad(chunk: int, arch: Optional[str], *, dx: bool = False) -> int:
+    """The rows of a padded chunk buffer on ``arch``: the logits GEMMs' A extent (:data:`A_EXTENT_ROWS_BY_ARCH`), or
+    with ``dx`` the dX GEMM's (:data:`DX_A_EXTENT_ROWS_BY_ARCH`); 0 when ``arch`` has no entry or the extent exceeds
+    ``chunk``."""
+    table = DX_A_EXTENT_ROWS_BY_ARCH if dx else A_EXTENT_ROWS_BY_ARCH
+    pad = int(table.get(arch, 0)) if arch is not None else 0
+    return pad if pad <= int(chunk) else 0
 
 
 def a_extent_rows(
     rows: int, chunk: int, arch: Optional[str], *, dx: bool = False
 ) -> int:
-    """The padded A extent (rows) of a compacted one-chunk call of ``rows`` valid rows on ``arch``: the logits GEMMs'
-    (:data:`A_EXTENT_ROWS_BY_ARCH`), or with ``dx`` the dX GEMM's (:data:`DX_A_EXTENT_ROWS_BY_ARCH`, from
-    :data:`DX_A_EXTENT_MIN_ROWS` rows on); 0 when the chunk keeps its own rows (no entry for ``arch``, at least that
-    many rows, or more than ``chunk``)."""
-    table = DX_A_EXTENT_ROWS_BY_ARCH if dx else A_EXTENT_ROWS_BY_ARCH
-    pad = int(table.get(arch, 0)) if arch is not None else 0
-    if dx and int(rows) < DX_A_EXTENT_MIN_ROWS:
+    """The padded A extent (rows) of a compacted one-chunk call of ``rows`` valid rows on ``arch``
+    (:func:`a_extent_pad`) when ``rows`` lies in the window :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS`
+    (with ``dx`` also from :data:`DX_A_EXTENT_MIN_ROWS` rows on) and below the extent; else 0 (the chunk keeps its own
+    rows)."""
+    rows = int(rows)
+    if rows <= 0 or not A_EXTENT_MIN_ROWS <= rows <= A_EXTENT_MAX_ROWS:
         return 0
-    return pad if 0 < int(rows) < pad <= int(chunk) else 0
+    if dx and rows < DX_A_EXTENT_MIN_ROWS:
+        return 0
+    pad = a_extent_pad(chunk, arch, dx=dx)
+    return pad if rows < pad else 0
 
 
 def make_plan(
@@ -5438,14 +5456,11 @@ def lm_head_det_loss_workspace_size(
             - 1
         )
     # a compacted one-chunk plan of a few valid rows pads its A extents (:func:`a_extent_rows`): sized for the
-    # padded buffers, which bound every valid-row count's
+    # padded buffers, which bound every valid-row count's (none when the call has fewer rows than the window)
     arch = record["arch"]
-    x_c_rows = a_extent_rows(1, chunk, arch) if compact_rows else 0
-    logits_rows = (
-        a_extent_rows(DX_A_EXTENT_MIN_ROWS, chunk, arch, dx=True)
-        if compact_rows and need_dx
-        else 0
-    )
+    padded = bool(compact_rows) and int(num_rows) >= A_EXTENT_MIN_ROWS
+    x_c_rows = a_extent_pad(chunk, arch) if padded else 0
+    logits_rows = a_extent_pad(chunk, arch, dx=True) if padded and need_dx else 0
     return int(
         workspace_layout(
             num_rows,
