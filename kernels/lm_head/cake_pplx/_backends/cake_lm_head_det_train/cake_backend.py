@@ -8011,7 +8011,8 @@ def prepare_lm_head_det_loss(
         W=W,
         labels=_prepare_labels(labels, geometry, row_index),
     )
-    rows = layout["d"][1] // 4  # the chunk buffers' rows (logits / x_c: a padded A extent's more)
+    # the chunk buffers' rows (logits / x_c: a padded A extent's more)
+    rows = layout["d"][1] // 4
     t["logits"] = carve("logits", torch.bfloat16, (max(rows, plan.dx_a_rows), V))
     t["stats"] = carve("stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = carve("d", torch.float32, (rows,))
@@ -8489,7 +8490,8 @@ def prepare_lm_head_det_loss_temperature(
         W=W,
         labels=_prepare_labels(labels, geometry, row_index),
     )
-    rows = layout["d"][1] // 4  # the chunk buffers' rows (logits / x_c: a padded A extent's more)
+    # the chunk buffers' rows (logits / x_c: a padded A extent's more)
+    rows = layout["d"][1] // 4
     t["logits"] = carve("logits", torch.bfloat16, (max(rows, plan.dx_a_rows), V))
     t["stats"] = carve("stats", torch.float32, (rows, plan.num_tiles, 2))
     t["d"] = carve("d", torch.float32, (rows,))

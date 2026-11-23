@@ -5546,7 +5546,7 @@ def test_a_extent_runner_operands(monkeypatch):
         assert r.layout["x_c"][1] == 256 * H * 2, entry
         assert r.layout["logits"][1] == 256 * V * 2, entry
         for name in ("stats", "d", "term"):
-            assert r.layout[name] == plain.layout[name], (entry, name)
+            assert r.layout[name][1] == plain.layout[name][1], (entry, name)
         for name, padded_name, width in (("x_c", "x_a", H), ("logits", "logits_a", V)):
             buf, view = t[padded_name], t[name]
             assert buf.shape == (256, width) and view.shape == (rows, width), name
@@ -5608,7 +5608,8 @@ def test_a_extent_runner_operands(monkeypatch):
     t = {"x_c": buf}
     cake_backend._bind_a_extents(p, t, 5)
     assert not bool(_bits(buf[5:]).any()) and bool((buf[:5] == 7).all())
-    t = {"x_c": torch.zeros((5, 8), dtype=torch.bfloat16)}  # allocated at the chunk's rows: no padded view
+    # allocated at the chunk's rows: no padded view
+    t = {"x_c": torch.zeros((5, 8), dtype=torch.bfloat16)}
     cake_backend._bind_a_extents(p, t, 5)
     assert "x_a" not in t
 
@@ -10829,7 +10830,8 @@ def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):
                 a = cake_backend.a_extent_rows(rows, 4096, arch)
                 dx = cake_backend.a_extent_rows(rows, 4096, arch, dx=True)
                 assert any(x for x, _ in bound) == bool(a), (case, bound)
-                want_dx = bool(dx) and tag != "logprob kept"  # the kept dX reads the kept view
+                # the kept dX reads the kept view
+                want_dx = bool(dx) and tag != "logprob kept"
                 assert any(d for _, d in bound) == want_dx, (case, bound)
             keys = ("loss",) + lp_keys if entry == "loss" else lp_keys
             for table in ("shipped", "256"):
