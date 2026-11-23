@@ -17328,9 +17328,9 @@ _ONE_SLICE = {"dx": {"k_slices": 1}}
 
 def test_small_call_switches_validate_and_restore():
     """The small-call switches return their previous values, reject bad values, and default to the shipped values
-    (256 rows, the small-call kept logits on, padding to 16 rows -- 256 rows for the log-probability entries on
-    sm_107a); a padding row count set with :func:`set_small_pad_rows` applies to every entry until ``None`` restores
-    the defaults."""
+    (256 rows, the small-call kept logits on, padding to 16 rows -- 256 rows for the log-probability and the loss
+    entries on sm_107a; a device-free call reads the 16-row default); a padding row count set with
+    :func:`set_small_pad_rows` applies to every entry until ``None`` restores the defaults."""
     meta = torch.device("meta")
     assert (
         cake_backend.uncompacted_max_rows()
@@ -17338,9 +17338,14 @@ def test_small_call_switches_validate_and_restore():
         == 256
     )
     assert cake_backend.small_t_keep() is True
-    assert cake_backend.small_pad_rows() == cake_backend.SMALL_PAD_ROWS_DEFAULT == 16
+    assert (
+        cake_backend.small_pad_rows("loss", meta)
+        == cake_backend.SMALL_PAD_ROWS_DEFAULT
+        == 16
+    )
     assert cake_backend.small_pad_rows("logprob", meta) == 16
     assert cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH == {"sm_107a": 256}
+    assert cake_backend.SMALL_PAD_ROWS_LOSS_BY_ARCH == {"sm_107a": 256}
     for bad in (-1, 1.5, True):
         with pytest.raises(ValueError):
             cake_backend.set_uncompacted_max_rows(bad)
@@ -17361,14 +17366,15 @@ def test_small_call_switches_validate_and_restore():
     assert cake_backend.set_small_pad_rows(32) == 0
     assert cake_backend.small_pad_rows("logprob", meta) == 32
     assert cake_backend.set_small_pad_rows(None) == 32
-    assert cake_backend.small_pad_rows() == 16
+    assert cake_backend.small_pad_rows("loss", meta) == 16
 
 
 def test_small_call_rule_is_host_only(monkeypatch):
     """The small-call rule reads host values alone (meta tensors and attribute stand-ins here): a 2-D BF16 CUDA ``X``
     with int64 ``[T]`` labels on its device, ``backend="cake"``, compacted, ``0 < T <= min(uncompacted_max_rows(),
     chunk_size)`` stages ``T`` rows, or the entry's ``small_pad_rows(...)`` when ``T`` is below it and the padded count
-    fits (the log-probability entries on sm_107a: 256 rows, the loss entry 16); a policy call at the zero-weight floor,
+    fits (on sm_107a 256 rows for the log-probability and the loss entries, elsewhere 16); a policy call at the
+    zero-weight floor,
     a per-row operand that is not an FP32 ``[T]`` tensor on that device or requires a gradient, and every other call
     stage nothing."""
     meta = torch.device("meta")
@@ -17467,7 +17473,7 @@ def test_small_call_rule_is_host_only(monkeypatch):
         assert rule(X(1), lab(1), "cake", 4096, None) == 16
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 16
         monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_107a")
-        assert rule(X(1), lab(1), "cake", 4096, None) == 16
+        assert rule(X(1), lab(1), "cake", 4096, None) == 256
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 256
         assert rule(X(255), lab(255), "cake", 4096, None, logprob=True) == 256
         assert rule(X(16), lab(16), "cake", 4096, None, logprob=True) == 256
@@ -17478,6 +17484,69 @@ def test_small_call_rule_is_host_only(monkeypatch):
         assert rule(X(1), lab(1), "cake", 4096, None, per_row=tau, logprob=True) == 256
         monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_100a")
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 16
+        assert rule(X(1), lab(1), "cake", 4096, None) == 16
+
+
+def test_small_call_loss_pad_rows_by_arch(monkeypatch):
+    """The loss entry's small-call padding follows the device architecture (:data:`SMALL_PAD_ROWS_LOSS_BY_ARCH`):
+    256 rows on sm_107a, 16 on sm_100a and sm_103a, the log-probability entries' rows unchanged and a forced count
+    winning everywhere; on sm_107a a loss call of ``T < 256`` rows stages 256 rows, one of 256 rows its own, a call
+    whose chunk or ``uncompacted_max_rows`` is below 256 its own rows, and a policy call 256 rows below the
+    zero-weight floor and its own rows when the floor is at most 256 (meta tensors and attribute stand-ins; the
+    architecture is mocked)."""
+    meta = torch.device("meta")
+
+    def X(T):
+        return SimpleNamespace(
+            ndim=2, dtype=torch.bfloat16, is_cuda=True, device=meta, shape=(T, 8)
+        )
+
+    def lab(T):
+        return SimpleNamespace(ndim=1, dtype=torch.int64, device=meta, shape=(T,))
+
+    def row(T):
+        return torch.empty((T,), dtype=torch.float32, device=meta)
+
+    rule = cake_backend._small_call_rows
+    loss_rows = cake_backend.SMALL_PAD_ROWS_LOSS_BY_ARCH
+    logprob_rows = cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH
+    default = cake_backend.SMALL_PAD_ROWS_DEFAULT
+    with _small_pad_rows(None):
+        for arch, loss, logprob in (
+            ("sm_107a", 256, 256),
+            ("sm_100a", 16, 16),
+            ("sm_103a", 16, 16),
+        ):
+            monkeypatch.setattr(cake_backend, "arch_for", lambda device=None, a=arch: a)
+            assert cake_backend.small_pad_rows("loss", meta) == loss, arch
+            assert cake_backend.small_pad_rows("logprob", meta) == logprob, arch
+            assert loss_rows.get(arch, default) == loss
+            assert logprob_rows.get(arch, default) == logprob
+            with _small_pad_rows(32):
+                assert cake_backend.small_pad_rows("loss", meta) == 32, arch
+                assert cake_backend.small_pad_rows("logprob", meta) == 32, arch
+        monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_107a")
+        for T in (1, 2, 16, 31, 32, 128, 255):
+            assert rule(X(T), lab(T), "cake", 4096, None) == 256, T
+        assert rule(X(256), lab(256), "cake", 4096, None) == 256
+        assert rule(X(257), lab(257), "cake", 4096, None) == 0
+        assert rule(X(1), lab(1), "cake", 128, None) == 1
+        with _uncompacted_max_rows(128):
+            assert rule(X(1), lab(1), "cake", 4096, None) == 1
+        policy = dict(objective="policy", per_row=(row(1), row(1)))
+        with _shipped_zero_weight_floor():
+            assert rule(X(1), lab(1), "cake", 4096, None, **policy) == 256
+        for floor in (2, 255, 256):
+            previous = cake_backend.set_zero_weight_min_rows(floor)
+            try:
+                assert rule(X(1), lab(1), "cake", 4096, None, **policy) == 1, floor
+            finally:
+                cake_backend.set_zero_weight_min_rows(previous)
+        previous = cake_backend.set_zero_weight_min_rows(257)
+        try:
+            assert rule(X(1), lab(1), "cake", 4096, None, **policy) == 256
+        finally:
+            cake_backend.set_zero_weight_min_rows(previous)
 
 
 @pytest.mark.parametrize("rows", [5, 16])
@@ -18024,9 +18093,10 @@ def test_device_small_pad_is_the_unpadded_call(glm_weight, T, entry, objective, 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob", "temperature"])
 def test_device_small_call_pads_to_the_entry_default(glm_weight, entry, monkeypatch):
-    """With the shipped defaults a one-row call stages ``small_pad_rows(entry, device)`` rows: 16 for the loss entry,
-    the device architecture's :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` entry (else 16) for the log-probability entries
-    (plain and with a temperature); the per-row output keeps one row.  The one-pass cross-entropy is off
+    """With the shipped defaults a one-row call stages ``small_pad_rows(entry, device)`` rows: the device
+    architecture's :data:`SMALL_PAD_ROWS_LOSS_BY_ARCH` entry (else 16) for the loss entry and its
+    :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` entry (else 16) for the log-probability entries (plain and with a
+    temperature); the per-row output keeps one row.  The one-pass cross-entropy is off
     (``one_pass_rows`` empty): by default a T = 1 loss call at ``ONE_PASS_HIDDEN`` takes it and stages nothing."""
     if entry == "temperature":
         _require_tau_program()
@@ -18036,12 +18106,13 @@ def test_device_small_call_pads_to_the_entry_default(glm_weight, entry, monkeypa
         inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
     kind = "loss" if entry == "loss" else "logprob"
     expected = cake_backend.small_pad_rows(kind, inp.X.device)
-    if kind == "loss":
-        assert expected == cake_backend.SMALL_PAD_ROWS_DEFAULT
-    else:
-        arch = cake_backend.arch_for(inp.X.device)
-        table = cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH
-        assert expected == table.get(arch, cake_backend.SMALL_PAD_ROWS_DEFAULT)
+    arch = cake_backend.arch_for(inp.X.device)
+    table = (
+        cake_backend.SMALL_PAD_ROWS_LOSS_BY_ARCH
+        if kind == "loss"
+        else cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH
+    )
+    assert expected == table.get(arch, cake_backend.SMALL_PAD_ROWS_DEFAULT)
     seen = []
     apply = cake_backend._SmallCallStage.apply
 

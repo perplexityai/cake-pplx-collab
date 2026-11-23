@@ -387,14 +387,18 @@ _SMALL_T_KEEP = {"on": True}
 # rows, ``IGNORE_INDEX`` labels, zero weights / reference log-probabilities, temperature 1) -- and returns the first
 # ``T`` rows of its per-row outputs: the logits GEMMs of a one-row call run well below the bandwidth of the same program
 # at 16 rows and more (GB300 ``gemm_logits``: 0.47 ms at one row, 0.32 ms at 16 rows).  ``rows`` is
-# :data:`SMALL_PAD_ROWS_DEFAULT`, except for the log-probability entries (plain and with a temperature) on the
-# architectures of :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH`: on R200 (sm_107a) a log-probability call of 256 rows runs
-# below one of 16 to 64 rows (with this padding, CUDA events, median of the timed rounds per arm,
-# R200 dlcluster nodes, ms at 16 / 64 / 128 / 192 / 256 rows: T = 1 log-probability forward 0.352 / 0.359 / 0.366 / 0.252 /
-# 0.223, forward + backward 0.856 / 0.863 / 0.836 / 0.687 / 0.676; T = 1 temperature forward + backward 1.234 /
-# 1.262 / 1.225 / 0.997 / 1.009), while the loss entry keeps 16 rows there (its backward grows with the rows: 0.212 /
-# 0.212 / 0.224 / 0.237 / 0.251) and B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability forward + backward
-# 1.095 -> 1.213).  :func:`set_small_pad_rows` replaces the defaults with one row count for every entry (0 = off).
+# :data:`SMALL_PAD_ROWS_DEFAULT`, except on the architectures of :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` for the
+# log-probability entries (plain and with a temperature) and of :data:`SMALL_PAD_ROWS_LOSS_BY_ARCH` for the loss entry:
+# on R200 (sm_107a) a log-probability call of 256 rows runs below one of 16 to 64 rows (with this padding, CUDA events,
+# median of the timed rounds per arm, R200 nodes, ms at 16 / 64 / 128 / 192 / 256 rows: T = 1 log-probability forward
+# 0.352 / 0.359 / 0.366 / 0.252 / 0.223, forward + backward 0.856 / 0.863 / 0.836 / 0.687 / 0.676; T = 1 temperature
+# forward + backward 1.234 / 1.262 / 1.225 / 0.997 / 1.009), and so does a loss step (one R200 GPU, CUPTI span,
+# 256 vs 16 rows: T = 16 forward + backward 962.5 -> 771.6 us, T = 32 1023.7 -> 769.9 us; the forward 1.46-1.59x
+# faster, while the backward alone grows with the rows, 0.87-0.90x, +34 to +48 us: its weight-gradient GEMM reads 256
+# rows); B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability forward + backward 1.095 -> 1.213).  The loss
+# entry's ``loss`` and ``dW`` group their sums over the staged rows, so a padded loss call's bits may differ from the
+# call at 16 rows (both are judged against the naive tier).  :func:`set_small_pad_rows` replaces the defaults with one
+# row count for every entry (0 = off).
 # The loss entry's pad applies to the calls the one-pass cross-entropy does not take (:func:`one_pass_rows`; by default
 # a T = 1 cross-entropy call at ``ONE_PASS_HIDDEN`` runs one-pass and is not staged; the loss figures above are of the
 # staged call).
@@ -403,6 +407,7 @@ _SMALL_T_KEEP = {"on": True}
 # remembered bindings (:data:`BINDING_CACHE`) -- whenever the caching allocator returns the same block.
 SMALL_PAD_ROWS_DEFAULT = 16
 SMALL_PAD_ROWS_LOGPROB_BY_ARCH: dict[str, int] = {"sm_107a": 256}
+SMALL_PAD_ROWS_LOSS_BY_ARCH: dict[str, int] = {"sm_107a": 256}
 # None: the per-entry / per-architecture defaults of small_pad_rows()
 _SMALL_PAD_ROWS: dict[str, Optional[int]] = {"rows": None}
 SUPPORTED_ABIS = (ABI_CONTRACT,)
@@ -3623,8 +3628,9 @@ def set_small_t_keep(on: bool) -> bool:
 def small_pad_rows(entry: str = "loss", device: Optional[torch.device] = None) -> int:
     """Rows a small call of ``entry`` (``"loss"``, or ``"logprob"`` for the log-probability entries, plain and with a
     temperature) on ``device`` (default: the current CUDA device) is padded to: the value of :func:`set_small_pad_rows`
-    when one is set, else :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` for a log-probability call on a listed architecture,
-    else :data:`SMALL_PAD_ROWS_DEFAULT` (0 = no padding)."""
+    when one is set, else :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` for a log-probability call and
+    :data:`SMALL_PAD_ROWS_LOSS_BY_ARCH` for a loss call on a listed architecture, else :data:`SMALL_PAD_ROWS_DEFAULT`
+    (0 = no padding)."""
     if entry not in ("loss", "logprob"):
         raise ValueError(
             f"small_pad_rows entry must be 'loss' or 'logprob', got {entry!r}"
@@ -3632,9 +3638,14 @@ def small_pad_rows(entry: str = "loss", device: Optional[torch.device] = None) -
     forced = _SMALL_PAD_ROWS["rows"]
     if forced is not None:
         return forced
-    arch = arch_for(device) if entry == "logprob" else None
+    arch = arch_for(device)
     if arch is not None:
-        return SMALL_PAD_ROWS_LOGPROB_BY_ARCH.get(arch, SMALL_PAD_ROWS_DEFAULT)
+        table = (
+            SMALL_PAD_ROWS_LOGPROB_BY_ARCH
+            if entry == "logprob"
+            else SMALL_PAD_ROWS_LOSS_BY_ARCH
+        )
+        return table.get(arch, SMALL_PAD_ROWS_DEFAULT)
     return SMALL_PAD_ROWS_DEFAULT
 
 
