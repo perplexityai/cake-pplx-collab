@@ -7814,16 +7814,21 @@ TILE_ALIGNED_CLASS_ROUTES: dict[str, tuple[str, ...]] = {
     "sm_103a": (),
     "sm_107a": (),
 }
-# The small-S rows where a single-wave backward main launch is capped at a token
-# count per CTA, ``{arch: {(route, C_lo, C_hi): ((S_lo, S_hi, tokens), ...)}}``:
+# The small-S rows where a single-wave backward main launch is capped by a token
+# stream length, ``{arch: {(route, C_lo, C_hi): ((S_lo, S_hi, tokens), ...)}}``:
 # a call of ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple
 # of 8) and ``S_lo <= S <= S_hi`` tokens, at ``bwd_grid_mult`` 1, launches an
 # ``occupancy`` record with :func:`small_s_grid` of its grid, at most
 # ``n_ch_tiles x ceil(S / (n_sub x tokens))`` CTAs and at least ``n_ch_tiles``
-# (:func:`launch_grid`), but at a backward :data:`DIRECT_ROWS` range.  The spans
-# of a key ascend and are disjoint; the keys of one ``(arch, route)`` share no
-# channel count and no ``(C, S)`` with an :data:`SM_WIDE_ROWS` segment, a
-# :data:`FALLBACK_ROWS` range or a backward :data:`DIRECT_ROWS` range.  The
+# (:func:`launch_grid`), but at a backward :data:`DIRECT_ROWS` range.
+# ``tokens`` (L) is the length of one token stream: the CTAs of a channel tile
+# split its ``S`` tokens into ``CTAs x n_sub`` streams of ``ceil(S / (CTAs x
+# n_sub))`` tokens, ``n_sub`` per CTA (the CTA's token sub-tiles,
+# :func:`channel_split`), so a CTA takes about ``n_sub x L`` tokens; the cap is
+# the fewest CTAs per channel tile whose streams of ``L`` tokens cover ``S``.
+# The spans of a key ascend and are disjoint; the keys of one ``(arch, route)``
+# share no channel count and no ``(C, S)`` with an :data:`SM_WIDE_ROWS` segment,
+# a :data:`FALLBACK_ROWS` range or a backward :data:`DIRECT_ROWS` range.  The
 # program, its channel tiles and the workspace stay the row's; ``dx`` does not
 # depend on the grid; ``dweight`` / ``dbias`` sum other CTA rows.  Rendered from
 # the backward kernel generator's table; every other row keeps its grid.
@@ -7861,8 +7866,9 @@ def grid_cap_spans(
 
 
 def grid_cap_tokens(arch: str, kind: str | None, C: int, S: int | None) -> int | None:
-    """The tokens per CTA of the :data:`GRID_CAP_ROWS` span holding ``S`` (both bounds included) of the key of
-    ``arch`` on route ``kind`` covering ``C``; ``None`` outside every span, without a key or for ``S`` of ``None``."""
+    """The ``tokens`` (L) of the :data:`GRID_CAP_ROWS` span holding ``S`` (both bounds included) of the key of
+    ``arch`` on route ``kind`` covering ``C``: the length of one token stream (a CTA runs ``n_sub`` streams, about
+    ``n_sub x L`` tokens); ``None`` outside every span, without a key or for ``S`` of ``None``."""
 
     if S is None:
         return None

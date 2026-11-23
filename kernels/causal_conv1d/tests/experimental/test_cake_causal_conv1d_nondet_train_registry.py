@@ -5815,12 +5815,12 @@ def _without_grid_cap_rows():
 
 @pytest.mark.cpu_only
 def test_grid_cap_rows_are_the_literal_rows() -> None:
-    """``GRID_CAP_ROWS`` is the table of record: sm_107a alone, seven ``bwd`` keys of 3 tokens per CTA and one
-    ``bwd_bias`` key of 5.  Each key is on a backward route of the architecture, with multiples of 8 at both ends and
-    ascending, disjoint spans of at least one token; at every channel count of a key and both ends of each span
-    ``grid_cap_tokens`` gives the span's tokens, and no backward ``DIRECT_ROWS`` range, ``SM_WIDE_ROWS`` segment or
-    ``FALLBACK_ROWS`` range holds the call; one token outside a span, off the 8-channel grid and on another route
-    there is no cap."""
+    """``GRID_CAP_ROWS`` is the table of record: sm_107a alone, seven ``bwd`` keys of 3 tokens per token stream (a
+    CTA runs ``n_sub`` streams) and one ``bwd_bias`` key of 5.  Each key is on a backward route of the architecture,
+    with multiples of 8 at both ends and ascending, disjoint spans of at least one token; at every channel count of a
+    key and both ends of each span ``grid_cap_tokens`` gives the span's tokens, and no backward ``DIRECT_ROWS`` range,
+    ``SM_WIDE_ROWS`` segment or ``FALLBACK_ROWS`` range holds the call; one token outside a span, off the 8-channel
+    grid and on another route there is no cap."""
 
     assert cake_jit.GRID_CAP_ROWS == GRID_CAP_ROWS_OF_RECORD
     for arch, rows in cake_jit.GRID_CAP_ROWS.items():
