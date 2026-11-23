@@ -999,6 +999,94 @@ def test_k1_det_0323_wgrad_rows_run_the_deterministic_plan(monkeypatch):
     assert split_cells == 281, split_cells
 
 
+def test_k1_det_0324_generic_call_runs_the_deterministic_generic_plan(monkeypatch):
+    """The unbatched generic call ``G.T @ X`` (both operands MN-major, no transposed store) of the rows of
+    :data:`DET_0322_WGRAD_ROWS` on every ``sm_107a`` part (208, 212, 216 and 224 SMs), BF16, at the token counts of the
+    check of version 0.3.23: :func:`plan_atomic_gemm` keeps it on the deterministic program, with the K1 programs
+    registered, and this package's plan is the deterministic package's generic plan (with its registry fallback),
+    field for field.  Since the deterministic package's version 0.3.24 that call swaps wherever the swapped key's
+    measured rule on the part is not empty (from its ``_SINGLE_WGRAD_SWAP_MIN_K`` entry on, if any; indexer_hw at every
+    token count, as before), and where the weight-gradient plan is served without a fallback the generic plan is that
+    plan; where it does not swap the plan is the deterministic package's plan with its swap floor of version 0.3.23
+    (T 8193 on the four rows without a rule before its version 0.3.22).  This is a plan check: it asserts no bits."""
+    _register_k1(monkeypatch, "sm_107a")
+    tokens = (1001, 1023, 1024, 1536, 2048, 2049, 3072, 4095, 4096, 7168, 7169, 8192, 8193, 15360, 15361, 65536, 131072)
+    floor_0323 = {
+        ("sm_107a", d_out, d_in, False): 8193 for d_in, d_out in DET_0322_WGRAD_ROWS if (d_in, d_out) != (6144, 32)
+    }
+
+    def det_wgrad_plan(G, X, out, sm_count):
+        A, B, transposed = det_backend.wgrad_views(G, X, arch="sm_107a")
+        assert transposed, tuple(out.shape)
+        return det_backend.cake_dense_gemm_det_train_projection_plan(
+            A, B, out, sm_count=sm_count, l2_bytes=126 << 20, transposed_out=transposed, arch="sm_107a"
+        )[0]
+
+    def det_generic_plan(G, X, out, sm_count):
+        return det_backend.cake_dense_gemm_det_train_projection_plan(
+            G.t(), X, out, sm_count=sm_count, l2_bytes=126 << 20, arch="sm_107a"
+        )[0]
+
+    swapped, flipped, served = 0, {}, {}
+    for d_in, d_out in DET_0322_WGRAD_ROWS:
+        key = ("sm_107a", True, True, False, True, False, d_out, None, d_in)
+        min_k = det_backend._SINGLE_WGRAD_SWAP_MIN_K.get(("sm_107a", d_out, d_in, False), 0)
+        for sm_count in (208, 212, 216, 224):
+            for T in tokens:
+                where = (d_in, d_out, sm_count, T)
+                G = torch.empty(T, d_out, dtype=torch.bfloat16)
+                X = torch.empty(T, d_in, dtype=torch.bfloat16)
+                out = torch.empty(d_out, d_in, dtype=torch.bfloat16)
+                plan, *_, reason = cake_backend.plan_atomic_gemm(
+                    G.t(), X, out, transposed_out=False, arch="sm_107a", sm_count=sm_count
+                )
+                assert plan is None, (where, plan)
+                assert reason == "the planner keeps the row on the deterministic program", (where, reason)
+                det = det_generic_plan(G, X, out, sm_count)
+                nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(
+                    G.t(), X, out, sm_count=sm_count, l2_bytes=126 << 20, arch="sm_107a"
+                )[0]
+                assert nd == det, (where, nd.template, det.template)
+                ruled = bool(det_backend._measured_row_rule(*key[:6], d_out, T, d_in, sm_count=sm_count))
+                swaps = det_backend._single_wgrad_swap("sm_107a", d_out, d_in, T, True, True, False, sm_count=sm_count)
+                assert swaps == (ruled and T >= min_k), where
+                with monkeypatch.context() as m:
+                    for floor_key, floor in floor_0323.items():
+                        m.setitem(det_backend._SINGLE_WGRAD_SWAP_MIN_K, floor_key, floor)
+                    old_swaps = det_backend._single_wgrad_swap(
+                        "sm_107a", d_out, d_in, T, True, True, False, sm_count=sm_count
+                    )
+                    old = det_generic_plan(G, X, out, sm_count)
+                assert swaps or not old_swaps, where  # the version adds swaps alone
+                if not swaps:
+                    assert det == old and not det.transposed_out, (where, det.template, old.template)
+                    continue
+                swapped += 1
+                if not old_swaps:
+                    flipped[(d_in, d_out)] = flipped.get((d_in, d_out), 0) + 1
+                wgrad = det_wgrad_plan(G, X, out, sm_count)
+                if wgrad.rule_fallback or wgrad.knob_fallback or wgrad.swap_fallback:
+                    # the two calls fall back in another order (the generic call drops the swap first): no identity
+                    assert d_out == 32, (where, wgrad.template)
+                    continue
+                assert det == wgrad and det.transposed_out, (where, det.template, wgrad.template)
+                served[(d_in, d_out)] = served.get((d_in, d_out), 0) + 1
+    # Swapped: 4096 -> 16 at the 12 token counts from 1024 where its rule is not empty (212 SMs 14 with 3072 and 4095),
+    # the three other rows of four at the 15 from 1024 on, indexer_hw at all 17: (12 * 3 + 14) + 15 * 4 * 3 + 17 * 4 =
+    # 50 + 180 + 68 = 298.  Flipped against the swap floor of version 0.3.23, below 8193 tokens: 4096 -> 16 at 1024,
+    # 1536, 2048, 4096, 7168, 7169 and 8192 (7 per part; 212 SMs 9), the three other rows at the 10 of 1024 - 8192:
+    # 30 + 40 * 3 = 150.  The four rows' weight-gradient plan is served at each of their 230 swapped cells.
+    assert swapped == 298, swapped
+    assert flipped == {(4096, 16): 30, (4096, 96): 40, (6144, 48): 40, (6144, 64): 40}, flipped
+    assert {row: count for row, count in served.items() if row != (6144, 32)} == {
+        (4096, 16): 50,
+        (4096, 96): 60,
+        (6144, 48): 60,
+        (6144, 64): 60,
+    }, served
+    print(f"K1_DET_0324 generic swapped {swapped}, flipped {sum(flipped.values())}, served identity {served}")
+
+
 def test_k1_excluded_token_counts(no_k1_chains):
     """A row of :data:`K1_SPLIT_RULES` or of a table of :data:`K1_SPLIT_RULES_BY_SM` runs the deterministic program at
     the token counts of its :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS` entries: from the entry's SM count up where that count
