@@ -43,9 +43,13 @@ on SM103), else ``bwd`` for more than
 :func:`.cake_jit.bwd_small_docs` and at most :func:`.cake_jit.bwd_max_docs`
 documents (no upper bound on SM100 / SM103) and ``bwd_small`` for the
 others (:func:`launch_bwd`); all write the same bytes.  The pair table is
-``pair_table_small`` for at most :func:`.cake_jit.small_docs` documents and
-``pair_table`` for more (:func:`launch_pair_table`); both write the same
-bytes.  A call looks up the operands' device index, its architecture and the
+``pair_table_small`` for at most :func:`.cake_jit.small_docs` documents, a
+large-pack pair table for the packs of its route
+(:func:`.cake_jit.pair_table_routes`: one kernel of chunks, or two, the
+chunk totals into a separate int32 workspace of ``ceil(S / chunk)`` words
+the call allocates and frees, then the scan) and ``pair_table`` for the
+others (:func:`launch_pair_table`); all write the same bytes.  A call looks
+up the operands' device index, its architecture and the
 roles once and passes them to its launches.  The checks read a plain tensor
 operand's shape, strides and address once, and run one by one (the first
 failing check raising its error) only for an operand that fails that read or
@@ -372,11 +376,27 @@ def _pair_count(num_pairs: Any, out: Optional[torch.Tensor]) -> int:
 # Launchers: caller-owned buffers, the current stream, no allocation, no check of the operands' contents
 
 
-def _launch_table(cu_seqlens: torch.Tensor, cu_pairs: torch.Tensor, S: int, index: int, arch: str) -> None:
+def _launch_table(
+    cu_seqlens: torch.Tensor,
+    cu_pairs: torch.Tensor,
+    S: int,
+    index: int,
+    arch: str,
+    workspace: torch.Tensor | None = None,
+) -> None:
     """The pair-table launch of :func:`launch_pair_table` for ``S`` documents on device ``index`` (of ``arch``): the
-    role of :func:`cake_jit.pair_table_role` on ``S`` rows, the documents (one CTA for a ``one_cta`` record)."""
+    roles of :func:`cake_jit.pair_table_roles` in order, each on ``S`` rows, the documents (one CTA for a ``one_cta``
+    record).  A two-phase table takes ``workspace``, int32 ``[>= ceil(S / chunk)]``; ``None`` allocates it here on
+    the device of ``cu_seqlens``, a separate tensor freed on return (stream-ordered: the forward and the backward
+    call this, never with ``cu_pairs``' storage)."""
+    roles = cake_jit.pair_table_roles(S, arch)
     values = {"cu_seqlens": cu_seqlens, "cu_pairs": cu_pairs, "num_docs": S}
-    cake_jit.run_module(cake_jit.pair_table_role(S, arch), values, rows=S, device_index=index, arch=arch)
+    if len(roles) > 1:
+        if workspace is None:
+            workspace = torch.empty(cake_jit.pair_table_workspace(S, arch), dtype=_I32, device=cu_seqlens.device)
+        values["workspace"] = workspace
+    for role in roles:
+        cake_jit.run_module(role, values, rows=S, device_index=index, arch=arch)
 
 
 def _launch_fwd(
@@ -467,19 +487,48 @@ def launch_pair_table(
     *,
     cu_seqlens: torch.Tensor,
     cu_pairs: torch.Tensor,
+    workspace: torch.Tensor | None = None,
     device_index: int | None = None,
     arch: str | None = None,
 ) -> None:
     """Launch a pair table: ``cu_pairs[0] = 0``, ``cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] -
-    cu_seqlens[s]) // 2`` (int32 ``[S + 1]``, ``S >= 1``), by the ``pair_table_small`` role for ``S <=
-    cake_jit.small_docs(arch)`` and the ``pair_table`` role for more (the same bytes).  ``device_index`` and ``arch``:
-    the index of the operands' device and its architecture when the caller has them; ``None`` looks them up."""
+    cu_seqlens[s]) // 2`` (int32 ``[S + 1]``, ``S >= 1``), by the roles of ``cake_jit.pair_table_roles(S, arch)``:
+    ``pair_table_small`` for ``S <= cake_jit.small_docs(arch)``, a large-pack pair table for the packs of its route,
+    ``pair_table`` for the others (the same bytes).  A two-phase route (``cake_jit.pair_table_workspace(S, arch)``
+    words, above 0) needs the caller's ``workspace``: a contiguous int32 tensor of at least that many elements on the
+    device of ``cu_seqlens``, whose bytes the launch overwrites (``ValueError`` without one, or for another tensor:
+    this launcher allocates nothing).  Every other route ignores ``workspace``.  ``device_index`` and ``arch``: the
+    index of the operands' device and its architecture when the caller has them; ``None`` looks them up."""
     S = int(cu_seqlens.numel()) - 1
     if device_index is None:
         device_index = cu_seqlens.device.index
     if arch is None:
         arch = cake_jit.device_arch(device_index)
-    _launch_table(cu_seqlens, cu_pairs, S, device_index, arch)
+    words = cake_jit.pair_table_workspace(S, arch)
+    if words:
+        roles = " then ".join(cake_jit.pair_table_roles(S, arch))
+        if workspace is None:
+            raise ValueError(
+                f"a pair table of {S} documents on {arch} runs {roles} and needs workspace, an int32 tensor of at "
+                f"least {words} elements; launch_pair_table allocates nothing"
+            )
+        if (
+            type(workspace) is not _Tensor
+            or workspace.dtype != _I32
+            or workspace.numel() < words
+            or not workspace.is_contiguous()
+            or workspace.device != cu_seqlens.device
+        ):
+            found = (
+                f"{tuple(workspace.shape)} {workspace.dtype} on {workspace.device}"
+                if isinstance(workspace, torch.Tensor)
+                else type(workspace).__name__
+            )
+            raise ValueError(
+                f"workspace must be a contiguous int32 tensor of at least {words} elements on {cu_seqlens.device} for "
+                f"a pair table of {S} documents on {arch} ({roles}), got {found}"
+            )
+    _launch_table(cu_seqlens, cu_pairs, S, device_index, arch, workspace if words else None)
 
 
 def launch_fwd(
@@ -794,17 +843,29 @@ def cake_gated_kv_compression_det_train_backward(
     )
 
 
-def cake_gated_kv_compression_det_train_memory_bytes(num_tokens: int, num_docs: int) -> dict[str, int]:
-    """The workspace and the state retained for the backward, in bytes, for ``T = num_tokens`` and ``S = num_docs``;
-    see :func:`cake_pplx.cake_gated_kv_compression_det_train.cake_gated_kv_compression_det_train_memory_bytes`."""
+def cake_gated_kv_compression_det_train_memory_bytes(
+    num_tokens: int, num_docs: int, device: Any = None
+) -> dict[str, int]:
+    """The workspace and the state retained for the backward, in bytes, for ``T = num_tokens`` and ``S = num_docs``
+    (on ``device``'s architecture; ``None``: the most of the delivered architectures); see
+    :func:`cake_pplx.cake_gated_kv_compression_det_train.cake_gated_kv_compression_det_train_memory_bytes`."""
     T = _count(num_tokens, "num_tokens")
     S = _count(num_docs, "num_docs")
     if T < 0 or S < 0:
         raise ValueError(f"num_tokens and num_docs must be at least 0, got {T} and {S}")
+    if device is None:
+        arches: tuple[str, ...] = ARCHES
+    else:
+        where = torch.device(device)
+        if where.type != "cuda":
+            raise ValueError(f"device must be a CUDA device, got {where}")
+        arches = (device_arch(torch.cuda.current_device() if where.index is None else where.index),)
     table = 4 * (S + 1)
+    # the pair table's own workspace, a separate int32 tensor of a two-phase route (its launch only: S >= 1)
+    chunks = 4 * max(cake_jit.pair_table_workspace(S, arch) for arch in arches) if S else 0
     return {
-        "forward_workspace": table,
-        "backward_workspace": table,
+        "forward_workspace": table + chunks,
+        "backward_workspace": table + chunks,
         "retained_for_backward": table,
         "retained_inputs": 2 * WIDTH * 4 * T + table,
     }

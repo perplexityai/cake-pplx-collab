@@ -479,7 +479,8 @@ def bench_row(pack: baselines.Pack, layout: str, args, device, timer, side, edge
     }
     supported = bool(cake.is_cake_gated_kv_compression_det_train_supported(device))
     if supported:
-        row["cake_memory_report"] = cake.cake_gated_kv_compression_det_train_memory_bytes(T, S)
+        # the report of this device's architecture (the two-phase pair table's chunk totals depend on it)
+        row["cake_memory_report"] = cake.cake_gated_kv_compression_det_train_memory_bytes(T, S, device)
     x = baselines.draw(pack.lengths, seed=args.seed, device=device, layout=layout)
     leaves = baselines.leaves_of(x)
     inputs = [*leaves, x.cz, x.cu]

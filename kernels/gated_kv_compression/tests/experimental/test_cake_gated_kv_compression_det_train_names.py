@@ -269,7 +269,7 @@ def test_package_identity_and_build_identity():
     assert all(re.fullmatch(pattern, name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
     stems = {rec["library"] for rec in jit.MODULES.values()}
-    assert len(stems) == len(jit.MODULES) - 5 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
+    assert len(stems) == len(jit.MODULES) - 9 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
     for first, second in (
         ("bwd", "bwd_sm_107a"),
         ("bwd_small", "bwd_small_sm_107a"),
@@ -290,6 +290,8 @@ UNFUSED = {
     "sm_103a": ("fwd_unfused_sm_103a", 128, "v4"),
     "sm_107a": ("fwd_unfused_sm_107a", 64, "v8"),
 }
+# The unfused forward records on the capped grid (``rows_capped``); the others keep the ``rows`` grid.
+CAPPED_UNFUSED = ("fwd_unfused",)
 
 
 def test_the_forward_record_follows_the_architecture(monkeypatch):
@@ -297,12 +299,12 @@ def test_the_forward_record_follows_the_architecture(monkeypatch):
     device capability), and the ``fwd_unfused`` role to ``fwd_unfused``, ``fwd_unfused_sm_103a`` (the same program)
     and ``fwd_unfused_sm_107a``; each role's sm_100a and sm_107a records are two distinct programs whose rendered
     kernels read ``C`` and ``Z`` with 128-bit and 256-bit loads, and whose grid rules give a row 128 and 64 lanes
-    (``rows_capped`` for ``fwd_unfused``, the sm_100a record)."""
+    (``rows_capped`` for the records of ``CAPPED_UNFUSED``)."""
     jit = _backend("cake_jit")
     for role, records in (("fwd", FORWARD), ("fwd_unfused", UNFUSED)):
         for arch, (name, lanes, _) in records.items():
             assert jit.role_record(role, arch) == name, (role, arch)
-            kind = "rows_capped" if name == "fwd_unfused" else "rows"
+            kind = "rows_capped" if name in CAPPED_UNFUSED else "rows"
             assert jit.MODULES[name]["grid_rule"] == {"kind": kind, "lanes_per_row": lanes, "rows_per_lane_group": 1}
     assert jit.MODULES["fwd"]["library"] != jit.MODULES["fwd_sm_107a"]["library"]
     assert jit.MODULES["fwd_unfused"]["library"] != jit.MODULES["fwd_unfused_sm_107a"]["library"]
