@@ -23,8 +23,9 @@ backend objects it forwards to (``cake_pplx._backends.cake_gated_kv_compression_
 every family are checked with ``tests.cake.test_helpers.cake_mode_names``; the checks here are this family's own.
 Build identities (program and library stems ``cake_gated_kv_compression_det_train_<hex>``, kernel symbols, csrc file
 names) keep their names.  The package serves capabilities (10, 0), (10, 3) and (10, 7) only; each role has one record
-per architecture, and the forwards' records follow the architecture (``fwd`` and ``fwd_unfused``, 128-bit lanes, on
-sm_100a / sm_103a; ``fwd_sm_107a`` and ``fwd_unfused_sm_107a``, 256-bit lanes, on sm_107a).
+per architecture, and the forwards' records follow the architecture (``fwd`` on sm_100a / sm_103a, ``fwd_unfused`` on
+sm_100a and ``fwd_unfused_sm_103a`` on sm_103a, 128-bit lanes; ``fwd_sm_107a`` and ``fwd_unfused_sm_107a``, 256-bit
+lanes, on sm_107a).
 """
 
 import importlib
@@ -268,12 +269,13 @@ def test_package_identity_and_build_identity():
     assert all(re.fullmatch(pattern, name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
     stems = {rec["library"] for rec in jit.MODULES.values()}
-    assert len(stems) == len(jit.MODULES) - 4 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
+    assert len(stems) == len(jit.MODULES) - 5 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
     for first, second in (
         ("bwd", "bwd_sm_107a"),
         ("bwd_small", "bwd_small_sm_107a"),
         ("bwd_warp", "bwd_warp_sm_103a"),
         ("bwd_warp", "bwd_warp_sm_107a"),
+        ("fwd_unfused", "fwd_unfused_sm_103a"),
     ):
         assert jit.MODULES[first]["library"] == jit.MODULES[second]["library"], first
 
@@ -281,26 +283,30 @@ def test_package_identity_and_build_identity():
 # The forward record of each architecture and the width of its C / Z loads: 128-bit (4 FP32 channels a lane, 128 lanes
 # a row) on sm_100a and sm_103a, 256-bit (8 channels, 64 lanes) on sm_107a, the faster schedule of each.
 FORWARD = {"sm_100a": ("fwd", 128, "v4"), "sm_103a": ("fwd", 128, "v4"), "sm_107a": ("fwd_sm_107a", 64, "v8")}
-# The same for the forward of more than fuse_docs documents, which builds no pair table.
+# The same for the forward of more than fuse_docs documents, which builds no pair table: a record an architecture, the
+# sm_100a one (``fwd_unfused``) on the capped grid.
 UNFUSED = {
     "sm_100a": ("fwd_unfused", 128, "v4"),
-    "sm_103a": ("fwd_unfused", 128, "v4"),
+    "sm_103a": ("fwd_unfused_sm_103a", 128, "v4"),
     "sm_107a": ("fwd_unfused_sm_107a", 64, "v8"),
 }
 
 
 def test_the_forward_record_follows_the_architecture(monkeypatch):
     """The ``fwd`` role resolves to ``fwd`` on sm_100a and sm_103a and to ``fwd_sm_107a`` on sm_107a (also from the
-    device capability), and the ``fwd_unfused`` role to ``fwd_unfused`` and ``fwd_unfused_sm_107a``; each pair is two
-    distinct programs whose rendered kernels read ``C`` and ``Z`` with 128-bit and 256-bit loads, and whose grid rules
-    give a row 128 and 64 lanes."""
+    device capability), and the ``fwd_unfused`` role to ``fwd_unfused``, ``fwd_unfused_sm_103a`` (the same program)
+    and ``fwd_unfused_sm_107a``; each role's sm_100a and sm_107a records are two distinct programs whose rendered
+    kernels read ``C`` and ``Z`` with 128-bit and 256-bit loads, and whose grid rules give a row 128 and 64 lanes
+    (``rows_capped`` for ``fwd_unfused``, the sm_100a record)."""
     jit = _backend("cake_jit")
     for role, records in (("fwd", FORWARD), ("fwd_unfused", UNFUSED)):
         for arch, (name, lanes, _) in records.items():
             assert jit.role_record(role, arch) == name, (role, arch)
-            assert jit.MODULES[name]["grid_rule"] == {"kind": "rows", "lanes_per_row": lanes, "rows_per_lane_group": 1}
+            kind = "rows_capped" if name == "fwd_unfused" else "rows"
+            assert jit.MODULES[name]["grid_rule"] == {"kind": kind, "lanes_per_row": lanes, "rows_per_lane_group": 1}
     assert jit.MODULES["fwd"]["library"] != jit.MODULES["fwd_sm_107a"]["library"]
     assert jit.MODULES["fwd_unfused"]["library"] != jit.MODULES["fwd_unfused_sm_107a"]["library"]
+    assert jit.MODULES["fwd_unfused"]["library"] == jit.MODULES["fwd_unfused_sm_103a"]["library"]
     for capability, arch in ARCH_BY_CAPABILITY.items():
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None, capability=capability: capability)
         jit.device_arch.cache_clear()

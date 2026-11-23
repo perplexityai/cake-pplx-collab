@@ -22,12 +22,14 @@ Without a device: the registry (the two pair-table roles, ``pair_table_small`` f
 ``pair_table`` for more, the two forward roles, ``fwd`` for at most 256 documents and ``fwd_unfused`` for more, and the
 two backward roles, each served on each of the three architectures by exactly one record and delivered for no other:
 the forward by ``fwd`` on sm_100a / sm_103a and ``fwd_sm_107a`` on sm_107a, each building the pair table of up to 256
-documents, and by ``fwd_unfused`` / ``fwd_unfused_sm_107a`` (the warp row search), the backward by ``bwd`` /
+documents, and by ``fwd_unfused`` / ``fwd_unfused_sm_103a`` / ``fwd_unfused_sm_107a`` (the warp row search, a record an
+architecture), the backward by ``bwd`` /
 ``bwd_sm_107a`` (two-level search), ``bwd_small`` / ``bwd_small_sm_107a`` (one-level search) and ``bwd_warp`` /
 ``bwd_warp_sm_103a`` / ``bwd_warp_sm_107a`` (the warp row search, one program); the launch facts,
 the kernel parameters each record takes), the record each role launches on each architecture, the pair-table role of
 512 and 513 documents, the forward role of 256, 257, 512, 513 and more documents, the backward role on either side of
-each architecture's bounds of documents, the launch grids (every row covered, the pair tables on one CTA), the
+each architecture's bounds of documents, the launch grids (every row covered, the pair tables on one CTA, the unfused
+forward's grid capped at its CTAs a multiprocessor in its range of documents, as the binding entry receives it), the
 launchers' keywords and the kernel arguments they pass, the exact overlap rule of two row-strided views
 (the two column halves of one buffer share no element), the operand checks' fast path (for every well-formed and
 malformed operand variant it gives the full checks' result or exception type and message, or defers to them; an output
@@ -108,7 +110,8 @@ RECORDS = {
     "pair_table_small": ("pair_table_small", ARCHES, None),
     "fwd": ("fwd", ("sm_100a", "sm_103a"), 128),
     "fwd_sm_107a": ("fwd", ("sm_107a",), 64),
-    "fwd_unfused": ("fwd_unfused", ("sm_100a", "sm_103a"), 128),
+    "fwd_unfused": ("fwd_unfused", ("sm_100a",), 128),
+    "fwd_unfused_sm_103a": ("fwd_unfused", ("sm_103a",), 128),
     "fwd_unfused_sm_107a": ("fwd_unfused", ("sm_107a",), 64),
     "bwd": ("bwd", ("sm_100a", "sm_103a"), 64),
     "bwd_sm_107a": ("bwd", ("sm_107a",), 64),
@@ -137,6 +140,12 @@ BWD_WARP_DOCS = dict.fromkeys(ARCHES, 16384)
 BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": None}
 # What :func:`cake_jit.bwd_warp_region` reads on each architecture: ``(lo, hi, above)``.
 BWD_WARP_REGIONS = {arch: (*(BWD_WARP_RANGES[arch] or (None, None)), BWD_WARP_DOCS[arch]) for arch in ARCHES}
+# Record -> its capped grid (the rendered ``capped_min_docs``, ``capped_max_docs`` and ``ctas_per_sm``, what
+# :func:`cake_jit.capped_leaves` reads): a forward of 2048 to 1048577 documents on sm_100a runs the unfused forward on
+# at most 6 CTAs a multiprocessor; no other record has one (sm_103a and sm_107a keep the rows grid).
+CAPPED = {"fwd_unfused": (2048, 1048577, 6)}
+# Multiprocessors of a B200 (sm_100a), a GB300 (sm_103a) and a VR200 (sm_107a), as the capped-grid tests stub them.
+SMS = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
 # Backward packs on either side of the documents bounds and of the forward's fused bound (``FUSE_DOCS``, 256).
 BWD_BOUND_DOCS = (1, 14, 15, 16, 26, 27, 32, 33, 40, 41, 124, 125, 126, 256, 257, 1024, 1025, 16384, 16385)
 # The backward's role at each of these documents, the same on every architecture, a letter a document count: ``s``
@@ -183,11 +192,16 @@ def _bwd_role(arch: str, docs: int) -> str:
     return "bwd" if BWD_SMALL_DOCS[arch] < docs and (high is None or docs <= high) else "bwd_small"
 
 
-# The forward programs with the warp row search, which ``fwd_unfused`` ships.
+# The forward programs with the warp row search, which ``fwd_unfused`` ships: one program in the records of sm_100a and
+# sm_103a, another on sm_107a.
 UNFUSED_LIBRARIES = {
     "fwd_unfused": "cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
+    "fwd_unfused_sm_103a": "cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
     "fwd_unfused_sm_107a": "cake_gated_kv_compression_det_train_64aae35cfb0e308d103a",
 }
+# The record serving ``fwd`` and ``fwd_unfused`` on each architecture.
+FORWARD_RECORDS = {"sm_100a": "fwd", "sm_103a": "fwd", "sm_107a": "fwd_sm_107a"}
+UNFUSED_RECORDS = {"sm_100a": "fwd_unfused", "sm_103a": "fwd_unfused_sm_103a", "sm_107a": "fwd_unfused_sm_107a"}
 # The records of each grid kind.
 ROW_RECORDS = tuple(name for name in RECORDS if not name.startswith("pair_table"))
 # The kernel parameters of each role (the argument plan without the grid), in any order: the host passes them by name.
@@ -328,11 +342,11 @@ def test_registry_records_are_well_formed() -> None:
     for name in ("pair_table", "pair_table_small"):
         assert cake_jit.MODULES[name]["grid_rule"]["kind"] == "one_cta", name
     for name in ROW_RECORDS:
-        assert cake_jit.MODULES[name]["grid_rule"]["kind"] == "rows", name
+        assert cake_jit.MODULES[name]["grid_rule"]["kind"] == ("rows_capped" if name in CAPPED else "rows"), name
     if rendered:
         # one program a record, but the three backward programs, two each the program of two records and the warp
-        # search the program of three, on disjoint architectures
-        assert len(libraries) == len(cake_jit.MODULES) - 4
+        # search the program of three, and the sm_100a / sm_103a unfused forward of two, on disjoint architectures
+        assert len(libraries) == len(cake_jit.MODULES) - 5
         for name, library in BACKWARD_LIBRARIES.items():
             assert cake_jit.MODULES[name]["library"] == library, name
 
@@ -396,14 +410,17 @@ def test_the_forward_records_build_the_table_of_up_to_256_documents() -> None:
 
 
 def test_the_unfused_forward_records_are_the_warp_search_programs() -> None:
-    """``fwd_unfused`` (sm_100a / sm_103a) and ``fwd_unfused_sm_107a`` (sm_107a) are the forward programs with the
-    warp row search, with the lanes and arguments of the ``fwd`` record of the same architectures, and no dynamic
-    shared memory (they build no table)."""
+    """``fwd_unfused`` (sm_100a), ``fwd_unfused_sm_103a`` (sm_103a, the same program) and ``fwd_unfused_sm_107a``
+    (sm_107a) are the forward programs with the warp row search, with the lanes and arguments of the ``fwd`` record of
+    the same architecture, and no dynamic shared memory (they build no table); their grid rule is the forward's, capped
+    (``rows_capped``) for a record of ``CAPPED`` (``fwd_unfused`` on sm_100a)."""
     for name, library in UNFUSED_LIBRARIES.items():
         rec = cake_jit.MODULES[name]
-        fused = cake_jit.MODULES[name.replace("fwd_unfused", "fwd")]
+        (arch,) = rec["arches"]
+        fused = cake_jit.MODULES[FORWARD_RECORDS[arch]]
+        kind = "rows_capped" if name in CAPPED else "rows"
         assert rec["library"] == library and rec["kernel_symbol"] == f"kernel_{library}", name
-        assert rec["arches"] == fused["arches"] and rec["grid_rule"] == fused["grid_rule"], name
+        assert arch in fused["arches"] and rec["grid_rule"] == {**fused["grid_rule"], "kind": kind}, name
         assert rec["arg_plan"] == fused["arg_plan"], name
         assert rec["launch"]["dynamic_smem_bytes"] == 0, name
         assert rec["library"] != fused["library"], name
@@ -425,7 +442,8 @@ def test_the_small_pair_table_serves_at_most_512_documents() -> None:
 def test_each_role_has_one_record_per_architecture() -> None:
     """Every role is served on every architecture of its ``ROLE_ARCHES`` (all three for the others) by exactly one
     record: the forward by ``fwd`` (128-bit lanes) on sm_100a and sm_103a and by ``fwd_sm_107a`` (256-bit lanes) on
-    sm_107a, and the same for ``fwd_unfused`` / ``fwd_unfused_sm_107a``, the backward by ``bwd`` (two-level search)
+    sm_107a, ``fwd_unfused`` by ``fwd_unfused`` on sm_100a, ``fwd_unfused_sm_103a`` on sm_103a and
+    ``fwd_unfused_sm_107a`` on sm_107a, the backward by ``bwd`` (two-level search)
     on sm_100a and sm_103a and by ``bwd_sm_107a`` on sm_107a, the small backward by ``bwd_small`` (one-level search)
     on sm_100a and sm_103a and by ``bwd_small_sm_107a`` on sm_107a, the warp backward by ``bwd_warp`` on sm_100a,
     ``bwd_warp_sm_103a`` on sm_103a and ``bwd_warp_sm_107a`` on sm_107a; no record serves another architecture."""
@@ -441,7 +459,7 @@ def test_each_role_has_one_record_per_architecture() -> None:
     assert [cake_jit.role_record("fwd", arch) for arch in ARCHES] == ["fwd", "fwd", "fwd_sm_107a"]
     assert [cake_jit.role_record("fwd_unfused", arch) for arch in ARCHES] == [
         "fwd_unfused",
-        "fwd_unfused",
+        "fwd_unfused_sm_103a",
         "fwd_unfused_sm_107a",
     ]
     assert [cake_jit.role_record("bwd", arch) for arch in ARCHES] == ["bwd", "bwd", "bwd_sm_107a"]
@@ -510,6 +528,62 @@ def test_grids_cover_every_row() -> None:
             assert grid[0] * per >= rows > (grid[0] - 1) * per, (name, rows, grid, per)
 
 
+def test_the_unfused_forward_grid_is_capped_in_its_range() -> None:
+    """A ``rows_capped`` record's grid is its ``rows`` grid but for ``lo <= num_docs <= hi`` documents
+    (:func:`cake_jit.capped_leaves`), where it is at most ``ctas_per_sm`` CTAs a multiprocessor: at each bound and
+    one past it, for a grid above, at and below the cap; the multiprocessor count is needed only when the cap can bind.
+    Every other record has no capped grid."""
+    assert cake_jit.GRID_KINDS == ("one_cta", "rows", "rows_capped")
+    assert {name: cake_jit.capped_leaves(name) for name in RECORDS} == {name: CAPPED.get(name) for name in RECORDS}
+    for name, (lo, hi, ctas) in CAPPED.items():
+        per = cake_jit.rows_per_cta(name)
+        for arch in cake_jit.MODULES[name]["arches"]:
+            cap = ctas * SMS[arch]
+            for rows in (1, per * ctas, per * ctas + 1, per * cap - 1, per * cap, per * cap + 1, per * cap * 3 + 5):
+                full = cake_jit.launch_grid(name, rows)
+                assert full == (max(1, -(-rows // per)), 1, 1), (name, rows)
+                for docs in (1, lo - 1, lo, hi, hi + 1, cake_jit.MAX_DOCS):
+                    inside = lo <= docs <= hi
+                    grid = cake_jit.launch_grid(name, rows, docs, SMS[arch])
+                    assert grid == ((min(full[0], cap), 1, 1) if inside else full), (name, arch, rows, docs, grid)
+                    if not inside or full[0] <= ctas:
+                        assert cake_jit.launch_grid(name, rows, docs) == full, (name, rows, docs)
+                    else:
+                        with pytest.raises(ValueError, match=rf"record {name}: the capped grid of {docs} documents"):
+                            cake_jit.launch_grid(name, rows, docs)
+    for name in RECORDS:
+        if name not in CAPPED:
+            for rows in (1, 10**6):
+                assert cake_jit.launch_grid(name, rows, 8193, 148) == cake_jit.launch_grid(name, rows), name
+
+
+def test_the_pair_table_role_follows_small_docs() -> None:
+    """:func:`cake_jit.pair_table_role` gives ``pair_table_small`` for at most ``small_docs`` documents and
+    ``pair_table`` for more, on each architecture."""
+    for arch in ARCHES:
+        for docs in (1, SMALL_DOCS - 1, SMALL_DOCS, SMALL_DOCS + 1, 8193, cake_jit.MAX_DOCS):
+            role = "pair_table_small" if docs <= SMALL_DOCS else "pair_table"
+            assert cake_jit.pair_table_role(docs, arch) == role, (arch, docs)
+
+
+def test_the_multiprocessor_count_is_read_once_a_device(monkeypatch) -> None:
+    """:func:`cake_jit.sm_count` reads the device's multiprocessor count from torch once per device index (no
+    device: the properties are a recorder)."""
+    asked = []
+
+    def properties(index):
+        asked.append(index)
+        return types.SimpleNamespace(multi_processor_count=SMS["sm_100a"] + index)
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", properties)
+    cake_jit.sm_count.cache_clear()
+    try:
+        assert [cake_jit.sm_count(index) for index in (0, 1, 0, 1, 0)] == [148, 149, 148, 149, 148]
+        assert asked == [0, 1]
+    finally:
+        cake_jit.sm_count.cache_clear()
+
+
 def test_launchers_take_named_buffers() -> None:
     """Each launcher takes its buffers and strides by keyword only, with no default, and the device index, the
     architecture (and the forward's or the backward's role) a public call passes down by keyword only, each defaulting
@@ -524,7 +598,8 @@ def test_launchers_take_named_buffers() -> None:
 
 def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
     """Each launcher hands ``run_module`` exactly the kernel parameters of its record, with ``num_docs = S``, the
-    rows of ``out`` / ``dout`` as ``G``, the strides it was given and the rows of its grid; the pair table of at most
+    rows of ``out`` / ``dout`` as ``G``, the strides it was given and the rows of its grid (``S`` for the pair table,
+    ``G`` for the forward, ``G + S`` for the backward); the pair table of at most
     512 documents is the ``pair_table_small`` role, of more the ``pair_table`` role; the forward of at most 256
     documents is the ``fwd`` role, of more (257, 512, 513, 8193 and 2^20) the ``fwd_unfused`` role; the backward of 23
     tokens and at most ``bwd_small_docs`` documents (26 on sm_100a / sm_103a, 125 on sm_107a) is the ``bwd_small``
@@ -561,7 +636,7 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
         assert set(values) == PARAMETERS[name], name
         assert values["num_docs"] == S and values["cu_seqlens"] is cu and values["cu_pairs"] is table, name
     (_, _, rows_table), (_, fwd, rows_fwd), (_, bwd, rows_bwd) = calls
-    assert rows_table == 1 and rows_fwd == G and rows_bwd == G + S
+    assert rows_table == S and rows_fwd == G and rows_bwd == G + S
     assert fwd["G"] == bwd["G"] == G
     assert (fwd["c_ld"], fwd["z_ld"], bwd["dc_ld"], bwd["dz_ld"]) == (1024, 1024, 512, 512)
     assert fwd["out"] is out and bwd["dout"] is out and bwd["dc"] is dc and bwd["dz"] is dz
@@ -569,7 +644,7 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
         calls.clear()
         bound = torch.zeros(docs + 1, dtype=torch.int32)
         cake_backend.launch_pair_table(cu_seqlens=bound, cu_pairs=torch.zeros_like(bound))
-        assert [(name, values["num_docs"], rows) for name, values, rows in calls] == [(role, docs, 1)], docs
+        assert [(name, values["num_docs"], rows) for name, values, rows in calls] == [(role, docs, docs)], docs
         assert set(calls[0][1]) == PARAMETERS[role]
     for arch in ARCHES:
         monkeypatch.setattr(cake_jit, "device_arch", lambda index, arch=arch: arch)
@@ -704,7 +779,8 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     record's grid: the forward of ``G`` rows runs ``fwd`` (two rows a CTA) on sm_100a / sm_103a and ``fwd_sm_107a``
     (four rows a CTA) on sm_107a; the pair tables run their one record everywhere, ``pair_table_small`` for 5 and 512
     documents and ``pair_table`` for 513; the forward of 256 documents runs ``fwd`` / ``fwd_sm_107a``, of 257, 512,
-    513 and 8193 ``fwd_unfused`` / ``fwd_unfused_sm_107a``; the backward of 23 tokens in 5, 26, 27, 124, 125, 126,
+    513 and 8193 ``fwd_unfused`` / ``fwd_unfused_sm_103a`` / ``fwd_unfused_sm_107a``; the backward of 23 tokens in 5,
+    26, 27, 124, 125, 126,
     16384, 16385 and 32769 documents runs the record of its role on the architecture (``_bwd_role``): on sm_100a
     ``bwd_small`` for 5 and 26, ``bwd`` for 27 to 16384, ``bwd_warp`` for more; on sm_103a ``bwd_small`` for 5,
     ``bwd_warp_sm_103a`` for 26 and 27, ``bwd`` for 124 to 16384, ``bwd_warp_sm_103a`` for more; on sm_107a
@@ -763,8 +839,8 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
             )
     expected = []
     for arch in ARCHES:
-        forward = "fwd_sm_107a" if arch == "sm_107a" else "fwd"
-        unfused = "fwd_unfused_sm_107a" if arch == "sm_107a" else "fwd_unfused"
+        forward = FORWARD_RECORDS[arch]
+        unfused = UNFUSED_RECORDS[arch]
         tables = (("pair_table_small", 1), ("pair_table_small", 1), ("pair_table", 1))
         forwards = ((forward, G), (forward, G), (unfused, G), (unfused, G), (unfused, G), (unfused, G))
         backwards = tuple(
@@ -779,6 +855,92 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     assert streams == [(("device", None), ("stream", None))] * len(expected)
     # nine forward rows: five CTAs of two rows on sm_100a / sm_103a, three CTAs of four rows on sm_107a
     assert [grid for name, _, _, grid in launched if name.startswith("fwd")] == [(5, 1, 1)] * 12 + [(3, 1, 1)] * 6
+
+
+def test_the_unfused_forward_launch_takes_the_capped_grid(monkeypatch) -> None:
+    """The forward launcher's ``fwd_unfused`` launch passes the binding entry the grid :func:`cake_jit.launch_grid`
+    gives its rows, documents and the device's multiprocessor count: on sm_100a at most ``ctas_per_sm`` CTAs a
+    multiprocessor for ``capped_min_docs <= S <= capped_max_docs`` (at each bound and one past it, for a grid at, just
+    above and past the cap), one CTA a block otherwise, and on sm_103a and sm_107a (a ``rows`` record) one CTA a block
+    for every pack; :func:`cake_jit.sm_count` is read once a launch, of the launch's device,
+    only when the cap can bind, and never for the backward (no device: the binding entry and the multiprocessor count
+    are recorders)."""
+    if not all(rec["arg_plan"] for rec in cake_jit.MODULES.values()):
+        pytest.skip("the records' argument plans are not rendered yet")
+    launched = []
+    monkeypatch.setattr(cake_jit, "_entry", lambda name, arch: lambda *args: launched.append((name, tuple(args[-3:]))))
+    streams = types.SimpleNamespace(use_raw_stream=lambda device, stream: contextlib.nullcontext())
+    monkeypatch.setattr(cake_jit, "_tvm_ffi", lambda: streams)
+    monkeypatch.setattr(cake_jit, "_tvm_device", lambda index: ("device", index))
+    monkeypatch.setattr(cake_jit, "_raw_stream", lambda index: ("stream", index))
+    T = 23
+    cz = torch.zeros(T, 2 * WIDTH)
+    c, z = cz[:, :WIDTH], cz[:, WIDTH:]
+    dc, dz = torch.zeros(T, WIDTH), torch.zeros(T, WIDTH)
+    for arch in ARCHES:
+        name = cake_jit.role_record("fwd_unfused", arch)
+        per = cake_jit.rows_per_cta(name)
+        if name not in CAPPED:
+            # a rows record (sm_103a, sm_107a): one CTA a block for every pack, the SM count never read
+            monkeypatch.setattr(cake_jit, "sm_count", lambda index: pytest.fail("read the SM count for a rows record"))
+            G = per * 6 * SMS[arch] * 3 + 5
+            out = torch.zeros(1, WIDTH, dtype=torch.bfloat16).expand(G, WIDTH)
+            for docs in (2047, 2048, 8193, 16384, 16385, 1048577):
+                launched.clear()
+                bound = torch.zeros(docs + 1, dtype=torch.int32)
+                cake_backend.launch_fwd(
+                    c=c, z=z, cu_seqlens=bound, cu_pairs=bound, out=out, c_ld=1024, z_ld=1024, device_index=7, arch=arch
+                )
+                assert launched == [(name, (-(-G // per), 1, 1))], (arch, docs, launched)
+            continue
+        lo, hi, ctas = CAPPED[name]
+        cap = ctas * SMS[arch]
+        asked = []
+
+        def sm_count(index, arch=arch, asked=asked):
+            asked.append(index)
+            return SMS[arch]
+
+        monkeypatch.setattr(cake_jit, "sm_count", sm_count)
+        for G in (per * ctas, per * ctas + 1, per * cap, per * cap + 1, per * cap * 3 + 5):
+            # G output rows: an expanded view (the launcher reads its shape only)
+            out = torch.zeros(1, WIDTH, dtype=torch.bfloat16).expand(G, WIDTH)
+            full = -(-G // per)
+            for docs in (lo - 1, lo, hi, hi + 1):
+                launched.clear()
+                asked.clear()
+                bound = torch.zeros(docs + 1, dtype=torch.int32)
+                cake_backend.launch_fwd(
+                    c=c, z=z, cu_seqlens=bound, cu_pairs=bound, out=out, c_ld=1024, z_ld=1024, device_index=7, arch=arch
+                )
+                inside = lo <= docs <= hi
+                want = (min(full, cap) if inside else full, 1, 1)
+                assert launched == [(name, want)], (arch, G, docs, launched)
+                assert want == cake_jit.launch_grid(name, G, docs, SMS[arch]), (arch, G, docs)
+                assert asked == ([7] if inside and full > ctas else []), (arch, G, docs, asked)
+        monkeypatch.setattr(cake_jit, "sm_count", lambda index: pytest.fail("read the SM count for a rows record"))
+        G = per * cap * 3 + 5
+        out = torch.zeros(1, WIDTH, dtype=torch.bfloat16).expand(G, WIDTH)
+        for docs in (lo, hi):
+            launched.clear()
+            bound = torch.zeros(docs + 1, dtype=torch.int32)
+            cake_backend.launch_bwd(
+                dout=out,
+                c=c,
+                z=z,
+                cu_seqlens=bound,
+                cu_pairs=bound,
+                dc=dc,
+                dz=dz,
+                c_ld=1024,
+                z_ld=1024,
+                dc_ld=512,
+                dz_ld=512,
+                device_index=7,
+                arch=arch,
+            )
+            role = cake_jit.role_record(_bwd_role(arch, docs), arch)
+            assert launched == [(role, cake_jit.launch_grid(role, G + docs))], (arch, docs)
 
 
 def test_a_launch_without_a_kernel_argument_is_refused(monkeypatch) -> None:
@@ -1533,7 +1695,8 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     """The forward of a pack of at most ``fuse_docs`` (256) documents launches ``fwd`` alone (the record of the
     device's architecture: ``fwd`` on sm_100a / sm_103a, ``fwd_sm_107a`` on sm_107a), which builds the pair table
     itself; the forward of more documents (257, 300, 512, 513, 8193) launches a pair table then ``fwd_unfused``
-    (``fwd_unfused`` on sm_100a / sm_103a, ``fwd_unfused_sm_107a`` on sm_107a); the backward of those packs a pair
+    (``fwd_unfused`` on sm_100a, ``fwd_unfused_sm_103a`` on sm_103a, ``fwd_unfused_sm_107a`` on sm_107a); the backward
+    of those packs a pair
     table then the record of their backward role (``bwd`` / ``bwd_sm_107a``), and of a pack of at most
     ``bwd_small_docs`` documents a pair table then
     ``bwd_small`` (``bwd_small`` on sm_100a / sm_103a, ``bwd_small_sm_107a`` on sm_107a), or the backward alone with
@@ -1577,8 +1740,8 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
         monkeypatch.setattr(module, "device_arch", lookup_arch)
     for name in ("fuse_docs", "small_docs", "bwd_small_docs", "bwd_max_docs", "bwd_warp_region"):
         monkeypatch.setattr(cake_jit, name, counted(name, getattr(cake_jit, name)))
-    forward = "fwd_sm_107a" if arch == "sm_107a" else "fwd"
-    unfused = "fwd_unfused_sm_107a" if arch == "sm_107a" else "fwd_unfused"
+    forward = FORWARD_RECORDS[arch]
+    unfused = UNFUSED_RECORDS[arch]
     # the backward of at most bwd_small_docs documents: the bwd_small role
     small_role = "bwd_small"
     small = "bwd_small_sm_107a" if arch == "sm_107a" else "bwd_small"

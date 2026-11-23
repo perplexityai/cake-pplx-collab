@@ -373,10 +373,10 @@ def _pair_count(num_pairs: Any, out: Optional[torch.Tensor]) -> int:
 
 
 def _launch_table(cu_seqlens: torch.Tensor, cu_pairs: torch.Tensor, S: int, index: int, arch: str) -> None:
-    """The pair-table launch of :func:`launch_pair_table` for ``S`` documents on device ``index`` (of ``arch``)."""
-    role = "pair_table_small" if S <= cake_jit.small_docs(arch) else "pair_table"
+    """The pair-table launch of :func:`launch_pair_table` for ``S`` documents on device ``index`` (of ``arch``): the
+    role of :func:`cake_jit.pair_table_role` on ``S`` rows, the documents (one CTA for a ``one_cta`` record)."""
     values = {"cu_seqlens": cu_seqlens, "cu_pairs": cu_pairs, "num_docs": S}
-    cake_jit.run_module(role, values, rows=1, device_index=index, arch=arch)
+    cake_jit.run_module(cake_jit.pair_table_role(S, arch), values, rows=S, device_index=index, arch=arch)
 
 
 def _launch_fwd(

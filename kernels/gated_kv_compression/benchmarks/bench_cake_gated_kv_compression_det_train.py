@@ -43,7 +43,10 @@ math, on one GPU, single rank.
   its iteration count (about 25 ms of GPU time, 10 to 100 iterations) in the arm list rotated left by ``g mod n``
   (reversed when ``g // n`` is odd).  An arm's time is the median over the groups of the group's median; a ratio is
   the median over the groups of the per-group ratio, with its range.  The noise band is the largest ``|cake_aa /
-  cake - 1|`` over the groups; a speedup beyond it reads ``faster`` or ``slower``, within it ``parity``.
+  cake - 1|`` over the groups; a speedup beyond it reads ``faster`` or ``slower``, within it ``parity``.  In
+  ``graph`` mode ``--graph-captures K`` captures the call K times in each group and takes the slowest instance's
+  median (a graph of back-to-back PDL launches can time in one of two states, fixed per capture); K = 1 (the
+  default) times one capture.
 * accuracy gate (before any timing): every computing arm, Cake's included, on draws of the row's pack (``--draws``
   plain draws, close pairs ``C[t1] = C[t0] (1 + 2^-12)`` and ``(1 + 2^-16)``, gate extremes) and once per layout on
   small edge packs: the feature request's acceptance criteria against a float64 oracle (``out`` within one BF16
@@ -311,21 +314,30 @@ def iteration_count(reply: dict) -> int:
     return int(min(MAX_ITERS, max(MIN_ITERS, TARGET_MS / estimate)))
 
 
-def time_arm(name, calls, phase, mode, spin, iters, timer, side) -> dict:
+def time_arm(name, calls, phase, mode, spin, iters, timer, side, captures=1) -> dict:
+    """One group's timing of arm ``name``: eager, or the replays of ``captures`` graphs captured one after another,
+    the slowest instance's reply (by its median) with every instance's median (``instances_ms``) when there are
+    several."""
     if mode == "eager":
         fn = calls[phase]
         if name not in iters:
             iters[name] = iteration_count(timer.times(fn, 3, spin))
         return timer.times(fn, iters[name], spin)
-    graph = capture(calls, phase, side)
-    try:
-        if name not in iters:
-            iters[name] = iteration_count(timer.times(graph.replay, 3, None))
-        return timer.times(graph.replay, iters[name], None)
-    finally:
-        del graph
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+    replies = []
+    for _ in range(max(1, captures)):
+        graph = capture(calls, phase, side)
+        try:
+            if name not in iters:
+                iters[name] = iteration_count(timer.times(graph.replay, 3, None))
+            replies.append(timer.times(graph.replay, iters[name], None))
+        finally:
+            del graph
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+    if len(replies) == 1:
+        return replies[0]
+    slowest = max(replies, key=lambda reply: _median(reply["ms"]))
+    return {**slowest, "instances_ms": [_median(reply["ms"]) for reply in replies]}
 
 
 def time_cell(calls: dict[str, Calls], names: list[str], phase: str, mode: str, args, timer, side) -> dict:
@@ -354,13 +366,15 @@ def time_cell(calls: dict[str, Calls], names: list[str], phase: str, mode: str, 
         torch.cuda.empty_cache()
     iters: dict[str, int] = {}
     groups: dict[str, list[float]] = {name: [] for name in timed}
+    instances: dict[str, list[list[float]]] = {name: [] for name in timed}
     late: dict[str, int] = {name: 0 for name in timed}
     for g in range(args.groups):
         order = group_order(timed, g)
         cell["group_orders"].append(order)
         for name in order:
             try:
-                reply = time_arm(name, calls[name], phase, mode, spins.get(name), iters, timer, side)
+                captures = args.graph_captures if mode == "graph" else 1
+                reply = time_arm(name, calls[name], phase, mode, spins.get(name), iters, timer, side, captures)
             except Exception as exc:  # noqa: BLE001 -- the arm leaves this cell; the others go on
                 torch.cuda.synchronize()
                 cell["skipped"][name] = f"failed in group {g}: {type(exc).__name__}: {str(exc)[:400]}"
@@ -368,6 +382,8 @@ def time_cell(calls: dict[str, Calls], names: list[str], phase: str, mode: str, 
                 groups.pop(name)
                 continue
             groups[name].append(_median(reply["ms"]) * 1e3)
+            if "instances_ms" in reply:
+                instances[name].append([value * 1e3 for value in reply["instances_ms"]])
             late[name] += reply["late"]
             cell["method"] = reply["method"]
     for name in timed:
@@ -379,6 +395,7 @@ def time_cell(calls: dict[str, Calls], names: list[str], phase: str, mode: str, 
             "iters": iters[name],
             "late": late[name],
             "spin_ms": spins.get(name),
+            **({"graph_instances_us": instances[name]} if instances[name] else {}),
         }
     for name in names:
         calls[name].release()
@@ -704,6 +721,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--modes", default="graph,eager", help="comma list of graph, eager")
     parser.add_argument("--arms", default=",".join(ARMS), help=f"comma list of {', '.join(ARMS)}")
     parser.add_argument("--groups", type=int, default=7, help="paired timing groups per phase and mode")
+    parser.add_argument(
+        "--graph-captures", type=int, default=1, help="graph mode: captures per arm and group, the slowest timed"
+    )
     parser.add_argument("--draws", type=int, default=2, help="plain gate draws per row (0: no gate, no baseline)")
     parser.add_argument("--gate-seed", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0, help="the seed of the timed inputs")
@@ -735,6 +755,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         parser.error("--arms cake_aa needs cake")
     if args.groups < 1:
         parser.error("--groups must be at least 1")
+    if args.graph_captures < 1:
+        parser.error("--graph-captures must be at least 1")
     if not torch.cuda.is_available():
         print("this benchmark needs a CUDA device", file=sys.stderr)
         return 2
