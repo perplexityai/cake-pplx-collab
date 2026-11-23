@@ -68,7 +68,8 @@ Host design (every switch is a keyword; no environment variable):
 from __future__ import annotations
 
 import functools
-from typing import Any, NamedTuple, Optional, Sequence, Tuple, Union
+import types
+from typing import Any, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -274,9 +275,9 @@ def _domain_choice(
     in_place: bool,
     x: torch.Tensor,
     out: Optional[torch.Tensor],
-) -> tuple[Optional[str], str, Optional[dict[str, Any]]]:
+) -> tuple[Optional[str], str, Optional[Mapping[str, Any]]]:
     """``(record, reason, launch)`` of a ``locality="domain"`` call with
-    elements: the interleaved-domain record and its :func:`cake_jit.domain_launch`
+    elements: the interleaved-domain record and its :func:`cake_jit.domain_launch` (read only)
     when :func:`cake_jit.domain_route` places the call, else ``(None, reason,
     None)`` for the route's plain program.  Never raises for a placement.
     The placements are read only for a call that passes the checks that need
@@ -299,14 +300,20 @@ def _domain_choice(
     reason = cake_jit.domain_placement(x_place, place(out, chunk))
     if reason != "placed":
         return None, reason, None
-    launch = cake_jit.domain_launch(
-        cake_jit.MODULES[name],
-        n_vecs=n_vecs,
-        x_place=x_place,
-        sm_count=cake_jit.sm_count(call.device_index),
-        arch=call.arch,
-    )
+    launch = _domain_launch(name, n_vecs, x_place, cake_jit.sm_count(call.device_index), call.arch)
     return name, reason, launch
+
+
+@functools.lru_cache(maxsize=1024)
+def _domain_launch(
+    name: str, n_vecs: int, x_place: tuple[int, int], sm_count: int, arch: str
+) -> types.MappingProxyType[str, Any]:
+    """:func:`cake_jit.domain_launch` of record ``name``, read only and kept per argument set: the calls on one pair
+    of buffers repeat it, and it costs about 1 us of host time in front of every launch."""
+
+    return types.MappingProxyType(
+        cake_jit.domain_launch(cake_jit.MODULES[name], n_vecs=n_vecs, x_place=x_place, sm_count=sm_count, arch=arch)
+    )
 
 
 def cake_act_qdq_det_train_forward(

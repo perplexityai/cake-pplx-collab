@@ -619,6 +619,19 @@ PER_THREAD_STREAM = 0x2
 # reused after it exits, while its last launch may still run).
 _THREAD = threading.local()
 _THREAD_TOKENS = itertools.count(1)
+# torch's getter of the raw current-stream handle (``torch.cuda.current_stream(i).cuda_stream`` without building a
+# ``torch.cuda.Stream``); ``None`` on a torch build without it.
+_CURRENT_RAW_STREAM = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+
+
+def _current_stream_handle(device_index: int) -> int:
+    """The handle of the device's current CUDA stream: the value of ``torch.cuda.current_stream(device_index)
+    .cuda_stream``, read without building a ``torch.cuda.Stream`` object when torch has the raw getter (about 2 us of
+    host time in front of every launch)."""
+
+    if _CURRENT_RAW_STREAM is not None:
+        return int(_CURRENT_RAW_STREAM(device_index))
+    return int(torch.cuda.current_stream(device_index).cuda_stream)
 
 
 def _stream_key(index: int, stream: int) -> tuple[int, ...]:
@@ -714,7 +727,7 @@ def launch(name: str, values: dict[str, Any], *, device_index: int, grid: tuple[
     if 2 * words > SLOT_WORDS:
         raise RuntimeError(f"the claim workspace of {name} ({2 * words} words) exceeds {SLOT_WORDS} words")
     with torch.cuda.device(device_index):
-        key = _stream_key(device_index, torch.cuda.current_stream().cuda_stream)
+        key = _stream_key(device_index, _current_stream_handle(device_index))
         captured = torch.cuda.is_current_stream_capturing()
         if captured:
             workspace = _capture_workspace(key)

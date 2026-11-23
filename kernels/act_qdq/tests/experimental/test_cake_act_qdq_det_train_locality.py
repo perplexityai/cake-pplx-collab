@@ -25,10 +25,12 @@ order, and the launch arguments and grid, against the kernel's own decoding of
 its items; and, against a fake driver, the unwind of a mapping that fails (out
 of memory, retried once; any other error, not retried) and the error without
 cuda-python; the free of a range queued while another call holds the module's
-lock; and the per-thread default stream's key per thread.  The GPU tests check
-that ``"domain"`` runs the ``"off"`` program on other architectures and on
-default memory, that ``"off"`` loads none of the route's state, and that on
-the per-thread default stream each thread takes its own claim workspace.  The
+lock; the per-thread default stream's key per thread; and the read-only launch
+arguments a placed call keeps.  The GPU tests check that ``"domain"`` runs the
+``"off"`` program on other architectures and on default memory, that ``"off"``
+loads none of the route's state, that a launch keys its claim workspace by
+torch's current stream, and that on the per-thread default stream each thread
+takes its own claim workspace.  The
 SM107 tests (skipped elsewhere; an SM107 whose driver reports fewer than two
 locality domains fails them) check the allocation (dies, registry, zero copy,
 the free, the free deferred past a capture, the refusal during capture, and
@@ -498,6 +500,20 @@ def test_the_per_thread_default_stream_has_a_key_per_thread() -> None:
     assert memory._stream_key(1, 0x7F00) == (1, 0x7F00)
 
 
+@pytest.mark.cpu_only
+def test_a_placed_call_keeps_its_launch_arguments_read_only() -> None:
+    """A placed call's launch arguments and grid are ``domain_launch``'s, kept per argument set and read only, so the
+    calls on one pair of buffers compute them once."""
+    name = _domain_name(KINDS[0])
+    n_vecs, x_place, sms = _first(KINDS[0]), (3 * TILE_BYTES + 16, 1), 212
+    got = pkg._domain_launch(name, n_vecs, x_place, sms, ARCH)
+    want = loader.domain_launch(loader.MODULES[name], n_vecs=n_vecs, x_place=x_place, sm_count=sms, arch=ARCH)
+    assert dict(got) == want
+    assert pkg._domain_launch(name, n_vecs, x_place, sms, ARCH) is got
+    with pytest.raises(TypeError):
+        got["grid"] = (1, 1, 1)
+
+
 # --------------------------------------------------------------------------- GPU: every architecture
 
 
@@ -560,6 +576,28 @@ def test_empty_input_plan() -> None:
         "grid": None,
     }
     assert forward(x, format="mxfp8_e8m0_g32", locality="domain").shape == (0, 512)
+
+
+@gpu
+def test_a_launch_keys_its_workspace_by_torchs_current_stream(monkeypatch) -> None:
+    """An eager launch takes the claim workspace of torch's current stream of the device, on the default stream, a
+    side stream and the per-thread default stream, with the stream handle read through torch's raw getter or,
+    without it, through ``torch.cuda.current_stream``.  The kernel is replaced, so this runs on every
+    architecture."""
+    monkeypatch.setattr(memory.cake_jit, "run_module", lambda name, values, **kwargs: None)
+    name = _domain_name(KINDS[0])
+    side = torch.cuda.Stream()
+    for getter in (memory._CURRENT_RAW_STREAM, None):
+        monkeypatch.setattr(memory, "_CURRENT_RAW_STREAM", getter)
+        monkeypatch.setattr(memory, "_STREAM_WORKSPACES", {})
+        for stream in (None, side, torch.cuda.ExternalStream(memory.PER_THREAD_STREAM)):
+            with torch.cuda.stream(stream):
+                handle = torch.cuda.current_stream(0).cuda_stream
+                assert memory._current_stream_handle(0) == handle, (getter, stream)
+                assert memory.stream_workspace(0, handle) is None, (getter, stream)
+                memory.launch(name, {}, device_index=0, grid=(1, 1, 1))
+                assert memory.stream_workspace(0, handle) is not None, (getter, stream)
+        assert len(memory._STREAM_WORKSPACES) == 3, (getter, list(memory._STREAM_WORKSPACES))
 
 
 @gpu
