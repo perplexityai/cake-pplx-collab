@@ -1568,11 +1568,11 @@ deterministic program that follow that package's version 0.3.23: the five `sm_10
 (`4096 -> 16`, `4096 -> 96`, `6144 -> 48`, `6144 -> 64` and indexer_hw `6144 -> 32`, to which no table of this package
 gives its own program) run that package's exact splits from lower token counts (the K1 weight-gradient row of the table
 above).  That package measured them against its version 0.3.22 and a second prepared copy of it in the same 21 paired
-rounds, with cold L2 in eager launches and CUDA graph replays, at 1024 to 8192 tokens (on the 216-SM R200 part
-`6144 -> 32` also at 8193 to 16171 tokens; the four other rows at 65536, 98304 and 131072 tokens), on an NVIDIA VR200
-(`sm_107a`, 212 SMs) and one R200 board (216 SMs): at each measured token count where a part plans a new plan, that
-plan was faster than the plan of version 0.3.22 beyond the A/A band in both modes, with one bit pattern run to run and
-within the naive BF16 tier on five seeds.  This package's post-ship A/B against its version 0.3.22:
+rounds, with cold L2 in eager launches and CUDA graph replays, at ten token counts from 1024 to 8192 tokens (on the
+216-SM R200 part `6144 -> 32` also at 8193 to 16171 tokens; the four other rows at 65536, 98304 and 131072 tokens), on
+an NVIDIA VR200 (`sm_107a`, 212 SMs) and one R200 board (216 SMs): at each measured token count where a part plans a new
+plan, that plan was faster than the plan of version 0.3.22 beyond the A/A band in both modes, with one bit pattern run
+to run and within the naive BF16 tier on five seeds.  This package's post-ship A/B against its version 0.3.22:
 [[TBD0323_ND_SENTENCE]].  Against version 0.3.22 the bits are the same where the two-way 64-row split runs at an even
 number of 64-token K blocks up to 8192 tokens and differ elsewhere [[TBD0323_BITS_CONFIRMED]].  The unbatched BF16
 `G.T @ X` call of the generic entry on `4096 -> 16`, `4096 -> 96`, `6144 -> 48` and `6144 -> 64` keeps its orientation

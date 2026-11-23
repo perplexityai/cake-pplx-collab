@@ -10444,10 +10444,10 @@ def test_gpu_promoted_programs(case):
 # enumeration over the rows and part sizes), at a token count where its longest segment holds more than one chunk.
 # Since version 0.3.22 the sm_107a indexer_hw 6144 -> 32 BF16 weight gradient plans the 64-row exact split (from
 # T 2048 on since version 0.3.23), and below that floor its three-way 128-row rule stays under the hint gate (T 10322),
-# so on sm_107a parts other than the 216-SM one ``dense_proj_det_gemm_nn_n128_hen_t_skx_kc64_pro7`` and
-# ``dense_proj_det_gemm_nn_n128_hen_t_skx_pro7`` are reached through caller knobs alone (the forced knobs of its row
-# below).  The 216-SM part plans that rule, on the promoted twin, from T 15361 on (``SM107A_0323_RANGES``), and since
-# version 0.3.23 the twin's four-way split on 6144 -> 48 at T 65536 - 131072.  The test forces the twin's
+# so on every sm_107a part ``dense_proj_det_gemm_nn_n128_hen_t_skx_pro7`` is reached through caller knobs alone (the
+# forced knobs of its row below), and so is ``dense_proj_det_gemm_nn_n128_hen_t_skx_kc64_pro7`` on parts other than
+# the 216-SM one.  The 216-SM part plans that rule, on the promoted twin, from T 15361 on (``SM107A_0323_RANGES``),
+# and since version 0.3.23 the twin's four-way split on 6144 -> 48 at T 65536 - 131072.  The test forces the twin's
 # program (``_template_knobs``) on the listed architectures, each a registered one of the twin on which the forced
 # knobs plan exactly the twin for this row (``test_forced_twin_cases_plan_their_twin``); the lists are not exhaustive.
 # On some registered architectures the row's rule still decides a knob the symbol leaves open: ``sk_exact`` (``None``
@@ -22714,7 +22714,10 @@ def test_sm107a_0323_forced_cta_rows_keeps_the_rule_parts_and_hint(monkeypatch):
     (``block_n``, ``pro``) but keeps its parts and, since version 0.3.23, its hint: on 6144 -> 48 at T 4096 on 212 SMs,
     below the 128-row hint gate (T 10322), the plan splits the 24 128-row pair tiles exactly in the rule's two parts
     with the hint and ``pro`` 0, where the tables of version 0.3.22 (no rule below T 8193) plan the auto two-way split
-    of those tiles without a hint and with the architecture's ``pro`` 7."""
+    of those tiles without a hint and with the architecture's ``pro`` 7.  This is the planner's own plan
+    (``_rows_plan`` plans without the registry fallback): the program it names,
+    ``dense_proj_det_gemm_nn_n128_hen_t_skx`` with ``pro`` 0, is not registered on ``sm_107a``, so the call itself
+    falls back to the plan without a rule, the plan and bits of version 0.3.22."""
     plan = _rows_plan("wgrad", "sm_107a", 212, 6144, 48, 4096, cta_rows=128)
     with monkeypatch.context() as m:
         _tables_0322(m)

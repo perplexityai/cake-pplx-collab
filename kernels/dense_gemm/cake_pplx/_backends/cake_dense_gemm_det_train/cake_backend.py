@@ -1762,8 +1762,10 @@ ROW_RULES: dict[tuple, dict] = {
     #      registered with it alone, and below the 64-row hint gate (T 7820 on the 4096 rows, T 5267 on the 6144 rows on
     #      a 126-MiB L2) a rule without it names an unregistered program and falls back to the plan before; from the
     #      gate on the hint changes no plan.  A caller that forces another tile height (``cta_rows``) drops the rule's
-    #      family knobs (``block_n``, ``pro``, ...) but keeps its ``sk_exact`` and its hint, which a caller-forced
-    #      128-row call below the 128-row gate (T 15180 / 10322) now carries too.  Measured in this package on VR200
+    #      family knobs (``block_n``, ``pro``, ...) but keeps its ``sk_exact`` and its hint in the plan it names; below
+    #      the 128-row gate (T 15180 / 10322) a caller-forced 128-row call names the unregistered
+    #      ``dense_proj_det_gemm_nn_n128_hen_t_skx`` (``pro`` 0) and falls back to the plan without a rule, the plan and
+    #      bits of version 0.3.22.  Measured in this package on VR200
     #      (212 SMs) and one R200 board (216 SMs) against the plan of version 0.3.22 and a second prepared copy of it,
     #      cold L2, eager launches and CUDA graph replays, 21 paired rounds per cell and mode, at T 1024, 2048, 3072,
     #      4096, 4097, 5120, 6144, 7168, 8065 and 8192 (indexer_hw on the 216-SM part also at T 8193 - 16171): every new
@@ -1780,7 +1782,8 @@ ROW_RULES: dict[tuple, dict] = {
     #      (T 1024 included) the geometric mean of the medians of the plan before over the split was 1.4 % (212 SMs) and
     #      2.6 % (216 SMs) above that over the rule; at T 8065 the medians of the rule over the split were 0.971 / 0.967
     #      (212 SMs) and 0.991 / 0.990 (216 SMs), so the row plans its rule from T 7169.  The 212-SM range of 4096 -> 16
-    #      rests on T 3072, where the rule was faster than the plan before on that part and slower on the 216-SM part.
+    #      rests on T 3072, where the rule was faster than the plan before on that part; on the 216-SM part it was flat
+    #      in eager launches and slower in CUDA graph replays there.
     #      Post-ship medians of the plan before over the new plan [[TBD0323_RANGE_212]] (212 SMs) and
     #      [[TBD0323_RANGE_216]] (216 SMs).  Against version 0.3.22 the bits are the same where the two-way split runs
     #      at an even number of 64-token K blocks up to T 8192 (the plan before split every 128-row tile into the same
@@ -2866,7 +2869,7 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ('sm_107a', False, True, False, False, False, 8192, 128, None): ((16172, 16384, {**_W8RELF_DGRAD_BF16, "group_m": 16}),),
         # version 0.3.23: the 4096 -> 16 BF16 weight gradient plans its three-way 64-row rule (``ROW_RULES``) from T 3072
         # on this part, below the key's floor (T 4096): measured faster than the plan of version 0.3.22 at T 3072 here
-        # [[TBD0323_212_3072]] and slower on the 216-SM part
+        # [[TBD0323_212_3072]]; on the 216-SM part it was flat in eager launches and slower in CUDA graph replays
         ('sm_107a', True, True, False, True, False, 16, None, 4096): ((3072, 4095, {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')}),),
     },
     # The 216-SM part (version 0.3.23).
