@@ -149,8 +149,9 @@ holds every channel tile, and on sm_100a and sm_103a it is the full co-resident 
 ### The backward
 
 The backward rows of `cake_jit.DIRECT_ROWS` (channel ranges within C 512 to 1024 at small S, where the single-rank
-backward runs its route's direct program) do not apply to this route: the KCP backward runs the programs below at
-every `C` and `S`.
+backward runs its route's direct program) and of `cake_jit.GRID_CAP_ROWS` (small-S rows on sm_107a, where the
+single-rank backward launches fewer CTAs) do not apply to this route: the KCP backward runs the programs below, on
+their own grids, at every `C` and `S`.
 
 The head program writes the FP32 derivative of each continuing fragment's
 first tokens (the halo adjoints) into the send layout. It matches the

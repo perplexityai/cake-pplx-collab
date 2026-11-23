@@ -7814,6 +7814,94 @@ TILE_ALIGNED_CLASS_ROUTES: dict[str, tuple[str, ...]] = {
     "sm_103a": (),
     "sm_107a": (),
 }
+# The small-S rows where a single-wave backward main launch is capped by a token
+# stream length, ``{arch: {(route, C_lo, C_hi): ((S_lo, S_hi, tokens), ...)}}``:
+# a call of ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple
+# of 8) and ``S_lo <= S <= S_hi`` tokens, at ``bwd_grid_mult`` 1, launches an
+# ``occupancy`` record with :func:`small_s_grid` of its grid, at most
+# ``n_ch_tiles x ceil(S / (n_sub x tokens))`` CTAs and at least ``n_ch_tiles``
+# (:func:`launch_grid`), but at a backward :data:`DIRECT_ROWS` range.
+# ``tokens`` (L) is the length of one token stream: the CTAs of a channel tile
+# split its ``S`` tokens into ``CTAs x n_sub`` streams of ``ceil(S / (CTAs x
+# n_sub))`` tokens, ``n_sub`` per CTA (the CTA's token sub-tiles,
+# :func:`channel_split`), so a CTA takes about ``n_sub x L`` tokens; the cap is
+# the fewest CTAs per channel tile whose streams of ``L`` tokens cover ``S``.
+# The spans of a key ascend and are disjoint; the keys of one ``(arch, route)``
+# share no channel count and no ``(C, S)`` with an :data:`SM_WIDE_ROWS` segment,
+# a :data:`FALLBACK_ROWS` range or a backward :data:`DIRECT_ROWS` range.  The
+# program, its channel tiles and the workspace stay the row's; ``dx`` does not
+# depend on the grid; ``dweight`` / ``dbias`` sum other CTA rows.  Rendered from
+# the backward kernel generator's table; every other row keeps its grid.
+GRID_CAP_ROWS: dict[
+    str, dict[tuple[str, int, int], tuple[tuple[int, int, int], ...]]
+] = {
+    "sm_107a": {
+        ("bwd", 584, 592): ((512, 1000, 3),),
+        ("bwd", 600, 616): ((512, 999, 3),),
+        ("bwd", 624, 632): ((512, 1000, 3),),
+        ("bwd", 648, 696): ((512, 1000, 3),),
+        ("bwd", 704, 704): ((512, 999, 3),),
+        ("bwd", 712, 760): ((512, 1000, 3),),
+        ("bwd", 768, 768): ((512, 512, 3),),
+        ("bwd_bias", 512, 512): ((2049, 3072, 5),),
+    },
+}
+
+
+def grid_cap_spans(
+    arch: str, kind: str | None, C: int
+) -> tuple[tuple[int, int, int], ...] | None:
+    """The ``((S_lo, S_hi, tokens), ...)`` spans of the :data:`GRID_CAP_ROWS` key of ``arch`` on route ``kind``
+    covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of 8), ``None`` without one."""
+
+    C = int(C)
+    if C % CHANNEL_MULTIPLE:
+        return None
+    for (route, c_lo, c_hi), spans in GRID_CAP_ROWS.get(arch, {}).items():
+        if route == kind and int(c_lo) <= C <= int(c_hi):
+            return tuple(
+                (int(s_lo), int(s_hi), int(tokens)) for s_lo, s_hi, tokens in spans
+            )
+    return None
+
+
+def grid_cap_tokens(arch: str, kind: str | None, C: int, S: int | None) -> int | None:
+    """The ``tokens`` (L) of the :data:`GRID_CAP_ROWS` span holding ``S`` (both bounds included) of the key of
+    ``arch`` on route ``kind`` covering ``C``: the length of one token stream (a CTA runs ``n_sub`` streams, about
+    ``n_sub x L`` tokens); ``None`` outside every span, without a key or for ``S`` of ``None``."""
+
+    if S is None:
+        return None
+    for s_lo, s_hi, tokens in grid_cap_spans(arch, kind, C) or ():
+        if s_lo <= int(S) <= s_hi:
+            return tokens
+    return None
+
+
+def small_s_grid(
+    grid: int,
+    *,
+    arch: str,
+    route: str | None,
+    C: int,
+    S: int,
+    n_ch_tiles: int,
+    n_sub: int,
+    grid_mult: int = 1,
+) -> int:
+    """``grid``, a backward main launch's CTA count (:func:`main_grid`), capped at a
+    row of :data:`GRID_CAP_ROWS`: where :func:`grid_cap_tokens` of ``arch``,
+    ``route``, ``C`` and ``S`` gives ``tokens``, at ``grid_mult`` 1 and ``S >= 1``,
+    ``max(n_ch_tiles, min(grid, n_ch_tiles x ceil(S / (n_sub x tokens))))`` with
+    the call's plan (``n_ch_tiles`` channel tiles of ``n_sub`` sub-tiles each);
+    ``grid`` elsewhere.  The callers keep a backward :data:`DIRECT_ROWS` range out
+    (:func:`launch_grid`)."""
+
+    tokens = grid_cap_tokens(arch, route, C, S)
+    if tokens is None or grid_mult != 1 or int(S) < 1:
+        return int(grid)
+    capped = int(n_ch_tiles) * _ceil_div(int(S), int(n_sub) * tokens)
+    return max(int(n_ch_tiles), min(int(grid), capped))
 
 
 def main_grid(
@@ -7989,12 +8077,16 @@ def launch_grid(
     architecture and the record's route, so a row of :data:`TILE_OVERRIDES`
     or :data:`NARROW_TILES` trims by its own tiles) drops CTAs to whole
     channel-tile ranks (the row is planned only where :func:`row_may_trim`
-    holds).  A ``co_resident`` record with the ``cap`` ``token_blocks`` (the
-    direct programs, :data:`GRID_CAPS`) launches at most one CTA per token
-    block of the call: ``min(ctas_per_sm x SM count, n_ch_tiles x max(1,
-    ceil(S / (block_tokens x n_sub))))`` with the call's plan (:func:`plan`
-    with the architecture and the record's route), ``block_tokens`` the
-    record's ``grid_rule["block_tokens"]``, else :data:`DIRECT_BLOCK_TOKENS`;
+    holds).  At a row of :data:`GRID_CAP_ROWS` (the record's route, ``C`` and
+    ``S``; a record of ``grid_mult`` 1; not at a backward :data:`DIRECT_ROWS`
+    range) an ``occupancy`` record then launches :func:`small_s_grid` of that
+    grid with the call's plan.  A ``co_resident`` record with the ``cap``
+    ``token_blocks`` (the direct programs, :data:`GRID_CAPS`) launches at most
+    one CTA per token block of the call: ``min(ctas_per_sm x SM count,
+    n_ch_tiles x max(1, ceil(S / (block_tokens x n_sub))))`` with the call's
+    plan (:func:`plan` with the architecture and the record's route),
+    ``block_tokens`` the record's ``grid_rule["block_tokens"]``, else
+    :data:`DIRECT_BLOCK_TOKENS`;
     a backward record's capped grid is at least ``n_ch_tiles`` CTAs (every
     channel tile needs a CTA to store its gradients).  So it needs the call's
     ``C`` and ``S`` (a ``ValueError`` without them).  The grid is a pure
@@ -8033,12 +8125,20 @@ def launch_grid(
             grid_x = min(grid_x, n_ch_tiles * blocks)
             if record["role"] == "bwd":
                 grid_x = max(grid_x, n_ch_tiles)
-        if kind == "occupancy" and C is not None and S is not None and C % 32:
+        if kind == "occupancy" and C is not None and S is not None:
             co_resident = int(rule["ctas_per_sm"]) * sm_count(device_index)
             factor = grid_mult(record, arch)
-            if row_may_trim(record, arch, co_resident, factor, int(C), int(S)):
-                route = record_route(record, arch)
-                ct_vec, _, n_ch_tiles = _plan_split(
+            route = _plan_route(record, arch)
+            tokens = None
+            if factor == 1 and route is not None:
+                tokens = grid_cap_tokens(arch, route, int(C), int(S))
+                if tokens is not None and direct_row(arch, route, int(C), int(S)):
+                    tokens = None
+            trim = False
+            if C % 32:
+                trim = row_may_trim(record, arch, co_resident, factor, int(C), int(S))
+            if trim or tokens is not None:
+                ct_vec, n_sub, n_ch_tiles = _plan_split(
                     int(S),
                     int(C),
                     geometry=rule["geometry"],
@@ -8046,16 +8146,27 @@ def launch_grid(
                     arch=arch,
                     route=route,
                 )
-                grid_x = main_grid(
-                    co_resident,
-                    arch=arch,
-                    grid_mult=factor,
-                    C=int(C),
-                    n_ch_tiles=n_ch_tiles,
-                    S=int(S),
-                    ct_vec=ct_vec,
-                    route=route,
-                )
+                if trim:
+                    grid_x = main_grid(
+                        co_resident,
+                        arch=arch,
+                        grid_mult=factor,
+                        C=int(C),
+                        n_ch_tiles=n_ch_tiles,
+                        S=int(S),
+                        ct_vec=ct_vec,
+                        route=route,
+                    )
+                if tokens is not None:
+                    grid_x = small_s_grid(
+                        grid_x,
+                        arch=arch,
+                        route=route,
+                        C=int(C),
+                        S=int(S),
+                        n_ch_tiles=n_ch_tiles,
+                        n_sub=n_sub,
+                    )
     else:
         raise ValueError(
             f"unknown Cake causal conv1d training grid rule: {kind!r} (known: {GRID_KINDS})"
@@ -8119,8 +8230,10 @@ def plan_row(
     the ``[S_min, S_max]`` range of the record's :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token
     floors and single-tile range of a narrow forward row (:func:`forward_narrow_min_s`, :data:`FORWARD_WIDTH_FLOORS`
     and :func:`forward_single_tile_range`, of the call's taps: ``bf16_taps``, read on ``fwd_bias`` only), the trim of
-    :func:`launch_grid` (an ``occupancy`` record at ``C % 32`` on the default grid) and its ``token_blocks`` cap
-    (the direct programs), and ``num_docs`` only through
+    :func:`launch_grid` (an ``occupancy`` record at ``C % 32`` on the default grid), its :data:`GRID_CAP_ROWS` cap
+    (an ``occupancy`` record inside a span, on the default grid: every row of a key's channel counts plans its grid per
+    call) and its ``token_blocks`` cap (the direct programs),
+    and ``num_docs`` only through
     :func:`search_steps`; so with this row (of the call's side and taps) :func:`row_launch` returns what
     :func:`plan` and :func:`launch_grid` return for the call (the planning ``_launch`` does: ``plan(..., arch=,
     route=, bf16_taps=)`` with the record's route) without selecting, splitting or sizing the grid again.  Registry
@@ -8196,13 +8309,15 @@ def plan_row(
             ranges.append((s_min, s_max, narrow))
         overrides = tuple(ranges)
     factor = 1
+    capped = grid_cap_spans(arch, kind, C) is not None
     if rule.get("cap") is not None:
         # Capped by S (the direct programs): planned per call; a backward call multiplies the capped grid.
         grid = None
         factor = int(bwd_grid_mult) if role == "bwd" else 1
     elif bwd_grid_mult != 1:
         grid = (launch_grid(record, device_index=device_index)[0] * bwd_grid_mult, 1, 1)
-    elif rule["kind"] == "occupancy" and C % 32:
+    elif rule["kind"] == "occupancy" and (C % 32 or capped):
+        # Trimmed or capped by S: planned per call.
         grid = None
     else:
         grid = launch_grid(record, device_index=device_index)
