@@ -1469,6 +1469,23 @@ wider work items, and the kernel reads the runtime cluster size.  The GEMM opera
 described by TMA descriptors the host prepares in a per-runner descriptor
 workspace; the logits GEMM's output descriptor covers the chunk's rows only.
 
+A compacted one-chunk call of fewer valid rows than
+`cake_backend.A_EXTENT_ROWS_BY_ARCH` names for its architecture (16 on
+`sm_100a` / `sm_103a`, 256 on `sm_107a`; `cake_backend.a_extent_rows`) gives
+its logits GEMMs (every arm, the temperature forms and the kept forward
+included) an `A` descriptor of that many rows: the gather buffer holds them,
+its rows past the chunk zero.  On `sm_107a` the dX GEMM of such a call of at
+least two rows reads its `dz` the same way (`DX_A_EXTENT_ROWS_BY_ARCH`, 256
+rows of the chunk's logits buffer; not the kept backward, which reads the kept
+logits).  `M`, the output and workspace descriptors, the statistics, every
+per-row operand, the grid and the K slices keep the chunk's rows, so the extra
+rows only form accumulator rows that no epilogue stores: every output keeps
+its bits.  The padded rows are zeroed where the buffer is allocated (per call;
+once for a prepared runner, whose `lm_head_det_loss_workspace_size` covers
+them) and add up to `2 * 256 * V` bytes of logits buffer on `sm_107a`, which
+`memory_report` does not count.  Calls with every row valid (uncompacted),
+longer calls and the hidden valid-row count keep the chunk's rows.
+
 ## Layout of this package
 
 * `cake_jit.py` -- `MODULES` registry (one record per architecture, expanded
