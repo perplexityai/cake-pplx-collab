@@ -733,7 +733,7 @@ across communication-SM splits and under CUDA Graph replay.
   / 4,188 / 5,941 / 0. Every eager configuration gives the same bits at 0.2.4,
   with the split on and with it off, and every line repeats its outputs bitwise.
 
-  | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this arm (ms) | change | forward with context main (ms) | this arm (ms) | change | checkpointed step main (ms) | this arm (ms) | change |
+  | device | EP | configuration | routing | tokens per rank | forward 0.2.4 (ms) | forward, this arm (ms) | change | forward with context 0.2.4 (ms) | this arm (ms) | change | checkpointed step 0.2.4 (ms) | this arm (ms) | change |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
   | B300 | 8 | before down, 384 experts, top 6, split off (shipped) | ragged | as listed (4k) | 1.931 | 2.027 | +5.0 % (band 12.1 %, noise; steady +0.5 %) | 2.022 | 2.047 | +1.2 % (band 8.1 %, noise; steady +0.9 %) | 8.627 | 8.636 | +0.1 % (band 4.6 %, noise; steady +0.5 %) |
   | B300 | 8 | before down, 384 experts, top 6, split off (shipped) | uniform | 16,384 | 7.737 | 7.763 | +0.3 % (band 1.3 %, noise; steady -0.1 %) | 8.020 | 8.014 | -0.1 % (band 1.3 %, noise; steady -0.3 %) | 28.805 | 28.785 | -0.1 % (band 1.1 %, noise; steady +0.2 %) |
@@ -767,7 +767,7 @@ across communication-SM splits and under CUDA Graph replay.
 
   Table: the same devices at the other setting (not shipped), same method:
 
-  | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this arm (ms) | change | forward with context main (ms) | this arm (ms) | change | checkpointed step main (ms) | this arm (ms) | change |
+  | device | EP | configuration | routing | tokens per rank | forward 0.2.4 (ms) | forward, this arm (ms) | change | forward with context 0.2.4 (ms) | this arm (ms) | change | checkpointed step 0.2.4 (ms) | this arm (ms) | change |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
   | B300 | 8 | before down, 384 experts, top 6, split on (not shipped) | ragged | as listed (4k) | 1.931 | 2.085 | +8.0 % (band 11.8 %, noise; steady +0.4 %) | 2.022 | 2.022 | +0.0 % (band 7.4 %, noise; steady -0.6 %) | 8.627 | 8.580 | -0.5 % (band 4.1 %, noise; steady -0.2 %) |
   | B300 | 8 | before down, 384 experts, top 6, split on (not shipped) | uniform | 16,384 | 7.737 | 7.707 | -0.4 % (band 1.3 %, noise; steady -1.1 %) | 8.020 | 8.066 | +0.6 % (band 1.8 %, noise; steady +0.3 %) | 28.805 | 28.820 | +0.1 % (band 1.1 %, noise; steady +0.4 %) |
@@ -794,9 +794,12 @@ across communication-SM splits and under CUDA Graph replay.
   After 0.2.5 (its fixed B300 BF16 EP8 split, forward / backward 24 / 40): this
   package (the split off there, no row) against 0.2.5 on B300, same method and
   configurations: record window 0 faster, 0 slower, 12 within noise of 12;
-  steady window 0 faster, 0 slower, 12 within noise of 12. With the split forced
-  on (not shipped): record window 0 faster, 0 slower, 14 within noise of 14;
-  steady window 0 faster, 0 slower, 14 within noise of 14.
+  steady window 0 faster, 0 slower, 12 within noise of 12. 2 of these rows are
+  above 0.2.5 in every round, inside the band: forward with context, ragged 16k,
+  record window +0.57 % (band 3.15 %); forward, uniform 16,384, record window
+  +1.54 % (band 1.80 %). With the split forced on (not shipped): record window 0
+  faster, 0 slower, 14 within noise of 14; steady window 0 faster, 0 slower, 14
+  within noise of 14.
 
 Optimizer steps, router-network backpropagation and shared-gradient
 all-reduce are outside this adapter.
