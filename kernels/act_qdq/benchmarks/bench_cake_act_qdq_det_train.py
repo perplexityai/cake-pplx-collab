@@ -27,6 +27,12 @@ Cases: ``[rows, 512]`` FP4 (E4M3 scale, group 16); ``[rows, 128]`` and
 8,192 and 16,384 rows.  Each runs out of place and in place, eager and in a
 CUDA graph, without and with the scale output.  The input is ``randn`` BF16.
 
+``--locality domain`` (or ``both``) adds ``cake_domain`` rows on SM107: the
+out-of-place call with ``locality="domain"``, its input and output from
+``cake_act_qdq_det_train_domain_empty``, each row recording the program the
+call runs (``route``, ``reason``: ``cake_act_qdq_det_train_domain_plan``) and
+whether its output equals the default call's bit for bit (``exact``).
+
 Optional baselines, each imported only when its flag is given:
 
 - ``--deepseek-kernel PATH``: the TileLang kernels of DeepSeek-V4.1-Flash
@@ -71,6 +77,8 @@ import torch
 
 from cake_pplx.cake_act_qdq_det_train import (
     GROUP_SIZES,
+    cake_act_qdq_det_train_domain_empty,
+    cake_act_qdq_det_train_domain_plan,
     cake_act_qdq_det_train_forward,
     is_cake_act_qdq_det_train_supported,
 )
@@ -85,6 +93,7 @@ CASES = (
     ("mxfp8_e8m0_g32", (8, 4096)),
 )
 MODES = ("out_of_place", "in_place")
+LOCALITIES = ("off", "domain", "both")
 EXECS = ("eager", "graph")
 QMAX = {"fp4_e4m3_g16": 6.0, "mxfp4_e8m0_g32": 6.0, "mxfp8_e8m0_g32": 448.0}
 DEEPSEEK_REVISION = "314113f8a7dadb388215396ba5fbee2c610a04d6"
@@ -391,6 +400,30 @@ def _bench_cake(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]]
                 _try_measure(out, base, fn, execution)
 
 
+def _bench_cake_domain(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]]) -> None:
+    """The ``locality="domain"`` call, out of place, its ``x`` and ``out`` in die-interleaved memory."""
+    for scales in args.scales:
+        base = _row(case.common, impl="cake_domain", mode="out_of_place", scales=scales)
+        try:
+            x = cake_act_qdq_det_train_domain_empty(case.shape)
+            y = cake_act_qdq_det_train_domain_empty(case.shape)
+            x.copy_(case.x0)
+            s = torch.empty_like(case.want_s) if scales else None
+            plan = cake_act_qdq_det_train_domain_plan(x, format=case.fmt, out=y, scales=s)
+            cake_act_qdq_det_train_forward(x, format=case.fmt, out=y, scales=s, locality="domain")
+            exact = _same_bits(y, case.want_y) and (s is None or _same_bits(s, case.want_s))
+        except Exception as error:  # noqa: BLE001 - recorded, not fatal (no SM107, no cuda-python)
+            out.append(_row(base, error=f"{type(error).__name__}: {error}"[:400]))
+            continue
+        base = _row(base, exact=exact, route=plan["route"], reason=plan["reason"])
+
+        def fn(x=x, y=y, s=s):
+            return cake_act_qdq_det_train_forward(x, format=case.fmt, out=y, scales=s, locality="domain")
+
+        for execution in args.exec:
+            _try_measure(out, base, fn, execution)
+
+
 def _bench_deepseek(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]]) -> None:
     module = _deepseek(args.deepseek_kernel)
     width, group = case.shape[-1], case.group
@@ -478,7 +511,10 @@ def _bench_cudnn(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]
 def _run_case(args: argparse.Namespace, fmt: str, inner: tuple[int, ...], rows_count: int, env: dict) -> list:
     case = _Case(fmt, inner, rows_count, env)
     out: list[dict[str, Any]] = []
-    _bench_cake(args, case, out)
+    if args.locality != "domain":
+        _bench_cake(args, case, out)
+    if args.locality != "off":
+        _bench_cake_domain(args, case, out)
     baselines = []
     if args.deepseek_kernel:
         baselines.append(("deepseek_tilelang", lambda: _bench_deepseek(args, case, out)))
@@ -535,6 +571,12 @@ def main() -> None:
     parser.add_argument("--deepseek-kernel", help="path of DeepSeek-V4.1-Flash inference/kernel.py")
     parser.add_argument("--torch-compile", action="store_true", help="time a torch.compile composite of the rule")
     parser.add_argument("--cudnn", action="store_true", help="time cuDNN frontend RopeQDQInplace (sm_100 only)")
+    parser.add_argument(
+        "--locality",
+        choices=LOCALITIES,
+        default="off",
+        help='Cake calls: "off" (default), "domain" (SM107 die-interleaved memory, out of place) or both',
+    )
     parser.add_argument("--no-oracle", action="store_true", help="skip the FP64 check of the Cake output")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
