@@ -4616,17 +4616,23 @@ class _KeptPlan(Plan):
         return tuple(s for s in super().stages if s not in recompute)
 
 
-# The padded A extent of a small compacted one-chunk call, per architecture: the logits GEMMs (every arm: the plain
-# and statistics-free forms, the label-column and ``dz`` arms, their temperature forms) of a chunk of
-# :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` valid rows read their A operand -- the gathered rows -- through
-# a tensor map of this many rows, the rows past the chunk zero; on the architectures of
-# :data:`DX_A_EXTENT_ROWS_BY_ARCH` the dX GEMM reads the chunk's ``dz`` the same way (from :data:`DX_A_EXTENT_MIN_ROWS`
-# rows on).  On R200 (sm_107a) the shipped programs run a chunk of a few rows slower than one of 256 rows: the A
-# operand's row extent, not the row count, sets their time there (CUPTI, us, the logits GEMM of a log-probability
-# forward + backward step at 14 / 182 / 242 valid rows: 325.6 -> 167.2 / 237.7 -> 175.2 / 178.6 -> 178.6; the step at
-# T = 16 / 192, 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3).  The row window is the measured one: the
-# forward at 242 valid rows measured slower with the extent, and no call below 14 valid rows was measured.  B200 and
-# GB300 keep the chunk's rows (a 16-row extent made no call faster there).  ``M`` (the epilogues' row bound), ``C``, the
+# The padded A extent of a small compacted one-chunk call of the log-probability entry's eager forms without a
+# temperature (the plans :func:`prepare_lm_head_det_loss` builds with ``_a_extent``: the forward, the kept forward, the
+# recompute backward and the kept backward of :func:`forward_logprob` / :func:`backward_logprob` and their kept forms),
+# per architecture: the logits GEMMs (the kept forward's, the label-column arm's forward and the ``dz`` arm's recompute;
+# not the previous path's plain logits GEMM of ``logprob_lbl=False`` / ``logprob_dz=False``) of a chunk of
+# :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` valid rows read their A operand -- the gathered rows --
+# through a tensor map of this many rows, the rows past the chunk zero; on the architectures of
+# :data:`DX_A_EXTENT_ROWS_BY_ARCH` the recompute backward's dX GEMM reads the chunk's ``dz`` the same way (from
+# :data:`DX_A_EXTENT_MIN_ROWS` rows on).  On R200 (sm_107a) the shipped programs run a chunk of a few rows slower than
+# one of 256 rows: the A operand's row extent, not the row count, sets their time there (CUPTI, us, the logits GEMM of a
+# log-probability forward + backward step at 14 / 182 / 242 valid rows: 325.6 -> 167.2 / 237.7 -> 175.2 / 178.6 ->
+# 178.6; the default autograd step at T = 16 / 192, 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3; its
+# checkpointed step, which runs the recompute backward and its dX GEMM, at T = 16 2142.5 -> 1594.8).  The row window and
+# the forms are the measured ones: the forward at 242 valid rows measured slower with the extent, no call below 14
+# valid rows was measured, and the loss entry, the temperature forms and the prepared runners (CUDA graphs included)
+# were not measured with the extent, so they keep the chunk's rows.  B200 and GB300 keep the chunk's rows (a 16-row
+# extent made no call faster there).  ``M`` (the epilogues' row bound), ``C``, the
 # statistics, every per-row operand, the grid and the K slices keep the chunk's rows, so the extra rows only form
 # accumulator rows that no epilogue stores and no per-row read reaches: every output keeps its bits.  At most a chunk
 # (``pad <= chunk``).
@@ -4686,6 +4692,7 @@ def make_plan(
     counted_tma_cast: bool = True,
     dx_slices_cap: Optional[int] = None,
     cast_fold: bool = False,
+    a_extent: bool = False,
 ) -> Plan:
     """The chunk schedule; ``dx_max_slices`` > 1 (K-sliced dX stages registered) picks each chunk's slice count
     (``dx_resident`` = the device's co-resident dX clusters, :func:`cluster_resident`); ``valid_rows`` (compaction)
@@ -4708,11 +4715,20 @@ def make_plan(
     one (an explicitly pinned weight-gradient TMA epilogue, an fp32 fused cast).  ``dx_slices_cap`` (the zero-weight
     split of the loss entry, :func:`forward_loss`): no chunk's rule-picked dX slice count exceeds it
     (:func:`capped_k_slices`; an explicit ``k_slices`` knob is not capped).  ``cast_fold``: the compact dX cast folds
-    the label residuals of the one-slice chunks (:attr:`Plan.cast_fold`, :func:`cast_fold_rows`).  A compacted
-    one-chunk plan without the hidden valid-row count takes the padded A extents of ``arch``
-    (:func:`a_extent_rows`, :attr:`Plan.a_rows` / :attr:`Plan.dx_a_rows`)."""
+    the label residuals of the one-slice chunks (:attr:`Plan.cast_fold`, :func:`cast_fold_rows`).  ``a_extent`` (the
+    log-probability entry's eager forms without a temperature, :func:`prepare_lm_head_det_loss`'s ``_a_extent``): a
+    compacted one-chunk plan without the hidden valid-row count -- a kept plan, a forward with the label-column arm or a
+    backward with the ``dz`` arm -- takes the padded A extents of ``arch`` (:func:`a_extent_rows`, :attr:`Plan.a_rows`
+    / :attr:`Plan.dx_a_rows`); every other plan keeps the chunk's rows."""
     if (logprob_dz or logprob_lbl or logprob_keep) and problem.entry != "logprob":
         raise ValueError("the logits GEMM arms belong to the log-probability entry")
+    # the padded A extents serve the measured forms only: the kept logits, the label-column arm's forward and the
+    # ``dz`` arm's recompute backward (not the previous path's plain logits GEMM of ``logprob_lbl=False`` /
+    # ``logprob_dz=False``)
+    a_extent = bool(
+        a_extent
+        and (logprob_keep or (logprob_dz if need_dx or need_dw else logprob_lbl))
+    )
     if logprob_keep:
         if arch is None:
             raise ValueError(
@@ -4826,9 +4842,9 @@ def make_plan(
         )
         hidden_group = None if raster is None else raster[0]
     a_rows = dx_a_rows = 0
-    if valid_rows is not None and len(chunks) == 1 and not hidden_count:
-        # a compacted one-chunk call (its A operands are the plan's own chunk buffers); the kept dX GEMM reads the
-        # caller's kept view, which keeps its rows
+    if a_extent and valid_rows is not None and len(chunks) == 1 and not hidden_count:
+        # a compacted one-chunk call of the log-probability entry's eager forms (``a_extent``; its A operands are the
+        # plan's own chunk buffers); the kept dX GEMM reads the caller's kept view, which keeps its rows
         a_rows = a_extent_rows(rows, problem.chunk, arch)
         if need_dx and not logprob_keep:
             dx_a_rows = a_extent_rows(rows, problem.chunk, arch, dx=True)
@@ -5455,12 +5471,6 @@ def lm_head_det_loss_workspace_size(
             )
             - 1
         )
-    # a compacted one-chunk plan of a few valid rows pads its A extents (:func:`a_extent_rows`): sized for the
-    # padded buffers, which bound every valid-row count's (none when the call has fewer rows than the window)
-    arch = record["arch"]
-    padded = bool(compact_rows) and int(num_rows) >= A_EXTENT_MIN_ROWS
-    x_c_rows = a_extent_pad(chunk, arch) if padded else 0
-    logits_rows = a_extent_pad(chunk, arch, dx=True) if padded and need_dx else 0
     return int(
         workspace_layout(
             num_rows,
@@ -5473,8 +5483,6 @@ def lm_head_det_loss_workspace_size(
             dx_ws_slabs=slabs,
             hidden=hidden or 0,
             compact=bool(compact_rows),
-            x_c_rows=x_c_rows,
-            logits_rows=logits_rows,
         )["total"]
     )
 
@@ -7764,6 +7772,7 @@ def prepare_lm_head_det_loss(
     cast_fold: bool = False,
     _template_only: bool = False,
     _chunk_views: Optional["_HiddenCount"] = None,
+    _a_extent: bool = False,
 ) -> LmHeadDetLossRunner:
     """Validate one binding and prepare its launches.
 
@@ -7849,7 +7858,10 @@ def prepare_lm_head_det_loss(
     which launches with per-call buffers and the device's constant cells
     (:func:`_device_constants`).  It binds those cells too, rather than filling
     cells of its own, and it never launches (a runner of ``_chunk_views`` is
-    one).
+    one).  ``_a_extent`` (private; the log-probability entry's eager forms
+    without a temperature): the plan takes the padded A extents of a small
+    compacted one-chunk call (:func:`make_plan`'s ``a_extent``); a prepared
+    runner keeps the chunk's rows.
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
@@ -7972,6 +7984,7 @@ def prepare_lm_head_det_loss(
         # :func:`make_plan` has no temperature forms); the caller passes the fold operands to :func:`finalize_dx`
         # (:func:`cast_fold_operands`)
         cast_fold=bool(cast_fold and backend == "cake"),
+        a_extent=bool(_a_extent and entry == "logprob"),
     )
     plan = plan_of(dcnt=dcnt is not None)
     if plan.dcnt and any(s not in stages for s in plan.stages):
@@ -11464,6 +11477,7 @@ def _forward_logprob_rows(
         logprob_lbl=lbl,
         _template_only=arena is not None and backend == "cake",
         _chunk_views=hc,
+        _a_extent=True,
     )
     if hc is not None or (arena is not None and backend == "cake"):
         # the hidden valid-row count: chunk 0's logits already sit in the prologue's buffers, so the first call launches
@@ -11708,6 +11722,7 @@ def backward_logprob(
         else None,
         cast_fold=cast_fold,
         _template_only=hc is not None and backend == "cake",
+        _a_extent=True,
     )
     if hc is not None or (skip and runner.plan.dcnt):
         binding = _Binding.from_runner(runner, hc)
@@ -12388,6 +12403,7 @@ def _forward_keep_bound(
             logprob_lbl=False,
             logprob_keep=True,
             _template_only=backend == "cake",
+            _a_extent=True,
         )
         # the kept views are bound per call: every call launches through the templated binding
         binding = cast(_KeptBinding, _KeptBinding.from_runner(runner, hc))
@@ -12533,6 +12549,7 @@ def backward_logprob_keep(
             logprob_keep=True,
             cast_fold=cast_fold,
             _template_only=backend == "cake",
+            _a_extent=True,
         )
         binding = cast(_KeptBinding, _KeptBinding.from_runner(runner))
         del runner

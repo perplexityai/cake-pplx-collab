@@ -1471,26 +1471,35 @@ wider work items, and the kernel reads the runtime cluster size.  The GEMM opera
 described by TMA descriptors the host prepares in a per-runner descriptor
 workspace; the logits GEMM's output descriptor covers the chunk's rows only.
 
-On `sm_107a` a compacted one-chunk call of 14 to 182 valid rows
-(`cake_backend.A_EXTENT_MIN_ROWS` / `A_EXTENT_MAX_ROWS`, fewer than the 256
-rows `cake_backend.A_EXTENT_ROWS_BY_ARCH` names; `cake_backend.a_extent_rows`)
-gives its logits GEMMs (every arm, the temperature forms and the kept forward
-included) an `A` descriptor of 256 rows: the gather buffer holds them, its
-rows past the chunk zero.  Its dX GEMM reads its `dz` the same way
-(`DX_A_EXTENT_ROWS_BY_ARCH`, 256 rows of the chunk's logits buffer; not the
-kept backward, which reads the kept logits).  `M`, the output and workspace
-descriptors, the statistics, every per-row operand, the grid and the K slices
-keep the chunk's rows, so the extra rows only form accumulator rows that no
-epilogue stores: every output keeps its bits.  The shipped programs run a
-chunk of a few rows slower than one of 256 rows there (CUPTI, the logits GEMM
-of a log-probability step at 14 valid rows 325.6 -> 167.2 us, at 182 valid
-rows 237.7 -> 175.2 us; at 242 valid rows the forward measured slower, so
-the window stops at the measured 182).  The padded rows are zeroed where the
-buffer is allocated (per call; once for a prepared runner, whose
-`lm_head_det_loss_workspace_size` covers them) and add up to `2 * 256 * V`
-bytes of logits buffer, which `memory_report` does not count.  Calls with
-every row valid (uncompacted), longer calls, the hidden valid-row count and
-the other architectures keep the chunk's rows.
+On `sm_107a` the log-probability entry's eager calls without a temperature
+(`cake_lm_head_det_train_logprob` and the backend's `forward_logprob` /
+`backward_logprob`, their kept-logits forms included) of one compacted chunk
+of 14 to 182 valid rows (`cake_backend.A_EXTENT_MIN_ROWS` /
+`A_EXTENT_MAX_ROWS`, fewer than the 256 rows
+`cake_backend.A_EXTENT_ROWS_BY_ARCH` names; `cake_backend.a_extent_rows`)
+give their logits GEMMs -- the kept forward's, the label-column arm's forward
+and the `dz` arm's recompute -- an `A` descriptor of 256 rows: the gather
+buffer holds them, its rows past the chunk zero.  The recompute backward's
+dX GEMM reads its `dz` the same way (`DX_A_EXTENT_ROWS_BY_ARCH`, 256 rows of
+the chunk's logits buffer; not the kept backward, which reads the kept
+logits).  `M`, the output and workspace descriptors, the statistics, every
+per-row operand, the grid and the K slices keep the chunk's rows, so the
+extra rows only form accumulator rows that no epilogue stores: every output
+keeps its bits.  The shipped programs run a chunk of a few rows slower than
+one of 256 rows there (CUPTI, the logits GEMM of a log-probability step at
+14 valid rows 325.6 -> 167.2 us, at 182 valid rows 237.7 -> 175.2 us; at
+242 valid rows the forward measured slower, so the window stops at the
+measured 182).  Measured on the default autograd call: the step at `T` = 16
+(15 valid rows) 1450.7 -> 1230.7 us, its checkpointed step (the recompute
+backward and its dX GEMM) 2142.5 -> 1594.8 us.  The padded rows are zeroed
+where the buffer is allocated (per call) and add up to `2 * 256 * V` bytes of
+logits buffer, which `memory_report` does not count.  The loss entry, the
+temperature forms, the prepared runners (`prepare_lm_head_det_loss`, CUDA
+graphs included), the previous path's plain logits GEMM
+(`logprob_lbl=False` / `logprob_dz=False`), calls with every row valid
+(uncompacted), longer calls, the hidden valid-row count and the other
+architectures keep the chunk's rows: the extent was measured only on the
+default log-probability call.
 
 ## Layout of this package
 
