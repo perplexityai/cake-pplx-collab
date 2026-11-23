@@ -121,7 +121,9 @@ for its placement.  `cake_act_qdq_det_train_domain_plan` returns the route, the 
 `"empty"`, `"arch"`, `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"` and
 `"die_parity"` that holds), the program, `first_tile`, `first_die` and the grid, without a launch.  An in-place call
 runs the `"off"` program: the interleaved-domain programs take `x` and `y` as non-aliasing (restrict) buffers.  On
-VR200, {{DOMAIN_SPEEDUP}}.  The plain programs run on the helper's memory as fast as on default memory.
+VR200, the domain program ran 1.02-1.11x as fast as the `"off"` program on the package benchmark's out-of-place rows
+from 8,388,608 vectors (GPU time, median of 4 GPUs; MXFP8 `[16384, 8, 4096]`: 162.1 µs off, 147.5 µs domain).  The plain
+programs run on the helper's memory as fast as on default memory.
 
 The claim counters are one unsigned 32-bit word per die in a 128-byte workspace (`cake_domain`; the record's
 `counters` field).  Every launch leaves its counters zero, so the package zeroes a workspace once, when it makes it.
