@@ -29,9 +29,10 @@ non-deterministic weight gradient is
 
 from __future__ import annotations
 
+import functools
 import math
 import textwrap
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -62,10 +63,22 @@ def _device_index(device: torch.device) -> int:
     return device.index if device.index is not None else torch.cuda.current_device()
 
 
+@functools.cache
+def _capability(device_index: int) -> tuple[int, int]:
+    """The compute capability of a CUDA device (fixed for the process)."""
+
+    major, minor = torch.cuda.get_device_capability(device_index)
+    return int(major), int(minor)
+
+
+def _device_capability(device: torch.device) -> tuple[int, int]:
+    return _capability(_device_index(device))
+
+
 def _device_arch(device: torch.device) -> str:
     if device.type != "cuda":
         raise ValueError(f"Cake RMSNorm training requires CUDA tensors, got {device}")
-    capability = tuple(torch.cuda.get_device_capability(device))
+    capability = _device_capability(device)
     arch = arch_for_capability(capability)
     if arch is None:
         raise ValueError(
@@ -554,13 +567,17 @@ def _workspace_views(
     rows: int,
     device: torch.device,
     owner: Optional[dict] = None,
+    layout: dict[str, int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, int]]:
-    layout = _loader.workspace_layout(
-        record,
-        rows,
-        device_index=_device_index(device),
-        capacity_record=record if owner is None else owner,
-    )
+    # ``layout``: the ``cake_jit.workspace_layout`` of ``record`` with the
+    # capacity of ``owner`` (the backward's plan holds it), else computed here
+    if layout is None:
+        layout = _loader.workspace_layout(
+            record,
+            rows,
+            device_index=_device_index(device),
+            capacity_record=record if owner is None else owner,
+        )
     if not isinstance(workspace, torch.Tensor):
         raise TypeError("workspace must be a torch.Tensor")
     if (
@@ -593,6 +610,175 @@ def _workspace_views(
         torch.uint32
     )
     return partial, counters, layout
+
+
+# Entries of each host-path memo (``_backward_plan``, ``_launch_plan``): one per
+# (device, width, residual flag, weight dtype, token count) a process calls
+# with; a training run repeats a handful.
+_PLAN_CACHE_SIZE = 256
+
+
+def _registry_token() -> tuple:
+    """The registry objects a memoised host plan reads (part of its key): a
+    plan computed against a replaced registry table, SM-count function or
+    accuracy-guard table is never served for another."""
+
+    return (
+        id(_loader.MODULES),
+        id(_loader.ROUTES),
+        _loader.sm_count,
+        id(_windows.ACCURACY_EDGES),
+        id(_windows.ACCURACY_MIN_SMS),
+    )
+
+
+@functools.lru_cache(maxsize=_PLAN_CACHE_SIZE)
+def _backward_plan(
+    device_index: int,
+    arch: str,
+    hidden: int,
+    residual: bool,
+    w_dtype: str,
+    rows: int,
+    select: Any,
+    registry: tuple,
+) -> tuple[tuple[str, ...], dict, dict | None, dict[str, int]]:
+    """``(module names, the launched workspace-owning record, the route's
+    partial-capacity owner or None, the launched record's workspace layout)``
+    of the backward call of ``rows`` tokens, ``select`` the
+    ``selected_modules`` in place.  Memoised per device, width, residual flag,
+    weight dtype and token count: it reads only registry constants, the
+    accuracy-guard tables and the SM counts (no tensor, pointer or stream); an
+    error is raised again on every call.  The layout is shared: callers read
+    it only."""
+
+    owner = _workspace_record(arch, hidden, residual, rows, w_dtype)
+    selection = _backward_selection_rows(
+        arch, hidden, residual, rows, w_dtype, device_index
+    )
+    names = tuple(
+        select(arch, hidden, "bwd", residual, rows=selection, w_dtype=w_dtype)
+    )
+    launched = [
+        _loader.MODULES[name]
+        for name in names
+        if _loader.MODULES[name].get("workspace_rule") is not None
+    ]
+    if len(launched) != 1:
+        raise RuntimeError(
+            f"the exported backward route for hidden={hidden} launches "
+            f"{len(launched)} workspace-owning modules for {rows} rows; expected one"
+        )
+    layout = _loader.workspace_layout(
+        launched[0],
+        rows,
+        device_index=device_index,
+        capacity_record=launched[0] if owner is None else owner,
+    )
+    return names, launched[0], owner, layout
+
+
+# The loader functions a launch reads, as this module imported them.  A launch
+# plan (:func:`_launch_plan`) holds what ``_loader.run_module`` computes with
+# them, so a call uses one only while all five are in place; while one is
+# replaced (a test's recording ``run_module`` or emulated SM count, for
+# example) every launch goes through ``_loader.run_module``.
+_RUN_MODULE = _loader.run_module
+_LAUNCH_GRID = _loader.launch_grid
+_SM_COUNT = _loader.sm_count
+_LOAD = _loader.load
+_DEVICE_ARCH = _loader.device_arch
+
+
+def _loader_in_place() -> bool:
+    """Whether the loader functions a launch plan replays are the imported ones."""
+
+    return (
+        _loader.run_module is _RUN_MODULE
+        and _loader.launch_grid is _LAUNCH_GRID
+        and _loader.sm_count is _SM_COUNT
+        and _loader.load is _LOAD
+        and _loader.device_arch is _DEVICE_ARCH
+    )
+
+
+@functools.lru_cache(maxsize=_PLAN_CACHE_SIZE)
+def _launch_plan(
+    names: tuple[str, ...],
+    arch: str,
+    rows: int,
+    device_index: int,
+    registry: tuple,
+    launch_grid: Any,
+) -> tuple[tuple[str, Any, tuple[str, ...], tuple[int, ...]], ...] | None:
+    """``(name, run function, argument names, grid)`` of each module of
+    ``names``, in order, for a call of ``rows`` tokens on device
+    ``device_index`` (architecture ``arch``): what ``_loader.run_module``
+    computes for the launch -- the ``run`` function of the module ``load``
+    returns for ``arch``, the logical names of the record's kernel arguments
+    in its ``arg_plan`` order and the ``launch_grid`` values that end it.
+    Memoised per call shape: it reads only registry constants, the device's
+    SM count and the loaded modules (no tensor, pointer or stream); ``None``
+    when an ``arg_plan`` has a kernel argument after a grid value; an error
+    is raised again on every call."""
+
+    plan = []
+    for name in names:
+        record = _loader.MODULES[name]
+        logical = record["logical"]
+        grid = launch_grid(record, rows, device_index=device_index)
+        grid_values = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
+        keys: list[str] = []
+        tail: list[int] = []
+        for kind, key in record["arg_plan"]:
+            if kind == "grid":
+                tail.append(grid_values[key])
+            elif tail:
+                return None
+            else:
+                keys.append(logical[key])
+        plan.append((name, _loader.load(name, arch).run, tuple(keys), tuple(tail)))
+    return tuple(plan)
+
+
+def _run(
+    names: tuple[str, ...],
+    values: dict[str, object],
+    *,
+    arch: str,
+    rows: int,
+    device_index: int,
+) -> None:
+    """Launch the modules ``names`` in order with the logical arguments
+    ``values`` on the current torch stream: per module the kernel, arguments,
+    grid and launch attributes of ``_loader.run_module``, from the call
+    shape's :func:`_launch_plan`, all inside one ``tvm_ffi.use_torch_stream()``
+    (``run_module`` enters one per module).  While a loader function the plan
+    replays is replaced, or when no plan can be made, each module is launched
+    through ``_loader.run_module`` as before, which raises any error of the
+    plan after the launches that come before it."""
+
+    plan = None
+    if _loader_in_place():
+        try:
+            plan = _launch_plan(
+                names, arch, rows, device_index, _registry_token(), _loader.launch_grid
+            )
+        except Exception:  # noqa: BLE001 - run_module raises it again below, in order
+            plan = None
+    if plan is None:
+        for name in names:
+            _loader.run_module(name, values, rows=rows, device_index=device_index)
+        return
+    with _loader.tvm_ffi.use_torch_stream():
+        for name, run, keys, grid in plan:
+            try:
+                args = [values[key] for key in keys]
+            except KeyError:
+                # ``run_module`` raises the error that names the missing argument
+                _loader.run_module(name, values, rows=rows, device_index=device_index)
+                continue
+            run(*args, *grid)
 
 
 def cake_rmsnorm_det_train_forward(
@@ -682,7 +868,7 @@ def cake_rmsnorm_det_train_forward(
             alignment=align,
         )
     if not route_applies(
-        device_capability=tuple(torch.cuda.get_device_capability(device)),
+        device_capability=_device_capability(device),
         hidden=hidden,
         kind="fwd",
         residual=has_residual,
@@ -748,10 +934,13 @@ def cake_rmsnorm_det_train_forward(
         "u_stride": int(residual.stride(0)) if has_residual else 0,
     }
     device_index = _device_index(device)
-    for name in selected_modules(
-        arch, hidden, "fwd", has_residual, rows=rows, w_dtype=w_dtype
-    ):
-        _loader.run_module(name, values, rows=rows, device_index=device_index)
+    _run(
+        selected_modules(arch, hidden, "fwd", has_residual, rows=rows, w_dtype=w_dtype),
+        values,
+        arch=arch,
+        rows=rows,
+        device_index=device_index,
+    )
     _copy_back(copy_backs)
     return results
 
@@ -868,7 +1057,7 @@ def cake_rmsnorm_det_train_backward(
             alignment=align,
         )
     if not route_applies(
-        device_capability=tuple(torch.cuda.get_device_capability(device)),
+        device_capability=_device_capability(device),
         hidden=hidden,
         kind="bwd",
         residual=has_residual,
@@ -891,32 +1080,21 @@ def cake_rmsnorm_det_train_backward(
     if rows == 0:
         dw_result.zero_()
         return dx_result, dw_result
-    owner = _workspace_record(arch, hidden, has_residual, rows, w_dtype)
-    selection = _backward_selection_rows(
-        arch, hidden, has_residual, rows, w_dtype, _device_index(device)
+    device_index = _device_index(device)
+    names, record, owner, layout = _backward_plan(
+        device_index,
+        arch,
+        hidden,
+        has_residual,
+        w_dtype,
+        rows,
+        selected_modules,
+        _registry_token(),
     )
-    names = selected_modules(
-        arch, hidden, "bwd", has_residual, rows=selection, w_dtype=w_dtype
-    )
-    launched = [
-        _loader.MODULES[name]
-        for name in names
-        if _loader.MODULES[name].get("workspace_rule") is not None
-    ]
-    if len(launched) != 1:
-        raise RuntimeError(
-            f"the exported backward route for hidden={hidden} launches "
-            f"{len(launched)} workspace-owning modules for {rows} rows; expected one"
-        )
     if workspace is None and hidden in _PER_CALL_WORKSPACE_WIDTHS:
         # private to this call: only the launched module's layout bytes, with the
         # partial capacity ``_workspace_views`` binds, not every window's
-        nbytes = _loader.workspace_layout(
-            launched[0],
-            rows,
-            device_index=_device_index(device),
-            capacity_record=launched[0] if owner is None else owner,
-        )["total_bytes"]
+        nbytes = layout["total_bytes"]
         workspace = torch.zeros(int(nbytes), dtype=torch.uint8, device=device)
     if workspace is None:
         workspace = cake_rmsnorm_det_train_backward_workspace(
@@ -931,7 +1109,7 @@ def cake_rmsnorm_det_train_backward(
     # tasks and the chunks, store ``dx`` by row and ``dw`` by column, each
     # column summed in a fixed order.
     partial, counters, layout = _workspace_views(
-        workspace, launched[0], rows=rows, device=device, owner=owner
+        workspace, record, rows=rows, device=device, owner=owner, layout=layout
     )
     # The plain kernel keeps the residual-gradient parameters in its signature
     # and never reads them: bind them to ``g`` exactly like the source launcher.
@@ -953,9 +1131,7 @@ def cake_rmsnorm_det_train_backward(
         "n_chunks": int(layout["n_chunks"]),
         "slots": int(layout["slots"]),
     }
-    device_index = _device_index(device)
-    for name in names:
-        _loader.run_module(name, values, rows=rows, device_index=device_index)
+    _run(names, values, arch=arch, rows=rows, device_index=device_index)
     _copy_back(copy_backs)
     return dx_result, dw_result
 

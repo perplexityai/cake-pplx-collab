@@ -54,7 +54,7 @@ import functools
 import math
 import textwrap
 import warnings
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -456,9 +456,9 @@ def _copy_back(pairs: list[tuple[torch.Tensor, Optional[torch.Tensor]]]) -> None
             user_buffer.copy_(kernel_buffer.reshape(user_buffer.shape))
 
 
-# Entries of each host-path memo (``_backward_plan``, ``_workspace_bytes_of``):
-# one per (device, width, residual flag, weight dtype, token count) a process
-# calls with; a training run repeats a handful.
+# Entries of each host-path memo (``_backward_plan``, ``_workspace_bytes_of``,
+# ``_launch_plan``): one per (device, width, residual flag, weight dtype, token
+# count) a process calls with; a training run repeats a handful.
 _PLAN_CACHE_SIZE = 256
 
 
@@ -781,6 +781,109 @@ def _backward_plan(
     return names, record, layout
 
 
+# The loader functions a launch reads, as this module imported them.  A launch
+# plan (:func:`_launch_plan`) holds what ``_loader.run_module`` computes with
+# them, so a call uses one only while all five are in place; while one is
+# replaced (a test's recording ``run_module`` or emulated SM count, for
+# example) every launch goes through ``_loader.run_module``.
+_RUN_MODULE = _loader.run_module
+_LAUNCH_GRID = _loader.launch_grid
+_SM_COUNT = _loader.sm_count
+_LOAD = _loader.load
+_DEVICE_ARCH = _loader.device_arch
+
+
+def _loader_in_place() -> bool:
+    """Whether the loader functions a launch plan replays are the imported ones."""
+
+    return (
+        _loader.run_module is _RUN_MODULE
+        and _loader.launch_grid is _LAUNCH_GRID
+        and _loader.sm_count is _SM_COUNT
+        and _loader.load is _LOAD
+        and _loader.device_arch is _DEVICE_ARCH
+    )
+
+
+@functools.lru_cache(maxsize=_PLAN_CACHE_SIZE)
+def _launch_plan(
+    names: tuple[str, ...],
+    arch: str,
+    rows: int,
+    device_index: int,
+    registry: tuple,
+    launch_grid: Any,
+) -> tuple[tuple[str, Any, tuple[str, ...], tuple[int, ...]], ...] | None:
+    """``(name, run function, argument names, grid)`` of each module of
+    ``names``, in order, for a call of ``rows`` tokens on device
+    ``device_index`` (architecture ``arch``): what ``_loader.run_module``
+    computes for the launch -- the ``run`` function of the module ``load``
+    returns for ``arch``, the logical names of the record's kernel arguments
+    in its ``arg_plan`` order and the ``launch_grid`` values that end it.
+    Memoised per call shape: it reads only registry constants, the device's
+    SM count and the loaded modules (no tensor, pointer or stream); ``None``
+    when an ``arg_plan`` has a kernel argument after a grid value; an error
+    is raised again on every call."""
+
+    plan = []
+    for name in names:
+        record = _loader.MODULES[name]
+        logical = record["logical"]
+        grid = launch_grid(record, rows, device_index=device_index)
+        grid_values = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
+        keys: list[str] = []
+        tail: list[int] = []
+        for kind, key in record["arg_plan"]:
+            if kind == "grid":
+                tail.append(grid_values[key])
+            elif tail:
+                return None
+            else:
+                keys.append(logical[key])
+        plan.append((name, _loader.load(name, arch).run, tuple(keys), tuple(tail)))
+    return tuple(plan)
+
+
+def _run(
+    names: tuple[str, ...],
+    values: dict[str, object],
+    *,
+    arch: str,
+    rows: int,
+    device_index: int,
+) -> None:
+    """Launch the modules ``names`` in order with the logical arguments
+    ``values`` on the current torch stream: per module the kernel, arguments,
+    grid and launch attributes of ``_loader.run_module``, from the call
+    shape's :func:`_launch_plan`, all inside one ``tvm_ffi.use_torch_stream()``
+    (``run_module`` enters one per module).  While a loader function the plan
+    replays is replaced, or when no plan can be made, each module is launched
+    through ``_loader.run_module`` as before, which raises any error of the
+    plan after the launches that come before it."""
+
+    plan = None
+    if _loader_in_place():
+        try:
+            plan = _launch_plan(
+                names, arch, rows, device_index, _registry_token(), _loader.launch_grid
+            )
+        except Exception:  # noqa: BLE001 - run_module raises it again below, in order
+            plan = None
+    if plan is None:
+        for name in names:
+            _loader.run_module(name, values, rows=rows, device_index=device_index)
+        return
+    with _loader.tvm_ffi.use_torch_stream():
+        for name, run, keys, grid in plan:
+            try:
+                args = [values[key] for key in keys]
+            except KeyError:
+                # ``run_module`` raises the error that names the missing argument
+                _loader.run_module(name, values, rows=rows, device_index=device_index)
+                continue
+            run(*args, *grid)
+
+
 def _forward(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -887,10 +990,13 @@ def _forward(
         "u_stride": int(residual.stride(0)) if has_residual else 0,
     }
     device_index = _device_index(device)
-    for name in selected_modules(
-        arch, hidden, "fwd", has_residual, rows=rows, w_dtype=w_dtype
-    ):
-        _loader.run_module(name, values, rows=rows, device_index=device_index)
+    _run(
+        selected_modules(arch, hidden, "fwd", has_residual, rows=rows, w_dtype=w_dtype),
+        values,
+        arch=arch,
+        rows=rows,
+        device_index=device_index,
+    )
     _copy_back(copy_backs)
     return results
 
@@ -1083,8 +1189,7 @@ def _backward(
         "n_chunks": int(layout["n_chunks"]),
         "slots": int(layout["slots"]),
     }
-    for name in names:
-        _loader.run_module(name, values, rows=rows, device_index=device_index)
+    _run(names, values, arch=arch, rows=rows, device_index=device_index)
     _copy_back(copy_backs)
     return dx_result, dw_result
 
