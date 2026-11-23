@@ -21700,8 +21700,9 @@ def test_sm107a_0322_generic_call_swaps_from_the_floor(monkeypatch, out_f32):
 SM107A_0322_BEFORE_HINT_T = 10322
 _SM107A_0322_BEFORE_PROMOTED = "dense_proj_det_gemm_nn_n128_hen_t_kc64_pro15"
 #: The token counts of the routing check of version 0.3.22 on the rows of ``SM107A_0322_WGRAD_ROWS``: those of the plan
-#: checks above, the floor's neighbour, the hint gate of the plan before and the token count under it, and those of the
-#: sweeps of versions 0.3.12 - 0.3.20 (``_START_0312_SWEEP_TOKENS``).
+#: checks above, the floor's neighbour, the 6144-row hint gate of the plan before (``SM107A_0322_BEFORE_HINT_T``) and
+#: the token count under it, and those of the sweeps of versions 0.3.12 - 0.3.20 (``_START_0312_SWEEP_TOKENS``).  The
+#: other timed boundary pairs (T 12288 / 12289 on every row, T 15179 / 15180 on the 4096 rows) are not in this sweep.
 SM107A_0322_SWEEP_TOKENS = tuple(
     sorted(
         {

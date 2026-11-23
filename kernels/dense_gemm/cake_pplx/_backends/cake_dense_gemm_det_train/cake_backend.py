@@ -2819,9 +2819,11 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
     },
     # The 216-SM part: the indexer_hw BF16 weight gradient keeps its plan of version 0.3.21 at every token count.  Its
     # 64-row exact split of version 0.3.22 (``ROW_RULES``) measured slower than that plan on this part at T 16172, 32768
-    # and 65536 (flat at T 16384 and 131072, faster at T 8193 alone; T 8194 - 16171 are not measured), so one range
-    # from the rule's floor on carries the key's ``ROW_RULE_MIN_T`` tier rule, its rule of version 0.3.21 (below the
-    # floor that tier plans it already).  The generic call follows: it swaps at every token count in both versions (no
+    # and 65536 (flat at T 16384 and 131072, faster at T 8193).  A second measurement on this part found the split
+    # faster than that plan at T 8193 - 15360 (medians of that plan over the split 1.03 to 1.33) and slower at T 16171;
+    # that range keeps the plan of version 0.3.21 until the package's checks have run on it.  One range from the rule's
+    # floor on carries the key's ``ROW_RULE_MIN_T`` tier rule, its rule of version 0.3.21 (below the floor that tier
+    # plans it already).  The generic call follows: it swaps at every token count in both versions (no
     # ``_SINGLE_WGRAD_SWAP_MIN_K`` entry) and runs this plan.  The four other rows of version 0.3.22 plan their rules
     # on this part.  Deleting this table puts the rule back on this part; the tests that pin the table change with it.
     ("sm_107a", 216): {
