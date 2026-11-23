@@ -1486,30 +1486,42 @@ _NARROW_N_SWAP_ARCHES = ("sm_100a", "sm_103a")
 #: Package-only: the smallest token count ``K`` at which a keyed unbatched weight gradient runs swapped, by
 #: ``(arch, M, N, out_f32)`` of the generic call (see :func:`_single_wgrad_swap`).  On sm_107a (212 SMs) the 6144 -> 576
 #: bf16 weight gradient ran the swapped plan 0.91x at T 2048 and 4096 and 1.18x to 1.46x from T 6144 to 40961.  The
-#: four sm_107a bf16 weight gradients that version 0.3.22 keys (4096 -> 16 / 96, 6144 -> 48 / 64, ``ROW_RULES``) swap
-#: from T 8193 on, their rules' token floor in that version, where the swapped call was measured.  Version 0.3.23
-#: starts their weight-gradient rules lower (``ROW_RULE_MIN_T``) but keeps this floor: below T 8193 the generic call
-#: keeps its orientation of version 0.3.21 (the direct plan without a rule), since the swapped generic call was not
-#: measured against it there.
+#: four sm_107a bf16 weight gradients that version 0.3.22 keys (4096 -> 16 / 96, 6144 -> 48 / 64, ``ROW_RULES``)
+#: swapped from T 8193 on in versions 0.3.22 and 0.3.23 (an entry of T 8193 each: their rules' token floor in version
+#: 0.3.22, where the swapped call was measured).  Since version 0.3.24 they have no entry: the generic call swaps where
+#: the swapped key's measured rule at ``K`` on the part (``ROW_RULE_MIN_T``, ``ROW_RULE_RANGES_BY_SM``) is not empty,
+#: and so runs the weight-gradient entry's plan, program and bits there; it keeps the direct plan without a rule where
+#: that rule is empty (below T 1024, and 4096 -> 16 at T 2049 - 4095, T 2049 - 3071 on the 212-SM part).  Post-ship
+#: medians of the direct plan over the swapped one [[TBD0324_GENERIC_AB_212]] (212 SMs) and
+#: [[TBD0324_GENERIC_AB_216]] (216 SMs).
 _SINGLE_WGRAD_SWAP_MIN_K = {
     ("sm_107a", 576, 6144, False): 6144,
-    ("sm_107a", 16, 4096, False): 8193,
-    ("sm_107a", 96, 4096, False): 8193,
-    ("sm_107a", 48, 6144, False): 8193,
-    ("sm_107a", 64, 6144, False): 8193,
+    # [[TBD0324_FLOORS]]: an entry ("sm_107a", d_out, d_in, False): F only for a row of the four whose post-ship A/B
+    # floor F is above T 1024; a row without a measured floor keeps T 8193
 }
 
 
 def _single_wgrad_swap(
-    arch: str, M: int, N: int, K: int, a_mn: bool, b_mn: bool, out_f32: bool
+    arch: str,
+    M: int,
+    N: int,
+    K: int,
+    a_mn: bool,
+    b_mn: bool,
+    out_f32: bool,
+    *,
+    sm_count: Optional[int] = None,
 ) -> bool:
     """Package-only: an unbatched (``L == 1``) call with both operands MN-major and no transposed store is the
     weight gradient ``G.T @ X`` of :func:`cake_dense_gemm_det_train_projection_wgrad` with ``G = A.T`` (``M`` output
     rows) and ``X = B`` (``N`` columns).  It runs the swapped ``X.T @ G`` with the transposed store
 
     * where that entry swaps by a measured rule: ``ROW_RULES`` keys the row in the swapped orientation alone
-      (:func:`_orientation_rules`; the narrow 16- to 128-row, 512-row and 576-row weight gradients) and ``K`` is at
-      least the row's ``_SINGLE_WGRAD_SWAP_MIN_K`` entry, if any.  The plan, its program and its bits are then the
+      (:func:`_orientation_rules`; the narrow 16- to 128-row, 512-row and 576-row weight gradients), ``K`` is at
+      least the row's ``_SINGLE_WGRAD_SWAP_MIN_K`` entry, if any, and (since version 0.3.24) the row's measured rule
+      at ``K`` on the part is not empty (:func:`_measured_row_rule` of the swapped key with ``sm_count``: the token
+      tiers of ``ROW_RULE_MIN_T`` and the part ranges of ``ROW_RULE_RANGES_BY_SM``; without ``sm_count`` the part
+      tables are not read, the planner always passes its part).  The plan, its program and its bits are then the
       weight-gradient entry's;
     * where no rule keys the row in either orientation, the output is narrow (``N <= 64``: the ``[d_in, d_out]``
       weight gradient ``X.T @ G`` of a narrow projection), ``4096 <= M <= 8192`` and ``K >= 256``, on
@@ -1523,7 +1535,18 @@ def _single_wgrad_swap(
     swapped_rule, direct_rule = _orientation_rules(arch, M, N, out_f32)
     if swapped_rule or direct_rule:
         min_k = _SINGLE_WGRAD_SWAP_MIN_K.get((arch, M, N, out_f32), 0)
-        return swapped_rule and not direct_rule and min_k <= K
+        # the weight-gradient entry's measured rule at this token count on this part (tiers, part ranges): the
+        # swapped GEMM has N = M (d_out), K = K (T) and M = N (d_in)
+        return (
+            swapped_rule
+            and not direct_rule
+            and min_k <= K
+            and bool(
+                _measured_row_rule(
+                    arch, True, True, out_f32, True, False, M, K, N, sm_count=sm_count
+                )
+            )
+        )
     return arch in _NARROW_N_SWAP_ARCHES and N <= 64 and 4096 <= M <= 8192 and K >= 256
 
 
@@ -1794,6 +1817,11 @@ ROW_RULES: dict[tuple, dict] = {
     #      generic call of 4096 -> 16 / 96 and 6144 -> 48 / 64 keeps T 8193 as its swap floor
     #      (``_SINGLE_WGRAD_SWAP_MIN_K``); the indexer_hw generic call swaps at every token count and runs these
     #      plans ----
+    # ---- version 0.3.24: the generic call of 4096 -> 16 / 96 and 6144 -> 48 / 64 has no ``_SINGLE_WGRAD_SWAP_MIN_K``
+    #      entry [[TBD0324_FLOORS]]: it swaps, and runs the plan, program and bits of the weight-gradient entry,
+    #      wherever these rules and tiers give the swapped key a rule on the part (``_single_wgrad_swap``), and keeps
+    #      the direct plan without a rule where they give none.  Post-ship medians of the direct plan over the swapped
+    #      one [[TBD0324_GENERIC_AB_212]] (212 SMs) and [[TBD0324_GENERIC_AB_216]] (216 SMs) ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 96, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 48, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},
@@ -2890,7 +2918,8 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
     #   1.054 / 1.055 at these T, eager / CUDA graph) and slower on the 212-SM part.  Token counts above 131072 keep the
     #   rule.
     # - The generic call follows both: it swaps at every token count on indexer_hw (no ``_SINGLE_WGRAD_SWAP_MIN_K``
-    #   entry) and from T 8193 on on 6144 -> 48.
+    #   entry) and on 6144 -> 48 where the rule is not empty (from T 1024 on since version 0.3.24; from T 8193 on in
+    #   version 0.3.23).
     # - The other three rows of version 0.3.22 plan their tiers on this part.
     # - Deleting this table puts the tiers back on this part; the tests that pin the table change with it.
     ("sm_107a", 216): {
@@ -4148,11 +4177,12 @@ def cake_dense_gemm_det_train_projection_plan(
 
     A fourth package-only deviation, the unbatched weight-gradient swap (:func:`_single_wgrad_swap`): an ``L == 1``
     call with both operands MN-major and no transposed store is the weight gradient ``G.T @ X``; where the rule table
-    keys that row in the swapped orientation alone, the call is planned swapped like the batched small-M swap (and
-    under the same registry fallback), so it runs the plan of :func:`cake_dense_gemm_det_train_projection_wgrad` for
-    the same math instead of padding its few output rows into a tall tile; a row without a rule whose output has at
-    most 64 columns against 4096 to 8192 rows and ``K >= 256`` is planned swapped too on ``_NARROW_N_SWAP_ARCHES`` (its
-    columns go to the 64-row tile of the transposed store instead of one padded 224- / 256-column tile).
+    keys that row in the swapped orientation alone and its measured rule at that token count on the part is not empty
+    (since version 0.3.24), the call is planned swapped like the batched small-M swap (and under the same registry
+    fallback), so it runs the plan of :func:`cake_dense_gemm_det_train_projection_wgrad` for the same math instead of
+    padding its few output rows into a tall tile; a row without a rule whose output has at most 64 columns against
+    4096 to 8192 rows and ``K >= 256`` is planned swapped too on ``_NARROW_N_SWAP_ARCHES`` (its columns go to the
+    64-row tile of the transposed store instead of one padded 224- / 256-column tile).
 
     A fifth package-only deviation, the promoted chunks (``promote``, ``plan.promote_blocks``): once the program and the
     plan are settled, a plan whose longest segment holds more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks (64:
@@ -4339,6 +4369,7 @@ def cake_dense_gemm_det_train_projection_plan(
             operand_view(A3, "A", k_axis=2)[0],
             operand_view(B3, "B", k_axis=1)[0],
             out.dtype == torch.float32,
+            sm_count=sm_count,
         )
     )
     swapped = _allow_swap and swap_eligible
