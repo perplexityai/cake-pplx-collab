@@ -52,9 +52,11 @@ Usage::
     cake_act_qdq_det_train_forward(x, format="mxfp4_e8m0_g32", out=x)  # in place
 
 On an R200 (SM107), ``locality="domain"`` runs a program whose CTAs work on
-their own die's memory, for an out-of-place call whose input and output lie
-in memory from :func:`cake_act_qdq_det_train_domain_empty` (2 MB chunks that
-alternate between the two dies).  Every other call runs the default program;
+their own die's memory, for an out-of-place call of at least 8,388,608
+vectors (``numel / 8``) whose input and output lie in memory from
+:func:`cake_act_qdq_det_train_domain_empty` (2 MB chunks that alternate
+between the two dies), at the same offset in their chunks and in chunks of
+the same die.  Every other call runs the default program;
 the bytes are the same either way, and
 :func:`cake_act_qdq_det_train_domain_plan` reports which program a call
 runs::
@@ -195,7 +197,8 @@ def cake_act_qdq_det_train_domain_empty(
     Allocate the buffers once, before any CUDA graph capture, and reuse
     them.  A capture begun with ``cudaStreamBeginCapture`` on a stream that
     is not torch's current stream is not detected.  The ``"off"`` programs
-    run on this memory as fast as on default memory.  Needs cuda-python
+    run on this memory at 0.95-1.03x of their speed on default memory (GPU
+    time, VR200 package benchmark).  Needs cuda-python
     (the ``locality`` extra).
 
     Parameters

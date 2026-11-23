@@ -22,20 +22,23 @@ the memory whose 2 MB chunks alternate between the two dies
 The ``cpu_only`` tests check the pure parts: the interleaved-domain records,
 where a byte range lies in such memory, the reasons of the route in their
 order, and the launch arguments and grid, against the kernel's own decoding of
-its items; and, against a fake driver, the unwind of a mapping that fails
-(out of memory, retried once; any other error, not retried) and the error
-without cuda-python.  The GPU tests check that ``"domain"`` runs the ``"off"``
-program on other architectures and on default memory, and that ``"off"``
-loads none of the route's state.  The SM107 tests (skipped elsewhere; an SM107
-whose driver reports fewer than two locality domains fails them) check the
-allocation (dies, registry, zero copy, the free, the free deferred past a
-capture, the refusal during capture, and with two SM107s both during a
-capture on the other device), the route's bytes against the ``"off"`` route
-for every format with and without the scales (and a caller's scales buffer),
-out of place above the route's first size and at offsets inside a chunk,
-every domain program against the FP64 rule on any grid, each plain reason,
-the claim counters left zero, a launch that raises, two streams at once, CUDA
-graph replay with a graph workspace and with none left, and steady-state calls
+its items; and, against a fake driver, the unwind of a mapping that fails (out
+of memory, retried once; any other error, not retried) and the error without
+cuda-python; the free of a range queued while another call holds the module's
+lock; and the per-thread default stream's workspace per thread.  The GPU tests
+check that ``"domain"`` runs the ``"off"`` program on other architectures and
+on default memory, and that ``"off"`` loads none of the route's state.  The
+SM107 tests (skipped elsewhere; an SM107 whose driver reports fewer than two
+locality domains fails them) check the allocation (dies, registry, zero copy,
+the free, the free deferred past a capture, the refusal during capture, and
+with two SM107s both during a capture on the other device), the route's bytes
+against the ``"off"`` route for every format with and without the scales (and
+a caller's scales buffer), out of place above the route's first size and at
+offsets inside a chunk, every domain program against the FP64 rule on any grid
+and on the plain programs' rule inputs (edge rows, every finite BF16 under
+every scale, group scales from 2^-120 to 2^120), each plain reason, the claim
+counters left zero, a launch that raises, two streams at once, CUDA graph
+replay with a graph workspace and with none left, and steady-state calls
 without host synchronization.
 
 This suite names the backend package once, through
@@ -48,6 +51,7 @@ import enum
 import gc
 import subprocess
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -440,6 +444,43 @@ def test_driver_needs_cuda_python(monkeypatch) -> None:
         memory._driver.__wrapped__()
 
 
+@pytest.mark.cpu_only
+def test_a_range_queued_under_the_lock_is_freed_when_the_lock_is_released(monkeypatch) -> None:
+    """A finalizer that finds the module's lock taken only queues its range; the call holding the lock frees it as
+    it releases it, and a pass that can free nothing (during a capture) leaves it queued."""
+    freed: list = []
+    monkeypatch.setattr(memory, "_free", freed.append)
+    monkeypatch.setattr(memory, "_unregister", lambda index, base: None)
+    monkeypatch.setattr(memory, "_capturing", lambda: False)
+    assert not memory._PENDING
+    entry = memory._Mapped(0, 1 << 30, CHUNK, CHUNK)
+    with memory._LOCK:
+        memory._release(entry)
+        assert freed == [] and list(memory._PENDING) == [entry]
+    memory._drain()
+    assert freed == [entry] and not memory._PENDING
+    monkeypatch.setattr(memory, "_capturing", lambda: True)
+    memory._release(entry)
+    assert freed == [entry] and list(memory._PENDING) == [entry]
+    monkeypatch.setattr(memory, "_capturing", lambda: False)
+    memory._drain()
+    assert freed == [entry, entry] and not memory._PENDING
+
+
+@pytest.mark.cpu_only
+def test_the_per_thread_default_stream_has_a_workspace_per_thread() -> None:
+    """The per-thread default stream's handle names another stream in each thread, so its workspaces are keyed by
+    the thread too; any other handle names one stream."""
+    other: list = []
+    thread = threading.Thread(target=lambda: other.append(memory._stream_key(0, memory.PER_THREAD_STREAM)))
+    thread.start()
+    thread.join()
+    here = memory._stream_key(0, memory.PER_THREAD_STREAM)
+    assert here != other[0] and here[:2] == other[0][:2] == (0, memory.PER_THREAD_STREAM)
+    assert memory._stream_key(0, 0) == (0, 0)
+    assert memory._stream_key(1, 0x7F00) == (1, 0x7F00)
+
+
 # --------------------------------------------------------------------------- GPU: every architecture
 
 
@@ -764,6 +805,66 @@ def test_every_domain_program_runs_on_any_grid(r200, fmt: str) -> None:
                 assert int(words.count_nonzero()) == 0, (what, words.tolist())
 
 
+# The inputs that define the rule's contract, as the plain programs' tests use them.
+RULE_INPUTS = {
+    "edge": lambda fmt: reference.edge_input(fmt),
+    "sweep": lambda fmt: reference.sweep_input(fmt),
+    "wide": lambda fmt: reference.randn_input((33, 8, 512), fmt, lo=120, hi=120, seed=31),
+}
+# Byte offsets of those inputs in memory that alternates dies: 3 tiles before the end of a die-0 chunk (an input of
+# more than 3 tiles reaches die 1), and inside the first tile of a die-1 chunk.
+RULE_OFFSETS = (CHUNK - 3 * TILE_BYTES + 16, CHUNK + 16)
+
+
+@pytest.mark.parametrize("inputs", tuple(RULE_INPUTS))
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_every_domain_program_gives_the_rule_on_its_contract_inputs(r200, fmt: str, inputs: str) -> None:
+    """Every interleaved-domain program, launched directly on the host's grid over memory that alternates dies,
+    gives the FP64 rule's bits on the inputs of the plain programs' rule tests: the edge rows (midpoints and ties,
+    the floors, saturation), every finite BF16 value under every scale, and group scales from 2^-120 to 2^120.  The
+    walk leaves its counters zero."""
+    x0 = RULE_INPUTS[inputs](fmt)
+    want = reference.qdq(x0, fmt)
+    G = reference.GROUP[fmt]
+    n_vecs = x0.numel() // loader.VECTOR
+    buf_x = domain_empty((max(RULE_OFFSETS) // BF16 + x0.numel(),))
+    buf_y = domain_empty((max(RULE_OFFSETS) // BF16 + x0.numel(),))
+    for offset in RULE_OFFSETS:
+        x = buf_x[offset // BF16 : offset // BF16 + x0.numel()].view(x0.shape)
+        y = buf_y[offset // BF16 : offset // BF16 + x0.numel()].view(x0.shape)
+        x_place = memory.place(x, CHUNK)
+        assert x_place == (offset % CHUNK, (offset // CHUNK) & 1), x_place
+        for scale_out in (False, True):
+            name = _domain_name(loader.route_name(fmt, scale_out=scale_out))
+            record = loader.MODULES[name]
+            words_a_die = record["counters"]["words"]
+            launch = loader.domain_launch(
+                record, n_vecs=n_vecs, x_place=x_place, sm_count=loader.sm_count(0), arch=ARCH
+            )
+            x.copy_(x0)
+            y.fill_(float("nan"))
+            words = torch.zeros(2 * words_a_die, dtype=torch.int32, device="cuda")
+            values = {
+                "x": x,
+                "y": y,
+                "n_vecs": n_vecs,
+                "counters0": words.view(torch.uint32)[:words_a_die],
+                "counters1": words.view(torch.uint32)[words_a_die:],
+                **{key: launch[key] for key in ("first_tile", "first_die", "chunk_tile_shift", "batch_shift")},
+            }
+            s = None
+            if scale_out:
+                s = torch.full((*x0.shape[:-1], x0.shape[-1] // G), float("nan"), device="cuda")
+                values["scales"] = s
+            loader.run_module(name, values, device_index=0, grid=launch["grid"])
+            what = f"{name} {inputs} offset={offset}"
+            _assert_same(f"{what} y", reference.y_bits(y), reference.y_bits(want[0]))
+            if scale_out:
+                _assert_same(f"{what} scales", reference.scale_bits(s), reference.scale_bits(want[1]))
+            _assert_same(f"{what} x after the call", x, x0)
+            assert int(words.count_nonzero()) == 0, (what, words.tolist())
+
+
 def test_plain_reasons_on_r200(big, monkeypatch) -> None:
     """Each placement the route refuses runs the ``"off"`` program with the same bytes, for the reason the plan
     gives."""
@@ -785,6 +886,8 @@ def test_plain_reasons_on_r200(big, monkeypatch) -> None:
     )
     n_vecs = x0.numel() // loader.VECTOR
     for reason, source, out in cases:
+        if out is not None:
+            out.fill_(float("nan"))
         got = plan(source, format=fmt, out=out)
         size = source.numel() // loader.VECTOR
         program = loader.selected_module(ARCH, fmt, scale_out=False, n_vecs=size, in_place=False)

@@ -25,18 +25,21 @@ locality domain), chunk ``k`` in die ``k & 1``, and returns a torch tensor
 over it without a copy.  The range is registered by device, so :func:`place`
 finds a tensor's offset in its chunk and the die of that chunk from its
 address alone, with no driver call.  The plain programs run over such memory
-at the speed of default memory.  The driver maps this memory outside torch's
-caching allocator, so ``torch.cuda.memory_allocated`` and the other
-``torch.cuda.memory_*`` counters do not count it.
+at about the speed of default memory: within 0.95-1.03x of it in the package
+benchmark on VR200, the slowest for buffers of one chunk, which lie wholly in
+die 0.  The driver maps this memory outside torch's caching allocator, so
+``torch.cuda.memory_allocated`` and the other ``torch.cuda.memory_*`` counters
+do not count it.
 
 The tensor and every view of it keep the range alive.  Once the last one is
-gone, its finalizer queues the range, and the first of that finalizer and the
-next :func:`domain_empty` call that finds no other thread freeing ranges
-synchronizes the device, unmaps the chunks and frees the range.  In torch's
-default (global) capture mode a CUDA graph capture forbids its thread these
-driver calls on every device, so during a capture on any device in this
-thread a range waits for the next free outside a capture (another range's
-finalizer or the next :func:`domain_empty` call), and
+gone, its finalizer queues the range and frees it: it synchronizes the device,
+unmaps the chunks and frees the range.  When another call holds the module's
+lock (another thread allocating, or this thread inside a garbage collection),
+the finalizer only queues the range, and that call frees it as it releases the
+lock.  In torch's default (global) capture mode a CUDA graph capture forbids
+its thread these driver calls on every device, so during a capture on any
+device in this thread a range waits for the next free outside a capture
+(another range's finalizer or the next :func:`domain_empty` call), and
 :func:`domain_empty` refuses to allocate.  The check reads torch's current
 stream of every device with an active primary context: a capture begun with
 ``cudaStreamBeginCapture`` on a stream that is not torch's current stream is
@@ -48,8 +51,10 @@ Claim workspaces (:func:`launch`): an interleaved-domain launch takes its two
 dies' claim counters, ``words`` unsigned words each (the record's
 ``counters``), from a workspace of :data:`SLOT_WORDS` words that no launch in
 flight shares; every launch leaves its counters zero.  Eager calls use one
-workspace per (device, stream), zeroed once when it is made.  The calls of one
-CUDA graph capture on one capture stream share one taken for good from the
+workspace per (device, stream), zeroed once when it is made; on the per-thread
+default stream (``cudaStreamPerThread``, one handle that names another stream
+in each thread) one per (device, thread).  The calls of one CUDA graph capture
+on one capture stream share one taken for good from the
 :data:`GRAPH_WORKSPACES` zeroed workspaces that the device's first
 :func:`domain_empty` call makes; once all are taken, each captured call takes
 one from the graph's pool, which the graph zeroes at every replay.  The
@@ -459,19 +464,19 @@ def _free(entry: _Mapped) -> None:
 _PENDING: collections.deque[_Mapped] = collections.deque()
 
 
-def _free_pending() -> None:
+def _free_pending() -> int:
     """Under ``_LOCK``: free and unregister every pending range, keeping them all for a later call while this thread
-    captures a CUDA graph on any device, and keeping those whose free fails."""
+    captures a CUDA graph on any device, and keeping those whose free fails.  Returns how many it freed."""
 
     if not _PENDING:
-        return
+        return 0
     try:
         capturing = _capturing()
     except Exception:  # noqa: BLE001 - a finalizer cannot raise; a later call checks again
         capturing = True
     if capturing:
-        return
-    kept = []
+        return 0
+    kept, freed = [], 0
     while _PENDING:
         entry = _PENDING.popleft()
         try:
@@ -480,20 +485,32 @@ def _free_pending() -> None:
             kept.append(entry)
             continue
         _unregister(entry.index, entry.base)
+        freed += 1
     _PENDING.extend(kept)
+    return freed
+
+
+def _drain() -> None:
+    """Free the pending ranges unless another call holds ``_LOCK``; every call that holds it runs this after it
+    releases it, so a range a finalizer queued meanwhile (it found the lock taken) is not left pending.  Stops when
+    a pass frees nothing: during a capture, or when every free fails, the ranges wait for a later call."""
+
+    while _PENDING and _LOCK.acquire(blocking=False):
+        try:
+            freed = _free_pending()
+        finally:
+            _LOCK.release()
+        if not freed:
+            return
 
 
 def _release(entry: _Mapped) -> None:
     """The finalizer of a range's owner: queue the range, and free the queue unless another call holds ``_LOCK``
-    (another thread, or this one inside a garbage collection); that call or the next :func:`domain_empty` call frees
-    it then."""
+    (another thread, or this one inside a garbage collection); that call frees it as it releases the lock
+    (:func:`_drain`)."""
 
     _PENDING.append(entry)
-    if _LOCK.acquire(blocking=False):
-        try:
-            _free_pending()
-        finally:
-            _LOCK.release()
+    _drain()
 
 
 def _cuda_device(device: Union[torch.device, str, int, None]) -> torch.device:
@@ -551,13 +568,16 @@ def domain_empty(
     nbytes = math.prod(dims) * dtype.itemsize
     chunks = max(1, -(-nbytes // chunk))
     owner = _Range()
-    with _LOCK:
-        _free_pending()
-        _make_graph_workspaces(index)
-        base, size = _map_or_out_of_memory(driver, index, chunk, chunks)
-        finalizer = weakref.finalize(owner, _release, _Mapped(index, base, size, chunk))
-        finalizer.atexit = False
-        _register(index, base, size)
+    try:
+        with _LOCK:
+            _free_pending()
+            _make_graph_workspaces(index)
+            base, size = _map_or_out_of_memory(driver, index, chunk, chunks)
+            finalizer = weakref.finalize(owner, _release, _Mapped(index, base, size, chunk))
+            finalizer.atexit = False
+            _register(index, base, size)
+    finally:
+        _drain()
     whole = torch.from_dlpack(_Export(base, size, index, owner))
     del owner
     return whole[:nbytes].view(dtype).view(dims)
@@ -585,10 +605,22 @@ class _Workspace:
 
 # device index -> {"block": the zeroed words of its GRAPH_WORKSPACES graph workspaces, "taken": how many are taken}
 _GRAPH_WORKSPACES: dict[int, dict[str, Any]] = {}
-# (device index, stream handle) -> the workspace of the eager calls on that stream
-_STREAM_WORKSPACES: dict[tuple[int, int], _Workspace] = {}
-# (device index, capture stream handle) -> (capture id, the graph workspace of that capture's calls on that stream)
-_CAPTURE_WORKSPACES: dict[tuple[int, int], tuple[int, _Workspace]] = {}
+# _stream_key(device index, stream handle) -> the workspace of the eager calls on that stream
+_STREAM_WORKSPACES: dict[tuple[int, ...], _Workspace] = {}
+# _stream_key(device index, capture stream handle) -> (capture id, the graph workspace of that capture's calls on
+# that stream)
+_CAPTURE_WORKSPACES: dict[tuple[int, ...], tuple[int, _Workspace]] = {}
+# cudaStreamPerThread: one handle that names the calling thread's own default stream
+PER_THREAD_STREAM = 0x2
+
+
+def _stream_key(index: int, stream: int) -> tuple[int, ...]:
+    """The key of the workspaces of the calls on ``stream`` of device ``index``: the per-thread default stream's
+    handle names another stream in each thread, so its key also holds the thread."""
+
+    if stream == PER_THREAD_STREAM:
+        return (index, stream, threading.get_ident())
+    return (index, stream)
 
 
 def _make_graph_workspaces(index: int) -> None:
@@ -624,7 +656,7 @@ def _capture_id(stream: int) -> Optional[int]:
     return int(result[2])
 
 
-def _capture_workspace(key: tuple[int, int]) -> _Workspace:
+def _capture_workspace(key: tuple[int, ...]) -> _Workspace:
     """The workspace of a call during a capture on the stream of ``key``: the one this capture's calls on that
     stream already hold, else a graph workspace taken for good (without a capture id, one per call), else, with none
     left, one from the graph's pool that the graph zeroes at every replay.  Only a graph workspace is kept across
@@ -643,6 +675,7 @@ def _capture_workspace(key: tuple[int, int]) -> _Workspace:
             k = workspaces["taken"]
             workspaces["taken"] = k + 1
             words = workspaces["block"][k * SLOT_WORDS : (k + 1) * SLOT_WORDS]
+    _drain()
     if words is None:
         return _Workspace(torch.zeros(SLOT_WORDS, dtype=torch.int32, device=torch.device("cuda", key[0])))
     workspace = _Workspace(words)
@@ -652,9 +685,10 @@ def _capture_workspace(key: tuple[int, int]) -> _Workspace:
 
 
 def stream_workspace(index: int, stream: int) -> Optional[torch.Tensor]:
-    """The words of the eager calls' workspace on ``stream`` of device ``index``, or None before its first call."""
+    """The words of the eager calls' workspace on ``stream`` of device ``index`` (of this thread, for the per-thread
+    default stream), or None before its first call."""
 
-    workspace = _STREAM_WORKSPACES.get((index, stream))
+    workspace = _STREAM_WORKSPACES.get(_stream_key(index, stream))
     return None if workspace is None else workspace.words
 
 
@@ -669,7 +703,7 @@ def launch(name: str, values: dict[str, Any], *, device_index: int, grid: tuple[
     if 2 * words > SLOT_WORDS:
         raise RuntimeError(f"the claim workspace of {name} ({2 * words} words) exceeds {SLOT_WORDS} words")
     with torch.cuda.device(device_index):
-        key = (device_index, torch.cuda.current_stream().cuda_stream)
+        key = _stream_key(device_index, torch.cuda.current_stream().cuda_stream)
         captured = torch.cuda.is_current_stream_capturing()
         if captured:
             workspace = _capture_workspace(key)
@@ -696,6 +730,7 @@ __all__ = [
     "DRIVER_NAMES",
     "DriverError",
     "GRAPH_WORKSPACES",
+    "PER_THREAD_STREAM",
     "SLOT_WORDS",
     "domain_count",
     "domain_empty",
