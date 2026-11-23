@@ -3861,14 +3861,15 @@ def _gather_rows(values: dict[str, Any]) -> None:
 
 def _rlab_zero(values: dict[str, Any]) -> None:
     """Zero the call's FP32 label residuals ``rlab`` ahead of its first row-gradient producer (:func:`_with_rlab_zero`)
-    on a plan whose producers can leave a row unwritten (a ``dz`` arm: an ignored row, a label outside the head, a row
-    the zero-gradient row skip leaves out): such a row reads 0, and the slab sum folds nothing into it.  ``row_grad``
-    writes every row of its chunk itself (+0 on a row with no label column), so a plan of ``row_grad`` producers alone
-    has no zero step."""
+    on a plan whose producers can leave a row a fold reads unwritten (:func:`_rlab_zero_needed`: a counted ``dz`` arm
+    leaves the rows past its count, chunks that do not tile ``rlab`` leave rows to no producer): such a row reads 0,
+    and the slab sum folds nothing into it.  ``row_grad`` writes every row of its chunk itself (+0 on a row with no
+    label column) and an uncounted ``dz`` arm every row whose label lies in the head, the only rows a fold reads
+    (:func:`_rlab_rows_stored`), so an uncounted plan over tiling chunks has no zero step."""
     values["rlab"].zero_()
 
 
-# The host step of :func:`_rlab_zero` (key ``("rlab_zero", None)``, one per call that computes dX).
+# The host step of :func:`_rlab_zero` (key ``("rlab_zero", None)``, at most one per call; :func:`_rlab_zero_needed`).
 RLAB_ZERO_STAGE = "rlab_zero"
 _RLAB_ZERO_KEY = (RLAB_ZERO_STAGE, None)
 
@@ -6947,26 +6948,39 @@ def _chunks_tile_rows(plan: Plan) -> bool:
     return end == plan.rows
 
 
+def _rlab_rows_stored(plan: Plan) -> bool:
+    """Whether the call's own row-gradient producers store every row of ``rlab`` that a fold can read: the plan is not
+    counted (:attr:`Plan.dcnt`) and its chunks tile ``rlab`` (:func:`_chunks_tile_rows`).  A fold (the slab sums, the
+    dX cast's fold programs) adds a row's residual only when the row's label lies in ``[0, V)`` and the residual is
+    nonzero.  ``row_grad`` stores every row of its chunk (+0 on a row with no label column); the uncounted ``dz`` arms
+    store every row of their chunk whose label lies in ``[0, ldc)``, and their ``ldc`` is ``V`` (:func:`gemm_scalars`).
+    So on such a plan every row a fold reads holds this call's residual, whatever ``rlab`` held before the call, and a
+    row no producer stores (an ignored row, a label at or past ``V``) is never folded.  A counted ``dz`` arm (the
+    zero-gradient row skip) stores only the rows under its count."""
+    return not plan.dcnt and _chunks_tile_rows(plan)
+
+
 def _rlab_zero_needed(plan: Plan, keys: list) -> bool:
-    """Whether the launch keys ``keys`` of ``plan`` need the host zero of ``rlab`` (:func:`_rlab_zero`): the plan
-    computes dX and a row of ``rlab`` could stay unwritten by the call's row-gradient producers.  ``row_grad`` stores
-    every row of its chunk, one writer a row: the row's FP32 label residual, and +0 on a row with no label column (an
-    ignored row, a label at or past ``V``).  The ``dz`` arms store only the rows whose label lies in the head, their
-    counted forms only the rows under the count.  So the zero is left out when every producer key is ``row_grad`` and
-    the chunks tile ``rlab`` (:func:`_chunks_tile_rows`), and kept on every other plan that computes dX."""
+    """Whether the launch keys ``keys`` of ``plan`` need the host zero of ``rlab`` (:func:`_rlab_zero`) on every call:
+    the plan computes dX and a row a fold reads could stay unwritten by the call's own row-gradient producers -- a
+    counted plan or chunks that do not tile ``rlab`` (:func:`_rlab_rows_stored`), unless every producer key is
+    ``row_grad`` over tiling chunks (it stores every row of its chunk).  An uncounted plan over tiling chunks has no
+    zero step: a fresh ``rlab`` is zero-filled once, where it is allocated (:func:`_rlab_fresh_zero`), and a held one
+    (a prepared runner's, a log-probability graph's) is bound again without a fill."""
     if not plan.need_dx:
         return False
+    tiles = _chunks_tile_rows(plan)
+    if tiles and not plan.dcnt:
+        return False
     producers = [stage for stage, _ in keys if stage in DZ_PRODUCER_STAGES]
-    return not (
-        all(stage == "row_grad" for stage in producers) and _chunks_tile_rows(plan)
-    )
+    return not (all(stage == "row_grad" for stage in producers) and tiles)
 
 
 def _with_rlab_zero(plan: Plan, keys: list) -> list:
     """``keys`` with the host step ``("rlab_zero", None)`` (:func:`_rlab_zero`) right before the first row-gradient
-    producer (:data:`DZ_PRODUCER_STAGES`: ``row_grad``, the ``dz`` arms) when a row of the call's FP32 label residuals
-    ``rlab`` could stay unwritten (:func:`_rlab_zero_needed`): the slab sums fold ``rlab``, and such a row must read 0.
-    Before the first producer, so a hidden valid-row count's queued chunk 0 keeps it among the late launches."""
+    producer (:data:`DZ_PRODUCER_STAGES`: ``row_grad``, the ``dz`` arms) when a row a fold reads could stay unwritten by
+    the call's producers (:func:`_rlab_zero_needed`): the slab sums fold ``rlab``, and such a row must read 0.  Before
+    the first producer, so a hidden valid-row count's queued chunk 0 keeps it among the late launches."""
     if not _rlab_zero_needed(plan, keys):
         return keys
     for pos, (stage, _) in enumerate(keys):
@@ -7000,28 +7014,35 @@ def _rlab_filled(plan: Plan, keys: tuple, tiles: Optional[bool] = None) -> bool:
     return producers and (_chunks_tile_rows(plan) if tiles is None else tiles)
 
 
+def _rlab_fresh_zero(plan: Plan, keys: tuple) -> bool:
+    """Whether a fresh ``rlab`` for the launch keys ``keys`` (a prepared runner's, a remembered binding's per-call
+    buffer) is allocated zero-filled: the plan computes dX, the keys have no zero step (:func:`_with_rlab_zero`) and
+    their producers do not store every row (:func:`_rlab_filled`: a ``dz`` arm leaves the rows whose label lies
+    outside the head unwritten).  No fold reads those rows (:func:`_rlab_rows_stored`), but the slab sum loads a row's
+    residual before its label test: the one zero fill at the buffer's creation keeps every load of a defined value."""
+    return plan.need_dx and _RLAB_ZERO_KEY not in keys and not _rlab_filled(plan, keys)
+
+
 class _GraphRlab:
     """The FP32 label residuals ``rlab`` of one log-probability autograd graph (its rows of the chunk loop), held from
     its first backward through its later ones (a retained graph runs several): a later backward binds the held tensor
-    and allocates and fills none of its own (:meth:`_Binding._call_rlab`).  ``clean``: every row without a label column
-    in the head (an ignored row, a label at or past ``V``) holds +0 -- after a zero fill, or after ``row_grad`` over
-    chunks that tile the rows (it stores +0 there); the ``dz`` arms keep it (they store only the rows whose label lies
-    in the head, and every backward of the graph has the same labels in the same row order).  A counted plan (the
-    zero-gradient row skip, :attr:`Plan.dcnt`) orders the rows per call and leaves the rows past its count unwritten: it
-    never binds the held tensor.  A call takes the tensor until it returns, so a concurrent backward of the same graph
-    allocates its own; a call that fails leaves none.  ``own``: the free-list entry the holder owns and its list
-    (:func:`_graph_rlab`: taken by the first backward that binds the holder), put back when the holder is freed (the
-    entry stays the holder's while a backward hands back another tensor)."""
+    and allocates and fills none of its own (:meth:`_Binding._call_rlab`).  Only a plan whose producers store every row
+    a fold reads binds it (:func:`_rlab_rows_stored`: not counted, chunks that tile the rows), so a row no producer
+    stores keeps what it held (a zero from the buffer's creation, or an earlier call's residual), which no fold
+    reads.  A counted plan (the zero-gradient row skip, :attr:`Plan.dcnt`) orders the rows per call and leaves the rows
+    past its count unwritten: it never binds the held tensor.  A call takes the tensor until it returns, so a
+    concurrent backward of the same graph allocates its own; a call that fails leaves none.  ``own``: the free-list
+    entry the holder owns and its list (:func:`_graph_rlab`: taken by the first backward that binds the holder), put
+    back when the holder is freed (the entry stays the holder's while a backward hands back another tensor)."""
 
-    __slots__ = ("tensor", "clean", "own")
+    __slots__ = ("tensor", "own")
 
     def __init__(
         self,
         tensor: Optional[torch.Tensor] = None,
-        clean: bool = False,
         own: Optional[tuple] = None,
     ):
-        self.tensor, self.clean, self.own = tensor, clean, own
+        self.tensor, self.own = tensor, own
 
     def __del__(self):
         own = self.own
@@ -7341,7 +7362,8 @@ def _store_label_residual(
     """The row-gradient producers' label residual (reference): for each row of the chunk whose label lies in
     ``[0, V)``, ``r = s - f32(bf16(s))`` of the label column's FP32 gradient ``s`` (gathered at the clamped label
     ``index``), 0 where ``bf16(s)`` is not finite, into ``rlab[row0 + r]``; 0 on every other row (``row_grad`` stores
-    that +0 itself; the ``dz`` arms leave those rows to the call's zero fill).  Nothing without an ``rlab`` operand."""
+    that +0 itself; the ``dz`` arm kernels store nothing there, and no fold reads such a row,
+    :func:`_rlab_rows_stored`).  Nothing without an ``rlab`` operand."""
     rlab = values.get("rlab")
     if rlab is None:
         return
@@ -8389,8 +8411,9 @@ def prepare_lm_head_loss(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -8447,6 +8470,12 @@ def prepare_lm_head_loss(
 
     fwd = forward_keys(plan)
     bwd = _runner_backward_keys(plan, _template_only)
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it
     spare = (("row_grad", 0),) if plan.logprob_dz else ()
@@ -8867,8 +8896,9 @@ def prepare_lm_head_loss_temperature(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -8931,6 +8961,12 @@ def prepare_lm_head_loss_temperature(
     bwd = (_recompute_keys_temperature(plan) if entry == "logprob" else ()) + cast_keys(
         plan
     )
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it.  A
     # call with a temperature never recounts on the hidden path (no temperature form of ``row_grad``)
@@ -9363,14 +9399,16 @@ class _Binding:
     # the log-probability backward makes its gradient accumulators and outputs right before its first dX GEMM key
     # (behind the row gathers and the recompute launch) instead of up front (:func:`_gradients_at_first_dx`)
     backward_gradients_at_dx: bool = False
-    # the ``rlab_zero`` host step the plan's forward / backward sequence had (:func:`_with_rlab_zero`): the binding's
-    # sequences leave it out and each call allocates ``rlab`` zero-filled instead (:meth:`_call_rlab`)
+    # each call allocates its fresh ``rlab`` zero-filled (:meth:`_call_rlab`): the plan's forward / backward sequence
+    # had the ``rlab_zero`` host step (:func:`_with_rlab_zero`; the binding's sequences leave it out), or a ``dz`` arm
+    # of the sequence leaves rows unwritten (:func:`_rlab_fresh_zero`)
     forward_rlab_zero: bool = False
     backward_rlab_zero: bool = False
     # the backward sequence stores every row of ``rlab`` (:func:`_rlab_filled`)
     backward_rlab_filled: bool = False
-    # the plan is not counted and its chunks tile its rows (:func:`_chunks_tile_rows`): a call binds the autograd
-    # graph's label residuals (:meth:`_call_rlab`); formed once, with the binding
+    # every row a fold reads is stored by the call's own producers (:func:`_rlab_rows_stored`: not counted, chunks that
+    # tile the rows): a call binds the autograd graph's label residuals (:meth:`_call_rlab`); formed once, with the
+    # binding
     rlab_graph: bool = False
 
     @classmethod
@@ -9407,14 +9445,14 @@ class _Binding:
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
+        # a call's fresh ``rlab`` is zero-filled where the sequence had the zero step or a ``dz`` arm of it leaves rows
+        # unwritten (:func:`_rlab_fresh_zero`)
+        forward_zero = forward_zero or _rlab_fresh_zero(plan, forward_order)
+        backward_zero = backward_zero or _rlab_fresh_zero(plan, backward_order)
         # the calls bind the autograd graph's label residuals (:meth:`_call_rlab`, :attr:`rlab_graph`); only those read
-        # ``filled``.  A sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
-        rlab_graph = not plan.dcnt and _chunks_tile_rows(plan)
-        filled = (
-            rlab_graph
-            and not backward_zero
-            and _rlab_filled(plan, backward_order, True)
-        )
+        # ``filled``
+        rlab_graph = _rlab_rows_stored(plan)
+        filled = rlab_graph and _rlab_filled(plan, backward_order, True)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -9582,20 +9620,20 @@ class _Binding:
         zero: bool,
         graph: Optional[_GraphRlab] = None,
         filled: bool = False,
-    ) -> tuple[torch.Tensor, Optional[bool]]:
-        """``(rlab, clean)``: the call's FP32 label residuals (``[plan.rows]``) and the state to hand back to ``graph``
-        when the call returns (``None``: nothing to hand back).  ``zero`` (the plan had the ``rlab_zero`` step,
-        :func:`_without_rlab_zero`): allocated zero-filled, on the call's stream ahead of all its launches (the step
-        ran right before the first row-gradient producer; nothing ahead of it reads or writes ``rlab``), so the same
-        rows hold +0.  ``graph`` (the log-probability autograd graph's, :class:`_GraphRlab`): a plan that is not
-        counted, over chunks that tile its rows (:attr:`rlab_graph`), takes the graph's tensor when it is clean or the
-        call stores every row
-        (``filled``, :func:`_rlab_filled`) -- no allocation and no fill: the producers store the same rows they store in
-        a fresh zero-filled tensor, and every other row already holds +0 -- else it takes one for the graph
-        (zero-filled as above): while the graph owns no buffer (its forward takes none), from
-        the free list of the call's stream (:func:`_graph_rlab`), or the holding stream's request where no list serves
-        (:func:`_graph_rlab_tensor`), else an ordinary allocation; a counted plan allocates its own
-        and leaves the graph's."""
+    ) -> tuple[torch.Tensor, bool]:
+        """``(rlab, hand)``: the call's FP32 label residuals (``[plan.rows]``) and whether the call hands them to
+        ``graph`` when it returns.  ``zero`` (:meth:`from_runner`: the plan had the ``rlab_zero`` step, or a ``dz`` arm
+        leaves rows unwritten, :func:`_rlab_fresh_zero`): a fresh tensor is allocated zero-filled, on the call's stream
+        ahead of all its launches (the step ran right before the first row-gradient producer; nothing ahead of it reads
+        or writes ``rlab``), so the same rows hold +0.  ``graph`` (the log-probability autograd graph's,
+        :class:`_GraphRlab`): a plan whose producers store every row a fold reads (:attr:`rlab_graph`,
+        :func:`_rlab_rows_stored`) takes the graph's tensor -- no allocation and no fill: the producers store every row
+        a fold reads again, and the other rows keep what they held, which no fold reads -- else one for the graph:
+        while the graph owns no buffer (its forward takes none), from the free list of the call's stream
+        (:func:`_graph_rlab`: zero-filled when it is requested, else as an earlier graph left it), or the holding
+        stream's request where no list serves (:func:`_graph_rlab_tensor`), else an ordinary allocation -- these two
+        zero-filled unless the call stores every row (``filled``, :func:`_rlab_filled`), as a later backward of the
+        graph binds the tensor; a counted plan allocates its own and leaves the graph's."""
         plan = self.plan
         if graph is not None and self.rlab_graph:
             held, graph.tensor = graph.tensor, None  # taken until the call returns
@@ -9603,22 +9641,22 @@ class _Binding:
                 held is not None
                 and held.numel() == plan.rows
                 and held.device == self.device
-                and (graph.clean or filled)
             ):
                 return held, True
-            clean: Optional[bool] = zero or filled
+            zero = not filled
             if graph.own is None:
-                own = _graph_rlab(plan.rows, zero, self.device)
+                own = _graph_rlab(plan.rows, self.device)
                 if own is None:
-                    return _graph_rlab_tensor(plan.rows, zero, self.device), clean
+                    return _graph_rlab_tensor(plan.rows, zero, self.device), True
                 graph.own = own
-                return own[1][1], clean
+                return own[1][1], True
+            hand = True
         else:
-            clean = None
+            hand = False
         rlab = (torch.zeros if zero else torch.empty)(
             (plan.rows,), dtype=torch.float32, device=self.device
         )
-        return rlab, clean
+        return rlab, hand
 
     def _launch(
         self,
@@ -9776,10 +9814,10 @@ class _Binding:
                 )
             t["dcnt"] = dcnt
         self._scratch(t, hidden, backward=True)
-        clean = None
+        hand = False
         if plan.need_dx or plan.need_dw:
             # the producers' label residuals: written by the recompute, ahead of the gradient buffers
-            t["rlab"], clean = self._call_rlab(
+            t["rlab"], hand = self._call_rlab(
                 self.backward_rlab_zero, rlab, self.backward_rlab_filled
             )
 
@@ -9812,8 +9850,8 @@ class _Binding:
         else:
             gradient_buffers()
             self._launch(self.backward_order, t, dw_stream)
-        if clean is not None:
-            rlab.tensor, rlab.clean = t["rlab"], clean
+        if hand:
+            rlab.tensor = t["rlab"]
         if fold_out is not None:
             fold_out["fold"] = cast_fold_operands(plan, t)
         dx = (
@@ -9865,14 +9903,14 @@ class _TemperatureBinding(_Binding):
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
+        # a call's fresh ``rlab`` is zero-filled where the sequence had the zero step or a ``dz`` arm of it leaves rows
+        # unwritten (:func:`_rlab_fresh_zero`)
+        forward_zero = forward_zero or _rlab_fresh_zero(plan, forward_order)
+        backward_zero = backward_zero or _rlab_fresh_zero(plan, backward_order)
         # the calls bind the autograd graph's label residuals (:meth:`_call_rlab`, :attr:`rlab_graph`); only those read
-        # ``filled``.  A sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
-        rlab_graph = not plan.dcnt and _chunks_tile_rows(plan)
-        filled = (
-            rlab_graph
-            and not backward_zero
-            and _rlab_filled(plan, backward_order, True)
-        )
+        # ``filled``
+        rlab_graph = _rlab_rows_stored(plan)
+        filled = rlab_graph and _rlab_filled(plan, backward_order, True)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -10251,9 +10289,9 @@ class _KeptBinding(_Binding):
             t["x_c"] = torch.empty((rows, H), dtype=torch.bfloat16, device=self.device)
         self._scratch(t, chunk_buffers=False, backward=True)
         t["logits_keep"] = logits
-        clean = None
+        hand = False
         if plan.need_dx or plan.need_dw:
-            t["rlab"], clean = self._call_rlab(
+            t["rlab"], hand = self._call_rlab(
                 self.backward_rlab_zero,
                 None if dz_ready else rlab,
                 self.backward_rlab_filled,
@@ -10285,8 +10323,8 @@ class _KeptBinding(_Binding):
                     "after_dz runs with dx_side only (a dX-only kept backward)"
                 )
             self._launch(keys, t, dw_stream)
-        if clean is not None:
-            rlab.tensor, rlab.clean = t["rlab"], clean
+        if hand:
+            rlab.tensor = t["rlab"]
         dx = t.get("dx_out") if plan.dx_cast else t.get("dx_acc")
         return dx, t.get("dw_out")
 
@@ -12554,19 +12592,20 @@ _CUDA_IS_CAPTURING = getattr(torch._C, "_cuda_isCurrentStreamCapturing", None)
 _RLAB_POOL_ON = None not in (_CUDA_GET_DEVICE, _CUDA_GET_STREAM, _CUDA_IS_CAPTURING)
 
 
-def _graph_rlab(rows: int, zero: bool, device: torch.device) -> Optional[tuple]:
+def _graph_rlab(rows: int, device: torch.device) -> Optional[tuple]:
     """A log-probability graph's ``[rows]`` FP32 label residuals from the free list of the caller's stream
-    (:data:`_RLAB_POOL`), zero-filled when ``zero``: ``(list, entry)``, the entry ``(rows, tensor, capacity, buffer)``
-    the graph's holder owns (:attr:`_GraphRlab.own`) until it is freed (:meth:`_GraphRlab.__del__`), which appends the
-    entry back to ``list`` while the list holds fewer than :data:`_RLAB_POOL_MAX` entries and else lets the buffer go
-    back to the allocator.  ``None`` (no buffer) under a CUDA graph capture, from another current device, above the
-    small-pool limit, or past :data:`_RLAB_POOL_STREAMS` streams.  The take pops the list's last entry; when the list
-    is empty or that buffer has fewer than ``rows`` rows, the popped buffer goes back to the allocator and a new one is
-    requested through :func:`_graph_rlab_tensor` (the holding stream's segment, so the caller's own blocks keep their
-    placement), its capacity rounded up to the allocator's 512-byte block (the same block).  So a take of a large
-    enough buffer makes no request, no stream switch and no stream mark.  Same values, same launches: the zero fill runs
-    on the caller's stream over the ``[rows]`` view, and a buffer that is not filled is written row by row by the
-    backward that binds it, as a fresh one.
+    (:data:`_RLAB_POOL`): ``(list, entry)``, the entry ``(rows, tensor, capacity, buffer)`` the graph's holder owns
+    (:attr:`_GraphRlab.own`) until it is freed (:meth:`_GraphRlab.__del__`), which appends the entry back to ``list``
+    while the list holds fewer than :data:`_RLAB_POOL_MAX` entries and else lets the buffer go back to the allocator.
+    ``None`` (no buffer) under a CUDA graph capture, from another current device, above the small-pool limit, or past
+    :data:`_RLAB_POOL_STREAMS` streams.  The take pops the list's last entry; when the list is empty or that buffer has
+    fewer than ``rows`` rows, the popped buffer goes back to the allocator and a new one is requested through
+    :func:`_graph_rlab_tensor` (the holding stream's segment, so the caller's own blocks keep their placement), its
+    capacity rounded up to the allocator's 512-byte block (the same block).  So a take of a large enough buffer makes no
+    request, no stream switch and no stream mark.  A new buffer is zero-filled once, at its request (on the caller's
+    stream, all ``capacity`` rows); a buffer taken from the list is bound as an earlier graph left it, with no fill: the
+    holders bind it only on plans whose producers store every row a fold reads (:func:`_rlab_rows_stored`), so the rows
+    they leave keep a zero or an earlier graph's residual, which no fold reads.
 
     Liveness: an entry is in one free list or owned by one holder, so two live holders never share a buffer.  The
     graph's work on it runs on the caller's stream (its backward on its forward's stream), and the list is that
@@ -12593,12 +12632,10 @@ def _graph_rlab(rows: int, zero: bool, device: torch.device) -> Optional[tuple]:
                 entry = None
             if entry is None or entry[2] < rows:
                 capacity = -(-rows // _RLAB_POOL_ALIGN) * _RLAB_POOL_ALIGN
-                buffer = _graph_rlab_tensor(capacity, False, device)
+                buffer = _graph_rlab_tensor(capacity, True, device)
                 entry = (capacity, buffer, capacity, buffer)
             if entry[0] != rows:
                 entry = (rows, entry[3][:rows], entry[2], entry[3])
-            if zero:
-                entry[1].zero_()
             return free, entry
     return None
 
@@ -12614,12 +12651,12 @@ def _logprob_graph_rlab(
     """The holder of a log-probability autograd graph's label residuals (:class:`_GraphRlab`), for the backward's
     ``[rows]`` loop rows (the forward's valid-row index): ``None`` when no backward can bind them (no gradient, another
     backend, no rows), else an empty holder.  The forward takes no buffer: the first backward that binds the holder
-    takes one (:meth:`_Binding._call_rlab`, from the free list of its stream, :func:`_graph_rlab`) and zero-fills it
-    there when its plan has the ``rlab_zero`` step (the ``dz`` arm's recompute), where a backward without a holder
-    allocates and fills its own; a backward of another form (a counted plan, the vocabulary-major form) binds its own.
-    So no forward takes or fills a buffer -- a call that records no graph (no gradient, a reentrant checkpoint's first
-    pass) and a checkpoint's recomputation (whose graph runs no backward) included -- and the later backwards of a
-    retained graph bind the held tensor."""
+    takes one (:meth:`_Binding._call_rlab`, from the free list of its stream, :func:`_graph_rlab`: zero-filled when it
+    is requested, else as an earlier graph left it), where a backward without a holder allocates its own (zero-filled
+    for a ``dz`` arm, :func:`_rlab_fresh_zero`); a backward of another form (a counted plan, the vocabulary-major form)
+    binds its own.  So no forward takes or fills a buffer -- a call that records no graph (no gradient, a reentrant
+    checkpoint's first pass) and a checkpoint's recomputation (whose graph runs no backward) included -- and the later
+    backwards of a retained graph bind the held tensor."""
     if backend != "cake" or not (need_dx or need_dw) or not X.is_cuda:
         return None
     rows = (
