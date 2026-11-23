@@ -157,23 +157,41 @@ RECORDS = {
 # the records serving the roles, what :func:`cake_jit.pair_table_routes` reads): ``(lo, hi, roles, chunk)``, the one-
 # kernel table of chunks of 1024 documents for 8193 to 131071 documents on sm_100a / sm_103a and 8193 to 65536 on
 # sm_107a (no workspace: chunk 0), then the two phases of chunks of 8192 documents from 131072 on sm_100a / sm_103a and
-# of 1024 from 65537 on sm_107a, up to 1048577.
+# of 1024 from 65537 on sm_107a, up to the module's documents bound, 16777216 (``MAX_DOCS``).
 TABLE_ROUTES = {
     "sm_100a": (
         (8193, 131071, ("pair_table_chunks1",), 0),
-        (131072, 1048577, ("pair_table_totals8", "pair_table_scan8"), 8192),
+        (131072, 16777216, ("pair_table_totals8", "pair_table_scan8"), 8192),
     ),
     "sm_103a": (
         (8193, 131071, ("pair_table_chunks1",), 0),
-        (131072, 1048577, ("pair_table_totals8", "pair_table_scan8"), 8192),
+        (131072, 16777216, ("pair_table_totals8", "pair_table_scan8"), 8192),
     ),
     "sm_107a": (
         (8193, 65536, ("pair_table_chunks1",), 0),
-        (65537, 1048577, ("pair_table_totals1", "pair_table_scan1"), 1024),
+        (65537, 16777216, ("pair_table_totals1", "pair_table_scan1"), 1024),
     ),
 }
-# Every bound of the pair-table routes and one either side, and the documents bounds of the module.
-TABLE_BOUND_DOCS = (1, 512, 513, 8192, 8193, 8194, 65535, 65536, 65537, 131071, 131072, 131073, 1048577, 1048578)
+# Every bound of the pair-table routes and one either side, the former top of the two phases (1048577) and one past it,
+# and the documents bounds of the module (1 and ``MAX_DOCS``, the top of the two phases).
+TABLE_BOUND_DOCS = (
+    1,
+    512,
+    513,
+    8192,
+    8193,
+    8194,
+    65535,
+    65536,
+    65537,
+    131071,
+    131072,
+    131073,
+    1048577,
+    1048578,
+    16777215,
+    16777216,
+)
 
 
 def _table_route(arch: str, docs: int) -> tuple[tuple[str, ...], int]:
@@ -207,10 +225,10 @@ BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": None}
 # What :func:`cake_jit.bwd_warp_region` reads on each architecture: ``(lo, hi, above)``.
 BWD_WARP_REGIONS = {arch: (*(BWD_WARP_RANGES[arch] or (None, None)), BWD_WARP_DOCS[arch]) for arch in ARCHES}
 # Record -> its capped grid (the rendered ``capped_min_docs``, ``capped_max_docs`` and ``ctas_per_sm``, what
-# :func:`cake_jit.capped_leaves` reads): a forward of 2048 to 1048577 documents on sm_100a runs the unfused forward on
+# :func:`cake_jit.capped_leaves` reads): a forward of 2048 to 16777216 documents on sm_100a runs the unfused forward on
 # at most 6 CTAs a multiprocessor; no other record has one (sm_103a, whose confirming run did not pass the capped
 # grid, and sm_107a keep the rows grid).
-CAPPED = {"fwd_unfused": (2048, 1048577, 6)}
+CAPPED = {"fwd_unfused": (2048, 16777216, 6)}
 # Multiprocessors of a B200 (sm_100a), a GB300 (sm_103a) and a VR200 (sm_107a), as the capped-grid tests stub them.
 SMS = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
 # Backward packs on either side of the documents bounds and of the forward's fused bound (``FUSE_DOCS``, 256).
@@ -616,7 +634,7 @@ def test_the_unfused_forward_grid_is_capped_in_its_range() -> None:
             for rows in (1, per * ctas, per * ctas + 1, per * cap - 1, per * cap, per * cap + 1, per * cap * 3 + 5):
                 full = cake_jit.launch_grid(name, rows)
                 assert full == (max(1, -(-rows // per)), 1, 1), (name, rows)
-                for docs in (1, lo - 1, lo, hi, hi + 1, cake_jit.MAX_DOCS):
+                for docs in (1, lo - 1, lo, 1048577, 1048578, hi, hi + 1, cake_jit.MAX_DOCS):
                     inside = lo <= docs <= hi
                     grid = cake_jit.launch_grid(name, rows, docs, SMS[arch])
                     assert grid == ((min(full[0], cap), 1, 1) if inside else full), (name, arch, rows, docs, grid)
@@ -671,19 +689,12 @@ def test_the_pair_table_routes_follow_the_table_leaves() -> None:
             assert cake_jit.pair_table_workspace(docs, arch) == words, (arch, docs)
         # every route is past the small pair table's packs and below the module's documents bound
         assert all(SMALL_DOCS < lo <= hi <= cake_jit.MAX_DOCS for lo, hi, _, _ in TABLE_ROUTES[arch]), arch
-    # the routes' words at their ends: 16 and 129 words of chunks of 8192 on sm_100a, 65 and 1025 of 1024 on sm_107a
-    assert [cake_jit.pair_table_workspace(docs, "sm_100a") for docs in (131072, 131073, 1048576, 1048577)] == [
-        16,
-        17,
-        128,
-        129,
-    ]
-    assert [cake_jit.pair_table_workspace(docs, "sm_107a") for docs in (65536, 65537, 1048576, 1048577)] == [
-        0,
-        65,
-        1024,
-        1025,
-    ]
+    # the routes' words at their ends: 16 and 2048 words of chunks of 8192 on sm_100a, 65 and 16384 of 1024 on sm_107a;
+    # 128 / 129 / 129 and 1024 / 1025 / 1025 at 1048576, 1048577 (the former top) and 1048578
+    ends = (131072, 131073, 1048576, 1048577, 1048578, 16777215, 16777216)
+    assert [cake_jit.pair_table_workspace(docs, "sm_100a") for docs in ends] == [16, 17, 128, 129, 129, 2048, 2048]
+    ends = (65536, 65537, 1048576, 1048577, 1048578, 16777215, 16777216)
+    assert [cake_jit.pair_table_workspace(docs, "sm_107a") for docs in ends] == [0, 65, 1024, 1025, 1025, 16384, 16384]
 
 
 def test_the_pair_table_launch_takes_the_route_of_its_documents(monkeypatch) -> None:
@@ -734,9 +745,12 @@ def test_a_two_phase_pair_table_needs_the_callers_workspace(monkeypatch) -> None
     monkeypatch.setattr(cake_jit, "run_module", lambda *args, **kwargs: pytest.fail("launched"))
     for arch, docs, words in (
         ("sm_100a", 131072, 16),
+        ("sm_100a", 16777216, 2048),
         ("sm_103a", 1048577, 129),
+        ("sm_103a", 1048578, 129),
         ("sm_107a", 65537, 65),
         ("sm_107a", 1048577, 1025),
+        ("sm_107a", 16777216, 16384),
     ):
         roles = " then ".join(_table_route(arch, docs)[0])
         bound = torch.zeros(docs + 1, dtype=torch.int32)
@@ -1138,7 +1152,7 @@ def test_the_unfused_forward_launch_takes_the_capped_grid(monkeypatch) -> None:
             monkeypatch.setattr(cake_jit, "sm_count", lambda index: pytest.fail("read the SM count for a rows record"))
             G = per * 6 * SMS[arch] * 3 + 5
             out = torch.zeros(1, WIDTH, dtype=torch.bfloat16).expand(G, WIDTH)
-            for docs in (2047, 2048, 8193, 16384, 16385, 1048577):
+            for docs in (2047, 2048, 8193, 16384, 16385, 1048577, 1048578, 16777216):
                 launched.clear()
                 bound = torch.zeros(docs + 1, dtype=torch.int32)
                 cake_backend.launch_fwd(
@@ -1506,8 +1520,10 @@ def test_the_memory_report_separates_workspace_and_retained_state(monkeypatch) -
             }, (T, S, device)
         assert report_of(T, S) == report_of(T, S, None)
     # 131072 documents: 16 words of chunks of 8192 on sm_100a / sm_103a, 128 of 1024 on sm_107a, the most without a
-    # device
+    # device; 16777216 (the top of the two phases): 2048 and 16384 words
     assert report_of(1, 131072)["forward_workspace"] == 4 * 131073 + 512
+    assert report_of(1, 16777216)["forward_workspace"] == 4 * 16777217 + 4 * 16384
+    assert report_of(1, 16777216, "cuda:0")["forward_workspace"] == 4 * 16777217 + 4 * 2048
     with pytest.raises(ValueError):
         pkg.cake_gated_kv_compression_det_train_memory_bytes(-1, 2)
     with pytest.raises(TypeError):

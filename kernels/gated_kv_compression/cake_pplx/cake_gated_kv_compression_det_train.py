@@ -312,8 +312,8 @@ def cake_gated_kv_compression_det_train_memory_bytes(
 
     * ``forward_workspace``: ``4 (S + 1)``, the pair table an explicit forward allocates and frees, plus
       ``4 ceil(S / chunk)``, the chunk totals of a pair table in two phases (a separate int32 tensor, freed on
-      return), for ``131072 <= S <= 1048577`` on SM100 / SM103 (chunks of 8192 documents) and ``65537 <= S <=
-      1048577`` on SM107 (chunks of 1024);
+      return), for ``131072 <= S <= 16777216`` on SM100 / SM103 (chunks of 8192 documents) and ``65537 <= S <=
+      16777216`` on SM107 (chunks of 1024);
     * ``backward_workspace``: the same, the pair table an explicit backward without ``pair_offsets`` allocates
       and frees, with its chunk totals.  The autograd backward allocates none, except a ``1024 G``-byte contiguous
       copy of an incoming gradient that is not contiguous and 16-byte aligned (for example the expanded gradient of

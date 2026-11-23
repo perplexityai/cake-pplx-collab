@@ -626,9 +626,18 @@ def test_the_autograd_node_saves_its_inputs_and_the_pair_table_only(form) -> Non
 # The large-pack pair tables' routes on each architecture: ``(lo, hi, roles)``, the roles a pair-table launch of ``lo``
 # to ``hi`` documents runs in order.
 TABLE_ROUTES = {
-    "sm_100a": ((8193, 131071, ("pair_table_chunks1",)), (131072, 1048577, ("pair_table_totals8", "pair_table_scan8"))),
-    "sm_103a": ((8193, 131071, ("pair_table_chunks1",)), (131072, 1048577, ("pair_table_totals8", "pair_table_scan8"))),
-    "sm_107a": ((8193, 65536, ("pair_table_chunks1",)), (65537, 1048577, ("pair_table_totals1", "pair_table_scan1"))),
+    "sm_100a": (
+        (8193, 131071, ("pair_table_chunks1",)),
+        (131072, 16777216, ("pair_table_totals8", "pair_table_scan8")),
+    ),
+    "sm_103a": (
+        (8193, 131071, ("pair_table_chunks1",)),
+        (131072, 16777216, ("pair_table_totals8", "pair_table_scan8")),
+    ),
+    "sm_107a": (
+        (8193, 65536, ("pair_table_chunks1",)),
+        (65537, 16777216, ("pair_table_totals1", "pair_table_scan1")),
+    ),
 }
 
 

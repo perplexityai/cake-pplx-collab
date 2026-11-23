@@ -117,7 +117,7 @@ The roles, in launch order:
   ``pair_table_scan8`` (chunks of 8192 documents, 1024 threads of 8) from
   131072 documents on ``sm_100a`` and ``sm_103a``, and
   ``pair_table_totals1`` then ``pair_table_scan1`` (chunks of 1024) from
-  65537 on ``sm_107a``, up to 1048577: two kernels on one stream, each
+  65537 on ``sm_107a``, up to 16777216: two kernels on one stream, each
   chunk's pair count into a ``workspace`` of ``ceil(S / chunk)`` int32 words
   (:func:`pair_table_workspace`), then each chunk's scan.  A pair-table
   launch of ``S`` documents runs :func:`pair_table_roles`:
@@ -135,7 +135,7 @@ block: ``one_cta`` is ``(1, 1, 1)``; ``rows`` covers ``rows`` rows with
 ``block_x // lanes_per_row * rows_per_lane_group`` rows per CTA
 (``lanes_per_row`` threads share one 512-wide row, ``rows_per_lane_group``
 rows per group of them); ``rows_capped`` (the ``fwd_unfused`` record of
-``sm_100a``: 2048 to 1048577 documents, 6 CTAs a multiprocessor) is
+``sm_100a``: 2048 to 16777216 documents, 6 CTAs a multiprocessor) is
 ``rows`` but for a launch of ``capped_min_docs <= S <= capped_max_docs``
 documents (:func:`capped_leaves`), whose grid is at most ``ctas_per_sm``
 CTAs a multiprocessor (:func:`sm_count`): its CTAs stride over the row
