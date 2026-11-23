@@ -529,76 +529,97 @@ across communication-SM splits and under CUDA Graph replay.
   bitwise that of the split off, the ranks need not agree, and CUDA Graph
   replays and layers that share a workspace decide from their own schedule. A
   count that is odd, below 2 or not below the forward count in force keeps the
-  forward count. Row: B300 (148 SMs) EP8 16, GB200 (152 SMs) EP4 16. Measured
-  without a row (no configuration with ragged source rows faster than the
-  previous version in the record window; the split stays off there): B200 (148
-  SMs) EP8, GB300 (152 SMs) EP4. No row elsewhere (other devices and group sizes
+  forward count. Row: B200 (148 SMs) EP8 16, GB300 (152 SMs) EP4 16, GB200 (152
+  SMs) EP4 16. Measured without a row (no configuration with ragged source rows
+  faster than the previous version in the record window; the split stays off
+  there): B300 (148 SMs) EP8. No row elsewhere (other devices and group sizes
   were not measured).
 
   Table: this package against the previous version 0.2.4 (main, the split
-  absent) with the source split at its row, the device row kept; one node per
-  device, both versions loading GPU programs with the same SASS except the two
-  forward kernels of the router weight before the down projection (compared per
-  program before timing), BF16 routed experts, H 5120 / I 2304, 384 experts, top
-  6, clamped SwiGLU, FP32 accumulators; one process per version and
-  configuration, the two versions and a second process of the previous version
-  interleaved over six rounds with the order reversed in every second round,
+  absent), each device at its shipped setting: the split on at its row, off on a
+  device without a row; one node per device, both versions loading GPU programs
+  with the same SASS except the two forward kernels of the router weight before
+  the down projection (compared per program before timing), BF16 routed experts,
+  H 5120 / I 2304, 384 experts, top 6, clamped SwiGLU, FP32 accumulators; one
+  process per version and configuration, this package with the split on and with
+  it off and a second process of the previous version interleaved over six
+  rounds (B300 ragged 4k: twelve) with the order reversed in every second round,
   eager (CUDA Graph where stated), no CPU binding; the slowest rank's median of
   timed repetitions 1-20 after 3 warm-up repetitions, median over the rounds;
   the table prints those medians and change = printed package ms / printed main
-  ms - 1; band = the noise band of the identical arms and of the round spread;
-  'faster' or 'slower' = beyond the band in every round and on the GPU-paired
-  interval, 'noise' = inside the band, 'unresolved' = beyond the band but not in
-  every round; steady = the change of the medians of timed repetitions 41-60 of
-  60. Forward = schedule and forward without context; checkpointed step =
-  schedule, forward, context recompute and backward. Source rows per rank of the
-  ragged configurations: EP8 16k 21,419 / 14,428 / 16,181 / 11,502 / 10,086 /
-  21,331 / 9,762 / 0; EP8 4k 2,987 / 4,188 / 5,941 / 5,358 / 3,942 / 2,899 /
-  3,618 / 0; EP4 16k 21,419 / 14,428 / 16,181 / 0; EP4 4k 2,987 / 4,188 / 5,941
-  / 0. Every eager configuration gives the same bits at 0.2.4, with the split
-  and with it off, and every line repeats its outputs bitwise.
+  ms - 1; band = the largest of the deviation of the identical-version pair, its
+  round-interval half width and the round spreads of both versions; 'faster' =
+  the median of the per-round ratios below 1 minus the band, every round's ratio
+  below 1 and the 95 % interval of the GPU-paired ratio below 1; 'slower' = the
+  same above 1; 'noise' = the median ratio inside the band; 'unresolved' =
+  beyond the band without the other two conditions; steady = the change of the
+  medians of timed repetitions 41-60 of 60. Forward = schedule and forward
+  without context; forward with context = the forward that saves the context, on
+  a schedule built before the timed repetitions; checkpointed step = schedule,
+  forward, context recompute and backward. Source rows per rank of the ragged
+  configurations: EP8 16k 21,419 / 14,428 / 16,181 / 11,502 / 10,086 / 21,331 /
+  9,762 / 0; EP8 4k 2,987 / 4,188 / 5,941 / 5,358 / 3,942 / 2,899 / 3,618 / 0;
+  EP4 16k 21,419 / 14,428 / 16,181 / 0; EP4 4k 2,987 / 4,188 / 5,941 / 0. Every
+  eager configuration gives the same bits at 0.2.4, with the split on and with
+  it off, and every line repeats its outputs bitwise.
 
-  | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
-  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-  | B300 | 8 | before down, 384 experts, top 6 | ragged | as listed (4k) | 1.953 | 2.057 | +5.3 % (band 11.5 %, noise; steady -1.8 %) | 8.493 | 8.472 | -0.2 % (band 2.6 %, noise; steady +0.6 %) |
-  | B300 | 8 | before down, 384 experts, top 6 | uniform | 16,384 | 7.641 | 7.660 | +0.2 % (band 2.9 %, noise; steady +0.1 %) | 28.722 | 28.659 | -0.2 % (band 1.1 %, noise; steady -0.5 %) |
-  | B300 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 10.459 | 10.469 | +0.1 % (band 2.5 %, noise; steady +0.1 %) | 38.763 | 38.527 | -0.6 % (band 2.5 %, noise; steady -0.1 %) |
-  | B300 | 8 | before down, 384 experts, top 6 | ragged | as listed (16k) | 6.857 | 6.697 | -2.3 % (band 4.6 %, noise; steady -6.5 %) | 25.897 | 25.564 | -1.3 % (band 0.7 %, faster; steady -1.4 %) |
-  | B300 | 8 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed) | ragged | as listed (16k) | 6.978 | 6.513 | -6.7 % (band 6.6 %, noise; steady -5.6 %) | 25.436 | 25.028 | -1.6 % (band 1.4 %, noise; steady -1.4 %) |
-  | GB200 | 4 | before down, 384 experts, top 6 | uniform | 4,096 | 2.595 | 2.601 | +0.2 % (band 2.1 %, noise; steady -0.1 %) | 11.851 | 11.881 | +0.3 % (band 0.9 %, noise; steady +1.0 %) |
-  | GB200 | 4 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 3.080 | 3.062 | -0.6 % (band 4.7 %, noise; steady +0.5 %) | 13.616 | 13.628 | +0.1 % (band 1.8 %, noise; steady +0.7 %) |
-  | GB200 | 4 | before down, 384 experts, top 6 | ragged | as listed (4k) | 2.195 | 2.199 | +0.2 % (band 2.0 %, noise; steady +0.2 %) | 10.720 | 10.700 | -0.2 % (band 0.4 %, noise; steady -0.2 %) |
-  | GB200 | 4 | before down, 384 experts, top 6 | uniform | 16,384 | 8.277 | 8.157 | -1.4 % (band 4.0 %, noise; steady +1.4 %) | 30.488 | 30.691 | +0.7 % (band 1.6 %, noise; steady +0.1 %) |
-  | GB200 | 4 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 10.504 | 10.572 | +0.6 % (band 1.6 %, noise; steady +0.6 %) | 38.783 | 38.749 | -0.1 % (band 2.8 %, noise; steady +0.0 %) |
-  | GB200 | 4 | before down, 384 experts, top 6 | ragged | as listed (16k) | 7.321 | 6.944 | -5.1 % (band 2.6 %, faster; steady -1.4 %) | 27.602 | 27.262 | -1.2 % (band 2.3 %, noise; steady -0.8 %) |
-  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed) | ragged | as listed (16k) | 7.141 | 6.910 | -3.2 % (band 4.4 %, noise; steady -3.3 %) | 26.484 | 26.292 | -0.7 % (band 2.1 %, noise; steady -0.3 %) |
-  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed) | uniform capture, 2.0x hot rank replay | 16,384 | 13.953 | 13.888 | -0.5 % (band 1.7 %, noise; steady +0.2 %) | 49.469 | 49.583 | +0.2 % (band 0.7 %, noise; steady -0.0 %) |
-  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed) | uniform capture, 3.0x hot rank replay | 16,384 | 19.356 | 19.441 | +0.4 % (band 1.2 %, noise; steady +0.3 %) | 71.979 | 71.843 | -0.2 % (band 1.4 %, noise; steady -0.2 %) |
-  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed) | uniform capture, uniform replay | 16,384 | 8.217 | 8.118 | -1.2 % (band 7.3 %, noise; steady -0.2 %) | 30.006 | 29.809 | -0.7 % (band 2.5 %, noise; steady +0.1 %) |
+  | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this arm (ms) | change | forward with context main (ms) | this arm (ms) | change | checkpointed step main (ms) | this arm (ms) | change |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | B300 | 8 | before down, 384 experts, top 6, split off (shipped) | ragged | as listed (4k) | 1.931 | 2.027 | +5.0 % (band 12.1 %, noise; steady +0.5 %) | 2.022 | 2.047 | +1.2 % (band 8.1 %, noise; steady +0.9 %) | 8.627 | 8.636 | +0.1 % (band 4.6 %, noise; steady +0.5 %) |
+  | B300 | 8 | before down, 384 experts, top 6, split off (shipped) | uniform | 16,384 | 7.737 | 7.763 | +0.3 % (band 1.3 %, noise; steady -0.1 %) | 8.020 | 8.014 | -0.1 % (band 1.3 %, noise; steady -0.3 %) | 28.805 | 28.785 | -0.1 % (band 1.1 %, noise; steady +0.2 %) |
+  | B300 | 8 | before down, 384 experts, top 6, split off (shipped) | 1.5x hot rank | 16,384 | 10.758 | 10.680 | -0.7 % (band 1.7 %, noise; steady -0.1 %) | 11.165 | 11.187 | +0.2 % (band 1.1 %, noise; steady +0.2 %) | 38.801 | 38.904 | +0.3 % (band 1.3 %, noise; steady +0.8 %) |
+  | B300 | 8 | before down, 384 experts, top 6, split off (shipped) | ragged | as listed (16k) | 6.935 | 6.921 | -0.2 % (band 9.1 %, noise; steady -1.2 %) | 7.199 | 7.110 | -1.2 % (band 3.8 %, noise; steady +1.3 %) | 25.866 | 25.848 | -0.1 % (band 2.0 %, noise; steady +0.4 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split on (shipped) | ragged | as listed (4k) | 2.140 | 2.120 | -0.9 % (band 1.0 %, noise; steady -1.4 %) | 2.187 | 2.175 | -0.5 % (band 6.9 %, noise; steady +0.7 %) | 9.100 | 9.117 | +0.2 % (band 2.7 %, noise; steady +0.7 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split on (shipped) | uniform | 16,384 | 8.166 | 8.093 | -0.9 % (band 3.5 %, noise; steady +0.6 %) | 8.552 | 8.512 | -0.5 % (band 1.6 %, noise; steady +0.8 %) | 30.139 | 30.197 | +0.2 % (band 1.5 %, noise; steady -0.1 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split on (shipped) | 1.5x hot rank | 16,384 | 11.140 | 11.096 | -0.4 % (band 1.7 %, noise; steady -0.2 %) | 11.570 | 11.620 | +0.4 % (band 1.9 %, noise; steady +0.3 %) | 40.369 | 40.337 | -0.1 % (band 1.7 %, noise; steady -0.7 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split on (shipped) | ragged | as listed (16k) | 7.391 | 6.870 | -7.0 % (band 6.3 %, faster; steady -4.9 %) | 7.722 | 7.413 | -4.0 % (band 6.4 %, noise; steady -3.9 %) | 26.950 | 26.736 | -0.8 % (band 1.2 %, noise; steady -1.3 %) |
+  | B200 | 8 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed), split on (shipped) | ragged | as listed (16k) | 7.127 | 6.695 | -6.1 % (band 6.9 %, faster; steady -6.2 %) | - | - | - | 26.402 | 26.232 | -0.6 % (band 1.5 %, noise; steady -0.9 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split on (shipped) | uniform | 4,096 | 2.381 | 2.412 | +1.3 % (band 6.0 %, noise; steady +1.6 %) | 2.312 | 2.333 | +0.9 % (band 4.4 %, noise; steady +1.0 %) | 11.243 | 11.259 | +0.1 % (band 1.2 %, noise; steady +0.1 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split on (shipped) | 1.5x hot rank | 4,096 | 2.752 | 2.779 | +1.0 % (band 4.5 %, noise; steady +0.8 %) | 2.753 | 2.747 | -0.2 % (band 2.2 %, noise; steady +0.7 %) | 12.336 | 12.355 | +0.2 % (band 1.1 %, noise; steady -0.0 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split on (shipped) | ragged | as listed (4k) | 2.147 | 2.157 | +0.5 % (band 4.9 %, noise; steady +0.8 %) | 2.043 | 2.056 | +0.6 % (band 4.8 %, noise; steady +0.8 %) | 10.492 | 10.516 | +0.2 % (band 2.2 %, noise; steady +0.1 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split on (shipped) | uniform | 16,384 | 6.358 | 6.376 | +0.3 % (band 1.3 %, noise; steady +0.9 %) | 6.433 | 6.416 | -0.3 % (band 1.4 %, noise; steady -0.0 %) | 24.333 | 24.324 | -0.0 % (band 0.7 %, noise; steady +0.1 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split on (shipped) | 1.5x hot rank | 16,384 | 8.535 | 8.511 | -0.3 % (band 2.5 %, noise; steady +0.0 %) | 9.021 | 9.057 | +0.4 % (band 2.6 %, noise; steady +0.6 %) | 32.243 | 32.282 | +0.1 % (band 1.5 %, noise; steady +0.2 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split on (shipped) | ragged | as listed (16k) | 5.906 | 5.836 | -1.2 % (band 1.3 %, faster; steady -0.7 %) | 5.937 | 5.889 | -0.8 % (band 1.3 %, noise; steady -0.8 %) | 22.511 | 22.505 | -0.0 % (band 1.0 %, noise; steady -0.2 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed), split on (shipped) | ragged | as listed (16k) | 5.665 | 5.711 | +0.8 % (band 3.4 %, noise; steady -0.2 %) | - | - | - | 22.251 | 22.262 | +0.0 % (band 1.0 %, noise; steady -0.4 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on (shipped) | uniform capture, 2.0x hot rank replay | 16,384 | 10.940 | 10.929 | -0.1 % (band 0.6 %, noise; steady -0.5 %) | - | - | - | 40.690 | 40.643 | -0.1 % (band 1.1 %, noise; steady +0.0 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on (shipped) | uniform capture, 3.0x hot rank replay | 16,384 | 15.806 | 15.782 | -0.2 % (band 1.1 %, noise; steady -0.1 %) | - | - | - | 58.831 | 58.925 | +0.2 % (band 1.5 %, noise; steady -0.1 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on (shipped) | uniform capture, uniform replay | 16,384 | 6.244 | 6.194 | -0.8 % (band 2.8 %, noise; steady -0.2 %) | - | - | - | 23.854 | 23.870 | +0.1 % (band 0.8 %, noise; steady +0.2 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split on (shipped) | uniform | 4,096 | 2.643 | 2.623 | -0.8 % (band 2.2 %, noise; steady -0.1 %) | 2.792 | 2.832 | +1.4 % (band 3.1 %, noise; steady -1.1 %) | 12.086 | 12.099 | +0.1 % (band 1.1 %, noise; steady -0.1 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split on (shipped) | 1.5x hot rank | 4,096 | 3.100 | 3.104 | +0.1 % (band 10.0 %, noise; steady -0.1 %) | 3.369 | 3.387 | +0.5 % (band 2.3 %, noise; steady +0.4 %) | 13.893 | 13.891 | -0.0 % (band 1.5 %, noise; steady +0.8 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split on (shipped) | ragged | as listed (4k) | 2.219 | 2.242 | +1.0 % (band 1.3 %, noise; steady -0.3 %) | 2.264 | 2.237 | -1.2 % (band 2.4 %, noise; steady -1.4 %) | 10.839 | 10.810 | -0.3 % (band 1.0 %, noise; steady -0.2 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split on (shipped) | uniform | 16,384 | 8.155 | 8.126 | -0.4 % (band 3.0 %, noise; steady +1.1 %) | 8.768 | 8.809 | +0.5 % (band 2.4 %, noise; steady -0.2 %) | 30.484 | 30.574 | +0.3 % (band 0.8 %, noise; steady +0.1 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split on (shipped) | 1.5x hot rank | 16,384 | 10.685 | 10.750 | +0.6 % (band 2.3 %, noise; steady -1.4 %) | 11.211 | 11.260 | +0.4 % (band 1.1 %, noise; steady +0.9 %) | 39.717 | 39.684 | -0.1 % (band 1.8 %, noise; steady +0.1 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split on (shipped) | ragged | as listed (16k) | 7.521 | 7.245 | -3.7 % (band 3.3 %, faster; steady -2.2 %) | 8.118 | 7.812 | -3.8 % (band 3.5 %, faster; steady -2.5 %) | 27.740 | 27.469 | -1.0 % (band 1.7 %, noise; steady -0.8 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed), split on (shipped) | ragged | as listed (16k) | 7.236 | 7.075 | -2.2 % (band 4.1 %, noise; steady -3.7 %) | - | - | - | 26.927 | 26.884 | -0.2 % (band 1.1 %, noise; steady -0.7 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on (shipped) | uniform capture, 2.0x hot rank replay | 16,384 | 14.151 | 14.162 | +0.1 % (band 2.1 %, noise; steady -0.0 %) | - | - | - | 50.332 | 50.409 | +0.2 % (band 0.8 %, noise; steady -0.1 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on (shipped) | uniform capture, 3.0x hot rank replay | 16,384 | 19.778 | 19.759 | -0.1 % (band 1.3 %, noise; steady -0.2 %) | - | - | - | 72.849 | 73.127 | +0.4 % (band 1.9 %, noise; steady +0.5 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on (shipped) | uniform capture, uniform replay | 16,384 | 8.048 | 7.980 | -0.8 % (band 2.3 %, noise; steady +0.4 %) | - | - | - | 29.625 | 29.685 | +0.2 % (band 1.7 %, noise; steady +0.1 %) |
 
-  Table: the devices without a row (the split measured on, then the shipped
-  behavior with it off where measured), same method:
+  Table: the same devices at the other setting (not shipped), same method:
 
-  | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
-  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-  | B200 | 8 | before down, 384 experts, top 6, split on | ragged | as listed (4k) | 2.091 | 2.074 | -0.8 % (band 7.9 %, noise; steady -1.3 %) | 8.823 | 8.807 | -0.2 % (band 2.0 %, noise; steady +0.2 %) |
-  | B200 | 8 | before down, 384 experts, top 6, split on | uniform | 16,384 | 8.013 | 7.997 | -0.2 % (band 1.9 %, noise; steady +0.1 %) | 29.358 | 29.448 | +0.3 % (band 2.0 %, noise; steady +0.3 %) |
-  | B200 | 8 | before down, 384 experts, top 6, split on | 1.5x hot rank | 16,384 | 10.909 | 10.980 | +0.7 % (band 1.8 %, noise; steady -0.8 %) | 39.107 | 39.411 | +0.8 % (band 1.3 %, noise; steady +0.8 %) |
-  | B200 | 8 | before down, 384 experts, top 6, split on | ragged | as listed (16k) | 7.117 | 6.812 | -4.3 % (band 4.1 %, noise; steady -7.3 %) | 26.364 | 26.014 | -1.3 % (band 1.5 %, noise; steady -0.8 %) |
-  | B200 | 8 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed), split on | ragged | as listed (16k) | 6.934 | 6.503 | -6.2 % (band 7.8 %, noise; steady -4.7 %) | 25.965 | 25.415 | -2.1 % (band 2.1 %, noise; steady -0.9 %) |
-  | B200 | 8 | before down, 384 experts, top 6, split off (shipped) | ragged | as listed (16k) | 7.117 | 7.111 | -0.1 % (band 2.5 %, noise; steady -0.4 %) | 26.364 | 26.419 | +0.2 % (band 1.4 %, noise; steady +0.8 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split on | uniform | 4,096 | 2.312 | 2.318 | +0.3 % (band 1.3 %, noise; steady +0.3 %) | 11.143 | 11.155 | +0.1 % (band 0.2 %, noise; steady +0.1 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split on | 1.5x hot rank | 4,096 | 2.664 | 2.680 | +0.6 % (band 0.8 %, noise; steady +0.0 %) | 12.194 | 12.215 | +0.2 % (band 0.3 %, noise; steady +0.1 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split on | ragged | as listed (4k) | 2.093 | 2.095 | +0.1 % (band 0.8 %, noise; steady +0.1 %) | 10.429 | 10.430 | +0.0 % (band 0.2 %, noise; steady +0.0 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split on | uniform | 16,384 | 6.265 | 6.326 | +1.0 % (band 1.5 %, noise; steady +0.3 %) | 24.456 | 24.412 | -0.2 % (band 1.3 %, noise; steady +0.6 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split on | 1.5x hot rank | 16,384 | 8.580 | 8.594 | +0.2 % (band 1.2 %, noise; steady -0.3 %) | 32.586 | 32.469 | -0.4 % (band 1.7 %, noise; steady +0.8 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split on | ragged | as listed (16k) | 5.856 | 5.861 | +0.1 % (band 2.8 %, noise; steady -1.0 %) | 22.907 | 22.792 | -0.5 % (band 1.7 %, noise; steady +0.1 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed), split on | ragged | as listed (16k) | 5.792 | 5.699 | -1.6 % (band 5.0 %, noise; steady -1.3 %) | 22.258 | 22.197 | -0.3 % (band 1.6 %, noise; steady +0.1 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on | uniform capture, 2.0x hot rank replay | 16,384 | 10.997 | 10.976 | -0.2 % (band 1.5 %, noise; steady -0.3 %) | 40.808 | 40.839 | +0.1 % (band 0.7 %, noise; steady +0.0 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on | uniform capture, 3.0x hot rank replay | 16,384 | 15.854 | 15.835 | -0.1 % (band 1.0 %, noise; steady +0.1 %) | 59.616 | 59.413 | -0.3 % (band 1.0 %, noise; steady +0.3 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, CUDA Graph (captured on a uniform step, replayed), split on | uniform capture, uniform replay | 16,384 | 6.167 | 6.152 | -0.2 % (band 2.0 %, noise; steady +0.4 %) | 23.865 | 23.827 | -0.2 % (band 1.0 %, noise; steady +0.0 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split off (shipped) | ragged | as listed (4k) | 2.093 | 2.095 | +0.1 % (band 0.8 %, noise; steady -0.0 %) | 10.429 | 10.430 | +0.0 % (band 0.2 %, noise; steady -0.0 %) |
-  | GB300 | 4 | before down, 384 experts, top 6, split off (shipped) | ragged | as listed (16k) | 5.856 | 5.885 | +0.5 % (band 2.8 %, noise; steady +0.4 %) | 22.907 | 22.788 | -0.5 % (band 1.5 %, noise; steady +0.3 %) |
+  | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this arm (ms) | change | forward with context main (ms) | this arm (ms) | change | checkpointed step main (ms) | this arm (ms) | change |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | B300 | 8 | before down, 384 experts, top 6, split on (not shipped) | ragged | as listed (4k) | 1.931 | 2.085 | +8.0 % (band 11.8 %, noise; steady +0.4 %) | 2.022 | 2.022 | +0.0 % (band 7.4 %, noise; steady -0.6 %) | 8.627 | 8.580 | -0.5 % (band 4.1 %, noise; steady -0.2 %) |
+  | B300 | 8 | before down, 384 experts, top 6, split on (not shipped) | uniform | 16,384 | 7.737 | 7.707 | -0.4 % (band 1.3 %, noise; steady -1.1 %) | 8.020 | 8.066 | +0.6 % (band 1.8 %, noise; steady +0.3 %) | 28.805 | 28.820 | +0.1 % (band 1.1 %, noise; steady +0.4 %) |
+  | B300 | 8 | before down, 384 experts, top 6, split on (not shipped) | 1.5x hot rank | 16,384 | 10.758 | 10.641 | -1.1 % (band 2.1 %, noise; steady +0.0 %) | 11.165 | 11.192 | +0.2 % (band 1.6 %, noise; steady -0.5 %) | 38.801 | 38.979 | +0.5 % (band 1.1 %, noise; steady +0.2 %) |
+  | B300 | 8 | before down, 384 experts, top 6, split on (not shipped) | ragged | as listed (16k) | 6.935 | 6.606 | -4.7 % (band 4.4 %, noise; steady -4.9 %) | 7.199 | 6.978 | -3.1 % (band 3.1 %, noise; steady -4.8 %) | 25.866 | 25.535 | -1.3 % (band 1.2 %, noise; steady -0.9 %) |
+  | B300 | 8 | before down, 384 experts, top 6, CUDA Graph (captured on these sources, replayed), split on (not shipped) | ragged | as listed (16k) | 6.779 | 6.497 | -4.2 % (band 6.0 %, noise; steady -5.5 %) | - | - | - | 25.364 | 25.205 | -0.6 % (band 2.5 %, noise; steady -1.2 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split off (not shipped) | ragged | as listed (4k) | 2.140 | 2.142 | +0.1 % (band 6.8 %, noise; steady +0.7 %) | 2.187 | 2.227 | +1.8 % (band 7.8 %, noise; steady +1.9 %) | 9.100 | 9.152 | +0.6 % (band 2.2 %, noise; steady +0.1 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split off (not shipped) | uniform | 16,384 | 8.166 | 8.102 | -0.8 % (band 3.5 %, noise; steady -0.3 %) | 8.552 | 8.570 | +0.2 % (band 3.7 %, noise; steady +0.5 %) | 30.139 | 30.292 | +0.5 % (band 1.0 %, noise; steady -0.2 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split off (not shipped) | 1.5x hot rank | 16,384 | 11.140 | 11.091 | -0.4 % (band 1.4 %, noise; steady -0.3 %) | 11.570 | 11.624 | +0.5 % (band 1.9 %, noise; steady +0.3 %) | 40.369 | 40.584 | +0.5 % (band 1.7 %, noise; steady -0.8 %) |
+  | B200 | 8 | before down, 384 experts, top 6, split off (not shipped) | ragged | as listed (16k) | 7.391 | 7.361 | -0.4 % (band 3.6 %, noise; steady -0.1 %) | 7.722 | 7.724 | +0.0 % (band 3.4 %, noise; steady -0.5 %) | 26.950 | 27.029 | +0.3 % (band 1.5 %, noise; steady +0.1 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split off (not shipped) | uniform | 4,096 | 2.381 | 2.365 | -0.7 % (band 4.3 %, noise; steady -0.6 %) | 2.312 | 2.303 | -0.4 % (band 4.5 %, noise; steady +0.0 %) | 11.243 | 11.212 | -0.3 % (band 2.1 %, noise; steady -0.3 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split off (not shipped) | 1.5x hot rank | 4,096 | 2.752 | 2.778 | +0.9 % (band 4.5 %, noise; steady +0.9 %) | 2.753 | 2.750 | -0.1 % (band 2.1 %, noise; steady +0.9 %) | 12.336 | 12.369 | +0.3 % (band 1.1 %, noise; steady +0.2 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split off (not shipped) | ragged | as listed (4k) | 2.147 | 2.125 | -1.0 % (band 4.9 %, noise; steady -0.6 %) | 2.043 | 2.032 | -0.5 % (band 4.8 %, noise; steady -0.3 %) | 10.492 | 10.467 | -0.2 % (band 2.2 %, noise; steady -0.1 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split off (not shipped) | uniform | 16,384 | 6.358 | 6.380 | +0.3 % (band 2.6 %, noise; steady +0.4 %) | 6.433 | 6.446 | +0.2 % (band 1.3 %, noise; steady -0.3 %) | 24.333 | 24.289 | -0.2 % (band 1.3 %, noise; steady +0.1 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split off (not shipped) | 1.5x hot rank | 16,384 | 8.535 | 8.543 | +0.1 % (band 1.2 %, noise; steady +0.3 %) | 9.021 | 9.070 | +0.5 % (band 2.6 %, noise; steady +0.5 %) | 32.243 | 32.311 | +0.2 % (band 0.7 %, noise; steady -0.2 %) |
+  | GB300 | 4 | before down, 384 experts, top 6, split off (not shipped) | ragged | as listed (16k) | 5.906 | 5.926 | +0.3 % (band 2.8 %, noise; steady +0.6 %) | 5.937 | 5.958 | +0.4 % (band 1.0 %, noise; steady +0.4 %) | 22.511 | 22.604 | +0.4 % (band 1.1 %, noise; steady +0.1 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | uniform | 4,096 | 2.643 | 2.654 | +0.4 % (band 2.8 %, noise; steady +0.5 %) | 2.792 | 2.815 | +0.8 % (band 3.1 %, noise; steady -1.0 %) | 12.086 | 12.091 | +0.0 % (band 1.3 %, noise; steady -0.3 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | 1.5x hot rank | 4,096 | 3.100 | 3.085 | -0.5 % (band 6.4 %, noise; steady -0.4 %) | 3.369 | 3.378 | +0.3 % (band 1.8 %, noise; steady +0.9 %) | 13.893 | 13.880 | -0.1 % (band 1.5 %, noise; steady +0.9 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | ragged | as listed (4k) | 2.219 | 2.232 | +0.6 % (band 2.1 %, noise; steady -0.1 %) | 2.264 | 2.290 | +1.1 % (band 4.5 %, noise; steady -0.2 %) | 10.839 | 10.858 | +0.2 % (band 1.0 %, noise; steady +0.2 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | uniform | 16,384 | 8.155 | 8.110 | -0.6 % (band 2.6 %, noise; steady +0.2 %) | 8.768 | 8.810 | +0.5 % (band 1.7 %, noise; steady +0.2 %) | 30.484 | 30.620 | +0.4 % (band 1.2 %, noise; steady +0.1 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | 1.5x hot rank | 16,384 | 10.685 | 10.736 | +0.5 % (band 1.5 %, noise; steady -0.1 %) | 11.211 | 11.220 | +0.1 % (band 1.2 %, noise; steady -0.0 %) | 39.717 | 39.697 | -0.1 % (band 1.9 %, noise; steady +0.3 %) |
+  | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | ragged | as listed (16k) | 7.521 | 7.459 | -0.8 % (band 3.3 %, noise; steady +1.0 %) | 8.118 | 8.045 | -0.9 % (band 3.5 %, noise; steady +0.7 %) | 27.740 | 27.807 | +0.2 % (band 1.7 %, noise; steady -0.2 %) |
 
 Optimizer steps, router-network backpropagation and shared-gradient
 all-reduce are outside this adapter.

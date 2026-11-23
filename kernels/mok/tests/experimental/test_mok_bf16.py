@@ -2171,13 +2171,13 @@ def test_source_split_config_is_validated(field, value):
 @pytest.mark.parametrize(
     "capability,sm_count,ep_size,expected",
     [
-        ((10, 0), 148, 8, None),  # B200, EP8: measured, no gain (README)
+        ((10, 0), 148, 8, 16),  # B200, EP8
         ((10, 0), 148, 4, None),
         ((10, 0), 152, 4, 16),  # GB200, EP4
         ((10, 0), 152, 8, None),
-        ((10, 3), 148, 8, 16),  # B300, EP8
+        ((10, 3), 148, 8, None),  # B300, EP8: measured, no gain (README)
         ((10, 3), 148, 4, None),
-        ((10, 3), 152, 4, None),  # GB300, EP4: measured, no gain (README)
+        ((10, 3), 152, 4, 16),  # GB300, EP4
         ((10, 3), 152, 8, None),
         ((10, 3), 160, 4, None),  # other SM count
         ((10, 7), 212, 8, None),  # Rubin: no row
@@ -2213,8 +2213,8 @@ def test_source_split_defaults_resolve_the_measured_rows():
     assert facade["source_split_threshold"].default == 1.5
     assert kernels.SOURCE_SPLIT_UNIT == 256
     assert api.SOURCE_SPLIT_COMM_SMS == {
-        (10, 0): {152: {4: 16}},
-        (10, 3): {148: {8: 16}},
+        (10, 0): {148: {8: 16}, 152: {4: 16}},
+        (10, 3): {152: {4: 16}},
     }
     with pytest.raises(ValueError, match="ep_size must be a positive"):
         api.resolve_source_split_comm_sms(0)

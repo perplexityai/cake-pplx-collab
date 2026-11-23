@@ -120,8 +120,8 @@ _FACTORY_COMM_SMS = (40, 40)
 # resolves to None (the split off) elsewhere. Protocol and absolute times:
 # backend README, "Source split".
 SOURCE_SPLIT_COMM_SMS = {
-    (10, 0): {152: {4: 16}},
-    (10, 3): {148: {8: 16}},
+    (10, 0): {148: {8: 16}, 152: {4: 16}},
+    (10, 3): {152: {4: 16}},
 }
 SOURCE_SPLIT_THRESHOLD = 1.5
 
