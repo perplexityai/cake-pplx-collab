@@ -5525,7 +5525,8 @@ def test_a_extent_rule():
         logprob_dz=True,
         logprob_lbl=True,
     )
-    assert tau.temperature and pads(tau) == (0, 0)  # the temperature forms keep their rows
+    # the temperature forms keep their rows
+    assert tau.temperature and pads(tau) == (0, 0)
     base = workspace_layout(15, 512, 4096, hidden=256, compact=True)
     wide = workspace_layout(
         15, 512, 4096, hidden=256, compact=True, x_c_rows=256, logits_rows=256
@@ -10850,7 +10851,12 @@ def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
 
     monkeypatch.setattr(cake_backend, "_row_scan", scan_spy)
     inp = make_inputs(
-        256, objective="ce", seed=SEED + 7743, device=CUDA, W=glm_weight, ignore_frac=0.05
+        256,
+        objective="ce",
+        seed=SEED + 7743,
+        device=CUDA,
+        W=glm_weight,
+        ignore_frac=0.05,
     )
     entries = (
         ("cake_backend", cake_backend.cake_lm_head_det_train_loss, {}),
@@ -11039,7 +11045,10 @@ def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):
             use(table)
             r = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
             assert (r.plan.a_rows, r.plan.dx_a_rows) == (0, 0), (entry, table)
-            assert "x_a" not in r.tensors and "logits_a" not in r.tensors, (entry, table)
+            assert "x_a" not in r.tensors and "logits_a" not in r.tensors, (
+                entry,
+                table,
+            )
             r.forward()
             r.backward()
             torch.cuda.synchronize()
