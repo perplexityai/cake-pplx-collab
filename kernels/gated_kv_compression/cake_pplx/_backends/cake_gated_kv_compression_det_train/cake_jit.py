@@ -364,7 +364,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
-        "capped_max_docs": 1048577,
+        "capped_max_docs": 16777216,
         "capped_min_docs": 2048,
         "ctas_per_sm": 6,
         "ffi_entry": "run",
@@ -787,7 +787,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_7f1086e2d261582c7740",
         "role": "pair_table_totals8",
-        "table_max_docs": 1048577,
+        "table_max_docs": 16777216,
         "table_min_docs": 131072,
     },
     "pair_table_totals8_sm_103a": {
@@ -813,7 +813,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_7f1086e2d261582c7740",
         "role": "pair_table_totals8",
-        "table_max_docs": 1048577,
+        "table_max_docs": 16777216,
         "table_min_docs": 131072,
     },
     "pair_table_scan8": {
@@ -840,7 +840,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_b2e8112209b0598a0643",
         "role": "pair_table_scan8",
-        "table_max_docs": 1048577,
+        "table_max_docs": 16777216,
         "table_min_docs": 131072,
     },
     "pair_table_scan8_sm_103a": {
@@ -867,7 +867,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_b2e8112209b0598a0643",
         "role": "pair_table_scan8",
-        "table_max_docs": 1048577,
+        "table_max_docs": 16777216,
         "table_min_docs": 131072,
     },
     "pair_table_totals1_sm_107a": {
@@ -893,7 +893,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_226d77a045d657b1ed90",
         "role": "pair_table_totals1",
-        "table_max_docs": 1048577,
+        "table_max_docs": 16777216,
         "table_min_docs": 65537,
     },
     "pair_table_scan1_sm_107a": {
@@ -920,7 +920,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_c82665f54344c397fa6e",
         "role": "pair_table_scan1",
-        "table_max_docs": 1048577,
+        "table_max_docs": 16777216,
         "table_min_docs": 65537,
     },
 }
