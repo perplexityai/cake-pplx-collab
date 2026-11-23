@@ -3785,24 +3785,33 @@ class _SmallCallStage(torch.autograd.Function):
             start, nbytes = offsets[name]
             return block[start : start + nbytes].view(dtype)
 
-        valid = view("valid", torch.bool)
         xs = view("x", torch.bfloat16).view(rows, H)
         lab = view("labels", torch.int64) if pad else labels
-        # (staged view, input, fill of the padded rows, ignored rows zeroed) of each per-row tensor
+        # (staged region, input, fill of the padded rows, ignored rows zeroed) of each per-row tensor
         fills = []
 
         def staged(name, t, fill, masked):
             if not isinstance(t, torch.Tensor):
                 return t
-            out = view(name, torch.float32)
-            fills.append((out, t, fill, masked))
-            return out
+            fills.append((name, t, fill, masked))
+            return view(name, torch.float32)
 
         infer = staged("infer", infer_logp, 0.0, True)
         weights = staged("weights", loss_weights, 0.0, True)
         tau_s = staged("tau", tau, 1.0, False) if tau is not None else temperature
 
         def stage() -> None:
+            # The staged views' first values, written after this Function returned them: autograd forbids an
+            # in-place change of a view a custom Function returned, so the writes go through an alias of the block
+            # with its own version counter (``set_`` on the block's storage) and the returned views keep theirs.
+            # Nothing reads the block before these writes (the call's first launch runs them first).
+            raw = torch.empty((0,), dtype=torch.uint8, device=block.device)
+            raw.set_(block.untyped_storage(), block.storage_offset(), block.shape)
+
+            def alias(name, dtype):
+                start, nbytes = offsets[name]
+                return raw[start : start + nbytes].view(dtype)
+
             # ``where(..., out=)`` takes no number as ``other``: the device's cached zero cell is that zero
             device = X.device
             index = int(
@@ -3812,14 +3821,17 @@ class _SmallCallStage(torch.autograd.Function):
             )
             zero = _device_constants(index)["stage_zero"]
             with torch.no_grad():
-                torch.ge(labels, 0, out=valid)
+                valid = torch.ge(labels, 0, out=alias("valid", torch.bool))
+                x_out = alias("x", torch.bfloat16).view(rows, H)
                 bf16_zero = zero.view(torch.bfloat16)[:1]
-                torch.where(valid.unsqueeze(1), X, bf16_zero, out=xs[:T])
+                torch.where(valid.unsqueeze(1), X, bf16_zero, out=x_out[:T])
                 if pad:
-                    xs[T:].zero_()
-                    lab[:T].copy_(labels)
-                    lab[T:].fill_(IGNORE_INDEX)
-                for out, t, fill, masked in fills:
+                    x_out[T:].zero_()
+                    lab_out = alias("labels", torch.int64)
+                    lab_out[:T].copy_(labels)
+                    lab_out[T:].fill_(IGNORE_INDEX)
+                for name, t, fill, masked in fills:
+                    out = alias(name, torch.float32)
                     if masked:
                         torch.where(valid, t, zero, out=out[:T])
                     else:
