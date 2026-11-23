@@ -823,6 +823,76 @@ def test_k1_small_token_counts_run_the_deterministic_program(monkeypatch):
     assert cake_backend.k1_splits_fit(1, 1) and not cake_backend.k1_splits_fit(0, 64)
 
 
+#: The sm_107a BF16 weight gradients that the deterministic package's version 0.3.22 keys (the 64-row exact split of
+#: every tail tile from 8193 tokens on): (d_in, d_out) -> the split's parts.  No K1 table of this package holds them.
+DET_0322_WGRAD_ROWS = {(4096, 16): 3, (4096, 96): 3, (6144, 48): 2, (6144, 64): 2, (6144, 32): 2}
+#: The parts on which the deterministic package keeps a row of :data:`DET_0322_WGRAD_ROWS` on its plan of version 0.3.21
+#: at every token count (its 216-SM range of ``ROW_RULE_RANGES_BY_SM``): (d_in, d_out) -> SM counts.
+DET_0322_KEPT = {(6144, 32): (216,)}
+
+
+def test_k1_det_0322_wgrad_rows_run_the_deterministic_plan(monkeypatch):
+    """The rows of :data:`DET_0322_WGRAD_ROWS` run the deterministic program on every ``sm_107a`` part (208, 212, 216
+    and 224 SMs) below and above the deterministic rules' floor of 8193 tokens: neither :func:`k1_plan` nor any K1
+    table of :func:`plan_atomic_gemm` takes them, with the K1 programs registered.  That program's plan is the
+    deterministic package's (this package's weight-gradient entry calls its weight-gradient entry): on the 212- and
+    216-SM parts the 64-row exact split of the row's parts from 8193 tokens on, its plan of version 0.3.21 (128-row
+    tiles) at 8192 tokens; on the parts of :data:`DET_0322_KEPT` (indexer_hw on 216 SMs) its plan of version 0.3.21 at
+    every token count."""
+    _register_k1(monkeypatch, "sm_107a")
+
+    def det_plan(d_in, d_out, T, sm_count):
+        G = torch.empty(T, d_out, dtype=torch.bfloat16)
+        X = torch.empty(T, d_in, dtype=torch.bfloat16)
+        A, B, transposed = det_backend.wgrad_views(G, X, arch="sm_107a")
+        assert transposed, (d_in, d_out, T)
+        return det_backend.cake_dense_gemm_det_train_projection_plan(
+            A,
+            B,
+            torch.empty(d_out, d_in, dtype=torch.bfloat16),
+            sm_count=sm_count,
+            l2_bytes=126 << 20,
+            transposed_out=transposed,
+            arch="sm_107a",
+        )[0]
+
+    for (d_in, d_out), parts in DET_0322_WGRAD_ROWS.items():
+        key = ("sm_107a", True, True, False, True, False, d_out, None, d_in)
+        assert det_backend.ROW_RULES[key]["sk_exact"] == parts
+        assert det_backend.ROW_RULE_MIN_T[key][0][0] == 8193
+        for sm_count in (208, 212, 216, 224):
+            for T in (1001, 8192, 8193, 16172, 16384, 65536):
+                where = (d_in, d_out, sm_count, T)
+                kw = dict(arch="sm_107a", L=1, M=d_in, N=d_out, K=T, out_f32=False)
+                assert cake_backend.k1_plan(sm_count=sm_count, **kw) is None, where
+                G = torch.empty(T, d_out, dtype=torch.bfloat16)
+                X = torch.empty(T, d_in, dtype=torch.bfloat16)
+                out = torch.empty(d_out, d_in, dtype=torch.bfloat16)
+                plan, *_, reason = cake_backend.plan_atomic_gemm(
+                    X.t(), G, out, transposed_out=True, arch="sm_107a", sm_count=sm_count
+                )
+                assert plan is None, (where, plan)
+                assert reason == "the planner keeps the row on the deterministic program", (where, reason)
+        for sm_count in (212, 216):
+            kept = sm_count in DET_0322_KEPT.get((d_in, d_out), ())
+            for T, rows, exact in ((8192, 128, False), (8193, 64, True), (16384, 64, True)):
+                det = det_plan(d_in, d_out, T, sm_count)
+                where = (d_in, d_out, sm_count, T, det.template)
+                if kept:
+                    # the deterministic package's tables of version 0.3.21 for the row: its rule below the floor as the
+                    # rule at every token count, no token tier, no 216-SM range
+                    with monkeypatch.context() as m:
+                        m.setitem(det_backend.ROW_RULES, key, dict(det_backend.ROW_RULE_MIN_T[key][0][1]))
+                        m.delitem(det_backend.ROW_RULE_MIN_T, key)
+                        m.delitem(det_backend.ROW_RULE_RANGES_BY_SM, ("sm_107a", 216))
+                        old = det_plan(d_in, d_out, T, sm_count)
+                    assert det == old, (where, old.template)
+                    assert det.cta_rows == 128 and det.sk_exact != parts, where
+                    continue
+                assert det.cta_rows == rows, where
+                assert (det.sk_exact == parts) == exact, where
+
+
 def test_k1_excluded_token_counts(no_k1_chains):
     """A row of :data:`K1_SPLIT_RULES` or of a table of :data:`K1_SPLIT_RULES_BY_SM` runs the deterministic program at
     the token counts of its :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS` entries: from the entry's SM count up where that count
@@ -16121,8 +16191,11 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
         (12288, 6144): {4096: v8},
     }
     dgrad_rows = {(16384, 6144): {8192: "kn_n256_f32_v8_ht_pro7"}}
+    # (its 216-SM sm_107a part, version 0.3.22, holds one BF16 range:
+    # test_k1_det_0322_wgrad_rows_run_the_deterministic_plan)
     assert set(det_backend.ROW_RULE_RANGES_BY_SM) == {
         (arch, sms),
+        ("sm_107a", 216),
         ("sm_103a", 148),
         ("sm_103a", 152),
         ("sm_100a", 152),
@@ -21420,7 +21493,9 @@ LONG_SEGMENT_MISSED_CELLS = {
     ),
 }
 # fmt: on
-#: The rows of the cells above without a rule of the deterministic package: (d_in, d_out).
+#: The rows of the cells above without a rule of the deterministic package up to its version 0.3.21; its version 0.3.22
+#: gives them sm_107a rules from 8193 tokens (``DET_0322_WGRAD_ROWS``), and still none on sm_100a and sm_103a:
+#: (d_in, d_out).
 LONG_SEGMENT_RULELESS_ROWS = ((4096, 16), (4096, 96), (6144, 48), (6144, 64))
 
 
