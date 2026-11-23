@@ -10509,10 +10509,7 @@ def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
             ignore_frac=0.05,
         )
         expected = (
-            runs
-            and entry == "loss"
-            and floor is None
-            and lo <= T <= min(chunk, hi)
+            runs and entry == "loss" and floor is None and lo <= T <= min(chunk, hi)
         )
         previous = cake_backend.set_zero_weight_min_rows(
             cake_backend.ZERO_WEIGHT_MIN_ROWS_DEFAULT if floor is None else floor
