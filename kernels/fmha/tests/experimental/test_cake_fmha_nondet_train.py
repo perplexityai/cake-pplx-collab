@@ -29,13 +29,14 @@ or ``FUSED_OF``, and no variant or host sequence names a one-launch record) and 
 (``SEQUENCES``: its three records), the route of a call (``variant``: the pair route for head dimension 128, a key
 length that is a multiple of 256, at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
 ``PAIR_REGIONS``; every measured crossover call on its decided route, ``DECIDED_LEAST``; ``fused_record``: the
-one-launch route inside the region of ``FUSED_REGION``, on both sides of each of its bounds; the shipped region of
-each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both sides of each of its bounds, and the long
-calls of the benchmark's ``T1`` to ``T4`` rows on the three-kernel routes on every architecture), the launch grids, the
-stage launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
+one-launch route inside any piece of the region of ``FUSED_REGION``, on both sides of each bound of a region of one
+piece and of two pieces; the shipped region of each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both
+sides of each bound of each of its pieces and, for each piece, a call that no other piece of its region holds, and the
+long calls of the benchmark's ``T1`` to ``T4`` rows on the three-kernel routes on every architecture), the launch grids,
+the stage launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
 registry-ordered launch), the two layouts of the dQ accumulator in the judge's helper, the build manifest (every
-record's and host sequence's library, the recorded source digests), the standalone loader, the prebuilt libraries
-served first, and no environment read outside the JIT shim.
+record's and host sequence's library, the recorded source digests), the standalone loader, the prebuilt libraries served
+first, and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, each stage judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error
 against an FP64 oracle of the same inputs over 32 independent draws, in the L2 and the max norm, median and largest,
@@ -448,11 +449,11 @@ def test_the_route_of_a_call() -> None:
                         assert not pair(arch, causal, count, S, 2 * S), (arch, count, S)
 
 
-# Calls on both sides of each bound of the region (max_ctas, s_max, skv_any, skv_per_sq) = (64, 1024, 512, 2), as
-# ((B, H, Sq, Skv), routed): the CTAs of the one-launch grid B * H * (Sq / 128 + Skv / 128) at 63, 64 and 66; the
-# longer sequence at 1024 and 1152; the key length at 512 and 640 against 128 queries; the key length at twice and past
-# twice 384 queries.
-FUSED_REGION_PROBE = (64, 1024, 512, 2)
+# Calls on both sides of each bound of the region of one piece (max_ctas, s_max, skv_any, skv_per_sq) =
+# (64, 1024, 512, 2), as ((B, H, Sq, Skv), routed): the CTAs of the one-launch grid B * H * (Sq / 128 + Skv / 128) at
+# 63, 64 and 66; the longer sequence at 1024 and 1152; the key length at 512 and 640 against 128 queries; the key length
+# at twice and past twice 384 queries.
+FUSED_REGION_PROBE = ((64, 1024, 512, 2),)
 FUSED_REGION_CALLS = (
     ((21, 1, 128, 256), True),
     ((22, 1, 128, 256), False),
@@ -469,53 +470,82 @@ FUSED_REGION_CALLS = (
     ((1, 1, 384, 768), True),
     ((1, 1, 384, 896), False),
 )
+# A region of two pieces: the piece above and (192, 512, 128, 0).  Calls as ((B, H, Sq, Skv), routed): inside both
+# pieces; inside the first piece only; inside the second piece only, outside the first one by its CTAs, on the inner
+# side of each bound of the second piece (the CTAs at 192 with 256 queries and 128 keys and with 128 queries and keys,
+# the longer sequence at 512, the key length at 128); outside both pieces, one step past each bound of the second piece
+# (the CTAs at 195 and 194, the longer sequence at 640, 256 keys against 128 queries and against 512 queries).
+FUSED_REGION_PROBE_TWO = ((64, 1024, 512, 2), (192, 512, 128, 0))
+FUSED_REGION_TWO_CALLS = (
+    ((1, 1, 128, 128), True),
+    ((1, 1, 128, 512), True),
+    ((1, 33, 128, 128), True),
+    ((1, 64, 256, 128), True),
+    ((1, 65, 256, 128), False),
+    ((2, 48, 128, 128), True),
+    ((97, 1, 128, 128), False),
+    ((1, 32, 512, 128), True),
+    ((1, 32, 640, 128), False),
+    ((1, 40, 256, 128), True),
+    ((1, 40, 128, 256), False),
+    ((1, 16, 512, 256), False),
+)
 
 
 def test_the_one_launch_route_of_a_call(monkeypatch) -> None:
     """``fused_record(arch, B, H, Sq, Skv, D, causal)`` is ``FUSED_OF[(D, causal)]`` for a call without the mask
-    inside the region ``FUSED_REGION[(arch, D)]`` = ``(max_ctas, s_max, skv_any, skv_per_sq)``: ``B * H * (Sq / 128 +
-    Skv / 128) <= max_ctas``, ``max(Sq, Skv) <= s_max`` and ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq``; None
+    inside the region ``FUSED_REGION[(arch, D)]``, a tuple of one or more pieces ``(max_ctas, s_max, skv_any,
+    skv_per_sq)``: inside a piece when ``B * H * (Sq / 128 + Skv / 128) <= max_ctas``, ``max(Sq, Skv) <= s_max`` and
+    ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq``, and inside the region when inside any of its pieces; None
     otherwise, for every causal call and wherever the region is None.  Checked on region tables with one entry set to
-    distinct bounds, every call on both sides of each bound, and on the shipped table."""
+    one piece of distinct bounds, every call on both sides of each bound, and to two pieces, a call inside only the
+    second piece routed and a call outside both not; and on the shipped table."""
     assert dict(cake_jit.FUSED_OF) == FUSED_OF
     shipped = dict(cake_jit.FUSED_REGION)
     assert set(shipped) == {(arch, D) for arch in ARCHES for D in HEAD_DIMS}
     calls = [shape for shape, _ in FUSED_REGION_CALLS]
     for (arch, D), region in shipped.items():
-        assert region is None or (len(region) == 4 and all(type(n) is int and n >= 0 for n in region)), (arch, D)
+        assert region is None or (type(region) is tuple and len(region) >= 1), (arch, D)
+        for piece in region or ():
+            assert type(piece) is tuple and len(piece) == 4, (arch, D, piece)
+            assert all(type(n) is int and n >= 0 for n in piece), (arch, D, piece)
         for B, H, Sq, Skv in calls:
             assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
             if region is None:
                 assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, False) is None, (arch, D, B, H, Sq, Skv)
-    for arch in ARCHES:
-        for D in HEAD_DIMS:
-            table = dict.fromkeys(shipped)
-            table[(arch, D)] = FUSED_REGION_PROBE
-            monkeypatch.setattr(cake_jit, "FUSED_REGION", table)
-            for (B, H, Sq, Skv), routed in FUSED_REGION_CALLS:
-                found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
-                assert found == (FUSED_OF[(D, False)] if routed else None), (arch, D, B, H, Sq, Skv, found)
-                assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
-                for other in table:
-                    if other != (arch, D):
-                        assert cake_jit.fused_record(other[0], B, H, Sq, Skv, other[1], False) is None, other
+    probes = ((FUSED_REGION_PROBE, FUSED_REGION_CALLS), (FUSED_REGION_PROBE_TWO, FUSED_REGION_TWO_CALLS))
+    for probe, probe_calls in probes:
+        for arch in ARCHES:
+            for D in HEAD_DIMS:
+                table = dict.fromkeys(shipped)
+                table[(arch, D)] = probe
+                monkeypatch.setattr(cake_jit, "FUSED_REGION", table)
+                for (B, H, Sq, Skv), routed in probe_calls:
+                    found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
+                    assert found == (FUSED_OF[(D, False)] if routed else None), (probe, arch, D, B, H, Sq, Skv, found)
+                    assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
+                    for other in table:
+                        if other != (arch, D):
+                            assert cake_jit.fused_record(other[0], B, H, Sq, Skv, other[1], False) is None, other
 
 
-# The shipped regions of the one-launch route, per (architecture, head dimension): ``(max_ctas, s_max, skv_any,
-# skv_per_sq)``.  ``FUSED_REGION`` must be this table.
+# The shipped regions of the one-launch route, per (architecture, head dimension): the pieces ``(max_ctas, s_max,
+# skv_any, skv_per_sq)`` of each region.  ``FUSED_REGION`` must be this table.
 SHIPPED_FUSED_REGION = {
-    ("sm_100a", 128): (152, 2048, 512, 1),
-    ("sm_100a", 64): (152, 2048, 512, 2),
-    ("sm_103a", 128): (152, 2048, 512, 1),
-    ("sm_103a", 64): (204, 2048, 256, 0),
-    ("sm_107a", 128): (256, 2048, 512, 0),
-    ("sm_107a", 64): (212, 2048, 512, 2),
+    ("sm_100a", 128): ((152, 2048, 512, 1), (190, 1024, 256, 0), (152, 1024, 0, 3)),
+    ("sm_100a", 64): ((152, 2048, 512, 2), (190, 1024, 256, 0), (152, 1024, 0, 6)),
+    ("sm_103a", 128): ((152, 2048, 512, 1), (190, 1024, 256, 0), (152, 1024, 0, 3)),
+    ("sm_103a", 64): ((204, 2048, 256, 0), (156, 512, 0, 2), (256, 1024, 128, 0)),
+    ("sm_107a", 128): ((256, 2048, 512, 0), (320, 1024, 256, 0), (423, 512, 256, 0)),
+    ("sm_107a", 64): ((212, 2048, 512, 2), (210, 1024, 0, 6), (423, 512, 256, 0)),
 }
-# Calls on both sides of each bound of each shipped region, as ((B, H, Sq, Skv), routed), every other bound held: the
-# CTAs of the one-launch grid at max_ctas and one step past it, at 128 and at 256 queries and keys; the longer sequence
-# at 2048 and 2176 (the queries, and with skv_per_sq > 0 the keys too); the key length at skv_any and 128 past it
-# against 128 queries; the key length at skv_per_sq times the queries and 128 past it, above skv_any, or with
-# skv_per_sq 0 at skv_any and 128 past it against 2048 queries.
+# Calls on both sides of each bound of each shipped piece, as ((B, H, Sq, Skv), inside the piece), every other bound of
+# the piece held: the CTAs of the one-launch grid at the most CTAs within max_ctas and one step past it, at 128 and at
+# 256 queries and keys (256 queries and 128 keys where the piece holds no 256 keys); the longer sequence at s_max and
+# 128 past it (the queries, and with skv_per_sq > 0 the keys too); with skv_any > 0 the key length at skv_any and 128
+# past it against 128 queries; the key length at skv_per_sq times the queries and 128 past it, above skv_any, or with
+# skv_per_sq 0 at skv_any and 128 past it against s_max queries (a call listed once per piece).  A call outside one
+# piece may lie inside another piece of the same region; the call is routed when it is inside any piece of the region.
 SHIPPED_FUSED_CALLS = {
     (152, 2048, 512, 1): (
         ((1, 76, 128, 128), True),
@@ -583,21 +613,153 @@ SHIPPED_FUSED_CALLS = {
         ((1, 1, 384, 768), True),
         ((1, 1, 384, 896), False),
     ),
+    (190, 1024, 256, 0): (
+        ((1, 95, 128, 128), True),
+        ((96, 1, 128, 128), False),
+        ((1, 47, 256, 256), True),
+        ((2, 24, 256, 256), False),
+        ((1, 1, 1024, 128), True),
+        ((1, 1, 1152, 128), False),
+        ((1, 1, 128, 256), True),
+        ((1, 1, 128, 384), False),
+        ((1, 1, 1024, 256), True),
+        ((1, 1, 1024, 384), False),
+    ),
+    (152, 1024, 0, 6): (
+        ((1, 76, 128, 128), True),
+        ((77, 1, 128, 128), False),
+        ((2, 19, 256, 256), True),
+        ((3, 13, 256, 256), False),
+        ((1, 1, 1024, 128), True),
+        ((1, 1, 1152, 128), False),
+        ((1, 1, 1024, 1024), True),
+        ((1, 1, 1152, 1152), False),
+        ((1, 1, 128, 768), True),
+        ((1, 1, 128, 896), False),
+    ),
+    (152, 1024, 0, 3): (
+        ((1, 76, 128, 128), True),
+        ((77, 1, 128, 128), False),
+        ((2, 19, 256, 256), True),
+        ((3, 13, 256, 256), False),
+        ((1, 1, 1024, 128), True),
+        ((1, 1, 1152, 128), False),
+        ((1, 1, 1024, 1024), True),
+        ((1, 1, 1152, 1152), False),
+        ((1, 1, 128, 384), True),
+        ((1, 1, 128, 512), False),
+    ),
+    (156, 512, 0, 2): (
+        ((1, 78, 128, 128), True),
+        ((79, 1, 128, 128), False),
+        ((3, 13, 256, 256), True),
+        ((2, 20, 256, 256), False),
+        ((1, 1, 512, 128), True),
+        ((1, 1, 640, 128), False),
+        ((1, 1, 512, 512), True),
+        ((1, 1, 640, 640), False),
+        ((1, 1, 128, 256), True),
+        ((1, 1, 128, 384), False),
+    ),
+    (256, 1024, 128, 0): (
+        ((1, 128, 128, 128), True),
+        ((129, 1, 128, 128), False),
+        ((1, 85, 256, 128), True),
+        ((2, 43, 256, 128), False),
+        ((1, 1, 1024, 128), True),
+        ((1, 1, 1152, 128), False),
+        ((1, 1, 128, 128), True),
+        ((1, 1, 128, 256), False),
+        ((1, 1, 1024, 256), False),
+    ),
+    (320, 1024, 256, 0): (
+        ((1, 160, 128, 128), True),
+        ((161, 1, 128, 128), False),
+        ((4, 20, 256, 256), True),
+        ((3, 27, 256, 256), False),
+        ((1, 1, 1024, 128), True),
+        ((1, 1, 1152, 128), False),
+        ((1, 1, 128, 256), True),
+        ((1, 1, 128, 384), False),
+        ((1, 1, 1024, 256), True),
+        ((1, 1, 1024, 384), False),
+    ),
+    (423, 512, 256, 0): (
+        ((1, 211, 128, 128), True),
+        ((212, 1, 128, 128), False),
+        ((3, 35, 256, 256), True),
+        ((2, 53, 256, 256), False),
+        ((1, 1, 512, 128), True),
+        ((1, 1, 640, 128), False),
+        ((1, 1, 128, 256), True),
+        ((1, 1, 128, 384), False),
+        ((1, 1, 512, 256), True),
+        ((1, 1, 512, 384), False),
+    ),
+    (210, 1024, 0, 6): (
+        ((1, 105, 128, 128), True),
+        ((106, 1, 128, 128), False),
+        ((4, 13, 256, 256), True),
+        ((1, 53, 256, 256), False),
+        ((1, 1, 1024, 128), True),
+        ((1, 1, 1152, 128), False),
+        ((1, 1, 1024, 1024), True),
+        ((1, 1, 1152, 1152), False),
+        ((1, 1, 128, 768), True),
+        ((1, 1, 128, 896), False),
+    ),
 }
 # The benchmark's long rows ``T1`` to ``T4``, 8192 queries and keys, as (B, H, D, causal).
 LONG_ROWS = ((4, 32, 128, False), (4, 32, 128, True), (8, 32, 64, False), (8, 32, 64, True))
 
 
+def _inside_piece(piece: tuple[int, int, int, int], B: int, H: int, Sq: int, Skv: int) -> bool:
+    """A call without the mask inside one piece ``(max_ctas, s_max, skv_any, skv_per_sq)`` of a region."""
+    max_ctas, s_max, skv_any, skv_per_sq = piece
+    fits = B * H * (Sq // 128 + Skv // 128) <= max_ctas and max(Sq, Skv) <= s_max
+    return fits and (Skv <= skv_any or Skv <= skv_per_sq * Sq)
+
+
+# The query and key lengths searched for a call that only one piece of a region holds.
+PIECE_ONLY_LENGTHS = (128, 256, 512, 768, 1024, 2048)
+
+
+def _piece_only_call(region: tuple[tuple[int, int, int, int], ...], index: int) -> tuple[int, int, int, int] | None:
+    """A call ``(1, H, Sq, Skv)`` inside the piece ``region[index]`` and inside no other piece of ``region``, with
+    ``Sq`` and ``Skv`` in ``PIECE_ONLY_LENGTHS`` (the first such lengths, the most heads), or None."""
+    piece = region[index]
+    others = [other for at, other in enumerate(region) if at != index]
+    for Sq in PIECE_ONLY_LENGTHS:
+        for Skv in PIECE_ONLY_LENGTHS:
+            for H in range(piece[0] // (Sq // 128 + Skv // 128), 0, -1):
+                if _inside_piece(piece, 1, H, Sq, Skv) and not any(_inside_piece(o, 1, H, Sq, Skv) for o in others):
+                    return 1, H, Sq, Skv
+    return None
+
+
 def test_the_shipped_one_launch_regions() -> None:
     """``FUSED_REGION`` is the shipped table ``SHIPPED_FUSED_REGION``, and ``fused_record`` keeps each region on both
-    sides of each of its bounds: the one-launch record inside, None one step past the bound and for every causal call.
-    The benchmark's long rows take the three-kernel routes on every architecture."""
+    sides of each bound of each of its pieces: the one-launch record for a call inside any piece of the region (a call
+    one step past a bound of one piece may lie inside another piece), None for a call inside no piece and for every
+    causal call.  Every piece of a region routes a call that no other piece of the region holds.  The benchmark's long
+    rows take the three-kernel routes on every architecture."""
     assert dict(cake_jit.FUSED_REGION) == SHIPPED_FUSED_REGION
+    pieces = {piece for region in SHIPPED_FUSED_REGION.values() for piece in region}
+    assert set(SHIPPED_FUSED_CALLS) == pieces, sorted(set(SHIPPED_FUSED_CALLS) ^ pieces)
     for (arch, D), region in SHIPPED_FUSED_REGION.items():
-        for (B, H, Sq, Skv), routed in SHIPPED_FUSED_CALLS[region]:
+        for piece in region:
+            for (B, H, Sq, Skv), inside in SHIPPED_FUSED_CALLS[piece]:
+                assert _inside_piece(piece, B, H, Sq, Skv) == inside, (piece, B, H, Sq, Skv)
+                routed = any(_inside_piece(other, B, H, Sq, Skv) for other in region)
+                found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
+                assert found == (FUSED_OF[(D, False)] if routed else None), (arch, D, piece, B, H, Sq, Skv, found)
+                assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
+        for index, piece in enumerate(region):
+            call = _piece_only_call(region, index)
+            assert call is not None, (arch, D, piece)
+            B, H, Sq, Skv = call
             found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
-            assert found == (FUSED_OF[(D, False)] if routed else None), (arch, D, B, H, Sq, Skv, found)
-            assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
+            assert found == FUSED_OF[(D, False)], (arch, D, piece, call, found)
     for arch in ARCHES:
         for B, H, D, causal in LONG_ROWS:
             assert cake_jit.fused_record(arch, B, H, 8192, 8192, D, causal) is None, (arch, B, H, D, causal)
