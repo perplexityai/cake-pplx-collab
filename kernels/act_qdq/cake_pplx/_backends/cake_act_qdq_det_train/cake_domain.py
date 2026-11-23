@@ -32,11 +32,17 @@ caching allocator, so ``torch.cuda.memory_allocated`` and the other
 The tensor and every view of it keep the range alive.  Once the last one is
 gone, its finalizer queues the range, and the first of that finalizer and the
 next :func:`domain_empty` call that finds no other thread freeing ranges
-synchronizes the device, unmaps the chunks and frees the range.  A range whose
-device's current stream is capturing a CUDA graph waits for the next
-:func:`domain_empty` call.  Do not allocate such memory, or drop the last
-view of it, in one thread while another thread captures a CUDA graph: the
-driver calls would end that capture.
+synchronizes the device, unmaps the chunks and frees the range.  In torch's
+default (global) capture mode a CUDA graph capture forbids its thread these
+driver calls on every device, so during a capture on any device in this
+thread a range waits for the next free outside a capture (another range's
+finalizer or the next :func:`domain_empty` call), and
+:func:`domain_empty` refuses to allocate.  The check reads torch's current
+stream of every device with an active primary context: a capture begun with
+``cudaStreamBeginCapture`` on a stream that is not torch's current stream is
+not detected.  Do not allocate such memory, or drop the last view of it, in
+one thread while another thread captures a CUDA graph: the driver calls would
+end that capture.
 
 Claim workspaces (:func:`launch`): an interleaved-domain launch takes its two
 dies' claim counters, ``words`` unsigned words each (the record's
@@ -148,13 +154,22 @@ def _primary_context(driver: Any, index: int) -> Iterator[Any]:
         driver.cuDevicePrimaryCtxRelease(device)
 
 
-def _capturing(index: int) -> bool:
-    """Whether the current stream of CUDA device ``index`` is capturing a graph."""
+def _capturing() -> bool:
+    """Whether this thread's current stream of any CUDA device is capturing a graph: in the global capture mode a
+    capture on one device ends at a driver call of this thread that may synchronize any device.  A device whose
+    primary context is inactive captures nothing and is skipped, so the check makes no context."""
 
-    if torch.cuda.current_device() == index:
-        return torch.cuda.is_current_stream_capturing()
-    with torch.cuda.device(index):
-        return torch.cuda.is_current_stream_capturing()
+    driver = _driver()
+    _check(driver.cuInit(0), "cuInit")
+    for index in range(torch.cuda.device_count()):
+        device = _check(driver.cuDeviceGet(index), "cuDeviceGet")
+        _, active = _check(driver.cuDevicePrimaryCtxGetState(device), "cuDevicePrimaryCtxGetState")
+        if not active:
+            continue
+        with torch.cuda.device(index):
+            if torch.cuda.is_current_stream_capturing():
+                return True
+    return False
 
 
 def domain_count(index: int) -> int:
@@ -445,16 +460,21 @@ _PENDING: collections.deque[_Mapped] = collections.deque()
 
 
 def _free_pending() -> None:
-    """Under ``_LOCK``: free and unregister every pending range, keeping for a later call those whose device's
-    current stream is capturing and those whose free fails."""
+    """Under ``_LOCK``: free and unregister every pending range, keeping them all for a later call while this thread
+    captures a CUDA graph on any device, and keeping those whose free fails."""
 
+    if not _PENDING:
+        return
+    try:
+        capturing = _capturing()
+    except Exception:  # noqa: BLE001 - a finalizer cannot raise; a later call checks again
+        capturing = True
+    if capturing:
+        return
     kept = []
     while _PENDING:
         entry = _PENDING.popleft()
         try:
-            if _capturing(entry.index):
-                kept.append(entry)
-                continue
             _free(entry)
         except Exception:  # noqa: BLE001 - a finalizer cannot raise; a later call retries where this one stopped
             kept.append(entry)
@@ -496,10 +516,10 @@ def domain_empty(
 
     ``TypeError`` for a ``dtype`` that is not a ``torch.dtype``; ``ValueError`` for a negative dimension or a device
     that is not CUDA; ``torch.cuda.OutOfMemoryError`` when the device has no room, after torch's cached free memory
-    is returned to the driver once; ``RuntimeError`` during CUDA graph capture, on another architecture, with fewer
-    than two locality domains, without cuda-python's locality-domain names, or when the driver refuses the memory.
-    The device's first call zeroes its :data:`GRAPH_WORKSPACES` graph workspaces and synchronizes the current stream
-    once.  Each call first frees the ranges whose owners are gone.
+    is returned to the driver once; ``RuntimeError`` during a CUDA graph capture on any device in this thread, on
+    another architecture, with fewer than two locality domains, without cuda-python's locality-domain names, or when
+    the driver refuses the memory.  The device's first call zeroes its :data:`GRAPH_WORKSPACES` graph workspaces and
+    synchronizes the current stream once.  Each call first frees the ranges whose owners are gone.
     """
 
     if not isinstance(dtype, torch.dtype):
@@ -509,10 +529,6 @@ def domain_empty(
         raise ValueError(f"shape has a negative dimension: {dims}")
     device = _cuda_device(device)
     index = device.index
-    if _capturing(index):
-        raise RuntimeError(
-            "memory that alternates dies cannot be allocated during CUDA graph capture: allocate it before the capture"
-        )
     arch = cake_jit.device_arch(index)
     chunk = cake_jit.domain_chunk_bytes(arch)
     if chunk is None:
@@ -521,6 +537,11 @@ def domain_empty(
             "interleaved-domain program"
         )
     driver = _driver()
+    if _capturing():
+        raise RuntimeError(
+            "memory that alternates dies cannot be allocated during a CUDA graph capture on any device of this "
+            "thread: allocate it before the capture"
+        )
     domains = domain_count(index)
     if domains < DIES:
         raise RuntimeError(

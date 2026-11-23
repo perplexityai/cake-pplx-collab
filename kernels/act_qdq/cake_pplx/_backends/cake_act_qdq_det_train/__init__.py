@@ -278,25 +278,26 @@ def _domain_choice(
     """``(record, reason, launch)`` of a ``locality="domain"`` call with
     elements: the interleaved-domain record and its :func:`cake_jit.domain_launch`
     when :func:`cake_jit.domain_route` places the call, else ``(None, reason,
-    None)`` for the route's plain program.  Never raises for a placement."""
+    None)`` for the route's plain program.  Never raises for a placement.
+    The placements are read only for a call that passes the checks that need
+    none (:func:`cake_jit.domain_candidate`), so a call outside the record's
+    size range costs no more than those checks."""
 
-    chunk = cake_jit.domain_chunk_bytes(call.arch)
-    x_place = y_place = None
-    if chunk is not None:
-        place = _domain().place
-        x_place = place(x, chunk)
-        y_place = None if out is None else place(out, chunk)
-    name, reason = cake_jit.domain_route(
+    name, reason = cake_jit.domain_candidate(
         call.arch,
         format,
         scale_out=call.scale_out,
         n_vecs=n_vecs,
         in_place=in_place,
         out_given=out is not None,
-        x_place=x_place,
-        y_place=y_place,
     )
     if name is None:
+        return None, reason, None
+    chunk = int(cake_jit.MODULES[name]["grid_rule"]["chunk_bytes"])
+    place = _domain().place
+    x_place = place(x, chunk)
+    reason = cake_jit.domain_placement(x_place, place(out, chunk))
+    if reason != "placed":
         return None, reason, None
     launch = cake_jit.domain_launch(
         cake_jit.MODULES[name],
@@ -375,10 +376,10 @@ def cake_act_qdq_det_train_domain_empty(
     defaults to the current CUDA device.  ``TypeError`` for a ``dtype`` that
     is not a ``torch.dtype``, ``ValueError`` for a negative dimension or a
     device that is not CUDA, ``torch.cuda.OutOfMemoryError`` when the device
-    has no room, ``RuntimeError`` during CUDA graph capture, on another
-    architecture or with fewer than two locality domains
-    (``cake_domain.domain_empty``).  Freeing the last view synchronizes the
-    device."""
+    has no room, ``RuntimeError`` during a CUDA graph capture on any device
+    in this thread, on another architecture or with fewer than two locality
+    domains (``cake_domain.domain_empty``).  Freeing the last view
+    synchronizes the device."""
 
     return _domain().domain_empty(shape, dtype=dtype, device=device)
 

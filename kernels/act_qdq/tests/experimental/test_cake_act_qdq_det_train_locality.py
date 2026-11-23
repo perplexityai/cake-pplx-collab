@@ -22,18 +22,21 @@ the memory whose 2 MB chunks alternate between the two dies
 The ``cpu_only`` tests check the pure parts: the interleaved-domain records,
 where a byte range lies in such memory, the reasons of the route in their
 order, and the launch arguments and grid, against the kernel's own decoding of
-its items.  The GPU tests check that ``"domain"`` runs the ``"off"`` program
-on other architectures and on default memory, and that ``"off"`` loads none
-of the route's state.  The SM107 tests (skipped elsewhere; an SM107 whose
-driver reports fewer than two locality domains fails them) check the
+its items; and, against a fake driver, the unwind of a mapping that fails
+(out of memory, retried once; any other error, not retried) and the error
+without cuda-python.  The GPU tests check that ``"domain"`` runs the ``"off"``
+program on other architectures and on default memory, and that ``"off"``
+loads none of the route's state.  The SM107 tests (skipped elsewhere; an SM107
+whose driver reports fewer than two locality domains fails them) check the
 allocation (dies, registry, zero copy, the free, the free deferred past a
-capture, the refusal during capture), the route's bytes against the ``"off"``
-route for every format with and without the scales (and a caller's scales
-buffer), out of place above the route's first size and at offsets inside a
-chunk, every domain program against the FP64 rule on any grid, each plain
-reason, the claim counters left zero, a launch that raises, two streams at
-once, CUDA graph replay with a graph workspace and with none left, and
-steady-state calls without host synchronization.
+capture, the refusal during capture, and with two SM107s both during a
+capture on the other device), the route's bytes against the ``"off"`` route
+for every format with and without the scales (and a caller's scales buffer),
+out of place above the route's first size and at offsets inside a chunk,
+every domain program against the FP64 rule on any grid, each plain reason,
+the claim counters left zero, a launch that raises, two streams at once, CUDA
+graph replay with a graph workspace and with none left, and steady-state calls
+without host synchronization.
 
 This suite names the backend package once, through
 ``tests.cake.test_helpers.cake_package``.
@@ -41,9 +44,11 @@ This suite names the backend package once, through
 
 from __future__ import annotations
 
+import enum
 import gc
 import subprocess
 import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -169,7 +174,18 @@ def test_domain_route_reasons_in_order(kind: str) -> None:
     def route(arch: str = ARCH, **change):
         return loader.domain_route(arch, fmt, **{**good, **change})
 
-    assert route() == (name, "placed")
+    def split(arch: str = ARCH, **change):
+        # the call path: the checks without a placement, then the placement checks of a candidate
+        args = {**good, **change}
+        x_place, y_place = args.pop("x_place"), args.pop("y_place")
+        candidate, reason = loader.domain_candidate(arch, fmt, **args)
+        if candidate is None:
+            return None, reason
+        assert reason == "candidate"
+        reason = loader.domain_placement(x_place, y_place)
+        return (candidate, reason) if reason == "placed" else (None, reason)
+
+    assert route() == split() == (name, "placed")
     assert route(n_vecs=last) == (name, "placed")
     assert route(x_place=(0, 0), y_place=(0, 0)) == (name, "placed")
     seen = {"placed"}
@@ -185,7 +201,7 @@ def test_domain_route_reasons_in_order(kind: str) -> None:
         ({"y_place": (5 * TILE_BYTES + 64, 1)}, "chunk_offset"),
         ({"y_place": (5 * TILE_BYTES + 48, 0)}, "die_parity"),
     ):
-        assert route(**change) == (None, reason), change
+        assert route(**change) == split(**change) == (None, reason), change
         seen.add(reason)
     assert seen == set(loader.DOMAIN_REASONS)
     # the first reason that holds
@@ -249,6 +265,179 @@ def test_domain_launch_covers_every_tile() -> None:
         loader.domain_launch(loader.MODULES["mxfp8_e8m0_g32"], n_vecs=1, x_place=(0, 0), sm_count=sms, arch=ARCH)
     with pytest.raises(ValueError, match="unknown"):
         loader.launch_grid(record, n_vecs=1, sm_count=sms, arch=ARCH)
+
+
+CUresult = enum.Enum("CUresult", ("CUDA_SUCCESS", "CUDA_ERROR_OUT_OF_MEMORY", "CUDA_ERROR_INVALID_VALUE"))
+OK = CUresult.CUDA_SUCCESS
+
+
+class _FakeDriver:
+    """The driver calls of ``cake_domain._map`` without a GPU.  ``call`` returns ``status`` at chunk ``k`` of every
+    attempt (``cuMemSetAccess`` at any chunk); ``log`` records each reservation, created handle, mapped and unmapped
+    chunk, released handle and freed reservation as ``(what, value)``."""
+
+    CUresult = CUresult
+    CUdeviceptr = int
+    CUmemAllocationType = SimpleNamespace(CU_MEM_ALLOCATION_TYPE_PINNED=1)
+    CUmemLocationType = SimpleNamespace(CU_MEM_LOCATION_TYPE_DEVICE=1, CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN=2)
+    CUmemAllocationGranularity_flags = SimpleNamespace(CU_MEM_ALLOC_GRANULARITY_MINIMUM=0)
+    CUmemAccess_flags = SimpleNamespace(CU_MEM_ACCESS_FLAGS_PROT_READWRITE=3)
+
+    def __init__(self, call: str, k: int, status: CUresult) -> None:
+        self.call, self.k, self.status = call, k, status
+        self.log: list[tuple[str, int]] = []
+        self.base = 0
+        self.created = 0
+        self.handles = 0
+        self.contexts = 0
+
+    def _status(self, call: str, k: int) -> CUresult:
+        return self.status if call == self.call and (k == self.k or call == "cuMemSetAccess") else OK
+
+    @staticmethod
+    def CUmemAllocationProp() -> SimpleNamespace:
+        return SimpleNamespace(type=None, location=SimpleNamespace(type=None, id=None))
+
+    @staticmethod
+    def CUmemAccessDesc() -> SimpleNamespace:
+        return SimpleNamespace(location=SimpleNamespace(type=None, id=None), flags=None)
+
+    def cuInit(self, flags):
+        return (OK,)
+
+    def cuDeviceGet(self, index):
+        return (OK, index)
+
+    def cuDevicePrimaryCtxRetain(self, device):
+        self.contexts += 1
+        return (OK, "context")
+
+    def cuDevicePrimaryCtxRelease(self, device):
+        self.contexts -= 1
+        return (OK,)
+
+    def cuCtxPushCurrent(self, context):
+        return (OK,)
+
+    def cuCtxPopCurrent(self):
+        return (OK, "context")
+
+    def cuMemGetAllocationGranularity(self, prop, flags):
+        return (OK, CHUNK)
+
+    def cuMemAddressReserve(self, size, alignment, address, flags):
+        self.base += 1 << 40
+        self.created = 0
+        self.log.append(("reserve", self.base))
+        return (OK, self.base)
+
+    def cuMemCreate(self, size, prop, flags):
+        status = self._status("cuMemCreate", self.created)
+        self.created += 1
+        if status != OK:
+            return (status, None)
+        self.handles += 1
+        self.log.append(("create", self.handles))
+        return (OK, self.handles)
+
+    def cuMemMap(self, address, size, offset, handle, flags):
+        k = (address - self.base) // CHUNK
+        status = self._status("cuMemMap", k)
+        if status == OK:
+            self.log.append(("map", k))
+        return (status,)
+
+    def cuMemRelease(self, handle):
+        self.log.append(("release", handle))
+        return (OK,)
+
+    def cuMemSetAccess(self, address, size, descriptors, count):
+        return (self._status("cuMemSetAccess", 0),)
+
+    def cuMemUnmap(self, address, size):
+        self.log.append(("unmap", (address - self.base) // CHUNK))
+        return (OK,)
+
+    def cuMemAddressFree(self, address, size):
+        self.log.append(("free", address))
+        return (OK,)
+
+
+def _attempts(fake: _FakeDriver) -> list[dict[str, list[int]]]:
+    """The fake's log split at each reservation: per attempt, the values of each kind of call in order."""
+    attempts: list[dict[str, list[int]]] = []
+    for what, value in fake.log:
+        if what == "reserve":
+            attempts.append({kind: [] for kind in ("reserve", "create", "map", "release", "unmap", "free")})
+        attempts[-1][what].append(value)
+    return attempts
+
+
+def _fake_driver(monkeypatch, call: str, k: int, status: CUresult) -> tuple[_FakeDriver, list[int]]:
+    """A fake driver as the module's driver, and the list ``torch.cuda.empty_cache`` appends to."""
+    fake = _FakeDriver(call, k, status)
+    monkeypatch.setattr(memory, "_driver", lambda: fake)
+    emptied: list[int] = []
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: emptied.append(1))
+    return fake, emptied
+
+
+@pytest.mark.cpu_only
+def test_out_of_memory_unwinds_each_attempt(monkeypatch) -> None:
+    """``cuMemCreate`` out of memory at chunk 3: each of the two attempts unmaps chunks 0 to 2, releases every handle
+    it made and frees its reservation once; torch's cache is returned to the driver once between them, then
+    ``torch.cuda.OutOfMemoryError``, and the registry is unchanged."""
+    k, chunks = 3, 8
+    before = memory.registered(0)
+    fake, emptied = _fake_driver(monkeypatch, "cuMemCreate", k, CUresult.CUDA_ERROR_OUT_OF_MEMORY)
+    with pytest.raises(torch.cuda.OutOfMemoryError, match="no room"):
+        memory._map_or_out_of_memory(fake, 0, CHUNK, chunks)
+    assert len(emptied) == 1
+    attempts = _attempts(fake)
+    assert len(attempts) == 2
+    for attempt in attempts:
+        assert len(attempt["create"]) == k
+        assert attempt["map"] == list(range(k)) and attempt["unmap"] == list(range(k))
+        assert sorted(attempt["release"]) == attempt["create"]
+        assert attempt["free"] == attempt["reserve"]
+    assert fake.contexts == 0
+    assert memory.registered(0) == before
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("call", ("cuMemMap", "cuMemSetAccess"))
+def test_a_failed_mapping_unwinds_without_retry(call: str, monkeypatch) -> None:
+    """A ``cuMemMap`` that fails at chunk 3 still releases that chunk's handle and unmaps chunks 0 to 2; a
+    ``cuMemSetAccess`` that fails unmaps every chunk.  Either frees the reservation once and, with a status other than
+    out of memory, raises the module's driver error with no second attempt."""
+    k, chunks = 3, 8
+    fake, emptied = _fake_driver(monkeypatch, call, k, CUresult.CUDA_ERROR_INVALID_VALUE)
+    with pytest.raises(memory.DriverError, match=call) as raised:
+        memory._map_or_out_of_memory(fake, 0, CHUNK, chunks)
+    assert raised.value.status is CUresult.CUDA_ERROR_INVALID_VALUE
+    assert emptied == []
+    (attempt,) = _attempts(fake)
+    mapped = k if call == "cuMemMap" else chunks
+    assert len(attempt["create"]) == (k + 1 if call == "cuMemMap" else chunks)
+    assert sorted(attempt["release"]) == attempt["create"]
+    assert attempt["map"] == list(range(mapped)) and attempt["unmap"] == list(range(mapped))
+    assert attempt["free"] == attempt["reserve"]
+    assert fake.contexts == 0
+
+
+@pytest.mark.cpu_only
+def test_driver_needs_cuda_python(monkeypatch) -> None:
+    """Without cuda-python, or with one that lacks the locality-domain names, the driver module is a
+    ``RuntimeError`` (the uncached function, so the module's cache is untouched)."""
+    monkeypatch.setitem(sys.modules, "cuda.bindings", None)
+    monkeypatch.setitem(sys.modules, "cuda.bindings.driver", None)
+    with pytest.raises(RuntimeError, match="cuda-python"):
+        memory._driver.__wrapped__()
+    bindings = ModuleType("cuda.bindings")
+    bindings.driver = ModuleType("cuda.bindings.driver")
+    monkeypatch.setitem(sys.modules, "cuda.bindings", bindings)
+    with pytest.raises(RuntimeError, match="does not name"):
+        memory._driver.__wrapped__()
 
 
 # --------------------------------------------------------------------------- GPU: every architecture
@@ -453,6 +642,47 @@ def test_a_free_during_capture_waits_for_the_next_allocation(r200) -> None:
     assert scratch.tolist() == [1.0] * 16
     domain_empty((4, WIDTH))
     assert all(entry[0] != base for entry in memory.registered(0))
+
+
+@pytest.fixture(scope="module")
+def r200_pair(r200) -> int:
+    """Device 1, when devices 0 and 1 are both SM107s whose drivers report two locality domains; skipped otherwise."""
+    if torch.cuda.device_count() < 2 or torch.cuda.get_device_capability(1) != (10, 7):
+        pytest.skip("a capture on one device with memory on another needs two SM107 (R200) devices")
+    if memory.domain_count(1) < memory.DIES:
+        pytest.skip(f"device 1 reports fewer than {memory.DIES} locality domains")
+    return 1
+
+
+def test_a_capture_on_another_device_defers_the_free_and_refuses_allocation(r200_pair) -> None:
+    """In torch's default (global) capture mode a capture on cuda:0 forbids this thread the driver calls of a free or
+    an allocation on cuda:1.  The last view of a cuda:1 buffer going during the capture leaves its range registered
+    (and mapped), an allocation on cuda:1 raises, and the capture ends cleanly; the next allocation frees the range."""
+    other = r200_pair
+    fmt = "mxfp8_e8m0_g32"
+    t = domain_empty((4, WIDTH), device=other)
+    base = t.data_ptr()
+    x = domain_empty((4, WIDTH), device=other)
+    y = domain_empty((4, WIDTH), device=other)
+    x.copy_(reference.randn_input((4, WIDTH), fmt, seed=73, device=x.device))
+    _assert_same("eager on cuda:1", forward(x, format=fmt, out=y, locality="domain"), forward(x, format=fmt))
+    torch.cuda.synchronize(other)
+    with torch.cuda.device(0):
+        scratch = torch.zeros(16, device="cuda:0")
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=torch.cuda.Stream(0)):
+            scratch.add_(1)
+            del t
+            gc.collect()
+            assert any(entry[0] == base for entry in memory.registered(other))
+            with pytest.raises(RuntimeError, match="capture"):
+                domain_empty((4, WIDTH), device=other)
+        assert any(entry[0] == base for entry in memory.registered(other))
+        graph.replay()
+        torch.cuda.synchronize(0)
+        assert scratch.tolist() == [1.0] * 16
+    domain_empty((4, WIDTH), device=other)
+    assert all(entry[0] != base for entry in memory.registered(other))
 
 
 @pytest.mark.parametrize("offset", OFFSETS, ids=("die0_inside_a_tile", "die1_whole_tile"))

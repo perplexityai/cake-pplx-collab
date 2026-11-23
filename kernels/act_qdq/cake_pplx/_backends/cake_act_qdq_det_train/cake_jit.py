@@ -1023,6 +1023,54 @@ def chunk_place(address: int, nbytes: int, base: int, size: int, chunk_bytes: in
     return offset, chunk & 1
 
 
+def domain_candidate(
+    arch: str,
+    format: str,
+    *,
+    scale_out: bool,
+    n_vecs: int,
+    in_place: bool,
+    out_given: bool,
+) -> tuple[str | None, str]:
+    """The first four checks of :func:`domain_route`, which read no memory
+    placement: ``(record, "candidate")`` for the interleaved-domain record of
+    the route when ``arch`` has one, the call is out of place with an ``out``
+    buffer and ``n_vecs`` lies in the record's ``vectors`` range, else
+    ``(None, reason)`` with the first of ``"arch"``, ``"in_place"``,
+    ``"no_out"`` and ``"size"`` that holds."""
+
+    name = domain_module(arch, format, scale_out=scale_out)
+    if name is None:
+        return None, "arch"
+    if in_place:
+        return None, "in_place"
+    if not out_given:
+        return None, "no_out"
+    span = MODULES[name]["vectors"].get(arch, {}).get("out_of_place")
+    if span is None or not int(span[0]) <= int(n_vecs) <= int(span[1]):
+        return None, "size"
+    return name, "candidate"
+
+
+def domain_placement(
+    x_place: tuple[int, int] | None, y_place: tuple[int, int] | None
+) -> str:
+    """The last four checks of :func:`domain_route`, on the placements of a
+    candidate's input and output (:func:`chunk_place` results): ``"placed"``,
+    or the first of ``"x_memory"``, ``"out_memory"``, ``"chunk_offset"`` and
+    ``"die_parity"`` that holds."""
+
+    if x_place is None:
+        return "x_memory"
+    if y_place is None:
+        return "out_memory"
+    if x_place[0] != y_place[0]:
+        return "chunk_offset"
+    if x_place[1] != y_place[1]:
+        return "die_parity"
+    return "placed"
+
+
 def domain_route(
     arch: str,
     format: str,
@@ -1051,28 +1099,23 @@ def domain_route(
     - ``"chunk_offset"``: the two start at different offsets in their chunks;
     - ``"die_parity"``: their chunks lie in different dies.
 
-    ``x_place`` and ``y_place`` are :func:`chunk_place` results.
+    ``x_place`` and ``y_place`` are :func:`chunk_place` results.  The first
+    four are :func:`domain_candidate`, the last four
+    :func:`domain_placement`.
     """
 
-    name = domain_module(arch, format, scale_out=scale_out)
+    name, reason = domain_candidate(
+        arch,
+        format,
+        scale_out=scale_out,
+        n_vecs=n_vecs,
+        in_place=in_place,
+        out_given=out_given,
+    )
     if name is None:
-        return None, "arch"
-    if in_place:
-        return None, "in_place"
-    if not out_given:
-        return None, "no_out"
-    span = MODULES[name]["vectors"].get(arch, {}).get("out_of_place")
-    if span is None or not int(span[0]) <= int(n_vecs) <= int(span[1]):
-        return None, "size"
-    if x_place is None:
-        return None, "x_memory"
-    if y_place is None:
-        return None, "out_memory"
-    if x_place[0] != y_place[0]:
-        return None, "chunk_offset"
-    if x_place[1] != y_place[1]:
-        return None, "die_parity"
-    return name, "placed"
+        return None, reason
+    reason = domain_placement(x_place, y_place)
+    return (name, reason) if reason == "placed" else (None, reason)
 
 
 def domain_launch(
@@ -1264,9 +1307,11 @@ __all__ = [
     "arch_for_capability",
     "chunk_place",
     "device_arch",
+    "domain_candidate",
     "domain_chunk_bytes",
     "domain_launch",
     "domain_module",
+    "domain_placement",
     "domain_route",
     "launch_grid",
     "library_name",

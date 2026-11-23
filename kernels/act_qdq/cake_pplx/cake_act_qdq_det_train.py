@@ -189,10 +189,14 @@ def cake_act_qdq_det_train_domain_empty(
 
     Chunk ``k`` of the allocation lies in die ``k & 1``.  The tensor is
     contiguous and starts on a chunk; views of it (slices, reshapes) keep it
-    alive.  Freeing the last view synchronizes the device.  Allocate the
-    buffers once, before any CUDA graph capture, and reuse them.  The
-    ``"off"`` programs run on this memory as fast as on default memory.
-    Needs cuda-python (the ``locality`` extra).
+    alive.  Freeing the last view synchronizes the device; during a CUDA
+    graph capture on any device in this thread, the range is freed after the
+    capture, by a later free or a later call of this function.
+    Allocate the buffers once, before any CUDA graph capture, and reuse
+    them.  A capture begun with ``cudaStreamBeginCapture`` on a stream that
+    is not torch's current stream is not detected.  The ``"off"`` programs
+    run on this memory as fast as on default memory.  Needs cuda-python
+    (the ``locality`` extra).
 
     Parameters
     ----------
@@ -211,10 +215,11 @@ def cake_act_qdq_det_train_domain_empty(
         ``ValueError`` for a negative dimension or a device that is not
         CUDA, ``torch.cuda.OutOfMemoryError`` when the device has no room
         (after torch's cached free memory is returned to the driver once),
-        and ``RuntimeError`` during CUDA graph capture, on a device other
-        than SM107, when the driver reports fewer than two locality domains,
-        or without a cuda-python that names them.  torch's
-        ``torch.cuda.memory_*`` counters do not count this memory.
+        and ``RuntimeError`` during a CUDA graph capture on any device in
+        this thread, on a device other than SM107, when the driver reports
+        fewer than two locality domains, or without a cuda-python that names
+        them.  torch's ``torch.cuda.memory_*`` counters do not count this
+        memory.
     """
 
     return _backend().cake_act_qdq_det_train_domain_empty(shape, dtype=dtype, device=device)

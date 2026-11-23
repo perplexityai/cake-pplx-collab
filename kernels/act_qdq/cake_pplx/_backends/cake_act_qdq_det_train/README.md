@@ -130,16 +130,18 @@ one of 1,024 zeroed workspaces that the helper makes per device on its first cal
 captured call takes one from the graph's pool, which the graph zeroes at every replay.  The replays of one instantiated
 graph never overlap, but a capture instantiated more than once, or added to other graphs as a child graph, shares its
 workspace between those copies: run them one at a time.  Allocate the buffers before a capture (the helper refuses
-during one), and make one eager call per program the capture uses.  After the first call on a stream, a call does not
-synchronize the host.
+during a CUDA graph capture on any device in this thread), and make one eager call per program the capture uses.  After
+the first call on a stream, a call does not synchronize the host.
 
-Freeing the last view of a buffer synchronizes the device, then unmaps its chunks; a buffer freed during a capture is
-unmapped by the next helper call.  Do not allocate these buffers, or free the last view of one, in one thread while
-another thread captures a CUDA graph: the driver calls would end that capture.  The driver maps this memory outside
-torch's caching allocator, so the `torch.cuda.memory_*` counters do not count it.  When the device has no room, the
-helper returns torch's cached free memory to the driver once and then raises `torch.cuda.OutOfMemoryError`.  The helper
-needs cuda-python with the locality-domain names (`cuda-bindings` 13.5 or later: the package's `locality` extra), and
-the driver must report two locality domains.  The `"off"` route never imports it.
+Freeing the last view of a buffer synchronizes the device, then unmaps its chunks; a buffer freed during a CUDA graph
+capture on any device in this thread is unmapped by the next helper call.  The helper reads torch's current stream of
+each device: a capture begun with `cudaStreamBeginCapture` on a stream that is not torch's current stream is not
+detected.  Do not allocate these buffers, or free the last view of one, in one thread while another thread captures a
+CUDA graph: the driver calls would end that capture.  The driver maps this memory outside torch's caching allocator, so
+the `torch.cuda.memory_*` counters do not count it.  When the device has no room, the helper returns torch's cached
+free memory to the driver once and then raises `torch.cuda.OutOfMemoryError`.  The helper needs cuda-python with the
+locality-domain names (`cuda-bindings` 13.5 or later: the package's `locality` extra), and the driver must report two
+locality domains.  The `"off"` route never imports it.
 
 ## Numerics
 
@@ -220,8 +222,9 @@ checkpointed recompute, steady-state calls without host synchronization, and no 
 `tests/experimental/test_cake_act_qdq_det_train_locality.py` checks the `locality="domain"` route.  On an R200 it
 checks every interleaved-domain program against the FP64 rule on any grid, the route's bytes against the `"off"` route
 above its first size, each reason of the plan, the claim counters, two streams, CUDA graph replay and steady-state
-calls without host synchronization.  On every architecture it checks that a call outside the helper's memory runs the
-`"off"` program.
+calls without host synchronization; with two R200s, a free and an allocation during a capture on the other device.  On
+every architecture it checks that a call outside the helper's memory runs the `"off"` program, and without a GPU the
+helper's unwind of a failed mapping and its error without cuda-python.  On an R200 these tests need the `locality` extra.
 
 ## Limitations
 

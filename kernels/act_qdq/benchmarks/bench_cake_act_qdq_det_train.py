@@ -27,11 +27,14 @@ Cases: ``[rows, 512]`` FP4 (E4M3 scale, group 16); ``[rows, 128]`` and
 8,192 and 16,384 rows.  Each runs out of place and in place, eager and in a
 CUDA graph, without and with the scale output.  The input is ``randn`` BF16.
 
-``--locality domain`` (or ``both``) adds ``cake_domain`` rows on SM107: the
-out-of-place call with ``locality="domain"``, its input and output from
+``--locality domain`` replaces the ``cake`` rows with ``cake_domain`` rows
+(``both`` adds them; off SM107 those rows record the error): the out-of-place
+call with ``locality="domain"``, its input and output from
 ``cake_act_qdq_det_train_domain_empty``, each row recording the program the
-call runs (``route``, ``reason``: ``cake_act_qdq_det_train_domain_plan``) and
-whether its output equals the default call's bit for bit (``exact``).
+call runs (``route``, ``reason``: ``cake_act_qdq_det_train_domain_plan``),
+whether its output equals the default call's bit for bit (``exact``) and the
+FP64 check of the default call's output (``rule_exact``; the printed table
+shows ``exact/rule_exact``).
 
 Optional baselines, each imported only when its flag is given:
 
@@ -48,9 +51,10 @@ Optional baselines, each imported only when its flag is given:
   on the last 64 channels of each 512-channel row (an identity here; the
   ``[rows, 8, 4096]`` input is viewed as ``[-1, 512]``).
 
-Before timing, the Cake output is checked bit for bit against the FP64 rule
-(``--no-oracle`` skips this), and every baseline output against the Cake
-output, on the timed input; each row records the result in ``exact``.
+Before timing, the default Cake call's output is checked bit for bit against
+the FP64 rule for every ``--locality`` (``--no-oracle`` skips this), and every
+baseline output against the Cake output, on the timed input; each row records
+the result in ``exact`` (a ``cake_domain`` row: ``rule_exact``).
 
 Usage::
 
@@ -390,8 +394,8 @@ class _Case:
         }
 
 
-def _bench_cake(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]]) -> None:
-    exact = None if args.no_oracle else _matches_rule(case.x0, case.want_y, case.want_s, case.fmt)
+def _bench_cake(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]], exact: Optional[bool]) -> None:
+    """The default call; ``exact`` is the FP64 check of its output."""
     for scales in args.scales:
         for mode in args.mode:
             fn = _cake_calls(case.x0.clone(), case.fmt, mode, scales)
@@ -400,10 +404,13 @@ def _bench_cake(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]]
                 _try_measure(out, base, fn, execution)
 
 
-def _bench_cake_domain(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]]) -> None:
-    """The ``locality="domain"`` call, out of place, its ``x`` and ``out`` in die-interleaved memory."""
+def _bench_cake_domain(
+    args: argparse.Namespace, case: _Case, out: list[dict[str, Any]], rule_exact: Optional[bool]
+) -> None:
+    """The ``locality="domain"`` call, out of place, its ``x`` and ``out`` in die-interleaved memory;
+    ``rule_exact`` is the FP64 check of the default call's output."""
     for scales in args.scales:
-        base = _row(case.common, impl="cake_domain", mode="out_of_place", scales=scales)
+        base = _row(case.common, impl="cake_domain", mode="out_of_place", scales=scales, rule_exact=rule_exact)
         try:
             x = cake_act_qdq_det_train_domain_empty(case.shape)
             y = cake_act_qdq_det_train_domain_empty(case.shape)
@@ -511,10 +518,11 @@ def _bench_cudnn(args: argparse.Namespace, case: _Case, out: list[dict[str, Any]
 def _run_case(args: argparse.Namespace, fmt: str, inner: tuple[int, ...], rows_count: int, env: dict) -> list:
     case = _Case(fmt, inner, rows_count, env)
     out: list[dict[str, Any]] = []
+    rule = None if args.no_oracle else _matches_rule(case.x0, case.want_y, case.want_s, case.fmt)
     if args.locality != "domain":
-        _bench_cake(args, case, out)
+        _bench_cake(args, case, out, rule)
     if args.locality != "off":
-        _bench_cake_domain(args, case, out)
+        _bench_cake_domain(args, case, out, rule)
     baselines = []
     if args.deepseek_kernel:
         baselines.append(("deepseek_tilelang", lambda: _bench_deepseek(args, case, out)))
@@ -596,14 +604,18 @@ def main() -> None:
             torch.cuda.empty_cache()
 
     print(f"{env['gpu']} ({env['arch']}), torch {env['torch']}, CUDA {env['cuda']}")
-    print("| format | shape | impl | mode | exec | scales | exact | GPU (us) | loop (us) |")
-    print("|---|---|---|---|---|---|---|---:|---:|")
+    print("| format | shape | impl | route | mode | exec | scales | exact | GPU (us) | loop (us) |")
+    print("|---|---|---|---|---|---|---|---|---:|---:|")
     for row in rows:
         gpu = f"{row['gpu_us']:.2f}" if "gpu_us" in row else row.get("error", "")
         loop = f"{row['loop_us']:.2f}" if "loop_us" in row else ""
+        route = row.get("route", "") + (f":{row['reason']}" if "reason" in row else "")
+        exact = row.get("exact")
+        if "rule_exact" in row:
+            exact = f"{exact}/{row['rule_exact']}"
         print(
-            f"| {row['format']} | {row['shape']} | {row['impl']} | {row['mode']} | {row.get('execution', '')} | "
-            f"{row['scales']} | {row.get('exact')} | {gpu} | {loop} |"
+            f"| {row['format']} | {row['shape']} | {row['impl']} | {route} | {row['mode']} | "
+            f"{row.get('execution', '')} | {row['scales']} | {exact} | {gpu} | {loop} |"
         )
     if args.json:
         args.json.write_text(json.dumps({"environment": env, "rows": rows}, indent=2) + "\n")

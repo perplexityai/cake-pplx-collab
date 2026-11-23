@@ -151,6 +151,14 @@ def test_domain_empty_refuses_a_cpu_device() -> None:
 
 
 @pytest.mark.cpu_only
+def test_domain_empty_checks_dtype_and_shape_before_the_device() -> None:
+    with pytest.raises(TypeError, match="dtype"):
+        cake_act_qdq_det_train_domain_empty((4, 32), dtype="bfloat16")
+    with pytest.raises(ValueError, match="negative"):
+        cake_act_qdq_det_train_domain_empty((-1, 32))
+
+
+@pytest.mark.cpu_only
 def test_constants_are_the_backend_objects() -> None:
     facade = cake_pplx.cake_act_qdq_det_train
     for name in ("ARCHES", "SUPPORTED_COMPUTE_CAPABILITIES", "FORMATS", "GROUP_SIZES"):
