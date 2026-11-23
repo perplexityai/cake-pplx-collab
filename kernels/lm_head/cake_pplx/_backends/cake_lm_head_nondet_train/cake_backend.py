@@ -393,13 +393,17 @@ _SMALL_T_KEEP = {"on": True}
 # median of the timed rounds per arm, R200 nodes, ms at 16 / 64 / 128 / 192 / 256 rows: T = 1 log-probability forward
 # 0.352 / 0.359 / 0.366 / 0.252 / 0.223, forward + backward 0.856 / 0.863 / 0.836 / 0.687 / 0.676; T = 1 temperature
 # forward + backward 1.234 / 1.262 / 1.225 / 0.997 / 1.009), and so does a loss step of at most
-# :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH` rows (one R200 GPU, CUPTI span, 256 vs 16 rows: T = 16 forward + backward
-# 962.5 -> 771.6 us, T = 32 1023.7 -> 769.9 us; the forward 1.46-1.59x faster, while the backward alone grows with the
-# rows, 0.87-0.90x, +34 to +48 us: its weight-gradient GEMM reads 256 rows; 256 vs ``T`` rows: T = 128 877.5 -> 715.5
-# us, while at T = 192 the checkpointed step measured slower, 1073.4 -> 1124.2 us, so longer loss calls keep their
-# rows); B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability forward + backward 1.095 -> 1.213).  The loss
-# entry's ``loss`` and ``dW`` group their sums over the staged rows, so a padded loss call's bits may differ from the
-# call at 16 rows (both are judged against the naive tier).  :func:`set_small_pad_rows` replaces the defaults with one
+# :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH` rows (one R200 GPU, CUPTI span, 256 staged rows vs 16 at T = 16 and vs the
+# call's own 32 at T = 32: forward + backward 962.5 -> 771.6 us and 1023.7 -> 769.9 us; the forward 1.46-1.59x faster,
+# while the backward alone grows with the rows, 0.87-0.90x, +34 to +48 us: its weight-gradient GEMM reads 256 rows;
+# 256 vs ``T`` rows: T = 128 877.5 -> 715.5 us, while at T = 192 the checkpointed step measured slower, 1073.4 ->
+# 1124.2 us, so longer loss calls keep their rows); B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability
+# forward + backward 1.095 -> 1.213).  A loss call staged at 256 rows holds its deferred weight gradient's BF16
+# ``[256, V]`` ``dz`` rows from the forward to the backward (79 MB at V = 154880, where a 16-row call holds 5 MB; R200
+# step peak +82.5 MB at T = 2 to 16), and the first forward of a call staged at 256 rows measured a peak of 1.88 GiB at
+# H = 6144, V = 154880 (B200 and R200; 0.10 GiB on later calls, 0.02 GiB at 16 staged rows; 0.3.4 staged at 256 rows
+# measured the same).  The loss entry's ``loss`` and ``dW`` group their sums over the staged rows, so a padded loss
+# call's bits may differ from the call at 16 rows (both are judged against the naive tier).  :func:`set_small_pad_rows` replaces the defaults with one
 # row count for every entry (0 = off).
 # The loss entry's pad applies to the calls the one-pass cross-entropy does not take (:func:`one_pass_rows`; by default
 # a T = 1 cross-entropy call at ``ONE_PASS_HIDDEN`` runs one-pass and is not staged; the loss figures above are of the
