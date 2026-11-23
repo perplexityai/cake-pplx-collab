@@ -518,7 +518,10 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   stage's, summed by the same ordered tail reduce, and every tile keeps its
   k-step order, so the output bits are the selected stage's. The rules cover
   the 148-SM `sm_100a` and 152-SM `sm_103a` parts, where the queue walk was
-  timed against the stage it replaces and no row was slower; on the 148-SM
+  timed against the stage it replaces and no row was confirmed slower across
+  several GPUs, except one disclosed row (the 8-group gate/up weight gradient
+  with a composed bfloat16 accumulate, lead route, eager: slower on one of
+  three 148-SM `sm_100a` GPUs, faster on the other two); on the 148-SM
   `sm_100a` part the `main_halves` stage keeps it for the fused accumulate
   only (a bfloat16 row there was slower), and the `main_wave_halves` stage
   keeps it up to 16 groups (a 32-group bfloat16 row there was slower). An
