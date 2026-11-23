@@ -57,10 +57,9 @@ and ``S``; outside the backward rows of ``cake_jit.DIRECT_ROWS``) a backward at
 (``cake_jit.small_s_grid``); its channel tiles, ``dx`` and workspace stay the
 row's.  Here ``n_ch_tiles`` is the plan's number of channel tiles and ``n_sub``
 is the number of token sub-tiles of one CTA: ``n_ch_tiles`` 3 and ``n_sub`` 4
-at the ``bwd`` keys, ``n_ch_tiles`` 1 and ``n_sub`` 2 at the ``bwd_bias`` key.
-``tokens`` (3 on ``bwd``, 5 on ``bwd_bias``) is the length of one token
+at the keys (sm_107a, ``bwd`` only).  ``tokens`` (3) is the length of one token
 stream: the CTAs of a channel tile split ``S`` into ``CTAs x n_sub`` streams,
-so each CTA takes about ``n_sub x tokens`` tokens.
+the tail streams shorter, so each CTA takes about ``n_sub x tokens`` tokens.
 
 Numerical mode: the package is chosen by its module name and no entry point
 takes a mode keyword.  This package has no deterministic programs (they are the
@@ -374,7 +373,9 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 _POOL_DEPTH = 4
 # torch's out-of-memory error: a refill that meets it keeps no new buffer, frees no
 # idle buffer and keeps the pool's size.
-_OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", MemoryError)
+_OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(
+    torch.cuda, "OutOfMemoryError", MemoryError
+)
 _POOL_DTYPES: dict[str, torch.dtype] = {"fwd": torch.int32, "bwd": torch.uint8}
 _ZEROED_POOL: dict[tuple[int, str], list] = {}
 _POOL_SIZE: dict[tuple[int, str], int] = {}
@@ -410,7 +411,9 @@ _ACCUMULATOR_VIEWS: dict[int, tuple[weakref.ref, dict]] = {}
 # (``cake_jit.tokens_select``) holds ``None`` and plans every call.  At most ``_ROW_PLANS_MAX`` rows (then emptied);
 # :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties it (needed after a change of the registry tables,
 # the SM count or the architecture a device reports, which the rows were planned from).
-_ROW_PLANS: dict[tuple, tuple[tuple[int, int, Optional[_loader.RowPlan], dict], ...]] = {}
+_ROW_PLANS: dict[
+    tuple, tuple[tuple[int, int, Optional[_loader.RowPlan], dict], ...]
+] = {}
 _ROW_PLANS_MAX = 1024
 # The torch dtype of each accumulator / counter dtype name of a workspace rule.
 _TORCH_DTYPES = {
@@ -724,7 +727,9 @@ def _dweight_sum(value: object, policy: str) -> str:
     routes have a pair form)."""
 
     if not isinstance(value, str):
-        raise TypeError(f"dweight_sum must be a str, one of {DWEIGHT_SUMS}, got {type(value).__name__}")
+        raise TypeError(
+            f"dweight_sum must be a str, one of {DWEIGHT_SUMS}, got {type(value).__name__}"
+        )
     if value not in DWEIGHT_SUMS:
         raise ValueError(f"dweight_sum must be one of {DWEIGHT_SUMS}, got {value!r}")
     if value == "fp32_pair" and policy != "fp32":
@@ -1115,7 +1120,9 @@ def _capture_info(stream: int) -> tuple[int, object]:
         return 0, None
     if info[1] != cudart.cudaStreamCaptureStatus.cudaStreamCaptureStatusActive:
         return 0, None
-    graph = info[3] if len(info) > 3 and isinstance(info[3], cudart.cudaGraph_t) else None
+    graph = (
+        info[3] if len(info) > 3 and isinstance(info[3], cudart.cudaGraph_t) else None
+    )
     return int(info[2]), graph
 
 
@@ -1126,7 +1133,15 @@ class _PoolBuffer:
 
     __slots__ = ("tensor", "kind", "device_index", "flag", "sem", "obj")
 
-    def __init__(self, tensor: torch.Tensor, kind: str, device_index: int, flag: int, sem: int, obj: object):
+    def __init__(
+        self,
+        tensor: torch.Tensor,
+        kind: str,
+        device_index: int,
+        flag: int,
+        sem: int,
+        obj: object,
+    ):
         self.tensor, self.kind, self.device_index = tensor, kind, device_index
         self.flag, self.sem, self.obj = flag, sem, obj
 
@@ -1158,22 +1173,34 @@ class _UserObjects:
         self.libc = libc
         self.sem_post = ctypes.cast(libc.sem_post, ctypes.c_void_p).value
         self.success = cudart.cudaError_t.cudaSuccess
-        self.create_flags = int(cudart.cudaUserObjectFlags.cudaUserObjectNoDestructorSync)
+        self.create_flags = int(
+            cudart.cudaUserObjectFlags.cudaUserObjectNoDestructorSync
+        )
         self.move = int(cudart.cudaUserObjectRetainFlags.cudaGraphUserObjectMove)
         self.free_sems: list[int] = []
-        self.retired: list[int] = []  # semaphores of released idle objects, until their post is consumed
+        self.retired: list[
+            int
+        ] = []  # semaphores of released idle objects, until their post is consumed
         self.flags: list[torch.Tensor] = []  # pinned int32 readiness flags, never freed
         self.free_flags: list[tuple[torch.Tensor, int, int]] = []
-        self.pending_flags: list[tuple[torch.Tensor, int, int]] = []  # returned before their copy was seen
-        self.released: list[_PoolBuffer] = []  # held buffers their graphs released, for their device's refill
+        self.pending_flags: list[
+            tuple[torch.Tensor, int, int]
+        ] = []  # returned before their copy was seen
+        self.released: list[
+            _PoolBuffer
+        ] = []  # held buffers their graphs released, for their device's refill
 
     def semaphore(self) -> int:
         if not self.free_sems:
-            chunk = self.libc.malloc(self.SEM_BYTES * (self.SEM_CHUNK + 1))  # never freed
+            chunk = self.libc.malloc(
+                self.SEM_BYTES * (self.SEM_CHUNK + 1)
+            )  # never freed
             if not chunk:
                 raise MemoryError("malloc of the semaphores failed")
             base = (chunk + self.SEM_BYTES - 1) // self.SEM_BYTES * self.SEM_BYTES
-            self.free_sems.extend(base + self.SEM_BYTES * i for i in range(self.SEM_CHUNK))
+            self.free_sems.extend(
+                base + self.SEM_BYTES * i for i in range(self.SEM_CHUNK)
+            )
         sem = self.free_sems.pop()
         if self.libc.sem_init(sem, 0, 0) != 0:
             self.free_sems.append(sem)
@@ -1251,7 +1278,9 @@ def _mem_pool(device_index: int) -> object:
     return pool
 
 
-def _package_zeros(numel: int, dtype: torch.dtype, device: torch.device, device_index: int) -> torch.Tensor:
+def _package_zeros(
+    numel: int, dtype: torch.dtype, device: torch.device, device_index: int
+) -> torch.Tensor:
     """A zeroed tensor of the package's own memory pool on the device (:func:`_mem_pool`), or of the caching
     allocator's current pool where the package has none.  Only a failure to enter the pool (an unusable
     ``torch.cuda.use_mem_pool``) takes the device off it; an allocation error (an out-of-memory error) propagates.
@@ -1264,7 +1293,9 @@ def _package_zeros(numel: int, dtype: torch.dtype, device: torch.device, device_
             with contextlib.ExitStack() as stack:
                 try:
                     stack.enter_context(torch.cuda.use_mem_pool(pool, device=device))
-                except Exception:  # the API is unusable here: the device leaves its pool for good
+                except (
+                    Exception
+                ):  # the API is unusable here: the device leaves its pool for good
                     _MEM_POOLS[device_index] = None
                 else:
                     # an allocation error (an OOM) propagates and the device keeps its pool
@@ -1358,7 +1389,9 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
                     _drop_capture_entries(buf.tensor)
                     bkey = (buf.device_index, buf.kind)
                     pool = _ZEROED_POOL.setdefault(bkey, [])
-                    if len(pool) < _POOL_DEPTH and buf.tensor.numel() >= _POOL_SIZE.get(bkey, 0):
+                    if len(pool) < _POOL_DEPTH and buf.tensor.numel() >= _POOL_SIZE.get(
+                        bkey, 0
+                    ):
                         # its graphs' launches have completed and left it zero: ready at once
                         buf.obj = uo.create(buf.sem)
                         buf.flag = uo.flag()
@@ -1375,7 +1408,9 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
                             # the flags' source, written on this stream before the copies that read it
                             one = torch.ones(1, dtype=torch.int32, device=device)
                             tensors = [
-                                torch.zeros(size, dtype=_POOL_DTYPES[kind], device=device)
+                                torch.zeros(
+                                    size, dtype=_POOL_DTYPES[kind], device=device
+                                )
                                 for _ in range(_POOL_DEPTH - len(keep))
                             ]
                     except _OUT_OF_MEMORY:
@@ -1387,7 +1422,11 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
                         ctypes.c_int32.from_address(flag[2]).value = 0
                         flag[0][flag[1] : flag[1] + 1].copy_(one, non_blocking=True)
                         sem = uo.semaphore()
-                        fresh.append(_PoolBuffer(tensor, kind, device_index, flag, sem, uo.create(sem)))
+                        fresh.append(
+                            _PoolBuffer(
+                                tensor, kind, device_index, flag, sem, uo.create(sem)
+                            )
+                        )
                 for buf in pool:
                     if buf not in keep:
                         uo.release(buf.obj, buf.sem)
@@ -1399,7 +1438,9 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
         _POOL_READY[kind][device_index] = size
 
 
-def _pool_take(device_index: int, kind: str, need: int, graph: object) -> Optional[torch.Tensor]:
+def _pool_take(
+    device_index: int, kind: str, need: int, graph: object
+) -> Optional[torch.Tensor]:
     """Inside a capture of ``graph``: an idle pre-zeroed buffer of ``kind`` with at least ``need`` elements whose
     zero fill has completed (its flag reads 1), its user object's reference moved into ``graph``; ``None`` when the
     device has none (or CUDA refuses the retain).  Either way the next eager call refills the pool.  Makes no CUDA
@@ -1496,7 +1537,9 @@ def _forward_work(
     if capturing is None:
         capturing = torch.cuda.is_current_stream_capturing()
     if capturing:
-        return _capture_buffer(_CAPTURE_FORWARD_WORKSPACES, device_index, "fwd", words, device)
+        return _capture_buffer(
+            _CAPTURE_FORWARD_WORKSPACES, device_index, "fwd", words, device
+        )
     if words > _POOL_READY["fwd"].get(device_index, 0):
         _pool_refill(device_index, "fwd", words, device)
     key = (device_index, _current_stream_handle(device_index))

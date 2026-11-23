@@ -5384,10 +5384,9 @@ def test_backward_direct_rows_bwd_grid_mult_and_graph_replays(
         _route_judge(S, C, docs, kind, call, key=243, label=label)
 
 
-# The small-S grid cap of the single-wave backward (``GRID_CAP_ROWS``): the labels of its routes (``bwd``;
-# ``bwd_bias`` with FP32 and with BF16 taps) and the document counts of a span's middle (one, four in the perf
-# packing, 32).
-GRID_CAP_LABELS = ("bwd", "bwd_bias", "bwd_bias-bf16")
+# The small-S grid cap of the single-wave backward (``GRID_CAP_ROWS``): the labels of its routes (``bwd``, the one
+# route with keys) and the document counts of a span's middle (one, four in the perf packing, 32).
+GRID_CAP_LABELS = ("bwd",)
 GRID_CAP_DOCS = (1, 4, 32)
 
 
