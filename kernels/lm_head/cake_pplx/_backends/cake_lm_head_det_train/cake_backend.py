@@ -4732,7 +4732,7 @@ def make_plan(
     split of the loss entry, :func:`forward_loss`): no chunk's rule-picked dX slice count exceeds it
     (:func:`capped_k_slices`; an explicit ``k_slices`` knob is not capped).  ``cast_fold``: the compact dX cast folds
     the label residuals of the one-slice chunks (:attr:`Plan.cast_fold`, :func:`cast_fold_rows`).  ``a_extent`` (the
-    log-probability entry's eager forms without a temperature, :func:`prepare_lm_head_det_loss`'s ``_a_extent``): a
+    default route's eager log-probability forms, :func:`prepare_lm_head_det_loss`'s ``_a_extent``): a
     compacted one-chunk plan without the hidden valid-row count -- a kept plan, a forward with the label-column arm or a
     backward with the ``dz`` arm -- takes the padded A extents of ``arch`` (:func:`a_extent_rows`, :attr:`Plan.a_rows`
     / :attr:`Plan.dx_a_rows`); every other plan keeps the chunk's rows."""
