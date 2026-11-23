@@ -43,7 +43,13 @@ The order of that cross-CTA sum depends on the CTAs' timing, so ``dweight`` /
 ``dbias`` are not bitwise reproducible run to run; that is the only relaxed
 property (the accumulation dtypes, plain FP32 words, and rounding boundaries
 are the det package's).  No reduce program, no host synchronization, no cooperative
-launch, no grid barrier.
+launch, no grid barrier.  At the backward rows of ``cake_jit.DIRECT_ROWS``
+(routes ``bwd``, ``bwd_dt`` and ``bwd_bias``; per architecture and route,
+channel ranges within C = 512 to 1024, each with its own token range within
+S = 1 to 4096) the backward runs the route's direct program instead, which has
+no det twin: one ordinary launch without TMA or a staged pipeline, whose ``dx``
+is bit for bit the route's staged programs' and whose ``dweight`` / ``dbias``
+take the same unordered FP32 accumulation, ticket counters and last-CTA store.
 
 Numerical mode: the package is chosen by its module name and no entry point
 takes a mode keyword.  This package has no deterministic programs (they are the
@@ -136,8 +142,12 @@ Host design (the knobs are keywords; no environment variable):
   same, as every program reads its partition from the launch (``gridDim.x``:
   the CTAs of a channel tile split its tokens evenly, and its ticket counter
   wraps after that many CTAs), so ``dx`` keeps its bits and more CTAs add into
-  the same accumulators.  The workspace does not grow with it (one accumulator
-  set and one counter per channel tile, whatever the grid).
+  the same accumulators.  At a backward row of ``cake_jit.DIRECT_ROWS`` it
+  multiplies the direct program's grid of the call (at least one CTA per
+  channel tile, at most one per token block: ``cake_jit.launch_grid``); that
+  program's CTAs take a tile's token blocks in turn, so any grid of at least
+  one CTA per tile is correct.  The workspace does not grow with it (one
+  accumulator set and one counter per channel tile, whatever the grid).
 - Backward grid beside a concurrent kernel: on the
   ``bwd`` and ``bwd_fp32g`` routes at ``bwd_grid_mult`` 1, a launch of exactly
   ``ctas_per_sm x SM count`` CTAs whose last channel-tile rank holds at least
@@ -212,9 +222,10 @@ Host design (the knobs are keywords; no environment variable):
   ``cake_jit.DIRECT_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers is planned
   for every side of its token ranges at its first call (``cake_jit.row_sides``:
   an SM-wide segment's program, the pair direct program inside the pair range,
-  the direct program inside the direct range, the route's fallback program
-  inside the fallback range, the rules' program outside them); a later call
-  picks its side with a few compares of ``S``.  A row whose
+  the direct program inside the direct range (on a backward route on the
+  route's direct tiles, ahead of the other tables), the route's fallback
+  program inside the fallback range, the rules' program outside them); a later
+  call picks its side with a few compares of ``S``.  A row whose
   program selection reads ``S`` through a token floor of the selection rules
   plans every call (on that side).
   :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` drops the rows.
@@ -781,7 +792,9 @@ def _launch(
     unwritten.  The caller launches this grid, so a call plans it once.  A
     backward ``bwd_grid_mult`` above 1 launches that many times the record's
     untrimmed grid (``launch_grid`` without the row), never trimmed to whole
-    channel-tile ranks; the scalars do not depend on the grid.  A record's
+    channel-tile ranks, or for a record whose grid is capped by the call (a
+    direct backward program at a row of ``cake_jit.DIRECT_ROWS``) that many
+    times its capped grid; the scalars do not depend on the grid.  A record's
     plan takes the device's architecture ``arch`` and the record's route, so a
     backward row of ``cake_jit.TILE_OVERRIDES`` or ``cake_jit.NARROW_TILES``
     and a forward narrow row (``cake_jit.channel_split``, of the call's taps:
@@ -807,6 +820,12 @@ def _launch(
             device_index=device_index,
             arch=arch,
             bwd_grid_mult=1,
+        )
+    elif record["grid_rule"].get("cap") is not None:
+        grid = (
+            launch_grid(record, device_index=device_index, C=C, S=S)[0] * bwd_grid_mult,
+            1,
+            1,
         )
     else:
         grid = (launch_grid(record, device_index=device_index)[0] * bwd_grid_mult, 1, 1)
@@ -949,8 +968,9 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
-    ``SM_WIDE_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS``, ``PAIR_PLANS``, ``DIRECT_PLANS``, the forward's
-    ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``,
+    ``SM_WIDE_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS``, ``PAIR_PLANS``, ``DIRECT_PLANS``, ``BACKWARD_DIRECT_PLANS``, the
+    forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``,
+    ``FORWARD_SINGLE_TILE_ROWS``,
     ``FORWARD_NARROW_WIDTHS`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or
     ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` / ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is
     read by every call, not planned."""
