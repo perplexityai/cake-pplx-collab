@@ -184,15 +184,16 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
         "bwd_h128": (
             (0, 1024, "cake_rmsnorm_train_9346600882e53a589509"),
             (1024, 2048, "cake_rmsnorm_train_401a018c68bc082078b2"),
-            (2048, 12288, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
+            (2048, 8192, "cake_rmsnorm_train_d197bcc34403e94ee2bd"),
+            (8192, 12288, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
             (12288, 16384, "cake_rmsnorm_train_c50d3bbd794af91a2538"),
             (16384, None, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
         ),
         "bwd_w32_h128": (
             (0, 1024, "cake_rmsnorm_train_ab8a320c36b909e7bf1e"),
             (1024, 1536, "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea"),
-            (1536, 4096, "cake_rmsnorm_train_a45d09aebf1bdca80e95"),
-            (4096, 8192, "cake_rmsnorm_train_d0fe504e1d8611c0b2dc"),
+            (1536, 2048, "cake_rmsnorm_train_a45d09aebf1bdca80e95"),
+            (2048, 8192, "cake_rmsnorm_train_e23083c7af388f9e2f50"),
             (8192, 12288, "cake_rmsnorm_train_3e751b6f0ebbd6be9481"),
             (12288, 16384, "cake_rmsnorm_train_d0fe504e1d8611c0b2dc"),
             (16384, None, "cake_rmsnorm_train_3e751b6f0ebbd6be9481"),
@@ -542,15 +543,15 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
         "bwd_h128": (
             (0, 1024, "cake_rmsnorm_train_9346600882e53a589509"),
             (1024, 2048, "cake_rmsnorm_train_401a018c68bc082078b2"),
-            (2048, 12288, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
+            (2048, 8192, "cake_rmsnorm_train_d197bcc34403e94ee2bd"),
+            (8192, 12288, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
             (12288, 16384, "cake_rmsnorm_train_c50d3bbd794af91a2538"),
             (16384, None, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
         ),
         "bwd_w32_h128": (
             (0, 1024, "cake_rmsnorm_train_ab8a320c36b909e7bf1e"),
             (1024, 2048, "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea"),
-            (2048, 4096, "cake_rmsnorm_train_a45d09aebf1bdca80e95"),
-            (4096, 8192, "cake_rmsnorm_train_d0fe504e1d8611c0b2dc"),
+            (2048, 8192, "cake_rmsnorm_train_e23083c7af388f9e2f50"),
             (8192, 12288, "cake_rmsnorm_train_3e751b6f0ebbd6be9481"),
             (12288, 16384, "cake_rmsnorm_train_d0fe504e1d8611c0b2dc"),
             (16384, None, "cake_rmsnorm_train_3e751b6f0ebbd6be9481"),
@@ -942,18 +943,15 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
         ),
         "bwd_h128": (
             (0, 1024, "cake_rmsnorm_train_9346600882e53a589509"),
-            (1024, 2048, "cake_rmsnorm_train_401a018c68bc082078b2"),
-            (2048, 4096, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
-            (4096, 12288, "cake_rmsnorm_train_c50d3bbd794af91a2538"),
-            (12288, None, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
+            (1024, 2047, "cake_rmsnorm_train_401a018c68bc082078b2"),
+            (2047, 65536, "cake_rmsnorm_train_d197bcc34403e94ee2bd"),
+            (65536, None, "cake_rmsnorm_train_8b0b86c827709e73ee26"),
         ),
         "bwd_w32_h128": (
             (0, 1024, "cake_rmsnorm_train_ab8a320c36b909e7bf1e"),
-            (1024, 2048, "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea"),
-            (2048, 8192, "cake_rmsnorm_train_d0fe504e1d8611c0b2dc"),
-            (8192, 12288, "cake_rmsnorm_train_3e751b6f0ebbd6be9481"),
-            (12288, 16384, "cake_rmsnorm_train_d0fe504e1d8611c0b2dc"),
-            (16384, None, "cake_rmsnorm_train_3e751b6f0ebbd6be9481"),
+            (1024, 2047, "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea"),
+            (2047, 65536, "cake_rmsnorm_train_e23083c7af388f9e2f50"),
+            (65536, None, "cake_rmsnorm_train_3e751b6f0ebbd6be9481"),
         ),
         "bwd_h256": (
             (0, 4, "cake_rmsnorm_train_780c64c6f2c4615bfbcf"),
@@ -1241,13 +1239,14 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
         "bwd_h128": (
             (1024, "unmeasured"),
             (2048, "unmeasured"),
+            (8192, "unmeasured"),
             (12288, "unmeasured"),
             (16384, "unmeasured"),
         ),
         "bwd_w32_h128": (
             (1024, "unmeasured"),
             (1536, "unmeasured"),
-            (4096, "unmeasured"),
+            (2048, "unmeasured"),
             (8192, "unmeasured"),
             (12288, "unmeasured"),
             (16384, "unmeasured"),
@@ -1502,13 +1501,13 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
         "bwd_h128": (
             (1024, "unmeasured"),
             (2048, "unmeasured"),
+            (8192, "unmeasured"),
             (12288, "unmeasured"),
             (16384, "unmeasured"),
         ),
         "bwd_w32_h128": (
             (1024, "unmeasured"),
             (2048, "unmeasured"),
-            (4096, "unmeasured"),
             (8192, "unmeasured"),
             (12288, "unmeasured"),
             (16384, "unmeasured"),
@@ -1819,18 +1818,11 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
         "fwd_w32_h6144": ((1024, "same"), (4096, "same")),
         "fwd_residual_h6144": ((256, "ulp"), (1024, "ulp")),
         "fwd_w32_residual_h6144": ((256, "ulp"), (1024, "ulp")),
-        "bwd_h128": (
-            (1024, "unmeasured"),
-            (2048, "unmeasured"),
-            (4096, "unmeasured"),
-            (12288, "unmeasured"),
-        ),
+        "bwd_h128": ((1024, "unmeasured"), (2047, "unmeasured"), (65536, "unmeasured")),
         "bwd_w32_h128": (
             (1024, "unmeasured"),
-            (2048, "unmeasured"),
-            (8192, "unmeasured"),
-            (12288, "unmeasured"),
-            (16384, "unmeasured"),
+            (2047, "unmeasured"),
+            (65536, "unmeasured"),
         ),
         "bwd_h256": (
             (4, "unmeasured"),
@@ -2047,7 +2039,8 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
         "bwd_h128": (
             (0, 1024, None),
             (1024, 2048, None),
-            (2048, 12288, None),
+            (2048, 8192, None),
+            (8192, 12288, None),
             (12288, 16384, None),
             (16384, None, None),
         ),
@@ -2158,8 +2151,8 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
         "bwd_w32_h128": (
             (0, 1024, None),
             (1024, 1536, None),
-            (1536, 4096, None),
-            (4096, 8192, None),
+            (1536, 2048, None),
+            (2048, 8192, None),
             (8192, 12288, None),
             (12288, 16384, None),
             (16384, None, None),
@@ -2266,7 +2259,8 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
         "bwd_h128": (
             (0, 1024, None),
             (1024, 2048, None),
-            (2048, 12288, None),
+            (2048, 8192, None),
+            (8192, 12288, None),
             (12288, 16384, None),
             (16384, None, None),
         ),
@@ -2382,8 +2376,7 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
         "bwd_w32_h128": (
             (0, 1024, None),
             (1024, 2048, None),
-            (2048, 4096, None),
-            (4096, 8192, None),
+            (2048, 8192, None),
             (8192, 12288, None),
             (12288, 16384, None),
             (16384, None, None),
@@ -2498,10 +2491,9 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
         ),
         "bwd_h128": (
             (0, 1024, None),
-            (1024, 2048, None),
-            (2048, 4096, None),
-            (4096, 12288, None),
-            (12288, None, None),
+            (1024, 2047, None),
+            (2047, 65536, None),
+            (65536, None, None),
         ),
         "bwd_h1280": (
             (0, 1, None),
@@ -2609,11 +2601,9 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
         ),
         "bwd_w32_h128": (
             (0, 1024, None),
-            (1024, 2048, None),
-            (2048, 8192, None),
-            (8192, 12288, None),
-            (12288, 16384, None),
-            (16384, None, None),
+            (1024, 2047, None),
+            (2047, 65536, None),
+            (65536, None, None),
         ),
         "bwd_w32_h1280": (
             (0, 4, None),
@@ -2822,7 +2812,10 @@ backward call or a checkpointed step slower than with the programs they replace.
 The deterministic package's one-row-per-stage det pairs also run with that package's
 slot plan (eight SMs left out) on sm_103a ``bwd_h2048`` and ``bwd_w32_h2048`` from
 T 171 to 16384, ``bwd_h6144`` from T 896 to 4096 and ``bwd_h4096`` and
-``bwd_w32_h4096`` from T 1024 to 20480.
+``bwd_w32_h4096`` from T 1024 to 20480.  On ``bwd_h128`` and ``bwd_w32_h128`` the
+deterministic package's ``rpw`` det pair (each CTA one slot, 16-row tiles strided over
+the slots) runs from T 2048 to 8192 on sm_100a and sm_103a (eight SMs left out) and
+from T 2047 to 65536 on sm_107a (every SM).
 On sm_103a ``bwd_h256`` (both weight dtypes) every window above 64
 rows runs a det pair.  Their main kernels are those the deterministic package runs for
 those rows on a device with 152 or more SMs, except from 1080 to 2048 rows, where it is
@@ -3031,7 +3024,10 @@ backward call or a checkpointed step slower than with the programs they replace.
 The deterministic package's one-row-per-stage det pairs also run with that package's
 slot plan (eight SMs left out) on sm_103a ``bwd_h2048`` and ``bwd_w32_h2048`` from
 T 171 to 16384, ``bwd_h6144`` from T 896 to 4096 and ``bwd_h4096`` and
-``bwd_w32_h4096`` from T 1024 to 20480.
+``bwd_w32_h4096`` from T 1024 to 20480.  On ``bwd_h128`` and ``bwd_w32_h128`` the
+deterministic package's ``rpw`` det pair (each CTA one slot, 16-row tiles strided over
+the slots) runs from T 2048 to 8192 on sm_100a and sm_103a (eight SMs left out) and
+from T 2047 to 65536 on sm_107a (every SM).
 On sm_103a ``bwd_h256`` (both weight dtypes) every window above 64
 rows runs a det pair.  Their main kernels are those the deterministic package runs for
 those rows on a device with 152 or more SMs, except from 1080 to 2048 rows, where it is
@@ -3374,7 +3370,10 @@ backward call or a checkpointed step slower than with the programs they replace.
 The deterministic package's one-row-per-stage det pairs also run with that package's
 slot plan (eight SMs left out) on sm_103a ``bwd_h2048`` and ``bwd_w32_h2048`` from
 T 171 to 16384, ``bwd_h6144`` from T 896 to 4096 and ``bwd_h4096`` and
-``bwd_w32_h4096`` from T 1024 to 20480.
+``bwd_w32_h4096`` from T 1024 to 20480.  On ``bwd_h128`` and ``bwd_w32_h128`` the
+deterministic package's ``rpw`` det pair (each CTA one slot, 16-row tiles strided over
+the slots) runs from T 2048 to 8192 on sm_100a and sm_103a (eight SMs left out) and
+from T 2047 to 65536 on sm_107a (every SM).
 On sm_103a ``bwd_h256`` (both weight dtypes) every window above 64
 rows runs a det pair.  Their main kernels are those the deterministic package runs for
 those rows on a device with 152 or more SMs, except from 1080 to 2048 rows, where it is
@@ -3507,7 +3506,7 @@ K KB or more, ``-`` that it starts beside every measured size; an architecture o
 route not listed is unmeasured.
 
 * ``sm_100a`` ``bwd_h1024``: (0, 4] -, (4, 8] -, (8, 64] -, (64, 128] -, (128, 1024] -, (1024, 2048] -, (2048, 32768] -, (32768, inf) -
-* ``sm_100a`` ``bwd_h128``: (0, 1024] -, (1024, 2048] -, (2048, 12288] -, (12288, 16384] -, (16384, inf) -
+* ``sm_100a`` ``bwd_h128``: (0, 1024] -, (1024, 2048] -, (2048, 8192] -, (8192, 12288] -, (12288, 16384] -, (16384, inf) -
 * ``sm_100a`` ``bwd_h1280``: (0, 1] -, (1, 128] -, (128, 512] -, (512, 4096] -, (4096, 8192] -, (8192, inf) -
 * ``sm_100a`` ``bwd_h1536``: (0, 2] >= 100, (2, 64] -, (64, 384] -, (384, 1024] >= 132, (1024, 1184] >= 100, (1184, 77824] >= 132, (77824, 78784] >= 100, (78784, 131072] -, (131072, 214016] >= 132, (214016, inf) -
 * ``sm_100a`` ``bwd_h2048``: (0, 4] >= 100, (4, 12] >= 100, (12, 64] -, (64, 336] -, (336, 3072] >= 100, (3072, 4096] >= 100, (4096, 7168] >= 100, (7168, 11264] >= 132, (11264, 16384] >= 100, (16384, 58880] >= 100, (58880, 131072] -, (131072, inf) >= 132
@@ -3518,7 +3517,7 @@ route not listed is unmeasured.
 * ``sm_100a`` ``bwd_h6144``: (0, 4] >= 100, (4, 64] -, (64, 1152] >= 132, (1152, 4096] >= 132, (4096, 42496] >= 100, (42496, 65536] >= 100, (65536, 131072] >= 100, (131072, inf) >= 100
 * ``sm_100a`` ``bwd_residual_h6144``: (0, 2] >= 100, (2, 64] -, (64, 1408] >= 100, (1408, 65536] >= 100, (65536, 131072] >= 100, (131072, inf) >= 100
 * ``sm_100a`` ``bwd_w32_h1024``: (0, 4] -, (4, 8] -, (8, 1024] -, (1024, 2048] -, (2048, 4096] -, (4096, 12288] -, (12288, 32768] -, (32768, inf) -
-* ``sm_100a`` ``bwd_w32_h128``: (0, 1024] -, (1024, 1536] -, (1536, 4096] -, (4096, 8192] -, (8192, 12288] -, (12288, 16384] -, (16384, inf) -
+* ``sm_100a`` ``bwd_w32_h128``: (0, 1024] -, (1024, 1536] -, (1536, 2048] -, (2048, 8192] -, (8192, 12288] -, (12288, 16384] -, (16384, inf) -
 * ``sm_100a`` ``bwd_w32_h1280``: (0, 1] -, (1, 128] -, (128, 512] -, (512, 4096] -, (4096, inf) -
 * ``sm_100a`` ``bwd_w32_h1536``: (0, 2] >= 100, (2, 64] -, (64, 384] -, (384, 1024] >= 132, (1024, 1184] -, (1184, 77824] >= 132, (77824, 131072] -, (131072, 214016] >= 132, (214016, inf) -
 * ``sm_100a`` ``bwd_w32_h2048``: (0, 4] >= 100, (4, 14] >= 100, (14, 64] -, (64, 336] -, (336, 1024] -, (1024, 4096] >= 132, (4096, 15403] >= 100, (15403, 45056] >= 132, (45056, 58880] >= 132, (58880, 65536] >= 100, (65536, 131072] -, (131072, inf) >= 132
@@ -3529,7 +3528,7 @@ route not listed is unmeasured.
 * ``sm_100a`` ``bwd_w32_h6144``: (0, 4] >= 100, (4, 64] -, (64, 1168] >= 132, (1168, 3584] >= 132, (3584, 65536] >= 100, (65536, 131072] >= 100, (131072, inf) >= 100
 * ``sm_100a`` ``bwd_w32_residual_h6144``: (0, 4] >= 100, (4, 64] -, (64, 1408] >= 100, (1408, 65536] >= 100, (65536, 131072] >= 100, (131072, inf) >= 100
 * ``sm_103a`` ``bwd_h1024``: (0, 4] -, (4, 64] -, (64, 128] -, (128, 1024] -, (1024, 1536] -, (1536, 2048] -, (2048, 32768] -, (32768, inf) -
-* ``sm_103a`` ``bwd_h128``: (0, 1024] -, (1024, 2048] -, (2048, 12288] -, (12288, 16384] -, (16384, inf) -
+* ``sm_103a`` ``bwd_h128``: (0, 1024] -, (1024, 2048] -, (2048, 8192] -, (8192, 12288] -, (12288, 16384] -, (16384, inf) -
 * ``sm_103a`` ``bwd_h1280``: (0, 1] -, (1, 128] -, (128, 512] -, (512, 2048] -, (2048, inf) -
 * ``sm_103a`` ``bwd_h1536``: (0, 4] >= 100, (4, 5] >= 100, (5, 64] -, (64, 214] -, (214, 1024] >= 132, (1024, 1216] >= 100, (1216, 4096] >= 132, (4096, 46592] >= 132, (46592, 53184] -, (53184, inf) >= 132
 * ``sm_103a`` ``bwd_h2048``: (0, 4] >= 100, (4, 16] >= 100, (16, 63] -, (63, 171] -, (171, 16384] >= 132, (16384, 32768] >= 100, (32768, 58496] >= 100, (58496, 61952] >= 100, (61952, 68160] >= 100, (68160, 131072] -, (131072, inf) >= 132
@@ -3540,7 +3539,7 @@ route not listed is unmeasured.
 * ``sm_103a`` ``bwd_h6144``: (0, 4] >= 100, (4, 6] >= 100, (6, 16] -, (16, 896] >= 100, (896, 4096] >= 132, (4096, 24575] >= 132, (24575, 65536] >= 100, (65536, 131072] >= 100, (131072, inf) >= 100
 * ``sm_103a`` ``bwd_residual_h6144``: (0, 4] >= 100, (4, 6] >= 100, (6, 31] -, (31, 32] >= 100, (32, 48] -, (48, 56] >= 100, (56, 304] >= 100, (304, 1920] >= 100, (1920, 131072] >= 100, (131072, inf) >= 100
 * ``sm_103a`` ``bwd_w32_h1024``: (0, 4] -, (4, 8] -, (8, 1024] -, (1024, 1536] -, (1536, 2048] -, (2048, 4096] -, (4096, 12288] -, (12288, 32768] -, (32768, inf) -
-* ``sm_103a`` ``bwd_w32_h128``: (0, 1024] -, (1024, 2048] -, (2048, 4096] -, (4096, 8192] -, (8192, 12288] -, (12288, 16384] -, (16384, inf) -
+* ``sm_103a`` ``bwd_w32_h128``: (0, 1024] -, (1024, 2048] -, (2048, 8192] -, (8192, 12288] -, (12288, 16384] -, (16384, inf) -
 * ``sm_103a`` ``bwd_w32_h1280``: (0, 1] -, (1, 128] -, (128, 512] -, (512, 4096] -, (4096, inf) -
 * ``sm_103a`` ``bwd_w32_h1536``: (0, 4] >= 100, (4, 6] >= 100, (6, 64] -, (64, 214] -, (214, 1024] >= 132, (1024, 1216] >= 100, (1216, 4096] >= 132, (4096, 46592] >= 132, (46592, 53184] >= 100, (53184, inf) >= 132
 * ``sm_103a`` ``bwd_w32_h2048``: (0, 4] >= 100, (4, 16] >= 100, (16, 64] -, (64, 171] -, (171, 16384] >= 132, (16384, 32768] >= 100, (32768, 58496] >= 100, (58496, 61952] >= 100, (61952, 68160] >= 100, (68160, 131072] -, (131072, inf) >= 132
@@ -3551,7 +3550,7 @@ route not listed is unmeasured.
 * ``sm_103a`` ``bwd_w32_h6144``: (0, 4] >= 100, (4, 12] >= 100, (12, 16] -, (16, 1024] >= 100, (1024, 4096] >= 132, (4096, 49152] >= 132, (49152, 83392] >= 132, (83392, 131072] >= 100, (131072, inf) >= 100
 * ``sm_103a`` ``bwd_w32_residual_h6144``: (0, 4] >= 100, (4, 10] >= 100, (10, 31] -, (31, 32] >= 100, (32, 48] -, (48, 320] >= 100, (320, 1824] >= 100, (1824, 131072] >= 100, (131072, inf) >= 100
 * ``sm_107a`` ``bwd_h1024``: (0, 4] -, (4, 8] -, (8, 1536] -, (1536, 2048] -, (2048, 24576] -, (24576, 32768] -, (32768, inf) -
-* ``sm_107a`` ``bwd_h128``: (0, 1024] -, (1024, 2048] -, (2048, 4096] -, (4096, 12288] -, (12288, inf) -
+* ``sm_107a`` ``bwd_h128``: (0, 1024] -, (1024, 2047] -, (2047, 65536] -, (65536, inf) -
 * ``sm_107a`` ``bwd_h1280``: (0, 1] -, (1, 128] -, (128, 512] -, (512, 8192] -, (8192, 16384] -, (16384, inf) -
 * ``sm_107a`` ``bwd_h1536``: (0, 4] >= 100, (4, 16] >= 100, (16, 320] -, (320, 1024] -, (1024, 12288] >= 100, (12288, 16384] >= 100, (16384, 45056] >= 100, (45056, 65536] >= 100, (65536, inf) -
 * ``sm_107a`` ``bwd_h2048``: (0, 4] >= 100, (4, 16] >= 100, (16, 31] -, (31, 256] -, (256, 1024] >= 100, (1024, 16384] >= 100, (16384, 50176] >= 100, (50176, 50688] -, (50688, 65536] >= 100, (65536, inf) -
@@ -3562,7 +3561,7 @@ route not listed is unmeasured.
 * ``sm_107a`` ``bwd_h6144``: (0, 4] >= 100, (4, 16] >= 100, (16, 960] >= 132, (960, 1151] >= 100, (1151, 1152] >= 132, (1152, 19456] >= 100, (19456, 30720] >= 100, (30720, 131072] >= 100, (131072, inf) >= 100
 * ``sm_107a`` ``bwd_residual_h6144``: (0, 4] >= 100, (4, 15] >= 100, (15, 320] >= 100, (320, 447] >= 100, (447, 576] >= 100, (576, 3584] >= 100, (3584, 7168] >= 100, (7168, 131072] >= 100, (131072, inf) >= 100
 * ``sm_107a`` ``bwd_w32_h1024``: (0, 4] -, (4, 16] -, (16, 1536] -, (1536, 4096] -, (4096, 16384] -, (16384, 32768] -, (32768, inf) -
-* ``sm_107a`` ``bwd_w32_h128``: (0, 1024] -, (1024, 2048] -, (2048, 8192] -, (8192, 12288] -, (12288, 16384] -, (16384, inf) -
+* ``sm_107a`` ``bwd_w32_h128``: (0, 1024] -, (1024, 2047] -, (2047, 65536] -, (65536, inf) -
 * ``sm_107a`` ``bwd_w32_h1280``: (0, 4] -, (4, 128] -, (128, 512] -, (512, 4096] -, (4096, 16384] -, (16384, 32768] -, (32768, inf) -
 * ``sm_107a`` ``bwd_w32_h1536``: (0, 4] >= 100, (4, 16] >= 100, (16, 320] -, (320, 1024] -, (1024, 16384] -, (16384, 45056] >= 100, (45056, 65536] >= 100, (65536, inf) -
 * ``sm_107a`` ``bwd_w32_h2048``: (0, 4] >= 100, (4, 16] >= 100, (16, 256] -, (256, 1024] >= 100, (1024, 16384] -, (16384, 50176] >= 100, (50176, inf) -
@@ -3588,9 +3587,10 @@ Beside those, leave some SMs free of the resident kernel.
 * ``sm_107a`` ``bwd_w32_residual_h6144``: (3584, 7168]
 
 * ``sm_100a`` ``bwd_h128``: (0, 1024] 93466008 ? (1024, 2048] 401a018c ?
-  (2048, 12288] 8b0b86c8 ? (12288, 16384] c50d3bbd ? (16384, inf) 8b0b86c8
+  (2048, 8192] d197bcc3 (det pair) ? (8192, 12288] 8b0b86c8 ? (12288, 16384] c50d3bbd ?
+  (16384, inf) 8b0b86c8
 * ``sm_100a`` ``bwd_w32_h128``: (0, 1024] ab8a320c ? (1024, 1536] b5f8c6c9 ?
-  (1536, 4096] a45d09ae ? (4096, 8192] d0fe504e ? (8192, 12288] 3e751b6f ?
+  (1536, 2048] a45d09ae ? (2048, 8192] e23083c7 (det pair) ? (8192, 12288] 3e751b6f ?
   (12288, 16384] d0fe504e ? (16384, inf) 3e751b6f
 * ``sm_100a`` ``bwd_h256``: (0, 4] 780c64c6 (one cluster) ?
   (4, 24] f2ccf719 (one cluster) ? (24, 64] 9fb6b410 (one cluster) ?
@@ -3672,10 +3672,8 @@ Beside those, leave some SMs free of the resident kernel.
   (4, 64] 6e0d06ab = (64, 1408] 71d36617 = (1408, 65536] a640d0b7 =
   (65536, 131072] f5453c09 = (131072, inf) a640d0b7
 * ``sm_103a`` ``bwd_h128``: (0, 1024] 93466008 ? (1024, 2048] 401a018c ?
-  (2048, 12288] 8b0b86c8 ? (12288, 16384] c50d3bbd ? (16384, inf) 8b0b86c8
-* ``sm_103a`` ``bwd_w32_h128``: (0, 1024] ab8a320c ? (1024, 2048] b5f8c6c9 ?
-  (2048, 4096] a45d09ae ? (4096, 8192] d0fe504e ? (8192, 12288] 3e751b6f ?
-  (12288, 16384] d0fe504e ? (16384, inf) 3e751b6f
+  (2048, 8192] d197bcc3 (det pair) ? (8192, 12288] 8b0b86c8 ? (12288, 16384] c50d3bbd ?
+  (16384, inf) 8b0b86c8
 * ``sm_103a`` ``bwd_h256``: (0, 4] 780c64c6 (one cluster) ?
   (4, 24] f2ccf719 (one cluster) ? (24, 64] 9fb6b410 (one cluster) ?
   (64, 1080] a385ae16 (det pair) = (1080, 2048] af005462 (det pair) ?
@@ -3753,11 +3751,8 @@ Beside those, leave some SMs free of the resident kernel.
   (4, 10] c29a8f85 (one cluster) ? (10, 31] 6e0d06ab = (31, 32] 71d36617 =
   (32, 48] 6e0d06ab ? (48, 320] 71d36617 ? (320, 1824] 71d36617 ?
   (1824, 131072] 5fbcc18d ? (131072, inf) 3c390339
-* ``sm_107a`` ``bwd_h128``: (0, 1024] 93466008 ? (1024, 2048] 401a018c ?
-  (2048, 4096] 8b0b86c8 ? (4096, 12288] c50d3bbd ? (12288, inf) 8b0b86c8
-* ``sm_107a`` ``bwd_w32_h128``: (0, 1024] ab8a320c ? (1024, 2048] b5f8c6c9 ?
-  (2048, 8192] d0fe504e ? (8192, 12288] 3e751b6f ? (12288, 16384] d0fe504e ?
-  (16384, inf) 3e751b6f
+* ``sm_107a`` ``bwd_h128``: (0, 1024] 93466008 ? (1024, 2047] 401a018c ?
+  (2047, 65536] d197bcc3 (det pair) ? (65536, inf) 8b0b86c8
 * ``sm_107a`` ``bwd_h256``: (0, 4] 780c64c6 (one cluster) ?
   (4, 24] f2ccf719 (one cluster) ? (24, 64] 9fb6b410 (one cluster) ?
   (64, 786432] a385ae16 (det pair) = (786432, inf) 44ef3141
