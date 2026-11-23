@@ -626,7 +626,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_00000000000000000001",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (33554432, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
     },
     "fp4_e4m3_g16_scales_domain": {
         "arches": ["sm_107a"],
@@ -653,7 +653,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_00000000000000000002",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (33554432, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
     },
     "mxfp4_e8m0_g32_domain": {
         "arches": ["sm_107a"],
@@ -680,7 +680,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_00000000000000000003",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (33554432, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
     },
     "mxfp4_e8m0_g32_scales_domain": {
         "arches": ["sm_107a"],
@@ -707,7 +707,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_00000000000000000004",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (33554432, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
     },
     "mxfp8_e8m0_g32_domain": {
         "arches": ["sm_107a"],
@@ -734,7 +734,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_00000000000000000005",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (33554432, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
     },
     "mxfp8_e8m0_g32_scales_domain": {
         "arches": ["sm_107a"],
@@ -761,7 +761,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_00000000000000000006",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (33554432, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
     },
 }
 

@@ -2132,7 +2132,7 @@ Other public names:
 - the device is `sm_107a`;
 - the call is out of place: `out` is given, and it is not `x`;
 - `x` and `out` both lie in memory from `cake_act_qdq_det_train_domain_empty` (any views of it), at the same offset in their 2 MB chunks and in chunks of the same die. Two buffers from the helper with the same view offset satisfy this;
-- `numel / 8` is at least {{DOMAIN_FIRST_VECTORS}} vectors.
+- `numel / 8` is at least 8,388,608 vectors.
 
 Every other call runs the `"off"` program and gives the same bytes; it never raises for its placement. The plan's `reason` names why: `"arch"`, `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"`, `"die_parity"` (checked in this order), or `"empty"` for a call with no elements. `"placed"` is the reason of the domain route. The placement is read from the package's registry of the helper's allocations, without a driver call. `scales` may lie in any memory. The interleaved-domain program gives the bytes of the `"off"` program for every input. Its CTAs claim their work with 32-bit atomic counters, which choose only which CTA computes a tile, never what it computes. On VR200, {{DOMAIN_SPEEDUP}}. The `"off"` programs run on the helper's memory as fast as on default memory, so a call that falls back loses nothing.
 

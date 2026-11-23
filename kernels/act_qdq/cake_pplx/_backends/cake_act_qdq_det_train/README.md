@@ -116,7 +116,7 @@ The items a CTA runs depend only on its claims, so any grid gives the same bytes
 most 16 per SM.  A call with `locality="domain"` runs it when all of these hold (`cake_jit.domain_route`): the device
 is `sm_107a`; the call is out of place with an `out` buffer; `x` and `out` lie in memory from the helper at the same
 offset in their chunks and in chunks of the same die; and `numel / 8` is in the record's `vectors` range (from
-{{DOMAIN_FIRST_VECTORS}} vectors).  Every other call runs the `"off"` program, with the same bytes, and never raises
+8,388,608 vectors).  Every other call runs the `"off"` program, with the same bytes, and never raises
 for its placement.  `cake_act_qdq_det_train_domain_plan` returns the route, the reason (`"placed"`, or the first of
 `"empty"`, `"arch"`, `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"` and
 `"die_parity"` that holds), the program, `first_tile`, `first_die` and the grid, without a launch.  An in-place call

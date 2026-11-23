@@ -149,7 +149,7 @@ BOUNDARY_LIMIT = 33554432
 # its inclusive n_vecs range, from the first size it runs (per route) to the last n_vecs whose tile count
 # (n_vecs + 255) fits in signed 32 bits; its grid rule; and its kernel parameters besides the grid.
 DOMAIN_LAST = 2**31 - 256
-DOMAIN_FIRST = {kind: 33554432 for kind in (f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))}
+DOMAIN_FIRST = {kind: 8388608 for kind in (f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))}
 DOMAIN_VECTORS = {
     kind: {"sm_107a": {"in_place": None, "out_of_place": (first, DOMAIN_LAST)}} for kind, first in DOMAIN_FIRST.items()
 }
