@@ -360,8 +360,9 @@ HOST_COUNT_MAX_ROWS = 1024
 # temperature) that would run compacted on CUDA with ``backend="cake"``, of at most this many rows and of one chunk
 # (``0 < T <= min(rows, chunk_size)``), runs uncompacted instead -- every row in the chunk loop, no valid-row count, so no
 # host synchronization: the readback of :func:`valid_rows` and the host time after it, exposed on such a call, cost
-# more than the ignored rows' share of its kernels.  The entry first stages ``X`` into a buffer whose ignored rows
-# (``labels < 0``) are zero (one device ``where``; policy ``infer_logp`` / ``loss_weights`` likewise), so a non-finite
+# more than the ignored rows' share of its kernels.  The entry stages ``X`` into a buffer whose ignored rows
+# (``labels < 0``) are zero (one device ``where``; policy ``infer_logp`` / ``loss_weights`` likewise) right before the
+# call's first launch, after its plan and binding lookup (:data:`_SMALL_STAGE`), so a non-finite
 # value in an ignored row reaches no output, as on the compacted path that never reads such a row; the staged buffer
 # is what the call saves for its backward.  All rows valid: the same launches and bits as the compacted call (which
 # keeps no index then).  With ignored rows: exact zero contributions of the ignored rows (``loss`` / ``dW`` group their
@@ -3708,23 +3709,56 @@ def _small_call_rows(
     return T
 
 
+# The staging of a small call (:class:`_SmallCallStage`) waits for the call's first launch: the stage allocates the staged
+# buffers (no device work) and leaves its device operations -- the comparison, the ``where`` per masked tensor and the
+# padded rows' fills -- pending for the calling thread; the next launch context (:func:`_ffi_stream_context`, entered
+# right before a program's first launch) runs them first, on the caller's stream.  So the plan, the binding lookup and
+# the per-call buffers of the call run on the host before the staging, and the GPU waits for none of them between the
+# staging and the first GEMM.  The only reader of a staged tensor ahead of that launch, a temperature check, runs the
+# staging first (:func:`_resolve_temperature`).  The small-call entries hold the stage inside :func:`_small_call_scope`.
+_SMALL_STAGE = threading.local()
+
+
+def _run_small_stage() -> None:
+    """Run the calling thread's pending small-call staging (:data:`_SMALL_STAGE`), if any, once."""
+    ops = getattr(_SMALL_STAGE, "ops", None)
+    if ops is not None:
+        _SMALL_STAGE.ops = None
+        ops()
+
+
+@contextlib.contextmanager
+def _small_call_scope():
+    """The block of a small call (:class:`_SmallCallStage` and the entry call on its staged rows): a staging that no
+    launch ran by the block's end runs there; one left pending by an exception is dropped (its buffers were never
+    read)."""
+    try:
+        yield
+    except BaseException:
+        _SMALL_STAGE.ops = None
+        raise
+    _run_small_stage()
+
+
 class _SmallCallStage(torch.autograd.Function):
     """The staged inputs of a small call (:func:`_small_call_rows`) as ``rows`` rows: ``(X, labels, infer_logp,
     loss_weights, temperature)``.  ``X``'s ignored rows (``labels < 0``) become zero rows and ``rows - T`` zero rows
     follow; ``labels`` get ``rows - T`` ``IGNORE_INDEX`` rows; ``infer_logp`` / ``loss_weights`` get zeros on the
     ignored and the padded rows; a temperature tensor gets ones on the padded rows.  Every staged tensor is a view of
     ONE allocation (a repeated call meets the same addresses when the caching allocator returns the same block); an
-    input left as is (``labels`` / a temperature of an unpadded call, ``None``, a number) comes back unchanged.  Device
-    work only: one comparison, one zeroed word, one ``where`` per masked tensor and the padded rows' fills -- no host
-    synchronization.  The backward hands ``dX``'s first ``T`` rows back (an ignored row's ``dX`` row is an exact zero
-    either way); the other outputs are not differentiable."""
+    input left as is (``labels`` / a temperature of an unpadded call, ``None``, a number) comes back unchanged.  The
+    forward allocates the block and leaves its device work pending (:data:`_SMALL_STAGE`): one comparison, one
+    ``where`` per masked tensor (the device's cached zero cell, ``stage_zero`` of :func:`_device_constants`, is its
+    zero) and the padded rows' fills, run right before the call's first launch -- no host synchronization.  The
+    backward hands ``dX``'s first ``T`` rows back (an ignored row's ``dX`` row is an exact zero either way); the other
+    outputs are not differentiable."""
 
     @staticmethod
     def forward(ctx, X, labels, rows, infer_logp, loss_weights, temperature):
         T, H = int(X.shape[0]), int(X.shape[1])
         pad = rows > T
         tau = temperature if pad and isinstance(temperature, torch.Tensor) else None
-        regions = [("x", 2 * rows * H), ("valid", T), ("zero", 4)]
+        regions = [("x", 2 * rows * H), ("valid", T)]
         if pad:
             regions.append(("labels", 8 * rows))
         for name, t in (("infer", infer_logp), ("weights", loss_weights), ("tau", tau)):
@@ -3740,33 +3774,49 @@ class _SmallCallStage(torch.autograd.Function):
             start, nbytes = offsets[name]
             return block[start : start + nbytes].view(dtype)
 
-        valid = torch.ge(labels, 0, out=view("valid", torch.bool))
-        # ``where(..., out=)`` takes no number as ``other``: a zeroed word of the block is that zero.
-        zero = view("zero", torch.uint8).zero_()
+        valid = view("valid", torch.bool)
         xs = view("x", torch.bfloat16).view(rows, H)
-        torch.where(valid.unsqueeze(1), X, zero[:2].view(torch.bfloat16), out=xs[:T])
-        lab = labels
-        if pad:
-            xs[T:].zero_()
-            lab = view("labels", torch.int64)
-            lab[:T].copy_(labels)
-            lab[T:].fill_(IGNORE_INDEX)
+        lab = view("labels", torch.int64) if pad else labels
+        # (staged view, input, fill of the padded rows, ignored rows zeroed) of each per-row tensor
+        fills = []
 
         def staged(name, t, fill, masked):
             if not isinstance(t, torch.Tensor):
                 return t
             out = view(name, torch.float32)
-            if masked:
-                torch.where(valid, t, zero.view(torch.float32), out=out[:T])
-            else:
-                out[:T].copy_(t)
-            if pad:
-                out[T:].fill_(fill)
+            fills.append((out, t, fill, masked))
             return out
 
         infer = staged("infer", infer_logp, 0.0, True)
         weights = staged("weights", loss_weights, 0.0, True)
         tau_s = staged("tau", tau, 1.0, False) if tau is not None else temperature
+
+        def stage() -> None:
+            # ``where(..., out=)`` takes no number as ``other``: the device's cached zero cell is that zero
+            device = X.device
+            index = int(
+                device.index
+                if device.index is not None
+                else torch.cuda.current_device()
+            )
+            zero = _device_constants(index)["stage_zero"]
+            with torch.no_grad():
+                torch.ge(labels, 0, out=valid)
+                bf16_zero = zero.view(torch.bfloat16)[:1]
+                torch.where(valid.unsqueeze(1), X, bf16_zero, out=xs[:T])
+                if pad:
+                    xs[T:].zero_()
+                    lab[:T].copy_(labels)
+                    lab[T:].fill_(IGNORE_INDEX)
+                for out, t, fill, masked in fills:
+                    if masked:
+                        torch.where(valid, t, zero, out=out[:T])
+                    else:
+                        out[:T].copy_(t)
+                    if pad:
+                        out[T:].fill_(fill)
+
+        _SMALL_STAGE.ops = stage
         ctx.rows = T
         ctx.set_materialize_grads(False)
         ctx.mark_non_differentiable(
@@ -4105,6 +4155,8 @@ def _resolve_temperature(
                 raise ValueError(
                     f"a per-token temperature must be on X's device {device}, got {temperature.device}"
                 )
+            # a small call's staged temperature is read here, ahead of the call's first launch: its staging first
+            _run_small_stage()
             tau = temperature.contiguous()
             if int(T) > 0:
                 # NaN fails ``> 0``, +inf fails ``< inf``
@@ -6047,6 +6099,8 @@ def _constant_cells(device: torch.device) -> dict[str, torch.Tensor]:
         "grad_scale": torch.ones((1,), dtype=torch.float32, device=device),
         "unit_scale": torch.ones((1,), dtype=torch.float32, device=device),
         "f32_dummy": torch.zeros((16,), dtype=torch.float32, device=device),
+        # the zero a small call's staging ``where`` takes as its other operand (:class:`_SmallCallStage`)
+        "stage_zero": torch.zeros((1,), dtype=torch.float32, device=device),
     }
 
 
@@ -6059,9 +6113,10 @@ _DEVICE_CELLS: dict[int, dict[str, torch.Tensor]] = {}
 def _device_constants(index: int) -> dict[str, torch.Tensor]:
     """The constant cells a remembered binding binds on every call, allocated once per device:
     ``grad_scale`` / ``unit_scale`` (``[1] = 1.0``; read-only here -- the loss entry's backward
-    casts through :func:`backward_loss`, the log-probability entry's cast scale is 1) and the
-    unused fp32 ``WS`` of the unsliced GEMMs.  Per-call ``torch.ones`` / ``torch.zeros`` would add
-    three fill launches to every remembered forward and backward.
+    casts through :func:`backward_loss`, the log-probability entry's cast scale is 1), the
+    unused fp32 ``WS`` of the unsliced GEMMs and ``stage_zero`` (``[1] = 0.0``, read-only: the zero of
+    a small call's staging, :class:`_SmallCallStage`).  Per-call ``torch.ones`` / ``torch.zeros`` would
+    add fill launches to every remembered forward and backward and to every small call.
 
     Every stream and thread shares the cells, so they are filled on a stream from torch's stream
     pool, and an event recorded behind the fills is waited for before they are cached: a call on
@@ -6112,8 +6167,11 @@ def _current_raw_stream(index: int) -> int:
 
 
 def _ffi_stream_context(index: int):
-    """tvm-ffi environment-stream context for torch's current stream on device ``index``."""
+    """tvm-ffi environment-stream context for torch's current stream on device ``index``.  Entered right before a
+    program's launch: a pending small-call staging (:data:`_SMALL_STAGE`) runs first, on torch's current stream."""
     import tvm_ffi
+
+    _run_small_stage()
 
     device = _FFI_DEVICES.get(index)
     if device is None:
@@ -15850,30 +15908,32 @@ def cake_lm_head_nondet_train_loss(
         )
     )
     if rows:
-        # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted; the per-row output cut back to T rows
+        # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted (the staging runs right before the
+        # call's first launch, _small_call_scope); the per-row output cut back to T rows
         T = int(X.shape[0])
-        Xs, lab, inf, wts, _ = _SmallCallStage.apply(
-            X, labels, rows, infer_logp, loss_weights, None
-        )
-        out = cake_lm_head_nondet_train_loss(
-            Xs,
-            W,
-            lab,
-            objective=objective,
-            loss_div=loss_div,
-            infer_logp=inf,
-            loss_weights=wts,
-            chunk_size=chunk_size,
-            return_logp=return_logp,
-            grad_weight_dtype=grad_weight_dtype,
-            backend=backend,
-            compact_rows=False,
-            fuse_dw_cast=fuse_dw_cast,
-            dx_finalize=dx_finalize,
-            dw_stream=dw_stream,
-            hidden_count=hidden_count,
-            gemm_tuning=gemm_tuning,
-        )
+        with _small_call_scope():
+            Xs, lab, inf, wts, _ = _SmallCallStage.apply(
+                X, labels, rows, infer_logp, loss_weights, None
+            )
+            out = cake_lm_head_nondet_train_loss(
+                Xs,
+                W,
+                lab,
+                objective=objective,
+                loss_div=loss_div,
+                infer_logp=inf,
+                loss_weights=wts,
+                chunk_size=chunk_size,
+                return_logp=return_logp,
+                grad_weight_dtype=grad_weight_dtype,
+                backend=backend,
+                compact_rows=False,
+                fuse_dw_cast=fuse_dw_cast,
+                dx_finalize=dx_finalize,
+                dw_stream=dw_stream,
+                hidden_count=hidden_count,
+                gemm_tuning=gemm_tuning,
+            )
         if not return_logp:
             return out
         return out[0], (out[1] if rows == T else out[1][:T])
@@ -15965,48 +16025,52 @@ def cake_lm_head_nondet_train_logprob(
         raise ValueError(f"backend must be one of {BACKENDS}")
     T = int(X.shape[0]) if X.ndim else 0
     rows = _small_call_rows(X, labels, backend, chunk_size, compact_rows, logprob=True)
-    if rows:
-        # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted; cut back to T rows below
-        X, labels, _, _, _ = _SmallCallStage.apply(X, labels, rows, None, None, None)
-        compact_rows = False
-    if (
-        _SMALL_T_KEEP["on"]
-        and backend == "cake"
-        and X.ndim == 2
-        and 0 < int(X.shape[0]) <= SMALL_T_KEEP_MAX_ROWS
-        and torch.is_grad_enabled()
-        and (X.requires_grad or W.requires_grad)
-    ):
-        # a small call where a backward can follow: the kept logits (set_small_t_keep)
-        logp = CakeLMHeadNondetLogprobKeepFunction.apply(
-            X,
-            W,
-            labels,
-            int(chunk_size),
-            compact_rows,
-            fuse_dw_cast,
-            dx_finalize,
-            dw_stream,
-            hidden_count,
-            gemm_tuning,
-            logprob_dz,
-        )
-    else:
-        logp = CakeLMHeadNondetLogprobFunction.apply(
-            X,
-            W,
-            labels,
-            int(chunk_size),
-            backend,
-            compact_rows,
-            fuse_dw_cast,
-            dx_finalize,
-            dw_stream,
-            hidden_count,
-            gemm_tuning,
-            logprob_dz,
-            logprob_lbl,
-        )
+    with _small_call_scope() if rows else contextlib.nullcontext():
+        if rows:
+            # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted (the staging runs right
+            # before the call's first launch, _small_call_scope); cut back to T rows below
+            X, labels, _, _, _ = _SmallCallStage.apply(
+                X, labels, rows, None, None, None
+            )
+            compact_rows = False
+        if (
+            _SMALL_T_KEEP["on"]
+            and backend == "cake"
+            and X.ndim == 2
+            and 0 < int(X.shape[0]) <= SMALL_T_KEEP_MAX_ROWS
+            and torch.is_grad_enabled()
+            and (X.requires_grad or W.requires_grad)
+        ):
+            # a small call where a backward can follow: the kept logits (set_small_t_keep)
+            logp = CakeLMHeadNondetLogprobKeepFunction.apply(
+                X,
+                W,
+                labels,
+                int(chunk_size),
+                compact_rows,
+                fuse_dw_cast,
+                dx_finalize,
+                dw_stream,
+                hidden_count,
+                gemm_tuning,
+                logprob_dz,
+            )
+        else:
+            logp = CakeLMHeadNondetLogprobFunction.apply(
+                X,
+                W,
+                labels,
+                int(chunk_size),
+                backend,
+                compact_rows,
+                fuse_dw_cast,
+                dx_finalize,
+                dw_stream,
+                hidden_count,
+                gemm_tuning,
+                logprob_dz,
+                logprob_lbl,
+            )
     return logp[:T] if rows > T else logp
 
 
@@ -16063,28 +16127,29 @@ def cake_lm_head_nondet_train_logprob_temperature(
         logprob=True,
     )
     if rows:
-        # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows (temperature 1 on the padded rows), uncompacted;
-        # cut back to T rows
-        X, labels, _, _, temperature = _SmallCallStage.apply(
-            X, labels, rows, None, None, temperature
-        )
-        logp = _logprob_temperature_call(
-            X,
-            W,
-            labels,
-            chunk_size,
-            backend,
-            False,
-            fuse_dw_cast,
-            dx_finalize,
-            dw_stream,
-            hidden_count,
-            gemm_tuning,
-            logprob_dz,
-            logprob_lbl,
-            temperature,
-            check_temperature,
-        )
+        # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows (temperature 1 on the padded rows), uncompacted
+        # (the staging runs right before the call's first launch, _small_call_scope); cut back to T rows
+        with _small_call_scope():
+            X, labels, _, _, temperature = _SmallCallStage.apply(
+                X, labels, rows, None, None, temperature
+            )
+            logp = _logprob_temperature_call(
+                X,
+                W,
+                labels,
+                chunk_size,
+                backend,
+                False,
+                fuse_dw_cast,
+                dx_finalize,
+                dw_stream,
+                hidden_count,
+                gemm_tuning,
+                logprob_dz,
+                logprob_lbl,
+                temperature,
+                check_temperature,
+            )
         return logp[:T] if rows > T else logp
     return _logprob_temperature_call(
         X,
