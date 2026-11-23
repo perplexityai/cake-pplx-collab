@@ -139,8 +139,9 @@ rows per group of them); ``rows_capped`` (the ``fwd_unfused`` record of
 ``rows`` but for a launch of ``capped_min_docs <= S <= capped_max_docs``
 documents (:func:`capped_leaves`), whose grid is at most ``ctas_per_sm``
 CTAs a multiprocessor (:func:`sm_count`): its CTAs stride over the row
-blocks, so every grid writes the same bytes.  ``fwd_unfused_sm_103a`` and
-``fwd_unfused_sm_107a`` keep the ``rows`` grid.
+blocks, so every grid writes the same bytes.  ``fwd_unfused_sm_103a`` (its
+confirming run did not pass the capped grid) and ``fwd_unfused_sm_107a``
+keep the ``rows`` grid.
 """
 
 from __future__ import annotations
