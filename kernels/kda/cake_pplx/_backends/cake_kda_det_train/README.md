@@ -265,9 +265,14 @@ prep's internal `dout` copy (`do_int`).  Such a workspace serves no checkpoint
 replay: `cake_kda_det_train_backward` with `saved=None` raises `ValueError` on it.
 `torch.utils.checkpoint` is unaffected, since the node's backward always reads
 the recomputed saved set, never the replay path.  A lean arena also refuses
-the rows whose backward dispatches the separate dA / dv program `dav` (9 to 15
-heads) with `ValueError` when a backward workspace is built and in the byte
-queries; it serves the contract's head counts 1, 2, 4, 8, 16, 32 and 64.
+the flag-off rows whose backward dispatches the separate dA / dv program `dav`
+(9 to 15 heads) with `ValueError` when a backward workspace is built and in
+the byte queries; it serves the contract's head counts 1, 2, 4, 8, 16, 32 and
+64.  In the in-kernel Q/K L2 norm modes every backward launches `dav` (the
+`dav_l2n*` records, which write `dAqk` alone), and a lean arena serves those
+rows too: its layouts of two or more passes hold that whole-sequence `dAqk`
+instead of a per-pass one, 256 B more per internal token-head (3076, tape
+2308, from four passes on).
 
 `tail_passes = B` runs the chunk-parallel tail stages of the backward (the
 fused gradient `dqkg`, the GLM intra program and, on `sm_100a` in the default
@@ -321,6 +326,12 @@ the state blocks and the slack come on top where the formulas say so:
 | `lean=True`, one pass | 4108; 4104 | 3340; 3336 | no |
 | `tail_passes=2` | 3336; 3078 | 2568; 2310 | no |
 | `tail_passes >= 4` | 2820 | 2052 | no |
+
+In the in-kernel Q/K L2 norm modes the layouts of two or more passes add the
+whole-sequence `dAqk` (256 B per internal token-head) and drop it from the
+per-pass set: 3076 (tape 2308) from four passes on, and `arena_floor` takes
+3076 (tape 2308) in place of 2820 (2052).  The default and one-pass lean
+layouts hold a whole `dAqk` in every mode.
 
 The byte queries take the option too: `cake_kda_det_train_workspace_bytes(..., arena=)`
 and `cake_backend.workspace_bytes(..., arena=)` give the configured arena for
@@ -538,8 +549,10 @@ the states:
   keep `fwdh_p3_wy` and the `_wt` adjoint forms);
 * `tape`: `wy_bwd` only (the tapes hold the states);
 
-then `dav_serial` (`dA_qk` alone; persistent grid over the chunk pairs) on
-the serial rows below 16 heads, and no `dav` launch elsewhere: the fused
+then (with the in-kernel Q/K L2 norm off) `dav_serial` (`dA_qk` alone;
+persistent grid over the chunk pairs) on the serial rows below 16 heads, and
+no `dav` launch elsewhere (in the L2 norm modes a `dav_l2n*` record on every
+row and the fused gradient's `davq` 0 build, which stores no `dA_qk`): the fused
 gradient hosts `dA_qk` (`dqkg_davq`) on the serial rows from 16 heads and on
 every segmented row, whose adjoint recurrence accumulates `dv` (on `sm_107a`
 from 16 heads the fused gradient is its `_nohint` build: the same kernel with
@@ -610,13 +623,14 @@ fallback's replay counts `qk_l2norm` and no `qk_apply`, the launches it makes).
 
 ### Programs by stage
 
-75 records naming 73 programs from 44 kernels, 8 of them the raw gate
+107 records naming 105 programs from 62 kernels, 17 of them the raw gate
 mode's (`fwdh_v3` and `fwdh_p3` are
 one program, the two passes of the segmented walk; `bwd_prep_g8_noqg` and
 `bwd_prep_g8_noqg_nokb` are two keyword forms of one kernel, and the four
 raw prep records four keyword forms of another; the records shipped
 on some of the architectures only are `glm_intra_v14`, `glm_intra_v18`, `glm_intra`,
-`gate_epilogue`, `fwd_intra_v37_l2n`, `glm_intra_v30_l2n` and the two `_nohint` records (`sm_107a`); `wy_bwd` and `wy_fwd_rows`
+`gate_epilogue`, `fwd_intra_v37_l2n`, `glm_intra_v30_l2n`, `bwd_prep_g8_replay_saved_l2n`
+(`sm_100a` / `sm_103a`) and the four `_nohint` records (`sm_107a`); `wy_bwd` and `wy_fwd_rows`
 are one program, the WY representation from the saved `Akk` on the backward
 and on the saving forward's overlap and paired serial rows; `fwdh_p3_o_ov`,
 `fwdh_p3_o_ov_id` and their `_rows` twins are the only programs launched with
@@ -642,9 +656,9 @@ record in both modes.
 | `seg_carry` | `seg_carry`, `seg_carry_ov`, `seg_carry_v8` | segmented route: between the forward passes (where pass 1 runs) and, in reverse, between the adjoint passes; `seg_carry_ov` (the release flags) on the forward paths of the rows with `NSEG * H >= 3.0 * sm_count` (`sm_100a` / `sm_103a`) or `>= 2.3 * sm_count` (`sm_107a`), at most 8192 segment-heads; on the other launches `seg_carry_v8` (the two-level carry; grid rule `carry_groups`) with at most two heads where `cake_jit.carry_choice` admits the problem, `seg_carry` elsewhere |
 | `fwdh_p3` | `fwdh_p3_o`, `fwdh_p3_o_ov`, `fwdh_p3_o_ov_id`, `fwdh_p3_o_ov_rows`, `fwdh_p3_o_ov_id_rows`, `fwdh_p3_wy`, `fwdh_p3` | segmented pass 2: `fwdh_p3_o` on the forward paths (the output fused), `fwdh_p3_o_ov` / `fwdh_p3_o_ov_id` (PDL launch; the release order up to 2 heads, the chain-major order above) where `seg_carry_ov` runs on `fwd_nosave` and their token-row twins `fwdh_p3_o_ov_rows` / `fwdh_p3_o_ov_id_rows` (the saved `Aqk`) on `fwd`, `fwdh_p3_wy` on `light_states` with at most 32 chains (the WY representation fused), `fwdh_p3` otherwise (`light`, replay, `light_states` above 32 chains) |
 | `bwd_prep` | `bwd_prep_g8_noqg`, `bwd_prep_g8_noqg_nokb`, `bwd_prep_g8`, `bwd_prep_g8_replay`; raw: the four `_raw` twins | backward; one CTA per chunk and head: `_noqg` on the light paths (the saved `qg`), `_noqg_nokb` on the light paths of the rows whose set carries `w` / `u` (the paired serial 16-head rows of `sm_100a`, the segmented 16-head rows of `sm_103a` / `sm_107a` above 32 chains: no `k * beta`), `bwd_prep_g8` on `tape`, `_replay` on the replay (it keeps the internal `dout` copy) |
-| `dav` | `dav_serial`, `dav_serial_replay` | serial rows below 16 heads (`dA_qk` alone, no `dv1` output); the `_replay` form on the replay; none elsewhere (the fused gradient hosts `dA_qk`) |
+| `dav` | `dav_serial`, `dav_serial_replay`; l2n: `dav_l2n`, `dav_l2n_wt`, `dav_l2n_wtk`, `dav_l2n_replay`, `dav_l2n_replay_wt` | flag-off: serial rows below 16 heads (`dA_qk` alone, no `dv1` output); the `_replay` form on the replay; none elsewhere (the fused gradient hosts `dA_qk`).  In-kernel Q/K L2 norm modes: every backward path and row (`dA_qk` alone, from an FP32 `v_new` the program recomputes from `Akk`, `beta`, `v`, `w` and the `h` tape), reading `w` as the path's WY or recurrence program leaves it: `dav_l2n` / `dav_l2n_replay` behind `wy_bwd` / `wy_bwd_replay` or the saved `w`, the `_wt` forms behind `fwdh_wy_bwd*`, `dav_l2n_wtk` behind `fwdh_p3_wy` |
 | `dhu` | `dhu_v1`, `dhu_v1_replay`, `dhu_v1_wt`, `dhu_v1_wt_replay`, `dhu_v2t`, `dhu_v2t_replay`, `dhu_v3_f`, `dhu_v3_f_wt`, `dhu_v3_f_replay`, `dhu_v3p_f`, `dhu_v3p_f_wt`, `dhu_v3p_f_replay`, `dhu_v3r_f`, `dhu_v3r_f_wt`, `dhu_v3r_f_replay`, `dhu_v3s_f`, `dhu_v3s_f_wt`, `dhu_v3s_f_replay` | serial 64-column form: `dhu_v1_wt*` behind the fused recompute (from 64 heads on `light` / replay), `dhu_v1*` otherwise; 32-column form: `dhu_v2t*`; segmented, two launches each, every form accumulating `dv1`: few chains `dhu_v3s_f` (`light`, `tape`), `dhu_v3s_f_wt` (`light_states`), `dhu_v3s_f_replay`; above four chains `dhu_v3_f*` (TMA tapes) when `NSEG * H < 4 * sm_count` (`<=` at `H <= 4`) -- on `sm_103a` `dhu_v3p_f*` (the form prefetching the next chunk's tiles) below `4 * sm_count` and `dhu_v3_f*` at the boundary alone -- else `dhu_v3r_f*`: the plain form on `light` / `tape` (and `light_states` above 32 chains), `_wt` on `light_states` with at most 32 chains, `_replay` on the replay |
-| `dqkg` | `dqkg`, `dqkg_int`, `dqkg_davq`, `dqkg_int_davq`, `dqkg_davq_nohint`, `dqkg_int_davq_nohint` | backward; `_davq` from 16 serial heads and on every segmented row (hosts `dA_qk`), `_int` on the replay; on `sm_107a` from 16 heads the `_nohint` builds of the two `_davq` forms (the L2 prefetch and evict-first hints off, built for `sm_107a` alone; the hinted builds elsewhere); reads `q` / `k` / `v` on the token rows |
+| `dqkg` | `dqkg`, `dqkg_int`, `dqkg_davq`, `dqkg_int_davq`, `dqkg_davq_nohint`, `dqkg_int_davq_nohint`; l2n: `dqkg_l2n`, `dqkg_int_l2n`, `dqkg_nohint_l2n`, `dqkg_int_nohint_l2n` | backward; `_davq` from 16 serial heads and on every segmented row (hosts `dA_qk`), `_int` on the replay; on `sm_107a` from 16 heads the `_nohint` builds of the two `_davq` forms (the L2 prefetch and evict-first hints off, built for `sm_107a` alone; the hinted builds elsewhere); reads `q` / `k` / `v` on the token rows.  In-kernel Q/K L2 norm modes: the `_l2n` records on every row (`dqkg_v18` built with `davq` 0: no `dA_qk`, which `dav` forms there; on `sm_107a` from 16 heads the `_nohint` ones) |
 | `glm_intra` | `glm_intra_v14`, `glm_intra_v18`, `glm_intra` | backward; reads `k` / `q` on the token rows; `glm_intra_v14` on `sm_103a` and `glm_intra_v18` on `sm_107a` (the gate epilogue fused: they write the token-row `dg` / `dbeta` themselves; `glm_intra_v18` names every named-barrier slot with an immediate, so two CTAs share an SM on `sm_107a`), `glm_intra` on `sm_100a`; raw gate mode: `glm_intra_raw` on every architecture (the raw gate's gradient formed in its drain: it writes the token-row `dg` / `dbeta` and the per-chunk partials of `dA_log` / `ddt_bias`) |
 | `gate_epilogue` | `gate_epilogue` | backward on `sm_100a` in the default gate mode (the GLM intra programs of `sm_103a` / `sm_107a` host it; none in raw gate mode) |
 | `param_finalize` | `param_finalize` | raw gate mode alone: once per backward call on every path, after the last tail range and document group (grid rule `heads`: one CTA per head); `dA_log` / `ddt_bias` from the per-chunk partials of the real chunks |
@@ -669,9 +683,12 @@ README.
   `run_module(name, values, grid=, device_index=)`.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
-  `cake-build/1`): one entry per `<library>_<arch>` (the 73 programs on the
-  architectures each ships on: 69 on all three, `glm_intra_v14` on `sm_103a`,
-  `glm_intra_v18` on `sm_107a`, `glm_intra` and `gate_epilogue` on `sm_100a`) with its two translation units, digests, nvcc flags
+  `cake-build/1`): one entry per `<library>_<arch>` (the 105 programs on the
+  architectures each ships on: 94 on all three; `glm_intra_v14`, `fwd_intra_v37_l2n`
+  and `glm_intra_v30_l2n` on `sm_103a`; `glm_intra_v18` and the four `_nohint`
+  programs on `sm_107a`; `glm_intra` and `gate_epilogue` on `sm_100a`;
+  `bwd_prep_g8_replay_saved_l2n` on `sm_100a` / `sm_103a`: 294 entries, 97 on
+  `sm_100a`, 98 on `sm_103a` and 99 on `sm_107a`) with its two translation units, digests, nvcc flags
   (`--use_fast_math`), closure digest and `aot/<name>.so` path.
   `cake_build.load_library(name)` loads the prebuilt library when `aot/` holds
   it and otherwise JIT-builds the entry through the JIT shim (`gen_jit_spec`,
@@ -683,15 +700,15 @@ README.
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include,
   shipped with the package so it compiles without another `csrc/` tree.
 * `csrc/cake_kda_det_train_<digest>_{kernel,binding}.cu` -- the generated device
-  and binding translation units of the 65 programs, shared by the
+  and binding translation units of the 105 programs, shared by the
   architectures a program ships on (per-architecture lines under `#if
   __CUDA_ARCH__`) and compiled once per architecture.  The sources are identity-checked by the
   digests in `build.json`.
 
 ## Status
 
-The registry holds the 67 records (65 programs) for `sm_100a`, `sm_103a` and
-`sm_107a` (three of them on a subset of the architectures: see the programs by
+The registry holds the 107 records (105 programs) for `sm_100a`, `sm_103a` and
+`sm_107a` (eleven of them on a subset of the architectures: see the programs by
 stage), exported from the kernel snapshot named in the pull request.
 
 Tests: `tests/experimental/test_cake_kda_det_train.py` (the backend suite: imports

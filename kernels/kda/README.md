@@ -26,9 +26,8 @@ an activated gate outside FLA's safe range), is judged against the naive impleme
 misses of both references measured on B200, GB300 and VR200 with the pinned FLA reference below and accepted a listed
 set of them, each capped at its measured values (`tests/cake_naive_accepted.json`): a listed output of its listed test
 passes only when FLA was judged and each part of the rule against its listed reference is met or within its cap, and its
-`TIER` line reads `accepted`; a value beyond a cap fails, and any other miss of both references fails. The entries
-marked `temporary`, the `dk` of the s1450-h2 case of the default-entry KCP tests with the in-kernel Q/K L2 norm, stay
-only until the fix of the in-kernel L2-norm backward lands, and their `TIER` lines say so. Each `TIER` line of the test
+`TIER` line reads `accepted`; a value beyond a cap fails, and any other miss of both references fails. No entry is
+marked `temporary`. Each `TIER` line of the test
 summary names the reference met and shows the errors against both. The tests set no tolerance, and they never compare
 `det` with `nondet`. A `det` package is also checked for bitwise identical results from run to run.
 

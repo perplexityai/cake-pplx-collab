@@ -38,8 +38,9 @@ records against their intra records, no rule selecting them, and on a GPU the ro
 prep's.  The tape path's w-only WY twin (``cake_jit.TAPE_TWINS``): its record against its WY record, no rule selecting
 it, the rule that launches it, and on a GPU the elements of ``w`` it writes and the tape backward's gradients judged at
 every head count.  The in-kernel Q/K L2 norm (``use_qk_l2norm_in_kernel``): its records are the deterministic
-package's, record for record, and the fused gradient's l2n class copies the deterministic records (``L2N_DQKG``), so an
-l2n mode runs the deterministic pair on every row; its host and device rows are in
+package's, record for record (its output backward ``dav_l2n*`` and its fused gradient ``dqkg_*l2n`` among them), and
+the raw class takes twins of the l2n fused gradient records (``RAW_L2N_DQKG``), so an l2n mode runs the deterministic
+pair on every row; its host and device rows are in
 ``test_cake_kda_nondet_train_l2n.py``.  The deterministic package runs here only in mode contracts: the records and
 launch lists this package copies, and each package's backward reading its own saved sets only (a set of the other
 package is refused with ``ValueError`` naming the mode).  The facade, the refusal of the deterministic package's objects
@@ -415,8 +416,9 @@ GRID_KINDS = (
 # deterministic package's architectures (the same builds; dqkg_davq / dqkg_int_davq share their programs with the
 # raw class, so they ship on the three though their g rules launch them on sm_100a / sm_103a alone; the in-kernel
 # Q/K L2 norm's sm_103a forms fwd_intra_v37_l2n and glm_intra_v30_l2n on sm_103a alone, and its replay prep's
-# saved-rstd twin on sm_100a / sm_103a), and the raw and l2n classes' two fused gradient builds with the L2 hints off
-# ship on sm_107a alone, as the deterministic package's do.
+# saved-rstd twin on sm_100a / sm_103a), and the raw class's two fused gradient builds with the L2 hints off and the
+# two l2n fused gradient builds with the L2 hints off (with their raw twins) ship on sm_107a alone, as the
+# deterministic package's do.
 RECORD_ARCHES = {
     "glm_intra": ("sm_100a",),
     "glm_intra_v14": ("sm_103a",),
@@ -432,27 +434,31 @@ RECORD_ARCHES = {
     "fwd_intra_v37_l2n": ("sm_103a",),
     "glm_intra_v30_l2n": ("sm_103a",),
     "bwd_prep_g8_replay_saved_l2n": ("sm_100a", "sm_103a"),
-    "dqkg_davq_nohint_l2n": ("sm_107a",),
-    "dqkg_int_davq_nohint_l2n": ("sm_107a",),
+    "dqkg_nohint_l2n": ("sm_107a",),
+    "dqkg_int_nohint_l2n": ("sm_107a",),
+    "dqkg_nohint_raw_l2n": ("sm_107a",),
+    "dqkg_int_nohint_raw_l2n": ("sm_107a",),
 }
 # The deterministic package's records no cell of this package launches: the sm_107a rows from 16 heads (the only
 # rows of the builds with the L2 hints off) run the S1 pair on every backward path of the g mode with the in-kernel
-# Q/K L2 norm off (their programs ship as the raw and l2n classes', RAW_DQKG and L2N_DQKG).  The in-kernel Q/K L2
-# norm's records (#7817: its fused class, 7 g records with their 7 raw twins, the sm_103a forward intra and GLM intra
-# forms and the replay prep's saved-rstd twin, the 2 GLM intra capture forms and the 3 programs of its fallback route)
-# are copied, record for record.
+# Q/K L2 norm off (their programs ship as the raw class's, RAW_DQKG).  The in-kernel Q/K L2 norm's records (#7817:
+# its fused class, 7 g records with their 7 raw twins, the sm_103a forward intra and GLM intra forms and the replay
+# prep's saved-rstd twin, the 2 GLM intra capture forms and the 3 programs of its fallback route; its output
+# backward, the 5 dav_l2n records, and its 4 fused gradient records) are copied, record for record.
 DET_RECORDS_NOT_LAUNCHED = frozenset(("dqkg_davq_nohint", "dqkg_int_davq_nohint"))
 # The in-kernel Q/K L2 norm (``use_qk_l2norm_in_kernel``): the modes, and the stages that select within the class of
-# the call's mode (a record's ``l2n``, ``["off"]`` when absent) -- the deterministic package's, the fused gradient,
-# whose S1 records serve ``"off"`` alone (no GLM intra program of an l2n mode adds the ``q * dq`` term), and the
-# parameter finalize, whose ``param_finalize`` serves ``"off"`` alone (an l2n mode's raw GLM intra program writes the
-# deterministic per-chunk partials, which ``param_finalize_l2n``, the same program, reduces).
+# the call's mode (a record's ``l2n``, ``["off"]`` when absent) -- the deterministic package's (the output backward
+# ``dav`` and the fused gradient among them; the fused gradient's S1 records serve ``"off"`` alone: no GLM intra
+# program of an l2n mode adds the ``q * dq`` term), and the parameter finalize, whose ``param_finalize`` serves
+# ``"off"`` alone (an l2n mode's raw GLM intra program writes the deterministic per-chunk partials, which
+# ``param_finalize_l2n``, the same program, reduces).
 L2N_MODES = ("off", "fused", "fallback")
 L2N_ON = ("fused", "fallback")
 L2N_STAGES = frozenset(
     {
         "fwd_intra",
         "bwd_prep",
+        "dav",
         "glm_intra",
         "qk_l2norm",
         "qk_apply",
@@ -465,8 +471,9 @@ L2N_STAGES = frozenset(
 L2N_FALLBACK_STAGES = ("qk_l2norm", "qk_apply", "qk_pullback")
 # The raw forget-gate mode (``use_gate_in_kernel=True``): the stages whose records come in a ``g`` and a ``raw`` class
 # (a record's ``gate``, ``"g"`` when absent) -- the deterministic package's and the fused gradient, whose S1 records
-# serve the activated gate alone -- and the fused gradient's raw class, record -> the deterministic record it copies
-# (rule, plan and program: raw mode runs the deterministic pair on every row, glm_intra_raw adds no q * dq term).
+# serve the activated gate alone -- and the fused gradient's raw class with the in-kernel Q/K L2 norm off, record ->
+# the deterministic record it copies (rule, plan and program: raw mode runs the deterministic pair on every row,
+# glm_intra_raw adds no q * dq term).
 GATE_STAGES = frozenset(
     {"fwd_intra", "bwd_prep", "dqkg", "glm_intra", "gate_epilogue", "param_finalize"}
 )
@@ -481,25 +488,25 @@ RAW_DQKG = {
 }
 # the raw-class fused gradient records that share their program with a g-class record of the same build
 RAW_DQKG_SHARED = ("dqkg_raw", "dqkg_int_raw", "dqkg_davq_raw", "dqkg_int_davq_raw")
-# The fused gradient's l2n class (g mode, ``l2n`` ``["fused", "fallback"]``), record -> the deterministic record it
-# copies (rule, plan and program): an l2n mode runs the deterministic pair on every row.  Each shares its program
-# with the raw-class record of the same deterministic record (L2N_DQKG_RAW), which serves every l2n mode.
-L2N_DQKG = {
-    "dqkg_l2n": "dqkg",
-    "dqkg_int_l2n": "dqkg_int",
-    "dqkg_davq_l2n": "dqkg_davq",
-    "dqkg_int_davq_l2n": "dqkg_int_davq",
-    "dqkg_davq_nohint_l2n": "dqkg_davq_nohint",
-    "dqkg_int_davq_nohint_l2n": "dqkg_int_davq_nohint",
+# The fused gradient's l2n records (``l2n`` ``["fused", "fallback"]``, built with ``davq`` 0: no dAqk) are the
+# deterministic package's records of the same names in the g class; their raw-class twins, record -> the
+# deterministic record it copies (rule, plan, program and modes; the class and its own variant): an l2n mode runs
+# the deterministic pair on every row in both gate modes.  Each twin shares its program with the g-class copy.
+RAW_L2N_DQKG = {
+    "dqkg_raw_l2n": "dqkg_l2n",
+    "dqkg_int_raw_l2n": "dqkg_int_l2n",
+    "dqkg_nohint_raw_l2n": "dqkg_nohint_l2n",
+    "dqkg_int_nohint_raw_l2n": "dqkg_int_nohint_l2n",
 }
-L2N_DQKG_RAW = {name: f"{det}_raw" for name, det in L2N_DQKG.items()}
+# the deterministic package's l2n fused gradient records, copied under their own names
+DET_L2N_DQKG = tuple(RAW_L2N_DQKG.values())
 # The parameter finalize of the raw class's l2n modes, record -> the deterministic record it copies (rule, plan,
 # architectures and program, shared with ``param_finalize``, which serves the flag-off mode): every mode's raw
 # backward takes the deterministic finalize on every architecture.
 L2N_PARAM = {"param_finalize_l2n": "param_finalize"}
-# The deterministic record of every copied record (the fused gradient's raw and l2n classes and the l2n parameter
-# finalize: their RAW_DQKG / L2N_DQKG / L2N_PARAM record; every other copy: its own name).
-DET_SOURCE = {**RAW_DQKG, **L2N_DQKG, **L2N_PARAM}
+# The deterministic record of every copied record (the fused gradient's raw class and its l2n twins and the l2n
+# parameter finalize: their RAW_DQKG / RAW_L2N_DQKG / L2N_PARAM record; every other copy: its own name).
+DET_SOURCE = {**RAW_DQKG, **RAW_L2N_DQKG, **L2N_PARAM}
 # The checkpoint hand-off's intra twins, intra record -> twin: new programs that also write every gk row and the
 # internal beta (``beta_int``); no path selects them, the hand-off's recompute launches one in place of its record.
 HANDOFF_TWINS = {"fwd_intra": "fwd_intra_v20", "fwd_intra_v14": "fwd_intra_v19"}
@@ -515,17 +522,17 @@ TAPE_WY_DROPPED = frozenset({"v", "beta", "u"})
 # finalize, reducing them in a fixed order (the deterministic records' rules: always, and the backward paths).
 RAW_PARAM_PAIR = {"glm_intra": "glm_intra_raw", "param_finalize": "param_finalize"}
 RAW_BWD_RULE = {"kind": "path_in", "paths": ["light", "light_states", "tape", "replay"]}
-# The registry's size: the deterministic package's 98 records (the raw class's kb-once replay prep
+# The registry's size: the deterministic package's 107 records (the raw class's kb-once replay prep
 # bwd_prep_g8_replay_kbonce_raw_l2n among them), less those, plus the seven S1 records, the hand-off twins, the tape
-# WY twin, the fused gradient's raw and l2n classes and the l2n parameter finalize.
+# WY twin, the fused gradient's raw class and its l2n twins and the l2n parameter finalize.
 MODULE_COUNT = (
-    98
+    107
     - len(DET_RECORDS_NOT_LAUNCHED)
     + 7
     + len(TWIN_RECORDS)
     + len(TAPE_WY_RECORDS)
     + len(RAW_DQKG)
-    + len(L2N_DQKG)
+    + len(RAW_L2N_DQKG)
     + len(L2N_PARAM)
 )
 # The records of the segmented adjoint recurrence launch twice per stage (the carry between the passes); the
@@ -641,10 +648,10 @@ L2N_UNFUSED = {"kind": "l2n_in", "modes": ["off", "fallback"]}
 def test_registry_records_are_well_formed() -> None:
     # the deterministic package's records (their own copies, the in-kernel Q/K L2 norm's among them) less the
     # deterministic forms no g-mode cell of this package launches, plus the S1 records, the hand-off twins, the tape
-    # WY twin, the fused gradient's raw and l2n classes and the l2n parameter finalize; thirteen libraries are shared
-    # (see the twins below): the two pairs of the deterministic package, the four raw-class fused gradient records
-    # with their g-class records, the six l2n-class ones with their raw-class records and the l2n parameter finalize
-    # with param_finalize
+    # WY twin, the fused gradient's raw class and its l2n twins and the l2n parameter finalize; eleven libraries are
+    # shared (see the twins below): the two pairs of the deterministic package, the four raw-class fused gradient
+    # records with their g-class records, the four raw-class l2n twins with their g-class records and the l2n
+    # parameter finalize with param_finalize
     assert cake_jit.HANDOFF_TWINS == HANDOFF_TWINS
     assert cake_jit.TAPE_TWINS == TAPE_TWINS
     assert cake_jit.GATE_STAGES == GATE_STAGES and tuple(cake_jit.GATES) == GATES
@@ -653,15 +660,13 @@ def test_registry_records_are_well_formed() -> None:
     assert set(cake_jit.MODULES) == (
         set(det_jit.MODULES) - DET_RECORDS_NOT_LAUNCHED
     ) | set(S1_RECORDS) | TWIN_RECORDS | TAPE_WY_RECORDS | set(RAW_DQKG) | set(
-        L2N_DQKG
+        RAW_L2N_DQKG
     ) | set(L2N_PARAM)
-    assert len(det_jit.MODULES) == 98
-    assert len(cake_jit.MODULES) == MODULE_COUNT == 119
-    assert (
-        len({r["library"] for r in cake_jit.MODULES.values()})
-        == (MODULE_COUNT - 2 - len(RAW_DQKG_SHARED) - len(L2N_DQKG) - len(L2N_PARAM))
-        == 106
-    )
+    assert len(det_jit.MODULES) == 107
+    assert len(cake_jit.MODULES) == MODULE_COUNT == 126
+    n_shared = 2 + len(RAW_DQKG_SHARED) + len(RAW_L2N_DQKG) + len(L2N_PARAM)
+    libraries = {r["library"] for r in cake_jit.MODULES.values()}
+    assert len(libraries) == MODULE_COUNT - n_shared == 115
     assert set(cake_jit.S1_RECORDS) == S1_RECORDS and len(cake_jit.S1_RECORDS) == 7
     assert tuple(cake_jit.PATHS) == PATHS
     assert tuple(cake_jit.OPTIONAL_STAGES) == OPTIONAL_STAGES
@@ -753,16 +758,8 @@ def test_registry_records_are_well_formed() -> None:
         assert twins == [] or {name, *twins} in (
             {"fwdh_v3", "fwdh_p3"},
             {"wy_bwd", "wy_fwd_rows"},
-            *(
-                {raw, RAW_DQKG[raw], l2n}
-                for l2n, raw in L2N_DQKG_RAW.items()
-                if raw in RAW_DQKG_SHARED
-            ),
-            *(
-                {raw, l2n}
-                for l2n, raw in L2N_DQKG_RAW.items()
-                if raw not in RAW_DQKG_SHARED
-            ),
+            *({raw, RAW_DQKG[raw]} for raw in RAW_DQKG_SHARED),
+            *({raw, det} for raw, det in RAW_L2N_DQKG.items()),
             *({l2n, det} for l2n, det in L2N_PARAM.items()),
         ), name
         # only a gate stage's records name a class
@@ -1409,9 +1406,10 @@ PLAN_GRID = [
 
 def test_the_raw_class_is_the_deterministic_raw_class() -> None:
     """Raw mode is the deterministic package's, record for record: every raw-class record of the registry is the
-    deterministic record of its name (a fused gradient record: of its ``RAW_DQKG`` record, with the class, its own
-    variant and every in-kernel Q/K L2 norm mode) under the copied library, every deterministic raw-class record has
-    its copy (the in-kernel Q/K L2 norm's among them, with the deterministic record's ``l2n``), the parameter-gradient
+    deterministic record of its name (a fused gradient record: of its ``RAW_DQKG`` record with the in-kernel Q/K L2
+    norm off, of its ``RAW_L2N_DQKG`` record in the l2n modes, with the class and its own variant) under the copied
+    library, every deterministic raw-class record has its copy (the in-kernel Q/K L2 norm's among them, with the
+    deterministic record's ``l2n``), the parameter-gradient
     pair (``glm_intra_raw``, ``param_finalize``: :data:`RAW_PARAM_PAIR`) is the deterministic records with their
     architectures and rules (all three architectures; ``always`` and the backward paths), ``param_finalize_l2n``
     (:data:`L2N_PARAM`) is the deterministic ``param_finalize`` with its architectures and rule, serving the l2n
@@ -1422,7 +1420,7 @@ def test_the_raw_class_is_the_deterministic_raw_class() -> None:
         name for name, rec in det_jit.MODULES.items() if rec.get("gate") == "raw"
     }
     assert not det_raw & DET_RECORDS_NOT_LAUNCHED
-    assert raw == det_raw | set(RAW_DQKG) | set(L2N_PARAM)
+    assert raw == det_raw | set(RAW_DQKG) | set(RAW_L2N_DQKG) | set(L2N_PARAM)
     assert set(RAW_PARAM_PAIR.values()) <= det_raw
     assert not det_raw & set(L2N_PARAM) and set(L2N_PARAM.values()) <= det_raw
     assert set(RAW_DQKG.values()) <= {
@@ -1445,12 +1443,13 @@ def test_the_raw_class_is_the_deterministic_raw_class() -> None:
         ), name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
         expected = {key: value for key, value in twin.items() if key not in renamed}
-        if name in RAW_DQKG:
-            # the fused gradient is an l2n stage here: its raw class serves every mode
-            assert "l2n" not in twin, name
-            expected.update(
-                variant=name.removeprefix("dqkg_"), gate="raw", l2n=list(L2N_MODES)
-            )
+        if name in RAW_DQKG or name in RAW_L2N_DQKG:
+            # the fused gradient's raw class: the flag-off records and the l2n twins, each with the deterministic
+            # record's modes
+            assert "gate" not in twin, name
+            twin_modes = ["off"] if name in RAW_DQKG else list(L2N_ON)
+            assert twin.get("l2n", ["off"]) == twin_modes, name
+            expected.update(variant=name.removeprefix("dqkg_"), gate="raw")
         if name in L2N_PARAM:
             # the deterministic record: its architectures and rule, the l2n modes alone
             assert "l2n" not in twin and twin["variant"] is None, name
@@ -1477,9 +1476,9 @@ def test_the_l2n_class_is_the_deterministic_l2n_class() -> None:
     """The in-kernel Q/K L2 norm is the deterministic package's, record for record: every deterministic record
     that serves an l2n mode (its fused class, the sm_103a forward intra form, the GLM intra capture forms, the
     fallback route's programs and the plain records the l2n route keeps) is copied with its ``l2n`` under the copied
-    library; the fused gradient's l2n class (``L2N_DQKG``) is the deterministic ``dqkg`` records' rules, plans and
-    programs in the g class, serving ``"fused"`` / ``"fallback"``, each sharing its program with the raw-class record
-    of the same deterministic record, which serves every mode.  The S1 records, the hand-off twins and the tape WY
+    library (the output backward ``dav_l2n*`` and the fused gradient ``dqkg_*l2n`` among them); the raw class's l2n
+    twins of the fused gradient (``RAW_L2N_DQKG``) are those records' rules, plans, programs and modes in the raw
+    class, each sharing its program with the g-class copy.  The S1 records, the hand-off twins and the tape WY
     twin carry no ``l2n`` key, and the narrowed g-class copies of the pair stages serve the flag-off mode alone: no
     ND-only record is selected in an l2n mode.  The tape WY twin is launched outside the selection
     (its stage ``wy`` is no l2n stage): a tape backward of an l2n mode may run it, writing its WY record's ``w`` bit
@@ -1497,10 +1496,19 @@ def test_the_l2n_class_is_the_deterministic_l2n_class() -> None:
     }
     # the deterministic l2n records: the 7 g + 7 raw fused ones and the raw class's kb-once replay prep, the sm_103a
     # forward intra and GLM intra forms, the replay prep's saved-rstd twin, the 2 capture forms, the 3 fallback
-    # programs and the 3 plain records the fused route keeps (fwd_intra, g and raw, and the g class's
-    # bwd_prep_g8_replay; the raw class's replay prep serves the flag-off and fallback modes alone)
+    # programs, the 5 dav_l2n records and the 4 l2n fused gradient records, and the 3 plain records the fused route
+    # keeps (fwd_intra, g and raw, and the g class's bwd_prep_g8_replay; the raw class's replay prep serves the
+    # flag-off and fallback modes alone)
     det_l2n_only = {n for n in det_l2n if not serves(det_jit.MODULES[n], "off")}
-    assert len(det_l2n_only) == 23, sorted(det_l2n_only)
+    assert len(det_l2n_only) == 32, sorted(det_l2n_only)
+    assert set(DET_L2N_DQKG) <= det_l2n_only
+    assert {n for n in det_l2n_only if det_jit.MODULES[n]["stage"] == "dav"} == {
+        "dav_l2n",
+        "dav_l2n_wt",
+        "dav_l2n_wtk",
+        "dav_l2n_replay",
+        "dav_l2n_replay_wt",
+    }
     assert "bwd_prep_g8_replay_kbonce_raw_l2n" in det_l2n_only
     assert {
         n
@@ -1523,22 +1531,21 @@ def test_the_l2n_class_is_the_deterministic_l2n_class() -> None:
         }, name
         compared += 1
     assert compared == len(det_l2n) > len(det_l2n_only)
-    # the fused gradient's l2n class
-    assert len(L2N_DQKG) == 6
-    for name, det_name in L2N_DQKG.items():
+    # the raw class's l2n twins of the fused gradient
+    assert len(RAW_L2N_DQKG) == 4
+    for name, det_name in RAW_L2N_DQKG.items():
         record, twin = cake_jit.MODULES[name], det_jit.MODULES[det_name]
-        raw = cake_jit.MODULES[L2N_DQKG_RAW[name]]
-        assert RAW_DQKG[L2N_DQKG_RAW[name]] == det_name, name
-        assert record["stage"] == "dqkg" and record.get("gate", "g") == "g", name
-        assert record["l2n"] == list(L2N_ON), name
-        assert raw["gate"] == "raw" and raw["l2n"] == list(L2N_MODES), name
+        g_copy = cake_jit.MODULES[det_name]
+        assert record["stage"] == "dqkg" and record["gate"] == "raw", name
+        assert record["l2n"] == list(L2N_ON) == twin["l2n"], name
+        assert g_copy.get("gate", "g") == "g" and "gate" not in twin, name
         assert (
             record["library"]
-            == raw["library"]
+            == g_copy["library"]
             == twin["library"].replace("cake_kda_det_train_", "cake_kda_train_")
         ), name
         expected = {k: v for k, v in twin.items() if k not in renamed}
-        expected.update(variant=name.removeprefix("dqkg_"), l2n=list(L2N_ON))
+        expected.update(variant=name.removeprefix("dqkg_"), gate="raw")
         assert {k: v for k, v in record.items() if k not in renamed} == expected, name
     # no ND-only record carries an l2n mode
     nd_only = set(S1_RECORDS) | TWIN_RECORDS | TAPE_WY_RECORDS
@@ -1550,7 +1557,7 @@ def test_the_l2n_class_is_the_deterministic_l2n_class() -> None:
             if serves(record, "off"):
                 assert record.get("l2n", ["off"]) == ["off"], name
             else:
-                assert name in det_l2n or name in L2N_DQKG, name
+                assert name in det_l2n, name
     # the parameter finalize of the l2n modes: the deterministic param_finalize (L2N_PARAM); param_finalize serves
     # the flag-off mode alone
     for name in cake_jit.records_of_stage("param_finalize", "raw"):
@@ -1653,9 +1660,10 @@ def test_records_of_stage_filters_the_gate_stages_by_class() -> None:
             assert all(cake_jit.MODULES[n]["gate"] == "raw" for n in raw), stage
         else:
             assert g == raw, stage
-    assert set(cake_jit.records_of_stage("dqkg", "raw")) == set(RAW_DQKG)
-    # the fused gradient's l2n class is of the g class (the raw class serves every in-kernel Q/K L2 norm mode)
-    assert set(L2N_DQKG) <= set(cake_jit.records_of_stage("dqkg"))
+    raw_dqkg = set(RAW_DQKG) | set(RAW_L2N_DQKG)
+    assert set(cake_jit.records_of_stage("dqkg", "raw")) == raw_dqkg
+    # the deterministic l2n fused gradient records are of the g class, their twins of the raw class
+    assert set(DET_L2N_DQKG) <= set(cake_jit.records_of_stage("dqkg"))
     # the raw GLM intra program of each in-kernel Q/K L2 norm mode (off, the fallback's capture form, fused)
     assert cake_jit.records_of_stage("glm_intra", "raw") == (
         "glm_intra_raw",
@@ -3696,6 +3704,12 @@ def _pass_bytes_per_th(gate_fused: bool) -> int:
 # whole-sequence set
 LEAN_SINGLE_BYTES = {False: {False: 4108, True: 3340}, True: {False: 4104, True: 3336}}
 LEAN_WHOLE_BYTES = {False: 2820, True: 2052}
+# what an in-kernel Q/K L2 norm mode adds to the whole-sequence set from two passes on: the dAqk the dav_l2n*
+# records write on every row (A32), whole instead of per pass (3076 B per internal token-head, tape 2308)
+L2N_LEAN_DAQK_BYTES = 256
+# rows of H 9-15 (the serial rows whose flag-off backward launches the separate dav program, which a lean arena
+# refuses; in an l2n mode a lean arena serves them)
+L2N_LEAN_ROWS = [((2000, 2000, 2000), 12), ((129, 300), 9), ((63, 1, 65), 15)]
 SEG_NAMES = frozenset(("seg_b", "seg_m", "hseg", "dseg", "dhseg"))
 # the tail stages' operands the tail split hands over per range: offset views of the whole-sequence buffers, the
 # range's table slices and count, the per-pass buffers; everything else they bind is addressed through the
@@ -3786,14 +3800,22 @@ def _slot_bytes(slots, R: int, H: int, NSEG: int, R_b: int) -> int:
 
 
 def _expected_lean_bytes(
-    tape: bool, t: int, R: int, H: int, NC: int, NSEG: int, gate_fused: bool = False
+    tape: bool,
+    t: int,
+    R: int,
+    H: int,
+    NC: int,
+    NSEG: int,
+    gate_fused: bool = False,
+    l2n: bool = False,
 ) -> int:
     """The lean layout's bytes from the documented rule: one pass is the saved-set layout without the replay's
     dout copy (4108 B per internal token-head, tape 3340; the fused architectures 4104 / 3336: no db_int slot);
     from two passes on the whole-sequence set (2820 B per internal token-head, tape 2052) plus the per-pass set
     (without dg_int / db_int where the gate epilogue is fused) packed first-fit, in order, into the dead ``qg`` /
     ``kg`` (512) and ``w`` (256) slots, the rest into an overflow slot shared with the segmented route's three
-    state blocks."""
+    state blocks.  In an in-kernel Q/K L2 norm mode (``l2n``) the whole-sequence set holds ``dAqk`` too
+    (:data:`L2N_LEAN_DAQK_BYTES` more: 3076, tape 2308) and the per-pass set packs none; one pass is unchanged."""
     block = NSEG * H * D * D * 4
     if t == 1:
         single = LEAN_SINGLE_BYTES[gate_fused][tape]
@@ -3802,7 +3824,9 @@ def _expected_lean_bytes(
     capacity = {"qg": 512 * R * H, "w": 256 * R * H}
     used = {"qg": 0, "w": 0}
     overflow = 0
-    for _name, kind, _sub, _life in _pass_occupants(gate_fused):
+    for name, kind, _sub, _life in _pass_occupants(gate_fused):
+        if l2n and name == "dAqk":
+            continue  # whole-sequence in the l2n modes
         nbytes = R_b * H * KIND_BYTES_PER_TH[cake_backend.PASS_KINDS[kind]]
         for host in ("qg", "w"):
             if used[host] + nbytes <= capacity[host]:
@@ -3811,7 +3835,8 @@ def _expected_lean_bytes(
         else:
             overflow += nbytes
     extra = max(overflow, 3 * block) if (overflow or NSEG) else 0
-    return LEAN_WHOLE_BYTES[tape] * R * H + extra
+    whole = LEAN_WHOLE_BYTES[tape] + (L2N_LEAN_DAQK_BYTES if l2n else 0)
+    return whole * R * H + extra
 
 
 def _lean_rows():
@@ -4108,6 +4133,149 @@ def test_lean_layouts_follow_the_byte_formulas() -> None:
         ) == cake_backend.memory_report(S, N, heads, **q)
 
 
+def test_lean_arena_serves_the_l2n_rows_with_their_dav_program() -> None:
+    """In an in-kernel Q/K L2 norm mode every backward path launches a ``dav`` record of
+    that mode (``dav_l2n*``: ``dAqk`` alone, which every lean layout holds whole), so a
+    lean arena serves every head count there, H 9-15 included (the rows the flag-off
+    test above refuses), in both gate modes, and ``arena_for_budget`` takes its lean
+    steps on those rows."""
+    modes = itertools.product(ARCHES, ("g", "raw"), ("fused", "fallback"))
+    for arch, gate, l2n in modes:
+        q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
+        for H in range(1, 65):
+            case = (arch, gate, l2n, H)
+            p = cake_backend.plan(2000, 3, H, 148, arch, gate=gate, l2n=l2n)
+            for path in p.records:
+                if path in ("fwd", "fwd_nosave"):
+                    continue
+                assert p.dispatched("dav", path), (case, path)
+                served = cake_jit.MODULES[p.record("dav", path)].get("l2n", [])
+                assert l2n in served, (case, path)
+            for t in (1, 4):
+                lean = cake_backend.CakeKDANondetArena(lean=True, tail_passes=t)
+                p.check_arena(lean)
+                want = p.workspace_bytes("bwd_lean", t)
+                assert p.arena_bytes(arena=lean) == want, (case, t)
+                got = cake_backend.workspace_bytes(2000, 3, H, arena=lean, **q)
+                assert got == want, (case, t)
+                report = cake_backend.memory_report(2000, 3, H, arena=lean, **q)
+                assert report["arena_bwd_configured"] == want, (case, t)
+            if 9 <= H <= 15:
+                got = cake_backend.arena_for_budget(p, p.arena_bytes() - 1)
+                assert got.lean, (case, got)
+
+
+def test_lean_layouts_follow_the_byte_formulas_in_the_l2n_modes() -> None:
+    """The lean layouts of the in-kernel Q/K L2 norm modes (both modes, both gate modes,
+    every architecture: the gate epilogue is fused on all of them), H 9-15 among the
+    rows: one pass is the fused saved-set layout without the replay's dout copy (4104 B
+    per internal token-head, tape 3336; its ``dAqk`` is whole in every mode); from two
+    passes on ``dAqk`` (written whole by the ``dav_l2n*`` records at 4, read per range by
+    GLM intra at 7) is a whole-sequence buffer, 256 B per internal token-head more (3076,
+    tape 2308), and leaves the per-pass set; ``memory_report``'s floors take 3076 / 2308
+    in place of 2820 / 2052."""
+    assert cake_backend._L2N_LEAN_DAQK_BYTES == L2N_LEAN_DAQK_BYTES
+    pass_names = frozenset(n for n, *_ in _pass_occupants(True)) - {"dAqk"}
+    rows = _lean_rows() + L2N_LEAN_ROWS
+    cases = itertools.product(rows, ARCHES, ("g", "raw"), ("fused", "fallback"))
+    for (lengths, heads), arch, gate, l2n in cases:
+        S, N = sum(lengths), len(lengths)
+        p = cake_backend.plan(S, N, heads, 148, arch, gate=gate, l2n=l2n)
+        q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
+        R, H, NC, NSEG = p.R, p.H, p.NC_pad, p.NSEG
+        block = NSEG * H * D * D * 4
+        blocks_over = max(0, 3 * block - 256 * R * H)
+        assert p.gate_fused is True and p.l2n == l2n
+        nc_min = -(-max(lengths) // BT) + 1
+        rows_min = BT * (nc_min + nc_min % 2)
+        block_min = p.P * H * D * D * 4 if p.recur == "seg" else 0
+        for tape in (False, True):
+            mode = "bwd_tape_lean" if tape else "bwd_lean"
+            save_mode = "tape" if tape else "light"
+            whole = LEAN_WHOLE_BYTES[tape] + L2N_LEAN_DAQK_BYTES
+            assert whole == (2308 if tape else 3076)
+            default = cake_backend.memory_report(
+                S,
+                N,
+                heads,
+                save_mode,
+                doc_lengths=lengths,
+                **q,
+            )
+            assert default["arena_floor"] == whole * R * H + 3 * block
+            floor_batched = whole * rows_min * H + 3 * block_min
+            assert default["arena_floor_batched"] == floor_batched
+            for t in (1, 2, 3, 4, 8):
+                arena = cake_backend.CakeKDANondetArena(lean=True, tail_passes=t)
+                p.check_arena(arena)
+                regions = p.layout(mode, t)
+                R_b = BT * -(-NC // t)
+                want = p.workspace_bytes(mode, t)
+                assert want == max(r.offset + r.nbytes for r in regions)
+                slots = cake_backend._slots_of(mode, t, R, H, NC, NSEG, l2n)
+                slots = _gate_fused_slots(slots)
+                assert want == _slot_bytes(slots, R, H, NSEG, R_b), (mode, t)
+                by_name = {r.name: r for r in regions}
+                # dAqk is whole on every layout of the mode
+                assert by_name["dAqk"].shape[0] == R, (mode, t)
+                assert not set(GATE_BUFFERS) & set(by_name), (mode, t)
+                if t == 1:
+                    single = LEAN_SINGLE_BYTES[True][tape]
+                    assert want == single * R * H + blocks_over, (mode, t)
+                else:
+                    assert by_name["dAqk"].lifetime == (4, 7), (mode, t)
+                    assert by_name["dAqk"].nbytes == 256 * R * H, (mode, t)
+                    assert pass_names <= set(by_name), (mode, t)
+                    for name in pass_names:
+                        assert by_name[name].shape[0] == R_b, (mode, t, name)
+                    expect = _expected_lean_bytes(
+                        tape,
+                        t,
+                        R,
+                        H,
+                        NC,
+                        NSEG,
+                        gate_fused=True,
+                        l2n=True,
+                    )
+                    assert want == expect, (mode, t)
+                    # the lifetime table of the plan's multi-pass layout: dAqk whole
+                    table = cake_backend.lifetime_table(mode, t, plan=p)
+                    rows_by = {row["buffer"]: row for row in table}
+                    assert set(rows_by) == set(by_name), (mode, t)
+                    daqk = rows_by["dAqk"]
+                    assert daqk["unit"] == "R*H", (mode, t)
+                    assert (daqk["first_write"], daqk["last_read"]) == (4, 7), (mode, t)
+                    if t == 2:
+                        # dq_f / dk_f fill the qg slot, dg_f the w slot; dAkk and db_f
+                        # overflow: 130 B per token-head (258 with the per-pass dAqk)
+                        over = max(130 * R * H, 3 * block)
+                        assert want == whole * R * H + over, (mode, t)
+                    elif t >= 4 and NC % t == 0:  # from four passes on everything fits
+                        assert want == whole * R * H + 3 * block, (mode, t)
+                floor = whole * R * H + 3 * block
+                report = cake_backend.memory_report(
+                    S,
+                    N,
+                    heads,
+                    save_mode,
+                    arena=arena,
+                    **q,
+                )
+                assert report["arena_bwd_configured"] == want, (mode, t)
+                assert report["arena_floor"] == floor <= want, (mode, t)
+                assert want <= report["arena_bwd"], (mode, t)
+                got = cake_backend.workspace_bytes(
+                    S,
+                    N,
+                    heads,
+                    save_mode=save_mode,
+                    arena=arena,
+                    **q,
+                )
+                assert got == want == p.arena_bytes(save_mode=save_mode, arena=arena)
+
+
 def test_lifetime_table_renders_the_lean_layouts() -> None:
     for mode in cake_backend.LEAN_MODES:
         tape = mode == "bwd_tape_lean"
@@ -4249,9 +4417,9 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
     names = [entry["name"] for entry in libraries]
     # The programs of cake_jit.MODULES, each built for the architectures its record delivers (all three but the
     # records of RECORD_ARCHES; the library twins, fwdh_v3 / fwdh_p3, wy_bwd / wy_fwd_rows, the four raw-class
-    # fused gradient records with their g-class records, the six l2n-class ones with their raw-class records and the
-    # l2n parameter finalize with param_finalize, are built once per architecture); the KCP programs have their own
-    # package.
+    # fused gradient records with their g-class records, the four raw-class l2n twins with their g-class records and
+    # the l2n parameter finalize with param_finalize, are built once per architecture); the KCP programs have their
+    # own package.
     train_libraries = {
         (record["library"], arch)
         for record in cake_jit.MODULES.values()
@@ -4260,7 +4428,7 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
     count = (
         sum(len(RECORD_ARCHES.get(name, ARCHES)) for name in cake_jit.MODULES)
         - (2 + len(RAW_DQKG_SHARED)) * len(ARCHES)
-        - sum(len(RECORD_ARCHES.get(name, ARCHES)) for name in L2N_DQKG)
+        - sum(len(RECORD_ARCHES.get(name, ARCHES)) for name in RAW_L2N_DQKG)
         - sum(
             len(
                 set(RECORD_ARCHES.get(name, ARCHES))
@@ -4269,16 +4437,17 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
             for name, det in L2N_PARAM.items()
         )
     )
-    # 227 entries before the in-kernel Q/K L2 norm's copies, plus its 64 (20 programs x 3 architectures, the raw
-    # class's kb-once replay prep among them, the sm_103a forward intra and GLM intra forms and the replay prep's
-    # saved-rstd twin on sm_100a / sm_103a); the l2n class of the fused gradient and the l2n parameter finalize add no
-    # build (param_finalize's program ships on the three)
-    assert count == 227 + 20 * 3 + 2 + 2 == 291
+    # 227 entries before the in-kernel Q/K L2 norm's copies, plus its 87 (27 programs x 3 architectures, the raw
+    # class's kb-once replay prep, the five dav_l2n programs and two l2n fused gradient programs among them, the
+    # sm_103a forward intra and GLM intra forms, the replay prep's saved-rstd twin on sm_100a / sm_103a and the two
+    # l2n fused gradient programs with the L2 hints off on sm_107a); the raw class's l2n twins of the fused gradient
+    # and the l2n parameter finalize add no build (their programs ship as the g-class copies' and param_finalize's)
+    assert count == 227 + 27 * 3 + 2 + 2 + 2 == 314
     assert len(train_libraries) == count
     assert len(names) == len(set(names)) == count
     assert {
         arch: sum(entry["arch"] == arch for entry in libraries) for arch in ARCHES
-    } == {"sm_100a": 96, "sm_103a": 97, "sm_107a": 98}
+    } == {"sm_100a": 103, "sm_103a": 104, "sm_107a": 107}
     for entry in libraries:
         assert entry["arch"] in ARCHES
         assert entry["entry"] == "run"
@@ -4313,7 +4482,7 @@ def test_copied_programs_are_the_deterministic_packages_sources(
     manifest: dict,
 ) -> None:
     """Every record but the S1 ones, the hand-off twins and the tape WY twin is a copy of the deterministic package's
-    record of the same name (a raw-class or l2n-class fused gradient record: of its ``RAW_DQKG`` / ``L2N_DQKG`` record;
+    record of the same name (a raw-class fused gradient record: of its ``RAW_DQKG`` / ``RAW_L2N_DQKG`` record;
     ``param_finalize_l2n``: of ``param_finalize``): the same digest in its library name (the package prefix aside),
     stage, launch, operands and grid, and (outside the g class of the two pair stages with the in-kernel Q/K L2 norm
     off, whose rules route the S1 cells) the same rule and architectures; each of its libraries has the deterministic
@@ -4335,13 +4504,10 @@ def test_copied_programs_are_the_deterministic_packages_sources(
         ), name
         for key in ("stage", "ffi_entry", "launch", "arg_plan", "logical"):
             assert record[key] == twin[key], (name, key)
-        if name in RAW_DQKG:
+        if name in RAW_DQKG or name in RAW_L2N_DQKG:
             assert record["variant"] == name.removeprefix("dqkg_"), name
             assert record["gate"] == "raw" and "gate" not in twin, name
-        elif name in L2N_DQKG:
-            assert record["variant"] == name.removeprefix("dqkg_"), name
-            assert "gate" not in record and "gate" not in twin, name
-            assert record["l2n"] == list(L2N_ON) and "l2n" not in twin, name
+            assert record.get("l2n") == twin.get("l2n"), name
         elif name in L2N_PARAM:
             assert record["variant"] == "l2n" and twin["variant"] is None, name
             assert record["gate"] == twin["gate"] == "raw", name

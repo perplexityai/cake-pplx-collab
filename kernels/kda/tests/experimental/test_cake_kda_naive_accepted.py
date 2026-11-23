@@ -17,8 +17,8 @@ The owner-accepted misses on the CPU: ``tests/cake_naive.py`` (:func:`accepted_c
 table ``tests/cake_naive_accepted.json``, applied by ``test_helpers/cake_kda_known_gaps.py`` (``settle``).  An output
 that misses the naive BF16 tier and FLA passes only when its test and output are listed and, against the listed
 reference, each part of the rule is met or within its cap; beyond any cap, or not listed, it fails.  An entry with
-a ``temporary`` field (class 3) is accepted the same way until the fix it names removes it, and its ``TIER`` line says
-so.
+a ``temporary`` field is accepted the same way until the fix it names removes it, and its ``TIER`` line says so; the
+shipped table has no such entry and no class 3 entry (the fix of the in-kernel L2-norm backward removed them).
 
 The judged outputs here are those of ``test_cake_kda_naive_fla_rule.py``: two distinct values per draw scaled by a
 power of two per draw, each side's error its dyadic offset times that scale, so the ratios of the errors are the ratios
@@ -346,13 +346,11 @@ def test_the_shipped_table_is_well_formed() -> None:
     for e in entries:
         assert set(e) | {"temporary", "accepted"} == set(raw["fields"]), e
         assert e["test"].startswith("tests/experimental/test_") and "::test_" in e["test"], e
-        assert e["class"] in (1, 2, 3, 4, 5) and e["reference"] in ("bf16", REFERENCE) and e["draws"] == DRAWS, e
-        # the temporary entries are exactly class 3
-        assert ("temporary" in e) == (e["class"] == 3), e
-        assert "temporary" not in e or (type(e["temporary"]) is str and e["temporary"]), e
+        assert e["class"] in (1, 2, 4, 5) and e["reference"] in ("bf16", REFERENCE) and e["draws"] == DRAWS, e
+        # no entry is temporary (class 3, the temporary class, has no entry)
+        assert "temporary" not in e, e
         # an entry the owner added after the others names the date it was accepted
         assert "accepted" not in e or re.fullmatch(r"\d{4}-\d{2}-\d{2}", e["accepted"]), e
-        assert not ("accepted" in e and "temporary" in e), e
         assert type(e["max_paired"]) is int and 0 <= e["max_paired"] <= DRAWS, e
         for cap in (e["l2_median"], e["l2_largest"]):
             assert type(cap) is float and math.isfinite(cap) and cap > 0 and _nine(cap) == cap, e
@@ -371,25 +369,21 @@ def _is_kcp_l2_norm_dk_of_the_default_entry(test: str, output: str) -> bool:
     )
 
 
-def test_the_kcp_l2_norm_dk_miss_of_the_default_entry_is_accepted_only_temporarily() -> None:
-    # dk of the s1450-h2 case of the default-entry tests with the in-kernel Q/K L2 norm: a miss to fix, accepted
-    # only until the kernel fix lands (class 3, temporary)
-    temporary = {k: e for k, e in accepted_entries().items() if "temporary" in e}
-    assert temporary
-    for (test, output), entry in accepted_entries().items():
-        listed = _is_kcp_l2_norm_dk_of_the_default_entry(test, output)
-        assert listed == (entry["class"] == 3) == ((test, output) in temporary), entry
-    test, output = next(iter(sorted(temporary)))
-    entry = temporary[(test, output)]
-    half = -(-entry["draws"] // 2)
-    verdict = _verdict(
-        entry,
-        max(entry["l2_median"], NEAR_TIE),
-        max(entry["l2_largest"], NEAR_TIE),
-        min(entry["max_paired"], half),
-    )
-    assert accepted_check(test, verdict) == (entry, [])
-    assert tier_line(test, verdict).endswith(f" | temporary: {entry['temporary']}")
+def test_the_kcp_l2_norm_dk_of_the_default_entry_is_not_accepted() -> None:
+    # dk of the s1450-h2 case of the default-entry tests with the in-kernel Q/K L2 norm: accepted until the fix of the
+    # in-kernel L2-norm backward (class 3, temporary), which removed every such entry; a miss of both references there
+    # now fails like any unlisted miss
+    entries = accepted_entries()
+    assert not any("temporary" in e or e["class"] == 3 for e in entries.values())
+    assert not any(_is_kcp_l2_norm_dk_of_the_default_entry(test, output) for test, output in entries)
+    test = "tests/experimental/test_cake_kda_nondet_train_kcp.py::test_gpu_default_entry_launches_match_held[g-l2n]"
+    assert _is_kcp_l2_norm_dk_of_the_default_entry(test, "s1450-h2.default.dk")
+    # a miss of both references there: listed nowhere, so it fails (no cap, no temporary note)
+    miss = {"output": "s1450-h2.default.dk", "reference": "bf16", "draws": DRAWS}
+    verdict = _verdict(miss, 1.2, 1.2, 0)
+    assert accepted_check(test, verdict) == (None, [])
+    line = tier_line(test, verdict)
+    assert line.startswith(f"TIER {test} s1450-h2.default.dk FAIL met=none ") and "temporary" not in line
 
 
 def test_every_shipped_entry_is_accepted_at_its_caps_and_not_beyond() -> None:
