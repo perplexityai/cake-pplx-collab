@@ -133,6 +133,22 @@ bits on either grid, and every band is unchanged.
 ``packed``, ``cake_jit.forward_packed``); ``run_module`` computes the same
 grid for the device's architecture and the call's own test, with the fewest
 host operations.
+Version 0.2.15 changes no bits.  The deterministic package's forward and
+this package's pipelined forwards warm in L2 the CTA's next block and the
+first block of the CTA a wave later, ``x`` and ``z`` each by its own layout:
+packed rows as one byte range, rows of head stride 128 and another token
+stride (a gate sliced from a projection, a broadcast over tokens, one token)
+as one range a token, and rows of other layouts (head-major) as one 256-byte
+range a row on sm_103a and sm_107a and none on sm_100a; 0.2.14 warmed ``x``
+and ``z`` only where both held packed rows.  Their program names and grids
+are those of 0.2.14.  Rows of other layouts of a BF16 weight gradient run
+the repeatable backward's long program (``bwd_bf16_rep_long``) in its place
+from ``cake_jit.LONG_BACKWARD_STRIDED_ROWS_PER_SM`` rows per SM (6145 on
+sm_100a and sm_103a, 4097 on sm_107a), with the same bits; an FP32 weight
+gradient and a call with ``compute_grad_weight=False`` run the long programs
+on packed rows only, as in 0.2.14.  ``cake_jit.module_for_rows`` of both
+packages and the deterministic package's ``cake_jit.backward_module`` take
+``compute_grad_weight`` (default true).
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -235,10 +251,11 @@ program, the strided program at every row count of the fused and the
 repeatable bands (the repeatable band's on packed rows its 128-thread
 build, CTAs walking 8-row blocks, a row to each 16 lanes as in the
 repeatable backward); a strided program reads packed rows at their linear
-offsets; where the repeatable
+offsets; on packed rows where the repeatable
 band runs its long role, the long
 program without the weight gradient (or, where none is routed, the long
-role with ``weight_grad`` 0).  On sm_100a and sm_103a, on packed rows (and
+role with ``weight_grad`` 0; such a call runs the long role on packed rows
+only).  On sm_100a and sm_103a, on packed rows (and
 one token of head stride 128, whose token stride is never read: the call
 passes it as ``H * 128``) up to ``cake_jit.PACKED_SMALL_ROWS_PER_SM`` rows
 per SM (128), every band but the long role runs instead the repeatable
@@ -377,7 +394,10 @@ Host design (the input layout rules are the deterministic package's):
   rows each; sm_100a), the extra-long forward (the long forward whose thread
   0 also warms the CTA's next block in L2) and the pipelined forwards (the
   deterministic package's forward programs with a gate that does not flush: the
-  mid forward's schedule and L2 prefetches with the L2 ``evict_first`` policy
+  mid forward's schedule and L2 prefetches, there of x and z each by its own
+  layout (packed rows one byte range, head stride 128 one range a token,
+  other layouts one 256-byte range a row on sm_103a and none on sm_100a),
+  with the L2 ``evict_first`` policy
   on the loads of x and z, one CTA per block below that package's cut of rows
   per SM of the architecture and whole waves from there, their records'
   ``persistent_from_rows_per_sm``, and on sm_100a and sm_103a, for rows the
@@ -442,8 +462,11 @@ Host design (the input layout rules are the deterministic package's):
   packed rows (all three head strides 128 and token strides ``H * 128``,
   the kernels' own test; a single token's stride, passed as 0, is not) from
   ``cake_jit.LONG_BACKWARD_ROWS_PER_SM`` rows per SM (2560 on sm_100a and
-  sm_103a, 1536 on sm_107a), its long program (``bwd_bf16_rep_long``, its
-  look-ahead loop: the same bits, grid and workspace); for an FP32
+  sm_103a, 1536 on sm_107a) and on rows of other layouts from
+  ``cake_jit.LONG_BACKWARD_STRIDED_ROWS_PER_SM`` rows per SM (6145 on
+  sm_100a and sm_103a, 4097 on sm_107a; not for a call with
+  ``compute_grad_weight=False``), its long program (``bwd_bf16_rep_long``,
+  its look-ahead loop: the same bits, grid and workspace); for an FP32
   weight gradient the repeatable backward (``bwd_f32_rep``) past the
   small-row band (512 rows), on sm_100a and sm_103a up to 64 rows per SM,
   the static backward (``bwd_f32``) up to 128 and the repeatable backward
@@ -1421,14 +1444,17 @@ def _backward(
     sm_count = device_sm_count(index)
     role = "bwd_f32" if dw is not None and dw.dtype == torch.float32 else "bwd_bf16"
     packed = _backward_packed(heads, dy_tok, dy_head, x_tok, x_head, z_tok, z_head)
-    name = module_for_rows(arch, role, rows, sm_count, packed=packed)
+    name = module_for_rows(
+        arch, role, rows, sm_count, packed=packed, compute_grad_weight=dw is not None
+    )
     if dw is None:
         # The band's program built without the weight gradient (the same dx
         # and dz bits): strided up to its cut (or at every row count where
         # the band routes no claimed one; on packed rows its 128-thread build
-        # where routed), else claimed, or the long or the one-cluster one; on
-        # packed rows up to the cut of the build of packed rows only, that
-        # build (the repeatable backward's dx and dz bits).
+        # where routed), else claimed, or the long (module_for_rows names the
+        # long role for this call on packed rows only) or the one-cluster
+        # one; on packed rows up to the cut of the build of packed rows only,
+        # that build (the repeatable backward's dx and dz bits).
         if (
             tokens == 1
             and arch in _ONE_TOKEN_PACKED_ARCHES
