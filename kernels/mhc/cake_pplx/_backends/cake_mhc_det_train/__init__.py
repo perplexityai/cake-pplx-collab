@@ -52,9 +52,9 @@ rows into L2 before its ``cp.async`` stage) from 1024 to 6143 tokens and
 from 6144 tokens.  SM103 runs ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 247
 and from 320 to 1023 tokens (record names
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
-``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``),
-``collapse_bwd__vjpwa_pf0`` from 248 to 319 and from 1024 to 8191 tokens
-(record names ``collapse_bwd__vjpwa_pf0__h5120__gt247_le319`` /
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``), ``collapse_bwd`` from
+248 to 319 tokens (record name ``collapse_bwd__h5120__le319``),
+``collapse_bwd__vjpwa_pf0`` from 1024 to 8191 tokens (record name
 ``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``) and
 ``collapse_bwd__vjpwd`` from 8192 tokens (record name
 ``collapse_bwd__vjpwd__h5120__gt8191``).  Every record gives the same bits.

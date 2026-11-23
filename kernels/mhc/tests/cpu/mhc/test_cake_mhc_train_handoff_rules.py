@@ -72,13 +72,16 @@ but the architectures and the select rule the same), ``collapse_bwd__vjpwa_pf0``
 ``collapse_bwd__vjpwd_sp4_mb4`` library from 31 to 38 tokens under the record name
 ``collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38``, the ``collapse_bwd__vjpwa_sp2_mb4`` library from 216 to 247 and from
 320 to 1023 tokens under the record names ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
-``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, the ``collapse_bwd__vjpwa_pf0`` library from 248 to 319 and from
-1024 to 8191 tokens under the record names ``collapse_bwd__vjpwa_pf0__h5120__gt247_le319`` /
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, the ``collapse_bwd`` library from 248 to 319 tokens under the
+record name ``collapse_bwd__h5120__le319`` (:data:`COLLAPSE_BWD_LIBRARY`: no record runs that library under its own
+name), the ``collapse_bwd__vjpwa_pf0`` library from 1024 to 8191 tokens under the record name
 ``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``, and the ``collapse_bwd__vjpwd`` library from 8192 tokens under the
 record name ``collapse_bwd__vjpwd__h5120__gt8191``.  ``collapse_bwd__vjpwa_pf0`` (the architecture's VJP of
 :data:`COLLAPSE_RECORDS`: the VJP staged by ``cp.async`` after an L2 prefetch of its own token's rows) is sm_107a's
-``collapse_bwd__vjpwa_pfq2`` under its own name, every other fact but the architectures and the select rule the same.
-The split records are the band's first one-CTA record split the same way (the same outputs bit for bit); the
+``collapse_bwd__vjpwa_pfq2`` under its own name, every other fact but the architectures and the select rule the same;
+``collapse_bwd__h5120__le319`` is that VJP under the names of the ``collapse_bwd`` library (the same stage filled
+through registers), every other fact but the architectures and the select rule the same.  The split records are the
+band's first one-CTA record split the same way (the same outputs bit for bit); the
 stage-free records (:data:`COLLAPSE_BWD_DIRECT`: each warp reads its ``dU`` and ``X`` words from global memory into
 registers; :data:`VJP_PART_SMEM` bytes of dynamic shared memory hold the partial sums alone) are the four-CTA split
 ``collapse_bwd__vjpwd_sp4_mb4`` and the one-CTA ``collapse_bwd__vjpwd``, with the same outputs bit for bit.
@@ -163,7 +166,7 @@ COLLAPSE_BWD_BAND = {
         ("collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38", 30, 38),
         ("collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215", 38, 215),
         ("collapse_bwd__vjpwa_sp2_mb4__h5120__le247", 215, 247),
-        ("collapse_bwd__vjpwa_pf0__h5120__gt247_le319", 247, 319),
+        ("collapse_bwd__h5120__le319", 247, 319),
         ("collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023", 319, 1023),
         ("collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191", 1023, 8191),
         ("collapse_bwd__vjpwd__h5120__gt8191", 8191, None),
@@ -189,24 +192,24 @@ BWD_SPLITS = {
     "sm_107a": (4, 2, 1, 1),
 }
 # The one-CTA-a-token record of each architecture's band that its split records split over k CTAs a token with the
-# same outputs bit for bit: the first one-CTA record of the band (on sm_103a the ``collapse_bwd__vjpwa_pf0`` alias of
-# 248 to 319 tokens).
+# same outputs bit for bit: the first one-CTA record of the band (on sm_103a the record of the ``collapse_bwd`` library
+# from 248 to 319 tokens).
 BWD_ONE_CTA = {
     "sm_100a": "collapse_bwd__vjpwa_pf0__h5120",
-    "sm_103a": "collapse_bwd__vjpwa_pf0__h5120__gt247_le319",
+    "sm_103a": "collapse_bwd__h5120__le319",
     "sm_107a": "collapse_bwd__vjpwa__h5120",
 }
 # The position in each architecture's band of the architecture's VJP of COLLAPSE_RECORDS (itself or an alias of it):
-# the first one-CTA record on sm_100a / sm_103a, the last record on sm_107a.
-BWD_VJP_AT = {"sm_100a": 4, "sm_103a": 4, "sm_107a": 3}
+# on sm_100a / sm_103a the band's first one-CTA record outside COLLAPSE_BWD_LIBRARY, on sm_107a the last record.
+BWD_VJP_AT = {"sm_100a": 4, "sm_103a": 6, "sm_107a": 3}
 # The aliases of the VJP's bands: record -> the record whose library, kernel and every other fact but the
 # architectures and the select rule it carries (sm_100a runs the ``_vjpwa_sp2_mb4`` library from 216 to 1023 tokens
 # under one alias, sm_103a from 216 to 247 and from 320 to 1023 tokens under two; the ``_vjpwa_sp2_mb4`` record keeps
 # sm_107a's band from 216 to 383 tokens.  Up to 215 tokens sm_100a and sm_103a run the ``_vjpwa_sp4_mb4`` library
 # under three aliases, its record keeping sm_107a's band up to 215 tokens, and the ``_vjpwd_sp4_mb4`` library under
 # its own record (sm_100a, 31 to 37 tokens) and one alias (sm_103a, 31 to 38 tokens).  sm_100a runs the
-# ``_vjpwa_pf0`` and ``_vjpwd`` libraries under their own records, sm_103a under three aliases (``_vjpwa_pf0`` from
-# 248 to 319 and from 1024 to 8191 tokens, ``_vjpwd`` from 8192 tokens)).
+# ``_vjpwa_pf0`` and ``_vjpwd`` libraries under their own records, sm_103a under two aliases (``_vjpwa_pf0`` from 1024
+# to 8191 tokens, ``_vjpwd`` from 8192 tokens)).
 COLLAPSE_BWD_ALIAS = {
     "collapse_bwd__vjpwa_sp2_mb4__h5120__le1023": "collapse_bwd__vjpwa_sp2_mb4__h5120",
     "collapse_bwd__vjpwa_sp2_mb4__h5120__le247": "collapse_bwd__vjpwa_sp2_mb4__h5120",
@@ -215,7 +218,6 @@ COLLAPSE_BWD_ALIAS = {
     "collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le215": "collapse_bwd__vjpwa_sp4_mb4__h5120",
     "collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215": "collapse_bwd__vjpwa_sp4_mb4__h5120",
     "collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38": "collapse_bwd__vjpwd_sp4_mb4__h5120",
-    "collapse_bwd__vjpwa_pf0__h5120__gt247_le319": "collapse_bwd__vjpwa_pf0__h5120",
     "collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191": "collapse_bwd__vjpwa_pf0__h5120",
     "collapse_bwd__vjpwd__h5120__gt8191": "collapse_bwd__vjpwd__h5120",
 }
@@ -228,10 +230,16 @@ COLLAPSE_BWD_ALIAS_ARCHES = {
     "collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le215": ["sm_100a"],
     "collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215": ["sm_103a"],
     "collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38": ["sm_103a"],
-    "collapse_bwd__vjpwa_pf0__h5120__gt247_le319": ["sm_103a"],
     "collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191": ["sm_103a"],
     "collapse_bwd__vjpwd__h5120__gt8191": ["sm_103a"],
 }
+# The band records of a library that no record runs under its own name: record -> the library (without the prefix).
+# sm_103a runs the ``collapse_bwd`` library (the VJP's stage filled through registers) from 248 to 319 tokens under
+# ``collapse_bwd__h5120__le319``: the architecture's VJP of COLLAPSE_RECORDS under that library's names, with its own
+# architectures and select rule, every other fact the same.
+COLLAPSE_BWD_LIBRARY = {"collapse_bwd__h5120__le319": "collapse_bwd__h5120"}
+# The architectures of each record of COLLAPSE_BWD_LIBRARY.
+COLLAPSE_BWD_LIBRARY_ARCHES = {"collapse_bwd__h5120__le319": ["sm_103a"]}
 # The split VJP records of the bands: record -> k, the CTAs a token (grid k T, each CTA on 4 / k streams).
 COLLAPSE_BWD_SPLIT = {
     "collapse_bwd__vjpwa_sp4_mb4__h5120": 4,
@@ -576,8 +584,9 @@ def test_collapse_records(mode: str, arch: str) -> None:
     # stage-free one-CTA VJP (COLLAPSE_BWD_DIRECT) as its own record; on sm_103a (T <= 30 / 31 <= T <= 38 /
     # 39 <= T <= 215 / 216 <= T <= 247 / 248 <= T <= 319 / 320 <= T <= 1023 / 1024 <= T <= 8191 / T >= 8192) the first
     # three are the same two libraries under three alias records, the fourth and the sixth the second library under
-    # two alias records, the fifth and the seventh the VJP under two alias records and the eighth the stage-free
-    # one-CTA VJP under an alias record.  The split records (BWD_SPLITS) and the stage-free records are the band's
+    # two alias records, the fifth the collapse_bwd library under its band record (COLLAPSE_BWD_LIBRARY), the seventh
+    # the VJP under an alias record and the eighth the stage-free one-CTA VJP under an alias record.  The split
+    # records (BWD_SPLITS) and the stage-free records are the band's
     # first one-CTA record (BWD_ONE_CTA) split over k CTAs a token (k 4 / 2 / 1: grid k T, col_split k) with
     # vjp_smem(k) bytes of dynamic shared memory (VJP_PART_SMEM without the stage), every other fact but the
     # architectures the same
@@ -591,7 +600,12 @@ def test_collapse_records(mode: str, arch: str) -> None:
     assert vjp == f"{COLLAPSE_RECORDS[arch][2]}__h{HIDDEN}"
     one_at = BWD_SPLITS[arch].index(1)
     assert band[one_at][0] == BWD_ONE_CTA[arch]
-    assert vjp_at == (len(band) - 1 if arch == "sm_107a" else one_at)
+    own_one = [
+        i
+        for i, ((s, _, _), k) in enumerate(zip(band, BWD_SPLITS[arch]))
+        if k == 1 and s not in COLLAPSE_BWD_LIBRARY
+    ]
+    assert vjp_at == (len(band) - 1 if arch == "sm_107a" else own_one[0])
     lowers, uppers = (0, *edges), (*edges, None)
     pairs = [(above, at_most) for _, above, at_most in band]
     assert pairs == list(zip(lowers, uppers))
@@ -602,7 +616,8 @@ def test_collapse_records(mode: str, arch: str) -> None:
             "at_most": at_most,
             "kind": "rows_between",
         }, suffix
-        name = f"{PREFIX[mode]}{COLLAPSE_BWD_ALIAS.get(suffix, suffix)}"
+        lib = COLLAPSE_BWD_ALIAS.get(suffix, COLLAPSE_BWD_LIBRARY.get(suffix, suffix))
+        name = f"{PREFIX[mode]}{lib}"
         assert (rec["kernel"], rec["library"], rec["kernel_symbol"]) == (
             name,
             name,
@@ -610,13 +625,19 @@ def test_collapse_records(mode: str, arch: str) -> None:
         ), suffix
         if suffix in COLLAPSE_BWD_ALIAS:
             arches = COLLAPSE_BWD_ALIAS_ARCHES[suffix]
+        elif suffix in COLLAPSE_BWD_LIBRARY:
+            arches = COLLAPSE_BWD_LIBRARY_ARCHES[suffix]
         else:
             arches = COLLAPSE_RECORD_ARCHES[suffix.removesuffix(f"__h{HIDDEN}")]
         assert arch in arches and rec["arches"] == arches, suffix
         assert REGISTRIES[mode].pdl_edge(rec["library"]) is None, suffix
-    # every record of the band runs its own library but an alias, which runs its record's; neighbours differ
+    # every record of the band runs its own library but an alias, which runs its record's, and a record of
+    # COLLAPSE_BWD_LIBRARY, which runs its library; neighbours differ
     libs = [_rec(mode, s)["library"] for s, _, _ in band]
-    assert len(set(libs)) == len({COLLAPSE_BWD_ALIAS.get(s, s) for s, _, _ in band})
+    own_libs = {
+        COLLAPSE_BWD_ALIAS.get(s, COLLAPSE_BWD_LIBRARY.get(s, s)) for s, _, _ in band
+    }
+    assert len(set(libs)) == len(own_libs)
     assert all(a != b for a, b in itertools.pairwise(libs))
     # an alias is its record under its own name, architectures and select rule: every other fact the same; every alias
     # runs on architectures its record does not list
@@ -628,10 +649,23 @@ def test_collapse_records(mode: str, arch: str) -> None:
         assert _strip(a, *keys) == _strip(o, *keys), alias
         assert a["arches"] == COLLAPSE_BWD_ALIAS_ARCHES[alias], alias
         assert not set(a["arches"]) & set(o["arches"]), alias
+    # a record of COLLAPSE_BWD_LIBRARY is the VJP under the names of a library that no record runs under its own name,
+    # with its own architectures (none of the VJP's) and select rule: every other fact the same
+    assert set(COLLAPSE_BWD_LIBRARY) == set(COLLAPSE_BWD_LIBRARY_ARCHES)
+    for record, library in COLLAPSE_BWD_LIBRARY.items():
+        r = _rec(mode, record)
+        assert f"{PREFIX[mode]}{library}" not in REGISTRIES[mode].MODULES, record
+        assert r["library"] == f"{PREFIX[mode]}{library}", record
+        assert r["arches"] == COLLAPSE_BWD_LIBRARY_ARCHES[record], record
+        assert not set(r["arches"]) & set(bwd["arches"]), record
+        keys = ("arches", "select_rule")
+        assert _strip(r, *keys) == _strip(bwd, *keys), record
     one_cta = _rec(mode, band[one_at][0])
     assert one_cta["grid_rule"] == one_token_per_cta
-    # the one-CTA record is the architecture's VJP (on sm_103a under an alias: its architectures checked above)
-    own_keys = ("arches",) if band[one_at][0] in COLLAPSE_BWD_ALIAS else ()
+    # the one-CTA record is the architecture's VJP (on sm_103a under the names of the collapse_bwd library: its
+    # architectures checked above)
+    tagged = {*COLLAPSE_BWD_ALIAS, *COLLAPSE_BWD_LIBRARY}
+    own_keys = ("arches",) if band[one_at][0] in tagged else ()
     assert _strip(one_cta, "select_rule", *own_keys) == _strip(
         bwd, "select_rule", *own_keys
     )
@@ -917,17 +951,18 @@ def test_the_sm100a_sm103a_collapse_backward_band_reads_the_token_count_only(
     tokens on sm_103a (:data:`BWD_DIRECT_ROWS`), each band under its own record, then the
     ``collapse_bwd__vjpwa_sp2_mb4`` library (sm_100a from 216 to 1023 tokens as
     ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``; sm_103a from 216 to 247 tokens as ``__le247`` and from 320 to 1023
-    tokens as ``__gt319_le1023``), the ``collapse_bwd__vjpwa_pf0`` library (sm_100a from 1024 to 6143 tokens as itself;
-    sm_103a from 248 to 319 tokens as ``__gt247_le319`` and from 1024 to 8191 tokens as ``__gt1023_le8191``) and the
-    stage-free one-CTA ``collapse_bwd__vjpwd`` library (sm_100a from 6144 tokens as itself; sm_103a from 8192 tokens
-    as ``__gt8191``) (:data:`BWD_EDGES`), on every board and Sinkhorn count (and, in the deterministic registry, along
-    every call path)."""
+    tokens as ``__gt319_le1023``, with ``collapse_bwd__h5120__le319`` (the ``collapse_bwd`` library) from 248 to 319
+    tokens), the ``collapse_bwd__vjpwa_pf0`` library (sm_100a from 1024 to 6143 tokens as itself; sm_103a from 1024
+    to 8191 tokens as ``__gt1023_le8191``) and the stage-free one-CTA ``collapse_bwd__vjpwd`` library (sm_100a from
+    6144 tokens as itself; sm_103a from 8192 tokens as ``__gt8191``) (:data:`BWD_EDGES`), on every board and Sinkhorn
+    count (and, in the deterministic registry, along every call path)."""
     p = PREFIX[mode]
     route = _collapse_backward_route(mode, arch)
-    sp4, vjpwd, sp2, pf0, vd = (
+    sp4, vjpwd, sp2, one, pf0, vd = (
         f"{p}collapse_bwd__vjpwa_sp4_mb4__h{HIDDEN}",
         f"{p}collapse_bwd__vjpwd_sp4_mb4__h{HIDDEN}",
         f"{p}collapse_bwd__vjpwa_sp2_mb4__h{HIDDEN}",
+        f"{p}collapse_bwd__h{HIDDEN}",
         f"{p}collapse_bwd__vjpwa_pf0__h{HIDDEN}",
         f"{p}collapse_bwd__vjpwd__h{HIDDEN}",
     )
@@ -950,13 +985,13 @@ def test_the_sm100a_sm103a_collapse_backward_band_reads_the_token_count_only(
             f"{vjpwd}__gt30_le38",
             f"{sp4}__gt38_le215",
             f"{sp2}__le247",
-            f"{pf0}__gt247_le319",
+            f"{one}__le319",
             f"{sp2}__gt319_le1023",
             f"{pf0}__gt1023_le8191",
             f"{vd}__gt8191",
         ]
-        libraries = [sp4, vjpwd, sp4, sp2, pf0, sp2, pf0, vd]
-        tail = ((247, sp2), (319, pf0), (1023, sp2), (8191, pf0), (None, vd))
+        libraries = [sp4, vjpwd, sp4, sp2, one, sp2, pf0, vd]
+        tail = ((247, sp2), (319, one), (1023, sp2), (8191, pf0), (None, vd))
     reg = REGISTRIES[mode]
     assert [reg.MODULES[n]["library"] for n in route] == libraries
     # up to 215 tokens: the stage-free library exactly at BWD_DIRECT_ROWS, the staged four-CTA split elsewhere
@@ -1114,9 +1149,10 @@ def test_the_nondet_handoff_records_are_the_det_records_renamed() -> None:
     }
     # the fused collapse, the standalone collapse pair (each in its sm_100a / sm_103a and its sm_107a form, the
     # forward's sm_107a form in its three token-count records, the VJP's in its four, the sm_100a / sm_103a VJP bands'
-    # aliases and the stage-free VJPs) and one twin per token-owner form
+    # aliases, the collapse_bwd library's band record and the stage-free VJPs) and one twin per token-owner form
     want = {f"{PREFIX['det']}{s}__h{HIDDEN}" for s in COLLAPSE_RECORD_ARCHES}
     want |= {f"{PREFIX['det']}{s}" for s in COLLAPSE_BWD_ALIAS}
+    want |= {f"{PREFIX['det']}{s}" for s in COLLAPSE_BWD_LIBRARY}
     want |= {f"{PREFIX['det']}bwd_token__{f}_ho__h{HIDDEN}" for f in TOKEN_FORMS}
     assert new == want, sorted(new)
     for name in new:

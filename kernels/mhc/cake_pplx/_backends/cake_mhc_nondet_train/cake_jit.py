@@ -279,21 +279,21 @@ workspace).  On sm_103a it holds eight:
 the ``_vjpwa_sp2_mb4`` library from 216 to 247 and from 320 to 1023 tokens
 under the record names ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` and
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, the
-``collapse_bwd__vjpwa_pf0__h5120`` library from 248 to 319 and from 1024 to
-8191 tokens under the record names
-``collapse_bwd__vjpwa_pf0__h5120__gt247_le319`` and
-``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``, and the
+``collapse_bwd__h5120`` library (own library stem, no workspace) from 248 to
+319 tokens under the record name ``collapse_bwd__h5120__le319``, the
+``collapse_bwd__vjpwa_pf0__h5120`` library from 1024 to 8191 tokens under the
+record name ``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``, and the
 ``collapse_bwd__vjpwd__h5120`` library from 8192 tokens under the record name
 ``collapse_bwd__vjpwd__h5120__gt8191``.  ``_vjpwa_pf0`` is the one-CTA VJP
 that prefetches its own token's ``dU`` and ``X`` rows into L2 and then fills
 its shared-memory stage by ``cp.async`` (grid T, 51456 bytes of dynamic
-shared memory); ``_vjpwd`` is the one-CTA VJP without the stage (each warp
-loads its ``dU`` and ``X`` words from global memory into registers; 256
-bytes of dynamic shared memory hold the partial sums; grid T).  The split
-VJPs (grid 4 T / 2 T, 20736 / 30976 bytes of dynamic shared memory) and
-``_vjpwd_sp4_mb4``, the four-CTA split without the shared-memory stage (256
-bytes of dynamic shared memory), give the same outputs bit for bit as the
-two one-CTA VJPs.  On sm_107a
+shared memory, as ``collapse_bwd__h5120``); ``_vjpwd`` is the one-CTA VJP
+without the stage (each warp loads its ``dU`` and ``X`` words from global
+memory into registers; 256 bytes of dynamic shared memory hold the partial
+sums; grid T).  The split VJPs (grid 4 T / 2 T, 20736 / 30976 bytes of
+dynamic shared memory) and ``_vjpwd_sp4_mb4``, the four-CTA split without
+the shared-memory stage (256 bytes of dynamic shared memory), give the same
+outputs bit for bit as the three one-CTA VJPs.  On sm_107a
 the three collapse records are that architecture's own forms, with the same
 outputs bit for bit:
 ``fwd_collapse__m2_pi_pn__h5120`` and ``collapse_fwd__m2__h5120`` take two
@@ -8460,7 +8460,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120__gt247_le319": {
+    "cake_mhc_train_collapse_bwd__h5120__le319": {
         "arches": [
             "sm_103a",
         ],
@@ -8484,8 +8484,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "rows_per_cta": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
-        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
+        "kernel": "cake_mhc_train_collapse_bwd__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__h5120",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -8494,7 +8494,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "persistent_ctas_per_sm": 1,
             "use_pdl": False,
         },
-        "library": "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
+        "library": "cake_mhc_train_collapse_bwd__h5120",
         "logical": {
             "T": "rows",
             "dpre_in": "dpre_in",
@@ -10101,7 +10101,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38",
             "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215",
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__le247",
-            "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120__gt247_le319",
+            "cake_mhc_train_collapse_bwd__h5120__le319",
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023",
             "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191",
             "cake_mhc_train_collapse_bwd__vjpwd__h5120__gt8191",

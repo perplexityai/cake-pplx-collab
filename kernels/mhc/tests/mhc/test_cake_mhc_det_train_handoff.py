@@ -88,7 +88,7 @@ T_ACCURACY = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 16384, 32768, 65536)
 # 6143 / 6144 (sm_100a) and 8191 / 8192 (sm_103a) both sides of each edge of sm_100a's and sm_103a's band of
 # ``collapse_backward`` from 216 tokens (768 inside the ``_vjpwa_sp2_mb4`` records, 2047 to 2049 inside the
 # ``_vjpwa_pf0`` records, 16384 and 65536 inside the ``_vjpwd`` records), 247 / 248 and 319 / 320 both sides of the
-# edges of sm_103a's ``_vjpwa_pf0`` record from 248 to 319 tokens (both inside sm_100a's ``_vjpwa_sp2_mb4`` record);
+# edges of sm_103a's ``collapse_bwd`` record from 248 to 319 tokens (both inside sm_100a's ``_vjpwa_sp2_mb4`` record);
 # 30 / 31, 37 / 38 and 38 / 39 both sides of each edge of the stage-free split VJP's band (sm_100a 31 to 37 tokens,
 # sm_103a 31 to 38), 53 / 54, 54 / 55, 74 / 75 and 77 / 78 inside the next record.
 T_COLLAPSE = (
@@ -1131,8 +1131,8 @@ def test_every_collapse_backward_record_gives_the_same_bits(T: int) -> None:
     the stage-free ``collapse_bwd__vjpwd_sp4_mb4`` library from 31 to 37, each band under its own record,
     ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` from 216 to 1023, ``collapse_bwd__vjpwa_pf0`` from 1024 to 6143,
     ``collapse_bwd__vjpwd`` from 6144; sm_103a: the same up to 215 tokens but the stage-free library from 31 to 38,
-    ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` from 216 to 247, ``collapse_bwd__vjpwa_pf0__h5120__gt247_le319``
-    from 248 to 319, ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023`` from 320 to 1023,
+    ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` from 216 to 247, ``collapse_bwd__h5120__le319`` from 248 to 319,
+    ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023`` from 320 to 1023,
     ``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191`` from 1024 to 8191 and ``collapse_bwd__vjpwd__h5120__gt8191``
     from 8192), every record of the
     route, launched on its own (the split records on their grid of 4 T / 2 T CTAs) on the same inputs into a
