@@ -927,7 +927,7 @@ out[t,s] = BF16(h + gate v)
 
 The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `dK`, `dV` (BF16) and `dq_weight = dw * k_weight`, `dk_weight = dw * q_weight` with `dw = sum_t c h k` in FP32. The square root's derivative is 0 where `|dot| <= clamp_value`. `dot = +0` gives `+sqrt(clamp_value)` and `-0` gives `-sqrt(clamp_value)`. A masked token gives `out = X` and `dX = dOut` exactly, zero `dK` and `dV`, and no weight-gradient contribution.
 
-**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward ships two programs per architecture, one for each way to sum the dot product `P`. The backward ships two programs per architecture with the same bits and the same grid. A call without a `token_mask` of at least 4096 tokens on `sm_103a` launches the one that copies the next token's inputs into shared memory ahead of use; every other call launches the other.
+**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward ships two programs per architecture, one for each way to sum the dot product `P`. The backward ships two programs per architecture with the same bits and the same grid. A call without a `token_mask` of at least 4096 tokens launches the one that copies the next token's inputs into shared memory ahead of use; every other call launches the other.
 
 **Sum of the dot product.** The autograd entries and the explicit forward take the keyword-only `dot_sum`. It selects the forward's sum of `P`.
 

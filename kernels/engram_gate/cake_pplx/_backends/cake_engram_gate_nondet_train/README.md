@@ -93,8 +93,8 @@ The backward recomputes `P` as a compensated dot product after either forward, s
 uses the forward's `dot_sum`. The backward has two programs with the same bits and the same grid: `bwd_dot2`, and
 `bwd_dot2_stage`, which also copies the next token's `dout`, `x` and `key` slices into a per-thread shared-memory
 stage with `cp.async`. A call without a `token_mask` of at least `cake_jit.STAGE_BWD_MIN_TOKENS` (4096) tokens on an
-architecture of `cake_jit.STAGE_BWD_ARCHES` (`sm_103a`) launches `bwd_dot2_stage`; every other call launches
-`bwd_dot2` (`cake_jit.backward_record`).
+architecture of `cake_jit.STAGE_BWD_ARCHES` (`sm_100a`, `sm_103a` and `sm_107a`) launches `bwd_dot2_stage`; every
+other call launches `bwd_dot2` (`cake_jit.backward_record`).
 
 ## Accuracy
 
