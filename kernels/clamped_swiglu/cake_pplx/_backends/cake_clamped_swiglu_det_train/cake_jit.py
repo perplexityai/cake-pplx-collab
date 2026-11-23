@@ -21,9 +21,10 @@ unit plus a tvm-ffi binding, compiled once per architecture it is delivered
 for.  A record is keyed by its program name
 ``cake_clamped_swiglu_det_train_<20 hex>`` and carries the host plan: the
 ``role`` it runs in, the ``stage`` it serves (``fwd``, ``bwd`` or
-``bwd_unweighted``, its role without the ``_large`` or ``_fine`` suffix),
-the architectures it is delivered for, the ``run`` entry and, in a large-R or
-a fine role, ``rows_per_sm_windows``; ``library`` is its key.  The derived
+``bwd_unweighted``, its role without the ``_large``, ``_relay`` or ``_fine``
+suffix), the architectures it is delivered for, the ``run`` entry and, in a
+large-R, a relay or a fine role, ``rows_per_sm_windows``; ``library`` is its
+key.  The derived
 leaves (``kernel_symbol``, ``launch``, ``arg_plan``) are written by the
 exporter from the rendered binding.  ``MODULES`` is a literal
 table (the exporter and the manifest checker read it with
@@ -67,10 +68,7 @@ load of each input a task (a warp per task in ``fwd_fine`` and
 ``bwd_unweighted_fine``, a CTA of 9 warps per row in ``bwd_fine``), so a
 row's serial chain is shorter when few rows share an SM.  A relay program
 runs a row on a CTA of 3 warps, a warp per run of 768 columns (3 tasks a
-row), so a row's loads take one memory trip; in ``bwd_relay`` warps 1 and 2
-hand their ``dh`` and activation words to warp 0 in static shared memory,
-and warp 0 runs the ``d_weight`` chain of the other programs in load order.
-A launch of more rows runs the windowed program of the window that holds
+row), so a row's loads take one memory trip.  A launch of more rows runs the windowed program of the window that holds
 it, ``lo * sm_count <= rows <= hi * sm_count`` (both bounds included), and
 the small-R program at every other row count (:func:`route`); an
 architecture without a large-R, a relay or a fine program runs the small-R
@@ -225,11 +223,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
-        "rows_per_sm_windows": {
-            "sm_100a": [[12, 21], [32, 41], [48, None]],
-            "sm_103a": [[12, 21], [32, 41], [48, None]],
-            "sm_107a": [[12, 21], [35, 41], [48, None]],
-        },
+        "rows_per_sm_windows": {"sm_100a": [[13, 21]], "sm_103a": [[14, 21]], "sm_107a": [[16, 21]]},
         "role": "bwd_large",
         "stage": "bwd",
     },
@@ -251,6 +245,31 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_clamped_swiglu_det_train_c30f690752c972d064fa",
         "rows_per_sm_windows": {"sm_100a": [[0, 2]], "sm_103a": [[0, 2]], "sm_107a": [[0, 2]]},
         "role": "bwd_fine",
+        "stage": "bwd",
+    },
+    # The weighted backward for many rows per SM: a CTA of 96 threads per row, warp r owns run r of each lane's loads
+    # (3 runs of 3 loads, 3 tasks a row), so a row's loads take one memory trip; registers sized for 9 CTAs an SM.
+    # Warps 1 and 2 hand their dh and activation words to warp 0 in a static 9 KB shared pool, and warp 0 runs the
+    # d_weight chain of the other programs in load order.
+    "cake_clamped_swiglu_det_train_b161c9eed1166d9766b9": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["parameter", "d_up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_b161c9eed1166d9766b9",
+        "launch": {
+            "block": (96, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_clamped_swiglu_det_train_b161c9eed1166d9766b9",
+        "rows_per_sm_windows": {
+            "sm_100a": [[3, 5], [25, None]],
+            "sm_103a": [[12, 13], [25, 647]],
+            "sm_107a": [[3, 6], [31, None]],
+        },
+        "role": "bwd_relay",
         "stage": "bwd",
     },
     # The backward of an unweighted call: d_gate and d_up (BF16) only, no weight and no d_weight, 128 threads, 32 lanes
@@ -362,8 +381,9 @@ MAX_GRID = 2**31 - 1
 
 # The most rows per SM a fine window may reach (its ``hi``).  The fine programs are for the fewest rows: the shipped
 # windows end at 2 to 8 rows per SM.  64 is 8 times the largest of them, room for a retune.  The package's route table
-# holds one entry per row count up to the fine window's last row count or the last large-R edge, whichever is larger,
-# so the bound lets the fine window add at most ``64 * sm_count`` entries (13,568 on 212 SMs).  On the delivered SM
+# holds one entry per row count up to the fine window's last row count or the last edge of the windowed programs (the
+# large-R and the relay ones), whichever is larger, so the bound lets the fine window add at most ``64 * sm_count``
+# entries (13,568 on 212 SMs).  On the delivered SM
 # counts (148 to 212) it also keeps a fine grid far below the 32-bit limits above (``bwd_fine``: at most
 # ``64 * sm_count`` CTAs and rows).
 MAX_FINE_ROWS_PER_SM = 64

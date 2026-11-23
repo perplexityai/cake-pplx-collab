@@ -19,16 +19,17 @@ Backend suite of the Cake deterministic routed-expert clamped SwiGLU training pa
 and the FP32 route-weight gradient ``d_weight = sum dh a``, intermediate width 2304, on SM100, SM103 and SM107.
 
 Without a device: the registry (per stage a small-R program on every architecture, a fine program with one window
-``[0, hi]`` of rows per SM on every architecture and, for ``fwd`` and ``bwd``, a large-R program with its windows of
-rows per SM on some; the unweighted backward ``bwd_unweighted`` with no weight, weight flag or weight gradient; each
-record delivered for its architectures and for no other, the launch facts, the argument plans), the route of a launch by
-its rows per SM (1 row, one row below, at and above each edge of the windows and the most rows, on the SM counts of the
-delivered GPUs, the route of the shipped records the same as 0.1.9's at every row count; with synthetic windows of a
-large-R and a relay record of ``bwd``, three programs above the fine window, each running the row counts its windows
-hold, and 0.1.9's route on an architecture without a relay record; windows that are not ascending, untouching lists of
-integers refused, windows of the large-R and the relay record that overlap or touch refused, and a fine window that is
-not one window from 0, that reaches the first large-R or relay window, that passes 64 rows per SM or whose grid passes
-``2**31 - 1``; the small-R program at every row count on an architecture without a fine or a large-R one; the SM count
+``[0, hi]`` of rows per SM on every architecture, for ``fwd`` and ``bwd`` a large-R program with its windows of rows
+per SM on some and for ``bwd`` a relay program with its windows; the unweighted backward ``bwd_unweighted`` with no
+weight, weight flag or weight gradient; each record delivered for its architectures and for no other, the launch facts,
+the argument plans), the route of a launch by its rows per SM (1 row, one row below, at and above each edge of the
+windows and the most rows, on the SM counts of the delivered GPUs: the fine, the small-R, the large-R and the relay
+program each running the row counts its windows hold, and the route of 0.1.9's code for the same records on an
+architecture without a relay record; with synthetic windows of the large-R and the relay record of ``bwd``, the same;
+windows that are not ascending, untouching lists of integers refused, windows of the large-R and the relay record that
+overlap or touch refused, and a fine window that is not one window from 0, that reaches the first large-R or relay
+window, that passes 64 rows per SM or whose grid passes ``2**31 - 1``; the small-R program at every row count on an
+architecture without a fine, a large-R or a relay one; the SM count
 read once per stage and device, no library loaded), the launch grid of each program (``ceil(3 R / 4)`` CTAs of
 ``bwd_unweighted`` up to the most rows, where ``3 R`` passes 32 bits; ``ceil(9 R / 4)`` CTAs of ``fwd_fine`` and
 ``bwd_unweighted_fine``, at most ``2**31 - 1``; ``R`` CTAs of 288 threads of ``bwd_fine`` and of 96 threads of a relay
@@ -169,23 +170,19 @@ ROLES = (
 )
 # The SM counts of the delivered GPUs the routes are checked on.
 SM_COUNTS = (148, 152, 212)
-# The windows of rows per SM in which each stage's large-R and fine programs run (the measured routes; ``None``: no
-# upper bound), and the lane layout every program keeps: literal copies, so a record that drifts from them fails here,
-# and the route tests expect these windows.
+# The windows of rows per SM in which each stage's large-R, relay and fine programs run (the measured routes; ``None``:
+# no upper bound), and the lane layout every program keeps: literal copies, so a record that drifts from them fails
+# here, and the route tests expect these windows.
 WINDOWS = {
     "fwd_large": {"sm_100a": [[112, None]], "sm_103a": [[208, None]], "sm_107a": [[384, None]]},
-    "bwd_large": {
-        "sm_100a": [[12, 21], [32, 41], [48, None]],
-        "sm_103a": [[12, 21], [32, 41], [48, None]],
-        "sm_107a": [[12, 21], [35, 41], [48, None]],
-    },
+    "bwd_large": {"sm_100a": [[13, 21]], "sm_103a": [[14, 21]], "sm_107a": [[16, 21]]},
+    "bwd_relay": {"sm_100a": [[3, 5], [25, None]], "sm_103a": [[12, 13], [25, 647]], "sm_107a": [[3, 6], [31, None]]},
     "fwd_fine": {"sm_100a": [[0, 8]], "sm_103a": [[0, 4]], "sm_107a": [[0, 4]]},
     "bwd_fine": {"sm_100a": [[0, 2]], "sm_103a": [[0, 2]], "sm_107a": [[0, 2]]},
     "bwd_unweighted_fine": {"sm_100a": [[0, 4]], "sm_103a": [[0, 4]], "sm_107a": [[0, 2]]},
 }
 LANE_LAYOUT = {"lanes": 32, "rows_per_thread": 1, "width_bits": 128}
-# The build facts of each role with records, and of ``bwd_relay``: the lane layout, in ``bwd_unweighted`` and
-# ``bwd_relay`` 3 tasks a row (a warp per (row, run)) and in a fine role 9 tasks a row (one load of each input a task).
+# The build facts of each role with records: the lane layout, in ``bwd_unweighted`` and ``bwd_relay`` 3 tasks a row (a warp per (row, run)) and in a fine role 9 tasks a row (one load of each input a task).
 BUILDS = {
     "fwd": LANE_LAYOUT,
     "fwd_large": LANE_LAYOUT,
@@ -575,8 +572,8 @@ def _edge_rows(edges: list[int]) -> list[int]:
     return sorted({rows for rows in {1, cake_jit.MAX_ROWS - 1} | near if 1 <= rows < cake_jit.MAX_ROWS})
 
 
-# The name of the synthetic relay record of the route tests (no relay record ships).
-RELAY_NAME = f"{cake_jit.LIBRARY_PREFIX}_{'0' * 20}"
+# The name of the relay record of the route tests: the shipped one, whose windows the synthetic routes replace.
+RELAY_NAME = cake_jit.PROGRAM_OF["bwd_relay"].get("sm_100a", f"{cake_jit.LIBRARY_PREFIX}_{'0' * 20}")
 
 
 def _on(arches: tuple[str, ...], windows: list[list[int | None]]) -> dict[str, list[list[int | None]]]:
@@ -585,12 +582,17 @@ def _on(arches: tuple[str, ...], windows: list[list[int | None]]) -> dict[str, l
 
 
 # Windows of rows per SM of the ``bwd`` windowed records for the synthetic routes (role -> architecture -> windows), by
-# name; the fine window stays the shipped ``[0, 2]``.  Without a relay record: the shipped windows and other large-R
-# windows (0.1.9's route).  With one: relay windows below, between and above the large-R ones, a relay window one row
-# per SM above a large-R one, the large-R window last and open, a relay record alone, and a relay record on two
-# architectures only (``sm_107a`` keeps the shipped windows).
+# name; the fine window stays the shipped ``[0, 2]``.  The shipped windows.  Without a relay record: the shipped
+# large-R windows, 0.1.9's three large-R windows and other large-R windows (0.1.9's route).  With one: relay windows
+# below, between and above the large-R ones, a relay window one row per SM above a large-R one, the large-R window last
+# and open, a relay record alone, and a relay record on two architectures only (``sm_107a`` keeps the shipped large-R
+# windows).
 ROUTES = {
-    "shipped": {"bwd_large": WINDOWS["bwd_large"]},
+    "shipped": {"bwd_large": WINDOWS["bwd_large"], "bwd_relay": WINDOWS["bwd_relay"]},
+    "large_shipped": {"bwd_large": WINDOWS["bwd_large"]},
+    "large_019": {
+        "bwd_large": {**_on(ARCHES[:2], [[12, 21], [32, 41], [48, None]]), "sm_107a": [[12, 21], [35, 41], [48, None]]}
+    },
     "large_two": {"bwd_large": {**_on(ARCHES[:2], [[16, 20], [36, 40]]), "sm_107a": [[16, 20], [35, 36]]}},
     "large_three": {"bwd_large": _on(ARCHES, [[3, 11], [16, 20], [48, None]])},
     "relay_around": {"bwd_large": _on(ARCHES, [[16, 20]]), "bwd_relay": _on(ARCHES, [[3, 15], [21, None]])},
@@ -609,12 +611,13 @@ ROUTES = {
 def bwd_windows(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[dict], None]]:
     """``place(table)``: the registry with the ``bwd`` windows of ``table`` (``"bwd_large"`` and ``"bwd_relay"`` ->
     architecture -> windows of rows per SM): the ``bwd_large`` record on the architectures of its row, with those
-    windows, and a ``bwd_relay`` record ``RELAY_NAME`` on the architectures of its row, the ``bwd_large`` record's plan
-    with a block of 96 threads (a CTA of 3 warps per row); a role without a row has no record.  ``PROGRAM_OF`` is
-    derived again, and the package's caches of plans, parameters and routes are emptied at each placement and after
-    the test."""
+    windows, and the ``bwd_relay`` record ``RELAY_NAME`` on the architectures of its row (the shipped relay record's
+    plan, or without one the ``bwd_large`` record's plan with a block of 96 threads, a CTA of 3 warps per row); a role
+    without a row has no record.  ``PROGRAM_OF`` is derived again, and the package's caches of plans, parameters and
+    routes are emptied at each placement and after the test."""
     large = cake_jit.PROGRAM_OF["bwd_large"]["sm_100a"]
     base = cake_jit.MODULES[large]
+    relay_base = cake_jit.MODULES.get(RELAY_NAME)
 
     def clear() -> None:
         pkg._plan.cache_clear()
@@ -629,8 +632,9 @@ def bwd_windows(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[dict], No
                 continue
             arches = [arch for arch in ARCHES if arch in rows]
             windows = {arch: rows[arch] for arch in arches}
-            record = {**base, "arches": arches, "role": role, "rows_per_sm_windows": windows}
-            if role == "bwd_relay":
+            shipped = relay_base if role == "bwd_relay" and relay_base is not None else base
+            record = {**shipped, "arches": arches, "role": role, "rows_per_sm_windows": windows}
+            if role == "bwd_relay" and relay_base is None:
                 launch = {**base["launch"], "block": (96, 1, 1)}
                 record.update(kernel_symbol=f"kernel_{name}", library=name, launch=launch)
             monkeypatch.setitem(cake_jit.MODULES, name, record)
@@ -780,7 +784,7 @@ def test_registry_records_are_well_formed() -> None:
     for stage in STAGES:
         assert set(programs[stage]) == set(ARCHES), stage
     assert cake_jit.PROGRAM_OF == programs
-    # Every role with a record has its build facts; so has bwd_relay, which may have none.
+    # Every role with a record has its build facts.
     roles = {record["role"] for record in cake_jit.MODULES.values()}
     assert roles <= set(cake_jit.BUILD_OF) == set(BUILDS) <= set(ROLES)
     prefix = cake_jit.LIBRARY_PREFIX + "_"
@@ -807,7 +811,7 @@ def test_registry_records_are_well_formed() -> None:
 
 
 def test_the_windows_and_the_lane_layout_are_the_measured_ones() -> None:
-    # every record's windows, by role (no relay record ships: WINDOWS has no relay row)
+    # every record's windows, by role
     windows: dict = {}
     for name, record in cake_jit.MODULES.items():
         for arch, row in record.get("rows_per_sm_windows", {}).items():
@@ -979,19 +983,25 @@ def test_rows_route_to_the_fine_the_small_or_a_windowed_program(stage, arch, sm_
     each on its grid: 1 row, one row below, at and above each edge of the windows, and ``MAX_ROWS - 1`` rows.  The
     package's route holds the plan of each row count up to the larger of the fine window's last row count and the last
     edge; above it, it runs the program of the last window when that window has no upper bound (:func:`_check_route`).
-    With the shipped records (no relay record), the route is 0.1.9's at every row count."""
-    _check_route(stage, arch, sm_count, host_device)
-    limit, plans, tail = pkg._route(stage, 0)
-    assert (limit, [plan[0] for plan in plans], tail[0]) == _route_019(stage, arch, sm_count)
+    On an architecture without a relay record of the stage, the route is the one 0.1.9's code makes from the same
+    records at every row count."""
+    ran = _check_route(stage, arch, sm_count, host_device)
+    relay = cake_jit.PROGRAM_OF[stage + RELAY].get(arch)
+    assert (relay in ran) == (relay is not None), (stage, arch, relay)
+    if relay is None:
+        limit, plans, tail = pkg._route(stage, 0)
+        assert (limit, [plan[0] for plan in plans], tail[0]) == _route_019(stage, arch, sm_count)
 
 
 @pytest.mark.parametrize("arch", ARCHES)
 @pytest.mark.parametrize("stage", STAGES)
-@pytest.mark.parametrize("without", [(LARGE, FINE), (FINE,)], ids=["large_fine", "fine"])
+@pytest.mark.parametrize(
+    "without", [(LARGE, RELAY, FINE), (LARGE, FINE), (FINE,)], ids=["large_relay_fine", "large_fine", "fine"]
+)
 def test_an_architecture_without_a_program_runs_the_small_one(stage, arch, without, host_device, monkeypatch) -> None:
-    """With no fine program of the stage on the architecture, and with neither a fine nor a large-R one (the registry's
-    table without them; no relay record ships), every row count that no remaining program's window holds runs the
-    small-R program: with neither, the route has no edge and no fine bound."""
+    """With no fine program of the stage on the architecture, with neither a fine nor a large-R one, and with none of
+    the fine, the large-R and the relay one (the registry's table without them), every row count that no remaining
+    program's window holds runs the small-R program: with none, the route has no edge and no fine bound."""
     sm_count = SM_COUNTS[-1]
     rows_list = _edge_rows(_route_edges(stage, arch, sm_count))
     edges, names = _expected_route(stage, arch, sm_count, without=without)
@@ -1001,7 +1011,7 @@ def test_an_architecture_without_a_program_runs_the_small_one(stage, arch, witho
     monkeypatch.setattr(cake_jit, "PROGRAM_OF", table)
     small = cake_jit.PROGRAM_OF[stage][arch]
     assert cake_jit.route(stage, arch, sm_count) == (edges, names)
-    assert LARGE not in without or (edges, names) == ((), (small,))
+    assert not set(WINDOWED_ROLES) <= set(without) or (edges, names) == ((), (small,))
     assert cake_jit.fine(stage, arch, sm_count) == (0, small)
     host_device.place(arch, sm_count)
     values = {key: f"<{key}>" for key in PARAMETERS[stage]}
@@ -1059,18 +1069,19 @@ def test_the_route_refuses_windows_that_are_no_route(role, row, message, bwd_win
         ("bwd", [[0, 2.0]], "is not one window \\[0, hi\\]"),
         ("bwd", [[0, True]], "is not one window \\[0, hi\\]"),
         ("bwd", [[False, 2]], "is not one window \\[0, hi\\]"),
-        ("bwd", [[0, 12]], "reaches the first large-R or relay window of 'bwd', from 1776 rows"),
-        ("bwd", [[0, 40]], "reaches the first large-R or relay window of 'bwd', from 1776 rows"),
+        ("bwd", [[0, 3]], "reaches the first large-R or relay window of 'bwd', from 444 rows"),
+        ("bwd", [[0, 40]], "reaches the first large-R or relay window of 'bwd', from 444 rows"),
         ("fwd", [[0, 112]], "reaches the first large-R or relay window of 'fwd', from 16576 rows"),
     ],
 )
 def test_the_route_refuses_fine_windows_that_are_no_route(stage, row, message, host_device, monkeypatch) -> None:
     """A fine record's windows on an architecture must be one ``[0, hi]`` list with an integer ``hi >= 1`` that ends
-    below the first window of the stage's large-R record (``hi`` below its ``lo``): any other row is a ``RuntimeError``
-    naming the record, from ``cake_jit.fine`` and from the package's route (the launcher is not made).  ``hi`` one
-    below that ``lo``, or ``MAX_FINE_ROWS_PER_SM`` when that is smaller, is a route."""
+    below the first window of the stage's large-R and relay records (``hi`` below every ``lo``): any other row is a
+    ``RuntimeError`` naming the record, from ``cake_jit.fine`` and from the package's route (the launcher is not made).
+    ``hi`` one below the first ``lo``, or ``MAX_FINE_ROWS_PER_SM`` when that is smaller, is a route."""
     fine = cake_jit.PROGRAM_OF[stage + FINE]["sm_100a"]
-    below = min(WINDOWS[stage + LARGE]["sm_100a"][0][0] - 1, cake_jit.MAX_FINE_ROWS_PER_SM)
+    first = min(WINDOWS[stage + suffix]["sm_100a"][0][0] for suffix in WINDOWED_ROLES if stage + suffix in WINDOWS)
+    below = min(first - 1, cake_jit.MAX_FINE_ROWS_PER_SM)
     for hi, accepted in ((below, True), (None, False)):
         windows = [[0, hi]] if accepted else row
         record = {**cake_jit.MODULES[fine], "rows_per_sm_windows": {"sm_100a": windows}}
