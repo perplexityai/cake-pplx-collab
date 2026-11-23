@@ -795,11 +795,14 @@ across communication-SM splits and under CUDA Graph replay.
   package (the split off there, no row) against 0.2.5 on B300, same method and
   configurations: record window 0 faster, 0 slower, 12 within noise of 12;
   steady window 0 faster, 0 slower, 12 within noise of 12. 2 of these rows are
-  above 0.2.5 in every round, inside the band: forward with context, ragged 16k,
-  record window +0.57 % (band 3.15 %); forward, uniform 16,384, record window
-  +1.54 % (band 1.80 %). With the split forced on (not shipped): record window 0
-  faster, 0 slower, 14 within noise of 14; steady window 0 faster, 0 slower, 14
-  within noise of 14.
+  above 0.2.5 in every round and their GPU-paired 95 % interval lies entirely
+  above 1, so each is a small slowdown that is consistent across rounds and
+  GPUs, inside the band (verdict noise): forward with context, ragged 16k,
+  record window +0.57 % (band 3.15 %; GPU-paired 95 % interval 1.0025..1.0082);
+  forward, uniform 16,384, record window +1.54 % (band 1.80 %; GPU-paired 95 %
+  interval 1.0011..1.0205). With the split forced on (not shipped): record
+  window 0 faster, 0 slower, 14 within noise of 14; steady window 0 faster, 0
+  slower, 14 within noise of 14.
 
 Optimizer steps, router-network backpropagation and shared-gradient
 all-reduce are outside this adapter.
