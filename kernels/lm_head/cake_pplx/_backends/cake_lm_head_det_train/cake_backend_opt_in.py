@@ -448,6 +448,10 @@ def _hidden_count_begin(
     else:
         compaction_index(labels, valid=valid, pos=pos, idx_full=idx_full, ar=ar)
         count_host.copy_(count_dev, non_blocking=True)
+        if rows0 == T:
+            # a one-chunk call: its dX finalize reads this scan of ``valid`` (:func:`.cake_backend._row_scan`), as in
+            # :func:`.cake_backend._hidden_count_begin`
+            setattr(valid, _main._DEVICE_SCAN_ATTR, pos)
     event.record()
     with _ffi_stream_context(index):
         for key in keys:
