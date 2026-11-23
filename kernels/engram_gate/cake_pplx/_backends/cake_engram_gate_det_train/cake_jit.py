@@ -107,7 +107,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (160, 1, 1),
             "cluster": (4, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 74240,
+            "dynamic_smem_bytes": 74880,
             "use_pdl": False,
         },
         "library": "cake_engram_gate_det_train_f432570962d690736ab8",
