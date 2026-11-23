@@ -40,8 +40,12 @@ trips in reverse launch order, the same bits) from 2048 to 6655 tokens and
 up to 215 / from 216 to 383 tokens, ``collapse_bwd__vjpwa`` (the same VJP
 without the L2 prefetch, the same bits) from 384 to 640 tokens and
 ``collapse_bwd__vjpwa_pfq2`` from 641 tokens.  On SM100 / SM103
-``collapse_backward`` runs ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens and
-``collapse_bwd`` from 1024 tokens; between them SM100 runs
+``collapse_backward`` runs ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens,
+except from 31 to 37 and from 54 to 74 tokens on SM100 and from 31 to 38 and
+from 55 to 77 tokens on SM103, where it runs ``collapse_bwd__vjpwd_sp4_mb4``
+(the same split VJP without the shared-memory stage, the same bits; each band
+under its own record name), and ``collapse_bwd`` from 1024 tokens; between
+them SM100 runs
 ``collapse_bwd__vjpwa_sp2_mb4`` (under the record name
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``) from 216 to 1023 tokens, and
 SM103 runs it from 216 to 247 and from 320 to 1023 tokens (record names
