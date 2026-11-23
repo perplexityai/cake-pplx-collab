@@ -11447,7 +11447,8 @@ def test_device_logprob_kept_backward_reuses_forward_labels(glm_weight, monkeypa
     again: on the default call's one-chunk kept logits (``T`` 256 with 5 % of the rows ignored, every row valid, a
     frozen ``W``) and the opt-in ``memory_mode="keep_logits"`` (``T`` 256, a frozen ``X``, ``T`` 1500 at chunk 512 --
     the hidden valid-row count's kept form where it runs -- and the caller's count ``num_valid_rows``), the kept
-    backward calls ``_prepare_labels`` and the host valid-row count zero times and receives the saved mask and labels;
+    backward calls ``_prepare_labels`` (outside the template a binding miss builds, which binds labels of its own) and
+    the host valid-row count zero times and receives the saved mask and labels;
     the saved mask is ``labels >= 0`` of a compacted call that counted its rows (``None`` without compaction and with
     the caller's count) and the saved labels are the valid rows' labels in index order (every label without
     compaction); ``logp`` / ``dX`` / ``dW`` are the bits (integer views) of ``memory_mode="fast"``, and a second
@@ -11457,11 +11458,23 @@ def test_device_logprob_kept_backward_reuses_forward_labels(glm_weight, monkeypa
     runs_hidden = bool(cake_jit.toolchain_runs_hidden_count(arch))
     armed = [False]
     prepared: list = []
+    building = [0]
+    build = cake_backend.prepare_lm_head_det_loss
+
+    def templating(*args, **kw):
+        # a binding miss builds the binding's template, which binds labels of its own (as before)
+        building[0] += 1
+        try:
+            return build(*args, **kw)
+        finally:
+            building[0] -= 1
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_det_loss", templating)
     for module in (cake_backend, opt_in):
         prepare = module._prepare_labels
 
         def preparing(*args, _real=prepare, **kw):
-            if armed[0]:
+            if armed[0] and not building[0]:
                 prepared.append(args[2] if len(args) > 2 else kw.get("row_index"))
             return _real(*args, **kw)
 
