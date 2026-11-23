@@ -2974,13 +2974,18 @@ K1_PROMOTE_BLOCKS = 64
 #: on every part.  Chunks of 32 missed no cell either where screened (every part but B300); the rule takes 64.  The
 #: wider rows whose plans change with chunks of 64, judged the same way, missed no cell with chunks of 64: 4096 -> 512,
 #: 5120 -> 512, the kv_a 6144 -> 576 and the batched MLA value-projection row on B200 (3591 cells) and B300 (3360); the
-#: first three on GB200 (2688), GB300 (2562) and the R200 board (1974); 5120 -> 512 and kv_a on VR200 (2100), where
-#: 4096 -> 512, whose plans also change from 4097 tokens on, was judged only at 16172 and 16231 tokens (42 cells, in the
-#: screen).  The full re-judge of version 0.3.21 (5 seeds, every part above): TBD0321[det-rejudge-0321].  Cost: the
-#: kernel time of the screen's programs with chunks of 64 over that of the 0.3.20 plan, the median over the cells whose
-#: plan changes, eager launches on B200, GB200, B300, GB300, VR200 and the R200 board: 1.0004 (GB300) to 1.0019 (the
-#: R200 board), the largest single cell 1.0353 (VR200); the package A/B of the plans that change on every part above
-#: (CUPTI, cold L2, eager launches and CUDA graph replays): TBD0321[det-cost-package-ab].
+#: first three on GB200 (2688), GB300 (2562), VR200 (3360) and the R200 board (1974).  The full re-judge of version
+#: 0.3.21 (5 seeds, every part above), per part the cells, the misses (deterministic / non-deterministic) and the
+#: largest ratio to the tier (either norm, median or largest error): B200 3928, 0 / 0, 1.002558; GB200 3860, 0 / 0,
+#: 1.002239; B300 4024, 0 / 0, 1.002558; GB300 4010, 0 / 0, 1.002343; VR200 3617, 0 / 0, 1.002261; the R200 board 3524,
+#: 0 / 0, 1.003311.  Cost: the kernel time of the screen's programs with chunks of 64 over that of the 0.3.20 plan, the
+#: median over the cells whose plan changes, eager launches on B200, GB200, B300, GB300, VR200 and the R200 board:
+#: 1.0004 (GB300) to 1.0019 (the R200 board), the largest single cell 1.0353 (VR200); the package A/B of the plans that
+#: change on every part above (CUPTI, cold L2, eager launches and CUDA graph replays), per part the cells, the geomean
+#: of the 0.3.20 time over the 0.3.21 time (above 1: 0.3.21 faster) and the cells slower than 0.3.20 beyond the spread
+#: of a second 0.3.20 arm, eager / graph: B200 197, 1.000 / 1.000, 12 / 13; GB200 195, 1.000 / 1.000, 2 / 2; B300 218,
+#: 1.001 / 1.000, 3 / 3; GB300 208, 1.000 / 1.000, 5 / 4; VR200 166, 0.998 / 0.999, 11 / 6; the R200 board 167, 0.996 /
+#: 0.997, 14 / 6; a slower cell took at most 1.0258 times the 0.3.20 time (paired median).
 K1_PROMOTE_MIN_SEGMENT = 64
 #: Rows whose plans keep the program without promotion where :func:`k1_promote_blocks` names the twin, keyed as
 #: ``ROW_RULES`` (the planned orientation): an exact ``(N, K, M)`` key holds at that token count ``K`` only, a ragged

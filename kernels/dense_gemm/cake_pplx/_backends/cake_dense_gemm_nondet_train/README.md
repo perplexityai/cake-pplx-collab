@@ -218,8 +218,15 @@ the split's length only, no token table, and the planner skips the rows of `K1_P
 its output without promotion met the naive BF16 tier (below) from 10240 to 131072 tokens, with the errors of PyTorch
 BF16, and the promoted program of version 0.3.0 (chunks of 128 K blocks) took 1.012 to 1.015 times its time at 10240 and
 12288 tokens.  The full re-judge of version 0.3.21 on the six parts of the screen:
-TBD0321[rejudge-0321-cells-and-misses-per-part-det-and-nondet].  Timed against version 0.3.20 on the cells whose plan
-changes: TBD0321[timing-0321-vs-0320-nondet-plan-changed-cells-per-part-eager-and-graph].  The naive BF16 tier is the
+per part the cells (5 seeds, 32 random inputs per cell, both packages), the misses (deterministic / non-deterministic)
+and the largest ratio of an error to the tier's (either norm, median or largest): B200 3928, 0 / 0, 1.002558; GB200
+3860, 0 / 0, 1.002239; B300 4024, 0 / 0, 1.002558; GB300 4010, 0 / 0, 1.002343; VR200 3617, 0 / 0, 1.002261; the R200
+board 3524, 0 / 0, 1.003311.  Timed against version 0.3.20 on the cells whose plan changes (CUPTI, cold L2, median of 21
+interleaved rounds), per part the cells, the geomean of 0.3.20's time over 0.3.21's (above 1: 0.3.21 faster) and the
+cells slower than 0.3.20 beyond the spread of a second 0.3.20 arm, eager launches / CUDA graph replays: B200 189, 1.000
+/ 0.999, 10 / 8; GB200 187, 1.000 / 1.000, 4 / 3; B300 208, 1.001 / 1.001, 3 / 4; GB300 200, 1.000 / 1.000, 3 / 5; VR200
+166, 0.997 / 0.998, 10 / 6; the R200 board 167, 0.996 / 0.997, 16 / 6; no slower cell took more than 1.0310 times the
+time of 0.3.20 (paired median).  The naive BF16 tier is the
 error against FP64 of PyTorch's BF16 product of the same operands: an output meets it when, in the L2 and the max norm,
 its median and largest error over a case's random draws are at most 1.005 times the tier's.  `promote=False` keeps the
 program without promotion.  `promote=True` runs the promoted program at any length on every CTA-pair plan and raises
@@ -415,9 +422,8 @@ tokens (the first item below).  The changes:
   package's plan did (5 cells each on the 212-SM VR200 and the 216-SM R200 board).  With chunks of 64 no output of
   either package missed it on any of the six parts, nor on the benchmark rows outside the screen whose plans change,
   judged with the same protocol: `4096 -> 512`, `5120 -> 512`, `6144 -> 576` and the MLA `vproj` row on the B200 (3591
-  cells) and the B300 (3360); the first three on the GB200 (2688), the GB300 (2562) and the 216-SM R200 board (1974);
-  `5120 -> 512` and `6144 -> 576` on the VR200 (2100); there `4096 -> 512`, whose plans also change from 4097 tokens on,
-  was judged at 16172 and 16231 tokens only (42 cells, in the screen).  `sm_107a` `5120 -> 1024` BF16 keeps its
+  cells) and the B300 (3360); the first three on the GB200 (2688), the GB300 (2562), the VR200 (3360) and the 216-SM
+  R200 board (1974).  `sm_107a` `5120 -> 1024` BF16 keeps its
   one-split program without promotion (`K1_PROMOTE_EXEMPT_ROWS`; since version 0.3.1 the planner chooses it on parts of
   216 SMs and more only): on a 212-SM VR200 part the promoted program of version 0.3.0 took 1.012 to 1.015 times its
   time at 10240 and 12288 tokens, and the program without promotion met the tier from 10240 to 131072 tokens.
@@ -1520,13 +1526,18 @@ runs below compare these plans with those of 0.3.20.  The pre-registered screen 
 NVIDIA GB200 (`sm_100a`, 152 SMs, driver 580.126.20), an NVIDIA GB300 (`sm_103a`, 152 SMs, driver 580.159.03), an
 NVIDIA B300 (`sm_103a`, 148 SMs, driver 580.126.09), an NVIDIA VR200 (`sm_107a`, 212 SMs, driver 620.43) and a 216-SM
 R200 board (`sm_107a`, driver 620.70.06); the rows outside the screen were judged on the same kinds of parts with the
-same drivers, except the VR200 (driver 620.70.06).  The full re-judge, the test suite and the timing runs of this
-version ran on TBD0321[0321-gpus-arch-sms-drivers-of-rejudge-suite-and-timing]; the timing compared
-TBD0321[0321-timing-arms-0320-det0321-cublas-cublaslt-cudnn-frontend].  Software of these runs: CUDA toolkit
-TBD0321[cuda-toolkit-and-nvcc-versions], PyTorch TBD0321[pytorch-version], cuBLAS and cuBLASLt
-TBD0321[cublas-cublaslt-versions], the cuDNN frontend TBD0321[cudnn-frontend-version-and-commit-sha] with cuDNN
-TBD0321[cudnn-version], Python TBD0321[python-version], apache-tvm-ffi TBD0321[apache-tvm-ffi-version], cuda-bindings
-TBD0321[cuda-bindings-version] and cupti-python TBD0321[cupti-python-version].
+same drivers, except the VR200 `5120 -> 512` and `6144 -> 576` rows (driver 620.70.06).  The full re-judge, the test
+suite and the timing runs of this version ran on an NVIDIA B200 (`sm_100a`, 148 SMs, driver 580.82.07), an NVIDIA GB200
+(`sm_100a`, 152 SMs, driver 580.126.20), an NVIDIA B300 (`sm_103a`, 148 SMs, driver 580.126.09), an NVIDIA GB300
+(`sm_103a`, 152 SMs, driver 580.167.08), an NVIDIA VR200 (`sm_107a`, 212 SMs, driver 620.43) and the 216-SM R200 board
+(`sm_107a`, driver 620.70.06); the timing compared this package's version 0.3.21 with its version 0.3.20 (two arms, for
+the run-to-run spread), with the deterministic package's version 0.3.21 on the same cells, and with cuBLAS
+(`torch.matmul`), cuBLASLt and the cuDNN frontend, counting only arms that met the naive BF16 tier on the same operands.
+Software of these runs: CUDA toolkit 13.5 (`nvcc` V13.5.37; the loaded CUDA runtime library 13.5; NVRTC 13.0 in the
+timing runs on the driver-580 parts and 13.5 on the `sm_107a` parts), PyTorch 2.14.1+cu130 (built with CUDA 13.0),
+cuBLAS and cuBLASLt 13.10.0 and 131000, the cuDNN frontend 1.33.0 built from its main branch at commit
+e341436356657f797742f58d6b4c731536c7d859, with cuDNN 9.28.1, Python 3.12.15, apache-tvm-ffi 0.1.12, cuda-bindings 13.4.3
+and cupti-python 13.4.0.
 
 ## Helpers of this package
 
