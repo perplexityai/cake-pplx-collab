@@ -123,8 +123,9 @@ program, `first_tile`, `first_die` and the grid, without a launch.  An in-place 
 interleaved-domain records define no in-place range (`vectors[arch]["in_place"]` is `None`).  On VR200, the domain
 program ran 1.02-1.11x as fast as the `"off"` program on the package benchmark's out-of-place rows from 8,388,608
 vectors (GPU time, median of 4 GPUs; MXFP8 `[16384, 8, 4096]`: 162.1 µs off, 147.5 µs domain).  A call that falls back
-runs the `"off"` program on the helper's memory: on the benchmark's fallback rows (131,072 to 4,194,304 vectors) it ran
-0.95-1.03x as fast as on default memory (GPU time), the slowest for buffers of one chunk, which lie wholly in die 0.
+runs the `"off"` program on the helper's memory: on the benchmark's fallback rows (out of place, 131,072 to 4,194,304
+vectors) it ran 0.95-1.03x as fast as on default memory (GPU time), the slowest for buffers of one chunk, which lie
+wholly in die 0; in-place calls and larger ones on the helper's memory were not measured.
 
 The claim counters are one unsigned 32-bit word per die in a 128-byte workspace (`cake_domain`; the record's `counters`
 field).  Every launch leaves its counters zero, so the package zeroes a workspace once, when it makes it.  Eager calls

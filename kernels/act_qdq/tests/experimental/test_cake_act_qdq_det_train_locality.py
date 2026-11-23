@@ -25,9 +25,10 @@ order, and the launch arguments and grid, against the kernel's own decoding of
 its items; and, against a fake driver, the unwind of a mapping that fails (out
 of memory, retried once; any other error, not retried) and the error without
 cuda-python; the free of a range queued while another call holds the module's
-lock; and the per-thread default stream's workspace per thread.  The GPU tests
-check that ``"domain"`` runs the ``"off"`` program on other architectures and
-on default memory, and that ``"off"`` loads none of the route's state.  The
+lock; and the per-thread default stream's key per thread.  The GPU tests check
+that ``"domain"`` runs the ``"off"`` program on other architectures and on
+default memory, that ``"off"`` loads none of the route's state, and that on
+the per-thread default stream each thread takes its own claim workspace.  The
 SM107 tests (skipped elsewhere; an SM107 whose driver reports fewer than two
 locality domains fails them) check the allocation (dies, registry, zero copy,
 the free, the free deferred past a capture, the refusal during capture, and
@@ -47,6 +48,7 @@ This suite names the backend package once, through
 
 from __future__ import annotations
 
+import collections
 import enum
 import gc
 import subprocess
@@ -446,18 +448,30 @@ def test_driver_needs_cuda_python(monkeypatch) -> None:
 
 @pytest.mark.cpu_only
 def test_a_range_queued_under_the_lock_is_freed_when_the_lock_is_released(monkeypatch) -> None:
-    """A finalizer that finds the module's lock taken only queues its range; the call holding the lock frees it as
-    it releases it, and a pass that can free nothing (during a capture) leaves it queued."""
+    """A finalizer that finds the module's lock taken only queues its range; the call that holds the lock frees it
+    as it releases it: here :func:`domain_empty`, whose mapping fails after the finalizer ran.  A pass that can free
+    nothing (during a capture) leaves the range queued for a later call."""
     freed: list = []
+    monkeypatch.setattr(memory, "_PENDING", collections.deque())
     monkeypatch.setattr(memory, "_free", freed.append)
     monkeypatch.setattr(memory, "_unregister", lambda index, base: None)
     monkeypatch.setattr(memory, "_capturing", lambda: False)
-    assert not memory._PENDING
+    monkeypatch.setattr(memory, "_driver", lambda: SimpleNamespace())
+    monkeypatch.setattr(memory, "domain_count", lambda index: memory.DIES)
+    monkeypatch.setattr(memory, "_make_graph_workspaces", lambda index: None)
+    monkeypatch.setattr(memory.cake_jit, "device_arch", lambda index: ARCH)
     entry = memory._Mapped(0, 1 << 30, CHUNK, CHUNK)
-    with memory._LOCK:
-        memory._release(entry)
-        assert freed == [] and list(memory._PENDING) == [entry]
-    memory._drain()
+    queued: list = []
+
+    def map_after_a_finalizer(driver, index, chunk, chunks):
+        memory._release(entry)  # the finalizer of a range whose last view died while domain_empty holds the lock
+        queued.append((list(freed), list(memory._PENDING)))
+        raise RuntimeError("mapping refused")
+
+    monkeypatch.setattr(memory, "_map_or_out_of_memory", map_after_a_finalizer)
+    with pytest.raises(RuntimeError, match="mapping refused"):
+        memory.domain_empty((4, WIDTH), device="cuda:0")
+    assert queued == [([], [entry])], queued
     assert freed == [entry] and not memory._PENDING
     monkeypatch.setattr(memory, "_capturing", lambda: True)
     memory._release(entry)
@@ -468,15 +482,18 @@ def test_a_range_queued_under_the_lock_is_freed_when_the_lock_is_released(monkey
 
 
 @pytest.mark.cpu_only
-def test_the_per_thread_default_stream_has_a_workspace_per_thread() -> None:
+def test_the_per_thread_default_stream_has_a_key_per_thread() -> None:
     """The per-thread default stream's handle names another stream in each thread, so its workspaces are keyed by
-    the thread too; any other handle names one stream."""
-    other: list = []
-    thread = threading.Thread(target=lambda: other.append(memory._stream_key(0, memory.PER_THREAD_STREAM)))
-    thread.start()
-    thread.join()
+    the thread's token, which no later thread reuses; any other handle names one stream."""
+    keys: list = []
+    for _ in range(2):
+        thread = threading.Thread(target=lambda: keys.append(memory._stream_key(0, memory.PER_THREAD_STREAM)))
+        thread.start()
+        thread.join()
     here = memory._stream_key(0, memory.PER_THREAD_STREAM)
-    assert here != other[0] and here[:2] == other[0][:2] == (0, memory.PER_THREAD_STREAM)
+    assert here == memory._stream_key(0, memory.PER_THREAD_STREAM)
+    assert len({here, *keys}) == 3, (here, keys)
+    assert all(key[:2] == (0, memory.PER_THREAD_STREAM) for key in (here, *keys))
     assert memory._stream_key(0, 0) == (0, 0)
     assert memory._stream_key(1, 0x7F00) == (1, 0x7F00)
 
@@ -543,6 +560,38 @@ def test_empty_input_plan() -> None:
         "grid": None,
     }
     assert forward(x, format="mxfp8_e8m0_g32", locality="domain").shape == (0, 512)
+
+
+@gpu
+def test_the_per_thread_default_stream_gives_each_thread_its_workspace(monkeypatch) -> None:
+    """On the per-thread default stream (``cudaStreamPerThread``) an eager launch takes its own thread's claim
+    workspace: two threads never share counters, and a thread's later launches reuse its own.  The kernel is
+    replaced, so this runs on every architecture."""
+    monkeypatch.setattr(memory, "_STREAM_WORKSPACES", {})
+    monkeypatch.setattr(memory.cake_jit, "run_module", lambda name, values, **kwargs: None)
+    name = _domain_name(KINDS[0])
+    seen: dict[int, list[int]] = {}
+    errors: list = []
+
+    def calls(k: int) -> None:
+        try:
+            with torch.cuda.stream(torch.cuda.ExternalStream(memory.PER_THREAD_STREAM)):
+                for _ in range(2):
+                    memory.launch(name, {}, device_index=0, grid=(1, 1, 1))
+                    seen.setdefault(k, []).append(memory.stream_workspace(0, memory.PER_THREAD_STREAM).data_ptr())
+                torch.cuda.current_stream().synchronize()
+        except BaseException as exc:  # noqa: BLE001 - reported by the test thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=calls, args=(k,)) for k in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors, errors
+    assert seen[0][0] == seen[0][1] and seen[1][0] == seen[1][1], seen
+    assert seen[0][0] != seen[1][0], seen
+    assert len(memory._STREAM_WORKSPACES) == 2
 
 
 @gpu

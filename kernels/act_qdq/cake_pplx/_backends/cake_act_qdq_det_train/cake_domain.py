@@ -25,11 +25,12 @@ locality domain), chunk ``k`` in die ``k & 1``, and returns a torch tensor
 over it without a copy.  The range is registered by device, so :func:`place`
 finds a tensor's offset in its chunk and the die of that chunk from its
 address alone, with no driver call.  The plain programs run over such memory
-at about the speed of default memory: within 0.95-1.03x of it in the package
-benchmark on VR200, the slowest for buffers of one chunk, which lie wholly in
-die 0.  The driver maps this memory outside torch's caching allocator, so
-``torch.cuda.memory_allocated`` and the other ``torch.cuda.memory_*`` counters
-do not count it.
+at about the speed of default memory: out-of-place calls of 131,072 to
+4,194,304 vectors ran at 0.95-1.03x of it in the package benchmark on VR200,
+the slowest for buffers of one chunk, which lie wholly in die 0; in-place
+calls and larger ones were not measured.  The driver maps this memory outside
+torch's caching allocator, so ``torch.cuda.memory_allocated`` and the other
+``torch.cuda.memory_*`` counters do not count it.
 
 The tensor and every view of it keep the range alive.  Once the last one is
 gone, its finalizer queues the range and frees it: it synchronizes the device,
@@ -53,8 +54,8 @@ dies' claim counters, ``words`` unsigned words each (the record's
 flight shares; every launch leaves its counters zero.  Eager calls use one
 workspace per (device, stream), zeroed once when it is made; on the per-thread
 default stream (``cudaStreamPerThread``, one handle that names another stream
-in each thread) one per (device, thread).  The calls of one CUDA graph capture
-on one capture stream share one taken for good from the
+in each thread) one per (device, thread), kept for the process.  The calls of
+one CUDA graph capture on one capture stream share one taken for good from the
 :data:`GRAPH_WORKSPACES` zeroed workspaces that the device's first
 :func:`domain_empty` call makes; once all are taken, each captured call takes
 one from the graph's pool, which the graph zeroes at every replay.  The
@@ -77,6 +78,7 @@ import collections
 import contextlib
 import ctypes
 import functools
+import itertools
 import math
 import threading
 import weakref
@@ -493,14 +495,15 @@ def _free_pending() -> int:
 def _drain() -> None:
     """Free the pending ranges unless another call holds ``_LOCK``; every call that holds it runs this after it
     releases it, so a range a finalizer queued meanwhile (it found the lock taken) is not left pending.  Stops when
-    a pass frees nothing: during a capture, or when every free fails, the ranges wait for a later call."""
+    a pass finds ranges and frees none: during a capture, or when every free fails, they wait for a later call."""
 
     while _PENDING and _LOCK.acquire(blocking=False):
         try:
+            had = bool(_PENDING)
             freed = _free_pending()
         finally:
             _LOCK.release()
-        if not freed:
+        if had and not freed:
             return
 
 
@@ -612,14 +615,22 @@ _STREAM_WORKSPACES: dict[tuple[int, ...], _Workspace] = {}
 _CAPTURE_WORKSPACES: dict[tuple[int, ...], tuple[int, _Workspace]] = {}
 # cudaStreamPerThread: one handle that names the calling thread's own default stream
 PER_THREAD_STREAM = 0x2
+# Each thread's token for the per-thread default stream: drawn once per thread, never reused (a thread's ident may be
+# reused after it exits, while its last launch may still run).
+_THREAD = threading.local()
+_THREAD_TOKENS = itertools.count(1)
 
 
 def _stream_key(index: int, stream: int) -> tuple[int, ...]:
     """The key of the workspaces of the calls on ``stream`` of device ``index``: the per-thread default stream's
-    handle names another stream in each thread, so its key also holds the thread."""
+    handle names another stream in each thread, so its key also holds the thread's token.  A thread's workspace is
+    kept for the process (a launch that raises drops it) and is never handed to another thread."""
 
     if stream == PER_THREAD_STREAM:
-        return (index, stream, threading.get_ident())
+        token = getattr(_THREAD, "token", None)
+        if token is None:
+            token = _THREAD.token = next(_THREAD_TOKENS)
+        return (index, stream, token)
     return (index, stream)
 
 

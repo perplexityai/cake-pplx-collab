@@ -193,13 +193,14 @@ def cake_act_qdq_det_train_domain_empty(
     contiguous and starts on a chunk; views of it (slices, reshapes) keep it
     alive.  Freeing the last view synchronizes the device; during a CUDA
     graph capture on any device in this thread, the range is freed after the
-    capture, by a later free or a later call of this function.
-    Allocate the buffers once, before any CUDA graph capture, and reuse
-    them.  A capture begun with ``cudaStreamBeginCapture`` on a stream that
-    is not torch's current stream is not detected.  The ``"off"`` programs
-    run on this memory at 0.95-1.03x of their speed on default memory (GPU
-    time, VR200 package benchmark).  Needs cuda-python
-    (the ``locality`` extra).
+    capture, by a later free or a later call of this function.  Allocate the
+    buffers once, before any CUDA graph capture, and reuse them.  A capture
+    begun with ``cudaStreamBeginCapture`` on a stream that is not torch's
+    current stream is not detected.  The ``"off"`` programs run on this
+    memory at 0.95-1.03x of their speed on default memory for out-of-place
+    calls of 131,072 to 4,194,304 vectors (GPU time, VR200 package
+    benchmark); in-place calls and larger ones were not measured.  Needs
+    cuda-python (the ``locality`` extra).
 
     Parameters
     ----------
