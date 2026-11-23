@@ -390,11 +390,14 @@ keyword.
   the loss entry's one-chunk calls in that row window without the zero-weight
   split (`cake_backend.hidden_count_chunks_admit`): their chunk 0 GEMM runs on
   `T` rows and the GPU no longer waits for the host count's readback and the
-  host work after it (measured on GB300, cross-entropy, chunk 4096: the
-  forward behind queued work 228 to 345 us faster at `T` = 32 to 1024, the
-  `T` = 1024 forward + backward step 3534.9 -> 3396.6 us in CUPTI span; at
-  `T` = 8 a step with a cleared binding cache measured slower, 1980.0 ->
-  2087.9 us, so smaller calls keep the host count).  Their dX finalize reads
+  host work after it (measured on GB300 against the host count,
+  cross-entropy, chunk 4096, 18 fresh processes per side: behind queued work
+  the forward 228 to 374 us faster and the backward 3.9 to 7.9 us faster at
+  `T` = 32 to 1024, the `T` = 1024 forward + backward step 3482.8 -> 3182.4
+  us; no slower forward, backward, step, cleared-cache step or checkpointed
+  step in CUPTI span or behind queued work; at `T` = 8 a step with a cleared
+  binding cache measured slower, 1980.0 -> 2087.9 us, so smaller calls keep
+  the host count).  Their dX finalize reads
   the scan the count's compaction formed, so no backward -- a retained
   graph's second one included -- launches a scan of its own, and a call
   inside a non-reentrant `torch.utils.checkpoint` keeps the host count in

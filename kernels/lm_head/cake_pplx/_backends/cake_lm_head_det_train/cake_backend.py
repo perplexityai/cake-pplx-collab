@@ -293,10 +293,13 @@ HIDDEN_COUNT_MIN_CHUNKS = 3
 # architecture's ``(min, max)``) take the hidden valid-row count too (:func:`hidden_count_chunks_admit`; not a call with
 # the zero-weight split, not the log-probability entries): at these rows chunk 0's logits GEMM runs on ``T`` rows, the
 # host plans behind the queued GEMM and the GPU no longer idles for the host count's readback and the host work after
-# it.  Measured on GB300 (cross-entropy loss entry, chunk 4096, H 6144, V 154880, 5 % ignored rows; CUPTI span of one
-# call, and the same call queued behind a 2 ms kernel; medians, us): the queued forward at T = 32 / 1024 941.9 -> 664.4
-# / 2439.6 -> 2159.8, the T = 1024 forward + backward step 3534.9 -> 3396.6; below 32 rows a step with a cleared binding
-# cache measured slower (T = 8: 1980.0 -> 2087.9), so smaller calls keep the host count.  Such a call's dX finalize
+# it.  Measured on GB300 against the host count (cross-entropy loss entry, chunk 4096, H 6144, V 154880, 5 % ignored
+# rows; 18 fresh processes per side, each the median of 20 calls: CUPTI span with a cold L2, and the same call queued
+# behind a 2 ms kernel; medians of the first 9, us): the queued forward at T = 32 / 1024 905.9 -> 662.2 / 2451.3 ->
+# 2157.7, the queued backward 394.3 -> 389.5 / 1019.6 -> 1011.7, the queued T = 1024 forward + backward step 3482.8 ->
+# 3182.4, and no slower call at T = 32 to 1024 (forward, backward, step, step with a cleared binding cache, checkpointed
+# step; both timings).  Below 32 rows a step with a cleared binding cache measured slower (T = 8: 1980.0 -> 2087.9), so
+# smaller calls keep the host count.  Such a call's dX finalize
 # reads the scan the count's compaction formed (:data:`_DEVICE_SCAN_ATTR`: no scan launch in any backward), and a call
 # inside a non-reentrant checkpoint keeps the host count in both passes (``forward_loss``'s ``_one_chunk_count``):
 # without these two rules the retained second backward (a device scan in place of the host count's one copy) and the
