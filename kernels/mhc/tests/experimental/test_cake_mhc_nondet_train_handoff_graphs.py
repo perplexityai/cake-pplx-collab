@@ -326,10 +326,11 @@ def test_captured_two_sublayer_chain(record_property) -> None:
     chain.check(record_property)
 
 
-@pytest.mark.parametrize("T", (2049, 768, 129))
+@pytest.mark.parametrize("T", (2049, 768, 129, 64, 34))
 def test_captured_standalone_collapse(T: int, record_property) -> None:
     """``collapse_forward`` and ``collapse_backward`` captured and replayed on 32 inputs: ``U``, ``dX`` and ``dpre_in``
-    judged against the naive tier (T 768 / 129: the split VJPs of the token-count bands of ``collapse_backward``)."""
+    judged against the naive tier (T 768 / 129 / 64 / 34: the split VJPs of the token-count bands of
+    ``collapse_backward``; 34 the stage-free split VJP on sm_100a / sm_103a)."""
     statics = make_inputs(T, device=_device(), seed=SEED + 5)
 
     def step():
