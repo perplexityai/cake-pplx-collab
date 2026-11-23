@@ -588,7 +588,7 @@ def test_build_schedule_plan_matches_the_unplanned_launches(count):
     ]
     plan = workspace.storage.launch_plans[key]
     assert len([k for k in workspace.storage.launch_plans if k[0] == "schedule"]) == 1
-    rank, token, total, counts, layout = functional._schedule_launches(
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
         workspace.storage, config, ids, count
     )
     unplanned = fields(
@@ -644,7 +644,7 @@ def test_build_schedule_plan_built_under_inference_mode():
             functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
         )
     assert workspace.storage.launch_plans[key] is plan
-    rank, token, total, counts, layout = functional._schedule_launches(
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
         workspace.storage, config, ids, count
     )
     unplanned = _schedule_fields(
@@ -2132,6 +2132,222 @@ def test_before_down_launchers_pass_exactly_the_registry_arguments(monkeypatch):
         MoKForward(True, weight_before_down=1)
 
 
+def _source_split_launcher_setup(monkeypatch):
+    """Stub kernels (no launch) and the arguments of a router-weight-before-down forward at EP4, 4 forward
+    communication SMs."""
+    calls = _stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    tokens, hidden, intermediate, experts, topk, macro, mini, comm, ep, limit = (
+        512, 256, 256, 4, 2, 768, 256, 4, 4, 10.0,
+    )  # fmt: skip
+    capacity = 4096
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(tokens, hidden, **options)
+    combine = torch.zeros(tokens * topk, hidden, **options)
+    ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
+    weight_ptrs = [65536 * (rank + 1) for rank in range(ep)]
+    shared = [
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(hidden, intermediate, **options),
+    ]
+    routed = [torch.zeros(experts, intermediate, hidden, **options) for _ in range(2)]
+    routed.append(torch.zeros(experts, hidden, intermediate, **options))
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    schedule = (
+        torch.full((capacity,), -1, dtype=torch.int32),
+        torch.zeros(capacity, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(experts, dtype=torch.int32),
+    )
+    layout = torch.zeros(3 * experts + capacity // 256, dtype=torch.int32)
+    call = (x, ptrs, combine, ptrs, *weights, *schedule, topk, limit, comm, macro, mini)
+    plan = (x, ptrs, ptrs, intermediate, experts, capacity, topk, limit, comm, macro, mini)
+    return calls, call, plan, weights, schedule, layout, weight_ptrs
+
+
+@pytest.mark.parametrize("context", [True, False], ids=["context", "context-free"])
+def test_source_split_launcher_arguments(monkeypatch, context):
+    """Host only (stub kernels, no launch): the router-weight-before-down forward hands the kernel ``ep_size``,
+    ``rich_comm_sms``, ``rich_threshold`` (1/256 steps) and ``owner_routes``.  Without a split the count in force
+    goes in as the rich count and ``num_tokens`` stands in for the route totals (never read); an unplanned call
+    with a split but without the totals keeps the count in force; a plan with a split needs the schedule's int32
+    ``[ep_size]`` totals at every launch.  Malformed splits and totals are refused before any launch, and the other
+    launchers refuse the split."""
+    calls, call, plan_args, weights, schedule, layout, weight_ptrs = _source_split_launcher_setup(monkeypatch)
+    forward = MoKForward(True, context=context, weight_before_down=True)
+    routes = torch.tensor([7, 0, 3, 5], dtype=torch.int32)
+
+    def launched(**expected):
+        ((role, arguments),) = calls
+        calls.clear()
+        assert role.endswith("_wbd"), role
+        for name, value in expected.items():
+            if isinstance(value, torch.Tensor):
+                got = arguments[name]
+                assert got.data_ptr() == value.data_ptr() and torch.equal(got, value), name
+            else:
+                assert arguments[name] == value, (name, arguments[name])
+
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs)
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=384, owner_routes=schedule[2])
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 300))
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=300, owner_routes=schedule[2])
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 300), owner_routes=routes)
+    launched(ep_size=4, rich_comm_sms=2, rich_threshold=300, owner_routes=routes)
+    plan = forward.plan(*plan_args, weight_ptrs=weight_ptrs)
+    MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=384, owner_routes=schedule[2])
+    plan = forward.plan(*plan_args, weight_ptrs=weight_ptrs, source_split=(2, 257))
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        MoKForward.launch_planned(plan, *weights, *schedule[:3], layout, routes.long())
+    MoKForward.launch_planned(plan, *weights, *schedule[:3], layout, routes)
+    launched(ep_size=4, rich_comm_sms=2, rich_threshold=257, owner_routes=routes)
+    for split in ((3, 384), (6, 384), (0, 384), (2, 256), (2, 2**31), (2.0, 384), (2, 384.0)):
+        with pytest.raises(ValueError, match="source_split must be"):
+            forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=split)
+        with pytest.raises(ValueError, match="source_split must be"):
+            forward.plan(*plan_args, weight_ptrs=weight_ptrs, source_split=split)
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 384), owner_routes=routes[:3])
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context)(*call, layout=layout, source_split=(2, 384))
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context)(*call, layout=layout, owner_routes=routes)
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context).plan(*plan_args, source_split=(2, 384))
+    assert calls == []
+
+
+def test_source_split_follows_the_config():
+    """Host only: the adapter's source split of a forward launch: off (the forward count in force, the threshold,
+    ``num_tokens`` in place of the totals) for the router weight after the down projection, without a count, with a
+    count not below the forward count in force and for a schedule without totals; on, the count, the threshold in
+    1/256 steps (rounded) and the schedule's totals; totals of another shape, type or device are refused."""
+    from types import SimpleNamespace
+
+    functional = object.__new__(backend.MoKFunctional)
+    device = torch.device("cpu")
+    workspace = SimpleNamespace(ep_size=4, device=SimpleNamespace(index=-1))
+    routes = torch.tensor([7, 0, 3, 5], dtype=torch.int32, device=device)
+    tokens = torch.zeros(1, dtype=torch.int32, device=device)
+    schedule = SimpleNamespace(owner_routes=routes, num_tokens=tokens)
+    on = dataclasses.replace(MoKConfig(), source_split_comm_sms=16, source_split_threshold=1.25)
+    functional.weight_before_down = False
+    assert functional._source_split(on, workspace, schedule, 24) == (24, 320, tokens)
+    functional.weight_before_down = True
+    off = dataclasses.replace(on, source_split_comm_sms=None)
+    assert functional._source_split(off, workspace, schedule, 24) == (24, 320, tokens)
+    assert functional._source_split(on, workspace, schedule, 16) == (16, 320, tokens)
+    no_routes = SimpleNamespace(owner_routes=None, num_tokens=tokens)
+    assert functional._source_split(on, workspace, no_routes, 24) == (24, 320, tokens)
+    rich, threshold, totals = functional._source_split(on, workspace, schedule, 24)
+    assert (rich, threshold) == (16, 320) and totals is routes
+    assert functional._source_split(
+        dataclasses.replace(on, source_split_threshold=1.5009), workspace, schedule, 24
+    )[1] == 384
+    for bad in (routes[:3], routes.long(), routes.float()):
+        with pytest.raises(ValueError, match="owner_routes must be"):
+            functional._source_split(
+                on, workspace, SimpleNamespace(owner_routes=bad, num_tokens=tokens), 24
+            )
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        functional._source_split(on, SimpleNamespace(ep_size=4, device=SimpleNamespace(index=0)), schedule, 24)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source_split_comm_sms", 0),
+        ("source_split_comm_sms", 3),
+        ("source_split_comm_sms", -2),
+        ("source_split_comm_sms", 148),
+        ("source_split_comm_sms", 16.0),
+        ("source_split_comm_sms", True),
+        ("source_split_threshold", 1.0),
+        ("source_split_threshold", 1.001),
+        ("source_split_threshold", 0.5),
+        ("source_split_threshold", 65536.5),
+        ("source_split_threshold", float("inf")),
+        ("source_split_threshold", float("nan")),
+        ("source_split_threshold", "1.5"),
+    ],
+)
+def test_source_split_config_is_validated(field, value):
+    """Host only: the schedule check refuses a source-split count that is not a positive, even count leaving
+    compute SMs and a threshold that is not finite, above 1.0 in 1/256 steps and at most 65536; the default and
+    in-range values pass."""
+    functional = object.__new__(backend.MoKFunctional)
+    functional._schedule_configs, functional._sm_count = {}, {0: 148}
+    device = torch.device("cuda", 0)
+    with pytest.raises(ValueError, match=field):
+        functional._check_schedule_config(dataclasses.replace(MoKConfig(), **{field: value}), device)
+    for good in (
+        MoKConfig(),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=16, source_split_threshold=1.002),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=2, source_split_threshold=65536),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=146, source_split_threshold=4),
+    ):
+        functional._check_schedule_config(good, device)
+
+
+@pytest.mark.parametrize(
+    "capability,sm_count,ep_size,expected",
+    [
+        ((10, 0), 148, 8, 16),  # B200, EP8
+        ((10, 0), 148, 4, None),
+        ((10, 0), 152, 4, 16),  # GB200, EP4
+        ((10, 0), 152, 8, None),
+        ((10, 3), 148, 8, None),  # B300, EP8: measured, no gain (README)
+        ((10, 3), 148, 4, None),
+        ((10, 3), 152, 4, 16),  # GB300, EP4
+        ((10, 3), 152, 8, None),
+        ((10, 3), 160, 4, None),  # other SM count
+        ((10, 7), 212, 8, None),  # Rubin: no row
+        ((12, 0), 170, 4, None),
+    ],
+)
+def test_source_split_auto_follows_the_device_and_group(monkeypatch, capability, sm_count, ep_size, expected):
+    """Host-only: ``"auto"`` for the source split resolves through the per-device, per-group-size table; devices and
+    group sizes without a measured row keep the split off (``None``)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: capability)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    assert api.resolve_source_split_comm_sms(ep_size) == expected
+
+
+def test_source_split_defaults_resolve_the_measured_rows():
+    """Host-only: the config default keeps the source split off, the facade default ``"auto"`` resolves the
+    measured row (threshold 1.5), the measured rows are the shipped table (a change here is a shipping change) and
+    malformed arguments are rejected before any collective."""
+    import inspect
+
+    config = MoKConfig()
+    assert config.source_split_comm_sms is None
+    assert config.source_split_threshold == api.SOURCE_SPLIT_THRESHOLD == 1.5
+    facade = inspect.signature(api.create_mok_bf16_workspace).parameters
+    assert facade["source_split_comm_sms"].default == "auto"
+    assert facade["source_split_threshold"].default == 1.5
+    assert kernels.SOURCE_SPLIT_UNIT == 256
+    assert api.SOURCE_SPLIT_COMM_SMS == {
+        (10, 0): {148: {8: 16}, 152: {4: 16}},
+        (10, 3): {152: {4: 16}},
+    }
+    with pytest.raises(ValueError, match="ep_size must be a positive"):
+        api.resolve_source_split_comm_sms(0)
+    kwargs = dict(group=None, device=None, num_local_tokens=512, hidden_size=256, topk=2)
+    with pytest.raises(ValueError, match='"auto"'):
+        api.create_mok_bf16_workspace(source_split_comm_sms="fast", **kwargs)
+
+
 def test_before_down_call_refusals_come_before_device_work(monkeypatch):
     """Host only: with ``router_weight_position="before_down"`` plain SwiGLU (``swiglu_limit=None``), MXFP8 routed
     weights and a recompute without the router weights are refused by every operation and ``prepare`` before any
@@ -2510,6 +2726,56 @@ def test_before_down_recompute_and_context_free_forward(macro, experts, topk):
     assert all(torch.count_nonzero(value).item() > 0 for value in expected)
     for a, b in zip(expected, gradients(rebuilt), strict=True):
         assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize("experts,topk", [(4, 2), (6, 6)], ids=["top2", "top6"])
+@pytest.mark.parametrize("macro", [768, 4096], ids=["replay", "resident"])
+def test_before_down_source_split_is_bitwise(macro, experts, topk):
+    """The router-weight-before-down forward (context and context-free) with the source split taken on one GPU
+    (route totals of one route, so the rank's 1024 source rows count as rich; 2, 4 and 6 of 8 communication SMs) and
+    held (the schedule's real totals): every launch writes the split-off bytes of y, the combine rows, the shared
+    gate, up and hidden and, on the resident macrobatch, the routed x, gate, up and hidden."""
+    _require_role("forward_clamped_wbd")
+    tokens, hidden, intermediate, mini, comm, limit = 1024, 512, 256, 256, 8, 0.125
+    x, _, shared, routed, scores = _before_down_problem(tokens, hidden, intermediate, experts, topk, 4127)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    row = torch.arange(tokens, device="cuda")
+    routes = torch.stack([(row * 5 + slot) % experts for slot in range(topk)], -1)
+    s = single_rank_schedule(routes, experts)
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    pointers = [scores.data_ptr()]
+    rows = min(s["actual"], macro)
+    taken = torch.ones(1, dtype=torch.int32, device="cuda")
+    held = torch.full((1,), tokens * topk, dtype=torch.int32, device="cuda")
+    for context in (True, False):
+        kernel = MoKForward(True, context=context, weight_before_down=True)
+
+        def run(**split):
+            combine = torch.zeros(tokens * topk, hidden, **options)
+            values = kernel(
+                x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+                *schedule, topk, limit, comm, macro, mini, weight_ptrs=pointers, **split,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return values, combine
+
+        base, base_combine = run()
+        assert torch.count_nonzero(base_combine).item() > 0
+        for split in (
+            dict(source_split=(2, 257), owner_routes=taken),
+            dict(source_split=(4, 300), owner_routes=taken),
+            dict(source_split=(6, 384), owner_routes=taken),
+            dict(source_split=(2, 257), owner_routes=held),
+        ):
+            values, combine = run(**split)
+            assert torch.equal(combine, base_combine), split
+            for index in (1, 3, 5, 7):  # shared gate, up, hidden, y
+                if base[index] is not None:
+                    assert torch.equal(values[index], base[index]), (split, index)
+            for index in (0, 2, 4, 6):  # routed x, gate, up, hidden of the resident macrobatch
+                if base[index] is not None:
+                    assert torch.equal(values[index][:rows], base[index][:rows]), (split, index)
 
 
 def test_before_down_clamp_at_the_limit():
