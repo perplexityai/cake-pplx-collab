@@ -11448,52 +11448,6 @@
     },
     {
       "arch": "sm_100a",
-      "closure_sha256": "5f0240f21a1719f0489a9fb7cb85826029799d95c5e40752cf0a13e41cd5daff",
-      "entry": "run",
-      "gencode": "-gencode=arch=compute_100a,code=sm_100a",
-      "min_cuda": "12.8",
-      "name": "cake_rmsnorm_train_aa1d3e29ef1b72a71d51_sm_100a",
-      "nvcc_flags": [
-        "--prec-div=true",
-        "--prec-sqrt=true",
-        "--ftz=false"
-      ],
-      "nvcc_flags_if": [],
-      "path": "aot/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_sm_100a.so",
-      "sha256": {
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_binding.cu": "f8063cef747594b97d44f3e26dcd9954809a6492e48731ef8a002ee018542e50",
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_kernel.cu": "f9e3a71f41b04904ee164d9a167fbf4bdcac8e980fe24c6a640ed105d6390272"
-      },
-      "sources": [
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_kernel.cu",
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_binding.cu"
-      ]
-    },
-    {
-      "arch": "sm_103a",
-      "closure_sha256": "d6d7b4adf0fcc35d4f84e181aad13ab690de041a99deb0a17403d961771656f9",
-      "entry": "run",
-      "gencode": "-gencode=arch=compute_103a,code=sm_103a",
-      "min_cuda": "12.9",
-      "name": "cake_rmsnorm_train_aa1d3e29ef1b72a71d51_sm_103a",
-      "nvcc_flags": [
-        "--prec-div=true",
-        "--prec-sqrt=true",
-        "--ftz=false"
-      ],
-      "nvcc_flags_if": [],
-      "path": "aot/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_sm_103a.so",
-      "sha256": {
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_binding.cu": "f8063cef747594b97d44f3e26dcd9954809a6492e48731ef8a002ee018542e50",
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_kernel.cu": "f9e3a71f41b04904ee164d9a167fbf4bdcac8e980fe24c6a640ed105d6390272"
-      },
-      "sources": [
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_kernel.cu",
-        "csrc/cake_rmsnorm_train_aa1d3e29ef1b72a71d51_binding.cu"
-      ]
-    },
-    {
-      "arch": "sm_100a",
       "closure_sha256": "9a8af7813e6701bd4d7f7ce3e32c51acfaf946e6b28948e610a9a2c91611e469",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
