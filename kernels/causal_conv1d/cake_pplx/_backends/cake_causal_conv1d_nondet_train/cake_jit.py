@@ -6261,7 +6261,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             24576,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
-        ("bwd", 512, 512): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 512, 512): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 520, 576): (
             1000,
             2048,
@@ -6272,7 +6272,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             2048,
             "cake_causal_conv1d_train_a9deef7249fb422bc28a",
         ),
-        ("bwd", 640, 640): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 640, 640): (1, 2561, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 704, 704): (
             1000,
             2048,
@@ -6289,7 +6289,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             "cake_causal_conv1d_train_a9deef7249fb422bc28a",
         ),
         ("bwd", 992, 992): (1, 1000, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
-        ("bwd", 1024, 1024): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 512): (
             1,
             4096,
@@ -6342,17 +6342,27 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
         ),
         ("bwd_bias", 512, 512): (
             1,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 520, 632): (
+            1000,
             2048,
             "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
         ),
-        ("bwd_bias", 520, 832): (
+        ("bwd_bias", 640, 640): (
+            1000,
+            2561,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 648, 832): (
             1000,
             2048,
             "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
         ),
         ("bwd_bias", 1024, 1024): (
             1,
-            2048,
+            4096,
             "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
         ),
     },
@@ -7843,7 +7853,6 @@ GRID_CAP_ROWS: dict[
         ("bwd", 704, 704): ((512, 999, 3),),
         ("bwd", 712, 760): ((512, 1000, 3),),
         ("bwd", 768, 768): ((512, 512, 3),),
-        ("bwd_bias", 512, 512): ((2049, 3072, 5),),
     },
 }
 

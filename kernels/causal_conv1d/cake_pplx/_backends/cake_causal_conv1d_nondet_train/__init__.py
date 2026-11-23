@@ -57,10 +57,9 @@ and ``S``; outside the backward rows of ``cake_jit.DIRECT_ROWS``) a backward at
 (``cake_jit.small_s_grid``); its channel tiles, ``dx`` and workspace stay the
 row's.  Here ``n_ch_tiles`` is the plan's number of channel tiles and ``n_sub``
 is the number of token sub-tiles of one CTA: ``n_ch_tiles`` 3 and ``n_sub`` 4
-at the ``bwd`` keys, ``n_ch_tiles`` 1 and ``n_sub`` 2 at the ``bwd_bias`` key.
-``tokens`` (3 on ``bwd``, 5 on ``bwd_bias``) is the length of one token
+at the keys (sm_107a, ``bwd`` only).  ``tokens`` (3) is the length of one token
 stream: the CTAs of a channel tile split ``S`` into ``CTAs x n_sub`` streams,
-so each CTA takes about ``n_sub x tokens`` tokens.
+the tail streams shorter, so each CTA takes about ``n_sub x tokens`` tokens.
 
 Numerical mode: the package is chosen by its module name and no entry point
 takes a mode keyword.  This package has no deterministic programs (they are the
