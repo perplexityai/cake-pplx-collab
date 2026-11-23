@@ -16,14 +16,18 @@ limitations under the License.
 The launch plans of both packages.  A forward or backward call launches its
 modules from a plan memoised per call shape (``_launch_plan``: per module the
 ``run`` function of the loaded module, the logical names of its kernel
-arguments and its grid), inside one ``tvm_ffi.use_torch_stream()``, where
-``cake_jit.run_module`` enters one per module and computes the rest on every
-launch.  The tests need no device: the loader's device-facing functions
-(``sm_count``, ``device_arch``, ``load`` and ``tvm_ffi.use_torch_stream``) are
-fakes that record every launch and stream context, put both into the
-loader and into the package's copies that its plans are checked against, so
-the plans stay in use; ``torch.cuda.get_device_capability`` is a fake where a
-test reads a device's architecture.
+arguments and its grid), with the FFI stream set once for all of them (the
+stream item below; inside one ``tvm_ffi.use_torch_stream()`` while the
+loader's tvm_ffi is replaced, as by most tests here), where
+``cake_jit.run_module`` enters one ``use_torch_stream()`` per module and
+computes the rest on every launch.  The tests need no device: the loader's
+device-facing functions (``sm_count``, ``device_arch``, ``load`` and
+``tvm_ffi.use_torch_stream``) are fakes that record every launch and stream
+context, put both into the loader and into the package's copies that its
+plans are checked against, so the plans stay in use;
+``torch.cuda.get_device_capability`` is a fake where a test reads a device's
+architecture.  (``test_cake_rmsnorm_train_streams.py`` checks the stream of
+the launches on a device.)
 
 * Every window of the H = 128 routes (both edges and inside; BF16 and FP32
   weights) and the lowest token count of every window of every other route,
@@ -64,11 +68,12 @@ test reads a device's architecture.
 * The registry token changes with each replaced registry object, never
   repeats, and does not follow a freed table's ``id``; the memoised route
   answer and forward modules follow the token and the function they are
-  given.
+  given, and the route answer every item of its key.
 * The non-deterministic backward given no workspace binds the views of the
-  path through its workspace helpers (or calls a replaced helper), at the
-  H = 128 placement; ``x``'s own row view and the companion inputs are read
-  as the checked path reads them.
+  path through its workspace helpers (or calls either helper replaced
+  alone), at the H = 128 placement, also for a layout the call's bytes do
+  not hold; ``x``'s own row view and the companion inputs are read as the
+  checked path reads them.
 * Forward and backward calls of H = 128 (the device functions faked) return
   outputs of the call's shapes holding what the launches wrote; a caller's
   output, written in place or through a temporary copied back, is returned.
@@ -96,6 +101,8 @@ HIDDEN = 128
 # The grid of the replaced ``launch_grid`` (no launch of the registry has it).
 ODD_GRID = (99991, 1, 1)
 _ROUTE = re.compile(r"(fwd|bwd)(_w32)?(_residual)?_h(\d+)")
+# The other kind and the other weight dtype token of a route.
+_OTHER = {"fwd": "bwd", "bwd": "fwd", "bf16": "f32", "f32": "bf16"}
 
 
 def _package(mode: str):
@@ -1158,8 +1165,10 @@ def test_the_route_answer_follows_the_registry_and_the_function(mode: str) -> No
     """The memoised route answer is ``route_applies``'s for every route of
     every architecture and for a width with no route; another function's
     answer for that function; with the route table replaced by one without a
-    route (a new registry token), that table's answer, and the shipped
-    table's again with it back."""
+    route (a new registry token), that table's answer for the route and,
+    asked after it, for each call shape one key item away (the other kind,
+    residual flag or weight dtype, another compute capability), and the
+    shipped table's again with it back."""
     pkg, loader = _package(mode), _loader(mode)
     token = pkg._registry_token()
     checked = 0
@@ -1194,12 +1203,45 @@ def test_the_route_answer_follows_the_registry_and_the_function(mode: str) -> No
         return False
 
     assert pkg._route_ok(*shape, token, refuse) is False and asked, mode
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(loader, "ROUTES", _route_tables(loader, (arch, route)))
-        replaced = pkg._registry_token()
-        assert replaced != token, mode
-        assert pkg._route_ok(*shape, replaced, pkg.route_applies) is False, mode
-    assert pkg._route_ok(*shape, pkg._registry_token(), pkg.route_applies) is True
+    # A route dropped from the table (a new token) is asked first, then, under
+    # the same token, every call shape that differs from it in one item of the
+    # key and has a route: the other kind, residual flag or weight dtype on
+    # the same compute capability, and the same route on every other one.
+    # A key without that item would give them the dropped route's answer.
+    with_residual = min(key for key in loader.ROUTES[arch] if _route(key)[2])
+    covered = set()
+    for dropped in (route, with_residual):
+        kind, hidden, residual, w_dtype = _route(dropped)
+        shape = (capability, hidden, kind, residual, w_dtype)
+        others = [
+            ("kind", (capability, hidden, _OTHER[kind], residual, w_dtype)),
+            ("residual", (capability, hidden, kind, not residual, w_dtype)),
+            ("w_dtype", (capability, hidden, kind, residual, _OTHER[w_dtype])),
+        ] + [
+            ("capability", (other, hidden, kind, residual, w_dtype))
+            for other in sorted(loader.ARCH_BY_CAPABILITY)
+            if other != capability
+        ]
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(loader, "ROUTES", _route_tables(loader, (arch, dropped)))
+            replaced = pkg._registry_token()
+            assert replaced != token, (mode, dropped)
+            assert pkg._route_ok(*shape, replaced, pkg.route_applies) is False
+            for item, other in others:
+                label = (mode, dropped, item, other)
+                want = loader.route_applies(
+                    device_capability=other[0],
+                    hidden=other[1],
+                    kind=other[2],
+                    residual=other[3],
+                    w_dtype=other[4],
+                )
+                if not want:
+                    continue
+                assert pkg._route_ok(*other, replaced, pkg.route_applies) is True, label
+                covered.add(item)
+        assert pkg._route_ok(*shape, pkg._registry_token(), pkg.route_applies) is True
+    assert covered == {"kind", "residual", "w_dtype", "capability"}, (mode, covered)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -1294,30 +1336,49 @@ def _view_of(tensor: torch.Tensor, base: int) -> tuple:
     )
 
 
-def _bind(pkg, call: dict, residue: int, seam: bool) -> tuple:
+def _bind(pkg, call: dict, residue: int, seam: str | None) -> tuple:
     """``(outcome, allocations, helper calls)`` of the package's binding of the
     workspace of a backward ``call`` given none, its allocations at
     ``residue`` modulo 1024: the views (:func:`_view_of`) or the error;
-    ``seam``: with the package's ``_package_workspace`` replaced by a recorder
-    of its calls (that calls the package's)."""
+    ``seam``: ``"workspace"``, with the package's ``_package_workspace``
+    replaced by a recorder of its calls (``(nbytes, hidden)``); ``"views"``,
+    with its ``_workspace_views`` replaced by a recorder of the workspace each
+    call binds (``(bytes, offset in its allocation)``); each recorder calls
+    the package's helper."""
     made: list = []
     calls: list = []
-    helper = pkg._package_workspace
+    helper, views = pkg._package_workspace, pkg._workspace_views
 
     def recording(nbytes: int, device: torch.device, hidden: int) -> torch.Tensor:
         calls.append((nbytes, hidden))
         return helper(nbytes, device, hidden)
 
+    def recording_views(workspace: torch.Tensor, record: dict, **kwargs) -> tuple:
+        calls.append((workspace.numel(), workspace.data_ptr() - made[0][1]))
+        return views(workspace, record, **kwargs)
+
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(torch, "zeros", _placed_zeros(residue, made))
-        if seam:
+        if seam == "workspace":
             patch.setattr(pkg, "_package_workspace", recording)
+        elif seam == "views":
+            patch.setattr(pkg, "_workspace_views", recording_views)
         try:
             partial, counters = pkg._bound_workspace(None, **call)
         except (ValueError, RuntimeError) as error:
             return ("error", type(error), str(error)), made, calls
     base = made[0][1]
     return ("views", _view_of(partial, base), _view_of(counters, base)), made, calls
+
+
+def _same_binding(pkg, call: dict, residue: int, label) -> tuple:
+    """The outcome (:func:`_bind`) of a backward ``call``'s workspace binding,
+    the same with the package's helpers in place and through each replaced
+    helper."""
+    got = _bind(pkg, call, residue, seam=None)[0]
+    assert got == _bind(pkg, call, residue, seam="workspace")[0], label
+    assert got == _bind(pkg, call, residue, seam="views")[0], label
+    return got
 
 
 def test_the_package_workspace_views_are_the_placed_views(
@@ -1330,13 +1391,19 @@ def test_the_package_workspace_views_are_the_placed_views(
     place it binds the same ``partial`` and ``counters`` views -- offset in
     the allocation, shape, strides, dtype, zeroed -- of the same single
     allocation as the path through ``_package_workspace`` and
-    ``_workspace_views`` (the replaced helper is called, with the call's
-    bytes); H = 128 views sit at the 256 mod 1024 placement; an allocation
-    whose placement does not fit (or, for another width, is not 256-byte
-    aligned) raises that path's error."""
+    ``_workspace_views``, each replaced alone by a recorder (the replaced
+    helper is called once: ``_package_workspace`` with the call's bytes,
+    ``_workspace_views`` with the workspace ``_package_workspace`` returns);
+    H = 128 views sit at the 256 mod 1024 placement; an allocation whose
+    placement does not fit (or, for another width, is not 256-byte aligned)
+    raises that path's error.  The same holds for a layout the call's bytes
+    do not hold: another width's whose total exceeds the bytes the call
+    allocates while its partial region fits them, or whose bytes are 1024
+    short of its total (``_workspace_bytes`` replaced); an H = 128 single
+    kernel's whose partial region reaches past its total."""
     pkg, loader = _package("nondet"), _loader("nondet")
     cpu = torch.device("cpu")
-    checked = others = errors = 0
+    checked = others = errors = larger = beyond = 0
     for arch in loader.ARCHES:
         monkeypatch.setattr(loader, "sm_count", _sm_count({0: BOARD_SMS[arch][0]}))
         token = pkg._registry_token()
@@ -1360,28 +1427,73 @@ def test_the_package_workspace_views_are_the_placed_views(
                 "residual": residual,
                 "device": cpu,
             }
+            slack = 768 if hidden == HIDDEN else 0
             residues = (0, 256, 512, 768, 64, 300) if hidden == HIDDEN else (0, 512, 64)
             for residue in residues:
                 label = (arch, hidden, residual, w_dtype, rows, residue)
-                got, made, calls = _bind(pkg, call, residue, seam=False)
-                want, made_seam, calls_seam = _bind(pkg, call, residue, seam=True)
-                assert got == want, label
+                got, made, calls = _bind(pkg, call, residue, seam=None)
+                want, made_seam, calls_seam = _bind(
+                    pkg, call, residue, seam="workspace"
+                )
+                viewed, made_views, calls_views = _bind(
+                    pkg, call, residue, seam="views"
+                )
+                assert got == want == viewed, label
                 assert calls == [] and calls_seam == [(nbytes, hidden)], label
-                slack = 768 if hidden == HIDDEN else 0
-                assert [size for size, _ in made] == [nbytes + slack], label
-                assert [size for size, _ in made_seam] == [nbytes + slack], label
+                for allocations in (made, made_seam, made_views):
+                    assert [size for size, _ in allocations] == [nbytes + slack], label
+                # the workspace ``_package_workspace`` returns: at the placed
+                # offset of an H = 128 allocation, else the allocation itself
+                start = (256 - residue) % 1024 if hidden == HIDDEN else 0
+                assert calls_views == [(min(nbytes, nbytes + slack - start), start)]
                 if got[0] == "error":
                     errors += 1
                     continue
                 # the workspace's start, from the counters (never empty)
-                start = got[2][0] - layout["counters_offset"]
+                assert got[2][0] - layout["counters_offset"] == start, label
                 if hidden == HIDDEN:
                     assert (made[0][1] + start) % 1024 == 256, label
+                    assert (made_views[0][1] + start) % 1024 == 256, label
                     checked += 1
                 else:
                     assert start == 0, label
                     others += 1
-    assert checked and others and errors, (checked, others, errors)
+            label = (arch, hidden, residual, w_dtype, rows)
+            if hidden != HIDDEN:
+                # a total past the call's bytes, the partial region within them
+                assert layout["partial_offset"] + layout["partial_bytes"] <= nbytes
+                over = dict(call, layout=dict(layout, total_bytes=nbytes + 256))
+                got = _same_binding(pkg, over, 0, label)
+                assert got[0] == "error" and got[1] is ValueError, label
+                assert f"workspace holds {nbytes} bytes" in got[2], label
+                short = int(layout["total_bytes"]) - 1024
+                monkeypatch.setattr(pkg, "_workspace_bytes", lambda *args, n=short: n)
+                got = _same_binding(pkg, call, 0, label)
+                assert got[0] == "error" and got[1] is ValueError, label
+                assert f"workspace holds {short} bytes" in got[2], label
+                larger += 1
+            elif record["workspace_rule"]["kind"] in (
+                "claim_sum_f32",
+                "claim_part_f32",
+            ):
+                # the partial region of a single kernel 256 bytes past the total
+                wide = dict(
+                    layout,
+                    partial_bytes=nbytes - int(layout["partial_offset"]) + 256,
+                )
+                got = _same_binding(pkg, dict(call, layout=wide), 256, label)
+                if got[0] == "views" and got[1][0] is not None:
+                    # the partial view (when not empty) ends within the workspace
+                    start = got[2][0] - layout["counters_offset"]
+                    assert got[1][0] - start + 4 * got[1][1][0] <= nbytes, label
+                beyond += 1
+    assert checked and others and errors and larger and beyond, (
+        checked,
+        others,
+        errors,
+        larger,
+        beyond,
+    )
 
 
 def _outcome(function, given, *args, **kwargs) -> tuple:
