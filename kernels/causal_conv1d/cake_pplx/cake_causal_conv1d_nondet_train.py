@@ -46,8 +46,13 @@ counters.  From release 0.2.14, at the small-S rows of
 at S = 512; the ``bwd_bias`` route at C = 512 from S = 2049 to 3072) a launch
 at ``bwd_grid_mult`` 1 runs the same program on fewer CTAs: at most
 ``n_ch_tiles x ceil(S / (n_sub x tokens))``, ``tokens`` 3 on ``bwd`` and 5 on
-``bwd_bias``, and at least one per channel tile.  This module never runs the
-deterministic package.
+``bwd_bias``, and at least one per channel tile.  Here ``n_ch_tiles`` is the
+plan's number of channel tiles and ``n_sub`` is the number of token sub-tiles
+of one CTA: ``n_ch_tiles`` 3 and ``n_sub`` 4 at the ``bwd`` keys,
+``n_ch_tiles`` 1 and ``n_sub`` 2 at the ``bwd_bias`` key.  ``tokens`` is the
+length of one token stream: the CTAs of a channel tile split ``S`` into
+``CTAs x n_sub`` streams, so each CTA takes about ``n_sub x tokens`` tokens.
+This module never runs the deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.
