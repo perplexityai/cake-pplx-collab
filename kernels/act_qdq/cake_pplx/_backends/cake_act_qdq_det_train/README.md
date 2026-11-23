@@ -29,9 +29,11 @@ if is_cake_act_qdq_det_train_supported(x.device):
     cake_act_qdq_det_train_forward(x, format="mxfp4_e8m0_g32", out=x)         # in place: returns x
 ```
 
-`cake_act_qdq_det_train_forward_workspace_bytes(shape, format=...)` returns 0: a call needs no workspace and keeps
-no state.  `is_cake_act_qdq_det_train_supported(device)` tells whether the device has kernels.  The facade also
-exposes `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `FORMATS` and `GROUP_SIZES`.
+`cake_act_qdq_det_train_forward_workspace_bytes(shape, format=...)` returns 0: a call takes no caller workspace.
+`is_cake_act_qdq_det_train_supported(device)` tells whether the device has kernels.
+`cake_act_qdq_det_train_domain_empty` and `cake_act_qdq_det_train_domain_plan` serve the `locality="domain"` route of
+an R200 ("Locality domains" below).  The facade also exposes `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `FORMATS` and
+`GROUP_SIZES`.
 
 ## Inputs and outputs
 
@@ -42,6 +44,7 @@ exposes `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `FORMATS` and `GROUP_SIZES`.
 | `out` | `None` (a new tensor), `x` itself (in place), or a contiguous, 16-byte aligned BF16 tensor of `x`'s shape on `x`'s device that does not overlap `x` |
 | `scales` | `None` or a contiguous FP32 tensor `[..., D / G]` on `x`'s device that does not overlap `x` or `out` |
 | `return_scales` | `False` (default) or `True` |
+| `locality` | `"off"` (default) or `"domain"`; checked before every other argument (`TypeError` for a non-string, `ValueError` for another string) |
 
 The call returns `y`, or `(y, scales)` when `return_scales` is true or a `scales` buffer is given.  `y` is `out`
 when `out` is given, so an in-place call returns `x`.  A new `scales` tensor is allocated when the scales are
@@ -55,11 +58,12 @@ outputs of the right shapes.
 
 ## Programs
 
-The package has seventeen programs: per format, with and without the scale output, a main program and a small one; a
-wide program for MXFP8 without the scale output; and per MXFP4 and MXFP8 format, with and without the scale output, a
-large program.  The wide and the large programs are built for `sm_100a` and `sm_103a`, every other program for
-`sm_100a`, `sm_103a` and `sm_107a`, each with the exact `-gencode` flag of the architecture, so `build.json` lists 46
-libraries.  A call runs one program of its route (`cake_jit.selected_module(arch, format, scale_out=..., n_vecs=...,
+The package has twenty-three programs: per format, with and without the scale output, a main program, a small one and
+an interleaved-domain one; a wide program for MXFP8 without the scale output; and per MXFP4 and MXFP8 format, with and
+without the scale output, a large program.  The wide and the large programs are built for `sm_100a` and `sm_103a`, the
+interleaved-domain programs for `sm_107a` ("Locality domains" below), every other program for `sm_100a`, `sm_103a` and
+`sm_107a`, each with the exact `-gencode` flag of the architecture, so `build.json` lists 52 libraries.  With
+`locality="off"`, a call runs one program of its route (`cake_jit.selected_module(arch, format, scale_out=..., n_vecs=...,
 in_place=...)`): the small, the wide or the large program when `n_vecs` lies in its `vectors` range for the call's kind,
 and the main program otherwise.  The small program's range out of place is 65,537 to 524,288 on `sm_100a` and `sm_103a`
 (to 131,072 for MXFP8 without the scale output) and 1 to 262,144 on `sm_107a`; in place it is 1 to 262,144 on `sm_107a`,
@@ -96,6 +100,46 @@ rank, nor the row count enters the kernel, so a new shape never rebuilds a libra
 library of its own program, so build every library of the architecture before a CUDA graph capture: call
 `build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output
 and program (size range and kind of call) that the capture uses.
+
+## Locality domains (`sm_107a`)
+
+An R200 has two dies, each with its own SMs and its own memory (a locality domain).  Default memory alternates between
+the dies every 4 KB, so about half of the bytes each SM reads come from the other die.
+`cake_act_qdq_det_train_domain_empty(shape, dtype=torch.bfloat16, device=None)` maps one range of 2 MB chunks
+(`cuMemCreate` in a locality domain), chunk `k` in die `k & 1`, and returns a torch tensor over it without a copy.  It
+registers the range, so a call finds a tensor's chunk offset and die from its address alone, with no driver call.
+
+The interleaved-domain program of a route (`cake_jit.DOMAIN_ROUTES`) keeps the main program's tiles of 256 vectors (64
+threads, 4 vectors each).  A chunk holds 512 tiles, and an item is 2 tiles of one chunk.  Each CTA reads its die at
+each claim, takes its next item from its own die's counter, and takes the other die's items once its own are taken.
+The items a CTA runs depend only on its claims, so any grid gives the same bytes; the host launches one CTA per item, at
+most 16 per SM.  A call with `locality="domain"` runs it when all of these hold (`cake_jit.domain_route`): the device
+is `sm_107a`; the call is out of place with an `out` buffer; `x` and `out` lie in memory from the helper at the same
+offset in their chunks and in chunks of the same die; and `numel / 8` is in the record's `vectors` range (from
+{{DOMAIN_FIRST_VECTORS}} vectors).  Every other call runs the `"off"` program, with the same bytes, and never raises
+for its placement.  `cake_act_qdq_det_train_domain_plan` returns the route, the reason (`"placed"`, or the first of
+`"empty"`, `"arch"`, `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"` and
+`"die_parity"` that holds), the program, `first_tile`, `first_die` and the grid, without a launch.  An in-place call
+runs the `"off"` program: the interleaved-domain programs take `x` and `y` as non-aliasing (restrict) buffers.  On
+VR200, {{DOMAIN_SPEEDUP}}.  The plain programs run on the helper's memory as fast as on default memory.
+
+The claim counters are one unsigned 32-bit word per die in a 128-byte workspace (`cake_domain`; the record's
+`counters` field).  Every launch leaves its counters zero, so the package zeroes a workspace once, when it makes it.
+Eager calls use one workspace per (device, stream).  The calls of one CUDA graph capture on one capture stream share
+one of 1,024 zeroed workspaces that the helper makes per device on its first call; once all 1,024 are taken, each
+captured call takes one from the graph's pool, which the graph zeroes at every replay.  The replays of one instantiated
+graph never overlap, but a capture instantiated more than once, or added to other graphs as a child graph, shares its
+workspace between those copies: run them one at a time.  Allocate the buffers before a capture (the helper refuses
+during one), and make one eager call per program the capture uses.  After the first call on a stream, a call does not
+synchronize the host.
+
+Freeing the last view of a buffer synchronizes the device, then unmaps its chunks; a buffer freed during a capture is
+unmapped by the next helper call.  Do not allocate these buffers, or free the last view of one, in one thread while
+another thread captures a CUDA graph: the driver calls would end that capture.  The driver maps this memory outside
+torch's caching allocator, so the `torch.cuda.memory_*` counters do not count it.  When the device has no room, the
+helper returns torch's cached free memory to the driver once and then raises `torch.cuda.OutOfMemoryError`.  The helper
+needs cuda-python with the locality-domain names (`cuda-bindings` 13.5 or later: the package's `locality` extra), and
+the driver must report two locality domains.  The `"off"` route never imports it.
 
 ## Numerics
 
@@ -161,16 +205,23 @@ repeats bit for bit, on every supported architecture, for any grid and in place 
 | `y` (BF16 values) | repeats bit for bit |
 | `scales` (FP32 scales) | repeats bit for bit |
 
-Each group is quantized by its own `G / 8` threads, and the group maximum is exact in any order.  The kernels use no
-atomics and sum nothing across threads, CTAs or calls.  No entry takes a `deterministic` keyword, and no call alerts
-under `torch.use_deterministic_algorithms(True)`.  A non-deterministic package is not planned: no step of this op has
-an order to relax.  There is no KCP (context-parallel) package either: the op works on each token alone.
+Each group is quantized by its own `G / 8` threads, and the group maximum is exact in any order.  The kernels sum
+nothing across threads, CTAs or calls.  Only the interleaved-domain programs use atomics: 32-bit integer claims that
+choose which CTA computes a tile, never what it computes, so their outputs are the `"off"` programs' bytes.  No entry
+takes a `deterministic` keyword, and no call alerts under `torch.use_deterministic_algorithms(True)`.  A
+non-deterministic package is not planned: no step of this op has an order to relax.  There is no KCP
+(context-parallel) package either: the op works on each token alone.
 
 `tests/experimental/test_cake_act_qdq_det_train.py` compares every output bit for bit (signed zeros included) with
 the FP64 rule on edge rows (format levels and midpoints, ties, signed zeros, floors, saturation, the infinities), on
 every finite BF16 value under every scale each format reaches, and on random inputs of the model shapes, in place and
 not.  It also checks five repeated calls, CUDA graph replay, a
 checkpointed recompute, steady-state calls without host synchronization, and no rebuild on a new shape.
+`tests/experimental/test_cake_act_qdq_det_train_locality.py` checks the `locality="domain"` route.  On an R200 it
+checks every interleaved-domain program against the FP64 rule on any grid, the route's bytes against the `"off"` route
+above its first size, each reason of the plan, the claim counters, two streams, CUDA graph replay and steady-state
+calls without host synchronization.  On every architecture it checks that a call outside the helper's memory runs the
+`"off"` program.
 
 ## Limitations
 
@@ -179,3 +230,6 @@ checkpointed recompute, steady-state calls without host synchronization, and no 
 - Non-finite inputs (NaN, ±Inf) are outside the rule; their outputs are unspecified.
 - Forward only: no backward and no autograd entry.  A straight-through estimator is the caller's choice.
 - One call takes at most `8 * (2^31 - 256)` elements.
+- The interleaved-domain route serves out-of-place calls on `sm_107a` over memory from
+  `cake_act_qdq_det_train_domain_empty` only.  The copies of one capture that uses it (instantiated more than once, or
+  added to other graphs as a child graph) must not run concurrently.

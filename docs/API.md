@@ -2114,8 +2114,10 @@ This family has a det module only, with no nondet or KCP module. Each group is q
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_act_qdq_det_train_forward` | `(x, *, format, out=None, scales=None, return_scales=False)` | `x` contiguous BF16 CUDA `[..., D]`, 16-byte aligned, `D` a multiple of `G`, at most `8*(2^31-256)` elements. `out`: `x` itself (in place) or a contiguous, 16-byte aligned BF16 tensor of `x`'s shape that does not overlap `x`. `scales`: a contiguous FP32 `[..., D/G]` buffer that overlaps neither. | Returns `y` (BF16, `x`'s shape; `out` when given, so `out=x` returns `x`), or `(y, scales)` when `return_scales=True` or `scales` is given. Not autograd. Any number of rows: a tensor with no elements returns empty outputs without a launch. A wrong dtype raises `TypeError`, any other bad argument `ValueError`, before any launch. |
-| `cake_act_qdq_det_train_forward_workspace_bytes` | `(shape, *, format)` | The input shape and format | Returns 0: no workspace. A call keeps no state between calls either. Raises `ValueError` for a shape or format the forward refuses. |
+| `cake_act_qdq_det_train_forward` | `(x, *, format, out=None, scales=None, return_scales=False, locality="off")` | `x` contiguous BF16 CUDA `[..., D]`, 16-byte aligned, `D` a multiple of `G`, at most `8*(2^31-256)` elements. `out`: `x` itself (in place) or a contiguous, 16-byte aligned BF16 tensor of `x`'s shape that does not overlap `x`. `scales`: a contiguous FP32 `[..., D/G]` buffer that overlaps neither. `locality`: `"off"` or `"domain"` (see "Locality domains" below). | Returns `y` (BF16, `x`'s shape; `out` when given, so `out=x` returns `x`), or `(y, scales)` when `return_scales=True` or `scales` is given. Not autograd. Any number of rows: a tensor with no elements returns empty outputs without a launch. `locality` is checked first: a non-string raises `TypeError` and another string `ValueError`. Then a wrong dtype raises `TypeError`, any other bad argument `ValueError`, before any launch. |
+| `cake_act_qdq_det_train_domain_empty` | `(shape, *, dtype=torch.bfloat16, device=None)` | A shape, an element type and a CUDA device (the current one by default) | Returns an uninitialized contiguous tensor in memory whose 2 MB chunks alternate between the two dies of an R200 (`sm_107a`). Raises `TypeError` for a `dtype` that is not a `torch.dtype`, `ValueError` for a negative dimension or a device that is not CUDA, `torch.cuda.OutOfMemoryError` when the device has no room (after torch's cached free memory is returned to the driver once), and `RuntimeError` during CUDA graph capture, on another architecture, when the driver reports fewer than two locality domains, or without cuda-python. |
+| `cake_act_qdq_det_train_domain_plan` | `(x, *, format, out=None, scales=None, return_scales=False)` | The forward's arguments, checked as the forward checks them | Returns `{"route", "reason", "program", "first_tile", "first_die", "grid"}`: what the forward runs with `locality="domain"`, without a launch or an allocation. |
+| `cake_act_qdq_det_train_forward_workspace_bytes` | `(shape, *, format)` | The input shape and format | Returns 0: a call takes no caller workspace. A `locality="domain"` call keeps its claim counters in the package's own 128-byte workspace per stream. Raises `ValueError` for a shape or format the forward refuses. |
 
 Other public names:
 
@@ -2123,7 +2125,21 @@ Other public names:
 - `FORMATS = ("fp4_e4m3_g16", "mxfp4_e8m0_g32", "mxfp8_e8m0_g32")`, `GROUP_SIZES` (format to `G`).
 - `is_cake_act_qdq_det_train_supported(device)`.
 
-**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs one program of its format and scale output, chosen by `n_vecs = numel / 8` and by whether the call is in place: the small program (256-thread CTAs, tiles of 512 vectors, 8 resident CTAs per SM, 4 on `sm_107a`) out of place for 65,537 to 524,288 vectors on `sm_100a` and `sm_103a` (to 131,072 for MXFP8 without scales) and for 1 to 262,144 on `sm_107a`, and in place for 1 to 262,144 on `sm_107a` only; for MXFP8 without scales on `sm_100a` and `sm_103a`, the wide program (128-thread CTAs, tiles of 512 vectors) out of place from 131,073 vectors to 2,147,483,136 and in place from 262,145 to 33,554,431; for MXFP4 and MXFP8 on `sm_100a` and `sm_103a`, the large program (1024-thread CTAs, tiles of 2,048 vectors) in place from 4,194,304 vectors (from 33,554,432 for MXFP8 without scales) and out of place from 8,388,608 for MXFP8 with scales only, all to 2,147,481,600; else the main program (64-thread CTAs, tiles of 128 vectors, 256 on `sm_107a`, 32 resident CTAs per SM, 16 on `sm_107a`). Every program gives the same bytes. The grid is one CTA per tile once the tiles pass 2.5 waves of resident CTAs, else the resident CTAs, at most one per tile, walk the tiles; the wide and the large programs always launch one CTA per tile. Every library serves any shape or row count; a call builds or loads its program's library on first use, so before a CUDA graph capture build the architecture's libraries (`cake_jit.specs_for_arch`) or make one eager call per program the capture uses. The facade reads no environment variable.
+**Options and environment.** `format`, `out`, `scales`, `return_scales` and `locality` are the only keywords. With `locality="off"` (the default), a call runs one program of its format and scale output, chosen by `n_vecs = numel / 8` and by whether the call is in place: the small program (256-thread CTAs, tiles of 512 vectors, 8 resident CTAs per SM, 4 on `sm_107a`) out of place for 65,537 to 524,288 vectors on `sm_100a` and `sm_103a` (to 131,072 for MXFP8 without scales) and for 1 to 262,144 on `sm_107a`, and in place for 1 to 262,144 on `sm_107a` only; for MXFP8 without scales on `sm_100a` and `sm_103a`, the wide program (128-thread CTAs, tiles of 512 vectors) out of place from 131,073 vectors to 2,147,483,136 and in place from 262,145 to 33,554,431; for MXFP4 and MXFP8 on `sm_100a` and `sm_103a`, the large program (1024-thread CTAs, tiles of 2,048 vectors) in place from 4,194,304 vectors (from 33,554,432 for MXFP8 without scales) and out of place from 8,388,608 for MXFP8 with scales only, all to 2,147,481,600; else the main program (64-thread CTAs, tiles of 128 vectors, 256 on `sm_107a`, 32 resident CTAs per SM, 16 on `sm_107a`). Every program gives the same bytes. The grid is one CTA per tile once the tiles pass 2.5 waves of resident CTAs, else the resident CTAs, at most one per tile, walk the tiles; the wide and the large programs always launch one CTA per tile. Every library serves any shape or row count; a call builds or loads its program's library on first use, so before a CUDA graph capture build the architecture's libraries (`cake_jit.specs_for_arch`) or make one eager call per program the capture uses. The facade reads no environment variable.
+
+**Locality domains (R200).** An R200 (`sm_107a`) has two dies, each with its own SMs and its own memory. Default memory alternates between the dies every 4 KB, so about half of the bytes each SM reads come from the other die. `cake_act_qdq_det_train_domain_empty` allocates memory in 2 MB chunks that alternate between the dies (chunk `k` of the allocation in die `k & 1`). With `locality="domain"`, a call runs the interleaved-domain program, in which each CTA works first on the chunks of its own die, when all of these hold:
+
+- the device is `sm_107a`;
+- the call is out of place: `out` is given, and it is not `x`;
+- `x` and `out` both lie in memory from `cake_act_qdq_det_train_domain_empty` (any views of it), at the same offset in their 2 MB chunks and in chunks of the same die. Two buffers from the helper with the same view offset satisfy this;
+- `numel / 8` is at least {{DOMAIN_FIRST_VECTORS}} vectors.
+
+Every other call runs the `"off"` program and gives the same bytes; it never raises for its placement. The plan's `reason` names why: `"arch"`, `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"`, `"die_parity"` (checked in this order), or `"empty"` for a call with no elements. `"placed"` is the reason of the domain route. The placement is read from the package's registry of the helper's allocations, without a driver call. `scales` may lie in any memory. The interleaved-domain program gives the bytes of the `"off"` program for every input. Its CTAs claim their work with 32-bit atomic counters, which choose only which CTA computes a tile, never what it computes. On VR200, {{DOMAIN_SPEEDUP}}. The `"off"` programs run on the helper's memory as fast as on default memory, so a call that falls back loses nothing.
+
+- **State.** The helper's allocations, and one 128-byte claim workspace per (device, stream) for eager calls. Every launch leaves its claim counters zero, so a workspace is zeroed once. The calls of one CUDA graph capture on one capture stream share one of 1,024 zeroed workspaces that the helper makes per device; once all are taken, each captured call takes one from the graph's pool, which the graph zeroes at every replay. The replays of one instantiated graph never overlap, but a capture instantiated more than once, or added to other graphs as a child graph, shares its workspace between those copies: run them one at a time. After the first call on a stream, a call does not synchronize the host.
+- **Capture.** Allocate the buffers before the capture, and make one eager `"domain"` call per program the capture uses. The helper refuses to allocate during a capture.
+- **Freeing.** A buffer lives while any view of it lives. Freeing the last view synchronizes the device; a buffer freed during a capture is unmapped by the next helper call. Keep the buffers alive while a captured graph that uses them can replay. Do not allocate these buffers, or free the last view of one, in one thread while another thread captures a CUDA graph: the driver calls would end that capture. The `torch.cuda.memory_*` counters do not count this memory.
+- **Requirements.** The helper needs cuda-python with the locality-domain names (`cuda-bindings` 13.5 or later; the `locality` extra of `cake-pplx-act-qdq`), a driver that reports the two locality domains, and the `sm_107a` libraries (CUDA 13.5). The `"off"` route and the `"domain"` route on `sm_100a` and `sm_103a` do not import it.
 
 **Cross-family.** None.
 
@@ -2131,7 +2147,11 @@ Other public names:
 
 ```python
 import torch
-from cake_pplx.cake_act_qdq_det_train import cake_act_qdq_det_train_forward
+from cake_pplx.cake_act_qdq_det_train import (
+    cake_act_qdq_det_train_domain_empty,
+    cake_act_qdq_det_train_domain_plan,
+    cake_act_qdq_det_train_forward,
+)
 
 kv = torch.randn(16384, 512, device="cuda", dtype=torch.bfloat16)
 q = torch.randn(16384, 32, 128, device="cuda", dtype=torch.bfloat16)
@@ -2140,6 +2160,15 @@ o = torch.randn(16384, 8, 4096, device="cuda", dtype=torch.bfloat16)
 kv_qdq, kv_scales = cake_act_qdq_det_train_forward(kv, format="fp4_e4m3_g16", return_scales=True)
 cake_act_qdq_det_train_forward(q, format="mxfp4_e8m0_g32", out=q)  # in place
 o_qdq = cake_act_qdq_det_train_forward(o, format="mxfp8_e8m0_g32")
+
+# R200 (sm_107a): input and output in memory whose 2 MB chunks alternate between the dies,
+# allocated once, before any CUDA graph capture.
+if torch.cuda.get_device_capability() == (10, 7):
+    x = cake_act_qdq_det_train_domain_empty(o.shape)
+    y = cake_act_qdq_det_train_domain_empty(o.shape)
+    x.copy_(o)
+    cake_act_qdq_det_train_forward(x, format="mxfp8_e8m0_g32", out=y, locality="domain")  # the bytes of o_qdq
+    print(cake_act_qdq_det_train_domain_plan(x, format="mxfp8_e8m0_g32", out=y))  # route, reason, program, grid
 ```
 
 **Caveats.**
@@ -2148,3 +2177,4 @@ o_qdq = cake_act_qdq_det_train_forward(o, format="mxfp8_e8m0_g32")
 - Non-finite inputs (NaN, ±Inf) are outside the rule; their outputs are unspecified.
 - Finite inputs can give `±inf`: with MXFP8 an element with `|x| >= 248*2^120`, with MXFP4 one with `|x| >= 224*2^120` (the rule's own BF16 rounding of `q * s`).
 - Only the dequantized BF16 values and the FP32 scales are returned, not the packed FP4/FP8 codes.
+- `locality="domain"` gains only where the caller places both `x` and `out` in the helper's memory. A call with `out=None` allocates default memory and runs the `"off"` program; so does an in-place call.

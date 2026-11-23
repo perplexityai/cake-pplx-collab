@@ -1,0 +1,751 @@
+"""
+Copyright (c) 2026, NVIDIA CORPORATION.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Tests of the ``locality="domain"`` route of the Cake activation
+quantize-dequantize forward: the interleaved-domain programs of SM107 (R200),
+the memory whose 2 MB chunks alternate between the two dies
+(``cake_act_qdq_det_train_domain_empty``) and the route's plan
+(``cake_act_qdq_det_train_domain_plan``).
+
+The ``cpu_only`` tests check the pure parts: the interleaved-domain records,
+where a byte range lies in such memory, the reasons of the route in their
+order, and the launch arguments and grid, against the kernel's own decoding of
+its items.  The GPU tests check that ``"domain"`` runs the ``"off"`` program
+on other architectures and on default memory, and that ``"off"`` loads none
+of the route's state.  The SM107 tests (skipped elsewhere; an SM107 whose
+driver reports fewer than two locality domains fails them) check the
+allocation (dies, registry, zero copy, the free, the free deferred past a
+capture, the refusal during capture), the route's bytes against the ``"off"``
+route for every format with and without the scales (and a caller's scales
+buffer), out of place above the route's first size and at offsets inside a
+chunk, every domain program against the FP64 rule on any grid, each plain
+reason, the claim counters left zero, a launch that raises, two streams at
+once, CUDA graph replay with a graph workspace and with none left, and
+steady-state calls without host synchronization.
+
+This suite names the backend package once, through
+``tests.cake.test_helpers.cake_package``.
+"""
+
+from __future__ import annotations
+
+import gc
+import subprocess
+import sys
+
+import pytest
+import torch
+
+from tests.cake.test_helpers.cake_package import cake_package
+from tests.experimental.test_helpers import cake_act_qdq_det_train_reference as reference
+
+PACKAGE = "cake.cake_act_qdq_det_train"
+pkg = cake_package(PACKAGE)
+loader = cake_package(PACKAGE, "cake_jit")
+memory = cake_package(PACKAGE, "cake_domain")
+forward = pkg.cake_act_qdq_det_train_forward
+plan = pkg.cake_act_qdq_det_train_domain_plan
+domain_empty = pkg.cake_act_qdq_det_train_domain_empty
+
+FORMATS = reference.FORMATS
+KINDS = tuple(loader.KINDS)
+ARCH = "sm_107a"
+# The chunk of the memory that alternates dies, and the bytes of a tile of the interleaved-domain programs.
+CHUNK = 2097152
+TILE_BYTES = 256 * 16
+BF16 = 2
+# The width of the inputs of the size tests: 12 vectors a row, so a size just above a bound ends inside a tile.
+WIDTH = 96
+
+
+def _domain_name(kind: str) -> str:
+    return loader.DOMAIN_ROUTES[ARCH][kind]
+
+
+def _first(kind: str) -> int:
+    """The first ``n_vecs`` the interleaved-domain program of route ``kind`` runs."""
+    return int(loader.MODULES[_domain_name(kind)]["vectors"][ARCH]["out_of_place"][0])
+
+
+def _bits(t: torch.Tensor) -> torch.Tensor:
+    return t.contiguous().view(torch.int16 if t.element_size() == 2 else torch.int32)
+
+
+def _assert_same(what: str, got: torch.Tensor, want: torch.Tensor) -> None:
+    assert got.shape == want.shape and got.dtype == want.dtype, what
+    if not torch.equal(_bits(got), _bits(want)):
+        bad = (_bits(got) != _bits(want)).nonzero()
+        raise AssertionError(f"{what}: {bad.shape[0]} of {got.numel()} values differ; first at {bad[0].tolist()}")
+
+
+def _spy(monkeypatch) -> list[str]:
+    """The names of the records launched through ``cake_jit.run_module`` from now on."""
+    launched: list[str] = []
+    run_module = loader.run_module
+
+    def spy(name, values, **kwargs):
+        launched.append(name)
+        return run_module(name, values, **kwargs)
+
+    monkeypatch.setattr(loader, "run_module", spy)
+    return launched
+
+
+# --------------------------------------------------------------------------- CPU-only: the pure parts
+
+
+@pytest.mark.cpu_only
+def test_domain_records_serve_their_routes(monkeypatch) -> None:
+    for arch in loader.ARCHES:
+        for fmt in FORMATS:
+            for scale_out in (False, True):
+                kind = loader.route_name(fmt, scale_out=scale_out)
+                name = loader.domain_module(arch, fmt, scale_out=scale_out)
+                assert name == (kind + "_domain" if arch == ARCH else None), (arch, kind, name)
+                if name is not None:
+                    assert name not in loader.ROUTES[arch][kind]
+    assert loader.domain_chunk_bytes(ARCH) == CHUNK
+    assert loader.domain_chunk_bytes("sm_100a") is None and loader.domain_chunk_bytes("sm_103a") is None
+    with pytest.raises(ValueError, match="format"):
+        loader.domain_module(ARCH, "nvfp4", scale_out=False)
+    monkeypatch.setitem(loader.DOMAIN_ROUTES[ARCH], "fp4_e4m3_g16", "fp4_e4m3_g16_scales_domain")
+    with pytest.raises(RuntimeError, match="does not serve that route"):
+        loader.domain_module(ARCH, "fp4_e4m3_g16", scale_out=False)
+    monkeypatch.undo()
+    # the claims leave unsigned counters zero: no other word type, and no host re-arm
+    record = loader.MODULES["mxfp8_e8m0_g32_domain"]
+    for change in ({"rearm": "host"}, {"rearm": "never"}, {"dtype": "int32"}, {"words": 0}):
+        monkeypatch.setitem(record, "counters", {**record["counters"], **change})
+        with pytest.raises(RuntimeError, match="does not serve that route"):
+            loader.domain_module(ARCH, "mxfp8_e8m0_g32", scale_out=False)
+        monkeypatch.undo()
+
+
+@pytest.mark.cpu_only
+def test_chunk_place() -> None:
+    """Offset in its chunk and die of the chunk (chunk k in die k & 1) of a byte range that lies in the buffer."""
+    place = loader.chunk_place
+    base, size = 1 << 40, 3 * CHUNK
+    assert place(base, 16, base, size, CHUNK) == (0, 0)
+    assert place(base + CHUNK + 48, 16, base, size, CHUNK) == (48, 1)
+    assert place(base + 2 * CHUNK - 16, 32, base, size, CHUNK) == (CHUNK - 16, 1)
+    assert place(base + 2 * CHUNK + TILE_BYTES, CHUNK - TILE_BYTES, base, size, CHUNK) == (TILE_BYTES, 0)
+    # one byte past the end, a start before the base or at the end: not in the buffer
+    assert place(base + 2 * CHUNK + TILE_BYTES, CHUNK - TILE_BYTES + 1, base, size, CHUNK) is None
+    assert place(base - 16, 16, base, size, CHUNK) is None
+    assert place(base + size, 0, base, size, CHUNK) is None
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("kind", KINDS)
+def test_domain_route_reasons_in_order(kind: str) -> None:
+    fmt = kind.removesuffix("_scales")
+    scale_out = kind.endswith("_scales")
+    name = _domain_name(kind)
+    first, last = loader.MODULES[name]["vectors"][ARCH]["out_of_place"]
+    assert loader.MODULES[name]["vectors"][ARCH]["in_place"] is None
+    assert 1 <= first <= last <= loader.MAX_VECTORS
+    good = {
+        "scale_out": scale_out,
+        "n_vecs": first,
+        "in_place": False,
+        "out_given": True,
+        "x_place": (5 * TILE_BYTES + 48, 1),
+        "y_place": (5 * TILE_BYTES + 48, 1),
+    }
+
+    def route(arch: str = ARCH, **change):
+        return loader.domain_route(arch, fmt, **{**good, **change})
+
+    assert route() == (name, "placed")
+    assert route(n_vecs=last) == (name, "placed")
+    assert route(x_place=(0, 0), y_place=(0, 0)) == (name, "placed")
+    seen = {"placed"}
+    for change, reason in (
+        ({"arch": "sm_100a"}, "arch"),
+        ({"arch": "sm_103a"}, "arch"),
+        ({"in_place": True}, "in_place"),
+        ({"out_given": False, "y_place": None}, "no_out"),
+        ({"n_vecs": first - 1}, "size"),
+        ({"n_vecs": last + 1}, "size"),
+        ({"x_place": None}, "x_memory"),
+        ({"y_place": None}, "out_memory"),
+        ({"y_place": (5 * TILE_BYTES + 64, 1)}, "chunk_offset"),
+        ({"y_place": (5 * TILE_BYTES + 48, 0)}, "die_parity"),
+    ):
+        assert route(**change) == (None, reason), change
+        seen.add(reason)
+    assert seen == set(loader.DOMAIN_REASONS)
+    # the first reason that holds
+    assert route(in_place=True, n_vecs=first - 1, x_place=None) == (None, "in_place")
+    assert route(out_given=False, n_vecs=first - 1, x_place=None) == (None, "no_out")
+    assert route(n_vecs=first - 1, x_place=None, y_place=None) == (None, "size")
+    assert route(x_place=None, y_place=None) == (None, "x_memory")
+    assert route(y_place=(0, 0)) == (None, "chunk_offset")
+
+
+def _kernel_item(slot: int, first_die: int, shift: int, batch_shift: int) -> tuple[int, int]:
+    """``(die, item)`` of chunk slot ``slot``, as the kernel numbers its items: chunk ``k`` lies in die
+    ``first_die ^ (k & 1)``, and die ``d``'s items run over its chunks in order, ``2^(shift - batch_shift)`` a chunk."""
+    chunk = slot >> shift
+    die = first_die ^ (chunk & 1)
+    item = ((chunk >> 1) << (shift - batch_shift)) + ((slot & ((1 << shift) - 1)) >> batch_shift)
+    return die, item
+
+
+@pytest.mark.cpu_only
+def test_domain_launch_covers_every_tile() -> None:
+    """``domain_launch``: the first tile rounds down, the chunk holds 512 tiles of 4,096 bytes, an item is 2 of
+    them, and the grid is one CTA per item of the chunks that hold the input, at most 16 a SM.  Every tile of the
+    input lies in an item below its die's item count, as the kernel decodes the item back to its slots."""
+    record = loader.MODULES["mxfp8_e8m0_g32_domain"]
+    sms = 212
+    resident = 16 * sms
+
+    def launch(n_vecs, offset, die):
+        return loader.domain_launch(record, n_vecs=n_vecs, x_place=(offset, die), sm_count=sms, arch=ARCH)
+
+    assert launch(512 * 256, 0, 0) == {
+        "first_tile": 0,
+        "first_die": 0,
+        "chunk_tile_shift": 9,
+        "batch_shift": 1,
+        "grid": (256, 1, 1),
+    }
+    got = launch(512 * 256 + 1, 3 * TILE_BYTES + 48, 1)
+    assert (got["first_tile"], got["first_die"], got["grid"]) == (3, 1, (512, 1, 1))
+    assert launch(loader.MAX_VECTORS, 0, 0)["grid"] == (resident, 1, 1)
+    for offset in (0, 16, TILE_BYTES, 3 * TILE_BYTES + 48, CHUNK - TILE_BYTES, CHUNK - 16):
+        for n_vecs in (1, 255, 256, 257, 4 * 256 + 3, 512 * 256 - 1, 512 * 256, 3 * 512 * 256 + 7):
+            for first_die in (0, 1):
+                got = launch(n_vecs, offset, first_die)
+                shift, batch_shift = got["chunk_tile_shift"], got["batch_shift"]
+                first_tile = got["first_tile"]
+                assert first_tile == offset // TILE_BYTES and got["first_die"] == first_die
+                tiles = -(-n_vecs // 256)
+                last_chunk = (first_tile + tiles - 1) >> shift
+                items = {die: ((last_chunk - (die ^ first_die) + 2) >> 1) << (shift - batch_shift) for die in (0, 1)}
+                assert got["grid"] == (min(items[0] + items[1], resident), 1, 1)
+                for c in range(tiles):
+                    die, item = _kernel_item(first_tile + c, first_die, shift, batch_shift)
+                    assert item < items[die], (offset, n_vecs, first_die, c)
+                    # the kernel's decode: the item's chunk and slots hold tile c
+                    chunk = (die ^ first_die) + (item >> (shift - batch_shift) << 1)
+                    slot = (chunk << shift) + ((item & ((1 << (shift - batch_shift)) - 1)) << batch_shift)
+                    assert slot <= first_tile + c < slot + (1 << batch_shift)
+    with pytest.raises(ValueError, match="interleaved-domain grid rule"):
+        loader.domain_launch(loader.MODULES["mxfp8_e8m0_g32"], n_vecs=1, x_place=(0, 0), sm_count=sms, arch=ARCH)
+    with pytest.raises(ValueError, match="unknown"):
+        loader.launch_grid(record, n_vecs=1, sm_count=sms, arch=ARCH)
+
+
+# --------------------------------------------------------------------------- GPU: every architecture
+
+
+def _supported() -> bool:
+    return torch.cuda.is_available() and pkg.is_cake_act_qdq_det_train_supported(torch.device("cuda", 0))
+
+
+gpu = pytest.mark.skipif(not _supported(), reason="cake_act_qdq_det_train needs an SM100 / SM103 / SM107 device")
+
+
+@gpu
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_domain_on_default_memory_runs_the_off_program(fmt: str, monkeypatch) -> None:
+    """On default memory (and on SM100 / SM103 everywhere) ``"domain"`` launches the program ``"off"`` launches, for
+    the reason the route gives, with the same bytes."""
+    arch = loader.device_arch(0)
+    x = reference.randn_input((129, 512), fmt, seed=61)
+    n_vecs = x.numel() // loader.VECTOR
+    for scale_out in (False, True):
+        want = forward(x, format=fmt, return_scales=scale_out)
+        program = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=False)
+        for out in (None, torch.empty_like(x)):
+            name, reason = loader.domain_route(
+                arch,
+                fmt,
+                scale_out=scale_out,
+                n_vecs=n_vecs,
+                in_place=False,
+                out_given=out is not None,
+                x_place=None,
+                y_place=None,
+            )
+            assert name is None
+            got = plan(x, format=fmt, out=out, return_scales=scale_out)
+            assert (got["route"], got["reason"], got["program"]) == ("plain", reason, program), got
+            launched = _spy(monkeypatch)
+            result = forward(x, format=fmt, out=out, return_scales=scale_out, locality="domain")
+            assert launched == [program], launched
+            monkeypatch.undo()
+            pairs = zip(result, want, strict=True) if scale_out else ((result, want),)
+            for what, (a, b) in zip(("y", "scales"), pairs):
+                _assert_same(f"{fmt} scale_out={scale_out} out={out is not None} {what}", a, b)
+    # in place: the reason is the route's, the program the in-place one
+    y = x.clone()
+    got = plan(y, format=fmt, out=y)
+    assert (got["route"], got["reason"]) == ("plain", "arch" if arch != ARCH else "in_place"), got
+    assert got["program"] == loader.selected_module(arch, fmt, scale_out=False, n_vecs=n_vecs, in_place=True)
+    _assert_same(f"{fmt} in place", forward(y, format=fmt, out=y, locality="domain"), forward(x, format=fmt))
+
+
+@gpu
+def test_empty_input_plan() -> None:
+    x = torch.empty((0, 512), device="cuda", dtype=torch.bfloat16)
+    assert plan(x, format="mxfp8_e8m0_g32") == {
+        "route": "plain",
+        "reason": "empty",
+        "program": None,
+        "first_tile": None,
+        "first_die": None,
+        "grid": None,
+    }
+    assert forward(x, format="mxfp8_e8m0_g32", locality="domain").shape == (0, 512)
+
+
+@gpu
+def test_off_loads_no_domain_state() -> None:
+    """In a fresh interpreter, ``"off"`` calls (and ``"domain"`` calls on SM100 / SM103) never import the module of
+    the memory that alternates dies and of the claim workspaces."""
+    script = (
+        "import sys, torch\n"
+        f"import {pkg.__name__} as b\n"
+        "x = torch.randn(129, 512, device='cuda', dtype=torch.bfloat16)\n"
+        "b.cake_act_qdq_det_train_forward(x, format='mxfp8_e8m0_g32')\n"
+        "b.cake_act_qdq_det_train_forward(x, format='mxfp8_e8m0_g32', out=torch.empty_like(x), locality='off')\n"
+        "if b.cake_jit.device_arch(0) != 'sm_107a':\n"
+        "    b.cake_act_qdq_det_train_forward(x, format='mxfp8_e8m0_g32', out=torch.empty_like(x), locality='domain')\n"
+        "    b.cake_act_qdq_det_train_domain_plan(x, format='mxfp8_e8m0_g32', out=torch.empty_like(x))\n"
+        "torch.cuda.synchronize()\n"
+        f"assert {memory.__name__!r} not in sys.modules, sorted(sys.modules)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+
+
+@gpu
+def test_domain_empty_refuses_other_architectures() -> None:
+    if loader.device_arch(0) == ARCH:
+        pytest.skip("SM107 is the architecture of the memory that alternates dies")
+    with pytest.raises(RuntimeError, match="SM107"):
+        domain_empty((4, 96))
+
+
+# --------------------------------------------------------------------------- SM107 (R200)
+
+
+@pytest.fixture(scope="module")
+def r200() -> int:
+    """Device 0, when it is an SM107.  A missing cuda-python, or an SM107 whose driver reports fewer than two
+    locality domains, fails here: neither is a reason to skip."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (10, 7):
+        pytest.skip("the interleaved-domain route needs an SM107 (R200) device")
+    count = memory.domain_count(0)
+    if count < memory.DIES:
+        pytest.fail(
+            f"device 0 is an SM107 but reports {count} locality domain(s); the interleaved-domain route needs "
+            f"{memory.DIES}: check the driver"
+        )
+    return 0
+
+
+# Byte offsets of an input in its buffer: inside a tile of a die-0 chunk, and at a whole tile of a die-1 chunk.
+OFFSETS = (5 * TILE_BYTES + 48, CHUNK + 7 * TILE_BYTES)
+
+
+class _Big:
+    """Two buffers of memory that alternate dies, room for an input just above every route's first size at each of
+    :data:`OFFSETS` and one chunk further, and a third one for a second stream's output."""
+
+    def __init__(self) -> None:
+        first = max(_first(kind) for kind in KINDS)
+        self.rows = first // (WIDTH // 8) + 1
+        self.numel = self.rows * WIDTH
+        elements = (max(OFFSETS) + CHUNK) // BF16 + self.numel + 64
+        self.x_buf = domain_empty((elements,))
+        self.y_buf = domain_empty((elements,))
+        self.z_buf = domain_empty((elements,))
+        self._inputs: dict[str, torch.Tensor] = {}
+
+    def view(self, buf: torch.Tensor, offset: int) -> torch.Tensor:
+        start = offset // BF16
+        return buf[start : start + self.numel].view(self.rows, WIDTH)
+
+    def input(self, fmt: str) -> torch.Tensor:
+        if fmt not in self._inputs:
+            self._inputs = {fmt: reference.randn_input((self.rows, WIDTH), fmt, seed=67)}
+        return self._inputs[fmt]
+
+
+@pytest.fixture(scope="module")
+def big(r200) -> _Big:
+    return _Big()
+
+
+@pytest.mark.parametrize("dtype", (torch.bfloat16, torch.float32, torch.uint8))
+def test_domain_empty_alternates_dies(r200, dtype) -> None:
+    shape = (3, CHUNK // 2 + 7)
+    t = domain_empty(shape, dtype=dtype)
+    nbytes = t.numel() * t.element_size()
+    chunks = -(-nbytes // CHUNK)
+    assert t.shape == shape and t.dtype == dtype and t.device == torch.device("cuda", 0) and t.is_contiguous()
+    base = t.data_ptr()
+    assert base % CHUNK == 0
+    assert (base, chunks * CHUNK) in memory.registered(0)
+    for k in range(chunks):
+        for at in (base + k * CHUNK, base + (k + 1) * CHUNK - 1):
+            assert memory.domain_of(at) == k & 1, (k, at)
+    flat = t.view(-1)
+    stride = CHUNK // t.element_size()
+    assert memory.place(flat[stride + 3 : stride + 11], CHUNK) == (3 * t.element_size(), 1)
+    assert memory.place(flat, CHUNK) == (0, 0)
+    # zero copy: the tensor is the registered range itself, and a write through a view is read through another
+    t.zero_()
+    flat[stride] = 1
+    torch.cuda.synchronize()
+    assert t.view(-1).nonzero().view(-1).tolist() == [stride]
+    # every spelling of the device
+    for device in (None, 0, "cuda", "cuda:0", torch.device("cuda", 0)):
+        u = domain_empty((4, WIDTH), device=device)
+        assert u.device == torch.device("cuda", 0) and u.dtype == torch.bfloat16 and u.shape == (4, WIDTH)
+        del u
+    # the last view gone, the range is unregistered and freed
+    del t, flat
+    gc.collect()
+    assert all(entry[0] != base for entry in memory.registered(0))
+
+
+def test_domain_empty_refuses_capture(r200) -> None:
+    domain_empty((4, WIDTH))  # the graph workspaces exist before the capture
+    graph = torch.cuda.CUDAGraph()
+    with pytest.raises(RuntimeError, match="capture"):
+        with torch.cuda.graph(graph):
+            domain_empty((4, WIDTH))
+
+
+def test_a_free_during_capture_waits_for_the_next_allocation(r200) -> None:
+    """A buffer whose last view goes during a capture stays registered (and mapped) through the capture; the next
+    ``domain_empty`` call frees and unregisters it."""
+    t = domain_empty((4, WIDTH))
+    base = t.data_ptr()
+    scratch = torch.zeros(16, device="cuda")
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        scratch.add_(1)
+        del t
+        gc.collect()
+        assert any(entry[0] == base for entry in memory.registered(0))
+    assert any(entry[0] == base for entry in memory.registered(0))
+    graph.replay()
+    torch.cuda.synchronize()
+    assert scratch.tolist() == [1.0] * 16
+    domain_empty((4, WIDTH))
+    assert all(entry[0] != base for entry in memory.registered(0))
+
+
+@pytest.mark.parametrize("offset", OFFSETS, ids=("die0_inside_a_tile", "die1_whole_tile"))
+@pytest.mark.parametrize("scale_out", (False, True), ids=("y", "y_scales"))
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_domain_route_gives_the_off_bytes(big, fmt: str, scale_out: bool, offset: int, monkeypatch) -> None:
+    """Out of place, just above the route's first size, ``x`` and ``out`` at the same offset in chunks of one die:
+    the plan says ``domain``, the call launches the interleaved-domain program once, and its bytes (and scales) are
+    the ``"off"`` route's on default memory; ``x`` is unchanged."""
+    kind = loader.route_name(fmt, scale_out=scale_out)
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    y.fill_(float("nan"))
+    got = plan(x, format=fmt, out=y, return_scales=scale_out)
+    assert got["route"] == "domain" and got["reason"] == "placed", got
+    assert got["program"] == _domain_name(kind)
+    assert (got["first_tile"], got["first_die"]) == ((offset % CHUNK) // TILE_BYTES, (offset // CHUNK) & 1)
+    launched = _spy(monkeypatch)
+    result = forward(x, format=fmt, out=y, return_scales=scale_out, locality="domain")
+    assert launched == [_domain_name(kind)], launched
+    monkeypatch.undo()
+    want = forward(x0, format=fmt, return_scales=scale_out)
+    y_got, s_got = result if scale_out else (result, None)
+    y_want, s_want = want if scale_out else (want, None)
+    assert y_got is y
+    _assert_same(f"{kind} offset={offset} y", y_got, y_want)
+    if scale_out:
+        _assert_same(f"{kind} offset={offset} scales", s_got, s_want)
+    _assert_same(f"{kind} offset={offset} x after the call", x, x0)
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_every_domain_program_runs_on_any_grid(r200, fmt: str) -> None:
+    """Every interleaved-domain program, launched directly on grids of 1 and 3 CTAs and on the host's grid, gives
+    the FP64 rule's bits: over memory that alternates dies (an input that crosses three chunk boundaries) and over
+    default memory, whose placement only changes the speed.  The walk leaves its counters zero."""
+    x0 = reference.randn_input((32769, WIDTH), fmt, seed=71)
+    want = reference.qdq(x0, fmt)
+    n_vecs = x0.numel() // loader.VECTOR
+    offset = CHUNK - 3 * TILE_BYTES + 16
+    buf_x = domain_empty((offset // BF16 + x0.numel(),))
+    buf_y = domain_empty((offset // BF16 + x0.numel(),))
+    placed = (
+        buf_x[offset // BF16 :].view(x0.shape),
+        buf_y[offset // BF16 :].view(x0.shape),
+    )
+    default = (torch.empty_like(x0), torch.empty_like(x0))
+    for scale_out in (False, True):
+        name = _domain_name(loader.route_name(fmt, scale_out=scale_out))
+        record = loader.MODULES[name]
+        words_a_die = record["counters"]["words"]
+        for x, y in (placed, default):
+            x_place = memory.place(x, CHUNK) or (0, 0)
+            launch = loader.domain_launch(
+                record, n_vecs=n_vecs, x_place=x_place, sm_count=loader.sm_count(0), arch=ARCH
+            )
+            for grid in ((1, 1, 1), (3, 1, 1), launch["grid"]):
+                x.copy_(x0)
+                y.fill_(float("nan"))
+                words = torch.zeros(2 * words_a_die, dtype=torch.int32, device="cuda")
+                values = {
+                    "x": x,
+                    "y": y,
+                    "n_vecs": n_vecs,
+                    "counters0": words.view(torch.uint32)[:words_a_die],
+                    "counters1": words.view(torch.uint32)[words_a_die:],
+                    **{key: launch[key] for key in ("first_tile", "first_die", "chunk_tile_shift", "batch_shift")},
+                }
+                s = None
+                if scale_out:
+                    s = torch.full((x0.shape[0], WIDTH // reference.GROUP[fmt]), float("nan"), device="cuda")
+                    values["scales"] = s
+                loader.run_module(name, values, device_index=0, grid=grid)
+                what = f"{name} grid={grid} placed={x.data_ptr() == placed[0].data_ptr()}"
+                _assert_same(f"{what} y", reference.y_bits(y), reference.y_bits(want[0]))
+                if scale_out:
+                    _assert_same(f"{what} scales", reference.scale_bits(s), reference.scale_bits(want[1]))
+                assert int(words.count_nonzero()) == 0, (what, words.tolist())
+
+
+def test_plain_reasons_on_r200(big, monkeypatch) -> None:
+    """Each placement the route refuses runs the ``"off"`` program with the same bytes, for the reason the plan
+    gives."""
+    fmt = "mxfp8_e8m0_g32"
+    offset = OFFSETS[0]
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    want = forward(x0, format=fmt)
+    ordinary = torch.empty_like(x0)
+    small = slice(0, 4097)
+    cases = (
+        ("x_memory", x0, y),
+        ("out_memory", x, ordinary),
+        ("no_out", x, None),
+        ("chunk_offset", x, big.view(big.y_buf, offset + 16)),
+        ("die_parity", x, big.view(big.y_buf, offset + CHUNK)),
+        ("size", x[small], y[small]),
+    )
+    n_vecs = x0.numel() // loader.VECTOR
+    for reason, source, out in cases:
+        got = plan(source, format=fmt, out=out)
+        size = source.numel() // loader.VECTOR
+        program = loader.selected_module(ARCH, fmt, scale_out=False, n_vecs=size, in_place=False)
+        assert (got["route"], got["reason"], got["program"]) == ("plain", reason, program), (reason, got)
+        launched = _spy(monkeypatch)
+        result = forward(source, format=fmt, out=out, locality="domain")
+        assert launched == [program], (reason, launched)
+        monkeypatch.undo()
+        expected = want[small] if reason == "size" else want
+        _assert_same(f"{reason} y", result, expected)
+    # in place on memory that alternates dies
+    got = plan(x, format=fmt, out=x)
+    assert (got["route"], got["reason"]) == ("plain", "in_place"), got
+    assert got["program"] == loader.selected_module(ARCH, fmt, scale_out=False, n_vecs=n_vecs, in_place=True)
+    _assert_same("in place", forward(x, format=fmt, out=x, locality="domain"), want)
+
+
+def test_counters_are_zero_after_calls(big) -> None:
+    """Every launch leaves the claim counters of a stream zero: the host zeroes them once."""
+    offset = OFFSETS[1]
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    for fmt in FORMATS:
+        x.copy_(big.input(fmt))
+        for scale_out in (False, True):
+            for _ in range(3):
+                forward(x, format=fmt, out=y, return_scales=scale_out, locality="domain")
+    words = memory.stream_workspace(0, torch.cuda.current_stream().cuda_stream)
+    assert words is not None
+    torch.cuda.synchronize()
+    assert int(words.count_nonzero()) == 0, words.tolist()
+
+
+def test_a_raising_launch_drops_its_workspace(big, monkeypatch) -> None:
+    """An eager launch that raises drops its stream's claim workspace; the next call on that stream makes a zeroed
+    one and gives the ``"off"`` bytes."""
+    fmt = "mxfp8_e8m0_g32"
+    offset = OFFSETS[0]
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    want = forward(x0, format=fmt)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+
+    def refuse(name, values, **kwargs):
+        raise RuntimeError("launch refused")
+
+    with torch.cuda.stream(side):
+        forward(x, format=fmt, out=y, locality="domain")
+        assert memory.stream_workspace(0, side.cuda_stream) is not None
+        monkeypatch.setattr(loader, "run_module", refuse)
+        with pytest.raises(RuntimeError, match="launch refused"):
+            forward(x, format=fmt, out=y, locality="domain")
+        monkeypatch.undo()
+        assert memory.stream_workspace(0, side.cuda_stream) is None
+        y.fill_(float("nan"))
+        forward(x, format=fmt, out=y, locality="domain")
+        words = memory.stream_workspace(0, side.cuda_stream)
+        assert words is not None
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    _assert_same("after a raising launch", y, want)
+    assert int(words.count_nonzero()) == 0, words.tolist()
+
+
+def test_caller_scales_on_the_domain_route(big, monkeypatch) -> None:
+    """A caller's ``scales`` buffer (in default memory) on the domain route: the call launches the scales program
+    and returns ``out`` and that buffer with the ``"off"`` bytes."""
+    fmt = "mxfp4_e8m0_g32"
+    offset = OFFSETS[1]
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    want_y, want_s = forward(x0, format=fmt, return_scales=True)
+    s = torch.full_like(want_s, float("nan"))
+    y.fill_(float("nan"))
+    launched = _spy(monkeypatch)
+    got_y, got_s = forward(x, format=fmt, out=y, scales=s, locality="domain")
+    assert launched == [_domain_name(loader.route_name(fmt, scale_out=True))], launched
+    monkeypatch.undo()
+    assert got_y is y and got_s is s
+    _assert_same("y", got_y, want_y)
+    _assert_same("scales", got_s, want_s)
+
+
+def test_two_streams_at_once(big) -> None:
+    """Calls on two streams at once, each with its own claim workspace, give the ``"off"`` bytes."""
+    fmt = "fp4_e4m3_g16"
+    offset = OFFSETS[0]
+    x0 = big.input(fmt)
+    x = big.view(big.x_buf, offset)
+    outs = (big.view(big.y_buf, offset), big.view(big.z_buf, offset))
+    x.copy_(x0)
+    want = forward(x0, format=fmt)
+    streams = (torch.cuda.Stream(), torch.cuda.Stream())
+    for stream in streams:
+        stream.wait_stream(torch.cuda.current_stream())
+    for _ in range(3):
+        for stream, out in zip(streams, outs, strict=True):
+            with torch.cuda.stream(stream):
+                out.fill_(float("nan"))
+                forward(x, format=fmt, out=out, locality="domain")
+    for stream in streams:
+        torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    for k, out in enumerate(outs):
+        _assert_same(f"stream {k}", out, want)
+    words = [memory.stream_workspace(0, stream.cuda_stream) for stream in streams]
+    assert words[0] is not None and words[1] is not None and words[0].data_ptr() != words[1].data_ptr()
+    assert all(int(w.count_nonzero()) == 0 for w in words)
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_cuda_graph_replays_match_eager(big, fmt: str) -> None:
+    """After one eager call per program, two captured calls on one capture stream take one zeroed graph workspace,
+    and every replay gives the eager bytes."""
+    offset = OFFSETS[1]
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    want_y, want_s = forward(x0, format=fmt, return_scales=True)
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        # one eager call per program the capture runs, so no library loads during the capture
+        forward(x, format=fmt, out=y, locality="domain")
+        forward(x, format=fmt, out=y, return_scales=True, locality="domain")
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    left = memory.graph_workspaces_left(0)
+    assert left > 0
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward(x, format=fmt, out=y, locality="domain")
+        _, s = forward(x, format=fmt, out=y, return_scales=True, locality="domain")
+    assert memory.graph_workspaces_left(0) == left - 1
+    for replay in range(3):
+        y.fill_(float("nan"))
+        s.fill_(float("nan"))
+        graph.replay()
+        torch.cuda.synchronize()
+        _assert_same(f"{fmt} replay {replay} y", y, want_y)
+        _assert_same(f"{fmt} replay {replay} scales", s, want_s)
+
+
+def test_cuda_graph_without_graph_workspaces_left(big, monkeypatch) -> None:
+    """With every graph workspace taken, each captured call takes a workspace from the graph's pool that the graph
+    zeroes at every replay; no capture keeps it, and every replay gives the eager bytes."""
+    fmt = "mxfp8_e8m0_g32"
+    offset = OFFSETS[0]
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    want_y, want_s = forward(x0, format=fmt, return_scales=True)
+    forward(x, format=fmt, out=y, locality="domain")
+    forward(x, format=fmt, out=y, return_scales=True, locality="domain")
+    torch.cuda.synchronize()
+    monkeypatch.setitem(memory._GRAPH_WORKSPACES[0], "taken", memory.GRAPH_WORKSPACES)
+    held = dict(memory._CAPTURE_WORKSPACES)
+    launched = _spy(monkeypatch)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward(x, format=fmt, out=y, locality="domain")
+        _, s = forward(x, format=fmt, out=y, return_scales=True, locality="domain")
+    assert launched == [_domain_name(fmt), _domain_name(fmt + "_scales")], launched
+    assert memory.graph_workspaces_left(0) == 0
+    assert memory._CAPTURE_WORKSPACES == held
+    for replay in range(3):
+        y.fill_(float("nan"))
+        s.fill_(float("nan"))
+        graph.replay()
+        torch.cuda.synchronize()
+        _assert_same(f"replay {replay} y", y, want_y)
+        _assert_same(f"replay {replay} scales", s, want_s)
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_steady_state_domain_calls_do_not_synchronize(big, fmt: str) -> None:
+    """After the first call on a stream, a ``"domain"`` call and its plan run under the error sync-debug mode."""
+    offset = OFFSETS[0]
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(big.input(fmt))
+    forward(x, format=fmt, out=y, locality="domain")
+    forward(x, format=fmt, out=y, return_scales=True, locality="domain")
+    torch.cuda.synchronize()
+    previous = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        assert plan(x, format=fmt, out=y)["route"] == "domain"
+        forward(x, format=fmt, out=y, locality="domain")
+        forward(x, format=fmt, out=y, return_scales=True, locality="domain")
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+    torch.cuda.synchronize()

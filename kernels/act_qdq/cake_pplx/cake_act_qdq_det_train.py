@@ -50,6 +50,20 @@ Usage::
         x, format="fp4_e4m3_g16", return_scales=True
     )
     cake_act_qdq_det_train_forward(x, format="mxfp4_e8m0_g32", out=x)  # in place
+
+On an R200 (SM107), ``locality="domain"`` runs a program whose CTAs work on
+their own die's memory, for an out-of-place call whose input and output lie
+in memory from :func:`cake_act_qdq_det_train_domain_empty` (2 MB chunks that
+alternate between the two dies).  Every other call runs the default program;
+the bytes are the same either way, and
+:func:`cake_act_qdq_det_train_domain_plan` reports which program a call
+runs::
+
+    o = torch.randn(16384, 8, 4096, device="cuda", dtype=torch.bfloat16)
+    x = cake_act_qdq_det_train_domain_empty(o.shape)
+    y = cake_act_qdq_det_train_domain_empty(o.shape)
+    x.copy_(o)
+    cake_act_qdq_det_train_forward(x, format="mxfp8_e8m0_g32", out=y, locality="domain")
 """
 
 from __future__ import annotations
@@ -113,6 +127,7 @@ def cake_act_qdq_det_train_forward(
     out: Optional[torch.Tensor] = None,
     scales: Optional[torch.Tensor] = None,
     return_scales: bool = False,
+    locality: str = "off",
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     r"""Quantize ``x`` per group to ``format`` and dequantize it back to BF16.
 
@@ -139,6 +154,16 @@ def cake_act_qdq_det_train_forward(
     return_scales : bool, optional
         Whether to return the FP32 scales (a new tensor unless ``scales`` is
         given).
+    locality : str, optional
+        ``"off"`` (default) or ``"domain"``; checked before every other
+        argument (``TypeError`` for a non-string, ``ValueError`` for another
+        string).  ``"domain"`` runs the R200 program whose CTAs work on their
+        own die's memory when the call is out of place on SM107, ``x`` and
+        ``out`` both lie in memory from
+        :func:`cake_act_qdq_det_train_domain_empty` at the same offset in
+        their 2 MB chunks and in chunks of the same die, and the call is
+        large enough; every other call runs the ``"off"`` program.  The
+        bytes are the same either way.
 
     Returns
     -------
@@ -147,6 +172,100 @@ def cake_act_qdq_det_train_forward(
         when ``return_scales`` is true or ``scales`` is given.
     """
     return _backend().cake_act_qdq_det_train_forward(
+        x, format=format, out=out, scales=scales, return_scales=return_scales, locality=locality
+    )
+
+
+@cake_api
+def cake_act_qdq_det_train_domain_empty(
+    shape: Sequence[int],
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+    device: Optional[Union[torch.device, str, int]] = None,
+) -> torch.Tensor:
+    """An uninitialized tensor in memory whose 2 MB chunks alternate between
+    the two dies of an R200 (SM107): the ``x`` and ``out`` of a
+    ``locality="domain"`` call.
+
+    Chunk ``k`` of the allocation lies in die ``k & 1``.  The tensor is
+    contiguous and starts on a chunk; views of it (slices, reshapes) keep it
+    alive.  Freeing the last view synchronizes the device.  Allocate the
+    buffers once, before any CUDA graph capture, and reuse them.  The
+    ``"off"`` programs run on this memory as fast as on default memory.
+    Needs cuda-python (the ``locality`` extra).
+
+    Parameters
+    ----------
+    shape : sequence of int
+        The tensor shape.
+    dtype : torch.dtype, optional
+        The element type (BF16 by default).
+    device : torch.device, str or int, optional
+        The CUDA device; the current one by default.
+
+    Returns
+    -------
+    torch.Tensor
+        A new contiguous tensor; its contents are undefined.  Raises
+        ``TypeError`` for a ``dtype`` that is not a ``torch.dtype``,
+        ``ValueError`` for a negative dimension or a device that is not
+        CUDA, ``torch.cuda.OutOfMemoryError`` when the device has no room
+        (after torch's cached free memory is returned to the driver once),
+        and ``RuntimeError`` during CUDA graph capture, on a device other
+        than SM107, when the driver reports fewer than two locality domains,
+        or without a cuda-python that names them.  torch's
+        ``torch.cuda.memory_*`` counters do not count this memory.
+    """
+
+    return _backend().cake_act_qdq_det_train_domain_empty(shape, dtype=dtype, device=device)
+
+
+@cake_api
+def cake_act_qdq_det_train_domain_plan(
+    x: torch.Tensor,
+    *,
+    format: str,
+    out: Optional[torch.Tensor] = None,
+    scales: Optional[torch.Tensor] = None,
+    return_scales: bool = False,
+) -> dict[str, Any]:
+    """Which program ``cake_act_qdq_det_train_forward(..., locality="domain")``
+    runs for these arguments, without a launch or an allocation.
+
+    The arguments are checked as the forward checks them.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        The forward's input: contiguous BF16 CUDA ``[..., D]``.
+    format : str
+        ``"fp4_e4m3_g16"``, ``"mxfp4_e8m0_g32"`` or ``"mxfp8_e8m0_g32"``.
+    out : torch.Tensor, optional
+        The forward's output buffer: ``x`` itself (in place) or a buffer of
+        ``x``'s shape that does not overlap ``x``.
+    scales : torch.Tensor, optional
+        The forward's FP32 scale buffer ``[..., D / G]``.
+    return_scales : bool, optional
+        Whether the forward returns the scales.
+
+    Returns
+    -------
+    dict
+        ``route``: ``"domain"`` or ``"plain"``.  ``reason``: ``"placed"`` on
+        the domain route; on the plain route the first that holds of
+        ``"empty"`` (no elements, no launch), ``"arch"`` (not SM107),
+        ``"in_place"``, ``"no_out"`` (``out`` not given), ``"size"`` (outside
+        the domain program's size range), ``"x_memory"`` / ``"out_memory"``
+        (``x`` / ``out`` not in memory from
+        :func:`cake_act_qdq_det_train_domain_empty`), ``"chunk_offset"``
+        (different offsets in their chunks) and ``"die_parity"`` (chunks in
+        different dies).  ``program``: the program's registry name (None
+        without a launch).  ``first_tile`` and ``first_die``: where the
+        input's first tile lies (None on the plain route).  ``grid``: the
+        launch grid (None without a launch).
+    """
+
+    return _backend().cake_act_qdq_det_train_domain_plan(
         x, format=format, out=out, scales=scales, return_scales=return_scales
     )
 
@@ -159,7 +278,9 @@ def cake_act_qdq_det_train_forward_workspace_bytes(
 ) -> int:
     """The workspace of one forward call of an input of ``shape``.
 
-    Always 0: a call needs no workspace and keeps no state between calls.
+    Always 0: a call takes no caller workspace.  A ``locality="domain"`` call
+    keeps its claim counters in the package's own 128-byte workspace per
+    stream.
 
     Parameters
     ----------
@@ -182,6 +303,8 @@ __all__ = [
     "SUPPORTED_COMPUTE_CAPABILITIES",  # noqa: F822
     "FORMATS",  # noqa: F822
     "GROUP_SIZES",  # noqa: F822
+    "cake_act_qdq_det_train_domain_empty",
+    "cake_act_qdq_det_train_domain_plan",
     "cake_act_qdq_det_train_forward",
     "cake_act_qdq_det_train_forward_workspace_bytes",
     "is_cake_act_qdq_det_train_supported",
