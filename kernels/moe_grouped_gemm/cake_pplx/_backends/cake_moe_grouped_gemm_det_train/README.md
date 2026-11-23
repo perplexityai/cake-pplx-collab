@@ -504,6 +504,29 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   `sm_100a` and `sm_103a` the `main_wave_halves` program keeps the A tile in
   the collector and synchronizes the waves every eight waves. None of these
   changes the output bits.
+- Weight-gradient queue walk (`wgrad_queue_walk`): on `sm_100a` and `sm_103a`
+  the 512-wide k tile routes also serve `main_halves_queue` (and
+  `main_halves_queue_acc` on the fp32 route), the A-collector half-release
+  build whose tiles before the split tail are claimed from one global counter
+  in tile order, so the tiles in flight are consecutive and tiles that read
+  the same `g` or `x` strip run at nearly the same time. The host binds it in
+  place of the stage it selects (`main_halves` or `main_wave_halves`) where a
+  rule of `HOST_PLAN_CONSTANTS["queue_walk"]` names the call: the device's
+  architecture and SM count, the selected stage, the output (`"bfloat16"` /
+  `"float32"`, or `"accumulate"` for a fused accumulate) and a range of group
+  counts. The call keeps the selected stage's plan; its split tail is that
+  stage's, summed by the same ordered tail reduce, and every tile keeps its
+  k-step order, so the output bits are the selected stage's. The rules cover
+  the 148-SM `sm_100a` and 152-SM `sm_103a` parts, where the queue walk was
+  timed against the stage it replaces and no row was confirmed slower across
+  several GPUs, except one disclosed row (the 8-group gate/up weight gradient
+  with a composed bfloat16 accumulate, lead route, eager: slower on one of
+  three 148-SM `sm_100a` GPUs, faster on the other two); on the 148-SM
+  `sm_100a` part the `main_halves` stage keeps it for the fused accumulate
+  only (a bfloat16 row there was slower), and the `main_wave_halves` stage
+  keeps it up to 16 groups (a 32-group bfloat16 row there was slower). An
+  `m_indptr` row table binds the queue stage of the lead route (its `_lead`
+  twin, with `m_begin`), as every other stage.
 - Weight-gradient k256 tail (`wgrad_k256_tail`): on the architectures listed
   in `k256_tail_archs`, when `K` (the columns of `dW[e]` and of `x`) is at
   most `k256_tail_max_k` and the groups average at least `k256_tail_min_rows`
@@ -528,9 +551,11 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   descriptor upload kernel.
 - Stream workspaces (kept per device and CUDA stream, reused by every launch
   on that stream): the `fwd` / `dgrad` scheduler words (`sched`,
-  `sched_words` u32 words whose first three rest at `sched_rest`) and the
+  `sched_words` u32 words whose first three rest at `sched_rest`), the
   wave-sync counters (`wave_sync`, `wave_sync_words` u32 words resting at
-  zero). The first launch on a stream allocates a buffer at its rest state;
+  zero) and the queue walk's tile counters (`queue_sched`, the argument the
+  queue programs name `sched`: `queue_sched_words` u32 words resting at zero;
+  the last cluster of a launch to retire sets them back to zero). The first launch on a stream allocates a buffer at its rest state;
   every kernel leaves it at its rest state, so launches on one stream share it
   and launches on two streams never do. A launch under CUDA graph capture, or
   for a device that is not the current one, takes buffers of its own, set to
@@ -552,16 +577,16 @@ fused one.
 
 | feature | sm_100a | sm_103a | sm_107a |
 | --- | --- | --- | --- |
-| `wgrad` k512 half-release stages | `main_halves` (planned walk), `main_wave_halves` (wave period 8) | `main_halves` (planned walk), `main_wave_halves` (wave period 8) | `main_halves`, `main_halves_k256t` |
+| `wgrad` k512 half-release stages | `main_halves` (planned walk), `main_wave_halves` (wave period 8), `main_halves_queue` (queue walk) | `main_halves` (planned walk), `main_wave_halves` (wave period 8), `main_halves_queue` (queue walk) | `main_halves`, `main_halves_k256t` |
 | `fwd` / `dgrad` L2 evict-first twin launched (`main_wide_ef`) | `fwd` (`K >= 6144`); `dgrad` (`K >= 4096`, `sum_m // E >= 4096`) | `fwd` (`K >= 6144`) | `fwd` (`K <= 2048`); `dgrad` (`K >= 4096`, `sum_m // E >= 16384`) |
-| `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_halves_k256t`, `tail_reduce` |
+| `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `main_halves_queue`, `tail_reduce` | `main_halves`, `main_wave_halves`, `main_halves_queue`, `tail_reduce` | `main_halves`, `main_halves_k256t`, `tail_reduce` |
 | `wgrad` accumulate, composed | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main`; misaligned `out`; `_acc` library not loadable |
 | CUDA toolkit floor (`min_cuda`) | 12.8 | 12.9 | 13.5 |
 | CUDA toolkit floor of the fused main stages (`min_cuda`) | 13.4 | 13.4 | 13.5 |
 
 The programs are exact-architecture tcgen05 payloads built for the exact
 targets `sm_100a`, `sm_103a` and `sm_107a` (`build.json` `arch_flags`).
-`cake_jit.PROGRAMS` lists thirty libraries, one per kernel and build,
+`cake_jit.PROGRAMS` lists thirty-two libraries, one per kernel and build,
 each a kernel and a host-binding translation unit under
 `csrc/cake_moe_grouped_det_gemm/` shared by the architectures it is built for (an
 architecture-dependent line is folded under `__CUDA_ARCH__`):
@@ -586,12 +611,15 @@ architecture-dependent line is folded under `__CUDA_ARCH__`):
   `sm_100a` and `sm_103a`, without it for `sm_107a`; for `sm_107a` its twin
   that runs the tiles left after the full waves as 256-column half tiles
   (`main_halves_k256t`); the wave-synchronized A-collector kernel that
-  releases it in two halves (`main_wave_halves`), for `sm_100a` and `sm_103a`.
+  releases it in two halves (`main_wave_halves`), for `sm_100a` and `sm_103a`;
+  the A-collector half-release kernel on the queue walk
+  (`main_halves_queue`), for `sm_100a` and `sm_103a`.
 - the 512-wide k tile's main kernel for `sm_107a`, a second `main` stage
   beside the one built for `sm_100a` and `sm_103a`.
 - the fp32 accumulate builds (`_acc`): the twins of `main_halves` (one for
   `sm_100a` and `sm_103a`, one for `sm_107a`), `main_wave_halves` (`sm_100a`,
-  `sm_103a`) and `main_halves_k256t` (`sm_107a`) on the fp32 512-wide k tile
+  `sm_103a`), `main_halves_queue` (`sm_100a`, `sm_103a`) and
+  `main_halves_k256t` (`sm_107a`) on the fp32 512-wide k tile
   route, which add the weight gradient into `C` with one fp32 add per element
   (their `build.json` entries need CUDA 13.4 on `sm_100a` and `sm_103a`,
   `min_cuda`), and the twin of the tail-reduce that adds the ordered sum of a
