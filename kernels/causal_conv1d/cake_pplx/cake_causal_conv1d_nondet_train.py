@@ -40,7 +40,14 @@ to 1024, each with its own token range within S = 1 to 4096) that launch runs
 the route's direct program, ahead of every table above and the thresholds: no
 TMA and no staged pipeline, each CTA the next token blocks of its channel tile,
 ``dx`` bit for bit the route's staged programs', and the same accumulators and
-counters.  This module never runs the deterministic package.
+counters.  From release 0.2.14, at the small-S rows of
+``cake_jit.GRID_CAP_ROWS`` (sm_107a: the ``bwd`` route at C = 584 to 760 but
+640, from S = 512 to 1000, to 999 at C = 600 to 616 and 704, and at C = 768
+at S = 512; the ``bwd_bias`` route at C = 512 from S = 2049 to 3072) a launch
+at ``bwd_grid_mult`` 1 runs the same program on fewer CTAs: at most
+``n_ch_tiles x ceil(S / (n_sub x tokens))``, ``tokens`` 3 on ``bwd`` and 5 on
+``bwd_bias``, and at least one per channel tile.  This module never runs the
+deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.

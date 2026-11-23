@@ -28,9 +28,11 @@ channel tile), and the workspace byte
 layout and size depend on ``C`` and the route only.  The direct backward programs (the backward keys of
 ``DIRECT_ROWS``, which have no deterministic twin): their records, keys and tile forms, their selection ahead of every
 other backward table, their plans and capped grids at and around their keys at every ``bwd_grid_mult``, and every
-backward plan, the public workspace and the KCP routes as without them outside those keys.  The public names
-(each carries the mode word ``nondet``; no entry point takes a mode keyword), and the package's wiring (test-helper
-key, package data, no ``__init__.py`` at the ``cake_pplx`` / ``cake_pplx._backends`` namespace levels).
+backward plan, the public workspace and the KCP routes as without them outside those keys.  The small-S grid cap
+(``GRID_CAP_ROWS``): its table and rules, the capped grid of a single-wave backward inside its spans, the same
+programs, plans, workspace and KCP routes as without it, and no cap at a backward ``DIRECT_ROWS`` range.  The public
+names (each carries the mode word ``nondet``; no entry point takes a mode keyword), and the package's wiring
+(test-helper key, package data, no ``__init__.py`` at the ``cake_pplx`` / ``cake_pplx._backends`` namespace levels).
 No device is needed; nothing is built or launched.  The ``build.json`` checks skip until the exporter renders the
 package.
 """
@@ -4465,8 +4467,8 @@ FULL_PLAN_SWEEP = os.environ.get("CAKE_CONV1D_FULL_PLAN_SWEEP") == "1"
 def _plan_sweep_channels() -> tuple[int, ...]:
     """``CHANNELS``, rows off the 32-channel grid, and every selection threshold and ``TILE_OVERRIDES`` channel count
     of the registry with the multiple of 8 below it, both ends of every ``NARROW_TILES`` key with their neighbours
-    outside it, both ends of every ``FALLBACK_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS`` and ``SM_WIDE_ROWS`` key with
-    their neighbours outside it, and
+    outside it, both ends of every ``FALLBACK_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS``, ``SM_WIDE_ROWS`` and
+    ``GRID_CAP_ROWS`` key with their neighbours outside it, and
     the forward's narrow rows (C 520 to 768, two of them off the 64-channel grid, C 712, the first row of sm_103a's
     ``FORWARD_NARROW_ROW_MIN_S`` floors of the ``fwd_bias`` route, and every row of ``FORWARD_NARROW_ROW_FLOORS`` and
     ``FORWARD_SINGLE_TILE_ROWS``) with their neighbours."""
@@ -4491,6 +4493,7 @@ def _plan_sweep_channels() -> tuple[int, ...]:
         cake_jit.PAIR_ROWS,
         cake_jit.DIRECT_ROWS,
         cake_jit.SM_WIDE_ROWS,
+        cake_jit.GRID_CAP_ROWS,
     ):
         for rows in table.values():
             for _, c_lo, c_hi in rows:
@@ -4500,7 +4503,8 @@ def _plan_sweep_channels() -> tuple[int, ...]:
 
 def _plan_sweep_tokens() -> tuple[int, ...]:
     """Token counts on both sides of every bound where ``S`` enters a plan: the ``TILE_OVERRIDES``, ``NARROW_TILES``,
-    ``FALLBACK_ROWS``, ``PAIR_ROWS`` and ``DIRECT_ROWS`` ranges and the ``SM_WIDE_ROWS`` segments, the forward's
+    ``FALLBACK_ROWS``, ``PAIR_ROWS`` and ``DIRECT_ROWS`` ranges, the ``SM_WIDE_ROWS`` segments and the
+    ``GRID_CAP_ROWS`` spans, the forward's
     ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS`` and ``FORWARD_WIDTH_FLOORS``
     floors and ``FORWARD_SINGLE_TILE_ROWS`` ranges, the grid-trim minimums and the selection rules' token floors, plus
     a few others."""
@@ -4523,10 +4527,11 @@ def _plan_sweep_tokens() -> tuple[int, ...]:
             for value in rows.values():
                 s_min, s_max = value[-2:]
                 tokens |= {s_min - 1, s_min, s_max, s_max + 1}
-    for rows in cake_jit.SM_WIDE_ROWS.values():
-        for segments in rows.values():
-            for s_lo, s_hi, _ in segments:
-                tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
+    for table in (cake_jit.SM_WIDE_ROWS, cake_jit.GRID_CAP_ROWS):
+        for rows in table.values():
+            for segments in rows.values():
+                for s_lo, s_hi, _ in segments:
+                    tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
     for table in (cake_jit.PAIR_ROWS, cake_jit.DIRECT_ROWS):
         for rows in table.values():
             for s_lo, s_hi, _ in rows.values():
@@ -5773,3 +5778,240 @@ def test_manifest_checker_lists_the_package() -> None:
     if not cake_jit.is_rendered():
         pytest.skip("build.json is not rendered yet")
     assert checker.run_in_tree(REPO, [entry]) == []
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# The small-S grid cap of the single-wave backward (``GRID_CAP_ROWS``).
+
+GRID_CAP_ROWS_OF_RECORD = {
+    "sm_107a": {
+        ("bwd", 584, 592): ((512, 1000, 3),),
+        ("bwd", 600, 616): ((512, 999, 3),),
+        ("bwd", 624, 632): ((512, 1000, 3),),
+        ("bwd", 648, 696): ((512, 1000, 3),),
+        ("bwd", 704, 704): ((512, 999, 3),),
+        ("bwd", 712, 760): ((512, 1000, 3),),
+        ("bwd", 768, 768): ((512, 512, 3),),
+        ("bwd_bias", 512, 512): ((2049, 3072, 5),),
+    },
+}
+# Device SM counts the cap is checked at: VR200's, one more and one of a smaller part.
+GRID_CAP_SMS = (212, 216, 132)
+
+
+@contextmanager
+def _without_grid_cap_rows():
+    """Inside the block ``GRID_CAP_ROWS`` is empty (every launch keeps its uncapped grid).  The host's row plans are
+    dropped on entry and on exit."""
+
+    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(cake_jit, "GRID_CAP_ROWS", {})
+            yield
+    finally:
+        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+
+
+@pytest.mark.cpu_only
+def test_grid_cap_rows_are_the_literal_rows() -> None:
+    """``GRID_CAP_ROWS`` is the table of record: sm_107a alone, seven ``bwd`` keys of 3 tokens per CTA and one
+    ``bwd_bias`` key of 5.  Each key is on a backward route of the architecture, with multiples of 8 at both ends and
+    ascending, disjoint spans of at least one token; at every channel count of a key and both ends of each span
+    ``grid_cap_tokens`` gives the span's tokens, and no backward ``DIRECT_ROWS`` range, ``SM_WIDE_ROWS`` segment or
+    ``FALLBACK_ROWS`` range holds the call; one token outside a span, off the 8-channel grid and on another route
+    there is no cap."""
+
+    assert cake_jit.GRID_CAP_ROWS == GRID_CAP_ROWS_OF_RECORD
+    for arch, rows in cake_jit.GRID_CAP_ROWS.items():
+        for (route, c_lo, c_hi), spans in rows.items():
+            assert route in cake_jit.backward_kinds(arch), (arch, route)
+            assert c_lo % 8 == 0 and c_hi % 8 == 0 and 0 < c_lo <= c_hi, (route, c_lo)
+            assert all(1 <= lo <= hi and tokens >= 1 for lo, hi, tokens in spans)
+            assert all(a[1] < b[0] for a, b in zip(spans, spans[1:]))
+            for C in range(c_lo, c_hi + 1, 8):
+                assert cake_jit.grid_cap_spans(arch, route, C) == spans, (route, C)
+                assert cake_jit.grid_cap_tokens(arch, route, C + 4, spans[0][0]) is None
+                for s_lo, s_hi, tokens in spans:
+                    for S in (s_lo, s_hi):
+                        cell = (arch, route, C, S)
+                        assert cake_jit.grid_cap_tokens(*cell) == tokens, cell
+                        assert not cake_jit.direct_row(*cell), cell
+                        assert cake_jit.sm_wide_module(*cell) is None, cell
+                        bounds = cake_jit.fallback_row_range(arch, route, C)
+                        assert bounds is None or not bounds[0] <= S <= bounds[1], cell
+                        assert cake_jit.grid_cap_tokens(arch, "bwd_dt", C, S) is None
+                    for S in (s_lo - 1, s_hi + 1):
+                        assert cake_jit.grid_cap_tokens(arch, route, C, S) is None
+    for arch in ("sm_100a", "sm_103a"):
+        assert cake_jit.grid_cap_spans(arch, "bwd", 600) is None
+
+
+@pytest.mark.cpu_only
+def test_small_s_grid_is_the_rule() -> None:
+    """``small_s_grid`` inside a span at ``grid_mult`` 1 is ``max(n_ch_tiles, min(grid, n_ch_tiles x ceil(S /
+    (n_sub x tokens))))``; outside every span, at ``grid_mult`` 2 to 4 and at ``S`` 0 it is ``grid``."""
+
+    for (route, c_lo, _), spans in GRID_CAP_ROWS_OF_RECORD["sm_107a"].items():
+        for s_lo, s_hi, tokens in spans:
+            for S in (s_lo, (s_lo + s_hi) // 2, s_hi):
+                for grid, n_ch_tiles, n_sub in ((424, 3, 4), (432, 1, 2), (64, 3, 4)):
+                    plan = {"n_ch_tiles": n_ch_tiles, "n_sub": n_sub}
+                    cell = {"arch": "sm_107a", "route": route, "C": c_lo, "S": S}
+                    want = n_ch_tiles * -(-S // (n_sub * tokens))
+                    want = max(n_ch_tiles, min(grid, want))
+                    assert cake_jit.small_s_grid(grid, **cell, **plan) == want
+                    for gm in (2, 3, 4):
+                        got = cake_jit.small_s_grid(grid, **cell, **plan, grid_mult=gm)
+                        assert got == grid
+            for S in (s_lo - 1, s_hi + 1, 0):
+                cell = {"arch": "sm_107a", "route": route, "C": c_lo, "S": S}
+                assert cake_jit.small_s_grid(424, **cell, n_ch_tiles=3, n_sub=4) == 424
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("sms", GRID_CAP_SMS)
+def test_grid_cap_caps_the_single_wave_backward(sms, fake_device) -> None:
+    """At the channel ends and an inner channel count of every key, at each span's ends, its middle and one token
+    outside it: a backward call of the key's route (row-planned and per-call alike) launches the program and plan
+    scalars of the uncapped table; at ``bwd_grid_mult`` 1 inside a span its grid is ``max(n_ch_tiles, min(grid,
+    n_ch_tiles x ceil(S / (n_sub x tokens))))`` of the uncapped ``grid``, below it at some cells, and elsewhere (one
+    token outside, ``bwd_grid_mult`` 2 to 4, the ``bwd_dt`` and ``bwd_fp32g`` routes) the uncapped grid."""
+
+    fake_device("sm_107a", sms)
+    capped = 0
+    for (route, c_lo, c_hi), spans in GRID_CAP_ROWS_OF_RECORD["sm_107a"].items():
+        for C in sorted({c_lo, (c_lo + c_hi) // 16 * 8, c_hi}):
+            for s_lo, s_hi, tokens in spans:
+                for S in (s_lo - 1, s_lo, (s_lo + s_hi) // 2, s_hi, s_hi + 1):
+                    for kind in (route, "bwd_dt", "bwd_fp32g"):
+                        policy = "fp32" if kind.endswith("fp32g") else "bf16"
+                        for gm in pkg.BWD_GRID_MULTS:
+                            call = ("sm_107a", kind, S, C, 4, gm, policy)
+                            with _without_grid_cap_rows():
+                                base = _per_call(*call)
+                            got = _per_call(*call)
+                            assert _row_planned(*call) == got, call
+                            assert got[:2] == base[:2], (call, got, base)
+                            assert isinstance(got[1], dict), (call, got)
+                            n_sub, n_ch_tiles = got[1]["n_sub"], got[1]["n_ch_tiles"]
+                            want = base[2]
+                            if kind == route and gm == 1 and s_lo <= S <= s_hi:
+                                cap = n_ch_tiles * -(-S // (n_sub * tokens))
+                                want = (max(n_ch_tiles, min(base[2][0], cap)), 1, 1)
+                            assert got[2] == want, (call, got[2], base[2])
+                            capped += got[2] != base[2]
+    assert capped, sms
+
+
+@pytest.mark.cpu_only
+def test_grid_cap_leaves_the_direct_rows(fake_device, monkeypatch) -> None:
+    """No call at a backward ``DIRECT_ROWS`` range takes the cap: the cells of the direct ranges next to the keys hold
+    no cap, and under a cap key laid over every backward key of sm_107a (C 512 to 1024, S 1 to 4096 on ``bwd`` and
+    ``bwd_bias``) each direct range still launches its direct program on the direct grid of the uncapped table, and
+    an ``occupancy`` record's ``launch_grid`` there is its uncapped grid, while one channel count off the direct
+    rows (C 584, S 100) the laid key caps the static program's grid by the rule."""
+
+    fake_device("sm_107a", 212)
+    for route, C, S in (
+        ("bwd", 600, 1000),
+        ("bwd", 640, 512),
+        ("bwd", 704, 1000),
+        ("bwd", 768, 1000),
+        ("bwd_bias", 512, 2048),
+    ):
+        assert cake_jit.direct_row("sm_107a", route, C, S), (route, C, S)
+        assert cake_jit.grid_cap_tokens("sm_107a", route, C, S) is None, (route, C, S)
+    cells = [
+        (route, C, S)
+        for (route, c_lo, c_hi), (s_lo, s_hi, _) in BACKWARD_DIRECT_ROWS_OF_RECORD[
+            "sm_107a"
+        ].items()
+        if route in ("bwd", "bwd_bias")
+        for C in sorted({c_lo, c_hi})
+        for S in (s_lo, s_hi)
+    ]
+    assert cells
+    static = {}
+    for route, C, S in cells:
+        with _without_backward_direct_rows():
+            names = cake_jit.selected_modules("sm_107a", route, C=C, S=S)
+        static[route, C, S] = cake_jit.MODULES[names[0]]
+    shipped = {}
+    for route, C, S in cells:
+        call = _per_call("sm_107a", route, S, C, 4, 1, "bf16")
+        record = static[route, C, S]
+        grid = None
+        if record["grid_rule"]["kind"] == "occupancy":
+            grid = cake_jit.launch_grid(record, device_index=FAKE_DEVICE, C=C, S=S)
+        shipped[route, C, S] = call, grid
+    assert any(grid is not None for _, grid in shipped.values())
+    off = ("sm_107a", "bwd", 100, 584, 4, 1, "bf16")
+    base = _per_call(*off)
+    laid = {
+        "sm_107a": {
+            ("bwd", 512, 1024): ((1, 4096, 3),),
+            ("bwd_bias", 512, 1024): ((1, 4096, 5),),
+        }
+    }
+    monkeypatch.setattr(cake_jit, "GRID_CAP_ROWS", laid)
+    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+    for route, C, S in cells:
+        call, grid = shipped[route, C, S]
+        assert call[0] == (BACKWARD_DIRECT_PROGRAMS[route],), (route, C, S, call)
+        assert _per_call("sm_107a", route, S, C, 4, 1, "bf16") == call, (route, C, S)
+        assert _row_planned("sm_107a", route, S, C, 4, 1, "bf16") == call, (route, C, S)
+        if grid is not None:
+            record = static[route, C, S]
+            got = cake_jit.launch_grid(record, device_index=FAKE_DEVICE, C=C, S=S)
+            assert got == grid, (route, C, S)
+    got = _per_call(*off)
+    assert _row_planned(*off) == got
+    assert got[:2] == base[:2], (got, base)
+    n_sub, n_ch_tiles = got[1]["n_sub"], got[1]["n_ch_tiles"]
+    want = max(n_ch_tiles, min(base[2][0], n_ch_tiles * -(-100 // (n_sub * 3))))
+    assert got[2] == (want, 1, 1) and want < base[2][0], (got, base)
+    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+
+
+@pytest.mark.cpu_only
+def test_grid_cap_leaves_kcp_and_the_workspace(fake_device) -> None:
+    """The KCP routes' selection, the KCP workspace, the KCP forward's single-rank main program (``kcp._sr_main``),
+    the public backward workspace and the token ranges of the host's row plans (``row_sides``: the spans cut no row)
+    are the same with and without ``GRID_CAP_ROWS``, at channel and token counts inside and around its keys."""
+
+    kcp = cake_package(KEY, "kcp")
+    arch = "sm_107a"
+    fake_device(arch, 212)
+    channels = (504, 512, 584, 600, 640, 704, 712, 760, 768, 776)
+    tokens = (1, 511, 512, 513, 999, 1000, 1001, 2048, 2049, 3072, 3073, 65536)
+
+    def attempt(fn, *args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except (ValueError, RuntimeError) as exc:
+            return type(exc).__name__, str(exc)
+
+    def read() -> dict:
+        out = {}
+        for C in channels:
+            out[("workspace", C)] = attempt(kcp_jit.workspace_bytes, arch, C)
+            out[("backward_workspace", C)] = attempt(
+                cake_jit.backward_workspace_bytes, arch, C
+            )
+            for kind in cake_jit.backward_kinds(arch):
+                out[("row_sides", kind, C)] = cake_jit.row_sides(arch, kind, C)
+            for S in tokens:
+                for kind in kcp_jit.ROUTES.get(arch, {}):
+                    out[(kind, C, S)] = attempt(
+                        kcp_jit.selected_modules, arch, kind, C=C, S=S
+                    )
+                out[("main", C, S)] = attempt(
+                    kcp._sr_main, arch, S=S, C=C, n_frag=3, device_index=FAKE_DEVICE
+                )
+        return out
+
+    shipped = read()
+    with _without_grid_cap_rows():
+        base = read()
+    assert shipped == base

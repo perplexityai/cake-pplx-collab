@@ -91,9 +91,16 @@ it, its last token count and one token above it in one, four, 32 and 100 documen
 the range (its split and its grid capped by the call's token blocks) and the program the other tables name outside it,
 on NaN-poisoned outputs and a caller-owned workspace that reads back zero after every call; at every ``bwd_grid_mult``
 (that many times the direct grid) eager and under CUDA Graph replay; every output judged against the naive tier, and
-``dx`` bit for bit that of the route's staged program (the backward keys removed) on the same inputs.  A row of the
-channel-switch test inside a backward key runs the direct program there and again one token above the key; a
-``NARROW_CASES`` token count inside one moves one token above it.
+``dx`` bit for bit that of the route's staged program (the backward keys removed) on the same inputs.  At C 512 the
+backward keys also run S 7 in documents of 1, 2, 1 and 3 tokens and S 5 in documents of 1, 0, 1 and 3 tokens.  A row
+of the channel-switch test inside a backward key runs the direct program there and again one token above the key; a
+``NARROW_CASES`` token count inside one moves one token above it.  The small-S grid cap of
+the single-wave backward (``GRID_CAP_ROWS``, under every label of ``GRID_CAP_LABELS``): at each key's channel ends, at
+each span's ends and one token outside them in one document and at its middle in one, four and 32 documents, the
+programs and splits of the uncapped table; inside a span of the architecture's key ``max(n_ch_tiles, min(grid,
+n_ch_tiles x ceil(S / (n_sub x tokens))))`` CTAs (``grid`` the uncapped launch's), elsewhere and on an architecture
+without a key the uncapped grid; every output judged against the naive tier, the workspace zero after every call and
+``dx`` bit for bit that of the uncapped launch.
 
 This suite names its package once, through ``tests.cake.test_helpers.cake_package`` (key
 ``cake_causal_conv1d_nondet_train``).  Every test skips until the exporter has rendered the package (``build.json``
@@ -5110,9 +5117,39 @@ def test_backward_direct_rows(kind, monkeypatch) -> None:
     bit that of the route's staged program on the same inputs (:func:`_staged_backward`)."""
 
     _require_route(kind)
+    _direct_rows_check(
+        kind, _backward_direct_cases(_arch(), kind), monkeypatch, key=241
+    )
+
+
+# Short documents at a direct backward key: ``(S, document lengths)`` at C :data:`BACKWARD_DIRECT_SHORT_DOCS_C`, inside
+# every architecture's backward ``DIRECT_ROWS`` key of each route (C 512 from S 1); documents of 1 to 3 tokens and an
+# empty one, which the rows of :func:`_backward_direct_cases` (documents of equal length) do not reach.
+BACKWARD_DIRECT_SHORT_DOCS = ((7, (1, 2, 1, 3)), (5, (1, 0, 1, 3)))
+BACKWARD_DIRECT_SHORT_DOCS_C = 512
+
+
+@pytest.mark.parametrize("kind", BACKWARD_DIRECT_LABELS)
+def test_backward_direct_rows_short_documents(kind, monkeypatch) -> None:
+    """At C 512, inside the backward ``DIRECT_ROWS`` key of the label's route on the device's architecture, S 7 in
+    documents of 1, 2, 1 and 3 tokens and S 5 in documents of 1, 0, 1 and 3 tokens (:data:`BACKWARD_DIRECT_SHORT_DOCS`):
+    the checks of :func:`test_backward_direct_rows` (the direct program on its split and token-block grid, NaN-poisoned
+    outs on a caller-owned workspace that reads back zero, every output judged against the naive tier, ``dx`` bit for
+    bit that of the route's staged program)."""
+
+    _require_route(kind)
+    arch, route, C = _arch(), _route_of(kind), BACKWARD_DIRECT_SHORT_DOCS_C
+    cases = tuple((S, C, docs) for S, docs in BACKWARD_DIRECT_SHORT_DOCS)
+    assert all(loader.direct_row(arch, route, C, S) for S, _, _ in cases), (arch, kind)
+    _direct_rows_check(kind, cases, monkeypatch, key=245)
+
+
+def _direct_rows_check(kind: str, cases: tuple, monkeypatch, *, key: int) -> None:
+    """The checks of :func:`test_backward_direct_rows` on the rows ``cases`` (``(S, C, docs)``) of label ``kind`` on
+    the device's architecture, the inputs drawn with ``key``."""
+
     arch, device = _arch(), _device()
     route = _route_of(kind)
-    cases = _backward_direct_cases(arch, kind)
     assert cases, f"{arch}: no backward DIRECT_ROWS key on route {route}"
     direct, record = _direct_backward_record(arch, kind)
     geometry = record["grid_rule"]["geometry"]
@@ -5204,7 +5241,7 @@ def test_backward_direct_rows(kind, monkeypatch) -> None:
                 )
             return _grads(dx, dw, db)
 
-        _route_judge(S, C, docs, kind, call, key=241, label=label)
+        _route_judge(S, C, docs, kind, call, key=key, label=label)
     assert inside_rows, f"{arch} {kind}: no row inside the key"
 
 
@@ -5345,6 +5382,166 @@ def test_backward_direct_rows_bwd_grid_mult_and_graph_replays(
             return found
 
         _route_judge(S, C, docs, kind, call, key=243, label=label)
+
+
+# The small-S grid cap of the single-wave backward (``GRID_CAP_ROWS``): the labels of its routes (``bwd``;
+# ``bwd_bias`` with FP32 and with BF16 taps) and the document counts of a span's middle (one, four in the perf
+# packing, 32).
+GRID_CAP_LABELS = ("bwd", "bwd_bias", "bwd_bias-bf16")
+GRID_CAP_DOCS = (1, 4, 32)
+
+
+def _grid_cap_keys(kind: str) -> list[tuple[int, int, tuple]]:
+    """``(C_lo, C_hi, spans)`` of the ``GRID_CAP_ROWS`` keys of label ``kind``'s route on every architecture: the
+    rows of one architecture's keys run on every architecture, and where it has no key no grid is capped."""
+
+    route = _route_of(kind)
+    keys = {}
+    for rows in loader.GRID_CAP_ROWS.values():
+        for (key_route, c_lo, c_hi), spans in rows.items():
+            if key_route == route:
+                keys[int(c_lo), int(c_hi)] = tuple(spans)
+    return [(c_lo, c_hi, spans) for (c_lo, c_hi), spans in sorted(keys.items())]
+
+
+def _grid_cap_cases(kind: str) -> tuple:
+    """``(S, C, docs)`` of the grid cap rows of label ``kind``: at each key's channel ends, each span's first and last
+    token count and one token outside each end in one document, and the span's middle in each packing of
+    :data:`GRID_CAP_DOCS`; each row once."""
+
+    cases = []
+    for c_lo, c_hi, spans in _grid_cap_keys(kind):
+        for C in dict.fromkeys((c_lo, c_hi)):
+            for s_lo, s_hi, _ in spans:
+                cases += [(S, C, None) for S in (s_lo - 1, s_lo, s_hi, s_hi + 1)]
+                S = (s_lo + s_hi) // 2
+                cases += [(S, C, _direct_docs(S, n)) for n in GRID_CAP_DOCS]
+    return tuple(dict.fromkeys(cases))
+
+
+@contextlib.contextmanager
+def _uncapped_backward():
+    """Inside the block ``GRID_CAP_ROWS`` is empty, so every backward launches its grid without the cap.  The host's
+    row plans are dropped on entry and on exit."""
+
+    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(loader, "GRID_CAP_ROWS", {})
+            yield
+    finally:
+        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+
+
+@pytest.mark.parametrize("kind", GRID_CAP_LABELS)
+def test_grid_cap_rows(kind, monkeypatch) -> None:
+    """Every row of :func:`_grid_cap_cases` on the device's architecture, on a caller-owned workspace of the public
+    size and NaN-poisoned ``dx``, ``dweight`` and ``dbias`` outs: the call launches the programs and splits of the
+    uncapped table (:func:`_uncapped_backward`) on the same inputs; inside a span of a key of the architecture the
+    main launch's grid is ``max(n_ch_tiles, min(grid, n_ch_tiles x ceil(S / (n_sub x tokens))))`` of the uncapped
+    launch's ``grid``, below it on some rows, and elsewhere (one token outside a span, an architecture without a key)
+    the uncapped grid; every output judged against the naive tier, the workspace zero after every call, and ``dx``
+    bit for bit that of the uncapped launch."""
+
+    _require_route(kind)
+    arch, device = _arch(), _device()
+    route = _route_of(kind)
+    cases = _grid_cap_cases(kind)
+    assert cases, f"no GRID_CAP_ROWS key on route {route}"
+    launched = []
+    capped_rows = []
+    run_module = pkg.run_module
+
+    def record_launch(name, values, *, device_index, grid=None):
+        split = tuple(int(values[key]) for key in ("ct_vec", "n_sub", "n_ch_tiles"))
+        launched.append((name, split, tuple(int(v) for v in grid)))
+        return run_module(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record_launch)
+    for S, C, docs in cases:
+        tokens = loader.grid_cap_tokens(arch, route, C, S)
+        assert not (tokens and loader.direct_row(arch, route, C, S)), (kind, S, C)
+        tag = (
+            "one" if docs is None else (docs if docs == "perf" else f"{len(docs)}docs")
+        )
+        label = f"{arch} {kind} S={S} C={C} docs={tag} tokens={tokens}"
+        workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
+
+        def call(
+            x,
+            w,
+            cu,
+            dy,
+            b,
+            policy,
+            S=S,
+            C=C,
+            tokens=tokens,
+            label=label,
+            workspace=workspace,
+        ):
+            dx = torch.full_like(x, float("nan"))
+            dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"] or w.dtype
+            dw = torch.full(
+                (C, WIDTH), float("nan"), dtype=dweight_dtype, device=device
+            )
+            db = (
+                None
+                if b is None
+                else torch.full((C,), float("nan"), dtype=b.dtype, device=device)
+            )
+            launched.clear()
+            got = _backward(
+                x,
+                w,
+                cu,
+                dy,
+                b,
+                policy,
+                kind=kind,
+                workspace=workspace,
+                dx=dx,
+                dweight=dw,
+                dbias=db,
+            )
+            torch.cuda.synchronize(device)
+            assert got[0] is dx and got[1] is dw and got[2] is db, label
+            capped = list(launched)
+            assert int(torch.count_nonzero(workspace)) == 0, (
+                f"{label}: workspace not zero"
+            )
+            launched.clear()
+            with _uncapped_backward():
+                base = _backward(
+                    x, w, cu, dy, b, policy, kind=kind, workspace=workspace
+                )
+                torch.cuda.synchronize(device)
+            uncapped = list(launched)
+            assert int(torch.count_nonzero(workspace)) == 0, (
+                f"{label}: workspace not zero after the uncapped call"
+            )
+            plans = [row[:2] for row in uncapped]
+            assert capped, label
+            assert [row[:2] for row in capped] == plans, (label, capped, uncapped)
+            assert capped[1:] == uncapped[1:], (label, capped, uncapped)
+            (_, n_sub, n_ch_tiles), grid = uncapped[0][1], uncapped[0][2]
+            want = grid
+            if tokens is not None:
+                cap = n_ch_tiles * -(-S // (n_sub * tokens))
+                want = (max(n_ch_tiles, min(grid[0], cap)), 1, 1)
+            assert capped[0][2] == want, (label, capped[0][2], grid)
+            if want != grid:
+                capped_rows.append((S, C))
+            assert torch.equal(_bits(dx), _bits(base[0])), (
+                f"{label}: dx differs from the uncapped launch's"
+            )
+            return _grads(dx, dw, db)
+
+        _route_judge(S, C, docs, kind, call, key=251, label=label)
+    if loader.GRID_CAP_ROWS.get(arch):
+        assert capped_rows, f"{arch} {kind}: no row's grid is capped"
+    else:
+        assert not capped_rows, f"{arch} {kind}: capped {capped_rows}"
 
 
 def test_backward_is_one_launch_with_zeroed_accumulators(monkeypatch) -> None:
