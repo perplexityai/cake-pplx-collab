@@ -431,8 +431,13 @@ keyword.
   held after the checkpointed forward).  `row_grad` overwrites them, so a
   second backward through a retained graph recomputes (bitwise the same), and
   `backward_logprob_keep` marks the views it consumed (a second call on them
-  is a `ValueError`).  A forward with a trainable input whose backward never
-  runs pays the full-logits forward instead of the label-column arm
+  is a `ValueError`).  The autograd entries also save the forward's bound
+  labels (the valid rows' labels when compacted) and the valid-row mask of its
+  count (`KeptForwardResult.labels_c` / `row_valid`, `8 * T_v + T` bytes): the
+  kept backward neither compares nor gathers the labels again (the same mask
+  and labels, so the same bits).  A forward with a trainable input whose
+  backward never runs pays the full-logits forward instead of the label-column
+  arm
   (measured per call, both call orders combined: at `T` = 1 +0.4 to +1.6 us on
   B200 and +9.6 to +13.1 us on GB300; at `T` = 32 and 128 -3.3 to +1.2 us on
   B200 and 5.4 to 13.0 us faster on GB300) and holds the kept logits until its

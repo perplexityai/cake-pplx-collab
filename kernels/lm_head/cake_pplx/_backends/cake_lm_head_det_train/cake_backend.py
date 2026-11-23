@@ -9419,8 +9419,9 @@ class _KeptBinding(_Binding):
     def forward_keep(
         self, X, W, labels, row_index=None, hidden=None, dw_stream: str = "auto"
     ):
-        """:meth:`_Binding.forward` of the log-probability entry that keeps the logits: ``(logp, lse, kept)``, ``kept``
-        one BF16 ``[rows_c, V]`` view per chunk (:func:`_kept_views`; chunk 0's in the chunk buffer)."""
+        """:meth:`_Binding.forward` of the log-probability entry that keeps the logits: ``(logp, lse, kept,
+        labels_c)``, ``kept`` one BF16 ``[rows_c, V]`` view per chunk (:func:`_kept_views`; chunk 0's in the chunk
+        buffer), ``labels_c`` the labels the launches read (:func:`_prepare_labels`: compacted by ``row_index``)."""
         p, plan = self.plan.problem, self.plan
         T = plan.rows
         self._check_hidden(hidden)
@@ -9443,7 +9444,7 @@ class _KeptBinding(_Binding):
         t["logp"] = torch.empty((T,), dtype=torch.float32, device=self.device)
         kept = t["logits_keep"] = _kept_views(plan, t["logits"], self.device)
         self._launch(self.forward_late if early else self.forward_order, t, dw_stream)
-        return t["logp"], t["lse"], kept
+        return t["logp"], t["lse"], kept, t["labels"]
 
     def backward_logprob_keep(
         self,
@@ -9457,17 +9458,28 @@ class _KeptBinding(_Binding):
         dw_stream: str = "auto",
         rlab: Optional[_GraphRlab] = None,
         fold_out: Optional[dict] = None,
+        labels_c: Optional[torch.Tensor] = None,
     ):
         """:meth:`_Binding.backward_logprob` over the forward's kept views ``logits`` (:func:`check_kept_logits`):
         ``row_grad`` overwrites each with the chunk's ``dz``; no chunk logits buffer is allocated.  ``rlab``: the
-        autograd graph's label residuals (:meth:`_call_rlab`); ``fold_out`` as there."""
+        autograd graph's label residuals (:meth:`_call_rlab`); ``fold_out`` as there.  ``labels_c``: the labels the
+        kept forward bound (:meth:`forward_keep`; the same rows and values), bound instead of compacting ``labels``
+        again."""
         p, plan = self.plan.problem, self.plan
         T, H, V = plan.rows, p.hidden, p.vocab
         self._check_hidden(None)
+        if not (
+            isinstance(labels_c, torch.Tensor)
+            and labels_c.dtype == plan.geometry.labels_dtype
+            and tuple(labels_c.shape) == (T,)
+            and labels_c.is_contiguous()
+            and labels_c.device == self.device
+        ):
+            labels_c = _prepare_labels(labels, plan.geometry, row_index)
         t: dict[str, Any] = dict(
             X=_prepare_x(X, p, plan.compact),
             W=W,
-            labels=_prepare_labels(labels, plan.geometry, row_index),
+            labels=labels_c,
             lse=lse,
         )
         self._compact(t, row_index)
@@ -9767,9 +9779,14 @@ class ForwardResult(_TemperatureResultState):
 class KeptForwardResult(ForwardResult):
     """:class:`ForwardResult` of :func:`forward_logprob_keep`: ``logits`` holds the kept BF16 logits, one
     ``[rows_c, V]`` view per chunk, for :func:`backward_logprob_keep` (which overwrites them with ``dz``); ``None``
-    when nothing was launched (no row, or every row ignored)."""
+    when nothing was launched (no row, or every row ignored).  ``labels_c``: the labels the forward bound (the
+    valid rows' labels in ``row_index`` order when compacted), and ``row_valid``: the forward's bool ``[T]`` valid-row
+    mask of a compacted call that counted its rows (``None`` otherwise) -- the autograd entries save both for the
+    kept backward, which then forms neither again (``_labels_c`` / ``_row_valid`` of :func:`backward_logprob_keep`)."""
 
     logits: Optional[tuple] = None
+    labels_c: Optional[torch.Tensor] = None
+    row_valid: Optional[torch.Tensor] = None
 
 
 def _kept_result(result: ForwardResult, logits: Optional[tuple]) -> KeptForwardResult:
@@ -11124,8 +11141,12 @@ def forward_logprob(
         stats=True,
         hidden_count=_resolve_hidden_count(hidden_count),
     )
+    row_valid = None
     if hc is not None:
         row_index = hc.row_index()
+    elif keep is not None and compact:
+        # the one-chunk kept logits' count keeps its valid-row mask for the kept backward (the same count)
+        row_index, row_valid = valid_rows(labels, mask=True)
     else:
         row_index = valid_row_index(labels) if compact else None
     if row_index is not None and row_index.numel() == 0:  # every row ignored
@@ -11143,6 +11164,7 @@ def forward_logprob(
             chunk_size=chunk_size,
             backend=backend,
             tuning=tuning,
+            row_valid=row_valid,
         )
     logp, lse, memory = _forward_logprob_rows(
         problem,
@@ -12049,6 +12071,7 @@ def forward_logprob_keep(
         )
     compact = _resolve_compact(compact_rows)
     hc = None
+    row_valid = None
     if row_index is _RECOUNT:
         hc = _hidden_count(
             problem,
@@ -12062,8 +12085,12 @@ def forward_logprob_keep(
         )
         if hc is not None:
             row_index = hc.row_index()
+            row_valid = hc.valid if row_index is not None else None
+        elif compact:
+            # the valid-row mask of the count is kept for the kept backward (the same count)
+            row_index, row_valid = valid_rows(labels, mask=True)
         else:
-            row_index = valid_row_index(labels) if compact else None
+            row_index = None
     elif row_index is not None:
         if not compact:
             raise ValueError("a valid-row index belongs to a compacted forward")
@@ -12086,6 +12113,7 @@ def forward_logprob_keep(
         chunk_size=chunk_size,
         backend=backend,
         tuning=tuning,
+        row_valid=row_valid,
     )
 
 
@@ -12100,9 +12128,11 @@ def _forward_keep_bound(
     chunk_size: int,
     backend: str,
     tuning: dict[str, dict[str, Any]],
+    row_valid: Optional[torch.Tensor] = None,
 ) -> KeptForwardResult:
     """:func:`forward_logprob_keep`'s body after its count (``row_index`` non-empty, or ``None``): the kept binding from
-    the cache or a new one, launched; also the kept form of :func:`forward_logprob` under its ``keep``."""
+    the cache or a new one, launched; also the kept form of :func:`forward_logprob` under its ``keep``.  ``row_valid``:
+    the count's valid-row mask (:attr:`KeptForwardResult.row_valid`; kept only with ``row_index``)."""
     T = problem.num_rows
     cache = BINDING_CACHE
     key = None
@@ -12150,7 +12180,7 @@ def _forward_keep_bound(
         del runner
         if key is not None:
             cache.remember(key, binding)
-    logp, lse, kept = binding.forward_keep(X, W, labels, row_index, hc)
+    logp, lse, kept, labels_c = binding.forward_keep(X, W, labels, row_index, hc)
     return KeptForwardResult(
         loss=None,
         logp=scatter_rows(logp, row_index, T),
@@ -12160,6 +12190,8 @@ def _forward_keep_bound(
         row_index=row_index,
         num_rows=T,
         logits=kept,
+        labels_c=labels_c,
+        row_valid=row_valid if row_index is not None else None,
     )
 
 
@@ -12182,6 +12214,8 @@ def backward_logprob_keep(
     gemm_tuning: Optional[dict[str, dict[str, Any]]] = None,
     row_index: Any = _RECOUNT,
     _rlab: Optional[_GraphRlab] = None,
+    _row_valid: Optional[torch.Tensor] = None,
+    _labels_c: Optional[torch.Tensor] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """:func:`backward_logprob` over the kept logits ``logits`` of :func:`forward_logprob_keep`
     (:attr:`KeptForwardResult.logits`, ``cake`` backend): each chunk's ``dz`` is formed by ``row_grad`` over its kept
@@ -12189,7 +12223,9 @@ def backward_logprob_keep(
     ``dW`` as there (bitwise the same).  The views serve one backward: this call marks them consumed and a second
     backward on them is a ``ValueError``.  ``row_index`` as in :func:`backward_logprob`
     (the forward's valid-row index, or a recount); the hidden valid-row count and ``logprob_dz`` do not apply.
-    ``_rlab`` (internal) as in :func:`backward_logprob`."""
+    ``_rlab`` (internal) as in :func:`backward_logprob`.  ``_row_valid`` / ``_labels_c`` (internal; with the forward's
+    ``row_index``): the forward's valid-row mask and bound labels (:attr:`KeptForwardResult.row_valid` /
+    :attr:`KeptForwardResult.labels_c`) -- the backward forms neither again (the same mask and labels)."""
     if backend != "cake":
         raise ValueError("the kept logits (logprob_keep) run on the cake backend")
     problem = validate_lm_head_det_inputs(
@@ -12209,8 +12245,14 @@ def backward_logprob_keep(
     if row_index is not _RECOUNT:
         if row_index is not None and not compact:
             raise ValueError("a valid-row index belongs to a compacted backward")
-        row_valid = (labels >= 0) if (row_index is not None and fused_dx) else None
+        if row_index is None or not fused_dx:
+            row_valid = None
+        elif _row_valid is not None:
+            row_valid = _row_valid  # the forward's mask (the same count)
+        else:
+            row_valid = labels >= 0
     else:
+        _labels_c = None
         row_index, row_valid = (
             valid_rows(labels, mask=fused_dx) if compact else (None, None)
         )
@@ -12286,7 +12328,17 @@ def backward_logprob_keep(
     for view in views:  # consumed from here on: row_grad overwrites them with dz
         setattr(view, _KEPT_SPENT, True)
     dx, dw = binding.backward_logprob_keep(
-        X, W, labels, lse, dlogp, views, row_index, stream_mode, _rlab, fold_out
+        X,
+        W,
+        labels,
+        lse,
+        dlogp,
+        views,
+        row_index,
+        stream_mode,
+        _rlab,
+        fold_out,
+        labels_c=_labels_c,
     )
     if dx is not None:
         dx = (
@@ -13375,9 +13427,17 @@ class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
         ctx.set_materialize_grads(False)
         # the kept logits are saved tensors too, so a non-reentrant checkpoint drops them with the rest; ``row_grad``
         # overwrites them with ``dz`` through a raw pointer (no version-counter bump), so the first backward spends
-        # them (``ctx.kept`` True -> False) and a later one through a retained graph recomputes (bitwise the same)
+        # them (``ctx.kept`` True -> False) and a later one through a retained graph recomputes (bitwise the same).
+        # The forward's valid-row mask and bound labels follow the row index: the kept backward forms neither again.
         ctx.save_for_backward(
-            X, W, labels, result.lse, result.row_index, *(result.logits or ())
+            X,
+            W,
+            labels,
+            result.lse,
+            result.row_index,
+            result.row_valid,
+            result.labels_c,
+            *(result.logits or ()),
         )
         ctx.kept = result.logits is not None
         ctx.chunk_size, ctx.compact = (
@@ -13406,7 +13466,7 @@ class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
         if dlogp is None:
             return (None,) * 12
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
-        X, W, labels, lse, row_index, *kept = ctx.saved_tensors
+        X, W, labels, lse, row_index, row_valid, labels_c, *kept = ctx.saved_tensors
         common = dict(
             chunk_size=ctx.chunk_size,
             need_dx=need_dx,
@@ -13422,7 +13482,15 @@ class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
         if ctx.kept and (need_dx or need_dw):
             ctx.kept = False  # spent: row_grad overwrites them with dz
             dx, dw = backward_logprob_keep(
-                X, W, labels, lse, dlogp, tuple(kept), **common
+                X,
+                W,
+                labels,
+                lse,
+                dlogp,
+                tuple(kept),
+                _row_valid=row_valid,
+                _labels_c=labels_c,
+                **common,
             )
         else:
             dx, dw = backward_logprob(

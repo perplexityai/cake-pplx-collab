@@ -11169,7 +11169,8 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch):
         X, W = leaves()
         lp = call(X, W)
         node = lp.grad_fn
-        assert len(node.saved_tensors) == 5 + len(plan_chunks(T_v, C))
+        # X, W, labels, lse, row_index, the forward's valid-row mask and bound labels, the kept views
+        assert len(node.saved_tensors) == 7 + len(plan_chunks(T_v, C))
         assert node.kept is True  # kept, not yet spent
         lp.backward(inp.dlogp, retain_graph=True)
         assert node.kept is False  # spent
@@ -11289,6 +11290,144 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch):
     assert runner.plan.logprob_keep
     with pytest.raises(NotImplementedError, match="eager entry points"):
         runner.forward()
+
+
+def test_device_logprob_kept_backward_reuses_forward_labels(glm_weight, monkeypatch):
+    """The kept log-probability backward binds the forward's labels and valid-row mask
+    (:attr:`KeptForwardResult.labels_c` / ``row_valid``, saved by the autograd entries) instead of forming them
+    again: on the default call's one-chunk kept logits (``T`` 256 with 5 % of the rows ignored, every row valid, a
+    frozen ``W``) and the opt-in ``memory_mode="keep_logits"`` (``T`` 256, a frozen ``X``, ``T`` 1500 at chunk 512 --
+    the hidden valid-row count's kept form where it runs -- and the caller's count ``num_valid_rows``), the kept
+    backward calls ``_prepare_labels`` and the host valid-row count zero times and receives the saved mask and labels;
+    the saved mask is ``labels >= 0`` of a compacted call that counted its rows (``None`` without compaction and with
+    the caller's count) and the saved labels are the valid rows' labels in index order (every label without
+    compaction); ``logp`` / ``dX`` / ``dW`` are the bits (integer views) of ``memory_mode="fast"``, and a second
+    backward through the retained graph (a recomputation) gives the first one's bits."""
+    _require_program(entry="logprob")
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    runs_hidden = bool(cake_jit.toolchain_runs_hidden_count(arch))
+    armed = [False]
+    prepared: list = []
+    for module in (cake_backend, opt_in):
+        prepare = module._prepare_labels
+
+        def preparing(*args, _real=prepare, **kw):
+            if armed[0]:
+                prepared.append(args[2] if len(args) > 2 else kw.get("row_index"))
+            return _real(*args, **kw)
+
+        monkeypatch.setattr(module, "_prepare_labels", preparing)
+    counts = _record_host_counts(monkeypatch)
+    hidden: list = []
+    count = cake_backend._hidden_count
+
+    def counting(*args, **kw):
+        hc = count(*args, **kw)
+        hidden.append(hc is not None)
+        return hc
+
+    monkeypatch.setattr(cake_backend, "_hidden_count", counting)
+    given: list = []
+    keep_backward = cake_backend.backward_logprob_keep
+
+    def keep_spy(*args, **kw):
+        given.append((kw.get("_row_valid"), kw.get("_labels_c")))
+        return keep_backward(*args, **kw)
+
+    monkeypatch.setattr(cake_backend, "backward_logprob_keep", keep_spy)
+
+    def kept_node(lp):
+        pending, seen = [lp.grad_fn], set()
+        while pending:
+            node = pending.pop()
+            if node is None or id(node) in seen:
+                continue
+            seen.add(id(node))
+            if hasattr(node, "kept"):
+                return node
+            pending.extend(n for n, _ in node.next_functions)
+        raise AssertionError("no kept log-probability node")
+
+    def same(a, b):
+        if a is None or b is None:
+            return a is None and b is None
+        return a.data_ptr() == b.data_ptr() and torch.equal(a, b)
+
+    C = 4096
+    keep = dict(memory_mode="keep_logits")
+    # (case, T, chunk, ignored fraction, keywords, train X, train W)
+    for tag, T, chunk, ignore, kw, x, w in (
+        ("default", 256, C, 0.05, {}, True, True),
+        ("default, every row valid", 256, C, 0.0, {}, True, True),
+        ("default, frozen W", 256, C, 0.05, {}, True, False),
+        ("keep_logits", 256, C, 0.05, keep, True, True),
+        ("keep_logits, frozen X", 256, C, 0.05, keep, False, True),
+        ("keep_logits, chunk 512", 1500, 512, 0.05, keep, True, True),
+        ("keep_logits, the caller's count", 256, C, 0.05, keep, True, True),
+    ):
+        inp = make_inputs(
+            T, seed=SEED + 7717 + T, device=CUDA, W=glm_weight, ignore_frac=ignore
+        )
+        kw = dict(kw)
+        if "count" in tag:
+            kw["num_valid_rows"] = int(inp.valid.sum())
+        fast = _run(
+            inp,
+            chunk,
+            entry="logprob",
+            backend="cake",
+            memory_mode="fast",
+            train_x=x,
+            train_w=w,
+        )
+        X = inp.X.detach().requires_grad_(x)
+        W = inp.W.detach().requires_grad_(w)
+        hidden.clear()
+        lp = opt_in.cake_lm_head_det_train_logprob(
+            X, W, inp.labels, chunk_size=chunk, **kw
+        )
+        assert any(hidden) == (T > chunk and runs_hidden), (tag, hidden)
+        node = kept_node(lp)
+        assert node.kept is True, tag
+        saved = node.saved_tensors
+        row_index, row_valid, labels_c = saved[4], saved[5], saved[6]
+        del saved
+        valid = inp.labels >= 0
+        if row_index is None:
+            assert bool(valid.all()) and row_valid is None, tag
+            assert torch.equal(labels_c.long(), inp.labels), tag
+        else:
+            assert torch.equal(row_index, valid.nonzero().squeeze(1)), tag
+            if "num_valid_rows" in kw:
+                assert row_valid is None, tag  # the caller's count: no mask formed
+            else:
+                assert row_valid.dtype == torch.bool, tag
+                assert torch.equal(row_valid, valid), tag
+            assert torch.equal(labels_c.long(), inp.labels[row_index]), tag
+        grads = []
+        for retain in (True, False):
+            X.grad = W.grad = None
+            prepared.clear()
+            counts.clear()
+            given.clear()
+            armed[0] = True
+            try:
+                lp.backward(inp.dlogp, retain_graph=retain)
+                torch.cuda.synchronize()
+            finally:
+                armed[0] = False
+            if retain:  # the first backward: the kept logits
+                assert not prepared and not counts, (tag, prepared, counts)
+                assert len(given) == 1, (tag, len(given))
+                assert same(given[0][0], row_valid), tag
+                assert same(given[0][1], labels_c), tag
+            else:  # through the retained graph: the recomputation
+                assert not given, tag
+            grads.append(dict(logp=lp.detach(), dX=X.grad, dW=W.grad))
+        keys = ("logp",) + (("dX",) if x else ()) + (("dW",) if w else ())
+        _assert_same_bits(fast, grads[0], keys=keys)
+        _assert_same_bits(grads[0], grads[1], keys=keys)
+        del lp, node, fast, grads, row_index, row_valid, labels_c
 
 
 def test_device_host_count_early_launch_is_bitwise(glm_weight, monkeypatch):

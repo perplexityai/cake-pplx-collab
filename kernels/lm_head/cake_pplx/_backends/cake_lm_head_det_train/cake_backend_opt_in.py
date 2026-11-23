@@ -10281,8 +10281,21 @@ class CakeLMHeadDetLogprobOneChunkFunction(CakeLMHeadDetLogprobAutoFunction):
             keep=keep,
         )
         kept = getattr(result, "logits", None)
-        # the kept logits are saved tensors too (see the backend's kept-logits function)
-        ctx.save_for_backward(X, W, labels, result.lse, result.row_index, *(kept or ()))
+        # the kept logits are saved tensors too (see the backend's kept-logits function), behind the forward's
+        # valid-row mask and bound labels (the kept backward forms neither again); the default form saves its five
+        if kept is not None:
+            ctx.save_for_backward(
+                X,
+                W,
+                labels,
+                result.lse,
+                result.row_index,
+                result.row_valid,
+                result.labels_c,
+                *kept,
+            )
+        else:
+            ctx.save_for_backward(X, W, labels, result.lse, result.row_index)
         ctx.one_chunk = ctx.kept = kept is not None
         ctx.auto = bool(auto)
         ctx.chunk_size, ctx.backend, ctx.compact = chunk_size, backend, compact
