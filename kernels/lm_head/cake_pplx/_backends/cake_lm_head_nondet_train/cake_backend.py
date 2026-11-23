@@ -3803,10 +3803,10 @@ class _SmallCallStage(torch.autograd.Function):
         def stage() -> None:
             # The staged views' first values, written after this Function returned them: autograd forbids an
             # in-place change of a view a custom Function returned, so the writes go through an alias of the block
-            # with its own version counter (``set_`` on the block's storage) and the returned views keep theirs.
+            # with its own version counter (``.data``: the block's storage, no operator and no new allocation, so
+            # every tensor an operator returns here lies in the block) and the returned views keep theirs.
             # Nothing reads the block before these writes (the call's first launch runs them first).
-            raw = torch.empty((0,), dtype=torch.uint8, device=block.device)
-            raw.set_(block.untyped_storage(), block.storage_offset(), block.shape)
+            raw = block.data
 
             def alias(name, dtype):
                 start, nbytes = offsets[name]
