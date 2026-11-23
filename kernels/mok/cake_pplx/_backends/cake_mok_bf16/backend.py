@@ -160,14 +160,6 @@ class _SchedulePlan:
     gather: object
     barrier: object
     scheduler: object
-    # Rows ``[unset_from, num_local_tokens)`` of ``routes`` hold ``-1`` in
-    # stream order after the last eager build (None: not known). Only
-    # ``build_schedule`` writes ``routes``; a build during CUDA Graph capture
-    # sets ``captured`` and every later build writes the whole buffer.
-    unset_from: int | None = None
-    captured: bool = False
-    head_rows: int = -1
-    head: torch.Tensor | None = None
 
 
 def count_routed_load(routes, ep_size, local_experts):
@@ -546,35 +538,6 @@ class MoKFunctional:
             )
         return views
 
-    @staticmethod
-    def _stage_routes(plan, top_experts, count):
-        """Write ``count`` source rows of expert IDs into the plan's int32 route
-        buffer and ``-1`` into its other rows, as ``_schedule_launches`` builds
-        its route tensor.
-
-        The ``-1`` rows are written only when they are not already in place:
-        after an eager build, rows ``[count, num_local_tokens)`` hold ``-1``
-        until a later build writes IDs there, since only ``build_schedule``
-        writes the buffer (in stream order). A build during CUDA Graph capture
-        writes the whole buffer, and so does every later build of the plan: a
-        replay rewrites the buffer outside this record."""
-        routes = plan.routes
-        if torch.cuda.is_current_stream_capturing():
-            plan.captured = True
-        unset_from = None if plan.captured else plan.unset_from
-        plan.unset_from = None
-        if count == routes.shape[0]:
-            routes.copy_(top_experts)
-        else:
-            if unset_from is None or unset_from > count:
-                routes.fill_(-1)
-            if plan.head_rows != count:
-                plan.head = routes[:count]
-                plan.head_rows = count
-            plan.head.copy_(top_experts)
-        if not plan.captured:
-            plan.unset_from = count
-
     def _check_device(self, workspace):
         if (
             workspace.device != self.device
@@ -636,10 +599,14 @@ class MoKFunctional:
             )
         else:
             with _ffi_stream():
-                # The route tensor and the launches of ``_schedule_launches``,
-                # in the same order, through the workspace's prebuilt plan.
+                # The same copies and launches as ``_schedule_launches``, in
+                # the same order, through the workspace's prebuilt plan.
                 routes = plan.routes
-                self._stage_routes(plan, top_experts, count)
+                if count == workspace.num_local_tokens:
+                    routes.copy_(top_experts)
+                else:
+                    routes.fill_(-1)
+                    routes[:count].copy_(top_experts)
                 if plan.gather is None:
                     self.communication.all_gather_top_experts(
                         routes,
@@ -752,12 +719,11 @@ class MoKFunctional:
         """The workspace's schedule launches for this adapter, built and
         validated on first use (like the operations' launch plans, they live in
         ``workspace.launch_plans`` and die with the workspace): a persistent
-        int32 route buffer (each call writes it in stream order before the
-        gather reads it, as the workspace's shared buffers already require;
-        ``_stage_routes``), the gather and barrier plans and the scheduler
-        plan. None during CUDA Graph capture before the first eager build: the
-        plan writes its template eagerly, so that capture runs
-        ``_schedule_launches``. The
+        int32 route buffer (each call overwrites it in stream order before the
+        gather reads it, as the workspace's shared buffers already require),
+        the gather and barrier plans and the scheduler plan. None during CUDA
+        Graph capture before the first eager build: the plan writes its
+        template eagerly, so that capture runs ``_schedule_launches``. The
         plan's tensors are normal tensors also when the first build runs under
         ``torch.inference_mode()``, so later builds in or outside inference
         mode can write the route buffer."""

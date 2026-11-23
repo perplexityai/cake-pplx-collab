@@ -310,10 +310,7 @@ ones, 256 rows each, kept with the launch plans): the bytes of the copy and the
 fill it replaces, in one launch. A source that autograd records, or one that
 overlaps the workspace, takes the copy and the fill. Every call still writes
 the padding rows of the workspace's source, combine and gradient buffers; it
-never relies on their earlier contents. The schedule plan's route buffer, which
-only `build_schedule` writes, gets its `-1` rows past the count only when the
-previous eager build of the plan did not leave them in place; after a build
-during CUDA Graph capture, every build writes the whole buffer.
+never relies on their earlier contents.
 
 ## Repeatability
 

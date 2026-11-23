@@ -2911,44 +2911,6 @@ def test_padding_rows_are_constant_normal_tensors_built_outside_capture(monkeypa
     assert backend.MoKFunctional._padding_rows(workspace) is rows
 
 
-def test_stage_routes_writes_the_unplanned_route_tensor(monkeypatch):
-    """Host only: over source counts that repeat, grow, shrink and fill the buffer, the schedule plan's route buffer
-    holds the count's expert IDs and ``-1`` in every other row after each eager build (the route tensor of
-    ``_schedule_launches``), whether or not the build wrote the ``-1`` rows; it keeps the ``-1`` rows past the count
-    on record (``unset_from``). A build during CUDA Graph capture writes the whole buffer and turns the record off for
-    the plan's later builds, so a write of the buffer behind the record (a replay) leaves the next build exact."""
-    rows, topk = 64, 6
-    capturing = [False]
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capturing[0])
-    plan = backend._SchedulePlan(
-        routes=torch.full((rows, topk), 99, dtype=torch.int32), gather=None, barrier=None, scheduler=None
-    )
-    generator = torch.Generator().manual_seed(4421)
-    fills = []
-    original = torch.Tensor.fill_
-
-    def build(count, capture=False):
-        capturing[0] = capture
-        ids = randint(0, 384, (count, topk), generator=generator, dtype=torch.int64)
-        fills.clear()
-        monkeypatch.setattr(torch.Tensor, "fill_", lambda self, value: fills.append(value) or original(self, value))
-        backend.MoKFunctional._stage_routes(plan, ids, count)
-        monkeypatch.setattr(torch.Tensor, "fill_", original)
-        expected = torch.full((rows, topk), -1, dtype=torch.int32)
-        expected[:count] = ids
-        assert torch.equal(plan.routes, expected), count
-        return len(fills)
-
-    assert build(17) == 1 and plan.unset_from == 17  # unknown rows: written
-    assert build(17) == 0 and build(40) == 0 and plan.unset_from == 40  # repeat / grow: the -1 rows are in place
-    assert build(rows) == 0 and plan.unset_from == rows  # a full buffer has no -1 rows
-    assert build(30) == 1 and build(0) == 1 and build(5) == 0 and plan.unset_from == 5
-    assert build(50, capture=True) == 1 and plan.captured and plan.unset_from is None
-    plan.routes[:60] = 123  # a replay writes the buffer behind the record
-    assert build(55) == 1 and build(55) == 1 and plan.unset_from is None
-    assert build(rows) == 0 and build(3) == 1
-
-
 @pytest.mark.parametrize(
     "position,ep,experts,topk",
     [("before_down", 8, 48, 6), ("after_down", 4, 4, 2)],
@@ -3071,10 +3033,9 @@ def test_padded_staging_matches_the_copy_and_fill_form(position, ep, experts, to
 def test_build_schedule_route_buffer_over_changing_counts():
     """``build_schedule`` through the schedule plan over changing source counts on one source workspace (one-GPU
     emulation of rank 0 of EP 4, :class:`OneGpuGroup`): after each eager build the plan's route buffer holds the
-    count's expert IDs and ``-1`` in every other row, also where the build left the ``-1`` rows of the previous build
-    in place (repeated and growing counts), and the schedule equals the unplanned launches' bit for bit.  A build
-    during CUDA Graph capture turns that record off: replays that write IDs past a later eager count leave every
-    later eager schedule exact, and the captured schedule replays exactly."""
+    count's expert IDs and ``-1`` in every other row (repeated, growing and shrinking counts), and the schedule equals
+    the unplanned launches' bit for bit.  Replays of a build captured in a CUDA Graph, which write IDs past a later
+    eager count, leave every later eager schedule exact, and the captured schedule replays exactly."""
     require_gpu()
     ep, experts, topk, hidden = 4, 4, 2, 256
     counts = (777, 777, 900, 1024, 300, 300, 901, 513)
@@ -3112,7 +3073,6 @@ def test_build_schedule_route_buffer_over_changing_counts():
 
     for count in counts:
         eager(count)
-        assert storage.launch_plans[key].unset_from == count
     plan = storage.launch_plans[key]
     eager(300)
     graph_ids = problem(901)
@@ -3121,7 +3081,7 @@ def test_build_schedule_route_buffer_over_changing_counts():
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
         captured = functional.build_schedule(workspace, config, graph_ids, num_local_experts=experts)
-    assert storage.launch_plans[key] is plan and plan.captured and plan.unset_from is None
+    assert storage.launch_plans[key] is plan
     for count in (600, 600, 1024, 450):
         graph.replay()
         torch.cuda.synchronize()
