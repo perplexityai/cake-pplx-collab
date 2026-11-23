@@ -1545,11 +1545,14 @@ deterministic program that follow that package's version 0.3.22: the `sm_107a` B
 `sm_107a` part, run the deterministic package's exact split of every tail tile on 64-row tiles from 8193 tokens on
 (three parts on the 4096 rows, two on the 6144 rows), the plan of that package's version 0.3.21 below.  On the 216-SM
 R200 part `6144 -> 32` keeps that package's plan of version 0.3.21, and its bits, at every token count: there its new
-plan measured slower at 16172, 32768 and 65536 tokens.  That package
-measured them on an NVIDIA VR200 (`sm_107a`, 212 SMs; [[TBD0322_NODES]]) against its version 0.3.21: medians of the
-plan before over the new plan [[TBD0322_RANGE_4096_16]] on `4096 -> 16`, [[TBD0322_RANGE_4096_96]] on `4096 -> 96`,
-[[TBD0322_RANGE_6144_48]] on `6144 -> 48`, [[TBD0322_RANGE_6144_64]] on `6144 -> 64` and
-[[TBD0322_RANGE_INDEXER_HW]] on `6144 -> 32`; the 216-SM R200 part: [[TBD0322_R200_216_STATUS]].  The new plans give
+plan measured slower at 16172, 32768 and 65536 tokens.  Both packages were measured against their version 0.3.21
+and a second prepared copy of it in the same 21 paired rounds, with cold L2 in eager launches and CUDA graph
+replays, at 14 token counts per row from 8193 to 131072 tokens, on an NVIDIA VR200 (`sm_107a`, 212 SMs; one
+node, driver 620.43): faster at each of them in both packages and modes, medians of the plan before over the
+new plan 1.171 to 1.523 on `4096 -> 16`, 1.200 to 1.631 on `4096 -> 96`, 1.064 to 1.517 on `6144 -> 48`, 1.071
+to 1.504 on `6144 -> 64` and 1.025 to 1.440 on `6144 -> 32`; on the 216-SM R200 part (one board, driver
+620.70.06): 1.204 to 1.481 on `4096 -> 16`, 1.197 to 1.530 on `4096 -> 96`, 1.074 to 1.329 on `6144 -> 48`
+and 1.095 to 1.352 on `6144 -> 64`, with `6144 -> 32` on its plan of version 0.3.21.  The new plans give
 the same bits on every run.  Against version 0.3.21 the bits are the same on `6144 -> 48` and `6144 -> 64` at an even
 number of 64-token K blocks from 10322 tokens on (the old plan's two-way split gave each tile the same two K halves in
 the same promoted chunks there) and differ at an odd number of K blocks, from 8193 to 10321 tokens and, on `4096 -> 16`,

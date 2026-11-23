@@ -1723,13 +1723,14 @@ ROW_RULES: dict[tuple, dict] = {
     #      128-row two-way split of 16 / 24 tiles, 32 / 48 units: ``..._nn_n128_hen_t_kc64_pro15`` through the registry
     #      fallback from the 128-row hint gate on, below it ``..._nn_n128_t_pro7``), and on indexer_hw the 128-row
     #      three-way split of 24 tiles (72 units, ``..._nn_n128_hen_t_skx(_kc64)_pro7`` from T 10322, below it the
-    #      no-rule plan through the rule fallback).  Measured on VR200 (212 SMs) at T 8193, 16172, 16384, 32768,
-    #      65536 and 131072 (6144 -> 48 / 64 also at T 15180, 15239, 16231, 16385, 24576 and 24577) with cold L2 in
-    #      eager launches and CUDA graph replays, 21 paired rounds per GPU and mode against the plan before: faster at
-    #      every measured token count in both modes, within the naive BF16 tier on five seeds and with one bit pattern
-    #      on every run; medians of the plan before over the new plan [[TBD0322_RANGE_4096_16]] on 4096 -> 16,
-    #      [[TBD0322_RANGE_4096_96]] on 4096 -> 96, [[TBD0322_RANGE_6144_48]] on 6144 -> 48,
-    #      [[TBD0322_RANGE_6144_64]] on 6144 -> 64 and [[TBD0322_RANGE_INDEXER_HW]] on indexer_hw.  The bits against
+    #      no-rule plan through the rule fallback).  Measured on VR200 (212 SMs; one node, driver 620.43) in both
+    #      packages against the plan before and a second prepared copy of it in the same 21 paired rounds per cell and
+    #      mode, with cold L2 in eager launches and CUDA graph replays, at 14 token counts per row from T 8193 to 131072
+    #      (both sides of T 12288 / 12289, of 10321 / 10322 on the 6144 rows and of 15179 / 15180 on the 4096 rows) and
+    #      at T 8192, where the plan stays: faster at every changed token count in both modes and with one bit pattern
+    #      on every run, and within the naive BF16 tier on 21 seeds at each changed token count; medians of the plan
+    #      before over the new plan 1.171 to 1.523 on 4096 -> 16, 1.200 to 1.631 on 4096 -> 96, 1.064 to 1.517 on
+    #      6144 -> 48, 1.071 to 1.504 on 6144 -> 64 and 1.025 to 1.440 on indexer_hw.  The bits against
     #      the plan before: the same on 6144 -> 48 and 6144 -> 64 at an even k_blocks = ceil(T / 64) from T 10322 on,
     #      where the plan before gives every tile the same two K halves (its auto two-way split: unit u is tile u // 2,
     #      K half u % 2) in the same promoted chunks of 64 K blocks (``..._nn_n128_hen_t_kc64_pro15`` from the 128-row
@@ -1738,8 +1739,11 @@ ROW_RULES: dict[tuple, dict] = {
     #      K half) and on 4096 -> 16 / 96 and indexer_hw at every token count from T 8193 on (three parts against two
     #      on the 4096 rows, two against three on indexer_hw from T 10322, the no-rule plan without promoted chunks
     #      below it).  The 216-SM part (108 pairs) plans the same programs and units on 4096 -> 16 / 96 and
-    #      6144 -> 48 / 64: [[TBD0322_R200_216_STATUS]]; there indexer_hw keeps its plan before, and its bits, at every
-    #      token count (measured slower than that plan at T 16172, 32768 and 65536: ``ROW_RULE_RANGES_BY_SM``).
+    #      6144 -> 48 / 64: measured the same way on one R200 board (driver 620.70.06), faster at every changed token
+    #      count in both packages and modes, medians of the plan before over the new plan 1.204 to 1.481 on 4096 -> 16,
+    #      1.197 to 1.530 on 4096 -> 96, 1.074 to 1.329 on 6144 -> 48 and 1.095 to 1.352 on 6144 -> 64; there indexer_hw
+    #      keeps its plan before, and its bits, at every token count (measured slower than that plan at T 16172, 32768
+    #      and 65536: ``ROW_RULE_RANGES_BY_SM``).
     #      The 208- and 224-SM parts and the token counts above 131072 are not measured and plan these rules (one wave
     #      of 96 units on 104 and 112 pairs; longer parts in more promoted chunks).  The unbatched generic call of
     #      4096 -> 16 / 96 and 6144 -> 48 / 64 with both operands MN-major runs swapped from T 8193 on since this
