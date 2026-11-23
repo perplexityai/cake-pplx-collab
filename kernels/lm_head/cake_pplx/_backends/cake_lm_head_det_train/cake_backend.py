@@ -289,18 +289,20 @@ ABI_CONTRACT = "lm_head_loss_v1"
 # plan on the count after the readback, the launches it orders) is hidden behind chunk 0's logits GEMM only from there; one- and
 # two-chunk calls measured 5-16 % slower with it than on the host-count path (same kernels, bitwise the same outputs).
 HIDDEN_COUNT_MIN_CHUNKS = 3
-# The loss entry's one-chunk calls of this many rows (``HIDDEN_COUNT_LOSS_MIN_ROWS <= T <= min(chunk,
-# HIDDEN_COUNT_LOSS_MAX_ROWS)``) take the hidden valid-row count too (:func:`hidden_count_chunks_admit`; not a call with
+# On the architectures of this table the loss entry's one-chunk calls of ``min <= T <= min(chunk, max)`` rows (the
+# architecture's ``(min, max)``) take the hidden valid-row count too (:func:`hidden_count_chunks_admit`; not a call with
 # the zero-weight split, not the log-probability entries): at these rows chunk 0's logits GEMM runs on ``T`` rows, the
 # host plans behind the queued GEMM and the GPU no longer idles for the host count's readback and the host work after
-# it.  Measured on B200 (cross-entropy loss entry, chunk 4096, H 6144, V 154880, 5 % ignored rows, forward + backward
-# of one call; CUPTI span from its first kernel, and the same call queued behind a 2 ms kernel): T = 32 / 64 / 128 / 256
-# / 1024 span 1380.0 -> 1355.1 / 1373.5 -> 1359.7 / 1397.2 -> 1386.4 / 1547.4 -> 1484.2 / 4040.0 -> 3958.7 us, queued
-# 161-181 us faster; T = 1 / 16 span +12.2 / +1.9 us, so smaller calls keep the host count.  The upper bound
-# is :data:`HOST_COUNT_MAX_ROWS` and lies below every architecture's zero-gradient row floor
+# it.  Measured on GB300 (cross-entropy loss entry, chunk 4096, H 6144, V 154880, 5 % ignored rows; CUPTI span of one
+# call, and the same call queued behind a 2 ms kernel; medians, us): the queued forward at T = 32 / 1024 941.9 -> 664.4
+# / 2439.6 -> 2159.8, the T = 1024 forward + backward step 3534.9 -> 3396.6; below 32 rows a step with a cleared binding
+# cache measured slower (T = 8: 1980.0 -> 2087.9), so smaller calls keep the host count.  B200 and R200 keep the host
+# count at every T: there the call's retained backward and its checkpointed step measured slower with the hidden count
+# (its device prologue runs again in the backward's and in the checkpoint's recomputation; checkpointed step at
+# T = 128 on B200 2240.5 -> 2411.5, at T = 32 on R200 1466.5 -> 1576.2).  The upper bound is at most
+# :data:`HOST_COUNT_MAX_ROWS` and lies below every architecture's zero-gradient row floor
 # (:data:`ZERO_DLOGP_MIN_ROWS_BY_ARCH`).  Bitwise the same outputs (:func:`hidden_count_default`).
-HIDDEN_COUNT_LOSS_MIN_ROWS = 32
-HIDDEN_COUNT_LOSS_MAX_ROWS = 1024
+HIDDEN_COUNT_LOSS_ROWS_BY_ARCH: dict[str, tuple[int, int]] = {"sm_103a": (32, 1024)}
 # Calls of at most this many rows form the valid-row count and index of the host-count path on the host
 # (:func:`valid_rows`): the bool mask ``labels >= 0`` comes back in one copy of ``T`` bytes -- the call's one
 # synchronization -- and the index goes back in one copy, instead of ``nonzero``'s count, scan and select kernels and
@@ -2186,18 +2188,25 @@ class _HiddenCount(_TemperatureCountState):
 
 
 def hidden_count_chunks_admit(
-    rows: int, chunk: int, *, loss_call: bool = False
+    rows: int, chunk: int, *, loss_call: bool = False, arch: Optional[str] = None
 ) -> bool:
     """The chunk rule of the hidden valid-row count: a call of :data:`HIDDEN_COUNT_MIN_CHUNKS` chunks or more, or --
-    ``loss_call``, a call of the loss entry without the zero-weight split -- a one-chunk call of
-    :data:`HIDDEN_COUNT_LOSS_MIN_ROWS` to :data:`HIDDEN_COUNT_LOSS_MAX_ROWS` rows."""
+    ``loss_call``, a call of the loss entry without the zero-weight split -- a one-chunk call in the row window
+    :data:`HIDDEN_COUNT_LOSS_ROWS_BY_ARCH` gives ``arch`` (``None``, a check ahead of the record lookup: the window
+    of any architecture)."""
     rows, chunk = int(rows), int(chunk)
     if rows <= 0:
         return False
     if (rows + chunk - 1) // chunk >= HIDDEN_COUNT_MIN_CHUNKS:
         return True
-    top = min(chunk, HIDDEN_COUNT_LOSS_MAX_ROWS)
-    return bool(loss_call) and HIDDEN_COUNT_LOSS_MIN_ROWS <= rows <= top
+    if not loss_call:
+        return False
+    if arch is None:
+        windows = list(HIDDEN_COUNT_LOSS_ROWS_BY_ARCH.values())
+    else:
+        window = HIDDEN_COUNT_LOSS_ROWS_BY_ARCH.get(arch)
+        windows = [] if window is None else [window]
+    return any(lo <= rows <= min(chunk, hi) for lo, hi in windows)
 
 
 def hidden_count_eligible(
@@ -2214,8 +2223,8 @@ def hidden_count_eligible(
     scalar), a call of
     :data:`HIDDEN_COUNT_MIN_CHUNKS` chunks or more (``ceil(T / chunk) >= 3``: one- and two-chunk calls cannot hide the
     path's fixed host cost behind chunk 0's logits GEMM and run 5-16 % slower with it) or, ``loss_call`` (the loss
-    entry without the zero-weight split), a one-chunk call of :data:`HIDDEN_COUNT_LOSS_MIN_ROWS` to
-    :data:`HIDDEN_COUNT_LOSS_MAX_ROWS` rows (:func:`hidden_count_chunks_admit`), an ``X`` the GEMM reads in
+    entry without the zero-weight split), a one-chunk call in the record architecture's row window
+    (:data:`HIDDEN_COUNT_LOSS_ROWS_BY_ARCH`, :func:`hidden_count_chunks_admit`), an ``X`` the GEMM reads in
     place -- a 16-byte row pitch (no contiguous copy) and a 16-byte-aligned base -- and a toolchain whose code for the
     record's architecture runs the hidden count's schedule (:func:`cake_jit.toolchain_runs_hidden_count`: not nvcc
     13.0.x for sm_103a).  Every other call takes the shipped :func:`valid_rows` path."""
@@ -2224,7 +2233,9 @@ def hidden_count_eligible(
         record is None
         or module_name is None
         or rows <= 0
-        or not hidden_count_chunks_admit(rows, chunk, loss_call=loss_call)
+        or not hidden_count_chunks_admit(
+            rows, chunk, loss_call=loss_call, arch=record["arch"]
+        )
         or problem.x_copy
         or X.data_ptr() % 16
     ):

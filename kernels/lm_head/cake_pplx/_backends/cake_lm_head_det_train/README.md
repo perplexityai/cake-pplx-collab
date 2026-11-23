@@ -286,8 +286,8 @@ keyword.
   different chunk boundaries and differ by FP32 rounding (deterministic run to
   run).  All rows valid: the uncompacted path (no gather, no scatter).  Every
   row ignored: zeros without a launch.  On this host-count path (the calls the
-  hidden valid-row count below does not serve: one and two chunks, except the
-  loss entry's one-chunk calls of 32 to 1024 rows) a
+  hidden valid-row count below does not serve: one and two chunks, except, on
+  `sm_103a`, the loss entry's one-chunk calls of 32 to 1024 rows) a
   remembered forward launches chunk 0's row gather and logits GEMM right
   behind the count and binds the rest of the call -- the compacted labels, the
   policy operands, the row vectors, the accumulators -- behind them
@@ -385,19 +385,20 @@ keyword.
   two-chunk calls measured 5-16 % slower with it, so, like the dW side
   stream's `auto` rule, it serves calls of three or more chunks) and every
   `sm_103a` call on CUDA 13.0 (the toolchain note below) take the previous
-  path.  The exception is the loss entry's one-chunk calls of
-  `cake_backend.HIDDEN_COUNT_LOSS_MIN_ROWS` (32) to
-  `cake_backend.HIDDEN_COUNT_LOSS_MAX_ROWS` (1024) rows without the
-  zero-weight split (`cake_backend.hidden_count_chunks_admit`): their chunk 0
-  GEMM runs on `T` rows and the GPU no longer waits for the host count's
-  readback and the host work after it (measured on B200, cross-entropy, chunk
-  4096: a forward + backward step up to 81 us faster in CUPTI span at
-  `T` = 32 to 1024, parity at 64 and 128 rows, and 161 to 181 us faster
-  behind queued work; `T` = 1 and 16
-  measured no faster, so smaller calls keep the host count).  The
-  log-probability entries keep the previous rule.  The prepared runner
-  (`prepare_lm_head_det_loss`) is
-  unchanged.  The chunk buffers and the gather buffer exist at the buffer
+  path.  The exception is, on the architectures of
+  `cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH` (`sm_103a`: 32 to 1024 rows),
+  the loss entry's one-chunk calls in that row window without the zero-weight
+  split (`cake_backend.hidden_count_chunks_admit`): their chunk 0 GEMM runs on
+  `T` rows and the GPU no longer waits for the host count's readback and the
+  host work after it (measured on GB300, cross-entropy, chunk 4096: the
+  forward behind queued work 228 to 345 us faster at `T` = 32 to 1024, the
+  `T` = 1024 forward + backward step 3534.9 -> 3396.6 us in CUPTI span; a
+  `T` = 8 step measured slower, so smaller calls keep the host count).  B200
+  and R200 keep the host count at every `T`: there the retained backward and
+  the checkpointed step measured slower with the hidden count, whose device
+  prologue runs again in their recomputation.  The log-probability entries
+  keep the previous rule.  The prepared runner (`prepare_lm_head_det_loss`)
+  is unchanged.  The chunk buffers and the gather buffer exist at the buffer
   extent before the count is known (`memory_report(..., hidden_count=True)`;
   `cake_backend.hidden_count_eligible` / `_hidden_count_begin`).
 * Log-probability logits GEMM arms (`logprob_dz` / `logprob_lbl`, keywords of

@@ -5327,21 +5327,21 @@ def test_hidden_count_eligibility_rules(monkeypatch, toolchain_check_uncached):
 
 
 def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
-    """The loss entry's one-chunk calls of ``HIDDEN_COUNT_LOSS_MIN_ROWS`` (32) to ``HIDDEN_COUNT_LOSS_MAX_ROWS`` (1024)
-    rows take the hidden valid-row count (``hidden_count_chunks_admit(..., loss_call=True)``, the loss entry without
-    the zero-weight split): not below 32 rows, not above ``min(chunk, 1024)`` rows, not in two chunks; three chunks and
-    more on either rule; ``loss_call=False`` (the log-probability entries, a split call) keeps the previous rule.
-    ``hidden_count_eligible`` and the opt-in module's ``_hidden_count_program`` follow it, and the call's other rules
-    still apply: a registered program, an ``X`` read in place and the toolchain (sm_103a on CUDA 13.0: the host
-    count)."""
+    """On the architectures of ``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH`` (sm_103a: 32 to 1024 rows) the loss entry's one-chunk
+    calls in the architecture's row window take the hidden valid-row count (``hidden_count_chunks_admit(...,
+    loss_call=True, arch=)``, the loss entry without the zero-weight split): not below 32 rows, not above ``min(chunk,
+    1024)`` rows, not in two chunks; sm_100a and sm_107a admit no one-chunk loss call; ``arch=None`` (the check ahead of
+    the record lookup) takes any architecture's window; three chunks and more on either rule; ``loss_call=False`` (the
+    log-probability entries, a split call) keeps the previous rule.  ``hidden_count_eligible`` (the record's
+    architecture) and the opt-in module's ``_hidden_count_program`` follow it, and the call's other rules still apply:
+    a registered program, an ``X`` read in place and the toolchain (sm_103a on CUDA 13.0: the host count)."""
     monkeypatch.setattr(cake_build, "record_cuda_version", lambda arch: (13, 4))
-    lo = cake_backend.HIDDEN_COUNT_LOSS_MIN_ROWS
-    hi = cake_backend.HIDDEN_COUNT_LOSS_MAX_ROWS
-    assert (lo, hi) == (32, 1024)
-    assert hi <= cake_backend.HOST_COUNT_MAX_ROWS
+    assert cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH == {"sm_103a": (32, 1024)}
+    for lo, hi in cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH.values():
+        assert hi <= cake_backend.HOST_COUNT_MAX_ROWS
     assert cake_backend.HIDDEN_COUNT_MIN_CHUNKS == 3
     admit = cake_backend.hidden_count_chunks_admit
-    # (rows, chunk, admitted for a loss call, admitted otherwise)
+    # (rows, chunk, admitted for an sm_103a loss call, admitted otherwise)
     for rows, chunk, loss, other in (
         (0, 4096, False, False),
         (1, 4096, False, False),
@@ -5362,8 +5362,13 @@ def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
         (32, 16, False, False),
         (33, 16, True, True),
     ):
-        assert admit(rows, chunk, loss_call=True) is loss, (rows, chunk)
-        assert admit(rows, chunk) is other, (rows, chunk)
+        case = (rows, chunk)
+        assert admit(rows, chunk, loss_call=True, arch="sm_103a") is loss, case
+        assert admit(rows, chunk, loss_call=True) is loss, case  # any window
+        for arch in ("sm_100a", "sm_107a", "sm_120a"):
+            assert admit(rows, chunk, loss_call=True, arch=arch) is other, (case, arch)
+        assert admit(rows, chunk) is other, case
+        assert admit(rows, chunk, arch="sm_103a") is other, case
     name = "cake_lm_head_det_loss_fake"
     full = _fake_record(_ROW_GRAD_PLAN)
     full["stages"] = [
@@ -5374,44 +5379,60 @@ def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
     ]
     for stage in full["stages"][1:]:
         full[stage] = full["row_grad"]
-    monkeypatch.setitem(cake_jit.MODULES, name, full)
+    sm_103a = dict(full, arch="sm_103a")
+    monkeypatch.setitem(cake_jit.MODULES, name, sm_103a)
     elig = cake_backend.hidden_count_eligible
     # a host tensor: the rule reads the pointer only
     X = torch.empty(16, 6144, dtype=torch.bfloat16)
     for T in (32, 64, 256, 1024):
         p = _problem(T, 6144, 154880, 4096)
-        assert elig(p, X, full, name, stats=True, loss_call=True), T
-        assert not elig(p, X, full, name, stats=True), T  # the previous rule
+        assert elig(p, X, sm_103a, name, stats=True, loss_call=True), T
+        assert not elig(p, X, sm_103a, name, stats=True), T  # the previous rule
+        for arch in ("sm_100a", "sm_107a"):
+            other = dict(full, arch=arch)
+            monkeypatch.setitem(cake_jit.MODULES, name, other)
+            assert not elig(p, X, other, name, stats=True, loss_call=True), (T, arch)
+            assert elig(  # three chunks: the previous rule
+                _problem(3 * 4096, 6144, 154880, 4096),
+                X,
+                other,
+                name,
+                stats=True,
+                loss_call=True,
+            ), arch
+        monkeypatch.setitem(cake_jit.MODULES, name, sm_103a)
     for T in (1, 16, 31, 1025, 4096):
         p = _problem(T, 6144, 154880, 4096)
-        assert not elig(p, X, full, name, stats=True, loss_call=True), T
+        assert not elig(p, X, sm_103a, name, stats=True, loss_call=True), T
     assert not elig(
-        _problem(1024, 6144, 154880, 512), X, full, name, stats=True, loss_call=True
+        _problem(1024, 6144, 154880, 512), X, sm_103a, name, stats=True, loss_call=True
     )  # two chunks
     p = _problem(256, 6144, 154880, 4096)
     assert not elig(p, X, None, None, stats=True, loss_call=True)
-    assert not elig(replace(p, x_copy=True), X, full, name, stats=True, loss_call=True)
+    assert not elig(
+        replace(p, x_copy=True), X, sm_103a, name, stats=True, loss_call=True
+    )
     n = 16 * 6144
     misaligned = torch.empty(n + 8, dtype=torch.bfloat16)[4 : 4 + n].view(16, 6144)
-    assert not elig(p, misaligned, full, name, stats=True, loss_call=True)
+    assert not elig(p, misaligned, sm_103a, name, stats=True, loss_call=True)
     # the opt-in module's host check of its loss forward
-    monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, full))
+    monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, sm_103a))
     program = opt_in._hidden_count_program
     kw = dict(backend="cake", compact=True, stats=True, hidden_count=True)
-    assert program(p, X, loss_call=True, **kw) == (name, full)
+    assert program(p, X, loss_call=True, **kw) == (name, sm_103a)
     assert program(p, X, **kw) is None
     assert program(p, X, loss_call=True, **dict(kw, compact=False)) is None
     assert program(p, X, loss_call=True, **dict(kw, hidden_count=False)) is None
     assert program(_problem(16, 6144, 154880, 4096), X, loss_call=True, **kw) is None
+    sm_100a = dict(full, arch="sm_100a")
+    monkeypatch.setitem(cake_jit.MODULES, name, sm_100a)
+    monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, sm_100a))
+    assert program(p, X, loss_call=True, **kw) is None
     # the toolchain gate: sm_103a on CUDA 13.0 keeps the host count
-    sm_103a = dict(full, arch="sm_103a")
     monkeypatch.setitem(cake_jit.MODULES, name, sm_103a)
-    assert elig(p, X, sm_103a, name, stats=True, loss_call=True)
     monkeypatch.setattr(cake_build, "record_cuda_version", lambda arch: (13, 0))
     cake_jit.toolchain_runs_hidden_count.cache_clear()
     assert not elig(p, X, sm_103a, name, stats=True, loss_call=True)
-    monkeypatch.setitem(cake_jit.MODULES, name, full)
-    assert elig(p, X, full, name, stats=True, loss_call=True)  # sm_100a is not affected
 
 
 def test_a_extent_rule():
@@ -10675,21 +10696,22 @@ def test_device_hidden_count_kernels_match_torch(glm_weight):
 
 
 def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
-    """The loss entry's one-chunk calls of ``HIDDEN_COUNT_LOSS_MIN_ROWS`` (32) to ``HIDDEN_COUNT_LOSS_MAX_ROWS``
-    (1024) rows without the zero-weight split take the hidden valid-row count where the toolchain runs it: through
-    the backend's entry and the opt-in module's default call (the public default with a trainable ``W``), a call
-    begins the count exactly when it is such a call -- not at ``T`` 16, 31 or 1025 (chunk 4096), not at ``T`` 1024
-    in two chunks of 512, not a policy call the split serves (``set_zero_weight_min_rows(0)``), not a
-    log-probability call of 256 rows -- and gives the bits (integer views) of the same call with
-    ``hidden_count=False``, which begins no count: ``loss``, ``logp``, ``dX`` and ``dW``."""
+    """The loss entry's one-chunk calls in the running architecture's row window (``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH``)
+    without the zero-weight split take the hidden valid-row count where the toolchain runs it, with the shipped table
+    (no window on B200 / R200: no one-chunk loss call begins the count) and with the running architecture given the
+    sm_103a window (32, 1024): through the backend's entry and the opt-in module's default call (the public default
+    with a trainable ``W``), a call begins the count exactly when it is such a call -- not at ``T`` 16, 31 or 1025
+    (chunk 4096), not at ``T`` 1024 in two chunks of 512, not a policy call the split serves
+    (``set_zero_weight_min_rows(0)``), not a log-probability call of 256 rows -- and gives the bits (integer views) of
+    the same call with ``hidden_count=False``, which begins no count: ``loss``, ``logp``, ``dX`` and ``dW``."""
     _require_program(entry="loss")
     _require_program(entry="logprob")
+    arch = cake_backend.arch_for(CUDA)
     runs = bool(
         cake_backend.hidden_count_default()
-        and cake_jit.toolchain_runs_hidden_count(cake_backend.arch_for(CUDA))
+        and cake_jit.toolchain_runs_hidden_count(arch)
     )
-    lo = cake_backend.HIDDEN_COUNT_LOSS_MIN_ROWS
-    hi = cake_backend.HIDDEN_COUNT_LOSS_MAX_ROWS
+    shipped = dict(cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH)
     begun = _record_every_hidden_count(monkeypatch)
     # (T, chunk, objective, entry, zero-weight floor; None: the shipped floor)
     cases = [(T, 4096, "ce", "loss", None) for T in (16, 31, 32, 64, 256, 1024, 1025)]
@@ -10699,40 +10721,47 @@ def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
         (256, 4096, "policy", "loss", 0),
         (256, 4096, "ce", "logprob", None),
     ]
-    for T, chunk, objective, entry, floor in cases:
-        inp = make_inputs(
-            T,
-            objective=objective,
-            seed=SEED + 7731 + T,
-            device=CUDA,
-            W=glm_weight,
-            ignore_frac=0.05,
-        )
-        expected = (
-            runs and entry == "loss" and floor is None and lo <= T <= min(chunk, hi)
-        )
-        previous = cake_backend.set_zero_weight_min_rows(
-            cake_backend.ZERO_WEIGHT_MIN_ROWS_DEFAULT if floor is None else floor
-        )
-        try:
-            for switches in ({}, dict(memory_mode=None)):
-                case = (T, chunk, objective, entry, floor, tuple(switches))
-                begun.clear()
-                off = _run(
-                    inp,
-                    chunk,
-                    entry=entry,
-                    backend="cake",
-                    hidden_count=False,
-                    **switches,
-                )
-                assert begun == [], (case, begun)
-                on = _run(inp, chunk, entry=entry, backend="cake", **switches)
-                assert bool(begun) == expected, (case, begun)
-                _assert_same_bits(off, on)
-                del off, on
-        finally:
-            cake_backend.set_zero_weight_min_rows(previous)
+    for table in (shipped, dict(shipped, **{arch: (32, 1024)})):
+        monkeypatch.setattr(cake_backend, "HIDDEN_COUNT_LOSS_ROWS_BY_ARCH", table)
+        window = table.get(arch)
+        for T, chunk, objective, entry, floor in cases:
+            inp = make_inputs(
+                T,
+                objective=objective,
+                seed=SEED + 7731 + T,
+                device=CUDA,
+                W=glm_weight,
+                ignore_frac=0.05,
+            )
+            expected = (
+                runs
+                and entry == "loss"
+                and floor is None
+                and window is not None
+                and window[0] <= T <= min(chunk, window[1])
+            )
+            previous = cake_backend.set_zero_weight_min_rows(
+                cake_backend.ZERO_WEIGHT_MIN_ROWS_DEFAULT if floor is None else floor
+            )
+            try:
+                for switches in ({}, dict(memory_mode=None)):
+                    case = (window, T, chunk, objective, entry, floor, tuple(switches))
+                    begun.clear()
+                    off = _run(
+                        inp,
+                        chunk,
+                        entry=entry,
+                        backend="cake",
+                        hidden_count=False,
+                        **switches,
+                    )
+                    assert begun == [], (case, begun)
+                    on = _run(inp, chunk, entry=entry, backend="cake", **switches)
+                    assert bool(begun) == expected, (case, begun)
+                    _assert_same_bits(off, on)
+                    del off, on
+            finally:
+                cake_backend.set_zero_weight_min_rows(previous)
 
 
 def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):
@@ -10816,7 +10845,9 @@ def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):
                 temperature="hetero" if tag == "temperature" else None,
             )
             rows = int((inp.labels >= 0).sum())
-            if entry == "loss" and T >= cake_backend.HIDDEN_COUNT_LOSS_MIN_ROWS:
+            if entry == "loss" and cake_backend.hidden_count_chunks_admit(
+                T, 4096, loss_call=True, arch=arch
+            ):
                 kw = dict(kw, hidden_count=False)  # the host count: a padded plan
             out = {}
             for table in ("off", "shipped", "256"):
