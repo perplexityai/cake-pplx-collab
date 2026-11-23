@@ -59,8 +59,9 @@ takes it.
 
 The one-launch route (head dimension 128 or 64, no mask): one kernel, the
 ``bwd_fused`` stage (``bwd_fused`` / ``bwd_fused_hd64``), does the whole
-backward of a small shape.  On the grid ``(Sq / 128 + Skv / 128, H, B)`` the
-first ``Sq / 128`` CTAs of a (head, batch) are Q-owners, each the dq of one
+backward of a call on few CTAs (short sequences, or long ones with few
+heads).  On the grid ``(Sq / 128 + Skv / 128, H, B)`` the first
+``Sq / 128`` CTAs of a (head, batch) are Q-owners, each the dq of one
 query block, and the others are KV-owners, each dk and dv of one key block;
 the kernel makes ``LSE * log2(e)`` and ``dPsum`` itself, needs no workspace
 and writes dq, dk and dv once each in one fixed order.  ``FUSED_OF`` names its
