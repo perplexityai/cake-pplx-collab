@@ -10770,7 +10770,11 @@ def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
     with a trainable ``W``), a call begins the count exactly when it is such a call -- not at ``T`` 16, 31 or 1025
     (chunk 4096), not at ``T`` 1024 in two chunks of 512, not a policy call the split serves
     (``set_zero_weight_min_rows(0)``), not a log-probability call of 256 rows -- and gives the bits (integer views) of
-    the same call with ``hidden_count=False``, which begins no count: ``loss``, ``logp``, ``dX`` and ``dW``."""
+    the same call with ``hidden_count=False``, which begins no count: ``loss``, ``logp``, ``dX`` and ``dW``.  With the
+    window, a windowed call's dX finalize -- in the step's backward and in a retained graph's second backward -- reads
+    the scan its compaction formed (``_DEVICE_SCAN_ATTR``: no scan of its own, the bits of ``cumsum(mask)``), and a
+    checkpointed call (non-reentrant ``torch.utils.checkpoint``, both entries) begins no count in either pass and gives
+    the bits of the checkpointed call with ``hidden_count=False``."""
     _require_program(entry="loss")
     _require_program(entry="logprob")
     arch = cake_backend.arch_for(CUDA)
@@ -10829,6 +10833,80 @@ def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
                     del off, on
             finally:
                 cake_backend.set_zero_weight_min_rows(previous)
+    if not runs:
+        return
+    monkeypatch.setattr(
+        cake_backend, "HIDDEN_COUNT_LOSS_ROWS_BY_ARCH", {arch: (32, 1024)}
+    )
+    scans: list = []
+    row_scan = cake_backend._row_scan
+
+    def scan_spy(row_valid):
+        out = row_scan(row_valid)
+        formed = getattr(row_valid, cake_backend._DEVICE_SCAN_ATTR, None)
+        want = torch.cumsum(row_valid, 0, dtype=torch.int32)
+        scans.append((formed is not None and out is formed, torch.equal(out, want)))
+        return out
+
+    monkeypatch.setattr(cake_backend, "_row_scan", scan_spy)
+    inp = make_inputs(
+        256, objective="ce", seed=SEED + 7743, device=CUDA, W=glm_weight, ignore_frac=0.05
+    )
+    entries = (
+        ("cake_backend", cake_backend.cake_lm_head_det_train_loss, {}),
+        ("opt_in", opt_in.cake_lm_head_det_train_loss, dict(memory_mode=None)),
+    )
+    for name, fn, extra in entries:
+
+        def call(X, W, **kw):
+            return fn(
+                X,
+                W,
+                inp.labels,
+                objective="ce",
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                return_logp=True,
+                backend="cake",
+                **dict(extra, **kw),
+            )
+
+        # the step's backward and a retained graph's second backward read the forward's scan
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        begun.clear()
+        scans.clear()
+        loss, _ = call(X, W)
+        assert begun, name
+        loss.backward(retain_graph=True)
+        first = (X.grad.clone(), W.grad.clone())
+        X.grad = W.grad = None
+        loss.backward()
+        torch.cuda.synchronize()
+        assert len(scans) == 2 and all(a and b for a, b in scans), (name, scans)
+        assert torch.equal(_bits(X.grad), _bits(first[0])), name
+        assert torch.equal(_bits(W.grad), _bits(first[1])), name
+        del loss, X, W, first
+        # a checkpointed call keeps the host count in both passes
+        got = {}
+        for count in (True, False):
+            X = inp.X.detach().requires_grad_(True)
+            W = inp.W.detach().requires_grad_(True)
+            begun.clear()
+            scans.clear()
+            loss = torch.utils.checkpoint.checkpoint(
+                lambda x, w, _c=count: call(x, w, hidden_count=_c)[0],
+                X,
+                W,
+                use_reentrant=False,
+            )
+            loss.backward()
+            torch.cuda.synchronize()
+            assert begun == [], (name, count, begun)
+            assert not any(a for a, _ in scans), (name, count, scans)
+            got[count] = dict(loss=loss.detach(), dX=X.grad, dW=W.grad)
+            del loss, X, W
+        _assert_same_bits(got[True], got[False], keys=("loss", "dX", "dW"))
 
 
 def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):

@@ -296,10 +296,13 @@ HIDDEN_COUNT_MIN_CHUNKS = 3
 # it.  Measured on GB300 (cross-entropy loss entry, chunk 4096, H 6144, V 154880, 5 % ignored rows; CUPTI span of one
 # call, and the same call queued behind a 2 ms kernel; medians, us): the queued forward at T = 32 / 1024 941.9 -> 664.4
 # / 2439.6 -> 2159.8, the T = 1024 forward + backward step 3534.9 -> 3396.6; below 32 rows a step with a cleared binding
-# cache measured slower (T = 8: 1980.0 -> 2087.9), so smaller calls keep the host count.  On B200 and R200 these calls
-# keep the host count: there the call's retained backward and its checkpointed step measured slower with the hidden
-# count (its device prologue runs again in the backward's and in the checkpoint's recomputation; checkpointed step at
-# T = 128 on B200 2240.5 -> 2411.5, at T = 32 on R200 1466.5 -> 1576.2).  The upper bound is at most
+# cache measured slower (T = 8: 1980.0 -> 2087.9), so smaller calls keep the host count.  Such a call's dX finalize
+# reads the scan the count's compaction formed (:data:`_DEVICE_SCAN_ATTR`: no scan launch in any backward), and a call
+# inside a non-reentrant checkpoint keeps the host count in both passes (``forward_loss``'s ``_one_chunk_count``):
+# without these two rules the retained second backward (a device scan in place of the host count's one copy) and the
+# checkpointed step (the device prologue in both passes) measured slower with the hidden count (B200 queued backward
+# +1.4 to +4.4 us at T = 32 to 1024, checkpointed step at T = 128 2240.5 -> 2411.5; R200 checkpointed step at T = 32
+# 1466.5 -> 1576.2).  B200 and R200 keep the host count for these calls.  The upper bound is at most
 # :data:`HOST_COUNT_MAX_ROWS` and lies below every architecture's zero-gradient row floor
 # (:data:`ZERO_DLOGP_MIN_ROWS_BY_ARCH`).  Bitwise the same outputs (:func:`hidden_count_default`).
 HIDDEN_COUNT_LOSS_ROWS_BY_ARCH: dict[str, tuple[int, int]] = {"sm_103a": (32, 1024)}
@@ -2385,6 +2388,11 @@ def _hidden_count_begin(
     else:
         compaction_index(labels, valid=valid, pos=pos, idx_full=idx_full, ar=ar)
         count_host.copy_(count_dev, non_blocking=True)
+        if rows0 == T:
+            # a one-chunk call (the loss entry's row window, :func:`hidden_count_chunks_admit`): its dX finalize reads
+            # this scan of ``valid`` (:func:`_row_scan`), so a backward -- a retained graph's second one too -- launches
+            # no scan of its own; ``4 T`` bytes, kept with the mask
+            setattr(valid, _DEVICE_SCAN_ATTR, pos)
     event.record()
     with _ffi_stream_context(index):
         for key in keys:
@@ -2622,15 +2630,23 @@ def _hidden_count_memory_temperature(
 # (``row_valid``), the host copy of that mask their one synchronization read back (a CUDA call of at most
 # :data:`HOST_COUNT_MAX_ROWS` rows): the dX finalize scans it on the host (:func:`_row_scan`).
 _HOST_MASK_ATTR = "_cake_host_mask"
+# The attribute under which the hidden valid-row count of a one-chunk call (:func:`_hidden_count_begin`) keeps, on the
+# bool valid-row mask it returns, the inclusive int32 scan of that mask its compaction already formed on the device
+# (``pos``): the dX finalize reads it (:func:`_row_scan`) instead of scanning the mask again in every backward.
+_DEVICE_SCAN_ATTR = "_cake_device_scan"
 
 
 def _row_scan(row_valid: torch.Tensor) -> torch.Tensor:
     """The inclusive int32 scan of the bool ``[T]`` valid-row mask ``row_valid`` that :func:`scale_cast_scatter` reads
-    (:func:`finalize_dx`).  A mask that carries its host copy (:data:`_HOST_MASK_ATTR`) is scanned on the host and the
+    (:func:`finalize_dx`).  A mask that carries the scan its compaction formed (:data:`_DEVICE_SCAN_ATTR`) gives that
+    scan, with no launch.  A mask that carries its host copy (:data:`_HOST_MASK_ATTR`) is scanned on the host and the
     scan goes to the mask's device in one ``4 T``-byte copy, in place of the device's int32 cast, scan-init and scan
     kernels; under a CUDA graph capture (it takes no host copy), from another current device, or for a mask without a
-    host copy, the device scans the mask.  Both are the integer prefix sum of the same mask: the same scan, so the same
+    host copy, the device scans the mask.  All are the integer prefix sum of the same mask: the same scan, so the same
     outputs."""
+    formed = getattr(row_valid, _DEVICE_SCAN_ATTR, None)
+    if formed is not None:
+        return formed
     host = getattr(row_valid, _HOST_MASK_ATTR, None)
     if host is not None:
         device = row_valid.device
@@ -10217,6 +10233,7 @@ def forward_loss(
     hidden_count: Optional[bool] = None,
     gemm_tuning: Optional[dict[str, dict[str, Any]]] = None,
     return_logp: bool = True,
+    _one_chunk_count: bool = True,
 ) -> ForwardResult:
     """Forward of the loss entry: ``loss`` (FP32 scalar), ``logp`` (FP32 ``[T]``) and the
     FP32 gradient accumulators ``dx_acc`` / ``dw_acc`` of the trainable inputs.
@@ -10245,6 +10262,9 @@ def forward_loss(
     :func:`hidden_count_default`) runs a compacted call's valid-row count on the
     device.  ``gemm_tuning`` (default :func:`gemm_tuning_default`) pins GEMM
     knobs explicitly; the result carries it for the deferred weight gradient.
+    ``_one_chunk_count=False`` (the autograd entry's calls inside a non-reentrant
+    ``torch.utils.checkpoint``): a one-chunk call keeps the host count
+    (:func:`hidden_count_chunks_admit` without the loss entry's row window).
 
     Zero-weight rows (a compacted policy call, :func:`zero_weight_split`): the chunk loop runs over the gradient rows
     ``(labels >= 0) & (loss_weights != 0)`` only (``row_index``, ``row_valid``, ``dx_acc`` and the deferred operands
@@ -10306,7 +10326,7 @@ def forward_loss(
         stats=True,
         hidden_count=_resolve_hidden_count(hidden_count),
         loss_weights=loss_weights if split else None,
-        loss_call=not split,
+        loss_call=_one_chunk_count and not split,
     )
     zero_index = None
     if hc is not None:
@@ -13127,6 +13147,7 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         gemm_tuning,
     ):
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
+        one_chunk_count = True
         # under saved-tensor hooks: a non-reentrant torch.utils.checkpoint's passes leave the gradients to the
         # recomputation (gradient placement "auto"); the plain step (no hooks) and other hooks run the fused forward.
         # Under a selective checkpoint's modes (any need_dx / need_dw): again, with the dispatch modes popped
@@ -13177,10 +13198,14 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                     hidden_count=hidden_count,
                     gemm_tuning=gemm_tuning,
                     return_logp=bool(return_logp),
+                    # both passes of a checkpointed one-chunk call keep the host count: measured slower with the
+                    # loss entry's one-chunk hidden count (its device prologue runs in both passes)
+                    _one_chunk_count=False,
                 ),
             )
             if out is not None:
                 return out
+            one_chunk_count = _checkpoint_pass() is None
         result = forward_loss(
             X,
             W,
@@ -13201,6 +13226,7 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             hidden_count=hidden_count,
             gemm_tuning=gemm_tuning,
             return_logp=bool(return_logp),
+            _one_chunk_count=one_chunk_count,
         )
         ctx.set_materialize_grads(False)
         ctx.dx_acc, ctx.dw_acc = (

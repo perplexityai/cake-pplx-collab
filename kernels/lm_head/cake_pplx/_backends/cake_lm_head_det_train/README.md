@@ -392,11 +392,15 @@ keyword.
   `T` rows and the GPU no longer waits for the host count's readback and the
   host work after it (measured on GB300, cross-entropy, chunk 4096: the
   forward behind queued work 228 to 345 us faster at `T` = 32 to 1024, the
-  `T` = 1024 forward + backward step 3534.9 -> 3396.6 us in CUPTI span; a
-  `T` = 8 step measured slower, so smaller calls keep the host count).  On
-  B200 and R200 these one-chunk calls keep the host count: there the retained
-  backward and the checkpointed step measured slower with the hidden count,
-  whose device prologue runs again in their recomputation.  The
+  `T` = 1024 forward + backward step 3534.9 -> 3396.6 us in CUPTI span; at
+  `T` = 8 a step with a cleared binding cache measured slower, 1980.0 ->
+  2087.9 us, so smaller calls keep the host count).  Their dX finalize reads
+  the scan the count's compaction formed, so no backward -- a retained
+  graph's second one included -- launches a scan of its own, and a call
+  inside a non-reentrant `torch.utils.checkpoint` keeps the host count in
+  both passes: without these two rules the retained second backward and the
+  checkpointed step measured slower with the hidden count on B200 and R200.
+  On B200 and R200 these one-chunk calls keep the host count.  The
   log-probability entries keep the previous rule.  The prepared runner
   (`prepare_lm_head_det_loss`) is unchanged.  The chunk buffers and the gather
   buffer exist at the buffer extent before the count is known

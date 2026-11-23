@@ -4991,6 +4991,7 @@ def forward_loss(
     check_num_valid_rows: bool = False,
     return_logp: bool = True,
     _cast_fold: bool = False,
+    _one_chunk_count: bool = True,
 ) -> ForwardResult:
     """Forward of the loss entry: ``loss`` (FP32 scalar), ``logp`` (FP32 ``[T]``) and the
     FP32 gradient accumulators ``dx_acc`` / ``dw_acc`` of the trainable inputs.
@@ -5019,6 +5020,10 @@ def forward_loss(
     :func:`hidden_count_default`) runs a compacted call's valid-row count on the
     device.  ``gemm_tuning`` (default :func:`gemm_tuning_default`) pins GEMM
     knobs explicitly; the result carries it for the deferred weight gradient.
+    ``_one_chunk_count=False`` (the autograd entry's calls inside a non-reentrant
+    ``torch.utils.checkpoint``): a one-chunk call keeps the host count
+    (:func:`.cake_backend.hidden_count_chunks_admit` without the loss entry's
+    row window).
 
     ``memory_mode`` (default ``None``: the fast form; the autograd entries resolve theirs, :func:`memory_mode_default`,
     to :data:`MEMORY_AUTO` and pass it): ``"budget"`` (``cake`` backend, BF16 ``dW``) picks the weight-gradient form of
@@ -5156,7 +5161,7 @@ def forward_loss(
             stats=True,
             hidden_count=count,
             loss_weights=loss_weights if split else None,
-            loss_call=not split,
+            loss_call=_one_chunk_count and not split,
         )
         if hc is not None:
             # the hidden valid-row count: chunk 0's gather and logits GEMM are queued; the count arrives through the
@@ -8460,6 +8465,9 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 check_num_valid_rows=check_num_valid_rows,
                 return_logp=bool(return_logp),
                 _cast_fold=cast_fold,
+                # both passes of a checkpointed one-chunk call keep the host count: measured slower with the loss
+                # entry's one-chunk hidden count (its device prologue runs in both passes)
+                _one_chunk_count=False,
             )
             split, handed = _main._loss_checkpoint_split(
                 ctx,
@@ -8514,6 +8522,7 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             check_num_valid_rows=check_num_valid_rows,
             return_logp=bool(return_logp),
             _cast_fold=cast_fold,
+            _one_chunk_count=ckpt is None,
         )
         CakeLMHeadDetLossFunction._setup(
             ctx, X, grad_weight_dtype, backend, memory_mode
