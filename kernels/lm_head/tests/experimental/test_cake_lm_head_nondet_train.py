@@ -17741,7 +17741,9 @@ def test_device_small_call_stages_after_planning(glm_weight, entry, T, monkeypat
     lookup = cake_backend.BindingCache.lookup
 
     def spy(self, key):
-        pending_at_lookup.append(cake_backend._SMALL_STAGE.ops is not None)
+        # a backward's lookup runs on the autograd engine's thread: no pending staging there
+        pending = getattr(cake_backend._SMALL_STAGE, "ops", None)
+        pending_at_lookup.append(pending is not None)
         return lookup(self, key)
 
     keep = entry != "logprob"
