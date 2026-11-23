@@ -216,10 +216,11 @@ def test_manifests_name_the_det_package_and_libraries() -> None:
     if test_only.is_file():
         assert json.loads(test_only.read_text())["package"] == NEW_PACKAGE
     single = {record["library"] for record in cake_jit.MODULES.values()}
-    # 65 g-gate, 8 raw-gate, 5 Q/K L2 norm fallback and 18 fused Q/K L2 norm programs (10 g-gate, fwd_intra v37
-    # and glm_intra v30 on sm_103a and the replay prep's saved-rstd twin among them, and 8 raw-gate: the 7 twins of
-    # the g-gate forms and the kb-once replay prep, bwd_prep_g8_replay_kbonce_raw_l2n)
-    assert len(single) == 96
+    # 65 g-gate, 8 raw-gate, 5 Q/K L2 norm fallback and 27 fused Q/K L2 norm programs (10 g-gate, fwd_intra v37
+    # and glm_intra v30 on sm_103a and the replay prep's saved-rstd twin among them, 8 raw-gate: the 7 twins of
+    # the g-gate forms and the kb-once replay prep, bwd_prep_g8_replay_kbonce_raw_l2n, and 9 of both gate modes:
+    # the 5 output backward programs, dav_l2n*, and the 4 fused gradient programs, dqkg_*l2n)
+    assert len(single) == 105
     for library in single:
         assert re.fullmatch(r"cake_kda_det_train_[0-9a-f]{20}", library), library
     for name, record in cake_jit.MODULES.items():

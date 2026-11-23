@@ -613,15 +613,16 @@ def force_wgrad_form(
     monkeypatch, P: Package, form: str, arch: str
 ) -> Optional[tuple[int, str]]:
     """Host constants under which a weight gradient on ``arch`` takes ``form``
-    (:data:`WGRAD_FORMS`: k tile and main stage; ``k512_queue`` the non-deterministic queue walk
-    standing in for ``main_halves``) at any rows per group, given a ``K`` of :func:`form_k`;
-    ``(tile_k, main stage)``, or None where ``arch`` (or the package) has no such form."""
+    (:data:`WGRAD_FORMS`: k tile and main stage; ``k512_queue`` the queue walk standing in for
+    ``main_halves``, in a package whose constants have ``queue_walk`` rules) at any rows per
+    group, given a ``K`` of :func:`form_k`; ``(tile_k, main stage)``, or None where ``arch``
+    (or the package) has no such form.  The other forms clear the ``queue_walk`` rules."""
     c = P.constants
     tile = 512 if form.startswith("k512") else 256
     stage = form.split("_", 1)[1]
     queue = stage == "queue"
     if queue:
-        if not P.nondet:
+        if "queue_walk" not in c:
             return None
         stage = "main_halves"
     halves = stage in ("main_halves", "main_wave_halves", "main_halves_k256t")
@@ -647,7 +648,7 @@ def force_wgrad_form(
         return None
     if not wave:
         monkeypatch.setitem(c, "wave_sync_min_k", 1 << 30)
-    if P.nondet:
+    if "queue_walk" in c:
         rules = []
         if queue:
             rules = [
@@ -1618,8 +1619,8 @@ def check_edges(P: Package, op: str, out_dtype=torch.bfloat16) -> None:
 
 
 # The 512-wide k tile forms an accumulating weight gradient is checked on (check_accumulate):
-# main_halves, the wave form (sm_100a / sm_103a), the k256 tail (sm_107a) and the
-# non-deterministic queue walk (sm_100a / sm_103a): every main stage with an accumulate build.
+# main_halves, the wave form (sm_100a / sm_103a), the k256 tail (sm_107a) and the queue walk
+# (sm_100a / sm_103a): every main stage with an accumulate build.
 ACC_FORMS = (
     "k512_main_halves",
     "k512_main_wave_halves",

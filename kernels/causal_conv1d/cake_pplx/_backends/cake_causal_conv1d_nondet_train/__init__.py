@@ -50,6 +50,17 @@ S = 1 to 4096) the backward runs the route's direct program instead, which has
 no det twin: one ordinary launch without TMA or a staged pipeline, whose ``dx``
 is bit for bit the route's staged programs' and whose ``dweight`` / ``dbias``
 take the same unordered FP32 accumulation, ticket counters and last-CTA store.
+At the small-S rows of ``cake_jit.GRID_CAP_ROWS`` (by architecture, route, ``C``
+and ``S``; outside the backward rows of ``cake_jit.DIRECT_ROWS``) a backward at
+``bwd_grid_mult`` 1 launches fewer CTAs of the same program: at most
+``n_ch_tiles x ceil(S / (n_sub x tokens))`` and at least one per channel tile
+(``cake_jit.small_s_grid``); its channel tiles, ``dx`` and workspace stay the
+row's.  Here ``n_ch_tiles`` is the plan's number of channel tiles and ``n_sub``
+is the number of token sub-tiles of one CTA: ``n_ch_tiles`` 3 and ``n_sub`` 4
+at the ``bwd`` keys, ``n_ch_tiles`` 1 and ``n_sub`` 2 at the ``bwd_bias`` key.
+``tokens`` (3 on ``bwd``, 5 on ``bwd_bias``) is the length of one token
+stream: the CTAs of a channel tile split ``S`` into ``CTAs x n_sub`` streams,
+so each CTA takes about ``n_sub x tokens`` tokens.
 
 Numerical mode: the package is chosen by its module name and no entry point
 takes a mode keyword.  This package has no deterministic programs (they are the
@@ -146,8 +157,10 @@ Host design (the knobs are keywords; no environment variable):
   multiplies the direct program's grid of the call (at least one CTA per
   channel tile, at most one per token block: ``cake_jit.launch_grid``); that
   program's CTAs take a tile's token blocks in turn, so any grid of at least
-  one CTA per tile is correct.  The workspace does not grow with it (one
-  accumulator set and one counter per channel tile, whatever the grid).
+  one CTA per tile is correct.  Above 1 the rows of ``cake_jit.GRID_CAP_ROWS``
+  launch that many times the untrimmed grid, as every other row.  The workspace
+  does not grow with it (one accumulator set and one counter per channel tile,
+  whatever the grid).
 - Backward grid beside a concurrent kernel: on the
   ``bwd`` and ``bwd_fp32g`` routes at ``bwd_grid_mult`` 1, a launch of exactly
   ``ctas_per_sm x SM count`` CTAs whose last channel-tile rank holds at least
@@ -217,8 +230,9 @@ Host design (the knobs are keywords; no environment variable):
   ``FORWARD_WIDTH_FLOORS`` token floors and its single-tile range)
   and sizes the grid (``cake_jit.plan_row``); later calls of the row only
   compare ``S`` with the entry's token ranges (and size the grid where
-  ``launch_grid`` trims it by ``S``), so they launch the values a per-call
-  plan gives.  A row a ``cake_jit.SM_WIDE_ROWS``, ``cake_jit.PAIR_ROWS``,
+  ``launch_grid`` trims it by ``S`` or, at the ``C`` of a
+  ``cake_jit.GRID_CAP_ROWS`` key, caps it by ``S``), so they launch the values
+  a per-call plan gives.  A row a ``cake_jit.SM_WIDE_ROWS``, ``cake_jit.PAIR_ROWS``,
   ``cake_jit.DIRECT_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers is planned
   for every side of its token ranges at its first call (``cake_jit.row_sides``:
   an SM-wide segment's program, the pair direct program inside the pair range,
@@ -968,7 +982,8 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
-    ``SM_WIDE_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS``, ``PAIR_PLANS``, ``DIRECT_PLANS``, ``BACKWARD_DIRECT_PLANS``, the
+    ``SM_WIDE_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS``, ``GRID_CAP_ROWS``, ``PAIR_PLANS``, ``DIRECT_PLANS``,
+    ``BACKWARD_DIRECT_PLANS``, the
     forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``,
     ``FORWARD_SINGLE_TILE_ROWS``,
     ``FORWARD_NARROW_WIDTHS`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or

@@ -603,6 +603,45 @@ def test_l2n_plans_need_l2n_records(arch: str) -> None:
 
 
 @pytest.mark.parametrize("arch", list(cake_jit.ARCHES))
+def test_l2n_plans_refuse_a_backward_path_without_an_l2n_dav_record(
+    arch: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_check_l2n_dav``: the fused gradient of an l2n mode (``davq`` 0) stores no
+    ``dAqk``, so an l2n plan whose backward path launches no ``dav`` record of its mode
+    (none, or a flag-off one) is refused with ``ValueError`` naming the path; a path
+    without a ``dav`` stage (the forward) and the flag-off plans are not checked.
+    Through ``plan``: a registry whose ``dav_l2n_replay`` rule admits no problem leaves
+    the replay of an H 12 row without a ``dav`` record, and every l2n plan of the row
+    is refused in both gate modes while its flag-off plan still builds."""
+    check = cake_backend._check_l2n_dav
+    fwd = {"fwd": {"fwd_intra": "fwd_intra_l2n"}}
+    match = "path 'replay' launches no dav record"
+    for mode in ("fused", "fallback"):
+        check(fwd, arch=arch, H=12, l2n=mode)
+        check({**fwd, "replay": {"dav": "dav_l2n_replay"}}, arch=arch, H=12, l2n=mode)
+        for name in (None, "dav_serial_replay"):
+            records = {**fwd, "replay": {"dav": name}}
+            check(records, arch=arch, H=12, l2n="off")
+            with pytest.raises(ValueError, match=match):
+                check(records, arch=arch, H=12, l2n=mode)
+    narrowed = dict(cake_jit.MODULES["dav_l2n_replay"])
+    narrowed["select_rule"] = {"kind": "heads_at_least", "min": 1 << 20}
+    monkeypatch.setitem(cake_jit.MODULES, "dav_l2n_replay", narrowed)
+    cake_backend._plan.cache_clear()  # no plan of the real registry answers below
+    try:
+        for gate in ("g", "raw"):
+            for mode in ("fused", "fallback"):
+                with pytest.raises(ValueError, match=match):
+                    cake_backend.plan(2000, 3, 12, 148, arch, gate=gate, l2n=mode)
+        p = cake_backend.plan(2000, 3, 12, 148, arch)
+        assert p.record("dav", "replay") == "dav_serial_replay"
+    finally:
+        monkeypatch.undo()
+        cake_backend._plan.cache_clear()  # nor a plan of the narrowed one after it
+
+
+@pytest.mark.parametrize("arch", list(cake_jit.ARCHES))
 def test_fallback_replay_counts_no_qk_apply(arch: str) -> None:
     """The fallback plan selects a ``qk_apply`` record on the replay path too (the KCP's local backward plans on
     that path), but the replay normalizes q / k with ``qk_l2norm`` and never launches ``qk_apply``: the replay's
@@ -648,7 +687,12 @@ SHAPES_L2N = (
     ((2048,), 16),
     ((4000, 96), 32),
     ((5000, 3000), 64),
+    # the serial route below 16 heads: with the norm off its backward launches the
+    # separate dav program; with it the dav_l2n* records and the hinted dqkg_*l2n
+    ((300, 129), 12),
 )
+# the backward-route rows: the three middle rows of SHAPES_L2N and its 12-head row
+SHAPES_L2N_ROUTES = SHAPES_L2N[1:4] + SHAPES_L2N[5:]
 # Accuracy: ``out`` and every gradient are judged by ``judge_arms`` (``test_helpers/cake_kda_naive.py``): each
 # output's error against the exact FP64 recurrence beside the naive BF16 tier's (``tests/cake_naive.py``) over the
 # judge's draws.  A row of up to about 4096 tokens is judged as it is.  A larger row runs once for its exact checks,
@@ -828,7 +872,7 @@ def test_l2n_matches_the_exact_reference(
 
 @pytest.mark.parametrize("raw_gate", [False, True], ids=["g", "raw"])
 @pytest.mark.parametrize(
-    "shape", SHAPES_L2N[1:4], ids=lambda s: f"{len(s[0])}docs-S{sum(s[0])}-H{s[1]}"
+    "shape", SHAPES_L2N_ROUTES, ids=lambda s: f"{len(s[0])}docs-S{sum(s[0])}-H{s[1]}"
 )
 def test_l2n_forward_rows_equal_the_reference_and_every_backward_route(
     shape, raw_gate: bool, l2n_hook: dict

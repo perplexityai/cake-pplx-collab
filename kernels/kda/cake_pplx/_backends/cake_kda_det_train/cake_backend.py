@@ -85,7 +85,11 @@ rows with at most 32 (document, head) chains does the same; the serial adjoint
 recurrence accumulates ``dv`` itself, so ``dav`` computes ``dAqk`` alone there
 and from 16 heads the fused gradient hosts even that (no ``dav`` launch); the
 segmented adjoint recurrence accumulates ``dv`` too and the fused gradient
-hosts ``dAqk`` on every segmented row (no ``dav`` launch).  The fused gradient and the GLM
+hosts ``dAqk`` on every segmented row (no ``dav`` launch).  In the in-kernel
+Q/K L2 norm modes ``dav`` forms ``dAqk`` on every backward path and row
+instead (the ``dav_l2n*`` records: from an FP32 ``v_new`` it recomputes from
+``Akk``, ``beta``, ``v``, ``w`` and the ``h`` tape) and the fused gradient
+stores none there (its ``davq`` 0 builds).  The fused gradient and the GLM
 intra kernel read the user's ``q`` / ``k`` / ``v`` token rows where they are;
 the backward programs of the saved-set paths read the saved ``Aqk`` / ``Akk``
 token rows and the user's ``dout``, the replay path's programs the internal
@@ -239,13 +243,17 @@ class CakeKDADetArena:
     ``lean`` sizes a backward workspace for the saved-set paths only (layouts ``bwd_lean`` / ``bwd_tape_lean``: no
     replay layout, no internal ``dout`` copy), so the workspace serves no checkpoint replay (``cake_kda_det_train_backward`` with
     ``saved=None``; ``torch.utils.checkpoint`` never replays: the node's backward reads the recomputed saved set)
-    and no row that dispatches the separate ``dav`` program (H 9-15, outside the contract's head counts).
+    and no flag-off row that dispatches the separate ``dav`` program (H 9-15, outside the contract's head counts).
+    In an in-kernel Q/K L2 norm mode every backward launches ``dav`` (the ``dav_l2n*`` records, ``dAqk`` alone),
+    and the lean layouts of two or more tail passes hold that whole-sequence ``dAqk`` (256 B more per internal
+    token-head) instead of a per-pass one.
     ``tail_passes = B`` (which implies ``lean``) runs the three chunk-parallel tail stages of the backward (the
     fused gradient, GLM intra and, on ``sm_100a``, the gate epilogue) once per range of ``ceil(NC_pad / B)`` chunks
     on offset views of the whole-sequence buffers, with the per-pass buffers (``dq_f, dk_f, dg_f, db_f, dAkk, dAqk``
     and, where the gate epilogue launches, ``dg_int, db_int``) sized for one range: the same kernels on the same bytes (bitwise the same gradients), ``B - 1`` more launches
     per tail stage.  The arena bytes: :func:`workspace_bytes` / :func:`memory_report` with ``arena=``; the floor
-    from four passes on is 2820 B per internal token-head (plus three state blocks on the segmented route), against
+    from four passes on is 2820 B per internal token-head (3076 in an in-kernel Q/K L2 norm mode; plus three state
+    blocks on the segmented route), against
     4488 at head (passes above four buy nothing).
 
     ``batch_tokens`` runs the forward and the backward over groups of whole, contiguous documents of at most that
@@ -619,7 +627,9 @@ class Plan:
 
     def check_arena(self, arena: CakeKDADetArena, *, backward: bool = True) -> None:
         """``ValueError`` when ``arena`` cannot serve this plan: a lean arena on a backward row that dispatches the
-        separate ``dav`` program (H 9-15; the lean layouts keep no ``dv1`` and no whole-sequence ``dAqk``), a
+        separate ``dav`` program of the flag-off mode (H 9-15; the lean layouts keep no ``dv1`` and no
+        whole-sequence ``dAqk`` there; an in-kernel Q/K L2 norm mode's ``dav_l2n*`` records write ``dAqk`` alone,
+        which its lean layouts hold whole, :func:`_lean_slots`), a
         batched arena on a row whose block table gives the documents proportional segment counts (at most
         ``prop_max_chains`` (document, head) chains on the segmented route: a group of fewer documents would change
         every document's segments)."""
@@ -628,6 +638,7 @@ class Plan:
             and arena.lean
             and any(
                 self.dispatched("dav", path)
+                and "l2n" not in cake_jit.MODULES[self.record("dav", path)]
                 for path in self.records
                 if path not in ("fwd", "fwd_nosave")
             )
@@ -921,6 +932,27 @@ def plan(
     )
 
 
+def _check_l2n_dav(
+    records: dict[str, dict[str, str | None]], *, arch: str, H: int, l2n: str
+) -> None:
+    """Refuse a plan of an in-kernel Q/K L2 norm mode (``l2n != "off"``) whose backward path launches no ``dav`` record
+    of that mode.  There the fused gradient (its ``davq`` 0 builds, the ``dqkg_*l2n`` records) stores no ``dAqk``
+    and the ``dav_l2n*`` records form it on every backward path and row, so a path without one would leave GLM intra
+    reading ``dAqk`` rows no launch of the call wrote.  The registry's rules cover every backward path of every
+    problem; this check keeps a registry that does not from launching without a ``dAqk`` producer."""
+    if l2n == "off":
+        return
+    for path, by_stage in records.items():
+        if "dav" not in by_stage:
+            continue  # a forward path
+        name = by_stage["dav"]
+        if name is None or l2n not in cake_jit.MODULES[name].get("l2n", ("off",)):
+            raise ValueError(
+                f"plan: path {path!r} launches no dav record of l2n mode {l2n!r} ({arch}, H={H}, record {name!r}); "
+                "the l2n fused gradient stores no dAqk, so every backward path needs the l2n output backward"
+            )
+
+
 @functools.lru_cache(maxsize=256)
 def _plan(
     S: int,
@@ -957,6 +989,7 @@ def _plan(
         for path in PATHS
         if path != "light_states" or recur == "seg"
     }
+    _check_l2n_dav(records, arch=arch, H=H, l2n=l2n)
     names = sorted(
         {
             name
@@ -1080,8 +1113,8 @@ def arena_for_budget(
     default, ``lean=True``, two tail passes, four, then four passes over document groups of ``batch_tokens``
     tokens, halving from half the pack down to the longest document and last one document per group
     (``doc_lengths`` required from the batched steps on: the floor is the longest document, and a smaller budget
-    could only fail inside the calls).  An option the row refuses (lean on the rows with the separate ``dav``
-    program, batching on the proportional rows) is skipped; the batched steps take the lean four-pass layouts where
+    could only fail inside the calls).  An option the row refuses (lean on the flag-off rows with the separate
+    ``dav`` program, batching on the proportional rows) is skipped; the batched steps take the lean four-pass layouts where
     the row admits them.  ``ValueError`` naming the smallest arena seen when nothing fits.  The layouts are those
     of the plan's gate mode (:attr:`Plan.gate`; the raw mode's backward layouts drop the gate epilogue's buffers on
     every architecture)."""
@@ -1360,6 +1393,12 @@ _SEG_BLOCKS_BWD: tuple[Occupant, ...] = (
 )
 
 
+# The bytes per internal token-head the lean layouts of two or more tail passes add in an in-kernel Q/K L2 norm
+# mode: the whole-sequence ``dAqk`` (``A32``) the ``dav_l2n*`` records write (:func:`_lean_slots`).  The one-pass
+# lean layout and the full layouts hold a whole ``dAqk`` in every mode.
+_L2N_LEAN_DAQK_BYTES = 256
+
+
 def _lean_slots_single(tape: bool) -> tuple[tuple[Occupant, ...], ...]:
     """The lean layout of one tail pass: the saved-set layout (``SLOTS["bwd"]`` / ``["bwd_tape"]``) without the
     replay-only ``do_int`` copy (the saved-set paths pass the user's ``dout``; ``db_int`` takes a slot of its own)
@@ -1382,7 +1421,7 @@ def _lean_slots_single(tape: bool) -> tuple[tuple[Occupant, ...], ...]:
 
 
 def _lean_slots(
-    tape: bool, passes: int, R: int, H: int, NC: int, NSEG: int
+    tape: bool, passes: int, R: int, H: int, NC: int, NSEG: int, l2n: str = "off"
 ) -> tuple[tuple[Occupant, ...], ...]:
     """The lean layout of ``passes >= 2`` tail passes.  Whole-sequence buffers: gk, v_new and h (light only), dv2,
     dh with u and kb under it (tape: and the prep's unread pad-row target), qg / kg, w, beta_int: 2820 B per
@@ -1390,7 +1429,10 @@ def _lean_slots(
     first-fit, in order, into the bytes of the two whole-sequence slots that are dead before the tail (qg / kg: 512
     B per token-head, w: 256); what does not fit goes to an overflow slot shared with the segmented route's state
     blocks (lifetimes [3, 5] against the per-pass [6, 8]).  From four passes on everything fits: 2820 * R * H +
-    3 * block, plus the ceil slack of the last range."""
+    3 * block, plus the ceil slack of the last range.  In an in-kernel Q/K L2 norm mode (``l2n`` other than
+    ``"off"``) ``dav`` writes the whole ``dAqk`` at 4 (the ``dav_l2n*`` records, on every row) and GLM intra reads it
+    per range at 7, so ``dAqk`` leaves the per-pass set for a whole-sequence slot of its own:
+    :data:`_L2N_LEAN_DAQK_BYTES` more per internal token-head (3076, tape 2308)."""
     R_b = BT * -(-NC // passes)
     unit_w, unit_p = R * H, R_b * H
     whole: list[list[Occupant]] = [
@@ -1405,6 +1447,9 @@ def _lean_slots(
         [("w", "B16", 0, (2, 5))],
         [("beta_int", "V32", 0, (1, 7))],
     ]
+    l2n_on = l2n != "off"
+    if l2n_on:
+        whole.append([("dAqk", "A32", 0, (4, 7))])
     if tape:
         whole[2].append(("v_new_scratch", "B16", 0, (1, 1)))
     else:
@@ -1416,6 +1461,8 @@ def _lean_slots(
     overflow: list[Occupant] = []
     over_used = 0
     for name, kind, _sub, life in _PASS_OCCUPANTS:
+        if l2n_on and name == "dAqk":
+            continue  # whole-sequence in the l2n modes (above)
         nbytes = _kind_bytes(kind, R, H, NC, NSEG, R_b)[0]
         for host in ("qg", "w"):
             if used[host] + nbytes <= capacity[host]:
@@ -1456,13 +1503,19 @@ def _register_route_slots(mode: str, slots: _RouteSlots) -> None:
 
 
 def _slots_of(
-    mode: str, tail_passes: int, R: int, H: int, NC: int, NSEG: int
+    mode: str,
+    tail_passes: int,
+    R: int,
+    H: int,
+    NC: int,
+    NSEG: int,
+    l2n: str = "off",
 ) -> tuple[tuple[Occupant, ...], ...]:
     if mode in LEAN_MODES:
         tape = mode == "bwd_tape_lean"
         if tail_passes == 1:
             return _lean_slots_single(tape)
-        return _lean_slots(tape, tail_passes, R, H, NC, NSEG)
+        return _lean_slots(tape, tail_passes, R, H, NC, NSEG, l2n)
     if mode not in SLOTS:
         raise ValueError(
             f"layout mode must be one of {MODES + LEAN_MODES + FWD_LAYOUTS[1:]}, got {mode!r}"
@@ -1560,7 +1613,7 @@ def _layout(
 ) -> tuple[Region, ...]:
     route = _ROUTE_SLOTS.get(mode)
     slots = (
-        _l2n_slots(_slots_of(mode, tail_passes, R, H, NC, NSEG), mode, l2n)
+        _l2n_slots(_slots_of(mode, tail_passes, R, H, NC, NSEG, l2n), mode, l2n)
         if route is None
         # a registered route's function takes the l2n mode as a seventh argument only in an l2n mode (the
         # flag-off call is the six-argument one it always was)
@@ -2046,7 +2099,9 @@ def lifetime_table(
                 "lifetime_table: the multi-pass lean layouts pack the per-pass buffers by the problem's geometry; "
                 "pass plan="
             )
-        slots = _slots_of(mode, tail_passes, plan.R, plan.H, plan.NC_pad, plan.NSEG)
+        slots = _slots_of(
+            mode, tail_passes, plan.R, plan.H, plan.NC_pad, plan.NSEG, l2n
+        )
     else:
         slots = _slots_of(mode, tail_passes, 0, 1, 0, 0)
     slots = _l2n_slots(slots, mode, l2n)
@@ -2120,7 +2175,8 @@ def memory_report(
     + the per-call tensors live at the peak).  ``sm_count`` and ``arch`` (:func:`_arch_sms`: the current device's
     when ``None``) select the segmented route's segment count.  ``arena`` (:class:`CakeKDADetArena`) adds the configured
     arenas (``arena_bwd_configured`` / ``arena_fwd_configured``; the default's stays ``arena_bwd``), the floor of
-    the lean layouts (``arena_floor``: 2820 B per internal token-head plus three state blocks) and recomputes the
+    the lean layouts (``arena_floor``: 2820 B per internal token-head, 3076 in an in-kernel Q/K L2 norm mode, plus
+    three state blocks) and recomputes the
     totals with the configured backward arena (the replay total keeps the default's: a lean workspace serves no
     replay).  A batched option reports the bound of every group (``arena_bwd_bound_batched``) and, with
     ``doc_lengths``, its exact groups (``batches`` as ``(d0, d1, S, N)``), ``largest_batch_rows``,
@@ -2128,7 +2184,8 @@ def memory_report(
     the group with the most segments; a group gathers its blocks of the saved states only where they are not one
     run of them, at most three per segment) and
     ``arena_floor_batched`` (one document per group under the lean four-pass layouts: ``2820 * R_min * H + 3 * P *
-    H * 64 KiB``, ``R_min`` the internal rows of the longest document; 2052 for the tape forms).  ``gate`` is the
+    H * 64 KiB``, ``R_min`` the internal rows of the longest document; 2052 for the tape forms; 256 more in an
+    in-kernel Q/K L2 norm mode).  ``gate`` is the
     gate mode (:attr:`Plan.gate`): with ``"raw"`` the backward layouts drop ``dg_int`` / ``db_int`` on every
     architecture, ``out_bwd`` is the raw mode's outputs (:func:`output_bytes`) and ``bwd_partials`` the per-call
     parameter partials ``dA_part`` / ``db_part`` (``2 * NC_pad * H * 128 * 8`` bytes, allocated by the backward
@@ -2196,7 +2253,7 @@ def memory_report(
         )
         arena_fwd_conf = arena_fwd
     block = num_segments * H * D * D * 4
-    per_th = 2052 if tape else 2820
+    per_th = (2052 if tape else 2820) + (_L2N_LEAN_DAQK_BYTES if l2n != "off" else 0)
     arena_floor = per_th * rows * H + 3 * block
     # the batched option: the bound of every group, and with doc_lengths the exact groups, their scratch and the floor
     bound = batches = largest = scratch = floor_batched = None
@@ -2470,7 +2527,9 @@ def _group_tail_passes(
     nseg = p.batch_segments(batch)
     for passes in range(1, arena.tail_passes):
         if all(
-            _mode_bytes(BT * nc_pad, p.H, nc_pad, nseg, mode, passes, p.gate_fused)
+            _mode_bytes(
+                BT * nc_pad, p.H, nc_pad, nseg, mode, passes, p.gate_fused, p.l2n
+            )
             <= nbytes
             for mode in modes
         ):
@@ -3977,7 +4036,8 @@ def _tail_passes(
     """Steps 6-8 of the backward (the fused gradient, GLM intra and, where it launches, the gate epilogue; never
     ``param_finalize``, which runs once per call) once per tail range
     (:func:`_tail_ranges`) of a lean workspace with ``tail_passes > 1`` (a group's view: its own).  Per range: the
-    whole-sequence arena buffers (``gk``, ``v_new``, ``dv2``, ``beta_int``, the ``h`` / ``dh`` tapes) as leading-axis
+    whole-sequence arena buffers (``gk``, ``v_new``, ``dv2``, ``beta_int``, the ``h`` / ``dh`` tapes; in an in-kernel
+    Q/K L2 norm mode ``dAqk`` too) as leading-axis
     views offset by the range's first chunk, the chunk tables as the range's slices, ``seq_chunk_start`` as the
     one-entry count of the range's real chunks (``num_seqs = 0`` makes the fused gradient read that entry as its item
     bound), the lean layout's per-pass buffers as they are (sized for one range) and the token tensors whole (every
@@ -4019,6 +4079,9 @@ def _tail_passes(
             "num_seqs": 0,
             "num_chunks_pad": length,
         }
+        if p.l2n != "off":
+            # an in-kernel Q/K L2 norm mode: dav wrote the whole dAqk (the lean layout holds it whole, _lean_slots)
+            pass_values["dAqk"] = values["dAqk"][rows:]
         if "dA_part" in values:
             # raw gate mode: the per-chunk parameter partials (indexed by chunk) offset by the range's first chunk,
             # like gk's rows; param_finalize runs once after the last range

@@ -53,13 +53,13 @@ pair route: key lengths that are multiples of 256).  Without the mask `Sq`
 and `Skv` are independent; the causal mask needs `Sq == Skv`.
 
 A call takes the one-launch route when `cake_jit.fused_record` gives it a
-record: no mask, and the call inside the region `FUSED_REGION[(arch, D)]` in
-`cake_jit.py`, which bounds the CTAs of the one-launch grid
-(`B * H * (Sq / 128 + Skv / 128)`), the longer sequence and the key length
-(`Skv` at most a bound, or at most a multiple of `Sq`).  Each region is the
-measured region of its architecture and head dimension, where the one-launch
-route measured faster than the three-kernel routes (the one-launch table
-below).  Every other head-dimension 128 call
+record: no mask, and the call inside any piece of the region
+`FUSED_REGION[(arch, D)]` in `cake_jit.py`.  Each piece bounds the CTAs of
+the one-launch grid (`B * H * (Sq / 128 + Skv / 128)`), the longer sequence
+and the key length (`Skv` at most a bound, or at most a multiple of `Sq`).
+Each region is the measured region of its architecture and head dimension,
+where the one-launch route measured faster than the three-kernel routes (the
+one-launch table below).  Every other head-dimension 128 call
 whose key length is a multiple of 256 and not longer than its query
 length takes the pair route where a region of `PAIR_REGIONS` in `cake_jit.py`
 holds its `B * H` and `Skv` for its architecture and mask (`cake_jit.variant`
@@ -69,14 +69,17 @@ four rows.  On `sm_100a` the causal pair build ships and no call takes it.  The
 for every `sm_103a` library and 13.5 for every `sm_107a` library; an older
 local toolkit raises `RuntimeError` when the library is built.
 
-The regions of the one-launch route (`FUSED_REGION`: `(max_ctas, s_max, skv_any, skv_per_sq)`; no mask), with CTAs
-`B * H * (Sq / 128 + Skv / 128)`:
+The regions of the one-launch route (`FUSED_REGION`: one or more pieces `(max_ctas, s_max, skv_any, skv_per_sq)`; no
+mask; a call inside any piece takes the route), with CTAs `B * H * (Sq / 128 + Skv / 128)`:
 
-| architecture | head dim 128 | head dim 64 |
+| architecture | head dim | pieces |
 |---|---|---|
-| `sm_100a` | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq` | `(152, 2048, 512, 2)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq` |
-| `sm_103a` | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq` | `(204, 2048, 256, 0)`: CTAs `<= 204`, `max(Sq, Skv) <= 2048`, `Skv <= 256` |
-| `sm_107a` | `(256, 2048, 512, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 2048`, `Skv <= 512` | `(212, 2048, 512, 2)`: CTAs `<= 212`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq` |
+| `sm_100a` | 128 | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 3 * Sq` |
+| `sm_100a` | 64 | `(152, 2048, 512, 2)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 6)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 6 * Sq` |
+| `sm_103a` | 128 | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 3 * Sq` |
+| `sm_103a` | 64 | `(204, 2048, 256, 0)`: CTAs `<= 204`, `max(Sq, Skv) <= 2048`, `Skv <= 256`; `(156, 512, 0, 2)`: CTAs `<= 156`, `max(Sq, Skv) <= 512`, `Skv <= 2 * Sq`; `(256, 1024, 128, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 1024`, `Skv <= 128` |
+| `sm_107a` | 128 | `(256, 2048, 512, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 2048`, `Skv <= 512`; `(320, 1024, 256, 0)`: CTAs `<= 320`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(423, 512, 256, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 512`, `Skv <= 256` |
+| `sm_107a` | 64 | `(212, 2048, 512, 2)`: CTAs `<= 212`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq`; `(210, 1024, 0, 6)`: CTAs `<= 210`, `max(Sq, Skv) <= 1024`, `Skv <= 6 * Sq`; `(423, 512, 256, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 512`, `Skv <= 256` |
 
 The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
 

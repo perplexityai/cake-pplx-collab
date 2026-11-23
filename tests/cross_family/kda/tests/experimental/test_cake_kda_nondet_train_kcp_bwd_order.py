@@ -19,7 +19,8 @@ issue; every backward their rules refuse runs ``"first"`` / ``"main"``.
 
 CPU rows: the knobs' gate and values, the dAqk allowlist against the records every plan binds (``H >= 16`` and a davq
 record, no stale entry) and ``kcp_dav_needed`` against every plan (true exactly where the plan dispatches its dav
-stage, H 9-15, whose fused gradient stores no dAqk), the two rules :func:`cake_kcp._tape_order` /
+stage, H 9-15 and every plan of the norm, whose fused gradient stores no dAqk), the two rules
+:func:`cake_kcp._tape_order` /
 :func:`cake_kcp._k3_stream` per refusal, the launch order of the real backward driver under each knob pair (stubbed
 launches; the defaults the ``"under_b1"`` / ``"side"`` order) and :func:`_bwd_sequence_first_main` mapping each
 order back to the ``"first"`` / ``"main"`` one, the side stream's join on an error, and that the GPU rows reach
@@ -32,8 +33,9 @@ and judged; every backward's recorded order / stream and refusal as the rank's f
 tokens, the plan's fused-gradient record, the K3 list and the ``walk_streams`` rule), the launches the ``"first"`` /
 ``"main"`` form's with the moved launch where the knob puts it (:func:`_bwd_sequence_first_main` gives back exactly
 the reference sequence) and the collectives in the same order; the dAqk rows NaN-filled right after the ``dav`` stage
-reach no output where the backward skips ``kcp_dav`` (both orders) and reach the gradients on the H12 row (the
-negative control: ``kcp_dav`` runs there and its fused gradient reads ``kcp_dav``'s dAqk); in the activated gate
+reach no output where the backward skips ``kcp_dav`` (both orders) and reach the gradients on the H12 row and the
+rows with the norm (the negative control: ``kcp_dav`` / the norm's ``kcp_dav_l2n`` runs there and its fused
+gradient reads that program's dAqk); in the activated gate
 without the norm, ``graph="replay"`` with both knobs (eager, capture, replays: one capture per kind) judged beside the
 eager forced form.
 
@@ -121,7 +123,8 @@ DM_MODES = ("plain_nt", "handle_off", "handle_auto", "handle_wy")
 # (lengths, H, W, layout, gate mode, use_qk_l2norm_in_kernel): two H64 W4 rows (8 in-and-out fragments on the
 # interior ranks: P = 1, two streams by the rule on the K3 list), a W2 H32 row with the norm, an H16 row (the dAqk
 # allowlist's head bound) and the H12 row whose fused gradient takes its dAqk from kcp_dav (refusal and the poison's
-# control)
+# control); on the two rows with the norm every fused gradient takes its dAqk from kcp_dav_l2n (the tape order's
+# refusal "dav" and the poison's control there too)
 # The H64 rows (16384 tokens) are above the judged size (tests/cake_naive.py's FP64 reference runs per token): they keep
 # their exact checks (records, launches, collectives, finite outputs, the poison by finiteness); the W2 H32, W4 H16
 # and W4 H12 rows judge every node form and knob pair over the judge's 32 draws.
@@ -203,7 +206,9 @@ def test_dav_daqk_allowlist_matches_the_plan_records() -> None:
     :data:`DAV_DAQK_MIN_HEADS` every plan refuses (``"heads"``: the serial route's ``dqkg_int*`` takes its dAqk from
     ``kcp_dav``, and no statement covers a davq record there); from 16 heads every plan binds a davq record and is
     admitted (the allowlist is complete), the serial ``dqkg_int*`` records are never listed, and every listed
-    ``(record, arch)`` is bound by some plan (no stale entry).  CPU only: the plans read no tensor."""
+    ``(record, arch)`` is bound by some plan (no stale entry).  In the norm's mode every plan binds the
+    ``dqkg_int*l2n`` form, which stores no dAqk (``kcp_dav_l2n`` forms it): never listed (``"record"`` from
+    16 heads).  CPU only: the plans read no tensor."""
     plans = _plans()
     assert {a for a, *_ in plans} == set(ARCHES), sorted({a for a, *_ in plans})
     assert cake_kcp_plan.DAV_DAQK_MIN_HEADS == 16
@@ -215,6 +220,10 @@ def test_dav_daqk_allowlist_matches_the_plan_records() -> None:
         case = (arch, sm, gate, l2n, S, docs, H, rec)
         if H < 16:
             assert why == "heads", case
+            continue
+        if l2n != "off":
+            assert rec.startswith("dqkg_int") and rec.endswith("_l2n"), case
+            assert "davq" not in rec and why == "record", (case, why)
             continue
         assert "davq" in rec and why is None, (case, why)
         hit.add((rec, arch))
@@ -229,19 +238,22 @@ def test_dav_daqk_allowlist_matches_the_plan_records() -> None:
 
 def test_kcp_dav_needed_matches_the_plan_records() -> None:
     """:func:`cake_kcp_plan.kcp_dav_needed` on every plan of the grid: true exactly where the plan dispatches its
-    ``dav`` stage on the replay path, which is H 9-15 on every architecture, gate mode and norm mode (the serial route
-    below 16 heads); there its fused gradient is a ``dqkg_int*`` form that stores no dAqk and the dAqk allowlist
-    refuses it (``"heads"``); everywhere else the fused gradient is a davq form (it stores every dAqk row GLM intra
-    reads) and the backward skips ``kcp_dav``.  CPU only."""
+    ``dav`` stage on the replay path, which is H 9-15 on every architecture and gate mode (the serial route below
+    16 heads) and every plan of the norm (its ``dav_l2n_replay*`` records); there its fused gradient is a
+    ``dqkg_int*`` form that stores no dAqk and the dAqk allowlist refuses it (``"heads"``; ``"record"`` from 16
+    heads in the norm's mode, whose ``dqkg_int*l2n`` records are never listed); everywhere else the fused gradient
+    is a davq form (it stores every dAqk row GLM intra reads) and the backward skips ``kcp_dav``.  CPU only."""
     seen = set()
     for arch, sm, gate, l2n, S, docs, H, rec, p in _plans():
         case = (arch, sm, gate, l2n, S, docs, H, rec)
         need = cake_kcp_plan.kcp_dav_needed(p)
         assert need == p.dispatched("dav", cake_kcp.LOCAL_PATH_BWD), case
-        assert need == (9 <= H <= 15), case
+        assert need == (9 <= H <= 15 or l2n != "off"), case
         if need:
             assert "davq" not in rec and rec.startswith("dqkg_int"), case
-            assert cake_kcp_plan.dav_daqk_refusal(rec, arch, H) == "heads", case
+            assert rec.endswith("_l2n") == (l2n != "off"), case
+            why = "heads" if H < 16 else "record"
+            assert cake_kcp_plan.dav_daqk_refusal(rec, arch, H) == why, case
         else:
             assert "davq" in rec, case
         seen.add((arch, need))
@@ -643,16 +655,18 @@ def test_backward_issue_order_per_knob(monkeypatch) -> None:
 
 def test_bwd_order_gpu_rows_reach_both_knobs() -> None:
     """The GPU rows (``BWD_ORDER_ROWS``) admit both knobs somewhere and refuse the tape order on the H12 row (where
-    ``kcp_dav`` runs): on every SM count
-    of every target architecture some rank with tokens of an ``H >= 16`` row plans ``P = 1`` with a non-empty K3 list,
+    ``kcp_dav`` runs) and the rows with the norm (where ``kcp_dav_l2n`` runs): on every SM count
+    of every target architecture some rank with tokens of an ``H >= 16`` row plans ``P = 1`` with a non-empty K3 list
+    (one of them on a row without the norm, where the tape order is admitted),
     some rank of the H64 rows has two streams by the ``walk_streams`` rule on its K3 list, and the H12 row has a rank
     with tokens (its plan's fused gradient reads ``kcp_dav``'s dAqk: the poison's negative control).  CPU only: the context's plan reads no
     device."""
     for arch, sms in cake_kcp_plan.QK_L2NORM_SMS.items():
         for sm in sms:
-            p1, rule_two, h12 = [], [], []
+            p1, p1_tape, rule_two, h12 = [], [], [], []
             for row in BWD_ORDER_ROWS:
                 lengths, H, W, layout = row[:4]
+                l2n = row[5]
                 part, _ = _partition(lengths, W, layout)
                 for rank in range(W):
                     ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
@@ -669,11 +683,13 @@ def test_bwd_order_gpu_rows_reach_both_knobs() -> None:
                     if not len(tb.walk_m_b1):
                         continue
                     p1.append((_mode_row_id(row), rank))
+                    if not l2n:
+                        p1_tape.append((_mode_row_id(row), rank))
                     seg = [int(x) for x in tb.hp.seg_chunk_start]
                     chains = [seg[s + 1] - seg[s] for s in tb.walk_m_b1]
                     if H == 64 and cake_kcp.walk_streams(chains, H, sm) == "two":
                         rule_two.append((_mode_row_id(row), rank))
-            assert p1 and rule_two and h12, (arch, sm, p1, rule_two, h12)
+            assert p1 and p1_tape and rule_two and h12, (arch, sm, p1, rule_two, h12)
 
 
 # --------------------------------------------------------------------------------------------- GPU rows
@@ -982,12 +998,13 @@ def _run_rank_order(
             # (both orders: "first" forced, and the shipped "under_b1"; finite on every row, judged on a judged row);
             # where kcp_dav runs (a rank with tokens of the H12 row) it reaches the gradients (the fused gradient
             # reads its dAqk): an output holds a NaN or an inf
-            # (judged where no rank of the row runs kcp_dav, H outside 9..15: the same decision on every rank)
+            # (judged where no rank of the row runs kcp_dav, H outside 9..15 without the norm -- with it every rank with
+            # tokens runs kcp_dav_l2n: the same decision on every rank)
             poison_finite = {}
             for arm in ("first_main", "base"):
                 res, _ = step("plain", ARMS[arm], poison=True)
                 poison_finite[arm] = finite(res)
-                if not 9 <= H <= 15:
+                if not (9 <= H <= 15 or l2n):
                     keep(f"poisoned.{arm}", [judged_params(res)])
                 del res
             info_j["poison_finite"] = poison_finite
@@ -1103,11 +1120,14 @@ def _run_rank_order(
     )
     report["tape_b1_engaged"] = sum(i["engaged"]["tape_b1"] for _, _, i in gathered)
     report["k3_side_engaged"] = sum(i["engaged"]["k3_side"] for _, _, i in gathered)
-    report["flags"]["knobs_engaged"] = (not expect_engaged) or (
-        report["tape_b1_engaged"] > 0 and report["k3_side_engaged"] > 0
-    )
-    if 9 <= H <= 15:
-        # the negative control: the poison reaches the gradients on some rank with tokens (kcp_dav runs there)
+    # the tape order stays first on a row with the norm (kcp_dav_l2n reads the h tape: refusal "dav", check_record)
+    expect_tape = expect_engaged and not l2n
+    tape_ok = report["tape_b1_engaged"] > 0 or not expect_tape
+    k3_ok = report["k3_side_engaged"] > 0
+    report["flags"]["knobs_engaged"] = (not expect_engaged) or (tape_ok and k3_ok)
+    if 9 <= H <= 15 or l2n:
+        # the negative control: the poison reaches the gradients on some rank with tokens (kcp_dav, or the
+        # norm's kcp_dav_l2n, runs there)
         report["flags"]["poison_control"] = any(
             i["poison_uncovered_reached"] for _, _, i in gathered
         )
@@ -1153,10 +1173,12 @@ def test_bwd_order_gpu_rows(row, record_property) -> None:
     its list once on the call's stream); the backward's launches the forced form's in another order -- the K1 tape
     replay between the b1 issue and the adjoint merge under ``"under_b1"``, K3 before ``kcp_dav`` on the side stream;
     :func:`_bwd_sequence_first_main` gives back the forced form's sequence exactly -- and its collectives in the same
-    order; both knobs engaged somewhere on the rows that can (``H >= 16``, ``P = 1``, a K3 list).  The dAqk rows
+    order; both knobs engaged somewhere on the rows that can (``H >= 16``, ``P = 1``, a K3 list; the tape order
+    without the norm).  The dAqk rows
     NaN-filled after the ``dav`` stage: where the backward skips ``kcp_dav`` (both orders) no NaN reaches an output
     (finite; judged as ``"poisoned.<knob pair>"`` on a judged row without a ``kcp_dav`` rank), and on the H12 row
-    (``kcp_dav`` runs) the poison reaches the gradients on some rank on every draw (an output holds a NaN or an inf).
+    (``kcp_dav`` runs) and the rows with the norm (``kcp_dav_l2n`` runs) the poison reaches the gradients on some
+    rank on every draw (an output holds a NaN or an inf).
     Activated gate without the norm: ``graph="replay"`` under both knobs (forced two streams) over the functional steps
     (eager, capture, replays: one capture per kind), every step finite and judged (``"graph.replay"``, repeats) beside
     the eager forced form (``"graph.eager"``).  The H64 rows keep the exact checks only: the W2 H32, W4 H16 and W4 H12

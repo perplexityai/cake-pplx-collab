@@ -2176,7 +2176,7 @@ SAVED_ROWS_PRODUCER_STAGES = ("fwd_intra", "wy_fwd", "wy")
 # arches, select rule, the members each binds) with KCP_SAVED_VERSION, the sets, their bytes and the direct WY records
 # (_saved_rows_contract_key).  A det head bump that touches a producer changes it: rerun
 # test_saved_rows_forward_rows_have_the_replay_layout on sm_100a, sm_103a and sm_107a, then pin the new key here
-SAVED_ROWS_CONTRACT_KEY = "d7f3675838835582"
+SAVED_ROWS_CONTRACT_KEY = "6c7d3bcfe0055fbf"
 # the contract's GPU rows (lengths, H, gate mode, use_qk_l2norm_in_kernel), one rank: H 4 (below 16 heads) to 64,
 # both gate modes with the norm off and on
 SAVED_ROWS_CONTRACT_ROWS = [

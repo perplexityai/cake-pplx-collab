@@ -88,6 +88,19 @@ BENCH_ROWS = (
 )
 # The benchmark projections, (N, K) of w ``[E, N, K]``.
 BENCH_PROJ = (("gate_up", 4096, 6144), ("down", 6144, 2048))
+# Weight-gradient cases of the queue walk (``cake_backend.wgrad_queue_walk``): (label,
+# sizes, N, K), each over more 512-wide k tiles than one wave of clusters, so the queue
+# claims tiles over several waves before a split tail.  Eight ragged groups with an empty
+# and a one-row group under ``wave_sync_min_k`` (the ``main_halves`` stand-in), and the
+# skewed and one-empty E4 rows at a quarter of the benchmark rows' sums (the
+# ``main_wave_halves`` stand-in).
+QUEUE_CASES = (
+    ("e8_ragged", [4100, 0, 4170, 1, 8000, 3001, 513, 12289], 1024, 2048),
+    ("e4_skewed", [13608, 10208, 6800, 3400], 2048, 4608),
+    ("e4_one_empty", [14072, 8440, 5632, 0], 2048, 4608),
+)
+QUEUE_CASE_BY_LABEL = {case[0]: case for case in QUEUE_CASES}
+DTYPE_NAMES = {torch.bfloat16: "bfloat16", torch.float32: "float32"}
 
 
 def _wide_ts33(op, k, arch, sum_m, groups, c):
@@ -730,10 +743,22 @@ def test_expert_rows_take_the_measured_wgrad_stage(arch, out_dtype):
 
 
 def test_workspace_arguments_of_the_argument_plans():
-    """``sched`` is followed by the queue split ``c0``, ``c1``; ``wave_sync`` by
+    """``sched`` is followed by the queue split ``c0``, ``c1`` (a queue-walk program's
+    ``sched``, its tile counters, is its last argument before the grid); ``wave_sync`` by
     ``wave_mode``; the ``main_wave`` stages bind programs taking ``wave_sync``."""
-    for program in PROGRAMS.values():
+    queue_programs = {
+        stage["program"]
+        for route in ROUTES.values()
+        for stage in route["stages"]
+        if stage["name"].removesuffix(cb.ACC_SUFFIX) == cb.QUEUE_STAGE
+    }
+    for program_name, program in PROGRAMS.items():
         plan = [tuple(item) for item in program["arg_plan"]]
+        if program_name in queue_programs:
+            at = plan.index(("buffer", "sched"))
+            assert all(kind == "grid" for kind, _ in plan[at + 1 :]), program_name
+            assert ("parameter", "c0") not in plan, program_name
+            plan = plan[:at] + plan[at + 1 :]
         for buffer, parameters in (
             ("sched", [("parameter", "c0"), ("parameter", "c1")]),
             ("wave_sync", [("parameter", "wave_mode")]),
@@ -752,6 +777,128 @@ def test_workspace_arguments_of_the_argument_plans():
     assert len(rest) == 3 and all(0 <= int(v) < 2**32 for v in rest)
     assert int(HOST_PLAN_CONSTANTS["sched_words"]) >= len(rest)
     assert int(HOST_PLAN_CONSTANTS["wave_sync_words"]) >= 1
+    assert int(HOST_PLAN_CONSTANTS["queue_sched_words"]) == 2
+
+
+def test_queue_stages_take_the_half_release_arguments():
+    """The queue walk's stages: served by both 512-wide k tile routes (the accumulate
+    stage by the fp32 route alone) on the architectures of the ``queue_walk`` rules and
+    nowhere else, each program with the launch shape and FFI entry of the route's
+    ``main_halves`` program on that architecture and its argument plan plus the
+    ``sched`` buffer, which the weight-gradient binding binds to the ``queue_sched``
+    stream workspace (the row programs' ``sched`` keeps its own kind).  Every rule names
+    a stage the queue walk may stand in for, an output kind and a group range, and the
+    routes serve the stage it binds.  (A CPU check.)"""
+    assert cb.BINDING_WORKSPACE_KINDS == {"wgrad": {"sched": cb.QUEUE_SCHED}}
+    assert cb.WORKSPACE_KINDS == cb.STREAM_WORKSPACES + (cb.QUEUE_SCHED,)
+    assert cb.QUEUE_SELECTED_STAGES == ("main_halves", "main_wave_halves")
+    rules = HOST_PLAN_CONSTANTS["queue_walk"]
+    assert rules, "no queue_walk rule"
+    rule_arches = {rule["arch"] for rule in rules}
+    for rule in rules:
+        assert rule["stage"] in cb.QUEUE_SELECTED_STAGES, rule
+        assert set(rule["outputs"]) <= {"bfloat16", "float32", "accumulate"}, rule
+        low, high = rule["groups"]
+        assert 1 <= low <= high, rule
+        assert rule["sm_counts"] and all(int(v) > 0 for v in rule["sm_counts"]), rule
+    for out_dtype in ("bfloat16", "float32"):
+        name = cake_jit.record_name("wgrad", out_dtype=out_dtype, tile_k=512)
+        for arch in ROUTES[name]["arches"]:
+            served = cake_jit.stage_served(name, cb.QUEUE_STAGE, arch)
+            assert served == (arch in rule_arches), (name, arch)
+            acc_served = cake_jit.stage_served(
+                name, cb.QUEUE_STAGE + cb.ACC_SUFFIX, arch
+            )
+            assert acc_served == (served and out_dtype == "float32"), (name, arch)
+            if not served:
+                continue
+            for stage, twin in (
+                (cb.QUEUE_STAGE, "main_halves"),
+                (cb.QUEUE_STAGE + cb.ACC_SUFFIX, "main_halves" + cb.ACC_SUFFIX),
+            ):
+                if not cake_jit.stage_served(name, stage, arch):
+                    continue
+                binding = cake_jit.stage_binding(name, stage, arch)
+                twin_binding = cake_jit.stage_binding(name, twin, arch)
+                assert binding["specializations"] == twin_binding["specializations"]
+                program = PROGRAMS[binding["program"]]
+                halves = PROGRAMS[twin_binding["program"]]
+                assert program["launch"] == halves["launch"], (name, stage, arch)
+                assert program["ffi_entry"] == halves["ffi_entry"], (name, stage, arch)
+                plan = [tuple(i) for i in program["arg_plan"]]
+                assert plan.count(("buffer", "sched")) == 1, (name, stage, arch)
+                assert [i for i in plan if i != ("buffer", "sched")] == [
+                    tuple(i) for i in halves["arg_plan"]
+                ], (name, stage, arch)
+            if out_dtype == "float32":
+                for rule in rules:
+                    if rule["arch"] == arch and "accumulate" in rule["outputs"]:
+                        assert acc_served, (name, arch, rule)
+    for name, route in ROUTES.items():
+        if route["op"] == "wgrad":
+            continue
+        for stage in route["stages"]:
+            assert stage["name"].removesuffix(cb.ACC_SUFFIX) != cb.QUEUE_STAGE, name
+
+
+def test_queue_stages_have_lead_twins():
+    """The lead route of each 512-wide k tile route serves the queue walk's stages exactly
+    where the route does, each on the lead twin of the route's queue program, whose
+    argument plan takes ``m_begin`` and the ``sched`` buffer: an ``m_indptr`` row table
+    binds the queue stage of the lead route, as every other stage.  (A CPU check.)"""
+    seen = 0
+    for out_dtype in ("bfloat16", "float32"):
+        name = cake_jit.record_name("wgrad", out_dtype=out_dtype, tile_k=512)
+        lead = cake_jit.lead_route(name)
+        assert lead in ROUTES, lead
+        for arch in ROUTES[name]["arches"]:
+            for stage in (cb.QUEUE_STAGE, cb.QUEUE_STAGE + cb.ACC_SUFFIX):
+                served = cake_jit.stage_served(name, stage, arch)
+                assert cake_jit.stage_served(lead, stage, arch) == served, (
+                    name,
+                    stage,
+                    arch,
+                )
+                if not served:
+                    continue
+                program = cake_jit.stage_binding(name, stage, arch)["program"]
+                twin = cake_jit.stage_binding(lead, stage, arch)["program"]
+                assert twin == cake_jit.lead_twin(program), (name, stage, arch, twin)
+                plan = [tuple(item) for item in PROGRAMS[twin]["arg_plan"]]
+                assert ("buffer", "m_begin") in plan, (twin, plan)
+                assert plan.count(("buffer", "sched")) == 1, (twin, plan)
+                seen += 1
+    assert seen, "no queue-walk stage on any 512-wide k tile route"
+
+
+def test_wgrad_queue_walk_follows_its_rules():
+    """``wgrad_queue_walk`` holds exactly where one rule of ``queue_walk`` names the
+    architecture, the SM count, the selected stage (one of ``QUEUE_SELECTED_STAGES``),
+    the output and a group range holding the group count.  (A CPU check.)"""
+    c = HOST_PLAN_CONSTANTS
+    stages = ("main", "main_wave", "main_halves_k256t", *cb.QUEUE_SELECTED_STAGES)
+    outputs = ("bfloat16", "float32", "accumulate")
+    for arch in cake_jit.ARCHES:
+        for sms in (148, 152, 160, 212):
+            for stage in stages:
+                for output in outputs:
+                    for groups in (1, 2, 4, 8, 16, 17, 32, 33, 64):
+                        want = any(
+                            rule["arch"] == arch
+                            and sms in rule["sm_counts"]
+                            and rule["stage"] == stage
+                            and output in rule["outputs"]
+                            and rule["groups"][0] <= groups <= rule["groups"][1]
+                            for rule in c["queue_walk"]
+                        )
+                        got = cb.wgrad_queue_walk(stage, output, arch, sms, groups, c)
+                        assert got == want, (arch, sms, stage, output, groups)
+    assert not cb.wgrad_queue_walk(
+        "main_halves", "bfloat16", "sm_100a", 148, 8, {"queue_walk": []}
+    )
+    # A bfloat16 row of the 148-SM sm_100a main_halves stage was slower on the queue walk.
+    assert not cb.wgrad_queue_walk("main_halves", "bfloat16", "sm_100a", 148, 16, c)
+    assert cb.wgrad_queue_walk("main_halves", "accumulate", "sm_100a", 148, 16, c)
 
 
 # The keywords the host binds a stage's argument plan from, by the stage it binds: the
@@ -1093,6 +1240,16 @@ def _u32_words(tensor):
 
 def _workspace_kinds(launch):
     return {kind for item in launch.launches for _, kind in item.workspace_slots}
+
+
+def _assert_queue_at_rest(device, stream=None):
+    """The queue walk's counters kept for ``stream`` (the current stream by default; if a
+    queue launch kept them) are ``queue_sched_words`` zero words."""
+    words = cb.stream_workspace(cb.QUEUE_SCHED, device, stream)
+    if words is None:
+        return
+    assert words.numel() == int(HOST_PLAN_CONSTANTS["queue_sched_words"])
+    assert _u32_words(words) == [0] * words.numel(), _u32_words(words)
 
 
 def _prepare_row_op(op, sizes, n, k, device, out=None):
@@ -1713,6 +1870,63 @@ def test_wgrad_k512_halves_gives_the_drain_build_bits(
 
 
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("label", list(QUEUE_CASE_BY_LABEL))
+def test_wgrad_queue_walk_gives_the_selected_stage_bits(
+    label, out_dtype, monkeypatch, record_property
+):
+    """Where a ``queue_walk`` rule names the call (forced here for the device, the
+    selected stage and the output, at any group count), the weight gradient binds the
+    queue walk (``cb.QUEUE_STAGE``, then the ordered tail reduce of a split tail) in place
+    of the stage the host selects, with that stage's plan.  Its counters
+    (``cb.QUEUE_SCHED``) are back at zero after the launches, and its output, judged
+    against the naive BF16 tier and run to run, has the bits of the selected stage's
+    launch (the same call with no rule)."""
+    device = _require_program("wgrad", out_dtype)
+    _fresh_stream_workspaces(monkeypatch)
+    c = HOST_PLAN_CONSTANTS
+    arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
+    _label, sizes, n, k = QUEUE_CASE_BY_LABEL[label]
+    case = _Case(sizes, n, k, device, seed=13)
+    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "queue_walk", [])
+    selected = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+        case.g, case.x, case.offs, out_dtype=out_dtype
+    )
+    name = selected.record_name
+    if not cake_jit.stage_served(name, cb.QUEUE_STAGE, arch):
+        pytest.skip(f"no queue-walk weight-gradient build on {arch}")
+    stage = selected.stages[0]
+    assert selected.plan["tile_k"] == 512, selected.plan
+    assert stage == (
+        "main_wave_halves" if k >= int(c["wave_sync_min_k"]) else "main_halves"
+    )
+    rule = {
+        "arch": arch,
+        "sm_counts": [cb.sm_count(device)],
+        "stage": stage,
+        "outputs": [DTYPE_NAMES[out_dtype]],
+        "groups": [1, 1 << 30],
+    }
+    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "queue_walk", [rule])
+    launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+        case.g, case.x, case.offs, out_dtype=out_dtype
+    )
+    assert launch.stages == (cb.QUEUE_STAGE, *selected.stages[1:]), launch.stages
+    assert launch.plan == selected.plan
+    assert _workspace_kinds(launch) == {cb.QUEUE_SCHED}, _workspace_kinds(launch)
+
+    def after():
+        out = launch.out.clone()
+        torch.cuda.synchronize()
+        words = cb.stream_workspace(cb.QUEUE_SCHED, device)
+        assert words is not None
+        assert _u32_words(words) == [0] * int(c["queue_sched_words"])
+        bits = {torch.bfloat16: torch.int16, torch.float32: torch.int32}[out.dtype]
+        assert torch.equal(selected.launch().view(bits), out.view(bits))
+
+    _judge_launch(record_property, "wgrad", launch, case, launches=2, then=after)
+
+
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
 def test_wgrad_k256_tail_gives_the_k256_tile_bits(out_dtype, monkeypatch, record_property):
     """Where ``wgrad_k256_tail`` holds, the half-release 512-wide k tile launches its
     twin that runs the tiles left after its full waves as 256-column half tiles
@@ -1876,6 +2090,172 @@ def test_cuda_graph_replay(op, monkeypatch, record_property):
     judge_draws(record_property, draw, seed=case.seed, then=after)
 
 
+# The queue-walk case of the forced-rule stream and graph tests: the ``main_halves``
+# stand-in of ``QUEUE_CASES`` on its seed there, so every output these tests judge has
+# the bits of an output ``test_wgrad_queue_walk_gives_the_selected_stage_bits`` judges.
+QUEUE_STREAM_CASE = "e8_ragged"
+INT_VIEWS = {torch.bfloat16: torch.int16, torch.float32: torch.int32}
+
+
+def _forced_queue_walk(case, out_dtype, monkeypatch):
+    """Force a ``queue_walk`` rule for the device, the stage the call selects with no
+    rule and the output (any group count), as
+    ``test_wgrad_queue_walk_gives_the_selected_stage_bits`` does, and return the launch of
+    the selected stage (prepared with no rule); skips where the route serves no
+    queue-walk stage on this architecture."""
+    device = case.device
+    arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
+    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "queue_walk", [])
+    selected = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+        case.g, case.x, case.offs, out_dtype=out_dtype
+    )
+    if not cake_jit.stage_served(selected.record_name, cb.QUEUE_STAGE, arch):
+        pytest.skip(f"no queue-walk weight-gradient build on {arch}")
+    assert selected.plan["tile_k"] == 512, selected.plan
+    assert selected.stages[0] in cb.QUEUE_SELECTED_STAGES, selected.stages
+    rule = {
+        "arch": arch,
+        "sm_counts": [cb.sm_count(device)],
+        "stage": selected.stages[0],
+        "outputs": [DTYPE_NAMES[out_dtype]],
+        "groups": [1, 1 << 30],
+    }
+    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "queue_walk", [rule])
+    return selected
+
+
+def _queue_launch(case, out_dtype, selected):
+    """A weight gradient of ``case`` prepared under the forced rule: it binds the queue
+    walk (``cb.QUEUE_STAGE``) with the plan and later stages of ``selected`` and takes
+    the queue counters (``cb.QUEUE_SCHED``) as its only stream workspace."""
+    launch = cake_moe_grouped_gemm_det_train_prepare_wgrad(
+        case.g, case.x, case.offs, out_dtype=out_dtype
+    )
+    assert launch.stages == (cb.QUEUE_STAGE, *selected.stages[1:]), launch.stages
+    assert launch.plan == selected.plan
+    assert _workspace_kinds(launch) == {cb.QUEUE_SCHED}, _workspace_kinds(launch)
+    return launch
+
+
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+def test_wgrad_queue_walk_on_two_concurrent_streams(out_dtype, monkeypatch, record_property):
+    """Under a forced ``queue_walk`` rule, two prepared weight gradients bound to the
+    queue walk, launched interleaved on two streams in flight together, give the bits of
+    an isolated launch on the quiet current stream (judged against the naive BF16 tier
+    over the draws).  Each stream keeps queue counters (``cb.QUEUE_SCHED``) of its own,
+    which neither the other stream nor the current one holds, and every stream's
+    counters are back at zero after the launches."""
+    device = _require_program("wgrad", out_dtype)
+    _fresh_stream_workspaces(monkeypatch)
+    _label, sizes, n, k = QUEUE_CASE_BY_LABEL[QUEUE_STREAM_CASE]
+    case = _Case(sizes, n, k, device, seed=13)
+    selected = _forced_queue_walk(case, out_dtype, monkeypatch)
+    launches = [_queue_launch(case, out_dtype, selected) for _ in range(2)]
+    bits = INT_VIEWS[out_dtype]
+
+    def draw(d):
+        # the isolated launch: alone on the current stream
+        case.refill(d.seed)
+        launches[0].out.fill_(float("nan"))
+        out = launches[0].launch()
+        torch.cuda.synchronize()
+        d.op("dW", out, "wgrad", case.g, case.x, sizes)
+
+    def after():
+        # the case's own inputs (draw 0, the last)
+        want = launches[0].out.clone().view(bits)
+        main = torch.cuda.current_stream(device)
+        streams = [torch.cuda.Stream(device) for _ in range(2)]
+        for stream in streams:
+            stream.wait_stream(main)
+        # each launch's words compared on its own stream before its next launch
+        differ = [[], []]
+        for _ in range(8):
+            for index, stream in enumerate(streams):
+                with torch.cuda.stream(stream):
+                    launches[index].out.fill_(float("nan"))
+                    got = launches[index].launch().view(bits)
+                    differ[index].append(torch.ne(got, want).sum())
+        for stream in streams:
+            main.wait_stream(stream)
+        torch.cuda.synchronize()
+        for index in range(2):
+            for call, count in enumerate(differ[index]):
+                assert int(count) == 0, (
+                    f"stream {index} launch {call}: {int(count)} elements differ"
+                )
+        words = [cb.stream_workspace(cb.QUEUE_SCHED, device, s) for s in streams]
+        assert all(w is not None for w in words), words
+        assert words[0].data_ptr() != words[1].data_ptr()
+        current = cb.stream_workspace(cb.QUEUE_SCHED, device)
+        assert current is not None
+        assert current.data_ptr() not in {w.data_ptr() for w in words}
+        for stream in (None, *streams):
+            _assert_queue_at_rest(device, stream)
+
+    judge_draws(record_property, draw, seed=case.seed, then=after)
+
+
+def test_wgrad_queue_walk_cuda_graph_replay(monkeypatch, record_property):
+    """Under a forced ``queue_walk`` rule, a captured weight gradient binds the queue
+    walk and takes queue counters of its own (``cb.QUEUE_SCHED``, set to zero in the
+    graph), never those kept for the stream of its eager launches; every replay gives
+    the bits of the eager launch (judged against the naive BF16 tier over the draws), and
+    after the replays both the graph's counters and the stream's are back at zero."""
+    device = _require_program("wgrad", torch.bfloat16)
+    _fresh_stream_workspaces(monkeypatch)
+    _label, sizes, n, k = QUEUE_CASE_BY_LABEL[QUEUE_STREAM_CASE]
+    case = _Case(sizes, n, k, device, seed=13)
+    selected = _forced_queue_walk(case, torch.bfloat16, monkeypatch)
+    launch = _queue_launch(case, torch.bfloat16, selected)
+    side = torch.cuda.Stream(device)
+    graph = torch.cuda.CUDAGraph()
+    captured = []
+
+    def draw(d):
+        case.refill(d.seed)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            launch.launch()
+            side.synchronize()
+            launch.launch()
+        torch.cuda.current_stream(device).wait_stream(side)
+        torch.cuda.synchronize()
+        eager = launch.out.view(torch.int16).clone()
+        if not captured:  # the first draw captures the graph
+            kept = cb.stream_workspace(cb.QUEUE_SCHED, device, side)
+            assert kept is not None
+            launch_workspace = cb._launch_workspace
+
+            def recording(kind, device_, device_index, keep):
+                buffer = launch_workspace(kind, device_, device_index, keep)
+                captured.append((kind, keep, buffer))
+                return buffer
+
+            monkeypatch.setattr(cb, "_launch_workspace", recording)
+            with torch.cuda.graph(graph):
+                launch.launch()
+            monkeypatch.setattr(cb, "_launch_workspace", launch_workspace)
+            assert [(kind, keep) for kind, keep, _ in captured] == [
+                (cb.QUEUE_SCHED, False)
+            ], captured
+            assert captured[0][2].data_ptr() != kept.data_ptr()
+        for _ in range(3):
+            launch.out.fill_(float("nan"))
+            graph.replay()
+            torch.cuda.synchronize()
+            d.op("dW", launch.out, "wgrad", case.g, case.x, sizes)
+            assert torch.equal(launch.out.view(torch.int16), eager)
+
+    def after():
+        for _kind, _keep, buffer in captured:
+            assert _u32_words(buffer) == [0] * buffer.numel(), _u32_words(buffer)
+        assert cb.stream_workspace(cb.QUEUE_SCHED, device, side) is not None
+        _assert_queue_at_rest(device, side)
+
+    judge_draws(record_property, draw, seed=case.seed, then=after)
+
+
 @pytest.mark.parametrize("op", ["dgrad", "wgrad"])
 def test_prepared_launches_allocate_nothing_after_the_first(op, monkeypatch, record_property):
     """After the first launch on a stream (which creates the stream workspaces and
@@ -2030,6 +2410,178 @@ def test_m_indptr_form_matches_offs_form():
         cake_moe_grouped_gemm_det_train_wgrad(
             g, x, m_indptr[:-2], num_groups=len(RAGGED_E6)
         )
+
+
+# The rows of the queue walk's lead-row tests: group 0 starts at row 37 and five rows
+# follow the last group, all NaN (a launch that read one would not give finite bits).
+QUEUE_LEAD_ROWS = (37, 5)
+
+
+def _queue_lead_operands(case):
+    """``(g, x, m_indptr, g0, x0)`` over ``case``'s rows: ``g`` / ``x`` with the NaN rows of
+    ``QUEUE_LEAD_ROWS`` before group 0 and after the last group, and the ``[E + 1]`` table
+    ``m_indptr`` from row 37; ``g0`` / ``x0`` of the same shapes with the case's rows from
+    row 0 and zero rows after them, for the ``[E]`` call over the same ``sum_m`` (so the
+    same plan)."""
+    before, after = QUEUE_LEAD_ROWS
+    rows = sum(case.sizes)
+
+    def framed(t, start, fill):
+        out = torch.full(
+            (before + rows + after, t.shape[1]), fill, dtype=t.dtype, device=t.device
+        )
+        out[start : start + rows] = t
+        return out
+
+    table = torch.cat((case.offs.new_zeros(1), case.offs)) + before
+    assert table.dtype == torch.int32
+    return (
+        framed(case.g, before, float("nan")),
+        framed(case.x, before, float("nan")),
+        table,
+        framed(case.g, 0, 0.0),
+        framed(case.x, 0, 0.0),
+    )
+
+
+def _queue_lead_launches(case, g, x, table, g0, x0, output, monkeypatch, **kwargs):
+    """Prepare the weight gradient of ``case`` four ways: the ``m_indptr`` call with no
+    ``queue_walk`` rule (the selected stage of the lead route), then under a rule forced for
+    the device, the stage it selects and ``output`` (any group count): the ``m_indptr`` call,
+    the ``[E]`` call over the same ``sum_m`` (``g0`` / ``x0``) and the ``[E]`` call over the
+    case's rows alone.  ``kwargs`` (output dtype, ``out`` factory, accumulate) go to every
+    call; ``out`` is a factory so each call writes a tensor of its own.  Returns
+    ``(plain, lead, base, alone)``; skips where the route serves no queue-walk stage."""
+    device = case.device
+    arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
+    groups = len(case.sizes)
+    make_out = kwargs.pop("out", None)
+    prepare = cake_moe_grouped_gemm_det_train_prepare_wgrad
+
+    def call(a, b, offs, **extra):
+        out = None if make_out is None else make_out()
+        return prepare(a, b, offs, out=out, **extra, **kwargs)
+
+    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "queue_walk", [])
+    plain = call(g, x, table, num_groups=groups)
+    name = plain.record_name
+    if not cake_jit.stage_served(name, cb.QUEUE_STAGE, arch):
+        pytest.skip(f"no queue-walk weight-gradient build on {arch}")
+    assert plain.plan["tile_k"] == 512, plain.plan
+    assert plain.stages[0].removesuffix(cb.ACC_SUFFIX) in cb.QUEUE_SELECTED_STAGES
+    rule = {
+        "arch": arch,
+        "sm_counts": [cb.sm_count(device)],
+        "stage": plain.stages[0].removesuffix(cb.ACC_SUFFIX),
+        "outputs": [output],
+        "groups": [1, 1 << 30],
+    }
+    monkeypatch.setitem(HOST_PLAN_CONSTANTS, "queue_walk", [rule])
+    lead = call(g, x, table, num_groups=groups)
+    base = call(g0, x0, case.offs)
+    alone = call(case.g, case.x, case.offs)
+    return plain, lead, base, alone
+
+
+def _check_queue_lead_launches(plain, lead, base, alone, stage, record_property):
+    """``lead`` binds ``stage`` (the queue walk, or its accumulate stage) on the lead route,
+    on the lead twin of the program the ``[E]`` call ``base`` binds, with ``plain``'s plan
+    and later stages; one launch of each gives finite bits equal to ``base``'s, to
+    ``plain``'s (the selected stage) and, where it plans the same, to ``alone``'s, with the
+    queue counters back at zero."""
+    device = lead.out.device
+    arch = SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
+    assert lead.stages == (stage, *plain.stages[1:]), (lead.stages, plain.stages)
+    assert lead.plan == plain.plan, (lead.plan, plain.plan)
+    _assert_lead_binding(lead, base)
+    name = base.record_name
+    program = cake_jit.stage_binding(name, stage, arch)["program"]
+    assert lead.bound_routes[0] == cake_jit.lead_route(name), lead.bound_routes
+    assert lead.bound_programs[0] == cake_jit.lead_twin(program), lead.bound_programs
+    assert _workspace_kinds(lead) == {cb.QUEUE_SCHED}, _workspace_kinds(lead)
+    same_plan = alone.plan == lead.plan and alone.stages == lead.stages
+    record_property("bound", list(lead.bound_programs))
+    record_property("alone_plans_the_same", same_plan)
+    outs = [launch.launch() for launch in (lead, base, plain, alone)]
+    torch.cuda.synchronize()
+    got = _bits(outs[0])
+    assert bool(torch.isfinite(outs[0]).all()), "the lead launch read a NaN row"
+    assert torch.equal(got, _bits(outs[1])), "m_indptr vs [E] over the same sum_m"
+    assert torch.equal(got, _bits(outs[2])), "queue walk vs the selected stage"
+    if same_plan:
+        assert torch.equal(got, _bits(outs[3])), "m_indptr vs [E] over its rows alone"
+    _assert_queue_at_rest(device)
+
+
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("label", list(QUEUE_CASE_BY_LABEL))
+def test_wgrad_queue_walk_lead_rows_give_the_E_bits(
+    label, out_dtype, monkeypatch, record_property
+):
+    """Under a forced ``queue_walk`` rule, an ``m_indptr`` row table whose group 0 starts at
+    row 37, with NaN rows before it and five after the last group (``QUEUE_LEAD_ROWS``),
+    binds the queue stage of the lead route (``cb.QUEUE_STAGE`` on the lead twin of the
+    ``[E]`` call's program, with ``m_begin``) with the plan of the selected stage.  Its
+    output has the bits of the ``[E]`` queue launch over the same ``sum_m``, of the
+    selected stage's lead launch (no rule) and, where it plans the same, of the ``[E]``
+    queue launch over the case's rows alone; the counters (``cb.QUEUE_SCHED``) are back at
+    zero."""
+    device = _require_program("wgrad", out_dtype)
+    _fresh_stream_workspaces(monkeypatch)
+    _label, sizes, n, k = QUEUE_CASE_BY_LABEL[label]
+    case = _Case(sizes, n, k, device, seed=13)
+    g, x, table, g0, x0 = _queue_lead_operands(case)
+    launches = _queue_lead_launches(
+        case,
+        g,
+        x,
+        table,
+        g0,
+        x0,
+        DTYPE_NAMES[out_dtype],
+        monkeypatch,
+        out_dtype=out_dtype,
+    )
+    for launch in launches:
+        launch.out.fill_(float("nan"))
+    _check_queue_lead_launches(*launches, cb.QUEUE_STAGE, record_property)
+
+
+@pytest.mark.parametrize("label", list(QUEUE_CASE_BY_LABEL))
+def test_wgrad_queue_walk_acc_lead_rows(label, monkeypatch, record_property):
+    """The fused FP32 accumulate of the queue walk (``cb.QUEUE_STAGE`` with
+    ``cb.ACC_SUFFIX``) on the rows of ``test_wgrad_queue_walk_lead_rows_give_the_E_bits``:
+    every call adds into a copy of one finite ``out``, and the ``m_indptr`` call binds the
+    lead twin of the ``[E]`` call's accumulate program and gives the bits of the ``[E]``
+    calls and of the selected stage's fused accumulate."""
+    device = _require_program("wgrad", torch.float32)
+    if not cb.generated_program_available(
+        device, "wgrad", torch.float32, accumulate=True
+    ):
+        pytest.skip("no fused accumulate build of the float32 weight gradient here")
+    _fresh_stream_workspaces(monkeypatch)
+    _label, sizes, n, k = QUEUE_CASE_BY_LABEL[label]
+    case = _Case(sizes, n, k, device, seed=13)
+    g, x, table, g0, x0 = _queue_lead_operands(case)
+    gen = torch.Generator(device=device).manual_seed(29)
+    dst0 = torch.randn(len(sizes), n, k, generator=gen, device=device)
+    plain, lead, base, alone = _queue_lead_launches(
+        case,
+        g,
+        x,
+        table,
+        g0,
+        x0,
+        "accumulate",
+        monkeypatch,
+        out=dst0.clone,
+        accumulate=True,
+    )
+    for launch in (plain, lead, base, alone):
+        assert launch.plan["accumulate"] == "fused", launch.plan
+    _check_queue_lead_launches(
+        plain, lead, base, alone, cb.QUEUE_STAGE + cb.ACC_SUFFIX, record_property
+    )
 
 
 def test_autograd_wrapper_matches_reference_and_is_deterministic(record_property):

@@ -43,7 +43,8 @@ PACKAGE_DIR = Path(cake_build.__file__).parent
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 GRID = [["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]]
 
-# The frozen kernel argument lists (name, kind) of the four KCP kernel packages and the two chunk stages of the route.
+# The frozen kernel argument lists (name, kind) of the four KCP kernel packages and the three chunk stages of the
+# route.
 FWDH_PLAN = [
     ["buffer", "w_tma"], ["buffer", "kg_tma"], ["buffer", "u"], ["buffer", "gk"], ["parameter", "num_heads"],
     ["buffer", "seq_chunk_start"], ["parameter", "num_seqs"], ["buffer", "walk_seg"], ["buffer", "h0"],
@@ -85,6 +86,13 @@ FWDH_O_PLAN = [
 DAV_PLAN = [
     ["buffer", "do_tma"], ["buffer", "vnew_tma"], ["buffer", "aqk_tma"], ["buffer", "dAqk"], ["buffer", "dv1"],
     ["parameter", "num_heads"], ["parameter", "scale"], *GRID,
+]  # fmt: skip
+# the output backward of the in-kernel Q/K L2 norm modes: dAqk from the FP32 v_new it forms from akk_int, beta,
+# v, w and the h tape (no v_new operand, no dv1)
+DAV_L2N_PLAN = [
+    ["buffer", "do_tma"], ["buffer", "akk_tma"], ["buffer", "v_tma"], ["buffer", "w_tma"], ["buffer", "h_tma"],
+    ["buffer", "beta"], ["buffer", "chunk_bos"], ["buffer", "chunk_len"], ["buffer", "dAqk"], ["parameter", "scale"],
+    ["parameter", "num_heads"], ["parameter", "num_chunks"], *GRID,
 ]  # fmt: skip
 # The K4 merge records (the register-blocked v2 builds the rule names): record -> (build keywords, threads per CTA =
 # 128 * cols_per_cta / the thread tile's outputs, architectures).  The pairs builds are scalar on sm_107a (the
@@ -143,6 +151,7 @@ PLANS = {
     **dict.fromkeys(MERGE_RECORDS, MERGE_PLAN),
     "kcp_fwd_o": FWD_O_PLAN,
     "kcp_dav": DAV_PLAN,
+    "kcp_dav_l2n": DAV_L2N_PLAN,
     "kcp_fwdh_o": FWDH_O_PLAN,
     "kcp_fwdh_o_vh64": FWDH_O_PLAN,
     "kcp_transfer_walk_three_mma": TRANSFER_PLAN,
@@ -155,12 +164,13 @@ PLANS = {
 # Launch block of the records that are not 192 threads wide (the merge records: MERGE_RECORDS); the full-width fwdh
 # offset walk runs the split-role schedule (four state, four decay, one TMA and one MMA warp), the shipped transfer
 # walk two compute warpgroups (eight compute, one load and one MMA warp), the fused forward walk ten warps in both
-# forms.
+# forms, the l2n output backward fourteen (448 threads).
 BLOCKS = {
     "kcp_fwdh_offset": 320,
     "kcp_transfer_walk": 320,
     "kcp_fwdh_o": 320,
     "kcp_fwdh_o_vh64": 320,
+    "kcp_dav_l2n": 448,
 }
 # The program every record launches.  The exporter names a program after its kernel and build keywords, so a changed
 # kernel build ships under a new name; this table pins each record's program, and a renamed program fails here until the
@@ -181,6 +191,7 @@ PROGRAM_NAMES = {
     "kcp_affine_merge_c64": "cake_kda_det_train_8cda0d1f1291e740f798_kcp",
     "kcp_fwd_o": "cake_kda_det_train_c811c1b52ed680d0a515_kcp",
     "kcp_dav": "cake_kda_det_train_f227dd21f1f3cb464b29",
+    "kcp_dav_l2n": "cake_kda_det_train_44f8275bc726f8a46e33_kcp",
     "kcp_fwdh_o": "cake_kda_det_train_051de8b4660b1587fc85_kcp",
     "kcp_fwdh_o_vh64": "cake_kda_det_train_5e6f3ba0b9b429241ab2_kcp",
     "kcp_transfer_walk_three_mma": "cake_kda_det_train_b1477ed31fad32a5c2c9_kcp",
@@ -222,6 +233,7 @@ def test_the_tables_are_disjoint_and_complete() -> None:
         "kcp_fwd_o",
         "kcp_dav",
         "kcp_fwdh_o",
+        "kcp_dav_l2n",
     )
     assert (*kcp_jit.PROGRAMS[:5], "kcp_fwdh_o") == kcp_jit.WALK_PROGRAMS
     assert kcp_jit.PRECISION_MODES == (0, 1, 2)
@@ -282,6 +294,10 @@ def test_every_record_launches_its_pinned_program() -> None:
     assert not set(libraries) & {r["library"] for r in cake_jit.MODULES.values()}, (
         "no KCP program shares a name with a single-rank one"
     )
+    # the l2n output backward runs the single-rank replay form of the program (its 20 hex digits) under the
+    # ``_kcp`` suffix
+    replay = cake_jit.MODULES["dav_l2n_replay"]["library"]
+    assert PROGRAM_NAMES["kcp_dav_l2n"] == f"{replay}_kcp"
 
 
 def test_merge_selection_covers_every_launch_once() -> None:
@@ -385,6 +401,9 @@ def test_selection_and_grids() -> None:
     with pytest.raises(ValueError):
         kcp_jit.launch_grid("kcp_fwd_o", num_chunks_pad=0, num_heads=4, sm_count=152)
     assert kcp_jit.launch_grid("kcp_dav", num_chunks_pad=10, num_heads=3) == (5, 3, 1)
+    # the l2n output backward: one CTA item per (padded chunk, head) tile
+    l2n_grid = kcp_jit.launch_grid("kcp_dav_l2n", num_chunks_pad=10, num_heads=3)
+    assert l2n_grid == (30, 1, 1)
     with pytest.raises(ValueError):
         kcp_jit.launch_grid("kcp_dav", num_chunks_pad=9, num_heads=3)
 

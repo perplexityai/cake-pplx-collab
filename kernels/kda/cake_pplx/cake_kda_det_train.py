@@ -311,7 +311,8 @@ def cake_kda_det_train_arena(
     tail pass instead of the default's 4488, tape 3720; no checkpoint replay on such a workspace); ``tail_passes
     >= 2`` (implies ``lean``) runs the backward's tail, the fused gradient / GLM intra / gate epilogue, once per
     range of ``ceil(NC_pad / tail_passes)`` chunks over per-range buffers: 2820 B per internal token-head plus
-    three state blocks on the floor, the same gradients bitwise, some speed cost (see the package README).
+    three state blocks on the floor (3076 with ``use_qk_l2norm_in_kernel=True``, whose backward keeps a
+    whole-sequence ``dAqk``), the same gradients bitwise, some speed cost (see the package README).
     ``batch_tokens`` runs the forward and the backward over groups of whole, contiguous documents of at most that
     many tokens (and at most ``max_docs_per_batch`` documents, which needs ``batch_tokens``) in an arena sized for
     the largest group (at ``tail_passes``; each group runs its tail in the fewest passes up to that which fit the

@@ -21,17 +21,19 @@ On the CPU: the registry's lead twins mirror the routes, their builds share the
 CUDA floor, the row table is read on the shape alone and passed as views, an ``m_indptr``
 never falls back to a route without its lead twin, ``_bind`` refuses a wrong pairing of
 route and row table, the availability query needs the lead twins, no BF16 weight
-gradient has an accumulate build, and a sweep of architectures and SM counts binds
-the lead twins with reference 1's plan.  On a GPU (the device's SM count and the bound
-programs recorded as test properties):
+gradient has an accumulate build, a sweep of architectures and SM counts binds
+the lead twins with reference 1's plan, and a sweep of the queue walk's rules binds the
+lead twin of the queue stage where a rule names the call.  On a GPU (the device's SM
+count and the bound programs recorded as test properties):
 reference 1's bits always and reference 2's where it plans the same, every
-forced stage from an odd row and from row 0 (the split tail with group 0 in it, its
-tail reduce wherever a route serves one, the probed queue split), CUDA graphs over
-device-copied routings, edges and whole-empty chunks with the rows outside poisoned
+forced stage from an odd row and from row 0 (the queue walk, the split tail with group 0
+in it, its tail reduce wherever a route serves one, the probed queue split), CUDA graphs
+over device-copied routings, edges and whole-empty chunks with the rows outside poisoned
 (the ``-0.0`` exception of equal values), padded rows, two streams (each with its own
 ``out``, and both writing disjoint rows of one ``out``), the bits of the judged
-``[E]`` cases, the autograd function, accumulation (main_halves, the wave form and
-the k256 tail, their split tails) and the binding before row tables (negative control).
+``[E]`` cases, the autograd function, accumulation (main_halves, the wave form, the
+k256 tail and the queue walk, their split tails) and the binding before row tables
+(negative control).
 """
 
 import pytest
@@ -66,8 +68,8 @@ JUDGED_TESTS = {
     "dgrad": suite.test_dgrad_matches_reference,
     "wgrad": suite.test_wgrad_matches_reference,
 }
-WGRAD_FORMS = tuple(form for form in ds.WGRAD_FORMS if form != "k512_queue")
-ACC_FORMS = tuple(form for form in ds.ACC_FORMS if form != "k512_queue")
+WGRAD_FORMS = ds.WGRAD_FORMS
+ACC_FORMS = ds.ACC_FORMS
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +108,52 @@ def test_no_bfloat16_accumulate_build():
 @pytest.mark.parametrize("op", ds.OPS)
 def test_host_binds_the_lead_twins(op, monkeypatch):
     ds.check_host_binding(monkeypatch, P, op)
+
+
+def test_host_binds_the_queue_walk_lead_twins(monkeypatch):
+    """CPU sweep of the ``queue_walk`` rules: on each rule's architecture and SM counts, under
+    constants that select the rule's stage, a slice of the rule's output whose group count is
+    an end of the rule's range binds the lead twin of reference 1's queue stage (its
+    accumulate stage for ``"accumulate"``) with reference 1's plan (``ds.assert_lead``);
+    one group below the range keeps the selected stage."""
+    cb, c = P.cb, P.constants
+    rules = list(c["queue_walk"])
+    assert rules, "no queue_walk rule"
+    seen = 0
+    for rule in rules:
+        arch, stage = rule["arch"], rule["stage"]
+        form = "k512_" + stage
+        low, high = (int(v) for v in rule["groups"])
+        for sms in rule["sm_counts"]:
+            with monkeypatch.context() as scope:
+                ds.fake_device(scope, P, arch, int(sms))
+                assert ds.force_wgrad_form(scope, P, form, arch) == (512, stage), rule
+                scope.setitem(c, "queue_walk", rules)
+                k = ds.form_k(P, form)
+                for output in rule["outputs"]:
+                    accumulate = output == "accumulate"
+                    out_dtype = (
+                        torch.bfloat16 if output == "bfloat16" else torch.float32
+                    )
+                    suffix = cb.ACC_SUFFIX if accumulate else ""
+                    for groups in sorted({low - 1, low, high} - {0}):
+                        what = (rule, sms, output, groups)
+                        layout = ds.Layout((600,) * (groups + 1), n=512, k=k)
+                        lead, ref1, _ref2, _chunk = ds.meta_calls(
+                            P,
+                            "wgrad",
+                            layout,
+                            1,
+                            groups + 1,
+                            out_dtype=out_dtype,
+                            accumulate=accumulate,
+                        )
+                        ds.assert_lead(P, lead, ref1, str(what))
+                        inside = low <= groups <= high
+                        want = (cb.QUEUE_STAGE if inside else stage) + suffix
+                        assert lead.stages[0] == want, (what, lead.stages)
+                        seen += inside
+    assert seen, "no rule bound the queue walk"
 
 
 def test_two_reference_chunks_plan_as_reference_2(monkeypatch):

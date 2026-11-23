@@ -591,6 +591,20 @@ class MoKFunctional:
                 raise ValueError(
                     "Communication-SM counts must be positive, even and leave compute SMs"
                 )
+        for name in ("bf16_comm_sms", "mxfp8_comm_sms"):
+            split = getattr(config, name)
+            if split is not None and (
+                type(split) is not tuple
+                or len(split) != 2
+                or any(
+                    type(count) is not int or count <= 0 or count % 2 or count >= sms
+                    for count in split
+                )
+            ):
+                raise ValueError(
+                    f"{name} must be None or a (forward, backward) pair of positive, "
+                    "even communication-SM counts that leave compute SMs"
+                )
         if config.imbalance_comm_sms is not None:
             hot = config.imbalance_comm_sms
             if (
@@ -849,12 +863,21 @@ class MoKFunctional:
                 )
         return choice
 
-    def _comm_split(self, config, workspace):
+    def _comm_split(self, config, workspace, mxfp8=False):
         """(forward, backward) communication-SM counts for the next launch.
 
-        ``config.comm_split_log`` prints each change of the split to stderr.
+        The fixed split is the row of the launch's routed precision
+        (``config.mxfp8_comm_sms`` for MXFP8 routed weights,
+        ``config.bf16_comm_sms`` for BF16), else ``fwd_num_comm_sms`` /
+        ``bwd_num_comm_sms``; the imbalance split replaces it while the load
+        is skewed. ``config.comm_split_log`` prints each change of the split to
+        stderr.
         """
-        base = (config.fwd_num_comm_sms, config.bwd_num_comm_sms)
+        routed = config.mxfp8_comm_sms if mxfp8 else config.bf16_comm_sms
+        if routed is not None:
+            base = tuple(routed)
+        else:
+            base = (config.fwd_num_comm_sms, config.bwd_num_comm_sms)
         if config.imbalance_comm_sms is None:
             return base
         capturing = torch.cuda.is_current_stream_capturing()
@@ -1264,7 +1287,7 @@ class MoKFunctional:
             forward_kernel, _ = self._kernels(swiglu_limit, mxfp8)
         else:
             forward_kernel = self._context_free_forward_kernel(swiglu_limit)
-        fwd_comm_sms, _ = self._comm_split(config, workspace)
+        fwd_comm_sms, _ = self._comm_split(config, workspace, mxfp8)
         program = {"multimacro": self._multimacro(config, workspace)} if mxfp8 else {}
         if self.weight_before_down:
             program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
@@ -1481,7 +1504,7 @@ class MoKFunctional:
             )
             program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
         self._barrier(workspace)
-        fwd_comm_sms, _ = self._comm_split(config, workspace)
+        fwd_comm_sms, _ = self._comm_split(config, workspace, mxfp8)
         values = self._recompute_kernel(swiglu_limit, mxfp8)(
             workspace.x_buffer[:shared_rows],
             workspace.x_buffer_ptrs,
@@ -1744,7 +1767,7 @@ class MoKFunctional:
             workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
         self._barrier(workspace)
         _, backward_kernel = self._kernels(swiglu_limit, mxfp8)
-        _, bwd_comm_sms = self._comm_split(config, workspace)
+        _, bwd_comm_sms = self._comm_split(config, workspace, mxfp8)
         values = backward_kernel(
             workspace.d_y_buffer[:shared_rows],
             workspace.d_y_buffer_ptrs,

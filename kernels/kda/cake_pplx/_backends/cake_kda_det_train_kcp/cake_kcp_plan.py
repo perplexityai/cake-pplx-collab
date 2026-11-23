@@ -2974,7 +2974,11 @@ def kcp_dav_needed(plan) -> bool:
     (``dqkg_int`` and its raw / L2N forms) stores no ``dAqk``, so GLM intra reads ``kcp_dav``'s.  Everywhere else the
     plan's fused gradient stores every ``dAqk`` row GLM intra reads, pad rows included (the plan's own correctness
     rests on it: it launches no dav stage there), and the adjoint walks form ``dv1`` from ``aqk_int`` themselves (their
-    ``fuse_dv1`` builds), so no kernel reads ``kcp_dav``'s outputs and the backward skips it."""
+    ``fuse_dv1`` builds), so no kernel reads ``kcp_dav``'s outputs and the backward skips it.  In an in-kernel Q / K
+    L2 norm mode the plan dispatches ``dav`` on every row (the ``dav_l2n_replay*`` records: its fused gradient,
+    ``dqkg_int*l2n``, stores no ``dAqk``), so the backward launches the mode's output backward ``kcp_dav_l2n`` on
+    every problem (``cake_kcp.kcp_local_record``); it forms no ``dv1``, which every adjoint walk record forms
+    itself (each is its form's ``fuse_dv1`` build)."""
     return bool(plan.dispatched("dav", LOCAL_PATH_BWD))
 
 

@@ -2166,7 +2166,9 @@ def test_l2n_local_stage_values_cover_the_records(
     every logical name of every record they launch; no record outside the mode's own (``_l2n`` twins, the ``qk_*``
     programs) binds ``q_raw`` / ``k_raw``; the first reader gets the saved rstd with (1, 0), a fresh one with (0, 1)
     or none with (0, 0); no gate epilogue launches; stage for stage the records are the flag-off plan's or the mode's
-    twins, the KCP-owned records and the KCP walk / merge / collective sequence unchanged.  ``fuse``: the
+    twins, the KCP-owned records and the KCP walk / merge / collective sequence unchanged but the mode's output
+    backward ``kcp_dav_l2n``, launched once on every backward (before the fused gradient, in place of the flag-off
+    ``kcp_dav`` of the rows whose plan dispatches ``dav``) and never on a forward.  ``fuse``: the
     ``fwd_o_fuse`` knob (1 shipped): a forward that keeps no tape walks ``kcp_fwdh_o``, whose local operands the
     values carry, and launches no ``kcp_fwd_o``; under 0 (and in the replay forward) the tape walk and ``kcp_fwd_o``."""
     missing = cake_kcp_plan.qk_l2norm_missing(form, gate, arch)
@@ -2341,6 +2343,17 @@ def test_l2n_local_stage_values_cover_the_records(
             for s, r, _g, _v in res_off
             if not (s == "backend" and mod(s, r)["stage"] == "gate_epilogue")
         ]
+        # the mode's output backward: kcp_dav_l2n once on a backward, before the fused gradient; the flag-off
+        # kcp_dav only where the flag-off plan dispatches dav
+        dav_l2n, dav_off = ("kcp", "kcp_dav_l2n"), ("kcp", "kcp_dav")
+        assert on_l.count(dav_l2n) == int(kind.startswith("bwd")), (kind, on_l)
+        if dav_l2n in on_l:
+            stages_on = [mod(s, r)["stage"] if s == "backend" else r for s, r in on_l]
+            assert "dqkg" in stages_on, (kind, on_l)
+            assert on_l.index(dav_l2n) < stages_on.index("dqkg"), (kind, on_l)
+        assert dav_off not in on_l, (kind, on_l)
+        on_l = [x for x in on_l if x != dav_l2n]
+        off_l = [x for x in off_l if x != dav_off]
         assert len(on_l) == len(off_l), (kind, on_l, off_l)
         on_stages = collections.Counter(
             mod(s, r)["stage"] if s == "backend" else r for s, r in on_l
@@ -2792,7 +2805,8 @@ def test_gpu_l2n_flag_off_identity_w1() -> None:
 
 # (lengths, H, W, layout): W = 1 in-process, CP2 / CP4 spawned, CP8 one process per Slurm task; documents crossing
 # ranks with boundaries inside chunks (cross-document resets), documents over >= 3 ranks, one-token documents and
-# fragments, a zero-token rank at W = 2 / 4 / 8, 4 and 64 heads.
+# fragments, a zero-token rank at W = 2 / 4 / 8, 4 and 64 heads, and 12 (the serial route below 16 heads:
+# kcp_dav_l2n and the hinted fused gradient dqkg_int_l2n, where the norm off launches kcp_dav).
 ROWS = [
     ((100, 640, 77, 1000, 129), 4, 1, "contiguous"),
     ((700, 1, 1300, 999), 64, 1, "contiguous"),
@@ -2807,6 +2821,7 @@ ROWS = [
     ((3000, 2048, 5, 1), 4, 8, "zigzag_per_document"),
     ((4000, 1003), 4, 8, "ragged:1,0,999,1000,1000,1000,1,1002"),
     ((700, 1, 1300, 999), 64, 8, "zigzag"),
+    ((100, 640, 77, 1000, 129), 12, 2, "contiguous"),
 ]
 RAW_GATE_ROWS = [
     ((100, 640, 77, 1000, 129), 4, 1, "contiguous"),

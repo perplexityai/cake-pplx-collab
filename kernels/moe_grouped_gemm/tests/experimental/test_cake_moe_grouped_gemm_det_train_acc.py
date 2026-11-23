@@ -94,8 +94,9 @@ DTYPE_NAMES = {torch.bfloat16: "bfloat16", torch.float32: "float32"}
 ACC = cb.ACC_SUFFIX
 TAIL_REDUCE = cb.TAIL_REDUCE
 TAIL_REDUCE_ACC = cb.TAIL_REDUCE_ACC
-# The main stages with an accumulate build: the planner-reachable 512-wide k tile forms.
-TWIN_FORMS = ("main_halves", "main_wave_halves", "main_halves_k256t")
+# The main stages with an accumulate build: the planner-reachable 512-wide k tile forms and
+# the queue walk (``cake_backend.wgrad_queue_walk``).
+TWIN_FORMS = ("main_halves", "main_wave_halves", "main_halves_k256t", cb.QUEUE_STAGE)
 F32_K256 = cake_jit.record_name("wgrad", out_dtype="float32", tile_k=256)
 F32_K512 = cake_jit.record_name("wgrad", out_dtype="float32", tile_k=512)
 # The accumulate builds this release ships, route -> architecture -> stages: fp32 ``out``
@@ -107,8 +108,18 @@ F32_K512 = cake_jit.record_name("wgrad", out_dtype="float32", tile_k=512)
 # same (``test_docs_list_the_shipped_acc_builds``).
 SHIPPED_ACC_STAGES = {
     F32_K512: {
-        "sm_100a": ("main_halves_acc", "main_wave_halves_acc", TAIL_REDUCE_ACC),
-        "sm_103a": ("main_halves_acc", "main_wave_halves_acc", TAIL_REDUCE_ACC),
+        "sm_100a": (
+            "main_halves_acc",
+            "main_wave_halves_acc",
+            "main_halves_queue_acc",
+            TAIL_REDUCE_ACC,
+        ),
+        "sm_103a": (
+            "main_halves_acc",
+            "main_wave_halves_acc",
+            "main_halves_queue_acc",
+            TAIL_REDUCE_ACC,
+        ),
         "sm_107a": ("main_halves_acc", "main_halves_k256t_acc", TAIL_REDUCE_ACC),
     },
     F32_K256: {
@@ -151,7 +162,8 @@ INT_VIEW = {torch.float32: torch.int32, torch.bfloat16: torch.int16}
 SM_COUNTS = {"sm_100a": (148, 160), "sm_103a": (148, 160), "sm_107a": (208, 212, 216)}
 ARCH_SM_COUNTS = [(arch, sms) for arch, counts in SM_COUNTS.items() for sms in counts]
 # The weight-gradient forms: label -> (k tile, main stage).  ``k256`` / ``k256_wave`` are the
-# 256-wide k tile's plain and wave-synchronised stages; the others the 512-wide k tile's.
+# 256-wide k tile's plain and wave-synchronised stages; the others the 512-wide k tile's
+# (``cb.QUEUE_STAGE``: the queue walk standing in for ``main_halves``, ``_force_form``).
 FORMS = {
     "k256": (256, "main"),
     "k256_wave": (256, "main_wave"),
@@ -160,6 +172,7 @@ FORMS = {
     "main_halves": (512, "main_halves"),
     "main_wave_halves": (512, "main_wave_halves"),
     "main_halves_k256t": (512, "main_halves_k256t"),
+    cb.QUEUE_STAGE: (512, cb.QUEUE_STAGE),
 }
 # The group sizes a forced-form case tries, in order (an empty and a one-row group each).
 CASE_SIZES = (
@@ -298,7 +311,27 @@ def _assert_twin_launch(ovw, acc, arch):
     assert (mode, acc.plan.get("accumulate_reason")) == want, (ovw.stages, arch)
     assert len(acc.launches) == len(ovw.launches)
     if mode == "fused":
-        assert acc.stages == tuple(stage + ACC for stage in ovw.stages)
+        # The fused accumulate binds the twin's accumulate stage, or the queue walk's where a
+        # ``queue_walk`` rule names the fused accumulate (``wgrad_queue_walk``).
+        stages = ovw.stages
+        queue_acc = cb.QUEUE_STAGE + ACC
+        selected, e = ovw.stages[0], acc.out.shape[0]
+        sms = cb.sm_count(acc.out.device)
+        if acc.stages[0] == queue_acc and selected != cb.QUEUE_STAGE:
+            assert selected in cb.QUEUE_SELECTED_STAGES, (selected, arch)
+            assert cb.wgrad_queue_walk(selected, "accumulate", arch, sms, e), (
+                selected,
+                arch,
+                e,
+            )
+            stages = (cb.QUEUE_STAGE, *ovw.stages[1:])
+        elif selected in cb.QUEUE_SELECTED_STAGES:
+            assert not (
+                cb.wgrad_queue_walk(selected, "accumulate", arch, sms, e)
+                and cake_jit.stage_served(acc.record_name, queue_acc, arch)
+                and cb.acc_library_loadable(acc.record_name, queue_acc, arch)
+            ), (selected, arch, acc.stages)
+        assert acc.stages == tuple(stage + ACC for stage in stages)
         assert acc.add_from is None and acc.bump_version
     else:
         assert acc.stages == ovw.stages and not acc.bump_version
@@ -341,9 +374,34 @@ def _plan_without(plan, *keys):
 def _force_form(monkeypatch, form, arch):
     """Constants under which a weight gradient on ``arch`` takes ``form`` (``FORMS``; given a
     ``K`` of ``_form_ks(form)``; the 512-wide k tile at any rows per group); False where the
-    architecture has no such form."""
+    architecture has no such form.  The queue walk (``cb.QUEUE_STAGE``) is forced as the
+    stand-in of ``main_halves`` for every output, SM count and group count; every other
+    form is forced with no ``queue_walk`` rule."""
     c = HOST_PLAN_CONSTANTS
     tile, stage = FORMS[form]
+    rules = []
+    if stage == cb.QUEUE_STAGE:
+        served = any(
+            cake_jit.stage_served(
+                cake_jit.record_name("wgrad", out_dtype=name, tile_k=512),
+                cb.QUEUE_STAGE,
+                arch,
+            )
+            for name in DTYPE_NAMES.values()
+        )
+        if not served:
+            return False
+        stage = "main_halves"
+        rules = [
+            {
+                "arch": arch,
+                "sm_counts": list(range(1, 1025)),
+                "stage": stage,
+                "outputs": ["bfloat16", "float32", "accumulate"],
+                "groups": [1, 1 << 30],
+            }
+        ]
+    monkeypatch.setitem(c, "queue_walk", rules)
     halves = stage in ("main_halves", "main_wave_halves", "main_halves_k256t")
     wave = stage in ("main_wave", "main_wave_halves")
     if halves and arch not in c["k512_release_archs"]:
@@ -370,9 +428,11 @@ def _force_form(monkeypatch, form, arch):
 
 
 def _form_ks(form):
-    """Reductions ``K`` a shape of ``form`` may take."""
+    """Reductions ``K`` a shape of ``form`` may take (the queue walk's: ``main_halves``'s)."""
     c = HOST_PLAN_CONSTANTS
     tile, stage = FORMS[form]
+    if stage == cb.QUEUE_STAGE:
+        stage = "main_halves"
     if stage in ("main_wave", "main_wave_halves"):
         return [int(c["wave_sync_min_k"]) + tile * i for i in range(4)]
     if stage == "main_halves_k256t":
@@ -384,7 +444,8 @@ def _form_ks(form):
 
 def _det_plan(sizes, n, k, arch, sms, out_dtype=torch.float32):
     """``(main stage, plan)`` that ``cake_moe_grouped_gemm_det_train_prepare_wgrad`` takes for ``sizes`` and
-    ``(N, K)`` on ``arch`` with ``sms`` SMs, under the constants as the test set them."""
+    ``(N, K)`` on ``arch`` with ``sms`` SMs, under the constants as the test set them: the
+    overwrite's main stage (the queue walk where a ``queue_walk`` rule names the call)."""
     c = HOST_PLAN_CONSTANTS
     sum_m, e = sum(sizes), len(sizes)
     tile_k = cb.select_wgrad_tile(k, arch, sum_m, e, c)
@@ -394,6 +455,11 @@ def _det_plan(sizes, n, k, arch, sms, out_dtype=torch.float32):
     stage, _wave = cb.select_wgrad_stage(
         name, k, tile_k, arch, c, sum_m=sum_m, num_groups=e
     )
+    k256_tail = stage == "main_halves_k256t"
+    if cb.wgrad_queue_walk(
+        stage, DTYPE_NAMES[out_dtype], arch, sms, e, c
+    ) and cake_jit.stage_served(name, cb.QUEUE_STAGE, arch):
+        stage = cb.QUEUE_STAGE
     plan = cb.plan_wgrad(
         sum_m=sum_m,
         num_groups=e,
@@ -402,7 +468,7 @@ def _det_plan(sizes, n, k, arch, sms, out_dtype=torch.float32):
         tile_k=tile_k,
         sm_count=sms,
         reduce_threads=256,
-        k256_tail=stage == "main_halves_k256t",
+        k256_tail=k256_tail,
         constants=c,
     )
     return stage, plan
@@ -567,8 +633,9 @@ def test_forced_form_cases_exist(arch, sm_count, out_dtype, monkeypatch):
 def test_acc_bindings_are_the_shipped_set():
     """The registry serves exactly the accumulate builds of ``SHIPPED_ACC_STAGES``: the
     fp32 512-wide k tile route serves ``main_halves_acc`` on sm_100a / sm_103a / sm_107a,
-    ``main_wave_halves_acc`` on sm_100a / sm_103a, ``main_halves_k256t_acc`` on sm_107a and
-    ``tail_reduce_acc`` on all three; the fp32 256-wide k tile route serves
+    ``main_wave_halves_acc`` and ``main_halves_queue_acc`` on sm_100a / sm_103a,
+    ``main_halves_k256t_acc`` on sm_107a and ``tail_reduce_acc`` on all three; the fp32
+    256-wide k tile route serves
     ``tail_reduce_acc`` (the k256 tail's split tail); the bf16 routes serve none (a bf16
     ``out`` composes).  A render that lost or added an accumulate stage fails here."""
     assert _acc_bindings() == _shipped_bindings()
@@ -709,6 +776,72 @@ def test_k256_tile_and_forced_forms_compose(arch, sm_count, monkeypatch):
                     )
                     seen.append(want[1])
     assert {"tile_k", "stage"} <= set(seen), seen
+
+
+# Architectures and SM counts of the queue walk's host check: the parts of the shipped
+# ``queue_walk`` rules (B200 148, GB300 152), others of the same architectures, and R200.
+QUEUE_ARCH_SM_COUNTS = [
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_100a", 160),
+    ("sm_103a", 152),
+    ("sm_103a", 160),
+    ("sm_107a", 212),
+]
+
+
+@pytest.mark.parametrize("arch,sm_count", QUEUE_ARCH_SM_COUNTS)
+def test_queue_walk_binds_where_its_rules_name_the_call(arch, sm_count, monkeypatch):
+    """With the shipped ``queue_walk`` rules, on the owner rows and projections and at 2 and
+    64 groups, for an fp32 and a bf16 ``out``: a weight gradient binds the queue walk
+    exactly where ``wgrad_queue_walk`` names the stage the call selects with no rule, its
+    output and its group count and the route serves the queue stage -- the overwrite
+    (output its dtype) and a composed accumulate (the overwrite's programs) in place of the
+    selected stage, a fused accumulate (``"accumulate"``) in place of its accumulate
+    stage.  The plan and every later stage are those of the call with no rule."""
+    _fake_device(monkeypatch, arch, sm_count, checks=False)
+    meta = torch.device("meta")
+    c = HOST_PLAN_CONSTANTS
+    rules = c["queue_walk"]
+    seen = set()
+    rows = [*OWNER_ROWS, *((f"e{e}", _balanced(base.EXPERT_ROWS, e)) for e in (2, 64))]
+    for label, sizes in rows:
+        for proj, n, k in base.BENCH_PROJ:
+            for out_dtype in (torch.float32, torch.bfloat16):
+                what = (label, proj, out_dtype)
+                g, x, offs, out = _operands(sizes, n, k, out_dtype, meta)
+                with monkeypatch.context() as mp:
+                    mp.setitem(c, "queue_walk", [])
+                    plain_ovw, plain_acc = _prepare_pair(g, x, offs, out)
+                ovw, acc = _prepare_pair(g, x, offs, out)
+                selected, e = plain_ovw.stages[0], len(sizes)
+                name = plain_ovw.record_name
+                fused = plain_acc.plan["accumulate"] == "fused"
+                for launch, plain, output, suffix in (
+                    (ovw, plain_ovw, DTYPE_NAMES[out_dtype], ""),
+                    (
+                        acc,
+                        plain_acc,
+                        "accumulate" if fused else DTYPE_NAMES[out_dtype],
+                        ACC if fused else "",
+                    ),
+                ):
+                    queue_stage = cb.QUEUE_STAGE + suffix
+                    want = cb.wgrad_queue_walk(
+                        selected, output, arch, sm_count, e, c
+                    ) and cake_jit.stage_served(name, queue_stage, arch)
+                    assert launch.plan == plain.plan, what
+                    assert launch.stages[1:] == plain.stages[1:], what
+                    assert launch.stages[0] == (
+                        queue_stage if want else plain.stages[0]
+                    ), (what, launch.stages)
+                    if want:
+                        seen.add((output, selected))
+    rule_sms = {int(v) for rule in rules if rule["arch"] == arch for v in rule["sm_counts"]}
+    if sm_count in rule_sms:
+        assert seen, (arch, sm_count)
+    else:
+        assert not seen, (arch, sm_count, seen)
 
 
 def _record_bound_routes(monkeypatch):
