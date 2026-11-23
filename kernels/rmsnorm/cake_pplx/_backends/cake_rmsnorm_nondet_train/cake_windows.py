@@ -250,7 +250,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (8, 1024, "cake_rmsnorm_train_744d74299c2d45867c94"),
             (1024, 2048, "cake_rmsnorm_train_561bea88a25c2f245c29"),
             (2048, 4096, "cake_rmsnorm_train_1a45ade5011422a0d019"),
-            (4096, 12288, "cake_rmsnorm_train_aa1d3e29ef1b72a71d51"),
+            (4096, 12288, "cake_rmsnorm_train_1a45ade5011422a0d019"),
             (12288, 32768, "cake_rmsnorm_train_1a45ade5011422a0d019"),
             (32768, None, "cake_rmsnorm_train_2980f513dd6581ec98e7"),
         ),
@@ -610,9 +610,9 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (4, 8, "cake_rmsnorm_train_8501e95ea685c476cb50"),
             (8, 1024, "cake_rmsnorm_train_744d74299c2d45867c94"),
             (1024, 1536, "cake_rmsnorm_train_ba8feeec37d2bdde1fca"),
-            (1536, 2048, "cake_rmsnorm_train_aa1d3e29ef1b72a71d51"),
+            (1536, 2048, "cake_rmsnorm_train_1a45ade5011422a0d019"),
             (2048, 4096, "cake_rmsnorm_train_1a45ade5011422a0d019"),
-            (4096, 12288, "cake_rmsnorm_train_aa1d3e29ef1b72a71d51"),
+            (4096, 12288, "cake_rmsnorm_train_1a45ade5011422a0d019"),
             (12288, 32768, "cake_rmsnorm_train_1a45ade5011422a0d019"),
             (32768, None, "cake_rmsnorm_train_2980f513dd6581ec98e7"),
         ),
@@ -3613,7 +3613,7 @@ Beside those, leave some SMs free of the resident kernel.
   (32768, inf) cfc0c892
 * ``sm_100a`` ``bwd_w32_h1024``: (0, 4] 81e742d5 (one cluster) ?
   (4, 8] 8501e95e (one cluster) ? (8, 1024] 744d7429 ? (1024, 2048] 561bea88 (det pair)
-  ? (2048, 4096] 1a45ade5 ? (4096, 12288] aa1d3e29 ? (12288, 32768] 1a45ade5 ?
+  ? (2048, 4096] 1a45ade5 ? (4096, 12288] 1a45ade5 ? (12288, 32768] 1a45ade5 ?
   (32768, inf) 2980f513
 * ``sm_100a`` ``bwd_h1280``: (0, 1] 8895b022 ? (1, 128] a5f2942d ? (128, 512] 809235a3 ?
   (512, 4096] 12bbedff (det pair) ? (4096, 8192] c646e097 (det pair) ?
@@ -3691,7 +3691,7 @@ Beside those, leave some SMs free of the resident kernel.
   (1536, 2048] 33d90259 ? (2048, 32768] af798d10 ? (32768, inf) cfc0c892
 * ``sm_103a`` ``bwd_w32_h1024``: (0, 4] 81e742d5 (one cluster) ?
   (4, 8] 8501e95e (one cluster) ? (8, 1024] 744d7429 ? (1024, 1536] ba8feeec (det pair)
-  ? (1536, 2048] aa1d3e29 ? (2048, 4096] 1a45ade5 ? (4096, 12288] aa1d3e29 ?
+  ? (1536, 2048] 1a45ade5 ? (2048, 4096] 1a45ade5 ? (4096, 12288] 1a45ade5 ?
   (12288, 32768] 1a45ade5 ? (32768, inf) 2980f513
 * ``sm_103a`` ``bwd_h1280``: (0, 1] 8895b022 ? (1, 128] a5f2942d ? (128, 512] 809235a3 ?
   (512, 2048] 12bbedff (det pair) ? (2048, inf) b2cf87e6
