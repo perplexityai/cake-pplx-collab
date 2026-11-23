@@ -393,13 +393,14 @@ keyword.
   host work after it (measured on GB300, cross-entropy, chunk 4096: the
   forward behind queued work 228 to 345 us faster at `T` = 32 to 1024, the
   `T` = 1024 forward + backward step 3534.9 -> 3396.6 us in CUPTI span; a
-  `T` = 8 step measured slower, so smaller calls keep the host count).  B200
-  and R200 keep the host count at every `T`: there the retained backward and
-  the checkpointed step measured slower with the hidden count, whose device
-  prologue runs again in their recomputation.  The log-probability entries
-  keep the previous rule.  The prepared runner (`prepare_lm_head_det_loss`)
-  is unchanged.  The chunk buffers and the gather buffer exist at the buffer
-  extent before the count is known (`memory_report(..., hidden_count=True)`;
+  `T` = 8 step measured slower, so smaller calls keep the host count).  On
+  B200 and R200 these one-chunk calls keep the host count: there the retained
+  backward and the checkpointed step measured slower with the hidden count,
+  whose device prologue runs again in their recomputation.  The
+  log-probability entries keep the previous rule.  The prepared runner
+  (`prepare_lm_head_det_loss`) is unchanged.  The chunk buffers and the gather
+  buffer exist at the buffer extent before the count is known
+  (`memory_report(..., hidden_count=True)`;
   `cake_backend.hidden_count_eligible` / `_hidden_count_begin`).
 * Log-probability logits GEMM arms (`logprob_dz` / `logprob_lbl`, keywords of
   the log-probability entry points, default `True`; `False` restores the

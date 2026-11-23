@@ -296,9 +296,9 @@ HIDDEN_COUNT_MIN_CHUNKS = 3
 # it.  Measured on GB300 (cross-entropy loss entry, chunk 4096, H 6144, V 154880, 5 % ignored rows; CUPTI span of one
 # call, and the same call queued behind a 2 ms kernel; medians, us): the queued forward at T = 32 / 1024 941.9 -> 664.4
 # / 2439.6 -> 2159.8, the T = 1024 forward + backward step 3534.9 -> 3396.6; below 32 rows a step with a cleared binding
-# cache measured slower (T = 8: 1980.0 -> 2087.9), so smaller calls keep the host count.  B200 and R200 keep the host
-# count at every T: there the call's retained backward and its checkpointed step measured slower with the hidden count
-# (its device prologue runs again in the backward's and in the checkpoint's recomputation; checkpointed step at
+# cache measured slower (T = 8: 1980.0 -> 2087.9), so smaller calls keep the host count.  On B200 and R200 these calls
+# keep the host count: there the call's retained backward and its checkpointed step measured slower with the hidden
+# count (its device prologue runs again in the backward's and in the checkpoint's recomputation; checkpointed step at
 # T = 128 on B200 2240.5 -> 2411.5, at T = 32 on R200 1466.5 -> 1576.2).  The upper bound is at most
 # :data:`HOST_COUNT_MAX_ROWS` and lies below every architecture's zero-gradient row floor
 # (:data:`ZERO_DLOGP_MIN_ROWS_BY_ARCH`).  Bitwise the same outputs (:func:`hidden_count_default`).
