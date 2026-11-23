@@ -17328,8 +17328,9 @@ _ONE_SLICE = {"dx": {"k_slices": 1}}
 
 def test_small_call_switches_validate_and_restore():
     """The small-call switches return their previous values, reject bad values, and default to the shipped values
-    (256 rows, the small-call kept logits on, padding to 16 rows -- 256 rows for the log-probability and the loss
-    entries on sm_107a; a device-free call reads the 16-row default); a padding row count set with
+    (256 rows, the small-call kept logits on, padding to 16 rows -- 256 rows for the log-probability entries and the
+    loss entry's calls of at most 128 rows on sm_107a; a device-free call reads the 16-row default); a padding row
+    count set with
     :func:`set_small_pad_rows` applies to every entry until ``None`` restores the defaults."""
     meta = torch.device("meta")
     assert (
@@ -17346,6 +17347,7 @@ def test_small_call_switches_validate_and_restore():
     assert cake_backend.small_pad_rows("logprob", meta) == 16
     assert cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH == {"sm_107a": 256}
     assert cake_backend.SMALL_PAD_ROWS_LOSS_BY_ARCH == {"sm_107a": 256}
+    assert cake_backend.SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH == {"sm_107a": 128}
     for bad in (-1, 1.5, True):
         with pytest.raises(ValueError):
             cake_backend.set_uncompacted_max_rows(bad)
@@ -17474,6 +17476,8 @@ def test_small_call_rule_is_host_only(monkeypatch):
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 16
         monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_107a")
         assert rule(X(1), lab(1), "cake", 4096, None) == 256
+        assert rule(X(128), lab(128), "cake", 4096, None) == 256
+        assert rule(X(129), lab(129), "cake", 4096, None) == 129
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 256
         assert rule(X(255), lab(255), "cake", 4096, None, logprob=True) == 256
         assert rule(X(16), lab(16), "cake", 4096, None, logprob=True) == 256
@@ -17488,12 +17492,12 @@ def test_small_call_rule_is_host_only(monkeypatch):
 
 
 def test_small_call_loss_pad_rows_by_arch(monkeypatch):
-    """The loss entry's small-call padding follows the device architecture (:data:`SMALL_PAD_ROWS_LOSS_BY_ARCH`):
-    256 rows on sm_107a, 16 on sm_100a and sm_103a, the log-probability entries' rows unchanged and a forced count
-    winning everywhere; on sm_107a a loss call of ``T < 256`` rows stages 256 rows, one of 256 rows its own, a call
-    whose chunk or ``uncompacted_max_rows`` is below 256 its own rows, and a policy call 256 rows below the
-    zero-weight floor and its own rows when the floor is at most 256 (meta tensors and attribute stand-ins; the
-    architecture is mocked)."""
+    """The loss entry's small-call padding follows the device architecture (:data:`SMALL_PAD_ROWS_LOSS_BY_ARCH`,
+    :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH`): 256 rows on sm_107a for a call of at most 128 rows, 16 above it and on
+    sm_100a and sm_103a, the log-probability entries' rows unchanged and a forced count winning everywhere; on sm_107a
+    a loss call of ``T <= 128`` rows stages 256 rows, one of 129 to 256 rows its own, a call whose chunk or
+    ``uncompacted_max_rows`` is below 256 its own rows, and a policy call 256 rows below the zero-weight floor and its
+    own rows when the floor is at most 256 (meta tensors and attribute stand-ins; the architecture is mocked)."""
     meta = torch.device("meta")
 
     def X(T):
@@ -17519,15 +17523,23 @@ def test_small_call_loss_pad_rows_by_arch(monkeypatch):
         ):
             monkeypatch.setattr(cake_backend, "arch_for", lambda device=None, a=arch: a)
             assert cake_backend.small_pad_rows("loss", meta) == loss, arch
+            assert cake_backend.small_pad_rows("loss", meta, 128) == loss, arch
+            assert cake_backend.small_pad_rows("loss", meta, 129) == default, arch
             assert cake_backend.small_pad_rows("logprob", meta) == logprob, arch
+            assert cake_backend.small_pad_rows("logprob", meta, 255) == logprob, arch
             assert loss_rows.get(arch, default) == loss
             assert logprob_rows.get(arch, default) == logprob
             with _small_pad_rows(32):
                 assert cake_backend.small_pad_rows("loss", meta) == 32, arch
+                assert cake_backend.small_pad_rows("loss", meta, 129) == 32, arch
                 assert cake_backend.small_pad_rows("logprob", meta) == 32, arch
         monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_107a")
-        for T in (1, 2, 16, 31, 32, 128, 255):
+        for T in (1, 2, 16, 31, 32, 127, 128):
             assert rule(X(T), lab(T), "cake", 4096, None) == 256, T
+            assert rule(X(T), lab(T), "cake", 4096, None, logprob=True) == 256, T
+        for T in (129, 192, 255):
+            assert rule(X(T), lab(T), "cake", 4096, None) == T, T
+            assert rule(X(T), lab(T), "cake", 4096, None, logprob=True) == 256, T
         assert rule(X(256), lab(256), "cake", 4096, None) == 256
         assert rule(X(257), lab(257), "cake", 4096, None) == 0
         assert rule(X(1), lab(1), "cake", 128, None) == 1

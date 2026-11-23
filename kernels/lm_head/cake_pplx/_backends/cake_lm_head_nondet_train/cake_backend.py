@@ -392,9 +392,11 @@ _SMALL_T_KEEP = {"on": True}
 # on R200 (sm_107a) a log-probability call of 256 rows runs below one of 16 to 64 rows (with this padding, CUDA events,
 # median of the timed rounds per arm, R200 nodes, ms at 16 / 64 / 128 / 192 / 256 rows: T = 1 log-probability forward
 # 0.352 / 0.359 / 0.366 / 0.252 / 0.223, forward + backward 0.856 / 0.863 / 0.836 / 0.687 / 0.676; T = 1 temperature
-# forward + backward 1.234 / 1.262 / 1.225 / 0.997 / 1.009), and so does a loss step (one R200 GPU, CUPTI span,
-# 256 vs 16 rows: T = 16 forward + backward 962.5 -> 771.6 us, T = 32 1023.7 -> 769.9 us; the forward 1.46-1.59x
-# faster, while the backward alone grows with the rows, 0.87-0.90x, +34 to +48 us: its weight-gradient GEMM reads 256
+# forward + backward 1.234 / 1.262 / 1.225 / 0.997 / 1.009), and so does a loss step of at most
+# :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH` rows (one R200 GPU, CUPTI span, 256 vs 16 rows: T = 16 forward + backward
+# 962.5 -> 771.6 us, T = 32 1023.7 -> 769.9 us; the forward 1.46-1.59x faster, while the backward alone grows with the
+# rows, 0.87-0.90x, +34 to +48 us: its weight-gradient GEMM reads 256 rows; 256 vs ``T`` rows: T = 128 877.5 -> 715.5
+# us, while at T = 192 the checkpointed step measured slower, 1073.4 -> 1124.2 us, so longer loss calls keep their
 # rows); B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability forward + backward 1.095 -> 1.213).  The loss
 # entry's ``loss`` and ``dW`` group their sums over the staged rows, so a padded loss call's bits may differ from the
 # call at 16 rows (both are judged against the naive tier).  :func:`set_small_pad_rows` replaces the defaults with one
@@ -408,6 +410,8 @@ _SMALL_T_KEEP = {"on": True}
 SMALL_PAD_ROWS_DEFAULT = 16
 SMALL_PAD_ROWS_LOGPROB_BY_ARCH: dict[str, int] = {"sm_107a": 256}
 SMALL_PAD_ROWS_LOSS_BY_ARCH: dict[str, int] = {"sm_107a": 256}
+# a loss call of more rows than this keeps :data:`SMALL_PAD_ROWS_DEFAULT` on that architecture
+SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH: dict[str, int] = {"sm_107a": 128}
 # None: the per-entry / per-architecture defaults of small_pad_rows()
 _SMALL_PAD_ROWS: dict[str, Optional[int]] = {"rows": None}
 SUPPORTED_ABIS = (ABI_CONTRACT,)
@@ -3625,12 +3629,16 @@ def set_small_t_keep(on: bool) -> bool:
     return previous
 
 
-def small_pad_rows(entry: str = "loss", device: Optional[torch.device] = None) -> int:
+def small_pad_rows(
+    entry: str = "loss",
+    device: Optional[torch.device] = None,
+    rows: Optional[int] = None,
+) -> int:
     """Rows a small call of ``entry`` (``"loss"``, or ``"logprob"`` for the log-probability entries, plain and with a
     temperature) on ``device`` (default: the current CUDA device) is padded to: the value of :func:`set_small_pad_rows`
     when one is set, else :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` for a log-probability call and
-    :data:`SMALL_PAD_ROWS_LOSS_BY_ARCH` for a loss call on a listed architecture, else :data:`SMALL_PAD_ROWS_DEFAULT`
-    (0 = no padding)."""
+    :data:`SMALL_PAD_ROWS_LOSS_BY_ARCH` for a loss call on a listed architecture -- a loss call of ``rows`` rows above
+    :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH` excepted --, else :data:`SMALL_PAD_ROWS_DEFAULT` (0 = no padding)."""
     if entry not in ("loss", "logprob"):
         raise ValueError(
             f"small_pad_rows entry must be 'loss' or 'logprob', got {entry!r}"
@@ -3639,14 +3647,14 @@ def small_pad_rows(entry: str = "loss", device: Optional[torch.device] = None) -
     if forced is not None:
         return forced
     arch = arch_for(device)
-    if arch is not None:
-        table = (
-            SMALL_PAD_ROWS_LOGPROB_BY_ARCH
-            if entry == "logprob"
-            else SMALL_PAD_ROWS_LOSS_BY_ARCH
-        )
-        return table.get(arch, SMALL_PAD_ROWS_DEFAULT)
-    return SMALL_PAD_ROWS_DEFAULT
+    if arch is None:
+        return SMALL_PAD_ROWS_DEFAULT
+    if entry == "logprob":
+        return SMALL_PAD_ROWS_LOGPROB_BY_ARCH.get(arch, SMALL_PAD_ROWS_DEFAULT)
+    top = SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH.get(arch)
+    if rows is not None and top is not None and int(rows) > top:
+        return SMALL_PAD_ROWS_DEFAULT
+    return SMALL_PAD_ROWS_LOSS_BY_ARCH.get(arch, SMALL_PAD_ROWS_DEFAULT)
 
 
 def set_small_pad_rows(rows: Optional[int]) -> Optional[int]:
@@ -3714,7 +3722,7 @@ def _small_call_rows(
     floor = zero_weight_min_rows() if objective == "policy" else None
     if floor is not None and floor <= T:
         return 0
-    pad = small_pad_rows("logprob" if logprob else "loss", X.device)
+    pad = small_pad_rows("logprob" if logprob else "loss", X.device, T)
     if T < pad <= limit and (floor is None or pad < floor):
         return pad
     return T
