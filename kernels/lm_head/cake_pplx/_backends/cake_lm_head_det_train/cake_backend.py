@@ -289,6 +289,18 @@ ABI_CONTRACT = "lm_head_loss_v1"
 # plan on the count after the readback, the launches it orders) is hidden behind chunk 0's logits GEMM only from there; one- and
 # two-chunk calls measured 5-16 % slower with it than on the host-count path (same kernels, bitwise the same outputs).
 HIDDEN_COUNT_MIN_CHUNKS = 3
+# The loss entry's one-chunk calls of this many rows (``HIDDEN_COUNT_LOSS_MIN_ROWS <= T <= min(chunk,
+# HIDDEN_COUNT_LOSS_MAX_ROWS)``) take the hidden valid-row count too (:func:`hidden_count_chunks_admit`; not a call with
+# the zero-weight split, not the log-probability entries): at these rows chunk 0's logits GEMM runs on ``T`` rows, the
+# host plans behind the queued GEMM and the GPU no longer idles for the host count's readback and the host work after
+# it.  Measured on B200 (cross-entropy loss entry, chunk 4096, H 6144, V 154880, 5 % ignored rows, forward + backward
+# of one call; CUPTI span from its first kernel, and the same call queued behind a 2 ms kernel): T = 32 / 64 / 128 / 256
+# / 1024 span 1380.0 -> 1355.1 / 1373.5 -> 1359.7 / 1397.2 -> 1386.4 / 1547.4 -> 1484.2 / 4040.0 -> 3958.7 us, queued
+# 161-181 us faster; T = 1 / 16 span +12.2 / +1.9 us, so smaller calls keep the host count.  The upper bound
+# is :data:`HOST_COUNT_MAX_ROWS` and lies below every architecture's zero-gradient row floor
+# (:data:`ZERO_DLOGP_MIN_ROWS_BY_ARCH`).  Bitwise the same outputs (:func:`hidden_count_default`).
+HIDDEN_COUNT_LOSS_MIN_ROWS = 32
+HIDDEN_COUNT_LOSS_MAX_ROWS = 1024
 # Calls of at most this many rows form the valid-row count and index of the host-count path on the host
 # (:func:`valid_rows`): the bool mask ``labels >= 0`` comes back in one copy of ``T`` bytes -- the call's one
 # synchronization -- and the index goes back in one copy, instead of ``nonzero``'s count, scan and select kernels and
@@ -2173,6 +2185,21 @@ class _HiddenCount(_TemperatureCountState):
         return None if count == self.num_rows else self.idx_full[:count]
 
 
+def hidden_count_chunks_admit(
+    rows: int, chunk: int, *, loss_call: bool = False
+) -> bool:
+    """The chunk rule of the hidden valid-row count: a call of :data:`HIDDEN_COUNT_MIN_CHUNKS` chunks or more, or --
+    ``loss_call``, a call of the loss entry without the zero-weight split -- a one-chunk call of
+    :data:`HIDDEN_COUNT_LOSS_MIN_ROWS` to :data:`HIDDEN_COUNT_LOSS_MAX_ROWS` rows."""
+    rows, chunk = int(rows), int(chunk)
+    if rows <= 0:
+        return False
+    if (rows + chunk - 1) // chunk >= HIDDEN_COUNT_MIN_CHUNKS:
+        return True
+    top = min(chunk, HIDDEN_COUNT_LOSS_MAX_ROWS)
+    return bool(loss_call) and HIDDEN_COUNT_LOSS_MIN_ROWS <= rows <= top
+
+
 def hidden_count_eligible(
     problem: "Problem",
     X: torch.Tensor,
@@ -2180,12 +2207,15 @@ def hidden_count_eligible(
     module_name: Optional[str],
     *,
     stats: bool,
+    loss_call: bool = False,
 ) -> bool:
     """Whether a compacted call runs the hidden valid-row count: a registered program with the gather kernel and the
     device-count form of chunk 0's logits GEMM (its raster height at the buffer extent ``min(chunk, T)`` is a launch
     scalar), a call of
     :data:`HIDDEN_COUNT_MIN_CHUNKS` chunks or more (``ceil(T / chunk) >= 3``: one- and two-chunk calls cannot hide the
-    path's fixed host cost behind chunk 0's logits GEMM and run 5-16 % slower with it), an ``X`` the GEMM reads in
+    path's fixed host cost behind chunk 0's logits GEMM and run 5-16 % slower with it) or, ``loss_call`` (the loss
+    entry without the zero-weight split), a one-chunk call of :data:`HIDDEN_COUNT_LOSS_MIN_ROWS` to
+    :data:`HIDDEN_COUNT_LOSS_MAX_ROWS` rows (:func:`hidden_count_chunks_admit`), an ``X`` the GEMM reads in
     place -- a 16-byte row pitch (no contiguous copy) and a 16-byte-aligned base -- and a toolchain whose code for the
     record's architecture runs the hidden count's schedule (:func:`cake_jit.toolchain_runs_hidden_count`: not nvcc
     13.0.x for sm_103a).  Every other call takes the shipped :func:`valid_rows` path."""
@@ -2194,7 +2224,7 @@ def hidden_count_eligible(
         record is None
         or module_name is None
         or rows <= 0
-        or (rows + chunk - 1) // chunk < HIDDEN_COUNT_MIN_CHUNKS
+        or not hidden_count_chunks_admit(rows, chunk, loss_call=loss_call)
         or problem.x_copy
         or X.data_ptr() % 16
     ):
@@ -9908,17 +9938,21 @@ def _hidden_count(
     stats: bool,
     hidden_count: bool,
     loss_weights: Optional[torch.Tensor] = None,
+    loss_call: bool = False,
 ) -> Optional[_HiddenCount]:
     """The hidden valid-row count prologue of a compacted ``cake`` call when the switch (``hidden_count``, resolved by
     the caller) is on and the call is eligible (:func:`hidden_count_eligible`); ``None`` = the shipped
-    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`gradient_index`)."""
+    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`gradient_index`).  ``loss_call``: a call of
+    the loss entry without the zero-weight split (:func:`hidden_count_chunks_admit`)."""
     if not (compact and backend == "cake" and hidden_count):
         return None
     rows, chunk = int(problem.num_rows), int(problem.chunk)
-    if rows <= 0 or (rows + chunk - 1) // chunk < HIDDEN_COUNT_MIN_CHUNKS:
+    if not hidden_count_chunks_admit(rows, chunk, loss_call=loss_call):
         return None  # the chunk rule of :func:`hidden_count_eligible`, ahead of the record lookup
     module_name, record = record_for(X.device)
-    if not hidden_count_eligible(problem, X, record, module_name, stats=stats):
+    if not hidden_count_eligible(
+        problem, X, record, module_name, stats=stats, loss_call=loss_call
+    ):
         return None
     return _hidden_count_begin(
         problem,
@@ -10080,6 +10114,7 @@ def forward_loss(
         stats=True,
         hidden_count=_resolve_hidden_count(hidden_count),
         loss_weights=loss_weights if split else None,
+        loss_call=not split,
     )
     zero_index = None
     if hc is not None:

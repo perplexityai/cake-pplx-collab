@@ -4862,17 +4862,21 @@ def _hidden_count_program(
     compact: bool,
     stats: bool,
     hidden_count: bool,
+    loss_call: bool = False,
 ) -> Optional[tuple[str, dict[str, Any]]]:
     """``(module_name, record)`` of a call that runs the hidden valid-row count (:func:`_hidden_count`'s rules: a
     compacted ``cake`` call with the switch on that :func:`hidden_count_eligible` admits), else ``None``.  Host checks
-    only: nothing is allocated or queued."""
+    only: nothing is allocated or queued.  ``loss_call``: a call of the loss entry without the zero-weight split
+    (:func:`.cake_backend.hidden_count_chunks_admit`)."""
     if not (compact and backend == "cake" and hidden_count):
         return None
     rows, chunk = int(problem.num_rows), int(problem.chunk)
-    if rows <= 0 or (rows + chunk - 1) // chunk < HIDDEN_COUNT_MIN_CHUNKS:
+    if not _main.hidden_count_chunks_admit(rows, chunk, loss_call=loss_call):
         return None  # the chunk rule of :func:`hidden_count_eligible`, ahead of the record lookup
     module_name, record = record_for(X.device)
-    if not hidden_count_eligible(problem, X, record, module_name, stats=stats):
+    if not hidden_count_eligible(
+        problem, X, record, module_name, stats=stats, loss_call=loss_call
+    ):
         return None
     return module_name, record
 
@@ -4888,10 +4892,12 @@ def _hidden_count(
     stats: bool,
     hidden_count: bool,
     loss_weights: Optional[torch.Tensor] = None,
+    loss_call: bool = False,
 ) -> Optional[_HiddenCount]:
     """The hidden valid-row count prologue of a compacted ``cake`` call when the switch (``hidden_count``, resolved by
     the caller) is on and the call is eligible (:func:`hidden_count_eligible`); ``None`` = the shipped
-    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`.cake_backend.gradient_index`)."""
+    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`.cake_backend.gradient_index`).
+    ``loss_call``: a call of the loss entry without the zero-weight split (:func:`_hidden_count_program`)."""
     program = _hidden_count_program(
         problem,
         X,
@@ -4899,6 +4905,7 @@ def _hidden_count(
         compact=compact,
         stats=stats,
         hidden_count=hidden_count,
+        loss_call=loss_call,
     )
     if program is None:
         return None
@@ -5149,6 +5156,7 @@ def forward_loss(
             stats=True,
             hidden_count=count,
             loss_weights=loss_weights if split else None,
+            loss_call=not split,
         )
         if hc is not None:
             # the hidden valid-row count: chunk 0's gather and logits GEMM are queued; the count arrives through the
