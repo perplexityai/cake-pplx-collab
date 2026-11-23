@@ -705,33 +705,33 @@ across communication-SM splits and under CUDA Graph replay.
   there): B300 (148 SMs) EP8. No row elsewhere (other devices and group sizes
   were not measured).
 
-  Table: this package against the previous version 0.2.4 (main, the split
-  absent), each device at its shipped setting: the split on at its row, off on a
-  device without a row; one node per device, both versions loading GPU programs
-  with the same SASS except the two forward kernels of the router weight before
-  the down projection (compared per program before timing), BF16 routed experts,
-  H 5120 / I 2304, 384 experts, top 6, clamped SwiGLU, FP32 accumulators; one
-  process per version and configuration, this package with the split on and with
-  it off and a second process of the previous version interleaved over six
-  rounds (B300 ragged 4k: twelve) with the order reversed in every second round,
-  eager (CUDA Graph where stated), no CPU binding; the slowest rank's median of
-  timed repetitions 1-20 after 3 warm-up repetitions, median over the rounds;
-  the table prints those medians and change = printed package ms / printed main
-  ms - 1; band = the largest of the deviation of the identical-version pair, its
-  round-interval half width and the round spreads of both versions; 'faster' =
-  the median of the per-round ratios below 1 minus the band, every round's ratio
-  below 1 and the 95 % interval of the GPU-paired ratio below 1; 'slower' = the
-  same above 1; 'noise' = the median ratio inside the band; 'unresolved' =
-  beyond the band without the other two conditions; steady = the change of the
-  medians of timed repetitions 41-60 of 60. Forward = schedule and forward
-  without context; forward with context = the forward that saves the context, on
-  a schedule built before the timed repetitions; checkpointed step = schedule,
-  forward, context recompute and backward. Source rows per rank of the ragged
-  configurations: EP8 16k 21,419 / 14,428 / 16,181 / 11,502 / 10,086 / 21,331 /
-  9,762 / 0; EP8 4k 2,987 / 4,188 / 5,941 / 5,358 / 3,942 / 2,899 / 3,618 / 0;
-  EP4 16k 21,419 / 14,428 / 16,181 / 0; EP4 4k 2,987 / 4,188 / 5,941 / 0. Every
-  eager configuration gives the same bits at 0.2.4, with the split on and with
-  it off, and every line repeats its outputs bitwise.
+  Table: this package against version 0.2.4 (the split absent; measured before
+  0.2.5 merged), each device at its shipped setting: the split on at its row,
+  off on a device without a row; one node per device, both versions loading GPU
+  programs with the same SASS except the two forward kernels of the router
+  weight before the down projection (compared per program before timing), BF16
+  routed experts, H 5120 / I 2304, 384 experts, top 6, clamped SwiGLU, FP32
+  accumulators; one process per version and configuration, this package with the
+  split on and with it off and a second process of the previous version
+  interleaved over six rounds (B300 ragged 4k: twelve) with the order reversed
+  in every second round, eager (CUDA Graph where stated), no CPU binding; the
+  slowest rank's median of timed repetitions 1-20 after 3 warm-up repetitions,
+  median over the rounds; the table prints those medians and change = printed
+  package ms / printed 0.2.4 ms - 1; band = the largest of the deviation of the
+  identical-version pair, its round-interval half width and the round spreads of
+  both versions; 'faster' = the median of the per-round ratios below 1 minus the
+  band, every round's ratio below 1 and the 95 % interval of the GPU-paired
+  ratio below 1; 'slower' = the same above 1; 'noise' = the median ratio inside
+  the band; 'unresolved' = beyond the band without the other two conditions;
+  steady = the change of the medians of timed repetitions 41-60 of 60. Forward =
+  schedule and forward without context; forward with context = the forward that
+  saves the context, on a schedule built before the timed repetitions;
+  checkpointed step = schedule, forward, context recompute and backward. Source
+  rows per rank of the ragged configurations: EP8 16k 21,419 / 14,428 / 16,181 /
+  11,502 / 10,086 / 21,331 / 9,762 / 0; EP8 4k 2,987 / 4,188 / 5,941 / 5,358 /
+  3,942 / 2,899 / 3,618 / 0; EP4 16k 21,419 / 14,428 / 16,181 / 0; EP4 4k 2,987
+  / 4,188 / 5,941 / 0. Every eager configuration gives the same bits at 0.2.4,
+  with the split on and with it off, and every line repeats its outputs bitwise.
 
   | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this arm (ms) | change | forward with context main (ms) | this arm (ms) | change | checkpointed step main (ms) | this arm (ms) | change |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -790,6 +790,13 @@ across communication-SM splits and under CUDA Graph replay.
   | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | uniform | 16,384 | 8.155 | 8.110 | -0.6 % (band 2.6 %, noise; steady +0.2 %) | 8.768 | 8.810 | +0.5 % (band 1.7 %, noise; steady +0.2 %) | 30.484 | 30.620 | +0.4 % (band 1.2 %, noise; steady +0.1 %) |
   | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | 1.5x hot rank | 16,384 | 10.685 | 10.736 | +0.5 % (band 1.5 %, noise; steady -0.1 %) | 11.211 | 11.220 | +0.1 % (band 1.2 %, noise; steady -0.0 %) | 39.717 | 39.697 | -0.1 % (band 1.9 %, noise; steady +0.3 %) |
   | GB200 | 4 | before down, 384 experts, top 6, split off (not shipped) | ragged | as listed (16k) | 7.521 | 7.459 | -0.8 % (band 3.3 %, noise; steady +1.0 %) | 8.118 | 8.045 | -0.9 % (band 3.5 %, noise; steady +0.7 %) | 27.740 | 27.807 | +0.2 % (band 1.7 %, noise; steady -0.2 %) |
+
+  After 0.2.5 (its fixed B300 BF16 EP8 split, forward / backward 24 / 40): this
+  package (the split off there, no row) against 0.2.5 on B300, same method and
+  configurations: record window 0 faster, 0 slower, 12 within noise of 12;
+  steady window 0 faster, 0 slower, 12 within noise of 12. With the split forced
+  on (not shipped): record window 0 faster, 0 slower, 14 within noise of 14;
+  steady window 0 faster, 0 slower, 14 within noise of 14.
 
 Optimizer steps, router-network backpropagation and shared-gradient
 all-reduce are outside this adapter.
