@@ -262,22 +262,18 @@ record; same grid, block and selection); ``collapse_forward_h5120`` is one
 record on sm_100a / sm_103a (``collapse_fwd__h5120``: own library stem, no
 workspace; the per-call PDL attribute on its own edge ``K4->C``, no band), and
 ``collapse_backward_h5120`` there is selected by the token count
-(``rows_between``).  On sm_100a it holds seven records:
+(``rows_between``).  On sm_100a it holds five records:
 ``collapse_bwd__vjpwa_sp4_mb4__h5120__le30`` up to 30 tokens,
 ``collapse_bwd__vjpwd_sp4_mb4__h5120`` from 31 to 37 tokens,
-``collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le53`` from 38 to 53 tokens,
-``collapse_bwd__vjpwd_sp4_mb4__h5120__gt53_le74`` from 54 to 74 tokens,
-``collapse_bwd__vjpwa_sp4_mb4__h5120__gt74_le215`` from 75 to 215 tokens
+``collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le215`` from 38 to 215 tokens
 (the ``_vjpwa_sp4_mb4`` and ``_vjpwd_sp4_mb4`` libraries, each band under
 its own record name and rule),
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` (the ``_vjpwa_sp2_mb4``
 library under its own record name and rule) from 216 to 1023 tokens and
 ``collapse_bwd__h5120`` (own library stem, no workspace) from 1024 tokens.
-On sm_103a it holds nine: ``collapse_bwd__vjpwa_sp4_mb4__h5120__le30`` up
+On sm_103a it holds seven: ``collapse_bwd__vjpwa_sp4_mb4__h5120__le30`` up
 to 30 tokens, ``collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38`` from 31 to
-38 tokens, ``collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le54`` from 39 to 54
-tokens, ``collapse_bwd__vjpwd_sp4_mb4__h5120__gt54_le77`` from 55 to 77
-tokens, ``collapse_bwd__vjpwa_sp4_mb4__h5120__gt77_le215`` from 78 to 215
+38 tokens, ``collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215`` from 39 to 215
 tokens, the ``_vjpwa_sp2_mb4`` library from 216 to 247 and from 320 to 1023
 tokens under the record names ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247``
 and ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, the
@@ -8660,7 +8656,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le53": {
+    "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le215": {
         "arches": [
             "sm_100a",
         ],
@@ -8706,12 +8702,12 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "collapse_bwd",
         "select_rule": {
             "above": 37,
-            "at_most": 53,
+            "at_most": 215,
             "kind": "rows_between",
         },
         "workspace_rule": None,
     },
-    "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le54": {
+    "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215": {
         "arches": [
             "sm_103a",
         ],
@@ -8757,108 +8753,6 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "collapse_bwd",
         "select_rule": {
             "above": 38,
-            "at_most": 54,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt74_le215": {
-        "arches": [
-            "sm_100a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "pre_in"],
-            ["buffer", "du"],
-            ["buffer", "dx"],
-            ["buffer", "dpre_in"],
-            ["parameter", "T"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "col_split": 4,
-            "grid_limit": 0,
-            "grid_per_sm": 0,
-            "kind": "rows_per_cta",
-            "rows_per_cta": 1,
-        },
-        "hidden": 5120,
-        "kernel": "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120",
-        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120",
-        "launch": {
-            "block": (256, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 20736,
-            "persistent_ctas_per_sm": 1,
-            "use_pdl": False,
-        },
-        "library": "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120",
-        "logical": {
-            "T": "rows",
-            "dpre_in": "dpre_in",
-            "du": "du",
-            "dx": "dx",
-            "pre_in": "pre_in",
-            "x": "x",
-        },
-        "role": "collapse_bwd",
-        "select_rule": {
-            "above": 74,
-            "at_most": 215,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt77_le215": {
-        "arches": [
-            "sm_103a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "pre_in"],
-            ["buffer", "du"],
-            ["buffer", "dx"],
-            ["buffer", "dpre_in"],
-            ["parameter", "T"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "col_split": 4,
-            "grid_limit": 0,
-            "grid_per_sm": 0,
-            "kind": "rows_per_cta",
-            "rows_per_cta": 1,
-        },
-        "hidden": 5120,
-        "kernel": "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120",
-        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120",
-        "launch": {
-            "block": (256, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 20736,
-            "persistent_ctas_per_sm": 1,
-            "use_pdl": False,
-        },
-        "library": "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120",
-        "logical": {
-            "T": "rows",
-            "dpre_in": "dpre_in",
-            "du": "du",
-            "dx": "dx",
-            "pre_in": "pre_in",
-            "x": "x",
-        },
-        "role": "collapse_bwd",
-        "select_rule": {
-            "above": 77,
             "at_most": 215,
             "kind": "rows_between",
         },
@@ -8962,108 +8856,6 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": {
             "above": 30,
             "at_most": 38,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120__gt53_le74": {
-        "arches": [
-            "sm_100a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "pre_in"],
-            ["buffer", "du"],
-            ["buffer", "dx"],
-            ["buffer", "dpre_in"],
-            ["parameter", "T"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "col_split": 4,
-            "grid_limit": 0,
-            "grid_per_sm": 0,
-            "kind": "rows_per_cta",
-            "rows_per_cta": 1,
-        },
-        "hidden": 5120,
-        "kernel": "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
-        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
-        "launch": {
-            "block": (256, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 256,
-            "persistent_ctas_per_sm": 1,
-            "use_pdl": False,
-        },
-        "library": "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
-        "logical": {
-            "T": "rows",
-            "dpre_in": "dpre_in",
-            "du": "du",
-            "dx": "dx",
-            "pre_in": "pre_in",
-            "x": "x",
-        },
-        "role": "collapse_bwd",
-        "select_rule": {
-            "above": 53,
-            "at_most": 74,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120__gt54_le77": {
-        "arches": [
-            "sm_103a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "pre_in"],
-            ["buffer", "du"],
-            ["buffer", "dx"],
-            ["buffer", "dpre_in"],
-            ["parameter", "T"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "col_split": 4,
-            "grid_limit": 0,
-            "grid_per_sm": 0,
-            "kind": "rows_per_cta",
-            "rows_per_cta": 1,
-        },
-        "hidden": 5120,
-        "kernel": "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
-        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
-        "launch": {
-            "block": (256, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 256,
-            "persistent_ctas_per_sm": 1,
-            "use_pdl": False,
-        },
-        "library": "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
-        "logical": {
-            "T": "rows",
-            "dpre_in": "dpre_in",
-            "du": "du",
-            "dx": "dx",
-            "pre_in": "pre_in",
-            "x": "x",
-        },
-        "role": "collapse_bwd",
-        "select_rule": {
-            "above": 54,
-            "at_most": 77,
             "kind": "rows_between",
         },
         "workspace_rule": None,
@@ -9963,9 +9755,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "collapse_backward_h5120": [
             "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__le30",
             "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
-            "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le53",
-            "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120__gt53_le74",
-            "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt74_le215",
+            "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le215",
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__le1023",
             "cake_mhc_train_collapse_bwd__h5120",
         ],
@@ -10146,9 +9936,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "collapse_backward_h5120": [
             "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__le30",
             "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38",
-            "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le54",
-            "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120__gt54_le77",
-            "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt77_le215",
+            "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215",
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__le247",
             "cake_mhc_train_collapse_bwd__h5120__le319",
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023",

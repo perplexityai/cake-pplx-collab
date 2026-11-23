@@ -97,8 +97,8 @@ T_ACCURACY = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 16384, 32768, 65536)
 # 2047 / 2048 and 6655 / 6656 both sides of each edge of its band of ``collapse_forward``; 215 / 216 and 1023 / 1024
 # both sides of each edge of sm_100a's and sm_103a's band of ``collapse_backward`` (768 inside its second record),
 # 247 / 248 and 319 / 320 both sides of the edges of sm_103a's ``collapse_bwd`` record from 248 to 319 tokens (both
-# inside sm_100a's second record); 30 / 31, 37 / 38, 38 / 39, 53 / 54, 54 / 55, 74 / 75 and 77 / 78 both sides of each
-# edge of the stage-free split VJP's bands (sm_100a 31 to 37 and 54 to 74 tokens, sm_103a 31 to 38 and 55 to 77).
+# inside sm_100a's second record); 30 / 31, 37 / 38 and 38 / 39 both sides of each edge of the stage-free split VJP's
+# band (sm_100a 31 to 37 tokens, sm_103a 31 to 38), 53 / 54, 54 / 55, 74 / 75 and 77 / 78 inside the next record.
 T_COLLAPSE = (
     1,
     7,
@@ -420,9 +420,9 @@ def test_every_collapse_backward_record_matches_fp64(T: int, record_property) ->
     """Where ``collapse_backward`` is a token-count band of records (sm_107a: ``collapse_bwd__vjpwa_sp4_mb4`` up to
     215 tokens, ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383, ``collapse_bwd__vjpwa`` from 384 to 640,
     ``collapse_bwd__vjpwa_pfq2`` from 641; sm_100a: the ``collapse_bwd__vjpwa_sp4_mb4`` library up to 215 tokens but
-    the stage-free ``collapse_bwd__vjpwd_sp4_mb4`` library from 31 to 37 and from 54 to 74, each band under its own
-    record, ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` from 216 to 1023, ``collapse_bwd`` from 1024; sm_103a: the
-    same but the stage-free library from 31 to 38 and from 55 to 77,
+    the stage-free ``collapse_bwd__vjpwd_sp4_mb4`` library from 31 to 37, each band under its own record,
+    ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` from 216 to 1023, ``collapse_bwd`` from 1024; sm_103a: the same but
+    the stage-free library from 31 to 38,
     ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` from 216 to 247, ``collapse_bwd__h5120__le319`` from 248 to 319 and
     ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023`` from 320 to 1023), every record of the
     route, launched on its own (the split records on their grid of 4 T / 2 T CTAs) into a NaN-filled ``dX`` and

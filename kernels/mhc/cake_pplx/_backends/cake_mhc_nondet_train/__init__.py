@@ -79,10 +79,9 @@ prefetch, from 384 to 640 tokens and ``collapse_bwd__vjpwa_pfq2`` from 641
 tokens; on SM100 / SM103 ``collapse_backward`` runs
 ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens (but
 ``collapse_bwd__vjpwd_sp4_mb4``, the same split VJP without the shared-memory
-stage, from 31 to 37 and from 54 to 74 tokens on SM100 and from 31 to 38 and
-from 55 to 77 tokens on SM103, each band under its own record name) and
-``collapse_bwd`` from 1024 tokens, and between them
-``collapse_bwd__vjpwa_sp2_mb4``: on SM100 from 216 to
+stage, from 31 to 37 tokens on SM100 and from 31 to 38 tokens on SM103, each
+band under its own record name) and ``collapse_bwd`` from 1024 tokens, and
+between them ``collapse_bwd__vjpwa_sp2_mb4``: on SM100 from 216 to
 1023 tokens under the record name ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``,
 on SM103 from 216 to 247 and from 320 to 1023 tokens under the record names
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
