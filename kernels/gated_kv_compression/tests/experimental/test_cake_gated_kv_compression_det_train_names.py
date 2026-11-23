@@ -291,7 +291,7 @@ UNFUSED = {
     "sm_107a": ("fwd_unfused_sm_107a", 64, "v8"),
 }
 # The unfused forward records on the capped grid (``rows_capped``); the others keep the ``rows`` grid.
-CAPPED_UNFUSED = ("fwd_unfused",)
+CAPPED_UNFUSED = ("fwd_unfused", "fwd_unfused_sm_103a")
 
 
 def test_the_forward_record_follows_the_architecture(monkeypatch):

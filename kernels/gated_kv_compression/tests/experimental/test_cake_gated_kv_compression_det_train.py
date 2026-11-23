@@ -207,9 +207,10 @@ BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": None}
 # What :func:`cake_jit.bwd_warp_region` reads on each architecture: ``(lo, hi, above)``.
 BWD_WARP_REGIONS = {arch: (*(BWD_WARP_RANGES[arch] or (None, None)), BWD_WARP_DOCS[arch]) for arch in ARCHES}
 # Record -> its capped grid (the rendered ``capped_min_docs``, ``capped_max_docs`` and ``ctas_per_sm``, what
-# :func:`cake_jit.capped_leaves` reads): a forward of 2048 to 1048577 documents on sm_100a runs the unfused forward on
-# at most 6 CTAs a multiprocessor; no other record has one (sm_103a and sm_107a keep the rows grid).
-CAPPED = {"fwd_unfused": (2048, 1048577, 6)}
+# :func:`cake_jit.capped_leaves` reads): a forward of 2048 to 1048577 documents on sm_100a and of 2048 to 16384 on
+# sm_103a runs the unfused forward on at most 6 CTAs a multiprocessor; no other record has one (sm_107a keeps the rows
+# grid).
+CAPPED = {"fwd_unfused": (2048, 1048577, 6), "fwd_unfused_sm_103a": (2048, 16384, 6)}
 # Multiprocessors of a B200 (sm_100a), a GB300 (sm_103a) and a VR200 (sm_107a), as the capped-grid tests stub them.
 SMS = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
 # Backward packs on either side of the documents bounds and of the forward's fused bound (``FUSE_DOCS``, 256).

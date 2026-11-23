@@ -134,13 +134,14 @@ multiprocessor count: the host never reads ``cu_seqlens`` or ``cu_pairs``.
 block: ``one_cta`` is ``(1, 1, 1)``; ``rows`` covers ``rows`` rows with
 ``block_x // lanes_per_row * rows_per_lane_group`` rows per CTA
 (``lanes_per_row`` threads share one 512-wide row, ``rows_per_lane_group``
-rows per group of them); ``rows_capped`` (the ``fwd_unfused`` record of
-``sm_100a``: 2048 to 1048577 documents, 6 CTAs a multiprocessor) is
+rows per group of them); ``rows_capped`` (the ``fwd_unfused`` records of
+``sm_100a``, 2048 to 1048577 documents, and of ``sm_103a``, 2048 to 16384,
+6 CTAs a multiprocessor each) is
 ``rows`` but for a launch of ``capped_min_docs <= S <= capped_max_docs``
 documents (:func:`capped_leaves`), whose grid is at most ``ctas_per_sm``
 CTAs a multiprocessor (:func:`sm_count`): its CTAs stride over the row
-blocks, so every grid writes the same bytes.  ``fwd_unfused_sm_103a`` and
-``fwd_unfused_sm_107a`` keep the ``rows`` grid.
+blocks, so every grid writes the same bytes.  ``fwd_unfused_sm_107a`` keeps
+the ``rows`` grid.
 """
 
 from __future__ import annotations
@@ -396,8 +397,11 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
+        "capped_max_docs": 16384,
+        "capped_min_docs": 2048,
+        "ctas_per_sm": 6,
         "ffi_entry": "run",
-        "grid_rule": {"kind": "rows", "lanes_per_row": 128, "rows_per_lane_group": 1},
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 128, "rows_per_lane_group": 1},
         "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
         "launch": {
             "block": (256, 1, 1),
