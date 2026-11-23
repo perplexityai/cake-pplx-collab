@@ -30,15 +30,16 @@ or ``FUSED_OF``, and no variant or host sequence names a one-launch record) and 
 length that is a multiple of 256, at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
 ``PAIR_REGIONS``; every measured crossover call on its decided route, ``DECIDED_LEAST``; the pair route without the
 mask for fewer queries than keys within the bounds ``PAIR_FEWER_QUERIES`` of the architecture, the shipped bounds
-``SHIPPED_PAIR_FEWER_QUERIES``, on both sides of each bound and refused with the mask; ``fused_record``: the
-one-launch route inside any piece of the region of ``FUSED_REGION``, on both sides of each bound of a region of one
-piece and of two pieces; the shipped region of each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both
-sides of each bound of each of its pieces and, for each piece, a call that no other piece of its region holds, and the
-long calls of the benchmark's ``T1`` to ``T4`` rows on the three-kernel routes on every architecture), the launch grids,
-the stage launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
-registry-ordered launch), the two layouts of the dQ accumulator in the judge's helper, the build manifest (every
-record's and host sequence's library, the recorded source digests), the standalone loader, the prebuilt libraries served
-first, and no environment read outside the JIT shim.
+``SHIPPED_PAIR_FEWER_QUERIES``, on both sides of each bound and refused with the mask, and every measured call with
+fewer queries than keys on its decided route, ``DECIDED_FEWER_QUERIES``; ``fused_record``: the one-launch route inside
+any piece of the region of ``FUSED_REGION``, on both sides of each bound of a region of one piece and of two pieces;
+the shipped region of each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both sides of each bound of
+each of its pieces and, for each piece, a call that no other piece of its region holds, every measured long call on
+its decided route, ``DECIDED_LONG_CALLS``, and the long calls of the benchmark's ``T1`` to ``T4`` rows on the
+three-kernel routes on every architecture), the launch grids, the stage launchers' keywords, their positional launch of
+every routed record (the FFI arguments and grid of the registry-ordered launch), the two layouts of the dQ accumulator
+in the judge's helper, the build manifest (every record's and host sequence's library, the recorded source digests), the
+standalone loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, each stage judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error
 against an FP64 oracle of the same inputs over 32 independent draws, in the L2 and the max norm, median and largest,
@@ -183,6 +184,18 @@ FEWER_QUERIES_CALLS = (
     ((16, 6144, 8192), True),
     ((4, 4096, 8192), False),
     ((32, 2048, 8192), False),
+)
+# The decided route of the measured calls with fewer queries than keys (head dimension 128, no mask), as ((B, H, Sq,
+# Skv), routed where the architecture has the bounds: ``sm_103a`` and ``sm_107a``).  This is the decision taken from the
+# measurement, not a measurement: the routed calls were faster than 0.1.8 (the 1-CTA route) in both replicate runs on
+# SM103 and SM107; 32 heads of 1024 queries against 4096 keys and four heads of 2048 queries against 8192 keys were
+# not, and stay on the 1-CTA route.  ``PAIR_FEWER_QUERIES`` must reproduce it.
+DECIDED_FEWER_QUERIES = (
+    ((1, 32, 4096, 8192), True),
+    ((2, 32, 4096, 8192), True),
+    ((4, 32, 4096, 8192), True),
+    ((1, 32, 1024, 4096), False),
+    ((1, 4, 2048, 8192), False),
 )
 
 
@@ -423,9 +436,10 @@ def test_the_route_of_a_call() -> None:
     ``PAIR_FEWER_QUERIES[arch]`` (the shipped table ``SHIPPED_PAIR_FEWER_QUERIES``; each call of
     ``FEWER_QUERIES_CALLS`` on its side of each bound), False otherwise (every head-dimension 64 call, every odd
     key-block count, every other call with more keys than queries).  Every bound is a measured value and ``PAIR_LEAST``
-    the least length of each table; every measured crossover call is on its decided route (``DECIDED_LEAST``); a longer
-    call stays on the pair route; an unmeasured ``B * H`` or length is on it exactly where its measured neighbours are;
-    a call with at least as many queries as keys takes the route of ``PAIR_REGIONS`` alone."""
+    the least length of each table; every measured crossover call is on its decided route (``DECIDED_LEAST``), and so
+    is every measured call with fewer queries than keys (``DECIDED_FEWER_QUERIES``); a longer call stays on the pair
+    route; an unmeasured ``B * H`` or length is on it exactly where its measured neighbours are; a call with at least
+    as many queries as keys takes the route of ``PAIR_REGIONS`` alone."""
     assert set(cake_jit.PAIR_REGIONS) == set(ARCHES) and set(cake_jit.PAIR_LEAST) == set(ARCHES)
     assert dict(cake_jit.PAIR_FEWER_QUERIES) == SHIPPED_PAIR_FEWER_QUERIES
     for arch, regions in cake_jit.PAIR_REGIONS.items():
@@ -458,6 +472,10 @@ def test_the_route_of_a_call() -> None:
             assert not pair(arch, True, count, Sq, Skv), (arch, count, Sq, Skv)
             found = cake_jit.variant(64, False, batch=1, heads=count, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
             assert found == (64, False, False), (arch, count, Sq, Skv, found)
+        # Every measured call with fewer queries than keys on its decided route.
+        for (B, H, Sq, Skv), routed in DECIDED_FEWER_QUERIES:
+            found = cake_jit.variant(128, False, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+            assert Sq < Skv and found == (128, False, bounds is not None and routed), (arch, B, H, Sq, Skv, found)
         for causal in (False, True):
             for count, least in DECIDED_LEAST[arch][causal].items():
                 for S in MEASURED_LENGTHS:
@@ -930,6 +948,19 @@ SHIPPED_FUSED_CALLS = {
 }
 # The benchmark's long rows ``T1`` to ``T4``, 8192 queries and keys, as (B, H, D, causal).
 LONG_ROWS = ((4, 32, 128, False), (4, 32, 128, True), (8, 32, 64, False), (8, 32, 64, True))
+# The decided route of the measured long calls (head dimension 128, no mask, 4096 or 8192 queries and keys, up to four
+# heads), as ((B, H, Sq, Skv), routed) on every architecture.  This is the decision taken from the measurement, not a
+# measurement: the routed calls (128 CTAs or fewer) were faster on the one-launch route than 0.1.8 (the three-kernel
+# routes) in both replicate runs on SM100, SM103 and SM107; the calls on 256 CTAs or more were slower there and stay on
+# the three-kernel routes.  ``FUSED_REGION`` must reproduce it.
+DECIDED_LONG_CALLS = (
+    ((1, 1, 4096, 4096), True),
+    ((1, 1, 8192, 4096), True),
+    ((1, 2, 4096, 4096), True),
+    ((1, 2, 8192, 8192), False),
+    ((1, 4, 8192, 4096), False),
+    ((1, 4, 8192, 8192), False),
+)
 
 
 def _inside_piece(piece: tuple[int, int, int, int], B: int, H: int, Sq: int, Skv: int) -> bool:
@@ -962,7 +993,8 @@ def test_the_shipped_one_launch_regions() -> None:
     sides of each bound of each of its pieces: the one-launch record for a call inside any piece of the region (a call
     one step past a bound of one piece may lie inside another piece), None for a call inside no piece and for every
     causal call.  Every piece of a region routes a call that no other piece of the region holds.  The benchmark's long
-    rows take the three-kernel routes on every architecture."""
+    rows take the three-kernel routes on every architecture, and every measured long call its decided route
+    (``DECIDED_LONG_CALLS``)."""
     assert dict(cake_jit.FUSED_REGION) == SHIPPED_FUSED_REGION
     pieces = {piece for region in SHIPPED_FUSED_REGION.values() for piece in region}
     assert set(SHIPPED_FUSED_CALLS) == pieces, sorted(set(SHIPPED_FUSED_CALLS) ^ pieces)
@@ -983,6 +1015,9 @@ def test_the_shipped_one_launch_regions() -> None:
     for arch in ARCHES:
         for B, H, D, causal in LONG_ROWS:
             assert cake_jit.fused_record(arch, B, H, 8192, 8192, D, causal) is None, (arch, B, H, D, causal)
+        for (B, H, Sq, Skv), routed in DECIDED_LONG_CALLS:
+            found = cake_jit.fused_record(arch, B, H, Sq, Skv, 128, False)
+            assert found == (FUSED_OF[(128, False)] if routed else None), (arch, B, H, Sq, Skv, found)
 
 
 def test_the_accumulator_layouts() -> None:
