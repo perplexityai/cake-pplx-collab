@@ -192,7 +192,7 @@ def test_the_backend_never_reads_the_torch_deterministic_setting():
 
 def test_package_identity_and_build_identity():
     """``build.json`` and the registry name the package; each of the four records is one
-    ``cake_route_weight_scale_det_train`` program built for ``sm_100a``, ``sm_103a`` and ``sm_107a``."""
+    ``cake_route_weight_scale_det_train`` program built for ``sm_100a`` and ``sm_103a``."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_route_weight_scale_det_train"

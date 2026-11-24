@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Registry of the Cake route-weight row scaling training kernels of a routed MoE
-expert (SM100 / SM103 / SM107), deterministic.
+expert (SM100 / SM103), deterministic.  The sm_107a builds follow once they
+run on an SM107 device.
 
 ``MODULES`` has four records, one per stage and width, keyed by the record
 name ``<stage>_h<width>``.  Each record is one exported program (a CUDA device
@@ -53,8 +54,8 @@ from __future__ import annotations
 
 from typing import Any
 
-ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
+ARCHES = ("sm_100a", "sm_103a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
 PACKAGE = "cake_pplx._backends.cake_route_weight_scale_det_train"
 LIBRARY_PREFIX = "cake_route_weight_scale_det_train"
 MANIFEST = "build.json"
@@ -75,7 +76,7 @@ MAX_ROWS = 2**31 - 256
 MODULES: dict[str, dict[str, Any]] = {
     # The forward, H = 4096.
     "fwd_h4096": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_00000000000000000001",
@@ -92,7 +93,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The forward, H = 3584.
     "fwd_h3584": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_00000000000000000002",
@@ -109,7 +110,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The backward, H = 4096: dx and dw in one pass over x and dy.
     "bwd_h4096": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "dy"], ["buffer", "w"], ["buffer", "dx"], ["buffer", "dw"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "dy_stride"], ["parameter", "dx_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_00000000000000000003",
@@ -126,7 +127,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The backward, H = 3584: dx and dw in one pass over x and dy.
     "bwd_h3584": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "dy"], ["buffer", "w"], ["buffer", "dx"], ["buffer", "dw"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "dy_stride"], ["parameter", "dx_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_00000000000000000004",

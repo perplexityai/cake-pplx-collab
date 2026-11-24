@@ -1,4 +1,4 @@
-# Cake route-weight row scaling (BF16 x FP32 route weight, SM100 / SM103 / SM107)
+# Cake route-weight row scaling (BF16 x FP32 route weight, SM100 / SM103)
 
 Backend of `cake_pplx.cake_route_weight_scale_det_train`: the route-weight row
 scaling of a routed MoE expert in training.  After the down projection, each
@@ -10,8 +10,8 @@ synchronization.
 
 The facade `cake_pplx.cake_route_weight_scale_det_train` is the API; this
 backend package is experimental (no compatibility guarantee for its internal
-names).  SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the
-supported architectures; another device raises `RuntimeError`.  Each library
+names).  SM100 (B200 / GB200) and SM103 (B300 / GB300) are the supported
+architectures; another device, SM107 (R200) included, raises `RuntimeError`.  Each library
 is loaded prebuilt from `aot/` when a builder compiled it and JIT-built from the
 sources and flags `build.json` records otherwise.  Only the JIT shim
 (`_cake_pplx_jit.py`) reads environment variables, and only to build or find a
@@ -97,4 +97,5 @@ The call never reads torch's deterministic-algorithms setting and never alerts.
 - `H` 4096 and 3584 only.
 - BF16 `x` / `dy` / `y` / `dx` and FP32 `w` / `dw` only.
 - Operands of another layout are refused, not copied.
-- No build for any architecture other than SM100, SM103 and SM107.
+- No build for any architecture other than SM100 and SM103; the SM107 build
+  follows once it runs on an SM107 device.
