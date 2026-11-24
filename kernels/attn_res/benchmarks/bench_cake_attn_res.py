@@ -965,25 +965,31 @@ def cmd_report(args):
         names = [y for y in DW_YARDSTICKS if any(k[0] == y for k in yard)]
         if names:
             lines += [
-                "### dw against the FP32 evaluations (L2 error vs FP64, median / largest; the CPU form gates, the "
-                "others are reported)",
+                "### dw against the FP32 evaluations (error vs FP64; the CPU form gates, the others are reported)",
                 "",
-                "| n | " + " | ".join(f"{y} L2" for y in names) + " | "
-                + " | ".join(f"{a} dw L2 (meets {' / '.join(names)})" for a in sorted({k[0] for k in acc})) + " |",
-                "|" + "---|" * (1 + len(names) + len({k[0] for k in acc})),
+                "Each cell: L2 error median / largest; max-norm error median / largest. An arm meets a yardstick "
+                "when all four are at most 1.005 x the yardstick's.",
+                "",
+                "| n | evaluation | dw L2 (median / largest) | dw max-norm (median / largest) | meets "
+                + " / ".join(names) + " |",
+                "|---|---|---|---|---|",
             ]
             for n in sorted({k[1] for k in yard}):
-                cells = [str(n)]
-                cells += [pair(yard[(y, n)]["l2"]) if (y, n) in yard else "n/a" for y in names]
+                for y in names:
+                    if (y, n) in yard:
+                        lines.append(
+                            f"| {n} | {y} (yardstick) | {pair(yard[(y, n)]['l2'])} | {pair(yard[(y, n)]['max'])} | |"
+                        )
                 for arm in sorted({k[0] for k in acc}):
                     r = acc.get((arm, n))
                     if r is None or "yardsticks" not in r["rows"]["dw"]:
-                        cells.append("n/a")
                         continue
                     vs = r["rows"]["dw"]["yardsticks"]
                     verdict = " / ".join("yes" if vs[y]["meets"] else "no" for y in names if y in vs)
-                    cells.append(f"{pair(r['rows']['dw']['l2']['ours'])} ({verdict})")
-                lines.append("| " + " | ".join(cells) + " |")
+                    lines.append(
+                        f"| {n} | {arm} | {pair(r['rows']['dw']['l2']['ours'])} | "
+                        f"{pair(r['rows']['dw']['max']['ours'])} | {verdict} |"
+                    )
             lines.append("")
     meets = {key: r["meets_bar"] for key, r in acc.items()}
     mem_rows = {}
