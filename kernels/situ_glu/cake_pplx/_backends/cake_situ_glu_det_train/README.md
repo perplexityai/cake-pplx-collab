@@ -83,9 +83,10 @@ and the strides are launch arguments, so one library per program and architectur
 - `beta = 4` takes `P = E E`; any other `beta` takes `P` from its own exponential.  The choice is the same for every
   element of a call.
 - The exponentials are the approximate base-2 exponential.  `E` and `W` flush below `2^-126`, only where
-  `|g| > 43.7 beta` or `|u| > 43.7 lb`; there `1 - tanh^2` is under `2^-124`, far below the BF16 rounding of the
-  gradient it joins.  `P` keeps its subnormal values, so a gate below about -87 keeps a nonzero sigmoid where FP32
-  holds one.
+  `|g| > 43.7 beta` or `|u| > 43.7 lb`.  `h` takes them only as `1 - E`, `1 + E`, `1 - W` and `1 + W`, which the flush
+  leaves as they are.  In the backward, a gate past `43.7 beta` has `d_gate` under `2^-124 |dh| lb` and an up past
+  `43.7 lb` has `d_up` under `2^-124 |dh| beta`; the kernels store 0 there.  `P` keeps its subnormal values, so a gate
+  below about -87 keeps a nonzero sigmoid where FP32 holds one.
 - The reciprocal `R` of `(1 + E)(1 + P)(1 + W)`, in `[1, 8]`: the forward takes one per element; the backward takes
   one per pair of elements (of their product, in `[1, 64]`, multiplied back by the other element's factor) and writes
   both gradients with `R^2`, so it needs no other reciprocal.  A negative gate's sigmoid numerator `P` is the last

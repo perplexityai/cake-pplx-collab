@@ -28,15 +28,16 @@ draws, in the L2 and the max norm, median and largest, beside the error of the s
 :mod:`tests.cake.test_helpers.situ_glu_reference`) over row counts 1 to 4097, widths 256 to 33,792 (one segment,
 partial passes of the CTA's warps, both sides of a full pass, and the issue's widths), the merged, two-tensor, sliced
 and copied layouts, saturated, deep negative, small and wide values, zero gates and ups, every BF16 gate and scalars
-other than the model's.  The kernels have no row-count boundary: one program per stage, one CTA per block of rows.  Beside the
-judge, exact facts of the contract (no tolerance): ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly (and ``d_up = 0``
-at ``g = 0``, ``d_gate = 0`` at ``u = 0``); saturated inputs give finite outputs with the oracle's signs; ``R = 0``
-returns empty outputs and launches nothing; one library per stage serves every row count, width, scalar and layout;
-the same bits at every call, in every layout, at every row count (a row's outputs do not depend on the other rows),
-at large row counts whose offsets pass 2**31 bytes, on a side stream with no host synchronization, in CUDA graph
-replays and under ``torch.use_deterministic_algorithms``; the autograd function matches the steps bit for bit, saves
-only its inputs, gives the same bits under non-reentrant checkpointing and has no double backward; inputs the kernels
-can read are read in place, others copied once; unfit outputs, operands and scalars are refused.
+other than the model's.  The kernels have no row-count boundary: one program per stage, one CTA per block of rows.
+Beside the judge, exact facts of the contract (no tolerance): ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly (and
+``d_up = 0`` at ``g = 0``, ``d_gate = 0`` at ``u = 0``); saturated inputs give finite outputs with the oracle's signs
+outside the flushed range; ``R = 0`` returns empty outputs and launches nothing; one library per stage serves every row
+count, width, scalar and layout; the same bits at every call, in every layout, at every row count (a row's outputs do
+not depend on the other rows), at large row counts whose offsets pass 2**31 bytes, on a side stream with no host
+synchronization, in CUDA graph replays and under ``torch.use_deterministic_algorithms``; the autograd function matches
+the steps bit for bit, saves only its inputs, gives the same bits under non-reentrant checkpointing and has no double
+backward; inputs the kernels can read are read in place, others copied once; unfit outputs, operands and scalars are
+refused.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -546,7 +547,9 @@ def test_saturated_inputs_are_finite_with_the_oracle_signs(layout, beta, lb, dev
     ``{-200, -20, 0, 20, 200}`` and ``u`` in ``{-1000, -50, 0, 50, 1000}`` crossed in the first row: every output is
     finite, and has the sign of the float64 oracle wherever the oracle is at least the smallest normal number (for
     ``d_gate``, where ``|g| >= 20``: there the gate derivative has no zero, so its sign is the operation's, not a
-    rounding's)."""
+    rounding's).  Past ``|g| = 43 beta`` (``d_gate``) and ``|u| = 43 lb`` (``d_up``) the kernels flush the
+    exponential, so a gradient under ``2^-124 |dh| lb`` or ``2^-124 |dh| beta`` is stored as 0: those elements are
+    only checked to be finite."""
     gen = torch.Generator(device=device).manual_seed(5)
     rows, width = 129, 3072
     g = -200.0 + 400.0 * torch.rand(rows, width, device=device, generator=gen)
@@ -565,7 +568,9 @@ def test_saturated_inputs_are_finite_with_the_oracle_signs(layout, beta, lb, dev
         assert bool(value.isfinite().all()), name
         signed = want[name].abs() >= MIN_NORMAL
         if name == "d_gate":
-            signed &= gate.abs() >= 20.0
+            signed &= (gate.abs() >= 20.0) & (gate.abs() <= 43.0 * beta)
+        if name == "d_up":
+            signed &= t.up.float().abs() <= 43.0 * lb
         assert bool(signed.any()), name
         assert torch.equal(torch.sign(value.double())[signed], torch.sign(want[name])[signed]), name
 
