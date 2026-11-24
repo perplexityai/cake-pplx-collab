@@ -376,11 +376,15 @@ SEGMENTS: dict[str, Any] = {
 #   of 1501 tokens or more, 1334 was not slower.
 # Host scalars cannot tell a skewed pack from an even one, so every bound is
 # the one measured safe on both.  The same constants were measured on B200
-# (148 SMs) and VR200 (212 SMs) against the occupancy plan: <<FILL: B200 and
-# VR200 evidence (rows, kernel time, memory) from the validation>>.  Outside
-# the envelope (other architectures and SM counts, such as ``sm_100a`` with
-# 152 SMs or ``sm_107a`` with 216 SMs; other head counts; the serial route)
-# and without a token count the occupancy rule alone decides.  So do the
+# (148 SMs) and VR200 (212 SMs) against the occupancy plan: on B200 the 53
+# packs whose plan changes took 0.424-0.987 of the occupancy plan's forward
+# kernel time and 0.606-0.999 of its backward (54 timed rows); on VR200 the 71
+# packs whose plan changes took 0.377-0.991 of the occupancy plan's forward
+# kernel time and 0.586-1.006 of its backward (72 timed rows), with no higher
+# step or checkpointed-step peak and no larger saved set on B200 and VR200.
+# Outside the envelope (other architectures and SM counts, such as ``sm_100a``
+# with 152 SMs or ``sm_107a`` with 216 SMs; other head counts; the serial
+# route) and without a token count the occupancy rule alone decides.  So do the
 # packs of a band of ``occupancy_bands_by_arch`` (``heads`` heads and more
 # than ``tokens_above``, fewer than ``tokens_below`` tokens on the
 # architecture): on GB300 and VR200 the 4-head packs of at most 4096 tokens,

@@ -537,10 +537,14 @@ skewed pack had 8 or fewer segments per document; on the skewed packs of 16384
 tokens the slower ones had segments of 1501 tokens or more, and 1334 was not
 slower.  So the rule keeps at least 12 segments per document and segments of
 at most 1408 tokens.  On B200 and VR200 the same constants were measured
-against the occupancy plan: <<FILL: B200 and VR200 rows, kernel time and
-memory from the validation>>.  Other architectures and SM counts (`sm_100a`
-with 152 SMs, `sm_107a` with 216 SMs), other head counts, and the serial
-route keep the occupancy rule.  So do the packs of the bands of
+against the occupancy plan: on B200 the 53 packs whose plan changes took
+0.424-0.987 of the occupancy plan's forward kernel time and 0.606-0.999 of its
+backward (54 timed rows); on VR200 the 71 packs whose plan changes took
+0.377-0.991 of the occupancy plan's forward kernel time and 0.586-1.006 of its
+backward (72 timed rows), with no higher step or checkpointed-step peak and no
+larger saved set on B200 and VR200 (table below).  Other architectures and SM
+counts (`sm_100a` with 152 SMs, `sm_107a` with 216 SMs), other head counts,
+and the serial route keep the occupancy rule.  So do the packs of the bands of
 `occupancy_bands_by_arch`.  On GB300 and VR200 the 4-head packs of at most
 4096 tokens keep it, for accuracy: there the token-aware plan would take 12
 segments per document where the occupancy plan takes 13 to 38 (GB300) or 13
@@ -562,19 +566,38 @@ plans take it.  The records whose rules read the segment count
 
 | GPU | packs whose plan changes | fwd time | bwd time | step time | ckpt step time | peak, step | peak, ckpt step | saved set per layer |
 |---|---|---|---|---|---|---|---|---|
-| B200 (`sm_100a`, 148 SMs) | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> |
-| GB300 (`sm_103a`, 152 SMs) | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> |
-| VR200 (`sm_107a`, 212 SMs) | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> |
+| B200 (`sm_100a`, 148 SMs) | 53 | 0.759 (0.424-0.987) | 0.899 (0.606-0.999) | 0.862 (0.551-0.996) | 0.836 (0.523-0.994) | -1.8 to 0.0 | -1.8 to 0.0 | 0.0 |
+| GB300 (`sm_103a`, 152 SMs) | 46 | 0.862 (0.718-0.987) | 0.928 (0.812-0.995) | 0.905 (0.786-0.992) | 0.894 (0.767-0.989) | -1.6 to 0.0 | -1.7 to 0.0 | 0.0 |
+| VR200 (`sm_107a`, 212 SMs) | 71 | 0.743 (0.377-0.991) | 0.892 (0.586-1.006) | 0.850 (0.502-0.996) | 0.833 (0.468-0.992) | -1.8 to 0.0 | -1.8 to 0.0 | 0.0 |
 
-* <<FILL: what was measured: KDA 0.2.2 against 0.2.1 (the occupancy rule) on
-  the same GPU, CUDA and torch versions, both packages, the gate and L2-norm
-  modes, the timer (summed GPU kernel time, CUPTI), rounds and statistic, and
-  the spread of two identical arms; times are new / old ratios, a ratio below
-  1 means faster; memory in MiB (2^20 bytes)>>
-* <<FILL: the packs whose plan does not change run the same programs with the
-  same bits as 0.2.1; on the changed packs the deterministic package is
-  bitwise identical from run to run and its outputs meet the accuracy rule of
-  the family README>>
+* Measured with KDA 0.2.2 against 0.2.1 (the occupancy rule) on B200 (CUDA
+  13.5.37, torch 2.14.1+cu130), GB300 (CUDA 13.5.37, torch 2.14.1+cu130) and
+  VR200 (CUDA 13.5.37, torch 2.14.1+cu130): each version in its own process on
+  the same GPU, both packages, gate `g` and raw, and in-kernel Q/K L2 norm off
+  and on.  Times are new / old ratios of summed GPU kernel time (CUPTI; eager,
+  L2 flushed before every call), each version's value the median of its pooled
+  inner-round medians over 10-15 rotated rounds (2 inner rounds per process);
+  a ratio below 1 means faster.  Each time cell gives the median and the range
+  over the timed rows of the changed packs: 54 rows on B200, 15 rows on GB300
+  and 72 rows on VR200.  Timing processes per node at once: 4.  Two identical
+  arms of the new version differed by up to 3.94 % on B200, 3.73 % on GB300
+  and 2.36 % on VR200.  Memory columns: new minus old in MiB (2^20 bytes) of
+  the allocator peak above the live tensors at the step and at the
+  checkpointed step, and of the saved set per layer (the package's
+  `memory_report`), with the default arena: 232 records of 116 packs on B200,
+  192 records of 96 packs on GB300 and 304 records of 152 packs on VR200.
+  B200, GB300 and VR200 were measured on pre-release builds whose plans and
+  programs for the timed packs on that GPU equal this version's.
+* On B200, GB300 and VR200 the packs whose plan does not change run the same
+  programs with the same bits as 0.2.1; on the changed packs the deterministic
+  package is bitwise identical from run to run (3 runs) and its outputs meet
+  the accuracy rule of the family README.
+* On VR200 three backward times of the changed packs were slower than in
+  0.2.1 (gate `g`, L2 norm off): 16384 tokens in four documents with 16
+  heads (non-deterministic package, 1.0022) and 16384 tokens in twelve
+  documents, one of them 12009 tokens long, with 4 heads (1.0056
+  deterministic, 1.0054 non-deterministic).  The forward, the step and the
+  checkpointed step of these packs were faster.
 
 Forward (`fwd`): the chunk tables from `cu_seqlens` -- on the segmented route
 up to 256 documents no table launch: the intra program `fwd_intra_v14`, launched
