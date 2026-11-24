@@ -55,9 +55,9 @@
     }
   },
   "generator": {
-    "cake_revision": "547cac1b9198cd2c0e58a917eecebe9a0423a7f6",
+    "cake_revision": "27a02b55aad8ee13b8624fc14245f95a157a9f02",
     "cuda": "13.5.37",
-    "rendered_at": "2026-11-23T23:51:44Z"
+    "rendered_at": "2026-11-24T12:45:00Z"
   },
   "libraries": [
     {
@@ -790,6 +790,102 @@
       "sources": [
         "csrc/cake_mhc_train_bwd_slab_fold__dynr_kernel.cu",
         "csrc/cake_mhc_train_bwd_slab_fold__dynr_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_107a",
+      "closure_sha256": "c220b795e778f59394bbe4a3d2b042173fed3f72e69bbcb22f4a09a27a624ea6",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
+      "min_cuda": "13.5",
+      "name": "cake_mhc_train_bwd_slab_red__dynr__h5120_sm_107a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false",
+        "--ptxas-options=--maxrregcount=160"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_mhc_train_bwd_slab_red__dynr__h5120_sm_107a.so",
+      "sha256": {
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h5120_binding.cu": "354ac0d0f464d0a10f70336e3e2f103d483d473b2538e79eb18fa5ac42ea47df",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h5120_kernel.cu": "5c2f8a9a561079bc70a6d340f457cc89789c1d433256124ba96d5755cb8d9bca"
+      },
+      "sources": [
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h5120_kernel.cu",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h5120_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_107a",
+      "closure_sha256": "39c028abeaca962802edcb816f7118f1eb0bcdce2db2669c059babcf1a2113c6",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
+      "min_cuda": "13.5",
+      "name": "cake_mhc_train_bwd_slab_red__dynr__h7168_sm_107a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false",
+        "--ptxas-options=--maxrregcount=160"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_mhc_train_bwd_slab_red__dynr__h7168_sm_107a.so",
+      "sha256": {
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h7168_binding.cu": "8678bafb0992ef63e0b08fc492ebbe308f2206aa45d83f4da958ae18b36533e2",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h7168_kernel.cu": "7089823df9f2cd191181c7f5916c3bbfc33731532dff5747e02bea822910b2b7"
+      },
+      "sources": [
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h7168_kernel.cu",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr__h7168_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_107a",
+      "closure_sha256": "413e5ddc2ed7560db6be64b52c1ae9c8c255f0e300f67df4b05956c6a2680c9f",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
+      "min_cuda": "13.5",
+      "name": "cake_mhc_train_bwd_slab_red__dynr_os_sm_107a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false",
+        "--ptxas-options=--maxrregcount=160"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_mhc_train_bwd_slab_red__dynr_os_sm_107a.so",
+      "sha256": {
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_os_binding.cu": "c18ec3e2e3110856076bf7b42e7007d99cd740e655aa96cb82ef6ad61a40e2de",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_os_kernel.cu": "c7ba3c1a9d3db66cfb27690221f03f0acbd686be489aa69207d2558b21e37d01"
+      },
+      "sources": [
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_os_kernel.cu",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_os_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_107a",
+      "closure_sha256": "8a5f65b8cd533df0a3fb3f5e9acffaf508f276a41cc3d3510d7e6b081c17afe0",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
+      "min_cuda": "13.5",
+      "name": "cake_mhc_train_bwd_slab_red__dynr_sm_107a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false",
+        "--ptxas-options=--maxrregcount=160"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_mhc_train_bwd_slab_red__dynr_sm_107a.so",
+      "sha256": {
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_binding.cu": "2bb5eb64a1fc6da4f63f29ce1e38b7fa857dfcab3b2e01d325f93c6e1869af42",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_kernel.cu": "de44bd4342e7aa247a9e39f3397af8223c2c27b9eecd378d3a72786b6053b2c1"
+      },
+      "sources": [
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_kernel.cu",
+        "csrc/cake_mhc_train_bwd_slab_red__dynr_binding.cu"
       ]
     },
     {

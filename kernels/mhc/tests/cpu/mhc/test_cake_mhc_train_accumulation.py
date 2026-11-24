@@ -22,7 +22,9 @@ and what it refuses.
   architecture, role and parameter-row layout (``ACC_WORDS_PROGRAMS``; the ``"<role>/rows"`` program where
   ``bwd_group_rows`` holds: hidden 4096 above 14927 tokens on sm_100a / sm_103a); every other record stays.  The
   two-word records are in no route (only the mode selects them), ship for the architectures of their table, have the
-  role they replace and keep the buffers of the records they replace (the same logical arguments).
+  role they replace and keep the buffers of the records they replace (the same logical arguments; in the
+  nondeterministic registry on sm_107a the two-word column slab, a fold, also binds the ``dfn`` slots, the arrival
+  counts and ``prow``, which the reduction form it replaces leaves out).
 * The mode exists at hidden 4096 and the Sinkhorn count of record only; elsewhere it is a ``NotImplementedError``,
   and an unknown mode is a ``ValueError``.
 """

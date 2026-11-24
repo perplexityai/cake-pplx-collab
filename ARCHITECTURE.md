@@ -15,7 +15,7 @@ The rest of this document explains how the repository meets this requirement.
 | Family | One operation, for example `kda` or `rmsnorm`. A family is the unit of release. |
 | Mode | `det` or `nondet`. The mode is part of the name. No `deterministic=` keyword exists. |
 | `det` | Bitwise identical output from run to run. |
-| `nondet` | No bitwise promise. At its non-deterministic step, it raises the PyTorch deterministic-algorithms alert. It never falls back to `det`. |
+| `nondet` | No bitwise promise. At its non-deterministic step, it raises the PyTorch deterministic-algorithms alert, or, while that mode is on, runs the step in a fixed order instead (the mhc backward on `sm_107a`). [docs/API.md](docs/API.md#det-and-nondet) lists the behavior of each family. It never falls back to `det`. |
 | KCP | Context-parallel route. The suffix is `_kcp`. |
 | Facade | Public module `cake_pplx.<module>`. It wraps one backend package. |
 | Backend package | `cake_pplx._backends.<module>/`. Holds kernels, `build.json` and `csrc/`. |
