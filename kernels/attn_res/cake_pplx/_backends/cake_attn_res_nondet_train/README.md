@@ -36,14 +36,14 @@ p, r, d)` returns `(dv, dw)` and writes caller-owned `dv` tensors when they are 
 | `w`, `dw` | `[7168]` | FP32 | any (`w`); contiguous (`dw`) |
 | `p`, `r`, `d` | `[T, n]` | FP32 | contiguous (row-major) |
 
-`eps` is a run-time scalar (finite, non-negative); `T >= 0` and `n` are run-time values (no recompilation).
+`eps` is a run-time scalar (finite, non-negative); `T >= 0` and `n` are run-time values. `fwd` and `bwd` ship one program per value bound `nmax` from 2 to 9; a call of `n` values runs the program of the smallest bound at least `n` (`cake_jit.nmax_for`). The libraries are a fixed set: no shape compiles a new one.
 
 ## Kernels
 
 | Stage | Record | Grid | Work |
 | --- | --- | --- | --- |
-| `fwd` | `fwd` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d` |
-| `bwd` | `bwd` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: every `dv_j`; adds the token's `dw` terms into the zeroed `dw` with `red.global.add.f32` |
+| `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d` |
+| `bwd` | `bwd_n2` .. `bwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: every `dv_j`; adds the token's `dw` terms into the zeroed `dw` with `red.global.add.f32` |
 
 `groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`). The host zeroes
 `dw` before the backward launch. The kernels take nine value pointers; the host passes the first value in the slots

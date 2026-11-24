@@ -169,6 +169,19 @@ def test_accuracy_meets_the_tier_and_dw_no_worse_than_an_fp32_sum(n, data, recor
     assert not failures, failures
 
 
+@pytest.mark.parametrize("n", range(1, 10))
+def test_every_value_count(n, record_property) -> None:
+    """Every ``n`` from 1 to 9 (every value-bound program of both modes) meets the tier through the autograd entry."""
+    device = _device_or_skip()
+
+    def make(seed):
+        return make_inputs(1025, n, seed=seed, device=device, data="scaled", weights="normproj")
+
+    judge, failures, *_ = _judge_modes(make, seed=26400 + n)
+    judge.record(record_property)
+    assert not failures, failures
+
+
 @pytest.mark.parametrize("T", (1, 4097, 16380, 32768))
 @pytest.mark.parametrize("n", (2, 9))
 def test_token_counts(n, T, record_property) -> None:
@@ -194,13 +207,15 @@ def test_no_token(n) -> None:
 
 
 def test_dynamic_shapes_load_no_new_library_and_never_synchronize() -> None:
-    """After one warm-up call per mode, calls with changing ``n`` and token counts load no new library, and run under
+    """After one warm-up call per mode and value count (each program loaded once: the libraries are a fixed set, no
+    shape compiles a new one), calls with changing ``n`` and token counts load no new library, and run under
     ``torch.cuda.set_sync_debug_mode("error")`` (any synchronizing CUDA call raises)."""
     device = _device_or_skip()
     backends = [importlib.import_module(f"cake_pplx._backends.cake_attn_res_{m}_train.cake_backend") for m in MODES]
-    warm = make_inputs(5, 3, seed=2, device=device)
-    for mode in MODES:
-        _autograd(mode, warm)
+    for n in range(1, 10):
+        warm = make_inputs(5, n, seed=2 + n, device=device)
+        for mode in MODES:
+            _autograd(mode, warm)
     loads = [b.load.cache_info().misses for b in backends]
     shapes = ((1, 2), (4097, 9), (129, 5), (16380, 2), (7, 1), (2049, 8), (33, 4))
     inputs = [make_inputs(T, n, seed=T + n, device=device) for T, n in shapes]

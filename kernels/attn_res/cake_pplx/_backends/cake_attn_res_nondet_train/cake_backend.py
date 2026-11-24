@@ -17,10 +17,10 @@ Loader, checks, launches and autograd of the Cake attention residual (AttnRes): 
 values of width 7168, ``1 <= n <= 9`` (SM100 / SM103 / SM107), non-deterministic package.
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds one record per program (its ``library``
-stem; the ``build.json`` entries are ``<library>_<arch>``), :func:`.cake_jit.record` names the record of a stage and
-:func:`.cake_jit.grid` gives its grid.  :mod:`.cake_build` serves a library from a prebuilt ``aot/`` file when a
-builder compiled it and otherwise through the package's JIT build shim (``_cake_pplx_jit.py``) from the sources and
-flags of ``build.json``.
+stem; the ``build.json`` entries are ``<library>_<arch>``), :func:`.cake_jit.record` names the record a stage launches
+for ``n`` values and :func:`.cake_jit.grid` gives its grid.  :mod:`.cake_build` serves a library from a prebuilt
+``aot/`` file when a builder compiled it and otherwise through the package's JIT build shim (``_cake_pplx_jit.py``)
+from the sources and flags of ``build.json``.
 
 Per token ``t`` (``H = 7168``), with every quantity in FP32 and each BF16 output rounded once, at its store::
 
@@ -38,8 +38,10 @@ One forward call launches ``fwd`` alone: it writes ``out`` and the state the bac
 (FP32 ``[T, n]`` each, row-major).  One backward call zeroes ``dw`` and launches ``bwd``: every ``dv_j`` from ``dout``,
 the values, ``w`` and that state (no forward sum is recomputed), and ``dw`` added into the zeroed FP32 row with float
 atomics (``red.global.add.f32``).  The kernels take the values as nine pointers (this module passes the first value in
-the slots past ``n``, which the kernels never read) and ``n``, the token count and ``eps`` as run-time scalars: one
-program serves every ``n`` and every token count (no recompilation, no shape list).
+the slots past ``n``, which the kernels never read) and ``n``, the token count and ``eps`` as run-time scalars.
+``fwd`` and ``bwd`` ship one program per value bound ``nmax`` from 2 to 9 (``nmax`` values held in registers); a call
+of ``n`` values runs the program of the smallest bound at least ``n`` (:func:`.cake_jit.nmax_for`).  Every program
+serves every token count, so the libraries are a fixed set: no shape compiles a new one.
 
 ``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once
 (:func:`.cake_jit.groups`, from a table per architecture and SM count); any grid is correct.  Every launch is a plain
@@ -104,9 +106,6 @@ _ALIGNMENT = 16
 _MAX_TOKENS = 2**31 - 1
 _BF16 = torch.bfloat16
 _FP32 = torch.float32
-# The records the launches use, looked up once.
-_FWD_RECORD: str = cake_jit.record("fwd")
-_BWD_RECORD: str = cake_jit.record("bwd")
 
 # The public module the entry points are documented under.
 _MODULE = "cake_pplx.cake_attn_res_nondet_train"
@@ -513,9 +512,10 @@ def _forward(
         return out, p, r, d, eps_f
     index = device.index
     device_arch(index)  # RuntimeError on a device outside ARCHES
-    groups = _groups(_FWD_RECORD, T, index)
+    name = cake_jit.record("fwd", n)
+    groups = _groups(name, T, index)
     args = (*_slots(values), _weight(w), out, p, r, d, T, n, eps_f)
-    _run(_FWD_RECORD, "fwd", index, (*args, cake_jit.cluster_ctas(_FWD_RECORD) * groups, 1, 1))
+    _run(name, "fwd", index, (*args, cake_jit.cluster_ctas(name) * groups, 1, 1))
     return out, p, r, d, eps_f
 
 
@@ -541,9 +541,10 @@ def _launch_backward(
         return dv, dw
     index = device.index
     device_arch(index)  # RuntimeError on a device outside ARCHES
-    groups = _groups(_BWD_RECORD, T, index)
+    name = cake_jit.record("bwd", n)
+    groups = _groups(name, T, index)
     args = (dout, *_slots(values), _weight(w), p, r, d, *_slots(dv), dw, T, n)
-    _run(_BWD_RECORD, "bwd", index, (*args, cake_jit.cluster_ctas(_BWD_RECORD) * groups, 1, 1))
+    _run(name, "bwd", index, (*args, cake_jit.cluster_ctas(name) * groups, 1, 1))
     return dv, dw
 
 

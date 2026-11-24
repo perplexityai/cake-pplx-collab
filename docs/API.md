@@ -1040,9 +1040,9 @@ dw   = sum over t and j of ds_j r_j v_j   (FP32)
 
 The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward, which recomputes no forward sum. No sum uses FP64. An all-zero value row gives `r_j = 1 / sqrt(eps)` and `d_j = 0`: a finite result.
 
-**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. One forward program serves both modules. The backward is one program in nondet and two in det (the backward, then the fixed-order sum of the weight-gradient rows). One program per stage serves every `n` and every token count.
+**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward and the backward ship one program per value bound from 2 to 9 (the bound is the number of values the program keeps in registers); a call of `n` values runs the program of the smallest bound at least `n`. The forward programs serve both modules. The det backward adds a fixed-order sum of the weight-gradient rows. Every program serves every token count, so the libraries are a fixed set.
 
-**Inputs.** `values`: a list or tuple of `n` BF16 `[T, 7168]` tensors, each contiguous and 16-byte aligned, all on one CUDA device. They stay separate: nothing is stacked or copied. `w`: FP32 `[7168]` (the product of the norm and projection weights; its gradient is `dw`). `eps`: a run-time float, 1e-5 by default. `T >= 0` and `n` are run-time values: no recompilation.
+**Inputs.** `values`: a list or tuple of `n` BF16 `[T, 7168]` tensors, each contiguous and 16-byte aligned, all on one CUDA device. They stay separate: nothing is stacked or copied. `w`: FP32 `[7168]` (the product of the norm and projection weights; its gradient is `dw`). `eps`: a run-time float, 1e-5 by default. `T >= 0` and `n` are run-time values: no shape compiles a new library.
 
 ### `cake_pplx.cake_attn_res_det_train`
 

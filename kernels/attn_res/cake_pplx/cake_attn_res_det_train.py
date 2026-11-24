@@ -59,9 +59,11 @@ the checks, the launch plan, the autograd Function and the generated kernels
 live in the backend package ``cake_pplx._backends.cake_attn_res_det_train``,
 imported on first use; this module forwards every keyword.  Every switch is a
 keyword argument; no environment variable is read.  The token count, ``n``
-and ``eps`` are run-time values: one program per stage serves them all (no
-recompilation), with no device-to-host read and no host synchronization; the
-calls are CUDA-graph capturable after one eager call.
+and ``eps`` are run-time values: each stage ships one program per value bound
+from 2 to 9 and a call runs the one of the smallest bound at least ``n``, so
+the libraries are a fixed set and no shape compiles a new one; no call reads
+device memory to the host or synchronizes; the calls are CUDA-graph
+capturable after one eager call of the same ``n``.
 
 Memory: the state kept for the backward is references to the inputs and the
 forward's FP32 ``p``, ``r`` and ``d`` (``[T, n]`` each, ``12 T n`` bytes:

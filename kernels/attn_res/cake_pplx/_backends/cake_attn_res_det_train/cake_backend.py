@@ -17,10 +17,10 @@ Loader, checks, launches and autograd of the Cake attention residual (AttnRes): 
 values of width 7168, ``1 <= n <= 9`` (SM100 / SM103 / SM107), deterministic package.
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds one record per program (its ``library``
-stem; the ``build.json`` entries are ``<library>_<arch>``), :func:`.cake_jit.record` names the record of a stage and
-:func:`.cake_jit.grid` gives its grid.  :mod:`.cake_build` serves a library from a prebuilt ``aot/`` file when a
-builder compiled it and otherwise through the package's JIT build shim (``_cake_pplx_jit.py``) from the sources and
-flags of ``build.json``.
+stem; the ``build.json`` entries are ``<library>_<arch>``), :func:`.cake_jit.record` names the record a stage launches
+for ``n`` values and :func:`.cake_jit.grid` gives its grid.  :mod:`.cake_build` serves a library from a prebuilt
+``aot/`` file when a builder compiled it and otherwise through the package's JIT build shim (``_cake_pplx_jit.py``)
+from the sources and flags of ``build.json``.
 
 Per token ``t`` (``H = 7168``), with every quantity in FP32 and each BF16 output rounded once, at its store::
 
@@ -40,7 +40,10 @@ every ``dv_j`` from ``dout``, the values, ``w`` and that state (no forward sum i
 ``dw`` partial sums per launch group of its grid into a workspace ``dw_rows [G, 7168]`` (every row written in full);
 ``dw_reduce`` adds the ``G`` rows in one fixed order into ``dw``.  The kernels take the values as nine pointers (this
 module passes the first value in the slots past ``n``, which the kernels never read) and ``n``, the token count and
-``eps`` as run-time scalars: one program serves every ``n`` and every token count (no recompilation, no shape list).
+``eps`` as run-time scalars.  ``fwd`` and ``bwd`` ship one program per value bound ``nmax`` from 2 to 9 (``nmax`` values
+held in registers); a call of ``n`` values runs the program of the smallest bound at least ``n``
+(:func:`.cake_jit.nmax_for`).  Every program serves every token count, so the libraries are a fixed set: no shape
+compiles a new one.
 
 ``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once
 (:func:`.cake_jit.groups`, from a table per architecture and SM count); any grid is correct.  Every launch is a plain
@@ -106,9 +109,7 @@ _ALIGNMENT = 16
 _MAX_TOKENS = 2**31 - 1
 _BF16 = torch.bfloat16
 _FP32 = torch.float32
-# The records the launches use, looked up once.
-_FWD_RECORD: str = cake_jit.record("fwd")
-_BWD_RECORD: str = cake_jit.record("bwd")
+# The record the weight-gradient sum launches, looked up once.
 _DW_REDUCE_RECORD: str = cake_jit.record("dw_reduce")
 _DW_REDUCE_GRID: tuple[int, int, int] = cake_jit.dw_reduce_grid()
 # Bytes of one FP32 [7168] row (a partial row of the backward's weight gradient).
@@ -478,8 +479,9 @@ def _check_outputs(name: str, ts: Any, T: int, n: int, device: torch.device) -> 
 def cake_attn_res_det_train_workspace_bytes(T: int, n: int, device: Union[torch.device, int, str, None] = None) -> int:
     """Bytes of device memory one backward call over ``T`` tokens and ``n`` values on ``device`` (None: the current
     CUDA device) allocates beside its operands and outputs: the ``[G, 7168]`` FP32 rows of ``dw`` partial sums, one per
-    launch group of the backward grid, 28 KiB each (0 for ``T == 0``).  It does not depend on ``n``.  A forward call
-    allocates its outputs alone: ``out`` and the retained state (:func:`cake_attn_res_det_train_retained_bytes`)."""
+    launch group of the backward grid, 28 KiB each (0 for ``T == 0``); ``n`` picks the backward program and so its
+    resident groups.  A forward call allocates its outputs alone: ``out`` and the retained state
+    (:func:`cake_attn_res_det_train_retained_bytes`)."""
     T, n = int(T), int(n)
     if T < 0:
         raise ValueError(f"T must be non-negative, got {T}")
@@ -490,7 +492,7 @@ def cake_attn_res_det_train_workspace_bytes(T: int, n: int, device: Union[torch.
     index = _device_index(device)
     if index is None:
         raise ValueError(f"device must be a CUDA device, got {device}")
-    rows = cake_jit.groups(_BWD_RECORD, T, device_arch(index), sm_count(index))
+    rows = cake_jit.groups(cake_jit.record("bwd", n), T, device_arch(index), sm_count(index))
     return _ROW_BYTES * rows
 
 
@@ -529,9 +531,10 @@ def _forward(
         return out, p, r, d, eps_f
     index = device.index
     device_arch(index)  # RuntimeError on a device outside ARCHES
-    groups = _groups(_FWD_RECORD, T, index)
+    name = cake_jit.record("fwd", n)
+    groups = _groups(name, T, index)
     args = (*_slots(values), _weight(w), out, p, r, d, T, n, eps_f)
-    _run(_FWD_RECORD, "fwd", index, (*args, cake_jit.cluster_ctas(_FWD_RECORD) * groups, 1, 1))
+    _run(name, "fwd", index, (*args, cake_jit.cluster_ctas(name) * groups, 1, 1))
     return out, p, r, d, eps_f
 
 
@@ -556,12 +559,13 @@ def _launch_backward(
         return dv, torch.zeros(HIDDEN, dtype=_FP32, device=device)
     index = device.index
     device_arch(index)  # RuntimeError on a device outside ARCHES
-    groups = _groups(_BWD_RECORD, T, index)
+    name = cake_jit.record("bwd", n)
+    groups = _groups(name, T, index)
     # One row per launch group, each written in full by its group.
     dw_rows = torch.empty(groups, HIDDEN, dtype=_FP32, device=device)
     dw = torch.empty(HIDDEN, dtype=_FP32, device=device)
     bwd = (dout, *_slots(values), _weight(w), p, r, d, *_slots(dv), dw_rows, T, n)
-    _run(_BWD_RECORD, "bwd", index, (*bwd, cake_jit.cluster_ctas(_BWD_RECORD) * groups, 1, 1))
+    _run(name, "bwd", index, (*bwd, cake_jit.cluster_ctas(name) * groups, 1, 1))
     _run(_DW_REDUCE_RECORD, "dw_reduce", index, (dw_rows, dw, groups, *_DW_REDUCE_GRID))
     return dv, dw
 

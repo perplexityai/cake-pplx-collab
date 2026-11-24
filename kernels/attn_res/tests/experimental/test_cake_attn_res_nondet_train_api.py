@@ -320,13 +320,14 @@ def test_the_explicit_steps_give_the_autograd_bits(n) -> None:
 
 
 def test_dynamic_token_counts_and_values_need_no_new_build() -> None:
-    """Calls with changing ``n`` (1 to 9) and token counts (1 to 4097) load no library beyond the first call's:
-    one program per stage serves every shape."""
+    """After one call per value count (each program loaded once), calls with changing ``n`` (1 to 9) and token
+    counts (1 to 4097) load no library: the programs serve every token count, so the libraries are a fixed set."""
     device = _device_or_skip()
     backend = _backend()
-    ns = make_inputs(3, 2, seed=71, device=device)
-    _autograd(ns)
+    for n in range(1, api.MAX_VALUES + 1):
+        _autograd(make_inputs(3, n, seed=71 + n, device=device))
     loads = backend.load.cache_info().currsize
+    assert loads <= len(backend.cake_jit.MODULES)
     entries = backend._entry.cache_info().currsize
     for T, n in ((1, 1), (7, 9), (4097, 5), (129, 3), (2, 8), (1025, 9), (33, 2)):
         got = _autograd(make_inputs(T, n, seed=73 + T, device=device))

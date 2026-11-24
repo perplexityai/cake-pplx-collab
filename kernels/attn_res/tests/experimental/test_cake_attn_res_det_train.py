@@ -54,8 +54,10 @@ PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 STAGES = ("fwd", "bwd", "dw_reduce")
-RECORDS = ("bwd", "dw_reduce", "fwd")
-PERSISTENT_RECORDS = ("bwd", "fwd")
+NMAX = (2, 3, 4, 5, 6, 7, 8, 9)
+# One fwd and one bwd program per value bound, and the one dw_reduce program.
+PERSISTENT_RECORDS = tuple(sorted(f"{stage}_n{k}" for stage in ("fwd", "bwd") for k in NMAX))
+RECORDS = tuple(sorted((*PERSISTENT_RECORDS, "dw_reduce")))
 ENTRIES = (
     "cake_attn_res_det",
     "cake_attn_res_det_train_backward",
@@ -106,8 +108,12 @@ def test_registry_records_are_well_formed() -> None:
     for name, rec in cake_jit.MODULES.items():
         assert rec["arches"] == list(ARCHES), name
         assert rec["ffi_entry"] == "run", name
-        assert rec["stage"] == name, name
-        assert cake_jit.record(name) == name
+        if name == "dw_reduce":
+            assert rec["stage"] == name and cake_jit.record(name) == name
+        else:
+            stage, k = name.rsplit("_n", 1)
+            assert rec["stage"] == stage, name
+            assert cake_jit.record(stage, int(k)) == name
         assert rec["library"].startswith(cake_jit.LIBRARY_PREFIX + "_"), name
         assert rec["kernel_symbol"] == f"kernel_{rec['library']}", name
         launch = rec["launch"]
@@ -119,6 +125,23 @@ def test_registry_records_are_well_formed() -> None:
         cake_backend._plan(name, rec["stage"])
     with pytest.raises(ValueError):
         cake_jit.record("main")
+
+
+def test_each_value_count_runs_the_program_of_the_smallest_bound() -> None:
+    """``n`` values run the ``fwd`` / ``bwd`` program of the smallest bound at least ``n`` (``n = 1`` the bound 2
+    one; ``dw_reduce`` has one program); ``n`` outside 1 to 9 is a ``ValueError``."""
+    assert cake_jit.NMAX == NMAX
+    for n in range(1, MAX_VALUES + 1):
+        assert cake_jit.nmax_for(n) == max(n, 2)
+        for stage in ("fwd", "bwd"):
+            assert cake_jit.record(stage, n) == f"{stage}_n{max(n, 2)}"
+    assert cake_jit.record("fwd") == "fwd_n9"
+    assert cake_jit.record("dw_reduce", 3) == "dw_reduce"
+    for bad in (0, 10):
+        with pytest.raises(ValueError):
+            cake_jit.nmax_for(bad)
+        with pytest.raises(ValueError):
+            cake_jit.record("bwd", bad)
 
 
 def test_no_record_is_delivered_outside_the_architectures() -> None:
@@ -191,10 +214,11 @@ def test_stage_launchers_pass_every_kernel_parameter(n, monkeypatch) -> None:
     dout = torch.zeros(T, HIDDEN, **bf16)
     dw_rows = torch.zeros(groups, HIDDEN)
     dw = torch.zeros(HIDDEN)
-    cake_backend.launch_fwd("fwd", values=values, w=w, out=out, p=p, r=r, d=d, eps=1e-5, groups=groups)
-    cake_backend.launch_bwd("bwd", dout=dout, values=values, w=w, p=p, r=r, d=d, dv=dv, dw_rows=dw_rows, groups=groups)
+    fwd, bwd = cake_jit.record("fwd", n), cake_jit.record("bwd", n)
+    cake_backend.launch_fwd(fwd, values=values, w=w, out=out, p=p, r=r, d=d, eps=1e-5, groups=groups)
+    cake_backend.launch_bwd(bwd, dout=dout, values=values, w=w, p=p, r=r, d=d, dv=dv, dw_rows=dw_rows, groups=groups)
     cake_backend.launch_dw_reduce("dw_reduce", dw_rows=dw_rows, dw=dw)
-    assert [name for name, _ in recorder.calls] == ["fwd", "bwd", "dw_reduce"]
+    assert [name for name, _ in recorder.calls] == [fwd, bwd, "dw_reduce"]
     for name, args in recorder.calls:
         params = cake_backend.parameters(name)
         assert len(args) == len(params) + 3, (name, params)
@@ -208,7 +232,7 @@ def test_stage_launchers_pass_every_kernel_parameter(n, monkeypatch) -> None:
         assert named["w"] is w and named["p"] is p and named["r"] is r and named["d"] is d
         for j in range(MAX_VALUES):
             assert named[f"v{j}"] is values[j if j < n else 0], (name, j)
-        if name == "fwd":
+        if name.startswith("fwd_"):
             assert named["out"] is out and named["eps"] == 1e-5
         else:
             assert named["dout"] is dout and named["dw_rows"] is dw_rows
@@ -217,14 +241,14 @@ def test_stage_launchers_pass_every_kernel_parameter(n, monkeypatch) -> None:
 
 
 def test_workspace_and_retained_bytes(monkeypatch) -> None:
-    """The backward's workspace is one FP32 ``[7168]`` row per launch group of its grid, whatever ``n``; the forward
-    keeps ``p``, ``r``, ``d``: ``12 T n`` bytes."""
+    """The backward's workspace is one FP32 ``[7168]`` row per launch group of the grid of the program ``n`` runs;
+    the forward keeps ``p``, ``r``, ``d``: ``12 T n`` bytes."""
     monkeypatch.setattr(cake_backend, "device_arch", lambda index: "sm_103a")
     monkeypatch.setattr(cake_backend, "sm_count", lambda index: 152)
     for T in (0, 1, 16380):
         for n in (1, 2, 5, 9):
             assert pkg.cake_attn_res_det_train_retained_bytes(T, n) == 12 * T * n
-            rows = cake_jit.groups("bwd", T, "sm_103a", 152) if T else 0
+            rows = cake_jit.groups(cake_jit.record("bwd", n), T, "sm_103a", 152) if T else 0
             assert pkg.cake_attn_res_det_train_workspace_bytes(T, n, "cuda:0") == 4 * HIDDEN * rows
     for bad in ((-1, 2), (1, 0), (1, 10)):
         with pytest.raises(ValueError):
@@ -383,14 +407,17 @@ def test_every_record_loads(device) -> None:
         assert callable(cake_backend.load(name, arch).run), name
 
 
-# (n, T, data, weights): one value to nine; one token, a few, past one wave of groups, an odd count.
+# (n, T, data, weights): every value count 1 to 9 (every program); one token, a few, past one wave of groups.
 CASES = (
     (1, 7, "scaled", "small"),
     (2, 1, "scaled", "small"),
     (2, 129, "peaked", "normproj"),
     (3, 1025, "zero_rows", "small"),
+    (4, 33, "scaled", "normproj"),
     (5, 129, "scaled", "normproj"),
     (5, 1025, "peaked", "small"),
+    (6, 257, "zero_rows", "small"),
+    (7, 129, "scaled", "small"),
     (8, 7, "zero_rows", "normproj"),
     (9, 129, "zero_rows", "small"),
     (9, 1025, "scaled", "small"),
@@ -409,8 +436,9 @@ def _forward_state(ns, device):
     out = torch.full((T, HIDDEN), math.nan, dtype=torch.bfloat16, device=device)
     p, r, d = (torch.full((T, n), math.nan, device=device) for _ in range(3))
     arch = cake_backend.device_arch(device.index)
-    groups = cake_jit.groups("fwd", T, arch, cake_backend.sm_count(device.index))
-    cake_backend.launch_fwd("fwd", values=ns.values, w=ns.w, out=out, p=p, r=r, d=d, eps=1e-5, groups=groups)
+    name = cake_jit.record("fwd", n)
+    groups = cake_jit.groups(name, T, arch, cake_backend.sm_count(device.index))
+    cake_backend.launch_fwd(name, values=ns.values, w=ns.w, out=out, p=p, r=r, d=d, eps=1e-5, groups=groups)
     return out, p, r, d
 
 
