@@ -57,6 +57,8 @@ BACKEND = f"cake_pplx._backends.{MODULE}"
 # The facade's functions (its own ``cake_api`` defs); each calls the backend
 # function of the same name.
 FACADE_FUNCTIONS = {
+    f"{MODULE}_domain_empty",
+    f"{MODULE}_domain_plan",
     f"{MODULE}_forward",
     f"{MODULE}_forward_workspace_bytes",
     f"is_{MODULE}_supported",
@@ -167,16 +169,20 @@ def test_modules_sit_at_their_places() -> None:
         "_cake_pplx_jit.py",
         "build.json",
         "cake_build.py",
+        "cake_domain.py",
         "cake_jit.py",
         "csrc",
     } <= files
-    for submodule in ("cake_build", "cake_jit"):
+    for submodule in ("cake_build", "cake_domain", "cake_jit"):
         loaded = importlib.import_module(f"{BACKEND}.{submodule}")
         assert Path(loaded.__file__).parent == package, submodule
-    # the registry keys are the programs the routes name; the library names are build identities
+    # the registry keys are the programs the routes and the interleaved-domain routes name; the library names are
+    # build identities
     cake_jit = importlib.import_module(f"{BACKEND}.cake_jit")
     routed = {name for routes in cake_jit.ROUTES.values() for names in routes.values() for name in names}
-    assert set(cake_jit.MODULES) == routed
+    domain = {name for routes in cake_jit.DOMAIN_ROUTES.values() for name in routes.values()}
+    assert not routed & domain
+    assert set(cake_jit.MODULES) == routed | domain
     assert set(cake_jit.KINDS) <= routed
     assert all(
         re.fullmatch(r"cake_act_qdq_[0-9a-f]{20}", record["library"]) for record in cake_jit.MODULES.values()

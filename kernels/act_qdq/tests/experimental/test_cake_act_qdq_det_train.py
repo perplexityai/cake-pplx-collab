@@ -145,6 +145,23 @@ LARGE_RULE = {
 # The largest n_vecs the size-boundary test launches at, where the large range of MXFP8 without the scales begins in
 # place: a range bound above it (the last of the wide and the large ranges) is checked by the registry tests only.
 BOUNDARY_LIMIT = 33554432
+# The interleaved-domain program of each route, on sm_107a only and out of place only (``cake_jit.DOMAIN_ROUTES``):
+# its inclusive n_vecs range, from the first size it runs (per route) to the last n_vecs whose tile count
+# (n_vecs + 255) fits in signed 32 bits; its grid rule; and its kernel parameters besides the grid.
+DOMAIN_LAST = 2**31 - 256
+DOMAIN_FIRST = {kind: 8388608 for kind in (f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))}
+DOMAIN_VECTORS = {
+    kind: {"sm_107a": {"in_place": None, "out_of_place": (first, DOMAIN_LAST)}} for kind, first in DOMAIN_FIRST.items()
+}
+DOMAIN_RULE = {
+    "batch_shift": {"sm_107a": 1},
+    "chunk_bytes": 2097152,
+    "ctas_per_sm": {"sm_107a": 16},
+    "kind": "domain_items",
+    "tile_vectors": {"sm_107a": 256},
+    "vector_elements": 8,
+}
+DOMAIN_PARAMS = ["counters0", "counters1", "n_vecs", "first_tile", "first_die", "chunk_tile_shift", "batch_shift"]
 
 
 def _expected(arch: str, kind: str, call: str, n_vecs: int) -> str:
@@ -878,20 +895,31 @@ def test_registry_records_reference_the_build_manifest() -> None:
         for kind, names in routes.items():
             ranged = [kind + suffix for suffix, vectors in RANGED[kind].items() if arch in vectors]
             assert names == [kind, *ranged], (arch, kind)
+    # one interleaved-domain record per route, on sm_107a only, on no route of ROUTES
+    assert loader.DOMAIN_ROUTES == {"sm_107a": {kind: kind + "_domain" for kind in loader.KINDS}}
     referenced = set()
     for name, record in loader.MODULES.items():
         kind = loader.route_name(record["format"], scale_out=record["scale_out"])
         suffix = name.removeprefix(kind)
-        small, wide, large = suffix == "_small", suffix == "_wide", suffix == "_large"
-        assert suffix in ("", *RANGED[kind]), name
-        assert ("vectors" in record) == (small or wide or large), name
+        small, wide, large, domain = suffix == "_small", suffix == "_wide", suffix == "_large", suffix == "_domain"
+        assert suffix in ("", *RANGED[kind], "_domain"), name
+        assert ("vectors" in record) == (small or wide or large or domain), name
         if small or wide or large:
             assert record["vectors"] == RANGED[kind][suffix], name
+        if domain:
+            assert record["vectors"] == DOMAIN_VECTORS[kind], name
+        assert ("counters" in record) == domain, name
+        if domain:
+            # one unsigned claim counter a die, which every launch leaves zero
+            assert record["counters"] == {"dtype": "uint32", "rearm": "kernel", "words": 1}, name
         assert re.fullmatch(r"cake_act_qdq_[0-9a-f]{20}", record["library"]), name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
-        assert tuple(record["arches"]) == (("sm_100a", "sm_103a") if wide or large else loader.ARCHES), name
+        arches = ("sm_107a",) if domain else ("sm_100a", "sm_103a") if wide or large else loader.ARCHES
+        assert tuple(record["arches"]) == arches, name
         assert record["ffi_entry"] == "run", name
-        rule = SMALL_RULE if small else WIDE_RULE if wide else LARGE_RULE if large else MAIN_RULE
+        rule = (
+            DOMAIN_RULE if domain else SMALL_RULE if small else WIDE_RULE if wide else LARGE_RULE if large else MAIN_RULE
+        )
         assert record["grid_rule"] == rule, name
         assert record["grid_rule"]["vector_elements"] == loader.VECTOR, name
         assert record["group"] == loader.GROUP_SIZES[record["format"]], name
@@ -899,10 +927,15 @@ def test_registry_records_reference_the_build_manifest() -> None:
         assert tuple(launch["block"]) == (256 if small else 128 if wide else 1024 if large else 64, 1, 1), name
         assert tuple(launch["cluster"]) == (1, 1, 1), name
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
-        assert launch["dynamic_smem_bytes"] == 0, name
+        if domain:
+            # the claim word in shared memory
+            assert isinstance(launch["dynamic_smem_bytes"], int) and launch["dynamic_smem_bytes"] >= 0, name
+        else:
+            assert launch["dynamic_smem_bytes"] == 0, name
         params = [key for kind, key in record["arg_plan"] if kind != "grid"]
         axes = [key for kind, key in record["arg_plan"] if kind == "grid"]
-        assert params == (["x", "y", "scales", "n_vecs"] if record["scale_out"] else ["x", "y", "n_vecs"]), name
+        io = ["x", "y", "scales"] if record["scale_out"] else ["x", "y"]
+        assert params == io + (DOMAIN_PARAMS if domain else ["n_vecs"]), name
         assert axes == list(loader.GRID_AXES), name
         for arch in record["arches"]:
             library = loader.library_name(name, arch)
