@@ -292,8 +292,11 @@ def cake_act_qdq_det_train_forward_workspace_bytes(
     """The workspace of one forward call of an input of ``shape``.
 
     Always 0: a call takes no caller workspace.  A ``locality="domain"`` call
-    keeps its claim counters in the package's own workspace per stream, 128
-    bytes in each die's memory.
+    keeps its claim counters in the package's own workspace per stream: 128
+    bytes in each die's memory, from the device's 15,360 eager workspaces
+    (for eager calls) or 1,024 graph workspaces (for CUDA graph captures); a
+    stream or capture that finds its kind all taken keeps both counters in
+    default memory.
 
     Parameters
     ----------

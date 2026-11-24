@@ -25,8 +25,12 @@ order, and the launch arguments and grid, against the kernel's own decoding of
 its items; and, against a fake driver, the unwind of a mapping that fails (out
 of memory, retried once; any other error, not retried) and the error without
 cuda-python; the free of a range queued while another call holds the module's
-lock; the per-thread default stream's key per thread; the two dies' rows of a
-claim workspace; and the read-only launch arguments a placed call keeps.  The
+lock; a device's first claim-counter mapping (no room for the counters raises
+and records nothing, a failure after they map frees their range once and
+reports the first error, and the counters are zeroed and the stream
+synchronized before the device's entry is published); the per-thread default
+stream's key per thread; the two dies' rows of a claim workspace; and the
+read-only launch arguments a placed call keeps.  The
 GPU tests check that ``"domain"`` runs the ``"off"`` program on other
 architectures and on default memory, that ``"off"`` loads none of the route's
 state, that a launch keys its claim workspace by torch's current stream, and
@@ -494,6 +498,114 @@ def test_a_range_queued_under_the_lock_is_freed_when_the_lock_is_released(monkey
     monkeypatch.setattr(memory, "_capturing", lambda: False)
     memory._drain()
     assert freed == [entry, entry] and not memory._PENDING
+
+
+def _stub_counter_mapping(monkeypatch) -> list:
+    """The stubs of a device's first claim-counter mapping on the CPU: no device has its counters yet, the driver is
+    a stand-in, and ``_free`` records what it frees (the list returned).  Each test patches ``_map_or_out_of_memory``
+    itself."""
+    freed: list = []
+    monkeypatch.setattr(memory, "_GRAPH_WORKSPACES", {})
+    monkeypatch.setattr(memory, "_PENDING", collections.deque())
+    monkeypatch.setattr(memory, "_free", freed.append)
+    monkeypatch.setattr(memory, "_unregister", lambda index, base: None)
+    monkeypatch.setattr(memory, "_capturing", lambda: False)
+    monkeypatch.setattr(memory, "_driver", lambda: SimpleNamespace())
+    monkeypatch.setattr(memory, "domain_count", lambda index: memory.DIES)
+    monkeypatch.setattr(memory.cake_jit, "device_arch", lambda index: ARCH)
+    return freed
+
+
+@pytest.mark.cpu_only
+def test_no_room_for_the_claim_counters_records_nothing(monkeypatch) -> None:
+    """A device's first :func:`domain_empty` maps its claim counters (one chunk in each die) before the tensor; when
+    the device has no room for them, the call raises ``torch.cuda.OutOfMemoryError``, maps no tensor and records no
+    counters, so the next call maps them again."""
+    mapped: list = []
+    freed = _stub_counter_mapping(monkeypatch)
+
+    def no_room(driver, index, chunk, chunks):
+        mapped.append((index, chunk, chunks))
+        raise torch.cuda.OutOfMemoryError("no room for the claim counters")
+
+    monkeypatch.setattr(memory, "_map_or_out_of_memory", no_room)
+    for _ in range(2):
+        with pytest.raises(torch.cuda.OutOfMemoryError, match="claim counters"):
+            memory.domain_empty((4, WIDTH), device="cuda:0")
+    assert mapped == [(0, CHUNK, memory.DIES)] * 2
+    assert freed == [] and memory._GRAPH_WORKSPACES == {}
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("free_fails", (False, True))
+def test_a_failure_after_the_claim_counters_map_frees_them(free_fails: bool, monkeypatch) -> None:
+    """A step after the claim counters map (here their export as a tensor) that raises frees their range once and
+    records nothing; when that free raises too, the first error is the one reported."""
+    mapped: list = []
+    freed = _stub_counter_mapping(monkeypatch)
+    base = 1 << 30
+
+    def counters(driver, index, chunk, chunks):
+        mapped.append((index, chunk, chunks))
+        return base, chunk * chunks
+
+    def free(entry) -> None:
+        freed.append(entry)
+        if free_fails:
+            raise RuntimeError("free refused")
+
+    def refused(producer):
+        raise RuntimeError("export refused")
+
+    monkeypatch.setattr(memory, "_map_or_out_of_memory", counters)
+    monkeypatch.setattr(memory, "_free", free)
+    monkeypatch.setattr(torch, "from_dlpack", refused)
+    with pytest.raises(RuntimeError, match="export refused"):
+        memory._make_graph_workspaces(0)
+    assert mapped == [(0, CHUNK, memory.DIES)]
+    (entry,) = freed
+    assert (entry.index, entry.base, entry.size, entry.chunk) == (0, base, memory.DIES * CHUNK, CHUNK)
+    assert entry.unmapped == 0
+    assert memory._GRAPH_WORKSPACES == {}
+
+
+@pytest.mark.cpu_only
+def test_the_claim_counters_are_zeroed_and_synchronized_before_they_are_published(monkeypatch) -> None:
+    """The claim counters' block is zeroed, then the current stream is synchronized, and only then is the device's
+    entry published (a reader without the lock finds no entry or a zeroed block); a later call maps nothing."""
+    mapped: list = []
+    freed = _stub_counter_mapping(monkeypatch)
+    events: list = []
+
+    class Block:
+        def view(self, *shape):
+            events.append(("view", shape))
+            return self
+
+        def zero_(self):
+            events.append(("zero", 0 in memory._GRAPH_WORKSPACES))
+            return self
+
+    block = Block()
+
+    def counters(driver, index, chunk, chunks):
+        mapped.append((index, chunk, chunks))
+        return 1 << 30, chunk * chunks
+
+    def stream(device):
+        assert device == torch.device("cuda", 0)
+        return SimpleNamespace(synchronize=lambda: events.append(("sync", 0 in memory._GRAPH_WORKSPACES)))
+
+    monkeypatch.setattr(memory, "_map_or_out_of_memory", counters)
+    monkeypatch.setattr(torch, "from_dlpack", lambda producer: block)
+    monkeypatch.setattr(torch.cuda, "current_stream", stream)
+    memory._make_graph_workspaces(0)
+    memory._make_graph_workspaces(0)
+    assert events == [("view", (torch.int32,)), ("view", (memory.DIES, CHUNK // 4)), ("zero", False), ("sync", False)]
+    assert mapped == [(0, CHUNK, memory.DIES)] and freed == []
+    assert memory._GRAPH_WORKSPACES == {
+        0: {"block": block, "taken": 0, "eager": memory.GRAPH_WORKSPACES, "slots": CHUNK // (4 * memory.SLOT_WORDS)}
+    }
 
 
 @pytest.mark.cpu_only
