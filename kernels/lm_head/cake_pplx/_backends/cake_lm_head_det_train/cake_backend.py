@@ -305,10 +305,17 @@ HIDDEN_COUNT_MIN_CHUNKS = 3
 # without these two rules the retained second backward (a device scan in place of the host count's one copy) and the
 # checkpointed step (the device prologue in both passes) measured slower with the hidden count (B200 queued backward
 # +1.4 to +4.4 us at T = 32 to 1024, checkpointed step at T = 128 2240.5 -> 2411.5; R200 checkpointed step at T = 32
-# 1466.5 -> 1576.2).  B200 and R200 keep the host count for these calls.  The upper bound is at most
-# :data:`HOST_COUNT_MAX_ROWS` and lies below every architecture's zero-gradient row floor
-# (:data:`ZERO_DLOGP_MIN_ROWS_BY_ARCH`).  Bitwise the same outputs (:func:`hidden_count_default`).
-HIDDEN_COUNT_LOSS_ROWS_BY_ARCH: dict[str, tuple[int, int]] = {"sm_103a": (32, 1024)}
+# 1466.5 -> 1576.2).  With both rules, measured on B200 the same way against the host count: the queued forward at
+# T = 32 / 1024 841.5 -> 679.4 / 2797.4 -> 2636.4, the queued backward 431.0 -> 426.5 / 1236.6 -> 1232.0, the queued
+# T = 1024 forward + backward step 4069.1 -> 3906.4, the checkpointed step at T = 128 2307.0 -> 2304.9 (the host count
+# in both), and no slower call at T = 32 to 1024 (the same operations and timings).  R200 keeps the host count for
+# these calls (no timing of the two rules there).  The upper bound is at most :data:`HOST_COUNT_MAX_ROWS` and lies
+# below every architecture's zero-gradient row floor (:data:`ZERO_DLOGP_MIN_ROWS_BY_ARCH`).  Bitwise the same outputs
+# (:func:`hidden_count_default`).
+HIDDEN_COUNT_LOSS_ROWS_BY_ARCH: dict[str, tuple[int, int]] = {
+    "sm_100a": (32, 1024),
+    "sm_103a": (32, 1024),
+}
 # Calls of at most this many rows form the valid-row count and index of the host-count path on the host
 # (:func:`valid_rows`): the bool mask ``labels >= 0`` comes back in one copy of ``T`` bytes -- the call's one
 # synchronization -- and the index goes back in one copy, instead of ``nonzero``'s count, scan and select kernels and

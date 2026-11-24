@@ -287,7 +287,8 @@ keyword.
   run).  All rows valid: the uncompacted path (no gather, no scatter).  Every
   row ignored: zeros without a launch.  On this host-count path (the calls the
   hidden valid-row count below does not serve: one and two chunks, except, on
-  `sm_103a`, the loss entry's one-chunk calls of 32 to 1024 rows) a
+  `sm_100a` and `sm_103a`, the loss entry's one-chunk calls of 32 to 1024
+  rows) a
   remembered forward launches chunk 0's row gather and logits GEMM right
   behind the count and binds the rest of the call -- the compacted labels, the
   policy operands, the row vectors, the accumulators -- behind them
@@ -386,7 +387,8 @@ keyword.
   stream's `auto` rule, it serves calls of three or more chunks) and every
   `sm_103a` call on CUDA 13.0 (the toolchain note below) take the previous
   path.  The exception is, on the architectures of
-  `cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH` (`sm_103a`: 32 to 1024 rows),
+  `cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH` (`sm_100a` and `sm_103a`: 32
+  to 1024 rows),
   the loss entry's one-chunk calls in that row window without the zero-weight
   split (`cake_backend.hidden_count_chunks_admit`): their chunk 0 GEMM runs on
   `T` rows and the GPU no longer waits for the host count's readback and the
@@ -403,7 +405,13 @@ keyword.
   inside a non-reentrant `torch.utils.checkpoint` keeps the host count in
   both passes: without these two rules the retained second backward and the
   checkpointed step measured slower with the hidden count on B200 and R200.
-  On B200 and R200 these one-chunk calls keep the host count.  The
+  With both rules, on B200 (measured the same way against the host count):
+  behind queued work the forward at `T` = 32 / 1024 841.5 -> 679.4 /
+  2797.4 -> 2636.4 us, the backward 431.0 -> 426.5 / 1236.6 -> 1232.0 us, the
+  `T` = 1024 forward + backward step 4069.1 -> 3906.4 us, the checkpointed
+  step at `T` = 128 2307.0 -> 2304.9 us (the host count in both), and no
+  slower call at `T` = 32 to 1024.  On R200 these one-chunk calls keep the
+  host count (the two rules were not timed there).  The
   log-probability entries keep the previous rule.  The prepared runner
   (`prepare_lm_head_det_loss`) is unchanged.  The chunk buffers and the gather
   buffer exist at the buffer extent before the count is known

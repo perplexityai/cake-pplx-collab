@@ -5327,16 +5327,20 @@ def test_hidden_count_eligibility_rules(monkeypatch, toolchain_check_uncached):
 
 
 def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
-    """On the architectures of ``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH`` (sm_103a: 32 to 1024 rows) the loss entry's one-chunk
-    calls in the architecture's row window take the hidden valid-row count (``hidden_count_chunks_admit(...,
-    loss_call=True, arch=)``, the loss entry without the zero-weight split): not below 32 rows, not above ``min(chunk,
-    1024)`` rows, not in two chunks; sm_100a and sm_107a admit no one-chunk loss call; ``arch=None`` (the check ahead of
-    the record lookup) takes any architecture's window; three chunks and more on either rule; ``loss_call=False`` (the
-    log-probability entries, a split call) keeps the previous rule.  ``hidden_count_eligible`` (the record's
-    architecture) and the opt-in module's ``_hidden_count_program`` follow it, and the call's other rules still apply:
-    a registered program, an ``X`` read in place and the toolchain (sm_103a on CUDA 13.0: the host count)."""
+    """On the architectures of ``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH`` (sm_100a and sm_103a: 32 to 1024 rows) the loss
+    entry's one-chunk calls in the architecture's row window take the hidden valid-row count
+    (``hidden_count_chunks_admit(..., loss_call=True, arch=)``, the loss entry without the zero-weight split): not
+    below 32 rows, not above ``min(chunk, 1024)`` rows, not in two chunks; sm_107a (and an unlisted architecture)
+    admits no one-chunk loss call; ``arch=None`` (the check ahead of the record lookup) takes any architecture's
+    window; three chunks and more on either rule; ``loss_call=False`` (the log-probability entries, a split call)
+    keeps the previous rule.  ``hidden_count_eligible`` (the record's architecture) and the opt-in module's
+    ``_hidden_count_program`` follow it, and the call's other rules still apply: a registered program, an ``X`` read
+    in place and the toolchain (sm_103a on CUDA 13.0: the host count)."""
     monkeypatch.setattr(cake_build, "record_cuda_version", lambda arch: (13, 4))
-    assert cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH == {"sm_103a": (32, 1024)}
+    assert cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH == {
+        "sm_100a": (32, 1024),
+        "sm_103a": (32, 1024),
+    }
     for lo, hi in cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH.values():
         assert hi <= cake_backend.HOST_COUNT_MAX_ROWS
     assert cake_backend.HIDDEN_COUNT_MIN_CHUNKS == 3
@@ -5363,9 +5367,10 @@ def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
         (33, 16, True, True),
     ):
         case = (rows, chunk)
-        assert admit(rows, chunk, loss_call=True, arch="sm_103a") is loss, case
+        for arch in ("sm_100a", "sm_103a"):
+            assert admit(rows, chunk, loss_call=True, arch=arch) is loss, (case, arch)
         assert admit(rows, chunk, loss_call=True) is loss, case  # any window
-        for arch in ("sm_100a", "sm_107a", "sm_120a"):
+        for arch in ("sm_107a", "sm_120a"):
             assert admit(rows, chunk, loss_call=True, arch=arch) is other, (case, arch)
         assert admit(rows, chunk) is other, case
         assert admit(rows, chunk, arch="sm_103a") is other, case
@@ -5391,7 +5396,10 @@ def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
         for arch in ("sm_100a", "sm_107a"):
             other = dict(full, arch=arch)
             monkeypatch.setitem(cake_jit.MODULES, name, other)
-            assert not elig(p, X, other, name, stats=True, loss_call=True), (T, arch)
+            windowed = arch == "sm_100a"
+            got = elig(p, X, other, name, stats=True, loss_call=True)
+            assert got is windowed, (T, arch)
+            assert not elig(p, X, other, name, stats=True), (T, arch)
             assert elig(  # three chunks: the previous rule
                 _problem(3 * 4096, 6144, 154880, 4096),
                 X,
@@ -5427,6 +5435,11 @@ def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
     sm_100a = dict(full, arch="sm_100a")
     monkeypatch.setitem(cake_jit.MODULES, name, sm_100a)
     monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, sm_100a))
+    assert program(p, X, loss_call=True, **kw) == (name, sm_100a)
+    assert program(p, X, **kw) is None
+    sm_107a = dict(full, arch="sm_107a")
+    monkeypatch.setitem(cake_jit.MODULES, name, sm_107a)
+    monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, sm_107a))
     assert program(p, X, loss_call=True, **kw) is None
     # the toolchain gate: sm_103a on CUDA 13.0 keeps the host count
     monkeypatch.setitem(cake_jit.MODULES, name, sm_103a)
@@ -10872,7 +10885,7 @@ def test_device_hidden_count_kernels_match_torch(glm_weight):
 def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
     """The loss entry's one-chunk calls in the running architecture's row window (``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH``)
     without the zero-weight split take the hidden valid-row count where the toolchain runs it, with the shipped table
-    (no window on B200 / R200: no one-chunk loss call begins the count) and with the running architecture given the
+    (no window on R200: no one-chunk loss call begins the count) and with the running architecture given the
     sm_103a window (32, 1024): through the backend's entry and the opt-in module's default call (the public default
     with a trainable ``W``), a call begins the count exactly when it is such a call -- not at ``T`` 16, 31 or 1025
     (chunk 4096), not at ``T`` 1024 in two chunks of 512, not a policy call the split serves
