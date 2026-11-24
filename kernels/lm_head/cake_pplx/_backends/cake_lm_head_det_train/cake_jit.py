@@ -748,6 +748,40 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["grid", "grid_y"],
         ["grid", "grid_z"],
     ],
+    "scale_cast_scatter_fold_bf16": [
+        ["buffer", "acc"],
+        ["buffer", "g"],
+        ["buffer", "scan"],
+        ["buffer", "idx_lo"],
+        ["buffer", "out"],
+        ["parameter", "row_vecs"],
+        ["parameter", "num_rows"],
+        ["buffer", "labels"],
+        ["buffer", "rlab"],
+        ["buffer", "W"],
+        ["parameter", "V"],
+        ["parameter", "fold_lo"],
+        ["parameter", "fold_hi"],
+        ["grid", "grid_x"],
+        ["grid", "grid_y"],
+        ["grid", "grid_z"],
+    ],
+    "scale_cast_fold_bf16": [
+        ["buffer", "acc"],
+        ["buffer", "g"],
+        ["buffer", "out"],
+        ["parameter", "num_vecs"],
+        ["parameter", "row_vecs"],
+        ["buffer", "labels"],
+        ["buffer", "rlab"],
+        ["buffer", "W"],
+        ["parameter", "V"],
+        ["parameter", "fold_lo"],
+        ["parameter", "fold_hi"],
+        ["grid", "grid_x"],
+        ["grid", "grid_y"],
+        ["grid", "grid_z"],
+    ],
 }
 _LAUNCHES: dict[str, dict[str, list[int]]] = {
     "b256_c1": {"block": [256, 1, 1], "cluster": [1, 1, 1]},
@@ -996,7 +1030,7 @@ _REGISTRY: dict[str, dict[str, Any]] = {
                 "dc45b3bd617f038cbddb",
                 "slab_sum",
                 "b256_c1",
-                "max(1, min(num_vecs/2048, 65535))",
+                "max(1, min(max(num_vecs/2048, min(num_vecs/256, sms*3, sms*3*(sms*2-num_vecs/2048))), 65535))",
                 1,
                 1,
             ],
@@ -1214,6 +1248,22 @@ _REGISTRY: dict[str, dict[str, Any]] = {
                 "b128_c1",
                 "n_keys/span",
                 "H/1024",
+                1,
+            ],
+            "scale_cast_scatter_fold_bf16": [
+                "b9eea8f269340a194207",
+                "scale_cast_scatter_fold_bf16",
+                "b256_c1",
+                "max(1, min(num_rows*row_vecs/2048, num_rows, 65535))",
+                1,
+                1,
+            ],
+            "scale_cast_fold_bf16": [
+                "510395e04cafbf3836e8",
+                "scale_cast_fold_bf16",
+                "b256_c1",
+                "max(1, min(num_vecs/2048, num_vecs/row_vecs, 65535))",
+                1,
                 1,
             ],
         },
@@ -1473,7 +1523,7 @@ _REGISTRY: dict[str, dict[str, Any]] = {
                 "dc45b3bd617f038cbddb",
                 "slab_sum",
                 "b256_c1",
-                "max(1, min(num_vecs/2048, 65535))",
+                "max(1, min(max(num_vecs/2048, min(num_vecs/256, sms*3, sms*3*(sms*2-num_vecs/2048))), 65535))",
                 1,
                 1,
             ],
@@ -1691,6 +1741,22 @@ _REGISTRY: dict[str, dict[str, Any]] = {
                 "b128_c1",
                 "n_keys/span",
                 "H/1024",
+                1,
+            ],
+            "scale_cast_scatter_fold_bf16": [
+                "b9eea8f269340a194207",
+                "scale_cast_scatter_fold_bf16",
+                "b256_c1",
+                "max(1, min(num_rows*row_vecs/2048, num_rows, 65535))",
+                1,
+                1,
+            ],
+            "scale_cast_fold_bf16": [
+                "510395e04cafbf3836e8",
+                "scale_cast_fold_bf16",
+                "b256_c1",
+                "max(1, min(num_vecs/2048, num_vecs/row_vecs, 65535))",
+                1,
                 1,
             ],
         },
@@ -1950,7 +2016,7 @@ _REGISTRY: dict[str, dict[str, Any]] = {
                 "dc45b3bd617f038cbddb",
                 "slab_sum",
                 "b256_c1",
-                "max(1, min(num_vecs/2048, 65535))",
+                "max(1, min(max(num_vecs/2048, min(num_vecs/256, sms*3, sms*3*(sms*2-num_vecs/2048))), 65535))",
                 1,
                 1,
             ],
@@ -2170,6 +2236,22 @@ _REGISTRY: dict[str, dict[str, Any]] = {
                 "H/1024",
                 1,
             ],
+            "scale_cast_scatter_fold_bf16": [
+                "b9eea8f269340a194207",
+                "scale_cast_scatter_fold_bf16",
+                "b256_c1",
+                "max(1, min(num_rows*row_vecs/2048, num_rows, 65535))",
+                1,
+                1,
+            ],
+            "scale_cast_fold_bf16": [
+                "510395e04cafbf3836e8",
+                "scale_cast_fold_bf16",
+                "b256_c1",
+                "max(1, min(num_vecs/2048, num_vecs/row_vecs, 65535))",
+                1,
+                1,
+            ],
         },
     },
 }
@@ -2285,6 +2367,16 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 # ``scale_cast_bf16``      out = bf16(g * acc) over a flat fp32 accumulator
 # ``scale_cast_f32``       out = g * acc (fp32) -- the single output cast of
 #                          ``dW`` (either) and ``dX`` (bf16) in the backward.
+# ``scale_cast_fold_bf16`` the flat bf16 cast with the label residual fold of
+#                          the rows [fold_lo, fold_hi): such a row of a label
+#                          y in [0, V) and a nonzero residual r is cast as
+#                          bf16(g * fma(r, fp32(W[y]), acc)) -- the fold of
+#                          the fold-alone slab sum, then the cast, in one
+#                          pass (the same bits); every other row as
+#                          ``scale_cast_bf16``.
+# ``scale_cast_scatter_fold_bf16``  the scatter cast with the same fold of
+#                          the compact rows [fold_lo, fold_hi);
+#                          ``scale_cast_scatter_bf16`` reads no fold operand.
 # ``gather_rows_bf16``     chunk 0's row gather of the hidden valid-row count
 #                          path: out[r] = X[idx[r]] for r < min(count, num_rows)
 #                          with the count read from device memory, exact zeros
@@ -2347,6 +2439,8 @@ STAGES = (
     "scale_cast_bf16",
     "scale_cast_f32",
     "scale_cast_scatter_bf16",
+    "scale_cast_fold_bf16",
+    "scale_cast_scatter_fold_bf16",
 )
 # The base stages (one per kernel role of the chunk loop).  Every other name in
 # ``STAGES`` is a structural FORM of a base GEMM stage -- a distinct kernel body,
@@ -2398,6 +2492,8 @@ BASE_STAGES = (
     "scale_cast_bf16",
     "scale_cast_f32",
     "scale_cast_scatter_bf16",
+    "scale_cast_fold_bf16",
+    "scale_cast_scatter_fold_bf16",
 )
 GEMM_STAGES = tuple(stage for stage in STAGES if stage.startswith("gemm_"))
 ROW_STAGES = (
@@ -2410,6 +2506,8 @@ ROW_STAGES = (
     "scale_cast_bf16",
     "scale_cast_f32",
     "scale_cast_scatter_bf16",
+    "scale_cast_fold_bf16",
+    "scale_cast_scatter_fold_bf16",
 )
 
 # The temperature forms (``_tau``) of the log-probability entry: the logits GEMM arms and the device-count logits GEMM

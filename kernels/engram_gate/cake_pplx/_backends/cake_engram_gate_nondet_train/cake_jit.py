@@ -107,7 +107,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (160, 1, 1),
             "cluster": (4, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 74240,
+            "dynamic_smem_bytes": 74880,
             "use_pdl": False,
         },
         "library": "cake_engram_gate_train_f432570962d690736ab8",
@@ -117,7 +117,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dw_part"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "dq"], ["buffer", "dk"], ["parameter", "NP"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_engram_gate_train_eec3759c50f56c38622b",
+        "kernel_symbol": "kernel_cake_engram_gate_train_86e6b25d037311a56d45",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -125,7 +125,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 4096,
             "use_pdl": False,
         },
-        "library": "cake_engram_gate_train_eec3759c50f56c38622b",
+        "library": "cake_engram_gate_train_86e6b25d037311a56d45",
         "stage": "dw_reduce",
     },
     "fwd_dot2": {
@@ -171,7 +171,7 @@ CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3}
 # of at least ``STAGE_BWD_MIN_TOKENS`` tokens on these architectures, and the
 # slower one or no faster one everywhere else (a call with a mask tensor, even an
 # all-true one, fewer tokens, or another architecture).
-STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_103a"})
+STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_100a", "sm_103a", "sm_107a"})
 STAGE_BWD_MIN_TOKENS = 4096
 # Whole four-CTA clusters one device holds at once, by the CTAs per SM of a
 # program: (architecture, SM count) -> {CTAs per SM: clusters}, as

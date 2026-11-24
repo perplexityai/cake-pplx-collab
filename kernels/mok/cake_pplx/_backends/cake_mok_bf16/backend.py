@@ -36,6 +36,7 @@ from ._kernels import (
     MoKRecompute,
     MoKRecomputeMXFP8,
     MoKScheduler,
+    SOURCE_SPLIT_UNIT,
     _ffi_stream,
     _recall,
     _remember,
@@ -138,6 +139,17 @@ class _StepPlan:
     dy_rows: torch.Tensor | None = None
 
 
+@dataclass(slots=True, eq=False)
+class _SchedulePlan:
+    """Schedule launches of one adapter on one workspace (see
+    ``MoKFunctional._schedule_plan``)."""
+
+    routes: torch.Tensor
+    gather: object
+    barrier: object
+    scheduler: object
+
+
 def count_routed_load(routes, ep_size, local_experts):
     """Routed rows per owning rank over the gathered expert ids ``routes``.
 
@@ -237,10 +249,10 @@ class MoKFunctional:
         ``y = S(x) + sum_k h_k Wd_k^T``, with ``d_w = dot(dh, a)`` (``dh`` the
         gradient of ``h``; a zero weight is allowed and has its gradient); it
         needs the layouts of ``BEFORE_DOWN_LAYOUTS``, ``clamped_swiglu=True``,
-        ``fp32_wgrad=True``, BF16 routed weights and an sm_100a or sm_103a
-        device. Every unsupported combination raises here, before any kernel
-        is loaded or launched: ``TypeError`` for a position that is not a
-        ``str``, an ``ep``, ``local_experts`` or ``topk`` that is not an
+        ``fp32_wgrad=True``, BF16 routed weights and an sm_100a, sm_103a or
+        sm_107a device. Every unsupported combination raises here, before any
+        kernel is loaded or launched: ``TypeError`` for a position that is not
+        a ``str``, an ``ep``, ``local_experts`` or ``topk`` that is not an
         ``int`` and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
         ``bool`` (in both positions), ``ValueError`` for every other value.
         """
@@ -273,6 +285,8 @@ class MoKFunctional:
 
         self._multimacro_target = target_arch(self.device) == "sm_107a"
         self._sm_count = {}  # device index -> multi_processor_count
+        # device index -> the last configuration build_schedule validated there.
+        self._schedule_configs = {}
         # Validated weight sets (LRU, ``_weight_key`` per weight): one entry
         # per MoE layer and operation, no reference to any weight.
         self._validated = {}
@@ -482,15 +496,114 @@ class MoKFunctional:
                 "Workspace/expert geometry differs from the compiled scheduler"
             )
         self._check_device(workspace)
-        sms = self._sm_count.get(workspace.device.index)
-        if sms is None:
-            sms = self._sm_count[workspace.device.index] = (
-                torch.cuda.get_device_properties(workspace.device).multi_processor_count
+        self._check_schedule_config(config, workspace.device)
+        if not isinstance(top_experts, torch.Tensor) or top_experts.ndim != 2:
+            raise ValueError("Expert IDs must have shape [source_tokens, topk]")
+        count = top_experts.shape[0]
+        if owner is not None and count > owner.source_capacity:
+            raise ValueError(
+                "Input length exceeds source capacity; collectively recreate the workspace"
             )
+        expected_count = count if owner is not None else workspace.num_local_tokens
+        if (
+            top_experts.device != workspace.device
+            or top_experts.dtype != torch.int64
+            or not top_experts.is_contiguous()
+            or tuple(top_experts.shape) != (expected_count, workspace.topk)
+        ):
+            raise ValueError(
+                "Expert IDs must be contiguous int64 on the workspace device with its source shape"
+            )
+        if workspace.num_local_tokens * workspace.topk * 4 % 2048:
+            raise ValueError("The route buffer must contain complete metadata chunks")
+        plan = self._schedule_plan(workspace)
+        # The before-down forward's source split reads the owner-rank route
+        # totals of this schedule (``MoKSchedule.owner_routes``).
+        split = config.source_split_comm_sms is not None
+        if plan is None:
+            rank, token, num_tokens, counts, layout, owner_routes = (
+                self._schedule_launches(workspace, config, top_experts, count, split)
+            )
+        else:
+            with _ffi_stream():
+                # The same copies and launches as ``_schedule_launches``, in
+                # the same order, through the workspace's prebuilt plan.
+                routes = plan.routes
+                if count == workspace.num_local_tokens:
+                    routes.copy_(top_experts)
+                else:
+                    routes.fill_(-1)
+                    routes[:count].copy_(top_experts)
+                if plan.gather is None:
+                    self.communication.all_gather_top_experts(
+                        routes,
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.all_gather_top_experts_buffer_multicast_ptr,
+                        workspace.ep_rank,
+                    )
+                else:
+                    plan.gather.launch(())
+                if plan.barrier is not None:
+                    plan.barrier.launch(())
+                rank, token, num_tokens, counts, layout = self.scheduler.launch_planned(
+                    plan.scheduler
+                )
+                self._observe_load(workspace, config, num_tokens)
+                self.scheduler.layout_planned(plan.scheduler, counts, rank, layout)
+                owner_routes = self.scheduler.owner_loads() if split else None
+                self.scheduler.release_counts()
+        if owner is not None:
+            return MoKSourceSchedule(
+                peer_rank=rank,
+                peer_token_idx=token,
+                num_tokens=num_tokens,
+                tokens_per_expert=counts,
+                layout=layout,
+                owner_routes=owner_routes,
+                num_source_tokens=count,
+                workspace=owner,
+            )
+        return native.MoKSchedule(
+            peer_rank=rank,
+            peer_token_idx=token,
+            num_tokens=num_tokens,
+            tokens_per_expert=counts,
+            layout=layout,
+            owner_routes=owner_routes,
+        )
+
+    def _check_schedule_config(self, config, device):
+        """The configuration checks of :meth:`build_schedule`, once per
+        (device, configuration object): ``MoKConfig`` is frozen, so a
+        configuration that passed on a device passes again; the last one that
+        passed is kept per device index (a reference, so its identity is not
+        reused)."""
+        index = device.index
+        if self._schedule_configs.get(index) is config:
+            return
+        sms = self._sm_count.get(index)
+        if sms is None:
+            sms = self._sm_count[index] = torch.cuda.get_device_properties(
+                device
+            ).multi_processor_count
         for count in (config.fwd_num_comm_sms, config.bwd_num_comm_sms):
             if type(count) is not int or count <= 0 or count % 2 or count >= sms:
                 raise ValueError(
                     "Communication-SM counts must be positive, even and leave compute SMs"
+                )
+        for name in ("bf16_comm_sms", "mxfp8_comm_sms"):
+            split = getattr(config, name)
+            if split is not None and (
+                type(split) is not tuple
+                or len(split) != 2
+                or any(
+                    type(count) is not int or count <= 0 or count % 2 or count >= sms
+                    for count in split
+                )
+            ):
+                raise ValueError(
+                    f"{name} must be None or a (forward, backward) pair of positive, "
+                    "even communication-SM counts that leave compute SMs"
                 )
         if config.imbalance_comm_sms is not None:
             hot = config.imbalance_comm_sms
@@ -515,6 +628,25 @@ class MoKFunctional:
                 raise ValueError(
                     "imbalance_threshold must be a finite number above 1.0"
                 )
+        split = config.source_split_comm_sms
+        if split is not None and (
+            type(split) is not int or split <= 0 or split % 2 or split >= sms
+        ):
+            raise ValueError(
+                "source_split_comm_sms must be a positive, even communication-SM "
+                "count that leaves compute SMs"
+            )
+        threshold = config.source_split_threshold
+        if (
+            type(threshold) not in (int, float)
+            or not math.isfinite(threshold)
+            or not 1.0 < threshold <= 65536
+            or round(threshold * SOURCE_SPLIT_UNIT) <= SOURCE_SPLIT_UNIT
+        ):
+            raise ValueError(
+                "source_split_threshold must be a finite number at most 65536 "
+                "that stays above 1.0 in 1/256 steps"
+            )
         if type(config.comm_split_log) is not bool:
             raise TypeError("comm_split_log must be a boolean")
         if (
@@ -530,25 +662,60 @@ class MoKFunctional:
             raise ValueError(
                 "This Cake metadata pipeline currently uses the native 2048-byte chunk"
             )
-        if not isinstance(top_experts, torch.Tensor) or top_experts.ndim != 2:
-            raise ValueError("Expert IDs must have shape [source_tokens, topk]")
-        count = top_experts.shape[0]
-        if owner is not None and count > owner.source_capacity:
-            raise ValueError(
-                "Input length exceeds source capacity; collectively recreate the workspace"
-            )
-        expected_count = count if owner is not None else workspace.num_local_tokens
-        if (
-            top_experts.device != workspace.device
-            or top_experts.dtype != torch.int64
-            or not top_experts.is_contiguous()
-            or tuple(top_experts.shape) != (expected_count, workspace.topk)
-        ):
-            raise ValueError(
-                "Expert IDs must be contiguous int64 on the workspace device with its source shape"
-            )
-        if workspace.num_local_tokens * workspace.topk * 4 % 2048:
-            raise ValueError("The route buffer must contain complete metadata chunks")
+        self._schedule_configs[index] = config
+
+    def _schedule_plan(self, workspace):
+        """The workspace's schedule launches for this adapter, built and
+        validated on first use (like the operations' launch plans, they live in
+        ``workspace.launch_plans`` and die with the workspace): a persistent
+        int32 route buffer (each call overwrites it in stream order before the
+        gather reads it, as the workspace's shared buffers already require),
+        the gather and barrier plans and the scheduler plan. None during CUDA
+        Graph capture before the first eager build: the plan writes its
+        template eagerly, so that capture runs ``_schedule_launches``. The
+        plan's tensors are normal tensors also when the first build runs under
+        ``torch.inference_mode()``, so later builds in or outside inference
+        mode can write the route buffer."""
+        key = ("schedule", self.scheduler, self.communication)
+        plans = workspace.launch_plans
+        plan = plans.get(key)
+        if plan is None:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            with torch.inference_mode(False):
+                routes = torch.empty(
+                    (workspace.num_local_tokens, workspace.topk),
+                    dtype=torch.int32,
+                    device=workspace.device,
+                )
+                # A stand-in communication object without ``gather_plan``
+                # gathers through ``all_gather_top_experts`` (as at EP 1, where
+                # the gather is a copy).
+                planner = getattr(self.communication, "gather_plan", None)
+                plan = plans[key] = _SchedulePlan(
+                    routes=routes,
+                    gather=None
+                    if planner is None
+                    else planner(
+                        routes,
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.all_gather_top_experts_buffer_multicast_ptr,
+                        workspace.ep_rank,
+                    ),
+                    barrier=self._barrier_plan(workspace),
+                    scheduler=self.scheduler.plan(
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.schedule_capacity,
+                        workspace.ep_rank,
+                    ),
+                )
+        return plan
+
+    def _schedule_launches(self, workspace, config, top_experts, count, split=False):
+        """The schedule's copies and launches without a plan (first build under
+        CUDA Graph capture): ``(peer_rank, peer_token, num_tokens,
+        tokens_per_expert, layout, owner_routes)``, ``owner_routes`` None
+        unless ``split``."""
         if count == workspace.num_local_tokens:
             top_experts_int32 = top_experts.to(torch.int32)
         else:
@@ -566,31 +733,16 @@ class MoKFunctional:
             workspace.ep_rank,
         )
         self._barrier(workspace)
-        rank, token, count, counts = self.scheduler(
+        rank, token, num_tokens, counts = self.scheduler(
             workspace.all_gather_top_experts_buffer,
             workspace.schedule_capacity,
             workspace.ep_rank,
         )
-        self._observe_load(workspace, config, count)
+        self._observe_load(workspace, config, num_tokens)
         layout = self.scheduler.layout(counts, workspace.schedule_capacity, rank)
+        owner_routes = self.scheduler.owner_loads() if split else None
         self.scheduler.release_counts()
-        if owner is not None:
-            return MoKSourceSchedule(
-                peer_rank=rank,
-                peer_token_idx=token,
-                num_tokens=count,
-                tokens_per_expert=counts,
-                layout=layout,
-                num_source_tokens=top_experts.shape[0],
-                workspace=owner,
-            )
-        return native.MoKSchedule(
-            peer_rank=rank,
-            peer_token_idx=token,
-            num_tokens=count,
-            tokens_per_expert=counts,
-            layout=layout,
-        )
+        return rank, token, num_tokens, counts, layout, owner_routes
 
     def _load_entry(self, workspace, create):
         entry = self._load_state.get(id(workspace))
@@ -711,12 +863,21 @@ class MoKFunctional:
                 )
         return choice
 
-    def _comm_split(self, config, workspace):
+    def _comm_split(self, config, workspace, mxfp8=False):
         """(forward, backward) communication-SM counts for the next launch.
 
-        ``config.comm_split_log`` prints each change of the split to stderr.
+        The fixed split is the row of the launch's routed precision
+        (``config.mxfp8_comm_sms`` for MXFP8 routed weights,
+        ``config.bf16_comm_sms`` for BF16), else ``fwd_num_comm_sms`` /
+        ``bwd_num_comm_sms``; the imbalance split replaces it while the load
+        is skewed. ``config.comm_split_log`` prints each change of the split to
+        stderr.
         """
-        base = (config.fwd_num_comm_sms, config.bwd_num_comm_sms)
+        routed = config.mxfp8_comm_sms if mxfp8 else config.bf16_comm_sms
+        if routed is not None:
+            base = tuple(routed)
+        else:
+            base = (config.fwd_num_comm_sms, config.bwd_num_comm_sms)
         if config.imbalance_comm_sms is None:
             return base
         capturing = torch.cuda.is_current_stream_capturing()
@@ -741,6 +902,37 @@ class MoKFunctional:
                     flush=True,
                 )
         return split
+
+    def _source_split(self, config, workspace, schedule, fwd_comm_sms):
+        """``(rich_comm_sms, rich_threshold, owner_routes)`` of a forward
+        launch: the router-weight-before-down kernel's communication-SM count
+        for a source-rich rank (``MoKConfig.source_split_comm_sms``), its
+        threshold in 1/256 steps and the schedule's owner-rank route totals the
+        kernel reads the ranks' mean source rows from. The split is off (the
+        count in force, and ``num_tokens`` in place of the totals, which the
+        kernel then never reads) for the router weight after the down
+        projection, without a count, with a count not below the forward count
+        in force (``fwd_comm_sms``), or for a schedule without totals."""
+        rich = config.source_split_comm_sms
+        threshold = round(config.source_split_threshold * SOURCE_SPLIT_UNIT)
+        routes = schedule.owner_routes
+        if (
+            not self.weight_before_down
+            or rich is None
+            or rich >= fwd_comm_sms
+            or routes is None
+        ):
+            return fwd_comm_sms, threshold, schedule.num_tokens
+        if (
+            routes.numel() != workspace.ep_size
+            or routes.dtype != torch.int32
+            or routes.get_device() != workspace.device.index
+        ):
+            raise ValueError(
+                "schedule.owner_routes must be the schedule's int32 [ep_size] "
+                "route totals on the workspace device"
+            )
+        return rich, threshold, routes
 
     @staticmethod
     def _schedule(schedule):
@@ -946,6 +1138,9 @@ class MoKFunctional:
         intermediate = shared_gate_weights.shape[0]
         experts = schedule.tokens_per_expert.numel()
         before_down = self.weight_before_down
+        rich_comm_sms, rich_threshold, owner_routes = self._source_split(
+            config, workspace, schedule, fwd_comm_sms
+        )
 
         def build():
             x_rows = workspace.x_buffer[:shared_rows]
@@ -965,6 +1160,9 @@ class MoKFunctional:
                     config.minibatch_size,
                     weight_ptrs=(
                         workspace.router_weight_buffer_ptrs if before_down else None
+                    ),
+                    source_split=(
+                        (rich_comm_sms, rich_threshold) if before_down else None
                     ),
                 ),
                 barrier=self._barrier_plan(workspace),
@@ -990,6 +1188,8 @@ class MoKFunctional:
                 config.minibatch_size,
                 intermediate,
                 experts,
+                rich_comm_sms,
+                rich_threshold,
             ),
             build,
         )
@@ -1029,6 +1229,7 @@ class MoKFunctional:
                 schedule.peer_token_idx,
                 schedule.num_tokens,
                 schedule.layout,
+                owner_routes,
             )
             if barrier is not None:
                 barrier.launch(())
@@ -1086,10 +1287,17 @@ class MoKFunctional:
             forward_kernel, _ = self._kernels(swiglu_limit, mxfp8)
         else:
             forward_kernel = self._context_free_forward_kernel(swiglu_limit)
-        fwd_comm_sms, _ = self._comm_split(config, workspace)
+        fwd_comm_sms, _ = self._comm_split(config, workspace, mxfp8)
         program = {"multimacro": self._multimacro(config, workspace)} if mxfp8 else {}
         if self.weight_before_down:
             program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
+            if not mxfp8:
+                rich_comm_sms, rich_threshold, owner_routes = self._source_split(
+                    config, workspace, schedule, fwd_comm_sms
+                )
+                program["source_split"] = (rich_comm_sms, rich_threshold)
+                if rich_comm_sms < fwd_comm_sms:
+                    program["owner_routes"] = owner_routes
         values = forward_kernel(
             workspace.x_buffer[:shared_rows],
             workspace.x_buffer_ptrs,
@@ -1296,7 +1504,7 @@ class MoKFunctional:
             )
             program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
         self._barrier(workspace)
-        fwd_comm_sms, _ = self._comm_split(config, workspace)
+        fwd_comm_sms, _ = self._comm_split(config, workspace, mxfp8)
         values = self._recompute_kernel(swiglu_limit, mxfp8)(
             workspace.x_buffer[:shared_rows],
             workspace.x_buffer_ptrs,
@@ -1559,7 +1767,7 @@ class MoKFunctional:
             workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
         self._barrier(workspace)
         _, backward_kernel = self._kernels(swiglu_limit, mxfp8)
-        _, bwd_comm_sms = self._comm_split(config, workspace)
+        _, bwd_comm_sms = self._comm_split(config, workspace, mxfp8)
         values = backward_kernel(
             workspace.d_y_buffer[:shared_rows],
             workspace.d_y_buffer_ptrs,

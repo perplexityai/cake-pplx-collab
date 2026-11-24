@@ -2317,7 +2317,8 @@
     "library": "cake_mok_forward_clamped_wbd",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "x_shared",
@@ -2352,6 +2353,7 @@
       "y_done",
       "weight_peers",
       "row_weights",
+      "owner_routes",
       "local_tokens",
       "hidden",
       "intermediate",
@@ -2365,6 +2367,9 @@
       "minis_per_macro_div",
       "fused_col_blocks_div",
       "down_col_blocks_div",
+      "ep_size",
+      "rich_comm_sms",
+      "rich_threshold",
       "grid_x",
       "grid_y",
       "grid_z"
@@ -2374,7 +2379,8 @@
     "library": "cake_mok_forward_clamped_noctx_wbd",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "x_shared",
@@ -2409,6 +2415,7 @@
       "y_done",
       "weight_peers",
       "row_weights",
+      "owner_routes",
       "local_tokens",
       "hidden",
       "intermediate",
@@ -2422,6 +2429,9 @@
       "minis_per_macro_div",
       "fused_col_blocks_div",
       "down_col_blocks_div",
+      "ep_size",
+      "rich_comm_sms",
+      "rich_threshold",
       "grid_x",
       "grid_y",
       "grid_z"
@@ -2431,7 +2441,8 @@
     "library": "cake_mok_recompute_clamped_wbd",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "x_shared",
@@ -2476,7 +2487,8 @@
     "library": "cake_mok_backward_clamped_fp32_wbd",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "dy_s",
@@ -2577,7 +2589,8 @@
     "library": "cake_mok_epilogue_backward_6",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "shared",
@@ -2596,7 +2609,8 @@
     "library": "cake_mok_count_4_96",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2613,7 +2627,8 @@
     "library": "cake_mok_rows_4_96",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2635,7 +2650,8 @@
     "library": "cake_mok_count_8_48",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2652,7 +2668,8 @@
     "library": "cake_mok_rows_8_48",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2674,7 +2691,8 @@
     "library": "cake_mok_count_16_24",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2691,7 +2709,8 @@
     "library": "cake_mok_rows_16_24",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2713,7 +2732,8 @@
     "library": "cake_mok_count_32_12",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2730,7 +2750,8 @@
     "library": "cake_mok_rows_32_12",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2752,7 +2773,8 @@
     "library": "cake_mok_count_64_6",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",
@@ -2769,7 +2791,8 @@
     "library": "cake_mok_rows_64_6",
     "arches": [
       "sm_100a",
-      "sm_103a"
+      "sm_103a",
+      "sm_107a"
     ],
     "arguments": [
       "topk_all",

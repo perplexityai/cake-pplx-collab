@@ -113,9 +113,9 @@ def cake_causal_conv1d_nondet_kcp(
     ----------
     x_local : torch.Tensor
         BF16 ``[S_local, C]`` or ``[1, S_local, C]`` contiguous packed activations of this rank's fragments, in the
-        partition's order; ``C`` is a multiple of 8.
+        partition's order; ``C`` is a multiple of 8.  16-byte aligned (``ValueError`` otherwise).
     weight : torch.Tensor
-        FP32 ``[C, 4]`` contiguous taps.
+        FP32 ``[C, 4]`` contiguous taps, 16-byte aligned (``ValueError`` otherwise).
     ctx : CakeKDADetKcpContext
         From ``cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context`` (the same context the KDA step of the rank
         uses).
@@ -194,9 +194,9 @@ def cake_causal_conv1d_nondet_kcp_multi(
     ----------
     xs : sequence of torch.Tensor
         ``n >= 1`` BF16 ``[S_local, C_i]`` or ``[1, S_local, C_i]`` contiguous packed activations of this rank's
-        fragments; each ``C_i`` is a multiple of 8 (they may differ).
+        fragments; each ``C_i`` is a multiple of 8 (they may differ).  Each 16-byte aligned.
     weights : sequence of torch.Tensor
-        FP32 ``[C_i, 4]`` contiguous taps, one per tensor.
+        FP32 ``[C_i, 4]`` contiguous taps, one per tensor, each 16-byte aligned.
     ctx : CakeKDADetKcpContext
         As in :func:`cake_causal_conv1d_nondet_kcp`.  Every rank of the group calls this function once per layer, in
         the same order, with the same tensor count and channel counts.

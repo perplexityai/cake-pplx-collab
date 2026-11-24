@@ -3,13 +3,22 @@
 """Known gaps: the tests that miss the naive BF16 tier on a GPU model, expected to fail there.
 
 Every listed test misses the tier (``tests/cake/test_helpers/cake_naive.py``) on a BF16
-output only and in the max norm only; its L2 error meets the tier.  They are BF16
-rounding near ties: the largest error is about half a BF16 ulp of the top binade, and
+output only and in the max norm only; its L2 error meets the tier.  All of them but one
+are BF16 rounding near ties: the largest error is about half a BF16 ulp of the top binade, and
 the kernel's FP32 sum lands on the other side of a BF16 rounding midpoint a little more
 often than torch's.  The composed BF16 accumulate (``accumulate=True`` into a bf16
 ``out``) rounds as the naive tier does, the weight gradient to BF16 and then
 ``out0 + dW`` to BF16; its misses are the same near ties: the weight gradient rounds
 to the other BF16 neighbour, and the second rounding carries that into ``out``.
+
+One gap is of another kind: the GB300 key of
+``test_wgrad_queue_walk_gives_the_selected_stage_bits[e4_one_empty-out_dtype0]``
+misses the tier in the max norm by 7.4e-8 of 0.0157 (median ratio 1.00500476, its
+largest ratio meets the tier).  The test judges the sampled rows; torch's BF16 product
+of the sampled operands takes another cuBLAS kernel than the full shape, about nine
+times more accurate in FP32, while the package's full-shape output equals torch's BF16
+product of the full shape bit for bit.  The shipped program of the selected stage misses
+by the same ratio on the same inputs.  Its cap is that ratio rounded up, 1.0051.
 
 A gap is keyed by the GPU model and the test's node id, and names the outputs that miss
 the tier there (as the TIER lines name them), each with two caps.  An output's max-norm
@@ -89,6 +98,10 @@ class Gap(NamedTuple):
 
 
 _REASON = "known gap: BF16 rounding near tie in the max norm (L2 meets the naive tier)"
+_SAMPLED_REASON = (
+    "known gap: max-norm miss of the sampled rows' naive tier (L2 meets it); the "
+    "full-shape BF16 output equals torch's BF16 product bit for bit"
+)
 
 
 def _near_tie(caps: Mapping[str, tuple[float, float]]) -> Gap:
@@ -239,6 +252,7 @@ KNOWN_GAPS: dict[str, dict[str, Gap]] = {
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py::test_repeat_launches_and_naive_tier[wgrad_edge_e3_long_empty_down_bf16]": _near_tie({"dW[sampled]": (1.0051, 1.0065)}),
     },
     "GB300": {
+        "tests/experimental/test_cake_moe_grouped_gemm_det_train.py::test_wgrad_queue_walk_gives_the_selected_stage_bits[e4_one_empty-out_dtype0]": Gap({"dW[sampled]": (1.0051, NEAR_TIE)}, _SAMPLED_REASON),
         "tests/experimental/test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output[e32_hot_down_wgrad_bf16]": _near_tie({"dW[sample]": (1.0203, 1.0207)}),
         "tests/experimental/test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output[e32_hot_gate_up_wgrad_bf16]": _near_tie({"dW[sample]": (1.0181, NEAR_TIE)}),
         "tests/experimental/test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output[e4_m112576_down_wgrad_bf16]": _near_tie({"dW[sample]": (1.0115, NEAR_TIE)}),

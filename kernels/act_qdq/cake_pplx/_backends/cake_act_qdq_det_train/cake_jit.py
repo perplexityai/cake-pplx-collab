@@ -21,12 +21,14 @@ translation unit plus a tvm-ffi binding, compiled once per architecture.  A
 record is keyed by its route: the format (``fp4_e4m3_g16``,
 ``mxfp4_e8m0_g32`` or ``mxfp8_e8m0_g32``), with the suffix ``_scales`` for
 the build that also stores the FP32 scale of each group, and the suffix
-``_small``, ``_wide`` or ``_large`` for the route's small, wide or large
-build.  The host plan of a record is ``format``, ``scale_out``, ``group``
-(the elements of one scale group), ``arches``, ``ffi_entry``, ``grid_rule``
-and, for a ranged record (small, wide or large) only, ``vectors``: per
-architecture and kind of call (``out_of_place`` or ``in_place``), the
-inclusive ``n_vecs`` range its route runs it for, or ``None`` for no size.
+``_small``, ``_wide``, ``_large`` or ``_domain`` for the route's small, wide,
+large or interleaved-domain build.  The host plan of a record is ``format``,
+``scale_out``, ``group`` (the elements of one scale group), ``arches``,
+``ffi_entry``, ``grid_rule``; for a ranged record (small, wide, large or
+interleaved-domain) only, ``vectors``: per architecture and kind of call
+(``out_of_place`` or ``in_place``), the inclusive ``n_vecs`` range its route
+runs it for, or ``None`` for no size; and for an interleaved-domain record
+only, ``counters`` (its claim workspace, below).
 The derived leaves (``library``, ``kernel_symbol``,
 ``launch`` and ``arg_plan``) are written from the rendered program each time
 the package is generated; ``library`` is the program identity
@@ -84,6 +86,22 @@ is a run-time scalar, so a library serves every shape; a call builds or loads
 only its own program's library on first use.  Build every library of the
 architecture (:func:`specs_for_arch`) before a CUDA graph capture, to keep the
 JIT out of the capture.
+
+The interleaved-domain records (``<route>_domain``, SM107 only) are not on
+any route of ``ROUTES``: ``DOMAIN_ROUTES`` names one per route, and only a
+call with ``locality="domain"`` runs it, out of place, when
+:func:`domain_route` finds ``x`` and ``y`` in memory whose chunks of
+``grid_rule["chunk_bytes"]`` alternate between the two dies (chunk ``k`` of a
+buffer in die ``k & 1``), at the same offset in their chunks and in chunks of
+the same die, and ``n_vecs`` in the record's ``vectors`` range.  Such a
+program takes the main program's tiles (64 threads, 256 vectors) and each CTA
+claims its next item, ``2^batch_shift`` tiles of one chunk, from its own die's
+counter first and then from the other die's; the record's ``counters`` field
+gives the claim workspace: ``words`` words a die of ``dtype`` ``"uint32"``,
+which every launch leaves zero (``rearm`` ``"kernel"``), so a workspace is
+zeroed once, when it is made.  Its grid is the ``domain_items`` rule of
+:func:`domain_launch`; any grid of at least one CTA gives the same bytes.
+Every domain program gives the bytes of the plain program of its route.
 """
 
 from __future__ import annotations
@@ -577,6 +595,174 @@ MODULES: dict[str, dict[str, Any]] = {
             "sm_103a": {"in_place": (4194304, 2147481600), "out_of_place": (8388608, 2147481600)},
         },
     },
+    # The interleaved-domain build of each route, SM107 only (``DOMAIN_ROUTES``):
+    # the main program's tiles over memory whose 2 MB chunks alternate between
+    # the two dies, each CTA claiming items of its own die's chunks first, out
+    # of place, for the n_vecs of its ``vectors``; a call with
+    # ``locality="domain"`` runs it when :func:`domain_route` places ``x`` and
+    # ``y`` in such memory.
+    "fp4_e4m3_g16_domain": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "n_vecs"], ["parameter", "first_tile"], ["parameter", "first_die"], ["parameter", "chunk_tile_shift"], ["parameter", "batch_shift"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "counters": {"dtype": "uint32", "rearm": "kernel", "words": 1},
+        "ffi_entry": "run",
+        "format": "fp4_e4m3_g16",
+        "grid_rule": {
+            "batch_shift": {"sm_107a": 1},
+            "chunk_bytes": 2097152,
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "domain_items",
+            "tile_vectors": {"sm_107a": 256},
+            "vector_elements": 8,
+        },
+        "group": 16,
+        "kernel_symbol": "kernel_cake_act_qdq_dfdafec075fee7302f3b",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_dfdafec075fee7302f3b",
+        "scale_out": False,
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+    },
+    "fp4_e4m3_g16_scales_domain": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "n_vecs"], ["parameter", "first_tile"], ["parameter", "first_die"], ["parameter", "chunk_tile_shift"], ["parameter", "batch_shift"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "counters": {"dtype": "uint32", "rearm": "kernel", "words": 1},
+        "ffi_entry": "run",
+        "format": "fp4_e4m3_g16",
+        "grid_rule": {
+            "batch_shift": {"sm_107a": 1},
+            "chunk_bytes": 2097152,
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "domain_items",
+            "tile_vectors": {"sm_107a": 256},
+            "vector_elements": 8,
+        },
+        "group": 16,
+        "kernel_symbol": "kernel_cake_act_qdq_851b2cd815bd9f70bd34",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_851b2cd815bd9f70bd34",
+        "scale_out": True,
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+    },
+    "mxfp4_e8m0_g32_domain": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "n_vecs"], ["parameter", "first_tile"], ["parameter", "first_die"], ["parameter", "chunk_tile_shift"], ["parameter", "batch_shift"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "counters": {"dtype": "uint32", "rearm": "kernel", "words": 1},
+        "ffi_entry": "run",
+        "format": "mxfp4_e8m0_g32",
+        "grid_rule": {
+            "batch_shift": {"sm_107a": 1},
+            "chunk_bytes": 2097152,
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "domain_items",
+            "tile_vectors": {"sm_107a": 256},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_3fcef995964af95f49e7",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_3fcef995964af95f49e7",
+        "scale_out": False,
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+    },
+    "mxfp4_e8m0_g32_scales_domain": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "n_vecs"], ["parameter", "first_tile"], ["parameter", "first_die"], ["parameter", "chunk_tile_shift"], ["parameter", "batch_shift"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "counters": {"dtype": "uint32", "rearm": "kernel", "words": 1},
+        "ffi_entry": "run",
+        "format": "mxfp4_e8m0_g32",
+        "grid_rule": {
+            "batch_shift": {"sm_107a": 1},
+            "chunk_bytes": 2097152,
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "domain_items",
+            "tile_vectors": {"sm_107a": 256},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_db936c037a2c98a5db5c",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_db936c037a2c98a5db5c",
+        "scale_out": True,
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+    },
+    "mxfp8_e8m0_g32_domain": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "n_vecs"], ["parameter", "first_tile"], ["parameter", "first_die"], ["parameter", "chunk_tile_shift"], ["parameter", "batch_shift"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "counters": {"dtype": "uint32", "rearm": "kernel", "words": 1},
+        "ffi_entry": "run",
+        "format": "mxfp8_e8m0_g32",
+        "grid_rule": {
+            "batch_shift": {"sm_107a": 1},
+            "chunk_bytes": 2097152,
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "domain_items",
+            "tile_vectors": {"sm_107a": 256},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_c3252edeaabce416eab7",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_c3252edeaabce416eab7",
+        "scale_out": False,
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+    },
+    "mxfp8_e8m0_g32_scales_domain": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "n_vecs"], ["parameter", "first_tile"], ["parameter", "first_die"], ["parameter", "chunk_tile_shift"], ["parameter", "batch_shift"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "counters": {"dtype": "uint32", "rearm": "kernel", "words": 1},
+        "ffi_entry": "run",
+        "format": "mxfp8_e8m0_g32",
+        "grid_rule": {
+            "batch_shift": {"sm_107a": 1},
+            "chunk_bytes": 2097152,
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "domain_items",
+            "tile_vectors": {"sm_107a": 256},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_48c0dbfaea5f3b9c07f7",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_48c0dbfaea5f3b9c07f7",
+        "scale_out": True,
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+    },
 }
 
 # Per architecture, the records of each route: its main record and its ranged
@@ -627,6 +813,20 @@ ROUTES: dict[str, dict[str, list[str]]] = {
     },
 }
 
+# Per architecture, the interleaved-domain record of each route.  No route of
+# ``ROUTES`` lists one: a call runs it only with ``locality="domain"`` and only
+# where :func:`domain_route` places its memory.
+DOMAIN_ROUTES: dict[str, dict[str, str]] = {
+    "sm_107a": {
+        "fp4_e4m3_g16": "fp4_e4m3_g16_domain",
+        "fp4_e4m3_g16_scales": "fp4_e4m3_g16_scales_domain",
+        "mxfp4_e8m0_g32": "mxfp4_e8m0_g32_domain",
+        "mxfp4_e8m0_g32_scales": "mxfp4_e8m0_g32_scales_domain",
+        "mxfp8_e8m0_g32": "mxfp8_e8m0_g32_domain",
+        "mxfp8_e8m0_g32_scales": "mxfp8_e8m0_g32_scales_domain",
+    },
+}
+
 # One build per architecture: B200 / GB200 (``sm_100a``), B300 / GB300
 # (``sm_103a``) and R200 (``sm_107a``), each compiled with its exact
 # ``-gencode`` flag set (``build.json`` ``arch_flags``).  No family fallback.
@@ -653,6 +853,26 @@ KINDS = tuple(f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))
 # persist_waves * resident``, else ``min(tiles, resident)``, where ``n_vecs =
 # numel / vector_elements``.
 GRID_KINDS = ("tiles",)
+# The grid rule of an interleaved-domain record (:func:`domain_launch`).
+DOMAIN_GRID_KIND = "domain_items"
+# The claim workspace of an interleaved-domain record (``record["counters"]``):
+# its word type and who re-arms it to zero (``"kernel"``: every launch leaves
+# it zero, so the host zeroes it once, when it makes it).
+COUNTER_DTYPE = "uint32"
+COUNTER_REARM = "kernel"
+# The reasons of :func:`domain_route`: ``"placed"`` for the interleaved-domain
+# program, any other for the plain program of the route (the same bytes).
+DOMAIN_REASONS = (
+    "placed",
+    "arch",
+    "in_place",
+    "no_out",
+    "size",
+    "x_memory",
+    "out_memory",
+    "chunk_offset",
+    "die_parity",
+)
 # The grid arguments of an argument plan, in order.
 GRID_AXES = ("grid_x", "grid_y", "grid_z")
 # BF16 elements per vector (16 bytes): a thread's load and store.
@@ -748,6 +968,210 @@ def selected_module(
     return held[0] if held else main[0]
 
 
+def domain_module(arch: str, format: str, *, scale_out: bool) -> str | None:
+    """The interleaved-domain record of the route of ``format`` (with its scale
+    output) on ``arch``, or None when ``arch`` has none (``ValueError`` for an
+    unknown format).  A record that does not serve the route, or whose grid
+    rule or claim workspace is outside the vocabulary, is a registry error
+    (``RuntimeError``)."""
+
+    kind = route_name(format, scale_out=scale_out)
+    name = DOMAIN_ROUTES.get(arch, {}).get(kind)
+    if name is None:
+        return None
+    record = MODULES.get(name)
+    if (
+        record is None
+        or record["format"] != format
+        or bool(record["scale_out"]) != bool(scale_out)
+        or record["group"] != GROUP_SIZES[format]
+        or arch not in record["arches"]
+        or record["grid_rule"]["kind"] != DOMAIN_GRID_KIND
+        or record["counters"]["rearm"] != COUNTER_REARM
+        or record["counters"]["dtype"] != COUNTER_DTYPE
+        or int(record["counters"]["words"]) < 1
+    ):
+        raise RuntimeError(
+            f"the interleaved-domain record {name} of route {kind!r} on {arch} does not serve that route"
+        )
+    return name
+
+
+def domain_chunk_bytes(arch: str) -> int | None:
+    """The chunk of the interleaved-domain records of ``arch`` (the bytes of
+    memory in one die before the next chunk in the other die), or None when
+    ``arch`` has none.  Records that disagree are a registry error
+    (``RuntimeError``)."""
+
+    sizes = {int(MODULES[name]["grid_rule"]["chunk_bytes"]) for name in DOMAIN_ROUTES.get(arch, {}).values()}
+    if not sizes:
+        return None
+    if len(sizes) != 1:
+        raise RuntimeError(f"the interleaved-domain records of {arch} disagree on their chunk: {sorted(sizes)}")
+    return sizes.pop()
+
+
+def chunk_place(address: int, nbytes: int, base: int, size: int, chunk_bytes: int) -> tuple[int, int] | None:
+    """Where ``nbytes`` bytes from ``address`` lie in a buffer of ``size`` bytes
+    from ``base`` whose chunk ``k`` of ``chunk_bytes`` lies in die ``k & 1``:
+    ``(offset of the first byte in its chunk, die of that chunk)``, or None when
+    the bytes do not all lie in the buffer."""
+
+    if not base <= address < base + size or address + nbytes > base + size:
+        return None
+    chunk, offset = divmod(address - base, chunk_bytes)
+    return offset, chunk & 1
+
+
+def domain_candidate(
+    arch: str,
+    format: str,
+    *,
+    scale_out: bool,
+    n_vecs: int,
+    in_place: bool,
+    out_given: bool,
+) -> tuple[str | None, str]:
+    """The first four checks of :func:`domain_route`, which read no memory
+    placement: ``(record, "candidate")`` for the interleaved-domain record of
+    the route when ``arch`` has one, the call is out of place with an ``out``
+    buffer and ``n_vecs`` lies in the record's ``vectors`` range, else
+    ``(None, reason)`` with the first of ``"arch"``, ``"in_place"``,
+    ``"no_out"`` and ``"size"`` that holds."""
+
+    name = domain_module(arch, format, scale_out=scale_out)
+    if name is None:
+        return None, "arch"
+    if in_place:
+        return None, "in_place"
+    if not out_given:
+        return None, "no_out"
+    span = MODULES[name]["vectors"].get(arch, {}).get("out_of_place")
+    if span is None or not int(span[0]) <= int(n_vecs) <= int(span[1]):
+        return None, "size"
+    return name, "candidate"
+
+
+def domain_placement(
+    x_place: tuple[int, int] | None, y_place: tuple[int, int] | None
+) -> str:
+    """The last four checks of :func:`domain_route`, on the placements of a
+    candidate's input and output (:func:`chunk_place` results): ``"placed"``,
+    or the first of ``"x_memory"``, ``"out_memory"``, ``"chunk_offset"`` and
+    ``"die_parity"`` that holds."""
+
+    if x_place is None:
+        return "x_memory"
+    if y_place is None:
+        return "out_memory"
+    if x_place[0] != y_place[0]:
+        return "chunk_offset"
+    if x_place[1] != y_place[1]:
+        return "die_parity"
+    return "placed"
+
+
+def domain_route(
+    arch: str,
+    format: str,
+    *,
+    scale_out: bool,
+    n_vecs: int,
+    in_place: bool,
+    out_given: bool,
+    x_place: tuple[int, int] | None,
+    y_place: tuple[int, int] | None,
+) -> tuple[str | None, str]:
+    """The program of a ``locality="domain"`` call of ``format`` with
+    ``n_vecs`` vectors on ``arch``: ``(record, "placed")`` for the
+    interleaved-domain record of its route, or ``(None, reason)`` for the
+    route's plain program (:func:`selected_module`, the same bytes), with the
+    first reason that holds, in this order:
+
+    - ``"arch"``: ``arch`` has no interleaved-domain record;
+    - ``"in_place"``: the output is the input;
+    - ``"no_out"``: the call has no ``out`` buffer (its output would be new
+      memory that does not alternate dies);
+    - ``"size"``: ``n_vecs`` lies outside the record's ``vectors`` range;
+    - ``"x_memory"``: the input does not lie in one buffer whose chunks
+      alternate dies (``x_place`` None);
+    - ``"out_memory"``: the output does not (``y_place`` None);
+    - ``"chunk_offset"``: the two start at different offsets in their chunks;
+    - ``"die_parity"``: their chunks lie in different dies.
+
+    ``x_place`` and ``y_place`` are :func:`chunk_place` results.  The first
+    four are :func:`domain_candidate`, the last four
+    :func:`domain_placement`.
+    """
+
+    name, reason = domain_candidate(
+        arch,
+        format,
+        scale_out=scale_out,
+        n_vecs=n_vecs,
+        in_place=in_place,
+        out_given=out_given,
+    )
+    if name is None:
+        return None, reason
+    reason = domain_placement(x_place, y_place)
+    return (name, reason) if reason == "placed" else (None, reason)
+
+
+def domain_launch(
+    record: dict[str, Any], *, n_vecs: int, x_place: tuple[int, int], sm_count: int, arch: str
+) -> dict[str, Any]:
+    """The scalar arguments and the grid of interleaved-domain ``record`` for
+    ``n_vecs`` vectors whose first byte lies at ``x_place``
+    (:func:`chunk_place`) on a device of architecture ``arch`` with
+    ``sm_count`` SMs: ``first_tile``, ``first_die``, ``chunk_tile_shift``,
+    ``batch_shift`` and ``grid``.
+
+    A tile is ``T = tile_vectors[arch]`` vectors (``16 T`` bytes), and a chunk
+    of ``chunk_bytes`` holds ``2^chunk_tile_shift`` tiles.  Tile ``c`` of ``x``
+    lies in slot ``first_tile + c``: ``first_tile`` is ``x``'s offset in its
+    chunk in whole tiles, rounded down (an ``x`` that starts inside a tile
+    moves a few bytes of a tile across the dies, never what it computes), and
+    chunk ``k`` lies in die ``first_die ^ (k & 1)``.  An item is
+    ``2^batch_shift`` slots of one chunk (``batch_shift`` at most
+    ``chunk_tile_shift``).  The chunks ``0`` to ``last_chunk = (first_tile +
+    tiles - 1) >> chunk_tile_shift`` hold the items, each die's chunks in turn,
+    and the grid is one CTA per item, at most ``ctas_per_sm[arch]`` per SM; any
+    grid of at least one CTA gives the same bytes.
+    """
+
+    rule = record["grid_rule"]
+    if rule["kind"] != DOMAIN_GRID_KIND or rule["vector_elements"] != VECTOR:
+        raise ValueError(
+            f"not a Cake activation QDQ interleaved-domain grid rule: {rule!r} (kind {DOMAIN_GRID_KIND!r}, "
+            f"{VECTOR}-element vectors)"
+        )
+    if arch not in rule["tile_vectors"]:
+        raise ValueError(f"the Cake activation QDQ grid rule has no tile for {arch}: {rule!r}")
+    tile = int(rule["tile_vectors"][arch])
+    tile_bytes = tile * VECTOR * 2  # BF16
+    slots, rest = divmod(int(rule["chunk_bytes"]), tile_bytes)
+    if rest or slots < 1 or slots & (slots - 1):
+        raise ValueError(f"the chunk of {rule!r} is not a power-of-two count of {tile_bytes}-byte tiles")
+    chunk_tile_shift = slots.bit_length() - 1
+    batch_shift = min(int(rule["batch_shift"][arch]), chunk_tile_shift)
+    offset, first_die = int(x_place[0]), int(x_place[1])
+    first_tile = offset // tile_bytes
+    tiles = -(-int(n_vecs) // tile)
+    last_chunk = (first_tile + tiles - 1) >> chunk_tile_shift
+    items = sum(
+        ((last_chunk - die + 2) >> 1) << (chunk_tile_shift - batch_shift) for die in (first_die, first_die ^ 1)
+    )
+    resident = int(rule["ctas_per_sm"][arch]) * int(sm_count)
+    return {
+        "first_tile": first_tile,
+        "first_die": first_die,
+        "chunk_tile_shift": chunk_tile_shift,
+        "batch_shift": batch_shift,
+        "grid": (max(1, min(items, resident)), 1, 1),
+    }
+
+
 @functools.cache
 def device_arch(device_index: int) -> str:
     """The architecture of one CUDA device (``RuntimeError`` when the package has
@@ -834,10 +1258,13 @@ def run_module(
     """Launch record ``name`` with the kernel arguments ``values``.
 
     ``values`` maps the kernel parameter names of the record's ``arg_plan``
-    (``x``, ``y``, ``scales``, ``n_vecs``) to tensors and Python integers.
+    (``x``, ``y``, ``scales``, ``n_vecs``; for an interleaved-domain record
+    also ``counters0``, ``counters1``, ``first_tile``, ``first_die``,
+    ``chunk_tile_shift`` and ``batch_shift``) to tensors and Python integers.
     The grid is the record's :func:`launch_grid` unless ``grid`` is given (any
-    grid of at least one CTA is correct).  The kernel runs on the current
-    torch stream.
+    grid of at least one CTA is correct); an interleaved-domain record takes
+    the grid of :func:`domain_launch`.  The kernel runs on the current torch
+    stream.
     """
 
     record = MODULES[name]
@@ -862,6 +1289,11 @@ __all__ = [
     "ALIGNMENT_BYTES",
     "ARCHES",
     "ARCH_BY_CAPABILITY",
+    "COUNTER_DTYPE",
+    "COUNTER_REARM",
+    "DOMAIN_GRID_KIND",
+    "DOMAIN_REASONS",
+    "DOMAIN_ROUTES",
     "FORMATS",
     "GRID_AXES",
     "GRID_KINDS",
@@ -873,7 +1305,14 @@ __all__ = [
     "ROUTES",
     "VECTOR",
     "arch_for_capability",
+    "chunk_place",
     "device_arch",
+    "domain_candidate",
+    "domain_chunk_bytes",
+    "domain_launch",
+    "domain_module",
+    "domain_placement",
+    "domain_route",
     "launch_grid",
     "library_name",
     "load",

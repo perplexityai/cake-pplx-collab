@@ -127,6 +127,10 @@ from .cake_backend import (
     _check_temperature_operands,
     _deferred_operands,
     _device_constants,
+    _EAGER_BASE,
+    _EAGER_FORMED,
+    DX_FINALIZE_FOLD_STAGE,
+    _eager_fold_values,
     _dw_stream,
     _evict,
     DX_BASES,
@@ -135,6 +139,7 @@ from .cake_backend import (
     _dx_slab_sum_slots,
     _dx_slab_sum_values,
     RLAB_ZERO_STAGE,
+    _rlab_fresh_zero,
     _rlab_zero,
     _with_rlab_zero,
     _resolve_dx_rule,
@@ -1840,6 +1845,21 @@ def cast_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
     return tuple(keys)
 
 
+def _runner_backward_keys(
+    plan: Plan, template_only: bool = False
+) -> tuple[tuple[str, Any], ...]:
+    """The backward launch keys a runner of ``plan`` binds (``backward_order``): the log-probability backward
+    (:func:`.cake_backend.recompute_keys`) and the output casts (:func:`cast_keys`).  A template-only runner of the
+    loss entry (``_template_only``, the eager entry points' binding build) binds none: it never launches, and its
+    remembered binding (:meth:`_Binding.from_runner`) serves the loss forward only -- the loss backward finalizes the
+    forward's accumulators through the eager casts (:func:`finalize_dx`, :func:`dw_cast`), never through a binding."""
+    if template_only and plan.problem.entry == "loss":
+        return ()
+    return (
+        recompute_keys(plan) if plan.problem.entry == "logprob" else ()
+    ) + cast_keys(plan)
+
+
 @dataclass
 class LmHeadLossRunner:
     """The prepared launches of one tensor binding.
@@ -2098,13 +2118,21 @@ def _bind_all(
 
 
 def _eager_launch(
-    record, module_name: str, stage: str, values: dict[str, Any], device, geometry
+    record,
+    module_name: str,
+    stage: str,
+    values: dict[str, Any],
+    device,
+    geometry,
+    form: Optional[tuple] = None,
 ) -> tuple[_Launch, list]:
     """``(launch, arguments)`` of one eager stage of the output boundary (:func:`scale_cast`, :func:`scale_cast_scatter`,
     :func:`dw_cast`).  Bound by :func:`_bind_all`; while :data:`BINDING_CACHE` is enabled the templated launch is
-    remembered there per form -- the record, the stage, the device and every non-tensor host value, which fix the grid
-    and the scalar arguments -- and a later call of the same form slots its tensors into it: the same entry, grid and
-    arguments as a fresh binding."""
+    remembered there per form (:func:`.cake_backend._eager_form`) -- the record, the stage, the device and every host
+    value that is neither a tensor nor a per-call scalar, which fix the grid and the other scalar arguments -- and a
+    later call of the same form slots its tensors and per-call scalars into it (:func:`.cake_backend._eager_template`):
+    the same entry, grid and arguments as a fresh binding.  ``form``: the caller's own key of the call's form
+    (:data:`.cake_backend._EAGER_FORMED`), used instead of :func:`.cake_backend._eager_form`."""
     key = (stage, "eager")
     cache = BINDING_CACHE
     if not cache.enabled:
@@ -2112,24 +2140,14 @@ def _eager_launch(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
         return launch, list(launch.arguments)
-    form = (
-        module_name,
-        stage,
-        str(device),
-        tuple(
-            sorted(
-                (name, isinstance(value, torch.Tensor))
-                + ((None,) if isinstance(value, torch.Tensor) else (value,))
-                for name, value in values.items()
-            )
-        ),
-    )
+    if form is None:
+        form = _main._eager_form(module_name, stage, device, values)
     launch = cache.eager_lookup(form, record)
     if launch is None:
         launch = _bind_all(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
-        cache.eager_remember(form, record, launch.templated())
+        cache.eager_remember(form, record, _main._eager_template(launch))
         return launch, list(launch.arguments)
     return launch, launch.arguments_for(values)
 
@@ -2458,8 +2476,9 @@ def prepare_lm_head_loss(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -2522,7 +2541,13 @@ def prepare_lm_head_loss(
         )
 
     fwd = forward_keys(plan)
-    bwd = (recompute_keys(plan) if entry == "logprob" else ()) + cast_keys(plan)
+    bwd = _runner_backward_keys(plan, _template_only)
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it
     spare = (("row_grad", 0),) if plan.logprob_dz else ()
@@ -2938,8 +2963,9 @@ def prepare_lm_head_loss_temperature(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -3009,6 +3035,12 @@ def prepare_lm_head_loss_temperature(
     bwd = (_recompute_keys_temperature(plan) if entry == "logprob" else ()) + cast_keys(
         plan
     )
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it.  A
     # call with a temperature never recounts on the hidden path (no temperature form of ``row_grad``)
@@ -3201,6 +3233,11 @@ class _Binding:
     owned_bytes: int = 0
     layout: dict = field(default_factory=dict, repr=False)
     memory: dict = field(default_factory=dict, repr=False)
+    # each call allocates its fresh ``rlab`` zero-filled: the plan computes dX and an uncounted ``dz`` arm of the
+    # forward / backward sequence leaves rows unwritten (:func:`.cake_backend._rlab_fresh_zero`; a sequence with the
+    # ``rlab_zero`` step zeroes it there)
+    forward_rlab_zero: bool = False
+    backward_rlab_zero: bool = False
 
     @classmethod
     def from_runner(
@@ -3225,9 +3262,7 @@ class _Binding:
                 hidden_stats=hidden.stats,
             )
             forward_order = forward_keys(plan)
-            backward_order = (
-                recompute_keys(plan) if p.entry == "logprob" else ()
-            ) + cast_keys(plan)
+            backward_order = _runner_backward_keys(plan, runner._template_only)
             memory = _hidden_count_memory(
                 memory,
                 num_rows=p.num_rows,
@@ -3274,6 +3309,8 @@ class _Binding:
             owned_bytes=sum(v.numel() * v.element_size() for v in owned.values()),
             layout=runner.layout,
             memory=memory,
+            forward_rlab_zero=_rlab_fresh_zero(plan, forward_order),
+            backward_rlab_zero=_rlab_fresh_zero(plan, backward_order),
         )
 
     def holds_no_tensor(self) -> bool:
@@ -3454,7 +3491,9 @@ class _Binding:
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
             if plan.need_dx or plan.need_dw:
-                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+                t["rlab"] = (torch.zeros if self.forward_rlab_zero else torch.empty)(
+                    (T,), dtype=torch.float32, device=self.device
+                )
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -3507,7 +3546,9 @@ class _Binding:
             t["d_in"] = dlogp
         self._scratch(t, hidden)
         if plan.need_dx or plan.need_dw:
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"] = (torch.zeros if self.backward_rlab_zero else torch.empty)(
+                (T,), dtype=torch.float32, device=self.device
+            )
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -3631,6 +3672,8 @@ class _TemperatureBinding(_Binding):
             owned_bytes=sum(v.numel() * v.element_size() for v in owned.values()),
             layout=runner.layout,
             memory=memory,
+            forward_rlab_zero=_rlab_fresh_zero(plan, forward_order),
+            backward_rlab_zero=_rlab_fresh_zero(plan, backward_order),
         )
 
     def _temperature(
@@ -3713,7 +3756,9 @@ class _TemperatureBinding(_Binding):
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
             if plan.need_dx or plan.need_dw:
-                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+                t["rlab"] = (torch.zeros if self.forward_rlab_zero else torch.empty)(
+                    (T,), dtype=torch.float32, device=self.device
+                )
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -3768,7 +3813,9 @@ class _TemperatureBinding(_Binding):
             t["d_in"] = dlogp
         self._scratch(t, hidden)
         if plan.need_dx or plan.need_dw:
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"] = (torch.zeros if self.backward_rlab_zero else torch.empty)(
+                (T,), dtype=torch.float32, device=self.device
+            )
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -4890,22 +4937,24 @@ def scale_cast(
     stage = "scale_cast_f32" if out_dtype == torch.float32 else "scale_cast_bf16"
     if acc.numel() % geometry.cast_vec:
         raise ValueError(f"the cast needs a multiple of {geometry.cast_vec} elements")
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
-    values.update(
-        acc=acc.reshape(-1),
-        g=g,
-        out=out.reshape(-1),
-        num_vecs=int(acc.numel() // geometry.cast_vec),
-        loss_div=1.0,
-    )
-    launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
     index = (
         acc.device.index
         if acc.device.index is not None
         else torch.cuda.current_device()
+    )
+    num_vecs = int(acc.numel() // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
+    values.update(
+        acc=acc.reshape(-1), g=g, out=out.reshape(-1), num_vecs=num_vecs, loss_div=1.0
+    )
+    launch, arguments = _eager_launch(
+        record,
+        module_name,
+        stage,
+        values,
+        acc.device,
+        geometry,
+        form=(_EAGER_FORMED, module_name, stage, int(index), num_vecs),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -4922,6 +4971,7 @@ def scale_cast_scatter(
     num_rows: int,
     *,
     backend: str = "cake",
+    fold: Optional[dict[str, Any]] = None,
 ) -> torch.Tensor:
     """``scatter_rows(bf16(g * acc), row_index, num_rows)`` as ONE new BF16 ``[num_rows, H]`` tensor written in one
     pass: ``bf16(g * acc[compact row])`` on the valid rows, exact zeros elsewhere.  ``acc`` is the compact FP32
@@ -4930,7 +4980,14 @@ def scale_cast_scatter(
     ``r``, which the kernel validates through ``row_index[scan[r] - 1] == r``), ``g`` = ``grad`` (``None`` = 1).  The
     same FP32 multiply and BF16 rounding as :func:`scale_cast`, so the valid rows are bitwise the flat cast's; every
     output element is written exactly once.  ``T_v == 0`` (every row ignored) is one zero fill: the kernel reads a
-    candidate compact row for every output row and would have none."""
+    candidate compact row for every output row and would have none.
+
+    ``fold`` (:func:`cast_fold_operands`; the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label
+    residuals no slab sum folded (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
+    such a row's ``acc``, folds ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a
+    nonzero residual -- the fold-alone slab sum's arithmetic and predicate -- and then scales and rounds it: the bits
+    of the slab sum's FP32 store cast as before.  ``None`` or an empty range: no row folds, and the program without a
+    fold operand (``scale_cast_scatter_bf16``) runs."""
     if acc.dtype != torch.float32 or acc.ndim != 2 or not acc.is_contiguous():
         raise ValueError("the accumulator must be a contiguous FP32 [T_v, H] tensor")
     T_v, H = (int(s) for s in acc.shape)
@@ -4968,14 +5025,27 @@ def scale_cast_scatter(
         if grad is None
         else grad.detach().reshape(1).to(device=acc.device, dtype=torch.float32)
     )
+    if fold is None:
+        fold_lo = fold_hi = 0
+    else:
+        fold_lo, fold_hi = int(fold["lo"]), int(fold["hi"])
+        if not 0 <= fold_lo <= fold_hi <= T_v:
+            raise ValueError(
+                f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})"
+            )
     if backend == "reference":
+        if fold_hi > fold_lo:
+            raise NotImplementedError(
+                "the reference backend folds the label residuals in the slab sum"
+            )
         out.zero_()
         out.index_copy_(0, row_index, (acc * g).to(torch.bfloat16))
         return out
     module_name, record = record_for(acc.device)
     record_abi(record)
     geometry = Geometry.from_record(record)
-    stage = "scale_cast_scatter_bf16"
+    # the fold program when a row folds, else the program without a fold operand
+    stage = DX_FINALIZE_FOLD_STAGE if fold_hi > fold_lo else "scale_cast_scatter_bf16"
     if stage not in record:
         raise NotImplementedError(
             f"the registered program {module_name!r} lacks the stage {stage!r}"
@@ -4984,8 +5054,13 @@ def scale_cast_scatter(
         raise ValueError(
             f"the scatter needs a row width of a multiple of {geometry.cast_vec} elements"
         )
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
+    index = (
+        acc.device.index
+        if acc.device.index is not None
+        else torch.cuda.current_device()
+    )
+    row_vecs = int(H // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
     values.update(
         acc=acc,
         g=g,
@@ -4994,17 +5069,18 @@ def scale_cast_scatter(
             torch.int32
         ),  # the low int32 word of each int64 index (stride 2)
         out=out,
-        row_vecs=int(H // geometry.cast_vec),
+        row_vecs=row_vecs,
         num_rows=num_rows,
         loss_div=1.0,
     )
+    # the form: the output rows and the row width, and with a fold the head's rows; the fold rows are per-call slots
+    # (:data:`EAGER_CALL_SCALARS`)
+    form: tuple = (_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows)
+    if fold_hi > fold_lo:
+        values.update(_eager_fold_values(fold, H))
+        form += (int(values["V"]),)
     launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
-    index = (
-        acc.device.index
-        if acc.device.index is not None
-        else torch.cuda.current_device()
+        record, module_name, stage, values, acc.device, geometry, form=form
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -5021,13 +5097,19 @@ def finalize_dx(
     num_rows: Optional[int],
     *,
     backend: str = "cake",
+    fold: Optional[dict[str, Any]] = None,
 ) -> torch.Tensor:
     """The dX output boundary: ``bf16(g * acc)`` restored to the caller's ``[num_rows, H]`` rows.  Every row valid
     (``row_index`` None): :func:`scale_cast`, already one pass over every row.  Compacted rows with the forward's
     valid-row mask (``row_valid``: the fused dX finalize): the inclusive int32 scan -- one ``cumsum``, issued here
-    behind the backward's queued GEMMs -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
+    behind the backward's queued GEMMs, on the host for a mask read back to the host
+    (:func:`.cake_backend._row_scan`) -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
-    (zero fill + ``index_copy_``).  All three produce the same bits."""
+    (zero fill + ``index_copy_``).  All three produce the same bits.  ``fold`` (:func:`cast_fold_operands`): the scatter cast
+    folds the label residuals of the rows no slab sum folded (:func:`scale_cast_scatter`); only the scatter takes it."""
+    if fold is not None and int(fold["hi"]) > int(fold["lo"]):
+        if row_index is None or row_valid is None:
+            raise ValueError("only the compact scatter cast folds label residuals")
     if row_index is None:
         return scale_cast(acc, grad, torch.bfloat16, backend=backend)
     if num_rows is None:
@@ -5040,9 +5122,9 @@ def finalize_dx(
         )
     if row_valid.dtype != torch.bool or tuple(row_valid.shape) != (int(num_rows),):
         raise ValueError(f"row_valid must be the bool [{int(num_rows)}] valid-row mask")
-    scan = torch.cumsum(row_valid, 0, dtype=torch.int32)
+    scan = _main._row_scan(row_valid)
     return scale_cast_scatter(
-        acc, grad, row_index, scan, int(num_rows), backend=backend
+        acc, grad, row_index, scan, int(num_rows), backend=backend, fold=fold
     )
 
 
@@ -5141,8 +5223,7 @@ def dw_cast(
         )
     geometry = Geometry.from_record(record)
     index = device.index if device.index is not None else torch.cuda.current_device()
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
+    values: dict[str, Any] = dict(_EAGER_BASE)
     values.update(
         A=dz_last,
         B=x_rows,
@@ -5165,8 +5246,27 @@ def dw_cast(
             first_chunk=int(dw_acc is None),
         ),
     )
+    # the form: the GEMM's rows, width, vocabulary rows, raster / block and first-chunk arguments (its launch scalars
+    # are :func:`gemm_scalars` of them; the record fixes the geometry)
     launch, arguments = _eager_launch(
-        record, module_name, stage, values, device, geometry
+        record,
+        module_name,
+        stage,
+        values,
+        device,
+        geometry,
+        form=(
+            _EAGER_FORMED,
+            module_name,
+            stage,
+            int(index),
+            int(rows),
+            H,
+            int(V),
+            group_m,
+            group_n,
+            int(dw_acc is None),
+        ),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:

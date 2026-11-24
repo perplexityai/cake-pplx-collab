@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -137,8 +137,13 @@ kernel_cake_rmsnorm_train_1863320f3158d35eead6(float* __restrict__ partial, floa
         for (int d_2 = 0; d_2 < 16; d_2++) {
             #pragma unroll
             for (int q_2 = 0; q_2 < 1; q_2++) {
+#if defined(_MSC_VER)
+                uint64_t _smem_raw_0[2];
+                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_0[0]), "=l"(_smem_raw_0[1]) : "r"(slot0 + buf_p + (unsigned int)(d_2 * 384 * 4 * 4 + q_2 * 16)));
+#else
                 __int128_t _smem_raw_0;
                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_0) : "r"(slot0 + buf_p + (unsigned int)(d_2 * 384 * 4 * 4 + q_2 * 16)));
+#endif
                 pw[d_2 * 4 + q_2 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_0)[0];
                 pw[(d_2 * 4 + q_2 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_0)[1];
                 pw[(d_2 * 4 + q_2 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_0)[2];
@@ -165,8 +170,13 @@ kernel_cake_rmsnorm_train_1863320f3158d35eead6(float* __restrict__ partial, floa
     for (int d_4 = 0; d_4 < 16; d_4++) {
         #pragma unroll
         for (int q_3 = 0; q_3 < 1; q_3++) {
+#if defined(_MSC_VER)
+            uint64_t _smem_raw_1[2];
+            asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_1[0]), "=l"(_smem_raw_1[1]) : "r"(slot0 + buf_l + (unsigned int)(d_4 * 384 * 4 * 4 + q_3 * 16)));
+#else
             __int128_t _smem_raw_1;
             asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_1) : "r"(slot0 + buf_l + (unsigned int)(d_4 * 384 * 4 * 4 + q_3 * 16)));
+#endif
             pw_1[d_4 * 4 + q_3 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_1)[0];
             pw_1[(d_4 * 4 + q_3 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_1)[1];
             pw_1[(d_4 * 4 + q_3 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_1)[2];

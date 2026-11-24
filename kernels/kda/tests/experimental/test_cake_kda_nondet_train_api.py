@@ -30,10 +30,12 @@ refusal of a workspace, a saved set or an arena option of the deterministic pack
 heads 1..128 (one record per stage, the fused gradient and the GLM intra program agreeing on S1 as the independent
 table says, the plan's records the registry's, every record of the pair stages launched on every architecture it
 ships for; the in-kernel Q/K L2 norm modes select the deterministic pair on every cell) with the plan's pairing
-guard.  On a GPU: the public entries against the package and the deterministic package, the refusal of the other
-package's workspace and saved set, torch's deterministic mode (strict and ``warn_only``: this package runs, nothing
-warns or raises), the autograd node and the raw gate mode.  The names are covered by
-``test_cake_kda_nondet_train_names.py``.
+guard.  On a GPU: the public entries, the package's entries, a caller workspace, the autograd node and the raw gate
+mode, each arm judged against the exact FP64 reference beside the naive BF16 tier (``tests/cake_naive.py``) over the
+judge's draws; the refusal of the other package's workspace and saved set; torch's deterministic mode (strict and
+``warn_only``: this package runs, nothing warns or raises; each arm judged); which package's backward an autograd
+node runs (launch records).  The package has no bit contract: no result is compared with another result of this
+package or with the deterministic package's.  The names are covered by ``test_cake_kda_nondet_train_names.py``.
 """
 
 import ast
@@ -61,12 +63,16 @@ from cake_pplx._backends.cake_kda_nondet_train import cake_backend, cake_jit
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
     make_inputs,
-    make_raw_inputs,
 )
+from tests.experimental.test_helpers.cake_kda_naive import draw_case, judge_arms
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CAKE_PPLX_DIR = Path(nd_api.__file__).resolve().parent
 GRAD_ORDER = ("dq", "dk", "dv", "dbeta", "dg")  # the order the backward returns
+RAW_GRAD_ORDER = GRAD_ORDER + ("dA_log", "ddt_bias")
+# the gradients of the autograd leaves q, k, v, g, beta (and A_log, dt_bias in the raw gate mode), in their order
+LEAF_GRADS = ("dq", "dk", "dv", "dg", "dbeta")
+RAW_LEAF_GRADS = LEAF_GRADS + ("dA_log", "ddt_bias")
 # facade entry -> its twin in the deterministic facade (the same parameters; cake_kda_nondet adds checkpoint_handoff)
 DET_TWIN = {
     "cake_kda_nondet_train_forward": "cake_kda_det_train_forward",
@@ -1458,21 +1464,24 @@ L2N_PARAM = {"param_finalize_l2n": "param_finalize"}
 
 
 def _det_name(name: str | None) -> str | None:
-    """The deterministic record a record of this package copies: the fused gradient's raw and l2n classes are the
-    deterministic ``dqkg`` records with a class suffix, ``param_finalize_l2n`` is ``param_finalize``; every other copy
-    keeps its name."""
+    """The deterministic record a record of this package copies: the fused gradient's raw class is the
+    deterministic ``dqkg`` records with the class suffix (``_raw``; its l2n twins ``_raw_l2n``: the deterministic
+    ``_l2n`` records), ``param_finalize_l2n`` is ``param_finalize``; every other copy keeps its name."""
     if name in L2N_PARAM:
         return L2N_PARAM[name]
     if name is not None and name.startswith("dqkg"):
-        return name.removesuffix("_raw").removesuffix("_l2n")
+        # the raw class's l2n twins: the deterministic l2n records; the raw class: the deterministic records
+        if name.endswith("_raw_l2n"):
+            return name.removesuffix("_raw_l2n") + "_l2n"
+        return name.removesuffix("_raw")
     return name
 
 
 def test_the_l2n_modes_select_the_deterministic_pair() -> None:
     """Over architecture x path x heads 1..128 (two packings each), both gate modes and both in-kernel Q/K L2 norm
     modes (``"fused"``, ``"fallback"``): the plan's records are the deterministic package's plan of the same mode,
-    record for record (the fused gradient's raw and l2n classes and ``param_finalize_l2n`` by their deterministic
-    names), never an S1 record,
+    record for record (the fused gradient's raw class, its l2n twins and ``param_finalize_l2n`` by their
+    deterministic names), never an S1 record,
     never the gate epilogue; on the l2n stages each is the only record of its mode class whose rule admits the
     problem; and every program of the pair stages serving an l2n mode runs on exactly the architectures it ships
     for, but the deterministic glm_intra_l2n's sm_103a build (kept beside its sm_103a form)."""
@@ -1568,6 +1577,15 @@ def test_the_plan_refuses_a_mixed_pair(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- the public entries (GPU)
+#
+# Accuracy: every result is judged against the exact FP64 reference beside the naive BF16 tier over the judge's
+# draws (test_helpers/cake_kda_naive.py :func:`judge_arms`, tests/cake_naive.py), each entry under its own arm name.
+# The package has no bit contract: no result is compared with another result of this package or with the
+# deterministic package's.  The deterministic package runs here for mode contracts only (its refusals of this
+# package's objects, which package's backward a node runs), never for a result.
+
+# the seed of every judged case and of the inputs of the cases that judge nothing (each draw's seed derives from it)
+SEED = 7816
 
 
 def _device_or_skip() -> torch.device:
@@ -1589,15 +1607,23 @@ def _operands(inputs):
     return tuple(inputs[n] for n in ("q", "k", "v", "g", "beta", "cu_seqlens", "dout"))
 
 
-def _bits_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
-    if a.dtype != b.dtype or a.shape != b.shape:
-        return False
-    view = torch.int16 if a.element_size() == 2 else torch.int32
-    return torch.equal(a.contiguous().view(view), b.contiguous().view(view))
+def _step(out, grads, names=GRAD_ORDER) -> dict[str, torch.Tensor]:
+    """One arm's results by name: ``out`` and a backward's results in its return order ``names``, cloned (the judge
+    reads them after the draw's later calls)."""
+    grads = list(grads)
+    assert len(grads) == len(names)
+    return {
+        "out": out.detach().clone(),
+        **{name: t.clone() for name, t in zip(names, grads, strict=True)},
+    }
 
 
-def _same(got, want) -> bool:
-    return all(_bits_equal(a, b) for a, b in zip(got, want, strict=True))
+def _node_step(o, leaves, names=LEAF_GRADS) -> dict[str, torch.Tensor]:
+    """The autograd node's arm: ``out`` and the leaves' gradients, the leaves in the order of ``names``."""
+    return {
+        "out": o.detach().clone(),
+        **{name: leaf.grad for name, leaf in zip(names, leaves, strict=True)},
+    }
 
 
 # a row that runs the S1 pair from its saved set on every architecture (16 heads) and one that runs it on the replay
@@ -1605,98 +1631,86 @@ def _same(got, want) -> bool:
 GPU_ROWS = (((129, 63), 16), ((63, 1, 65), 2))
 
 
-def _leaf_grads(grads):
-    """The backward's ``(dq, dk, dv, dbeta, dg)`` in the order of the leaves ``(q, k, v, g, beta)``."""
-    return (grads[0], grads[1], grads[2], grads[4], grads[3])
-
-
 @pytest.mark.parametrize("shape", GPU_ROWS, ids=["h16", "h2"])
-def test_public_entries_run_the_package(shape) -> None:
-    """The public entries give this package's bits (its entries' at the default scale) with and without a caller
-    workspace (the facade's, this package's type, of the byte query's size) and through the autograd node (this
-    package's); ``out``, ``dq``, ``dk``, ``dv`` and ``dbeta`` are the deterministic package's bits.  A workspace
-    serves its own package: this package's entries refuse the deterministic package's workspace and the
+def test_public_entries_run_the_package(shape, record_property) -> None:
+    """The public entries run this package, each arm judged: the package's entries at the default scale
+    (``backend``), the facade's explicit entries without and with a caller workspace (``facade`` /
+    ``facade_workspace``: the facade's, this package's type, of the byte query's size) and the facade's autograd node
+    (``autograd``: this package's).  The saved sets and the node are this package's on every draw.  A workspace serves
+    its own package: on the first draw this package's entries refuse the deterministic package's workspace and the
     deterministic entries refuse this package's (``ValueError`` naming the mode)."""
     device = _device_or_skip()
     lengths, heads = shape
     S, N = sum(lengths), len(lengths)
-    q, k, v, g, beta, cu, dout = _operands(
-        make_inputs(lengths, heads, device, batched=True)
-    )
     scale = nd_api.DEFAULT_SCALE
-    det_out, det_saved = det_backend.cake_kda_det_train_forward(
-        q, k, v, g, beta, cu, scale=scale
-    )
-    det_grads = det_backend.cake_kda_det_train_backward(
-        q, k, v, g, beta, cu, dout, saved=det_saved, scale=scale
-    )
-    out_want, saved_want = cake_backend.cake_kda_nondet_train_forward(
-        q, k, v, g, beta, cu, scale=scale
-    )
-    grads_want = [
-        t.clone()
-        for t in cake_backend.cake_kda_nondet_train_backward(
-            q, k, v, g, beta, cu, dout, saved=saved_want, scale=scale
-        )
-    ]
-    assert _bits_equal(out_want, det_out) and _same(grads_want[:4], det_grads[:4])
     ws = nd_api.cake_kda_nondet_train_workspace(S, N, heads, device)
     assert type(ws) is cake_backend.CakeKDANondetWorkspace
     assert ws.bytes == nd_api.cake_kda_nondet_train_workspace_bytes(S, N, heads)
-    for workspace in (None, ws):
-        out, saved = nd_api.cake_kda_nondet_train_forward(
-            q, k, v, g, beta, cu, workspace=workspace
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "g", False, s, device, batched=True)
+        q, k, v, g, beta, cu, dout = _operands(inputs)
+        out, saved = cake_backend.cake_kda_nondet_train_forward(
+            q, k, v, g, beta, cu, scale=scale
         )
         assert type(saved) is cake_backend.CakeKDANondetChunkSaved
-        assert _bits_equal(out, out_want), workspace is None
-        grads = nd_api.cake_kda_nondet_train_backward(
-            q, k, v, g, beta, cu, dout, saved=saved, workspace=workspace
+        grads = cake_backend.cake_kda_nondet_train_backward(
+            q, k, v, g, beta, cu, dout, saved=saved, scale=scale
         )
-        assert _same(grads, grads_want), workspace is None
-    leaves = [t.detach().clone().requires_grad_(True) for t in (q, k, v, g, beta)]
-    o = nd_api.cake_kda_nondet(*leaves, cu)
-    assert o.grad_fn._forward_cls is cake_backend.CakeKDANondetFunction
-    assert _bits_equal(o, out_want)
-    o.backward(dout)
-    for leaf, want in zip(leaves, _leaf_grads(grads_want), strict=True):
-        assert _bits_equal(leaf.grad, want)
-    det_ws = det_api.cake_kda_det_train_workspace(S, N, heads, device)
-    for call in (
-        lambda: nd_api.cake_kda_nondet_train_forward(
-            q, k, v, g, beta, cu, workspace=det_ws
-        ),
-        lambda: nd_api.cake_kda_nondet_train_backward(
-            q, k, v, g, beta, cu, dout, saved=saved_want, workspace=det_ws
-        ),
-        lambda: nd_api.cake_kda_nondet(q, k, v, g, beta, cu, workspace=det_ws),
-    ):
-        with pytest.raises(ValueError, match=_refused("workspace", det_ws)):
-            call()
-    with pytest.raises(ValueError, match=DET_REFUSES):
-        det_api.cake_kda_det_train_forward(q, k, v, g, beta, cu, workspace=ws)
+        arms = {"backend": _step(out, grads)}
+        for label, workspace in (("facade", None), ("facade_workspace", ws)):
+            out, saved = nd_api.cake_kda_nondet_train_forward(
+                q, k, v, g, beta, cu, workspace=workspace
+            )
+            assert type(saved) is cake_backend.CakeKDANondetChunkSaved, label
+            grads = nd_api.cake_kda_nondet_train_backward(
+                q, k, v, g, beta, cu, dout, saved=saved, workspace=workspace
+            )
+            arms[label] = _step(out, grads)
+        leaves = [t.detach().clone().requires_grad_(True) for t in (q, k, v, g, beta)]
+        o = nd_api.cake_kda_nondet(*leaves, cu)
+        assert o.grad_fn._forward_cls is cake_backend.CakeKDANondetFunction
+        o.backward(dout)
+        arms["autograd"] = _node_step(o, leaves)
+        if j == 0:
+            det_ws = det_api.cake_kda_det_train_workspace(S, N, heads, device)
+            for call in (
+                lambda: nd_api.cake_kda_nondet_train_forward(
+                    q, k, v, g, beta, cu, workspace=det_ws
+                ),
+                lambda: nd_api.cake_kda_nondet_train_backward(
+                    q, k, v, g, beta, cu, dout, saved=saved, workspace=det_ws
+                ),
+                lambda: nd_api.cake_kda_nondet(q, k, v, g, beta, cu, workspace=det_ws),
+            ):
+                with pytest.raises(ValueError, match=_refused("workspace", det_ws)):
+                    call()
+            with pytest.raises(ValueError, match=DET_REFUSES):
+                # mode contract: the deterministic entry refuses this package's workspace
+                det_api.cake_kda_det_train_forward(q, k, v, g, beta, cu, workspace=ws)
+        return arms, inputs
+
+    judge_arms(record_property, draw, seed=SEED, scale=scale)
 
 
 @pytest.mark.parametrize("warn_only", [False, True], ids=["strict", "warn_only"])
 def test_torch_deterministic_mode_runs_this_package(
-    warn_only: bool, restore_torch_deterministic, monkeypatch: pytest.MonkeyPatch
+    warn_only: bool,
+    restore_torch_deterministic,
+    record_property,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` (strict, and with ``warn_only=True``) the public entries run
     this package: the forward's saved set is a ``CakeKDANondetChunkSaved``, the autograd node a
     ``CakeKDANondetFunction``, every launch of a caller workspace a record of this package's registry (a program of
-    its own library prefix) and the deterministic package launches nothing; the results are the bits of the calls
-    with torch's mode off, ``dg`` included, with and without a caller workspace; no call raises and none warns (no
-    warning from cake_pplx code, none naming a missing deterministic implementation)."""
+    its own library prefix) and the deterministic package launches nothing; no call raises and none warns (no warning
+    from cake_pplx code, none naming a missing deterministic implementation).  Each arm is judged: the calls with
+    torch's mode off (``mode_off``) and, with it on, without and with a caller workspace (``mode_on`` /
+    ``mode_on_workspace``) and through the autograd node (``mode_on_autograd``), ``dg`` included.  Torch's mode is on
+    around the package's calls only (the FP64 reference and the naive tier run with it off)."""
     device = _device_or_skip()
     lengths, heads = (129, 63), 16
     S, N = sum(lengths), len(lengths)
-    q, k, v, g, beta, cu, dout = _operands(make_inputs(lengths, heads, device))
-    out_want, saved = nd_api.cake_kda_nondet_train_forward(q, k, v, g, beta, cu)
-    grads_want = [
-        t.clone()
-        for t in nd_api.cake_kda_nondet_train_backward(
-            q, k, v, g, beta, cu, dout, saved=saved
-        )
-    ]
     launched: list = []
 
     def recording(name, values, *, grid, device_index):
@@ -1712,72 +1726,95 @@ def test_torch_deterministic_mode_runs_this_package(
 
     monkeypatch.setattr(det_jit, "run_module", refuse)
     monkeypatch.setattr(det_jit, "load", refuse)
-    torch.use_deterministic_algorithms(True, warn_only=warn_only)
-    with warnings.catch_warnings(record=True) as rec:
-        warnings.simplefilter("always")
-        for workspace in (None, ws):
-            launched.clear()
-            out, saved = nd_api.cake_kda_nondet_train_forward(
-                q, k, v, g, beta, cu, workspace=workspace
-            )
-            assert type(saved) is cake_backend.CakeKDANondetChunkSaved
-            grads = nd_api.cake_kda_nondet_train_backward(
-                q, k, v, g, beta, cu, dout, saved=saved, workspace=workspace
-            )
+    warned: list[str] = []
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "g", False, s, device)
+        q, k, v, g, beta, cu, dout = _operands(inputs)
+        out, saved = nd_api.cake_kda_nondet_train_forward(q, k, v, g, beta, cu)
+        grads = nd_api.cake_kda_nondet_train_backward(
+            q, k, v, g, beta, cu, dout, saved=saved
+        )
+        arms = {"mode_off": _step(out, grads)}
+        with (
+            _torch_deterministic(warn_only=warn_only),
+            warnings.catch_warnings(record=True) as rec,
+        ):
+            warnings.simplefilter("always")
+            for label, workspace in (("mode_on", None), ("mode_on_workspace", ws)):
+                launched.clear()
+                out, saved = nd_api.cake_kda_nondet_train_forward(
+                    q, k, v, g, beta, cu, workspace=workspace
+                )
+                assert type(saved) is cake_backend.CakeKDANondetChunkSaved
+                grads = nd_api.cake_kda_nondet_train_backward(
+                    q, k, v, g, beta, cu, dout, saved=saved, workspace=workspace
+                )
+                torch.cuda.synchronize(device)
+                arms[label] = _step(out, grads)
+                if workspace is not None:
+                    # the caller workspace ran the forward and the backward
+                    assert launched
+                    for name in launched:
+                        library = cake_jit.MODULES[name]["library"]
+                        assert library.startswith("cake_kda_train_"), (name, library)
+            leaves = [
+                t.detach().clone().requires_grad_(True) for t in (q, k, v, g, beta)
+            ]
+            o = nd_api.cake_kda_nondet(*leaves, cu)
+            assert o.grad_fn._forward_cls is cake_backend.CakeKDANondetFunction
+            o.backward(dout)
             torch.cuda.synchronize(device)
-            assert _bits_equal(out, out_want), workspace is None
-            assert _same(grads, grads_want), workspace is None
-            if workspace is not None:
-                # the caller workspace ran the forward and the backward (the checks above are not vacuous)
-                assert launched
-                for name in launched:
-                    library = cake_jit.MODULES[name]["library"]
-                    assert library.startswith("cake_kda_train_"), (name, library)
-        leaves = [t.detach().clone().requires_grad_(True) for t in (q, k, v, g, beta)]
-        o = nd_api.cake_kda_nondet(*leaves, cu)
-        assert o.grad_fn._forward_cls is cake_backend.CakeKDANondetFunction
-        o.backward(dout)
-        torch.cuda.synchronize(device)
-    assert torch.are_deterministic_algorithms_enabled()
-    assert _bits_equal(o, out_want)
-    for leaf, want in zip(leaves, _leaf_grads(grads_want), strict=True):
-        assert _bits_equal(leaf.grad, want), warn_only
-    assert _cake_pplx_warnings(rec) == []
+            assert torch.are_deterministic_algorithms_enabled()
+            arms["mode_on_autograd"] = _node_step(o, leaves)
+        warned.extend(_cake_pplx_warnings(rec))
+        return arms, inputs
+
+    judge_arms(record_property, draw, seed=SEED, scale=nd_api.DEFAULT_SCALE)
+    assert warned == []
 
 
 def test_autograd_node_keeps_its_package_under_torch_deterministic_mode() -> None:
-    """The autograd node is the forward's package: this facade's ``cake_kda_nondet`` gives this package's node, whose
-    backward runs this package even when torch's deterministic mode is switched on after the forward (no warning,
-    no alert); the deterministic facade's ``cake_kda_det`` gives the deterministic package's node, whose backward
-    runs that package."""
+    """The autograd node is the forward's package: this facade's ``cake_kda_nondet`` gives this package's node and
+    the deterministic facade's ``cake_kda_det`` the deterministic package's (a mode contract).  On a caller workspace
+    of the node's own package whose launcher records the launches (each package refuses the other's workspace), each
+    node's backward, with torch's deterministic mode switched on after the forward, launches its records there,
+    raises nothing and warns nothing.  No result is compared: this package's node is judged in
+    :func:`test_public_entries_run_the_package` and :func:`test_torch_deterministic_mode_runs_this_package`."""
     device = _device_or_skip()
     lengths, heads = (129, 63), 16
-    q, k, v, g, beta, cu, dout = _operands(make_inputs(lengths, heads, device))
-    scale = nd_api.DEFAULT_SCALE
-    want = {}
-    for det, fwd, bwd in (
+    S, N = sum(lengths), len(lengths)
+    q, k, v, g, beta, cu, dout = _operands(
+        draw_case(lengths, heads, "g", False, SEED, device)
+    )
+    for det, entry, node, ws_type, jit in (
         (
             False,
-            cake_backend.cake_kda_nondet_train_forward,
-            cake_backend.cake_kda_nondet_train_backward,
+            nd_api.cake_kda_nondet,
+            cake_backend.CakeKDANondetFunction,
+            cake_backend.CakeKDANondetWorkspace,
+            cake_jit,
         ),
         (
             True,
-            det_backend.cake_kda_det_train_forward,
-            det_backend.cake_kda_det_train_backward,
+            det_api.cake_kda_det,
+            det_backend.CakeKDADetFunction,
+            det_backend.CakeKDADetWorkspace,
+            det_jit,
         ),
     ):
-        _, saved = fwd(q, k, v, g, beta, cu, scale=scale)
-        want[det] = [
-            t.clone() for t in bwd(q, k, v, g, beta, cu, dout, saved=saved, scale=scale)
-        ]
-    for det, entry, node in (
-        (False, nd_api.cake_kda_nondet, cake_backend.CakeKDANondetFunction),
-        (True, det_api.cake_kda_det, det_backend.CakeKDADetFunction),
-    ):
+        launched: list = []
+
+        def recording(name, values, *, grid, device_index, _jit=jit, _log=launched):
+            _log.append(name)
+            _jit.run_module(name, values, grid=grid, device_index=device_index)
+
+        ws = ws_type.for_problem(S, N, heads, device, launcher=recording)
         leaves = [t.detach().clone().requires_grad_(True) for t in (q, k, v, g, beta)]
-        o = entry(*leaves, cu)
+        o = entry(*leaves, cu, workspace=ws)  # mode contract (the deterministic row)
         assert o.grad_fn._forward_cls is node, det
+        assert launched, det  # the forward ran on the caller workspace
+        launched.clear()
         with (
             _torch_deterministic(warn_only=True),
             warnings.catch_warnings(record=True) as rec,
@@ -1786,72 +1823,70 @@ def test_autograd_node_keeps_its_package_under_torch_deterministic_mode() -> Non
             o.backward(dout)
             torch.cuda.synchronize(device)
         assert _cake_pplx_warnings(rec) == [], det
-        for leaf, ref in zip(leaves, _leaf_grads(want[det]), strict=True):
-            assert _bits_equal(leaf.grad, ref), det
+        # the backward launched on the node's own package's workspace
+        assert launched, det
+        assert all(name in jit.MODULES for name in launched), (det, launched)
+        assert all(leaf.grad is not None for leaf in leaves), det
 
 
 def test_each_backward_refuses_the_other_packages_saved_set() -> None:
-    """This package's forward writes its saved set in the deterministic package's format (the same version, ``Aqk``
-    / ``Akk`` bits and extras) under its own type: each package's backward reads its own sets and refuses the other
-    package's (``ValueError`` naming the mode), the light and the tape set alike; ``dq``, ``dk``, ``dv`` and
-    ``dbeta`` are the deterministic package's bits."""
+    """This package's forward writes its saved set in the deterministic package's format (the same version, the same
+    ``Aqk`` / ``Akk`` dtype and shape and the same present fields) under its own type: each package's backward reads
+    its own sets and refuses the other package's (``ValueError`` naming the mode), the light and the tape set alike.
+    A mode contract: no result is compared."""
     device = _device_or_skip()
     lengths, heads = (63, 1, 65), 2
-    q, k, v, g, beta, cu, dout = _operands(make_inputs(lengths, heads, device))
+    q, k, v, g, beta, cu, dout = _operands(
+        draw_case(lengths, heads, "g", False, SEED, device)
+    )
     scale = nd_api.DEFAULT_SCALE
     for save_mode in (None, "tape"):
-        nd_out, nd_saved = nd_api.cake_kda_nondet_train_forward(
+        _, nd_saved = nd_api.cake_kda_nondet_train_forward(
             q, k, v, g, beta, cu, scale=scale, save_mode=save_mode
         )
-        det_out, det_saved = det_api.cake_kda_det_train_forward(
+        # mode contract: the deterministic package's set, for the format and the refusals
+        _, det_saved = det_api.cake_kda_det_train_forward(
             q, k, v, g, beta, cu, scale=scale, save_mode=save_mode
         )
         assert type(nd_saved) is cake_backend.CakeKDANondetChunkSaved
-        assert _bits_equal(nd_out, det_out)
         assert nd_saved.version == det_saved.version
-        assert _bits_equal(nd_saved.Aqk, det_saved.Aqk)
-        assert _bits_equal(nd_saved.Akk, det_saved.Akk)
+        for name in ("Aqk", "Akk"):
+            a, b = getattr(nd_saved, name), getattr(det_saved, name)
+            assert (a.dtype, a.shape) == (b.dtype, b.shape), (save_mode, name)
         for name in ("qg", "w", "u", "h", "v_new", "seg_m", "hseg", "seg_state"):
             a, b = getattr(nd_saved, name), getattr(det_saved, name)
             assert (a is None) == (b is None), (save_mode, name)
-        own = [
-            t.clone()
-            for t in nd_api.cake_kda_nondet_train_backward(
-                q, k, v, g, beta, cu, dout, saved=nd_saved, scale=scale
-            )
-        ]
+        own = nd_api.cake_kda_nondet_train_backward(
+            q, k, v, g, beta, cu, dout, saved=nd_saved, scale=scale
+        )
+        assert len(own) == len(GRAD_ORDER), save_mode
         with pytest.raises(ValueError, match=_refused("saved", det_saved)):
             nd_api.cake_kda_nondet_train_backward(
                 q, k, v, g, beta, cu, dout, saved=det_saved, scale=scale
             )
+        # mode contract: the deterministic backward reads its own set
         det_own = det_api.cake_kda_det_train_backward(
             q, k, v, g, beta, cu, dout, saved=det_saved, scale=scale
         )
+        assert len(det_own) == len(GRAD_ORDER), save_mode
         with pytest.raises(ValueError, match=DET_REFUSES):
+            # mode contract: the deterministic backward refuses this package's set
             det_api.cake_kda_det_train_backward(
                 q, k, v, g, beta, cu, dout, saved=nd_saved, scale=scale
             )
-        # dq, dk, dv and dbeta are the deterministic package's bits (dg differs by FP32 rounding on the S1 rows)
-        assert _same(own[:4], det_own[:4]), save_mode
 
 
-def test_public_entries_run_the_raw_gate_like_the_deterministic_package() -> None:
-    """The raw gate mode through the public entries: this facade and the deterministic facade give the same ``out``
-    and seven results bit for bit (explicit calls with and without a workspace of the raw mode, the autograd node:
-    this package runs the deterministic package's raw-mode programs); each facade's raw-mode workspace serves its
-    package, with the byte query's size; a workspace of the g mode is refused by a raw call (``ValueError``)."""
+def test_public_entries_run_the_raw_gate(record_property) -> None:
+    """The raw gate mode through this facade's public entries, each arm judged: the explicit calls without and with a
+    workspace of the raw mode (``""`` / ``workspace``: ``out`` and the seven results, ``dA_log`` / ``ddt_bias``
+    included) and the autograd node (``autograd``).  Each facade's raw-mode workspace is its package's type, of the raw
+    mode and of the byte query's size; on the first draw a workspace of the g mode is refused by a raw call of either
+    facade (``ValueError``; the deterministic facade's refusal is a mode contract: no deterministic result is
+    computed)."""
     device = _device_or_skip()
     lengths, heads = (63, 1, 65), 2
     S, N = sum(lengths), len(lengths)
-    inputs = make_raw_inputs(lengths, heads, device)
-    q, k, v, raw, beta, cu, dout = _operands(inputs)
-    kw = {
-        "use_gate_in_kernel": True,
-        "A_log": inputs["A_log"],
-        "dt_bias": inputs["dt_bias"],
-        "lower_bound": LOWER_BOUND,
-    }
-    results = {}
+    workspaces = {}
     for label, api, prefix, own in (
         ("det", det_api, "cake_kda_det", det_backend.CakeKDADetWorkspace),
         ("nd", nd_api, "cake_kda_nondet", cake_backend.CakeKDANondetWorkspace),
@@ -1862,22 +1897,35 @@ def test_public_entries_run_the_raw_gate_like_the_deterministic_package() -> Non
         assert ws.bytes == getattr(api, f"{prefix}_train_workspace_bytes")(
             S, N, heads, use_gate_in_kernel=True
         )
-        runs = []
-        for workspace in (None, ws):
-            out, saved = getattr(api, f"{prefix}_train_forward")(
+        workspaces[label] = (ws, workspace_of(S, N, heads, device))
+    ws, g_ws = workspaces["nd"]
+    _, det_g_ws = workspaces["det"]
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "raw", False, s, device)
+        q, k, v, raw, beta, cu, dout = _operands(inputs)
+        kw = {
+            "use_gate_in_kernel": True,
+            "A_log": inputs["A_log"],
+            "dt_bias": inputs["dt_bias"],
+            "lower_bound": LOWER_BOUND,
+        }
+        arms = {}
+        for label, workspace in (("", None), ("workspace", ws)):
+            out, saved = nd_api.cake_kda_nondet_train_forward(
                 q, k, v, raw, beta, cu, workspace=workspace, **kw
             )
             assert saved.gate == "raw", label
-            grads = getattr(api, f"{prefix}_train_backward")(
+            grads = nd_api.cake_kda_nondet_train_backward(
                 q, k, v, raw, beta, cu, dout, saved=saved, workspace=workspace, **kw
             )
             assert len(grads) == 7, label
-            runs.append((out.clone(), [t.clone() for t in grads]))
+            arms[label] = _step(out, grads, RAW_GRAD_ORDER)
         leaves = [
             t.detach().clone().requires_grad_(True)
             for t in (q, k, v, raw, beta, inputs["A_log"], inputs["dt_bias"])
         ]
-        o = getattr(api, prefix)(
+        o = nd_api.cake_kda_nondet(
             *leaves[:5],
             cu,
             use_gate_in_kernel=True,
@@ -1886,17 +1934,17 @@ def test_public_entries_run_the_raw_gate_like_the_deterministic_package() -> Non
             lower_bound=LOWER_BOUND,
         )
         o.backward(dout)
-        # the leaves' order (q, k, v, raw, beta, A_log, dt_bias) -> the backward's
-        gr = [leaf.grad for leaf in leaves]
-        runs.append((o.detach(), (gr[0], gr[1], gr[2], gr[4], gr[3], gr[5], gr[6])))
-        g_ws = workspace_of(S, N, heads, device)
-        with pytest.raises(ValueError, match="gate mode"):
-            getattr(api, f"{prefix}_train_forward")(
-                q, k, v, raw, beta, cu, workspace=g_ws, **kw
-            )
-        results[label] = runs
-    want_out, want_grads = results["det"][0]
-    for label, runs in results.items():
-        for i, (out, grads) in enumerate(runs):
-            assert _bits_equal(out, want_out), (label, i)
-            assert _same(grads, want_grads), (label, i)
+        arms["autograd"] = _node_step(o, leaves, RAW_LEAF_GRADS)
+        if j == 0:
+            with pytest.raises(ValueError, match="gate mode"):
+                nd_api.cake_kda_nondet_train_forward(
+                    q, k, v, raw, beta, cu, workspace=g_ws, **kw
+                )
+            with pytest.raises(ValueError, match="gate mode"):
+                # mode contract: the deterministic facade refuses its g-mode workspace
+                det_api.cake_kda_det_train_forward(
+                    q, k, v, raw, beta, cu, workspace=det_g_ws, **kw
+                )
+        return arms, inputs
+
+    judge_arms(record_property, draw, seed=SEED, scale=nd_api.DEFAULT_SCALE)

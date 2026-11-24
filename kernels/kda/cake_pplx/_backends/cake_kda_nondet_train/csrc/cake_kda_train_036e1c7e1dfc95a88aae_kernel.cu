@@ -338,9 +338,9 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
             float upd[64];
             float decay = 1.0f;
             if (nc > 0) {
-                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                 gk_pre = gk[gn_next];
-                long long dh_base = ((long long)(c0 + nc - 1) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128 + vbase);
+                long long dh_base = ((long long)(c0 + nc - 1) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128 + vbase);
                 tmem_ld_x16(&upd[0], taddr + (unsigned int)m128_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");
                 unsigned int packed[8];
@@ -447,7 +447,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                     const unsigned* _raw_stv8_1 = reinterpret_cast<const unsigned*>(packed_0);
                     asm volatile(
                         "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(dh_out + (dh_base + 16))), "r"(_raw_stv8_1[0]), "r"(_raw_stv8_1[1]), "r"(_raw_stv8_1[2]), "r"(_raw_stv8_1[3]), "r"(_raw_stv8_1[4]), "r"(_raw_stv8_1[5]), "r"(_raw_stv8_1[6]), "r"(_raw_stv8_1[7]) : "memory");
+                        :: "l"((void*)(dh_out + (dh_base + 16ll))), "r"(_raw_stv8_1[0]), "r"(_raw_stv8_1[1]), "r"(_raw_stv8_1[2]), "r"(_raw_stv8_1[3]), "r"(_raw_stv8_1[4]), "r"(_raw_stv8_1[5]), "r"(_raw_stv8_1[6]), "r"(_raw_stv8_1[7]) : "memory");
                 }
                 unsigned int upd_bf16_0[8];
                 #pragma unroll
@@ -506,7 +506,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                     const unsigned* _raw_stv8_2 = reinterpret_cast<const unsigned*>(packed_1);
                     asm volatile(
                         "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(dh_out + (dh_base + 32))), "r"(_raw_stv8_2[0]), "r"(_raw_stv8_2[1]), "r"(_raw_stv8_2[2]), "r"(_raw_stv8_2[3]), "r"(_raw_stv8_2[4]), "r"(_raw_stv8_2[5]), "r"(_raw_stv8_2[6]), "r"(_raw_stv8_2[7]) : "memory");
+                        :: "l"((void*)(dh_out + (dh_base + 32ll))), "r"(_raw_stv8_2[0]), "r"(_raw_stv8_2[1]), "r"(_raw_stv8_2[2]), "r"(_raw_stv8_2[3]), "r"(_raw_stv8_2[4]), "r"(_raw_stv8_2[5]), "r"(_raw_stv8_2[6]), "r"(_raw_stv8_2[7]) : "memory");
                 }
                 unsigned int upd_bf16_1[8];
                 #pragma unroll
@@ -565,7 +565,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                     const unsigned* _raw_stv8_3 = reinterpret_cast<const unsigned*>(_packed_3);
                     asm volatile(
                         "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(dh_out + (dh_base + 48))), "r"(_raw_stv8_3[0]), "r"(_raw_stv8_3[1]), "r"(_raw_stv8_3[2]), "r"(_raw_stv8_3[3]), "r"(_raw_stv8_3[4]), "r"(_raw_stv8_3[5]), "r"(_raw_stv8_3[6]), "r"(_raw_stv8_3[7]) : "memory");
+                        :: "l"((void*)(dh_out + (dh_base + 48ll))), "r"(_raw_stv8_3[0]), "r"(_raw_stv8_3[1]), "r"(_raw_stv8_3[2]), "r"(_raw_stv8_3[3]), "r"(_raw_stv8_3[4]), "r"(_raw_stv8_3[5]), "r"(_raw_stv8_3[6]), "r"(_raw_stv8_3[7]) : "memory");
                 }
                 unsigned int upd_bf16_2[8];
                 #pragma unroll
@@ -616,7 +616,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                 _phase_dv_ready_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 int trow = row0 + c * 64 + t_row;
-                long long t_base = ((long long)trow * (long long)num_heads + (long long)head) * 128 + (long long)vbase;
+                long long t_base = ((long long)trow * (long long)num_heads + (long long)head) * 128ll + (long long)vbase;
                 float bdvv[32];
                 float _tmem_load_0[16];
                 asm volatile(
@@ -759,7 +759,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                         :: "l"((void*)(dv2 + (t_base + (long long)(32 + lane_half * 16)))), "r"(_raw_stv8_6[0]), "r"(_raw_stv8_6[1]), "r"(_raw_stv8_6[2]), "r"(_raw_stv8_6[3]), "r"(_raw_stv8_6[4]), "r"(_raw_stv8_6[5]), "r"(_raw_stv8_6[6]), "r"(_raw_stv8_6[7]) : "memory");
                 }
                 if (nc > rc + 1) {
-                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                     gk_pre = gk[gn_next_1];
                 }
                 mbarrier_wait(dh_ready_addr, _phase_dh_ready_0);
@@ -768,7 +768,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                 if (nc > rc + 1) {
                     float _exp2_7 = approx_exp2(gk_pre);
                     decay = _exp2_7;
-                    long long dh_base_1 = ((long long)(c0 + c - 1) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128 + vbase);
+                    long long dh_base_1 = ((long long)(c0 + c - 1) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128 + vbase);
                     float _tmem_load_2[16];
                     tmem_ld_x16(&_tmem_load_2[0], taddr + (unsigned int)m128_row_base);
                     asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -891,7 +891,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_9 = reinterpret_cast<const unsigned*>(packed_2_1);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base_1 + 16))), "r"(_raw_stv8_9[0]), "r"(_raw_stv8_9[1]), "r"(_raw_stv8_9[2]), "r"(_raw_stv8_9[3]), "r"(_raw_stv8_9[4]), "r"(_raw_stv8_9[5]), "r"(_raw_stv8_9[6]), "r"(_raw_stv8_9[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base_1 + 16ll))), "r"(_raw_stv8_9[0]), "r"(_raw_stv8_9[1]), "r"(_raw_stv8_9[2]), "r"(_raw_stv8_9[3]), "r"(_raw_stv8_9[4]), "r"(_raw_stv8_9[5]), "r"(_raw_stv8_9[6]), "r"(_raw_stv8_9[7]) : "memory");
                     }
                     unsigned int upd_bf16_2_1[8];
                     #pragma unroll
@@ -958,7 +958,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_10 = reinterpret_cast<const unsigned*>(packed_3);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base_1 + 32))), "r"(_raw_stv8_10[0]), "r"(_raw_stv8_10[1]), "r"(_raw_stv8_10[2]), "r"(_raw_stv8_10[3]), "r"(_raw_stv8_10[4]), "r"(_raw_stv8_10[5]), "r"(_raw_stv8_10[6]), "r"(_raw_stv8_10[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base_1 + 32ll))), "r"(_raw_stv8_10[0]), "r"(_raw_stv8_10[1]), "r"(_raw_stv8_10[2]), "r"(_raw_stv8_10[3]), "r"(_raw_stv8_10[4]), "r"(_raw_stv8_10[5]), "r"(_raw_stv8_10[6]), "r"(_raw_stv8_10[7]) : "memory");
                     }
                     unsigned int upd_bf16_3_1[8];
                     #pragma unroll
@@ -1025,7 +1025,7 @@ kernel_cake_kda_train_036e1c7e1dfc95a88aae(const __grid_constant__ CUtensorMap k
                         const unsigned* _raw_stv8_11 = reinterpret_cast<const unsigned*>(packed_4);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(dh_out + (dh_base_1 + 48))), "r"(_raw_stv8_11[0]), "r"(_raw_stv8_11[1]), "r"(_raw_stv8_11[2]), "r"(_raw_stv8_11[3]), "r"(_raw_stv8_11[4]), "r"(_raw_stv8_11[5]), "r"(_raw_stv8_11[6]), "r"(_raw_stv8_11[7]) : "memory");
+                            :: "l"((void*)(dh_out + (dh_base_1 + 48ll))), "r"(_raw_stv8_11[0]), "r"(_raw_stv8_11[1]), "r"(_raw_stv8_11[2]), "r"(_raw_stv8_11[3]), "r"(_raw_stv8_11[4]), "r"(_raw_stv8_11[5]), "r"(_raw_stv8_11[6]), "r"(_raw_stv8_11[7]) : "memory");
                     }
                     unsigned int upd_bf16_4[8];
                     #pragma unroll

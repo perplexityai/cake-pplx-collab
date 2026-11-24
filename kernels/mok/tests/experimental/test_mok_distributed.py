@@ -21,15 +21,17 @@ this process sees fewer GPUs than its group has ranks (the ``ep8`` items on a no
 The workers live in :mod:`tests.experimental._mok_dist`: the complete training step eager and under CUDA Graph
 replay, unequal source counts per rank (empty ranks included), the training features (clamped SwiGLU, recompute and
 the context-free forward, FP32 weight-gradient accumulation, native MXFP8), the adapter's source-length guards and
-scratch lifetime, and the router weight before the down projection through the adapter on SM100a / SM103a: at EP1
-and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and (8, 48) with
-top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow multiplier, the trap
-of a schedule past its capacity and the bytes of separate group launches.
+scratch lifetime, and the router weight before the down projection through the adapter on SM100a, SM103a and
+SM107a: at EP1 and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and
+(8, 48) with top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow
+multiplier, the trap of a schedule past its capacity, the bytes of separate group launches and the bytes of the
+forward source split.
 Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case (the whole
 group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
 own under a strict expected-failure marker, from the same group run: the BF16 routed weight gradients of the cases
-whose experts' rows cross a macrobatch boundary and miss the tier.
+whose experts' rows cross a macrobatch boundary and miss the tier, and the EP1 MXFP8 routed gate weight gradient with
+FP32 accumulation, which misses the tier in the max norm.
 
 Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
 """
@@ -37,9 +39,12 @@ Backend suite: the package is imported only through :func:`tests.cake.test_helpe
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_package import cake_package
 from tests.experimental import _mok_dist as workers
 from tests.experimental import _mok_gaps as gaps
 from tests.experimental._mok_spawn import run_ranks, run_ranks_isolated
+
+kernels = cake_package("cake_mok_bf16", "_kernels")
 
 
 def _run(world, worker, *args):
@@ -93,7 +98,8 @@ def test_unequal_sources(record_property, part):
 
 #: The known-gap outputs of the training features per world: at EP1 (1031 tokens, 768-row macrobatches: experts cross a
 #: macrobatch boundary) the BF16 routed dW that misses the tier, the down projection of the clamped cases and all three
-#: projections of the plain recompute case.  The MXFP8 score gradient of these cases meets the tier.
+#: projections of the plain recompute case; and the gate projection's dW of the MXFP8 case with FP32 weight gradients,
+#: which misses the max norm (its L2 norm meets the tier).  The MXFP8 score gradient of these cases meets the tier.
 FEATURE_GAPS = {
     1: (
         ("bf16-clamped:dw_routed_down", gaps.bf16_straddle_dw),
@@ -101,6 +107,7 @@ FEATURE_GAPS = {
         ("bf16-recompute:dw_routed_up", gaps.bf16_straddle_dw),
         ("bf16-recompute:dw_routed_down", gaps.bf16_straddle_dw),
         ("bf16-clamped-recompute:dw_routed_down", gaps.bf16_straddle_dw),
+        ("mxfp8-fp32-wgrad:dw_routed_gate", gaps.mxfp8_fp32_dw_gate),
     ),
     4: (),
     8: (),
@@ -142,10 +149,14 @@ OVERFLOW_TIMEOUT = 600
 
 
 def _require_before_down(world):
-    """Skip on SM107a before any process starts: the router weight before the down projection has no build there."""
+    """Skip before any process starts unless every rank's device has the router-weight-before-down builds
+    (``BEFORE_DOWN_TARGETS``: SM100a, SM103a and SM107a have them)."""
     if torch.cuda.is_available() and torch.cuda.device_count() >= world:
-        if any(torch.cuda.get_device_capability(index) == (10, 7) for index in range(world)):
-            pytest.skip("The router weight before the down projection has SM100a and SM103a builds only")
+        for index in range(world):
+            capability = torch.cuda.get_device_capability(index)
+            arch = gaps.TARGETS.get(capability, f"sm_{capability[0]}{capability[1]}")
+            if arch not in kernels.BEFORE_DOWN_TARGETS:
+                pytest.skip(f"The router weight before the down projection has no {arch} build")
 
 
 @pytest.mark.parametrize(
@@ -258,3 +269,19 @@ def test_before_down_run_to_run(record_property, world, local_experts):
     launches = [run_ranks(world, workers.before_down_digests, local_experts) for _ in range(2)]
     assert launches[0] == launches[1]
     record_property("digests", launches[0])
+
+
+@pytest.mark.parametrize("world,local_experts", list(TOP6_LAYOUTS.values()), ids=list(TOP6_LAYOUTS))
+def test_before_down_source_split_bitwise(record_property, world, local_experts):
+    """The forward source split (``source_split_comm_sms``) on the requester's inputs at a 384-expert layout with one
+    or two source-rich ranks and an empty rank, over random routes, the placement mix and a full skew: each split
+    (several counts and thresholds, per-rank counts, a threshold no rank reaches) gives every rank the bytes of the
+    split off, in the context and the context-free forward, and a CUDA Graph captured with the split replays them
+    after new routes are loaded."""
+    _require_before_down(world)
+    results = run_ranks(world, workers.before_down_source_split, local_experts)
+    assert [r["case"] for r in results[0]] == [
+        f"bf16-clamped-before-down-source-split-{name}"
+        for name in ("random", "placement-mixed", "full-skew-last")
+    ]
+    record_property("rich_ranks", results[0][0]["rich"])

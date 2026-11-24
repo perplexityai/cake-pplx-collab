@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -294,50 +294,90 @@ kernel_cake_rmsnorm_det_train_58305d0f80e3e79161d4(__nv_bfloat16* __restrict__ g
                     int _parity_full = (int)((unsigned int)k / 4 % 2);
                     mbarrier_wait(full_addr + (_stage_full) * 8, _parity_full);
                     int sbase = ring_at + k % 4 * 4096;
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_4[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_4[0]), "=l"(_smem_raw_4[1]) : "r"(sbase + (0 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_4;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_4) : "r"(sbase + (0 + t) * 8 * 2));
+#endif
                     gw[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_4)[0];
                     gw[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_4)[1];
                     gw[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_4)[2];
                     gw[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_4)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_5[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_5[0]), "=l"(_smem_raw_5[1]) : "r"(sbase + 2048 + (0 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_5;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_5) : "r"(sbase + 2048 + (0 + t) * 8 * 2));
+#endif
                     xw[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_5)[0];
                     xw[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_5)[1];
                     xw[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_5)[2];
                     xw[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_5)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_6[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_6[0]), "=l"(_smem_raw_6[1]) : "r"(sbase + (32 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_6;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_6) : "r"(sbase + (32 + t) * 8 * 2));
+#endif
                     gw[4] = reinterpret_cast<const uint32_t*>(&_smem_raw_6)[0];
                     gw[5] = reinterpret_cast<const uint32_t*>(&_smem_raw_6)[1];
                     gw[6] = reinterpret_cast<const uint32_t*>(&_smem_raw_6)[2];
                     gw[7] = reinterpret_cast<const uint32_t*>(&_smem_raw_6)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_7[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_7[0]), "=l"(_smem_raw_7[1]) : "r"(sbase + 2048 + (32 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_7;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_7) : "r"(sbase + 2048 + (32 + t) * 8 * 2));
+#endif
                     xw[4] = reinterpret_cast<const uint32_t*>(&_smem_raw_7)[0];
                     xw[5] = reinterpret_cast<const uint32_t*>(&_smem_raw_7)[1];
                     xw[6] = reinterpret_cast<const uint32_t*>(&_smem_raw_7)[2];
                     xw[7] = reinterpret_cast<const uint32_t*>(&_smem_raw_7)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_8[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_8[0]), "=l"(_smem_raw_8[1]) : "r"(sbase + (64 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_8;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_8) : "r"(sbase + (64 + t) * 8 * 2));
+#endif
                     gw[8] = reinterpret_cast<const uint32_t*>(&_smem_raw_8)[0];
                     gw[9] = reinterpret_cast<const uint32_t*>(&_smem_raw_8)[1];
                     gw[10] = reinterpret_cast<const uint32_t*>(&_smem_raw_8)[2];
                     gw[11] = reinterpret_cast<const uint32_t*>(&_smem_raw_8)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_9[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_9[0]), "=l"(_smem_raw_9[1]) : "r"(sbase + 2048 + (64 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_9;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_9) : "r"(sbase + 2048 + (64 + t) * 8 * 2));
+#endif
                     xw[8] = reinterpret_cast<const uint32_t*>(&_smem_raw_9)[0];
                     xw[9] = reinterpret_cast<const uint32_t*>(&_smem_raw_9)[1];
                     xw[10] = reinterpret_cast<const uint32_t*>(&_smem_raw_9)[2];
                     xw[11] = reinterpret_cast<const uint32_t*>(&_smem_raw_9)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_10[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_10[0]), "=l"(_smem_raw_10[1]) : "r"(sbase + (96 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_10;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_10) : "r"(sbase + (96 + t) * 8 * 2));
+#endif
                     gw[12] = reinterpret_cast<const uint32_t*>(&_smem_raw_10)[0];
                     gw[13] = reinterpret_cast<const uint32_t*>(&_smem_raw_10)[1];
                     gw[14] = reinterpret_cast<const uint32_t*>(&_smem_raw_10)[2];
                     gw[15] = reinterpret_cast<const uint32_t*>(&_smem_raw_10)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_11[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_11[0]), "=l"(_smem_raw_11[1]) : "r"(sbase + 2048 + (96 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_11;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_11) : "r"(sbase + 2048 + (96 + t) * 8 * 2));
+#endif
                     xw[12] = reinterpret_cast<const uint32_t*>(&_smem_raw_11)[0];
                     xw[13] = reinterpret_cast<const uint32_t*>(&_smem_raw_11)[1];
                     xw[14] = reinterpret_cast<const uint32_t*>(&_smem_raw_11)[2];
@@ -485,14 +525,24 @@ kernel_cake_rmsnorm_det_train_58305d0f80e3e79161d4(__nv_bfloat16* __restrict__ g
                     float kx = rq * rq * rq * cq;
                     float nkx = -kx;
                     unsigned long long dx_base = (unsigned long long)row * 1024ull;
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_12[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_12[0]), "=l"(_smem_raw_12[1]) : "r"(sbase + (0 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_12;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_12) : "r"(sbase + (0 + t) * 8 * 2));
+#endif
                     gw[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_12)[0];
                     gw[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_12)[1];
                     gw[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_12)[2];
                     gw[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_12)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_13[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_13[0]), "=l"(_smem_raw_13[1]) : "r"(sbase + 2048 + (0 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_13;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_13) : "r"(sbase + 2048 + (0 + t) * 8 * 2));
+#endif
                     xw[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_13)[0];
                     xw[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_13)[1];
                     xw[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_13)[2];
@@ -529,14 +579,24 @@ kernel_cake_rmsnorm_det_train_58305d0f80e3e79161d4(__nv_bfloat16* __restrict__ g
                         packed_0[_lp] = *(uint32_t*)&_bf2;
                     }
                     reinterpret_cast<int4*>(dx + (dx_base + (unsigned long long)((0 + t) * 8)))[0] = reinterpret_cast<int4*>(packed_0)[0];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_14[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_14[0]), "=l"(_smem_raw_14[1]) : "r"(sbase + (32 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_14;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_14) : "r"(sbase + (32 + t) * 8 * 2));
+#endif
                     gw[4] = reinterpret_cast<const uint32_t*>(&_smem_raw_14)[0];
                     gw[5] = reinterpret_cast<const uint32_t*>(&_smem_raw_14)[1];
                     gw[6] = reinterpret_cast<const uint32_t*>(&_smem_raw_14)[2];
                     gw[7] = reinterpret_cast<const uint32_t*>(&_smem_raw_14)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_15[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_15[0]), "=l"(_smem_raw_15[1]) : "r"(sbase + 2048 + (32 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_15;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_15) : "r"(sbase + 2048 + (32 + t) * 8 * 2));
+#endif
                     xw[4] = reinterpret_cast<const uint32_t*>(&_smem_raw_15)[0];
                     xw[5] = reinterpret_cast<const uint32_t*>(&_smem_raw_15)[1];
                     xw[6] = reinterpret_cast<const uint32_t*>(&_smem_raw_15)[2];
@@ -573,14 +633,24 @@ kernel_cake_rmsnorm_det_train_58305d0f80e3e79161d4(__nv_bfloat16* __restrict__ g
                         packed_1[_lp] = *(uint32_t*)&_bf2;
                     }
                     reinterpret_cast<int4*>(dx + (dx_base + (unsigned long long)((32 + t) * 8)))[0] = reinterpret_cast<int4*>(packed_1)[0];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_16[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_16[0]), "=l"(_smem_raw_16[1]) : "r"(sbase + (64 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_16;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_16) : "r"(sbase + (64 + t) * 8 * 2));
+#endif
                     gw[8] = reinterpret_cast<const uint32_t*>(&_smem_raw_16)[0];
                     gw[9] = reinterpret_cast<const uint32_t*>(&_smem_raw_16)[1];
                     gw[10] = reinterpret_cast<const uint32_t*>(&_smem_raw_16)[2];
                     gw[11] = reinterpret_cast<const uint32_t*>(&_smem_raw_16)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_17[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_17[0]), "=l"(_smem_raw_17[1]) : "r"(sbase + 2048 + (64 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_17;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_17) : "r"(sbase + 2048 + (64 + t) * 8 * 2));
+#endif
                     xw[8] = reinterpret_cast<const uint32_t*>(&_smem_raw_17)[0];
                     xw[9] = reinterpret_cast<const uint32_t*>(&_smem_raw_17)[1];
                     xw[10] = reinterpret_cast<const uint32_t*>(&_smem_raw_17)[2];
@@ -617,14 +687,24 @@ kernel_cake_rmsnorm_det_train_58305d0f80e3e79161d4(__nv_bfloat16* __restrict__ g
                         packed_2[_lp] = *(uint32_t*)&_bf2;
                     }
                     reinterpret_cast<int4*>(dx + (dx_base + (unsigned long long)((64 + t) * 8)))[0] = reinterpret_cast<int4*>(packed_2)[0];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_18[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_18[0]), "=l"(_smem_raw_18[1]) : "r"(sbase + (96 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_18;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_18) : "r"(sbase + (96 + t) * 8 * 2));
+#endif
                     gw[12] = reinterpret_cast<const uint32_t*>(&_smem_raw_18)[0];
                     gw[13] = reinterpret_cast<const uint32_t*>(&_smem_raw_18)[1];
                     gw[14] = reinterpret_cast<const uint32_t*>(&_smem_raw_18)[2];
                     gw[15] = reinterpret_cast<const uint32_t*>(&_smem_raw_18)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_19[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_19[0]), "=l"(_smem_raw_19[1]) : "r"(sbase + 2048 + (96 + t) * 8 * 2));
+#else
                     __int128_t _smem_raw_19;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_19) : "r"(sbase + 2048 + (96 + t) * 8 * 2));
+#endif
                     xw[12] = reinterpret_cast<const uint32_t*>(&_smem_raw_19)[0];
                     xw[13] = reinterpret_cast<const uint32_t*>(&_smem_raw_19)[1];
                     xw[14] = reinterpret_cast<const uint32_t*>(&_smem_raw_19)[2];
