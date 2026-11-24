@@ -3320,7 +3320,7 @@ def test_build_schedule_route_buffer_over_changing_counts():
         return rand(count, ep * experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
 
     def unplanned(ids, count):
-        rank, token, total, tokens, layout = functional._schedule_launches(storage, config, ids, count)
+        rank, token, total, tokens, layout, _ = functional._schedule_launches(storage, config, ids, count)
         return _schedule_fields(
             workspace_module.MoKSchedule(
                 peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=tokens, layout=layout
