@@ -28,8 +28,8 @@ The mode is part of the name: the entry takes no ``deterministic`` keyword
 on the three-kernel routes the dQ tiles of the key blocks of one head are
 added into an FP32 accumulator in arrival order, so ``dq`` may differ in its
 last bits run to run; ``dk`` and ``dv`` have one fixed order.  On the
-one-launch route (no mask, few CTAs) ``dq``, ``dk`` and ``dv``
-each have one fixed order; the module stays non-deterministic.  Under
+one-launch route (few CTAs, without the mask or with it) ``dq``, ``dk`` and
+``dv`` each have one fixed order; the module stays non-deterministic.  Under
 ``torch.use_deterministic_algorithms(True)`` the entry raises PyTorch's alert
 before it launches.
 
@@ -133,10 +133,10 @@ def cake_fmha_nondet_train_backward(
     -----
     Not bitwise reproducible: on the three-kernel routes the dQ tiles of the key blocks of one head are added into
     an FP32 accumulator in arrival order, so ``dq`` may differ in its last bits run to run.  ``dk`` and ``dv`` are
-    summed in one fixed order.  A call on the one-launch route (no mask, few CTAs) runs one kernel in
-    which ``dq``, ``dk`` and ``dv`` each have one fixed order; the module makes no bit promise either way.  Under
-    ``torch.use_deterministic_algorithms(True)`` the call raises PyTorch's ``RuntimeError`` (``... does not have a
-    deterministic implementation ...``) before it allocates or launches; with ``warn_only=True`` it warns once
+    summed in one fixed order.  A call on the one-launch route (few CTAs, without the mask or with it) runs one
+    kernel in which ``dq``, ``dk`` and ``dv`` each have one fixed order; the module makes no bit promise either way.
+    Under ``torch.use_deterministic_algorithms(True)`` the call raises PyTorch's ``RuntimeError`` (``... does not
+    have a deterministic implementation ...``) before it allocates or launches; with ``warn_only=True`` it warns once
     (``UserWarning``) and runs.  There is no deterministic module to fall back to.  The kernels run on the current
     stream of the operands' device (made current for the launches); nothing synchronizes.
     """
