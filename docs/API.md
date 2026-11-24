@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 21 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 22 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -43,6 +43,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | mok | Has no nondet module | — |
 | act_qdq | Has no nondet module | — |
 | gated_kv_compression | Has no nondet module | — |
+| route_weight_scale | Has no nondet module | — |
 
 ---
 
@@ -2191,3 +2192,76 @@ if torch.cuda.get_device_capability() == (10, 7):
 - Finite inputs can give `±inf`: with MXFP8 an element with `|x| >= 248*2^120`, with MXFP4 one with `|x| >= 224*2^120` (the rule's own BF16 rounding of `q * s`).
 - Only the dequantized BF16 values and the FP32 scales are returned, not the packed FP4/FP8 codes.
 - `locality="domain"` gains only where the caller places both `x` and `out` in the helper's memory. A call with `out=None` allocates default memory and runs the `"off"` program; so does an in-place call.
+
+---
+
+## route_weight_scale
+
+**Computes.** The route-weight row scaling of a routed MoE expert for training, hidden size `H` 4096 or 3584. After the down projection, each received token copy (row `r < rows`) is scaled by its FP32 route weight `w[r]` before the combine:
+
+- **Forward:** `y = BF16(w * x)`, the FP32 product rounded once. Bit for bit `(w[:, None] * x.float()).bfloat16()`.
+- **Backward:** `dx = BF16(w * dy)`, bit for bit `(w[:, None] * dy.float()).bfloat16()`, and the FP32 `dw = sum_c dy * x`, one word per row. `dw` does not divide by `w`, so a zero-weight row gets signed zeros in `y` and `dx` and keeps its `dw`.
+- One kernel per call. The backward reads `x` and `dy` once and writes `dx` and `dw` once: no `[rows, H]` FP32 product is formed.
+- The products of two BF16 values in `dw` are exact in FP32; the additions form a balanced binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd halves, then five XOR shuffles across the row's 32 lanes). Every product rounds to nearest without flushing subnormals; nothing is FP64.
+
+**Architectures.** `sm_100a`, `sm_103a`; `sm_107a` follows once it runs on an SM107 device. Other devices, SM107 included, raise `RuntimeError`, also for `rows = 0`. The `build.json` of the package gives the minimum CUDA toolkit of each library.
+
+**Inputs.**
+
+- `x`, `dy`: BF16 `[rows, H]`, `H` 4096 or 3584. Each BF16 operand, inputs and outputs, has a unit column stride, a row stride that is a multiple of 8 elements and a 16-byte aligned base, so row slices of wider or longer buffers are read and written in place. An output's row stride is at least `H`. A single row's stride is not read.
+- `w`: FP32 `[rows]`, contiguous. Any value; zeros allowed.
+- `rows` is any count from 0 to `2**31 - 257`, read from the tensor shape. Row offsets are 64-bit, so 1,048,576 rows at `H = 4096` (more than 2^31 elements) are one call. `rows` and the strides are launch arguments: one library per program and architecture serves every call, with no recompilation.
+- Every operand is on one CUDA device. An operand of another dtype, shape or layout raises `ValueError` before any allocation or launch; nothing is copied.
+
+### `cake_pplx.cake_route_weight_scale_det_train`
+
+This family has a det module only, with no nondet or KCP module: nothing sums across rows, and the one sum, `dw` within a row, has one fixed order. Every call gives the same bits for the same inputs on the same architecture, whatever `rows`, the layout, the stream or a CUDA graph, and no call alerts under `torch.use_deterministic_algorithms(True)`. Source: [`kernels/route_weight_scale/cake_pplx/cake_route_weight_scale_det_train.py`](../kernels/route_weight_scale/cake_pplx/cake_route_weight_scale_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_route_weight_scale_det` | `(x, w)` | As above | Autograd. Returns contiguous BF16 `y [rows, H]`. `x.grad` is BF16 `[rows, H]`, `w.grad` FP32 `[rows]`. Saves only `x` and `w`. Works under `torch.utils.checkpoint(..., use_reentrant=False)`. An upstream gradient the kernels cannot read (an expanded one, say) is copied once. |
+| `cake_route_weight_scale_det_train_forward` | `(x, w, *, out=None)` | `out` optional preallocated BF16 `[rows, H]` (the layout rules above) | Returns `y` (`out` when given). Not autograd. `rows == 0` returns an empty `y` without a launch. |
+| `cake_route_weight_scale_det_train_backward` | `(x, dy, w, *, dx=None, dw=None)` | `dy` BF16 `[rows, H]`; optional preallocated `dx` BF16 `[rows, H]` and contiguous FP32 `dw [rows]` | Returns `(dx, dw)`. Not autograd. One launch for both outputs. |
+
+Other public names:
+
+- `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `WIDTHS` (4096, 3584).
+- `CakeRouteWeightScaleDetFunction`: the autograd class, `apply(x, w)`.
+- `is_cake_route_weight_scale_det_train_supported(device)`.
+
+**Options and environment.** `out`, `dx` and `dw` are the only keywords. The facade reads no environment variable.
+
+**Cross-family.** None. `x` is the output of moe_grouped_gemm's down projection; `y` goes to the combine.
+
+**Example.**
+
+```python
+import torch
+import torch.utils.checkpoint
+from cake_pplx.cake_route_weight_scale_det_train import (
+    cake_route_weight_scale_det,
+    cake_route_weight_scale_det_train_forward,
+)
+
+rows, H = 327_680, 4096
+x = torch.randn(rows, H, device="cuda", dtype=torch.bfloat16, requires_grad=True)  # down projection output
+w = torch.rand(rows, device="cuda").requires_grad_()                               # FP32 route weights
+
+y = cake_route_weight_scale_det(x, w)  # BF16 [rows, H]
+y.backward(torch.randn_like(y))        # x.grad BF16 [rows, H], w.grad FP32 [rows]
+
+# Activation checkpointing (the forward runs again in the backward).
+y = torch.utils.checkpoint.checkpoint(cake_route_weight_scale_det, x, w, use_reentrant=False)
+
+# Row slices of a preallocated receive buffer, without autograd.
+buffer = torch.empty(655_360, H, device="cuda", dtype=torch.bfloat16)
+cake_route_weight_scale_det_train_forward(x.detach(), w.detach(), out=buffer[:rows])
+```
+
+**Caveats.**
+
+- `H` is 4096 or 3584 only.
+- Workspace: none. A call allocates only the outputs it is not given. Retained state of the autograd function: `x` and `w` (references, no copy).
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills each output a call allocates with NaN before the kernel writes it: one more fill launch per new output. Output buffers passed to every call avoid the fills. The bits do not change.
+- No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. Not tested under `torch.compile`.
+- A program's library builds at its first launch. Before capturing a CUDA graph, run an eager call of each stage and width the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
