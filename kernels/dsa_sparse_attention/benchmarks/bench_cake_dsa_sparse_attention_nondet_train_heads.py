@@ -33,6 +33,11 @@ Arms (each times its own whole call, glue included):
   FP32 ``[S, 576]`` accumulator is created inside the timed backward; the backward is ``torch.autograd.grad`` of
   ``out`` with respect to ``q_latent`` and ``q_rope``.  ``cake_no_olo`` passes ``with_o_lo=False``.  A package that
   does not serve the head count records the arm as unavailable with its error.
+* ``cake_det``: the deterministic flat autograd entry ``cake_dsa_sparse_attention_det`` in the same form (no
+  ``with_o_lo`` option).  Its backward runs in the storage of the saved ``o_lo`` and so replays the forward when called
+  again on a consumed graph; its ``bwd`` op therefore times each backward on a fresh forward made outside the timed
+  span.  A package without a deterministic module for the head count records the arm as unavailable with its error
+  (the "vs deterministic Cake" column of such a row is unsupported).
 * ``cudnn_fe``: the cuDNN frontend's native DSA forward (``sparse_attention_forward_wrapper``) and its default
   non-deterministic backward (``DSA.sparse_attention_backward_wrapper``) on packed ``q [T, H, 576]`` and ``kv [S, 576]``
   (built inside the timed forward with ``--layout split``, the default; given once with ``--layout packed``).  The
@@ -42,8 +47,9 @@ Arms (each times its own whole call, glue included):
   version, file and the backward backend it selected).
 * ``fa4``: FlashAttention-4's sparse MLA kernels through autograd (``flash_attn.cute.flash_attn_varlen_func`` with
   ``q_rope``, ``k_rope [S, 1, 64]``, ``kv_latent [S, 1, 512]``, ``qv = q_latent``, per-document gather indices,
-  ``causal=True``, recompute-P backward in 4096-token chunks); its BF16 ``dk`` / ``dv`` are upcast-added into the
-  zeroed FP32 accumulator inside the timed backward.
+  ``causal=True``, recompute-P backward in token chunks of ``--fa4-token-chunk``, default 4096, ``0`` for one
+  unchunked backward); its BF16 ``dk`` / ``dv`` are upcast-added into the zeroed FP32 accumulator inside the timed
+  backward.
 * ``fa4_fp32``: the same kernels through their private forward (``_flash_attn_fwd``, training configuration, returning
   ``o_lo``) and sparse-MLA backward (``_flash_attn_bwd_sparse_mla``) with preallocated zeroed FP32 ``dk [S, 1, 64]`` and
   ``dv [S, 1, 512]`` (the kernels' own FP32 accumulation, no BF16 round trip); these two buffers are the arm's
@@ -53,26 +59,31 @@ Index glue outside the timed region, for every arm: the frontend takes the valid
 (``-1`` replaced by 0 past it; rows with holes are compacted stably first), FlashAttention-4 the per-document rows with
 ``-1`` for every invalid slot, Cake the global rows and ``topk_length``.
 
-Ops: ``fwd``; ``bwd`` (one retained forward, the backward called repeatedly); ``step`` (forward + backward);
+Ops: ``fwd``; ``bwd`` (one retained forward, the backward called repeatedly; ``cake_det``: a fresh forward per call,
+outside the span); ``step`` (forward + backward);
 ``recompute`` (forward + forward + backward: the forward runs twice per update under activation checkpointing).
 
 Timing (one arm per process is the protocol; the driver runs fresh processes in rotating rounds): CUPTI activity spans
 through ``torch.profiler`` with a cold L2 before every iteration (the timer of
-``bench_cake_dsa_sparse_attention_nondet_train.py``), ``--warmup`` warm-up calls, then ``--steps`` timed calls; every
-per-iteration span is recorded with its median.  With ``nvidia-ml-py`` installed each op also records NVML of the
-timing GPU by UUID: the SM clock (5 ms samples), the share of samples with a power-cap / slowdown clock event reason,
-the energy over the op and the enforced power limit.
+``bench_cake_dsa_sparse_attention_nondet_train.py``, kept here so that a baseline process imports no Cake module),
+``--warmup`` warm-up calls, then ``--steps`` timed calls; every per-iteration span is recorded with its median and the
+timer that produced it (``cupti``, or ``cuda_events (...)`` with the reason when the profiler recorded no activity).
+With ``nvidia-ml-py`` installed each op also records NVML of the timing GPU by UUID: the SM clock (5 ms samples), the
+share of samples with a power-cap / slowdown clock event reason, the energy over the op and the enforced power limit.
 
 Memory accounting per arm and row (torch allocator, bytes): ``fwd_workspace`` (peak of the forward above what it
 leaves allocated), ``out_lse`` (the returned ``out`` and ``lse``), ``retained`` (what the forward keeps alive for the
-backward besides ``out`` and ``lse``), ``bwd_workspace`` (peak of the backward above the gradients it returns) and
-``grads`` (``dq`` plus the FP32 accumulator).
+backward besides ``out`` and ``lse``), ``glue_retained`` (the part of ``retained`` made by the arm's input glue: the
+frontend's packed ``q`` and ``kv`` copies in the split layout), ``bwd_workspace`` (peak of the backward above the
+gradients it returns) and ``grads`` (``dq`` plus the FP32 accumulator).
 
 Usage::
 
     python benchmarks/bench_cake_dsa_sparse_attention_nondet_train_heads.py --arms cudnn_fe --heads 96 64 --json fe.json
     python benchmarks/bench_cake_dsa_sparse_attention_nondet_train_heads.py --arms cake --heads 64 \\
         --rows r1_doc_16380 r4_packed4_16380 --steps 20 --json cake64.json
+    python benchmarks/bench_cake_dsa_sparse_attention_nondet_train_heads.py --arms fa4,fa4_fp32 --heads 96 \\
+        --fa4-token-chunk 8192 --json fa4-8192.json
 """
 
 import argparse
@@ -90,10 +101,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.bench_cake_dsa_sparse_attention_nondet_train import (  # noqa: E402
-    _cuda_event_times,
-    _cupti_times,
-)
+# The reference helper imports torch only: a baseline process loads no Cake module unless a Cake arm runs.
 from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_reference import (  # noqa: E402
     D_LATENT,
     D_QK,
@@ -146,6 +154,13 @@ def _local_rows(inp):
 class _Accumulating:
     """The zeroed FP32 ``dkv_acc [S, 576]`` an arm's backward adds into (latent columns ``0:512``, rope ``512:576``)."""
 
+    #: Time the ``bwd`` op on a fresh forward per call (made outside the timed span), not on one retained forward.
+    bwd_fresh_forward = False
+
+    def glue_retained(self, st):
+        """Bytes of the forward state that the arm's input glue made (part of ``retained``)."""
+        return 0
+
     @staticmethod
     def new_acc(inp):
         return torch.zeros(
@@ -169,15 +184,7 @@ class ArmCake(_Accumulating):
     with_o_lo = True
 
     def __init__(self, inp, *, scale=SCALE, layout="split", topk_length=True):
-        from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
-            cake_dsa_sparse_attention_nondet,
-        )
-
-        self.fn, self.inp, self.scale = (
-            cake_dsa_sparse_attention_nondet,
-            inp,
-            float(scale),
-        )
+        self.fn, self.inp, self.scale = self._entry(), inp, float(scale)
         self.layout = layout
         if layout == "packed":
             q = torch.cat([inp.q_latent, inp.q_rope], dim=-1).requires_grad_()
@@ -195,6 +202,16 @@ class ArmCake(_Accumulating):
         self.num_segments = int(inp.cu_seqlens_k.numel()) - 1
         self.forward()  # validation, binding and the first build, outside the timed region
         torch.cuda.synchronize()
+
+    def _entry(self):
+        from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
+            cake_dsa_sparse_attention_nondet,
+        )
+
+        return cake_dsa_sparse_attention_nondet
+
+    def _forward_kwargs(self):
+        return {} if self.with_o_lo else dict(with_o_lo=False)
 
     def versions(self):
         import importlib.metadata as md
@@ -218,7 +235,7 @@ class ArmCake(_Accumulating):
             holder["acc"] = self.new_acc(inp)
             return holder["acc"]
 
-        kw = {} if self.with_o_lo else dict(with_o_lo=False)
+        kw = self._forward_kwargs()
         out, lse = self.fn(
             self.q_latent,
             self.q_rope,
@@ -255,6 +272,32 @@ class ArmCakeNoOlo(ArmCake):
 
     name = "cake_no_olo"
     with_o_lo = False
+
+
+class ArmCakeDet(ArmCake):
+    """The deterministic flat autograd entry ``cake_dsa_sparse_attention_det`` in the form of ``cake`` (see the module
+    docstring); its backward is timed on a fresh forward per iteration."""
+
+    name = "cake_det"
+    bwd_fresh_forward = True
+
+    def _entry(self):
+        from cake_pplx.cake_dsa_sparse_attention_det_train import (
+            cake_dsa_sparse_attention_det,
+        )
+
+        return cake_dsa_sparse_attention_det
+
+    def _forward_kwargs(self):
+        return {}
+
+    def versions(self):
+        found = super().versions()
+        found.pop("with_o_lo")
+        return dict(
+            found,
+            entry="cake_dsa_sparse_attention_det (autograd, dkv_acc callable)",
+        )
 
 
 class ArmCudnnFe(_Accumulating):
@@ -327,6 +370,10 @@ class ArmCudnnFe(_Accumulating):
         fe_lse = res["lse"]
         lse = fe_lse.masked_fill(torch.isposinf(fe_lse), float("-inf"))
         return dict(q=q, kv=kv, out=res["out"], lse=lse, fe_lse=fe_lse)
+
+    def glue_retained(self, st):
+        """The packed ``q [T, H, 576]`` and ``kv [S, 576]`` copies the split layout makes inside the forward."""
+        return _nbytes(st["q"], st["kv"]) if self.layout == "split" else 0
 
     def backward(self, st):
         res = self.DSA.sparse_attention_backward_wrapper(
@@ -424,7 +471,8 @@ class ArmFA4(_Accumulating):
             float(scale),
             layout,
         )
-        self.causal, self.token_chunk = bool(causal), int(token_chunk)
+        self.causal = bool(causal)
+        self.token_chunk = int(token_chunk) or None  # 0: one unchunked backward
         self.idx = _local_rows(inp)
         self.q_rope = inp.q_rope.detach().contiguous().requires_grad_()
         self.q_latent = inp.q_latent.detach().contiguous().requires_grad_()
@@ -583,8 +631,10 @@ class ArmFA4Fp32(ArmFA4):
 
 
 ARMS = {
-    cls.name: cls for cls in (ArmCake, ArmCakeNoOlo, ArmCudnnFe, ArmFA4, ArmFA4Fp32)
+    cls.name: cls
+    for cls in (ArmCake, ArmCakeNoOlo, ArmCakeDet, ArmCudnnFe, ArmFA4, ArmFA4Fp32)
 }
+FA4_ARMS = ("fa4", "fa4_fp32")
 
 
 # ---------------------------------------------------------------------------
@@ -668,15 +718,131 @@ class Nvml:
 # ---------------------------------------------------------------------------
 
 
-def spans_ms(fn, steps, warmup):
+_ITERATION_RANGE = "cake_bench_iteration_"
+_L2_FLUSH: dict = {}
+
+
+def _flush_l2(device):
+    """Overwrite a buffer twice the size of the device's L2 so that the next call starts with a cold L2."""
+    buffer = _L2_FLUSH.get(device)
+    if buffer is None:
+        l2_bytes = getattr(torch.cuda.get_device_properties(device), "L2_cache_size", 0)
+        buffer = torch.empty(
+            2 * (l2_bytes or (128 << 20)), dtype=torch.uint8, device=device
+        )
+        _L2_FLUSH[device] = buffer
+    buffer.zero_()
+
+
+def _span_ns(event):
+    """``(start, end)`` of a profiler event in ns."""
+    if hasattr(event, "start_ns"):
+        start = event.start_ns()
+        return start, start + event.duration_ns()
+    start = event.start_us() * 1000
+    return start, start + event.duration_us() * 1000
+
+
+def _call(fn, prep):
+    """One untimed ``prep()`` (when given) for the next timed call: ``fn(prep())`` split at the L2 flush."""
+    return (lambda: fn()) if prep is None else (lambda state=prep(): fn(state))
+
+
+def _cupti_times(fn, reps, warmup, prep=None):
+    """Per-iteration GPU spans (ms) from the CUPTI activity records of ``torch.profiler``, or None when an iteration
+    has no recorded GPU activity.
+
+    Every iteration runs ``prep`` (when given; untimed), flushes the L2, then calls ``fn`` (``fn(prep())`` with
+    ``prep``) inside a ``record_function`` range.  The CUDA runtime / driver calls that start inside that range name
+    (by CUPTI correlation id) the GPU activities of the iteration; its span runs from the first start to the last end
+    of those activities."""
+    from torch.profiler import ProfilerActivity, profile, record_function
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    for _ in range(warmup):
+        call = _call(fn, prep)
+        _flush_l2(device)
+        call()
+        del call
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for i in range(reps):
+            call = _call(fn, prep)
+            _flush_l2(device)
+            with record_function(f"{_ITERATION_RANGE}{i}"):
+                call()
+            del call
+        torch.cuda.synchronize()
+    events = list(prof.profiler.kineto_results.events())
+    cpu, gpu = torch.autograd.DeviceType.CPU, torch.autograd.DeviceType.CUDA
+    ranges = {}
+    launches = []
+    activities = {}
+    for event in events:
+        name = event.name()
+        if event.device_type() == cpu:
+            if name.startswith(_ITERATION_RANGE):
+                ranges[int(name[len(_ITERATION_RANGE) :])] = _span_ns(event)
+            elif name.startswith("cu") and event.correlation_id() > 0:
+                launches.append((_span_ns(event)[0], event.correlation_id()))
+        elif event.device_type() == gpu and event.correlation_id() > 0:
+            activities.setdefault(event.correlation_id(), []).append(_span_ns(event))
+    times = []
+    for i in range(reps):
+        if i not in ranges:
+            return None
+        lo, hi = ranges[i]
+        spans = [
+            span
+            for start, corr in launches
+            if lo <= start <= hi
+            for span in activities.get(corr, ())
+        ]
+        if not spans:
+            return None
+        times.append(
+            (max(end for _, end in spans) - min(start for start, _ in spans)) / 1e6
+        )
+    return times
+
+
+def _cuda_event_times(fn, reps, warmup, prep=None):
+    """Per-iteration CUDA-event spans (ms), ``prep`` (untimed) and an L2 flush before every iteration."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    for _ in range(warmup):
+        call = _call(fn, prep)
+        _flush_l2(device)
+        call()
+        del call
+    torch.cuda.synchronize()
+    pairs = []
+    for _ in range(reps):
+        call = _call(fn, prep)
+        _flush_l2(device)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        call()
+        end.record()
+        del call
+        pairs.append((start, end))
+    torch.cuda.synchronize()
+    return [start.elapsed_time(end) for start, end in pairs]
+
+
+def spans_ms(fn, steps, warmup, prep=None):
     """Per-iteration GPU spans (ms) of ``steps`` calls after ``warmup`` calls, a cold L2 before every call: CUPTI
-    activity through ``torch.profiler``, CUDA events where the profiler records no GPU activity."""
+    activity through ``torch.profiler`` (timer ``cupti``), CUDA events where the profiler records no GPU activity
+    (timer ``cuda_events (...)``).  With ``prep`` every call is ``fn(prep())``, ``prep`` outside the span."""
     try:
-        times, timer = _cupti_times(fn, steps, warmup), "cupti"
+        times, timer = _cupti_times(fn, steps, warmup, prep), "cupti"
     except Exception as exc:  # noqa: BLE001 - any profiler failure selects the CUDA-event fallback
         times, timer = None, f"cupti failed: {type(exc).__name__}: {exc}"
     if times is None:
-        times, timer = _cuda_event_times(fn, steps, warmup), f"cuda_events ({timer})"
+        times, timer = (
+            _cuda_event_times(fn, steps, warmup, prep),
+            f"cuda_events ({timer})",
+        )
     return times, timer
 
 
@@ -703,6 +869,7 @@ def accounting(arm, device):
     after_fwd = torch.cuda.memory_allocated(device)
     fwd_peak = torch.cuda.max_memory_allocated(device)
     out_lse = _nbytes(st["out"], st["lse"])
+    glue = arm.glue_retained(st)
     torch.cuda.reset_peak_memory_stats(device)
     g = arm.backward(st)
     torch.cuda.synchronize()
@@ -712,6 +879,7 @@ def accounting(arm, device):
         fwd_workspace=fwd_peak - after_fwd,
         out_lse=out_lse,
         retained=after_fwd - base - out_lse,
+        glue_retained=glue,
         bwd_workspace=bwd_peak - after_bwd,
         grads=after_bwd - after_fwd,
     )
@@ -723,17 +891,26 @@ def measure(arm, ops, steps, warmup, nvml):
     st = arm.forward()
     torch.cuda.synchronize()
     fns = dict(
-        fwd=arm.forward,
-        bwd=lambda: arm.backward(st),
-        step=lambda: arm.backward(arm.forward()),
-        recompute=lambda: (arm.forward(), arm.backward(arm.forward())),
+        fwd=(arm.forward, None),
+        bwd=(arm.backward, arm.forward)
+        if arm.bwd_fresh_forward
+        else (lambda: arm.backward(st), None),
+        step=(lambda: arm.backward(arm.forward()), None),
+        recompute=(lambda: (arm.forward(), arm.backward(arm.forward())), None),
     )
     found = {}
     for op in ops:
+        fn, prep = fns[op]
         state = nvml.start()
-        times, timer = spans_ms(fns[op], steps, warmup)
+        times, timer = spans_ms(fn, steps, warmup, prep)
         found[op] = dict(
-            _summary(times), times_ms=times, timer=timer, nvml=nvml.stop(state)
+            _summary(times),
+            times_ms=times,
+            timer=timer,
+            form="fresh forward per call, outside the span"
+            if prep is not None
+            else ("one retained forward" if op == "bwd" else "whole call"),
+            nvml=nvml.stop(state),
         )
     torch.cuda.synchronize()
     return found
@@ -830,8 +1007,11 @@ def run(args):
                 arms={},
             )
             for name in args.arms:
+                kw = dict(scale=args.softmax_scale, layout=args.layout)
+                if name in FA4_ARMS:
+                    kw["token_chunk"] = args.fa4_token_chunk
                 try:
-                    arm = ARMS[name](inp, scale=args.softmax_scale, layout=args.layout)
+                    arm = ARMS[name](inp, **kw)
                 except Exception as exc:  # noqa: BLE001 - unavailable package, refused head count or geometry
                     entry["arms"][name] = dict(
                         error=f"{type(exc).__name__}: {exc}",
@@ -871,7 +1051,8 @@ def run(args):
                     b = perf["bytes"]
                     print(
                         f"{row:20s} H{heads:<3d} {name:12s} {ops} ms | retained {b['retained'] / 2**20:.0f} MiB "
-                        f"fwd_ws {b['fwd_workspace'] / 2**20:.0f} MiB bwd_ws {b['bwd_workspace'] / 2**20:.0f} MiB",
+                        f"(glue {b['glue_retained'] / 2**20:.0f} MiB) fwd_ws {b['fwd_workspace'] / 2**20:.0f} MiB "
+                        f"bwd_ws {b['bwd_workspace'] / 2**20:.0f} MiB",
                         flush=True,
                     )
                 arm = None
@@ -897,6 +1078,12 @@ def main():
         "--ops", default=",".join(OPS), help=f"comma list of {', '.join(OPS)}"
     )
     parser.add_argument("--layout", choices=LAYOUTS, default="split")
+    parser.add_argument(
+        "--fa4-token-chunk",
+        type=int,
+        default=FA4_TOKEN_CHUNK,
+        help="token chunk of the FlashAttention-4 sparse MLA backward (0: one unchunked backward)",
+    )
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--topk", type=int, default=DEFAULT_TOPK)
@@ -919,6 +1106,8 @@ def main():
         parser.error(f"unknown arms / ops: {unknown}")
     if not (math.isfinite(args.softmax_scale) and args.softmax_scale > 0):
         parser.error("--softmax-scale must be a positive finite float")
+    if args.fa4_token_chunk < 0:
+        parser.error("--fa4-token-chunk must be >= 0")
     results = run(args)
     if args.json:
         Path(args.json).write_text(json.dumps(results, indent=1, default=str))
