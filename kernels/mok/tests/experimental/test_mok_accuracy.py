@@ -868,7 +868,7 @@ def _require_group():
 def _cpu_scales(tokens):
     """FP32 shared-expert scales drawn on the CPU: ``U[0, 2)``, every 4th token's exactly 0 and the next one's exactly
     1."""
-    scale = torch.rand(tokens) * 2.0
+    scale = rand(tokens) * 2.0
     scale[::4] = 0.0
     scale[1::4] = 1.0
     return scale
@@ -886,8 +886,8 @@ def test_shared_scale_dot_accuracy(record_property, tokens, width):
     naive_values = {}
 
     def run(j, _seed):
-        a = (torch.randn(tokens, width) * 0.125).bfloat16().cuda()
-        b = (torch.randn(tokens, width) * 0.125).bfloat16().cuda()
+        a = (randn(tokens, width) * 0.125).bfloat16().cuda()
+        b = (randn(tokens, width) * 0.125).bfloat16().cuda()
         with kernels._ffi_stream():
             dots = helpers.dot(a, b)
         naive_values[j] = dict(d_shared_scale=(a * b).sum(-1))
@@ -913,9 +913,9 @@ def test_epilogue_forward_scaled_accuracy(record_property, tokens, hidden):
     naive_values = {}
 
     def run(j, _seed):
-        shared = (torch.randn(tokens, hidden) * 0.125).bfloat16().cuda()
-        routed = (torch.randn(tokens * topk, hidden) * 0.125).bfloat16().cuda()
-        scores = torch.rand(tokens, topk) * 1.5
+        shared = (randn(tokens, hidden) * 0.125).bfloat16().cuda()
+        routed = (randn(tokens * topk, hidden) * 0.125).bfloat16().cuda()
+        scores = rand(tokens, topk) * 1.5
         scores[::5, 0] = 0.0
         scores, scale = scores.cuda(), _cpu_scales(tokens).cuda()
         y = epilogues.forward(shared, routed, scores, scale)
@@ -974,23 +974,23 @@ def _scaled_group_adapter_case(
     naive_values = {}
 
     def run(j, _draw):
-        x = (torch.randn(tokens, hidden) * 0.125).bfloat16()
-        dy = (torch.randn(tokens, hidden) * 0.125).bfloat16()
+        x = (randn(tokens, hidden) * 0.125).bfloat16()
+        dy = (randn(tokens, hidden) * 0.125).bfloat16()
         shared = [
-            (torch.randn(intermediate, hidden) / hidden**0.5).bfloat16(),
-            (torch.randn(intermediate, hidden) / hidden**0.5).bfloat16(),
-            (torch.randn(hidden, intermediate) / intermediate**0.5).bfloat16(),
+            (randn(intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(hidden, intermediate) / intermediate**0.5).bfloat16(),
         ]
         routed = [
-            (torch.randn(experts, intermediate, hidden) / hidden**0.5).bfloat16(),
-            (torch.randn(experts, intermediate, hidden) / hidden**0.5).bfloat16(),
-            (torch.randn(experts, hidden, intermediate) / intermediate**0.5).bfloat16(),
+            (randn(experts, intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(experts, intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(experts, hidden, intermediate) / intermediate**0.5).bfloat16(),
         ]
-        scores = torch.rand(tokens, topk) * 1.5
+        scores = rand(tokens, topk) * 1.5
         scores[::5, 0] = 0.0
         scores[3] = 0.0
         scale = _cpu_scales(tokens)
-        ids = torch.rand(tokens, experts).argsort(-1)[:, :topk].contiguous()
+        ids = rand(tokens, experts).argsort(-1)[:, :topk].contiguous()
         x, dy, scores, scale, ids = (
             value.to(device) for value in (x, dy, scores, scale, ids)
         )

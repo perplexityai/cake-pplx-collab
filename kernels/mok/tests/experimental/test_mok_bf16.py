@@ -3106,29 +3106,25 @@ def _cpu_problem(tokens, hidden, intermediate, experts, topk, seed, device):
     first weight and every weight of token 3 exactly 0, FP32 shared scales in [0, 2) with every 4th token's exactly 0
     and the next token's exactly 1, and int64 expert ids (``topk`` distinct experts per token)."""
     g = torch.Generator().manual_seed(seed)
-    x = (torch.randn(tokens, hidden, generator=g) * 0.125).bfloat16()
-    dy = (torch.randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    x = (randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    dy = (randn(tokens, hidden, generator=g) * 0.125).bfloat16()
     weights = (
-        (torch.randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
-        (torch.randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
-        (torch.randn(hidden, intermediate, generator=g) / intermediate**0.5).bfloat16(),
+        (randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (randn(hidden, intermediate, generator=g) / intermediate**0.5).bfloat16(),
+        (randn(experts, intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (randn(experts, intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
         (
-            torch.randn(experts, intermediate, hidden, generator=g) / hidden**0.5
-        ).bfloat16(),
-        (
-            torch.randn(experts, intermediate, hidden, generator=g) / hidden**0.5
-        ).bfloat16(),
-        (
-            torch.randn(experts, hidden, intermediate, generator=g) / intermediate**0.5
+            randn(experts, hidden, intermediate, generator=g) / intermediate**0.5
         ).bfloat16(),
     )
-    scores = torch.rand(tokens, topk, generator=g) * 1.5
+    scores = rand(tokens, topk, generator=g) * 1.5
     scores[::5, 0] = 0.0
     scores[3:4] = 0.0
-    scale = torch.rand(tokens, generator=g) * 2.0
+    scale = rand(tokens, generator=g) * 2.0
     scale[::4] = 0.0
     scale[1::4] = 1.0
-    ids = torch.rand(tokens, experts, generator=g).argsort(-1)[:, :topk].contiguous()
+    ids = rand(tokens, experts, generator=g).argsort(-1)[:, :topk].contiguous()
     return dict(
         x=x.to(device), dy=dy.to(device), weights=tuple(w.to(device) for w in weights), scores=scores.to(device),
         scale=scale.to(device), ids=ids.to(device),
@@ -3148,13 +3144,13 @@ def test_shared_scale_helpers_on_the_gpu(monkeypatch, tokens, width):
     device = torch.device("cuda", torch.cuda.current_device())
     helpers = kernels.MoKSharedScale()
     g = torch.Generator().manual_seed(7001 + tokens + width)
-    values = (torch.randn(tokens, width, generator=g) * 0.125).bfloat16()
-    other = (torch.randn(tokens, width, generator=g) * 0.125).bfloat16()
-    scales = torch.rand(tokens, generator=g) * 4.0 - 2.0
+    values = (randn(tokens, width, generator=g) * 0.125).bfloat16()
+    other = (randn(tokens, width, generator=g) * 0.125).bfloat16()
+    scales = rand(tokens, generator=g) * 4.0 - 2.0
     scales[::4] = 0.0
     scales[1::4] = 1.0
     single = torch.zeros_like(values)
-    columns = torch.randint(0, width, (tokens,), generator=g)
+    columns = randint(0, width, (tokens,), generator=g)
     single[torch.arange(tokens), columns] = values[torch.arange(tokens), columns]
     expected_rows = (scales[:, None] * values.float()).bfloat16()
     expected_single = (
@@ -3204,10 +3200,10 @@ def test_scaled_epilogues_on_the_gpu(tokens, hidden):
     device = torch.device("cuda", torch.cuda.current_device())
     scaled, top8 = MoKEpilogues(10, shared_row="scaled"), MoKEpilogues(8)
     g = torch.Generator().manual_seed(7101 + tokens + hidden)
-    shared = (torch.randn(tokens, hidden, generator=g) * 0.125).bfloat16()
-    routed = (torch.randn(tokens, 10, hidden, generator=g) * 0.125).bfloat16()
-    scores = torch.rand(tokens, 10, generator=g) + 0.01
-    mixed = torch.rand(tokens, generator=g) * 2.0
+    shared = (randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    routed = (randn(tokens, 10, hidden, generator=g) * 0.125).bfloat16()
+    scores = rand(tokens, 10, generator=g) + 0.01
+    mixed = rand(tokens, generator=g) * 2.0
     mixed[::3] = 1.0
     expected_dx = mixed[:, None] * shared.float()
     for slot in range(10):
@@ -3307,9 +3303,7 @@ def test_direct_backward_on_the_gpu(geometry):
     dx_peer = torch.empty(tokens * topk, hidden, **options)
     ds_peer = torch.empty_like(scores)
     g = torch.Generator().manual_seed(7301 + hidden)
-    initial = [
-        (torch.randn(w.shape, generator=g) * 0.01).to(device) for w in p["weights"]
-    ]
+    initial = [(randn(w.shape, generator=g) * 0.01).to(device) for w in p["weights"]]
     accumulators = [value.clone() for value in initial]
     ones, zeros = torch.ones(tokens, device=device), torch.zeros(tokens, device=device)
 
@@ -3386,8 +3380,8 @@ def test_direct_backward_on_the_gpu(geometry):
         assert same(replay(), reference) == [] and same(replay(), reference) == []
         g = torch.Generator().manual_seed(7401 + hidden)
         for value in (x, dy):
-            value.copy_((torch.randn(value.shape, generator=g) * 0.125).bfloat16())
-        scores.copy_(torch.rand(scores.shape, generator=g) * 1.5)
+            value.copy_((randn(value.shape, generator=g) * 0.125).bfloat16())
+        scores.copy_(rand(scores.shape, generator=g) * 1.5)
         assert same(replay(), outputs(sequence(name, scale))) == []
 
 

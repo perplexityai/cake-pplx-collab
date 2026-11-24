@@ -102,6 +102,7 @@ def _peak(run):
 
 def main(argv=None):
     from tests.cake.test_helpers.cake_package import cake_package
+    from tests.experimental._mok_reference import rand, randn
     from tests.experimental._mok_one_gpu import (
         OneGpuGroup,
         bound_multiplier,
@@ -144,23 +145,18 @@ def main(argv=None):
         schedule_capacity_multiplier=multiplier,
     )
     g = torch.Generator().manual_seed(args.seed)
-    x = (torch.randn(t, h, generator=g) * 0.125).bfloat16().to(device)
-    dy = (torch.randn(t, h, generator=g) * 0.125).bfloat16().to(device)
+    x = (randn(t, h, generator=g) * 0.125).bfloat16().to(device)
+    dy = (randn(t, h, generator=g) * 0.125).bfloat16().to(device)
     weights = [
-        (torch.randn(*shape, generator=g) * scale).bfloat16().to(device)
+        (randn(*shape, generator=g) * scale).bfloat16().to(device)
         for shape, scale in (
             ((i, h), h**-0.5), ((i, h), h**-0.5), ((h, i), i**-0.5),
             ((experts, i, h), h**-0.5), ((experts, i, h), h**-0.5), ((experts, h, i), i**-0.5),
         )
     ]  # fmt: skip
-    scores = (torch.rand(t, topk, generator=g) * 1.5).to(device)
-    scale = (torch.rand(t, generator=g) * 2.0).to(device)
-    ids = (
-        torch.rand(t, experts, generator=g)
-        .argsort(-1)[:, :topk]
-        .contiguous()
-        .to(device)
-    )
+    scores = (rand(t, topk, generator=g) * 1.5).to(device)
+    scale = (rand(t, generator=g) * 2.0).to(device)
+    ids = rand(t, experts, generator=g).argsort(-1)[:, :topk].contiguous().to(device)
     accumulators = [torch.zeros(w.shape, device=device) for w in weights]
     schedule = functional.build_schedule(
         workspace, config, ids, num_local_experts=experts
