@@ -52,11 +52,57 @@
     }
   },
   "generator": {
-    "cake_revision": "1b5fff5a575417f161f82effefac06093dd2b3a3",
+    "cake_revision": "fb5b97381185b2619bb2e97eac63e87e47145589",
     "cuda": "13.5.37",
-    "rendered_at": "2026-11-24T22:09:36Z"
+    "rendered_at": "2026-11-24T22:50:32Z"
   },
   "libraries": [
+    {
+      "arch": "sm_100a",
+      "closure_sha256": "2fbeef2713d3e30411ac38a96ef54df058f4f72b569975b58b2a836a5c8bf86f",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_100a,code=sm_100a",
+      "min_cuda": "12.8",
+      "name": "cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_sm_100a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_sm_100a.so",
+      "sha256": {
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_binding.cu": "b2b0130b52e599c051d3128c964c7d5e6fd4c9acf513d07c5ed4a7e8b93a7a50",
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_kernel.cu": "884965cfcfb0fcf869c8c089eadad5e80f5e72090a0d42e3b0366b4bf6b99e9b"
+      },
+      "sources": [
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_kernel.cu",
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_103a",
+      "closure_sha256": "d1148fa32537f03b14bed5347047453e073c97c1be9d7255ff8bc2d38b837d3f",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_103a,code=sm_103a",
+      "min_cuda": "12.9",
+      "name": "cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_sm_103a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_sm_103a.so",
+      "sha256": {
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_binding.cu": "b2b0130b52e599c051d3128c964c7d5e6fd4c9acf513d07c5ed4a7e8b93a7a50",
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_kernel.cu": "884965cfcfb0fcf869c8c089eadad5e80f5e72090a0d42e3b0366b4bf6b99e9b"
+      },
+      "sources": [
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_kernel.cu",
+        "csrc/cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653_binding.cu"
+      ]
+    },
     {
       "arch": "sm_100a",
       "closure_sha256": "c45414d4385f12988eefcd5f4b8a97fe45da745b3815b43b8d4bf5354674a67f",
