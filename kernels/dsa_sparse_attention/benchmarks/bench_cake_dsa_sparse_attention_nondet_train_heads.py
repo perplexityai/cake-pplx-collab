@@ -749,11 +749,7 @@ def kernel_table(fn, warmup=1):
             continue
         entry = table.setdefault(event.name, [0, 0.0])
         entry[0] += 1
-        entry[1] += (
-            event.device_time_total / 1000.0
-            if hasattr(event, "device_time_total")
-            else 0.0
-        )
+        entry[1] += event.time_range.elapsed_us() / 1000.0
     return table
 
 
