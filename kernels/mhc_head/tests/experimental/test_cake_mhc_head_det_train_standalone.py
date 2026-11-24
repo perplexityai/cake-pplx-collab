@@ -26,8 +26,10 @@ fallback of ``cake_build.py`` imports the package's own JIT shim
 ``_cake_pplx_jit.py``.  The copy keeps ``csrc/``, so
 the subprocess also checks what a vendoring builder compiles: every
 ``build.json`` library is the build of one registry record for one of the
-record's architectures, routed on that architecture (``ROUTES[arch][role][hidden]``
-or ``SMALL_ROUTES[arch][role]``),
+record's architectures, routed on that architecture (``ROUTES[arch][role][hidden]``,
+``TOKEN_BANDS[arch][role][hidden]`` or ``SMALL_ROUTES[arch][role]``) but the two
+sm_107a forward libraries no route names (hidden 0, and hidden 4096 in
+128-thread CTAs: the token bands serve every forward call there),
 with every source present in the copy at its manifest digest and the prebuilt
 path ``aot/<library>.so`` inside the copy.  Two tests, CPU-only: no GPU, no
 generated program and no JIT build is needed, so both run on every lane.  The
@@ -126,18 +128,27 @@ for arch in cake_jit.ARCHES:
         small = cake_jit.SMALL_ROUTES.get(arch, {}).get(role)
         if small is not None:
             routes[arch, role].add(small)
+        for bands in cake_jit.TOKEN_BANDS.get(arch, {}).get(role, {}).values():
+            routes[arch, role].update(band for _last, band in bands)
 routed = {
     cake_jit.library_name(cake_jit.route_module(arch, role, hidden, rows), arch)
     for arch in cake_jit.ARCHES
     for role in cake_jit.ROUTES[arch]
     for hidden in cake_jit.ROUTES[arch][role]
-    for rows in (1, cake_jit.small_elements(arch, role) // hidden + 1)
+    for rows in (
+        1,
+        cake_jit.small_elements(arch, role) // hidden + 1,
+        *(last + 1 for last, _band in cake_jit.TOKEN_BANDS.get(arch, {}).get(role, {}).get(hidden, ())),
+    )
 }
-assert routed == set(libraries), (sorted(routed), sorted(libraries))
+# The sm_107a forward libraries no route names: the token bands serve every forward call there.
+unrouted = {"cake_mhc_det_train_head_fwd_sm_107a", "cake_mhc_det_train_head_fwd__lw256_t128_h4096_sm_107a"}
+assert unrouted <= set(libraries) and not unrouted & routed, sorted(unrouted & routed)
+assert routed == set(libraries) - unrouted, (sorted(routed), sorted(libraries))
 for library, entry in sorted(libraries.items()):
     name, arch = records[library]
     assert entry["arch"] == arch and arch in manifest["arch_flags"], (library, entry["arch"])
-    assert name in routes[arch, cake_jit.MODULES[name]["role"]], library
+    assert library in unrouted or name in routes[arch, cake_jit.MODULES[name]["role"]], library
     assert os.path.realpath(cake_build.prebuilt_path(library)) == os.path.join(
         copy_dir, "aot", library + ".so"
     ), library

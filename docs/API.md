@@ -849,7 +849,20 @@ The backward computes `dX[t, i, d] = BF16(dY[t, d] * 0.25)` for all four streams
 
 **Accuracy.** In both modes the tests judge every output over 32 inputs against a float64 oracle of the mean and its gradient. The error, in the L2 and the max norm, median and max, must be at most 1.005 times that of the naive BF16 tier (torch on the same BF16 inputs: `X.mean(dim=1)`, `dY * 0.25` on each stream and `dX0 + dY * 0.25`), and zero where the tier's error is zero. No test compares the outputs with torch bit for bit.
 
-**Architectures.** `sm_100a`, `sm_103a` and `sm_107a` serve hidden sizes 4096, 5120 and 7168. On `sm_107a`, hidden 5120 and 7168 run the kernels built for any hidden size; no kernel is built for those two sizes there.
+**Architectures.** `sm_100a`, `sm_103a` and `sm_107a` serve hidden sizes 4096, 5120 and 7168. On `sm_107a` the forward runs one kernel per hidden size and band of the token count `T` (table below), and the backward of hidden 5120 and 7168 runs the kernels built for any hidden size. The `sm_100a` and `sm_103a` routes have no token bands.
+
+| Hidden size | `T` on `sm_107a` | Forward kernel suffix |
+|---|---|---|
+| 4096 | `T <= 2048` | `__lw256_t128_xhl1na_ef_h4096` |
+| 4096 | `2049 <= T <= 7168` | `__lw256_t128_rv_h4096` |
+| 4096 | `T > 7168` | `__lw256_t256_rv_h4096` |
+| 5120 | `T <= 1536` | `__lw256_t160_xhl1na_ef_h5120` |
+| 5120 | `T > 1536` | `__lw256_t320_rv_h5120` |
+| 7168 | `T <= 1024` | `__lw256_t224_xhl1na_ef_h7168` |
+| 7168 | `1025 <= T <= 4096` | `__lw256_t224_rv_h7168` |
+| 7168 | `T > 4096` | `__lw256_t448_rv_h7168` |
+
+A det kernel name is `cake_mhc_det_train_head_fwd` and the suffix, a nondet name `cake_mhc_train_head_fwd` and the suffix. Each forward kernel loads 256-bit vectors, and its CTA (`t<threads>`) covers half or all of a token row. The `xhl1na_ef` kernels load `X` with the L2 evict-first policy. The `rv` kernels run their CTAs in reversed order, so the last tokens go first.
 
 **Inputs.** `X` is BF16 `[T, 4, H]` and `dY` is BF16 `[T, H]`. Both must be contiguous and 32-byte aligned. T is at most `MAX_TOKENS = 2^22 - 1`.
 

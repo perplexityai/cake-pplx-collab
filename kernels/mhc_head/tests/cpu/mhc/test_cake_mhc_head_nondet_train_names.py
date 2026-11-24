@@ -276,23 +276,33 @@ def test_the_registry_is_the_det_head_registry_renamed() -> None:
     """Every record of the registry (launch, grid rule, argument plan, logical map, architectures, hidden size), the
     route of every (architecture, role, hidden size), the small-problem routes and every host constant are the
     deterministic head's, with the library stem ``cake_mhc_det_train_head_`` replaced by ``cake_mhc_train_head_``:
-    the same programs, launched on the same architectures, under this package's own library names."""
+    the same programs, launched on the same architectures, under this package's own library names.  So is every
+    token band of the sm_107a forward (``TOKEN_BANDS``), and a call at each band edge routes to the same program."""
     ours = importlib.import_module(f"{BACKEND}.cake_jit")
     det = importlib.import_module(f"{DET_BACKEND}.cake_jit")
     modules, routes, small_routes = ours.MODULES, ours.ROUTES, ours.SMALL_ROUTES
     assert modules == _renamed(det.MODULES)
     assert routes == _renamed(det.ROUTES)
     assert small_routes == _renamed(det.SMALL_ROUTES)
+    assert ours.TOKEN_BANDS == _renamed(det.TOKEN_BANDS)
     assert all(record["library"].startswith(STEM) for record in modules.values()), (
         modules
     )
     for arch, roles in routes.items():
         for role, by_hidden in roles.items():
             for hidden, name in by_hidden.items():
+                edges = [
+                    rows
+                    for last, _band in ours.TOKEN_BANDS.get(arch, {})
+                    .get(role, {})
+                    .get(hidden, ())
+                    for rows in (last, last + 1)
+                ]
                 for rows in (
                     1,
                     ours.small_elements(arch, role) // hidden,
                     ours.small_elements(arch, role) // hidden + 1,
+                    *edges,
                 ):
                     assert ours.route_module(arch, role, hidden, rows) == _renamed(
                         det.route_module(arch, role, hidden, rows)
@@ -309,7 +319,6 @@ def test_the_registry_is_the_det_head_registry_renamed() -> None:
         "MAX_TOKENS",
         "MAX_VECTORS",
         "SMALL_ELEMENTS",
-        "SMALL_ELEMENTS_BY_ROUTE",
     ):
         assert getattr(ours, name) == getattr(det, name), name
 
