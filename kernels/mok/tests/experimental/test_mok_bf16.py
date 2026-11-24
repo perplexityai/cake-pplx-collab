@@ -24,6 +24,15 @@ has its builds), and on SM100a, SM103a and SM107a its fused training at top-2 an
 with another communication-SM split), zero weights, recompute and the context-free forward, the exact limit, the
 384-expert scheduler layouts, and the scheduler and the adapter at the requested worst-case schedule capacity (the
 routed weight gradients from ring rows past 2^31 bytes exactly).
+The explicit modes (``router_weight_gradient``, ``shared_expert``, ``activation``): their refusals before device work
+and their launchers' arguments against the registry (no GPU), and on SM100a and SM103a the 512-expert top-10 group
+(``MODE_GROUPS["scaled_top10"]``) on inputs drawn on the CPU: the shared-scale helpers (``BF16(s * v)`` bit for bit, the
+row dots repeatable at any grid size), the scaled epilogues (the exact backward sum, ``s = 1`` against the top-8
+epilogues), the direct-gradient backward against the quotient one (every shared output and the routed down-projection
+weight gradient bit for bit, zero weights, the shared-scale operands at ``s = 1`` and ``s = 0``), and the adapter at
+EP8 ``(8, 64)`` emulated on one GPU (nine backward items, checkpointed step, CUDA Graph, where ``s`` enters, changing
+source counts without kernel loads, no host synchronization in a steady-state step, ``torch.utils.checkpoint`` with
+``use_reentrant=False``).
 Every kernel output is checked against its contract (finite; exact integer and table outputs; documented bitwise
 route forms such as recompute == saved context and graph replay == eager launch) and for run-to-run repeatability
 (five launches on the same inputs give the same bytes).  The accuracy of every floating output against the float64
@@ -85,12 +94,17 @@ def _same(a, b):
 
 def _require_role(role):
     """Skip a role of :data:`BEFORE_DOWN_ROLES` (the router-weight-before-down kernels, top-k 6 and the 384-expert
-    scheduler layouts: builds for the targets of ``BEFORE_DOWN_TARGETS``) on a device whose target has no build of
-    it.  Every other role is built for every target (:func:`test_before_down_roles_are_registry_records`), so a
-    missing build fails at load instead of skipping."""
+    scheduler layouts: builds for the targets of ``BEFORE_DOWN_TARGETS``) or of :data:`MODE_GROUP_ROLES` (SM100a and
+    SM103a) on a device whose target has no build of it; a group role absent from the registry skips too, and
+    :func:`test_mode_group_roles_are_registry_records` fails for it.  Every other role is built for every target
+    (:func:`test_before_down_roles_are_registry_records`), so a missing build fails at load instead of skipping."""
     require_gpu()
     arch = jit.target_arch()
-    if (role in BEFORE_DOWN_ROLES or role in MODE_GROUP_ROLES) and arch not in jit._registry()[role]["arches"]:
+    if role in MODE_GROUP_ROLES and role not in jit._registry():
+        pytest.skip(f"{role} is not in this package's registry")
+    if (
+        role in BEFORE_DOWN_ROLES or role in MODE_GROUP_ROLES
+    ) and arch not in jit._registry()[role]["arches"]:
         pytest.skip(f"{role} has no {arch} build")
 
 
@@ -1963,7 +1977,14 @@ BOUND_IDS = ["ep64-local6", "ep8-local48"]
 def _mode_group_roles(group):
     """The roles only the :data:`MODE_GROUPS` group ``group`` loads: its fused backward, epilogues, shared-scale
     helpers and its layouts' scheduler kernels."""
-    roles = [kernels._role("backward", False, group.fp32_wgrad, direct=group.router_weight_gradient == "direct")]
+    roles = [
+        kernels._role(
+            "backward",
+            False,
+            group.fp32_wgrad,
+            direct=group.router_weight_gradient == "direct",
+        )
+    ]
     if group.shared_expert == "scaled":
         roles += [
             f"epilogue_forward_scaled_{group.topk}",
@@ -1978,7 +1999,9 @@ def _mode_group_roles(group):
 
 #: The roles only a :data:`MODE_GROUPS` group loads (the 512-expert top-10 group: the direct-gradient backward, the
 #: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64) scheduler kernels).
-MODE_GROUP_ROLES = tuple(role for group in kernels.MODE_GROUPS.values() for role in _mode_group_roles(group))
+MODE_GROUP_ROLES = tuple(
+    role for group in kernels.MODE_GROUPS.values() for role in _mode_group_roles(group)
+)
 
 
 def _group_records(registry):
@@ -1990,7 +2013,11 @@ def _group_records(registry):
     sibling = {
         "backward_fp32_direct": ("backward_fp32", "dy_routed_ptr", "dy_scaled_ptr"),
         "epilogue_forward_scaled_10": ("epilogue_forward_8", "scores", "shared_scale"),
-        "epilogue_backward_scaled_10": ("epilogue_backward_8", "scores", "shared_scale"),
+        "epilogue_backward_scaled_10": (
+            "epilogue_backward_8",
+            "scores",
+            "shared_scale",
+        ),
         "count_8_64": ("count_8_32", None, None),
         "rows_8_64": ("rows_8_32", None, None),
     }
@@ -2009,7 +2036,11 @@ def _group_records(registry):
             arguments = list(registry[base]["arguments"])
             if after is not None:
                 arguments.insert(arguments.index(after) + 1, added)
-        records[role] = {"library": f"cake_mok_{role}", "arches": targets, "arguments": arguments}
+        records[role] = {
+            "library": f"cake_mok_{role}",
+            "arches": targets,
+            "arguments": arguments,
+        }
     return records
 
 
@@ -2062,7 +2093,9 @@ def test_before_down_roles_are_registry_records():
         role("backward", True, True, weight_before_down=True),
     }
     for ep, experts in SCHEDULER_LAYOUTS:
-        if not any((ep, experts) in group.layouts for group in kernels.MODE_GROUPS.values()):
+        if not any(
+            (ep, experts) in group.layouts for group in kernels.MODE_GROUPS.values()
+        ):
             names |= {f"count_{ep}_{experts}", f"rows_{ep}_{experts}", f"pad_{ep}"}
     names |= {f"epilogue_backward_{k}" for k in kernels.EPILOGUE_TOPKS}
     names |= {f"epilogue_forward_{k}" for k in kernels.WEIGHTED_EPILOGUE_TOPKS}
@@ -2540,7 +2573,13 @@ def test_mode_group_roles_are_registry_records():
     registry = jit._registry()
     missing = [role for role in MODE_GROUP_ROLES if role not in registry]
     assert missing == [], f"group roles not in this package's registry: {missing}"
-    expected = _group_records({role: record for role, record in registry.items() if role not in MODE_GROUP_ROLES})
+    expected = _group_records(
+        {
+            role: record
+            for role, record in registry.items()
+            if role not in MODE_GROUP_ROLES
+        }
+    )
     for group in kernels.MODE_GROUPS.values():
         for role in _mode_group_roles(group):
             assert registry[role]["arches"] == list(group.targets), role
@@ -2571,17 +2610,38 @@ GROUP_OK = dict(
         ((8, 32), 8, {}),
         ((8, 32), 8, dict(shared_expert="unscaled")),
         ((8, 32), 8, dict(router_weight_gradient="quotient")),
-        ((64, 6), 6, dict(router_weight_position="before_down", clamped_swiglu=True, shared_expert="unscaled")),
+        (
+            (64, 6),
+            6,
+            dict(
+                router_weight_position="before_down",
+                clamped_swiglu=True,
+                shared_expert="unscaled",
+            ),
+        ),
     ],
     ids=[
-        "512-top8", "256-top10", "512-quotient", "512-unscaled", "512-bf16-wgrad", "512-clamped", "512-clamped-act",
-        "512-before-down", "256-direct-scaled", "256-direct", "256-scaled", "384-before-down-direct",
+        "512-top8",
+        "256-top10",
+        "512-quotient",
+        "512-unscaled",
+        "512-bf16-wgrad",
+        "512-clamped",
+        "512-clamped-act",
+        "512-before-down",
+        "256-direct-scaled",
+        "256-direct",
+        "256-scaled",
+        "384-before-down-direct",
     ],
 )
 def test_mode_group_configurations_outside_the_group_are_refused(layout, topk, change):
     """Host only: a configuration that uses a layout, the top-k or a mode of the 512-expert top-10 group but is not
     the group's configuration raises ``ValueError`` naming the group's configuration and the one given."""
-    with pytest.raises(ValueError, match=r"512 routed experts at top-k 10 .* runs \(EP, local experts\) \(8, 64\)"):
+    with pytest.raises(
+        ValueError,
+        match=r"512 routed experts at top-k 10 .* runs \(EP, local experts\) \(8, 64\)",
+    ):
         kernels.check_configuration(*layout, topk, **{**GROUP_OK, **change})
 
 
@@ -2595,17 +2655,27 @@ def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
     group = kernels.MODE_GROUPS["scaled_top10"]
     assert group.targets == ("sm_100a", "sm_103a")
     assert kernels.check_configuration(8, 64, 10, **GROUP_OK) == "scaled_top10"
-    defaults = dict(clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down")
+    defaults = dict(
+        clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down"
+    )
     assert kernels.check_configuration(8, 32, 8, **defaults) is None
-    assert kernels.check_configuration(8, 32, 8, **defaults, activation="clamped_swiglu") is None
+    assert (
+        kernels.check_configuration(8, 32, 8, **defaults, activation="clamped_swiglu")
+        is None
+    )
     for arch in group.targets:
         kernels.check_target("after_down", arch, "scaled_top10")
-    with pytest.raises(ValueError, match="no sm_107a build in this package; use an sm_100a or sm_103a device"):
+    with pytest.raises(
+        ValueError,
+        match="no sm_107a build in this package; use an sm_100a or sm_103a device",
+    ):
         kernels.check_target("after_down", "sm_107a", "scaled_top10")
     loaded = []
     _group_stub_loader(monkeypatch, loaded)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    keywords = dict(fp32_wgrad=True, router_weight_gradient="direct", shared_expert="scaled")
+    keywords = dict(
+        fp32_wgrad=True, router_weight_gradient="direct", shared_expert="scaled"
+    )
     monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
     with pytest.raises(ValueError, match="no sm_107a build"):
         backend.MoKFunctional(8, 64, 10, **keywords)
@@ -2614,26 +2684,40 @@ def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
         monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
         loaded.clear()
         functional = backend.MoKFunctional(8, 64, 10, **keywords)
-        assert functional.group == "scaled_top10" and functional.shared_expert == "scaled"
+        assert (
+            functional.group == "scaled_top10" and functional.shared_expert == "scaled"
+        )
         assert set(_mode_group_roles(group)) <= set(loaded), sorted(loaded)
         assert {"forward", "pad_8", "gather", "barrier", "expert_layout"} <= set(loaded)
-        assert not {"backward_fp32", "epilogue_forward_8", "epilogue_backward_8"} & set(loaded)
+        assert not {"backward_fp32", "epilogue_forward_8", "epilogue_backward_8"} & set(
+            loaded
+        )
 
 
 def test_unbuilt_modes_and_mode_types_are_refused():
     """Host only: ``activation="situ_glu"`` and ``shared_expert="none"`` are recognized and raise ``ValueError`` (no
     build in this package yet); an unknown mode value raises ``ValueError`` naming the allowed values; a mode that is
     not a ``str`` raises ``TypeError``, before any value check (also of another argument)."""
-    with pytest.raises(ValueError, match="activation='situ_glu' has no build in this package yet"):
+    with pytest.raises(
+        ValueError, match="activation='situ_glu' has no build in this package yet"
+    ):
         kernels.check_configuration(8, 32, 8, **{**GROUP_OK, "activation": "situ_glu"})
-    with pytest.raises(ValueError, match="shared_expert='none' has no build in this package yet"):
+    with pytest.raises(
+        ValueError, match="shared_expert='none' has no build in this package yet"
+    ):
         kernels.check_configuration(8, 32, 8, **{**GROUP_OK, "shared_expert": "none"})
-    for name, value in (("router_weight_gradient", "dot"), ("shared_expert", "half"), ("activation", "gelu")):
+    for name, value in (
+        ("router_weight_gradient", "dot"),
+        ("shared_expert", "half"),
+        ("activation", "gelu"),
+    ):
         with pytest.raises(ValueError, match=f"{name} must be one of"):
             kernels.check_configuration(8, 32, 8, **{**GROUP_OK, name: value})
     for name in ("router_weight_gradient", "shared_expert", "activation"):
         with pytest.raises(TypeError, match=f"{name} must be one of"):
-            kernels.check_configuration(8, 32, 8, **{**GROUP_OK, name: None, "router_weight_position": "middle"})
+            kernels.check_configuration(
+                8, 32, 8, **{**GROUP_OK, name: None, "router_weight_position": "middle"}
+            )
 
 
 def test_situ_parameters_are_checked():
@@ -2642,18 +2726,30 @@ def test_situ_parameters_are_checked():
     kernels.check_situ_parameters(4.0, 25.0)
     kernels.check_situ_parameters(4, 25)
     for bad in (True, "4", torch.tensor(4.0), None):
-        with pytest.raises(TypeError, match="situ_beta must be a finite positive float"):
+        with pytest.raises(
+            TypeError, match="situ_beta must be a finite positive float"
+        ):
             kernels.check_situ_parameters(bad, 25.0)
         with pytest.raises(TypeError, match="situ_lb must be a finite positive float"):
             kernels.check_situ_parameters(4.0, bad)
     for bad in (0.0, -4.0, float("inf"), float("nan")):
-        with pytest.raises(ValueError, match="situ_beta must be a finite positive float"):
+        with pytest.raises(
+            ValueError, match="situ_beta must be a finite positive float"
+        ):
             kernels.check_situ_parameters(bad, 25.0)
         with pytest.raises(ValueError, match="situ_lb must be a finite positive float"):
             kernels.check_situ_parameters(4.0, bad)
 
 
-def _launcher_problem(tokens=512, hidden=256, intermediate=256, experts=4, topk=10, macro=768, capacity=8192):
+def _launcher_problem(
+    tokens=512,
+    hidden=256,
+    intermediate=256,
+    experts=4,
+    topk=10,
+    macro=768,
+    capacity=8192,
+):
     """Host-only launcher arguments (no device memory is read): BF16 zeros for x, a separate dy, the combine rows and
     the saved context, the weights, FP32 accumulators and scores, a schedule and its layout."""
     options = dict(dtype=torch.bfloat16)
@@ -2688,7 +2784,9 @@ def _launcher_problem(tokens=512, hidden=256, intermediate=256, experts=4, topk=
     )  # fmt: skip
 
 
-@pytest.mark.parametrize("operands", [False, True], ids=["staged-operands", "shared-operands"])
+@pytest.mark.parametrize(
+    "operands", [False, True], ids=["staged-operands", "shared-operands"]
+)
 def test_direct_backward_binds_the_unscaled_and_the_scaled_ring(monkeypatch, operands):
     """Host only (stub kernels): the direct-gradient backward hands its kernel exactly the registry arguments through
     ``__call__`` and through a plan; the down projection's input gradient (``dy_r``) and the dispatch's unscaled store
@@ -2702,7 +2800,9 @@ def test_direct_backward_binds_the_unscaled_and_the_scaled_ring(monkeypatch, ope
     topk, macro, mini, comm, ep = 10, 768, 256, 4, 4
     ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
     shared_operands = (torch.zeros_like(x), torch.zeros_like(x)) if operands else None
-    backward = MoKBackward(False, True, router_weight_gradient="direct", shared_operands=operands)
+    backward = MoKBackward(
+        False, True, router_weight_gradient="direct", shared_operands=operands
+    )
     backward(
         dy, ptrs, combine, ptrs, scores, ptrs, scores, ptrs, *p["weights"], *p["saved"], x, ptrs, *p["schedule"],
         topk, None, comm, macro, mini, weight_grad_accumulators=p["accumulators"], layout=p["layout"],
@@ -2719,12 +2819,20 @@ def test_direct_backward_binds_the_unscaled_and_the_scaled_ring(monkeypatch, ope
     assert [role for role, _ in calls] == ["backward_fp32_direct"] * 2
     for _, arguments in calls:
         unscaled, scaled = arguments["dy_r"], arguments["dy_atb_r"]
-        assert unscaled is arguments["dy_routed_ptr"] and scaled is arguments["dy_scaled_ptr"]
+        assert (
+            unscaled is arguments["dy_routed_ptr"]
+            and scaled is arguments["dy_scaled_ptr"]
+        )
         assert unscaled is not scaled and unscaled.data_ptr() != scaled.data_ptr()
         for ring in (unscaled, scaled):
-            assert tuple(ring.shape) == (macro, x.shape[1]) and ring.dtype == torch.bfloat16
+            assert (
+                tuple(ring.shape) == (macro, x.shape[1])
+                and ring.dtype == torch.bfloat16
+            )
         expected = shared_operands if operands else (dy, x)
-        assert arguments["dy_atb_s"] is expected[0] and arguments["x_atb_s"] is expected[1]
+        assert (
+            arguments["dy_atb_s"] is expected[0] and arguments["x_atb_s"] is expected[1]
+        )
         assert arguments["dy_s"] is dy
     # The launcher's shared_operands must match how it was built, before any launch.
     calls.clear()
@@ -2735,7 +2843,9 @@ def test_direct_backward_binds_the_unscaled_and_the_scaled_ring(monkeypatch, ope
             shared_operands=None if operands else (x, x),
         )  # fmt: skip
     if operands:
-        with pytest.raises(ValueError, match="shared_operands must be two contiguous BF16"):
+        with pytest.raises(
+            ValueError, match="shared_operands must be two contiguous BF16"
+        ):
             backward.launch_planned(
                 plan, *p["weights"], *p["saved"], x, *p["schedule"], p["layout"],
                 weight_grad_accumulators=p["accumulators"], shared_operands=(x, x[:256]),
@@ -2749,7 +2859,10 @@ def test_direct_backward_is_refused_outside_its_build(monkeypatch):
     loaded = []
     _group_stub_loader(monkeypatch, loaded)
     for args in ((True, True), (False, False), (True, True, True)):
-        with pytest.raises(ValueError, match="direct router-weight gradient backward is built for plain SwiGLU"):
+        with pytest.raises(
+            ValueError,
+            match="direct router-weight gradient backward is built for plain SwiGLU",
+        ):
             MoKBackward(*args, router_weight_gradient="direct")
     with pytest.raises(ValueError, match="router_weight_gradient must be one of"):
         MoKBackward(False, True, router_weight_gradient="dot")
@@ -2790,13 +2903,17 @@ def test_scaled_epilogues_take_the_shared_scale(monkeypatch):
         epilogues.forward(shared, routed, scores)
     with pytest.raises(ValueError, match="shared_scale is required exactly"):
         epilogues.backward(shared, routed)
-    with pytest.raises(ValueError, match=r"shared_scale must be contiguous CUDA FP32 \[tokens\]"):
+    with pytest.raises(
+        ValueError, match=r"shared_scale must be contiguous CUDA FP32 \[tokens\]"
+    ):
         epilogues.forward(shared, routed, scores, torch.ones(tokens + 1))
     assert calls == []
     epilogues.forward(shared, routed, scores, scales)
     epilogues.backward(shared, routed, scales)
     MoKEpilogues.launch_planned(epilogues.plan(routed, scores), shared, scores, scales)
-    MoKEpilogues.launch_planned(epilogues.plan(routed, False), shared, shared_scale=scales)
+    MoKEpilogues.launch_planned(
+        epilogues.plan(routed, False), shared, shared_scale=scales
+    )
     roles = ["epilogue_forward_scaled_10", "epilogue_backward_scaled_10"] * 2
     assert [role for role, _ in calls] == roles
     for _, arguments in calls:
@@ -2810,7 +2927,12 @@ def test_scaled_epilogues_take_the_shared_scale(monkeypatch):
         MoKEpilogues(8, shared_row="none")
     unscaled = MoKEpilogues(8)
     with pytest.raises(ValueError, match="shared_scale is required exactly"):
-        unscaled.forward(shared, torch.zeros(tokens * 8, hidden, dtype=torch.bfloat16), torch.zeros(tokens, 8), scales)
+        unscaled.forward(
+            shared,
+            torch.zeros(tokens * 8, hidden, dtype=torch.bfloat16),
+            torch.zeros(tokens, 8),
+            scales,
+        )
 
 
 def test_shared_scale_helpers_pass_the_registry_arguments(monkeypatch):
@@ -2819,11 +2941,15 @@ def test_shared_scale_helpers_pass_the_registry_arguments(monkeypatch):
     and a new FP32 ``[tokens]`` output on one CTA per eight rows, at most eight per SM.  A scale tensor of another shape
     raises before any launch; zero rows launch nothing."""
     calls = _group_stub_loader(monkeypatch)
-    monkeypatch.setattr(kernels.MoKSharedScale, "_check_rows", staticmethod(lambda *args: None))
+    monkeypatch.setattr(
+        kernels.MoKSharedScale, "_check_rows", staticmethod(lambda *args: None)
+    )
     monkeypatch.setattr(kernels.MoKSharedScale, "_sm_count", lambda self, device: 2)
     helpers = kernels.MoKSharedScale()
     values, scales = torch.zeros(3, 16, dtype=torch.bfloat16), torch.ones(3)
-    with pytest.raises(ValueError, match=r"scales must be contiguous CUDA FP32 \[tokens\]"):
+    with pytest.raises(
+        ValueError, match=r"scales must be contiguous CUDA FP32 \[tokens\]"
+    ):
         helpers.rows(values, torch.ones(4))
     assert calls == []
     out = helpers.rows(values, scales)
@@ -2843,7 +2969,9 @@ def test_shared_scale_helpers_pass_the_registry_arguments(monkeypatch):
     assert [arguments["grid_x"] for _, arguments in calls] == [16, 16]
     calls.clear()
     empty = torch.zeros(0, 16, dtype=torch.bfloat16)
-    assert helpers.rows(empty, torch.ones(0)).shape == (0, 16) and helpers.dot(empty, empty).shape == (0,)
+    assert helpers.rows(empty, torch.ones(0)).shape == (0, 16) and helpers.dot(
+        empty, empty
+    ).shape == (0,)
     assert calls == []
 
 
@@ -2855,17 +2983,25 @@ def test_scaled_call_refusals_come_before_device_work(monkeypatch):
     functional = object.__new__(backend.MoKFunctional)
     functional.local_experts = 4
     functional._validated = {}
-    functional.group, functional.shared_expert, functional.router_weight_gradient = "scaled_top10", "scaled", "direct"
+    functional.group, functional.shared_expert, functional.router_weight_gradient = (
+        "scaled_top10",
+        "scaled",
+        "direct",
+    )
     functional._forward_kernels, functional._backward_kernels = {}, {}
     functional._recompute_kernels, functional._context_free_forward_kernels = {}, {}
     events = []
     _group_stub_loader(monkeypatch, events)
     workspace = dataclasses.make_dataclass("W", ["device"])(torch.device("cuda", 0))
-    monkeypatch.setattr(backend.MoKFunctional, "_inputs", staticmethod(lambda *args: (workspace, 256)))
+    monkeypatch.setattr(
+        backend.MoKFunctional, "_inputs", staticmethod(lambda *args: (workspace, 256))
+    )
     monkeypatch.setattr(functional, "_check_device", lambda workspace: None)
     monkeypatch.setattr(functional, "_barrier", lambda w: events.append("barrier"))
     monkeypatch.setattr(
-        backend.MoKFunctional, "_copy_source", staticmethod(lambda *args: events.append("copy"))
+        backend.MoKFunctional,
+        "_copy_source",
+        staticmethod(lambda *args: events.append("copy")),
     )
     options = dict(dtype=torch.bfloat16)
     x = torch.zeros(256, 256, **options)
@@ -2879,7 +3015,9 @@ def test_scaled_call_refusals_come_before_device_work(monkeypatch):
         x_routed=x, gate_shared=x, gate_routed=x, up_shared=x, up_routed=x, hidden_shared=x, hidden_routed=x,
         schedule=schedule,
     )  # fmt: skip
-    forward = lambda **kw: functional.forward(None, None, schedule, x, scores, *shared, *kw.pop("r", routed), **kw)  # noqa: E731
+    forward = lambda **kw: functional.forward(
+        None, None, schedule, x, scores, *shared, *kw.pop("r", routed), **kw
+    )  # noqa: E731
     backward = lambda **kw: functional.backward(  # noqa: E731
         None, None, schedule, context, x, x, scores, *shared, *kw.pop("r", routed), **kw
     )
@@ -2888,17 +3026,675 @@ def test_scaled_call_refusals_come_before_device_work(monkeypatch):
             run()
         with pytest.raises(TypeError, match="shared_scale must be a torch.Tensor"):
             run(shared_scale=[1.0] * 256)
-        with pytest.raises(ValueError, match="shared_scale must be contiguous torch.float32"):
+        with pytest.raises(
+            ValueError, match="shared_scale must be contiguous torch.float32"
+        ):
             run(shared_scale=torch.ones(256))  # a CPU tensor
         with pytest.raises(ValueError, match="runs plain SwiGLU"):
             run(swiglu_limit=10.0, shared_scale=torch.ones(256))
         with pytest.raises(ValueError, match="takes BF16 routed weights"):
             run(r=mxfp8, shared_scale=torch.ones(256))
-    functional.group, functional.shared_expert, functional.router_weight_gradient = None, "unscaled", "quotient"
+    functional.group, functional.shared_expert, functional.router_weight_gradient = (
+        None,
+        "unscaled",
+        "quotient",
+    )
     for run in (forward, backward):
         with pytest.raises(ValueError, match="taken only with shared_expert='scaled'"):
             run(shared_scale=torch.ones(256))
     assert events == []
+
+
+def test_memory_report_counts_each_storage_once():
+    """Host only: the memory report helper (``report_mok_scaled.py``) counts each tensor storage once, in the first
+    part that reaches it (views, and a workspace a schedule or a context refers to, included); the retained state is
+    the schedule, with the context added for a layer without checkpointing."""
+    from tests.experimental.report_mok_scaled import memory_report
+
+    @dataclasses.dataclass
+    class Store:
+        rows: torch.Tensor
+        more: tuple
+
+    @dataclasses.dataclass
+    class Plan:
+        rows: torch.Tensor
+        store: Store
+
+    base = torch.zeros(64)
+    store = Store(base, (base[:8], torch.zeros(4, dtype=torch.bfloat16), None))
+    plan = Plan(torch.zeros(10, dtype=torch.int32), store)
+    context = (torch.zeros(3, dtype=torch.float64), plan, {"rows": torch.zeros(2)})
+    assert memory_report(store, plan, context) == dict(
+        workspace=256 + 8,
+        schedule=40,
+        context=24 + 8,
+        retained_checkpointed=40,
+        retained_with_context=40 + 32,
+    )
+
+
+# The 512-expert top-10 group (``MODE_GROUPS["scaled_top10"]``) on SM100a and SM103a: the helpers, the scaled
+# epilogues, the direct-gradient backward and the adapter.  Every input is drawn on the CPU and copied to the device.
+
+#: The group's (EP, local experts) layout and top-k.
+GROUP_LAYOUT, GROUP_TOPK = (
+    kernels.MODE_GROUPS["scaled_top10"].layouts[0],
+    kernels.MODE_GROUPS["scaled_top10"].topk,
+)
+#: The group's roles beside the scheduler layout's.
+GROUP_KERNELS = (
+    "backward_fp32_direct",
+    "epilogue_forward_scaled_10",
+    "shared_scale_rows",
+    "shared_scale_dot",
+)
+
+
+def _bits(value):
+    """``value``'s bytes as integers (BF16 / FP32), so that signed zeros differ."""
+    return value.view({2: torch.int16, 4: torch.int32}[value.element_size()])
+
+
+def _same_bits(a, b):
+    return all(torch.equal(_bits(x), _bits(y)) for x, y in zip(a, b, strict=True))
+
+
+def _cpu_problem(tokens, hidden, intermediate, experts, topk, seed, device):
+    """Inputs drawn on the CPU, then copied to ``device``: BF16 ``x`` and ``dY``, weights scaled to unit-variance
+    outputs (shared gate, up, down, routed gate, up, down), FP32 router weights in [0, 1.5) with every 5th token's
+    first weight and every weight of token 3 exactly 0, FP32 shared scales in [0, 2) with every 4th token's exactly 0
+    and the next token's exactly 1, and int64 expert ids (``topk`` distinct experts per token)."""
+    g = torch.Generator().manual_seed(seed)
+    x = (torch.randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    dy = (torch.randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    weights = (
+        (torch.randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (torch.randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (torch.randn(hidden, intermediate, generator=g) / intermediate**0.5).bfloat16(),
+        (
+            torch.randn(experts, intermediate, hidden, generator=g) / hidden**0.5
+        ).bfloat16(),
+        (
+            torch.randn(experts, intermediate, hidden, generator=g) / hidden**0.5
+        ).bfloat16(),
+        (
+            torch.randn(experts, hidden, intermediate, generator=g) / intermediate**0.5
+        ).bfloat16(),
+    )
+    scores = torch.rand(tokens, topk, generator=g) * 1.5
+    scores[::5, 0] = 0.0
+    scores[3:4] = 0.0
+    scale = torch.rand(tokens, generator=g) * 2.0
+    scale[::4] = 0.0
+    scale[1::4] = 1.0
+    ids = torch.rand(tokens, experts, generator=g).argsort(-1)[:, :topk].contiguous()
+    return dict(
+        x=x.to(device), dy=dy.to(device), weights=tuple(w.to(device) for w in weights), scores=scores.to(device),
+        scale=scale.to(device), ids=ids.to(device),
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "tokens,width", [(0, 4096), (1, 8), (37, 1032), (4099, 4096), (4099, 1024)]
+)
+def test_shared_scale_helpers_on_the_gpu(monkeypatch, tokens, width):
+    """``rows`` gives ``BF16(s * v)`` bit for bit (one FP32 product, one rounding: the CPU's FP32 product rounded to
+    BF16), so ``s = 1`` keeps the input bits and ``s = 0`` gives signed zeros.  ``dot`` gives the same FP32 bytes run
+    to run and at another grid size; a row with one nonzero product gives that product exactly, a zero row zero.  The
+    accuracy of ``dot`` against the float64 oracle is judged in ``test_mok_accuracy.py``."""
+    for role in ("shared_scale_rows", "shared_scale_dot"):
+        _require_role(role)
+    device = torch.device("cuda", torch.cuda.current_device())
+    helpers = kernels.MoKSharedScale()
+    g = torch.Generator().manual_seed(7001 + tokens + width)
+    values = (torch.randn(tokens, width, generator=g) * 0.125).bfloat16()
+    other = (torch.randn(tokens, width, generator=g) * 0.125).bfloat16()
+    scales = torch.rand(tokens, generator=g) * 4.0 - 2.0
+    scales[::4] = 0.0
+    scales[1::4] = 1.0
+    single = torch.zeros_like(values)
+    columns = torch.randint(0, width, (tokens,), generator=g)
+    single[torch.arange(tokens), columns] = values[torch.arange(tokens), columns]
+    expected_rows = (scales[:, None] * values.float()).bfloat16()
+    expected_single = (
+        single.float()[torch.arange(tokens), columns]
+        * other.float()[torch.arange(tokens), columns]
+    )
+    d_values, d_other, d_scales, d_single = (
+        v.to(device) for v in (values, other, scales, single)
+    )
+    with kernels._ffi_stream():
+        scaled = [helpers.rows(d_values, d_scales) for _ in range(REPEATS)]
+        dots = [helpers.dot(d_values, d_other) for _ in range(REPEATS)]
+        single_dot = helpers.dot(d_single, d_other)
+        zero_dot = helpers.dot(torch.zeros_like(d_values), d_other)
+    monkeypatch.setitem(helpers._sms, device, 1)  # one SM's grid: at most 8 CTAs
+    with kernels._ffi_stream():
+        small_grid = (helpers.rows(d_values, d_scales), helpers.dot(d_values, d_other))
+    torch.cuda.synchronize()
+    assert scaled[0].shape == (tokens, width) and dots[0].shape == (tokens,)
+    assert all(
+        torch.equal(_bits(value.cpu()), _bits(expected_rows))
+        for value in (*scaled, small_grid[0])
+    )
+    assert torch.equal(
+        _bits(scaled[0][1::4].cpu()), _bits(values[1::4])
+    )  # s = 1: the input bits
+    assert all(
+        torch.equal(_bits(value), _bits(dots[0]))
+        for value in (*dots[1:], small_grid[1])
+    )
+    assert torch.isfinite(dots[0]).all().item()
+    nonzero = expected_single != 0
+    assert torch.equal(single_dot.cpu()[nonzero], expected_single[nonzero])
+    assert torch.count_nonzero(zero_dot).item() == 0
+
+
+@pytest.mark.parametrize("tokens,hidden", [(0, 256), (1, 1032), (37, 4096), (512, 256)])
+def test_scaled_epilogues_on_the_gpu(tokens, hidden):
+    """The scaled top-10 epilogues.  The backward sum is exact: ``BF16(s * shared + routed_0 + ... + routed_9)`` in
+    FP32 in that order, bit for bit the CPU's.  The forward with ``s = 1`` and the last two slots zero (zero rows and
+    zero weights) has the bytes of the top-8 epilogue on the first eight slots (both start from ``s * shared``, then
+    add the slots in ascending order, and ``fma(0, 0, acc) = acc``); a token's row with ``s = 1`` has the bytes of an
+    all-ones call (each token reads its own scale).  Five launches and a CUDA Graph replay give the same bytes.  The
+    forward's accuracy against the float64 oracle is judged in ``test_mok_accuracy.py``."""
+    _require_role("epilogue_forward_scaled_10")
+    _require_role("epilogue_backward_8")
+    device = torch.device("cuda", torch.cuda.current_device())
+    scaled, top8 = MoKEpilogues(10, shared_row="scaled"), MoKEpilogues(8)
+    g = torch.Generator().manual_seed(7101 + tokens + hidden)
+    shared = (torch.randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    routed = (torch.randn(tokens, 10, hidden, generator=g) * 0.125).bfloat16()
+    scores = torch.rand(tokens, 10, generator=g) + 0.01
+    mixed = torch.rand(tokens, generator=g) * 2.0
+    mixed[::3] = 1.0
+    expected_dx = mixed[:, None] * shared.float()
+    for slot in range(10):
+        expected_dx = expected_dx + routed[:, slot].float()
+    padded, padded_scores = routed.clone(), scores.clone()
+    padded[:, 8:], padded_scores[:, 8:] = 0.0, 0.0
+    d = {name: value.to(device) for name, value in dict(
+        shared=shared, routed=routed.view(-1, hidden), scores=scores, mixed=mixed, ones=torch.ones(tokens),
+        padded=padded.view(-1, hidden), padded_scores=padded_scores,
+        routed8=routed[:, :8].reshape(-1, hidden), scores8=scores[:, :8].contiguous(),
+    ).items()}  # fmt: skip
+
+    def launch():
+        return (
+            scaled.forward(d["shared"], d["routed"], d["scores"], d["mixed"]),
+            scaled.backward(d["shared"], d["routed"], d["mixed"]),
+        )
+
+    eager = [tuple(value.clone() for value in launch()) for _ in range(REPEATS)]
+    assert all(_same_bits(eager[0], other) for other in eager[1:])
+    assert eager[0][0].shape == (tokens, hidden)
+    assert torch.equal(_bits(eager[0][1].cpu()), _bits(expected_dx.bfloat16()))
+    ones = scaled.forward(d["shared"], d["routed"], d["scores"], d["ones"])
+    unit = mixed == 1.0
+    assert torch.equal(
+        _bits(eager[0][0][unit.to(device)]), _bits(ones[unit.to(device)])
+    )
+    padded_y = scaled.forward(d["shared"], d["padded"], d["padded_scores"], d["ones"])
+    assert torch.equal(
+        _bits(padded_y), _bits(top8.forward(d["shared"], d["routed8"], d["scores8"]))
+    )
+    if tokens:
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            launch()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = launch()
+        for _ in range(2):
+            graph.replay()
+            torch.cuda.synchronize()
+            assert _same_bits(captured, eager[0])
+
+
+#: The direct-gradient launcher check's outputs, by index of ``(*backward result, dx_peer, ds_peer, forward shared
+#: output, combine rows)``.
+DIRECT_OUTPUTS = {
+    "dx_shared": 0, "d_gate_shared": 2, "d_up_shared": 4, "dh_shared": 6, "dw_shared_gate": 9, "dw_routed_gate": 10,
+    "dw_shared_up": 11, "dw_routed_up": 12, "dw_shared_down": 13, "dw_routed_down": 14, "dx_routed": 15,
+    "d_weights": 16, "y_shared": 17, "y_routed": 18,
+}  # fmt: skip
+#: What the direct and the quotient backward write alike (every shared output and the routed down-projection weight
+#: gradient, which reads ``BF16(w * dy)`` in both), and what only the shared scale's operands change.
+DIRECT_EQUAL_TO_QUOTIENT = ("dx_shared", "d_gate_shared", "d_up_shared", "dh_shared", "dw_shared_gate", "dw_shared_up",
+                            "dw_shared_down", "dw_routed_down", "y_shared", "y_routed")  # fmt: skip
+SHARED_OPERAND_OUTPUTS = ("dw_shared_gate", "dw_shared_up", "dw_shared_down")
+
+
+@pytest.mark.parametrize("geometry", GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
+def test_direct_backward_on_the_gpu(geometry):
+    """The direct-gradient backward at top-10 over 16 local experts (plain SwiGLU, FP32 accumulators from nonzero
+    starts), against the quotient backward on the same forward: the same bytes in every shared output and in the
+    routed down-projection weight gradient; a zero router weight has a nonzero gradient and exactly zero routed input
+    gradients.  With ``shared_operands=True`` and the helpers' ``BF16(1 * dy)`` / ``BF16(1 * x)`` every output has the
+    bytes of the staged-operand launch; with ``s = 0`` the shared weight-gradient accumulators keep their starts bit
+    for bit and every other output keeps its bytes.  :data:`REPEATS` launches, a CUDA Graph replay, and a replay after
+    the inputs change give the eager bytes."""
+    for role in GROUP_KERNELS:
+        _require_role(role)
+    hidden, intermediate, macro = geometry
+    experts, topk, tokens, mini, comm = 16, GROUP_TOPK, 512, 256, 4
+    device = torch.device("cuda", torch.cuda.current_device())
+    p = _cpu_problem(
+        tokens, hidden, intermediate, experts, topk, 7201 + hidden + macro, device
+    )
+    x, dy, scores = p["x"], p["dy"], p["scores"]
+    shared_gate, shared_up, shared_down, routed_gate, routed_up, routed_down = p[
+        "weights"
+    ]
+    forward = MoKForward(False)
+    launchers = dict(
+        quotient=MoKBackward(False, True),
+        direct=MoKBackward(False, True, router_weight_gradient="direct"),
+        operands=MoKBackward(
+            False, True, router_weight_gradient="direct", shared_operands=True
+        ),
+    )
+    helpers = kernels.MoKSharedScale()
+    row = torch.arange(tokens, device=device)
+    s = single_rank_schedule(
+        torch.stack([(row + slot) % experts for slot in range(topk)], -1), experts
+    )
+    options = dict(device=device, dtype=torch.bfloat16)
+    combine = torch.empty(tokens * topk, hidden, **options)
+    dx_peer = torch.empty(tokens * topk, hidden, **options)
+    ds_peer = torch.empty_like(scores)
+    g = torch.Generator().manual_seed(7301 + hidden)
+    initial = [
+        (torch.randn(w.shape, generator=g) * 0.01).to(device) for w in p["weights"]
+    ]
+    accumulators = [value.clone() for value in initial]
+    ones, zeros = torch.ones(tokens, device=device), torch.zeros(tokens, device=device)
+
+    def sequence(name, scale=None):
+        for accumulator, start in zip(accumulators, initial, strict=True):
+            accumulator.copy_(start)
+        values = forward(
+            x, [x.data_ptr()], combine, [combine.data_ptr()],
+            shared_gate, routed_gate, shared_up, routed_up, shared_down, routed_down,
+            s["peers"], s["schedule"], s["num_tokens"], s["counts"],
+            topk, None, comm, macro, mini,
+        )  # fmt: skip
+        operands = None
+        if scale is not None:
+            with kernels._ffi_stream():
+                operands = (helpers.rows(dy, scale), helpers.rows(x, scale))
+        result = launchers[name](
+            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+            shared_gate, routed_gate, shared_up, routed_up, shared_down, routed_down,
+            *values[:7], x, [x.data_ptr()],
+            s["peers"], s["schedule"], s["num_tokens"], s["counts"],
+            topk, None, comm, macro, mini,
+            weight_grad_accumulators=accumulators, shared_operands=operands,
+        )  # fmt: skip
+        return result, values
+
+    def outputs(launch):
+        result, values = launch
+        every = (*result, dx_peer, ds_peer, values[7], combine)
+        out = {name: every[index].clone() for name, index in DIRECT_OUTPUTS.items()}
+        for name, value in out.items():
+            assert torch.isfinite(value).all().item(), name
+        return out
+
+    def same(a, b, names=DIRECT_OUTPUTS):
+        return [
+            name for name in names if not torch.equal(_bits(a[name]), _bits(b[name]))
+        ]
+
+    eager = [outputs(sequence("direct")) for _ in range(REPEATS)]
+    assert all(same(eager[0], other) == [] for other in eager[1:])
+    quotient = outputs(sequence("quotient"))
+    assert same(eager[0], quotient, DIRECT_EQUAL_TO_QUOTIENT) == []
+    zero = scores == 0
+    assert torch.count_nonzero(eager[0]["dx_routed"][zero.flatten()]).item() == 0
+    assert (
+        torch.count_nonzero(eager[0]["d_weights"][zero]).item() > 0
+    )  # defined at a zero weight
+    assert torch.count_nonzero(quotient["d_weights"][zero]).item() == 0
+    assert same(outputs(sequence("operands", ones)), eager[0]) == []
+    scaled_zero = outputs(sequence("operands", zeros))
+    assert same(scaled_zero, eager[0]) == list(SHARED_OPERAND_OUTPUTS)
+    for name, start in zip(
+        ("dw_shared_gate", "dw_shared_up", "dw_shared_down"), initial[:3], strict=True
+    ):
+        assert torch.equal(_bits(scaled_zero[name]), _bits(start)), name
+    for name, scale in (("direct", None), ("operands", p["scale"])):
+        reference = outputs(sequence(name, scale))
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            sequence(name, scale)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = sequence(name, scale)
+
+        def replay():
+            graph.replay()
+            torch.cuda.synchronize()
+            return outputs(captured)
+
+        assert same(replay(), reference) == [] and same(replay(), reference) == []
+        g = torch.Generator().manual_seed(7401 + hidden)
+        for value in (x, dy):
+            value.copy_((torch.randn(value.shape, generator=g) * 0.125).bfloat16())
+        scores.copy_(torch.rand(scores.shape, generator=g) * 1.5)
+        assert same(replay(), outputs(sequence(name, scale))) == []
+
+
+def _group_adapter(ep, experts, tokens, hidden, macro, mini, device, counts=None):
+    """The group's adapter as rank 0 of its EP group emulated on one GPU (:class:`OneGpuGroup`, every route on this
+    rank), prepared for the context and the context-free forward and the recompute; its workspace (at the worst-case
+    multiplier; with ``counts`` a source workspace for those counts) and its config."""
+    functional = backend.MoKFunctional(ep, experts, GROUP_TOPK, **GROUP_OK)
+    functional.communication = OneGpuGroup()
+    functional.prepare(None, save_context=False)
+    functional.prepare(None)
+    functional.prepare_recompute(None)
+    if counts is None:
+        multiplier = bound_multiplier(tokens, GROUP_TOPK, ep, experts)
+        capacity = workspace_module.schedule_capacity_for(
+            tokens, GROUP_TOPK, ep, multiplier
+        )
+        workspace = one_gpu_workspace(ep, tokens, hidden, GROUP_TOPK, capacity, device)
+    else:
+        workspace, multiplier = one_gpu_source_workspace(
+            ep, experts, counts, hidden, GROUP_TOPK, device
+        )
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    return functional, workspace, config
+
+
+def _group_step(
+    functional,
+    config,
+    workspace,
+    p,
+    accumulators,
+    *,
+    checkpointed,
+    shared_scale,
+    schedule=None,
+):
+    """One training step of the group's adapter on the inputs ``p`` of :func:`_cpu_problem`: ``build_schedule`` (unless
+    ``schedule`` is given), the context forward (or the context-free forward and the recompute), ``backward`` into the
+    zeroed accumulators.  Returns ``(y, dx, d_weights, routed gate, up, down, shared gate, up, down weight gradients,
+    d_shared_scale)`` and the schedule."""
+    experts = p["weights"][3].shape[0]
+    if schedule is None:
+        schedule = functional.build_schedule(
+            workspace, config, p["ids"], num_local_experts=experts
+        )
+    for accumulator in accumulators:
+        accumulator.zero_()
+    weights = p["weights"]
+    y, context = functional.forward(
+        config, workspace, schedule, p["x"], p["scores"], *weights, save_context=not checkpointed,
+        shared_scale=shared_scale,
+    )  # fmt: skip
+    if checkpointed:
+        context = functional.recompute_forward_context(
+            config, workspace, schedule, p["x"], weights[0], weights[1], weights[3], weights[4]
+        )  # fmt: skip
+    grads = functional.backward(
+        config, workspace, schedule, context, p["dy"], p["x"], p["scores"], *weights,
+        weight_grad_accumulators=accumulators, shared_scale=shared_scale,
+    )  # fmt: skip
+    assert len(grads) == 9
+    return (y, *grads), schedule
+
+
+def _snapshot(values):
+    torch.cuda.synchronize()
+    out = tuple(value.clone() for value in values)
+    for index, value in enumerate(out):
+        assert torch.isfinite(value).all().item(), index
+    return out
+
+
+#: Indexes of ``_group_step``'s values.
+Y, DX, D_WEIGHTS, ROUTED_DW, SHARED_DW_INDEX, D_SHARED_SCALE = (
+    0,
+    1,
+    2,
+    (3, 4, 5),
+    (6, 7, 8),
+    9,
+)
+
+
+def test_scaled_group_adapter_step():
+    """The group's adapter step at EP8 ``(8, 64)``, top-10, emulated on one GPU as rank 0 (512 source rows, several
+    macrobatches): nine backward items, ``d_shared_scale`` FP32 ``[tokens]``; the context step and the checkpointed step
+    (context-free forward, recompute, backward) give the same bytes, run to run and in a CUDA Graph replay; a zero
+    router weight has a nonzero gradient.  The scale enters where the contract puts it: ``d_weights``, the routed weight
+    gradients and ``d_shared_scale`` do not depend on ``s``; with ``s = 0`` everywhere the shared weight gradients are
+    zero; a token's ``y`` and ``dx`` rows with ``s = 0`` (``s = 1``) have the bytes of an all-zero (all-one) step's.  A
+    steady-state step (``build_schedule``, context-free forward, recompute, backward) makes no host synchronization
+    (``torch.cuda.set_sync_debug_mode("error")``).  Accuracy: ``test_mok_accuracy.py``."""
+    ep, experts = GROUP_LAYOUT
+    for role in (*GROUP_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+    tokens, hidden, intermediate, macro, mini = 512, 512, 256, 1536, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _group_adapter(
+        ep, experts, tokens, hidden, macro, mini, device
+    )
+    p = _cpu_problem(tokens, hidden, intermediate, experts, GROUP_TOPK, 7501, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"]]
+    scale = p["scale"]
+
+    def step(checkpointed=False, shared_scale=scale, schedule=None):
+        values, schedule = _group_step(
+            functional, config, workspace, p, accumulators, checkpointed=checkpointed, shared_scale=shared_scale,
+            schedule=schedule,
+        )  # fmt: skip
+        return values, schedule
+
+    values, schedule = step()
+    first = _snapshot(values)
+    assert (
+        int(schedule.num_tokens.item()) > macro
+    )  # several macrobatches: backward replays the later ones
+    assert (
+        first[D_SHARED_SCALE].shape == (tokens,)
+        and first[D_SHARED_SCALE].dtype == torch.float32
+    )
+    assert _same_bits(first, _snapshot(step(schedule=schedule)[0]))
+    assert _same_bits(first, _snapshot(step(True, schedule=schedule)[0]))
+    zero_weight = p["scores"] == 0
+    assert torch.count_nonzero(first[D_WEIGHTS][zero_weight]).item() > 0
+    assert (
+        torch.count_nonzero(first[D_SHARED_SCALE][scale == 0]).item() > 0
+    )  # defined at s = 0
+    zero = _snapshot(step(shared_scale=torch.zeros_like(scale), schedule=schedule)[0])
+    one = _snapshot(step(shared_scale=torch.ones_like(scale), schedule=schedule)[0])
+    for index in (D_WEIGHTS, *ROUTED_DW, D_SHARED_SCALE):
+        assert torch.equal(_bits(zero[index]), _bits(first[index])), index
+        assert torch.equal(_bits(one[index]), _bits(first[index])), index
+    for index in SHARED_DW_INDEX:
+        assert torch.count_nonzero(zero[index]).item() == 0, index
+    for index in (Y, DX):
+        for value, rows in ((zero, scale == 0), (one, scale == 1)):
+            assert torch.equal(_bits(first[index][rows]), _bits(value[index][rows])), (
+                index
+            )
+    # Steady state: every kernel loaded, the schedule's load observation in flight.
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        steady, _ = step(True)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert _same_bits(first, _snapshot(steady))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        step(True, schedule=schedule)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured, _ = step(True, schedule=schedule)
+    for _ in range(2):
+        graph.replay()
+        assert _same_bits(first, _snapshot(captured))
+
+
+def test_scaled_group_adapter_changed_counts():
+    """The group's adapter over changing source counts on one source workspace (:data:`CHANGED_COUNTS`: 1031, 768, 257
+    and 513 rows), as rank 0 of EP8 emulated on one GPU: per count a new schedule, nine backward items with the
+    count's rows, and before each step every workspace row past the count holds other values, so the staging alone
+    decides those rows: the context step and the checkpointed step give exactly the bytes of the context step on a
+    fresh zeroed workspace; no count after the first loads a kernel."""
+    ep, experts = GROUP_LAYOUT
+    for role in (*GROUP_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+    hidden, intermediate, macro, mini = 512, 256, 1536, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _group_adapter(
+        ep, experts, None, hidden, macro, mini, device, CHANGED_COUNTS
+    )
+    fresh_workspaces = []  # alive to the end: no later workspace takes a freed one's address
+    loads = None
+    for index, count in enumerate(CHANGED_COUNTS):
+        p = _cpu_problem(
+            count, hidden, intermediate, experts, GROUP_TOPK, 7601 + index, device
+        )
+        accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"]]
+
+        def step(ws, checkpointed):
+            values, schedule = _group_step(
+                functional, config, ws, p, accumulators, checkpointed=checkpointed, shared_scale=p["scale"]
+            )  # fmt: skip
+            assert (
+                schedule.num_source_tokens == count
+                and int(schedule.num_tokens.item()) > macro
+            )
+            return _snapshot(values)
+
+        def poison(ws):
+            storage = ws.storage
+            for buffer, rows, value in (
+                (storage.x_buffer, count, 3.0),
+                (storage.d_y_buffer, count, -5.0),
+                (storage.router_weight_buffer, count, 0.75),
+                (storage.d_router_weight_buffer, count, 9.0),
+                (storage.combine_buffer, count * GROUP_TOPK, 7.0),
+                (storage.d_x_routed_buffer, count * GROUP_TOPK, -7.0),
+            ):
+                buffer[rows:].fill_(value)
+
+        fresh_workspaces.append(
+            one_gpu_source_workspace(
+                ep, experts, CHANGED_COUNTS, hidden, GROUP_TOPK, device
+            )[0]
+        )
+        reference = step(fresh_workspaces[-1], False)
+        shapes = [tuple(reference[i].shape) for i in (Y, DX, D_WEIGHTS, D_SHARED_SCALE)]
+        assert shapes == [
+            (count, hidden),
+            (count, hidden),
+            (count, GROUP_TOPK),
+            (count,),
+        ]
+        for checkpointed in (False, True):
+            poison(workspace)
+            values = step(workspace, checkpointed)
+            differs = [
+                i
+                for i, (a, b) in enumerate(zip(reference, values, strict=True))
+                if not _same_bits((a,), (b,))
+            ]
+            assert not differs, (
+                count,
+                "checkpointed" if checkpointed else "context",
+                differs,
+            )
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (count, "kernel loads", loads, misses)
+
+
+def test_scaled_group_checkpoint_without_reentrant():
+    """A caller's ``torch.autograd.Function`` (the package ships none) around the context-free forward that saves only
+    its inputs and whose backward recomputes the context and runs ``backward``, under
+    ``torch.utils.checkpoint.checkpoint(..., use_reentrant=False)`` (which reruns the forward in the backward pass):
+    ``x.grad``, the router-weight gradient, ``d_shared_scale`` and the FP32 weight-gradient accumulators have the bytes
+    of the adapter's context step, and ``y`` its ``y``."""
+    from torch.utils.checkpoint import checkpoint
+
+    ep, experts = GROUP_LAYOUT
+    for role in (*GROUP_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+    tokens, hidden, intermediate, macro, mini = 512, 512, 256, 1536, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _group_adapter(
+        ep, experts, tokens, hidden, macro, mini, device
+    )
+    p = _cpu_problem(tokens, hidden, intermediate, experts, GROUP_TOPK, 7701, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"]]
+    values, schedule = _group_step(
+        functional, config, workspace, p, accumulators, checkpointed=False, shared_scale=p["scale"]
+    )  # fmt: skip
+    reference = _snapshot(values)
+    weights = p["weights"]
+
+    class Layer(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, scores, shared_scale):
+            y, _ = functional.forward(
+                config, workspace, schedule, x, scores, *weights, save_context=False, shared_scale=shared_scale
+            )  # fmt: skip
+            ctx.save_for_backward(x, scores, shared_scale)
+            return y
+
+        @staticmethod
+        def backward(ctx, dy):
+            x, scores, shared_scale = ctx.saved_tensors
+            context = functional.recompute_forward_context(
+                config, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4]
+            )  # fmt: skip
+            grads = functional.backward(
+                config, workspace, schedule, context, dy.contiguous(), x, scores, *weights,
+                weight_grad_accumulators=accumulators, shared_scale=shared_scale,
+            )  # fmt: skip
+            return grads[0].clone(), grads[1].clone(), grads[8].clone()
+
+    leaves = [
+        p[name].detach().clone().requires_grad_(True)
+        for name in ("x", "scores", "scale")
+    ]
+    for accumulator in accumulators:
+        accumulator.zero_()
+    y = checkpoint(Layer.apply, *leaves, use_reentrant=False)
+    y_bits = y.detach().clone()
+    y.backward(p["dy"])
+    torch.cuda.synchronize()
+    assert torch.equal(_bits(y_bits), _bits(reference[Y]))
+    for leaf, index in zip(leaves, (DX, D_WEIGHTS, D_SHARED_SCALE), strict=True):
+        assert torch.equal(_bits(leaf.grad), _bits(reference[index])), index
+    order = (
+        *SHARED_DW_INDEX,
+        *ROUTED_DW,
+    )  # accumulators: shared gate, up, down, routed gate, up, down
+    for accumulator, index in zip(accumulators, order, strict=True):
+        assert torch.equal(_bits(accumulator), _bits(reference[index])), index
 
 
 @pytest.mark.parametrize("tokens", [4096, 16384, 32768])

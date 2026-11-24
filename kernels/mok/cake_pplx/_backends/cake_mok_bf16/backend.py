@@ -2079,7 +2079,9 @@ class MoKFunctional:
         self._barrier(workspace)
         _, backward_kernel = self._kernels(swiglu_limit, mxfp8)
         _, bwd_comm_sms = self._comm_split(config, workspace, mxfp8)
-        program = {} if shared_operands is None else {"shared_operands": shared_operands}
+        program = (
+            {} if shared_operands is None else {"shared_operands": shared_operands}
+        )
         values = backward_kernel(
             workspace.d_y_buffer[:shared_rows],
             workspace.d_y_buffer_ptrs,

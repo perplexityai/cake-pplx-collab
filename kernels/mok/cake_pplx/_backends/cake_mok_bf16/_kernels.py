@@ -3781,7 +3781,9 @@ class MoKEpilogues:
         view = output.view(torch.uint32)
         scales = () if shared_scale is None else (shared_scale,)
         plan.launch(
-            (shared, *scales, view) if scores is None else (shared, scores, *scales, view)
+            (shared, *scales, view)
+            if scores is None
+            else (shared, scores, *scales, view)
         )
         return output
 

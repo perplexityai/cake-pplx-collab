@@ -104,7 +104,9 @@ def test_shared_scale_oracle_follows_the_formula():
     s = torch.rand(TOKENS) * 2
     s[::4] = 0.0
     out = _layer(problem, naive.ORACLE, shared_scale=s)
-    routed_only = _layer(problem, naive.ORACLE, shared_w=None)  # 0 + the routed sums: the routed sums exactly
+    routed_only = _layer(
+        problem, naive.ORACLE, shared_w=None
+    )  # 0 + the routed sums: the routed sums exactly
     unscaled = naive.shared(x, dy, shared, None, naive.ORACLE)
     s64 = s.double()[:, None]
     assert torch.equal(out["y"], s64 * unscaled["y"] + routed_only["y"])
@@ -147,7 +149,11 @@ def test_zero_route_weights_have_the_defined_score_gradient(dtype):
                                                   torch.full_like(seg.routes, -1), seg.routes), 0)
             for seg in segments]  # fmt: skip
     dropped = naive.layer(x, dy, scores, shared, routed, kept, None, dtype)
-    assert _same(out["y"], dropped["y"]) and _same(out["dx"], dropped["dx"]) and _same(out["dw"], dropped["dw"])
+    assert (
+        _same(out["y"], dropped["y"])
+        and _same(out["dx"], dropped["dx"])
+        and _same(out["dw"], dropped["dw"])
+    )
     if dtype == naive.NAIVE:
         assert torch.count_nonzero(out["alt_d_scores"].view(-1)[zero]).item() == 0
         assert bool((out["alt_d_scores_direct"].view(-1)[zero] != 0).all())
@@ -163,7 +169,9 @@ def test_no_shared_expert_layer_is_the_routed_sum():
     s_out = naive.shared(x, dy, shared, None, naive.ORACLE)
     assert torch.equal(with_shared["y"], s_out["y"] + out["y"])
     assert torch.equal(with_shared["dx"], s_out["dx"] + out["dx"])
-    assert len(out["dw"]) == 3 and all(torch.equal(a, b) for a, b in zip(out["dw"], with_shared["dw"][:3]))
+    assert len(out["dw"]) == 3 and all(
+        torch.equal(a, b) for a, b in zip(out["dw"], with_shared["dw"][:3])
+    )
     with pytest.raises(ValueError, match="needs the shared expert"):
         _layer(problem, naive.ORACLE, shared_w=None, shared_scale=torch.ones(TOKENS))
 
@@ -205,8 +213,12 @@ def test_situ_oracle_matches_exact_arithmetic_after_one_bf16_rounding():
     BF16 value as 60-digit decimal arithmetic at saturated, deep-negative, small and zero inputs; the forms
     ``1 - tanh * tanh`` and ``1 - sigmoid`` would give 0 for the saturated gates, where the oracle's gradient is a normal
     nonzero value (shown at the positive saturated gate, where both forms cancel)."""
-    g = torch.tensor([p[0] for p in SITU_POINTS], dtype=torch.float64, requires_grad=True)
-    u = torch.tensor([p[1] for p in SITU_POINTS], dtype=torch.float64, requires_grad=True)
+    g = torch.tensor(
+        [p[0] for p in SITU_POINTS], dtype=torch.float64, requires_grad=True
+    )
+    u = torch.tensor(
+        [p[1] for p in SITU_POINTS], dtype=torch.float64, requires_grad=True
+    )
     h = naive.situ_glu(g, u, BETA, LB)
     h.backward(torch.ones_like(h))
     exact = [_exact(gi, ui, BETA, LB) for gi, ui in SITU_POINTS]
@@ -219,7 +231,9 @@ def test_situ_oracle_matches_exact_arithmetic_after_one_bf16_rounding():
     tg, s = torch.tanh(gate / BETA), torch.sigmoid(gate)
     cancelled = LB * torch.tanh(up / LB) * ((1 - tg * tg) * s + BETA * tg * s * (1 - s))
     big = gate > 120  # tanh and sigmoid both round to 1 in float64
-    assert torch.count_nonzero(cancelled[big]).item() == 0 and bool((g.grad[big & saturated] != 0).all())
+    assert torch.count_nonzero(cancelled[big]).item() == 0 and bool(
+        (g.grad[big & saturated] != 0).all()
+    )
 
 
 def test_situ_naive_is_the_pytorch_bf16_graph_and_zero_inputs_give_zero():
@@ -233,19 +247,38 @@ def test_situ_naive_is_the_pytorch_bf16_graph_and_zero_inputs_give_zero():
         (torch.randn(INTERMEDIATE, HIDDEN) / HIDDEN**0.5 * 8).bfloat16(),
         (torch.randn(HIDDEN, INTERMEDIATE) / INTERMEDIATE**0.5).bfloat16(),
     ]
-    out = naive.mlp(x, weights, dy, None, naive.NAIVE, activation=("situ_glu", BETA, LB))
+    out = naive.mlp(
+        x, weights, dy, None, naive.NAIVE, activation=("situ_glu", BETA, LB)
+    )
     with torch.enable_grad():
         xx = x.detach().requires_grad_()
         gate, up = xx @ weights[0].T, xx @ weights[1].T
-        hidden = BETA * torch.tanh(gate / BETA) * torch.sigmoid(gate) * (LB * torch.tanh(up / LB))
+        hidden = (
+            BETA
+            * torch.tanh(gate / BETA)
+            * torch.sigmoid(gate)
+            * (LB * torch.tanh(up / LB))
+        )
         y = hidden @ weights[2].T
         y.backward(dy)
-    assert torch.equal(out["hidden"], hidden.detach()) and torch.equal(out["y"], y.detach())
+    assert torch.equal(out["hidden"], hidden.detach()) and torch.equal(
+        out["y"], y.detach()
+    )
     assert torch.equal(out["dx"], xx.grad)
     zeros = torch.zeros(8, dtype=torch.float64)
     values = torch.linspace(-50, 50, 8, dtype=torch.float64)
     for dtype in (torch.float64, torch.bfloat16):
-        assert torch.count_nonzero(naive.situ_glu(zeros.to(dtype), values.to(dtype), BETA, LB)).item() == 0
-        assert torch.count_nonzero(naive.situ_glu(values.to(dtype), zeros.to(dtype), BETA, LB)).item() == 0
+        assert (
+            torch.count_nonzero(
+                naive.situ_glu(zeros.to(dtype), values.to(dtype), BETA, LB)
+            ).item()
+            == 0
+        )
+        assert (
+            torch.count_nonzero(
+                naive.situ_glu(values.to(dtype), zeros.to(dtype), BETA, LB)
+            ).item()
+            == 0
+        )
     with pytest.raises(ValueError, match="without a limit"):
         naive.mlp(x, weights, dy, 1.0, naive.NAIVE, activation=("situ_glu", BETA, LB))

@@ -123,6 +123,31 @@ context = backend.recompute_forward_context(
     router_weights=router_w)
 grads = backend.backward(config, workspace, schedule, context, dy, x, router_w, *weights,
                          swiglu_limit=10.0, weight_grad_accumulators=accumulators)
+
+# 512 routed experts at EP8 (64 local experts), top-10, with the direct
+# router-weight gradient and a per-token FP32 shared-expert scale s
+# (shape [n]): y = s * S(x) + sum_k w_k E_k(x). Plain SwiGLU, FP32 weight
+# gradients, BF16 routed weights; a workspace of its own at the worst-case
+# schedule capacity, as above.
+ep, local, k = 8, 64, 10
+worst = min(k, local) * max_rows * ep + local * 255
+m = math.ceil(worst / (max_rows * k)) / ep
+config, workspace = create_mok_bf16_workspace(
+    group=group, device=device, num_local_tokens=n, hidden_size=4096, topk=k,
+    source_capacity=max_rows, schedule_capacity_multiplier=m,
+)
+accumulators = [torch.zeros(w.shape, device=device) for w in weights]  # FP32
+backend = prepare_mok_bf16(ep_size=ep, local_experts=local, topk=k, fp32_wgrad=True,
+                           router_weight_gradient="direct", shared_expert="scaled")
+backend.prepare(save_context=False)  # compile before CUDA Graph capture
+schedule = backend.build_schedule(workspace, config, ids, num_local_experts=local)
+y, _ = backend.forward(config, workspace, schedule, x, router_w, *weights,
+                       save_context=False, shared_scale=s)
+context = backend.recompute_forward_context(
+    config, workspace, schedule, x, *weights[:2], *weights[3:5])
+dx, d_w, *weight_grads, d_s = backend.backward(
+    config, workspace, schedule, context, dy, x, router_w, *weights,
+    weight_grad_accumulators=accumulators, shared_scale=s)
 ```
 
 `weights` contains shared gate/up/down followed by routed gate/up/down; gate

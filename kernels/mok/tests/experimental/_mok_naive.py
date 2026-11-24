@@ -166,7 +166,12 @@ class _SiTUOracle(torch.autograd.Function):
     def forward(ctx, gate, up, beta, lb):
         ctx.save_for_backward(gate, up)
         ctx.scalars = (beta, lb)
-        return beta * torch.tanh(gate / beta) * torch.sigmoid(gate) * (lb * torch.tanh(up / lb))
+        return (
+            beta
+            * torch.tanh(gate / beta)
+            * torch.sigmoid(gate)
+            * (lb * torch.tanh(up / lb))
+        )
 
     @staticmethod
     def backward(ctx, grad):
@@ -174,7 +179,9 @@ class _SiTUOracle(torch.autograd.Function):
         beta, lb = ctx.scalars
         a = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
         u = lb * torch.tanh(up / lb)
-        d_a = torch.cosh(gate / beta).pow(-2) * torch.sigmoid(gate) + a * torch.sigmoid(-gate)
+        d_a = torch.cosh(gate / beta).pow(-2) * torch.sigmoid(gate) + a * torch.sigmoid(
+            -gate
+        )
         d_u = torch.cosh(up / lb).pow(-2)
         return grad * u * d_a, grad * a * d_u, None, None
 
@@ -184,7 +191,12 @@ def situ_glu(gate, up, beta, lb):
     dtype, the PyTorch spelling ``beta * tanh(gate / beta) * sigmoid(gate) * (lb * tanh(up / lb))`` with autograd."""
     if gate.dtype == ORACLE:
         return _SiTUOracle.apply(gate, up, float(beta), float(lb))
-    return beta * torch.tanh(gate / beta) * torch.sigmoid(gate) * (lb * torch.tanh(up / lb))
+    return (
+        beta
+        * torch.tanh(gate / beta)
+        * torch.sigmoid(gate)
+        * (lb * torch.tanh(up / lb))
+    )
 
 
 def _activation(gate, up, limit, activation):
@@ -195,7 +207,9 @@ def _activation(gate, up, limit, activation):
         return F.silu(gc) * uc
     name, beta, lb = activation
     if name != "situ_glu" or limit is not None:
-        raise ValueError("activation is None (SwiGLU) or ('situ_glu', beta, lb) without a limit")
+        raise ValueError(
+            "activation is None (SwiGLU) or ('situ_glu', beta, lb) without a limit"
+        )
     return situ_glu(gate, up, beta, lb)
 
 
@@ -491,7 +505,16 @@ def shared(x, dy, weights, limit, dtype, scale=None):
     return mlp(x, weights, dys, limit, dtype)
 
 
-def combine(shared_y, shared_dx, route, scores, dtype, *, weight_before_down=False, shared_scale=None):
+def combine(
+    shared_y,
+    shared_dx,
+    route,
+    scores,
+    dtype,
+    *,
+    weight_before_down=False,
+    shared_scale=None,
+):
     """The layer's ``y`` and ``dx`` from the shared expert's ``y`` / ``dx`` (``[T, hidden]``) and the routed experts'
     per-route values of :func:`routed` (``y_route``, ``dx_route``), with the FP32 ``scores`` ``[T, topk]``: ``y = shared
     + sum_k s_k y_route_k`` (BF16 routed outputs times FP32 scores promote to FP32; the sum is rounded to BF16 once)
@@ -541,9 +564,21 @@ def layer(
     if shared_w is not None:
         for n in sections:
             scale = None if shared_scale is None else shared_scale[start : start + n]
-            parts.append(shared(x[start : start + n], dy[start : start + n], shared_w, limit, dtype, scale))
+            parts.append(
+                shared(
+                    x[start : start + n],
+                    dy[start : start + n],
+                    shared_w,
+                    limit,
+                    dtype,
+                    scale,
+                )
+            )
             start += n
-        shared_y, shared_dx = torch.cat([p["y"] for p in parts]), torch.cat([p["dx"] for p in parts])
+        shared_y, shared_dx = (
+            torch.cat([p["y"] for p in parts]),
+            torch.cat([p["dx"] for p in parts]),
+        )
     else:
         shared_y = shared_dx = torch.zeros(t, x.shape[1], dtype=dtype, device=x.device)
     y, dx = combine(
@@ -553,7 +588,10 @@ def layer(
         y=y,
         dx=dx,
         d_scores=r["d_scores"].view(t, topk),
-        dw=[*r["dw"], *(torch.stack([p["dw"][i] for p in parts]) for i in range(3) if parts)],
+        dw=[
+            *r["dw"],
+            *(torch.stack([p["dw"][i] for p in parts]) for i in range(3) if parts),
+        ],
     )
     if shared_scale is not None:
         out["d_shared_scale"] = (dy.to(dtype) * shared_y.to(dtype)).sum(-1)
@@ -574,6 +612,12 @@ def epilogue_forward(shared_y, routed_y, scores, dtype, shared_scale=None):
         base = shared_y.double()
         if shared_scale is not None:
             base = base * shared_scale.double()[:, None]
-        return base + (routed_y.double().view(t, topk, -1) * scores.double()[..., None]).sum(1)
-    base = shared_y if shared_scale is None else shared_y.float() * shared_scale.float()[:, None]
+        return base + (
+            routed_y.double().view(t, topk, -1) * scores.double()[..., None]
+        ).sum(1)
+    base = (
+        shared_y
+        if shared_scale is None
+        else shared_y.float() * shared_scale.float()[:, None]
+    )
     return (base + (routed_y.view(t, topk, -1) * scores[..., None]).sum(1)).to(dtype)
