@@ -113,7 +113,7 @@ MODULES: dict[str, dict[str, Any]] = {
 }
 
 # CTAs per SM each persistent record holds at once: the launch bound of its build.
-CTAS_PER_SM = {"fwd": 1, "bwd": 1}
+CTAS_PER_SM = {"fwd": 2, "bwd": 2}
 # Columns of the [7168] weight gradient one CTA of ``dw_reduce`` sums (each CTA adds the G rows of its columns in
 # row order).
 DW_REDUCE_COLUMNS_PER_CTA = 128

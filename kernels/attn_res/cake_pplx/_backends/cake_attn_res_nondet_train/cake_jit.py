@@ -97,7 +97,7 @@ MODULES: dict[str, dict[str, Any]] = {
 }
 
 # CTAs per SM each record holds at once: the launch bound of its build.
-CTAS_PER_SM = {"fwd": 1, "bwd": 1}
+CTAS_PER_SM = {"fwd": 2, "bwd": 2}
 # Launch groups one device holds at once, by the CTAs per SM of a record: (architecture, SM count) -> {CTAs per SM:
 # groups}, as ``cudaOccupancyMaxActiveClusters`` reports them for the shipped programs.  Empty: no device measured.
 RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {}
