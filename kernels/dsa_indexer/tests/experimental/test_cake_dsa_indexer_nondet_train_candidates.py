@@ -1153,7 +1153,9 @@ def test_iota_table_made_on_a_busy_stream_is_waited_for():
             first = cake_backend._IotaBlocks(a, cq, ck, None, 1, device.index)
         with torch.cuda.stream(other):
             second = cake_backend._IotaBlocks(b, cq, ck, None, 1, device.index)
-            assert second.ready is not None  # the table's writes were still queued behind the busy stream
+            assert (
+                second.ready is not None
+            )  # the table's writes were still queued behind the busy stream
             second()
         with torch.cuda.stream(busy):
             first()
@@ -1174,7 +1176,12 @@ def test_iota_call_with_a_max_seqlen_k_below_a_key_segment_stops_before_its_prog
     seg_q, seg_k = (16, 16), (20000, 100)
     T, Tkv = sum(seg_q), sum(seg_k)
     plan = plan_with_candidates(
-        T, Tkv, len(seg_q), top_k=TOP_K, max_seqlen_k=IOTA_W, device=torch.device("cuda")
+        T,
+        Tkv,
+        len(seg_q),
+        top_k=TOP_K,
+        max_seqlen_k=IOTA_W,
+        device=torch.device("cuda"),
     )
     assert plan.iota
     code = f"""
@@ -1202,8 +1209,17 @@ print("COMPLETED", flush=True)
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=900
     )
     lines = out.stdout.strip().splitlines()
-    assert lines and lines[0].startswith("{"), (out.returncode, out.stdout[-2000:], out.stderr[-2000:])
+    assert lines and lines[0].startswith("{"), (
+        out.returncode,
+        out.stdout[-2000:],
+        out.stderr[-2000:],
+    )
     assert json.loads(lines[0])["stages"][0] == cake_policy.CB_IOTA_STAGE
-    assert out.returncode != 0 and "COMPLETED" not in out.stdout, (out.stdout[-2000:], out.stderr[-2000:])
+    assert out.returncode != 0 and "COMPLETED" not in out.stdout, (
+        out.stdout[-2000:],
+        out.stderr[-2000:],
+    )
     text = out.stdout + out.stderr
-    assert "device-side assert" in text or "srcIndex < srcSelectDimSize" in text, text[-3000:]
+    assert "device-side assert" in text or "srcIndex < srcSelectDimSize" in text, text[
+        -3000:
+    ]

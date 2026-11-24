@@ -1432,7 +1432,11 @@ class DSAIndexerNondetRunner:
                 if self._ticket_restore is not None:
                     # the scan binding zeroes the block's word on this stream right before the scan launch
                     at = self._scan_at
-                    launches = (*launches[:at], self._ticket_restore, *launches[at + 1 :])
+                    launches = (
+                        *launches[:at],
+                        self._ticket_restore,
+                        *launches[at + 1 :],
+                    )
                 elif self._tail_at >= 0:
                     # (a caller-owned tail is zeroed by the scan binding anyway)
                     self.ticket_tail.zero_()

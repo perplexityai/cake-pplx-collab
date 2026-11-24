@@ -981,11 +981,13 @@ class DispatchPolicy:
         three-warpgroup rule (``unit_block_q_for``): ``wide_first_k_rule[1]`` up to the rule's ``top_k``, else
         ``wide_first_rule[0]``, or None (the three-warpgroup rule first).  The three-warpgroup unit serves ``top_k``
         from ``l6_rule[1]`` on, so the rule moves calls of exactly that ``top_k`` up to the rule's: on ``sm_100a`` and
-        ``sm_103a`` the ``top_k = 512`` calls of 128 (``sm_100a``) and 64 (``sm_103a``) mean unit tiles and more, which
-        ran the wide program 4-11 % faster than the three-warpgroup and CTA-pair l6 programs (the 16384-query rows over
-        16384 / 65536 keys and the 8-segment packed row of 268757 keys; at 64 mean unit tiles ``sm_100a`` measured
-        parity).  The ``wide_wave_rule`` records (the FP8 form on ``sm_100a`` / ``sm_103a``) decide by waves instead
-        and never read it."""
+        ``sm_103a`` the ``top_k = 512`` calls of 128 (``sm_100a``) and 64 (``sm_103a``) mean unit tiles and more, where
+        the wide program ran 1-4 % (``sm_103a``, 64-448 mean unit tiles) and 7-10 % (``sm_100a``, 128-255 mean unit
+        tiles) faster than the CTA-pair l6 program these calls ran before (16384 queries over 16384-65536 keys, 8 x 2048
+        queries over 8 x 17408 keys and an 8-segment packed call of 16231 queries over 268757 keys; same finalize
+        program in both arms); ``sm_100a`` measured parity at 64 and 96 mean unit tiles, so its floor stays at 128.
+        The ``wide_wave_rule`` records (the FP8 form on ``sm_100a`` / ``sm_103a``) decide by waves instead and never
+        read it."""
         rule = self.wide_first_k_rule
         if rule is not None and int(top_k) <= int(rule[0]):
             return float(rule[1])
