@@ -620,7 +620,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "group": 16,
         "kernel_symbol": "kernel_cake_act_qdq_dfdafec075fee7302f3b",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -647,7 +647,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "group": 16,
         "kernel_symbol": "kernel_cake_act_qdq_851b2cd815bd9f70bd34",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -674,7 +674,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_3fcef995964af95f49e7",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -701,7 +701,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_db936c037a2c98a5db5c",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -728,7 +728,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_c3252edeaabce416eab7",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -755,7 +755,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_48c0dbfaea5f3b9c07f7",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
