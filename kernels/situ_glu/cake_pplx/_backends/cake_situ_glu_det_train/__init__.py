@@ -481,8 +481,9 @@ class CakeSiTUGLUDetFunction(torch.autograd.Function):
     """Autograd of :func:`cake_situ_glu_det`: saves only its inputs (``gate_up_or_gate`` and ``up``; no activation,
     no FP32 intermediate) and recomputes the activation in the backward, so
     ``torch.utils.checkpoint(..., use_reentrant=False)`` sees only the inputs as saved state.  The gradient of a merged
-    ``[R, 2I]`` input is one ``[R, 2I]`` tensor; ``beta`` and ``lb`` get no gradient.  No double backward:
-    differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``."""
+    ``[R, 2I]`` input is one ``[R, 2I]`` tensor; ``beta`` and ``lb`` get no gradient.  No double backward
+    (``once_differentiable``): with ``create_graph=True`` the gradients are constants of the graph, and differentiating
+    them raises ``RuntimeError`` when the upstream gradient requires grad."""
 
     @staticmethod
     def forward(ctx, gate_up_or_gate, up, beta, lb):
