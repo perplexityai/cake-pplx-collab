@@ -66,11 +66,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # segments of 256 columns a warp per pass.
     "cake_situ_glu_det_train_0d8b30c1317b470593ea": {
         "arches": ["sm_100a", "sm_103a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "width"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "beta"], ["parameter", "lb"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_situ_glu_det_train_0d8b30c1317b470593ea",
         "launch": {
-            "block": (1, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
@@ -83,11 +83,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # a row, six segments of 256 columns a warp per pass.
     "cake_situ_glu_det_train_9830620c58096d1142ec": {
         "arches": ["sm_100a", "sm_103a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "d_gate"], ["buffer", "d_up"], ["parameter", "rows"], ["parameter", "width"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "beta"], ["parameter", "lb"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_situ_glu_det_train_9830620c58096d1142ec",
         "launch": {
-            "block": (1, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 0,
