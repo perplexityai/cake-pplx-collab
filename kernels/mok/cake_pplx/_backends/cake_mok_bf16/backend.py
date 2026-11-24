@@ -1440,13 +1440,15 @@ class MoKFunctional:
             )
             if barrier is not None:
                 barrier.launch(())
-            output = self.epilogues.launch_planned(
-                plan.epilogue,
-                values[7],
-                None if before_down else scores,
-                None
+            # The shared scale is passed only with shared_expert="scaled": the
+            # default call keeps its form.
+            scales = (
+                ()
                 if shared_scale is None
-                else self._scale_rows(shared_scale, shared_rows),
+                else (self._scale_rows(shared_scale, shared_rows),)
+            )
+            output = self.epilogues.launch_planned(
+                plan.epilogue, values[7], None if before_down else scores, *scales
             )
         if not save_context:
             return output[:source_count], None
@@ -1536,13 +1538,16 @@ class MoKFunctional:
         if self.weight_before_down:
             output = self.epilogues.backward(values[7], combine)
         else:
+            scales = (
+                ()
+                if shared_scale is None
+                else (self._scale_rows(shared_scale, shared_rows),)
+            )
             output = self.epilogues.forward(
                 values[7],
                 combine,
                 workspace.router_weight_buffer[:shared_rows],
-                None
-                if shared_scale is None
-                else self._scale_rows(shared_scale, shared_rows),
+                *scales,
             )
         if not save_context:
             return output[:source_count], None
@@ -1950,6 +1955,10 @@ class MoKFunctional:
                     helpers.rows(plan.dy_rows, scale_rows),
                     helpers.rows(x_local, scale_rows),
                 )
+            # Passed only with the shared scale: the default call keeps its form.
+            program = (
+                {} if shared_operands is None else {"shared_operands": shared_operands}
+            )
             if barrier is not None:
                 barrier.launch(())
             values = backward_kernel.launch_planned(
@@ -1974,13 +1983,14 @@ class MoKFunctional:
                 schedule.tokens_per_expert,
                 schedule.layout,
                 weight_grad_accumulators,
-                shared_operands=shared_operands,
+                **program,
             )
             # Only dx_shared and the six weight gradients outlive the launch
             # (and, with the shared scale, dh_shared until its row dots are
             # taken); the scratch is dropped before the epilogue output and
             # the score-gradient copy are allocated (see ``_backward_native``).
             d_shared_scale = None
+            del program
             if shared_scale is not None:
                 del shared_operands
                 d_shared_scale = self.shared_scale_kernels.dot(
@@ -1990,9 +2000,9 @@ class MoKFunctional:
             del values
             if barrier is not None:
                 barrier.launch(())
-            dx = self.epilogues.launch_planned(
-                plan.epilogue, dx_shared, shared_scale=scale_rows
-            )
+            # The default call keeps its form (no shared_scale argument).
+            scales = {} if scale_rows is None else {"shared_scale": scale_rows}
+            dx = self.epilogues.launch_planned(plan.epilogue, dx_shared, **scales)
             del dx_shared
         dscores = workspace.d_router_weight_buffer[:source_count].clone()
         return self._backward_result(
@@ -2135,7 +2145,7 @@ class MoKFunctional:
         dx = self.epilogues.backward(
             dx_shared,
             workspace.d_x_routed_buffer[: shared_rows * workspace.topk],
-            scale_rows,
+            *(() if scale_rows is None else (scale_rows,)),
         )
         del dx_shared
         dscores = workspace.d_router_weight_buffer[:source_count].clone()
