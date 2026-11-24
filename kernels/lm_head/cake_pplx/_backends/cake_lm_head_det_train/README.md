@@ -1489,12 +1489,12 @@ workspace; the logits GEMM's output descriptor covers the chunk's rows only.
 On `sm_107a` the log-probability entry's eager calls without a temperature
 (`cake_lm_head_det_train_logprob` and the backend's `forward_logprob` /
 `backward_logprob`, their kept-logits forms included) of one compacted chunk
-of 14 to 182 valid rows (`cake_backend.A_EXTENT_MIN_ROWS` /
-`A_EXTENT_MAX_ROWS`, fewer than the 256 rows
-`cake_backend.A_EXTENT_ROWS_BY_ARCH` names; `cake_backend.a_extent_rows`)
+of 1 to 182 valid rows (`cake_backend.A_EXTENT_WINDOW_BY_ARCH`, fewer than
+the 256 rows `cake_backend.A_EXTENT_ROWS_BY_ARCH` names;
+`cake_backend.a_extent_rows`)
 give their logits GEMMs -- the kept forward's, the label-column arm's forward
 and the `dz` arm's recompute -- an `A` descriptor of 256 rows: the gather
-buffer holds them, its rows past the chunk zero.  The recompute backward's
+buffer holds them (its rows past the chunk: below).  The recompute backward's
 dX GEMM reads its `dz` the same way (`DX_A_EXTENT_ROWS_BY_ARCH`, 256 rows of
 the chunk's logits buffer; not the kept backward, which reads the kept
 logits).  `M`, the output and workspace descriptors, the statistics, every
@@ -1504,19 +1504,41 @@ keeps its bits.  The shipped programs run a chunk of a few rows slower than
 one of 256 rows there (CUPTI, the logits GEMM of a log-probability step at
 14 valid rows 325.6 -> 167.2 us, at 182 valid rows 237.7 -> 175.2 us; at
 242 valid rows the forward measured slower, so the window stops at the
-measured 182).  Measured on the default autograd call: the step at `T` = 16
+measured 182).  From 1 to 12 valid rows the GEMM's time without the extent
+follows where the gathered rows land in memory (the log-probability
+forward's logits GEMM at 1 / 2 / 6 / 8 / 12 valid rows over 24 placements:
+324.8 to 474.7 us; with the 256-row extent 165.4 to 167.2 us).  Measured on
+the default autograd call: the step at `T` = 16
 (15 valid rows) 1450.7 -> 1230.7 us (against 0.3.4: 1402.3 -> 1230.7 us), its
 checkpointed step (the recompute backward and its dX GEMM) 2142.5 -> 1594.8
-us.  The padded rows are zeroed
-where the buffer is allocated (per call) and add up to `2 * 256 * V` bytes of
-logits buffer, which `memory_report` does not count.  The loss entry (its
-zero-weight rows' log-probability pass included), the temperature forms,
+us.  A call that counts its valid rows on the host gathers the gather
+buffer's padded rows too: the count copies a padded index (the valid rows,
+then the last one repeated; `cake_backend.valid_rows`' `pad`) to the device
+in its one copy, so no launch fills them.  Other padded rows are zeroed where
+the buffer is allocated (per call).  They add up to `2 * 256 * V` bytes of
+logits buffer, which `memory_report` does not count.  The loss entry (its zero-weight rows'
+log-probability pass included), the temperature forms,
 the prepared runners (`prepare_lm_head_det_loss`, CUDA graphs included), the
 previous path's plain logits GEMM
 (`logprob_lbl=False` / `logprob_dz=False`), calls with every row valid
 (uncompacted), longer calls, the hidden valid-row count and the other
 architectures keep the chunk's rows: the extent was measured only on the
 default log-probability call.
+
+On `sm_100a` / `sm_103a` the same calls of 1 to 10 valid rows
+(`cake_backend.A_EXTENT_WINDOW_BY_ARCH`) give their logits GEMMs an `A`
+descriptor of 16 rows the same way (no dX extent).  With fewer rows the
+GEMM's time follows where the gathered rows land in memory (the
+log-probability forward's logits GEMM with its `A` operand moved over many
+placements: B200 at 6 / 1 valid rows over 130 placements 338.8 to 428.0 /
+357.6 to 463.5 us, with the 16-row extent 331.9 to 337.8 us at every
+placement; GB300 at 6 / 1 valid rows over 75 placements 337.3 to 451.4 /
+341.9 to 474.7 us, with the 16-row extent 316.1 to 317.8 / 314.2 to 316.5
+us; at 10 valid rows B200 340.2 to 414.4 us and GB300 334.4 to 442.0 us, with
+the extent 337.0 to 339.0 / 317.3 to 318.5 us).  From 11 valid rows on the
+time does not follow placement (B200 at 11 to 15 valid rows 337.7 to 340.1
+us, GB300 at 11 to 13 valid rows 317.5 to 319.4 us), so the window stops at
+10 rows: larger calls keep their rows and their count pads no index.
 
 ## Layout of this package
 

@@ -2640,6 +2640,10 @@ def _hidden_count_memory_temperature(
 # (``row_valid``), the host copy of that mask their one synchronization read back (a CUDA call of at most
 # :data:`HOST_COUNT_MAX_ROWS` rows): the dX finalize scans it on the host (:func:`_row_scan`).
 _HOST_MASK_ATTR = "_cake_host_mask"
+# The attribute under which :func:`valid_rows` keeps, on a valid-row index it padded (``extent``), the padded index of
+# the extent's rows whose first entries are that index (a view of it): the gather of a plan with a padded A extent
+# (:attr:`Plan.a_rows`) reads it to fill every row of the padded gather buffer (:func:`_bind_row_index`).
+_PAD_INDEX_ATTR = "_cake_pad_index"
 # The attribute under which the hidden valid-row count of a one-chunk call (:func:`_hidden_count_begin`) keeps, on the
 # bool valid-row mask it returns, the inclusive int32 scan of that mask its compaction already formed on the device
 # (``pos``): the dX finalize reads it (:func:`_row_scan`) instead of scanning the mask again in every backward.
@@ -2672,7 +2676,7 @@ def _row_scan(row_valid: torch.Tensor) -> torch.Tensor:
 
 
 def valid_rows(
-    labels: torch.Tensor, *, mask: bool = False
+    labels: torch.Tensor, *, mask: bool = False, extent: Optional[tuple[int, str]] = None
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """``(row_index, row_valid)``.  ``row_index`` is ``None`` when every row is valid (or ``T == 0``: the uncompacted
     path, no gather cost), else the ascending int64 index of the valid rows (``labels >= 0``; ``-100`` is the ignore
@@ -2685,7 +2689,11 @@ def valid_rows(
     :data:`HOST_COUNT_MAX_ROWS` rows reads the mask back instead (the one synchronization) and forms the same index on
     the host, copied back to the labels' device: no count or select kernels; with ``mask=True`` the returned mask
     keeps that host copy (:data:`_HOST_MASK_ATTR`, ``T`` host bytes), which the dX finalize scans on the host
-    (:func:`_row_scan`)."""
+    (:func:`_row_scan`).  ``extent`` (the eager log-probability forms' ``(chunk, arch)``, :func:`_a_extent_of`): such a
+    host count whose valid rows take the architecture's padded A extent (:func:`a_extent_rows`, the plan's
+    :attr:`Plan.a_rows`) copies an index of the extent's rows instead -- the valid rows, then the last one repeated --
+    and returns its first entries (the same index, a view) carrying the whole (:data:`_PAD_INDEX_ATTR`); other counts,
+    and a count on the device, pad nothing."""
     T = int(labels.numel())
     if T == 0:
         return None, None
@@ -2697,6 +2705,16 @@ def valid_rows(
             return None, None
         if mask:
             setattr(valid, _HOST_MASK_ATTR, host)
+        n = int(index.numel())
+        pad = a_extent_rows(n, *extent) if extent is not None else 0
+        if pad:
+            # the padded index in the same one copy: the gather fills the padded A extent's rows from it
+            padded = torch.cat((index, index[-1:].expand(pad - n))).to(
+                labels.device, non_blocking=True
+            )
+            index = padded[:n]
+            setattr(index, _PAD_INDEX_ATTR, padded)
+            return index, (valid if mask else None)
         # pageable host memory: the copy is staged before it returns, so the host index may go right away
         return index.to(labels.device, non_blocking=True), (valid if mask else None)
     index = valid.nonzero().squeeze(1)
@@ -2705,9 +2723,11 @@ def valid_rows(
     return index, (valid if mask else None)
 
 
-def valid_row_index(labels: torch.Tensor) -> Optional[torch.Tensor]:
-    """The valid-row index of :func:`valid_rows` alone (``None`` when every row is valid)."""
-    return valid_rows(labels)[0]
+def valid_row_index(
+    labels: torch.Tensor, *, extent: Optional[tuple[int, str]] = None
+) -> Optional[torch.Tensor]:
+    """The valid-row index of :func:`valid_rows` alone (``None`` when every row is valid; ``extent`` as there)."""
+    return valid_rows(labels, extent=extent)[0]
 
 
 # --------------------------------------------------------------------------- zero-weight split (loss entry)
@@ -4645,28 +4665,37 @@ class _KeptPlan(Plan):
 # The padded A extent of a small compacted one-chunk call of the log-probability entry's eager forms without a
 # temperature (the plans :func:`prepare_lm_head_det_loss` builds with ``_a_extent``: the forward, the kept forward, the
 # recompute backward and the kept backward of :func:`forward_logprob` / :func:`backward_logprob` and their kept forms;
-# not the loss entry's zero-weight rows' log-probability pass, :func:`_zero_weight_logp`), per architecture: the
-# logits GEMMs (the kept forward's, the label-column arm's forward and the ``dz`` arm's recompute; not the previous
-# path's plain logits GEMM of ``logprob_lbl=False`` / ``logprob_dz=False``) of a chunk of
-# :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` valid rows read their A operand -- the gathered rows --
-# through a tensor map of this many rows, the rows past the chunk zero; on the architectures of
-# :data:`DX_A_EXTENT_ROWS_BY_ARCH` the recompute backward's dX GEMM reads the chunk's ``dz`` the same way.  On R200
-# (sm_107a) the shipped programs run a chunk of a few rows slower than one of 256 rows: the A operand's row extent, not
-# the row count, sets their time there (CUPTI, us, the logits GEMM of a log-probability forward + backward step at 14 /
-# 182 / 242 valid rows: 325.6 -> 167.2 / 237.7 -> 175.2 / 178.6 -> 178.6; the default autograd step at T = 16 / 192,
-# 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3, against 0.3.4 at T = 16 1402.3 -> 1230.7; its checkpointed
-# step, which runs the recompute backward and its dX GEMM, at T = 16 2142.5 -> 1594.8).  The row window and the forms
-# are the measured ones: the forward at 242 valid rows measured slower with the extent, no call below 14
-# valid rows was measured, and the loss entry (its zero-weight rows' log-probability pass included), the temperature
-# forms and the prepared runners (CUDA graphs included) were not measured with the extent, so they keep the chunk's
-# rows.  B200 and GB300 keep the chunk's rows (a 16-row extent made no call faster there).  ``M`` (the epilogues' row
-# bound), ``C``, the statistics, every per-row operand, the grid and the K slices keep the chunk's rows, so the extra
-# rows only form accumulator rows that no epilogue stores and no per-row read reaches: every output keeps its bits.  At
-# most a chunk (``pad <= chunk``).
-A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
+# not the loss entry's zero-weight rows' log-probability pass, :func:`_zero_weight_logp`), per architecture: the logits
+# GEMMs (the kept forward's, the label-column arm's forward and the ``dz`` arm's recompute; not the previous path's
+# plain logits GEMM of ``logprob_lbl=False`` / ``logprob_dz=False``) of a chunk whose valid rows lie in the
+# architecture's window (:data:`A_EXTENT_WINDOW_BY_ARCH`) read their A operand -- the gathered rows -- through a tensor
+# map of this many rows (the rows past the chunk: see below); on the architectures of :data:`DX_A_EXTENT_ROWS_BY_ARCH` the
+# recompute backward's dX GEMM reads the chunk's ``dz`` the same way.  With fewer rows than the extent the shipped
+# programs' logits GEMM is slow or its time follows where the gathered rows land in memory; with the extent it is not
+# (CUPTI, us, the log-probability forward's logits GEMM, the gathered rows moved over many placements): B200 at 6 / 1
+# valid rows over 130 placements 338.8-428.0 / 357.6-463.5, with the 16-row extent 331.9-337.8 at every placement; GB300
+# at 6 / 1 valid rows over 75 placements 337.3-451.4 / 341.9-474.7, with the 16-row extent 316.1-317.8 / 314.2-316.5;
+# at 10 valid rows B200 340.2-414.4 and GB300 334.4-442.0, with the extent 337.0-339.0 / 317.3-318.5; from 11 valid rows
+# on the time does not follow placement (B200 at 11 to 15 valid rows 337.7-340.1, GB300 at 11 to 13 317.5-319.4), so
+# B200's and GB300's windows stop at 10 rows and the calls above them keep their rows (no padded index either);
+# R200 (sm_107a) at 1 / 2 / 6 / 8 / 12 valid rows over 24 placements 324.8-474.7, with the 256-row extent
+# 165.4-167.2.  On R200 the extent also sets the time at more rows (a log-probability forward + backward step's logits
+# GEMM at 14 / 182 / 242 valid rows: 325.6 -> 167.2 / 237.7 -> 175.2 / 178.6 -> 178.6; the default autograd step at
+# T = 16 / 192, 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3, against 0.3.4 at T = 16 1402.3 -> 1230.7; its
+# checkpointed step, which runs the recompute backward and its dX GEMM, at T = 16 2142.5 -> 1594.8); the forward at 242
+# valid rows measured slower with the extent, so R200's window stops at 182.  The loss entry (its zero-weight rows'
+# log-probability pass included), the temperature forms and the prepared runners (CUDA graphs included) were not
+# measured with the extent, so they keep the chunk's rows.  ``M`` (the epilogues' row bound), ``C``, the statistics,
+# every per-row operand, the grid and the K slices keep the chunk's rows, so the extra rows only form accumulator rows
+# that no epilogue stores and no per-row read reaches: every output keeps its bits.  At most a chunk
+# (``pad <= chunk``).  The gather writes the rows past the chunk too when the call's valid-row index is padded
+# (:func:`valid_rows` ``extent``: a count on the host appends copies of the last valid row, in the same host-to-device
+# copy), so no launch fills them; else (a count on the device, a caller's index) they are zeroed per call
+# (:func:`_bind_a_extents`).  Either way they hold finite values that form only accumulator rows no epilogue stores.
+A_EXTENT_ROWS_BY_ARCH = {"sm_100a": 16, "sm_103a": 16, "sm_107a": 256}
 DX_A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
-A_EXTENT_MIN_ROWS = 14
-A_EXTENT_MAX_ROWS = 182
+# the valid rows (inclusive) of a chunk that takes its architecture's extent
+A_EXTENT_WINDOW_BY_ARCH = {"sm_100a": (1, 10), "sm_103a": (1, 10), "sm_107a": (1, 182)}
 
 
 def a_extent_pad(chunk: int, arch: Optional[str], *, dx: bool = False) -> int:
@@ -4682,13 +4711,32 @@ def a_extent_rows(
     rows: int, chunk: int, arch: Optional[str], *, dx: bool = False
 ) -> int:
     """The padded A extent (rows) of a compacted one-chunk call of ``rows`` valid rows on ``arch``
-    (:func:`a_extent_pad`) when ``rows`` lies in the window :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` and
-    below the extent (``dx``: the dX GEMM's extent, the same window); else 0 (the chunk keeps its own rows)."""
+    (:func:`a_extent_pad`) when ``rows`` lies in the architecture's window (:data:`A_EXTENT_WINDOW_BY_ARCH`) and below
+    the extent (``dx``: the dX GEMM's extent, the same window); else 0 (the chunk keeps its own rows)."""
     rows = int(rows)
-    if rows <= 0 or not A_EXTENT_MIN_ROWS <= rows <= A_EXTENT_MAX_ROWS:
+    window = A_EXTENT_WINDOW_BY_ARCH.get(arch) if arch is not None else None
+    if rows <= 0 or window is None or not window[0] <= rows <= window[1]:
         return 0
     pad = a_extent_pad(chunk, arch, dx=dx)
     return pad if rows < pad else 0
+
+
+# CUDA device index -> its architecture tag ("" when unsupported), for :func:`_a_extent_of`
+_A_EXTENT_ARCH: dict[int, str] = {}
+
+
+def _a_extent_of(device: torch.device, chunk: int, backend: str) -> Optional[tuple[int, str]]:
+    """The ``extent`` of :func:`valid_rows` for an eager log-probability call on ``device`` with chunks of ``chunk``
+    rows: ``(chunk, arch)`` of the device's architecture when it has a padded A extent for that chunk
+    (:func:`a_extent_pad`), else None (no padding; also off the ``cake`` backend or off CUDA).  A count whose rows take
+    the extent (:func:`a_extent_rows`) pads its index; the plan of the same rows finds it (:func:`_bind_row_index`)."""
+    if backend != "cake" or device.type != "cuda":
+        return None
+    index = torch.cuda.current_device() if device.index is None else int(device.index)
+    arch = _A_EXTENT_ARCH.get(index)
+    if arch is None:
+        arch = _A_EXTENT_ARCH.setdefault(index, arch_for(torch.device("cuda", index)) or "")
+    return (int(chunk), arch) if arch and a_extent_pad(chunk, arch) else None
 
 
 def make_plan(
@@ -5553,16 +5601,37 @@ def _bind_a_extents(
     ``t["x_c"]`` / ``t["logits"]`` where they were allocated with that many rows: ``t["x_a"]`` / ``t["logits_a"]``
     the whole buffer, and ``t["x_c"]`` / ``t["logits"]`` its first ``rows`` rows (the chunk's, as without the
     padding).  ``zero``: the rows from ``rows`` on are zeroed here, once per buffer -- no launch writes them (the
-    gather, the logits GEMMs' ``C`` views and the row kernels cover the first ``rows``)."""
+    gather, the logits GEMMs' ``C`` views and the row kernels cover the first ``rows``) -- except the gather buffer's
+    when the call's padded index is bound (``t["row_index_a"]``, :func:`_bind_row_index`): its gather writes them."""
     for name, padded, pad in (
         ("x_c", "x_a", plan.a_rows),
         ("logits", "logits_a", plan.dx_a_rows),
     ):
         buf = t.get(name)
         if pad and buf is not None and int(buf.shape[0]) == pad > rows:
-            if zero:
+            if zero and not (name == "x_c" and t.get("row_index_a") is not None):
                 buf[rows:].zero_()
             t[padded], t[name] = buf, buf[:rows]
+
+
+def _bind_row_index(plan: Plan, t: dict[str, Any], row_index: torch.Tensor) -> None:
+    """Bind a compacted call's valid-row index ``t["row_index"]`` and, for a plan with a padded A extent
+    (:attr:`Plan.a_rows`) whose index carries a padded index of that many entries (:data:`_PAD_INDEX_ATTR`), that
+    index as ``t["row_index_a"]``: the gather then fills the whole padded gather buffer (:func:`_gather_values`)."""
+    t["row_index"] = row_index
+    padded = getattr(row_index, _PAD_INDEX_ATTR, None) if plan.a_rows else None
+    if padded is not None and int(padded.numel()) == plan.a_rows:
+        t["row_index_a"] = padded
+
+
+def _gather_values(t: dict[str, Any], plan: Plan, row0: int, rows_c: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(idx, out)`` of chunk ``(row0, rows_c)``'s row gather: the chunk's index entries into the gather buffer's first
+    ``rows_c`` rows, or with a bound padded index (:func:`_bind_row_index`) and the padded gather buffer
+    (``t["x_a"]``, :func:`_bind_a_extents`) that index into the whole buffer (one chunk: ``row0 == 0``)."""
+    idx_a, x_a = t.get("row_index_a"), t.get("x_a")
+    if plan.a_rows and idx_a is not None and x_a is not None and int(x_a.shape[0]) == int(idx_a.numel()):
+        return idx_a, x_a
+    return t["row_index"][row0 : row0 + rows_c], t["x_c"][:rows_c]
 
 
 def _logits_a(t: dict[str, Any], plan: Plan, x_chunk: torch.Tensor) -> torch.Tensor:
@@ -6198,10 +6267,11 @@ def stage_values(
             )
             return values
         row0, rows_c = plan.chunks[index]
+        idx, out = _gather_values(t, plan, row0, rows_c)
         values.update(
             src=t["X"],
-            idx=t["row_index"][row0 : row0 + rows_c],
-            out=t["x_c"][:rows_c],
+            idx=idx,
+            out=out,
             rows_c=int(rows_c),
             row0=int(row0),
             first_chunk=int(index == 0),
@@ -6540,9 +6610,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             values.update(src=t[index + "_full"], idx=t["row_index"], out=t[index])
             return values
         row0, rows_c = plan.chunks[index]
-        values.update(
-            src=t["X"], idx=t["row_index"][row0 : row0 + rows_c], out=t["x_c"][:rows_c]
-        )
+        idx, out = _gather_values(t, plan, row0, rows_c)
+        values.update(src=t["X"], idx=idx, out=out)
         return values
     if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
         acc = t["dx_acc"] if index == "dx" else t["dw_acc"]
@@ -8100,7 +8169,7 @@ def prepare_lm_head_det_loss(
     if plan.dx_ws_slabs:
         t["dx_ws"] = carve("dx_ws", torch.float32, (plan.dx_ws_slabs, rows, H))
     if plan.compact:
-        t["row_index"] = row_index
+        _bind_row_index(plan, t, row_index)
         t["x_c"] = carve(
             "x_c", torch.bfloat16, (max(rows, plan.a_rows), H)
         )  # the chunk's valid X rows, gathered per chunk
@@ -8579,7 +8648,7 @@ def prepare_lm_head_det_loss_temperature(
     if plan.dx_ws_slabs:
         t["dx_ws"] = carve("dx_ws", torch.float32, (plan.dx_ws_slabs, rows, H))
     if plan.compact:
-        t["row_index"] = row_index
+        _bind_row_index(plan, t, row_index)
         t["x_c"] = carve(
             "x_c", torch.bfloat16, (max(rows, plan.a_rows), H)
         )  # the chunk's valid X rows, gathered per chunk
@@ -9168,7 +9237,7 @@ class _Binding:
                 "the remembered binding was planned for another set of valid rows"
             )
         if plan.compact:
-            t["row_index"] = row_index
+            _bind_row_index(plan, t, row_index)
 
     def _call_rlab(
         self,
@@ -11403,9 +11472,15 @@ def forward_logprob(
         row_index = hc.row_index()
     elif keep is not None and compact:
         # the one-chunk kept logits' count keeps its valid-row mask for the kept backward (the same count)
-        row_index, row_valid = valid_rows(labels, mask=True)
+        row_index, row_valid = valid_rows(
+            labels, mask=True, extent=_a_extent_of(X.device, problem.chunk, backend)
+        )
     else:
-        row_index = valid_row_index(labels) if compact else None
+        row_index = (
+            valid_row_index(labels, extent=_a_extent_of(X.device, problem.chunk, backend))
+            if compact
+            else None
+        )
     if row_index is not None and row_index.numel() == 0:  # every row ignored
         return _empty_forward(
             problem, X, need_dx=False, need_dw=False, row_index=row_index
@@ -11636,7 +11711,11 @@ def backward_logprob(
             row_valid = hc.valid if (row_index is not None and fused_dx) else None
         else:
             row_index, row_valid = (
-                valid_rows(labels, mask=fused_dx) if compact else (None, None)
+                valid_rows(
+                    labels, mask=fused_dx, extent=_a_extent_of(X.device, problem.chunk, backend)
+                )
+                if compact
+                else (None, None)
             )
     rows = T if row_index is None else int(row_index.numel())
     if rows == 0:  # no rows, or every row ignored
@@ -12353,7 +12432,9 @@ def forward_logprob_keep(
             row_valid = hc.valid if row_index is not None else None
         elif compact:
             # the valid-row mask of the count is kept for the kept backward (the same count)
-            row_index, row_valid = valid_rows(labels, mask=True)
+            row_index, row_valid = valid_rows(
+                labels, mask=True, extent=_a_extent_of(X.device, problem.chunk, backend)
+            )
         else:
             row_index = None
     elif row_index is not None:
@@ -12520,7 +12601,11 @@ def backward_logprob_keep(
     else:
         _labels_c = None
         row_index, row_valid = (
-            valid_rows(labels, mask=fused_dx) if compact else (None, None)
+            valid_rows(
+                labels, mask=fused_dx, extent=_a_extent_of(X.device, problem.chunk, backend)
+            )
+            if compact
+            else (None, None)
         )
     rows = T if row_index is None else int(row_index.numel())
     if rows == 0:  # no rows, or every row ignored

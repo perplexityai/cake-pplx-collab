@@ -5449,9 +5449,10 @@ def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
 
 
 def test_a_extent_rule():
-    """The padded A extents of a small compacted one-chunk call (:func:`a_extent_rows`): on sm_107a the logits GEMMs'
-    and the dX GEMM's A extent is 256 rows for a chunk of ``A_EXTENT_MIN_ROWS`` (14) to ``A_EXTENT_MAX_ROWS`` (182)
-    valid rows; fewer or more rows, a chunk smaller than the extent and the other architectures keep their rows
+    """The padded A extents of a small compacted one-chunk call (:func:`a_extent_rows`), in each architecture's window
+    (``A_EXTENT_WINDOW_BY_ARCH``): on sm_107a the logits GEMMs' and the dX GEMM's A extent is 256 rows for a chunk of 1
+    to 182 valid rows; on sm_100a / sm_103a the logits GEMMs' A extent is 16 rows for 1 to 10 valid rows (no dX
+    extent); more rows, a chunk smaller than the extent and the other architectures keep their rows
     (:func:`a_extent_pad`: the buffer extent alone).  ``make_plan`` records them (:attr:`Plan.a_rows` /
     :attr:`Plan.dx_a_rows`) with ``a_extent`` (the eager log-prob forms) for a compacted one-chunk plan only -- a kept
     plan, a forward with the label-column arm, a backward with the ``dz`` arm; not for an uncompacted one, two chunks,
@@ -5459,20 +5460,30 @@ def test_a_extent_rule():
     kept logits; without ``a_extent`` (the loss entry, the temperature forms, a prepared runner) every plan keeps its
     rows.  ``workspace_layout`` widens only the ``x_c`` / ``logits`` regions for them."""
     rule = cake_backend.a_extent_rows
-    assert cake_backend.A_EXTENT_ROWS_BY_ARCH == {"sm_107a": 256}
+    assert cake_backend.A_EXTENT_ROWS_BY_ARCH == {"sm_100a": 16, "sm_103a": 16, "sm_107a": 256}
     assert cake_backend.DX_A_EXTENT_ROWS_BY_ARCH == {"sm_107a": 256}
-    assert (cake_backend.A_EXTENT_MIN_ROWS, cake_backend.A_EXTENT_MAX_ROWS) == (14, 182)
+    assert cake_backend.A_EXTENT_WINDOW_BY_ARCH == {
+        "sm_100a": (1, 10),
+        "sm_103a": (1, 10),
+        "sm_107a": (1, 182),
+    }
     pad_of = cake_backend.a_extent_pad
     assert pad_of(4096, "sm_107a") == pad_of(4096, "sm_107a", dx=True) == 256
     assert pad_of(256, "sm_107a") == 256 and pad_of(255, "sm_107a") == 0
-    for arch in ("sm_100a", "sm_103a", "sm_120a", None):
+    for arch in ("sm_100a", "sm_103a"):
+        assert pad_of(4096, arch) == 16 and pad_of(4096, arch, dx=True) == 0, arch
+    for arch in ("sm_120a", None):
         assert pad_of(4096, arch) == pad_of(4096, arch, dx=True) == 0, arch
     rows = (0, 1, 13, 14, 15, 100, 182, 183, 255, 256)
-    want = [0, 0, 0, 256, 256, 256, 256, 0, 0, 0]
+    want = [0, 256, 256, 256, 256, 256, 256, 0, 0, 0]
     assert [rule(r, 4096, "sm_107a") for r in rows] == want
     assert [rule(r, 4096, "sm_107a", dx=True) for r in rows] == want
     assert rule(14, 255, "sm_107a") == 0 and rule(14, 256, "sm_107a") == 256
-    for arch in ("sm_100a", "sm_103a", "sm_120a", None):
+    for arch in ("sm_100a", "sm_103a"):
+        assert [rule(r, 4096, arch) for r in rows] == [0, 16, 0, 0, 0, 0, 0, 0, 0, 0], arch
+        assert rule(10, 4096, arch) == 16 and rule(11, 4096, arch) == 0, arch
+        assert [rule(r, 4096, arch, dx=True) for r in rows] == [0] * len(rows), arch
+    for arch in ("sm_120a", None):
         assert [rule(r, 4096, arch) for r in rows] == [0] * len(rows), arch
         assert [rule(r, 4096, arch, dx=True) for r in rows] == [0] * len(rows), arch
     H, V = 6144, 154880
@@ -5499,14 +5510,16 @@ def test_a_extent_rule():
 
     assert pads(plan(20, 15)) == (256, 256)
     assert pads(plan(20, 14)) == (256, 256)
-    assert pads(plan(20, 13)) == (0, 0)  # below the window
-    assert pads(plan(20, 1)) == (0, 0)
+    assert pads(plan(20, 13)) == (256, 256)  # the window starts at 1 row
+    assert pads(plan(20, 1)) == (256, 256)
     assert pads(plan(300, 182)) == (256, 256)
     assert pads(plan(300, 183)) == (0, 0)  # above the window
     assert pads(plan(300, 255)) == (0, 0)
     assert pads(plan(300, 256)) == (0, 0)
-    for arch in ("sm_100a", "sm_103a", None):
-        assert pads(plan(20, 15, arch=arch)) == (0, 0), arch
+    for arch in ("sm_100a", "sm_103a"):
+        assert pads(plan(20, 10, arch=arch)) == (16, 0), arch
+        assert pads(plan(20, 11, arch=arch)) == (0, 0), arch
+    assert pads(plan(20, 15, arch=None)) == (0, 0)
     assert pads(plan(20, None)) == (0, 0)  # uncompacted: A is the caller's X
     assert pads(plan(300, 150, C=128)) == (0, 0)  # two chunks
     assert pads(plan(20, 15, C=128)) == (0, 0)  # 256 rows exceed the chunk
@@ -5819,6 +5832,87 @@ def test_a_extent_runner_operands(monkeypatch):
     t = {"x_c": torch.zeros((5, 8), dtype=torch.bfloat16)}
     cake_backend._bind_a_extents(p, t, 5)
     assert "x_a" not in t
+
+
+def test_a_extent_padded_index(monkeypatch):
+    """A host count with ``extent`` (:func:`valid_rows`; the eager log-probability forms pass ``(chunk, arch)``,
+    :func:`_a_extent_of`) whose valid rows take the padded A extent (:func:`a_extent_rows`) gives the same index as
+    without it, a view of an index of the extent's rows -- the valid rows, then the last one repeated -- carried as
+    ``_PAD_INDEX_ATTR``; valid rows outside the architecture's window, no valid row, every row valid and a count on the
+    device (more than ``HOST_COUNT_MAX_ROWS`` rows, or off CUDA) pad nothing.  A plan with the padded A extent binds that index (:func:`_bind_row_index`; only
+    when its length is the extent), its gather fills every row of the padded gather buffer from it
+    (:func:`_gather_values`) and :func:`_bind_a_extents` launches no fill for that buffer; without it the gather writes
+    the chunk's rows and the tail is zeroed."""
+    attr = cake_backend._PAD_INDEX_ATTR
+    monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {"sm_100a": 16})
+    monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", {"sm_100a": (2, 5)})
+    ext = (4096, "sm_100a")
+    labels = torch.full((12,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    labels[[1, 4, 6]] = 3
+    plain = cake_backend.valid_row_index(labels)
+    idx, mask = cake_backend.valid_rows(labels, mask=True, extent=ext)
+    assert idx.tolist() == plain.tolist() == [1, 4, 6] and mask.tolist() == (labels >= 0).tolist()
+    assert getattr(plain, attr, None) is None
+    padded = getattr(idx, attr, None)
+    if DEV.type == "cuda":
+        assert padded.tolist() == [1, 4, 6] + [6] * 13 and padded.device == labels.device
+        assert idx.data_ptr() == padded.data_ptr()
+        assert getattr(cake_backend.valid_row_index(labels, extent=ext), attr).tolist() == padded.tolist()
+    else:
+        assert padded is None  # a count off CUDA runs on the device path
+    one = torch.full((12,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    one[5] = 2  # 1 valid row: below the window (2, 5)
+    six = torch.full((12,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    six[:6] = 2  # 6 valid rows: above it
+    for other, want in (
+        (cake_backend.valid_row_index(one, extent=ext), [5]),
+        (cake_backend.valid_row_index(six, extent=ext), list(range(6))),
+        (cake_backend.valid_row_index(labels, extent=(8, "sm_100a")), [1, 4, 6]),  # extent > chunk
+        (cake_backend.valid_row_index(labels, extent=(4096, "sm_120a")), [1, 4, 6]),  # no extent there
+        (cake_backend.valid_row_index(labels), [1, 4, 6]),
+    ):
+        assert other.tolist() == want and getattr(other, attr, None) is None
+    none = cake_backend.valid_row_index(torch.full((4,), IGNORE_INDEX, device=DEV), extent=ext)
+    assert none.numel() == 0 and getattr(none, attr, None) is None
+    assert cake_backend.valid_row_index(torch.ones(4, dtype=torch.int64, device=DEV), extent=ext) is None
+    long = torch.full((cake_backend.HOST_COUNT_MAX_ROWS + 1,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    long[[2, 9]] = 1
+    on_device = cake_backend.valid_row_index(long, extent=ext)
+    assert on_device.tolist() == [2, 9] and getattr(on_device, attr, None) is None
+    assert cake_backend._a_extent_of(torch.device("cpu"), 4096, "cake") is None
+    if DEV.type == "cuda":
+        assert cake_backend._a_extent_of(DEV, 4096, "reference") is None
+        arch = cake_backend.arch_for(DEV)
+        want = (4096, arch) if arch == "sm_100a" else None  # the patched tables: an extent on sm_100a only
+        assert cake_backend._a_extent_of(DEV, 4096, "cake") == want
+    # binding and gather (host tensors stand in for the device's; the rule is the same)
+    host = torch.tensor([1, 4, 6] + [6] * 13, dtype=torch.int64)
+    index = host[:3]
+    setattr(index, attr, host)
+    X = torch.arange(12 * 8, dtype=torch.float32).view(12, 8).to(torch.bfloat16)
+    p = SimpleNamespace(a_rows=16, dx_a_rows=0)
+    for a_rows, bound in ((16, True), (8, False), (0, False)):
+        t = {}
+        cake_backend._bind_row_index(SimpleNamespace(a_rows=a_rows), t, index)
+        assert t["row_index"] is index and (t.get("row_index_a") is host) == bound, a_rows
+    t = {"X": X, "x_c": torch.full((16, 8), 7.0, dtype=torch.bfloat16)}
+    cake_backend._bind_row_index(p, t, index)
+    buf = t["x_c"]
+    cake_backend._bind_a_extents(p, t, 3)
+    assert t["x_a"] is buf and t["x_c"].shape == (3, 8) and bool((buf == 7).all())  # no fill
+    idx_g, out = cake_backend._gather_values(t, p, 0, 3)
+    assert idx_g is host and out is buf
+    cake_backend._gather_rows(dict(src=X, idx=idx_g, out=out))
+    assert torch.equal(_bits(buf[:3]), _bits(X[[1, 4, 6]]))
+    assert torch.equal(_bits(buf[3:]), _bits(X[6].expand(13, 8)))  # the last valid row repeated
+    # without the padded index: the chunk's rows, the tail zeroed
+    t = {"X": X, "x_c": torch.full((16, 8), 7.0, dtype=torch.bfloat16)}
+    cake_backend._bind_row_index(p, t, host[:3].clone())
+    buf = t["x_c"]
+    cake_backend._bind_a_extents(p, t, 3)
+    assert "row_index_a" not in t and not bool(_bits(buf[3:]).any())
+    idx_g, out = cake_backend._gather_values(t, p, 0, 3)
+    assert idx_g.tolist() == [1, 4, 6] and out.shape == (3, 8) and out.data_ptr() == buf.data_ptr()
 
 
 _HIDDEN_COUNT_HOST_CASES = [  # (T, C, objective, entry, ignored fraction): three chunks + tail, T < C, T = C + 1, T = C
@@ -11051,16 +11145,15 @@ def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):
     name, _ = cake_backend.record_for(CUDA)
     stages = cake_jit.registered_stages_with_temperature(name)
     has_tau = all(s in stages for s in TAU_STAGES)
-    window = (cake_backend.A_EXTENT_MIN_ROWS, cake_backend.A_EXTENT_MAX_ROWS)
     tables = {
-        "off": ({}, {}, window),
+        "off": ({}, {}, {}),
         "shipped": (
             dict(cake_backend.A_EXTENT_ROWS_BY_ARCH),
             dict(cake_backend.DX_A_EXTENT_ROWS_BY_ARCH),
-            window,
+            dict(cake_backend.A_EXTENT_WINDOW_BY_ARCH),
         ),
         # the whole window below the extent, so the calls of 10 and 190 valid rows pad too
-        "256": ({arch: 256}, {arch: 256}, (1, 255)),
+        "256": ({arch: 256}, {arch: 256}, {arch: (1, 255)}),
     }
     bound: list = []
     bind = cake_backend._bind_a_extents
@@ -11072,11 +11165,10 @@ def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):
     monkeypatch.setattr(cake_backend, "_bind_a_extents", binding)
 
     def use(table):
-        a, dx, (lo, hi) = tables[table]
+        a, dx, window = tables[table]
         monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", a)
         monkeypatch.setattr(cake_backend, "DX_A_EXTENT_ROWS_BY_ARCH", dx)
-        monkeypatch.setattr(cake_backend, "A_EXTENT_MIN_ROWS", lo)
-        monkeypatch.setattr(cake_backend, "A_EXTENT_MAX_ROWS", hi)
+        monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", window)
         cake_backend.BINDING_CACHE.clear()
         opt_in.BINDING_CACHE.clear()
         bound.clear()
