@@ -358,11 +358,16 @@ def grid(stage: str, batch: int, heads: int, seqlen_q: int, seqlen_kv: int) -> t
 # length)`` holds the calls with ``least <= B * H`` (and ``B * H <= most`` unless ``most`` is None) and at least
 # ``length`` keys; the regions route only calls with at least as many queries as keys.  Every measured call inside
 # a region was FASTER than 0.1.4 in every counted round of the crossover run, beyond the identical-kernel controls'
-# single-round noise, and every bound is a measured value (``B * H`` 1, 4, 16, 32 and 128; lengths 256 to 8192).  An
-# empty tuple routes no call: the ``sm_100a`` causal pair build ships and no call takes it.
+# single-round noise, and every bound is a measured value (``B * H`` 1, 4, 16, 32 and 128; lengths 256 to 8192).  The
+# ``sm_103a`` causal region ``(32, None, 8192)`` comes from a later measurement against the 1-CTA route (``B * H`` 16,
+# 32, 64, 128 and 256 with 4096, 8192 and 16384 keys): every measured call inside it was faster in every counted round
+# of both replicate runs, in eager calls and in CUDA-graph replays, beyond the identical-kernel controls' noise; at
+# ``B * H`` 128 and 256 with 4096 keys, and at ``B * H`` 16 with 8192 keys, not every run was, so calls with fewer
+# keys or fewer heads keep the 1-CTA route.  An empty tuple routes no call: the ``sm_100a`` causal pair build ships
+# and no call takes it.
 PAIR_REGIONS: dict[str, dict[bool, tuple[tuple[int, int | None, int], ...]]] = {
     "sm_100a": {False: ((1, 1, 4096), (1, 4, 8192), (128, None, 8192)), True: ()},
-    "sm_103a": {False: ((1, 4, 2048), (1, None, 8192)), True: ((1, 4, 2048),)},
+    "sm_103a": {False: ((1, 4, 2048), (1, None, 8192)), True: ((1, 4, 2048), (32, None, 8192))},
     "sm_107a": {
         False: ((1, 4, 2048), (1, None, 4096)),
         True: ((1, 4, 2048), (1, 16, 4096), (1, None, 8192)),
