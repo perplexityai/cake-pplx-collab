@@ -134,7 +134,7 @@ def is_cake_route_weight_scale_det_train_supported(device: torch.device) -> bool
     Returns
     -------
     bool
-        ``True`` for a CUDA device of compute capability (10, 0), (10, 3) or (10, 7).
+        ``True`` for a CUDA device of compute capability (10, 0) or (10, 3).
     """
 
     return _backend().is_cake_route_weight_scale_det_train_supported(device)
