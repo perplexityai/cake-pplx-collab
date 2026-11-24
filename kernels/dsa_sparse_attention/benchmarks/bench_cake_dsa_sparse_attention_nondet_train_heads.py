@@ -47,8 +47,9 @@ Arms (each times its own whole call, glue included):
   version, file and the backward backend it selected).
 * ``fa4``: FlashAttention-4's sparse MLA kernels through autograd (``flash_attn.cute.flash_attn_varlen_func`` with
   ``q_rope``, ``k_rope [S, 1, 64]``, ``kv_latent [S, 1, 512]``, ``qv = q_latent``, per-document gather indices,
-  ``causal=True``, recompute-P backward in token chunks of ``--fa4-token-chunk``, default 4096, ``0`` for one
-  unchunked backward); its BF16 ``dk`` / ``dv`` are upcast-added into the zeroed FP32 accumulator inside the timed
+  ``causal=True``, recompute-P backward; ``--fa4-token-chunk`` runs it in token chunks, default ``0``: one unchunked
+  backward, its fastest setting on these rows against 4096- and 8192-token chunks, at the cost of a ``dS`` scratch of
+  ``T x H x top-k`` BF16); its BF16 ``dk`` / ``dv`` are upcast-added into the zeroed FP32 accumulator inside the timed
   backward.
 * ``fa4_fp32``: the same kernels through their private forward (``_flash_attn_fwd``, training configuration, returning
   ``o_lo``) and sparse-MLA backward (``_flash_attn_bwd_sparse_mla``) with preallocated zeroed FP32 ``dk [S, 1, 64]`` and
@@ -124,7 +125,8 @@ HEADS = (96, 64)
 OPS = ("fwd", "bwd", "step", "recompute")
 LAYOUTS = ("split", "packed")
 SEED = 26300
-FA4_TOKEN_CHUNK = 4096
+#: FlashAttention-4 backward token chunk; 0 runs one unchunked backward.
+FA4_TOKEN_CHUNK = 0
 
 
 def _nbytes(*tensors):
@@ -1098,7 +1100,7 @@ def main():
         "--fa4-token-chunk",
         type=int,
         default=FA4_TOKEN_CHUNK,
-        help="token chunk of the FlashAttention-4 sparse MLA backward (0: one unchunked backward)",
+        help="token chunk of the FlashAttention-4 sparse MLA backward (default 0: one unchunked backward)",
     )
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)
