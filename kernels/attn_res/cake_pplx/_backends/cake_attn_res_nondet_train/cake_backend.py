@@ -529,22 +529,26 @@ def _launch_backward(
     T: int,
     dv: Optional[list[torch.Tensor]],
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
-    """The backward of checked operands over ``T`` tokens: ``(dv, dw)``.  Every buffer is allocated and the argument
-    tuple built before the launch."""
+    """The backward of checked operands over ``T`` tokens: ``(dv, dw)``.  Every buffer is allocated, the argument
+    tuple built and the entry looked up before ``dw`` is zeroed: the zeroing and the kernel launch back to back, so
+    the device does not wait on host work between them."""
     device = dout.device
     n = len(values)
     if dv is None:
         dv = [torch.empty(T, HIDDEN, dtype=_BF16, device=device) for _ in range(n)]
-    dw = torch.zeros(HIDDEN, dtype=_FP32, device=device)
     if T == 0:
         # No token: nothing to launch; a zero weight gradient.
-        return dv, dw
+        return dv, torch.zeros(HIDDEN, dtype=_FP32, device=device)
+    dw = torch.empty(HIDDEN, dtype=_FP32, device=device)
     index = device.index
-    device_arch(index)  # RuntimeError on a device outside ARCHES
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
     name = cake_jit.record("bwd", n)
     groups = _groups(name, T, index)
     args = (dout, *_slots(values), _weight(w), p, r, d, *_slots(dv), dw, T, n)
-    _run(name, "bwd", index, (*args, cake_jit.cluster_ctas(name) * groups, 1, 1))
+    _plan(name, "bwd")
+    run = _entry(name, arch)
+    dw.zero_()
+    run(*args, cake_jit.cluster_ctas(name) * groups, 1, 1)
     return dv, dw
 
 
