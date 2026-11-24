@@ -102,7 +102,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # The reference helper imports torch only: a baseline process loads no Cake module unless a Cake arm runs.
-from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_reference import (  # noqa: E402
+from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_reference import (  # noqa: E402, RUF100
     D_LATENT,
     D_QK,
     D_ROPE,
@@ -169,12 +169,12 @@ class _Accumulating:
 
     @staticmethod
     def grads(dq_latent, dq_rope, acc):
-        return dict(
-            dq_latent=dq_latent,
-            dq_rope=dq_rope,
-            dkv_latent=acc[:, :D_LATENT],
-            dk_rope=acc[:, D_LATENT:D_QK],
-        )
+        return {
+            "dq_latent": dq_latent,
+            "dq_rope": dq_rope,
+            "dkv_latent": acc[:, :D_LATENT],
+            "dk_rope": acc[:, D_LATENT:D_QK],
+        }
 
 
 class ArmCake(_Accumulating):
@@ -211,21 +211,21 @@ class ArmCake(_Accumulating):
         return cake_dsa_sparse_attention_nondet
 
     def _forward_kwargs(self):
-        return {} if self.with_o_lo else dict(with_o_lo=False)
+        return {} if self.with_o_lo else {"with_o_lo": False}
 
     def versions(self):
         import importlib.metadata as md
 
         mod = sys.modules.get(self.fn.__module__)
-        return dict(
-            entry="cake_dsa_sparse_attention_nondet (autograd, dkv_acc callable)",
-            dist=md.version("cake-pplx-dsa-sparse-attention"),
-            module_file=getattr(mod, "__file__", None),
-            with_o_lo=self.with_o_lo,
-            num_segments=self.num_segments,
-            topk_length=self.topk_length is not None,
-            layout=self.layout,
-        )
+        return {
+            "entry": "cake_dsa_sparse_attention_nondet (autograd, dkv_acc callable)",
+            "dist": md.version("cake-pplx-dsa-sparse-attention"),
+            "module_file": getattr(mod, "__file__", None),
+            "with_o_lo": self.with_o_lo,
+            "num_segments": self.num_segments,
+            "topk_length": self.topk_length is not None,
+            "layout": self.layout,
+        }
 
     def forward(self):
         holder = {}
@@ -249,7 +249,7 @@ class ArmCake(_Accumulating):
             num_segments=self.num_segments,
             **kw,
         )
-        return dict(out=out, lse=lse, holder=holder)
+        return {"out": out, "lse": lse, "holder": holder}
 
     def backward(self, st):
         if self.q_leaf is not None:
@@ -341,7 +341,7 @@ class ArmCudnnFe(_Accumulating):
         )
 
     def _call_fwd(self, q, kv, rank3):
-        kw = dict(topk_length=self.topk_length, softmax_scale=self.scale)
+        kw = {"topk_length": self.topk_length, "softmax_scale": self.scale}
         return self._fwd(
             q,
             kv.unsqueeze(1) if rank3 else kv,
@@ -369,7 +369,7 @@ class ArmCudnnFe(_Accumulating):
             res = self._call_fwd(q, kv, self.rank3)
         fe_lse = res["lse"]
         lse = fe_lse.masked_fill(torch.isposinf(fe_lse), float("-inf"))
-        return dict(q=q, kv=kv, out=res["out"], lse=lse, fe_lse=fe_lse)
+        return {"q": q, "kv": kv, "out": res["out"], "lse": lse, "fe_lse": fe_lse}
 
     def glue_retained(self, st):
         """The packed ``q [T, H, 576]`` and ``kv [S, 576]`` copies the split layout makes inside the forward."""
@@ -430,23 +430,23 @@ class ArmCudnnFe(_Accumulating):
                 str(k): list(v)
                 for k, v in getattr(fi, "_HEAD64_WINDOW_STARTS", {}).items()
             }
-        except Exception:  # noqa: BLE001
-            pass
-        return dict(
-            cudnn_frontend=getattr(self.cudnn, "__version__", None),
-            dist=dist,
-            module_file=getattr(self.cudnn, "__file__", None),
-            cudnn_backend=backend() if callable(backend) else None,
-            forward="sparse_attention_forward_wrapper",
-            backward="DSA.sparse_attention_backward_wrapper (default, non-deterministic)",
-            backward_backend=self.backend(),
-            forward_head64_windows=windows,
-            kv_index_rank3=self.rank3,
-            layout=self.layout,
-            cake_vendored_modules_loaded=sorted(
+        except Exception as exc:  # noqa: BLE001 - informational
+            windows = f"unavailable: {type(exc).__name__}: {exc}"
+        return {
+            "cudnn_frontend": getattr(self.cudnn, "__version__", None),
+            "dist": dist,
+            "module_file": getattr(self.cudnn, "__file__", None),
+            "cudnn_backend": backend() if callable(backend) else None,
+            "forward": "sparse_attention_forward_wrapper",
+            "backward": "DSA.sparse_attention_backward_wrapper (default, non-deterministic)",
+            "backward_backend": self.backend(),
+            "forward_head64_windows": windows,
+            "kv_index_rank3": self.rank3,
+            "layout": self.layout,
+            "cake_vendored_modules_loaded": sorted(
                 m for m in sys.modules if "cake" in m.lower() and "cudnn" in m.lower()
             ),
-        )
+        }
 
 
 class ArmFA4(_Accumulating):
@@ -512,7 +512,7 @@ class ArmFA4(_Accumulating):
             gather_bwd_token_chunk=self.token_chunk,
             return_lse=True,
         )
-        return dict(out=out, lse=self._lse(lse), raw_lse=lse)
+        return {"out": out, "lse": self._lse(lse), "raw_lse": lse}
 
     def backward(self, st):
         dq_rope, dk_rope, dkv_latent, dq_latent = torch.autograd.grad(
@@ -536,15 +536,15 @@ class ArmFA4(_Accumulating):
             dist = md.version("flash-attn-4")
         except Exception:  # noqa: BLE001
             dist = None
-        return dict(
-            entry="flash_attn.cute.flash_attn_varlen_func (autograd)",
-            dist=dist,
-            module_file=fc.__file__,
-            cutlass_dsl=getattr(cutlass, "__version__", None),
-            causal=self.causal,
-            token_chunk=self.token_chunk,
-            layout=self.layout,
-        )
+        return {
+            "entry": "flash_attn.cute.flash_attn_varlen_func (autograd)",
+            "dist": dist,
+            "module_file": fc.__file__,
+            "cutlass_dsl": getattr(cutlass, "__version__", None),
+            "causal": self.causal,
+            "token_chunk": self.token_chunk,
+            "layout": self.layout,
+        }
 
 
 class ArmFA4Fp32(ArmFA4):
@@ -589,7 +589,7 @@ class ArmFA4Fp32(ArmFA4):
             gather_kv_indices=self.idx,
             gather_bwd_recompute_p=True,
         )
-        return dict(out=out, lse=self._lse(lse), raw_lse=lse, o_lo=o_lo)
+        return {"out": out, "lse": self._lse(lse), "raw_lse": lse, "o_lo": o_lo}
 
     def backward(self, st):
         inp = self.inp
@@ -619,9 +619,12 @@ class ArmFA4Fp32(ArmFA4):
             dk=dk,
             dv=dv,
         )
-        return dict(
-            dq_latent=dq_latent, dq_rope=dq_rope, dkv_latent=dv[:, 0], dk_rope=dk[:, 0]
-        )
+        return {
+            "dq_latent": dq_latent,
+            "dq_rope": dq_rope,
+            "dkv_latent": dv[:, 0],
+            "dk_rope": dk[:, 0],
+        }
 
     def versions(self):
         return dict(
@@ -669,7 +672,12 @@ class Nvml:
     def start(self):
         if self.handle is None:
             return None
-        state = dict(stop=threading.Event(), clocks=[], reasons=[], t0=time.time())
+        state = {
+            "stop": threading.Event(),
+            "clocks": [],
+            "reasons": [],
+            "t0": time.time(),
+        }
         state["energy0"] = self._read("nvmlDeviceGetTotalEnergyConsumption")
         nv = self.nv
 
@@ -691,26 +699,28 @@ class Nvml:
 
     def stop(self, state):
         if state is None:
-            return dict(nvml=self.error or "unavailable")
+            return {"nvml": self.error or "unavailable"}
         state["stop"].set()
         state["thread"].join()
         e1 = self._read("nvmlDeviceGetTotalEnergyConsumption")
         clocks, reasons = state["clocks"], state["reasons"]
-        return dict(
-            gpu_uuid=self.uuid,
-            sm_clock_mhz_median=statistics.median(clocks) if clocks else None,
-            sm_clock_mhz_min=min(clocks) if clocks else None,
-            samples=len(clocks),
-            cap_reason_share=(sum(1 for r in reasons if r & _CAP_BITS) / len(reasons))
+        return {
+            "gpu_uuid": self.uuid,
+            "sm_clock_mhz_median": statistics.median(clocks) if clocks else None,
+            "sm_clock_mhz_min": min(clocks) if clocks else None,
+            "samples": len(clocks),
+            "cap_reason_share": (
+                sum(1 for r in reasons if r & _CAP_BITS) / len(reasons)
+            )
             if reasons
             else None,
-            reasons_seen=sorted({hex(r) for r in reasons}),
-            energy_mj=(e1 - state["energy0"])
+            "reasons_seen": sorted({hex(r) for r in reasons}),
+            "energy_mj": (e1 - state["energy0"])
             if e1 is not None and state["energy0"] is not None
             else None,
-            wall_s=time.time() - state["t0"],
-            power_limit_mw=self._read("nvmlDeviceGetEnforcedPowerLimit"),
-        )
+            "wall_s": time.time() - state["t0"],
+            "power_limit_mw": self._read("nvmlDeviceGetEnforcedPowerLimit"),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -745,7 +755,10 @@ def _span_ns(event):
 
 def _call(fn, prep):
     """One untimed ``prep()`` (when given) for the next timed call: ``fn(prep())`` split at the L2 flush."""
-    return (lambda: fn()) if prep is None else (lambda state=prep(): fn(state))
+    if prep is None:
+        return fn
+    state = prep()
+    return lambda: fn(state)
 
 
 def _cupti_times(fn, reps, warmup, prep=None):
@@ -848,15 +861,18 @@ def spans_ms(fn, steps, warmup, prep=None):
 
 def _summary(times):
     s = sorted(times)
-    q = lambda f: s[min(len(s) - 1, max(0, int(round(f * (len(s) - 1)))))]  # noqa: E731
-    return dict(
-        median_ms=statistics.median(s),
-        min_ms=s[0],
-        p25_ms=q(0.25),
-        p75_ms=q(0.75),
-        max_ms=s[-1],
-        n=len(s),
-    )
+
+    def q(f):
+        return s[min(len(s) - 1, max(0, round(f * (len(s) - 1))))]
+
+    return {
+        "median_ms": statistics.median(s),
+        "min_ms": s[0],
+        "p25_ms": q(0.25),
+        "p75_ms": q(0.75),
+        "max_ms": s[-1],
+        "n": len(s),
+    }
 
 
 def accounting(arm, device):
@@ -875,14 +891,14 @@ def accounting(arm, device):
     torch.cuda.synchronize()
     after_bwd = torch.cuda.memory_allocated(device)
     bwd_peak = torch.cuda.max_memory_allocated(device)
-    res = dict(
-        fwd_workspace=fwd_peak - after_fwd,
-        out_lse=out_lse,
-        retained=after_fwd - base - out_lse,
-        glue_retained=glue,
-        bwd_workspace=bwd_peak - after_bwd,
-        grads=after_bwd - after_fwd,
-    )
+    res = {
+        "fwd_workspace": fwd_peak - after_fwd,
+        "out_lse": out_lse,
+        "retained": after_fwd - base - out_lse,
+        "glue_retained": glue,
+        "bwd_workspace": bwd_peak - after_bwd,
+        "grads": after_bwd - after_fwd,
+    }
     del st, g
     return res
 
@@ -890,14 +906,14 @@ def accounting(arm, device):
 def measure(arm, ops, steps, warmup, nvml):
     st = arm.forward()
     torch.cuda.synchronize()
-    fns = dict(
-        fwd=(arm.forward, None),
-        bwd=(arm.backward, arm.forward)
+    fns = {
+        "fwd": (arm.forward, None),
+        "bwd": (arm.backward, arm.forward)
         if arm.bwd_fresh_forward
         else (lambda: arm.backward(st), None),
-        step=(lambda: arm.backward(arm.forward()), None),
-        recompute=(lambda: (arm.forward(), arm.backward(arm.forward())), None),
-    )
+        "step": (lambda: arm.backward(arm.forward()), None),
+        "recompute": (lambda: (arm.forward(), arm.backward(arm.forward())), None),
+    }
     found = {}
     for op in ops:
         fn, prep = fns[op]
@@ -952,31 +968,31 @@ def environment(device):
 
         pynvml.nvmlInit()
         driver = pynvml.nvmlSystemGetDriverVersion()
-    except Exception:  # noqa: BLE001
-        pass
-    return dict(
-        host=os.uname().nodename,
-        torch=torch.__version__,
-        cuda=torch.version.cuda,
-        driver=driver,
-        gpu=props.name,
-        cc=f"{props.major}.{props.minor}",
-        sms=props.multi_processor_count,
-        gpu_uuid="GPU-" + str(props.uuid),
-        cudnn_frontend=v("nvidia-cudnn-frontend"),
-        flash_attn_4=v("flash-attn-4"),
-        cutlass_dsl=v("nvidia-cutlass-dsl"),
-        cake_dsa_sparse_attention=v("cake-pplx-dsa-sparse-attention"),
-        cuda_visible_devices=os.environ.get("CUDA_VISIBLE_DEVICES"),
-        bench_file=str(Path(__file__).resolve()),
-    )
+    except Exception as exc:  # noqa: BLE001 - informational
+        driver = f"unavailable: {type(exc).__name__}: {exc}"
+    return {
+        "host": os.uname().nodename,
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "driver": driver,
+        "gpu": props.name,
+        "cc": f"{props.major}.{props.minor}",
+        "sms": props.multi_processor_count,
+        "gpu_uuid": "GPU-" + str(props.uuid),
+        "cudnn_frontend": v("nvidia-cudnn-frontend"),
+        "flash_attn_4": v("flash-attn-4"),
+        "cutlass_dsl": v("nvidia-cutlass-dsl"),
+        "cake_dsa_sparse_attention": v("cake-pplx-dsa-sparse-attention"),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "bench_file": str(Path(__file__).resolve()),
+    }
 
 
 def run(args):
     device = torch.device(args.device)
     torch.cuda.set_device(device)
     nvml = Nvml(device)
-    results = dict(env=environment(device), args=vars(args), rows=[])
+    results = {"env": environment(device), "args": vars(args), "rows": []}
     print(json.dumps(results["env"]), flush=True)
     for row in args.rows:
         seq_q, seq_k = ROWS[row]
@@ -986,16 +1002,16 @@ def run(args):
                 seq_q, seq_k, seed=args.seed, topk=args.topk, heads=heads, device=device
             )
             torch.cuda.synchronize()
-            entry = dict(
-                row=row,
-                heads=heads,
-                total_q=inp.total_q,
-                total_k=inp.total_k,
-                num_docs=len(seq_q),
-                topk=args.topk,
-                softmax_scale=args.softmax_scale,
-                valid_slots=int(inp.topk_length.sum()),
-                inputs_bytes=_nbytes(
+            entry = {
+                "row": row,
+                "heads": heads,
+                "total_q": inp.total_q,
+                "total_k": inp.total_k,
+                "num_docs": len(seq_q),
+                "topk": args.topk,
+                "softmax_scale": args.softmax_scale,
+                "valid_slots": int(inp.topk_length.sum()),
+                "inputs_bytes": _nbytes(
                     inp.q_latent,
                     inp.q_rope,
                     inp.kv_latent,
@@ -1003,20 +1019,20 @@ def run(args):
                     inp.dout,
                     inp.idx_global,
                 ),
-                input_seconds=time.time() - t0,
-                arms={},
-            )
+                "input_seconds": time.time() - t0,
+                "arms": {},
+            }
             for name in args.arms:
-                kw = dict(scale=args.softmax_scale, layout=args.layout)
+                kw = {"scale": args.softmax_scale, "layout": args.layout}
                 if name in FA4_ARMS:
                     kw["token_chunk"] = args.fa4_token_chunk
                 try:
                     arm = ARMS[name](inp, **kw)
                 except Exception as exc:  # noqa: BLE001 - unavailable package, refused head count or geometry
-                    entry["arms"][name] = dict(
-                        error=f"{type(exc).__name__}: {exc}",
-                        traceback=traceback.format_exc(),
-                    )
+                    entry["arms"][name] = {
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "traceback": traceback.format_exc(),
+                    }
                     print(
                         f"{row:20s} H{heads:<3d} {name:12s} unavailable: {type(exc).__name__}: {str(exc)[:300]}",
                         flush=True,
@@ -1024,20 +1040,20 @@ def run(args):
                     torch.cuda.empty_cache()
                     continue
                 try:
-                    perf = dict(
-                        ops=measure(arm, args.ops, args.steps, args.warmup, nvml)
-                    )
+                    perf = {
+                        "ops": measure(arm, args.ops, args.steps, args.warmup, nvml)
+                    }
                     perf["bytes"] = accounting(arm, device)
                     perf["versions"] = arm.versions()
                     if args.kernels:
                         perf["kernels_step"] = kernel_table(
-                            lambda: arm.backward(arm.forward())
+                            lambda a=arm: a.backward(a.forward())
                         )
                 except Exception as exc:  # noqa: BLE001
-                    perf = dict(
-                        error=f"{type(exc).__name__}: {exc}",
-                        traceback=traceback.format_exc(),
-                    )
+                    perf = {
+                        "error": f"{type(exc).__name__}: {exc}",
+                        "traceback": traceback.format_exc(),
+                    }
                 entry["arms"][name] = perf
                 if "error" in perf:
                     print(
