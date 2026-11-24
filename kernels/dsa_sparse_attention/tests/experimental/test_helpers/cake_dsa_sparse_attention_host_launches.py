@@ -142,7 +142,11 @@ class HostLaunches:
         real_entry_cls = backend._StageEntry
 
         def alloc(shape, dtype, device, *, zero: bool = False):
-            shape = (int(shape),) if isinstance(shape, int) else tuple(int(s) for s in shape)
+            shape = (
+                (int(shape),)
+                if isinstance(shape, int)
+                else tuple(int(s) for s in shape)
+            )
             self.allocs.append((list(shape), str(dtype), bool(zero)))
             return real_alloc(shape, dtype, cpu, zero=zero)
 
@@ -160,7 +164,9 @@ class HostLaunches:
         monkeypatch.setattr(
             backend, "_ffi_stream_context", lambda index: contextlib.nullcontext()
         )
-        monkeypatch.setattr(backend.BINDING_CACHE, "_entries", type(backend.BINDING_CACHE._entries)())
+        monkeypatch.setattr(
+            backend.BINDING_CACHE, "_entries", type(backend.BINDING_CACHE._entries)()
+        )
         monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
         monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
         if token_chunk is not None:
@@ -172,11 +178,16 @@ class HostLaunches:
                     return rec
                 rec = copy.deepcopy(rec)
                 policy = rec["key_pass_policy"]
-                per_token = int(
-                    policy.get(
-                        "dq_partial_bytes_per_token", backend.DQ_PARTIAL_BYTES_PER_TOKEN
+                per_token = (
+                    int(
+                        policy.get(
+                            "dq_partial_bytes_per_token",
+                            backend.DQ_PARTIAL_BYTES_PER_TOKEN,
+                        )
                     )
-                ) + 4 * int(chunk_topk) + 4
+                    + 4 * int(chunk_topk)
+                    + 4
+                )
                 policy["token_chunk_multiple"] = int(token_chunk)
                 policy["workspace_budget_bytes"] = int(token_chunk) * per_token
                 return rec
@@ -230,7 +241,11 @@ class HostLaunches:
 
     def _sim_delta(self, rec: Launch, v: dict) -> None:
         rows = int(v["num_rows"])
-        ts, hs, off = int(v["dout_token_stride"]), int(v["dout_head_stride"]), int(v["dout_offset"])
+        ts, hs, off = (
+            int(v["dout_token_stride"]),
+            int(v["dout_head_stride"]),
+            int(v["dout_offset"]),
+        )
         r = torch.arange(rows)
         first = off + (r // WINDOW) * ts + (r % WINDOW) * hs
         dout = v["dout"]
@@ -239,13 +254,19 @@ class HostLaunches:
         o = _flat(v["out"], rows * D_LATENT).view(rows, D_LATENT)[:, 0].float()
         d = g + 2 * o
         if v["o_lo"].numel():
-            d = d + 4 * _flat(v["o_lo"], rows * D_LATENT).view(rows, D_LATENT)[:, 0].float()
+            d = (
+                d
+                + 4
+                * _flat(v["o_lo"], rows * D_LATENT).view(rows, D_LATENT)[:, 0].float()
+            )
         _flat(v["delta"], rows).copy_(d)
 
     def _tokens(self, v: dict, passes: bool) -> torch.Tensor:
         if passes:
             base, n = int(v["token_base"]), int(v["num_tokens"])
-            assert int(v["token_step"]) == 1, "a key-pass launch walks its tokens ascending"
+            assert int(v["token_step"]) == 1, (
+                "a key-pass launch walks its tokens ascending"
+            )
             return torch.arange(base, base + n)
         return torch.arange(int(v["num_queries"]))
 
@@ -275,8 +296,12 @@ class HostLaunches:
                 partial[k] = partial[k] + own
             else:
                 total = partial[k] + own
-                dql[tokens] = total[..., None].to(dql.dtype).expand(-1, -1, dql.shape[-1])
-                dqr[tokens] = total[..., None].to(dqr.dtype).expand(-1, -1, dqr.shape[-1])
+                dql[tokens] = (
+                    total[..., None].to(dql.dtype).expand(-1, -1, dql.shape[-1])
+                )
+                dqr[tokens] = (
+                    total[..., None].to(dqr.dtype).expand(-1, -1, dqr.shape[-1])
+                )
         count, total = float(live.sum()), float(own.sum())
         acc = v["dkv_f32"]
         start = 0
@@ -370,11 +395,17 @@ def host_inputs(
     if T > 1:
         indices[1] = -1
     topk_length = torch.full((T,), K, dtype=torch.int32)
-    dout = randn(heads, T, D_LATENT).permute(1, 0, 2) if head_major else randn(T, heads, D_LATENT)
+    dout = (
+        randn(heads, T, D_LATENT).permute(1, 0, 2)
+        if head_major
+        else randn(T, heads, D_LATENT)
+    )
     lse = torch.randn(T, heads, generator=gen)
     if T > 1:
         lse[1] = -math.inf
-    return HostInputs(q_latent, q_rope, kv_latent, k_rope, indices, topk_length, dout, lse)
+    return HostInputs(
+        q_latent, q_rope, kv_latent, k_rope, indices, topk_length, dout, lse
+    )
 
 
 def windows(heads: int) -> list[int]:
@@ -396,9 +427,13 @@ def check_forward(
     tag = torch.empty(H)
     for rec in fwd:  # launch order: a later window overwrites the heads both cover
         tag[rec.window : rec.window + WINDOW] = TAG * rec.ordinal
-    assert tuple(out.shape) == (inp.total_q, H, D_LATENT) and out.dtype == torch.bfloat16
+    assert (
+        tuple(out.shape) == (inp.total_q, H, D_LATENT) and out.dtype == torch.bfloat16
+    )
     assert tuple(lse.shape) == (inp.total_q, H) and lse.dtype == torch.float32
-    assert torch.equal(out, inp.q_latent), "out: a query head holds another head's result"
+    assert torch.equal(out, inp.q_latent), (
+        "out: a query head holds another head's result"
+    )
     want = inp.q_rope[..., 0].float() + tag[None, :]
     assert torch.equal(lse, want), (
         "lse: a query head comes from the wrong window (heads both windows cover come from the later one)"
@@ -447,7 +482,9 @@ def check_backward(
     mains = [rec for rec in launches if family(rec.stage) in ("main", "main_pass")]
     want_order = [b for _ in range(chunks) for b in wins for _ in range(passes)]
     assert [rec.window for rec in mains] == want_order, [rec.window for rec in mains]
-    assert all(family(rec.stage) == ("main" if passes == 1 else "main_pass") for rec in mains)
+    assert all(
+        family(rec.stage) == ("main" if passes == 1 else "main_pass") for rec in mains
+    )
     assert all(rec.stage.endswith("natural") == direct for rec in mains)
     if passes > 1:
         compact = [rec for rec in launches if family(rec.stage) == "compact"]
@@ -467,9 +504,13 @@ def check_backward(
                 assert bool((lse_w[:, j] == math.inf).all()), (
                     f"window {b}: pad lane {j} (head {h}) has lse != +inf"
                 )
-                assert bool((delta_w[:, j] == 0).all()), f"window {b}: pad lane {j} has delta != 0"
+                assert bool((delta_w[:, j] == 0).all()), (
+                    f"window {b}: pad lane {j} has delta != 0"
+                )
             else:
-                assert torch.equal(lse_w[:, j], lse[:, h]), f"window {b}: lane {j} lse is not head {h}'s"
+                assert torch.equal(lse_w[:, j], lse[:, h]), (
+                    f"window {b}: lane {j} lse is not head {h}'s"
+                )
                 assert torch.equal(delta_w[:, j], canon_delta[:, h]), (
                     f"window {b}: lane {j} delta is not head {h}'s"
                 )
@@ -480,11 +521,18 @@ def check_backward(
     live = torch.isfinite(lse)
     head = torch.arange(H, dtype=torch.float32) + 1
     want_dq = torch.where(live, passes * head[None, :], torch.zeros(()))
-    assert torch.equal(dq_latent, want_dq[..., None].to(torch.bfloat16).expand_as(dq_latent)), (
+    assert torch.equal(
+        dq_latent, want_dq[..., None].to(torch.bfloat16).expand_as(dq_latent)
+    ), (
         "dq_latent: a query head holds the wrong window's gradient (the later window must overwrite the pad heads)"
     )
-    assert torch.equal(dq_rope, want_dq[..., None].to(torch.bfloat16).expand_as(dq_rope))
-    total = dict(count=float(passes * live.sum()), sum=float(passes * (live * head[None, :]).sum()))
+    assert torch.equal(
+        dq_rope, want_dq[..., None].to(torch.bfloat16).expand_as(dq_rope)
+    )
+    total = dict(
+        count=float(passes * live.sum()),
+        sum=float(passes * (live * head[None, :]).sum()),
+    )
     if casts:
         acc = casts[0].snap["acc"]
         assert acc.tolist() == [total["count"], total["sum"]], (
@@ -496,6 +544,10 @@ def check_backward(
 # ---------------------------------------------------------------------------------------------------------------
 # The 64-head capture (golden file)
 # ---------------------------------------------------------------------------------------------------------------
+
+
+#: The generated launchers' grid arguments (``grid[0..2]``, recorded as the launch's grid).
+GRID_ARGS = ("grid_x", "grid_y", "grid_z")
 
 
 def _describe(value: Any, roles: list[tuple[str, torch.Tensor]]) -> Any:
@@ -520,15 +572,21 @@ def _describe(value: Any, roles: list[tuple[str, torch.Tensor]]) -> Any:
     raise TypeError(f"launch value of type {type(value).__name__}")
 
 
-def describe(launches: list[Launch], roles: list[tuple[str, torch.Tensor]], launch) -> list:
+def describe(
+    launches: list[Launch], roles: list[tuple[str, torch.Tensor]], launch
+) -> list:
     """Each launch as ``[stage, grid, {name: value}]`` over the arguments the stage's kernel receives
-    (``launch.STAGE_ARGS[stage]``, the generated launcher's positional order; tensors as ``[role, shape, strides,
-    dtype, offset]``)."""
+    (``launch.STAGE_ARGS[stage]``, the generated launcher's positional order, less ``grid_x/y/z``: the grid is the
+    second field; tensors as ``[role, shape, strides, dtype, offset]``)."""
     return [
         [
             rec.stage,
             list(rec.grid),
-            {name: _describe(rec.values[name], roles) for name in sorted(launch.STAGE_ARGS[rec.stage])},
+            {
+                name: _describe(rec.values[name], roles)
+                for name in sorted(launch.STAGE_ARGS[rec.stage])
+                if name not in GRID_ARGS
+            },
         ]
         for rec in launches
     ]
@@ -552,14 +610,26 @@ def _case_inputs(case: dict) -> HostInputs:
 #: and ``dkv_fp32``; on the three architectures where their plans differ (token order, direct rule).
 H64_CASES: dict[str, dict] = {
     "fwd_derived": dict(entry="forward", lengths=False),
-    "fwd_packed_lengths_no_olo": dict(entry="forward", packed=True, with_o_lo=False, derive=True),
+    "fwd_packed_lengths_no_olo": dict(
+        entry="forward", packed=True, with_o_lo=False, derive=True
+    ),
     "bwd_single": dict(entry="backward"),
-    "bwd_head_major_fp32_no_olo": dict(entry="backward", head_major=True, with_o_lo=False, dkv_fp32=True, lengths=False),
-    "bwd_passes3_chunks": dict(entry="backward", T=40, S=96, key_passes=3, token_chunk=16),
-    "bwd_acc_direct_map": dict(entry="backward", acc=True, dst_map=True, dkv_direct=True),
-    "bwd_acc_cast_passes2": dict(entry="backward", acc=True, dkv_direct=False, key_passes=2),
+    "bwd_head_major_fp32_no_olo": dict(
+        entry="backward", head_major=True, with_o_lo=False, dkv_fp32=True, lengths=False
+    ),
+    "bwd_passes3_chunks": dict(
+        entry="backward", T=40, S=96, key_passes=3, token_chunk=16
+    ),
+    "bwd_acc_direct_map": dict(
+        entry="backward", acc=True, dst_map=True, dkv_direct=True
+    ),
+    "bwd_acc_cast_passes2": dict(
+        entry="backward", acc=True, dkv_direct=False, key_passes=2
+    ),
     "runner_step": dict(entry="runner"),
-    "runner_step_acc_no_olo": dict(entry="runner", acc=True, dst_map=True, with_o_lo=False),
+    "runner_step_acc_no_olo": dict(
+        entry="runner", acc=True, dst_map=True, with_o_lo=False
+    ),
 }
 #: The cases whose plans depend on the architecture (single-pass token order, the direct rule) also run there.
 H64_ARCH_CASES = ("bwd_single", "bwd_acc_direct_map", "runner_step")
@@ -572,7 +642,9 @@ def h64_case_names() -> list[tuple[str, str]]:
     return names
 
 
-def _acc(inp: HostInputs, case: dict) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+def _acc(
+    inp: HostInputs, case: dict
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     if not case.get("acc"):
         return None, None
     S = inp.total_k
@@ -582,7 +654,9 @@ def _acc(inp: HostInputs, case: dict) -> tuple[Optional[torch.Tensor], Optional[
     return torch.zeros(S, 640, dtype=torch.float32), None
 
 
-def run_case(h: HostLaunches, backend, case: dict, inp: Optional[HostInputs] = None) -> dict:
+def run_case(
+    h: HostLaunches, backend, case: dict, inp: Optional[HostInputs] = None
+) -> dict:
     """Run one case of :data:`H64_CASES` (or the same keys at another head count) under ``h``; returns the call's
     tensors by role."""
     inp = inp or _case_inputs(case)
@@ -629,7 +703,9 @@ def run_case(h: HostLaunches, backend, case: dict, inp: Optional[HostInputs] = N
             dkv_direct=case.get("dkv_direct"),
             with_o_lo=with_o_lo,
         )
-        roles.update(zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True))
+        roles.update(
+            zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True)
+        )
     elif entry == "runner":
         runner = backend.prepare_dsa_train(
             *args,
@@ -643,7 +719,9 @@ def run_case(h: HostLaunches, backend, case: dict, inp: Optional[HostInputs] = N
         )
         grads = runner.step()
         roles.update(out=runner.out, lse=runner.lse, o_lo=runner.o_lo, runner=runner)
-        roles.update(zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True))
+        roles.update(
+            zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True)
+        )
     else:
         raise ValueError(entry)
     roles["inputs"] = inp
@@ -675,7 +753,13 @@ def capture_case(monkeypatch, backend, jit, launch, name: str, arch: str) -> dic
     """The golden record of one 64-head case on ``arch``: ``{"launches": ..., "allocs": ...}``."""
     case = H64_CASES[name]
     h = HostLaunches(
-        monkeypatch, backend, jit, launch, arch, token_chunk=case.get("token_chunk"), simulate=False
+        monkeypatch,
+        backend,
+        jit,
+        launch,
+        arch,
+        token_chunk=case.get("token_chunk"),
+        simulate=False,
     )
     roles = run_case(h, backend, case)
     ordered = [(role, roles.get(role)) for role in _ROLE_ORDER]
@@ -722,7 +806,9 @@ def _package():
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[1])
-    parser.add_argument("--write", type=Path, required=True, help="golden file to write")
+    parser.add_argument(
+        "--write", type=Path, required=True, help="golden file to write"
+    )
     args = parser.parse_args(argv)
     backend, jit, launch = _package()
     args.write.write_text(dumps(capture_h64_cases(backend, jit, launch)))

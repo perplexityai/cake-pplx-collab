@@ -40,7 +40,9 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from tests.cake.test_helpers.cake_package import cake_package
-from tests.experimental.test_helpers import cake_dsa_sparse_attention_host_launches as hl
+from tests.experimental.test_helpers import (
+    cake_dsa_sparse_attention_host_launches as hl,
+)
 from tests.experimental.test_helpers import cake_dsa_sparse_attention_naive as nv
 from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_reference import (
     derive_topk_length,
@@ -91,32 +93,48 @@ def test_h64_plan_is_unchanged(monkeypatch, name, arch):
     (``cake_dsa_sparse_attention_h64_launches.json``) of the same case."""
     golden = json.loads(hl.GOLDEN.read_text())[f"{name}@{arch}"]
     found = json.loads(
-        json.dumps(hl.capture_case(monkeypatch, cake_backend, cake_jit, cake_launch, name, arch))
+        json.dumps(
+            hl.capture_case(
+                monkeypatch, cake_backend, cake_jit, cake_launch, name, arch
+            )
+        )
     )
     assert found["allocs"] == golden["allocs"], (found["allocs"], golden["allocs"])
     stages = [row[0] for row in found["launches"]]
     assert stages == [row[0] for row in golden["launches"]], stages
-    for i, (got, want) in enumerate(zip(found["launches"], golden["launches"], strict=True)):
+    for i, (got, want) in enumerate(
+        zip(found["launches"], golden["launches"], strict=True)
+    ):
         assert got == want, f"launch {i} ({got[0]}): {got} != {want}"
 
 
 #: The host cases of the head-window tests (keys of :func:`hl.run_case`).
 HOST_CASES = {
     "fwd": dict(entry="forward", lengths=False),
-    "fwd_packed_no_olo": dict(entry="forward", packed=True, with_o_lo=False, derive=True),
+    "fwd_packed_no_olo": dict(
+        entry="forward", packed=True, with_o_lo=False, derive=True
+    ),
     "bwd": dict(entry="backward"),
     "bwd_head_major_fp32_no_olo": dict(
         entry="backward", head_major=True, with_o_lo=False, dkv_fp32=True, lengths=False
     ),
-    "bwd_passes3_chunks": dict(entry="backward", T=40, S=96, key_passes=3, token_chunk=16),
-    "bwd_acc_direct_map": dict(entry="backward", acc=True, dst_map=True, dkv_direct=True),
-    "bwd_acc_direct_passes2": dict(entry="backward", acc=True, dkv_direct=True, key_passes=2),
+    "bwd_passes3_chunks": dict(
+        entry="backward", T=40, S=96, key_passes=3, token_chunk=16
+    ),
+    "bwd_acc_direct_map": dict(
+        entry="backward", acc=True, dst_map=True, dkv_direct=True
+    ),
+    "bwd_acc_direct_passes2": dict(
+        entry="backward", acc=True, dkv_direct=True, key_passes=2
+    ),
     "bwd_acc_cast_passes2_map": dict(
         entry="backward", acc=True, dst_map=True, dkv_direct=False, key_passes=2
     ),
     "runner": dict(entry="runner"),
     "runner_acc_no_olo": dict(entry="runner", acc=True, dst_map=True, with_o_lo=False),
-    "runner_passes2_chunks": dict(entry="runner", T=40, S=96, key_passes=2, token_chunk=16),
+    "runner_passes2_chunks": dict(
+        entry="runner", T=40, S=96, key_passes=2, token_chunk=16
+    ),
 }
 
 
@@ -167,19 +185,37 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
     ``dq`` is its own."""
     case = HOST_CASES[name]
     h = hl.HostLaunches(
-        monkeypatch, cake_backend, cake_jit, cake_launch, arch, token_chunk=case.get("token_chunk")
+        monkeypatch,
+        cake_backend,
+        cake_jit,
+        cake_launch,
+        arch,
+        token_chunk=case.get("token_chunk"),
     )
     inp = _host_case_inputs(case, heads)
     roles = hl.run_case(h, cake_backend, case, inp)
     with_o_lo = case.get("with_o_lo", True)
     entry = case["entry"]
     passes = case.get("key_passes") or 1
-    chunks = -(-inp.total_q // case["token_chunk"]) if passes > 1 and case.get("token_chunk") else 1
+    chunks = (
+        -(-inp.total_q // case["token_chunk"])
+        if passes > 1 and case.get("token_chunk")
+        else 1
+    )
     direct = bool(case.get("dkv_direct"))
     if entry == "runner":
-        direct = roles["runner"].dkv_direct  # the record's rule decides a runner without dkv_direct
+        direct = roles[
+            "runner"
+        ].dkv_direct  # the record's rule decides a runner without dkv_direct
     if entry == "forward":
-        hl.check_forward(h.launches, inp, roles["out"], roles["lse"], roles["o_lo"], with_o_lo=with_o_lo)
+        hl.check_forward(
+            h.launches,
+            inp,
+            roles["out"],
+            roles["lse"],
+            roles["o_lo"],
+            with_o_lo=with_o_lo,
+        )
         return
     launches = h.launches
     if entry == "runner":
@@ -187,7 +223,12 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
             i for i, rec in enumerate(launches) if hl.family(rec.stage) != "fwd"
         )
         hl.check_forward(
-            launches[:first_bwd], inp, roles["out"], roles["lse"], roles["o_lo"], with_o_lo=with_o_lo
+            launches[:first_bwd],
+            inp,
+            roles["out"],
+            roles["lse"],
+            roles["o_lo"],
+            with_o_lo=with_o_lo,
         )
         launches = launches[first_bwd:]
         lse = roles["lse"]
@@ -210,7 +251,9 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
 
 @pytest.mark.parametrize("heads", (64, 96, 128))
 @pytest.mark.parametrize("with_o_lo", (True, False))
-def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(monkeypatch, heads, with_o_lo):
+def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(
+    monkeypatch, heads, with_o_lo
+):
     """The autograd entry at ``heads`` query heads (host, simulated): the forward saves the nine tensors of its
     contract, of which the call's own state is ``lse [T, H]`` FP32, ``o_lo [T, H, 512]`` BF16 (with ``with_o_lo``;
     the zero-size placeholder without) and the derived ``topk_length [T]`` int32 -- exactly
@@ -235,7 +278,9 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(monkeypatch, heads
         )
     assert len(saved) == 9
     T, H = inp.total_q, heads
-    held = {t.untyped_storage().data_ptr() for t in (*leaves, inp.indices, out) if t.numel()}
+    held = {
+        t.untyped_storage().data_ptr() for t in (*leaves, inp.indices, out) if t.numel()
+    }
     retained = sum(
         t.untyped_storage().nbytes()
         for t in saved
@@ -253,7 +298,14 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(monkeypatch, heads
     )
     grads = torch.autograd.grad(out, leaves, inp.dout)
     bwd = hl.HostInputs(
-        leaves[0].detach(), leaves[1].detach(), inp.kv_latent, inp.k_rope, inp.indices, None, inp.dout, lse
+        leaves[0].detach(),
+        leaves[1].detach(),
+        inp.kv_latent,
+        inp.k_rope,
+        inp.indices,
+        None,
+        inp.dout,
+        lse,
     )
     hl.check_backward(
         h.launches[fwd_launches:],
@@ -281,7 +333,9 @@ def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
     for backward, passes, direct, with_o_lo, dout_copy in itertools.product(
         (False, True), (1, 3), (False, True), (True, False), (False, True)
     ):
-        kw = dict(backward=backward, key_passes=passes, dkv_direct=direct, token_chunk=chunk)
+        kw = dict(
+            backward=backward, key_passes=passes, dkv_direct=direct, token_chunk=chunk
+        )
         layout = cake_backend.workspace_layout(
             T, S, K, num_heads=heads, with_o_lo=with_o_lo, dout_copy=dout_copy, **kw
         )
@@ -316,9 +370,12 @@ def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
             want["topk_length"] = T * 4
         want["total"] = sum(want.values())
         assert retained == want
-        assert cake_backend.dsa_train_retained_size(
-            T, num_heads=heads, with_o_lo=with_o_lo, derive_topk_length=derive
-        ) == want["total"]
+        assert (
+            cake_backend.dsa_train_retained_size(
+                T, num_heads=heads, with_o_lo=with_o_lo, derive_topk_length=derive
+            )
+            == want["total"]
+        )
     h = hl.HostLaunches(
         monkeypatch, cake_backend, cake_jit, cake_launch, "sm_100a", token_chunk=chunk
     )
@@ -326,16 +383,32 @@ def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
         inp = hl.host_inputs(T, S, K, heads, head_major=head_major)
         h.bind(inp.q_latent)
         runner = prepare_dsa_train(
-            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices,
-            dout=inp.dout, key_passes=2,
+            inp.q_latent,
+            inp.q_rope,
+            inp.kv_latent,
+            inp.k_rope,
+            inp.indices,
+            dout=inp.dout,
+            key_passes=2,
         )
         copy = windows and head_major
         want = cake_backend.workspace_layout(
-            T, S, K, backward=True, key_passes=2, token_chunk=chunk, num_heads=heads, dout_copy=copy
+            T,
+            S,
+            K,
+            backward=True,
+            key_passes=2,
+            token_chunk=chunk,
+            num_heads=heads,
+            dout_copy=copy,
         )
         assert runner.layout == want
-        assert runner.workspace.numel() == want["total"] == cake_backend.dsa_train_workspace_size(
-            T, S, K, key_passes=2, num_heads=heads, dout_copy=copy
+        assert (
+            runner.workspace.numel()
+            == want["total"]
+            == cake_backend.dsa_train_workspace_size(
+                T, S, K, key_passes=2, num_heads=heads, dout_copy=copy
+            )
         )
 
 
@@ -374,8 +447,13 @@ def test_zero_query_rows_at_more_heads_return_empty_outputs_without_launching(
     out_pub, lse_pub = cake_backend.cake_dsa_sparse_attention_nondet(
         *leaves, inp.indices, return_lse=True
     )
-    assert tuple(out_pub.shape) == (0, heads, D_LATENT) and tuple(lse_pub.shape) == (0, heads)
-    g = torch.autograd.grad(out_pub, leaves, torch.zeros(0, heads, D_LATENT, dtype=torch.bfloat16))
+    assert tuple(out_pub.shape) == (0, heads, D_LATENT) and tuple(lse_pub.shape) == (
+        0,
+        heads,
+    )
+    g = torch.autograd.grad(
+        out_pub, leaves, torch.zeros(0, heads, D_LATENT, dtype=torch.bfloat16)
+    )
     assert [tuple(t.shape) for t in g] == [tuple(leaf.shape) for leaf in leaves]
 
 
@@ -410,7 +488,14 @@ def test_validate_rejects_other_head_counts(heads):
 
 @pytest.mark.parametrize(
     "q_heads, rope_heads, dout_heads",
-    [(96, 64, None), (64, 96, None), (96, 128, None), (96, 96, 64), (64, 64, 96), (128, 128, 96)],
+    [
+        (96, 64, None),
+        (64, 96, None),
+        (96, 128, None),
+        (96, 96, 64),
+        (64, 64, 96),
+        (128, 128, 96),
+    ],
 )
 def test_validate_rejects_mismatched_head_counts(q_heads, rope_heads, dout_heads):
     """``q_rope`` and ``dout`` carry the head count of ``q_latent``."""
@@ -536,7 +621,9 @@ def _cases_naive_tier():
 
 
 @pytest.mark.parametrize(
-    "heads, validity", _cases_naive_tier(), ids=[f"H{h}-{v}" for h, v in _cases_naive_tier()]
+    "heads, validity",
+    _cases_naive_tier(),
+    ids=[f"H{h}-{v}" for h, v in _cases_naive_tier()],
 )
 def test_naive_tier_heads(with_o_lo, heads, validity, record_property):
     """``out``, ``lse``, ``o_sum``, ``dq`` and the key gradients at ``heads`` query heads, scale ``192**-0.5``, top-k
@@ -562,7 +649,11 @@ def test_naive_tier_heads(with_o_lo, heads, validity, record_property):
             for direct in (True, False):
                 acc = torch.zeros(inp.total_k, D_QK, device="cuda")
                 grads = cake_backend.backward(
-                    *bwd, softmax_scale=SCALE, key_passes=p, dkv_acc=acc, dkv_direct=direct
+                    *bwd,
+                    softmax_scale=SCALE,
+                    key_passes=p,
+                    dkv_acc=acc,
+                    dkv_direct=direct,
                 )
                 assert grads[2] is None and grads[3] is None
                 label = f"{p} pass dkv_acc {'direct' if direct else 'cast'}"
@@ -572,7 +663,9 @@ def test_naive_tier_heads(with_o_lo, heads, validity, record_property):
         torch.cuda.synchronize()
         return nv.judged(nv.rope_problem(inp, indices=idx, scale=SCALE), runs)
 
-    nv.judge_draws(record_property, case, seed=SEED + 10 * heads + VALIDITY.index(validity))
+    nv.judge_draws(
+        record_property, case, seed=SEED + 10 * heads + VALIDITY.index(validity)
+    )
 
 
 @pytest.mark.parametrize("heads", (96,) + REDUCED_HEADS)
@@ -622,18 +715,29 @@ def test_dkv_acc_repeated_dst_heads(with_o_lo, heads, record_property):
         fwd = cake_backend.forward(*args, softmax_scale=SCALE)
         out, lse, o_lo = fwd
         gen = torch.Generator(device="cuda").manual_seed(s + 3)
-        dst_map = torch.randint(0, 300, (inp.total_k,), device="cuda", generator=gen).to(torch.int32)
+        dst_map = torch.randint(
+            0, 300, (inp.total_k,), device="cuda", generator=gen
+        ).to(torch.int32)
         runs = {"forward": _rope_outputs(fwd)}
         for direct in (True, False):
             for p in (1, 2):
                 acc = torch.randn(300, 704, device="cuda", generator=gen)
                 before = acc.clone()
                 grads = cake_backend.backward(
-                    *args, out, o_lo, lse, inp.dout, softmax_scale=SCALE, key_passes=p,
-                    dkv_acc=acc, dkv_dst_map=dst_map, dkv_direct=direct,
+                    *args,
+                    out,
+                    o_lo,
+                    lse,
+                    inp.dout,
+                    softmax_scale=SCALE,
+                    key_passes=p,
+                    dkv_acc=acc,
+                    dkv_dst_map=dst_map,
+                    dkv_direct=direct,
                 )
                 runs[f"{'direct' if direct else 'cast'} {p} pass"] = _rope_outputs(
-                    grads=grads, dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map)
+                    grads=grads,
+                    dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map),
                 )
         torch.cuda.synchronize()
         return nv.judged(nv.rope_problem(inp, scale=SCALE), runs)
@@ -652,7 +756,9 @@ def test_one_token_heads(with_o_lo, heads, record_property):
         args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
         fwd = cake_backend.forward(*args, softmax_scale=SCALE)
         out, lse, o_lo = fwd
-        grads = cake_backend.backward(*args, out, o_lo, lse, inp.dout, softmax_scale=SCALE)
+        grads = cake_backend.backward(
+            *args, out, o_lo, lse, inp.dout, softmax_scale=SCALE
+        )
         leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
         out_a = cake_backend.cake_dsa_sparse_attention_nondet(
             *leaves, inp.idx_global, softmax_scale=SCALE
@@ -678,7 +784,9 @@ def test_large_t_heads(with_o_lo, heads, record_property):
     chunks) judged over the draws.  The oracle runs in blocks of query rows (``nv.BLOCK_SLOTS`` (row, slot) pairs),
     about 2e13 FP64 operations per draw at 96 heads: opt in with ``CAKE_PPLX_DSA_LARGE_TESTS=1``."""
     if os.environ.get(LARGE_TESTS_ENV, "") != "1":
-        pytest.skip(f"set {LARGE_TESTS_ENV}=1 to run the T = 16380 case (minutes of FP64 oracle per draw)")
+        pytest.skip(
+            f"set {LARGE_TESTS_ENV}=1 to run the T = 16380 case (minutes of FP64 oracle per draw)"
+        )
     _require_heads(heads, backward=True)
     T = 16380
 
@@ -687,7 +795,9 @@ def test_large_t_heads(with_o_lo, heads, record_property):
         args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
         fwd = cake_backend.forward(*args, softmax_scale=SCALE)
         out, lse, o_lo = fwd
-        grads = cake_backend.backward(*args, out, o_lo, lse, inp.dout, softmax_scale=SCALE)
+        grads = cake_backend.backward(
+            *args, out, o_lo, lse, inp.dout, softmax_scale=SCALE
+        )
         runs = {"policy": _rope_outputs(fwd, grads)}
         if set(KEY_PASS_STAGES) <= set(cake_jit.registered_stages()):
             del grads
@@ -716,7 +826,11 @@ def test_long_keys_heads(with_o_lo, record_property):
         fwd = cake_backend.forward(*args, softmax_scale=SCALE)
         out, lse, o_lo = fwd
         bwd = args + (out, o_lo, lse, inp.dout)
-        runs = {"policy": _rope_outputs(fwd, cake_backend.backward(*bwd, softmax_scale=SCALE))}
+        runs = {
+            "policy": _rope_outputs(
+                fwd, cake_backend.backward(*bwd, softmax_scale=SCALE)
+            )
+        }
         for p in (2, 3):
             runs[f"{p} passes"] = _rope_outputs(
                 grads=cake_backend.backward(*bwd, softmax_scale=SCALE, key_passes=p)
@@ -742,22 +856,42 @@ def test_packed_views_head_major_dout_and_lengths_heads(with_o_lo, record_proper
     _require_heads(96, backward=True)
 
     def case(s, j):
-        inp = make_inputs([256], [2048], seed=s, topk=1024, heads=96, dout_layout="head_major")
+        inp = make_inputs(
+            [256], [2048], seed=s, topk=1024, heads=96, dout_layout="head_major"
+        )
         assert inp.dout.stride() == (512, 256 * 512, 1)
         q = torch.cat([inp.q_latent, inp.q_rope], -1).contiguous()
         kv = torch.cat([inp.kv_latent, inp.k_rope], -1).contiguous()
-        views = (q[..., :D_LATENT], q[..., D_LATENT:], kv[:, :D_LATENT], kv[:, D_LATENT:])
+        views = (
+            q[..., :D_LATENT],
+            q[..., D_LATENT:],
+            kv[:, :D_LATENT],
+            kv[:, D_LATENT:],
+        )
         lengths = inp.topk_length.clone()
         lengths[5] = 0
         lengths[9] = 3
-        fwd = cake_backend.forward(*views, inp.idx_global, topk_length=lengths, softmax_scale=SCALE)
+        fwd = cake_backend.forward(
+            *views, inp.idx_global, topk_length=lengths, softmax_scale=SCALE
+        )
         out, lse, o_lo = fwd
         grads = cake_backend.backward(
-            *views, inp.idx_global, out, o_lo, lse, inp.dout, topk_length=lengths, softmax_scale=SCALE
+            *views,
+            inp.idx_global,
+            out,
+            o_lo,
+            lse,
+            inp.dout,
+            topk_length=lengths,
+            softmax_scale=SCALE,
         )
         filled = torch.empty(inp.total_q, dtype=torch.int32, device="cuda")
         derived = cake_backend.forward(
-            *views, inp.idx_global, topk_length=filled, derive_topk_length=True, softmax_scale=SCALE
+            *views,
+            inp.idx_global,
+            topk_length=filled,
+            derive_topk_length=True,
+            softmax_scale=SCALE,
         )
         torch.cuda.synchronize()
         assert torch.equal(filled, derive_topk_length(inp.idx_global, inp.total_k))
@@ -787,7 +921,9 @@ def test_heads_and_counts_load_no_new_module(with_o_lo, record_property):
         args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
         fwd = cake_backend.forward(*args, softmax_scale=SCALE)
         out, lse, o_lo = fwd
-        grads = cake_backend.backward(*args, out, o_lo, lse, inp.dout, softmax_scale=SCALE)
+        grads = cake_backend.backward(
+            *args, out, o_lo, lse, inp.dout, softmax_scale=SCALE
+        )
         torch.cuda.synchronize()
         return _rope_outputs(fwd, grads)
 
@@ -801,7 +937,12 @@ def test_heads_and_counts_load_no_new_module(with_o_lo, record_property):
         inp = make_inputs([T], [T + 211 * j], seed=s, topk=256, heads=heads)
         run = step(inp)
         after = cake_jit.load_cake_dsa_train_module.cache_info()
-        assert (after.misses, after.currsize) == (loaded.misses, loaded.currsize), (heads, T, loaded, after)
+        assert (after.misses, after.currsize) == (loaded.misses, loaded.currsize), (
+            heads,
+            T,
+            loaded,
+            after,
+        )
         return nv.judged(nv.rope_problem(inp, scale=SCALE), {"": run})
 
     nv.judge_draws(record_property, draw, seed=SEED + 8000)
@@ -835,7 +976,11 @@ def test_step_at_96_heads_captures_into_a_cuda_graph_and_does_not_synchronize(
     graph and replays, judged beside the eager step; in steady state the step makes no pageable host-to-device copy
     and no synchronizing call and returns while queued device work still runs, as do the eager forward / backward
     pair and the prepared runner's step, which also allocates nothing."""
-    from tests.experimental.test_helpers.cake_host_sync import census, nonblocking, summary
+    from tests.experimental.test_helpers.cake_host_sync import (
+        census,
+        nonblocking,
+        summary,
+    )
 
     _require_heads(96, backward=True)
 
@@ -849,8 +994,15 @@ def test_step_at_96_heads_captures_into_a_cuda_graph_and_does_not_synchronize(
         def step():
             acc.zero_()
             out, lse = cake_backend.cake_dsa_sparse_attention_nondet(
-                q_leaf, r_leaf, inp.kv_latent, inp.k_rope, inp.idx_global,
-                softmax_scale=SCALE, return_lse=True, dkv_acc=acc, dkv_dst_map=dst_map,
+                q_leaf,
+                r_leaf,
+                inp.kv_latent,
+                inp.k_rope,
+                inp.idx_global,
+                softmax_scale=SCALE,
+                return_lse=True,
+                dkv_acc=acc,
+                dkv_dst_map=dst_map,
             )
             dq, dr = torch.autograd.grad(out, (q_leaf, r_leaf), inp.dout)
             return out, lse, dq, dr, acc
@@ -864,8 +1016,12 @@ def test_step_at_96_heads_captures_into_a_cuda_graph_and_does_not_synchronize(
         replayed = [t.detach().clone() for t in captured]
         runs = {}
         for label, got in (("eager", eager), ("graph", replayed)):
-            run = dict(zip(("out", "lse", "dq_latent", "dq_rope"), got[:4], strict=True))
-            run["dkv_acc"] = nv.Acc(before=torch.zeros_like(got[4]), after=got[4], dst_map=dst_map)
+            run = dict(
+                zip(("out", "lse", "dq_latent", "dq_rope"), got[:4], strict=True)
+            )
+            run["dkv_acc"] = nv.Acc(
+                before=torch.zeros_like(got[4]), after=got[4], dst_map=dst_map
+            )
             runs[label] = run
         return nv.judged(nv.rope_problem(inp, scale=SCALE), runs)
 
@@ -881,7 +1037,9 @@ def test_step_at_96_heads_captures_into_a_cuda_graph_and_does_not_synchronize(
 
     def eager_pair():
         out, lse, o_lo = cake_backend.forward(*args, softmax_scale=SCALE)
-        return cake_backend.backward(*args, out, o_lo, lse, inp.dout, softmax_scale=SCALE)
+        return cake_backend.backward(
+            *args, out, o_lo, lse, inp.dout, softmax_scale=SCALE
+        )
 
     eager_pair()
     torch.cuda.synchronize()
@@ -908,7 +1066,9 @@ def _ckpt_inputs(heads: int, seed: int = 0):
     g = torch.Generator(device="cuda").manual_seed(seed)
 
     def leaf(*shape):
-        return torch.randn(*shape, device="cuda", generator=g).bfloat16().requires_grad_()
+        return (
+            torch.randn(*shape, device="cuda", generator=g).bfloat16().requires_grad_()
+        )
 
     rows = torch.arange(T, device="cuda", dtype=torch.int32)[:, None] - torch.arange(
         W, device="cuda", dtype=torch.int32
@@ -932,7 +1092,9 @@ def _ckpt_fn(name, inp, acc=None):
     if name == "rope":
 
         def fn(q, q_rope, kv, k_rope):
-            return cake_backend.cake_dsa_sparse_attention_nondet(q, q_rope, kv, k_rope, inp.idx, **kw)
+            return cake_backend.cake_dsa_sparse_attention_nondet(
+                q, q_rope, kv, k_rope, inp.idx, **kw
+            )
 
     else:
 
@@ -958,8 +1120,12 @@ def test_ckpt_at_96_heads_keeps_nothing_alive(name, acc):
     before = torch.cuda.memory_allocated()
     out = checkpoint(fn, *leaves, use_reentrant=False)
     torch.cuda.synchronize()
-    kept = (torch.cuda.memory_allocated() - before - out.untyped_storage().nbytes()) / MIB
-    assert kept <= CKPT_RETAINED_LIMIT_MIB, f"{name}: {kept:.1f} MiB kept alive after a checkpointed forward"
+    kept = (
+        torch.cuda.memory_allocated() - before - out.untyped_storage().nbytes()
+    ) / MIB
+    assert kept <= CKPT_RETAINED_LIMIT_MIB, (
+        f"{name}: {kept:.1f} MiB kept alive after a checkpointed forward"
+    )
 
 
 @pytest.mark.parametrize("name", ("rope", "rope_varlen"))
@@ -981,7 +1147,11 @@ def test_ckpt_at_96_heads_outputs_and_gradients(with_o_lo, name, record_property
             for label in ("eager", "checkpointed"):
                 if acc is not None:
                     acc.zero_()
-                out = checkpoint(fn, *leaves, use_reentrant=False) if label == "checkpointed" else fn(*leaves)
+                out = (
+                    checkpoint(fn, *leaves, use_reentrant=False)
+                    if label == "checkpointed"
+                    else fn(*leaves)
+                )
                 if acc is not None:
                     acc.zero_()
                 grads = torch.autograd.grad(out, leaves, inp.dout, allow_unused=True)
@@ -989,13 +1159,20 @@ def test_ckpt_at_96_heads_outputs_and_gradients(with_o_lo, name, record_property
                 more = {}
                 if acc is not None:
                     assert grads[2] is None and grads[3] is None
-                    more["dkv_acc"] = nv.Acc(before=torch.zeros_like(acc), after=acc.clone())
+                    more["dkv_acc"] = nv.Acc(
+                        before=torch.zeros_like(acc), after=acc.clone()
+                    )
                 runs[f"{label}{' dkv_acc' if with_acc else ''}"] = _rope_outputs(
                     grads=grads, out=out.detach(), **more
                 )
         problem = nv.Problem(
-            q_latent=inp.q, kv_latent=inp.kv, indices=rows, q_rope=inp.q_rope, k_rope=inp.k_rope,
-            dout=inp.dout, scale=SCALE,
+            q_latent=inp.q,
+            kv_latent=inp.kv,
+            indices=rows,
+            q_rope=inp.q_rope,
+            k_rope=inp.k_rope,
+            dout=inp.dout,
+            scale=SCALE,
         )
         return nv.judged(problem, runs)
 
@@ -1005,8 +1182,13 @@ def test_ckpt_at_96_heads_outputs_and_gradients(with_o_lo, name, record_property
 def test_sm107a_device_refuses_more_than_64_heads():
     """On an sm_107a device a 96-head call is refused before any launch (the windows ship on sm_100a / sm_103a
     first)."""
-    if not _device_supported() or cake_backend.arch_for(torch.device("cuda")) != "sm_107a":
+    if (
+        not _device_supported()
+        or cake_backend.arch_for(torch.device("cuda")) != "sm_107a"
+    ):
         pytest.skip("an sm_107a device")
     inp = make_inputs([64], [512], seed=SEED, topk=128, heads=96)
     with pytest.raises((NotImplementedError, ValueError), match="sm_107a|64"):
-        cake_backend.forward(inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        cake_backend.forward(
+            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
+        )

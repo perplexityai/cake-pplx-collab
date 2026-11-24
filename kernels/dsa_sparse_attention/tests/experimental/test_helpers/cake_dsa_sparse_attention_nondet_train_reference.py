@@ -381,9 +381,7 @@ def reference_fp64(
     stream = consume is not None
     out = lse = dql = dqr = None
     if not stream:
-        out = torch.empty(
-            total_q, heads, D_LATENT, dtype=torch.float64, device=device
-        )
+        out = torch.empty(total_q, heads, D_LATENT, dtype=torch.float64, device=device)
         lse = torch.empty(total_q, heads, dtype=torch.float64, device=device)
         dql = torch.empty_like(out) if want_grad else None
         dqr = (
