@@ -332,9 +332,19 @@ CTAS_PER_SM = {
     "bwd_n8": 2,
     "bwd_n9": 2,
 }
-# Launch groups one device holds at once, by the CTAs per SM of a program: (architecture, SM count) -> {CTAs per SM:
-# groups}, as ``cudaOccupancyMaxActiveClusters`` reports them for the shipped programs.  Empty: no device measured.
-RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {}
+# Launch groups (four-CTA clusters) one device holds at once, by the CTAs per SM of a program: (architecture, SM
+# count) -> {CTAs per SM: clusters}, as ``cudaOccupancyMaxActiveClusters`` reports them (spread cluster scheduling, as
+# the programs launch).  Every program reaches its launch bound on GB300, and the count follows the CTAs per SM, not
+# the program: GB300 (152 SMs) holds 74 / 110 / 148 / 184 clusters at 2 / 3 / 4 / 5 CTAs per SM, measured on every
+# shipped program.  The entries at 3 and 4 CTAs per SM on B200 (148 SMs), GB200 (152 SMs) and VR200 (212 SMs) are the
+# counts measured on the four-CTA cluster programs of the engram_gate family, which give the same GB300 counts at 3 and
+# 4.  The four CTAs of a cluster share one GPC, so a device holds fewer clusters than CTAs per SM * SMs / 4.
+RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
+    ("sm_100a", 148): {3: 104, 4: 142},
+    ("sm_100a", 152): {3: 110, 4: 148},
+    ("sm_103a", 152): {2: 74, 3: 110, 4: 148, 5: 184},
+    ("sm_107a", 212): {3: 138, 4: 184},
+}
 # On a device or a count of CTAs per SM the table does not hold, the grid takes this fraction of CTAs per SM * SMs /
 # cluster CTAs groups.  Any grid is correct; a grid past the resident groups is slow, a smaller one leaves SMs idle.
 UNMEASURED_FRACTION = 0.85
