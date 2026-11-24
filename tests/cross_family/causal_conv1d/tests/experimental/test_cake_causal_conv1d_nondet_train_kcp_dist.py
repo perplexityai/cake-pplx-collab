@@ -33,7 +33,9 @@ another launch and never with the deterministic package.  Per row and rank:
 - ``REPEATS`` launches of the direct pass on each draw, every launch judged;
 - checkpoints with and without a recompute handle (``use_reentrant`` False and True; 2 x forward + backward) and
   nested checkpoints, judged; the per-phase collective counts of the deterministic suite (one halo exchange per
-  direction, one more in a plain recompute, none in a recompute with a handle); ``retain_graph`` accumulation
+  direction, one more in a plain recompute, none in a recompute with a handle; only the backward's exchange is
+  waited: the single call's eager forward exchange is a waiting collective, ``async_op=False``, which sends the slice
+  of ``x`` holding its send rows where they are one run of rows, ``kcp._send_slice``); ``retain_graph`` accumulation
   (judged as the gradients of ``2 dy``);
 - the handle retains exactly the history pool;
 - the two-launch forward (knobs ``fwd_main`` x ``fwd_overlap``, the same on every rank): ``LAST_CALL["fwd"]`` names
@@ -258,15 +260,46 @@ def _run_rank(
     info["counts"] = {
         "direct": c_direct, "plain": c_plain, "handle": c_h, "plain_reentrant": c_plain_re, "handle_reentrant": c_h_re,
     }  # fmt: skip
-    for t in ("calls", "waits"):
-        flags[f"positive_control_{t}"] = c_direct[t] == {"orig": 1, "recompute": 0, "bwd": 1} and c_plain[t] == {
-            "orig": 1, "recompute": 1, "bwd": 1,
+    # The single call's eager forward exchange is a waiting collective (``async_op=False``, ``kcp._fwd_sync``): it
+    # returns no work handle, so a forward exchange counts one call and no wait; the backward's is waited.
+    for t, f in (("calls", 1), ("waits", 0)):
+        flags[f"positive_control_{t}"] = c_direct[t] == {"orig": f, "recompute": 0, "bwd": 1} and c_plain[t] == {
+            "orig": f, "recompute": f, "bwd": 1,
         }  # fmt: skip
-        flags[f"handle_counts_{t}"] = c_h[t] == {"orig": 1, "recompute": 0, "bwd": 1}
-        flags[f"reentrant_counts_{t}"] = c_plain_re[t] == {"orig": 1, "recompute": 0, "bwd": 2} and c_h_re[t] == {
-            "orig": 1, "recompute": 0, "bwd": 1,
+        flags[f"handle_counts_{t}"] = c_h[t] == {"orig": f, "recompute": 0, "bwd": 1}
+        flags[f"reentrant_counts_{t}"] = c_plain_re[t] == {"orig": f, "recompute": 0, "bwd": 1 + f} and c_h_re[t] == {
+            "orig": f, "recompute": 0, "bwd": 1,
         }  # fmt: skip
     flags["handle_bytes"] = hd.nbytes() == n_hist * C * 2 == hd_re.nbytes()
+
+    # The forward exchange of the single call (eager, the waiting form): issued with ``sync``, its send buffer the
+    # slice of ``x`` holding the send rows where they are one run of rows (``kcp._send_slice``; on every sending rank
+    # of the contiguous layout), else their gather.
+    seen: list[dict] = []
+    exchange = conv_kcp._exchange
+
+    def recording(send, **kw):
+        same = send.untyped_storage().data_ptr() == x.untyped_storage().data_ptr()
+        seen.append({"sync": kw.get("sync"), "view": bool(send.numel()) and same})
+        return exchange(send, **kw)
+
+    conv_kcp._exchange = recording
+    try:
+        conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(x, w, ctx)
+    finally:
+        conv_kcp._exchange = exchange
+    torch.cuda.synchronize(device)
+    send_slice = conv_kcp._send_slice(
+        ctx, ctx.halo_tables["hist_index"], int(x.shape[0])
+    )
+    sends = int(sum(ctx.halo.fwd_send_rows))
+    info["fwd_exchange"] = {"seen": seen, "send_slice": send_slice, "send_rows": sends}
+    flags["fwd_exchange_sync"] = len(seen) == 1 and seen[0]["sync"] is True
+    flags["fwd_send_slice"] = (
+        len(seen) == 1
+        and seen[0]["view"] == (send_slice is not None)
+        and (layout != "contiguous" or sends == 0 or send_slice is not None)
+    )
 
     # Repeated launches of the direct pass on each draw: every launch judged; the number of distinct dweight bit
     # patterns of the first draw is recorded (no bound is placed on it).

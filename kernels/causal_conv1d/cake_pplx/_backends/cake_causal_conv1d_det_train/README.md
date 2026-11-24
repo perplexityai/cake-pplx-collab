@@ -190,7 +190,10 @@ The sets come from measurements of each entry against the one-launch forward
 (their comment in `kcp.py`).  On every architecture the single call runs the
 single-rank main program after the wait; so does the multi entry on sm_100a
 and sm_103a, and on sm_107a the multi entry overlaps its first tensor.  The
-exchange, its wait and the collectives are the same in every form.
+exchanged rows and the collectives are the same in every form.  Outside a CUDA
+Graph capture the waiting form of the single call issues its exchange as a
+waiting collective (`async_op=False`, on the caller's stream), so it has no
+work to wait.
 
 ### Halo exchange
 
@@ -199,7 +202,14 @@ One `all_to_all_single` per direction and call:
 - Forward: the history rows (up to three per continuing fragment) travel to
   the ranks of the fragments that read them, into the history pool `hist`
   (`[n_hist_rows, C]` BF16).  `hist` is saved for the backward; the backward
-  does not exchange it again.
+  does not exchange it again.  When the single call's send rows are one run of
+  consecutive rows of `x_local`, it sends that slice of `x_local` (no gather
+  copy).  A CUDA Graph capture of a call with `C x S` of at least
+  `CAPTURE_GATHER_ELEMS` (8192 x 16384) on sm_100a and sm_103a gathers them
+  instead.  On sm_103a the slice's shorter forward was measured to move the
+  checkpointed step's overlapped backward into its slow state.  sm_100a runs
+  the same overlapped backward and is included; the slice's effect was not
+  measured there (the comment at `CAPTURE_GATHER_ARCHS` in `kcp.py`).
 - Backward: the head program writes the FP32 derivative of each continuing
   fragment's first tokens (the halo adjoints; a token feeds at most three
   predecessor fragments) into the send layout; the exchange delivers them to
