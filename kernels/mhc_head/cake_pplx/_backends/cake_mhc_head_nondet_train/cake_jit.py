@@ -39,21 +39,29 @@ A role is the kernel of one public call: ``head_fwd`` (the forward),
 ``head_bwd`` (the backward that writes ``dX``) and ``head_bwd_acc`` (the
 backward that adds into ``dX``).  Each architecture group has its own
 libraries, and ``ROUTES[arch][role][hidden]`` names the record a role runs
-on an architecture at a hidden size (:func:`route_module`).  On sm_100a and
+on an architecture at a hidden size (:func:`route_module`, which also reads
+:data:`TOKEN_BANDS` and :data:`SMALL_ROUTES`).  On sm_100a and
 sm_103a every kernel moves 64-bit vectors (4 BF16 values) per thread and is
 built for one hidden size (the ``_h<hidden>`` libraries; the record's
 ``hidden``): the forward in 256-thread CTAs on sm_100a and 128-thread CTAs on
 sm_103a, the backward in 512-thread CTAs (on sm_100a 384 at hidden 4096 and
 256 at hidden 5120 and 7168) and the accumulating backward in 768-thread
-CTAs.  On sm_107a the hidden-4096 forward and writing backward move 256-bit
-vectors (16 values) in 128-thread CTAs, and the accumulating backward has L2
-do its additions (bulk reductions from a shared-memory segment of 128-bit
-vectors, 256-thread CTAs).
+CTAs.  On sm_107a the forward runs one library per hidden size and band of
+the token count ``T`` (:data:`TOKEN_BANDS`, then :data:`ROUTES` above the
+bands): 256-bit vectors (16 values) in CTAs of half or all of a token row;
+the smallest band's ``X`` loads take the L2 evict-first policy and the larger
+bands run their CTAs in the reversed order, the last tokens first.  The
+hidden-4096 writing backward moves 256-bit vectors in 128-thread CTAs, and the
+accumulating backward has L2 do its additions (bulk reductions from a
+shared-memory segment of 128-bit vectors, 256-thread CTAs).
 The unsuffixed libraries take any hidden size (``hidden`` 0), with 128-bit
 forward vectors (8 values) and 256-bit backward vectors (16 values) in
-256-thread CTAs; they serve a small problem (:data:`SMALL_ROUTES`): every role
-on sm_107a, the backward that writes ``dX`` on sm_100a and sm_103a; and on
-sm_107a every call of hidden 5120 or 7168 (:data:`ROUTES`).  Each
+256-thread CTAs; the backward ones serve a small problem
+(:data:`SMALL_ROUTES`): both backward roles on sm_107a, the backward that
+writes ``dX`` on sm_100a and sm_103a; and on sm_107a every backward call of
+hidden 5120 or 7168 (:data:`ROUTES`).  No route names the sm_107a forward
+libraries of hidden 0 and of hidden 4096 in 128-thread CTAs: the token bands
+serve every forward call there.  Each
 output element is one fixed chain of operations, the same chain in every
 build (the one addition of an accumulating element is L2's in the bulk-reduce
 library and the thread's in the others, both a BF16 addition rounded to
@@ -342,6 +350,278 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_mhc_train_head_fwd__lw256_t128_h4096",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t128_xhl1na_ef_h4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 128, "vector_elems": 16},
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t128_xhl1na_ef_h4096",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t128_xhl1na_ef_h4096",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t128_xhl1na_ef_h4096",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t128_rv_h4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 128, "vector_elems": 16},
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t128_rv_h4096",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t128_rv_h4096",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t128_rv_h4096",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t256_rv_h4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 256, "vector_elems": 16},
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t256_rv_h4096",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t256_rv_h4096",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t256_rv_h4096",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t160_xhl1na_ef_h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 160, "vector_elems": 16},
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t160_xhl1na_ef_h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t160_xhl1na_ef_h5120",
+        "launch": {
+            "block": (160, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t160_xhl1na_ef_h5120",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t320_rv_h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 320, "vector_elems": 16},
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t320_rv_h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t320_rv_h5120",
+        "launch": {
+            "block": (320, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t320_rv_h5120",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t224_xhl1na_ef_h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 224, "vector_elems": 16},
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t224_xhl1na_ef_h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t224_xhl1na_ef_h7168",
+        "launch": {
+            "block": (224, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t224_xhl1na_ef_h7168",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t224_rv_h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 224, "vector_elems": 16},
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t224_rv_h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t224_rv_h7168",
+        "launch": {
+            "block": (224, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t224_rv_h7168",
+        "logical": {
+            "T": "rows",
+            "hv": "hv",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "head_fwd",
+    },
+    "cake_mhc_train_head_fwd__lw256_t448_rv_h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "y"],
+            ["parameter", "T"],
+            ["parameter", "hv"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "vectors", "threads": 448, "vector_elems": 16},
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_head_fwd__lw256_t448_rv_h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_head_fwd__lw256_t448_rv_h7168",
+        "launch": {
+            "block": (448, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_head_fwd__lw256_t448_rv_h7168",
         "logical": {
             "T": "rows",
             "hv": "hv",
@@ -801,8 +1081,8 @@ MODULES: dict[str, dict[str, Any]] = {
 # The record a public call launches on each architecture, by role and hidden
 # size: the forward (``head_fwd``), the backward that writes ``dX``
 # (``head_bwd``) and the backward that adds into it (``head_bwd_acc``,
-# ``accumulate=True``).  :data:`SMALL_ROUTES` takes precedence for a small
-# problem.
+# ``accumulate=True``).  :data:`TOKEN_BANDS` takes precedence for a call
+# within one of its bands and :data:`SMALL_ROUTES` for a small problem.
 ROUTES: dict[str, dict[str, dict[int, str]]] = {
     "sm_100a": {
         "head_fwd": {
@@ -840,9 +1120,9 @@ ROUTES: dict[str, dict[str, dict[int, str]]] = {
     },
     "sm_107a": {
         "head_fwd": {
-            4096: "cake_mhc_train_head_fwd__lw256_t128_h4096",
-            5120: "cake_mhc_train_head_fwd",
-            7168: "cake_mhc_train_head_fwd",
+            4096: "cake_mhc_train_head_fwd__lw256_t256_rv_h4096",
+            5120: "cake_mhc_train_head_fwd__lw256_t320_rv_h5120",
+            7168: "cake_mhc_train_head_fwd__lw256_t448_rv_h7168",
         },
         "head_bwd": {
             4096: "cake_mhc_train_head_bwd__lw256_t128_h4096",
@@ -856,24 +1136,39 @@ ROUTES: dict[str, dict[str, dict[int, str]]] = {
         },
     },
 }
+# The sm_107a forward by band of the token count ``T`` (``rows``), per hidden
+# size: each band's last token count and its record, the smallest band first.
+# A call runs the first band that holds ``T``; a call of more tokens than
+# every band holds runs the route of :data:`ROUTES`.  The smallest band's
+# library loads ``X`` with the L2 evict-first policy, and the larger bands'
+# libraries run their CTAs in the reversed order (the last tokens first).  A
+# role with token bands has no small-problem route.
+TOKEN_BANDS: dict[str, dict[str, dict[int, tuple[tuple[int, str], ...]]]] = {
+    "sm_107a": {
+        "head_fwd": {
+            4096: (
+                (2048, "cake_mhc_train_head_fwd__lw256_t128_xhl1na_ef_h4096"),
+                (7168, "cake_mhc_train_head_fwd__lw256_t128_rv_h4096"),
+            ),
+            5120: ((1536, "cake_mhc_train_head_fwd__lw256_t160_xhl1na_ef_h5120"),),
+            7168: (
+                (1024, "cake_mhc_train_head_fwd__lw256_t224_xhl1na_ef_h7168"),
+                (4096, "cake_mhc_train_head_fwd__lw256_t224_rv_h7168"),
+            ),
+        },
+    },
+}
 # A call of a served hidden size with at most :func:`small_elements` values per
 # stream runs the unsuffixed library of its role where this names one: on
 # sm_100a and sm_103a the backward that writes ``dX`` (its 256-bit vectors keep
-# more bytes in flight per thread when the grid is small), and on sm_107a every
-# role, whose hidden-4096 libraries are timed on the large problems.  The limit
-# is ``SMALL_ELEMENTS`` (T 2048 at hidden 4096) but where
-# ``SMALL_ELEMENTS_BY_ROUTE`` names another: the sm_107a forward's 128-thread
-# CTAs of 256-bit vectors overtake the unsuffixed forward only past T 7168 at
-# hidden 4096.
+# more bytes in flight per thread when the grid is small), and on sm_107a both
+# backward roles, whose hidden-4096 libraries are timed on the large problems.
+# The limit is ``SMALL_ELEMENTS`` (T 2048 at hidden 4096).
 SMALL_ELEMENTS = 2048 * 4096
-SMALL_ELEMENTS_BY_ROUTE: dict[str, dict[str, int]] = {
-    "sm_107a": {"head_fwd": 7168 * 4096},
-}
 SMALL_ROUTES: dict[str, dict[str, str]] = {
     "sm_100a": {"head_bwd": "cake_mhc_train_head_bwd"},
     "sm_103a": {"head_bwd": "cake_mhc_train_head_bwd"},
     "sm_107a": {
-        "head_fwd": "cake_mhc_train_head_fwd",
         "head_bwd": "cake_mhc_train_head_bwd",
         "head_bwd_acc": "cake_mhc_train_head_bwd__acc",
     },
@@ -891,8 +1186,8 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 }
 STREAMS = 4
 # The hidden sizes each architecture serves: the keys of each of its routes.
-# SM107 serves 5120 and 7168 with the unsuffixed libraries (any hidden size) of
-# every role: no library is built for those sizes there.
+# SM107 serves 5120 and 7168 with the forward's band libraries and the
+# unsuffixed backward libraries (any hidden size).
 HIDDEN_SIZES: dict[str, tuple[int, ...]] = {
     "sm_100a": (4096, 5120, 7168),
     "sm_103a": (4096, 5120, 7168),
@@ -923,7 +1218,9 @@ def arch_for_capability(device_capability: Sequence[int]) -> str | None:
 
 def route_module(arch: str, role: str, hidden: int, rows: int) -> str:
     """The module of ``role`` on ``arch`` for ``rows`` tokens of ``hidden``
-    values (``ValueError`` when none is exported)."""
+    values (``ValueError`` when none is exported): the first band of
+    :data:`TOKEN_BANDS` that holds ``rows``, else the small-problem route,
+    else the route of :data:`ROUTES`."""
 
     name = ROUTES.get(arch, {}).get(role, {}).get(int(hidden))
     if name is None:
@@ -932,6 +1229,9 @@ def route_module(arch: str, role: str, hidden: int, rows: int) -> str:
             f"hidden {hidden}; exported architectures: {ARCHES}, hidden sizes: "
             f"{HIDDEN_SIZES}"
         )
+    for last, band in TOKEN_BANDS.get(arch, {}).get(role, {}).get(int(hidden), ()):
+        if int(rows) <= last:
+            return band
     small = SMALL_ROUTES.get(arch, {}).get(role)
     if small is not None and int(rows) * int(hidden) <= small_elements(arch, role):
         return small
@@ -940,9 +1240,9 @@ def route_module(arch: str, role: str, hidden: int, rows: int) -> str:
 
 def small_elements(arch: str, role: str) -> int:
     """The most values per stream a call of ``role`` on ``arch`` has for
-    :data:`SMALL_ROUTES` to take it."""
+    :data:`SMALL_ROUTES` to take it: :data:`SMALL_ELEMENTS` on every route."""
 
-    return SMALL_ELEMENTS_BY_ROUTE.get(arch, {}).get(role, SMALL_ELEMENTS)
+    return SMALL_ELEMENTS
 
 
 def supported_hidden_sizes(arch: str) -> tuple[int, ...]:

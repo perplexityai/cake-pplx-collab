@@ -22,8 +22,9 @@ callable takes a ``deterministic`` keyword (the ``forward`` / ``backward`` of
 the autograd ``Function`` classes included), the former modules and names are
 gone (no module, no alias, no ``cake_pplx`` namespace name), the module imports its backend
 on first use only, the registry routes each architecture and hidden size to its
-own libraries (``ROUTES[arch][role][hidden]``, the small-problem libraries of
-``SMALL_ROUTES``; ``build.json`` builds exactly the records' architectures),
+own libraries (``ROUTES[arch][role][hidden]``, the sm_107a forward's token
+bands ``TOKEN_BANDS``, the small-problem libraries of ``SMALL_ROUTES``;
+``build.json`` builds exactly the records' architectures),
 and the package is wired at its path (test-helper key, build manifest,
 package data).
 """
@@ -31,6 +32,7 @@ package data).
 import importlib
 import importlib.util
 import inspect
+import itertools
 import json
 import re
 import subprocess
@@ -72,10 +74,10 @@ REMOVED_NAMES = ("route_key", "route_modules")
 # build is for, 0 for any).  On sm_100a and sm_103a a 64-bit library per hidden size: the forward in 256-thread CTAs
 # on sm_100a and 128-thread CTAs on sm_103a, the backward in 512-thread CTAs (384 on sm_100a at
 # 4096, 256 on sm_100a at 5120 and 7168), the accumulating backward in 768-thread CTAs.  On sm_107a the hidden-4096
-# forward and writing backward move 256-bit vectors in 128-thread CTAs and the accumulating backward is the L2
-# bulk-reduce library (128-bit vectors, 256-thread CTAs).  The unsuffixed libraries take any hidden size: 128-bit
-# forward and 256-bit backward vectors in 256-thread CTAs, for a small problem on sm_107a (and the backward on
-# sm_100a / sm_103a).
+# forward and writing backward move 256-bit vectors in 128-thread CTAs, the forward has a 256-bit library per hidden
+# size and band of the token count (FWD_BANDS_107) and the accumulating backward is the L2 bulk-reduce library
+# (128-bit vectors, 256-thread CTAs).  The unsuffixed libraries take any hidden size: 128-bit forward and 256-bit
+# backward vectors in 256-thread CTAs, the backward for a small problem on sm_107a (and on sm_100a / sm_103a).
 _LW64 = ("sm_100a", "sm_103a")
 RECORDS = {
     "cake_mhc_det_train_head_fwd": ("head_fwd", ("sm_107a",), 256, 8, 0),
@@ -106,6 +108,25 @@ RECORDS = {
         16,
         4096,
     ),
+    **{
+        f"cake_mhc_det_train_head_fwd__lw256_t{t}_{s}_h{h}": (
+            "head_fwd",
+            ("sm_107a",),
+            t,
+            16,
+            h,
+        )
+        for t, h, s in (
+            (128, 4096, "xhl1na_ef"),
+            (128, 4096, "rv"),
+            (256, 4096, "rv"),
+            (160, 5120, "xhl1na_ef"),
+            (320, 5120, "rv"),
+            (224, 7168, "xhl1na_ef"),
+            (224, 7168, "rv"),
+            (448, 7168, "rv"),
+        )
+    },
     "cake_mhc_det_train_head_bwd": ("head_bwd", (*_LW64, "sm_107a"), 256, 16, 0),
     "cake_mhc_det_train_head_bwd__lw64_t384_h4096": (
         "head_bwd",
@@ -167,6 +188,25 @@ RECORDS = {
 # The dynamic shared memory of a record's launch: the L2 bulk-reduce backward's segment of 256 16-byte vectors.
 SMEM = {"cake_mhc_det_train_head_bwd__acc_l2red_lw128_t256_h4096": 4096}
 ROLES = ("head_fwd", "head_bwd", "head_bwd_acc")
+# The sm_107a forward per band of the token count, by hidden size: each band's last token count and its library, the
+# smallest band first; the last band (None) holds every larger count (the forward's route of ``ROUTES``).
+_FWD107 = "cake_mhc_det_train_head_fwd__lw256"
+FWD_BANDS_107 = {
+    4096: (
+        (2048, f"{_FWD107}_t128_xhl1na_ef_h4096"),
+        (7168, f"{_FWD107}_t128_rv_h4096"),
+        (None, f"{_FWD107}_t256_rv_h4096"),
+    ),
+    5120: (
+        (1536, f"{_FWD107}_t160_xhl1na_ef_h5120"),
+        (None, f"{_FWD107}_t320_rv_h5120"),
+    ),
+    7168: (
+        (1024, f"{_FWD107}_t224_xhl1na_ef_h7168"),
+        (4096, f"{_FWD107}_t224_rv_h7168"),
+        (None, f"{_FWD107}_t448_rv_h7168"),
+    ),
+}
 
 _CHILD = r"""
 import importlib, json, sys
@@ -289,12 +329,13 @@ def test_the_registry_routes_each_architecture_and_hidden_size_to_its_library() 
     whose thread count is the CTA's, ``kernel`` / ``library`` the record name, ``kernel_symbol``
     ``kernel_<library>``).  ``ROUTES[arch][role]`` maps every hidden size the architecture serves (all three on
     every architecture) to the record of the role delivered for the architecture and built for that hidden size, or
-    built for any where none is (sm_107a at 5120 and 7168);
+    built for any where none is (the sm_107a backward roles at 5120 and 7168), and the sm_107a forward to the
+    library of its last token band; ``TOKEN_BANDS`` holds the sm_107a forward's other bands and nothing else;
     ``SMALL_ROUTES`` sends a call of at most ``small_elements(arch, role)`` values per stream (``SMALL_ELEMENTS``,
-    T 7168 at hidden 4096 for the sm_107a forward) to the unsuffixed library of its role (the writing backward on
-    sm_100a and sm_103a, every role on sm_107a); :func:`route_module` follows both and refuses any other call, and a
-    record refuses a hidden size it is not built for.  Every route stays inside the kernels' ``hv <= MAX_VECTORS``
-    and its largest grid inside 31 bits."""
+    T 2048 at hidden 4096) to the unsuffixed library of its role (the writing backward on sm_100a and sm_103a,
+    both backward roles on sm_107a); :func:`route_module` follows them and refuses any other call, and a record
+    refuses a hidden size it is not built for.  Every route stays inside the kernels' ``hv <= MAX_VECTORS`` and its
+    largest grid inside 31 bits."""
     loader = importlib.import_module(f"{BACKEND}.cake_jit")
     assert set(loader.MODULES) == set(RECORDS)
     for name, (role, arches, threads, elems, hidden) in RECORDS.items():
@@ -329,35 +370,49 @@ def test_the_registry_routes_each_architecture_and_hidden_size_to_its_library() 
     assert routes == {
         arch: {
             role: {
-                hidden: built(arch, role, hidden)
+                hidden: (
+                    FWD_BANDS_107[hidden][-1][1]
+                    if (arch, role) == ("sm_107a", "head_fwd")
+                    else built(arch, role, hidden)
+                )
                 for hidden in loader.supported_hidden_sizes(arch)
             }
             for role in ROLES
         }
         for arch in loader.ARCHES
     }
+    assert loader.TOKEN_BANDS == {
+        "sm_107a": {
+            "head_fwd": {hidden: bands[:-1] for hidden, bands in FWD_BANDS_107.items()}
+        }
+    }
     small = "cake_mhc_det_train_head_bwd"
     assert small_routes == {
         "sm_100a": {"head_bwd": small},
         "sm_103a": {"head_bwd": small},
         "sm_107a": {
-            "head_fwd": "cake_mhc_det_train_head_fwd",
             "head_bwd": small,
             "head_bwd_acc": "cake_mhc_det_train_head_bwd__acc",
         },
     }
     assert loader.SMALL_ELEMENTS == 2048 * 4096
-    assert loader.SMALL_ELEMENTS_BY_ROUTE == {"sm_107a": {"head_fwd": 7168 * 4096}}
     for arch in loader.ARCHES:
         for role in ROLES:
             for hidden in loader.supported_hidden_sizes(arch):
                 largest = loader.small_elements(arch, role) // hidden
                 routed = loader.ROUTES[arch][role][hidden]
                 to_small = loader.SMALL_ROUTES.get(arch, {}).get(role, routed)
-                assert loader.route_module(arch, role, hidden, largest + 1) == routed
-                assert loader.route_module(arch, role, hidden, largest) == to_small
-                assert loader.route_module(arch, role, hidden, 1) == to_small
-                for name in {routed, to_small}:
+                names = {routed, to_small}
+                if (arch, role) == ("sm_107a", "head_fwd"):
+                    # the token bands (test_the_sm_107a_forward_runs_the_library_of_its_token_band)
+                    names = {name for _last, name in FWD_BANDS_107[hidden]}
+                else:
+                    assert (
+                        loader.route_module(arch, role, hidden, largest + 1) == routed
+                    )
+                    assert loader.route_module(arch, role, hidden, largest) == to_small
+                    assert loader.route_module(arch, role, hidden, 1) == to_small
+                for name in names:
                     record = loader.MODULES[name]
                     hv = loader.vectors_per_token(record, hidden)
                     assert 1 <= hv <= loader.MAX_VECTORS, (arch, role, hidden, hv)
@@ -377,6 +432,47 @@ def test_the_registry_routes_each_architecture_and_hidden_size_to_its_library() 
         loader.vectors_per_token(
             loader.MODULES["cake_mhc_det_train_head_bwd__lw64_t384_h4096"], 5120
         )
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("hidden", sorted(FWD_BANDS_107))
+def test_the_sm_107a_forward_runs_the_library_of_its_token_band(hidden: int) -> None:
+    """On sm_107a a forward of ``T`` tokens of hidden ``hidden`` runs the library of the first band of
+    :data:`FWD_BANDS_107` that holds ``T``, at every band edge: ``T`` equal to a band's last token count runs that
+    band's library and one token more runs the next band's; one token runs the smallest band's and ``MAX_TOKENS``
+    the last band's (the route of ``ROUTES``).  Each band library is the sm_107a forward record of that hidden size
+    (256-bit vectors) and no other route names it."""
+    loader = importlib.import_module(f"{BACKEND}.cake_jit")
+    bands = FWD_BANDS_107[hidden]
+    assert bands[-1][0] is None and all(
+        last < following
+        for (last, _name), (following, _following_name) in itertools.pairwise(
+            bands[:-1]
+        )
+    )
+
+    def route(rows: int) -> str:
+        return loader.route_module("sm_107a", "head_fwd", hidden, rows)
+
+    assert route(1) == bands[0][1]
+    for (last, name), (_following, following_name) in itertools.pairwise(bands):
+        assert route(last) == name, (hidden, last)
+        assert route(last + 1) == following_name, (hidden, last + 1)
+    assert route(loader.MAX_TOKENS) == bands[-1][1]
+    others = {
+        name
+        for arch, roles in loader.ROUTES.items()
+        for role, by_hidden in roles.items()
+        for h, name in by_hidden.items()
+        if (arch, role, h) != ("sm_107a", "head_fwd", hidden)
+    } | {name for small in loader.SMALL_ROUTES.values() for name in small.values()}
+    for _last, name in bands:
+        record = loader.MODULES[name]
+        assert record["role"] == "head_fwd" and record["arches"] == ["sm_107a"], name
+        assert (
+            record["hidden"] == hidden and record["grid_rule"]["vector_elems"] == 16
+        ), name
+        assert name not in others, name
 
 
 @pytest.mark.cpu_only
