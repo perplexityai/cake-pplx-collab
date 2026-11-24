@@ -56,9 +56,17 @@ Accuracy bar (the issue's, as the tests apply it): on ``--draws`` draws per ``n`
 evaluation in the L2 and the max norm; ``out`` and ``dv_j`` meet the bar when the median and the largest over the draws
 are at most 1.005 times those of the naive BF16 evaluation, ``dw`` when they are at most 1.005 times those of the
 issue's FP32 sum on the CPU.  A baseline that misses the bar is reported as a diagnostic, not as a speedup reference.
+Beside that bar, every arm's ``dw`` is set against two more FP32 evaluations on the GPU, reported and not gated: the
+issue's written FP32 backward (``dw`` by matmul) and the formula's FP32 backward (``dw`` by a torch reduction over the
+tokens).
+
+Memory per arm (one forward and backward at the timed row): the bytes a forward keeps beside ``out`` and its inputs,
+and the peak bytes the backward allocates beside the gradients; for the Cake arms also the package's own counts
+(``..._retained_bytes`` and ``..._workspace_bytes``).
 
 Subcommands: ``run`` (all rows on one GPU, JSON) and ``report`` (JSON to markdown, with the speedup of each Cake arm
-over the fastest baseline arm that meets the bar, and the latency of every baseline arm).
+over the fastest baseline arm that meets the bar, and the latency of every baseline arm; ``--json`` takes several
+comma-separated files, e.g. an accuracy run and a timing run).
 
 Example (one GPU)::
 
@@ -424,6 +432,14 @@ class CakeArm(Arm):
     def library(self) -> str:
         return f"cake-pplx-attn-res {_dist('cake-pplx-attn-res')} ({self.mod.__name__})"
 
+    def sizes(self, T: int, n: int, device: torch.device) -> dict:
+        """The package's own counts: retained state of a forward, workspace of a backward (bytes)."""
+        prefix = f"cake_attn_res_{self.name.split('_', 1)[1]}_train"
+        return {
+            "api_retained_bytes": int(getattr(self.mod, f"{prefix}_retained_bytes")(T, n)),
+            "api_workspace_bytes": int(getattr(self.mod, f"{prefix}_workspace_bytes")(T, n, device)),
+        }
+
     def layer(self):
         entry = self.entry
 
@@ -483,10 +499,11 @@ def _reference(values, w, dout, dtype):
     return found
 
 
-def _issue_fp32_dw(values, w, dout):
-    """The issue's FP32 ``dw`` (its written backward in FP32 on the CPU)."""
-    vs = [v.cpu().float() for v in values]
-    w32, g = w.cpu().float(), dout.cpu().float()
+def _issue_fp32_dw(values, w, dout, device=None):
+    """The issue's FP32 ``dw`` (its written backward in FP32; on the CPU unless ``device`` is given)."""
+    device = torch.device("cpu") if device is None else device
+    vs = [v.to(device).float() for v in values]
+    w32, g = w.to(device).float(), dout.to(device).float()
     r = torch.stack([torch.rsqrt(v.pow(2).mean(-1) + EPS) for v in vs], 1)
     dot = torch.stack([v @ w32 for v in vs], 1)
     p = (r * dot).softmax(1)
@@ -500,9 +517,19 @@ def _errors(actual, expected):
     return {"l2": diff.norm().item(), "max": diff.max().item(), "ref_l2": expected.norm().item()}
 
 
+# FP32 evaluations ``dw`` is also set against (reported, not gated): the issue's written backward in FP32 on the CPU
+# (the bar), the same on the GPU, and the formula's FP32 backward on the GPU (``dw`` by a reduction over the tokens).
+DW_YARDSTICKS = ("fp32_issue_cpu", "fp32_issue_gpu", "fp32_reduce_gpu")
+
+
+def _stats(xs):
+    return [statistics.median(xs), max(xs)]
+
+
 def accuracy_unit(arm_names, n, draws, device):
     """Per arm and output: the median and the largest error over the draws in the L2 and the max norm, beside the bar
-    (the naive BF16 evaluation for ``out`` and ``dv_j``, the issue's FP32 sum for ``dw``), and the verdict."""
+    (the naive BF16 evaluation for ``out`` and ``dv_j``, the issue's FP32 sum for ``dw``), and the verdict; ``dw``
+    also beside each of :data:`DW_YARDSTICKS`."""
     T = 2048
     arms = {}
     for name in arm_names:
@@ -510,7 +537,7 @@ def accuracy_unit(arm_names, n, draws, device):
             arms[name] = make_arm(name).layer()
         except Unsupported as exc:
             log(f"accuracy {name}: unsupported: {exc}")
-    errs = {name: collections.defaultdict(list) for name in [*arms, "bar"]}
+    errs = {name: collections.defaultdict(list) for name in [*arms, "bar", *DW_YARDSTICKS]}
     for draw in range(draws):
         g = torch.Generator(device=device).manual_seed(1000 * n + draw)
         scales = torch.linspace(0.5, 4.0, n).tolist()
@@ -523,6 +550,14 @@ def accuracy_unit(arm_names, n, draws, device):
         for key, t in tier.items():
             for norm, e in _errors(t.float() if key != "dw" else t, exact[key]).items():
                 errs["bar"][(key, norm)].append(e)
+        yardsticks = {
+            "fp32_issue_cpu": tier["dw"],
+            "fp32_issue_gpu": _issue_fp32_dw(values, w, dout, device),
+            "fp32_reduce_gpu": _reference(values, w, dout, torch.float32)["dw"],
+        }
+        for ys, t in yardsticks.items():
+            for norm, e in _errors(t, exact["dw"]).items():
+                errs[ys][("dw", norm)].append(e)
         for name, fn in arms.items():
             got = _outputs(fn, values, w, dout)
             for key, t in got.items():
@@ -536,14 +571,41 @@ def accuracy_unit(arm_names, n, draws, device):
             row = {}
             for norm in ("l2", "max"):
                 ours, bar = errs[name][(key, norm)], errs["bar"][(key, norm)]
-                row[norm] = {"ours": [statistics.median(ours), max(ours)], "bar": [statistics.median(bar), max(bar)]}
+                row[norm] = {"ours": _stats(ours), "bar": _stats(bar)}
                 ok &= row[norm]["ours"][0] <= NEAR_TIE * row[norm]["bar"][0]
                 ok &= row[norm]["ours"][1] <= NEAR_TIE * row[norm]["bar"][1]
             refs = errs[name][(key, "ref_l2")]
             row["rel_l2_median"] = statistics.median(e / r for e, r in zip(errs[name][(key, "l2")], refs, strict=True))
             rows[key] = row
+        versus = {}
+        for ys in DW_YARDSTICKS:
+            entry = {}
+            meets = True
+            for norm in ("l2", "max"):
+                ours, theirs = _stats(errs[name][("dw", norm)]), _stats(errs[ys][("dw", norm)])
+                entry[norm] = {"ours": ours, "yardstick": theirs}
+                meets &= ours[0] <= NEAR_TIE * theirs[0] and ours[1] <= NEAR_TIE * theirs[1]
+            entry["meets"] = meets
+            versus[ys] = entry
+        rows["dw"]["yardsticks"] = versus
         records.append({"kind": "accuracy", "arm": name, "n": n, "T": T, "draws": draws, "meets_bar": ok, "rows": rows})
-        log(f"accuracy n={n} {name}: meets_bar={ok}")
+        log(f"accuracy n={n} {name}: meets_bar={ok} dw vs " + ", ".join(f"{k} {v['meets']}" for k, v in versus.items()))
+    for ys in DW_YARDSTICKS:
+        refs = errs[ys][("dw", "ref_l2")]
+        records.append(
+            {
+                "kind": "dw_yardstick",
+                "yardstick": ys,
+                "n": n,
+                "T": T,
+                "draws": draws,
+                "l2": _stats(errs[ys][("dw", "l2")]),
+                "max": _stats(errs[ys][("dw", "max")]),
+                "rel_l2_median": statistics.median(
+                    e / r for e, r in zip(errs[ys][("dw", "l2")], refs, strict=True)
+                ),
+            }
+        )
     return records
 
 
@@ -629,6 +691,8 @@ def timing_unit(arm_names, T, n, args, device, cap_stream):
             grads = sum(leaf.grad.numel() * leaf.grad.element_size() for leaf in leaves)
             mem["grads_bytes"] = grads
             mem["bwd_peak_extra_bytes"] = torch.cuda.max_memory_allocated() - m1 - grads
+            if isinstance(arm, CakeArm):
+                mem.update(arm.sizes(T, n, device))
             del y
             if args.r2r:
                 outs = []
@@ -826,11 +890,27 @@ def cmd_run(args):
     log("RUN_DONE")
 
 
+def _load_runs(spec: str) -> tuple[dict, list]:
+    """The ``env_start`` of the first run that timed a row (else of the first run) and every run's records, from
+    comma-separated JSON paths."""
+    envs, recs = [], []
+    for path in (p for p in spec.split(",") if p):
+        data = json.loads(Path(path).read_text())
+        part = data.get("records", [])
+        envs.append((any(r.get("kind") == "timing" for r in part), data.get("env_start", {})))
+        recs.extend(part)
+    timed = [env for has, env in envs if has]
+    return (timed or [env for _, env in envs] or [{}])[0], recs
+
+
+def _mb(x) -> str:
+    return "n/a" if x is None else f"{x / 1e6:.1f}"
+
+
 def cmd_report(args):
-    data = json.loads(Path(args.json).read_text())
-    recs = data["records"]
-    env = data.get("env_start", {})
+    env, recs = _load_runs(args.json)
     acc = {(r["arm"], r["n"]): r for r in recs if r.get("kind") == "accuracy"}
+    yard = {(r["yardstick"], r["n"]): r for r in recs if r.get("kind") == "dw_yardstick"}
     timing = [r for r in recs if r.get("kind") == "timing" and "mode" in r]
     lines = [f"## {args.title}", ""]
     nvml = env.get("nvml", {})
@@ -843,18 +923,91 @@ def cmd_report(args):
         f"{nvml.get('CUDA_VISIBLE_DEVICES')}, cuda:0 = NVML {dev0.get('nvml_index')} {dev0.get('uuid')})."
     )
     lines.append("")
+    libraries = {}
+    for r in timing:
+        if r.get("library"):
+            libraries.setdefault(r["arm"], r["library"])
+    if libraries:
+        lines += ["| arm | implementation |", "|---|---|"]
+        lines += [f"| {arm} | {lib} |" for arm, lib in libraries.items()]
+        lines.append("")
     if acc:
-        lines += ["| arm | n | meets the bar | out rel-L2 (median) | worst dv rel-L2 (median) | dw rel-L2 (median) |"]
-        lines += ["|---|---|---|---|---|---|"]
+        lines += [
+            "### Accuracy against FP64 (T = 2048, median and largest over the draws)",
+            "",
+            "Bar: `out` and `dv_j` at most 1.005 x the naive BF16 evaluation's error, `dw` at most 1.005 x the "
+            "issue's FP32 evaluation (CPU), in the L2 and the max norm, median and largest.",
+            "",
+            "| arm | n | draws | meets the bar | out L2 (median / largest) | bar | "
+            "out max-norm (median / largest) | bar | "
+            "worst dv_j L2 (median / largest) | bar | dw L2 (median / largest) | bar (issue FP32, CPU) | "
+            "out / dv / dw rel-L2 (median) |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+
+        def pair(xs):
+            return f"{xs[0]:.3e} / {xs[1]:.3e}"
+
         for (arm, n), r in sorted(acc.items(), key=lambda kv: (kv[0][1], kv[0][0])):
             rows = r["rows"]
-            dv = max(v["rel_l2_median"] for k, v in rows.items() if k.startswith("dv"))
+            dvs = [k for k in rows if k.startswith("dv")]
+            worst = max(dvs, key=lambda k: rows[k]["l2"]["ours"][1] / max(rows[k]["l2"]["bar"][1], 1e-300))
+            dv_rel = max(rows[k]["rel_l2_median"] for k in dvs)
             lines.append(
-                f"| {arm} | {n} | {'yes' if r['meets_bar'] else 'no'} | {rows['out']['rel_l2_median']:.2e} | "
-                f"{dv:.2e} | {rows['dw']['rel_l2_median']:.2e} |"
+                f"| {arm} | {n} | {r['draws']} | {'yes' if r['meets_bar'] else 'no'} | "
+                f"{pair(rows['out']['l2']['ours'])} | {pair(rows['out']['l2']['bar'])} | "
+                f"{pair(rows['out']['max']['ours'])} | {pair(rows['out']['max']['bar'])} | "
+                f"{pair(rows[worst]['l2']['ours'])} ({worst}) | {pair(rows[worst]['l2']['bar'])} | "
+                f"{pair(rows['dw']['l2']['ours'])} | {pair(rows['dw']['l2']['bar'])} | "
+                f"{rows['out']['rel_l2_median']:.2e} / {dv_rel:.2e} / {rows['dw']['rel_l2_median']:.2e} |"
             )
         lines.append("")
+        names = [y for y in DW_YARDSTICKS if any(k[0] == y for k in yard)]
+        if names:
+            lines += [
+                "### dw against the FP32 evaluations (L2 error vs FP64, median / largest; the CPU form gates, the "
+                "others are reported)",
+                "",
+                "| n | " + " | ".join(f"{y} L2" for y in names) + " | "
+                + " | ".join(f"{a} dw L2 (meets {' / '.join(names)})" for a in sorted({k[0] for k in acc})) + " |",
+                "|" + "---|" * (1 + len(names) + len({k[0] for k in acc})),
+            ]
+            for n in sorted({k[1] for k in yard}):
+                cells = [str(n)]
+                cells += [pair(yard[(y, n)]["l2"]) if (y, n) in yard else "n/a" for y in names]
+                for arm in sorted({k[0] for k in acc}):
+                    r = acc.get((arm, n))
+                    if r is None or "yardsticks" not in r["rows"]["dw"]:
+                        cells.append("n/a")
+                        continue
+                    vs = r["rows"]["dw"]["yardsticks"]
+                    verdict = " / ".join("yes" if vs[y]["meets"] else "no" for y in names if y in vs)
+                    cells.append(f"{pair(r['rows']['dw']['l2']['ours'])} ({verdict})")
+                lines.append("| " + " | ".join(cells) + " |")
+            lines.append("")
     meets = {key: r["meets_bar"] for key, r in acc.items()}
+    mem_rows = {}
+    for r in timing:
+        if "memory" in r:
+            mem_rows.setdefault((r["T"], r["n"], r["arm"]), r["memory"])
+    if mem_rows:
+        lines += [
+            "### Memory (MB; one forward and backward at the timed row)",
+            "",
+            "Retained: bytes a forward keeps beside `out` and its inputs (allocator delta). Backward peak: bytes the "
+            "backward allocates beside the gradients (allocator peak). Cake API: the package's own retained-state and "
+            "workspace counts.",
+            "",
+            "| T | n | arm | retained (fwd) | backward peak extra | Cake API retained | Cake API workspace |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for (T, n, arm), m in sorted(mem_rows.items()):
+            lines.append(
+                f"| {T} | {n} | {arm} | {_mb(m.get('fwd_retained_bytes'))} | {_mb(m.get('bwd_peak_extra_bytes'))} | "
+                f"{_mb(m.get('api_retained_bytes'))} | {_mb(m.get('api_workspace_bytes'))} |"
+            )
+        lines.append("")
+    summary = []
     by = collections.defaultdict(dict)
     for r in timing:
         by[(r["mode"], r["phase"], r["T"], r["n"])][r["arm"]] = r
@@ -891,11 +1044,36 @@ def cmd_report(args):
                         continue
                     speed = f"{best['median_us'] / r['median_us']:.2f}x" if best else "n/a"
                     cells += [f"{r['median_us']:.1f}", speed, f"{r['gbs']:.0f}", f"{100 * r['hbm_utilization']:.1f}%"]
+                    summary.append(
+                        {
+                            "mode": mode,
+                            "phase": phase,
+                            "T": T,
+                            "n": n,
+                            "arm": arm,
+                            "us": round(r["median_us"], 2),
+                            "p10_us": round(r["p10_us"], 2),
+                            "p90_us": round(r["p90_us"], 2),
+                            "bytes": r["bytes"],
+                            "gbs": round(r["gbs"], 1),
+                            "hbm_utilization": round(r["hbm_utilization"], 4),
+                            "best_baseline": best["arm"] if best else None,
+                            "best_baseline_us": round(best["median_us"], 2) if best else None,
+                            "speedup": round(best["median_us"] / r["median_us"], 3) if best else None,
+                            "baselines_us": {
+                                a: round(arms[a]["median_us"], 2)
+                                for a in BASELINE_ARMS
+                                if "median_us" in arms.get(a, {})
+                            },
+                        }
+                    )
                 lines.append("| " + " | ".join(cells) + " |")
             lines.append("")
     text = "\n".join(lines) + "\n"
     if args.md:
         Path(args.md).write_text(text)
+    if args.summary:
+        Path(args.summary).write_text(json.dumps({"env": env, "rows": summary}, indent=1))
     print(text)
 
 
@@ -920,8 +1098,9 @@ def main():
     run.add_argument("--groups", type=int, default=3)
     run.add_argument("--r2r", action="store_true", help="check run-to-run bitwise equality per arm")
     report = sub.add_parser("report")
-    report.add_argument("--json", required=True)
+    report.add_argument("--json", required=True, help="one or more comma-separated run JSON files")
     report.add_argument("--md")
+    report.add_argument("--summary", help="write the speedup rows as a small JSON file")
     report.add_argument("--title", default="AttnRes")
     args = parser.parse_args()
     if args.cmd == "run":
