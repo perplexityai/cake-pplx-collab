@@ -18,6 +18,11 @@ limitations under the License.
 # SM103 / SM107): input validation, workspace layout, varlen index offsetting,
 # the prepared runner, the eager entry points and the autograd Functions.
 #
+# * The RoPE form takes ``H`` query heads, ``H = q_latent.shape[1]`` in
+#   ``SUPPORTED_HEADS`` (64, 96, 128); below, ``64`` in a shape stands for ``H``.
+#   The kernels are 64-head programs: ``H = 64`` runs them as they are, and a
+#   larger ``H`` runs them on two 64-head windows of the heads (see the comment
+#   above ``SUPPORTED_HEADS``).  The NoPE program serves 64 heads.
 # * Forward writes ``out [T, 64, 512]`` BF16, ``lse [T, 64]`` FP32 (natural
 #   log over the valid keys; ``-inf`` for a fully masked row, whose ``out`` is
 #   zero) and, with ``with_o_lo=True`` (the default), the BF16 output residual
@@ -104,6 +109,50 @@ NUM_HEADS = 64
 D_LATENT = 512
 D_ROPE = 64
 D_QK = D_LATENT + D_ROPE
+# Query heads of the RoPE form.  Every kernel of the program serves exactly ``NUM_HEADS`` (64) heads of a token
+# (``HEAD_WINDOW``): its tensor maps take 64-head boxes, and its ``lse`` / ``o_lo`` / ``delta`` addresses use the
+# literal 64.  A call with ``H = q_latent.shape[1]`` heads in ``SUPPORTED_HEADS`` runs them on head windows
+# (``head_windows``): ``H = 64`` is one window, today's plan unchanged; ``H = 96`` and ``128`` run the window
+# ``W1 = [H - 64, H)`` first and then ``W0 = [0, 64)`` (96: ``[32, 96)`` then ``[0, 64)``; 128: ``[64, 128)`` then
+# ``[0, 64)``).  The window's query, ``out``, ``dout`` and ``dq`` operands are head slices of the caller's tensors
+# (the tensor maps carry the strides); its ``lse`` / ``o_lo`` / stats operands are contiguous ``[T, 64]`` scratch:
+#
+# * forward: each window writes ``out[:, window]`` in place and its ``lse`` / ``o_lo`` into one scratch, from which
+#   a device copy moves the heads the window owns into the ``[T, H]`` outputs -- ``[64, H)`` for ``W1``, ``[0, 64)``
+#   for ``W0``.  ``W0`` runs last, so every output of the overlapped heads ``[H - 64, 64)`` comes from ``W0``.
+# * backward: one delta launch over the ``T * H`` (token, head) rows (the delta kernel's ``row / 64``, ``row % 64``
+#   read through the virtual ``dout`` strides ``(64 * hs, hs)``, exact when ``dout``'s token stride is ``H`` head
+#   strides ``hs``; another layout is copied once into the workspace), then per-window ``lse`` / ``delta`` stats:
+#   ``W1``'s local heads ``[0, 128 - H)`` (owned by ``W0``) get ``lse = +inf`` and ``delta = 0``, so the kernel's
+#   ``P = exp2(S * scale_log2 - lse)`` and ``dS = P (dP - delta) sm_scale`` are exactly zero there: they add
+#   nothing to dK / dV, and their ``dq`` (zero) is overwritten by ``W0``.  Both windows add into the same FP32
+#   accumulators (or directly into ``dkv_acc``), and one cast runs at the end.  A multi-pass backward runs, per token
+#   chunk, every pass of ``W1`` and then every pass of ``W0`` (the ``dq_partial`` scratch, 64 heads per token, is
+#   reused by the window).
+#
+# Per head, the numerics are those of the 64-head program.  The deterministic package and the NoPE program serve 64
+# heads only; on ``sm_107a`` the windows are not yet served (64 heads only).
+SUPPORTED_HEADS = (64, 96, 128)
+HEAD_WINDOW = NUM_HEADS
+# The architectures whose stages serve the head windows of ``H > 64`` (``sm_107a``: 64 heads only for now).
+WINDOW_ARCHES = ("sm_100a", "sm_103a")
+
+
+def head_windows(num_heads: int) -> tuple[int, ...]:
+    """The first head of every 64-head window of an ``num_heads``-head call, in launch order: ``(0,)`` for 64 heads,
+    ``(H - 64, 0)`` for 96 and 128 (``W1`` then ``W0``; see the comment above ``SUPPORTED_HEADS``)."""
+    H = int(num_heads)
+    if H not in SUPPORTED_HEADS:
+        raise ValueError(f"the RoPE form serves {SUPPORTED_HEADS} query heads, got {H}")
+    return (0,) if H == HEAD_WINDOW else (H - HEAD_WINDOW, 0)
+
+
+def window_owned_heads(num_heads: int, head0: int) -> tuple[int, int]:
+    """``[lo, hi)``: the heads whose outputs the window starting at ``head0`` delivers (``W0`` all of ``[0, 64)``,
+    ``W1`` the heads above 64); its local heads below ``lo - head0`` are ``W0``'s (the pad heads of ``W1``)."""
+    return (0, HEAD_WINDOW) if int(head0) == 0 else (HEAD_WINDOW, int(num_heads))
+
+
 # The NoPE program scores ``q . kv`` over the 512 shared latent dimensions with
 # an explicit scale; the model this program serves fixes it at 1/16 (exact in
 # every floating-point format), not ``1 / sqrt(512)``.
@@ -834,10 +883,23 @@ def generated_program_available(
 # ---------------------------------------------------------------------------
 
 
-def _check_head_tensor(t: torch.Tensor, name: str, last: int) -> None:
-    """``[T, 64, last]`` BF16 with a unit channel stride, TMA-admissible head and token strides and base address."""
-    if t.ndim != 3 or t.shape[1] != NUM_HEADS or t.shape[2] != last:
-        raise ValueError(f"{name} must be a BF16 [T, {NUM_HEADS}, {last}] tensor")
+def _check_head_tensor(
+    t: torch.Tensor,
+    name: str,
+    last: int,
+    heads: Union[int, tuple[int, ...]] = NUM_HEADS,
+) -> None:
+    """``[T, H, last]`` BF16 with a unit channel stride, TMA-admissible head and token strides and base address;
+    ``H`` is ``heads`` (an int) or one of ``heads`` (a tuple: the RoPE form's ``SUPPORTED_HEADS``)."""
+    allowed = (int(heads),) if isinstance(heads, int) else tuple(heads)
+    if t.ndim != 3 or int(t.shape[1]) not in allowed or t.shape[2] != last:
+        if len(allowed) == 1:
+            raise ValueError(f"{name} must be a BF16 [T, {allowed[0]}, {last}] tensor")
+        shapes = ", ".join(f"[T, {h}, {last}]" for h in allowed)
+        raise ValueError(
+            f"{name} must be a BF16 [T, H, {last}] tensor with H in {allowed} query heads ({shapes}), "
+            f"got shape {tuple(t.shape)}"
+        )
     if t.dtype != torch.bfloat16:
         raise ValueError(f"{name} must be bfloat16")
     if t.stride(2) != 1:
@@ -848,8 +910,8 @@ def _check_head_tensor(t: torch.Tensor, name: str, last: int) -> None:
     if head < last or head % TMA_STRIDE_ELEMENTS:
         raise ValueError(
             f"{name} head stride must be >= {last} elements and a multiple of {TMA_STRIDE_ELEMENTS} elements "
-            f"(16 bytes: TMA descriptor stride), got {head}; slices of a packed [T, {NUM_HEADS}, {D_QK}] query "
-            f"or of the [T, {NUM_HEADS}, 256] pre-absorption query are admitted"
+            f"(16 bytes: TMA descriptor stride), got {head}; slices of a packed [T, H, {D_QK}] query "
+            f"or of the [T, H, 256] pre-absorption query are admitted"
         )
     if token <= 0 or token % TMA_STRIDE_ELEMENTS:
         raise ValueError(
@@ -888,23 +950,45 @@ def _check_key_tensor(t: torch.Tensor, name: str, last: int) -> None:
 
 
 def _dout_admissible(dout: torch.Tensor) -> bool:
-    """Whether the backward kernels can read ``dout`` in place (:func:`_check_head_tensor` as a predicate)."""
+    """Whether the backward kernels can read ``dout`` in place (:func:`_check_head_tensor` as a predicate; any head
+    count of the RoPE form: the call's validation matches it against ``q_latent``)."""
     try:
-        _check_head_tensor(dout, "dout", D_LATENT)
+        _check_head_tensor(dout, "dout", D_LATENT, SUPPORTED_HEADS)
     except ValueError:
         return False
     return True
 
 
-def _dout_stride_constants(dout: Optional[torch.Tensor]) -> dict[str, int]:
+def _dout_rows_dense(dout: torch.Tensor) -> bool:
+    """Whether the delta stage of a multi-window plan reads ``dout [T, H, 512]`` in place: its token stride is ``H``
+    head strides, so the (token, head) row ``t * H + h`` sits at ``(t * H + h) * hs`` and the kernel's 64-head row
+    split with the virtual strides ``(64 * hs, hs)`` addresses it exactly (see the comment above
+    ``SUPPORTED_HEADS``).  Every other admissible layout (a head-major view) is copied once per backward."""
+    return int(dout.stride(0)) == int(dout.shape[1]) * int(dout.stride(1))
+
+
+def _dout_stride_constants(
+    dout: Optional[torch.Tensor], *, num_heads: int = NUM_HEADS, copied: bool = False
+) -> dict[str, int]:
     """The delta stage's ``dout`` operands: its token / head strides in elements and the element offset of the
     pointer the launcher passes (the validated view itself, 16-byte aligned: offset 0).  Both strides are multiples
-    of 8 (validated) and must fit the kernel's int32 arguments (a head-major view's head stride is ``T * 512``)."""
+    of 8 (validated) and must fit the kernel's int32 arguments (a head-major view's head stride is ``T * 512``).
+    Above 64 heads the delta runs over ``T * H`` rows of 64 virtual heads: token stride ``64 * hs`` and head stride
+    ``hs`` of a row-dense ``dout`` (:func:`_dout_rows_dense`), or of its dense copy (``copied``: ``hs = 512``)."""
     if dout is None:
         return {}
+    if int(num_heads) == NUM_HEADS:
+        return dict(
+            dout_token_stride=_check_int32("the dout token stride", dout.stride(0)),
+            dout_head_stride=_check_int32("the dout head stride", dout.stride(1)),
+            dout_offset=0,
+        )
+    head = D_LATENT if copied else int(dout.stride(1))
     return dict(
-        dout_token_stride=_check_int32("the dout token stride", dout.stride(0)),
-        dout_head_stride=_check_int32("the dout head stride", dout.stride(1)),
+        dout_token_stride=_check_int32(
+            "the dout virtual token stride", HEAD_WINDOW * head
+        ),
+        dout_head_stride=_check_int32("the dout head stride", head),
         dout_offset=0,
     )
 
@@ -938,10 +1022,13 @@ def validate_dsa_train_inputs(
     dense array or a strided view such as the head-major ``[512, T * 512, 1]``
     layout is consumed in place (the main stage reads it through a
     stride-carrying tensor map, the delta stage through the strides it
-    receives).
+    receives).  The head count ``H = q_latent.shape[1]`` is one of
+    ``SUPPORTED_HEADS`` (64, 96, 128); ``q_rope`` and ``dout`` have the same
+    ``H`` (:func:`num_query_heads` reads it).
     """
-    _check_head_tensor(q_latent, "q_latent", D_LATENT)
-    _check_head_tensor(q_rope, "q_rope", D_ROPE)
+    _check_head_tensor(q_latent, "q_latent", D_LATENT, SUPPORTED_HEADS)
+    heads = int(q_latent.shape[1])
+    _check_head_tensor(q_rope, "q_rope", D_ROPE, heads)
     _check_key_tensor(kv_latent, "kv_latent", D_LATENT)
     _check_key_tensor(k_rope, "k_rope", D_ROPE)
     num_queries = int(q_latent.shape[0])
@@ -975,10 +1062,40 @@ def validate_dsa_train_inputs(
     ):
         raise ValueError("topk_length must be a contiguous int32 [T] tensor")
     if dout is not None:
-        _check_head_tensor(dout, "dout", D_LATENT)
+        _check_head_tensor(dout, "dout", D_LATENT, heads)
         if int(dout.shape[0]) != num_queries:
             raise ValueError("dout must have T rows")
     return num_queries, num_kv, topk
+
+
+def num_query_heads(q_latent: torch.Tensor) -> int:
+    """The query head count ``H`` of a validated RoPE call (``q_latent.shape[1]``)."""
+    return int(q_latent.shape[1])
+
+
+def _check_window_arch(num_heads: int, arch: Optional[str]) -> None:
+    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``WINDOW_ARCHES`` (``sm_107a`` serves 64
+    query heads until its window stages are validated)."""
+    if int(num_heads) != NUM_HEADS and arch not in WINDOW_ARCHES:
+        raise NotImplementedError(
+            f"{int(num_heads)} query heads are served on {list(WINDOW_ARCHES)}; {arch} serves "
+            f"{NUM_HEADS} query heads only"
+        )
+
+
+def _check_nope_heads(q_latent: Any) -> None:
+    """The NoPE program serves 64 query heads: a 96- or 128-head ``q_latent`` gets an error naming the RoPE form."""
+    if (
+        isinstance(q_latent, torch.Tensor)
+        and q_latent.ndim == 3
+        and int(q_latent.shape[1]) != NUM_HEADS
+        and int(q_latent.shape[1]) in SUPPORTED_HEADS
+    ):
+        raise ValueError(
+            f"q_latent must be a BF16 [T, {NUM_HEADS}, {D_LATENT}] tensor: the NoPE program serves "
+            f"{NUM_HEADS} query heads only, got {int(q_latent.shape[1])} ({SUPPORTED_HEADS[1:]} heads are served by "
+            "the RoPE form)"
+        )
 
 
 def validate_dsa_nope_inputs(
@@ -1007,8 +1124,10 @@ def validate_dsa_nope_inputs(
     the head-major ``[512, T * 512, 1]`` layout is consumed in place (the main stage reads it through a
     stride-carrying tensor map, the delta stage through the strides it receives).  ``S == 0`` is rejected;
     ``T == 0`` only without ``allow_empty_queries`` (the eager entries return empty results for it).  Device
-    placement is checked by the callers, so this runs on host tensors.
+    placement is checked by the callers, so this runs on host tensors.  The NoPE program serves 64 query heads:
+    a 96- or 128-head ``q_latent`` raises ``ValueError`` naming the RoPE form, which serves them.
     """
+    _check_nope_heads(q_latent)
     _check_head_tensor(q_latent, "q_latent", D_LATENT)
     _check_key_tensor(kv_latent, "kv_latent", D_LATENT)
     num_queries = int(q_latent.shape[0])
@@ -1061,9 +1180,14 @@ def _check_sink(sink: Any) -> None:
     if not isinstance(sink, torch.Tensor):
         raise TypeError("sink must be a float32 [64] tensor or None")
     if sink.dtype != torch.float32 or tuple(sink.shape) != (NUM_HEADS,):
+        more = (
+            f"; the sink form serves {NUM_HEADS} query heads only"
+            if sink.ndim == 1 and int(sink.shape[0]) in SUPPORTED_HEADS[1:]
+            else ""
+        )
         raise ValueError(
             f"sink must be a float32 [{NUM_HEADS}] tensor (one value per query head), "
-            f"got {sink.dtype} {tuple(sink.shape)}"
+            f"got {sink.dtype} {tuple(sink.shape)}{more}"
         )
     if sink.stride(0) != 1:
         raise ValueError(f"sink must be contiguous, got stride {tuple(sink.stride())}")
@@ -1242,21 +1366,47 @@ def workspace_layout(
     key_passes: int = 1,
     dkv_direct: bool = False,
     token_chunk: Optional[int] = None,
+    num_heads: int = NUM_HEADS,
+    with_o_lo: bool = True,
+    dout_copy: bool = False,
 ) -> dict:
     """Byte ``(offset, size)`` of every workspace region plus ``"total"``.
 
     The ``topk_length`` region backs a full-length vector when the caller
-    passes none; ``delta`` and the FP32 dK/dV accumulators exist for the
+    passes none; ``delta`` (``num_heads`` FP32 per token) and the FP32 dK/dV
+    accumulators exist for the
     backward (a direct binding, ``dkv_direct``, adds into the caller's
     ``dkv_acc`` and has no accumulators).  A backward with more than one
     key-range pass adds the FP32 dQ partials (147,456 B per token), the
     compacted keys of one pass (``topk`` int32 per token) and the per-token
     counts for the tokens of one launch chunk: ``min(num_queries,
     token_chunk)`` rows (the whole row without a ``token_chunk``).
+
+    Above 64 heads (``num_heads`` 96 or 128: two head windows, see the comment
+    above ``SUPPORTED_HEADS``) the forward adds its window scratch,
+    ``fwd_lse`` (``[T, 64]`` FP32) and, with ``with_o_lo``, ``fwd_o_lo``
+    (``[T, 64, 512]`` BF16); the backward adds the per-window stats
+    ``window_lse`` / ``window_delta`` (``[2, T, 64]`` FP32 each) and, with
+    ``dout_copy`` (a ``dout`` whose token stride is not ``H`` head strides,
+    :func:`_dout_rows_dense`), the dense ``dout`` copy ``[T, H, 512]`` BF16.
+    The dQ partials stay 64 heads per token (the windows reuse them).  A
+    64-head layout is the layout of the first release, region for region.
     """
+    windows = int(num_heads) != NUM_HEADS
+    if windows:
+        head_windows(num_heads)  # refuses an unsupported count
     sizes = [("topk_length", num_queries * 4)]
+    if windows:
+        sizes.append(("fwd_lse", num_queries * HEAD_WINDOW * 4))
+        if with_o_lo:
+            sizes.append(("fwd_o_lo", num_queries * HEAD_WINDOW * D_LATENT * 2))
     if backward:
-        sizes.append(("delta", num_queries * NUM_HEADS * 4))
+        sizes.append(("delta", num_queries * int(num_heads) * 4))
+        if windows:
+            stats = len(head_windows(num_heads)) * num_queries * HEAD_WINDOW * 4
+            sizes += [("window_lse", stats), ("window_delta", stats)]
+            if dout_copy:
+                sizes.append(("dout_copy", num_queries * int(num_heads) * D_LATENT * 2))
         if not dkv_direct:
             sizes += [
                 ("dkv_latent_acc", num_kv * D_LATENT * 4),
@@ -1351,6 +1501,9 @@ def dsa_train_workspace_size(
     num_segments: int = 1,
     dkv_acc: bool = False,
     dkv_direct: Optional[bool] = None,
+    num_heads: int = NUM_HEADS,
+    with_o_lo: bool = True,
+    dout_copy: bool = False,
 ) -> int:
     """Workspace bytes :func:`prepare_dsa_train` needs for ``(T, S, topk)`` on ``device``.
 
@@ -1362,9 +1515,17 @@ def dsa_train_workspace_size(
     with ``dkv_direct`` as in :func:`prepare_dsa_train` (``None``, the default,
     = the record's rule of the device's architecture for ``(T, S, topk,
     num_segments)``; ``True`` / ``False`` force / disable the direct path).
+    ``num_heads`` is the binding's query head count ``H`` (64, 96 or 128),
+    ``with_o_lo`` its mode, and ``dout_copy`` whether its ``dout`` needs the
+    dense copy of a multi-window backward (``H > 64`` and a token stride other
+    than ``H`` head strides, :func:`_dout_rows_dense`); see
+    :func:`workspace_layout`.  The workspace is scratch: the state a training
+    step retains between its forward and its backward is
+    :func:`dsa_train_retained_size`.
     """
     _, record = record_for(device)
     arch = arch_for(device)
+    _check_window_arch(num_heads, arch)
     stages = cake_jit.registered_stages()
     direct = bool(backward) and plan_dkv_direct(
         record,
@@ -1400,8 +1561,51 @@ def dsa_train_workspace_size(
             key_passes=passes,
             dkv_direct=direct,
             token_chunk=_record_token_chunk(record, topk),
+            num_heads=num_heads,
+            with_o_lo=with_o_lo,
+            dout_copy=bool(dout_copy) and int(num_heads) != NUM_HEADS,
         )["total"]
     )
+
+
+def retained_layout(
+    num_queries: int,
+    *,
+    num_heads: int = NUM_HEADS,
+    with_o_lo: bool = True,
+    derive_topk_length: bool = True,
+) -> dict[str, int]:
+    """Bytes of the state a RoPE training step retains from its forward to its backward, by tensor, plus
+    ``"total"``: what the autograd entries save beyond their inputs and the returned ``out`` (``[T, H, 512]`` BF16,
+    ``H * 1024`` B per token, the caller's): ``lse`` (``[T, H]`` FP32), ``o_lo`` (``[T, H, 512]`` BF16, with
+    ``with_o_lo`` only) and the forward-derived ``topk_length`` (``[T]`` int32, when the call passes no lengths,
+    ``derive_topk_length``).  Under ``torch.utils.checkpoint(..., use_reentrant=False)`` none of it is kept: the
+    forward is recomputed.  The per-call scratch of either pass is :func:`workspace_layout`, not retained."""
+    T, H = int(num_queries), int(num_heads)
+    head_windows(H)  # refuses an unsupported count
+    sizes = {"lse": T * H * 4}
+    if with_o_lo:
+        sizes["o_lo"] = T * H * D_LATENT * 2
+    if derive_topk_length:
+        sizes["topk_length"] = T * 4
+    sizes["total"] = sum(sizes.values())
+    return sizes
+
+
+def dsa_train_retained_size(
+    num_queries: int,
+    *,
+    num_heads: int = NUM_HEADS,
+    with_o_lo: bool = True,
+    derive_topk_length: bool = True,
+) -> int:
+    """Retained bytes of one RoPE training step (:func:`retained_layout`'s ``"total"``)."""
+    return retained_layout(
+        num_queries,
+        num_heads=num_heads,
+        with_o_lo=with_o_lo,
+        derive_topk_length=derive_topk_length,
+    )["total"]
 
 
 def _plan_nope_direct(
@@ -1818,6 +2022,132 @@ class _Launch:
         self.launcher(self.run, self.values, self.grid)
 
 
+@dataclass(frozen=True)
+class WindowLaunch:
+    """A launch key of a plan over more than 64 heads: the 64-head plan's launch ``key`` (a stage name or a pass key
+    ``(stage, chunk index, pass index)``) on the head window ``[head0, head0 + 64)`` of the ``phase`` (``"fwd"`` or
+    ``"bwd"``): its query, ``out`` / ``dout`` / ``dq`` operands are head slices of the call's tensors, its ``lse`` /
+    ``o_lo`` / ``delta`` operands the window's contiguous scratch (see the comment above ``SUPPORTED_HEADS``)."""
+
+    phase: str
+    head0: int
+    key: Any
+
+
+@dataclass(frozen=True)
+class HeadStep:
+    """A device-copy step of a plan over more than 64 heads (torch copies on the current stream: no kernel of the
+    program, no host synchronization, capturable): ``"fwd_copy"`` after the forward window ``head0`` (the heads it
+    owns of its ``lse`` / ``o_lo`` scratch into the ``[T, H]`` outputs), ``"dout_copy"`` (a ``dout`` the delta cannot
+    read in place, :func:`_dout_rows_dense`, into its dense workspace copy) and ``"window_stats"`` (the per-window
+    ``lse`` / ``delta`` of the backward, the pad heads of ``W1`` at ``+inf`` / ``0``)."""
+
+    name: str
+    head0: int = 0
+
+
+def _window_values(
+    plan: "_Plan",
+    values: dict[str, Any],
+    t: dict[str, torch.Tensor],
+    phase: str,
+    head0: int,
+) -> dict[str, Any]:
+    """``values`` of the window ``[head0, head0 + 64)`` of ``phase`` (:class:`WindowLaunch`)."""
+    window = slice(int(head0), int(head0) + HEAD_WINDOW)
+    v = dict(values)
+    v["q_latent"] = t["q_latent"][:, window]
+    v["q_rope"] = t["q_rope"][:, window]
+    if phase == "fwd":
+        v["out"] = t["out"][:, window]
+        v["lse"] = t["fwd_lse"]
+        if plan.with_o_lo:
+            v["o_lo"] = t["fwd_o_lo"]
+        return v
+    index = plan.head_windows.index(int(head0))
+    # the dout the delta read (the dense copy when the plan makes one): the main stage reads its window slice
+    v["dout"] = values["dout"][:, window]
+    v["dq_latent"] = t["dq_latent"][:, window]
+    v["dq_rope"] = t["dq_rope"][:, window]
+    v["lse"] = t["window_lse"][index]
+    v["delta"] = t["window_delta"][index]
+    return v
+
+
+def _head_step(plan: "_Plan", step: HeadStep, t: dict[str, torch.Tensor]) -> None:
+    """Run the device-copy ``step`` of ``plan`` over the call's tensors ``t`` (:class:`HeadStep`)."""
+    H = plan.num_heads
+    if step.name == "fwd_copy":
+        lo, hi = window_owned_heads(H, step.head0)
+        a, b = lo - step.head0, hi - step.head0
+        t["lse"][:, lo:hi].copy_(t["fwd_lse"][:, a:b])
+        if plan.with_o_lo:
+            t["o_lo"][:, lo:hi].copy_(t["fwd_o_lo"][:, a:b])
+    elif step.name == "dout_copy":
+        t["dout_copy"].copy_(t["dout"])
+    elif step.name == "window_stats":
+        lse, delta = t["lse"], t["delta"]
+        for index, head0 in enumerate(plan.head_windows):
+            lo, hi = window_owned_heads(H, head0)
+            a, b = lo - head0, hi - head0
+            t["window_lse"][index, :, a:b].copy_(lse[:, lo:hi])
+            t["window_delta"][index, :, a:b].copy_(delta[:, lo:hi])
+            if a > 0:
+                # the pad heads of W1 (W0's): P = 0 and dS = 0, so they add nothing and their dq is overwritten
+                t["window_lse"][index, :, :a].fill_(math.inf)
+                t["window_delta"][index, :, :a].zero_()
+    else:
+        raise ValueError(f"unknown head step {step.name!r}")
+
+
+@dataclass(frozen=True)
+class _HeadStepLaunch:
+    """A prepared runner's :class:`HeadStep` over its bound tensors."""
+
+    plan: "_Plan" = field(repr=False)
+    step: HeadStep
+    tensors: dict[str, torch.Tensor] = field(repr=False)
+
+    def __call__(self) -> None:
+        _head_step(self.plan, self.step, self.tensors)
+
+
+def _run_keys(
+    plan: "_Plan",
+    values: dict[str, Any],
+    keys: tuple,
+    t: Optional[dict[str, torch.Tensor]] = None,
+) -> None:
+    """The launches of ``keys`` of ``plan`` over ``values`` (the eager bindings): a stage name, a pass key ``(stage,
+    chunk index, pass index)`` with its overrides, and -- on a plan over more than 64 heads, with the call's tensors
+    ``t`` -- a :class:`WindowLaunch` over its window's values and a :class:`HeadStep`."""
+    window_values: dict[tuple[str, int], dict[str, Any]] = {}
+    for key in keys:
+        stage_values = values
+        if isinstance(key, HeadStep):
+            _head_step(plan, key, t)
+            continue
+        if isinstance(key, WindowLaunch):
+            slot = (key.phase, key.head0)
+            stage_values = window_values.get(slot)
+            if stage_values is None:
+                stage_values = window_values[slot] = _window_values(
+                    plan, values, t, key.phase, key.head0
+                )
+            key = key.key
+        if isinstance(key, tuple):
+            stage, chunk, index = key
+            e = plan.entries[(stage, chunk)]
+            e.launcher(
+                e.run,
+                dict(stage_values, **plan.pass_overrides[chunk][index]),
+                e.grid,
+            )
+        else:
+            e = plan.entries[key]
+            e.launcher(e.run, stage_values, e.grid)
+
+
 def _stage_entry(
     stage: str,
     arch: str,
@@ -1903,6 +2233,12 @@ class _Plan:
     # ``False``: the plan runs the ``with_o_lo=False`` twins of the forward and the delta stage
     # (``cake_jit.NO_OLO_STAGES``); the kernels' ``o_lo`` operand is the zero-size placeholder (:func:`_o_lo_operand`).
     with_o_lo: bool = True
+    # The query head count H of the RoPE call and, above 64 heads, the first head of each 64-head window in launch
+    # order (``head_windows``; empty on a 64-head plan, whose launches are the first release's); ``dout_copy``: the
+    # multi-window backward copies ``dout`` into its dense workspace copy first (:func:`_dout_rows_dense`).
+    num_heads: int = NUM_HEADS
+    head_windows: tuple[int, ...] = ()
+    dout_copy: bool = False
 
     def launch_keys(self) -> tuple:
         return tuple(self.forward_stages) + self.backward_order
@@ -1993,7 +2329,9 @@ def _plan(
 ) -> _Plan:
     """Validate one geometry and resolve its plan (no allocation, no launch).  ``dkv_direct`` / ``check_dst_map``
     as in :func:`prepare_dsa_train`.  ``with_o_lo=False`` plans the ``with_o_lo=False`` twins of the forward and the
-    delta stage (:func:`_require_no_olo_stages`)."""
+    delta stage (:func:`_require_no_olo_stages`).  A call over ``H > 64`` query heads plans the head windows of the
+    comment above ``SUPPORTED_HEADS`` (:func:`_window_order`); a 64-head plan is the first release's, launch for
+    launch."""
     if derive_topk_length and topk_length is None:
         raise ValueError(
             "derive_topk_length=True needs a topk_length [T] int32 tensor for the forward to fill"
@@ -2001,6 +2339,8 @@ def _plan(
     num_queries, num_kv, topk = validate_dsa_train_inputs(
         q_latent, q_rope, kv_latent, k_rope, indices, topk_length, dout=dout
     )
+    H = num_query_heads(q_latent)
+    windows = H != NUM_HEADS
     if backward and dout is None:
         raise ValueError("a backward binding needs dout")
     accumulate = dkv_acc is not None
@@ -2027,10 +2367,10 @@ def _plan(
     tensors = [q_latent, q_rope, kv_latent, k_rope, indices, topk_length, dout]
     tensors += [dkv_acc, dkv_dst_map]
     tensors += list(outputs.values())
-    if not all(t.is_cuda and t.device == device for t in tensors if t is not None):
-        raise ValueError("Expected all tensors on one CUDA device")
+    _check_cuda_device(tensors, device)
     module_name, record = record_for(device)
     arch = arch_for(device)
+    _check_window_arch(H, arch)
     stages = cake_jit.registered_stages()
     if not with_o_lo:
         _require_no_olo_stages(
@@ -2072,29 +2412,30 @@ def _plan(
         if backward
         else 1
     )
+    _check_output(outputs.get("out"), "out", (num_queries, H, D_LATENT), torch.bfloat16)
+    _check_output(outputs.get("lse"), "lse", (num_queries, H), torch.float32)
     _check_output(
-        outputs.get("out"), "out", (num_queries, NUM_HEADS, D_LATENT), torch.bfloat16
-    )
-    _check_output(outputs.get("lse"), "lse", (num_queries, NUM_HEADS), torch.float32)
-    _check_output(
-        outputs.get("o_lo"), "o_lo", (num_queries, NUM_HEADS, D_LATENT), torch.bfloat16
+        outputs.get("o_lo"), "o_lo", (num_queries, H, D_LATENT), torch.bfloat16
     )
     _check_output(
         outputs.get("dq_latent"),
         "dq_latent",
-        (num_queries, NUM_HEADS, D_LATENT),
+        (num_queries, H, D_LATENT),
         torch.bfloat16,
     )
     _check_output(
         outputs.get("dq_rope"),
         "dq_rope",
-        (num_queries, NUM_HEADS, D_ROPE),
+        (num_queries, H, D_ROPE),
         torch.bfloat16,
     )
     _check_output(
         outputs.get("dkv_latent"), "dkv_latent", (num_kv, D_LATENT), torch.bfloat16
     )
     _check_output(outputs.get("dk_rope"), "dk_rope", (num_kv, D_ROPE), torch.bfloat16)
+    # a multi-window backward reads dout through the delta's virtual 64-head rows: a dout whose token stride is not
+    # H head strides is copied once per backward into the workspace (the main windows read the same copy)
+    dout_copy = bool(backward) and windows and not _dout_rows_dense(dout)
     layout = workspace_layout(
         num_queries,
         num_kv,
@@ -2103,6 +2444,9 @@ def _plan(
         key_passes=passes,
         dkv_direct=direct,
         token_chunk=_record_token_chunk(record, topk),
+        num_heads=H,
+        with_o_lo=with_o_lo,
+        dout_copy=dout_copy,
     )
     has_topk_length = topk_length is not None
     # the forward derives the row lengths into the vector when the caller gives none (or asks for it); the backward
@@ -2133,10 +2477,11 @@ def _plan(
         has_topk_length=int(has_topk_length),
         sm_scale=scale,
         scale_log2=scale * LOG2E,
-        num_rows=T * NUM_HEADS,  # bwd_delta: (token, head) rows
+        num_rows=T * H,  # bwd_delta: (token, head) rows
         # bwd_delta: dout's token / head strides and the pointer's element offset (the strided delta kernel reads
-        # a head-major or any other admissible view in place)
-        **_dout_stride_constants(dout),
+        # a head-major or any other admissible view in place; above 64 heads the virtual 64-head rows of a
+        # row-dense dout or of its dense copy)
+        **_dout_stride_constants(dout, num_heads=H, copied=dout_copy),
         latent_groups=S * D_LATENT // 32,  # bwd_cast: permuted 32-element groups
         rope_groups=S * D_ROPE // 32,
         out_f32=scalars["out_f32"],
@@ -2188,7 +2533,14 @@ def _plan(
             "bwd_compact",
             "bwd_main_pass_natural" if direct else "bwd_main_pass",
         )
-        entries[delta] = _stage_entry(delta, arch, scalars)
+        # above 64 heads the delta runs once over the T * H (token, head) rows: its grid rule reads the 64-row
+        # groups ceil(T * H / 64) as its token count (8 warps, one row each, per 8-row block)
+        delta_scalars = (
+            scalars
+            if not windows
+            else dict(scalars, num_queries=-(-T * H // HEAD_WINDOW))
+        )
+        entries[delta] = _stage_entry(delta, arch, delta_scalars)
         backward_order.append(delta)
         if passes == 1:
             entries[main_stage] = _stage_entry(main_stage, arch, scalars)
@@ -2210,6 +2562,16 @@ def _plan(
         if not direct:
             entries["bwd_cast"] = _stage_entry("bwd_cast", arch, scalars)
             backward_order.append("bwd_cast")
+    forward_order: tuple = (fwd,)
+    if windows:
+        forward_order, backward_order = _window_order(
+            H,
+            fwd,
+            tuple(backward_order),
+            passes=passes,
+            num_chunks=len(token_chunks),
+            dout_copy=dout_copy,
+        )
     return _Plan(
         module_name=module_name,
         arch=arch,
@@ -2233,9 +2595,60 @@ def _plan(
         pass_overrides=pass_overrides,
         entries=entries,
         backward_order=tuple(backward_order),
-        forward_stages=(fwd,),
+        forward_stages=forward_order,
         with_o_lo=bool(with_o_lo),
+        num_heads=H,
+        head_windows=head_windows(H) if windows else (),
+        dout_copy=dout_copy,
     )
+
+
+def _window_order(
+    num_heads: int,
+    fwd: str,
+    backward_order: tuple,
+    *,
+    passes: int,
+    num_chunks: int,
+    dout_copy: bool,
+) -> tuple[tuple, tuple]:
+    """``(forward keys, backward keys)`` of a plan over ``num_heads > 64`` heads from the 64-head plan's forward stage
+    ``fwd`` and its ``backward_order`` (see the comment above ``SUPPORTED_HEADS``):
+
+    * forward: per window in launch order (``W1`` then ``W0``), the window launch and its ``"fwd_copy"``;
+    * backward: the ``"dout_copy"`` (``dout_copy`` only), the delta stage once over the ``T * H`` rows, the
+      ``"window_stats"``, then the main stage per window -- with key passes, per token chunk every pass of ``W1``
+      (``bwd_compact``, ``bwd_main_pass*``) and then every pass of ``W0`` --, then the cast (absent on a direct
+      binding) once.
+    """
+    windows = head_windows(num_heads)
+    forward: list = []
+    for head0 in windows:
+        forward += [WindowLaunch("fwd", head0, fwd), HeadStep("fwd_copy", head0)]
+    if not backward_order:
+        return tuple(forward), ()
+    delta, rest = backward_order[0], backward_order[1:]
+    cast = ()
+    if rest and rest[-1] == "bwd_cast":
+        rest, cast = rest[:-1], (rest[-1],)
+    backward: list = [HeadStep("dout_copy")] if dout_copy else []
+    backward += [delta, HeadStep("window_stats")]
+    if passes == 1:
+        (main,) = rest
+        backward += [WindowLaunch("bwd", head0, main) for head0 in windows]
+    else:
+        per_chunk = len(rest) // int(num_chunks)
+        for chunk in range(int(num_chunks)):
+            keys = rest[chunk * per_chunk : (chunk + 1) * per_chunk]
+            for head0 in windows:
+                backward += [WindowLaunch("bwd", head0, key) for key in keys]
+    return tuple(forward), tuple(backward) + cast
+
+
+def _check_cuda_device(tensors: list, device: torch.device) -> None:
+    """Every tensor of ``tensors`` (``None`` skipped) on the one CUDA ``device``."""
+    if not all(t.is_cuda and t.device == device for t in tensors if t is not None):
+        raise ValueError("Expected all tensors on one CUDA device")
 
 
 def _bound_values(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
@@ -2281,28 +2694,61 @@ def _bound_values(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
                 key_scratch=t["topk_length"],
                 pass_counts=t["topk_length"],
             )
+        if getattr(plan, "dout_copy", False):
+            # a multi-window backward whose dout the delta cannot read in place: every stage reads the dense copy
+            # the ``"dout_copy"`` step fills first (a 64-head plan never copies; duck-typed plans may omit the field)
+            values["dout"] = t["dout_copy"]
     return values
 
 
-def _launches(plan: _Plan, values: dict[str, Any]) -> dict[Any, _Launch]:
-    """The launches of ``plan`` over ``values``, keyed as :class:`DSATrainRunner` documents."""
-    launches: dict[Any, _Launch] = {}
+def _launches(
+    plan: _Plan,
+    values: dict[str, Any],
+    t: Optional[dict[str, torch.Tensor]] = None,
+) -> dict[Any, Any]:
+    """The launches of ``plan`` over ``values``, keyed as :class:`DSATrainRunner` documents (on a plan over more than
+    64 heads also its :class:`WindowLaunch` keys over their window's values and its :class:`HeadStep` keys over the
+    runner's tensors ``t``)."""
+    launches: dict[Any, Any] = {}
+    window_values: dict[tuple[str, int], dict[str, Any]] = {}
     for key in plan.launch_keys():
-        stage, stage_values = key, values
-        if isinstance(key, tuple):
-            stage, chunk, index = key
-            stage_values = dict(values, **plan.pass_overrides[chunk][index])
+        if isinstance(key, HeadStep):
+            launches[key] = _HeadStepLaunch(plan, key, t)
+            continue
+        base, inner = values, key
+        if isinstance(key, WindowLaunch):
+            slot = (key.phase, key.head0)
+            base = window_values.get(slot)
+            if base is None:
+                base = window_values[slot] = _window_values(
+                    plan, values, t, key.phase, key.head0
+                )
+            inner = key.key
+        if isinstance(inner, tuple):
+            stage, chunk, index = inner
+            stage_values = dict(base, **plan.pass_overrides[chunk][index])
             e = plan.entries[(stage, chunk)]
         else:
+            stage, stage_values = inner, base
             e = plan.entries[stage]
         launches[key] = _Launch(stage, e.launcher, e.run, stage_values, e.grid)
     return launches
 
 
 def _scratch(plan: _Plan, flat: torch.Tensor) -> dict[str, torch.Tensor]:
-    """The backward scratch regions of ``plan`` carved from the workspace ``flat``."""
+    """The backward scratch regions of ``plan`` carved from the workspace ``flat`` (above 64 heads also the per-window
+    stats and the dense ``dout`` copy of a ``dout_copy`` plan)."""
     T, S, layout = plan.num_queries, plan.num_kv, plan.layout
-    t = dict(delta=_carve(flat, layout, "delta", torch.float32, (T, NUM_HEADS)))
+    H = plan.num_heads
+    t = dict(delta=_carve(flat, layout, "delta", torch.float32, (T, H)))
+    if plan.head_windows:
+        stats = (len(plan.head_windows), T, HEAD_WINDOW)
+        t["window_lse"] = _carve(flat, layout, "window_lse", torch.float32, stats)
+        t["window_delta"] = _carve(flat, layout, "window_delta", torch.float32, stats)
+        if plan.dout_copy:
+            t["dout_copy"] = _carve(
+                flat, layout, "dout_copy", torch.bfloat16, (T, H, D_LATENT)
+            )
     # a direct binding adds into dkv_acc: no private accumulators
     if not plan.dkv_direct:
         t["dkv_latent_acc"] = _carve(
@@ -2381,6 +2827,15 @@ class DSATrainRunner:
     chunk and per pass ``bwd_compact`` and ``bwd_main_pass`` -- or the single
     ``bwd_main`` --, then ``bwd_cast``; a direct binding, ``dkv_direct``,
     launches the natural-layout variants of the main stage and no cast).
+
+    A binding over ``H > 64`` query heads (``num_heads``) keys its window
+    launches :class:`WindowLaunch` and its device copies :class:`HeadStep`
+    (``forward_stages``: per window the launch and its ``"fwd_copy"``;
+    ``backward_order``: ``"dout_copy"`` when the binding's ``dout`` needs it,
+    the delta over the ``T * H`` rows, ``"window_stats"``, the main stage per
+    window -- per token chunk every pass of a window --, the cast); see the
+    comment above ``SUPPORTED_HEADS``.  The window scratch, the stats and the
+    ``dout`` copy are workspace regions (:func:`workspace_layout`).
     """
 
     module_name: str
@@ -2410,6 +2865,9 @@ class DSATrainRunner:
     # ``False``: the forward writes no ``o_lo`` (``tensors["o_lo"]`` is the kernels' zero-size placeholder) and the
     # backward's delta reads ``out`` alone.
     with_o_lo: bool = True
+    # The binding's query head count H (``SUPPORTED_HEADS``); above 64 heads ``launches`` also holds the window
+    # launches (:class:`WindowLaunch`) and device copies (:class:`HeadStep`) of the plan.
+    num_heads: int = NUM_HEADS
 
     @property
     def out(self) -> torch.Tensor:
@@ -2591,7 +3049,7 @@ def prepare_dsa_train(
         raise ValueError(
             f"workspace_buffer needs {layout['total']} bytes, got {flat.numel()}"
         )
-    num_queries, num_kv = plan.num_queries, plan.num_kv
+    num_queries, num_kv, H = plan.num_queries, plan.num_kv, plan.num_heads
 
     def fresh(shape, dtype):
         return _alloc(shape, dtype, device)
@@ -2610,29 +3068,27 @@ def prepare_dsa_train(
         topk_length.fill_(plan.topk)
     t["topk_length"] = topk_length
     t["out"] = (
-        out
-        if out is not None
-        else fresh((num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
+        out if out is not None else fresh((num_queries, H, D_LATENT), torch.bfloat16)
     )
-    t["lse"] = (
-        lse if lse is not None else fresh((num_queries, NUM_HEADS), torch.float32)
-    )
+    t["lse"] = lse if lse is not None else fresh((num_queries, H), torch.float32)
     if plan.with_o_lo and o_lo is None:
-        o_lo = fresh((num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
+        o_lo = fresh((num_queries, H, D_LATENT), torch.bfloat16)
     # with_o_lo=False: no buffer, the zero-size placeholder the twins never touch
     t["o_lo"] = _o_lo_operand(plan, o_lo, device)
+    # above 64 heads: the forward windows' lse / o_lo scratch, carved from the workspace
+    t.update(_forward_window_scratch(plan, device, flat))
     if backward:
         t["dout"] = dout
         t.update(_scratch(plan, flat))
         t["dq_latent"] = (
             dq_latent
             if dq_latent is not None
-            else fresh((num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
+            else fresh((num_queries, H, D_LATENT), torch.bfloat16)
         )
         t["dq_rope"] = (
             dq_rope
             if dq_rope is not None
-            else fresh((num_queries, NUM_HEADS, D_ROPE), torch.bfloat16)
+            else fresh((num_queries, H, D_ROPE), torch.bfloat16)
         )
         if plan.accumulate_dkv:
             t["dkv_acc"], _row_stride = _check_dkv_acc(dkv_acc, dkv_dst_map, num_kv)
@@ -2647,7 +3103,7 @@ def prepare_dsa_train(
         topk=plan.topk,
         softmax_scale=plan.softmax_scale,
         tensors=t,
-        launches=_launches(plan, values),
+        launches=_launches(plan, values, t),
         stages=plan.stages,
         dkv_fp32=plan.dkv_fp32,
         has_topk_length=plan.has_topk_length,
@@ -2660,6 +3116,7 @@ def prepare_dsa_train(
         dkv_direct=plan.dkv_direct,
         forward_stages=plan.forward_stages,
         with_o_lo=plan.with_o_lo,
+        num_heads=plan.num_heads,
     )
 
 
@@ -2901,6 +3358,32 @@ def backward_binding_key(
     )
 
 
+def _forward_window_scratch(
+    plan: _Plan,
+    device: torch.device,
+    flat: Optional[torch.Tensor] = None,
+) -> dict[str, torch.Tensor]:
+    """The forward window scratch of a plan over more than 64 heads (nothing on a 64-head plan): ``fwd_lse`` ``[T,
+    64]`` FP32 and, with ``with_o_lo``, ``fwd_o_lo`` ``[T, 64, 512]`` BF16 -- the contiguous operands each window's
+    forward writes before its ``"fwd_copy"`` -- carved from the workspace ``flat`` (a prepared runner) or allocated
+    per call (the eager bindings)."""
+    if not plan.head_windows:
+        return {}
+    T = plan.num_queries
+    shapes = {"fwd_lse": ((T, HEAD_WINDOW), torch.float32)}
+    if plan.with_o_lo:
+        shapes["fwd_o_lo"] = ((T, HEAD_WINDOW, D_LATENT), torch.bfloat16)
+    if flat is None:
+        return {
+            name: _alloc(shape, dtype, device)
+            for name, (shape, dtype) in shapes.items()
+        }
+    return {
+        name: _carve(flat, plan.layout, name, dtype, shape)
+        for name, (shape, dtype) in shapes.items()
+    }
+
+
 class _Binding:
     """A remembered plan plus the one value it owns (the materialized ``topk_length``)."""
 
@@ -2910,33 +3393,25 @@ class _Binding:
         self.plan = plan
         self.topk_length = topk_length
 
-    def _run(self, values: dict[str, Any], keys: tuple) -> None:
+    def _run(
+        self,
+        values: dict[str, Any],
+        keys: tuple,
+        t: Optional[dict[str, torch.Tensor]] = None,
+    ) -> None:
         """The stage launches of ``keys`` over ``values``, whose tensors are torch tensors: each binding call runs on
-        torch's current stream without an FFI stream context (:func:`_ffi_stream_context`)."""
-        plan = self.plan
-        for key in keys:
-            if isinstance(key, tuple):
-                stage, chunk, index = key
-                e = plan.entries[(stage, chunk)]
-                e.launcher(
-                    e.run,
-                    dict(values, **plan.pass_overrides[chunk][index]),
-                    e.grid,
-                )
-            else:
-                e = plan.entries[key]
-                e.launcher(e.run, values, e.grid)
+        torch's current stream without an FFI stream context (:func:`_ffi_stream_context`).  The window launches
+        and device copies of a plan over more than 64 heads read the call's tensors ``t`` (:func:`_run_keys`)."""
+        _run_keys(self.plan, values, keys, t)
 
     def forward(self, q_latent, q_rope, kv_latent, k_rope, indices, topk_length):
         plan = self.plan
-        T, device = plan.num_queries, q_latent.device
-        out = _alloc((T, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-        lse = _alloc((T, NUM_HEADS), torch.float32, device)
+        T, H, device = plan.num_queries, plan.num_heads, q_latent.device
+        out = _alloc((T, H, D_LATENT), torch.bfloat16, device)
+        lse = _alloc((T, H), torch.float32, device)
         # with_o_lo=False: no o_lo buffer (the twin leaves the placeholder operand unwritten)
         o_lo = (
-            _alloc((T, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-            if plan.with_o_lo
-            else None
+            _alloc((T, H, D_LATENT), torch.bfloat16, device) if plan.with_o_lo else None
         )
         t = dict(
             q_latent=q_latent,
@@ -2949,7 +3424,8 @@ class _Binding:
             lse=lse,
             o_lo=_o_lo_operand(plan, o_lo, device),
         )
-        self._run(_bound_values(plan, t), plan.forward_stages)
+        t.update(_forward_window_scratch(plan, device))
+        self._run(_bound_values(plan, t), plan.forward_stages, t)
         return out, lse, o_lo
 
     def backward(
@@ -2970,7 +3446,7 @@ class _Binding:
     ):
         _alert_nondeterministic(ROPE_BACKWARD_ENTRY)
         plan = self.plan
-        T, S, device = plan.num_queries, plan.num_kv, q_latent.device
+        T, S, H, device = plan.num_queries, plan.num_kv, plan.num_heads, q_latent.device
 
         def fresh(shape, dtype):
             return _alloc(shape, dtype, device)
@@ -2986,12 +3462,18 @@ class _Binding:
             lse=lse,
             o_lo=_o_lo_operand(plan, o_lo, device),
             dout=dout,
-            dq_latent=fresh((T, NUM_HEADS, D_LATENT), torch.bfloat16),
-            dq_rope=fresh((T, NUM_HEADS, D_ROPE), torch.bfloat16),
+            dq_latent=fresh((T, H, D_LATENT), torch.bfloat16),
+            dq_rope=fresh((T, H, D_ROPE), torch.bfloat16),
         )
         # The backward scratch is allocated per region (the prepared runner carves it
         # from one workspace): the FP32 dK/dV accumulators zero-filled, the rest plain.
-        t["delta"] = fresh((T, NUM_HEADS), torch.float32)
+        t["delta"] = fresh((T, H), torch.float32)
+        if plan.head_windows:
+            stats = (len(plan.head_windows), T, HEAD_WINDOW)
+            t["window_lse"] = fresh(stats, torch.float32)
+            t["window_delta"] = fresh(stats, torch.float32)
+            if plan.dout_copy:
+                t["dout_copy"] = fresh((T, H, D_LATENT), torch.bfloat16)
         # a direct binding adds into the caller's dkv_acc: no accumulators, no fill
         if not plan.dkv_direct:
             t["dkv_latent_acc"] = _alloc(
@@ -3018,7 +3500,7 @@ class _Binding:
             if dkv_dst_map is not None:
                 t["dkv_dst_map"] = dkv_dst_map
         t.update(_dkv_outputs(plan, t, None, None, fresh))
-        self._run(_bound_values(plan, t), plan.backward_order)
+        self._run(_bound_values(plan, t), plan.backward_order, t)
         if plan.accumulate_dkv:
             return t["dq_latent"], t["dq_rope"], None, None
         if plan.dkv_fp32:
@@ -3182,12 +3664,12 @@ def _empty_forward(
         topk_length,
         allow_empty_queries=True,
     )
-    device = q_latent.device
-    out = _alloc((0, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-    lse = _alloc((0, NUM_HEADS), torch.float32, device)
+    device, H = q_latent.device, num_query_heads(q_latent)
+    out = _alloc((0, H, D_LATENT), torch.bfloat16, device)
+    lse = _alloc((0, H), torch.float32, device)
     if not with_o_lo:
         return out, lse, None
-    return out, lse, _alloc((0, NUM_HEADS, D_LATENT), torch.bfloat16, device)
+    return out, lse, _alloc((0, H, D_LATENT), torch.bfloat16, device)
 
 
 def _empty_backward(
@@ -3218,12 +3700,13 @@ def _empty_backward(
         dout=dout,
         allow_empty_queries=True,
     )
-    _check_output(out, "out", (0, NUM_HEADS, D_LATENT), torch.bfloat16)
-    _check_output(o_lo, "o_lo", (0, NUM_HEADS, D_LATENT), torch.bfloat16)
-    _check_output(lse, "lse", (0, NUM_HEADS), torch.float32)
+    H = num_query_heads(q_latent)
+    _check_output(out, "out", (0, H, D_LATENT), torch.bfloat16)
+    _check_output(o_lo, "o_lo", (0, H, D_LATENT), torch.bfloat16)
+    _check_output(lse, "lse", (0, H), torch.float32)
     device, num_kv = q_latent.device, int(kv_latent.shape[0])
-    dq_latent = _alloc((0, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-    dq_rope = _alloc((0, NUM_HEADS, D_ROPE), torch.bfloat16, device)
+    dq_latent = _alloc((0, H, D_LATENT), torch.bfloat16, device)
+    dq_rope = _alloc((0, H, D_ROPE), torch.bfloat16, device)
     if dkv_acc is not None:
         # nothing to accumulate; the buffer and the map are validated all the same
         _check_dkv_acc(dkv_acc, dkv_dst_map, num_kv, check_dst_map=check_dst_map)
@@ -3782,30 +4265,26 @@ class _RopeVarlenBinding(_Binding):
             in_place=self.rows_in_place,
         )
         entry.launcher(entry.run, values, entry.grid)
-        out = _alloc((T, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-        lse = _alloc((T, NUM_HEADS), torch.float32, device)
+        H = plan.num_heads
+        out = _alloc((T, H, D_LATENT), torch.bfloat16, device)
+        lse = _alloc((T, H), torch.float32, device)
         o_lo = (
-            _alloc((T, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-            if plan.with_o_lo
-            else None
+            _alloc((T, H, D_LATENT), torch.bfloat16, device) if plan.with_o_lo else None
         )
-        values = _bound_values(
-            plan,
-            dict(
-                q_latent=q_latent,
-                q_rope=q_rope,
-                kv_latent=kv_latent,
-                k_rope=k_rope,
-                indices=indices,
-                topk_length=lengths,
-                out=out,
-                lse=lse,
-                o_lo=_o_lo_operand(plan, o_lo, device),
-            ),
+        t = dict(
+            q_latent=q_latent,
+            q_rope=q_rope,
+            kv_latent=kv_latent,
+            k_rope=k_rope,
+            indices=indices,
+            topk_length=lengths,
+            out=out,
+            lse=lse,
+            o_lo=_o_lo_operand(plan, o_lo, device),
         )
-        for stage in plan.forward_stages:  # the forward has no key-range passes
-            e = plan.entries[stage]
-            e.launcher(e.run, values, e.grid)
+        t.update(_forward_window_scratch(plan, device))
+        # the forward has no key-range passes (above 64 heads: its windows and their device copies)
+        self._run(_bound_values(plan, t), plan.forward_stages, t)
         return out, lse, o_lo
 
 
