@@ -307,15 +307,10 @@ write comes first, so such a call stops before any of its programs runs.
 A prepared runner launches the
 write with no allocation; preparing one (the eager entry prepares on every
 call) adds three small device launches for the write's scratch.  The
-16 MiB table the write copies rows from is shared per device by the runners
-that use it and freed with the last of them, so no device memory outlives
-the runners (an eager call while no prepared runner holds the table makes it
-again: one more allocation and three small launches); it is made on the stream
-of the prepare that needs it, and a call on another stream waits for that
-stream's event while the table is not complete and records its stream on the
-table, so the memory is reused only after that stream's reads.  A CUDA graph
-that captures a call reading the shared table keeps that table for the life
-of the process.
+16 MiB table the write copies rows from is made once per device, on the
+stream of its first call, and kept for the life of the process (16 MiB per
+device for this package); a call on another stream waits for that stream's
+event while the table is not complete.
 `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` reports the
 bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
 `scan_blocks` programs draw their work units from a 16-byte ticket block

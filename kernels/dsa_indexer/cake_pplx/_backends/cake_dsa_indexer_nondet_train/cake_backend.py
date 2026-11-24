@@ -1164,25 +1164,11 @@ def _offsets_placeholder(index: int) -> torch.Tensor:
 
 
 # row ``nb`` (``0 .. CB_SLOTS``) of the int32 ``[CB_SLOTS + 1, CB_SLOTS]`` table: ``0 .. nb - 1`` and a ``-1`` tail, per
-# device, held weakly (the runners that read it hold it), with the event its creating stream recorded right after writing it
-# and the raw handle of that stream (the stream the table's memory belongs to)
-_IOTA_ROWS: dict[int, tuple[weakref.ref, torch.cuda.Event, int]] = {}
-# the shared tables a CUDA graph capture read, per device, kept for the life of the process: the graph's replays read
-# them and the graph holds no reference to them
-_IOTA_CAPTURED: dict[int, torch.Tensor] = {}
+# device, kept for the life of the process, with the event its creating stream recorded right after writing it
+_IOTA_ROWS: dict[int, tuple[torch.Tensor, torch.cuda.Event]] = {}
 # the row base and limit of the rows outside every query segment (before ``cu_seqlens_q[0]`` or from
 # ``cu_seqlens_q[S]`` on): ``min(base + t + 8, limit)`` clamps to 7, so the row's visible count is 0
 _IOTA_NO_SEGMENT = -(1 << 62)
-
-
-def _current_raw_stream(index: int) -> int:
-    """The raw handle of torch's current stream on device ``index``."""
-    getter = getattr(torch._C, "_cuda_getCurrentRawStream", None)
-    return (
-        getter(index)
-        if getter is not None
-        else torch.cuda.current_stream(index).cuda_stream
-    )
 
 
 def _capturing(index: int) -> bool:
@@ -1191,38 +1177,28 @@ def _capturing(index: int) -> bool:
         return torch.cuda.is_current_stream_capturing()
 
 
-def _iota_rows(
-    index: int,
-) -> tuple[torch.Tensor, Optional[torch.cuda.Event], Optional[int]]:
+def _iota_rows(index: int) -> tuple[torch.Tensor, Optional[torch.cuda.Event]]:
     """The candidate-block rows of every block count on device ``index``: row ``nb`` of the int32 ``[CB_SLOTS + 1,
-    CB_SLOTS]`` table holds ``0 .. nb - 1`` and a ``-1`` tail.  One table per device (16 MiB), shared by the runners
-    that read it and freed with the last of them (the module holds it weakly, so no device memory outlives the runners;
-    the next prepare makes it again), made on device ``index``'s current stream with an event recorded on that stream
-    right after it: a reader on another stream waits on that event (:class:`_IotaBlocks`) before it reads the table,
-    and records its stream on the table, so the allocator reuses the memory only after that stream's reads.  Returns
-    the table, its event and the raw handle of its creating stream.  A CUDA graph capture that reads the shared table
-    keeps it for the life of the process (``_IOTA_CAPTURED``): the graph's replays read it and the graph holds no
-    reference to it.  Made during a capture, the table is the call's own (the capture's pool; the capture orders its
-    reads after its writes), not shared, and comes without an event or stream (None)."""
+    CB_SLOTS]`` table holds ``0 .. nb - 1`` and a ``-1`` tail.  One table per device (16 MiB), made on first use on
+    device ``index``'s current stream and kept for the life of the process, so an eager call never makes it again and no
+    CUDA graph or stream that reads it can outlive it; an event recorded on that stream right after it lets a reader on
+    another stream wait for it (:class:`_IotaBlocks`) before it reads the table.  Made during a CUDA graph capture, it is
+    the call's own (the capture's pool; the capture orders its reads after its writes), not kept, and comes without an
+    event."""
+    entry = _IOTA_ROWS.get(index)
+    if entry is not None:
+        return entry
     with torch.cuda.device(index):
-        capturing = torch.cuda.is_current_stream_capturing()
-        entry = _IOTA_ROWS.get(index)
-        rows = None if entry is None else entry[0]()
-        if rows is not None:
-            if capturing:
-                _IOTA_CAPTURED[index] = rows
-            return rows, entry[1], entry[2]
         device = f"cuda:{index}"
         slots = torch.arange(CB_SLOTS, dtype=torch.int32, device=device)
         counts = torch.arange(CB_SLOTS + 1, dtype=torch.int32, device=device)
         rows = torch.where(slots[None, :] < counts[:, None], slots[None, :], PAD_ID)
-        if capturing:
-            return rows, None, None
-        stream = torch.cuda.current_stream(index)
+        if torch.cuda.is_current_stream_capturing():
+            return rows, None
         ready = torch.cuda.Event()
-        ready.record(stream)
-        _IOTA_ROWS[index] = (weakref.ref(rows), ready, stream.cuda_stream)
-        return rows, ready, stream.cuda_stream
+        ready.record(torch.cuda.current_stream(index))
+        _IOTA_ROWS[index] = (rows, ready)
+        return rows, ready
 
 
 class _IotaBlocks:
@@ -1233,8 +1209,7 @@ class _IotaBlocks:
     ``cu_seqlens_q[S]`` on).  Every run reads the bound ``cu_seqlens_q`` / ``cu_seqlens_k`` / ``q_causal_offsets``
     (new values written into them are followed, also by a CUDA graph capturing the run), with no host synchronization
     and no allocation: the per-segment and per-row scratch is made here, by three small device launches (one ``full``,
-    two ``arange``) on every prepare -- so on every call of the eager entry, which prepares per call and, with no other
-    runner holding the row table, makes that table again (two ``arange`` and one ``where``, 16 MiB).  Per segment
+    two ``arange``) on every prepare -- so on every call of the eager entry, which prepares per call.  Per segment
     ``s`` (``q0 / q1`` its query bounds, ``L`` its keys) ``base`` and ``lim`` give ``n + 7 = max(min(t + 8 + base,
     lim), 7)``: with offsets ``base = offset - q0`` and ``lim = L + 7``; without them ``base = L - q1`` (the default
     offset ``L - (q1 - q0)``), and no row of the segment reaches ``lim``, so it is skipped.  ``searchsorted`` over
@@ -1244,9 +1219,7 @@ class _IotaBlocks:
     key segments) indexes past the table and stops with ``index_select``'s device-side assert, where the
     ``scan_blocks`` programs trap; the runner launches this fill first, so such a call stops before its scan and
     finalize programs run.  The table may come from another stream's first call: the prepare and every run outside a
-    capture make the current stream wait on the table's event while it has not completed at prepare, and a run outside a
-    capture on a stream other than the table's creating stream records that stream on the table (once per stream), so
-    the table's memory is reused only after that stream's reads, whichever runner drops it last."""
+    capture make the current stream wait on the table's event while it has not completed at prepare."""
 
     def __init__(
         self,
@@ -1266,10 +1239,7 @@ class _IotaBlocks:
         self.q_lo, self.q_hi = cu_seqlens_q[:-1], cu_seqlens_q[1:]
         self.k_lo, self.k_hi = cu_seqlens_k[:-1], cu_seqlens_k[1:]
         self.index = device_index
-        self.rows, ready, self.home = _iota_rows(device_index)
-        # the streams other than the table's creating stream (``home``, a raw handle: 0 is the legacy default stream;
-        # None: the capture's own table) that a run of this fill recorded on the table
-        self.streams: set[int] = set()
+        self.rows, ready = _iota_rows(device_index)
         # a table another stream is still writing: wait for it here and on every run (a run may use another stream)
         self.ready = None
         if ready is not None and not _capturing(device_index) and not ready.query():
@@ -1294,18 +1264,6 @@ class _IotaBlocks:
         S = self.num_segments
         if self.ready is not None and not _capturing(self.index):
             torch.cuda.current_stream(self.index).wait_event(self.ready)
-        if self.home is not None:
-            # a read on another stream than the table's, outside a capture (a capture's reads keep the table through
-            # ``_IOTA_CAPTURED`` or their runner): the allocator then waits for this stream's reads before it hands the
-            # table's memory out again, whichever runner drops the table last
-            stream = _current_raw_stream(self.index)
-            if (
-                stream != self.home
-                and stream not in self.streams
-                and not _capturing(self.index)
-            ):
-                self.rows.record_stream(torch.cuda.current_stream(self.index))
-                self.streams.add(stream)
         if S == 0:
             self.blocks.fill_(PAD_ID)
             return

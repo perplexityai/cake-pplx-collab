@@ -35,6 +35,7 @@ import random
 import subprocess
 import sys
 import warnings
+import weakref
 
 import pytest
 import torch
@@ -1169,10 +1170,10 @@ def test_iota_table_made_on_a_busy_stream_is_waited_for():
             cake_backend._IOTA_ROWS[device.index] = saved
 
 
-def test_iota_table_lives_only_while_a_runner_holds_it():
-    """The per-device row table is shared by the fills that read it and held only by them: a second fill reads the
-    first one's table, and once no fill holds it the module's entry is dead (its memory goes back to the allocator, so
-    no device memory of the package outlives its runners); the next fill makes a new table with the kernel rule's rows."""
+def test_iota_table_is_made_once_per_device_and_kept():
+    """The per-device row table is made by the first fill and kept for the life of the process: a later fill, also after
+    every earlier fill is dropped, reads the same table (an eager call never makes it again), with the kernel rule's
+    rows."""
     _require_cb_program()
     device = torch.device("cuda", torch.cuda.current_device())
     T = 64
@@ -1183,16 +1184,14 @@ def test_iota_table_lives_only_while_a_runner_holds_it():
     try:
         blocks = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
         first = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
-        second = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
-        assert second.rows is first.rows
-        table = cake_backend._IOTA_ROWS[device.index][0]
-        assert table() is first.rows
-        del first, second
+        table = weakref.ref(cake_backend._IOTA_ROWS[device.index][0])
+        assert first.rows is table()
+        del first
         gc.collect()
-        assert table() is None
-        third = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
-        assert cake_backend._IOTA_ROWS[device.index][0]() is third.rows
-        third()
+        assert table() is not None, "the row table was freed with its last fill"
+        second = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
+        assert second.rows is table()
+        second()
         torch.cuda.synchronize()
         assert torch.equal(blocks.cpu(), want)
     finally:
@@ -1202,10 +1201,9 @@ def test_iota_table_lives_only_while_a_runner_holds_it():
 
 
 def test_iota_table_read_by_a_captured_eager_call_outlives_its_runners():
-    """An eager candidate-block call captured into a CUDA graph while a prepared runner holds the device's row table
-    reads that shared table, which the graph does not own: the module keeps the table for the graph, so after the
-    runner is dropped and new allocations of the table's size are written, a replay still returns the eager call's
-    result."""
+    """An eager candidate-block call captured into a CUDA graph reads the device's row table, which the graph does not
+    own: the module keeps the table, so after the runners are dropped and new allocations of the table's size are
+    written, a replay still returns the eager call's result."""
     _require_cb_program()
     seg_q, seg_k, _, bound = IOTA_LAYOUTS["default_offsets"]
     q, k, w, cq, ck = cb.exact_inputs(
@@ -1214,18 +1212,15 @@ def test_iota_table_read_by_a_captured_eager_call_outlives_its_runners():
     device = q.device
     kw = dict(top_k=TOP_K, softmax_scale=cb.EXACT_SCALE, max_seqlen_k=bound)
     saved = cake_backend._IOTA_ROWS.pop(device.index, None)
-    kept = cake_backend._IOTA_CAPTURED.pop(device.index, None)
     try:
         expected = _call(q, k, w, cq, ck, max_seqlen_k=bound)
         runner = prepare_with_candidates(q, k, w, cq, ck, **kw)
         assert runner.stages[0] == cake_policy.CB_IOTA_STAGE, runner.stages
-        table = cake_backend._IOTA_ROWS[device.index][0]
-        assert table() is not None
+        table = weakref.ref(cake_backend._IOTA_ROWS[device.index][0])
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = topk_with_candidates(q, k, w, cq, ck, **kw)
-        assert cake_backend._IOTA_CAPTURED[device.index] is table()
         del runner
         gc.collect()
         assert table() is not None, "the table a graph reads was freed"
@@ -1240,18 +1235,14 @@ def test_iota_table_read_by_a_captured_eager_call_outlives_its_runners():
         del junk
     finally:
         cake_backend._IOTA_ROWS.pop(device.index, None)
-        cake_backend._IOTA_CAPTURED.pop(device.index, None)
         if saved is not None:
             cake_backend._IOTA_ROWS[device.index] = saved
-        if kept is not None:
-            cake_backend._IOTA_CAPTURED[device.index] = kept
 
 
 def test_iota_table_read_on_another_stream_outlives_its_last_holder():
-    """A fill run on a stream other than the row table's creating stream records that stream on the table: when the
-    last fill holding the table (another one, on the creating stream) is dropped while the read is still queued
-    behind a long-running kernel, the allocator does not hand the table's memory to new work on the creating stream
-    before the read, so the rows are the kernel rule's."""
+    """A fill on a stream other than the row table's creating stream reads the kept table: when every fill is dropped
+    while the read is still queued behind a long-running kernel, the table stays, so new work on the creating stream
+    cannot take its memory before the read, and the rows are the kernel rule's."""
     _require_cb_program()
     device = torch.device("cuda", torch.cuda.current_device())
     T = 4096
@@ -1260,22 +1251,20 @@ def test_iota_table_read_on_another_stream_outlives_its_last_holder():
     want = _iota_reference(T, cq, ck, None)
     saved = cake_backend._IOTA_ROWS.pop(device.index, None)
     try:
-        home, side = torch.cuda.current_stream(device), torch.cuda.Stream(device)
+        side = torch.cuda.Stream(device)
         held = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
         blocks = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
         holder = cake_backend._IotaBlocks(held, cq, ck, None, 1, device.index)
-        table = cake_backend._IOTA_ROWS[device.index][0]
-        assert holder.home == home.cuda_stream
+        table = weakref.ref(cake_backend._IOTA_ROWS[device.index][0])
         torch.cuda.synchronize()
         with torch.cuda.stream(side):
             torch.cuda._sleep(1 << 30)
             reader = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
             assert reader.rows is holder.rows and reader.ready is None
             reader()
-        assert reader.streams == {side.cuda_stream}
         del reader, holder
         gc.collect()
-        assert table() is None
+        assert table() is not None, "the row table was freed with its last fill"
         size = (CB_SLOTS + 1) * CB_SLOTS
         junk = [
             torch.full((size,), 7, dtype=torch.int32, device=device) for _ in range(2)
