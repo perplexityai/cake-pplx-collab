@@ -46,6 +46,8 @@ dq, dk, dv = cake_fmha_nondet_train_backward(
 | 128, pair route | causal | built, not routed | yes | yes | `bwd_pre` / `bwd_main_2cta_causal` / `bwd_post_pair` |
 | 128, one-launch route | none | yes | yes | yes | `bwd_fused` |
 | 64, one-launch route | none | yes | yes | yes | `bwd_fused_hd64` |
+| 128, one-launch route | causal | yes | yes | yes | `bwd_fused_causal` |
+| 64, one-launch route | causal | yes | yes | yes | `bwd_fused_hd64_causal` |
 
 Every variant takes any head count `H >= 1` (the same `H` for `q` and
 `k` / `v`) and query and key lengths that are positive multiples of 128 (the
@@ -53,13 +55,17 @@ pair route: key lengths that are multiples of 256).  Without the mask `Sq`
 and `Skv` are independent; the causal mask needs `Sq == Skv`.
 
 A call takes the one-launch route when `cake_jit.fused_record` gives it a
-record: no mask, and the call inside any piece of the region
-`FUSED_REGION[(arch, D)]` in `cake_jit.py`.  Each piece bounds the CTAs of
+record.  Without the mask: the call inside any piece of the region
+`FUSED_REGION[(arch, D)]` in `cake_jit.py`; each piece bounds the CTAs of
 the one-launch grid (`B * H * (Sq / 128 + Skv / 128)`), the longer sequence
 and the key length (`Skv` at most a bound, or at most a multiple of `Sq`).
+With the causal mask (`Sq == Skv`): the causal build of its head dimension,
+for the call inside any piece of the causal region
+`FUSED_CAUSAL_REGION[(arch, D)]`; each piece bounds the CTAs of the same grid
+from below and above and the length `S = Sq = Skv` from below and above.
 Each region is the measured region of its architecture and head dimension,
 where the one-launch route measured faster than the three-kernel routes (the
-one-launch table below).  Every other head-dimension 128 call
+one-launch tables below).  Every other head-dimension 128 call
 whose key length is a multiple of 256 takes the pair route where
 `cake_jit.variant` gives it: with a key length not longer than its query
 length, where a region of `PAIR_REGIONS` in `cake_jit.py` holds its `B * H`
@@ -82,6 +88,24 @@ mask; a call inside any piece takes the route), with CTAs `B * H * (Sq / 128 + S
 | `sm_103a` | 64 | `(204, 2048, 256, 0)`: CTAs `<= 204`, `max(Sq, Skv) <= 2048`, `Skv <= 256`; `(156, 512, 0, 2)`: CTAs `<= 156`, `max(Sq, Skv) <= 512`, `Skv <= 2 * Sq`; `(256, 1024, 128, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 1024`, `Skv <= 128`; `(152, 1024, 512, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 512` or `Skv <= 3 * Sq`; `(152, 2048, 0, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= Sq` |
 | `sm_107a` | 128 | `(256, 2048, 512, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 2048`, `Skv <= 512`; `(320, 1024, 256, 0)`: CTAs `<= 320`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(423, 512, 256, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(210, 2048, 768, 2)`: CTAs `<= 210`, `max(Sq, Skv) <= 2048`, `Skv <= 768` or `Skv <= 2 * Sq`; `(423, 1024, 128, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 1024`, `Skv <= 128`; `(128, 8192, 0, 1)`: CTAs `<= 128`, `max(Sq, Skv) <= 8192`, `Skv <= Sq` |
 | `sm_107a` | 64 | `(212, 2048, 512, 2)`: CTAs `<= 212`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq`; `(210, 1024, 0, 6)`: CTAs `<= 210`, `max(Sq, Skv) <= 1024`, `Skv <= 6 * Sq`; `(423, 512, 256, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(320, 1024, 256, 0)`: CTAs `<= 320`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(423, 1024, 128, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 1024`, `Skv <= 128` |
+
+The causal regions of the one-launch route (`FUSED_CAUSAL_REGION`: one or more pieces `(least_ctas, most_ctas, least_s,
+most_s)`; the causal mask, `Sq == Skv == S`; a call inside any piece takes the route), with CTAs
+`B * H * (Sq / 128 + Skv / 128)`:
+
+| architecture | head dim | pieces |
+|---|---|---|
+| `sm_100a` | 128 | `(0, 128, 0, 4096)`: CTAs `<= 128`, `S <= 4096`; `(0, 512, 0, 256)`: CTAs `<= 512`, `S <= 256` |
+| `sm_100a` | 64 | `(0, 128, 0, 4096)`: CTAs `<= 128`, `S <= 4096` |
+| `sm_103a` | 128 | `(0, 128, 0, 4096)`: CTAs `<= 128`, `S <= 4096`; `(256, 256, 128, 256)`: CTAs `== 256`, `128 <= S <= 256` |
+| `sm_103a` | 64 | `(0, 128, 0, 4096)`: CTAs `<= 128`, `S <= 4096`; `(0, 256, 0, 256)`: CTAs `<= 256`, `S <= 256` |
+| `sm_107a` | 128 | `(0, 128, 0, 4096)`: CTAs `<= 128`, `S <= 4096`; `(512, 1024, 256, 512)`: CTAs `>= 512` and `<= 1024`, `256 <= S <= 512`; `(256, 256, 4096, 4096)`: CTAs `== 256`, `S == 4096` |
+| `sm_107a` | 64 | `(0, 128, 0, 4096)`: CTAs `<= 128`, `S <= 4096`; `(512, 512, 256, 256)`: CTAs `== 512`, `S == 256` |
+
+Inside the pieces without a lower bound every measured causal call (`B * H` 1 to 128, `S` 128 to 4096) was faster on
+the one-launch route than on the three-kernel route in both replicate runs; inside the pieces with a lower bound every
+measured call was also faster than cuDNN's fastest measured plan, in CUDA-graph replays and in eager calls.  No piece
+holds a measured call that was not (a call measured twice counts by the later measurement).
 
 The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
 
@@ -171,7 +195,7 @@ The tests are in `tests/experimental/` of the family: the backend
 distribution as [`ARCHITECTURE.md`](../../../../../ARCHITECTURE.md)
 describes; without a supported device the device tests skip.
 
-Thirty-four tests observe the kernels that one backward call launches through
+Forty-two tests observe the kernels that one backward call launches through
 `torch.profiler`: `test_the_backward_launches_the_records_of_its_variant`
 and `test_the_backward_without_run_launches_the_same_records`.  The profiler
 records kernels only with a CUPTI that supports the device.  On `sm_107a`,
