@@ -334,21 +334,25 @@ CTAS_PER_SM = {
 }
 # Launch groups (four-CTA clusters) one device holds at once, by the CTAs per SM of a program: (architecture, SM
 # count) -> {CTAs per SM: clusters}, as ``cudaOccupancyMaxActiveClusters`` reports them (spread cluster scheduling, as
-# the programs launch).  Every program reaches its launch bound, and the count follows the CTAs per SM, not the
-# program: measured on every shipped program, GB300 (152 SMs) holds 74 / 110 / 148 / 184 clusters and B200 (148 SMs)
-# 71 / 104 / 142 / 175 at 2 / 3 / 4 / 5 CTAs per SM.  The entries of GB200 (152 SMs) and VR200 (212 SMs) at 3 and 4
-# CTAs per SM are the counts measured on the four-CTA cluster programs of the engram_gate family, which give the same
-# GB300 and B200 counts at 3 and 4.  The four CTAs of a cluster share one GPC, so a device holds fewer clusters than
-# CTAs per SM * SMs / 4.
+# the programs launch).  The count follows the CTAs per SM, not the program; every entry of GB300, B200, VR200 and
+# R200 was measured on the shipped programs (all of them on GB300).  The four CTAs of a cluster share one GPC, so a
+# device holds fewer clusters than CTAs per SM * SMs / 4, and on VR200 and R200 no more at 5 CTAs per SM than at 4.
+# The GB200 entries at 3 and 4 CTAs per SM are the counts measured on the four-CTA cluster programs of the
+# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.
 RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_100a", 148): {2: 71, 3: 104, 4: 142, 5: 175},
     ("sm_100a", 152): {3: 110, 4: 148},
     ("sm_103a", 152): {2: 74, 3: 110, 4: 148, 5: 184},
-    ("sm_107a", 212): {3: 138, 4: 184},
+    ("sm_107a", 208): {2: 104, 3: 153, 4: 208, 5: 208},
+    ("sm_107a", 212): {2: 92, 3: 138, 4: 184, 5: 184},
 }
-# On a device or a count of CTAs per SM the table does not hold, the grid takes this fraction of CTAs per SM * SMs /
-# cluster CTAs groups.  Any grid is correct; a grid past the resident groups is slow, a smaller one leaves SMs idle.
+# On a device or a count of CTAs per SM the table does not hold, the grid takes this fraction of min(CTAs per SM,
+# UNMEASURED_MAX_CTAS_PER_SM) * SMs / cluster CTAs groups: less than every measured device holds (the least, VR200,
+# holds 0.868 of CTAs per SM * SMs / 4 at 2 to 4 CTAs per SM, and at 5 the count of 4).  Any grid is correct; a grid
+# past the resident groups is slow (a group that is not resident starts its tokens only after a resident one has
+# walked all of its own), a smaller one leaves CTA slots idle.
 UNMEASURED_FRACTION = 0.85
+UNMEASURED_MAX_CTAS_PER_SM = 4
 
 
 def nmax_for(n: int) -> int:
@@ -376,11 +380,12 @@ def cluster_ctas(record_name: str) -> int:
 def resident_groups(record_name: str, arch: str, sm_count: int) -> int:
     """The launch groups of the ``fwd`` or ``bwd`` record ``record_name`` one device of ``arch`` with ``sm_count`` SMs
     holds at once: the :data:`RESIDENT_GROUPS` entry of its ``CTAS_PER_SM``, else :data:`UNMEASURED_FRACTION` of
-    ``CTAS_PER_SM * sm_count / cluster_ctas``; at least one."""
+    ``min(CTAS_PER_SM, UNMEASURED_MAX_CTAS_PER_SM) * sm_count / cluster_ctas``; at least one."""
     per_sm = CTAS_PER_SM[record_name]
     measured = RESIDENT_GROUPS.get((arch, sm_count), {}).get(per_sm)
     if measured is not None:
         return measured
+    per_sm = min(per_sm, UNMEASURED_MAX_CTAS_PER_SM)
     return max(1, int(UNMEASURED_FRACTION * per_sm * sm_count) // cluster_ctas(record_name))
 
 

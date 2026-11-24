@@ -158,14 +158,21 @@ def test_the_resident_group_table_is_bounded() -> None:
     fraction = cake_jit.UNMEASURED_FRACTION
     for (arch, sms), table in cake_jit.RESIDENT_GROUPS.items():
         assert arch in ARCHES
+        # More CTAs per SM never hold fewer clusters.
+        counts = [table[k] for k in sorted(table)]
+        assert counts == sorted(counts), (arch, sms)
         for per_sm, held in table.items():
+            # The fallback stays at or under every measured count.
+            capped = min(per_sm, cake_jit.UNMEASURED_MAX_CTAS_PER_SM)
+            assert int(fraction * capped * sms) // 4 <= held, (arch, sms, per_sm)
             for name in PERSISTENT_RECORDS:
                 assert 1 <= held <= per_sm * sms // cake_jit.cluster_ctas(name), (arch, sms, per_sm)
     for name in PERSISTENT_RECORDS:
         ctas = cake_jit.cluster_ctas(name)
         per_sm = cake_jit.CTAS_PER_SM[name]
         if ("sm_103a", 160) not in cake_jit.RESIDENT_GROUPS:
-            assert cake_jit.resident_groups(name, "sm_103a", 160) == max(1, int(fraction * per_sm * 160) // ctas)
+            capped = min(per_sm, cake_jit.UNMEASURED_MAX_CTAS_PER_SM)
+            assert cake_jit.resident_groups(name, "sm_103a", 160) == max(1, int(fraction * capped * 160) // ctas)
         assert cake_jit.resident_groups(name, "sm_107a", 1) >= 1
 
 
