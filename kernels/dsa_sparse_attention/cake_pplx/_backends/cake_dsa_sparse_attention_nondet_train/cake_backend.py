@@ -21,8 +21,9 @@ limitations under the License.
 # * The RoPE form takes ``H`` query heads, ``H = q_latent.shape[1]`` in
 #   ``SUPPORTED_HEADS`` (64, 96, 128); below, ``64`` in a shape stands for ``H``.
 #   The kernels are 64-head programs: ``H = 64`` runs them as they are, and a
-#   larger ``H`` runs them on two 64-head windows of the heads (see the comment
-#   above ``SUPPORTED_HEADS``).  The NoPE program serves 64 heads.
+#   larger ``H`` runs them on two 64-head windows of the heads, ``W1 = [H - 64,
+#   H)`` and then ``W0 = [0, 64)`` (see the comment above ``SUPPORTED_HEADS``).
+#   The NoPE program serves 64 heads.
 # * Forward writes ``out [T, 64, 512]`` BF16, ``lse [T, 64]`` FP32 (natural
 #   log over the valid keys; ``-inf`` for a fully masked row, whose ``out`` is
 #   zero) and, with ``with_o_lo=True`` (the default), the BF16 output residual
@@ -34,7 +35,9 @@ limitations under the License.
 #   is then ``None`` and the kernels receive a zero-size placeholder they never
 #   touch.
 # * Backward returns ``dq_latent [T, 64, 512]``, ``dq_rope [T, 64, 64]`` BF16
-#   (written once per row) and ``dkv_latent [S, 512]``,
+#   (stored, not accumulated: written once per row at 64 heads; above 64 the
+#   overlap heads ``[H - 64, 64)`` are written by ``W1`` (zeros) and then by
+#   ``W0``) and ``dkv_latent [S, 512]``,
 #   ``dk_rope [S, 64]`` (FP32 ``red.global`` accumulation in the kernels'
 #   internal permuted layout, un-permuted by the cast stage into natural-layout
 #   BF16 or, with ``dkv_fp32=True``, FP32 outputs) -- or, with a caller-owned
@@ -44,7 +47,9 @@ limitations under the License.
 #   reach the kernels through TMA descriptors encoded from the tensor's own
 #   head and token strides (the delta stage takes the same strides as
 #   scalars), the key operands by row stride (see ``_check_head_tensor`` /
-#   ``_check_key_tensor``).
+#   ``_check_key_tensor``).  Above 64 heads ``dout`` is read in place when its
+#   token stride is ``H`` head strides and otherwise copied once into the
+#   workspace (``_dout_rows_dense``).
 # * Without ``topk_length`` the forward kernel derives each row's length (last
 #   valid slot + 1) itself while it runs and skips the trailing invalid key
 #   blocks; ``derive_topk_length=True`` makes it write the lengths into the
@@ -195,7 +200,9 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # ``pass_counts``, and the pass variant of the main stage consumes them,
 # carrying the FP32 dQ / dQ_rope partial of every token in ``dq_partial``
 # between passes (dq_mode 1 store, 2 load-add-store, 3 load-add and BF16
-# output) -- ``dq`` is still written once per row; the dK/dV reductions are
+# output) -- ``dq`` is still written once per row at 64 heads (above 64 the
+# overlap heads ``[H - 64, 64)`` are written by ``W1`` (zeros) and then by
+# ``W0``); the dK/dV reductions are
 # unchanged (a pass only selects which keys a tile carries).  The pass count
 # follows the policy the record carries (``key_pass_policy``, evaluated by
 # ``KeyPassPolicy``): the L2 formula P = ceil(S * key_bytes / l2_budget_bytes)
@@ -1078,8 +1085,8 @@ def _check_window_arch(num_heads: int, arch: Optional[str]) -> None:
     query heads until its window stages are validated)."""
     if int(num_heads) != NUM_HEADS and arch not in WINDOW_ARCHES:
         raise NotImplementedError(
-            f"{int(num_heads)} query heads are served on {list(WINDOW_ARCHES)}; {arch} serves "
-            f"{NUM_HEADS} query heads only"
+            f"{int(num_heads)} query heads are served on {list(WINDOW_ARCHES)}; "
+            f"{arch if arch is not None else 'this device'} serves {NUM_HEADS} query heads only"
         )
 
 
@@ -1503,7 +1510,7 @@ def dsa_train_workspace_size(
     dkv_direct: Optional[bool] = None,
     num_heads: int = NUM_HEADS,
     with_o_lo: bool = True,
-    dout_copy: bool = False,
+    dout_copy: Optional[bool] = None,
 ) -> int:
     """Workspace bytes :func:`prepare_dsa_train` needs for ``(T, S, topk)`` on ``device``.
 
@@ -1515,13 +1522,17 @@ def dsa_train_workspace_size(
     with ``dkv_direct`` as in :func:`prepare_dsa_train` (``None``, the default,
     = the record's rule of the device's architecture for ``(T, S, topk,
     num_segments)``; ``True`` / ``False`` force / disable the direct path).
-    ``num_heads`` is the binding's query head count ``H`` (64, 96 or 128),
-    ``with_o_lo`` its mode, and ``dout_copy`` whether its ``dout`` needs the
-    dense copy of a multi-window backward (``H > 64`` and a token stride other
-    than ``H`` head strides, :func:`_dout_rows_dense`); see
-    :func:`workspace_layout`.  The workspace is scratch: the state a training
-    step retains between its forward and its backward is
-    :func:`dsa_train_retained_size`.
+    ``num_heads`` is the binding's query head count ``H`` (64, 96 or 128) and
+    ``with_o_lo`` its mode; see :func:`workspace_layout`.  ``dout_copy``
+    sizes the dense ``dout`` copy of a backward over more than 64 heads, which
+    a ``dout`` whose token stride is not ``H`` head strides needs
+    (:func:`_dout_rows_dense`; the head-major view an output projection hands
+    back is one): ``None`` (the default) includes it for every such backward,
+    the upper bound that serves any ``dout`` layout; ``True`` / ``False`` give
+    the exact size for a ``dout`` that needs it / does not (a dense ``[T, H,
+    512]`` or a packed-slice ``dout``).  A 64-head binding never copies.  The
+    workspace is scratch: the state a training step retains between its
+    forward and its backward is :func:`dsa_train_retained_size`.
     """
     _, record = record_for(device)
     arch = arch_for(device)
@@ -1563,7 +1574,8 @@ def dsa_train_workspace_size(
             token_chunk=_record_token_chunk(record, topk),
             num_heads=num_heads,
             with_o_lo=with_o_lo,
-            dout_copy=bool(dout_copy) and int(num_heads) != NUM_HEADS,
+            dout_copy=int(num_heads) != NUM_HEADS
+            and (dout_copy is None or bool(dout_copy)),
         )["total"]
     )
 
@@ -1574,19 +1586,32 @@ def retained_layout(
     num_heads: int = NUM_HEADS,
     with_o_lo: bool = True,
     derive_topk_length: bool = True,
+    varlen_topk: Optional[int] = None,
 ) -> dict[str, int]:
     """Bytes of the state a RoPE training step retains from its forward to its backward, by tensor, plus
-    ``"total"``: what the autograd entries save beyond their inputs and the returned ``out`` (``[T, H, 512]`` BF16,
-    ``H * 1024`` B per token, the caller's): ``lse`` (``[T, H]`` FP32), ``o_lo`` (``[T, H, 512]`` BF16, with
-    ``with_o_lo`` only) and the forward-derived ``topk_length`` (``[T]`` int32, when the call passes no lengths,
-    ``derive_topk_length``).  Under ``torch.utils.checkpoint(..., use_reentrant=False)`` none of it is kept: the
-    forward is recomputed.  The per-call scratch of either pass is :func:`workspace_layout`, not retained."""
+    ``"total"``: the tensors the autograd entries create in the forward and save for the backward.  Not counted:
+    their inputs, a caller ``topk_length`` and the returned ``out`` (``[T, H, 512]`` BF16, ``H * 1024`` B per token,
+    the call's output, which the autograd node saves too).
+
+    * Both entries: ``lse`` (``[T, H]`` FP32) and, with ``with_o_lo``, ``o_lo`` (``[T, H, 512]`` BF16).
+    * The flat entry (:func:`cake_dsa_sparse_attention_nondet`) called without lengths, ``derive_topk_length``: the
+      forward-derived ``topk_length`` (``[T]`` int32).
+    * The packed entry (:func:`cake_dsa_sparse_attention_nondet_varlen`), ``varlen_topk = K_slots`` (the slot count
+      ``gather_kv_indices.shape[1]``): on both of its routes (the index-preparation stage and the
+      ``offset_gather_kv_indices(..., compact=True)`` fallback) it builds fresh compacted rows ``indices`` (``[T,
+      K_slots]`` int32) and their counts ``topk_length`` (``[T]`` int32, with or without a caller cut) and saves
+      both; ``derive_topk_length`` is then not read.
+
+    Under ``torch.utils.checkpoint(..., use_reentrant=False)`` none of it is kept: the forward is recomputed.  The
+    per-call scratch of either pass is :func:`workspace_layout`, not retained."""
     T, H = int(num_queries), int(num_heads)
     head_windows(H)  # refuses an unsupported count
     sizes = {"lse": T * H * 4}
     if with_o_lo:
         sizes["o_lo"] = T * H * D_LATENT * 2
-    if derive_topk_length:
+    if varlen_topk is not None:
+        sizes["indices"] = T * int(varlen_topk) * 4
+    if derive_topk_length or varlen_topk is not None:
         sizes["topk_length"] = T * 4
     sizes["total"] = sum(sizes.values())
     return sizes
@@ -1598,6 +1623,7 @@ def dsa_train_retained_size(
     num_heads: int = NUM_HEADS,
     with_o_lo: bool = True,
     derive_topk_length: bool = True,
+    varlen_topk: Optional[int] = None,
 ) -> int:
     """Retained bytes of one RoPE training step (:func:`retained_layout`'s ``"total"``)."""
     return retained_layout(
@@ -1605,6 +1631,7 @@ def dsa_train_retained_size(
         num_heads=num_heads,
         with_o_lo=with_o_lo,
         derive_topk_length=derive_topk_length,
+        varlen_topk=varlen_topk,
     )["total"]
 
 
@@ -2694,9 +2721,9 @@ def _bound_values(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
                 key_scratch=t["topk_length"],
                 pass_counts=t["topk_length"],
             )
-        if getattr(plan, "dout_copy", False):
+        if plan.dout_copy:
             # a multi-window backward whose dout the delta cannot read in place: every stage reads the dense copy
-            # the ``"dout_copy"`` step fills first (a 64-head plan never copies; duck-typed plans may omit the field)
+            # the ``"dout_copy"`` step fills first (a 64-head plan never copies)
             values["dout"] = t["dout_copy"]
     return values
 
@@ -3650,11 +3677,22 @@ def _no_query_rows(q_latent: torch.Tensor) -> bool:
     return q_latent.ndim >= 1 and int(q_latent.shape[0]) == 0
 
 
+def _check_empty_window_arch(q_latent: torch.Tensor) -> None:
+    """The architecture rule of :func:`_check_window_arch` for a call without query rows: a CUDA ``q_latent`` of more
+    than 64 heads on an architecture outside ``WINDOW_ARCHES`` raises ``NotImplementedError`` as a call with query
+    rows does (a host-side query: no launch, no synchronization).  64 heads and host tensors are not checked: those
+    calls keep the device-free empty path of the first release."""
+    H = num_query_heads(q_latent)
+    if H != NUM_HEADS and q_latent.is_cuda:
+        _check_window_arch(H, arch_for(q_latent.device))
+
+
 def _empty_forward(
     q_latent, q_rope, kv_latent, k_rope, indices, topk_length, *, with_o_lo: bool
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """``(out, lse, o_lo)`` of a call without query rows: validated, empty, neither bound nor launched (``o_lo``
-    ``None`` under ``with_o_lo=False``)."""
+    ``None`` under ``with_o_lo=False``).  A CUDA call over more than 64 heads checks the architecture as a call with
+    query rows does (:func:`_check_empty_window_arch`)."""
     validate_dsa_train_inputs(
         q_latent,
         q_rope,
@@ -3664,6 +3702,7 @@ def _empty_forward(
         topk_length,
         allow_empty_queries=True,
     )
+    _check_empty_window_arch(q_latent)
     device, H = q_latent.device, num_query_heads(q_latent)
     out = _alloc((0, H, D_LATENT), torch.bfloat16, device)
     lse = _alloc((0, H), torch.float32, device)
@@ -3689,7 +3728,8 @@ def _empty_backward(
     check_dst_map: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Gradients of a call without query rows: empty ``dq``, zero ``dkv`` in the requested dtype (``None`` with
-    ``dkv_acc``: nothing to accumulate); nothing launched."""
+    ``dkv_acc``: nothing to accumulate); nothing launched.  A CUDA call over more than 64 heads checks the
+    architecture as a call with query rows does (:func:`_check_empty_window_arch`)."""
     validate_dsa_train_inputs(
         q_latent,
         q_rope,
@@ -3700,6 +3740,7 @@ def _empty_backward(
         dout=dout,
         allow_empty_queries=True,
     )
+    _check_empty_window_arch(q_latent)
     H = num_query_heads(q_latent)
     _check_output(out, "out", (0, H, D_LATENT), torch.bfloat16)
     _check_output(o_lo, "o_lo", (0, H, D_LATENT), torch.bfloat16)
@@ -3743,9 +3784,10 @@ def forward(
 
     ``with_o_lo`` (``bool``, default ``True``): with ``True`` the forward also writes ``o_lo``, the BF16 rounding
     residual of ``out``, and the backward forms ``delta = rowsum(dout * (out + o_lo))`` in FP32.  With ``False`` the
-    forward neither computes nor stores ``o_lo`` (64 KiB less written and saved per query token) and returns
-    ``None`` in its slot, and the backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``.  ``out`` and
-    ``lse`` have the same accuracy in both modes.  Any value other than a ``bool`` raises ``ValueError``.
+    forward neither computes nor stores ``o_lo`` (``H`` KiB less written and saved per query token, ``H`` the call's
+    query head count) and returns ``None`` in its slot, and the backward forms ``delta = rowsum(dout * out)`` from
+    the BF16 ``out``.  ``out`` and ``lse`` have the same accuracy in both modes.  Any value other than a ``bool``
+    raises ``ValueError``.
     """
     _check_with_o_lo(with_o_lo)
     if derive_topk_length and topk_length is None:
@@ -3837,11 +3879,14 @@ def backward(
     :func:`prepare_dsa_train`.  An admissible strided ``dout`` (the head-major
     ``[512, T * 512, 1]`` view an output projection hands back, or any view
     under the layout rules of ``q_latent``) is read in place by the delta stage
-    (token / head strides) and the main stage (stride-carrying tensor map); a
-    view the TMA descriptor cannot address (base not 16-byte aligned, strides
-    not multiples of 8 elements, channel stride != 1) is copied once.  A call
-    without query rows returns empty ``dq`` and zero ``dkv`` gradients without
-    launching.
+    (token / head strides) and the main stage (stride-carrying tensor map) at
+    64 heads; above 64 heads it is read in place when its token stride is ``H``
+    head strides (a dense or packed-slice ``dout``) and otherwise -- the
+    head-major view included -- copied once into the backward's workspace
+    (:func:`_dout_rows_dense`).  A view the TMA descriptor cannot address (base
+    not 16-byte aligned, strides not multiples of 8 elements, channel stride !=
+    1) is copied once.  A call without query rows returns empty ``dq`` and zero
+    ``dkv`` gradients without launching.
 
     ``with_o_lo`` is the forward's (see :func:`forward`): ``o_lo`` is the
     tensor that forward returned with ``True`` (default) and ``None`` with

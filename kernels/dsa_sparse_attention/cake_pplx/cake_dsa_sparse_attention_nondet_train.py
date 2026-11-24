@@ -82,8 +82,9 @@ With ``True`` the forward also writes ``o_lo``, the BF16 rounding residual of
 ``out``, and the backward forms ``delta = rowsum(dout * (out + o_lo))`` in
 FP32, which keeps the gradients accurate on peaked rows (rows whose softmax
 puts almost all weight on one key).  With ``False`` the forward neither
-computes nor stores ``o_lo`` (64 KiB less written and saved per query token)
-and the backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
+computes nor stores ``o_lo`` (``H`` KiB less written and saved per query
+token, ``H`` the call's query head count: 64 on the NoPE entries) and the
+backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
 the form cuDNN's DSA backward uses; on peaked rows the gradient error grows to
 that class.  ``out`` and ``lse`` have the same accuracy in both modes.  The
 step forwards then return ``None`` in the ``o_lo`` slot, and a step backward
@@ -292,7 +293,9 @@ def cake_dsa_sparse_attention_nondet(
 
     Strided inputs are consumed in place (no host copy): the kernels read the
     query operands through TMA descriptors encoded from the tensor's own head
-    and token strides and gather the key operands by row stride.  Admitted
+    and token strides and gather the key operands by row stride (above 64
+    heads the backward copies a ``dout`` whose token stride is not ``H`` head
+    strides, such as a head-major view, once on the device).  Admitted
     layouts: unit innermost stride; head / token / key-row strides that are
     positive multiples of 8 elements (16 bytes, the TMA descriptor stride
     granule); head stride and key row stride at least the slice width; a
@@ -347,7 +350,9 @@ def cake_dsa_sparse_attention_nondet(
         (``<= S``).  The passes carry dQ through
         an FP32 partial in the workspace (``T * 147,456`` B plus ``T * (4 *
         topk + 4)`` B, ~608 MiB at ``T = 4096``, top-k 2048); dQ is still
-        written once per row and the dK/dV accumulation is unchanged.
+        written once per row at 64 heads (above 64 the overlap heads ``[H -
+        64, 64)`` are written by the first window, zeros, and then by the
+        second) and the dK/dV accumulation is unchanged.
     backend : str
         Only ``"cake"``.
     dkv_acc : Optional[torch.Tensor | Callable]
@@ -430,7 +435,9 @@ def cake_dsa_sparse_attention_nondet(
         Only with ``return_lse=True``.
 
     Gradients flow to ``q_latent``, ``q_rope``, ``kv_latent`` and ``k_rope``
-    (``dq`` written once per row; ``dkv`` accumulated in FP32 with atomics,
+    (``dq`` stored, not accumulated: written once per row at 64 heads, and above
+    64 the overlap heads ``[H - 64, 64)`` written by the first window, zeros,
+    and then by the second; ``dkv`` accumulated in FP32 with atomics,
     then cast to BF16, or accumulated into ``dkv_acc``).  BF16 operands into the tensor cores, FP32
     accumulation; the backward recomputes the scores from the BF16 inputs and
     forms ``delta`` in FP32 from the BF16 output and its saved BF16 residual
