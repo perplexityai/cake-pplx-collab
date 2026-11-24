@@ -258,7 +258,7 @@ class CakeKDADetArena:
     ``lean`` sizes a backward workspace for the saved-set paths only (layouts ``bwd_lean`` / ``bwd_tape_lean``: no
     replay layout, no internal ``dout`` copy), so the workspace serves no checkpoint replay (``cake_kda_det_train_backward`` with
     ``saved=None``; ``torch.utils.checkpoint`` never replays: the node's backward reads the recomputed saved set)
-    and no flag-off row that dispatches the separate ``dav`` program (H 9-15, outside the contract's head counts).
+    and no flag-off row that dispatches the separate ``dav`` program (9 to 15 heads; every other head count in 1..128 is served).
     In an in-kernel Q/K L2 norm mode every backward launches ``dav`` (the ``dav_l2n*`` records, ``dAqk`` alone),
     and the lean layouts of two or more tail passes hold that whole-sequence ``dAqk`` (256 B more per internal
     token-head) instead of a per-pass one.

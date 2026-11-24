@@ -4193,9 +4193,9 @@ def test_lean_layouts_follow_the_byte_formulas() -> None:
 def test_lean_arena_serves_the_l2n_rows_with_their_dav_program() -> None:
     """In an in-kernel Q/K L2 norm mode every backward path launches a ``dav`` record of
     that mode (``dav_l2n*``: ``dAqk`` alone, which every lean layout holds whole), so a
-    lean arena serves every head count there, H 9-15 included (the rows the flag-off
-    test above refuses), in both gate modes, and ``arena_for_budget`` takes its lean
-    steps on those rows."""
+    lean arena serves every head count there (this test: 1 to 64), H 9-15 included (the
+    rows the flag-off test above refuses), in both gate modes, and ``arena_for_budget``
+    takes its lean steps on those rows."""
     modes = itertools.product(ARCHES, ("g", "raw"), ("fused", "fallback"))
     for arch, gate, l2n in modes:
         q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
@@ -9305,6 +9305,9 @@ PATH_ROWS = [
     ((65, 200), 32),
     ((63, 1, 65), 64),
     ((2048, 100, 513), 4),
+    # above 64 heads (issue #264): the serial walk on the records of 64 heads
+    ((63, 1, 65), 96),
+    ((63, 1, 65), 128),
 ]
 JUDGED_PATHS = (("light", None, False), ("tape", "tape", False), ("replay", None, True))
 
@@ -10463,7 +10466,9 @@ def test_raw_gate_saved_states_are_judged(
         _finite_arms(run(make_raw_inputs(lengths, heads, device), True), (S, heads))
 
 
-@pytest.mark.parametrize("shape", [((63, 1, 65), 2), ((129, 63), 16)], ids=_shape_id)
+@pytest.mark.parametrize(
+    "shape", [((63, 1, 65), 2), ((129, 63), 16), ((63, 1, 65), 96)], ids=_shape_id
+)
 def test_raw_gate_autograd_and_checkpoint_are_judged(
     device, manifest, monkeypatch, shape, record_property
 ) -> None:
@@ -10882,6 +10887,7 @@ RAW_BATCHED_ROWS = [
     ((20, 20, 20, 20, 20, 20, 20), 8),
     ((63, 1, 65), 64),
     ((129, 300), 16),
+    ((63, 1, 65), 96),
 ]
 
 

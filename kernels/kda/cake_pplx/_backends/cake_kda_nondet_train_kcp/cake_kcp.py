@@ -884,7 +884,7 @@ def _operands(
     qk_l2norm: bool = False,
 ):
     """The operands without their optional batch axis, ``(T_r, H)`` and whether the inputs carried a batch axis.
-    ``T_r`` must equal the context's local token count; ``H`` is the operands' head count (``1..64``).  ``gate="raw"``
+    ``T_r`` must equal the context's local token count; ``H`` is the operands' head count (``1..128``).  ``gate="raw"``
     (``use_gate_in_kernel=True``): ``g`` is the raw gate, BF16 ``[T_r, H, 128]``, any view the single-rank rule
     accepts (``cake_backend._check_raw``: unit innermost stride, 16-byte outer strides and address, no overlap; the
     only full check, as the strided-pointer bindings check no layout; never copied).  ``qk_l2norm``
@@ -900,8 +900,8 @@ def _operands(
         raise ValueError(
             f"operands carry {T} tokens, the CakeKDANondetKcpContext of rank {ctx.rank} holds T_r={ctx.T_r}"
         )
-    if not 1 <= H <= 64:
-        raise ValueError(f"H={H}: the Cake KDA kernels take 1..64 heads")
+    if not 1 <= H <= 128:
+        raise ValueError(f"H={H}: the Cake KDA kernels take 1..128 heads")
     if qk_l2norm:
         q = _check_qk_view(q, "q", T, H, device)
         k = _check_qk_view(k, "k", T, H, device)

@@ -3,7 +3,7 @@
 Experimental backend for the packed Kimi Delta Attention (KDA) chunked
 training forward and backward in the GLM-5.3-Flash geometry: head dimension
 128 for `q`, `k`, `v` and the gate, chunk length 64, per-document zero initial
-state, `H` heads per call (1 to 64), one packed batch of documents described by
+state, `H` heads per call (1 to 128), one packed batch of documents described by
 `cu_seqlens`.
 
 Both the API and the backend are experimental: no compatibility guarantee.
@@ -72,9 +72,10 @@ ws = cake_kda_det_train_workspace(S, num_docs, H, device, use_gate_in_kernel=Tru
   set (with or without the saved segment states) and the checkpoint replay
   (`saved=None`) give bitwise the same gradients.
 * Limits: `H * 128 * 64 < 2**31` (`H <= 262143`; the public contract covers
-  `H` in 1..64); `R * H * 64 < 2**31` over the padded rows `R = 64 * NC_pad` of
-  the intra-chunk buffers (at `H = 64` that is `S` up to about 524k tokens; the
-  contract's shapes use at most half of that range); `num_docs <= 65536` (the
+  `H` in 1..128); `R * H * 64 < 2**31` over the padded rows `R = 64 * NC_pad` of
+  the intra-chunk buffers (at `H = 64` that is `S` up to about 524k tokens, at
+  `H = 96` about 349k and at `H = 128` about 262k in one document; at `H = 64`
+  the contract's shapes use at most half of that range); `num_docs <= 65536` (the
   layout table's 16-step document search); `S >= 1`, `num_docs >= 1`.  Any `S`,
   including `S < 64` and document lengths that are not multiples of 64.  The
   host refuses a problem outside these limits before any launch.
@@ -328,12 +329,12 @@ replay: `cake_kda_det_train_backward` with `saved=None` raises `ValueError` on i
 the recomputed saved set, never the replay path.  A lean arena also refuses
 the flag-off rows whose backward dispatches the separate dA / dv program `dav`
 (9 to 15 heads) with `ValueError` when a backward workspace is built and in
-the byte queries; it serves the contract's head counts 1, 2, 4, 8, 16, 32 and
-64.  In the in-kernel Q/K L2 norm modes every backward launches `dav` (the
-`dav_l2n*` records, which write `dAqk` alone), and a lean arena serves those
-rows too: its layouts of two or more passes hold that whole-sequence `dAqk`
-instead of a per-pass one, 256 B more per internal token-head (3076, tape
-2308, from four passes on).
+the byte queries; it serves every other head count in 1..128.  In the
+in-kernel Q/K L2 norm modes every backward launches `dav` (the `dav_l2n*`
+records, which write `dAqk` alone), and a lean arena serves those rows too:
+its layouts of two or more passes hold that whole-sequence `dAqk` instead of a
+per-pass one, 256 B more per internal token-head (3076, tape 2308, from four
+passes on).
 
 `tail_passes = B` runs the chunk-parallel tail stages of the backward (the
 fused gradient `dqkg`, the GLM intra program and, on `sm_100a` in the default

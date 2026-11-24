@@ -66,8 +66,9 @@ cake_kcp_jit = cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_jit")
 SM_COUNT = 152  # GB300; the plan rule's examples of the design note §7.2
 EVIDENCE_DIR = os.environ.get("KCP_EVIDENCE_DIR")
 LAYOUT_NAMES = {"C": "contiguous", "Z": "zigzag", "D": "zigzag_per_document"}
-OWNERSHIP_H = (1, 3, 4, 6, 12, 64)
-OWNERSHIP_W = (2, 4, 8, 16)
+# 96 heads over 4 / 8 / 64 ranks: 24 / 12 / 2 heads per owner, 48 owners at 64 ranks (issue #264); 128 the top
+OWNERSHIP_H = (1, 3, 4, 6, 12, 64, 96, 128)
+OWNERSHIP_W = (2, 4, 8, 16, 64)
 
 
 def _evidence(name: str, record: dict) -> None:

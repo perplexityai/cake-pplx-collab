@@ -3749,9 +3749,9 @@ def test_lean_layouts_follow_the_byte_formulas() -> None:
 def test_lean_arena_serves_the_l2n_rows_with_their_dav_program() -> None:
     """In an in-kernel Q/K L2 norm mode every backward path launches a ``dav`` record of
     that mode (``dav_l2n*``: ``dAqk`` alone, which every lean layout holds whole), so a
-    lean arena serves every head count there, H 9-15 included (the rows the flag-off
-    test above refuses), in both gate modes, and ``arena_for_budget`` takes its lean
-    steps on those rows."""
+    lean arena serves every head count there (this test: 1 to 64), H 9-15 included (the
+    rows the flag-off test above refuses), in both gate modes, and ``arena_for_budget``
+    takes its lean steps on those rows."""
     modes = itertools.product(ARCHES, ("g", "raw"), ("fused", "fallback"))
     for arch, gate, l2n in modes:
         q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
@@ -8867,6 +8867,7 @@ RAW_BATCHED_ROWS = [
     ((20, 20, 20, 20, 20, 20, 20), 8),
     ((63, 1, 65), 64),
     ((129, 300), 16),
+    ((63, 1, 65), 96),
 ]
 
 

@@ -17,7 +17,12 @@ The version is in [`VERSION`](VERSION). Since 0.2.0 every `sm_107a` library need
 single-rank packages also read the pack's token count when they choose the segments per document of the segmented
 route, on the architectures and SM counts that `cake_jit.TOKEN_SEGMENTS` lists (the token-aware segment rule; see
 [Kernel structure of one training step](cake_pplx/_backends/cake_kda_det_train/README.md#kernel-structure-of-one-training-step)).
-The context-parallel packages keep the occupancy rule.
+The context-parallel packages keep the occupancy rule. The token-aware rule changes the segment plan of some
+single-rank packs of 4, 8 and 16 heads, so on those packs the outputs of the deterministic single-rank package can
+differ in their bits from those of 0.2.1; within one version it gives the same bits from run to run. Since 0.2.2 the
+four packages also take 65 to 128 heads (before: 1..64, a limit the KCP entries enforced). That change alone changes no
+program, plan or record of a call of at most 64 heads: at a given version, such a call runs the same plan and programs
+with or without it. Above 64 heads the int32 offsets bound the tokens: see [docs/API.md](../../docs/API.md#kda).
 
 The tests judge every floating output of the four packages by its error against an FP64 reference over 32 random
 draws (`tests/cake_naive.py`). Two references run on the same inputs: a naive BF16 PyTorch implementation, and
