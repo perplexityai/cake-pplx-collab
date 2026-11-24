@@ -31,8 +31,9 @@ arena option, in the deterministic and the non-deterministic package.
 - Over a grid of scalars: the route and the block table form never change, the
   segment count never grows, the light set saves the segment states exactly
   where the occupancy plan does, and the rule changes nothing outside its
-  envelope nor in its bands that keep the occupancy plan (VR200's 16-head
-  packs of 8193 to 16383 tokens).
+  envelope nor in its bands that keep the occupancy plan (GB300's and VR200's
+  4-head packs of at most 4096 tokens, VR200's 16-head packs of 8193 to 16383
+  tokens).
 - The memory of the token-aware plan (saved set, tables, arenas, the totals of
   the memory report) is at or below the occupancy plan's on every measured row
   of every entry of the envelope.
@@ -88,21 +89,23 @@ ISSUE_LENGTHS, ISSUE_HEADS = (120001, 70707, 65537, 5148), 4
 # : gate : l2n`` (``skew``: one document holds most of the tokens, which the
 # host rule cannot see); ``P<n>`` is the uniform table of ``n`` segments per
 # document (proportional only at most four (document, head) chains, as the
-# occupancy plan's table there), ``=`` the occupancy plan.
+# occupancy plan's table there), ``=`` the occupancy plan.  The 4-head rows of
+# at most 4096 tokens keep the occupancy plan, a band of
+# ``occupancy_bands_by_arch``.
 MEASURED_ROWS = (
-    ("2048x1:4:g:0", 38, "P12"),
+    ("2048x1:4:g:0", 38, "="),
     ("2048x3:16:g:0", 9, "="),
     ("4096x16:4:g:0", 10, "="),
-    ("4096x1:4:g:0", 38, "P12"),
-    ("4096x2:4:g:0", 38, "P12"),
+    ("4096x1:4:g:0", 38, "="),
+    ("4096x2:4:g:0", 38, "="),
     ("4096x2:8:g:0", 19, "P12"),
-    ("4096x3:4:g:0", 38, "P12"),
+    ("4096x3:4:g:0", 38, "="),
     ("4096x4:16:g:0", 9, "="),
-    ("4096x8:4:g:0", 19, "P12"),
+    ("4096x8:4:g:0", 19, "="),
     ("4096x8:8:g:0", 10, "="),
     ("4096xskew16:4:g:0", 10, "="),
-    ("4096xskew3:4:g:0", 38, "P12"),
-    ("4096xskew8:4:g:0", 19, "P12"),
+    ("4096xskew3:4:g:0", 38, "="),
+    ("4096xskew8:4:g:0", 19, "="),
     ("8192x12:8:g:0", 7, "="),
     ("8192x16:4:g:0", 10, "="),
     ("8192x1:4:g:0", 38, "P22"),
@@ -222,12 +225,14 @@ MEASURED_ROWS = (
     ("261393xskew8:4:g:0", 19, "="),
     ("262144x16:4:g:0", 10, "="),
 )
-MEASURED_KINDS = {"P": 53, "=": 78}
+MEASURED_KINDS = {"P": 46, "=": 85}
 
 # The same rows on B200 (``sm_100a``, 148 SMs; 16 heads take the serial route
-# there) and on VR200 (``sm_107a``, 212 SMs; the 16-head pack of 12288 tokens
-# keeps the occupancy plan there, a band of ``occupancy_bands_by_arch``), in the
-# columns of :data:`MEASURED_ROWS`.
+# there, and no band: its 4-head rows of at most 4096 tokens take the
+# token-aware plan) and on VR200 (``sm_107a``, 212 SMs; the 4-head rows of at
+# most 4096 tokens and the 16-head pack of 12288 tokens keep the occupancy plan
+# there, bands of ``occupancy_bands_by_arch``), in the columns of
+# :data:`MEASURED_ROWS`.
 MEASURED_ROWS_B200 = (
     ("2048x1:4:g:0", 37, "P12"),
     ("2048x3:16:g:0", None, "="),
@@ -362,19 +367,19 @@ MEASURED_ROWS_B200 = (
     ("262144x16:4:g:0", 10, "="),
 )
 MEASURED_ROWS_VR200 = (
-    ("2048x1:4:g:0", 38, "P12"),
+    ("2048x1:4:g:0", 38, "="),
     ("2048x3:16:g:0", 13, "P12"),
-    ("4096x16:4:g:0", 14, "P12"),
-    ("4096x1:4:g:0", 38, "P12"),
-    ("4096x2:4:g:0", 53, "P12"),
+    ("4096x16:4:g:0", 14, "="),
+    ("4096x1:4:g:0", 38, "="),
+    ("4096x2:4:g:0", 53, "="),
     ("4096x2:8:g:0", 26, "P12"),
-    ("4096x3:4:g:0", 53, "P12"),
+    ("4096x3:4:g:0", 53, "="),
     ("4096x4:16:g:0", 13, "P12"),
-    ("4096x8:4:g:0", 27, "P12"),
+    ("4096x8:4:g:0", 27, "="),
     ("4096x8:8:g:0", 14, "P12"),
-    ("4096xskew16:4:g:0", 14, "P12"),
-    ("4096xskew3:4:g:0", 53, "P12"),
-    ("4096xskew8:4:g:0", 27, "P12"),
+    ("4096xskew16:4:g:0", 14, "="),
+    ("4096xskew3:4:g:0", 53, "="),
+    ("4096xskew8:4:g:0", 27, "="),
     ("8192x12:8:g:0", 9, "="),
     ("8192x16:4:g:0", 14, "P12"),
     ("8192x1:4:g:0", 38, "P22"),
@@ -499,7 +504,7 @@ MEASURED_ROWS_VR200 = (
 MEASURED_BY_ENVELOPE = {
     (ARCH, SM): (MEASURED_ROWS, MEASURED_KINDS),
     ("sm_100a", 148): (MEASURED_ROWS_B200, {"P": 53, "=": 78}),
-    ("sm_107a", 212): (MEASURED_ROWS_VR200, {"P": 80, "=": 51}),
+    ("sm_107a", 212): (MEASURED_ROWS_VR200, {"P": 71, "=": 60}),
 }
 ENVELOPE_IDS = tuple(f"{arch}-{sm}" for arch, sm in MEASURED_BY_ENVELOPE)
 
@@ -569,7 +574,11 @@ def test_the_rule_constants() -> None:
             "min_uniform_segments": 12,
             "max_segment_tokens": 1408,
             "occupancy_bands_by_arch": {
-                "sm_107a": [{"heads": 16, "tokens_above": 8192, "tokens_below": 16384}]
+                "sm_103a": [{"heads": 4, "tokens_above": -1, "tokens_below": 4097}],
+                "sm_107a": [
+                    {"heads": 16, "tokens_above": 8192, "tokens_below": 16384},
+                    {"heads": 4, "tokens_above": -1, "tokens_below": 4097},
+                ],
             },
         }
         assert set(MEASURED_BY_ENVELOPE) == {
@@ -687,10 +696,11 @@ def test_the_bounds_of_each_branch() -> None:
     whose occupancy plan saves the segment states keeps that plan; a short pack
     takes the uniform table of ``P_u = max(P_ns, 12, ceil(S / 1408))`` segments
     per document below ``P_old`` (proportional only at most four chains, as the
-    occupancy plan's table), else the occupancy plan; the occupancy plan outside
-    the envelope (other architectures, SM counts and head counts, the serial
-    route, no token count); the rule on the B200 and VR200 entries of the
-    envelope."""
+    occupancy plan's table), else the occupancy plan; the packs of a band keep
+    the occupancy plan (on GB300 the 4-head packs of at most 4096 tokens); the
+    occupancy plan outside the envelope (other architectures, SM counts and head
+    counts, the serial route, no token count); the rule and its bands on the
+    B200 and VR200 entries of the envelope."""
     cases = (
         # (S, N, H, (route, segments, num_segments, proportional))
         # packs whose occupancy plan saves the states: the occupancy plan
@@ -716,11 +726,17 @@ def test_the_bounds_of_each_branch() -> None:
         (16897, 8, 4, ("seg", 13, 104, 0)),
         (25344, 8, 4, ("seg", 18, 144, 0)),
         (25345, 8, 4, ("seg", 19, 152, 0)),  # 19 = P_old
-        # four chains: the proportional table, as the occupancy plan's
-        (1, 1, 4, ("seg", 12, 12, 1)),
-        (4096, 1, 4, ("seg", 12, 12, 1)),
-        (64, 3, 4, ("seg", 12, 36, 0)),
-        (0, 3, 4, ("seg", 12, 36, 0)),  # an empty pack is a short pack
+        # GB300's band: 4 heads and at most 4096 tokens keep the occupancy plan
+        # (proportional at four chains); above it and at 8 heads the rule decides
+        (0, 3, 4, ("seg", 38, 114, 0)),  # an empty pack
+        (1, 1, 4, ("seg", 38, 38, 1)),
+        (64, 3, 4, ("seg", 38, 114, 0)),
+        (4096, 1, 4, ("seg", 38, 38, 1)),
+        (4096, 2, 4, ("seg", 38, 76, 0)),  # case E of the raw-gate accuracy test
+        (4096, 12, 4, ("seg", 13, 156, 0)),  # P_old 13, the band's last N
+        (4097, 1, 4, ("seg", 12, 12, 1)),  # four chains: the proportional table
+        (4097, 2, 4, ("seg", 12, 24, 0)),
+        (4096, 2, 8, ("seg", 12, 24, 0)),  # P_old 19
         (16384, 3, 4, ("seg", 15, 45, 0)),
         # P_u at or above P_old: the occupancy plan (no proportional count)
         (16384, 13, 4, ("seg", 12, 156, 0)),
@@ -757,13 +773,27 @@ def test_the_bounds_of_each_branch() -> None:
         for arch, sm, S, N, H, want in (
             ("sm_100a", 148, 16384, 3, 4, ("seg", 15, 45, 0)),  # P_old 37
             ("sm_100a", 148, 4096, 1, 4, ("seg", 12, 12, 1)),  # P_old 37
+            # no band on B200: 4 heads and at most 4096 tokens take the rule
+            ("sm_100a", 148, 0, 3, 4, ("seg", 12, 36, 0)),  # P_old 37
+            ("sm_100a", 148, 1, 1, 4, ("seg", 12, 12, 1)),
+            ("sm_100a", 148, 64, 3, 4, ("seg", 12, 36, 0)),
+            ("sm_100a", 148, 4096, 2, 4, ("seg", 12, 24, 0)),  # P_old 37
             ("sm_100a", 148, 16384, 16, 4, ("seg", 10, 160, 0)),  # P_u 12 >= 10
             ("sm_100a", 148, 16384, 3, 16, ("serial", 1, 0, 0)),
             ("sm_107a", 212, 16384, 3, 4, ("seg", 15, 45, 0)),  # P_old 53
             ("sm_107a", 212, 16384, 16, 4, ("seg", 12, 192, 0)),  # P_old 14
             ("sm_107a", 212, 65536, 4, 4, ("seg", 47, 188, 0)),  # P_old 53
-            # VR200's band: 16 heads and 8192 < S < 16384 keep the occupancy
-            # plan (P_old 13); at its bounds and at 8 heads the rule decides
+            # VR200's 4-head band: at most 4096 tokens keep the occupancy plan;
+            # above it and at 8 heads the rule decides
+            ("sm_107a", 212, 0, 3, 4, ("seg", 53, 159, 0)),
+            ("sm_107a", 212, 4096, 1, 4, ("seg", 38, 38, 1)),
+            ("sm_107a", 212, 4096, 2, 4, ("seg", 53, 106, 0)),  # case E
+            ("sm_107a", 212, 4096, 17, 4, ("seg", 13, 221, 0)),  # the last N
+            ("sm_107a", 212, 4097, 2, 4, ("seg", 12, 24, 0)),  # P_old 53
+            ("sm_107a", 212, 4096, 2, 8, ("seg", 12, 24, 0)),  # P_old 26
+            # VR200's 16-head band: 16 heads and 8192 < S < 16384 keep the
+            # occupancy plan (P_old 13); at its bounds and at 8 heads the rule
+            # decides
             ("sm_107a", 212, 8192, 3, 16, ("seg", 12, 36, 0)),
             ("sm_107a", 212, 8193, 3, 16, ("seg", 13, 39, 0)),
             ("sm_107a", 212, 12288, 3, 16, ("seg", 13, 39, 0)),

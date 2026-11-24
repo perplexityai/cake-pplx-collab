@@ -298,11 +298,12 @@ SAVED_VERSION_TAPE = (
 SEG_SAVE_MIN_TOKENS_PER_SEG = 384
 # The segment rules of a plan (:func:`plan`'s ``segment_rule``).  ``"tokens"`` (the default) is the token-aware rule of
 # ``cake_jit.TOKEN_SEGMENTS``: on its measured envelope (``sm_100a`` with 148 SMs, ``sm_103a`` with 152 SMs and
-# ``sm_107a`` with 212 SMs; 4 / 8 / 16 heads; on ``sm_107a`` not the 16-head packs of 8193 to 16383 tokens, its
-# ``occupancy_bands_by_arch``) a pack too short to save the segment states takes fewer segments per document, never
-# more than the occupancy rule's, so the saved set and the arena never grow.  ``"occupancy"`` is
-# the rule of ``cake_jit.SEGMENTS`` alone, the plans of releases before the token-aware rule, which the
-# context-parallel package's local plans keep.  A saved set has the tables and segment states of its forward's
+# ``sm_107a`` with 212 SMs; 4 / 8 / 16 heads; not the packs of its ``occupancy_bands_by_arch``: on ``sm_103a`` and
+# ``sm_107a`` the 4-head packs of at most 4096 tokens, for the accuracy of case E of the raw-gate accuracy test, and on
+# ``sm_107a`` the 16-head packs of 8193 to 16383 tokens, for memory) a pack too short to save the segment states takes
+# fewer segments per document, never more than the occupancy rule's, so the saved set and the arena never grow.
+# ``"occupancy"`` is the rule of ``cake_jit.SEGMENTS`` alone, the plans of releases before the token-aware rule, which
+# the context-parallel package's local plans keep.  A saved set has the tables and segment states of its forward's
 # plan, so its backward takes a plan of the same rule.
 SEGMENT_RULES = ("tokens", "occupancy")
 SAVE_MODES = ("light", "tape")

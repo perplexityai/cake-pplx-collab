@@ -176,11 +176,15 @@ SEG_P_SMALL_MAX_NH = 4
 # SEG_TOKEN_SM_COUNTS_BY_ARCH on its architecture, a head count of SEG_TOKEN_HEADS, the segmented route) a document
 # takes P_u = max(S // (SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG * N) + 1, SEG_TOKEN_MIN_UNIFORM_SEGMENTS,
 # ceil(S / SEG_TOKEN_MAX_SEGMENT_TOKENS)) segments where that is below the occupancy count above, except the packs of a
-# band of SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH ((heads, more than, fewer than tokens) on the architecture: VR200's 16-head
-# packs of 8193 to 16383 tokens); elsewhere, and without a token count (the registry's selection without num_tokens),
-# the occupancy count stays.
+# band of SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH ((heads, more than, fewer than tokens) on the architecture: GB300's and
+# VR200's 4-head packs of at most 4096 tokens, for accuracy, and VR200's 16-head packs of 8193 to 16383 tokens, for
+# memory); elsewhere, and without a token count (the registry's selection without num_tokens), the occupancy count
+# stays.
 SEG_TOKEN_SM_COUNTS_BY_ARCH = {"sm_100a": (148,), "sm_103a": (152,), "sm_107a": (212,)}
-SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH = {"sm_107a": ((16, 8192, 16384),)}
+SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH = {
+    "sm_103a": ((4, -1, 4097),),
+    "sm_107a": ((16, 8192, 16384), (4, -1, 4097)),
+}
 SEG_TOKEN_HEADS = (4, 8, 16)
 SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG = 384
 SEG_TOKEN_MIN_UNIFORM_SEGMENTS = 12

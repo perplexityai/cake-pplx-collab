@@ -539,15 +539,25 @@ at most 1408 tokens.  On B200 and VR200 the same constants were measured
 against the occupancy plan: <<FILL: B200 and VR200 rows, kernel time and
 memory from the validation>>.  Other architectures and SM counts (`sm_100a`
 with 152 SMs, `sm_107a` with 216 SMs), other head counts, and the serial
-route keep the occupancy rule.  On VR200 the 16-head packs of 8193 to 16383
-tokens keep it too (`occupancy_bands_by_arch`): there the FP32 `qk_rstd` of
-the in-kernel Q/K L2 norm (1 to 2 MiB) can fill a free end that the smaller
-arena leaves in a caching-allocator segment, which measured 491,520 B more
-memory above the live tensors at 12288 tokens in three documents.  The band
-holds in every L2 norm mode.  `segment_rule="occupancy"` selects the
-occupancy rule everywhere; the context-parallel package's local plans take
-it.  The records whose rules read the segment count (`walk_ctas_*`,
-`segments_heads_*`) are selected at the plan's count.
+route keep the occupancy rule.  So do the packs of the bands of
+`occupancy_bands_by_arch`.  On GB300 and VR200 the 4-head packs of at most
+4096 tokens keep it, for accuracy: there the token-aware plan would take 12
+segments per document where the occupancy plan takes 13 to 38 (GB300) or 13
+to 53 (VR200).  On 4096 tokens in two documents (38 or 53 segments per
+document to 12) it moved the explicit gate's `dA_log` gradient in case E of
+`test_raw_gate_and_the_explicit_gate_meet_the_naive_tier` to 1.1004 times the
+naive BF16 tier's median L2 error, beyond its accepted cap of 1.0607
+(`tests/cake_naive_accepted.json`), and to 1.0179 times FLA's, so it missed
+both references; the occupancy plan passes that case.  On B200 the
+token-aware plan passes it, so B200 has no band.  On VR200 the 16-head packs
+of 8193 to 16383 tokens keep the occupancy rule too: there the FP32 `qk_rstd`
+of the in-kernel Q/K L2 norm (1 to 2 MiB) can fill a free end that the
+smaller arena leaves in a caching-allocator segment, which measured 491,520 B
+more memory above the live tensors at 12288 tokens in three documents.  Both
+bands hold in every gate and L2 norm mode.  `segment_rule="occupancy"`
+selects the occupancy rule everywhere; the context-parallel package's local
+plans take it.  The records whose rules read the segment count
+(`walk_ctas_*`, `segments_heads_*`) are selected at the plan's count.
 
 | GPU | packs whose plan changes | fwd time | bwd time | step time | ckpt step time | peak, step | peak, ckpt step | saved set per layer |
 |---|---|---|---|---|---|---|---|---|

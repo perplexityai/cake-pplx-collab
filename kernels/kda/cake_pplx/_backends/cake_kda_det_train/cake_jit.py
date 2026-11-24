@@ -383,14 +383,32 @@ SEGMENTS: dict[str, Any] = {
 # and without a token count the occupancy rule alone decides.  So do the
 # packs of a band of ``occupancy_bands_by_arch`` (``heads`` heads and more
 # than ``tokens_above``, fewer than ``tokens_below`` tokens on the
-# architecture): on VR200 the 16-head packs of 8193 to 16383 tokens.  There
-# the FP32 ``qk_rstd`` of the in-kernel Q/K L2 norm (``8 * S * H`` bytes,
-# between 1 and 2 MiB) can fill a free end that the token-aware plan's
-# smaller arena leaves in a caching-allocator segment, and the allocator then
-# counts the whole end: measured on 12288 tokens in three documents, 491,520 B
-# more memory above the live tensors than the occupancy plan at the forward,
-# the step and the checkpointed step.  The byte queries do not all read the
-# L2 norm mode, so the band keeps the occupancy plan in every mode.
+# architecture): on GB300 and VR200 the 4-head packs of at most 4096 tokens,
+# and on VR200 the 16-head packs of 8193 to 16383 tokens.
+#
+# The 4-head band is for accuracy.  There the token-aware plan would take 12
+# segments per document wherever the occupancy plan takes more: 13 to 38 on
+# GB300 (1 to 12 documents), 13 to 53 on VR200 (1 to 17).  On 4096 tokens in
+# two documents (38 or 53 segments per document to 12) it moved the explicit
+# gate's ``dA_log`` gradient in case E of
+# ``test_raw_gate_and_the_explicit_gate_meet_the_naive_tier`` beyond its
+# accepted cap (``tests/cake_naive_accepted.json``: a median L2 error at most
+# 1.0607278 times the naive BF16 tier's): 1.1003996 times on both
+# architectures, and 1.0179 times FLA's, so it missed both references.  The
+# occupancy plan passes that case (on GB300 at the cap itself); on B200 the
+# token-aware plan passes it, so ``sm_100a`` has no band.  The band keeps the
+# occupancy plan below a token bound (every 4-head pack of at most 4096
+# tokens, not that one size) in every gate and L2 norm mode: the rule reads
+# neither.
+#
+# In the 16-head band the FP32 ``qk_rstd`` of the in-kernel Q/K L2 norm
+# (``8 * S * H`` bytes, between 1 and 2 MiB) can fill a free end that the
+# token-aware plan's smaller arena leaves in a caching-allocator segment, and
+# the allocator then counts the whole end: measured on 12288 tokens in three
+# documents, 491,520 B more memory above the live tensors than the occupancy
+# plan at the forward, the step and the checkpointed step.  The byte queries
+# do not all read the L2 norm mode, so the band keeps the occupancy plan in
+# every mode.
 # ``save_min_tokens_per_seg`` is the backend's ``SEG_SAVE_MIN_TOKENS_PER_SEG``
 # (a test holds the two equal).
 TOKEN_SEGMENTS: dict[str, Any] = {
@@ -400,7 +418,11 @@ TOKEN_SEGMENTS: dict[str, Any] = {
     "min_uniform_segments": 12,
     "max_segment_tokens": 1408,
     "occupancy_bands_by_arch": {
-        "sm_107a": [{"heads": 16, "tokens_above": 8192, "tokens_below": 16384}]
+        "sm_103a": [{"heads": 4, "tokens_above": -1, "tokens_below": 4097}],
+        "sm_107a": [
+            {"heads": 16, "tokens_above": 8192, "tokens_below": 16384},
+            {"heads": 4, "tokens_above": -1, "tokens_below": 4097},
+        ],
     },
 }
 # The two-level segment carry (``seg_carry_v8``: the segments of each
