@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 21 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 22 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, except situ_glu, which supports `sm_100a` and `sm_103a` only (its `sm_107a` libraries are not delivered yet). Some families limit shapes per architecture.
 
 ## Naming
 
@@ -39,6 +39,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | lm_head | `dX` is slab-summed and row skips can change bits. No run-to-run promise for any output. | Alerts before a K-sliced `dX` reduction |
 | gated_act_mxfp8 | Has no nondet module | — |
 | clamped_swiglu | Has no nondet module | — |
+| situ_glu | Has no nondet module | — |
 | engram_lookup | Has no nondet module | — |
 | mok | Has no nondet module | — |
 | act_qdq | Has no nondet module | — |
@@ -1859,6 +1860,83 @@ y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down 
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
 - A program's library builds at its first launch. The row count picks the program, and in the backward so does the weight: an unweighted backward runs its own programs. Before capturing a CUDA graph, run an eager call of each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
+
+---
+
+## situ_glu
+
+**Computes.** The SiTU-GLU activation of an MLP for training, at any width `I` that is a positive multiple of 256 (the Kimi-K3.1-Pro widths 3072, 6144 and 33,792 among them). Per row `r < R` and column `c < I`, from the BF16 gate `g` and up `u` and the FP32 scalars `beta` and `lb`:
+
+- **Forward:** `a = beta * tanh(g / beta) * sigmoid(g)` and `u' = lb * tanh(u / lb)` in FP32, and `h = BF16(a * u')`, the only rounding.
+- **Backward:** with `s = sigmoid(g)`, `tg = tanh(g / beta)` and `tu = tanh(u / lb)`, `d_gate = BF16(dh * u' * ((1 - tg^2) * s + a * (1 - s)))` and `d_up = BF16(dh * a * (1 - tu^2))`, each rounded once.
+- There is no clamp: both factors saturate smoothly, so large `|g|` and `|u|` keep finite values and nonzero gradients where FP32 holds them. `g = 0` or `u = 0` gives `h = 0` exactly. The activation is unweighted.
+- One kernel per call (PyTorch's NaN fills under deterministic algorithms aside; see Caveats). The backward needs only `gate`, `up` and `dh`; it recomputes the activation.
+- Every exponential is the approximate base-2 exponential of a negative argument, so none overflows: `tanh(|g| / beta) = (1 - E) / (1 + E)` with `E = 2^(-2 |g| log2(e) / beta)`, the sigmoid from `P = 2^(-|g| log2(e))` (`P = E * E` at `beta = 4`) and `1 - tanh^2 = 4 E / (1 + E)^2`, the up likewise. Below `|g| / beta = 1/16` (`|u| / lb`) the tanh is its odd polynomial to the fifth power. One reciprocal per element. Every product rounds to nearest without flushing subnormals; nothing is FP64.
+
+**Architectures.** `sm_100a`, `sm_103a`. Other devices raise `RuntimeError`, also for `R = 0`. The `sm_107a` libraries are not delivered yet. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` and 12.9 for `sm_103a`.
+
+**Inputs.**
+
+- `gate`, `up`: BF16 `[R, I]` each, or one `[R, 2I]` tensor with the gate in columns `[0, I)` and the up in `[I, 2I)` (pass it as the first argument with `up=None`). The kernels read every BF16 tensor through its row stride, so the halves of a merged tensor and row slices of wider tensors are read in place when the row stride is a multiple of 8 elements, the last stride is 1 and the base is 16-byte aligned. Other inputs are copied once.
+- `dh`: BF16 `[R, I]`.
+- `beta`, `lb`: finite positive Python numbers, rounded to FP32, with the defaults 4.0 and 25.0 (Kimi-K3.1-Pro's `activation_situ_beta` and `activation_situ_linear_beta`). They are launch arguments, as are `R`, `I` and the strides: one library per program and architecture serves every call, with no recompilation. Each stage has one program, with one CTA per row.
+- `R` is any count from 0 to `2**30`. Every operand is on one CUDA device.
+- Every argument is checked before an input is copied or an output allocated, so a call refused for its arguments copies, allocates and launches nothing.
+
+### `cake_pplx.cake_situ_glu_det_train`
+
+This family has a det module only, with no nondet or KCP module: every output is elementwise, with no reduction to reorder, and rows are independent. Every call gives the same bits for the same inputs on the same architecture, whatever `R`, the layout, the stream or a CUDA graph, and no call alerts under `torch.use_deterministic_algorithms(True)`. Source: [`kernels/situ_glu/cake_pplx/cake_situ_glu_det_train.py`](../kernels/situ_glu/cake_pplx/cake_situ_glu_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_situ_glu_det` | `(gate_up_or_gate, up=None, *, beta=4.0, lb=25.0)` | As above | Autograd. Returns contiguous BF16 `h [R, I]`, the down projection's input. A merged input's gradient is one `[R, 2I]` tensor; `beta` and `lb` get none. Saves only its inputs; the backward recomputes the activation. |
+| `cake_situ_glu_det_train_forward` | `(gate_up_or_gate, up=None, *, beta=4.0, lb=25.0, out=None)` | `out` optional preallocated BF16 `[R, I]` (the layout rules above, rows not overlapping) | Returns `h` (`out` when given). Not autograd. `R == 0` returns an empty `h` without a launch. |
+| `cake_situ_glu_det_train_backward` | `(grad_out, gate_up_or_gate, up=None, *, beta=4.0, lb=25.0, grad_gate_up_or_gate=None, grad_up=None)` | `grad_out` BF16 `[R, I]`; optional preallocated outputs: `grad_gate_up_or_gate` (`d_gate [R, I]`, or the merged `[R, 2I]` gradient), `grad_up` (two-tensor form only) | Returns `(d_gate_up, None)` for a merged input or `(d_gate, d_up)`. Not autograd. Unfit output buffers raise `ValueError` (never copied). |
+
+Other public names:
+
+- `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `WIDTH_MULTIPLE` (256).
+- `CakeSiTUGLUDetFunction`: the autograd class, `apply(gate_up_or_gate, up, beta, lb)`.
+- `is_cake_situ_glu_det_train_supported(device)`.
+
+**Options and environment.** `beta`, `lb` and the optional output buffers are the only keywords. The facade reads no environment variable.
+
+**Cross-family.** None. The merged `[R, 2I]` form takes the output of a gate/up projection as is, and `h` is the down projection's input.
+
+**Example.**
+
+```python
+import torch
+import torch.utils.checkpoint
+from cake_pplx.cake_situ_glu_det_train import cake_situ_glu_det
+
+R, I = 16380, 6144
+gate_up = torch.randn(R, 2 * I, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+h = cake_situ_glu_det(gate_up)  # BF16 [R, 6144]; beta = 4.0, lb = 25.0
+h.backward(torch.randn_like(h))  # gate_up.grad BF16 [R, 12288]
+
+# Activation checkpointing: checkpoint the op together with the down projection.
+w_down = (torch.randn(7168, I, device="cuda") / I**0.5).bfloat16().requires_grad_()  # BF16 [hidden, 6144]
+
+
+def situ_down(gate_up, w_down):
+    return torch.nn.functional.linear(cake_situ_glu_det(gate_up), w_down)
+
+
+y = torch.utils.checkpoint.checkpoint(situ_down, gate_up, w_down, use_reentrant=False)
+y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down projection's weight gradient
+```
+
+**Caveats.**
+
+- `sm_107a` (Rubin) devices raise `RuntimeError` until its libraries are delivered.
+- Checkpointing: the op keeps only its inputs, so checkpointing it alone saves no memory. The down projection keeps `h` for its weight gradient. Checkpoint the op together with the down projection (as in the example) so that `h` is not kept from the forward to the backward. The backward of a non-reentrant checkpoint then runs the forward kernel once more before the backward kernel: two forwards and one backward per step.
+- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy).
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
+- No double backward. With `create_graph=True` the op's gradients are constants of the graph: differentiating them raises `RuntimeError` when the upstream gradient requires grad, and adds no term of this op otherwise. No FP8 or FP4 output. Not tested under `torch.compile`.
+- `beta` and `lb` must be Python numbers: a tensor raises `TypeError`, as reading it would synchronize the host.
+- A program's library builds at its first launch. Before capturing a CUDA graph, run one eager call of each stage, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
 
 ---
 
