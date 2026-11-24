@@ -2202,7 +2202,7 @@ if torch.cuda.get_device_capability() == (10, 7):
 - **Forward:** `y = BF16(w * x)`, the FP32 product rounded once. Bit for bit `(w[:, None] * x.float()).bfloat16()`.
 - **Backward:** `dx = BF16(w * dy)`, bit for bit `(w[:, None] * dy.float()).bfloat16()`, and the FP32 `dw = sum_c dy * x`, one word per row. `dw` does not divide by `w`, so a zero-weight row gets signed zeros in `y` and `dx` and keeps its `dw`.
 - One kernel per call. The backward reads `x` and `dy` once and writes `dx` and `dw` once: no `[rows, H]` FP32 product is formed.
-- The products of two BF16 values in `dw` are exact in FP32; the additions form a balanced binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd halves, then five XOR shuffles across the row's 32 lanes). Every product rounds to nearest without flushing subnormals; nothing is FP64.
+- The products of two BF16 values in `dw` are exact in FP32; the additions form a balanced binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd halves, then five XOR shuffles across 32 lanes). Every product rounds to nearest without flushing subnormals; nothing is FP64.
 
 **Architectures.** `sm_100a`, `sm_103a`; `sm_107a` follows once it runs on an SM107 device. Other devices, SM107 included, raise `RuntimeError`, also for `rows = 0`. The `build.json` of the package gives the minimum CUDA toolkit of each library.
 
@@ -2264,4 +2264,4 @@ cake_route_weight_scale_det_train_forward(x.detach(), w.detach(), out=buffer[:ro
 - Workspace: none. A call allocates only the outputs it is not given. Retained state of the autograd function: `x` and `w` (references, no copy).
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills each output a call allocates with NaN before the kernel writes it: one more fill launch per new output. Output buffers passed to every call avoid the fills. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. Not tested under `torch.compile`.
-- A program's library builds at its first launch. Before capturing a CUDA graph, run an eager call of each stage and width the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
+- A program's library builds at its first launch. The forward at `H = 4096` runs one of two programs by the row count, with the same bits. Before capturing a CUDA graph, run an eager call of each stage, width and row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.

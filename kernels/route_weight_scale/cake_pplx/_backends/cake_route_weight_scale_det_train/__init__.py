@@ -39,25 +39,29 @@ Host design:
   allocates an output, so a call refused for its arguments allocates and
   launches nothing.  The checks read metadata only: nothing reads tensor
   contents, nothing synchronizes.
-- Launches.  One kernel per call: stage ``fwd`` or ``bwd`` at the width of
-  ``x`` (record ``<stage>_h<H>``), ``ceil(rows / 4)`` CTAs of 128 threads
-  (``cake_jit.grid``).  ``rows`` and the strides are launch arguments, so one
-  library per record and architecture serves every call; it loads (and,
-  without a prebuilt library, JIT-builds) at its first launch.  ``rows == 0``
-  launches nothing and loads no library.  Every launch is a plain
-  stream-ordered launch on the current torch stream of the operands' device
-  (tvm-ffi runs the call on that stream; the binding makes the device
-  current): nothing cooperative, no PDL, no shared memory.
+- Launches.  One kernel per call, of the record ``cake_jit.record_name``
+  picks: stage ``fwd`` or ``bwd`` at the width of ``x`` (``<stage>_h<H>``),
+  except that the forward at H = 4096 below the bound of
+  ``cake_jit.SMALL_ROWS`` takes ``fwd_h4096_t32`` (one row a CTA of 32
+  threads, the same bits).  The grid is the record's (``cake_jit.grid``): one
+  CTA per block of its ``rows_per_cta`` rows (4 for ``fwd_h4096`` and
+  ``fwd_h3584``, 1 for the others).  ``rows`` and the strides are launch
+  arguments, so one library per record and architecture serves every call; it
+  loads (and, without a prebuilt library, JIT-builds) at its first launch.
+  ``rows == 0`` launches nothing and loads no library.  Every launch is a
+  plain stream-ordered launch on the current torch stream of the operands'
+  device (tvm-ffi runs the call on that stream; the binding makes the device
+  current): nothing cooperative, no PDL, no dynamic shared memory.
 - Numerics.  ``y = bf16(w x)`` and ``dx = bf16(w dy)``: the FP32 product,
   rounded once to BF16 (round to nearest, no flush), so both are bit for bit
   ``(w[:, None] * x.float()).bfloat16()`` and ``(w[:, None] *
   dy.float()).bfloat16()``.  ``dw = sum over c of dy x``: the products are
   exact in FP32 and the additions form a balanced binary tree in one fixed
   order (pairs within a load of 8 columns, the loads of a lane pairwise, the
-  even and odd halves, then five XOR shuffles across the row's 32 lanes); one
-  FP32 word per row, stored once.  ``dw`` does not divide by ``w``: a
-  zero-weight row gets signed zeros in ``y`` and ``dx`` and keeps its ``dw``.
-  Nothing is FP64.
+  even and odd halves, then five XOR shuffles across 32 lanes; the
+  backward's four warps each sum a subtree of it); one FP32 word per row,
+  stored once.  ``dw`` does not divide by ``w``: a zero-weight row gets
+  signed zeros in ``y`` and ``dx`` and keeps its ``dw``.  Nothing is FP64.
 - Workspace: none.  The forward allocates ``y`` only, the backward ``dx`` and
   ``dw`` only (none when the caller passes them): no ``[rows, H]`` FP32
   buffer.  Retained state of the autograd function: ``x`` and ``w`` through
@@ -200,19 +204,21 @@ def _entry(name: str, arch: str) -> Any:
     return getattr(load(name, arch), cake_jit.MODULES[name]["ffi_entry"])
 
 
-# The FFI entry of each (stage, width, device index), bound at its first launch.
-_ENTRIES: dict[tuple[str, int, int], Any] = {}
+# The FFI entry of each (record, device index), bound at its first launch.
+_ENTRIES: dict[tuple[str, int], Any] = {}
 
 
 def _launch(stage: str, width: int, device_index: int, rows: int, *arguments: Any) -> None:
-    """Launch the program of ``stage`` at hidden size ``width`` on device ``device_index`` for ``rows >= 1`` rows:
-    ``arguments`` are the kernel parameters in the order of :data:`_PARAMETERS`, then the grid ``cake_jit.grid(rows)``.
-    The one place a kernel is launched."""
-    key = (stage, width, device_index)
+    """Launch the program of ``stage`` at hidden size ``width`` on device ``device_index`` for ``rows >= 1`` rows: the
+    record ``cake_jit.record_name(stage, width, rows)``, with ``arguments`` (the kernel parameters in the order of
+    :data:`_PARAMETERS`) and then that record's grid ``cake_jit.grid(rows, name)``.  The one place a kernel is
+    launched."""
+    name = cake_jit.record_name(stage, width, rows)
+    key = (name, device_index)
     entry = _ENTRIES.get(key)
     if entry is None:
-        entry = _ENTRIES[key] = _entry(cake_jit.record_name(stage, width), device_arch(device_index))
-    entry(*arguments, *cake_jit.grid(rows))
+        entry = _ENTRIES[key] = _entry(name, device_arch(device_index))
+    entry(*arguments, *cake_jit.grid(rows, name))
 
 
 # ----------------------------------------------------------------------------------------------------------------

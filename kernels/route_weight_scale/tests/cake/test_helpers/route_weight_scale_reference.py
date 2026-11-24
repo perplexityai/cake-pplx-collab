@@ -18,9 +18,8 @@ References of the route-weight row scaling tests, in PyTorch:
 * :func:`scaled`: ``BF16(w * v)``, the FP32 product rounded once, the exact contract of ``y`` (``v = x``) and of
   ``dx`` (``v = dy``).
 * :func:`tree_row_sum`: ``dw`` in the order the kernel states (pairs within a load of 8 columns, the loads of a lane
-  joined in the order of :func:`pairwise_plan`, the even and odd halves, then five XOR shuffles across the row's 32
-  lanes), each addition one FP32 rounding.  The products of two BF16 values are exact in FP32, so this gives ``dw``
-  bit for bit.
+  joined in the order of :func:`pairwise_plan`, the even and odd halves, then five XOR shuffles across 32 lanes), each
+  addition one FP32 rounding.  The products of two BF16 values are exact in FP32, so this gives ``dw`` bit for bit.
 * :func:`fp64_row_sum` and :func:`fp32_row_sum`: the FP64 reference of ``dw`` and the FP32 row sum
   ``(dy.float() * x.float()).sum(1)`` that ``dw`` is judged beside.  FP64 is used here only, never in the kernels.
 * :func:`issue_inputs`: the draws of the CPU reference script of the issue (seed 0), so the FP32 row sum's error
@@ -37,7 +36,7 @@ import torch
 # Lines printed at the end of the run (``tests/conftest.py``).
 REPORT: list[str] = []
 
-# 32 lanes own a row; a lane loads 8 BF16 columns at a time, as 4 pairs (even, odd).
+# A row's columns are spread over 32 lanes; a lane loads 8 BF16 columns at a time, as 4 pairs (even, odd).
 LANES = 32
 VEC = 8
 

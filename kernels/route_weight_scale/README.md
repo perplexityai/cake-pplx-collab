@@ -22,7 +22,7 @@ one sum, `dw` within a row, has one fixed order.
 | Shapes | `rows` and the strides are run-time values: one library per program and architecture, no recompilation. |
 | Host | No synchronization, no device-to-host read; runs on the current stream of the operands' device |
 | Checkpointing | Works under `torch.utils.checkpoint(..., use_reentrant=False)`; the recomputation launches the forward once. |
-| CUDA graphs | Run one eager call of each width first, so that no JIT build happens during capture. |
+| CUDA graphs | Run one eager call of each stage, width and row count the graph captures first, so that no JIT build happens during capture. The `H = 4096` forward runs one of two programs by the row count, with the same bits. |
 | Architectures | `sm_100a`, `sm_103a`; the JIT build needs the CUDA toolkit that `build.json` names for each |
 | Determinism | Bitwise reproducible run to run. No alert under `torch.use_deterministic_algorithms(True)`. |
 | Modes | `det` only: there is no step that sums across rows, so `nondet` and KCP are not applicable. |

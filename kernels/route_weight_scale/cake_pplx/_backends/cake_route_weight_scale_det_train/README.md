@@ -47,7 +47,7 @@ dx, dw = cake_route_weight_scale_det_train_backward(x, dy, w, dx=dx_buffer[:rows
 | Workspace | 0 bytes: the forward allocates only `y`, the backward only `dx` and `dw` (none when passed in) |
 | Retained state | The autograd function saves `x` and `w` only |
 | Empty input | `rows = 0`: empty outputs, no launch, no library load |
-| Programs | Four records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h3584`, `bwd_h4096`, `bwd_h3584`, each built for the two architectures |
+| Programs | Five records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h4096_t32`, `fwd_h3584`, `bwd_h4096`, `bwd_h3584`, each built for the two architectures |
 | Minimum CUDA | The `min_cuda` of each library in `build.json`; an older local toolkit raises `RuntimeError` when the library is built |
 
 A violation of the operand rules is a `ValueError` (a non-tensor operand a
@@ -58,14 +58,36 @@ expanded gradient, say) once.
 ## Kernel
 
 One call launches one kernel on the current torch stream of the operands'
-device, a plain stream-ordered launch: nothing cooperative, no PDL, no shared
-memory.  32 lanes own a row; each lane makes `H / 256` loads of 8 elements at
-columns `(p * 32 + lane) * 8`, so each load of a warp is contiguous.  A CTA of
-128 threads owns 4 consecutive rows, and the host launches `ceil(rows / 4)`
-CTAs (`cake_jit.grid`).  The forward multiplies each pair of elements by the
-row's weight in FP32 and rounds the pair to BF16.  The backward loads `dy`
-beside `x` and stores `dx` and `dw` in one pass: it never forms a `[rows, H]`
-FP32 product.  Every row offset is 64-bit.
+device, a plain stream-ordered launch: nothing cooperative, no PDL, no dynamic
+shared memory.  A row's columns are spread over 32 lanes: lane `l` makes
+`H / 256` loads of 8 elements at columns `(p * 32 + l) * 8`, so each load of a
+warp is contiguous.  Three kinds of program serve the calls:
+
+| Records | CTA | Rows a CTA (`rows_per_cta`) | Taken for |
+|---|---|---|---|
+| `fwd_h4096`, `fwd_h3584` | 128 threads, one warp a row | 4 consecutive rows | the forward (at `H = 4096` from the bound of `cake_jit.SMALL_ROWS` on) |
+| `fwd_h4096_t32` | 32 threads | 1 row | the forward at `H = 4096` below the bound of `cake_jit.SMALL_ROWS` |
+| `bwd_h4096`, `bwd_h3584` | 4 warps (128 threads) | 1 row | the backward |
+
+`cake_jit.record_name(stage, H, rows)` picks the record.  The forward
+multiplies each pair of elements by the row's weight in FP32 and rounds the
+pair to BF16; `fwd_h4096_t32` runs the per-element instructions of
+`fwd_h4096`, so the two store the same bits.  The backward loads `dy` beside
+`x` and stores `dx` and `dw` in one pass: it never forms a `[rows, H]` FP32
+product.  Each of its four warps sums one run of each lane's loads
+(`H = 4096`: 4, 4, 4, 4 loads; `H = 3584`: 4, 4, 4, 2) as a subtree of the
+`dw` tree (see Numerics) and stores the subtree's root, two FP32 words a
+lane, to static shared memory (1 KiB a CTA).  After a CTA barrier, warp 0
+joins the four roots pairwise in the same order, adds the even and odd halves
+and makes the five XOR shuffles across its 32 lanes.  So `dw` is summed in
+the order of Numerics, bit for bit, and each stage and width gives the same
+bits at every row count.
+
+Every program strides over the blocks of its rows with a 32-bit block counter.
+A grid of `g` CTAs covers `nblocks = ceil(rows / rows_per_cta)` blocks only
+while `nblocks + g <= 2**31`, so the host launches
+`min(nblocks, 2**31 - nblocks)` CTAs (`cake_jit.grid`): `nblocks` up to
+`2**30` blocks.  Every row offset is 64-bit.
 
 ## Numerics
 
@@ -75,9 +97,9 @@ FP32 product.  Every row offset is 64-bit.
   additions round.  They form a balanced binary tree in one fixed order: two
   products of a load's even (and odd) columns joined by one FMA, the two pairs
   added, the loads of a lane joined pairwise, the even and odd halves added,
-  and five XOR shuffles across the row's 32 lanes.  Every element's path has
-  the fewest roundings a pairwise sum allows.  `dw` is one FP32 word per row,
-  stored once; it does not divide by `w`, so a zero-weight row keeps its sum.
+  and five XOR shuffles across 32 lanes.  Every element's path has the fewest
+  roundings a pairwise sum allows.  `dw` is one FP32 word per row, stored
+  once; it does not divide by `w`, so a zero-weight row keeps its sum.
 - Nothing is FP64.  The tests compare `y` and `dx` bit for bit with the
   PyTorch FP32 product rounded to BF16, and `dw` against an FP64 reference
   of the same inputs beside the FP32 row sum `(dy.float() * x.float()).sum(1)`.
