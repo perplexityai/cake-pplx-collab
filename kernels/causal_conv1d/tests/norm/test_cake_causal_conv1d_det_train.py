@@ -3031,12 +3031,7 @@ def test_autograd_end_to_end(kind) -> None:
 
 def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
     arch = _arch()
-    # One shape per backward program of the route: C = 128 runs the fallback program, each channel threshold
-    # its own program.  The shape loop below must then load nothing.
-    for C in (128, *_backward_thresholds(arch)):
-        _check(64, C, None)
-    loaded_before = loader.load.cache_info().misses
-    for S, C, docs in (
+    shapes = (
         (1, 128, None),
         (65, 256, (64, 1)),
         (5, 136, (2, 0, 3)),
@@ -3044,7 +3039,26 @@ def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
         (4097, 2048, (1000, 0, 3, 3094)),
         (4097, 1024, (0, 4097, 0)),
         (4097, 1280, (1000, 0, 3, 3094)),
-    ):
+    )
+    # One shape per backward program of the route: C = 128 runs the fallback program, each channel threshold
+    # its own program.
+    for C in (128, *_backward_thresholds(arch)):
+        _check(64, C, None)
+    # Per shape of the loop, one document one token shorter (two tokens for S = 1), which selects the same forward
+    # and backward programs: the forward selects its static, direct and pair direct programs by S, at rows the
+    # shapes above need not reach (S 4097 at C 1024 runs the static program).  No warm-up size is a loop size.
+    # The shape loop below must then load nothing.
+    sizes = {(S, C) for S, C, _ in shapes}
+    for S, C, _ in shapes:
+        S_warm = 2 if S == 1 else S - 1
+        assert (S_warm, C) not in sizes
+        for route in (FORWARD_OF["bwd"], "bwd"):
+            assert loader.selected_modules(arch, route, C=C, S=S_warm) == loader.selected_modules(
+                arch, route, C=C, S=S
+            ), f"route {route} on {arch} selects another program at S={S_warm} than at S={S} (C={C})"
+        _check(S_warm, C, None)
+    loaded_before = loader.load.cache_info().misses
+    for S, C, docs in shapes:
         _check(S, C, docs)
     assert loader.load.cache_info().misses == loaded_before, (
         "a changed problem size rebuilt a module"
