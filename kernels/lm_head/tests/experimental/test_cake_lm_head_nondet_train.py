@@ -5263,7 +5263,10 @@ def test_device_no_added_synchronization(glm_weight, T, objective):
     synchronization debug mode does not report), ``torch.cuda.Stream.synchronize``, ``torch.cuda.synchronize`` and the
     debug mode's synchronizing operations.  On the hidden count path (three chunks or more) the call waits exactly once,
     and the forward's memory report records that path; the K-sliced reduction with its slab sum and the zero-weight
-    split (``policy_zero``: 16.6 % zero-weight rows) add none."""
+    split (``policy_zero``: 16.6 % zero-weight rows) add none.  A one-chunk call the deterministic package serves with
+    its hidden count (its ``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH`` window; its forward's memory report records the count)
+    waits once in each package: the deterministic package on the count's event, this package on the host count's
+    copy."""
     _require_program(entry="loss")
     base = _device_inputs(T, "policy" if objective != "ce" else "ce", W=glm_weight)
     inp = (
@@ -5345,9 +5348,27 @@ def test_device_no_added_synchronization(glm_weight, T, objective):
                 best = counts
         return best
 
+    def det_one_chunk_count():
+        if -(-T // 4096) >= cake_backend.HIDDEN_COUNT_MIN_CHUNKS:
+            return False
+        fwd = det_backend.forward_loss(
+            inp.X,
+            inp.W,
+            inp.labels,
+            chunk_size=4096,
+            hidden_count=True,
+            **kw,
+        )
+        return bool(fwd.memory.get("hidden_count"))
+
     for hidden in (False, True):
         nd, det = waits("nd", hidden), waits("det", hidden)
         print(f"\nsyncs T={T} {objective} hidden_count={hidden}: ND {nd} det {det}")
+        if hidden and det_one_chunk_count():
+            one_copy = dict(event=0, stream=0, device=0, debug=1)
+            one_event = dict(event=1, stream=0, device=0, debug=0)
+            assert (nd, det) == (one_copy, one_event), (T, objective, nd, det)
+            continue
         assert nd == det, (T, objective, hidden, nd, det)
         if hidden and -(-T // 4096) >= cake_backend.HIDDEN_COUNT_MIN_CHUNKS:
             assert sum(nd.values()) == 1 and nd["event"] == 1, nd
