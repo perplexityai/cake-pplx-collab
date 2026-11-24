@@ -5,7 +5,8 @@
 """MoK functional adapter over the generated training kernels.
 
 Copies, barriers, scheduler, epilogues and empty-expert zeroing retain the
-native launch boundaries. Unequal source lengths use masked rows in common
+native launch boundaries (a padded source prefix is staged with its constant
+padding rows by one copy). Unequal source lengths use masked rows in common
 symmetric storage; the fused kernels keep the same runtime-shape entrypoints.
 Routed experts run in BF16, or natively in MXFP8 when the routed weights are
 passed as caller-prequantized MXFP8 tuples, as in MoK's functional API. The FP32
@@ -14,7 +15,7 @@ router weight multiplies each routed expert's output in the combine
 down projection, with an unweighted combine (``"before_down"``).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import sys
 
@@ -137,6 +138,18 @@ class _StepPlan:
     x_rows: torch.Tensor
     scores: torch.Tensor | None = None
     dy_rows: torch.Tensor | None = None
+    # Padded staging per padding row count (``MoKFunctional._padding``).
+    padding: dict = field(default_factory=dict)
+
+
+@dataclass(slots=True, eq=False)
+class _PaddingRows:
+    """Constant padding rows of one workspace (``MoKFunctional._padding_rows``):
+    BF16 zeros ``[256, hidden]`` and FP32 ones ``[256, topk]``, never written
+    after they are filled."""
+
+    zeros: torch.Tensor
+    ones: torch.Tensor
 
 
 @dataclass(slots=True, eq=False)
@@ -457,10 +470,74 @@ class MoKFunctional:
             destination[count:rows].fill_(padding)
 
     @staticmethod
+    def _cat_rows(*stagings):
+        """Stage each ``(source, padding_rows, destination)``, ``destination``
+        a plan's ``[rows]`` prefix view, with one ``torch.cat``: the bytes of
+        ``_copy_source`` (source rows, then the constant padding rows), one
+        launch instead of a copy and a fill; None entries are skipped. False
+        when ``cat`` rejects a staging (a source that autograd records, or one
+        that overlaps the workspace); the caller then stages every buffer by
+        ``_copy_source``."""
+        try:
+            for staging in stagings:
+                if staging is not None:
+                    source, padding, destination = staging
+                    torch.cat((source, padding), out=destination)
+        except RuntimeError:
+            return False
+        return True
+
+    @staticmethod
     def _shared_rows(source_count):
         # Peer addressing retains the symmetric allocation. Shared-expert work
         # only needs the active local prefix rounded to the existing MMA tile.
         return max(256, (source_count + 255) // 256 * 256)
+
+    @staticmethod
+    def _padding_rows(workspace):
+        """The workspace's constant padding rows (BF16 zeros ``[256, hidden]``,
+        FP32 ones ``[256, topk]``; a padded prefix has 1 to 256 padding rows),
+        filled on first use and shared by the adapters of the workspace. None
+        during CUDA Graph capture before they exist: a fill recorded by the
+        capture would only run at replay. Normal tensors also when first used
+        under ``torch.inference_mode()``."""
+        key = ("padding_rows",)
+        plans = workspace.launch_plans
+        rows = plans.get(key)
+        if rows is None and not torch.cuda.is_current_stream_capturing():
+            with torch.inference_mode(False):
+                rows = plans[key] = _PaddingRows(
+                    zeros=torch.zeros(
+                        (256, workspace.hidden_size),
+                        dtype=torch.bfloat16,
+                        device=workspace.device,
+                    ),
+                    ones=torch.ones(
+                        (256, workspace.topk),
+                        dtype=torch.float32,
+                        device=workspace.device,
+                    ),
+                )
+        return rows
+
+    def _padding(self, workspace, plan, pad, tails=()):
+        """The views of a padded staging with ``pad`` padding rows: zeros and
+        ones of ``pad`` rows, then for each ``(buffer, width)`` of ``tails`` the
+        buffer's padding rows ``[(rows - pad) * width, rows * width)`` (``rows``
+        the plan's shared rows). Kept in the plan per ``pad`` (at most 256
+        entries). None when the padding rows do not exist yet (capture)."""
+        views = plan.padding.get(pad)
+        if views is None:
+            rows = self._padding_rows(workspace)
+            if rows is None:
+                return None
+            end = plan.x_rows.shape[0]
+            views = plan.padding[pad] = (
+                rows.zeros[:pad],
+                rows.ones[:pad],
+                *(buffer[(end - pad) * width : end * width] for buffer, width in tails),
+            )
+        return views
 
     def _check_device(self, workspace):
         if (
@@ -1197,14 +1274,24 @@ class MoKFunctional:
         with _ffi_stream():
             # Stage: counters, source rows, then the peer barrier (B2).
             plan.fused.slab.zero_()
-            if shared_rows > source_count:
-                self._copy_source(workspace.x_buffer, x, 0, shared_rows)
-                self._copy_source(
-                    workspace.router_weight_buffer, router_weights, 1, shared_rows
+            pad = shared_rows - source_count
+            if pad:
+                padding = self._padding(
+                    workspace, plan, pad, ((workspace.combine_buffer, topk),)
                 )
-                workspace.combine_buffer[
-                    source_count * topk : shared_rows * topk
-                ].zero_()
+                if padding is not None and self._cat_rows(
+                    (x, padding[0], plan.x_rows),
+                    (router_weights, padding[1], plan.scores),
+                ):
+                    padding[2].zero_()
+                else:
+                    self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    self._copy_source(
+                        workspace.router_weight_buffer, router_weights, 1, shared_rows
+                    )
+                    workspace.combine_buffer[
+                        source_count * topk : shared_rows * topk
+                    ].zero_()
                 scores = plan.scores
             elif before_down:
                 plan.x_rows.copy_(x)
@@ -1440,12 +1527,21 @@ class MoKFunctional:
         barrier = plan.barrier
         with _ffi_stream():
             plan.fused.slab.zero_()
-            if shared_rows > source_count:
-                self._copy_source(workspace.x_buffer, x, 0, shared_rows)
-                if before_down:
-                    self._copy_source(
-                        workspace.router_weight_buffer, router_weights, 1, shared_rows
-                    )
+            pad = shared_rows - source_count
+            if pad:
+                padding = self._padding(workspace, plan, pad)
+                if padding is None or not self._cat_rows(
+                    (x, padding[0], plan.x_rows),
+                    (router_weights, padding[1], plan.scores) if before_down else None,
+                ):
+                    self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    if before_down:
+                        self._copy_source(
+                            workspace.router_weight_buffer,
+                            router_weights,
+                            1,
+                            shared_rows,
+                        )
             else:
                 plan.x_rows.copy_(x)
                 if before_down:
@@ -1646,31 +1742,55 @@ class MoKFunctional:
         context = forward_context
         with _ffi_stream():
             plan.fused.slab.zero_()
+            padding = None
             if padded:
-                self._copy_source(workspace.d_y_buffer, grad_output, 0, shared_rows)
-            else:
-                plan.dy_rows.copy_(grad_output)
-            # Peers read this rank's x_buffer only to replay a second macrobatch.
-            # Without one, the shared-expert path reads the caller's x when it
-            # needs no padding rows.
-            if workspace.schedule_capacity <= config.macrobatch_size and not padded:
-                x_local = x
+                padding = self._padding(
+                    workspace,
+                    plan,
+                    shared_rows - source_count,
+                    (
+                        (workspace.d_x_routed_buffer, topk),
+                        (workspace.d_router_weight_buffer, 1),
+                    ),
+                )
+                if padding is not None and not self._cat_rows(
+                    (grad_output, padding[0], plan.dy_rows),
+                    (x, padding[0], plan.x_rows),
+                    (router_weights, padding[1], plan.scores),
+                ):
+                    padding = None
+            if padding is not None:
+                # Padded: dy, x and the router weights staged with their padding
+                # rows (``_cat_rows``), then the gradient buffers' padding rows.
+                padding[2].zero_()
+                padding[3].zero_()
+                x_local = plan.x_rows
             else:
                 if padded:
-                    self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    self._copy_source(workspace.d_y_buffer, grad_output, 0, shared_rows)
                 else:
-                    plan.x_rows.copy_(x)
-                x_local = plan.x_rows
-            if padded:
-                self._copy_source(
-                    workspace.router_weight_buffer, router_weights, 1, shared_rows
-                )
-                workspace.d_x_routed_buffer[
-                    source_count * topk : shared_rows * topk
-                ].zero_()
-                workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
-            else:
-                plan.scores.copy_(router_weights)
+                    plan.dy_rows.copy_(grad_output)
+                # Peers read this rank's x_buffer only to replay a second
+                # macrobatch. Without one, the shared-expert path reads the
+                # caller's x when it needs no padding rows.
+                if workspace.schedule_capacity <= config.macrobatch_size and not padded:
+                    x_local = x
+                else:
+                    if padded:
+                        self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    else:
+                        plan.x_rows.copy_(x)
+                    x_local = plan.x_rows
+                if padded:
+                    self._copy_source(
+                        workspace.router_weight_buffer, router_weights, 1, shared_rows
+                    )
+                    workspace.d_x_routed_buffer[
+                        source_count * topk : shared_rows * topk
+                    ].zero_()
+                    workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
+                else:
+                    plan.scores.copy_(router_weights)
             if barrier is not None:
                 barrier.launch(())
             values = backward_kernel.launch_planned(

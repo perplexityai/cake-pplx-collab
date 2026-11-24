@@ -3134,3 +3134,223 @@ def test_before_down_adapter_top6_changed_counts(ep, experts):
         if loads is None:
             loads = misses
         assert misses == loads, (count, "kernel loads", loads, misses)
+
+
+def test_cat_rows_matches_copy_source_and_rejects_what_cat_rejects():
+    """Host only: ``_cat_rows`` writes a destination prefix with the bytes of ``_copy_source`` (the source rows, then
+    the padding rows), leaves the rows past the prefix alone, and returns False when ``torch.cat`` rejects a staging,
+    so the caller stages by ``_copy_source``: a source that autograd records under grad mode, and a source that
+    overlaps its destination."""
+    functional = backend.MoKFunctional
+    source = torch.arange(20.0).reshape(5, 4)
+    for value, padding in ((0.0, torch.zeros(3, 4)), (1.0, torch.ones(3, 4))):
+        expected = torch.full((10, 4), 7.0)
+        functional._copy_source(expected, source, value, 8)
+        destination = torch.full((10, 4), 7.0)
+        assert functional._cat_rows((source, padding, destination[:8]), None)
+        assert torch.equal(destination, expected)
+    destination = torch.full((10, 4), 7.0)
+    with torch.enable_grad():
+        recorded = source.clone().requires_grad_(True)
+        assert not functional._cat_rows((recorded, torch.zeros(3, 4), destination[:8]))
+    buffer = torch.full((10, 4), 7.0)
+    buffer[:5] = source
+    assert not functional._cat_rows((buffer[:5], torch.zeros(3, 4), buffer[:8]))
+
+
+def test_padding_rows_are_constant_normal_tensors_built_outside_capture(monkeypatch):
+    """Host only: a workspace's padding rows are BF16 zeros ``[256, hidden]`` and FP32 ones ``[256, topk]`` with the
+    launch plans, built once (normal tensors also under ``torch.inference_mode()``), and not built during CUDA Graph
+    capture (the caller then stages by ``_copy_source``)."""
+    import types
+
+    workspace = types.SimpleNamespace(launch_plans={}, hidden_size=512, topk=6, device=torch.device("cpu"))
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    assert backend.MoKFunctional._padding_rows(workspace) is None and workspace.launch_plans == {}
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    with torch.inference_mode():
+        rows = backend.MoKFunctional._padding_rows(workspace)
+    assert workspace.launch_plans == {("padding_rows",): rows}
+    assert rows.zeros.dtype == torch.bfloat16 and tuple(rows.zeros.shape) == (256, 512) and not rows.zeros.any()
+    assert rows.ones.dtype == torch.float32 and tuple(rows.ones.shape) == (256, 6) and bool((rows.ones == 1).all())
+    assert not rows.zeros.is_inference() and not rows.ones.is_inference()
+    assert backend.MoKFunctional._padding_rows(workspace) is rows
+
+
+@pytest.mark.parametrize(
+    "position,ep,experts,topk",
+    [("before_down", 8, 48, 6), ("after_down", 4, 4, 2)],
+    ids=["before_down-ep8-local48", "after_down-ep4-local4"],
+)
+def test_padded_staging_matches_the_copy_and_fill_form(position, ep, experts, topk, monkeypatch):
+    """The padded staging of the planned forward, recompute and backward (``_cat_rows``: one ``torch.cat`` per source
+    buffer from the workspace's padding rows) over the changing source counts of :data:`CHANGED_COUNTS` on one source
+    workspace, as rank 0 of its EP group emulated on one GPU (:class:`OneGpuGroup`).  Before each step every
+    workspace buffer holds other values.  After the context step and after the checkpointed step the workspace rows
+    ``[0, shared_rows)`` of ``x``, the router weights and ``dy`` hold the source rows and the padding values, the
+    padding rows of the combine and gradient buffers hold 0, and the rows past ``shared_rows`` keep their values;
+    every output (``y``, ``dx``, ``dscores``, the six FP32 weight-gradient accumulators) equals bit for bit the same
+    step with every padded staging in the copy-and-fill form (``_copy_source``), and so does a step whose ``x`` is a
+    view of the workspace's own ``x`` rows (``cat`` rejects it, the copy-and-fill form stages it)."""
+    before = position == "before_down"
+    if before:
+        _require_role("forward_clamped_wbd")
+        _require_role(f"count_{ep}_{experts}")
+    else:
+        require_gpu()
+    hidden, intermediate, macro, mini = 512, 256, 1536, 256
+    limit = 0.125 if before else None
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=before, fp32_wgrad=True, router_weight_position=position
+    )
+    functional.communication = OneGpuGroup()
+    functional.prepare(limit, save_context=False)
+    functional.prepare_recompute(limit)
+    workspace, multiplier = one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)
+    storage = workspace.storage
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    original = backend.MoKFunctional._cat_rows
+    staged = []
+
+    def spy(*stagings):
+        staged.append(original(*stagings))
+        return staged[-1]
+
+    sources = (
+        (storage.x_buffer, 3.0, 0.0),
+        (storage.d_y_buffer, -5.0, 0.0),
+        (storage.router_weight_buffer, 0.75, 1.0),
+    )
+    targets = (
+        (storage.combine_buffer, topk, 7.0),
+        (storage.d_x_routed_buffer, topk, -7.0),
+        (storage.d_router_weight_buffer, 1, 9.0),
+    )
+    for index, count in enumerate(CHANGED_COUNTS):
+        rows = backend.MoKFunctional._shared_rows(count)
+        x, dy, shared, routed, scores = _before_down_problem(count, hidden, intermediate, experts, topk, 6301 + index)
+        ids = rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        weights = (*shared, *routed)
+
+        def step(checkpointed, x=x):
+            schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+            accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+            y, context = functional.forward(
+                config, workspace, schedule, x, scores, *weights, swiglu_limit=limit, save_context=not checkpointed
+            )  # fmt: skip
+            if checkpointed:
+                context = functional.recompute_forward_context(
+                    config, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4], swiglu_limit=limit,
+                    router_weights=scores,
+                )  # fmt: skip
+            grads = functional.backward(
+                config, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return tuple(value.clone() for value in (y, *grads))
+
+        def poison():
+            for buffer, value, _ in sources:
+                buffer.fill_(value)
+            for buffer, _, value in targets:
+                buffer.fill_(value)
+
+        def check_staged():
+            torch.cuda.synchronize()
+            pad = rows - count
+            for (buffer, rest, value), source in zip(sources, (x, dy, scores), strict=True):
+                filler = source.new_full((pad, source.shape[1]), value)
+                assert torch.equal(buffer[:rows], torch.cat((source, filler))), (count, value)
+                assert bool((buffer[rows:] == rest).all()), (count, rest)
+            for buffer, width, rest in targets:
+                assert not buffer[count * width : rows * width].any(), (count, width)
+                assert bool((buffer[rows * width :] == rest).all()), (count, rest)
+
+        values = {}
+        for form in ("cat", "copy"):
+            if form == "cat":
+                monkeypatch.setattr(backend.MoKFunctional, "_cat_rows", staticmethod(spy))
+            else:
+                monkeypatch.setattr(backend.MoKFunctional, "_cat_rows", staticmethod(lambda *stagings: False))
+            for checkpointed in (False, True):
+                staged.clear()
+                poison()
+                values[form, checkpointed] = step(checkpointed)
+                check_staged()
+                if form == "cat":
+                    padded = rows > count
+                    assert staged == ([True] * (3 if checkpointed else 2) if padded else []), (count, staged)
+            monkeypatch.undo()
+        for checkpointed in (False, True):
+            assert _same(values["cat", checkpointed], values["copy", checkpointed]), (count, checkpointed)
+        poison()
+        storage.x_buffer[:count].copy_(x)
+        assert _same(values["cat", True], step(True, x=storage.x_buffer[:count])), count
+
+
+def test_build_schedule_route_buffer_over_changing_counts():
+    """``build_schedule`` through the schedule plan over changing source counts on one source workspace (one-GPU
+    emulation of rank 0 of EP 4, :class:`OneGpuGroup`): after each eager build the plan's route buffer holds the
+    count's expert IDs and ``-1`` in every other row (repeated, growing and shrinking counts), and the schedule equals
+    the unplanned launches' bit for bit.  Replays of a build captured in a CUDA Graph, which write IDs past a later
+    eager count, leave every later eager schedule exact, and the captured schedule replays exactly."""
+    require_gpu()
+    ep, experts, topk, hidden = 4, 4, 2, 256
+    counts = (777, 777, 900, 1024, 300, 300, 901, 513)
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
+    workspace, _ = one_gpu_source_workspace(ep, experts, counts, hidden, topk, device)
+    storage = workspace.storage
+    rows = storage.num_local_tokens
+    assert rows == max(counts)
+    key = ("schedule", functional.scheduler, functional.communication)
+    generator = torch.Generator(device=device).manual_seed(5501)
+
+    def problem(count):
+        return rand(count, ep * experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
+
+    def unplanned(ids, count):
+        rank, token, total, tokens, layout, _ = functional._schedule_launches(storage, config, ids, count)
+        return _schedule_fields(
+            workspace_module.MoKSchedule(
+                peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=tokens, layout=layout
+            ),
+            experts,
+        )
+
+    def eager(count):
+        ids = problem(count)
+        schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+        torch.cuda.synchronize()
+        expected = torch.full((rows, topk), -1, dtype=torch.int32, device=device)
+        expected[:count] = ids
+        assert torch.equal(storage.launch_plans[key].routes, expected), count
+        assert _same(_schedule_fields(schedule, experts), unplanned(ids, count)), count
+
+    for count in counts:
+        eager(count)
+    plan = storage.launch_plans[key]
+    eager(300)
+    graph_ids = problem(901)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = functional.build_schedule(workspace, config, graph_ids, num_local_experts=experts)
+    assert storage.launch_plans[key] is plan
+    for count in (600, 600, 1024, 450):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same(_schedule_fields(captured, experts), unplanned(graph_ids, 901))
+        graph.replay()
+        eager(count)

@@ -303,6 +303,15 @@ Graph capture. The plan holds normal tensors also when the first
 `build_schedule` runs under `torch.inference_mode()`, so later calls may run
 in or outside inference mode.
 
+A padded source prefix (a source count that is not a multiple of 256) stages
+each source buffer (`x`, the router weights, `dy`) with one `torch.cat` of the
+caller's rows and the workspace's constant padding rows (BF16 zeros and FP32
+ones, 256 rows each, kept with the launch plans): the bytes of the copy and the
+fill it replaces, in one launch. A source that autograd records, or one that
+overlaps the workspace, takes the copy and the fill. Every call still writes
+the padding rows of the workspace's source, combine and gradient buffers; it
+never relies on their earlier contents.
+
 ## Repeatability
 
 Within the scope below, every output repeats bit for bit:
