@@ -602,7 +602,7 @@ ARCH_OF_SM = {148: "sm_100a", 212: "sm_107a"}
 # 128-row program with the row's column-grouped raster); since version 0.3.23 also the indexer_hw BF16 weight gradient
 # at T 2049 on 212-SM sm_107a parts (in versions 0.3.23 - 0.3.24 its ``ROW_RULE_MIN_T`` tier planned its rule from
 # T 2048: the 64-row exact two-way split, test_sm107a_0323_wgrad_tables), and since version 0.3.25 that row at T 1001
-# and 2049 on 212-SM sm_107a parts (its token tiers plan the 64-row whole tiles at T 960 - 4096,
+# and 2049 on 212-SM sm_107a parts (its token tiers plan the 64-row whole tiles at T 960 - 3584,
 # test_sm107a_0325_wgrad_tables).  (row, op, out dtype, T, SM count) -> template.
 PACKAGE_TABLE_TEMPLATES = {
     ("q_b", "dgrad", "bf16", 1001, 148): "dense_proj_det_gemm_kn_n256_pro7",
@@ -5738,7 +5738,7 @@ def test_sk_parts_rule(pairs):
     }
     # (version 0.3.22 moves the bf16 indexer_hw weight gradient onto the 64-row exact two-way split from T 8193 on, the
     # indexer_k rule, version 0.3.23 from T 2048 on with the L2 hint ``("evict_first", "none")`` and version 0.3.25 from
-    # T 4097 on, with the 64-row whole tiles at T 960 - 4096; below T 960 (T 2048 in versions 0.3.23 - 0.3.24) its
+    # T 3585 on, with the 64-row whole tiles at T 960 - 3584; below T 960 (T 2048 in versions 0.3.23 - 0.3.24) its
     # ROW_RULE_MIN_T tier keeps the round-13 three-way rule, which the fp32 key keeps and the 216-SM part keeps from
     # T 15361 on: test_sm107a_0322_wgrad_rule_tables, test_sm107a_0323_wgrad_tables, test_sm107a_0325_wgrad_tables)
     assert ROW_RULES[("sm_107a", True, True, True, True, False, 32, None, 6144)] == {
@@ -5747,7 +5747,7 @@ def test_sk_parts_rule(pairs):
     }
     assert cake_backend.ROW_RULE_MIN_T[("sm_107a", True, True, False, True, False, 32, None, 6144)] == (
         (960, {"block_n": 128, "sk_exact": 3}),
-        (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ("evict_first", "none")}),
+        (3585, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ("evict_first", "none")}),
     )
     for f32 in (False, True):
         assert ROW_RULES[
@@ -10452,7 +10452,7 @@ def test_gpu_promoted_programs(case):
 # gradient of the benchmark rows that the planner ran on that twin on some part when the row was chosen (a plan
 # enumeration over the rows and part sizes), at a token count where its longest segment holds more than one chunk.
 # Since version 0.3.22 the sm_107a indexer_hw 6144 -> 32 BF16 weight gradient plans the 64-row exact split (from T 2048
-# on in versions 0.3.23 - 0.3.24, from T 4097 on since version 0.3.25 with the 64-row whole tiles at T 960 - 4096), and
+# on in versions 0.3.23 - 0.3.24, from T 3585 on since version 0.3.25 with the 64-row whole tiles at T 960 - 3584), and
 # below T 960 (T 2048 in versions 0.3.23 - 0.3.24) its three-way 128-row rule stays under the hint gate (T 10322), so
 # on every sm_107a part ``dense_proj_det_gemm_nn_n128_hen_t_skx_pro7`` is reached through caller knobs alone (the
 # forced knobs of its row below), and so is ``dense_proj_det_gemm_nn_n128_hen_t_skx_kc64_pro7`` on parts other than the
@@ -23281,10 +23281,13 @@ def test_gpu_0324_generic_call_runs_the_wgrad_entry_plan_and_bits(case, monkeypa
 # CTAs without a K split (``{"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ("evict_first",
 # "none")}``: dense_proj_det_gemm_nn_n128_m64_hen_t_pro15, and its promoted twin where a tile holds more than 64 K
 # blocks) as a middle tier of ROW_RULE_MIN_T: 4096 -> 16 at T 960 - 3072, 4096 -> 96, 6144 -> 48 and indexer_hw at
-# T 960 - 4096, 6144 -> 64 at T 960 - 5120, on every sm_107a part (ROW_RULE_RANGES_BY_SM: the 212-SM range of
+# T 960 - 3584, 6144 -> 64 at T 960 - 5120, on every sm_107a part (ROW_RULE_RANGES_BY_SM: the 212-SM range of
 # 4096 -> 16 starts at T 3073, the 216-SM indexer_hw ranges at T 960).  Outside these bands every plan is that of
 # version 0.3.24; the unbatched generic call swaps at every token count of the bands (_single_wgrad_swap: the rule is
-# not empty) and runs the weight-gradient entry's plan there.  The checks compare with the tables of version 0.3.24
+# not empty) and runs the weight-gradient entry's plan there.  The bands of 4096 -> 96, 6144 -> 48 and indexer_hw ended
+# at T 4096 before the post-ship A/B on the 212-SM part, where the whole tiles were not faster than the plan of version
+# 0.3.24 in every entry at T 4096 on these rows; at T 3585 - 4096 they plan as in version 0.3.24
+# (test_sm107a_0325_band_ends_at_3584_on_three_rows).  The checks compare with the tables of version 0.3.24
 # (_tables_0324).
 # ---------------------------------------------------------------------------
 
@@ -23300,30 +23303,30 @@ _SM107A_0325_ARM_KNOBS = dict(block_n=128, cta_rows=64, sk=False, pro=15, hints=
 #: The band of each key: the token counts (inclusive) at which it plans the rule, on every sm_107a part.
 SM107A_0325_BANDS = {
     _sm107a_0323_key(4096, 16): (960, 3072),
-    _sm107a_0323_key(4096, 96): (960, 4096),
-    _sm107a_0323_key(6144, 48): (960, 4096),
+    _sm107a_0323_key(4096, 96): (960, 3584),
+    _sm107a_0323_key(6144, 48): (960, 3584),
     _sm107a_0323_key(6144, 64): (960, 5120),
-    _sm107a_0323_key(6144, 32): (960, 4096),
+    _sm107a_0323_key(6144, 32): (960, 3584),
 }
 # fmt: off
 #: Their token tiers (cake_backend.ROW_RULE_MIN_T): below T 960 the tier of version 0.3.24 under its lowest bound (no
 #: rule; indexer_hw its three-way 128-row rule), the rule of the version in the band, then the tiers of version 0.3.24
-#: (4096 -> 16 no rule at T 3073 - 4095, 4096 -> 96 the two-way split at T 4097 - 7168) and the key's ``ROW_RULES``.
+#: (4096 -> 16 no rule at T 3073 - 4095, 4096 -> 96 the two-way split at T 3585 - 7168) and the key's ``ROW_RULES``.
 SM107A_0325_WGRAD_TIERS = {
     _sm107a_0323_key(4096, 16): ((960, {}), (3073, _SM107A_0325_T1), (4096, {})),
-    _sm107a_0323_key(4096, 96): ((960, {}), (4097, _SM107A_0325_T1), (7169, _SM107A_0323_X64P2H)),
-    _sm107a_0323_key(6144, 48): ((960, {}), (4097, _SM107A_0325_T1)),
+    _sm107a_0323_key(4096, 96): ((960, {}), (3585, _SM107A_0325_T1), (7169, _SM107A_0323_X64P2H)),
+    _sm107a_0323_key(6144, 48): ((960, {}), (3585, _SM107A_0325_T1)),
     _sm107a_0323_key(6144, 64): ((960, {}), (5121, _SM107A_0325_T1)),
-    _sm107a_0323_key(6144, 32): ((960, _SM107A_0323_TIER), (4097, _SM107A_0325_T1)),
+    _sm107a_0323_key(6144, 32): ((960, _SM107A_0323_TIER), (3585, _SM107A_0325_T1)),
 }
 #: Their part ranges (cake_backend.ROW_RULE_RANGES_BY_SM): the 212-SM part plans the three-way rule of 4096 -> 16 from
-#: T 3073 (after the band); the 216-SM part plans indexer_hw on the rule of the version at T 960 - 4096, its two-way
-#: split at T 4097 - 15360 and its three-way 128-row rule from T 15361, and keeps the range of 6144 -> 48.
+#: T 3073 (after the band); the 216-SM part plans indexer_hw on the rule of the version at T 960 - 3584, its two-way
+#: split at T 3585 - 15360 and its three-way 128-row rule from T 15361, and keeps the range of 6144 -> 48.
 SM107A_0325_RANGES = {
     212: {_sm107a_0323_key(4096, 16): ((3073, 4095, _SM107A_0323_X64P3H),)},
     216: {
         _sm107a_0323_key(6144, 32): (
-            (960, 4096, _SM107A_0325_T1), (4097, 15360, _SM107A_0323_SKX64H), (15361, 2**31 - 1, _SM107A_0323_TIER),
+            (960, 3584, _SM107A_0325_T1), (3585, 15360, _SM107A_0323_SKX64H), (15361, 2**31 - 1, _SM107A_0323_TIER),
         ),
         _sm107a_0323_key(6144, 48): SM107A_0323_RANGES[216][_sm107a_0323_key(6144, 48)],
     },
@@ -23382,7 +23385,8 @@ def _sm107a_0325_same_bits(key, T, sm_count):
 #: recorded plan on the class: SM count -> (d_in, d_out) -> ((T, arm, program without the ``dense_proj_det_gemm_``
 #: prefix, parts, units, K blocks per unit (the longest segment), promoted chunk), ...).  ``T1``: the rule of the
 #: version, ``T1P``: the rule on the promoted twin.  At every cell the arm was faster than the plan of version 0.3.24
-#: beyond the A/A band in eager launches and CUDA graph replays on the class, within the naive BF16 tier.
+#: beyond the A/A band in eager launches and CUDA graph replays on the class, within the naive BF16 tier.  The measured
+#: T 4096 of 4096 -> 96, 6144 -> 48 and indexer_hw lies above their bands since the post-ship A/B (a kept cell).
 # fmt: off
 SM107A_0325_MEASURED_PLANS = {
     212: {
@@ -23399,7 +23403,6 @@ SM107A_0325_MEASURED_PLANS = {
             (1536, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 24, 0),
             (2048, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 32, 0),
             (3072, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 48, 0),
-            (4096, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 64, 0),
         ),
         (6144, 32): (
             (960, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 15, 0),
@@ -23407,7 +23410,6 @@ SM107A_0325_MEASURED_PLANS = {
             (1536, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 24, 0),
             (2048, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 32, 0),
             (3072, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 48, 0),
-            (4096, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 64, 0),
         ),
         (6144, 48): (
             (960, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 15, 0),
@@ -23415,7 +23417,6 @@ SM107A_0325_MEASURED_PLANS = {
             (1536, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 24, 0),
             (2048, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 32, 0),
             (3072, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 48, 0),
-            (4096, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 64, 0),
         ),
         (6144, 64): (
             (960, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 15, 0),
@@ -23441,7 +23442,6 @@ SM107A_0325_MEASURED_PLANS = {
             (1536, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 24, 0),
             (2048, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 32, 0),
             (3072, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 48, 0),
-            (4096, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 64, 0),
         ),
         (6144, 32): (
             (960, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 15, 0),
@@ -23449,7 +23449,6 @@ SM107A_0325_MEASURED_PLANS = {
             (1536, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 24, 0),
             (2048, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 32, 0),
             (3072, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 48, 0),
-            (4096, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 64, 0),
         ),
         (6144, 48): (
             (960, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 15, 0),
@@ -23457,7 +23456,6 @@ SM107A_0325_MEASURED_PLANS = {
             (1536, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 24, 0),
             (2048, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 32, 0),
             (3072, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 48, 0),
-            (4096, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 64, 0),
         ),
         (6144, 64): (
             (960, "T1", "nn_n128_m64_hen_t_pro15", 0, 0, 15, 0),
@@ -23471,22 +23469,24 @@ SM107A_0325_MEASURED_PLANS = {
     },
 }
 #: The measured cases whose plan the version keeps (d_in, d_out, T): below and above the bands (and, on the 212-SM part,
-#: 4096 -> 16 at T 3584 in its range of the three-way rule).
+#: 4096 -> 16 at T 3584 in its range of the three-way rule), among them T 4096 of 4096 -> 96, 6144 -> 48 and indexer_hw,
+#: measured with the rule of the version as the arm and above their bands since the post-ship A/B.
 SM107A_0325_KEPT_CELLS = {
     212: (
         (4096, 16, 256), (4096, 16, 512), (4096, 16, 3584), (4096, 16, 4096), (4096, 16, 5120), (4096, 16, 6144),
-        (4096, 16, 7168), (4096, 16, 8192), (4096, 96, 256), (4096, 96, 512), (4096, 96, 5120), (4096, 96, 6144),
-        (4096, 96, 7168), (4096, 96, 8192), (6144, 32, 256), (6144, 32, 512), (6144, 32, 5120), (6144, 32, 6144),
-        (6144, 32, 7168), (6144, 32, 8192), (6144, 48, 256), (6144, 48, 512), (6144, 48, 5120), (6144, 48, 6144),
-        (6144, 48, 7168), (6144, 48, 8192), (6144, 64, 256), (6144, 64, 512), (6144, 64, 6144), (6144, 64, 7168),
-        (6144, 64, 8192),
+        (4096, 16, 7168), (4096, 16, 8192), (4096, 96, 256), (4096, 96, 512), (4096, 96, 4096), (4096, 96, 5120),
+        (4096, 96, 6144), (4096, 96, 7168), (4096, 96, 8192), (6144, 32, 256), (6144, 32, 512), (6144, 32, 4096),
+        (6144, 32, 5120), (6144, 32, 6144), (6144, 32, 7168), (6144, 32, 8192), (6144, 48, 256), (6144, 48, 512),
+        (6144, 48, 4096), (6144, 48, 5120), (6144, 48, 6144), (6144, 48, 7168), (6144, 48, 8192), (6144, 64, 256),
+        (6144, 64, 512), (6144, 64, 6144), (6144, 64, 7168), (6144, 64, 8192),
     ),
     216: (
         (4096, 16, 256), (4096, 16, 512), (4096, 16, 4096), (4096, 16, 5120), (4096, 16, 6144), (4096, 16, 7168),
-        (4096, 16, 8192), (4096, 96, 256), (4096, 96, 512), (4096, 96, 5120), (4096, 96, 6144), (4096, 96, 7168),
-        (4096, 96, 8192), (6144, 32, 256), (6144, 32, 512), (6144, 32, 5120), (6144, 32, 6144), (6144, 32, 7168),
-        (6144, 32, 8192), (6144, 48, 256), (6144, 48, 512), (6144, 48, 5120), (6144, 48, 6144), (6144, 48, 7168),
-        (6144, 48, 8192), (6144, 64, 256), (6144, 64, 512), (6144, 64, 6144), (6144, 64, 7168), (6144, 64, 8192),
+        (4096, 16, 8192), (4096, 96, 256), (4096, 96, 512), (4096, 96, 4096), (4096, 96, 5120), (4096, 96, 6144),
+        (4096, 96, 7168), (4096, 96, 8192), (6144, 32, 256), (6144, 32, 512), (6144, 32, 4096), (6144, 32, 5120),
+        (6144, 32, 6144), (6144, 32, 7168), (6144, 32, 8192), (6144, 48, 256), (6144, 48, 512), (6144, 48, 4096),
+        (6144, 48, 5120), (6144, 48, 6144), (6144, 48, 7168), (6144, 48, 8192), (6144, 64, 256), (6144, 64, 512),
+        (6144, 64, 6144), (6144, 64, 7168), (6144, 64, 8192),
     ),
 }
 #: The measured diagnostic cases inside the bands (d_in, d_out, T): T 1023 on each row and class, timed with another
@@ -23504,11 +23504,11 @@ SM107A_0325_DIAGNOSTIC_CELLS = {
 SM107A_0325_MEASURED_CASES = {212: 66, 216: 65}
 #: The token counts of the routing and rule checks of the version: those of version 0.3.23 and the band edges and the
 #: midpoints of the measurement of version 0.3.25 not among them.
-_SM107A_0325_ADDED_SWEEP = (959, 960, 961, 992, 1280, 1792, 3073, 5121)
+_SM107A_0325_ADDED_SWEEP = (959, 960, 961, 992, 1280, 1792, 3073, 3585, 5121)
 SM107A_0325_SWEEP_TOKENS = tuple(sorted({*SM107A_0323_SWEEP_TOKENS, *_SM107A_0325_ADDED_SWEEP}))
 #: The token counts of the generic-call check of the version: those of version 0.3.24 and the band edges and midpoints
 #: of version 0.3.25 not among them.
-_SM107A_0325_ADDED_GENERIC = (959, 960, 961, 992, 1280, 1792, 3073, 4608, 5120, 5121)
+_SM107A_0325_ADDED_GENERIC = (959, 960, 961, 992, 1280, 1792, 3073, 3585, 4608, 5120, 5121)
 SM107A_0325_GENERIC_TOKENS = tuple(sorted({*SM107A_0324_GENERIC_TOKENS, *_SM107A_0325_ADDED_GENERIC}))
 #: The token counts of the plan grid: both ends of every count of 64-token K blocks from the lowest band start to one
 #: block above the highest band end (K blocks 15 to 81), and T 959, 1023 and 4095.
@@ -23707,6 +23707,96 @@ def test_sm107a_0325_tiers_plan_the_64_row_whole_tiles(monkeypatch, key):
     assert counts["t1"] and counts["before"], counts
     assert bool(counts["t1p"]) == (hi > BLOCK_K * cake_backend.K1_PROMOTE_MIN_SEGMENT), counts
     print(f"SM107A_0325 {d_in} -> {d_out}: {counts}")
+
+
+#: The rows whose band of the rule of the version ends at T 3584 (at T 4096 before the post-ship A/B): (d_in, d_out).
+#: At T 3585 - 4096 they plan their rule of version 0.3.24, the exact two-way 64-row split with the hint (``X64p2h`` on
+#: 4096 -> 96, ``SKX64h`` on the 6144 rows: one value).
+SM107A_0325_EDGE_3584_ROWS = ((4096, 96), (6144, 48), (6144, 32))
+#: The token counts above the band of the edge check: both ends of every count of 64-token K blocks from T 3585 to
+#: T 4096 (K blocks 57 to 64).
+SM107A_0325_EDGE_3584_ABOVE = tuple(
+    T for k_blocks in range(57, 65) for T in (BLOCK_K * k_blocks - BLOCK_K + 1, BLOCK_K * k_blocks)
+)
+
+
+@pytest.mark.parametrize("row", SM107A_0325_EDGE_3584_ROWS, ids=lambda row: f"{row[0]}x{row[1]}")
+def test_sm107a_0325_band_ends_at_3584_on_three_rows(monkeypatch, row):
+    """4096 -> 96, 6144 -> 48 and indexer_hw on the 208-, 212-, 216- and 224-SM parts: the band of the rule of the
+    version ends at T 3584 (``SM107A_0325_BANDS``).  At T 3584 the measured rule is the rule of the version and the
+    weight-gradient plan (with the registry fallback) its whole tiles on ``SM107A_0325_T1_PROGRAM`` (no K split, no
+    stream-K unit, no fallback), which differs from the plan of version 0.3.24; the unbatched generic call ``G.T @ X``
+    swaps onto that plan.  At every token count of T 3585 - 4096 the measured rule is that of version 0.3.24 with the
+    tables of both versions, the exact two-way 64-row split with the hint (pinned by value), and the generic call swaps
+    with the tables of both versions; at ``SM107A_0325_EDGE_3584_ABOVE`` the weight-gradient plan and the generic call's
+    plan are those of version 0.3.24 (``_tables_0324``), field for field: every pair tile split into two K halves on
+    ``dense_proj_det_gemm_nn_n128_m64_hen_t_skx_pro15``, no promoted chunk, no fallback, the generic call swapped onto
+    the weight-gradient plan."""
+    d_in, d_out = row
+    key = _sm107a_0323_key(d_in, d_out)
+    assert SM107A_0325_BANDS[key] == (960, 3584), key
+    split = {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ("evict_first", "none")}
+    assert split == _SM107A_0323_X64P2H == _SM107A_0323_SKX64H
+    edge, top = SM107A_0325_BANDS[key][1], 4096
+    tokens = range(edge, top + 1)
+    swap = cake_backend._single_wgrad_swap
+
+    def tables(sm_count):
+        rules = {T: cake_backend._measured_row_rule(*key[:6], d_out, T, d_in, sm_count=sm_count) for T in tokens}
+        swaps = {T: swap("sm_107a", d_out, d_in, T, True, True, False, sm_count=sm_count) for T in tokens}
+        plans = {
+            T: (_sm107a_0322_plan(d_in, d_out, T, sm_count), _generic_wgrad_plan("sm_107a", sm_count, d_in, d_out, T))
+            for T in (edge, *SM107A_0325_EDGE_3584_ABOVE)
+        }
+        return rules, swaps, plans
+
+    above = 0
+    for sm_count in SM107A_0323_SM_COUNTS:
+        rules, swaps, plans = tables(sm_count)
+        with monkeypatch.context() as m:
+            _tables_0324(m)
+            old_rules, old_swaps, old_plans = tables(sm_count)
+        assert (rules[edge], old_rules[edge]) == (_SM107A_0325_T1, split), (sm_count, rules[edge], old_rules[edge])
+        for T in tokens[1:]:
+            assert rules[T] == old_rules[T] == split, (sm_count, T, rules[T], old_rules[T])
+            assert _sm107a_0325_rule_at(key, sm_count, T) == split, (sm_count, T)
+            assert not _sm107a_0325_changed(key, sm_count, T), (sm_count, T)
+        assert all(swaps.values()) and all(old_swaps.values()), sm_count
+        # the last token count of the band: the whole tiles of the version
+        (plan, generic), (old, _old_generic) = plans[edge], old_plans[edge]
+        where = (d_in, d_out, sm_count, edge, plan.template)
+        assert plan.template == SM107A_0325_T1_PROGRAM, where
+        assert (plan.cta_rows, plan.sk_exact, plan.sk_units, plan.num_full, plan.tail_tiles, plan.promote_blocks) == (
+            64,
+            0,
+            0,
+            plan.pair_tiles,
+            0,
+            0,
+        ), where
+        assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback), where
+        assert generic == plan and generic.transposed_out, (where, generic.template)
+        assert _plan_signature(plan) != _plan_signature(old), (where, old.template)
+        # above the band: the plan of version 0.3.24
+        for T in SM107A_0325_EDGE_3584_ABOVE:
+            (plan, generic), (old, old_generic) = plans[T], old_plans[T]
+            where = (d_in, d_out, sm_count, T, plan.template)
+            assert plan == old, (where, old.template)
+            assert generic == old_generic, (where, generic.template, old_generic.template)
+            assert plan.template == _SM107A_0322_PROGRAM, where
+            assert (plan.cta_rows, plan.sk_exact, plan.num_full, plan.tail_tiles, plan.sk_units, plan.hints) == (
+                64,
+                2,
+                0,
+                plan.pair_tiles,
+                2 * plan.pair_tiles,
+                _SM107A_0323_HINTS,
+            ), where
+            assert (cake_backend.segment_blocks(plan), plan.promote_blocks) == (-(-plan.k_blocks // 2), 0), where
+            assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback), where
+            assert generic == plan and generic.transposed_out, (where, generic.template)
+            above += 1
+    assert above == len(SM107A_0323_SM_COUNTS) * len(SM107A_0325_EDGE_3584_ABOVE) == 64, above
 
 
 def test_sm107a_0325_measured_cells_plan_the_arm(monkeypatch):
@@ -24056,8 +24146,9 @@ def test_sm107a_0325_bound_rows_keep_a_workspace_row():
 #: The cases of the GPU check of version 0.3.25, (key, T): every (key, T) of the measured cells whose plan the version
 #: changes (``SM107A_0325_MEASURED_PLANS``, the same on both classes), the diagnostic T 1023 of each row
 #: (``SM107A_0325_DIAGNOSTIC_CELLS``), 6144 -> 64 at T 4097 (the first twin cell, an odd ``k_blocks``) and T 4608 (an
-#: unmeasured twin cell of an even ``k_blocks``) and 4096 -> 16 at T 2560 (a midpoint of its band, where the generic
-#: call swaps since this version).
+#: unmeasured twin cell of an even ``k_blocks``), 4096 -> 16 at T 2560 (a midpoint of its band, where the generic
+#: call swaps since this version) and T 3584 on 4096 -> 96, 6144 -> 48 and indexer_hw (the last token count of their
+#: bands, a midpoint of the post-ship A/B).
 SM107A_0325_GPU_CASES = tuple(
     sorted(
         {
@@ -24075,6 +24166,9 @@ SM107A_0325_GPU_CASES = tuple(
             (_sm107a_0323_key(6144, 64), 4097),
             (_sm107a_0323_key(6144, 64), 4608),
             (_sm107a_0323_key(4096, 16), 2560),
+            (_sm107a_0323_key(4096, 96), 3584),
+            (_sm107a_0323_key(6144, 48), 3584),
+            (_sm107a_0323_key(6144, 32), 3584),
         },
         key=lambda case: (case[0][8], case[0][6], case[1]),
     )

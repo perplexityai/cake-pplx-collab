@@ -1121,13 +1121,14 @@ def _det_tables_0324(m):
 
 
 #: The bands of the deterministic package's version 0.3.25 (token counts, inclusive): (d_in, d_out) -> (lo, hi), where
-#: it plans the rows of :data:`DET_0322_WGRAD_ROWS` on whole 64-row tiles without a K split on every ``sm_107a`` part.
+#: it plans the rows of :data:`DET_0322_WGRAD_ROWS` on whole 64-row tiles without a K split on every ``sm_107a`` part
+#: (``4096 -> 96``, ``6144 -> 48`` and ``6144 -> 32`` to 3584 tokens: above, their plan of version 0.3.24).
 DET_0325_BANDS = {
     (4096, 16): (960, 3072),
-    (4096, 96): (960, 4096),
-    (6144, 48): (960, 4096),
+    (4096, 96): (960, 3584),
+    (6144, 48): (960, 3584),
     (6144, 64): (960, 5120),
-    (6144, 32): (960, 4096),
+    (6144, 32): (960, 3584),
 }
 #: The program of those tiles, and its promoted twin where a tile holds more than 64 K blocks.
 DET_0325_PROGRAM = "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
@@ -1142,14 +1143,14 @@ def test_k1_det_0325_wgrad_rows_run_the_64_row_whole_tiles(monkeypatch):
     deterministic package's, field for field.  Inside a band that plan is the whole 64-row tiles (no K split, no
     stream-K unit) on :data:`DET_0325_PROGRAM`, or on :data:`DET_0325_TWIN` where a tile holds more than 64 K blocks,
     with no registry fallback, and the generic call swaps and runs it; outside the bands both plans are those of the
-    deterministic tables of version 0.3.24 (:func:`_det_tables_0324`).  The generic call swaps wherever the
-    deterministic rule is not empty: since version 0.3.25 also inside the bands where version 0.3.24 named no rule.  The
-    counts of the cells of each kind are those of the bands and of :func:`_det_0323_split`.  This is a plan check: it
-    asserts no bits."""
+    deterministic tables of version 0.3.24 (:func:`_det_tables_0324`; ``4096 -> 96``, ``6144 -> 48`` and ``6144 -> 32``
+    at 3585 to 4096 tokens among them).  The generic call swaps wherever the deterministic rule is not empty: since
+    version 0.3.25 also inside the bands where version 0.3.24 named no rule.  The counts of the cells of each kind are
+    those of the bands and of :func:`_det_0323_split`.  This is a plan check: it asserts no bits."""
     _register_k1(monkeypatch, "sm_107a")
     tokens = (
-        959, 960, 1001, 1023, 1024, 1536, 2048, 2049, 3072, 3073, 4095, 4096, 4097, 5120, 5121, 7168, 7169, 8192, 8193,
-        15360, 15361, 65536, 131072,
+        959, 960, 1001, 1023, 1024, 1536, 2048, 2049, 3072, 3073, 3584, 3585, 4095, 4096, 4097, 5120, 5121, 7168, 7169,
+        8192, 8193, 15360, 15361, 65536, 131072,
     )  # fmt: skip
 
     def det_wgrad_plan(G, X, out, sm_count):
