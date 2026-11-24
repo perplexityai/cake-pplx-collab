@@ -45,10 +45,10 @@ p, r, d)` returns `(dv, dw)` and writes caller-owned `dv` tensors when they are 
 
 | Stage | Record | Grid | Work |
 | --- | --- | --- | --- |
-| `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d` |
+| `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d`. `fwd_n2` .. `fwd_n4`: each CTA serves whole tokens (no exchange); `fwd_n5` .. `fwd_n9`: the four CTAs of a cluster split each token's columns |
 | `bwd` | `bwd_n2` .. `bwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: every `dv_j`; adds the token's `dw` terms into the zeroed `dw` with `red.global.add.f32` |
 
-`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`). The host zeroes
+`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB300, VR200 and R200; on another device a fallback under every measured count). The host zeroes
 `dw` before the backward launch. The kernels take nine value pointers; the host passes the first value in the slots
 past `n`, which the kernels never read.
 

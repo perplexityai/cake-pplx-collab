@@ -35,6 +35,7 @@ import ast
 import hashlib
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -43,7 +44,7 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_attn_res_naive import HIDDEN, MAX_VALUES, judge_draws, make_inputs
-from tests.cake.test_helpers.cake_attn_res_occupancy import max_active_clusters
+from tests.cake.test_helpers.cake_attn_res_occupancy import max_active_clusters, unreachable
 from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import judge_case
 
@@ -293,6 +294,16 @@ def test_manifest_covers_every_record_and_its_sources() -> None:
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in sm107)
 
 
+def test_ctas_per_sm_is_the_launch_bound_of_each_program() -> None:
+    """``CTAS_PER_SM`` (the key of the resident-cluster table) is the launch bound each rendered ``fwd`` / ``bwd``
+    program is compiled with (``LAUNCH_MIN_BLOCKS`` of its device source)."""
+    _manifest_or_skip()
+    for name in PERSISTENT_RECORDS:
+        source = (PACKAGE_DIR / "csrc" / f"{cake_jit.MODULES[name]['library']}_kernel.cu").read_text()
+        bounds = set(re.findall(r"^#define LAUNCH_MIN_BLOCKS (\d+)$", source, flags=re.MULTILINE))
+        assert bounds == {str(cake_jit.CTAS_PER_SM[name])}, (name, bounds)
+
+
 def test_the_loader_imports_standalone_by_path() -> None:
     """The vendorable form: ``cake_build.py`` loaded by path in a fresh process reads the manifest."""
     _manifest_or_skip()
@@ -419,21 +430,34 @@ def test_every_record_loads(device) -> None:
 def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
     """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters the
     driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and the measured table entry of this
-    device, when it has one, equals that count."""
+    device, when it has one, equals that count.  Skipped only when the query cannot run on this host (no
+    ``cuobjdump``, no driver library); a query that fails for one program fails the test."""
+    why = unreachable()
+    if why is not None:
+        pytest.skip(f"the occupancy query is not reachable: {why}")
     index = device.index
     arch = cake_backend.device_arch(index)
     sms = cake_backend.sm_count(index)
     cake_build = cake_package(PACKAGE, "cake_build")
+    problems = []
     for name in PERSISTENT_RECORDS:
         cake_backend.load(name, arch)
         library = cake_build.library_path(cake_backend.library_name(name, arch))
         found, why = max_active_clusters(library, cake_jit.MODULES[name], index)
-        if found is None:
-            pytest.skip(f"the occupancy query is not reachable: {why}")
-        assert cake_backend._groups(name, 2**31 - 1, index) <= found, (name, found)
+        grid = cake_backend._groups(name, 2**31 - 1, index)
         table = cake_jit.RESIDENT_GROUPS.get((arch, sms), {}).get(cake_jit.CTAS_PER_SM[name])
-        if table is not None:
-            assert table == found, (name, table, found)
+        print(
+            f"OCCUPANCY det {arch} sms={sms} {name} driver={found} grid_groups={grid} table={table} "
+            f"ctas_per_sm={cake_jit.CTAS_PER_SM[name]} ({why})"
+        )
+        if found is None:
+            problems.append(f"{name}: {why}")
+            continue
+        if grid > found:
+            problems.append(f"{name}: grid {grid} groups > {found} resident")
+        if table is not None and table != found:
+            problems.append(f"{name}: measured table {table} != driver {found}")
+    assert not problems, problems
 
 
 # (n, T, data, weights): every value count 1 to 9 (every program); one token, a few, past one wave of groups.

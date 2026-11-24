@@ -16,7 +16,8 @@ limitations under the License.
 The resident clusters of a loaded AttnRes program on one CUDA device, as the driver's
 ``cuOccupancyMaxActiveClusters`` reports them: the program's cubin is taken from its library with ``cuobjdump -xelf``
 (the CUDA toolkit the JIT build uses) and loaded into the device's primary context beside the library's own copy; the
-launch is the record's block and dynamic shared memory with the compile-time cluster.  Test-only: the packages size
+launch is the record's block and dynamic shared memory with the compile-time cluster (a program past 48 KiB of dynamic
+shared memory gets its limit raised first, as its binding raises it before a launch).  Test-only: the packages size
 their grids from measured tables (``cake_jit.RESIDENT_GROUPS``).
 """
 
@@ -48,6 +49,11 @@ class _LaunchConfig(ctypes.Structure):
     ]
 
 
+# ``CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES`` and the dynamic shared memory a function takes without it.
+_MAX_DYNAMIC_SMEM_ATTRIBUTE = 8
+_DEFAULT_DYNAMIC_SMEM_BYTES = 48 * 1024
+
+
 def _cuobjdump() -> Optional[str]:
     found = shutil.which("cuobjdump")
     if found:
@@ -55,6 +61,17 @@ def _cuobjdump() -> Optional[str]:
     for root in (os.environ.get("CUDA_HOME"), os.environ.get("CUDA_PATH")):
         if root and (Path(root) / "bin" / "cuobjdump").is_file():
             return str(Path(root) / "bin" / "cuobjdump")
+    return None
+
+
+def unreachable() -> Optional[str]:
+    """Why the query cannot run on this host (no ``cuobjdump``, no driver library), or None."""
+    if _cuobjdump() is None:
+        return "cuobjdump is not on PATH or under CUDA_HOME"
+    try:
+        ctypes.CDLL("libcuda.so.1")
+    except OSError as exc:
+        return f"libcuda.so.1 does not load: {exc}"
     return None
 
 
@@ -90,13 +107,24 @@ def max_active_clusters(library: Path, record: dict[str, Any], device_index: int
             try:
                 if cuda.cuModuleGetFunction(ctypes.byref(function), module, symbol):
                     continue
+                smem = int(launch["dynamic_smem_bytes"])
+                if smem > _DEFAULT_DYNAMIC_SMEM_BYTES:
+                    status = cuda.cuFuncSetAttribute(
+                        function, ctypes.c_int(_MAX_DYNAMIC_SMEM_ATTRIBUTE), ctypes.c_int(smem)
+                    )
+                    if status:
+                        return None, f"cuFuncSetAttribute(max dynamic shared memory {smem}) returned {status}"
                 config = _LaunchConfig(int(launch["cluster"][0]) * 1024, 1, 1, *map(int, launch["block"]))
-                config.shared_mem_bytes = int(launch["dynamic_smem_bytes"])
-                clusters = ctypes.c_int(0)
+                config.shared_mem_bytes = smem
+                clusters, per_sm = ctypes.c_int(0), ctypes.c_int(0)
                 status = cuda.cuOccupancyMaxActiveClusters(ctypes.byref(clusters), function, ctypes.byref(config))
                 if status:
                     return None, f"cuOccupancyMaxActiveClusters returned {status}"
-                return clusters.value, "cuOccupancyMaxActiveClusters"
+                status = cuda.cuOccupancyMaxActiveBlocksPerMultiprocessor(
+                    ctypes.byref(per_sm), function, ctypes.c_int(int(launch["block"][0])), ctypes.c_size_t(smem)
+                )
+                blocks = per_sm.value if status == 0 else f"query returned {status}"
+                return clusters.value, f"cuOccupancyMaxActiveClusters (CTAs per SM {blocks})"
             finally:
                 cuda.cuModuleUnload(module)
         return None, f"{record['kernel_symbol']} is in none of the {len(images)} cubins of {library.name}"

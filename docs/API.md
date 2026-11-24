@@ -1094,7 +1094,7 @@ h.backward(torch.randn_like(h))                  # values[j].grad (BF16), w.grad
 **Caveats.**
 
 - State kept for the backward: references to the inputs and `p`, `r`, `d`, `12 * T * n` bytes. Workspace of a backward call: none in nondet (`dw` is zeroed in place before the kernel adds into it); in det the FP32 `[7168]` weight-gradient rows, 28 KiB each, one per cluster of the backward grid. The det workspace query reads the device's architecture and SM count for `T > 0`.
-- The forward and the backward run one cluster of four CTAs per token, persistently: `min(T, resident clusters)` clusters. The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
+- The backward and the forward of 5 to 9 values run one cluster of four CTAs per token; the forward of 2 to 4 values runs one CTA per token (its clusters of four exchange nothing). Both run persistently: `min(T, resident clusters)` clusters, the resident count from counts measured per launch bound on B200, GB300, VR200 and R200 (another device takes a count under every measured one). The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
 - No double backward.
 - Capture in a CUDA graph only after one eager call has loaded the programs.
 

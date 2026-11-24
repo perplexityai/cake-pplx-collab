@@ -43,12 +43,16 @@ program of the smallest bound at least ``n`` (:func:`nmax_for`, :func:`record`).
 Every program serves every token count, so the set of libraries is fixed: no
 shape compiles a new one.
 
-Both kernels walk the tokens persistently: group ``g`` of ``G`` launch groups
-(one cluster of :func:`cluster_ctas` CTAs) serves the tokens ``g, g + G,
-...``.  The grid is ``(cluster_ctas * G, 1, 1)`` with ``G = min(T, resident
-groups)``, the groups one device holds at once (:func:`resident_groups`); any
-grid is correct (the groups never wait on each other).  Nothing launches
-cooperatively.
+Both kernels walk the tokens persistently over ``G`` launch groups (one
+cluster of :func:`cluster_ctas` CTAs each).  The ``fwd`` programs of 5 to 9
+values and every ``bwd`` program split each token's columns over the CTAs of
+a cluster: group ``g`` serves the tokens ``g, g + G, ...``.  The ``fwd``
+programs of 2 to 4 values (``fwd_n2``, ``fwd_n3``, ``fwd_n4``) serve whole
+tokens per CTA and exchange nothing: CTA ``r`` of group ``g`` serves the
+tokens ``4 g + r, 4 g + r + 4 G, ...``.  The grid is ``(cluster_ctas * G, 1,
+1)`` with ``G = min(T, resident groups)``, the groups one device holds at once
+(:func:`resident_groups`); any grid is correct (the groups never wait on each
+other).  Nothing launches cooperatively.
 """
 
 from __future__ import annotations
@@ -313,11 +317,12 @@ MODULES: dict[str, dict[str, Any]] = {
 }
 
 # CTAs per SM each ``fwd`` / ``bwd`` program holds at least: the launch bound (``min_blocks``) of its build.  Fewer
-# value registers (a smaller ``nmax``) leave room for more CTAs per SM.
+# value registers (a smaller ``nmax``) leave room for more CTAs per SM; the whole-token ``fwd`` programs of 2 to 4
+# values hold every value's 32 columns per thread in registers, two CTAs per SM.
 CTAS_PER_SM = {
-    "fwd_n2": 5,
-    "fwd_n3": 5,
-    "fwd_n4": 5,
+    "fwd_n2": 2,
+    "fwd_n3": 2,
+    "fwd_n4": 2,
     "fwd_n5": 4,
     "fwd_n6": 4,
     "fwd_n7": 4,
@@ -338,7 +343,9 @@ CTAS_PER_SM = {
 # R200 was measured on the shipped programs (all of them on GB300).  The four CTAs of a cluster share one GPC, so a
 # device holds fewer clusters than CTAs per SM * SMs / 4, and on VR200 and R200 no more at 5 CTAs per SM than at 4.
 # The GB200 entries at 3 and 4 CTAs per SM are the counts measured on the four-CTA cluster programs of the
-# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.
+# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.  The GPU tests check every program's
+# entry, and the grid the host takes, against the driver's count (``cuOccupancyMaxActiveClusters``) on the device
+# they run on.
 RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_100a", 148): {2: 71, 3: 104, 4: 142, 5: 175},
     ("sm_100a", 152): {3: 110, 4: 148},
