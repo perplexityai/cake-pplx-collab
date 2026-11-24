@@ -1038,7 +1038,7 @@ dv_j = BF16(p_j dout + ds_j r_j w - (ds_j d_j r_j^3 / 7168) v_j)
 dw   = sum over t and j of ds_j r_j v_j   (FP32)
 ```
 
-The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward, which recomputes no forward sum. No sum uses FP64. An all-zero value row gives `r_j = 1 / sqrt(eps)` and `d_j = 0`: a finite result.
+The kernels evaluate `ds_j` as `p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `c` the value of the largest `p_j` (the first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1 (a peaked softmax). The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward, which recomputes no forward sum. No sum uses FP64. An all-zero value row gives `r_j = 1 / sqrt(eps)` and `d_j = 0`: a finite result.
 
 **Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward and the backward ship one program per value bound from 2 to 9 (the bound is the number of values the program keeps in registers); a call of `n` values runs the program of the smallest bound at least `n`. The forward programs serve both modules. The det backward adds a fixed-order sum of the weight-gradient rows. Every program serves every token count, so the libraries are a fixed set.
 

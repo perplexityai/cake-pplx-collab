@@ -34,6 +34,10 @@ and, given ``dout``::
     dv_j = bf16(p_j dout + ds_j r_j w - (ds_j d_j r_j^3 / H) v_j)
     dw   = sum over t and j of ds_j r_j v_j                       (FP32)
 
+The kernels evaluate ``ds_j`` as ``p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))``, ``c`` the value of the largest
+``p_j`` (the first on ties): the same value, without the cancellation of ``dp_c - sum_i p_i dp_i`` when ``p_c`` rounds
+to 1 in FP32 (a peaked softmax), which would drop the dominant value's term of ``dw``.
+
 One forward call launches ``fwd`` alone: it writes ``out`` and the state the backward reads, ``p``, ``r`` and ``d``
 (FP32 ``[T, n]`` each, row-major).  One backward call zeroes ``dw`` and launches ``bwd``: every ``dv_j`` from ``dout``,
 the values, ``w`` and that state (no forward sum is recomputed), and ``dw`` added into the zeroed FP32 row with float

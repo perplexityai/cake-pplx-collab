@@ -10,6 +10,9 @@ dp_j = sum_c dout[c] v_j[c]   ds_j = p_j (dp_j - sum_i p_i dp_i)
 dv_j = bf16(p_j dout + ds_j r_j w - (ds_j d_j r_j^3 / 7168) v_j)   dw = sum over t and j of ds_j r_j v_j   (FP32)
 ```
 
+The backward evaluates `ds_j = p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `c` the value of the largest `p_j` (the
+first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1.
+
 The facade `cake_pplx.cake_attn_res_nondet_train` is a stable API; this backend package is experimental (no
 compatibility guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the
 supported architectures; another device raises `RuntimeError`. Its libraries are loaded prebuilt from `aot/` when a
