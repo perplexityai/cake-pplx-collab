@@ -3180,13 +3180,19 @@ SCALE_192 = 192**-0.5
 
 
 @pytest.mark.parametrize("heads", (80, 32, 160))
-def test_public_entries_refuse_other_head_counts(heads):
+def test_public_entries_refuse_other_head_counts(heads, monkeypatch):
     """A query head count other than 64, 96 or 128 is refused by the public autograd entry and the step forward
-    with ``ValueError`` (host validation, before any launch)."""
+    with ``ValueError`` (host validation while planning, before any allocation or launch; on CPU tensors, with the
+    binding's capture query stood in)."""
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     _, kv, idx = _host_inputs(total_q=8, total_k=16, topk=5)
     q = torch.zeros(8, heads, D_QK, dtype=torch.bfloat16)
     args = (
-        q[..., :D_LATENT], q[..., D_LATENT:], kv[:, :D_LATENT], kv[:, D_LATENT:], idx
+        q[..., :D_LATENT],
+        q[..., D_LATENT:],
+        kv[:, :D_LATENT],
+        kv[:, D_LATENT:],
+        idx,
     )
     with pytest.raises(ValueError, match=r"\[T, 64, 512\]"):
         cake_dsa_sparse_attention_nondet(*args)
