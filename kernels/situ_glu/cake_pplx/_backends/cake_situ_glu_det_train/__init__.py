@@ -47,8 +47,10 @@ Host design (every control is an argument; no environment variable):
   allocates and launches nothing.
 - Launches.  One kernel per call (``cake_jit.MODULES``, the record of the
   stage through ``cake_jit.PROGRAM_OF``): CTAs of 128 threads (the record's
-  launch block), one CTA per row on the grid's x axis (``cake_jit.grid``); a
-  CTA's four warps take the row's segments of 256 columns in turn.  ``R == 0``
+  launch block), one CTA per block of ``cake_jit.ROWS_PER_CTA`` rows on the
+  grid's x axis (``cake_jit.grid``).  In the forward a CTA's four warps take
+  its row's segments of 256 columns in turn; in the backward two warps take
+  each of its two rows' segments.  ``R == 0``
   launches nothing and loads no library.  Every launch is a plain
   stream-ordered launch on the current torch stream of the operands' device
   (a tvm-ffi call whose arguments include PyTorch CUDA tensors runs on that
@@ -62,17 +64,21 @@ Host design (every control is an argument; no environment variable):
   ``W = 2^(-2 |u| log2(e) / lb)``, all in ``[0, 1]`` so that no exponential
   overflows: ``tanh(|g| / beta) = (1 - E) / (1 + E)``, ``sigmoid(g) =
   1 / (1 + P)`` for ``g >= 0`` and ``P / (1 + P)`` for ``g < 0``, and
-  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  Below
-  ``|g| / beta = 1/16`` (``|u| / lb`` for the up) the tanh is the odd
-  polynomial ``z - z^3 / 3 + 2 z^5 / 15``, so ``g = 0`` or ``u = 0`` gives
+  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  For a small ``|g|``,
+  ``E`` is within a few FP32 ulps of 1, so ``1 - E`` keeps an absolute error
+  of a few ``2^-24``, far below the BF16 rounding of the output it scales;
+  ``g = 0`` gives ``E = 1`` exactly, so ``g = 0`` or ``u = 0`` gives
   ``h = 0`` exactly.  ``beta = 4`` takes ``P = E E``; any other ``beta`` takes
   ``P`` from its own exponential, the same choice for every element of a call.
-  The exponentials are the approximate base-2 exponential; the forward
-  flushes a subnormal ``E`` or ``W`` (they only enter ``1 + E`` and ``1 + W``
-  there) and keeps a subnormal ``P``, and the backward keeps every subnormal,
-  so a saturated gate or up keeps a nonzero gradient where FP32 holds one.
-  One reciprocal per element, of ``(1 + E)(1 + P)(1 + W)`` in ``[1, 8]``; the
-  backward multiplies it back out into the three factors' reciprocals.
+  The exponentials are the approximate base-2 exponential.  ``E`` and ``W``
+  flush below ``2^-126``, only where ``|g| > 43.7 beta`` or
+  ``|u| > 43.7 lb``; there ``1 - tanh^2`` is under ``2^-124``, far below the
+  BF16 rounding of the gradient it joins.  ``P`` keeps its subnormal values,
+  so a gate below about -87 keeps a nonzero sigmoid where FP32 holds one.
+  The reciprocal ``R`` of ``(1 + E)(1 + P)(1 + W)``, in ``[1, 8]``: the
+  forward takes one per element; the backward one per pair of elements (of
+  their product, multiplied back by the other element's factor) and writes
+  both gradients with ``R^2``.
   ``h``, ``d_gate`` and ``d_up`` are each rounded once to BF16.  Every product
   and FMA rounds to nearest without flushing subnormals; nothing is FP64.
 - Accuracy: the tests hold ``h``, ``d_gate`` and ``d_up`` to the PyTorch BF16

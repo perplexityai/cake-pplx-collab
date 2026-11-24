@@ -61,11 +61,13 @@ and 25.0.
 Two programs, one for `fwd` and one for `bwd` (`cake_jit.MODULES`, keyed by program name; `cake_jit.PROGRAM_OF` maps a
 stage to its program), each delivered for `sm_100a` and `sm_103a` and compiled with the exact `-gencode` flag of each
 (`build.json`).  Each is one kernel.  A row is `I / 256` segments of 256 columns, and a warp owns a segment: lane `l`
-loads 8 BF16 values at column `256 s + 8 l`, so each load of a warp is contiguous.  A CTA of 128 threads (four warps)
-owns a row, and its warps take the row's segments in turn: three segments per warp and pass in the forward, two in
-the backward.  Each warp issues the loads of its segments before it computes and stores them; a segment past the
-row's last one reloads the last segment and stores nothing.  The grid is one CTA per row (`cake_jit.grid`), and the
-CTAs stride over the rows, so any smaller grid would also be correct.  Row offsets are 64-bit.  No program uses shared
+loads 8 BF16 values at column `256 s + 8 l`, so each load of a warp is contiguous.  A CTA has 128 threads (four
+warps).  In the forward its four warps own one row and take the row's segments in turn, three segments per warp and
+pass.  In the backward two warps own each of its two rows, six segments per warp and pass.  Each warp issues the
+loads of its segments before it computes and stores them; a segment past the row's last one reloads the last segment
+and stores nothing, and a row past the last one stores nothing.  The grid is one CTA per block of rows
+(`cake_jit.ROWS_PER_CTA`, `cake_jit.grid`), and the CTAs stride over the blocks, so any smaller grid would also be
+correct.  Row offsets are 64-bit.  No program uses shared
 memory, a workspace, a cooperative launch or programmatic dependent launch.  The row count, the width, `beta`, `lb`
 and the strides are launch arguments, so one library per program and architecture serves every call.
 
@@ -75,16 +77,19 @@ and the strides are launch arguments, so one library per program and architectur
   `W = 2^(-2 |u| log2(e) / lb)`, all in `[0, 1]` so that no exponential overflows: `tanh(|g| / beta) = (1 - E) /
   (1 + E)`, `sigmoid(g) = 1 / (1 + P)` for `g >= 0` and `P / (1 + P)` for `g < 0`, and `1 - tanh^2 = 4 E / (1 + E)^2`
   (no cancellation); the up takes the same forms with `W`.
-- Below `|g| / beta = 1/16` (`|u| / lb` for the up) the tanh is the odd polynomial `z - z^3 / 3 + 2 z^5 / 15`, whose
-  next term is under `4e-9` of it.  So `g = 0` or `u = 0` gives `h = 0` exactly.
+- For a small `|g|`, `E` is within a few FP32 ulps of 1, so `1 - E` keeps an absolute error of a few `2^-24`, far below
+  the BF16 rounding of the output it scales.  `g = 0` gives `E = 1` exactly, so `g = 0` or `u = 0` gives `h = 0`
+  exactly.
 - `beta = 4` takes `P = E E`; any other `beta` takes `P` from its own exponential.  The choice is the same for every
   element of a call.
-- The exponentials are the approximate base-2 exponential.  The forward flushes a subnormal `E` or `W`, which only
-  enters `1 + E` and `1 + W` there, and keeps a subnormal `P`.  The backward keeps every subnormal, so a saturated
-  gate or up keeps a nonzero gradient where FP32 holds one.
-- One reciprocal per element, of `(1 + E)(1 + P)(1 + W)` in `[1, 8]`; the backward multiplies it back out into the
-  three factors' reciprocals.  A negative gate's sigmoid numerator `P` is the last factor of each product, so a
-  subnormal result rounds once.
+- The exponentials are the approximate base-2 exponential.  `E` and `W` flush below `2^-126`, only where
+  `|g| > 43.7 beta` or `|u| > 43.7 lb`; there `1 - tanh^2` is under `2^-124`, far below the BF16 rounding of the
+  gradient it joins.  `P` keeps its subnormal values, so a gate below about -87 keeps a nonzero sigmoid where FP32
+  holds one.
+- The reciprocal `R` of `(1 + E)(1 + P)(1 + W)`, in `[1, 8]`: the forward takes one per element; the backward takes
+  one per pair of elements (of their product, in `[1, 64]`, multiplied back by the other element's factor) and writes
+  both gradients with `R^2`, so it needs no other reciprocal.  A negative gate's sigmoid numerator `P` is the last
+  factor of each product, so a subnormal result rounds once.
 - `h`, `d_gate` and `d_up` are each rounded once to BF16.  Every product and FMA rounds to nearest without flushing
   subnormals; pairs of elements use the packed FP32 instructions, which round each half as the scalar instruction
   does.  Nothing is FP64.

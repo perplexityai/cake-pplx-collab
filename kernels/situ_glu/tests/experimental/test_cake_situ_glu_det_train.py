@@ -28,7 +28,7 @@ draws, in the L2 and the max norm, median and largest, beside the error of the s
 :mod:`tests.cake.test_helpers.situ_glu_reference`) over row counts 1 to 4097, widths 256 to 33,792 (one segment,
 partial passes of the CTA's warps, both sides of a full pass, and the issue's widths), the merged, two-tensor, sliced
 and copied layouts, saturated, deep negative, small and wide values, zero gates and ups, every BF16 gate and scalars
-other than the model's.  The kernels have no row-count boundary: one program per stage, one CTA per row.  Beside the
+other than the model's.  The kernels have no row-count boundary: one program per stage, one CTA per block of rows.  Beside the
 judge, exact facts of the contract (no tolerance): ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly (and ``d_up = 0``
 at ``g = 0``, ``d_gate = 0`` at ``u = 0``); saturated inputs give finite outputs with the oracle's signs; ``R = 0``
 returns empty outputs and launches nothing; one library per stage serves every row count, width, scalar and layout;
@@ -298,12 +298,15 @@ def test_argument_plans_are_the_kernel_parameters() -> None:
         assert [key for kind, key in record["arg_plan"] if kind == "grid"] == ["grid_x", "grid_y", "grid_z"]
 
 
-def test_grid_is_one_cta_per_row() -> None:
-    """One CTA per row on the x axis; at the largest row count a CTA's step over the rows stays in 32 bits."""
+def test_grid_is_one_cta_per_block() -> None:
+    """One CTA per block of rows on the x axis; at the largest row count a CTA's step over the rows stays in 32
+    bits."""
+    assert cake_jit.ROWS_PER_CTA == {"fwd": 1, "bwd": 2}
     for stage in STAGES:
+        per = cake_jit.ROWS_PER_CTA[stage]
         for rows in (1, 2, 3, 129, 4097, 16380, 262144, 1048576, cake_jit.MAX_ROWS):
-            assert tuple(cake_jit.grid(stage, rows)) == (rows, 1, 1), (stage, rows)
-        assert cake_jit.MAX_ROWS - 1 + cake_jit.grid(stage, cake_jit.MAX_ROWS)[0] <= 2**31 - 1
+            assert tuple(cake_jit.grid(stage, rows)) == (-(-rows // per), 1, 1), (stage, rows)
+        assert cake_jit.MAX_ROWS - 1 + per * cake_jit.grid(stage, cake_jit.MAX_ROWS)[0] <= 2**31 - 1
         for rows in (0, -1, cake_jit.MAX_ROWS + 1):
             with pytest.raises(ValueError):
                 cake_jit.grid(stage, rows)

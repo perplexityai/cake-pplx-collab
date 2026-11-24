@@ -37,9 +37,9 @@ and 25.0, the values of Kimi-K3.1-Pro (``activation_situ_beta`` and
 ``activation_situ_linear_beta``).
 
 The kernels take every exponential as a power of two of a negative argument
-(the approximate base-2 exponential), the tanh of a small argument as its odd
-polynomial, and one reciprocal per element; every product rounds to nearest
-without flushing subnormals, and nothing is FP64.  The tests hold ``h``,
+(the approximate base-2 exponential), every tanh as ``(1 - E) / (1 + E)`` of
+such a power, and at most one reciprocal per element; every product rounds to
+nearest without flushing subnormals, and nothing is FP64.  The tests hold ``h``,
 ``d_gate`` and ``d_up`` to the PyTorch BF16 naive implementation of the same
 operation (the gradients from PyTorch autograd), each against a float64
 reference computed from the BF16 inputs: over 32 random inputs of a case, in

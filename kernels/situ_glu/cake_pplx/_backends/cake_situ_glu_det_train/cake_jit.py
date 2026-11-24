@@ -42,8 +42,9 @@ program name: retuning a kernel renames its program (the record's key and
 ``library``) and leaves the host code as it is.  Both kernels take the row
 count, the width, ``beta``, ``lb`` and every BF16 row stride (in elements) as
 launch arguments, so one build serves every row count, every width that is a
-multiple of :data:`SEGMENT` and every layout.  A CTA owns one row at a time
-and the CTAs stride over the rows, so the grid is one CTA per row
+multiple of :data:`SEGMENT` and every layout.  A CTA owns a block of
+:data:`ROWS_PER_CTA` rows at a time (one in the forward, two in the backward)
+and the CTAs stride over the blocks, so the grid is one CTA per block
 (:func:`grid`).  The host launches nothing for ``rows == 0``.
 """
 
@@ -61,13 +62,13 @@ MANIFEST = "build.json"
 STAGES = ("fwd", "bwd")
 
 MODULES: dict[str, dict[str, Any]] = {
-    # The forward: h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb)), one CTA per row, a warp per segment of
-    # 256 columns, three segments a warp per pass.
-    "cake_situ_glu_det_train_TBD_FWD": {
+    # The forward: h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb)), one row a CTA, four warps a row, three
+    # segments of 256 columns a warp per pass.
+    "cake_situ_glu_det_train_0d8b30c1317b470593ea": {
         "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_situ_glu_det_train_TBD_FWD",
+        "kernel_symbol": "kernel_cake_situ_glu_det_train_0d8b30c1317b470593ea",
         "launch": {
             "block": (1, 1, 1),
             "cluster": (1, 1, 1),
@@ -75,16 +76,16 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_situ_glu_det_train_TBD_FWD",
+        "library": "cake_situ_glu_det_train_0d8b30c1317b470593ea",
         "stage": "fwd",
     },
-    # The backward: d_gate and d_up (BF16) from gate, up and dh, the activation recomputed, one CTA per row, a warp
-    # per segment of 256 columns, two segments a warp per pass.
-    "cake_situ_glu_det_train_TBD_BWD": {
+    # The backward: d_gate and d_up (BF16) from gate, up and dh, the activation recomputed, two rows a CTA, two warps
+    # a row, six segments of 256 columns a warp per pass.
+    "cake_situ_glu_det_train_9830620c58096d1142ec": {
         "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_situ_glu_det_train_TBD_BWD",
+        "kernel_symbol": "kernel_cake_situ_glu_det_train_9830620c58096d1142ec",
         "launch": {
             "block": (1, 1, 1),
             "cluster": (1, 1, 1),
@@ -92,7 +93,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_situ_glu_det_train_TBD_BWD",
+        "library": "cake_situ_glu_det_train_9830620c58096d1142ec",
         "stage": "bwd",
     },
 }
@@ -112,16 +113,21 @@ MAX_WIDTH = 2**31 - SEGMENT
 VECTOR_ELEMENTS = 8
 ALIGNMENT_BYTES = 16
 
-# ``rows`` is a 32-bit kernel parameter, and each CTA steps over the rows by the grid size in 32 bits: with one CTA
-# per row, up to this many rows no step passes 2**31 - 1.
+# The rows a CTA of 128 threads owns at a time: the forward's four warps own one row, the backward's two warps a row
+# own two rows.
+ROWS_PER_CTA = {"fwd": 1, "bwd": 2}
+
+# ``rows`` is a 32-bit kernel parameter, and each CTA steps over the rows by the grid size times its rows in 32 bits:
+# with one CTA per block, up to this many rows no step passes 2**31 - 1.
 MAX_ROWS = 2**30
 
 
 def grid(stage: str, rows: int) -> tuple[int, int, int]:
-    """The launch grid of ``stage`` for ``1 <= rows <= MAX_ROWS`` rows: one CTA per row on the x axis (the kernels
-    stride over the rows from ``blockIdx.x``, so a smaller grid would also be correct)."""
+    """The launch grid of ``stage`` for ``1 <= rows <= MAX_ROWS`` rows: one CTA per block of ``ROWS_PER_CTA[stage]``
+    rows on the x axis (the kernels stride over the blocks from ``blockIdx.x``, so a smaller grid would also be
+    correct)."""
     if stage not in STAGES:
         raise ValueError(f"stage is one of {STAGES}, got {stage!r}")
     if not 1 <= rows <= MAX_ROWS:
         raise ValueError(f"a launch needs 1 to {MAX_ROWS} rows, got {rows}")
-    return (rows, 1, 1)
+    return (-(-rows // ROWS_PER_CTA[stage]), 1, 1)

@@ -31,7 +31,7 @@ that are not multiples of 8 elements: the host copies them once).  ``data`` shap
 - ``"wide"``: ``6 x`` and ``40 x`` unit normals for ``g`` and ``u``;
 - ``"saturated"``: ``g`` uniform in ``[-200, 200]`` and ``u`` in ``[-1000, 1000]``;
 - ``"deep_negative"``: every gate in ``[-100, -80]``, where the sigmoid is subnormal or under FP32;
-- ``"small"``: ``g`` and ``u`` uniform in ``[-0.5, 0.5]``, where both tanh take the odd polynomial;
+- ``"small"``: ``g`` and ``u`` uniform in ``[-0.5, 0.5]``, where ``1 - E`` and ``1 - W`` are small;
 - ``"zero_gate"`` and ``"zero_up"``: a random half of the gates, or of the ups, is 0, so ``h`` is 0 there;
 - ``"all_gates"``: every finite BF16 bit pattern as a gate, in order, and 0 for the others.
 
