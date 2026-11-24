@@ -1499,7 +1499,8 @@ _NARROW_N_SWAP_ARCHES = ("sm_100a", "sm_103a")
 _SINGLE_WGRAD_SWAP_MIN_K = {
     ("sm_107a", 576, 6144, False): 6144,
     # no entry for the four sm_107a bf16 rows of version 0.3.22 (4096 -> 16 / 96, 6144 -> 48 / 64): the post-ship A/B
-    # floor of each was T 1024 on both parts
+    # floor of each was T 1024 on both parts (version 0.3.24); since version 0.3.25 the call swaps from T 960 on the
+    # 64-row whole tiles (post-ship A/B of the generic call: [[TBD0325_GENERIC_AB]])
 }
 
 
@@ -1846,20 +1847,23 @@ ROW_RULES: dict[tuple, dict] = {
     #      measured token count of each band the new plan was faster than the plan of version 0.3.24 beyond the A/A
     #      band in both modes on both parts, with one bit pattern run to run and within the naive BF16 tier on five
     #      seeds; medians of that plan over the new one were 1.038 to 1.361 / 1.043 to 1.354 (eager / CUDA graph) on the
-    #      212-SM part and 1.028 to 1.362 / 1.031 to 1.369 on the 216-SM part.  The unmeasured T 961 - 1023 lie between
-    #      the measured T 960 and 1024 of every band.  Each band ends at the last measured token count before one where
-    #      the new plan was not faster in both modes on both parts (medians eager / CUDA graph, 212-SM part; 216-SM
-    #      part): 4096 -> 16 at T 4096 (0.997 / 0.997, flat; 0.978 slower / 0.990 flat), 4096 -> 96 at T 5120 (0.991 /
-    #      0.996, flat; 0.981 / 0.986, flat), 6144 -> 48 at T 5120 (0.979 / 0.978, slower; 0.991 / 0.991, flat),
-    #      indexer_hw at T 5120 (0.999 / 1.001, flat; 0.970 slower / 0.980 flat) and 6144 -> 64 at T 6144 (1.023 faster
-    #      / 1.018 flat; 0.989 / 0.997, flat).  Post-ship medians of the plan before over the new plan at the timed
-    #      changed cells: [[TBD0325_AB_212]] on the 212-SM part and [[TBD0325_AB_216]] on the 216-SM part.  Against
-    #      version 0.3.24 the bits are the same at T 960 (both plans sum a tile's K in one chain) and on the twin at an
-    #      even number of K blocks (its two chunks are the two halves of the exact split before), and differ elsewhere
-    #      (one chain over a tile's K blocks instead of two or three parts).  The unbatched generic call of the five
-    #      rows swaps at every token count of the bands (``_single_wgrad_swap``: the rule is not empty) and runs these
-    #      plans there, now also at T 960 - 1023 and on 4096 -> 16 at T 2049 - 3072 (T 2049 - 3071 on the 212-SM
-    #      part) ----
+    #      212-SM part and 1.028 to 1.362 / 1.031 to 1.369 on the 216-SM part.  The new plan was not timed at
+    #      T 961 - 1023 (T 1023 was timed with the plan of version 0.3.24 and the 128-row whole tiles alone); these
+    #      token counts lie between the measured T 960 and 1024, where it was faster on both parts.  Each band ends at
+    #      the last measured token count before one where the new plan was not faster in both modes on both parts
+    #      (medians eager / CUDA graph, 212-SM part; 216-SM part): 4096 -> 16 at T 4096 (0.997 / 0.997, flat; 0.978
+    #      slower / 0.990 flat), 4096 -> 96 at T 5120 (0.991 / 0.996, flat; 0.981 / 0.986, flat), 6144 -> 48 at T 5120
+    #      (0.979 / 0.978, slower; 0.991 / 0.991, flat), indexer_hw at T 5120 (0.999 / 1.001, flat; 0.970 slower / 0.980
+    #      flat) and 6144 -> 64 at T 6144 (1.023 faster / 1.018 flat; 0.989 / 0.997, flat).  Post-ship medians of the
+    #      plan before over the new plan at the timed changed cells: [[TBD0325_AB_212]] on the 212-SM part and
+    #      [[TBD0325_AB_216]] on the 216-SM part.  Against version 0.3.24 the bits are the same at T 960 (both plans sum
+    #      a tile's K in one chain) and on the twin at an even number of K blocks (its two chunks are the two halves of
+    #      the exact split before), except for an output whose two halves both sum to -0.0 (stored -0.0 now, +0.0
+    #      before), and differ elsewhere (one chain over a tile's K blocks instead of two or three parts).  The
+    #      unbatched generic call of the five rows swaps at every token count of the bands (``_single_wgrad_swap``: the
+    #      rule is not empty) and runs these plans there, now also at T 960 - 1023 and on 4096 -> 16 at T 2049 - 3072
+    #      (T 2049 - 3071 on the 212-SM part), where its bits may change against version 0.3.24 (it ran the direct plan
+    #      there) ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 96, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 48, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},

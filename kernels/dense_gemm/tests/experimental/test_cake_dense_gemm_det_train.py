@@ -23362,8 +23362,9 @@ def _sm107a_0325_same_bits(key, T, sm_count):
     ``2 * SK_MIN_ITERS`` K blocks (T 960: the plan before admits no split either and sums a tile's K in one chain, as
     the whole tiles do); and on the promoted twin at an even ``k_blocks`` of two chunks where the plan before was the
     exact two-way 64-row split (the twin's balanced chunks are the split's two halves; 6144 -> 64 at an even
-    ``k_blocks`` of T 4097 - 5120).  Elsewhere the bits differ (one chain over a tile's K instead of two or three
-    parts)."""
+    ``k_blocks`` of T 4097 - 5120), except for an output whose two halves both sum to -0.0 (the twin stores -0.0, the
+    split before stored +0.0; the random draws of the GPU check do not reach it).  Elsewhere the bits differ (one chain
+    over a tile's K instead of two or three parts)."""
     if not _sm107a_0325_changed(key, sm_count, T):
         return True
     k_blocks = -(-T // BLOCK_K)
@@ -23532,10 +23533,12 @@ def test_sm107a_0325_wgrad_tables(monkeypatch):
     versions 0.3.23 and 0.3.25 or no rule) and the band of the rule of the version is ``SM107A_0325_BANDS``; the sm_107a
     part tables hold exactly the ranges of ``SM107A_0325_RANGES`` for them (sorted, disjoint, inclusive), and the
     216-SM part holds nothing else; their ``ROW_RULES`` values are those of version 0.3.23.  The rule of the version
-    carries the hint and names whole tiles (``"sk": False``); its program and twin are registered on sm_107a.  Against
-    the tables of version 0.3.24 (``_tables_0324``) exactly the five tiers, the 212-SM range of 4096 -> 16 and the
-    216-SM range of indexer_hw change: every other tier, range, ``ROW_RULES`` entry (the FP32 keys and the other
-    architectures among them) and the generic call's swap floors are those of version 0.3.24."""
+    carries the hint and names whole tiles (``"sk": False``); its program and twin are registered on sm_107a.  Each of
+    the five tiers, the 212-SM range of 4096 -> 16 and the 216-SM range of indexer_hw differs from the tables of
+    version 0.3.24 (``_tables_0324``, which puts back these alone; the other sm_107a tiers are pinned by
+    test_sm107a_212_tranche_floor_table).  The FP32 keys of the five rows keep their tables of version 0.3.24: in
+    ``ROW_RULES`` indexer_hw its three-way 128-row rule and the others none, and no token tier or part range; the
+    generic call's swap floors are those of version 0.3.24 (the 6144 -> 576 entry alone)."""
     assert {key: ROW_RULES[key] for key in SM107A_0322_WGRAD_ROWS} == SM107A_0323_WGRAD_RULES
     assert {
         key: tiers for key, tiers in cake_backend.ROW_RULE_MIN_T.items() if key in SM107A_0322_WGRAD_ROWS
@@ -23576,8 +23579,6 @@ def test_sm107a_0325_wgrad_tables(monkeypatch):
         _tables_0324(m)
         old_tiers = dict(cake_backend.ROW_RULE_MIN_T)
         old_ranges = {part: dict(rows) for part, rows in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
-        old_rules = dict(ROW_RULES)
-        old_floors = dict(cake_backend._SINGLE_WGRAD_SWAP_MIN_K)
     assert {
         key
         for key in {*old_tiers, *cake_backend.ROW_RULE_MIN_T}
@@ -23591,15 +23592,23 @@ def test_sm107a_0325_wgrad_tables(monkeypatch):
         for key in {*old_ranges[part], *ranges[part]}
         if old_ranges[part].get(key) != ranges[part].get(key)
     } == {(("sm_107a", 212), _sm107a_0323_key(4096, 16)), (("sm_107a", 216), _sm107a_0323_key(6144, 32))}
-    assert old_rules == ROW_RULES and old_floors == cake_backend._SINGLE_WGRAD_SWAP_MIN_K
+    # pinned by value: ``_tables_0324`` does not set the FP32 keys or the swap floors
+    for key, (_rule, _d_in, _d_out, before) in SM107A_0322_WGRAD_ROWS.items():
+        fp32_key = key[:3] + (True,) + key[4:]
+        assert ROW_RULES.get(fp32_key) == (before or None), key
+        assert fp32_key not in cake_backend.ROW_RULE_MIN_T, key
+        assert all(fp32_key not in rows for rows in cake_backend.ROW_RULE_RANGES_BY_SM.values()), key
+    assert ROW_RULES[("sm_107a", True, True, True, True, False, 32, None, 6144)] == {"block_n": 128, "sk_exact": 3}
+    assert cake_backend._SINGLE_WGRAD_SWAP_MIN_K == {("sm_107a", 576, 6144, False): 6144}
 
 
-def test_sm107a_0325_rule_by_token_count(monkeypatch):
+def test_sm107a_0325_rule_by_token_count():
     """``row_rule`` (and ``_measured_row_rule``) of each key of version 0.3.25 on the 208-, 212-, 216- and 224-SM parts
     and without an SM count is ``_sm107a_0325_rule_at`` over the architecture defaults at ``SM107A_0325_SWEEP_TOKENS``
     (those of version 0.3.23 and the edges and midpoints of the bands); the rule differs from version 0.3.24
-    (``_sm107a_0325_changed``) exactly inside the key's band; the FP32 key of each row has the measured rule it has with
-    the tables of version 0.3.24."""
+    (``_sm107a_0325_changed``) exactly inside the key's band; the FP32 key of each row has its rule of version 0.3.24
+    at every token count on every part (indexer_hw its three-way 128-row rule, the others none: the values
+    test_sm107a_0325_wgrad_tables pins)."""
     assert not set(_SM107A_0325_ADDED_SWEEP) & set(SM107A_0323_SWEEP_TOKENS)
     assert len(SM107A_0325_SWEEP_TOKENS) == len(SM107A_0323_SWEEP_TOKENS) + len(_SM107A_0325_ADDED_SWEEP)
     parts = (None, *SM107A_0323_SM_COUNTS)
@@ -23614,10 +23623,10 @@ def test_sm107a_0325_rule_by_token_count(monkeypatch):
             for T in SM107A_0325_SWEEP_TOKENS
         }
 
-    with monkeypatch.context() as m:
-        _tables_0324(m)
-        old_fp32 = fp32_rules()
-    assert fp32_rules() == old_fp32
+    fp32 = fp32_rules()
+    assert fp32
+    for (key, sm_count, T), rule in fp32.items():
+        assert rule == SM107A_0322_WGRAD_ROWS[key][3], (key[6], key[8], sm_count, T, rule)
     changed = 0
     for key, (_rule, d_in, d_out, _before) in SM107A_0322_WGRAD_ROWS.items():
         lo, hi = SM107A_0325_BANDS[key]
@@ -23971,7 +23980,7 @@ def test_sm107a_0325_forced_knobs_plan_a_registered_program(key):
     ``hints=("none", "none")`` plans a program registered for sm_107a with that knob (the registry fallback where the
     knobs name none); a forced ``sk=True`` plans the linearised stream-K units of ``stream_k_plan`` on the rule's
     program where each tile holds at most two units, and is refused (``check_stream_k_plan``: the program keys its
-    workspace by tail tile) where a tile would hold more, as with the tables of version 0.3.24 at those cells."""
+    workspace by tail tile) where a tile would hold more."""
     _rule, d_in, d_out, _before = SM107A_0322_WGRAD_ROWS[key]
     lo, hi = SM107A_0325_BANDS[key]
     registered = _registered("sm_107a")

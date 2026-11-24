@@ -1594,10 +1594,11 @@ Version 0.3.25 keeps every table of 0.3.24.  The BF16 weight gradients `4096 -> 
 `6144 -> 64` and indexer_hw `6144 -> 32`, which run the deterministic program, follow the deterministic package's
 version 0.3.25: whole 64-row tiles without a K split at 960 to 3072 tokens (`4096 -> 16`), 960 to 4096 (`4096 -> 96`,
 `6144 -> 48`, `6144 -> 32`) and 960 to 5120 (`6144 -> 64`), and the unbatched `G.T @ X` call of the generic entry runs
-that plan there too (now also at 960 to 1023 tokens, and `4096 -> 16` at 2049 to 3072).  This package's post-ship A/B
-against its version 0.3.24: [[TBD0325_ND_AB_212]] on the 212-SM part and [[TBD0325_ND_AB_216]] on the 216-SM part;
-generic call [[TBD0325_NDGEN_AB]].  Against version 0.3.24 its bits change where the deterministic package's do.
-Every other row, architecture and SM count plans as in version 0.3.24.
+that plan there too (now also at 960 to 1023 tokens, and `4096 -> 16` at 2049 to 3072 (2049 to 3071 on the 212-SM
+part)).  This package's post-ship A/B against its version 0.3.24: [[TBD0325_ND_AB_212]] on the 212-SM part and
+[[TBD0325_ND_AB_216]] on the 216-SM part; generic call [[TBD0325_NDGEN_AB]].  Against version 0.3.24 its bits change
+where the deterministic package's do; those of the generic call may also change where it now swaps (it ran the direct
+plan there before).  Every other row, architecture and SM count plans as in version 0.3.24.
 
 ## Helpers of this package
 
