@@ -100,6 +100,7 @@ POLICY_FIELDS = (
     "l6_rule",  # [max mean unit tiles, min top_k] of the three-warpgroup program, or None
     "wide_rule",  # [min wide rounds per CTA, min rounds x mean unit tiles] of the wide program
     "wide_first_rule",  # [min mean unit tiles] from which a wide-eligible call takes the wide program before the three-warpgroup rule, or None (the three-warpgroup rule first)
+    "wide_first_k_rule",  # [max top_k, min mean unit tiles] replacing wide_first_rule up to that top_k: a wide-eligible call of at most that top_k takes the wide program before the three-warpgroup rule from that many mean unit tiles on, or None (wide_first_rule on every call)
     "wide_wave_rule",  # [min narrow / wide wave ratio, min l6 / wide wave ratio, min mean unit tiles against l6(, the top_k up to which the tile minima hold, their exponent in top_k above it, the minimum of a packed call, the tiles a one-segment minimum rises per wide wave below the next element, the wide waves from which it holds, the l6 / wide wave ratio W below which the minimum is at least the next element / (W - 1) and on a packed call at least element 10 / (W - 1) ** 2, and from which the minimum of a one-document call of fewer wide waves than element 7 is at most element 11 / (W - 1) ** 2, on two or more wide waves at most the larger of that and element 12, from element 13 wide waves on of that and element 14)] replacing wide_rule and wide_first_rule, or None; see unit_block_q_for
     "desc_walk_kinds",  # [physical scan kinds whose descending-walk twin (key kind "<kind>_desc") a call with the sampled first threshold off runs, the same for a sampled call], or None; see select_program
     "split_max",  # most key-range splits per unit
@@ -315,6 +316,7 @@ _OPTIONAL_RULE = (
     "cand_mult_rule_unsampled",
     "l6_rule",
     "wide_first_rule",
+    "wide_first_k_rule",
     "wide_wave_rule",
     "desc_walk_kinds",
     "split_wave_rule",
@@ -368,6 +370,7 @@ class DispatchPolicy:
     l6_rule: Optional[list]
     wide_rule: list
     wide_first_rule: Optional[list]
+    wide_first_k_rule: Optional[list]
     wide_wave_rule: Optional[list]
     desc_walk_kinds: Optional[list]
     split_max: int
@@ -452,6 +455,17 @@ class DispatchPolicy:
         ):
             raise ValueError(
                 f"policy['wide_first_rule'] must be [min mean unit tiles] or None, got {first!r}"
+            )
+        first_k = raw["wide_first_k_rule"]
+        if first_k is not None and (
+            len(first_k) != 2
+            or not _is_int(first_k[0])
+            or first_k[0] < 1
+            or not _is_number(first_k[1])
+            or first_k[1] < 0
+        ):
+            raise ValueError(
+                f"policy['wide_first_k_rule'] must be [max top_k >= 1, min mean unit tiles >= 0] or None, got {first_k!r}"
             )
         waves = raw["wide_wave_rule"]
         if waves is not None and (
@@ -955,12 +969,32 @@ class DispatchPolicy:
             return self.block_q_wide if wide else other
         min_rounds, min_work = self.wide_rule
         wide = rounds >= min_rounds and rounds * mean_tiles >= min_work
-        first = self.wide_first_rule
-        if wide and first is not None and mean_tiles >= first[0]:
+        first = self.wide_first_for(top_k)
+        if wide and first is not None and mean_tiles >= first:
             return self.block_q_wide
         if three_wg:
             return self.block_q_l6
         return self.block_q_wide if wide else self.block_q_narrow
+
+    def wide_first_for(self, top_k: int) -> Optional[float]:
+        """The mean unit tiles from which a wide-eligible call of ``top_k`` takes the wide program before the
+        three-warpgroup rule (``unit_block_q_for``): ``wide_first_k_rule[1]`` up to the rule's ``top_k``, else
+        ``wide_first_rule[0]``, or None (the three-warpgroup rule first).  The three-warpgroup unit serves ``top_k``
+        from ``l6_rule[1]`` on, so the rule moves calls of exactly that ``top_k`` up to the rule's: on ``sm_100a`` and
+        ``sm_103a`` the ``top_k = 512`` calls of 128 (``sm_100a``) and 64 (``sm_103a``) mean unit tiles and more, where
+        the wide program ran 1-4 % (``sm_103a``, 64-448 mean unit tiles) and 7-10 % (``sm_100a``, 128-255 mean unit
+        tiles) faster than the CTA-pair l6 program these calls ran before (16384 queries over 16384-65536 keys, 8 x 2048
+        queries over 8 x 17408 keys and an 8-segment packed call of 16231 queries over 268757 keys; same finalize
+        program in both arms); ``sm_100a`` measured parity at 64 and 96 mean unit tiles, so its floor stays at 128.
+        ``sm_107a`` sets no floor: with one at 0 its ``top_k = 512`` calls of 64-192 mean unit tiles ran the same programs
+        as without it (its unpaired-l6 preference and CTA-pair rule decide them after the floor), and the single-CTA wide
+        program ran 3.9 % slower than its l6 program at 64 mean unit tiles.  The ``wide_wave_rule`` records (the FP8 form
+        on ``sm_100a`` / ``sm_103a``) decide by waves instead and never read it."""
+        rule = self.wide_first_k_rule
+        if rule is not None and int(top_k) <= int(rule[0]):
+            return float(rule[1])
+        first = self.wide_first_rule
+        return None if first is None else float(first[0])
 
     def n_split_for(
         self,
@@ -1308,10 +1342,16 @@ def scan_key_form(key: str) -> Optional[str]:
     return None if fields is None else fields.form
 
 
+# the fields of a ``POLICY`` record the FP8 form does not take over unless its FP8 record names them: the top_k-keyed
+# wide-first floor was measured on the BF16 programs only, so the FP8 plans keep the programs of their own records
+FP8_UNSET_FIELDS = {"wide_first_k_rule": None}
+
+
 def fp8_policy_record(record: dict, fp8_record: dict) -> dict:
     """The FP8 form's dispatch record of an architecture: its record ``record`` (``POLICY[arch]``) with the fields of
-    its FP8 record ``fp8_record`` (``POLICY_FP8[arch]``) replaced.  ``fp8_record`` names its own ``static_scan_kinds``
-    (the FP8 programs never keep the BF16 programs' static kinds) and no field outside ``POLICY_FIELDS``."""
+    its FP8 record ``fp8_record`` (``POLICY_FP8[arch]``) replaced and the ``FP8_UNSET_FIELDS`` it does not name unset.
+    ``fp8_record`` names its own ``static_scan_kinds`` (the FP8 programs never keep the BF16 programs' static kinds) and
+    no field outside ``POLICY_FIELDS``."""
     if (
         not isinstance(fp8_record, dict)
         or "static_scan_kinds" not in fp8_record
@@ -1320,7 +1360,7 @@ def fp8_policy_record(record: dict, fp8_record: dict) -> dict:
         raise ValueError(
             f"an FP8 dispatch record must name static_scan_kinds and only fields of {POLICY_FIELDS}, got {fp8_record!r}"
         )
-    return {**record, **fp8_record}
+    return {**record, **FP8_UNSET_FIELDS, **fp8_record}
 
 
 def fp8_scan_programs(scan_keys: Collection[str]) -> dict:
@@ -1803,7 +1843,12 @@ def select_fp8_program(
 # ``CB_KIND_FALLBACK`` maps the decided physical kind to (a wide unit, a CTA pair and a key-range split run their unit
 # geometry's unpaired, unsplit program; a split call runs narrow, the unit of more work units per query), with
 # ``n_split = 1``.  ``top_k`` is at most ``CB_MAX_TOP_K``: then every returned id lies in a returned block.
+# A call whose longest key segment holds at most ``CB_SLOTS`` blocks (``cb_block_cap`` 0) keeps every block of every
+# row, so no block score decides a row: it runs the plain call's plan as dispatched (any unit, pair, split with its
+# merge, and order) and the backend writes each row's ``0 .. nb - 1`` and ``-1`` tail on the device before it (stage
+# ``CB_IOTA_STAGE``; ``CandidateBlocksChoice.iota``).
 CB_ROLE = "scan_blocks"
+CB_IOTA_STAGE = "cb_iota"
 CB_SLOTS = 2048
 CB_BLOCK = 8
 CB_MAX_TOP_K = CB_SLOTS - 1
@@ -1825,8 +1870,8 @@ _CB_KEY = re.compile(r"scan_blocks:(narrow|l6):u([0-9]+):s0:f([01])")
 def cb_block_cap(num_keys: int, max_seqlen_k: Optional[int] = None) -> int:
     """Block entries per query slot of a ``scan_blocks`` launch: ``ceil(W / 8) - 1`` older blocks of the longest key
     segment ``W`` (``max_seqlen_k`` when given, else ``Tkv``) when ``ceil(W / 8) > CB_SLOTS``, else 0 (every row keeps
-    all its blocks and stores none).  ``max_seqlen_k`` must bound every key segment of the call: a row with more older
-    blocks than this traps on the device."""
+    all its blocks and stores none: the call runs the plain plan, ``CandidateBlocksChoice.iota``).  ``max_seqlen_k``
+    must bound every key segment of the call: a row with more older blocks than this traps on the device."""
     w = int(num_keys if max_seqlen_k is None else max_seqlen_k)
     blocks = (w + CB_BLOCK - 1) // CB_BLOCK
     return blocks - 1 if blocks > CB_SLOTS else 0
@@ -1838,12 +1883,15 @@ class CandidateBlocksChoice:
     (``choice.scan_key``) with its workspace (``choice.workspace_bytes``: the candidate buffers and the ticket tail);
     ``blk_cap`` block entries per query slot follow it (``blk_bytes`` = ``grid_ctas x block_q x blk_cap x 8``), so
     the call's workspace is ``workspace_bytes`` = ``choice.workspace_bytes + blk_bytes``.  The ``[T, CB_SLOTS]``
-    int32 output is the caller's and not part of it."""
+    int32 output is the caller's and not part of it.  ``iota`` (``blk_cap`` 0: every row keeps all its blocks):
+    ``choice`` is the plain call's plan (``select_program``: its scan and merge programs) with its
+    workspace, no block entries, and the backend writes the rows before its launches (``CB_IOTA_STAGE``)."""
 
     choice: ProgramChoice
     blk_cap: int
     blk_bytes: int
     workspace_bytes: int
+    iota: bool = False
 
     @property
     def keys(self) -> tuple:
@@ -1860,6 +1908,7 @@ class CandidateBlocksChoice:
             "blk_cap": self.blk_cap,
             "blk_bytes": self.blk_bytes,
             "cb_workspace_bytes": self.workspace_bytes,
+            "cb_iota": self.iota,
         }
 
 
@@ -1874,16 +1923,37 @@ def cb_scan_programs(scan_keys: Collection[str]) -> dict:
 
 
 def select_cb_program(
-    policy: DispatchPolicy, *, scan_keys: Collection[str], **call: Any
+    policy: DispatchPolicy,
+    *,
+    scan_keys: Collection[str],
+    iota: bool = True,
+    **call: Any,
 ) -> CandidateBlocksChoice:
     """The host dispatch of one call that also returns candidate blocks: the decision procedure of ``select_program``
     (``call``: its keywords), run by the ``scan_blocks`` program of the decided kind's ``CB_KIND_FALLBACK`` unit,
     unsplit and unpaired on the requested grid, without the snake and longest-first orders, with that unit's sampled
     first threshold and check period where the kind changed (``fallback_knobs``), the sample-fit form of its unit and
     the decided tile unroll where its program is registered, else the smallest registered one.  The block entries
-    follow ``cb_block_cap(num_keys, max_seqlen_k)``.  Raises ``NotImplementedError`` when ``scan_keys`` registers no
-    ``scan_blocks`` program of the unit."""
+    follow ``cb_block_cap(num_keys, max_seqlen_k)``.  When that is 0 (every row keeps all its blocks) the plan is
+    ``select_program``'s own with ``iota`` set: the plain call's programs, workspace and launches, and the rows written
+    by the backend (``iota=False``: the ``scan_blocks`` program writes them, the plan of the package before ``iota``,
+    the same rows; measurements only).  Raises ``NotImplementedError`` when ``scan_keys`` registers no
+    ``scan_blocks`` program of the unit (an ``iota`` plan: no ``scan_blocks`` program at all)."""
     choice = select_program(policy, scan_keys=scan_keys, **call)
+    programs = cb_scan_programs(scan_keys)
+    if iota and cb_block_cap(choice.num_keys, call.get("max_seqlen_k")) == 0:
+        if not programs:
+            raise NotImplementedError(
+                "the candidate-block call needs an architecture with scan_blocks programs: no registered scan_blocks "
+                "program serves this registry"
+            )
+        return CandidateBlocksChoice(
+            choice=choice,
+            blk_cap=0,
+            blk_bytes=0,
+            workspace_bytes=int(choice.workspace_bytes),
+            iota=True,
+        )
     physical = CB_KIND_FALLBACK[choice.physical_kind]
     if physical != choice.physical_kind:
         choice = fallback_knobs(policy, choice, physical, call)
@@ -1895,7 +1965,6 @@ def select_cb_program(
     )
     block_q = policy.block_q_narrow if physical == "narrow" else policy.block_q_l6
     fit = policy.sample_fit_for(T, Tkv, S, r, choice.cand_cap, physical)
-    programs = cb_scan_programs(scan_keys)
     unrolls = programs.get((physical, fit))
     if not unrolls:
         raise NotImplementedError(
@@ -2056,6 +2125,7 @@ __all__ = [
     "CAND_WIDTH_MAX",
     "CB_BLOCK",
     "CB_ENTRY_BYTES",
+    "CB_IOTA_STAGE",
     "CB_KIND_FALLBACK",
     "CB_MAX_TOP_K",
     "CB_ROLE",
