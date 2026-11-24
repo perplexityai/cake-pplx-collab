@@ -262,36 +262,46 @@ record; same grid, block and selection); ``collapse_forward_h5120`` is one
 record on sm_100a / sm_103a (``collapse_fwd__h5120``: own library stem, no
 workspace; the per-call PDL attribute on its own edge ``K4->C``, no band), and
 ``collapse_backward_h5120`` there is selected by the token count
-(``rows_between``).  On sm_100a it holds five records:
+(``rows_between``).  On sm_100a it holds six records:
 ``collapse_bwd__vjpwa_sp4_mb4__h5120__le30`` up to 30 tokens,
 ``collapse_bwd__vjpwd_sp4_mb4__h5120`` from 31 to 37 tokens,
 ``collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le215`` from 38 to 215 tokens
 (the ``_vjpwa_sp4_mb4`` and ``_vjpwd_sp4_mb4`` libraries, each band under
 its own record name and rule),
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` (the ``_vjpwa_sp2_mb4``
-library under its own record name and rule) from 216 to 1023 tokens and
-``collapse_bwd__h5120`` (own library stem, no workspace) from 1024 tokens.
-On sm_103a it holds seven: ``collapse_bwd__vjpwa_sp4_mb4__h5120__le30`` up
-to 30 tokens, ``collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38`` from 31 to
-38 tokens, ``collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215`` from 39 to 215
-tokens, the ``_vjpwa_sp2_mb4`` library from 216 to 247 and from 320 to 1023
-tokens under the record names ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247``
-and ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, the
-``collapse_bwd__h5120`` library from 248 to 319 tokens under the record name
-``collapse_bwd__h5120__le319``, and ``collapse_bwd__h5120`` itself from 1024
-tokens.  The split VJPs give ``collapse_bwd__h5120``'s outputs bit for bit
-(grid 4 T / 2 T, 20736 / 30976 bytes of dynamic shared memory);
-``_vjpwd_sp4_mb4`` is the four-CTA split without the shared-memory stage
-(each warp loads its ``dU`` and ``X`` words from global memory into
-registers; 256 bytes of dynamic shared memory hold the partial sums), with
-the same grid and the same outputs bit for bit.  On sm_107a
+library under its own record name and rule) from 216 to 1023 tokens,
+``collapse_bwd__vjpwa_pf0__h5120`` from 1024 to 6143 tokens and
+``collapse_bwd__vjpwd__h5120`` from 6144 tokens (own library stems, no
+workspace).  On sm_103a it holds eight:
+``collapse_bwd__vjpwa_sp4_mb4__h5120__le30`` up to 30 tokens,
+``collapse_bwd__vjpwd_sp4_mb4__h5120__gt30_le38`` from 31 to 38 tokens,
+``collapse_bwd__vjpwa_sp4_mb4__h5120__gt38_le215`` from 39 to 215 tokens,
+the ``_vjpwa_sp2_mb4`` library from 216 to 247 and from 320 to 1023 tokens
+under the record names ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` and
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, the
+``collapse_bwd__h5120`` library (own library stem, no workspace) from 248 to
+319 tokens under the record name ``collapse_bwd__h5120__le319``, the
+``collapse_bwd__vjpwa_pf0__h5120`` library from 1024 to 8191 tokens under the
+record name ``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``, and the
+``collapse_bwd__vjpwd__h5120`` library from 8192 tokens under the record name
+``collapse_bwd__vjpwd__h5120__gt8191``.  ``_vjpwa_pf0`` is the one-CTA VJP
+that prefetches its own token's ``dU`` and ``X`` rows into L2 and then fills
+its shared-memory stage by ``cp.async`` (grid T, 51456 bytes of dynamic
+shared memory, as ``collapse_bwd__h5120``); ``_vjpwd`` is the one-CTA VJP
+without the stage (each warp loads its ``dU`` and ``X`` words from global
+memory into registers; 256 bytes of dynamic shared memory hold the partial
+sums; grid T).  The split VJPs (grid 4 T / 2 T, 20736 / 30976 bytes of
+dynamic shared memory) and ``_vjpwd_sp4_mb4``, the four-CTA split without
+the shared-memory stage (256 bytes of dynamic shared memory), give the same
+outputs bit for bit as the three one-CTA VJPs.  On sm_107a
 the three collapse records are that architecture's own forms, with the same
 outputs bit for bit:
 ``fwd_collapse__m2_pi_pn__h5120`` and ``collapse_fwd__m2__h5120`` take two
 sub-tokens per thread group and trip (``rows_per_cta`` 4: half the CTAs of the
 sm_100a / sm_103a records), and ``collapse_bwd__vjpwa_pfq2__h5120`` fills the
-VJP's shared-memory stage by ``cp.async`` and prefetches a later token's rows
-into L2 (the same grid and dynamic shared memory).  On sm_107a
+VJP's shared-memory stage by ``cp.async`` as ``_vjpwa_pf0`` does but
+prefetches a later token's rows into L2 (the same grid and dynamic shared
+memory).  On sm_107a
 ``collapse_forward_h5120`` holds three records selected by the token count
 (``rows_between``): ``collapse_fwd__m2__h5120`` up to 2047 tokens,
 ``collapse_fwd__m2_xhnone_rv__h5120`` from 2048 to 6655 tokens and
@@ -8399,10 +8409,9 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_mhc_train_collapse_bwd__h5120": {
+    "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120": {
         "arches": [
             "sm_100a",
-            "sm_103a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -8424,8 +8433,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "rows_per_cta": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_mhc_train_collapse_bwd__h5120",
-        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__h5120",
+        "kernel": "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -8434,7 +8443,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "persistent_ctas_per_sm": 1,
             "use_pdl": False,
         },
-        "library": "cake_mhc_train_collapse_bwd__h5120",
+        "library": "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
         "logical": {
             "T": "rows",
             "dpre_in": "dpre_in",
@@ -8446,7 +8455,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "collapse_bwd",
         "select_rule": {
             "above": 1023,
-            "at_most": None,
+            "at_most": 6143,
             "kind": "rows_between",
         },
         "workspace_rule": None,
@@ -8498,6 +8507,159 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": {
             "above": 247,
             "at_most": 319,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191": {
+        "arches": [
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "du"],
+            ["buffer", "dx"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 1,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 1,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 51456,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
+        "logical": {
+            "T": "rows",
+            "dpre_in": "dpre_in",
+            "du": "du",
+            "dx": "dx",
+            "pre_in": "pre_in",
+            "x": "x",
+        },
+        "role": "collapse_bwd",
+        "select_rule": {
+            "above": 1023,
+            "at_most": 8191,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_mhc_train_collapse_bwd__vjpwd__h5120": {
+        "arches": [
+            "sm_100a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "du"],
+            ["buffer", "dx"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 1,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 1,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_collapse_bwd__vjpwd__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwd__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 256,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_collapse_bwd__vjpwd__h5120",
+        "logical": {
+            "T": "rows",
+            "dpre_in": "dpre_in",
+            "du": "du",
+            "dx": "dx",
+            "pre_in": "pre_in",
+            "x": "x",
+        },
+        "role": "collapse_bwd",
+        "select_rule": {
+            "above": 6143,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_mhc_train_collapse_bwd__vjpwd__h5120__gt8191": {
+        "arches": [
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "du"],
+            ["buffer", "dx"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 1,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 1,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_collapse_bwd__vjpwd__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwd__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 256,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_collapse_bwd__vjpwd__h5120",
+        "logical": {
+            "T": "rows",
+            "dpre_in": "dpre_in",
+            "du": "du",
+            "dx": "dx",
+            "pre_in": "pre_in",
+            "x": "x",
+        },
+        "role": "collapse_bwd",
+        "select_rule": {
+            "above": 8191,
+            "at_most": None,
             "kind": "rows_between",
         },
         "workspace_rule": None,
@@ -9757,7 +9919,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_collapse_bwd__vjpwd_sp4_mb4__h5120",
             "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120__gt37_le215",
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__le1023",
-            "cake_mhc_train_collapse_bwd__h5120",
+            "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120",
+            "cake_mhc_train_collapse_bwd__vjpwd__h5120",
         ],
         "collapse_forward_h5120": [
             "cake_mhc_train_collapse_fwd__h5120",
@@ -9940,7 +10103,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__le247",
             "cake_mhc_train_collapse_bwd__h5120__le319",
             "cake_mhc_train_collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023",
-            "cake_mhc_train_collapse_bwd__h5120",
+            "cake_mhc_train_collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191",
+            "cake_mhc_train_collapse_bwd__vjpwd__h5120__gt8191",
         ],
         "collapse_forward_h5120": [
             "cake_mhc_train_collapse_fwd__h5120",

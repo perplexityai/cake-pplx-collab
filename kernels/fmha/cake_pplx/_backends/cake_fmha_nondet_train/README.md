@@ -60,10 +60,12 @@ and the key length (`Skv` at most a bound, or at most a multiple of `Sq`).
 Each region is the measured region of its architecture and head dimension,
 where the one-launch route measured faster than the three-kernel routes (the
 one-launch table below).  Every other head-dimension 128 call
-whose key length is a multiple of 256 and not longer than its query
-length takes the pair route where a region of `PAIR_REGIONS` in `cake_jit.py`
-holds its `B * H` and `Skv` for its architecture and mask (`cake_jit.variant`
-picks the variant of a call); every other call takes the records of the first
+whose key length is a multiple of 256 takes the pair route where
+`cake_jit.variant` gives it: with a key length not longer than its query
+length, where a region of `PAIR_REGIONS` in `cake_jit.py` holds its `B * H`
+and `Skv` for its architecture and mask; without the mask and with a longer
+key length, within the bounds of `PAIR_FEWER_QUERIES` for its architecture
+(both pair-route tables below).  Every other call takes the records of the first
 four rows.  On `sm_100a` the causal pair build ships and no call takes it.  The
 `build.json` minimum CUDA toolkit is 12.8 for every `sm_100a` library, 12.9
 for every `sm_103a` library and 13.5 for every `sm_107a` library; an older
@@ -74,11 +76,11 @@ mask; a call inside any piece takes the route), with CTAs `B * H * (Sq / 128 + S
 
 | architecture | head dim | pieces |
 |---|---|---|
-| `sm_100a` | 128 | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 3 * Sq`; `(640, 512, 256, 0)`: CTAs `<= 640`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(301, 1024, 128, 0)`: CTAs `<= 301`, `max(Sq, Skv) <= 1024`, `Skv <= 128` |
+| `sm_100a` | 128 | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 3 * Sq`; `(640, 512, 256, 0)`: CTAs `<= 640`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(301, 1024, 128, 0)`: CTAs `<= 301`, `max(Sq, Skv) <= 1024`, `Skv <= 128`; `(128, 8192, 0, 1)`: CTAs `<= 128`, `max(Sq, Skv) <= 8192`, `Skv <= Sq` |
 | `sm_100a` | 64 | `(152, 2048, 512, 2)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 6)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 6 * Sq`; `(606, 256, 128, 0)`: CTAs `<= 606`, `max(Sq, Skv) <= 256`, `Skv <= 128`; `(212, 256, 0, 1)`: CTAs `<= 212`, `max(Sq, Skv) <= 256`, `Skv <= Sq` |
-| `sm_103a` | 128 | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 3 * Sq`; `(303, 512, 256, 0)`: CTAs `<= 303`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(301, 1024, 128, 0)`: CTAs `<= 301`, `max(Sq, Skv) <= 1024`, `Skv <= 128` |
+| `sm_103a` | 128 | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq`; `(190, 1024, 256, 0)`: CTAs `<= 190`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(152, 1024, 0, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 3 * Sq`; `(303, 512, 256, 0)`: CTAs `<= 303`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(301, 1024, 128, 0)`: CTAs `<= 301`, `max(Sq, Skv) <= 1024`, `Skv <= 128`; `(128, 8192, 0, 1)`: CTAs `<= 128`, `max(Sq, Skv) <= 8192`, `Skv <= Sq` |
 | `sm_103a` | 64 | `(204, 2048, 256, 0)`: CTAs `<= 204`, `max(Sq, Skv) <= 2048`, `Skv <= 256`; `(156, 512, 0, 2)`: CTAs `<= 156`, `max(Sq, Skv) <= 512`, `Skv <= 2 * Sq`; `(256, 1024, 128, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 1024`, `Skv <= 128`; `(152, 1024, 512, 3)`: CTAs `<= 152`, `max(Sq, Skv) <= 1024`, `Skv <= 512` or `Skv <= 3 * Sq`; `(152, 2048, 0, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= Sq` |
-| `sm_107a` | 128 | `(256, 2048, 512, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 2048`, `Skv <= 512`; `(320, 1024, 256, 0)`: CTAs `<= 320`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(423, 512, 256, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(210, 2048, 768, 2)`: CTAs `<= 210`, `max(Sq, Skv) <= 2048`, `Skv <= 768` or `Skv <= 2 * Sq`; `(423, 1024, 128, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 1024`, `Skv <= 128` |
+| `sm_107a` | 128 | `(256, 2048, 512, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 2048`, `Skv <= 512`; `(320, 1024, 256, 0)`: CTAs `<= 320`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(423, 512, 256, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(210, 2048, 768, 2)`: CTAs `<= 210`, `max(Sq, Skv) <= 2048`, `Skv <= 768` or `Skv <= 2 * Sq`; `(423, 1024, 128, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 1024`, `Skv <= 128`; `(128, 8192, 0, 1)`: CTAs `<= 128`, `max(Sq, Skv) <= 8192`, `Skv <= Sq` |
 | `sm_107a` | 64 | `(212, 2048, 512, 2)`: CTAs `<= 212`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq`; `(210, 1024, 0, 6)`: CTAs `<= 210`, `max(Sq, Skv) <= 1024`, `Skv <= 6 * Sq`; `(423, 512, 256, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 512`, `Skv <= 256`; `(320, 1024, 256, 0)`: CTAs `<= 320`, `max(Sq, Skv) <= 1024`, `Skv <= 256`; `(423, 1024, 128, 0)`: CTAs `<= 423`, `max(Sq, Skv) <= 1024`, `Skv <= 128` |
 
 The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
@@ -88,6 +90,15 @@ The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
 | `sm_100a` | `B * H` 1: `Skv >= 4096`; `B * H <= 4`: `Skv >= 8192`; `B * H >= 128`: `Skv >= 8192` | none |
 | `sm_103a` | `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 8192` | `B * H <= 4`: `Skv >= 2048` |
 | `sm_107a` | `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 4096` | `B * H <= 4`: `Skv >= 2048`; `B * H <= 16`: `Skv >= 4096`; any `B * H`: `Skv >= 8192` |
+
+The bounds of the pair route for a call without the mask whose key length is longer than its query length
+(`PAIR_FEWER_QUERIES`; the key length a multiple of 256):
+
+| architecture | no mask, `Sq < Skv` |
+|---|---|
+| `sm_100a` | none |
+| `sm_103a` | `B * H >= 8`, `Sq >= 4096`, `Skv >= 8192`, `Skv <= 2 * Sq` |
+| `sm_107a` | `B * H >= 8`, `Sq >= 4096`, `Skv >= 8192`, `Skv <= 2 * Sq` |
 
 ## Kernels
 
