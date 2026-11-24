@@ -57,6 +57,24 @@ a call.  Every record ships for the three architectures; where no region
 routes a call (``sm_100a`` with the mask) the pair build ships and no call
 takes it.
 
+The split route (the pair route split along the queries; no mask, head
+dimension 128, one batch, a key length that is a multiple of 256 and at
+least half the query length and at most the query length, inside a piece of
+``QSPLIT_REGION`` for the architecture): the main stage is the 2-CTA kernel
+built with ``q_split`` S of 2 or 4 (``bwd_main_2cta_qsplit2`` /
+``bwd_main_2cta_qsplit4``), S CTA pairs per 256 keys on the grid
+``(Skv / 128, H, B * S)``, each over every S-th query block; it adds the dQ
+tiles in the pair-row order and writes unscaled FP32 dK and dV partials
+``[B * S, Skv, H, D]`` (S per batch, every element) in place of dK and dV.
+The postprocess of the same S (``bwd_post_pair_qsplit2`` /
+``bwd_post_pair_qsplit4``) writes dQ as ``bwd_post_pair`` does, and its
+``2 * S * Skv / 128`` more CTAs per (head, batch) fold the S partials in
+their order into dK (times the softmax scale) and dV, each element rounded
+to BF16 once, so dK and dV keep one fixed order.  These records launch only
+through their host sequence: ``grid`` has no grid for them.
+:func:`qsplit_piece` gives the piece of a call; :func:`variant` and
+:func:`fused_record` read it.
+
 The one-launch route (head dimension 128 or 64, without the mask or with it):
 one kernel, the ``bwd_fused`` stage (``bwd_fused`` / ``bwd_fused_hd64``
 without the mask, ``bwd_fused_causal`` / ``bwd_fused_hd64_causal`` with it),
@@ -68,8 +86,9 @@ the kernel makes ``LSE * log2(e)`` and ``dPsum`` itself, needs no workspace
 and writes dq, dk and dv once each in one fixed order.  ``FUSED_OF`` names its
 record per (head dimension, causal) and :func:`fused_record` picks the
 one-launch route for a call without the mask inside one of the pieces of
-``FUSED_REGION``, and for a causal call (``Sq == Skv``) inside one of the
-pieces of ``FUSED_CAUSAL_REGION``; every other call takes the route of
+``FUSED_REGION`` that no piece of ``QSPLIT_REGION`` read before it holds,
+and for a causal call (``Sq == Skv``) inside one of the pieces of
+``FUSED_CAUSAL_REGION``; every other call takes the route of
 :func:`variant`.  No ``RECORD_OF`` variant and no host sequence names a
 ``bwd_fused`` record.
 """
@@ -400,7 +419,8 @@ RECORD_OF: dict[tuple[Any, ...], tuple[str, str, str]] = {
 
 # (head dim, causal, pair) -> the host sequence of the variant: one library whose ``run`` launches the three records
 # RECORD_OF names for it, in order, in one host call.  Derived by the exporter.
-SEQUENCES: dict[tuple[int, bool, bool], dict[str, Any]] = {
+# A split variant's key is (head dim, causal, pair, q_split), as in RECORD_OF.
+SEQUENCES: dict[tuple[Any, ...], dict[str, Any]] = {
     (128, False, False): {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "library": "cake_fmha_train_495bb89b89eb8b41327e",
@@ -505,16 +525,64 @@ PAIR_FEWER_QUERIES: dict[str, tuple[int, int, int, int] | None] = {
     "sm_103a": (8, 4096, 8192, 2),
     "sm_107a": (8, 4096, 8192, 2),
 }
+# Architecture -> the region of the split route (the ``RECORD_OF`` keys ``(128, False, True, q_split)``): one or more
+# pieces, each ``(q_split, least_kv, most_kv, least_q, most_q, before_fused)``.  A call is a candidate when it has no
+# mask, head dimension 128, one batch (``B == 1``), a key length that is a multiple of 256 and ``Sq / 2 <= Skv <= Sq``;
+# with ``kv = B * H * Skv / 128`` (the key blocks of all heads), it is inside a piece when ``least_kv <= kv <= most_kv``
+# and ``least_q <= Sq <= most_q``, and then takes the split of ``q_split`` (:func:`qsplit_piece`).  The pieces do not
+# overlap.  A piece with ``before_fused`` True is read before ``FUSED_REGION``: :func:`fused_record` gives its calls no
+# record.  The other pieces route only the calls that ``FUSED_REGION`` leaves to :func:`variant`.  Every measured call
+# that takes the split (``B * H`` 1 to 8, 4096 to 16384 queries, 2048 to 16384 keys) was faster with it, in one host
+# call, than on its route without it in every counted round of both replicate runs of the CUDA-graph timing (per call
+# and per kernel), beyond the identical-kernel controls' noise, and not slower beyond that noise in eager calls.
+# ``most_kv``, ``least_q`` and ``most_q`` are measured values; each ``least_kv`` is 1 or one past a measured value.
+# Every measured call that was not faster lies outside every piece or, at 4096 queries on ``sm_100a`` and ``sm_103a``,
+# inside ``FUSED_REGION``, which is read before the piece that holds it.  A call outside every piece keeps the route it
+# had without the split.  An architecture without an entry has no split route.
+QSPLIT_REGION: dict[str, tuple[tuple[int, int, int, int, int, bool], ...]] = {
+    "sm_100a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
+    "sm_103a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
+    "sm_107a": (
+        (4, 1, 32, 4096, 8192, True),
+        (2, 33, 64, 4096, 16384, True),
+        (4, 65, 256, 16384, 16384, True),
+        (2, 257, 512, 16384, 16384, True),
+    ),
+}
+
+
+def qsplit_piece(
+    arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: bool
+) -> tuple[int, int, int, int, int, bool] | None:
+    """The piece of ``QSPLIT_REGION[arch]`` that holds a call, or None (the
+    call does not take the split route).  The call is a candidate when it has
+    no mask, ``D == 128``, ``B == 1``, ``Skv`` is a multiple of
+    ``2 * BLOCK`` and ``Sq <= 2 * Skv`` and ``Skv <= Sq``; with ``(q_split,
+    least_kv, most_kv, least_q, most_q, before_fused)`` the bounds of a
+    piece, it is inside the piece when ``least_kv <= B * H * (Skv // BLOCK) <=
+    most_kv`` and ``least_q <= Sq <= most_q``.  Reads the shapes and the
+    architecture only; an architecture outside ``QSPLIT_REGION`` holds no
+    call."""
+    if causal or D != 128 or B != 1 or Skv % (2 * BLOCK) or Sq > 2 * Skv or Skv > Sq:
+        return None
+    kv = B * H * (Skv // BLOCK)
+    for piece in QSPLIT_REGION.get(arch, ()):
+        _, least_kv, most_kv, least_q, most_q, _ = piece
+        if least_kv <= kv <= most_kv and least_q <= Sq <= most_q:
+            return piece
+    return None
 
 
 def variant(
     D: int, causal: bool, *, batch: int, heads: int, seqlen_q: int, seqlen_kv: int, arch: str
-) -> tuple[int, bool, bool]:
-    """The ``RECORD_OF`` key of a call on ``arch``: ``(D, causal, pair)``.
-    ``pair`` is True for the pair route: head dimension 128, a key length that
-    is a multiple of ``2 * BLOCK`` (a CTA pair of the 2-CTA main kernel covers
-    two key blocks), and either at least as many queries as keys with
-    ``batch * heads`` and ``seqlen_kv`` in a region of
+) -> tuple[int, bool, bool] | tuple[int, bool, bool, int]:
+    """The ``RECORD_OF`` key of a call on ``arch``: ``(D, causal, pair)``, or
+    ``(128, False, True, q_split)`` for a call inside a piece of
+    ``QSPLIT_REGION[arch]`` (:func:`qsplit_piece`; the split route).
+    Otherwise ``pair`` is True for the pair route: head dimension 128, a key
+    length that is a multiple of ``2 * BLOCK`` (a CTA pair of the 2-CTA main
+    kernel covers two key blocks), and either at least as many queries as keys
+    with ``batch * heads`` and ``seqlen_kv`` in a region of
     ``PAIR_REGIONS[arch][causal]``, or no mask and fewer queries than keys
     within the bounds ``PAIR_FEWER_QUERIES[arch]``.  ``arch``
     is one of ``ARCHES``; every argument after ``causal`` is keyword-only.  An
@@ -522,6 +590,9 @@ def variant(
     ``RuntimeError`` for a device outside ``ARCHES`` before the call)."""
     causal = bool(causal)
     least = PAIR_LEAST[arch][causal]
+    piece = qsplit_piece(arch, batch, heads, seqlen_q, seqlen_kv, D, causal)
+    if piece is not None:
+        return (D, causal, True, piece[0])
     if seqlen_q < seqlen_kv:
         bounds = PAIR_FEWER_QUERIES[arch]
         if D != 128 or causal or bounds is None or seqlen_kv % (2 * BLOCK):
@@ -628,8 +699,10 @@ def fused_record(arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: b
     """The ``bwd_fused`` record of a call on ``arch`` (one of ``ARCHES``), or
     None: the call then takes the route of :func:`variant`.  The record is
     ``FUSED_OF[(D, causal)]`` when the call is inside the region of its mask.
-    Without the mask: the region ``FUSED_REGION[(arch, D)]`` is not None and
-    the call is inside any of its pieces: with ``(max_ctas, s_max, skv_any,
+    Without the mask: no piece of ``QSPLIT_REGION[arch]`` with
+    ``before_fused`` True holds the call (:func:`qsplit_piece`), the region
+    ``FUSED_REGION[(arch, D)]`` is not None and the call is inside any of
+    its pieces: with ``(max_ctas, s_max, skv_any,
     skv_per_sq)`` the bounds of a piece, ``B * H * (Sq // BLOCK + Skv //
     BLOCK) <= max_ctas`` (the CTAs of the one-launch grid), ``max(Sq, Skv) <=
     s_max`` and ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq``.  With the
@@ -652,6 +725,9 @@ def fused_record(arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: b
         return None
     region = FUSED_REGION.get((arch, D))
     if region is None:
+        return None
+    piece = qsplit_piece(arch, B, H, Sq, Skv, D, False)
+    if piece is not None and piece[5]:
         return None
     for max_ctas, s_max, skv_any, skv_per_sq in region:
         if B * H * (Sq // BLOCK + Skv // BLOCK) > max_ctas or max(Sq, Skv) > s_max:

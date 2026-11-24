@@ -42,7 +42,14 @@ region of ``FUSED_CAUSAL_REGION`` and only with ``Sq == Skv``, on both sides of 
 piece and of two pieces; the shipped causal region of each architecture and head dimension,
 ``SHIPPED_FUSED_CAUSAL_REGION``, on both sides of each bound of each of its pieces and, for each piece, a call that no
 other piece of its region holds, and every measured causal call on its decided route, ``DECIDED_CAUSAL_FUSED`` and
-``DECIDED_CAUSAL_CALLS``), the launch grids, the stage launchers' keywords, their positional launch of
+``DECIDED_CAUSAL_CALLS``; the split route, the pair route split along the queries: ``qsplit_piece`` against the
+suite's own rule on a grid of calls, ``variant`` giving the split variant inside a piece and otherwise the route the
+call has without the split, ``fused_record`` giving no record inside a piece read before ``FUSED_REGION`` and otherwise
+what it gives without the split; the shipped split region of each architecture, ``SHIPPED_QSPLIT_REGION``, on both
+sides of each bound of each of its pieces and refused outside the candidates (``B`` 2, head dimension 64, the mask, a
+key length that is not a multiple of 256 or outside ``[Sq / 2, Sq]``), and every measured call on its decided route,
+``DECIDED_QSPLIT``, with the route it has without the split), the launch grids, the stage launchers' keywords, their
+positional launch of
 every routed record (the FFI arguments and grid of the registry-ordered launch), the two layouts of the dQ accumulator
 in the judge's helper, the build manifest (every record's and host sequence's library, the recorded source digests), the
 standalone loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
@@ -67,7 +74,10 @@ skip the observation.  The public backward is also judged on the shipped tables 
 than keys within the bounds of the pair route (the pair route on SM103 and SM107, the 1-CTA route on SM100), and on
 the least causal call of the long-sequence causal region of SM103 (``B * H`` 32, 8192 queries and keys: the pair route
 on SM103 and SM107, the 1-CTA route on SM100), and on a causal call inside the causal one-launch region of every
-architecture at each head dimension (``B * H`` 8, 1024 queries and keys: the causal one-launch record alone).
+architecture at each head dimension (``B * H`` 8, 1024 queries and keys: the causal one-launch record alone), and on
+one call of each ``q_split`` inside a split piece of every architecture (one head, 8192 queries against 4096 keys and
+against 8192 keys), through the host sequence's ``run`` and its ``run_with_workspace``, launching the three records of
+its split variant.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -133,6 +143,13 @@ VARIANT_IDS = ["d128", "d128_causal", "d64", "d64_causal", "d128_pair", "d128_pa
 # The 2-CTA main-stage records (a cluster of two CTAs along x) and the postprocess that reads their pair-row order.
 PAIR_MAINS = ("bwd_main_2cta", "bwd_main_2cta_causal")
 PAIR_POST = "bwd_post_pair"
+# (head dimension, causal, pair, q_split) of every variant of the split route (the pair route split along the queries,
+# head dimension 128 without the mask); each is delivered for the three architectures.  Then, by ``q_split``, its
+# 2-CTA main-stage record (clusters of two CTAs along x; FP32 dK / dV partials in place of dK and dV) and its
+# postprocess record (the pair-row dQ and the fold of the partials).
+SPLIT_VARIANTS = ((128, False, True, 2), (128, False, True, 4))
+SPLIT_MAINS = {2: "bwd_main_2cta_qsplit2", 4: "bwd_main_2cta_qsplit4"}
+SPLIT_POSTS = {2: "bwd_post_pair_qsplit2", 4: "bwd_post_pair_qsplit4"}
 # The one-launch record of each (head dimension, causal): the build without the mask and the causal build.
 FUSED_OF = {
     (128, False): "bwd_fused",
@@ -249,7 +266,8 @@ def _pin_route(monkeypatch, pin: bool | None) -> None:
     """The pair regions a test runs under: ``pin`` True, one region holding every call on every architecture and mask
     (the pair route wherever the head dimension, the key length and ``Sq >= Skv`` allow it); False, no region (the
     1-CTA route); None, the shipped ``PAIR_REGIONS``.  ``PAIR_LEAST`` is pinned with them, and with True or False
-    ``PAIR_FEWER_QUERIES`` holds no bounds (no call with fewer queries than keys on the pair route)."""
+    ``PAIR_FEWER_QUERIES`` holds no bounds (no call with fewer queries than keys on the pair route) and
+    ``QSPLIT_REGION`` no piece (no call on the split route)."""
     if pin is None:
         return
     regions = ((1, None, 2 * cake_jit.BLOCK),) if pin else ()
@@ -258,6 +276,7 @@ def _pin_route(monkeypatch, pin: bool | None) -> None:
         monkeypatch.setitem(cake_jit.PAIR_REGIONS, arch, {False: regions, True: regions})
         monkeypatch.setitem(cake_jit.PAIR_LEAST, arch, {False: least, True: least})
         monkeypatch.setitem(cake_jit.PAIR_FEWER_QUERIES, arch, None)
+    monkeypatch.setattr(cake_jit, "QSPLIT_REGION", {})
 
 
 def main_cases(causal: bool, pair: bool = False) -> list[Case]:
@@ -418,12 +437,22 @@ def test_registry_records_are_well_formed() -> None:
         assert rec["kernel_symbol"] == "kernel_" + rec["library"], name
         launch = rec["launch"]
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
-        # The 2-CTA main kernels run in clusters of two CTAs along x; every other kernel in single-CTA clusters.
-        assert tuple(launch["cluster"]) == ((2, 1, 1) if name in PAIR_MAINS else (1, 1, 1)), name
+        # The 2-CTA main kernels (the split builds too) run in clusters of two CTAs along x; every other kernel in
+        # single-CTA clusters.
+        two_cta = name in PAIR_MAINS or name in SPLIT_MAINS.values()
+        assert tuple(launch["cluster"]) == ((2, 1, 1) if two_cta else (1, 1, 1)), name
         assert tuple(launch["block"]) == (BLOCK_THREADS[rec["stage"]], 1, 1), name
         libraries.add(rec["library"])
     assert len(libraries) == len(cake_jit.MODULES)
     assert set(PAIR_MAINS) | {PAIR_POST} <= set(cake_jit.MODULES)
+    # The split records: the main stage writes the FP32 partials in place of dK and dV; the postprocess reads them and
+    # writes dQ, dK and dV.
+    assert set(SPLIT_MAINS.values()) | set(SPLIT_POSTS.values()) <= set(cake_jit.MODULES)
+    for q_split in (2, 4):
+        main = {key for kind, key in cake_jit.MODULES[SPLIT_MAINS[q_split]]["arg_plan"] if kind == "buffer"}
+        post = {key for kind, key in cake_jit.MODULES[SPLIT_POSTS[q_split]]["arg_plan"] if kind == "buffer"}
+        assert {"dK_part", "dV_part"} <= main and not {"dK", "dV"} & main, (q_split, sorted(main))
+        assert {"dK_part", "dV_part", "dQ", "dK", "dV"} <= post, (q_split, sorted(post))
     # The one-launch records serve the bwd_fused stage, and no other record does.
     assert dict(cake_jit.FUSED_OF) == FUSED_OF
     fused = {name for name, rec in cake_jit.MODULES.items() if rec["stage"] == "bwd_fused"}
@@ -435,9 +464,15 @@ def test_routing_table_names_three_records_per_variant() -> None:
     the preprocess depends on the head dimension only, the postprocess on the head dimension and the route, each
     variant has its own main stage, a 2-CTA main stage goes with the pair-row postprocess and no other (the pair
     route, head dimension 128 only), and every record of the registry serves some variant or is the one-launch record
-    of ``FUSED_OF``, which no variant and no host sequence names."""
+    of ``FUSED_OF``, which no variant and no host sequence names.  A split variant ``(128, False, True, q_split)`` runs
+    the preprocess of head dimension 128, the split main stage and the folding postprocess of its ``q_split``."""
     table = cake_jit.RECORD_OF
-    assert set(table) == set(VARIANTS)
+    assert set(table) == set(VARIANTS) | set(SPLIT_VARIANTS)
+    for variant in SPLIT_VARIANTS:
+        q_split = variant[3]
+        want = (table[(128, False, False)][0], SPLIT_MAINS[q_split], SPLIT_POSTS[q_split])
+        assert table[variant] == want, (variant, table[variant])
+    assert len({names[1] for names in table.values()}) == len(table)
     used = set()
     for variant, names in table.items():
         assert tuple(cake_jit.MODULES[name]["stage"] for name in names) == CLOSURE_STAGES, (variant, names)
@@ -459,7 +494,7 @@ def test_routing_table_names_three_records_per_variant() -> None:
         assert tuple(sequence["records"]) == tuple(table[variant]), variant
         assert tuple(sequence["arches"]) == ARCHES, variant
         assert set(sequence["records"]).isdisjoint(cake_jit.FUSED_OF.values()), variant
-    assert len({sequence["library"] for sequence in cake_jit.SEQUENCES.values()}) == len(VARIANTS)
+    assert len({sequence["library"] for sequence in cake_jit.SEQUENCES.values()}) == len(table)
 
 
 def test_no_record_is_delivered_outside_the_architectures() -> None:
@@ -483,7 +518,11 @@ def test_the_route_of_a_call() -> None:
     the least length of each table; every measured crossover call is on its decided route (``DECIDED_LEAST``), and so
     is every measured call with fewer queries than keys (``DECIDED_FEWER_QUERIES``); a longer call stays on the pair
     route; an unmeasured ``B * H`` or length is on it exactly where its measured neighbours are; a call with at least
-    as many queries as keys takes the route of ``PAIR_REGIONS`` alone."""
+    as many queries as keys takes the route of ``PAIR_REGIONS`` alone.  All on the shipped tables: a call that a piece
+    of the shipped split region holds (``qsplit_piece``, which follows the suite's rule on ``SHIPPED_QSPLIT_REGION``)
+    takes the split variant ``(128, False, True, q_split)`` of that piece instead (``test_the_split_route_of_a_call``
+    checks the split rule).  Such a call has one batch, so its key above is read on the call with ``B * H`` batches and
+    one head, which no piece holds unless ``B * H`` is 1 (then the split variant, whose ``pair`` is True)."""
     assert set(cake_jit.PAIR_REGIONS) == set(ARCHES) and set(cake_jit.PAIR_LEAST) == set(ARCHES)
     assert dict(cake_jit.PAIR_FEWER_QUERIES) == SHIPPED_PAIR_FEWER_QUERIES
     for arch, regions in cake_jit.PAIR_REGIONS.items():
@@ -498,11 +537,26 @@ def test_the_route_of_a_call() -> None:
     with pytest.raises(TypeError):  # every argument after ``causal`` is keyword-only
         cake_jit.variant(128, False, 1, 1, 256, 256, ARCHES[0])
 
+    def held(
+        arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: bool
+    ) -> tuple[int, int, int, int, int, bool] | None:
+        """The piece of the shipped split region that holds a call (``qsplit_piece``), or None."""
+        piece = cake_jit.qsplit_piece(arch, B, H, Sq, Skv, D, causal)
+        assert piece == _qsplit_piece(SHIPPED_QSPLIT_REGION[arch], B, H, Sq, Skv, D, causal), (arch, B, H, Sq, Skv, D)
+        return piece
+
     def pair(arch: str, causal: bool, count: int, Sq: int, Skv: int) -> bool:
         found = cake_jit.variant(128, causal, batch=1, heads=count, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
         swapped = cake_jit.variant(128, causal, batch=count, heads=1, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
-        assert found == swapped, (arch, causal, count, Sq, Skv)
-        return found[2]
+        piece = held(arch, 1, count, Sq, Skv, 128, causal)
+        if piece is None:
+            assert found == swapped, (arch, causal, count, Sq, Skv)
+        else:
+            # The one-batch call takes the split variant of its piece; the call of ``count`` batches and one head
+            # (which no piece holds when ``count`` is more than 1) keeps the key of its ``B * H``.
+            assert found == (128, False, True, piece[0]), (arch, causal, count, Sq, Skv, found)
+            assert count == 1 or held(arch, count, 1, Sq, Skv, 128, causal) is None, (arch, count, Sq, Skv)
+        return swapped[2]
 
     step = 2 * cake_jit.BLOCK
     # The causal calls on both sides of each bound of the long-sequence causal region of sm_103a, each on its side, and
@@ -535,7 +589,8 @@ def test_the_route_of_a_call() -> None:
                 assert not pair(arch, False, count, 128, 8192), (arch, count)
                 assert not pair(arch, False, count, 8192, 256), (arch, count)
             # Every call: the head dimension, the key-block count, Sq >= Skv and the regions decide the route, and with
-            # fewer queries than keys the mask and the bounds.
+            # fewer queries than keys the mask and the bounds; a call that the shipped split region holds takes the
+            # split variant of its piece, and the call of as many batches and one head the key of the regions.
             for D in HEAD_DIMS:
                 for count in (1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 256):
                     for blocks in range(1, 70):
@@ -552,6 +607,15 @@ def test_the_route_of_a_call() -> None:
                             else:
                                 inside = not causal and _inside_fewer_queries(bounds, count, Sq, Skv)
                             expected = (D, causal, D == 128 and blocks % 2 == 0 and inside)
+                            piece = held(arch, 1, count, Sq, Skv, D, causal)
+                            if piece is not None:
+                                assert found == (128, False, True, piece[0]), (D, causal, count, Sq, Skv, arch, found)
+                                assert found in cake_jit.RECORD_OF, found
+                                if count == 1:
+                                    continue
+                                found = cake_jit.variant(
+                                    D, causal, batch=count, heads=1, seqlen_q=Sq, seqlen_kv=Skv, arch=arch
+                                )
                             assert found == expected, (D, causal, count, Sq, Skv, arch, found)
                             assert type(found[1]) is bool and type(found[2]) is bool, found
                             assert found in cake_jit.RECORD_OF, found
@@ -1045,6 +1109,32 @@ def _inside_causal_piece(piece: tuple[int, int, int, int], B: int, H: int, Sq: i
     return Sq == Skv and least_ctas <= ctas <= most_ctas and least_s <= Sq <= most_s
 
 
+def _qsplit_piece(
+    region: tuple[tuple[int, int, int, int, int, bool], ...], B: int, H: int, Sq: int, Skv: int, D: int, causal: bool
+) -> tuple[int, int, int, int, int, bool] | None:
+    """The piece ``(q_split, least_kv, most_kv, least_q, most_q, before_fused)`` of a split region that holds a call,
+    or None: a candidate (no mask, head dimension 128, one batch, a key length that is a multiple of 256 and
+    ``Sq / 2 <= Skv <= Sq``) with ``kv = B * H * Skv / 128`` and ``Sq`` within the bounds of the piece."""
+    if causal or D != 128 or B != 1 or Skv % 256 or not Sq <= 2 * Skv or not Skv <= Sq:
+        return None
+    kv = B * H * Skv // 128
+    inside = [piece for piece in region if piece[1] <= kv <= piece[2] and piece[3] <= Sq <= piece[4]]
+    assert len(inside) <= 1, (region, B, H, Sq, Skv)
+    return inside[0] if inside else None
+
+
+def _route_name(arch: str, B: int, H: int, Sq: int, Skv: int) -> str:
+    """The route of a head-dimension 128 call without the mask on the current tables: ``fused`` (the one-launch route,
+    ``fused_record``), else by ``variant``: ``split2`` / ``split4`` (the split route of that ``q_split``), ``pair`` or
+    ``1cta``."""
+    if cake_jit.fused_record(arch, B, H, Sq, Skv, 128, False) is not None:
+        return "fused"
+    found = cake_jit.variant(128, False, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+    if len(found) == 4:
+        return f"split{found[3]}"
+    return "pair" if found[2] else "1cta"
+
+
 # The query and key lengths searched for a call that only one piece of a region holds (up to the longest ``s_max`` of
 # a shipped piece).
 PIECE_ONLY_LENGTHS = (128, 256, 512, 768, 1024, 2048, 4096, 8192)
@@ -1066,11 +1156,13 @@ def _piece_only_call(region: tuple[tuple[int, int, int, int], ...], index: int) 
 def test_the_shipped_one_launch_regions() -> None:
     """``FUSED_REGION`` is the shipped table ``SHIPPED_FUSED_REGION``, and ``fused_record`` keeps each region on both
     sides of each bound of each of its pieces: the one-launch record for a call inside any piece of the region (a call
-    one step past a bound of one piece may lie inside another piece), None for a call inside no piece; the same call
+    one step past a bound of one piece may lie inside another piece) that no piece of the shipped split region read
+    before ``FUSED_REGION`` holds (``SHIPPED_QSPLIT_REGION``), None for a call inside no piece; the same call
     with the mask takes the route of the shipped causal region (``SHIPPED_FUSED_CAUSAL_REGION``), not of
     ``FUSED_REGION``.  Every piece of a region routes a call that no other piece of the region holds.  The benchmark's
     long rows take the three-kernel routes on every architecture, and every measured long call its decided route
-    (``DECIDED_LONG_CALLS``)."""
+    (``DECIDED_LONG_CALLS``: inside ``FUSED_REGION`` exactly when decided so, and on the one-launch route unless a split
+    piece read before ``FUSED_REGION`` holds it, ``DECIDED_QSPLIT``)."""
     assert dict(cake_jit.FUSED_REGION) == SHIPPED_FUSED_REGION
     pieces = {piece for region in SHIPPED_FUSED_REGION.values() for piece in region}
     assert set(SHIPPED_FUSED_CALLS) == pieces, sorted(set(SHIPPED_FUSED_CALLS) ^ pieces)
@@ -1080,6 +1172,8 @@ def test_the_shipped_one_launch_regions() -> None:
             for (B, H, Sq, Skv), inside in SHIPPED_FUSED_CALLS[piece]:
                 assert _inside_piece(piece, B, H, Sq, Skv) == inside, (piece, B, H, Sq, Skv)
                 routed = any(_inside_piece(other, B, H, Sq, Skv) for other in region)
+                ahead = _qsplit_piece(SHIPPED_QSPLIT_REGION[arch], B, H, Sq, Skv, D, False)
+                routed = routed and (ahead is None or not ahead[5])
                 found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
                 assert found == (FUSED_OF[(D, False)] if routed else None), (arch, D, piece, B, H, Sq, Skv, found)
                 causal = Sq == Skv and any(_inside_causal_piece(other, B, H, Sq, Skv) for other in causal_region)
@@ -1095,8 +1189,11 @@ def test_the_shipped_one_launch_regions() -> None:
         for B, H, D, causal in LONG_ROWS:
             assert cake_jit.fused_record(arch, B, H, 8192, 8192, D, causal) is None, (arch, B, H, D, causal)
         for (B, H, Sq, Skv), routed in DECIDED_LONG_CALLS:
+            inside = any(_inside_piece(piece, B, H, Sq, Skv) for piece in SHIPPED_FUSED_REGION[(arch, 128)])
+            assert inside == routed, (arch, B, H, Sq, Skv)
+            split = DECIDED_QSPLIT[arch][(B, H, Sq, Skv)][1] in ("split2", "split4")
             found = cake_jit.fused_record(arch, B, H, Sq, Skv, 128, False)
-            assert found == (FUSED_OF[(128, False)] if routed else None), (arch, B, H, Sq, Skv, found)
+            assert found == (FUSED_OF[(128, False)] if routed and not split else None), (arch, B, H, Sq, Skv, found)
 
 
 # Causal calls on both sides of each bound of the causal region of one piece (least_ctas, most_ctas, least_s, most_s) =
@@ -1370,7 +1467,8 @@ def test_the_shipped_causal_one_launch_regions() -> None:
     causal region on both sides of each bound of each of its pieces: the causal one-launch record for a causal call
     inside any piece of the region (a call one step past a bound of one piece may lie inside another piece), None for a
     causal call inside no piece and for a causal call with fewer or more keys than queries; the same calls without the
-    mask take the route of ``FUSED_REGION`` alone.  Every piece of a causal region routes a call that no other piece of
+    mask take the route of ``FUSED_REGION`` alone, unless a split piece read before ``FUSED_REGION`` holds them
+    (``SHIPPED_QSPLIT_REGION``).  Every piece of a causal region routes a call that no other piece of
     the region holds.  Every measured causal call is on its decided route (``DECIDED_CAUSAL_FUSED`` and
     ``DECIDED_CAUSAL_CALLS``), and the benchmark's long causal rows take the three-kernel routes."""
     assert dict(cake_jit.FUSED_CAUSAL_REGION) == SHIPPED_FUSED_CAUSAL_REGION
@@ -1385,6 +1483,8 @@ def test_the_shipped_causal_one_launch_regions() -> None:
                 found = cake_jit.fused_record(arch, B, H, S, S, D, True)
                 assert found == (record if routed else None), (arch, D, piece, B, H, S, found)
                 without = any(_inside_piece(other, B, H, S, S) for other in SHIPPED_FUSED_REGION[(arch, D)])
+                ahead = _qsplit_piece(SHIPPED_QSPLIT_REGION[arch], B, H, S, S, D, False)
+                without = without and (ahead is None or not ahead[5])
                 found = cake_jit.fused_record(arch, B, H, S, S, D, False)
                 assert found == (FUSED_OF[(D, False)] if without else None), (arch, D, B, H, S, found)
                 # The mask needs Sq == Skv: one key block fewer or more is never on the causal one-launch route.
@@ -1411,6 +1511,279 @@ def test_the_shipped_causal_one_launch_regions() -> None:
         for B, H, D, causal in LONG_ROWS:
             if causal:
                 assert cake_jit.fused_record(arch, B, H, 8192, 8192, D, True) is None, (arch, B, H, D)
+
+
+# The shipped split region of each architecture: its pieces ``(q_split, least_kv, most_kv, least_q, most_q,
+# before_fused)``.  ``QSPLIT_REGION`` must be this table.
+SHIPPED_QSPLIT_REGION = {
+    "sm_100a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
+    "sm_103a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
+    "sm_107a": (
+        (4, 1, 32, 4096, 8192, True),
+        (2, 33, 64, 4096, 16384, True),
+        (4, 65, 256, 16384, 16384, True),
+        (2, 257, 512, 16384, 16384, True),
+    ),
+}
+# Calls of one batch at head dimension 128 without the mask on both sides of each bound of each shipped split piece,
+# as ((B, H, Sq, Skv), the q_split of the piece that holds the call, or 0 for none).  ``kv = H * Skv / 128`` is even
+# (the key length is a multiple of 256), so a bound at an odd ``kv`` is probed at the nearest even one; a candidate
+# with ``Sq >= 4096`` has ``kv >= 16`` (the keys are at least half the queries); a query bound is probed 128 queries
+# past it.  On ``sm_100a`` and ``sm_103a``: the third piece (4096 queries) is read after ``FUSED_REGION``, which holds
+# 36 and 64 key blocks at two heads first.
+_SM100_QSPLIT_CALLS = (
+    ((1, 1, 8192, 4096), 4),
+    ((1, 1, 8064, 4096), 0),
+    ((1, 1, 8192, 4352), 2),
+    ((1, 1, 8320, 4352), 2),
+    ((1, 1, 8192, 8192), 2),
+    ((1, 2, 8192, 4096), 2),
+    ((1, 1, 16384, 8192), 2),
+    ((1, 1, 8448, 8448), 0),
+    ((1, 1, 16384, 8448), 0),
+    ((1, 2, 8064, 4096), 0),
+    ((1, 1, 16512, 8448), 0),
+    ((1, 1, 4096, 4096), 0),
+    ((1, 2, 4096, 2048), 0),
+    ((1, 2, 4096, 2304), 2),
+    ((1, 3, 4096, 2048), 2),
+    ((1, 4, 4096, 2048), 2),
+    ((1, 2, 4096, 4096), 2),
+    ((1, 3, 4096, 2816), 0),
+    ((1, 3, 3968, 2048), 0),
+    ((1, 3, 4224, 2304), 0),
+)
+SHIPPED_QSPLIT_CALLS = {
+    "sm_100a": _SM100_QSPLIT_CALLS,
+    "sm_103a": _SM100_QSPLIT_CALLS,
+    "sm_107a": (
+        ((1, 1, 4096, 2048), 4),
+        ((1, 1, 3968, 2048), 0),
+        ((1, 1, 4096, 4096), 4),
+        ((1, 2, 4096, 2048), 4),
+        ((1, 1, 8192, 4096), 4),
+        ((1, 1, 8064, 4096), 4),
+        ((1, 2, 4096, 2304), 2),
+        ((1, 1, 8192, 4352), 2),
+        ((1, 1, 8320, 4352), 2),
+        ((1, 3, 4096, 2048), 2),
+        ((1, 1, 8192, 8192), 2),
+        ((1, 2, 4096, 4096), 2),
+        ((1, 4, 4096, 2048), 2),
+        ((1, 1, 16384, 8192), 2),
+        ((1, 3, 3968, 2048), 0),
+        ((1, 3, 4096, 2816), 0),
+        ((1, 1, 8448, 8448), 0),
+        ((1, 1, 16512, 8448), 0),
+        ((1, 1, 16384, 8448), 4),
+        ((1, 1, 16384, 16384), 4),
+        ((1, 2, 16384, 16384), 4),
+        ((1, 4, 16384, 8192), 4),
+        ((1, 2, 16256, 16128), 0),
+        ((1, 2, 16512, 16384), 0),
+        ((1, 3, 16384, 11008), 2),
+        ((1, 4, 16384, 16384), 2),
+        ((1, 8, 16384, 8192), 2),
+        ((1, 6, 16384, 11008), 0),
+        ((1, 4, 16256, 16128), 0),
+        ((1, 4, 16512, 16384), 0),
+    ),
+}
+# Calls that are not candidates for the split on any architecture, as (B, H, Sq, Skv, D, causal), each one condition
+# away from a call inside a piece: two batches, head dimension 64, the mask, a key length that is not a multiple of
+# 256, 256 keys below half the queries and 256 keys above the queries.
+REFUSED_QSPLIT_CALLS = (
+    (2, 1, 8192, 4096, 128, False),
+    (2, 1, 4096, 4096, 128, False),
+    (2, 2, 16384, 16384, 128, False),
+    (1, 1, 8192, 4096, 64, False),
+    (1, 2, 4096, 4096, 64, False),
+    (1, 1, 8192, 8192, 128, True),
+    (1, 2, 16384, 16384, 128, True),
+    (1, 1, 8192, 4224, 128, False),
+    (1, 1, 8192, 3840, 128, False),
+    (1, 4, 4096, 1792, 128, False),
+    (1, 8, 16384, 7936, 128, False),
+    (1, 1, 8192, 8448, 128, False),
+    (1, 4, 16384, 16640, 128, False),
+)
+# The decided route of every measured call of the split's measurement (one batch, head dimension 128, no mask; one,
+# two, four and eight heads; 4096, 8192 and 16384 queries against as many keys and against half as many), as (B, H,
+# Sq, Skv) -> (its route without the split, the route of 0.1.11; its decided route), each ``fused``, ``pair``,
+# ``1cta``, ``split2`` or ``split4``.  This is the decision taken from the measurement, not a measurement: a call takes
+# the split where the split was faster than its route without it in every counted round of both replicate runs of the
+# CUDA-graph timing, per call and per kernel, beyond the identical-kernel controls' noise, and not slower beyond that
+# noise in eager calls.  On ``sm_100a`` and ``sm_103a`` the one-launch calls of 4096 queries were slower with the split
+# in eager calls and keep the one-launch route.  ``QSPLIT_REGION`` must reproduce it.
+_SM100_GRID = {
+    (1, 1, 4096, 4096): ("fused", "fused"),
+    (1, 1, 4096, 2048): ("fused", "fused"),
+    (1, 1, 8192, 8192): ("fused", "split2"),
+    (1, 1, 8192, 4096): ("fused", "split4"),
+    (1, 1, 16384, 16384): ("pair", "pair"),
+    (1, 1, 16384, 8192): ("pair", "split2"),
+    (1, 2, 4096, 4096): ("fused", "fused"),
+    (1, 2, 4096, 2048): ("fused", "fused"),
+    (1, 2, 16384, 16384): ("pair", "pair"),
+    (1, 2, 16384, 8192): ("pair", "pair"),
+    (1, 4, 8192, 8192): ("pair", "pair"),
+    (1, 4, 16384, 16384): ("pair", "pair"),
+    (1, 4, 16384, 8192): ("pair", "pair"),
+    (1, 8, 4096, 4096): ("1cta", "1cta"),
+    (1, 8, 4096, 2048): ("1cta", "1cta"),
+    (1, 8, 8192, 4096): ("1cta", "1cta"),
+}
+DECIDED_QSPLIT = {
+    "sm_100a": {
+        **_SM100_GRID,
+        (1, 2, 8192, 8192): ("pair", "pair"),
+        (1, 2, 8192, 4096): ("1cta", "split2"),
+        (1, 4, 4096, 4096): ("1cta", "1cta"),
+        (1, 4, 4096, 2048): ("1cta", "split2"),
+        (1, 4, 8192, 4096): ("1cta", "1cta"),
+        (1, 8, 8192, 8192): ("1cta", "1cta"),
+        (1, 8, 16384, 16384): ("1cta", "1cta"),
+        (1, 8, 16384, 8192): ("1cta", "1cta"),
+    },
+    "sm_103a": {
+        **_SM100_GRID,
+        (1, 2, 8192, 8192): ("pair", "pair"),
+        (1, 2, 8192, 4096): ("pair", "split2"),
+        (1, 4, 4096, 4096): ("pair", "pair"),
+        (1, 4, 4096, 2048): ("pair", "split2"),
+        (1, 4, 8192, 4096): ("pair", "pair"),
+        (1, 8, 8192, 8192): ("pair", "pair"),
+        (1, 8, 16384, 16384): ("pair", "pair"),
+        (1, 8, 16384, 8192): ("pair", "pair"),
+    },
+    "sm_107a": {
+        (1, 1, 4096, 4096): ("fused", "split4"),
+        (1, 1, 4096, 2048): ("fused", "split4"),
+        (1, 1, 8192, 8192): ("fused", "split2"),
+        (1, 1, 8192, 4096): ("fused", "split4"),
+        (1, 1, 16384, 16384): ("pair", "split4"),
+        (1, 1, 16384, 8192): ("pair", "split2"),
+        (1, 2, 4096, 4096): ("fused", "split2"),
+        (1, 2, 4096, 2048): ("fused", "split4"),
+        (1, 2, 8192, 8192): ("pair", "pair"),
+        (1, 2, 8192, 4096): ("pair", "split2"),
+        (1, 2, 16384, 16384): ("pair", "split4"),
+        (1, 2, 16384, 8192): ("pair", "split4"),
+        (1, 4, 4096, 4096): ("pair", "pair"),
+        (1, 4, 4096, 2048): ("pair", "split2"),
+        (1, 4, 8192, 8192): ("pair", "pair"),
+        (1, 4, 8192, 4096): ("pair", "pair"),
+        (1, 4, 16384, 16384): ("pair", "split2"),
+        (1, 4, 16384, 8192): ("pair", "split4"),
+        (1, 8, 4096, 4096): ("pair", "pair"),
+        (1, 8, 4096, 2048): ("1cta", "1cta"),
+        (1, 8, 8192, 8192): ("pair", "pair"),
+        (1, 8, 8192, 4096): ("pair", "pair"),
+        (1, 8, 16384, 16384): ("pair", "pair"),
+        (1, 8, 16384, 8192): ("pair", "split2"),
+    },
+}
+
+
+def test_the_split_route_of_a_call(monkeypatch) -> None:
+    """``qsplit_piece(arch, B, H, Sq, Skv, D, causal)`` is the piece of ``QSPLIT_REGION[arch]`` that holds a call by
+    the suite's own rule (``_qsplit_piece``), or None.  ``variant`` gives a call inside a piece the split variant
+    ``(128, False, True, q_split)`` of the piece and every other call the key it has without the split
+    (``QSPLIT_REGION`` emptied); ``fused_record`` gives a call inside a piece read before ``FUSED_REGION`` no record
+    and every other call the record it has without the split.  Checked on the shipped region of every architecture
+    over a grid of calls (3968 to 16896 queries against 256 keys below half of them up to 256 keys above them; one to
+    eight heads; two batches, head dimension 64 and the mask beside them).  An architecture outside ``QSPLIT_REGION``
+    keeps every route of the tables without the split; ``qsplit_piece`` holds no call there."""
+    shipped = dict(cake_jit.QSPLIT_REGION)
+    calls = []
+    for Sq in range(3968, 16897, 128):
+        for Skv in range((Sq // 256 - 2) * 128, Sq + 257, 128):
+            for H in (1, 2, 3, 4, 6, 8):
+                calls.append((1, H, Sq, Skv, 128, False))
+                if H <= 2:
+                    calls += [(2, H, Sq, Skv, 128, False), (1, H, Sq, Skv, 64, False)]
+                if Sq == Skv:
+                    calls.append((1, H, Sq, Skv, 128, True))
+
+    def routes(arch: str) -> dict:
+        """Each call -> (its ``variant`` key, its ``fused_record``) on ``arch`` with the current tables."""
+        return {
+            (B, H, Sq, Skv, D, causal): (
+                cake_jit.variant(D, causal, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch),
+                cake_jit.fused_record(arch, B, H, Sq, Skv, D, causal),
+            )
+            for B, H, Sq, Skv, D, causal in calls
+        }
+
+    monkeypatch.setattr(cake_jit, "QSPLIT_REGION", {})
+    without = {arch: routes(arch) for arch in ARCHES}
+    monkeypatch.setattr(cake_jit, "QSPLIT_REGION", shipped)
+    for arch in ARCHES:
+        held = 0
+        for call, (found, record) in routes(arch).items():
+            piece = _qsplit_piece(shipped[arch], *call)
+            assert cake_jit.qsplit_piece(arch, *call) == piece, (arch, call)
+            want_found, want_record = without[arch][call]
+            if piece is None:
+                assert (found, record) == (want_found, want_record), (arch, call, found, record)
+                continue
+            held += 1
+            assert found == (128, False, True, piece[0]) and found in cake_jit.RECORD_OF, (arch, call, found)
+            assert [type(n) for n in found] == [int, bool, bool, int], found
+            assert record == (None if piece[5] else want_record), (arch, call, record)
+        assert held > 0, arch
+    monkeypatch.setattr(cake_jit, "QSPLIT_REGION", {arch: p for arch, p in shipped.items() if arch != "sm_107a"})
+    assert routes("sm_107a") == without["sm_107a"]
+    assert cake_jit.qsplit_piece("sm_90a", 1, 1, 8192, 4096, 128, False) is None
+    assert cake_jit.fused_record("sm_90a", 1, 1, 8192, 4096, 128, False) is None
+    with pytest.raises(KeyError):
+        cake_jit.variant(128, False, batch=1, heads=1, seqlen_q=8192, seqlen_kv=4096, arch="sm_90a")
+
+
+def test_the_shipped_split_regions(monkeypatch) -> None:
+    """``QSPLIT_REGION`` is the shipped table ``SHIPPED_QSPLIT_REGION``: on each architecture pieces of a shipped
+    ``q_split`` that do not overlap, each holding calls whose FP32 partials have fewer than 2^31 elements (the split
+    main grid's z extent ``B * q_split`` is at most 4).  Each call of ``SHIPPED_QSPLIT_CALLS`` (both sides of each bound
+    of each piece) is inside the piece of its ``q_split`` or inside none, and takes the route that follows: the split
+    variant of the piece, no one-launch record inside a piece read before ``FUSED_REGION`` and otherwise the record of
+    ``FUSED_REGION``.  No call of ``REFUSED_QSPLIT_CALLS`` takes the split.  Every measured call of ``DECIDED_QSPLIT``
+    takes its decided route, and with ``QSPLIT_REGION`` emptied its route of 0.1.11; a call whose decided route is not
+    a split keeps that route."""
+    assert dict(cake_jit.QSPLIT_REGION) == SHIPPED_QSPLIT_REGION
+    assert set(SHIPPED_QSPLIT_CALLS) == set(DECIDED_QSPLIT) == set(ARCHES)
+    for arch, region in SHIPPED_QSPLIT_REGION.items():
+        for at, piece in enumerate(region):
+            q_split, least_kv, most_kv, least_q, most_q, before = piece
+            assert (128, False, True, q_split) in SPLIT_VARIANTS and type(before) is bool, (arch, piece)
+            assert 1 <= least_kv <= most_kv and least_q <= most_q, (arch, piece)
+            # The largest call of the piece: one batch, most_kv key blocks of all heads; each partial holds q_split
+            # times the elements of k.
+            assert q_split * most_kv * 128 * 128 < 2**31, (arch, piece)
+            for other in region[at + 1 :]:
+                apart = most_kv < other[1] or other[2] < least_kv or most_q < other[3] or other[4] < least_q
+                assert apart, (arch, piece, other)
+        fused_region = SHIPPED_FUSED_REGION[(arch, 128)]
+        for (B, H, Sq, Skv), q_split in SHIPPED_QSPLIT_CALLS[arch]:
+            piece = _qsplit_piece(region, B, H, Sq, Skv, 128, False)
+            assert (piece[0] if piece else 0) == q_split, (arch, B, H, Sq, Skv, piece)
+            assert cake_jit.qsplit_piece(arch, B, H, Sq, Skv, 128, False) == piece, (arch, B, H, Sq, Skv)
+            found = cake_jit.variant(128, False, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+            assert (found[3] if len(found) == 4 else 0) == q_split, (arch, B, H, Sq, Skv, found)
+            routed = any(_inside_piece(p, B, H, Sq, Skv) for p in fused_region) and not (piece and piece[5])
+            found = cake_jit.fused_record(arch, B, H, Sq, Skv, 128, False)
+            assert found == (FUSED_OF[(128, False)] if routed else None), (arch, B, H, Sq, Skv, found)
+        for B, H, Sq, Skv, D, causal in REFUSED_QSPLIT_CALLS:
+            assert _qsplit_piece(region, B, H, Sq, Skv, D, causal) is None, (arch, B, H, Sq, Skv, D, causal)
+            assert cake_jit.qsplit_piece(arch, B, H, Sq, Skv, D, causal) is None, (arch, B, H, Sq, Skv, D, causal)
+            found = cake_jit.variant(D, causal, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+            assert len(found) == 3, (arch, B, H, Sq, Skv, D, causal, found)
+        for call, (_, now) in DECIDED_QSPLIT[arch].items():
+            assert _route_name(arch, *call) == now, (arch, call)
+    monkeypatch.setattr(cake_jit, "QSPLIT_REGION", {})
+    for arch in ARCHES:
+        for call, (before, now) in DECIDED_QSPLIT[arch].items():
+            assert _route_name(arch, *call) == before, (arch, call)
+            assert now == before or now in ("split2", "split4"), (arch, call)
 
 
 def test_the_accumulator_layouts() -> None:
@@ -1972,6 +2345,72 @@ def test_the_causal_one_launch_backward_matches_the_reference(D, case, device, m
     judge_draws(record_property, draw)
 
 
+# The backward's calls on the split route on the shipped tables (no pin): one head of 8192 queries against 4096 keys
+# (``q_split`` 4 on every architecture) and against 8192 keys (``q_split`` 2 on every architecture), inside a piece read
+# before ``FUSED_REGION``; each through the host sequence's ``run`` and through its ``run_with_workspace`` (``run``
+# returning False: the workspace and the FP32 partials from Python).
+QSPLIT_CASES = ((Case(1, 1, 8192, 4096), 4), (Case(1, 1, 8192, 8192), 2))
+QSPLIT_PARAMS = [
+    pytest.param(case, q_split, path, id=f"d128_split{q_split}-{case.id}-{path}")
+    for case, q_split in QSPLIT_CASES
+    for path in ("run", "run_with_workspace")
+]
+
+
+@pytest.mark.parametrize(("case", "q_split", "path"), QSPLIT_PARAMS)
+def test_the_split_backward_matches_the_reference(
+    case, q_split, path, device, monkeypatch, tmp_path, record_property
+) -> None:
+    """A head-dimension 128 call without the mask inside a split piece of the device's architecture, on the shipped
+    tables: ``variant`` gives it the split variant ``(128, False, True, q_split)`` and ``fused_record`` no one-launch
+    record; the backward makes one host sequence call, ``run`` or (when ``run`` returns False) ``run_with_workspace``
+    with the partials it allocates, launches the three records of that variant in order and no other kernel (observed
+    on the device), writes none of its inputs, and its ``dq``, ``dk`` and ``dv`` hold the contract and meet the tier
+    of the backward formula on the same inputs."""
+    arch = cake_backend.device_arch(device.index)
+    piece = _qsplit_piece(SHIPPED_QSPLIT_REGION[arch], case.B, case.H, case.S, case.kv, 128, False)
+    assert piece is not None and piece[0] == q_split and piece[5], (arch, piece)
+    variant = cake_jit.variant(128, False, batch=case.B, heads=case.H, seqlen_q=case.S, seqlen_kv=case.kv, arch=arch)
+    assert variant == (128, False, True, q_split), (arch, variant)
+    assert cake_jit.fused_record(arch, case.B, case.H, case.S, case.kv, 128, False) is None, arch
+    found = cake_backend._sequence(variant, arch)
+    assert found is not None, "every split variant ships a host sequence"
+    library, run, run_with_workspace = found
+    calls = []
+
+    def without_allocator(*args):
+        calls.append(len(args))
+        return False
+
+    replacement = (library, run if path == "run" else without_allocator, run_with_workspace)
+    sequences = []
+    monkeypatch.setattr(cake_backend, "_sequence", lambda *key: sequences.append(key) or replacement)
+    launches = _count_fused_launches(monkeypatch)
+    x = make_inputs(case, 128, causal=False, seed=11, device=device)
+    inputs = (x.q, x.k, x.v, x.out, x.lse, x.dout)
+    before = [t.clone() for t in inputs]
+
+    def call():
+        return cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=False)
+
+    (dq, dk, dv), launched = _launched(call, device, tmp_path / "trace.json")
+    assert sequences == [(variant, arch)], sequences
+    assert launches == [] and calls == ([] if path == "run" else [11]), (launches, calls)
+    assert_backward_contract(path, x, {"dq": dq, "dk": dk, "dv": dv})
+    for name, old, new in zip(("q", "k", "v", "out", "lse", "dout"), before, inputs, strict=True):
+        assert torch.equal(old, new), f"the backward wrote its input {name}"
+
+    def draw(seed: int):
+        y = make_inputs(case, 128, causal=False, seed=seed, device=device)
+        got = cake_backend.cake_fmha_nondet_train_backward(
+            y.q, y.k, y.v, y.out, y.lse, y.dout, softmax_scale=y.softmax_scale, causal=False
+        )
+        return judged_backward(y, {path: dict(zip(("dq", "dk", "dv"), got, strict=True))})
+
+    judge_draws(record_property, draw)
+    _assert_launched(launched, variant)
+
+
 def _kernels(call, trace: Path) -> tuple[object, list[str]]:
     """``(result, names)``: ``call()``'s result and the names of the CUDA kernels it ran, in launch order, observed on
     the device (``torch.profiler``; the trace is written to ``trace``)."""
@@ -2003,7 +2442,7 @@ def _launched(call, device: torch.device, trace: Path) -> tuple[object, list[tup
 
 
 def _assert_launched(
-    launched: list[tuple[str, str]] | None, variant: tuple[int, bool, bool], record: str | None = None
+    launched: list[tuple[str, str]] | None, variant: tuple[int, ...], record: str | None = None
 ) -> None:
     """The kernels observed are those of the route of the call, in order, and no other: the one-launch ``record``
     alone when ``fused_record`` gave one, else the three records of ``variant`` (a ``RECORD_OF`` key).  Called after

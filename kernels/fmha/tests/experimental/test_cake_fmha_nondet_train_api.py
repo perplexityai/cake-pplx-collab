@@ -97,7 +97,8 @@ def _pin_route(monkeypatch, pair: bool) -> None:
     """Every call in a pair region of every architecture and mask (``pair`` True: the pair route wherever the head
     dimension, the key length and ``Sq >= Skv`` allow it) or in none (False: ``variant`` gives every call the 1-CTA
     route); with True and with False ``PAIR_FEWER_QUERIES`` holds no bounds on any architecture (no call with fewer
-    queries than keys on the pair route).  The shipped regions and bounds hold long sequences only."""
+    queries than keys on the pair route) and ``QSPLIT_REGION`` no piece (no call on the split route).  The shipped
+    regions and bounds hold long sequences only."""
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
     regions = ((1, None, 2 * cake_jit.BLOCK),) if pair else ()
@@ -106,6 +107,7 @@ def _pin_route(monkeypatch, pair: bool) -> None:
         monkeypatch.setitem(cake_jit.PAIR_REGIONS, arch, {False: regions, True: regions})
         monkeypatch.setitem(cake_jit.PAIR_LEAST, arch, {False: least, True: least})
         monkeypatch.setitem(cake_jit.PAIR_FEWER_QUERIES, arch, None)
+    monkeypatch.setattr(cake_jit, "QSPLIT_REGION", {})
 
 
 def _assert_route(device: torch.device, case: Case, pair: bool, causal: bool = False) -> None:
