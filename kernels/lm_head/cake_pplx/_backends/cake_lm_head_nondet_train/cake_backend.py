@@ -400,11 +400,11 @@ _SMALL_T_KEEP = {"on": True}
 # 1124.2 us, so longer loss calls keep their rows); B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability
 # forward + backward 1.095 -> 1.213).  A loss call staged at 256 rows holds its deferred weight gradient's BF16
 # ``[256, V]`` ``dz`` rows from the forward to the backward (79 MB at V = 154880, where a 16-row call holds 5 MB; R200
-# step peak +82.5 MB at T = 2 to 16), and the first forward of a call staged at 256 rows measured a peak of 1.88 GiB at
-# H = 6144, V = 154880 (B200 and R200; 0.10 GiB on later calls, 0.02 GiB at 16 staged rows; 0.3.4 staged at 256 rows
-# measured the same).  The loss entry's ``loss`` and ``dW`` group their sums over the staged rows, so a padded loss
-# call's bits may differ from the call at 16 rows (both are judged against the naive tier).  :func:`set_small_pad_rows` replaces the defaults with one
-# row count for every entry (0 = off).
+# step peak +82.5 MB at T = 2 to 16); the first forward of a call (a binding-cache miss) prepares the binding's
+# template without a ``[V, H]`` weight-gradient output (:func:`prepare_lm_head_loss`).  The loss entry's ``loss`` and
+# ``dW`` group their sums over the staged rows, so a padded loss call's bits may differ from the call at 16 rows (both
+# are judged against the naive tier).  :func:`set_small_pad_rows` replaces the defaults with one row count for every
+# entry (0 = off).
 # The loss entry's pad applies to the calls the one-pass cross-entropy does not take (:func:`one_pass_rows`; by default
 # a T = 1 cross-entropy call at ``ONE_PASS_HIDDEN`` runs one-pass and is not staged; the loss figures above are of the
 # staged call).
@@ -8286,7 +8286,9 @@ def prepare_lm_head_loss(
     runner only templates a remembered binding (:meth:`_Binding.from_runner`),
     which launches with per-call buffers and the device's constant cells
     (:func:`_device_constants`); it binds those cells too, rather than filling
-    cells of its own.
+    cells of its own.  A template-only runner that binds no backward launch
+    (the loss entry's) has no ``dx_out`` / ``dw_out``: no launch of it binds
+    them.
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
@@ -8533,21 +8535,29 @@ def prepare_lm_head_loss(
         if plan.dcnt:
             _check_output(dcnt, "dcnt", (plan.num_chunks,), torch.int32)
             t["dcnt"] = dcnt
+    # The backward launches this runner binds; a template-only runner of the loss entry binds none
+    # (:func:`_runner_backward_keys`), and no forward launch writes the casts' outputs (:func:`forward_keys`: the last
+    # chunk's fused cast, too, runs in the backward), so such a template allocates neither ``dx_out`` nor ``dw_out``: a
+    # ``[V, H]`` ``dw_out`` for it is a transient of the weight's size on every call that misses the binding cache (the
+    # call's backward casts into its own outputs, :func:`finalize_dx` / :func:`dw_cast`).
+    bwd = _runner_backward_keys(plan, _template_only)
+    cast_outputs = bool(bwd) or not _template_only
     if plan.need_dx:
         t["dx_acc"] = output(dx_acc, "dx_acc", (rows_loop, H), torch.float32)
-        if plan.dx_cast:
+        if plan.dx_cast and cast_outputs:
             t["dx_out"] = output(dx_out, "dx_out", (rows_loop, H), torch.bfloat16)
     if plan.need_dw:
         if plan.dw_acc_needed:
             t["dw_acc"] = output(dw_acc, "dw_acc", (V, H), torch.float32)
-        t["dw_out"] = output(
-            dw_out,
-            "dw_out",
-            (V, H),
-            torch.float32
-            if plan.dw_cast_stage in ("scale_cast_f32", "gemm_dw_cast_f32")
-            else torch.bfloat16,
-        )
+        if cast_outputs:
+            t["dw_out"] = output(
+                dw_out,
+                "dw_out",
+                (V, H),
+                torch.float32
+                if plan.dw_cast_stage in ("scale_cast_f32", "gemm_dw_cast_f32")
+                else torch.bfloat16,
+            )
     if layout.get("workspace"):
         t["workspace"] = _carve(
             flat, layout, "workspace", torch.uint8, (layout["workspace"][1],)
@@ -8562,7 +8572,6 @@ def prepare_lm_head_loss(
         )
 
     fwd = forward_keys(plan)
-    bwd = _runner_backward_keys(plan, _template_only)
     seq = tuple(fwd) + tuple(bwd)
     if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
         # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a

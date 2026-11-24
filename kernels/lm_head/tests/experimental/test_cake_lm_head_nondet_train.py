@@ -13405,6 +13405,49 @@ def test_device_loss_binding_binds_no_cast_launch(
     _assert_same_bits(new, old)
 
 
+@pytest.mark.parametrize("T", [16, 256])
+def test_device_template_loss_runner_has_no_cast_output(glm_weight, monkeypatch, T):
+    """The template-only runner a loss forward prepares on a binding-cache miss (``forward_loss``, one chunk) holds no
+    ``dx_out`` / ``dw_out`` -- the call's backward casts into its own outputs --, the miss's forward peak stays below
+    one ``[V, H]`` BF16 tensor (the weight-gradient output the template no longer allocates), and the step's loss,
+    logp, dX and dW are bitwise those of the next step, which finds the remembered binding."""
+    _require_program(entry="loss")
+    inp = _device_inputs(T, W=glm_weight)
+    V, H = (int(n) for n in inp.W.shape)
+    kw = dict(loss_div=inp.loss_div, chunk_size=4096, backend="cake")
+    real = cake_backend.prepare_lm_head_loss
+    runners: list = []
+
+    def recording(*args, **kwargs):
+        runners.append((real(*args, **kwargs), kwargs.get("_template_only", False)))
+        return runners[-1][0]
+
+    def step():
+        fr = cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated() - base
+        dx, dw = fr.backward(None)
+        torch.cuda.synchronize()
+        return peak, dict(loss=fr.loss, logp=fr.logp, dX=dx, dW=dw)
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_loss", recording)
+    with _cache(True) as cache:
+        cache.clear()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        peak, first = step()
+        assert [flag for _, flag in runners] == [True], runners
+        template = runners[0][0].tensors
+        runners.clear()
+        assert "dx_acc" in template, sorted(template)
+        assert "dx_out" not in template and "dw_out" not in template, sorted(template)
+        assert peak < V * H * 2, (peak, V * H * 2)
+        _, second = step()
+        assert runners == [], runners  # the remembered binding
+        _assert_same_bits(first, second)
+
+
 @pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
 def test_device_scatter_fold_form_serves_every_valid_row_count(monkeypatch, module):
     """The compact dX scatter cast with a label residual fold binds one eager form for an output of ``num_rows`` rows,
@@ -18781,6 +18824,62 @@ def test_template_only_loss_runner_never_launches():
     for launch in (runner.forward, runner.backward, runner.step):
         with pytest.raises(RuntimeError, match="never launches"):
             launch()
+
+
+_NO_CAST_CASES = [  # (T, C, objective, fused weight-gradient cast, compacted, dX, dW): 1 / 2 / 3 chunks
+    (10, 16, "ce", True, True, True, True),
+    (10, 16, "ce", False, True, True, True),
+    (20, 16, "ce", True, True, True, True),
+    (37, 16, "ce", True, True, True, True),
+    (37, 16, "ce", False, False, True, True),
+    (37, 16, "policy", True, True, True, True),
+    (20, 16, "policy", False, False, True, True),
+    (37, 16, "ce", True, True, True, False),
+    (37, 16, "ce", True, True, False, True),
+    (10, 16, "ce", True, False, False, True),
+]
+
+
+@pytest.mark.parametrize(
+    "T, C, objective, fuse, compact, need_dx, need_dw", _NO_CAST_CASES
+)
+def test_loss_forward_binds_no_cast_output(
+    T, C, objective, fuse, compact, need_dx, need_dw
+):
+    """No launch of a loss forward binds the casts' outputs: for loss plans of one, two and three chunks, the fused and
+    the unfused weight-gradient cast, compacted and not, cross-entropy and policy, dX and dW, dX only and dW only (the
+    reference runner's own tensors), the host values of every forward key (``forward_keys``; ``stage_values`` and the
+    remembered binding's ``_slot_values``, read-recorded) read neither ``dx_out`` nor ``dw_out``, and a template-only
+    runner of the loss entry binds no backward key (``_runner_backward_keys``).  So the template the eager loss
+    forward prepares on a binding-cache miss allocates neither (``prepare_lm_head_loss``), while a runner that
+    launches keeps both."""
+    inp = _host_inputs(T, objective, ignore_frac=0.25)
+    kw = dict(
+        chunk_size=C,
+        backend="reference",
+        compact_rows=compact,
+        fuse_dw_cast=fuse,
+        need_dx=need_dx,
+        need_dw=need_dw,
+    )
+    if objective == "ce":
+        kw.update(loss_div=inp.loss_div)
+    else:
+        kw.update(
+            objective="policy", infer_logp=inp.infer_logp, loss_weights=inp.loss_weights
+        )
+    runner = cake_backend.prepare_lm_head_loss(inp.X, inp.W, inp.labels, **kw)
+    plan, t = runner.plan, runner.tensors
+    case = (T, C, objective, fuse, compact, need_dx, need_dw)
+    assert ("dx_out" in t) is need_dx and ("dw_out" in t) is need_dw, case
+    assert cake_backend._runner_backward_keys(plan, True) == (), case
+    keys = cake_backend.forward_keys(plan)
+    assert keys, case
+    for key in keys:
+        for form in (cake_backend.stage_values, cake_backend._slot_values):
+            recorder = cake_backend._ReadRecorder(t)
+            form(key[0], recorder, plan, key[1])
+            assert not recorder.read & {"dx_out", "dw_out"}, (case, key, form.__name__)
 
 
 def test_eager_form_slots_the_fold_rows(monkeypatch):
