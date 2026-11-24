@@ -979,16 +979,20 @@ def test_forward_route_follows_the_layout(layout, T, route, launches):
     them), and on an architecture with a cut of the forward of packed rows
     (``FWD_PACKED_ROWS_PER_SM``) packed rows past it run ``fwd`` (``T``
     "packed_cut": the most tokens within it, "packed_past": the fewest past
-    it).  Each gives the bits of its rows as contiguous tensors."""
+    it); an architecture without a cut runs the forward of packed rows at
+    those token counts of the table's largest cut.  Each gives the bits of
+    its rows as contiguous tensors."""
     arch, _ = _packed_route()
     _, sms = _device()
     H = 48
     if T == "past":
         T = max(2, _tiny_rows(arch, sms) // H + 1)
     elif T in ("packed_cut", "packed_past"):
-        if arch not in loader.FWD_PACKED_ROWS_PER_SM:
-            pytest.skip(f"{arch} has no cut of the forward of packed rows")
-        T = _packed_rows(arch, sms) // H + (T == "packed_past")
+        cuts = loader.FWD_PACKED_ROWS_PER_SM
+        per_sm = cuts.get(arch, max(cuts.values()))
+        T = per_sm * sms // H + (T == "packed_past")
+        if arch not in cuts:
+            route = "fwd_packed"
     if layout == "broadcast":
         x, z, w, _ = make(1, H, seed=43)
         x, z = x.expand(T, H, D), z.expand(T, H, D)
@@ -1876,8 +1880,10 @@ def test_each_call_launches_one_module_of_its_role(T, H, launches):
     """One module a call: the forward of contiguous inputs runs
     ``forward_module`` of their strides (``_forward_launch``: the tiny forward
     up to its rows where routed, a single token too; else
-    ``ROUTES[arch]["fwd_packed"]`` where routed, except for a single token;
-    else ``ROUTES[arch]["fwd"]``); a
+    ``ROUTES[arch]["fwd_packed"]`` where routed for packed rows up to
+    ``_packed_rows`` (``FWD_PACKED_ROWS_PER_SM[arch] * SMs`` where the
+    architecture has a cut), except for a single token; else
+    ``ROUTES[arch]["fwd"]``); a
     backward runs one kernel, ``backward_module`` of its role and strides:
     ``bwd_bf16`` for a BF16 weight gradient, ``bwd_f32`` for an FP32 one,
     accumulating or not, each its long module (``LONG_ROLES``) where these
