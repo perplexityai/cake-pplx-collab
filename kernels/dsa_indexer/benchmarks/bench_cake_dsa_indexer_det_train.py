@@ -87,9 +87,9 @@ replaced -- ``cake_wide`` drops ``l6_rule`` and ``pair_rule`` (the
 single-CTA wide program on every architecture: the record's ``pair_units``
 gate keeps ``pair_for`` off the wide unit on ``sm_100a`` / ``sm_103a``, and
 the drop keeps the arm off the registered ``pair_wide`` on ``sm_107a`` too),
-``cake_l6`` drops ``pair_rule`` and the wide-first rule (``wide_first_rule``
-None), ``cake_pair_l6`` widens both unit rules to ``[1024.0, 512]`` /
-``[128.0, 1024.0, 512]`` with no wide-first rule, ``cake_wide_c1`` drops
+``cake_l6`` drops ``pair_rule`` and the wide-first rules (``wide_first_rule``
+and ``wide_first_k_rule`` None), ``cake_pair_l6`` widens both unit rules to
+``[1024.0, 512]`` / ``[128.0, 1024.0, 512]`` with no wide-first rule, ``cake_wide_c1`` drops
 both and takes the wide program from one round, ``wide_rule [1.0, 0.0]``,
 ``cake_narrow`` drops both and never qualifies for wide (the narrow program;
 only where ``narrow`` is registered for the row's fit); the recorded
@@ -1054,16 +1054,22 @@ FAR = {"far_sample": 1}
 # ``pair_for`` is gated by the record's ``pair_units`` (the units whose pair program the architecture registers), so a
 # record that drops ``l6_rule`` cannot compose the unregistered ``pair_wide`` on sm_100a / sm_103a; ``WIDE`` keeps dropping
 # ``pair_rule`` so the arm is the single-CTA wide program on sm_107a (which registers ``pair_wide``) as well.  The plain-l6
-# and reverse pair arms pin ``wide_first_rule`` to None: without the pin they would inherit an architecture's wide-first
-# precedence and run the wide program on every eligible row at or above its floor.  Every forced unit arm pins
+# and reverse pair arms pin ``wide_first_rule`` and its top_k-keyed form ``wide_first_k_rule`` to None: without the pin they
+# would inherit an architecture's wide-first precedence and run the wide program on every eligible row at or above its floor.  Every forced unit arm pins
 # ``wide_wave_rule`` to None: a record that sets it (the sm_100a and sm_103a FP8 records) decides narrow / l6 against
 # wide by waves of the persistent grid instead of the rules these arms replace.
 WIDE = {"l6_rule": None, "pair_rule": None, "wide_wave_rule": None}
-L6 = {"pair_rule": None, "wide_first_rule": None, "wide_wave_rule": None}
+L6 = {
+    "pair_rule": None,
+    "wide_first_rule": None,
+    "wide_first_k_rule": None,
+    "wide_wave_rule": None,
+}
 PAIR_L6 = {
     "l6_rule": [1024.0, 512],
     "pair_rule": [128.0, 1024.0, 512],
     "wide_first_rule": None,
+    "wide_first_k_rule": None,
     "wide_wave_rule": None,
 }
 WIDE_C1 = {
@@ -1091,6 +1097,7 @@ L6_ALL = {
     "l6_rule": [1e9, 0],
     "pair_rule": None,
     "wide_first_rule": None,
+    "wide_first_k_rule": None,
     "wide_rule": [1e18, 1e18],
     "wide_wave_rule": None,
 }

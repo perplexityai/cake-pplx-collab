@@ -28,8 +28,11 @@ segment boundaries, and no allocation or host synchronization in a run.
 
 import contextlib
 import functools
+import json
 import math
 import random
+import subprocess
+import sys
 import warnings
 
 import pytest
@@ -958,7 +961,7 @@ def test_iota_rows_are_the_scan_blocks_programs_rows(layout, monkeypatch):
     ns = _visible_counts(cq, ck, off)
     assert max((n + 7) // 8 for n in ns) == CB_SLOTS and min(ns) == 0
     runner = prepare_with_candidates(*args, **kw)
-    assert runner.stages[-1] == cake_policy.CB_IOTA_STAGE, runner.stages
+    assert runner.stages[0] == cake_policy.CB_IOTA_STAGE, runner.stages
     assert CB_ROLE not in runner.programs, runner.programs
     got = _call(q, k, w, cq, ck, offsets=off, **extra)
     failures = _structure_failures(*got, ns)
@@ -1014,7 +1017,7 @@ def test_iota_runner_follows_new_segments_without_allocation_or_sync():
         scores=scores,
         candidate_blocks=blocks,
     )
-    assert runner.stages[-1] == cake_policy.CB_IOTA_STAGE, runner.stages
+    assert runner.stages[0] == cake_policy.CB_IOTA_STAGE, runner.stages
     expected = _call(q, k, w, cq, ck, max_seqlen_k=bound)
     runner()
     torch.cuda.synchronize()
@@ -1062,3 +1065,124 @@ def test_iota_runner_follows_new_segments_without_allocation_or_sync():
             "the replay after new segments returns another result than the eager call"
         )
     assert not failures, "\n".join(failures[:20])
+
+
+def _iota_reference(T, cq, ck, offsets) -> torch.Tensor:
+    """The candidate-block rows of the kernel rule on the host: row ``t`` of segment ``s`` (query position ``u``, ``L`` keys,
+    offset ``offset`` or ``L - Lq``) sees ``n = clamp(offset + u + 1, 0, L)`` keys and holds ``0 .. ceil(n / 8) - 1`` and a
+    ``-1`` tail; a row outside every query segment is all ``-1``."""
+    cq, ck = [int(v) for v in cq.tolist()], [int(v) for v in ck.tolist()]
+    off = None if offsets is None else [int(v) for v in offsets.tolist()]
+    rows = torch.full((T, CB_SLOTS), -1, dtype=torch.int32)
+    for s in range(len(cq) - 1):
+        lq, lk = cq[s + 1] - cq[s], ck[s + 1] - ck[s]
+        base = lk - lq if off is None else off[s]
+        for u in range(lq):
+            n = min(max(base + u + 1, 0), lk)
+            nb = (n + 7) // 8
+            rows[cq[s] + u, :nb] = torch.arange(nb, dtype=torch.int32)
+    return rows
+
+
+def test_iota_fill_rows_outside_every_query_segment():
+    """The ``cb_iota`` fill on its own: rows before ``cu_seqlens_q[0]`` and from ``cu_seqlens_q[S]`` on are all ``-1``
+    (with and without causal offsets, an empty query segment and a segment without keys), the rows of the segments
+    follow the kernel rule, and a call without segments fills every row with ``-1``."""
+    _require_cb_program()
+    device = torch.device("cuda", torch.cuda.current_device())
+    T = 64
+    cq = torch.tensor([5, 12, 12, 30, 41], dtype=torch.int32, device=device)
+    ck = torch.tensor([0, 100, 140, 16000, 16000], dtype=torch.int32, device=device)
+    for offsets in (
+        None,
+        torch.tensor([90, -3, 15900, 4], dtype=torch.int64, device=device),
+    ):
+        blocks = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
+        fill = cake_backend._IotaBlocks(blocks, cq, ck, offsets, 4, device.index)
+        fill()
+        torch.cuda.synchronize()
+        want = _iota_reference(T, cq, ck, offsets)
+        assert torch.equal(blocks.cpu(), want), offsets
+        assert (blocks[:5] == -1).all() and (blocks[41:] == -1).all()
+    blocks = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
+    empty = torch.zeros(1, dtype=torch.int32, device=device)
+    cake_backend._IotaBlocks(blocks, empty, empty, None, 0, device.index)()
+    torch.cuda.synchronize()
+    assert (blocks == -1).all()
+
+
+def test_iota_table_made_on_a_busy_stream_is_waited_for():
+    """The per-device row table is made on the stream of its first prepare; a fill prepared and run on another stream
+    while that stream still holds the table's writes (behind a long-running kernel) waits for them, so its rows are the
+    kernel rule's; the table's event is dropped once it has completed at prepare."""
+    _require_cb_program()
+    device = torch.device("cuda", torch.cuda.current_device())
+    T = 4096
+    cq = torch.tensor([0, T], dtype=torch.int32, device=device)
+    ck = torch.tensor([0, 16384], dtype=torch.int32, device=device)
+    want = _iota_reference(T, cq, ck, None)
+    saved = cake_backend._IOTA_ROWS.pop(device.index, None)
+    try:
+        busy, other = torch.cuda.Stream(device), torch.cuda.Stream(device)
+        a = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
+        b = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
+        torch.cuda.synchronize()
+        with torch.cuda.stream(busy):
+            torch.cuda._sleep(1 << 30)
+            first = cake_backend._IotaBlocks(a, cq, ck, None, 1, device.index)
+        with torch.cuda.stream(other):
+            second = cake_backend._IotaBlocks(b, cq, ck, None, 1, device.index)
+            assert second.ready is not None  # the table's writes were still queued behind the busy stream
+            second()
+        with torch.cuda.stream(busy):
+            first()
+        torch.cuda.synchronize()
+        assert torch.equal(b.cpu(), want) and torch.equal(a.cpu(), want)
+        third = cake_backend._IotaBlocks(a, cq, ck, None, 1, device.index)
+        assert third.ready is None
+    finally:
+        if saved is not None:
+            cake_backend._IOTA_ROWS[device.index] = saved
+
+
+def test_iota_call_with_a_max_seqlen_k_below_a_key_segment_stops_before_its_programs():
+    """A call whose ``max_seqlen_k`` holds at most 2048 blocks takes the plain plan with the ``cb_iota`` fill first;
+    a key segment longer than the bound gives rows past 2048 blocks, and the fill stops the call with a device-side
+    assert before its programs run (a fresh interpreter: the CUDA context is unusable afterwards)."""
+    _require_cb_program()
+    seg_q, seg_k = (16, 16), (20000, 100)
+    T, Tkv = sum(seg_q), sum(seg_k)
+    plan = plan_with_candidates(
+        T, Tkv, len(seg_q), top_k=TOP_K, max_seqlen_k=IOTA_W, device=torch.device("cuda")
+    )
+    assert plan.iota
+    code = f"""
+import importlib, json, sys
+import torch
+backend = importlib.import_module({cake_backend.__name__!r})
+fn = getattr(backend, {topk_with_candidates.__name__!r})
+g = torch.Generator(device="cuda").manual_seed(7830)
+q = torch.randn(({T}, 32, 128), generator=g, device="cuda").to(torch.bfloat16)
+k = torch.randn(({Tkv}, 128), generator=g, device="cuda").to(torch.bfloat16)
+w = torch.randn(({T}, 32), generator=g, device="cuda")
+cq = torch.tensor([0, {seg_q[0]}, {T}], dtype=torch.int32, device="cuda")
+ck = torch.tensor([0, {seg_k[0]}, {Tkv}], dtype=torch.int32, device="cuda")
+runner = backend.{prepare_with_candidates.__name__}(q, k, w, cq, ck, top_k={TOP_K}, max_seqlen_k={IOTA_W})
+print(json.dumps({{"stages": list(runner.stages)}}), flush=True)
+try:
+    fn(q, k, w, cq, ck, top_k={TOP_K}, max_seqlen_k={IOTA_W})
+    torch.cuda.synchronize()
+except RuntimeError as exc:
+    print("RAISED", type(exc).__name__, str(exc).splitlines()[0], flush=True)
+    sys.exit(3)
+print("COMPLETED", flush=True)
+"""
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=900
+    )
+    lines = out.stdout.strip().splitlines()
+    assert lines and lines[0].startswith("{"), (out.returncode, out.stdout[-2000:], out.stderr[-2000:])
+    assert json.loads(lines[0])["stages"][0] == cake_policy.CB_IOTA_STAGE
+    assert out.returncode != 0 and "COMPLETED" not in out.stdout, (out.stdout[-2000:], out.stderr[-2000:])
+    text = out.stdout + out.stderr
+    assert "device-side assert" in text or "srcIndex < srcSelectDimSize" in text, text[-3000:]

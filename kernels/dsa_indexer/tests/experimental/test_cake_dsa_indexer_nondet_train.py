@@ -442,7 +442,7 @@ def test_registry_records_are_well_formed():
             }
         ), arch
         # the wide-first precedence reaches the unrolled wide program in both fit forms
-        if policy.wide_first_rule is not None:
+        if policy.wide_first_rule is not None or policy.wide_first_k_rule is not None:
             assert {"scan:wide:u2:s0:f0", "scan:wide:u2:s0:f1"} <= set(keys), arch
         # the sampled rank shift rule: a top_k floor a call can reach, a shift the default does not already give
         if policy.sample_shift_rule is not None:

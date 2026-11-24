@@ -297,12 +297,19 @@ A call whose longest key segment holds at most 2048 blocks (`ceil(W / 8) <=
 2048`, `W` as above) keeps every block of every row, so no block score
 decides a row: it runs the plain call's programs as dispatched (any unit, CTA
 pair, key-range split, unit order and finalize, with the plain call's
-workspace) and then writes each row's `0 .. nb - 1` and `-1` tail on the
-device (stage `cb_iota`: a few small launches over the rows and one copy of
+workspace), writing each row's `0 .. nb - 1` and `-1` tail on the device
+first (stage `cb_iota`: a few small launches over the rows and one copy of
 the rows, reading the bound segment boundaries and offsets on every run, no
 host synchronization, graph-capturable; plan field `iota`).  A row past
-2048 blocks there (a `max_seqlen_k` below one of its key segments) stops with
-a device-side assert, where the `scan_blocks` programs trap.
+2048 blocks there (a `max_seqlen_k` below one of its key segments) stops that
+write with a device-side assert, where the `scan_blocks` programs trap; the
+write comes first, so such a call stops before any of its programs runs.
+A prepared runner launches the
+write with no allocation; preparing one (the eager entry prepares on every
+call) adds three small device launches for the write's scratch.  The
+16 MiB table the write copies rows from is made once per device, on the
+stream of its first call; a call on another stream waits for that stream's
+event while the table is not complete.
 `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` reports the
 bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
 `scan_blocks` programs draw their work units from a 16-byte ticket block

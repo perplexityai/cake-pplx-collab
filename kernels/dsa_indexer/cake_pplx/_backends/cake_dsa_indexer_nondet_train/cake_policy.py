@@ -100,6 +100,7 @@ POLICY_FIELDS = (
     "l6_rule",  # [max mean unit tiles, min top_k] of the three-warpgroup program, or None
     "wide_rule",  # [min wide rounds per CTA, min rounds x mean unit tiles] of the wide program
     "wide_first_rule",  # [min mean unit tiles] from which a wide-eligible call takes the wide program before the three-warpgroup rule, or None (the three-warpgroup rule first)
+    "wide_first_k_rule",  # [max top_k, min mean unit tiles] replacing wide_first_rule up to that top_k: a wide-eligible call of at most that top_k takes the wide program before the three-warpgroup rule from that many mean unit tiles on, or None (wide_first_rule on every call)
     "wide_wave_rule",  # [min narrow / wide wave ratio, min l6 / wide wave ratio, min mean unit tiles against l6(, the top_k up to which the tile minima hold, their exponent in top_k above it, the minimum of a packed call, the tiles a one-segment minimum rises per wide wave below the next element, the wide waves from which it holds, the l6 / wide wave ratio W below which the minimum is at least the next element / (W - 1) and on a packed call at least element 10 / (W - 1) ** 2, and from which the minimum of a one-document call of fewer wide waves than element 7 is at most element 11 / (W - 1) ** 2, on two or more wide waves at most the larger of that and element 12, from element 13 wide waves on of that and element 14)] replacing wide_rule and wide_first_rule, or None; see unit_block_q_for
     "desc_walk_kinds",  # [physical scan kinds whose descending-walk twin (key kind "<kind>_desc") a call with the sampled first threshold off runs, the same for a sampled call], or None; see select_program
     "split_max",  # most key-range splits per unit
@@ -315,6 +316,7 @@ _OPTIONAL_RULE = (
     "cand_mult_rule_unsampled",
     "l6_rule",
     "wide_first_rule",
+    "wide_first_k_rule",
     "wide_wave_rule",
     "desc_walk_kinds",
     "split_wave_rule",
@@ -368,6 +370,7 @@ class DispatchPolicy:
     l6_rule: Optional[list]
     wide_rule: list
     wide_first_rule: Optional[list]
+    wide_first_k_rule: Optional[list]
     wide_wave_rule: Optional[list]
     desc_walk_kinds: Optional[list]
     split_max: int
@@ -452,6 +455,17 @@ class DispatchPolicy:
         ):
             raise ValueError(
                 f"policy['wide_first_rule'] must be [min mean unit tiles] or None, got {first!r}"
+            )
+        first_k = raw["wide_first_k_rule"]
+        if first_k is not None and (
+            len(first_k) != 2
+            or not _is_int(first_k[0])
+            or first_k[0] < 1
+            or not _is_number(first_k[1])
+            or first_k[1] < 0
+        ):
+            raise ValueError(
+                f"policy['wide_first_k_rule'] must be [max top_k >= 1, min mean unit tiles >= 0] or None, got {first_k!r}"
             )
         waves = raw["wide_wave_rule"]
         if waves is not None and (
@@ -955,12 +969,28 @@ class DispatchPolicy:
             return self.block_q_wide if wide else other
         min_rounds, min_work = self.wide_rule
         wide = rounds >= min_rounds and rounds * mean_tiles >= min_work
-        first = self.wide_first_rule
-        if wide and first is not None and mean_tiles >= first[0]:
+        first = self.wide_first_for(top_k)
+        if wide and first is not None and mean_tiles >= first:
             return self.block_q_wide
         if three_wg:
             return self.block_q_l6
         return self.block_q_wide if wide else self.block_q_narrow
+
+    def wide_first_for(self, top_k: int) -> Optional[float]:
+        """The mean unit tiles from which a wide-eligible call of ``top_k`` takes the wide program before the
+        three-warpgroup rule (``unit_block_q_for``): ``wide_first_k_rule[1]`` up to the rule's ``top_k``, else
+        ``wide_first_rule[0]``, or None (the three-warpgroup rule first).  The three-warpgroup unit serves ``top_k``
+        from ``l6_rule[1]`` on, so the rule moves calls of exactly that ``top_k`` up to the rule's: on ``sm_100a`` and
+        ``sm_103a`` the ``top_k = 512`` calls of 128 (``sm_100a``) and 64 (``sm_103a``) mean unit tiles and more, which
+        ran the wide program 4-11 % faster than the three-warpgroup and CTA-pair l6 programs (the 16384-query rows over
+        16384 / 65536 keys and the 8-segment packed row of 268757 keys; at 64 mean unit tiles ``sm_100a`` measured
+        parity).  The ``wide_wave_rule`` records (the FP8 form on ``sm_100a`` / ``sm_103a``) decide by waves instead
+        and never read it."""
+        rule = self.wide_first_k_rule
+        if rule is not None and int(top_k) <= int(rule[0]):
+            return float(rule[1])
+        first = self.wide_first_rule
+        return None if first is None else float(first[0])
 
     def n_split_for(
         self,
@@ -1845,7 +1875,7 @@ class CandidateBlocksChoice:
     the call's workspace is ``workspace_bytes`` = ``choice.workspace_bytes + blk_bytes``.  The ``[T, CB_SLOTS]``
     int32 output is the caller's and not part of it.  ``iota`` (``blk_cap`` 0: every row keeps all its blocks):
     ``choice`` is the plain call's plan (``select_program``: its scan and merge programs) with its
-    workspace, no block entries, and the backend writes the rows after its launches (``CB_IOTA_STAGE``)."""
+    workspace, no block entries, and the backend writes the rows before its launches (``CB_IOTA_STAGE``)."""
 
     choice: ProgramChoice
     blk_cap: int
