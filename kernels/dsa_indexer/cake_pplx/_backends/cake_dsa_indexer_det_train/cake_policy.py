@@ -145,7 +145,7 @@ POLICY_FIELDS = (
     "rank_finalize",  # the prefix-popcount rank finalize serves the calls rank_rule admits (False: every call sorts with CUB)
     "rank_window_variants",  # bitmap pool windows (bits) of the rank finalize program variants, ascending
     "rank_top_k_min",  # smallest top_k the rank finalize serves (below: the right-sized CUB programs)
-    "rank_small_k_rule",  # [min top_k, max top_k, slab window, two-level window] of the rank finalize below rank_top_k_min: a call of top_k in that range at its default finalize threads runs the finalize_threads_small rank program of the slab window where the pool needs at most it, else of the two-level window where it needs at most that, else its CUB program; or None
+    "rank_small_k_rule",  # [min top_k, max top_k, slab window, two-level window] of the rank finalize below rank_top_k_min: a call of top_k in that range at its default finalize threads runs the finalize_threads_small rank program of the slab window where the pool needs at most it (a split call: the merge with that rank finalize fused in, merge_rank), else of the two-level window where it needs at most that, else its CUB program; or None (also with rank_finalize off)
     "rank_rule",  # [max pool window (Tkv), max mean segment keys (Tkv / S)] of the rank finalize, or None
     "rank_staged",  # the rank finalize runs its SMEM-staged, coalesced-I/O form where rank_staged_rule admits the window (lever FRS)
     "rank_staged_rule",  # [max pool window whose staged rank finalize form keeps two CTAs per SM], or None
@@ -1591,20 +1591,28 @@ class DispatchPolicy:
         """Bitmap window of the rank finalize program a call of ``top_k`` below ``rank_top_k_min`` runs at
         ``finalize_threads_small`` threads in place of its right-sized CUB program, or None (the CUB program).
 
-        ``rank_small_k_rule`` = [min top_k, max top_k, slab window, two-level window]: with ``top_k`` in the rule's range, the
-        pool of ``finalize_rank_for`` (``Tkv``, or ``max_seqlen_k`` under lever RW) and ``need = max(pool, 32 x
-        finalize_threads_small)``, the slab window where ``need`` is at most it, else the two-level window where ``need`` is
-        at most that and ``rank_two_level`` is set, else None.  The windows skip the smaller variants on purpose: at
+        ``rank_small_k_rule`` = [min top_k, max top_k, slab window, two-level window]: with ``rank_finalize`` on and ``top_k``
+        in the rule's range, the pool of ``finalize_rank_for`` (``Tkv``, or ``max_seqlen_k`` under lever RW) and ``need =
+        max(pool, 32 x finalize_threads_small)``, the slab window where ``need`` is at most it, else the two-level window
+        where ``need`` is at most that and ``rank_two_level`` with its ``rank_two_level_rule`` is set, else None.  A split
+        call of the slab window runs the merge with this rank finalize fused in (``merge_rank_for``: key
+        ``merge:rank:w<slab window>``, no finalize launch).  The windows skip the smaller variants on purpose: at
         ``top_k = 512`` the 256-thread staged program of the 2^14 slab window ranked the 16384-key pool 1.56x (``sm_103a``)
         and 1.59x (``sm_100a``) faster than the 64-thread CUB program, and the two-level 2^17 window the 65536- and
         67923-key pools 1.25-1.40x faster, where the 2^16 slab window measured parity; the 2^18 and 2^19 two-level
         windows measured 0.74-0.92x, so a larger pool keeps CUB.  On ``sm_107a``, where the slab window runs the persistent
         form (``rank_persist_max_k``), the same rule took 3.3 % off the whole ``top_k = 512`` call over the 16384-key pool
         (the one-row staged form 2.2 %) and 1.5 % off a 20480-key pool (two-level 2^17 window), with the 24576- to
-        65536-key pools at parity.  Both forms give the CUB program's rows bit for bit."""
+        65536-key pools at parity.  Both forms give the CUB program's rows bit for bit.  Every timing above is of
+        ``top_k = 512`` (the bulk and persistent forms); the non-bulk forms that a ``top_k`` not a multiple of 4 runs and
+        the ``top_k`` 257 to 511 calls have bit-equality tests but no timing."""
         rule = self.rank_small_k_rule
         k = int(top_k)
-        if rule is None or not int(rule[0]) <= k <= int(rule[1]):
+        if (
+            rule is None
+            or not self.rank_finalize
+            or not int(rule[0]) <= k <= int(rule[1])
+        ):
             return None
         Tkv = int(num_keys)
         seg = None
@@ -1614,7 +1622,11 @@ class DispatchPolicy:
         need = max(pool, 32 * int(self.finalize_threads_small))
         if need <= int(rule[2]):
             return int(rule[2])
-        if self.rank_two_level and need <= int(rule[3]):
+        if (
+            self.rank_two_level
+            and self.rank_two_level_rule is not None
+            and need <= int(rule[3])
+        ):
             return int(rule[3])
         return None
 
@@ -1788,10 +1800,17 @@ def scan_key_form(key: str) -> Optional[str]:
     return None if fields is None else fields.form
 
 
+# the fields of a ``POLICY`` record the FP8 form does not take over unless its FP8 record names them: the top_k-keyed
+# wide-first floor and the rank small-k rule were measured on the BF16 programs only, so the FP8 plans keep the
+# programs of their own records
+FP8_UNSET_FIELDS = {"wide_first_k_rule": None, "rank_small_k_rule": None}
+
+
 def fp8_policy_record(record: dict, fp8_record: dict) -> dict:
     """The FP8 form's dispatch record of an architecture: its record ``record`` (``POLICY[arch]``) with the fields of
-    its FP8 record ``fp8_record`` (``POLICY_FP8[arch]``) replaced.  ``fp8_record`` names its own ``static_scan_kinds``
-    (the FP8 programs never keep the BF16 programs' static kinds) and no field outside ``POLICY_FIELDS``."""
+    its FP8 record ``fp8_record`` (``POLICY_FP8[arch]``) replaced and the ``FP8_UNSET_FIELDS`` it does not name unset.
+    ``fp8_record`` names its own ``static_scan_kinds`` (the FP8 programs never keep the BF16 programs' static kinds) and
+    no field outside ``POLICY_FIELDS``."""
     if (
         not isinstance(fp8_record, dict)
         or "static_scan_kinds" not in fp8_record
@@ -1800,7 +1819,7 @@ def fp8_policy_record(record: dict, fp8_record: dict) -> dict:
         raise ValueError(
             f"an FP8 dispatch record must name static_scan_kinds and only fields of {POLICY_FIELDS}, got {fp8_record!r}"
         )
-    return {**record, **fp8_record}
+    return {**record, **FP8_UNSET_FIELDS, **fp8_record}
 
 
 def fp8_scan_programs(scan_keys: Collection[str]) -> dict:
@@ -2434,7 +2453,7 @@ def select_fp8_program(
 # ``n_split = 1``.  ``top_k`` is at most ``CB_MAX_TOP_K``: then every returned id lies in a returned block.
 # A call whose longest key segment holds at most ``CB_SLOTS`` blocks (``cb_block_cap`` 0) keeps every block of every
 # row, so no block score decides a row: it runs the plain call's plan as dispatched (any unit, pair, split, order and
-# finalize) and the backend writes each row's ``0 .. nb - 1`` and ``-1`` tail on the device after it (stage
+# finalize) and the backend writes each row's ``0 .. nb - 1`` and ``-1`` tail on the device before it (stage
 # ``CB_IOTA_STAGE``; ``CandidateBlocksChoice.iota``).
 CB_ROLE = "scan_blocks"
 CB_IOTA_STAGE = "cb_iota"

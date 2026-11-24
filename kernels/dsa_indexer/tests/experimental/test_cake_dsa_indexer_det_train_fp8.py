@@ -65,6 +65,7 @@ MERGE_KEY = cake_policy.MERGE_KEY
 POLICY_FIELDS = cake_policy.POLICY_FIELDS
 DispatchPolicy = cake_policy.DispatchPolicy
 fp8_policy_record = cake_policy.fp8_policy_record
+FP8_UNSET_FIELDS = cake_policy.FP8_UNSET_FIELDS
 fp8_program_choice = cake_policy.fp8_program_choice
 fp8_scan_programs = cake_policy.fp8_scan_programs
 sample_class_for = cake_policy.sample_class_for
@@ -211,7 +212,8 @@ def test_fp8_scan_programs_index_the_fp8_keys_only():
 
 def test_fp8_record_replaces_only_its_fields_and_leaves_the_bf16_record():
     """``POLICY_FP8`` covers the architectures of ``POLICY``, each naming its own ``static_scan_kinds``; the FP8 record
-    is the BF16 record with exactly those fields replaced, and neither registry table changes."""
+    is the BF16 record with exactly those fields replaced and the BF16-only rules (``FP8_UNSET_FIELDS``) it does not
+    name unset, and neither registry table changes."""
     if not cake_jit.POLICY:
         pytest.skip("placeholder registry")
     assert (
@@ -227,8 +229,13 @@ def test_fp8_record_replaces_only_its_fields_and_leaves_the_bf16_record():
         # the FP8 record keeps the BF16 record's field order (the registry's, not necessarily POLICY_FIELDS')
         assert tuple(fp8) == tuple(record) and set(record) == set(POLICY_FIELDS), arch
         assert {f: fp8[f] for f in fields} == fields, arch
-        assert {f: fp8[f] for f in POLICY_FIELDS if f not in fields} == {
-            f: record[f] for f in POLICY_FIELDS if f not in fields
+        kept = [
+            f for f in POLICY_FIELDS if f not in fields and f not in FP8_UNSET_FIELDS
+        ]
+        assert {f: fp8[f] for f in kept} == {f: record[f] for f in kept}, arch
+        unset = [f for f in FP8_UNSET_FIELDS if f not in fields]
+        assert {f: fp8[f] for f in unset} == {
+            f: FP8_UNSET_FIELDS[f] for f in unset
         }, arch
         DispatchPolicy.from_record(fp8)  # a valid record
     assert before == (cake_jit.POLICY, cake_jit.POLICY_FP8)
@@ -340,6 +347,35 @@ def test_fp8_record_replaces_only_its_fields_and_leaves_the_bf16_record():
         fp8_policy_record(
             cake_jit.POLICY["sm_100a"], {"static_scan_kinds": [], "unknown": 1}
         )
+
+
+def test_fp8_records_leave_the_bf16_only_top_k_rules_off():
+    """The FP8 form takes neither the top_k-keyed wide-first floor nor the rank small-k rule of the BF16 records
+    (``FP8_UNSET_FIELDS``): its records leave both off, and its top_k 257 to 512 calls keep their CUB finalize
+    programs where the BF16 calls of the same geometry run the rank finalize."""
+    if not cake_jit.POLICY:
+        pytest.skip("placeholder registry")
+    for arch in cake_jit.POLICY:
+        policy = _fp8_policy(arch)
+        assert policy.wide_first_k_rule is None, arch
+        assert policy.rank_small_k_rule is None, arch
+        grid = 212 if arch == "sm_107a" else 148
+        for K in (257, 300, 512):
+            call = dict(top_k=K, arch=arch, num_sms=grid)
+            fp8 = plan_dsa_indexer_det_topk(
+                16384, 16384, 1, dtype=torch.float8_e4m3fn, **call
+            )
+            assert fp8.finalize_key == f"finalize:t{policy.finalize_threads_for(K)}", (
+                arch,
+                K,
+                fp8.finalize_key,
+            )
+            bf16 = plan_dsa_indexer_det_topk(16384, 16384, 1, **call)
+            assert bf16.finalize_key.startswith("finalize_rank:t256:w16384"), (
+                arch,
+                K,
+                bf16.finalize_key,
+            )
 
 
 def test_fp8_policy_fails_closed_without_fp8_programs(monkeypatch):

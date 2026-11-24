@@ -56,7 +56,7 @@ peaked variant):
   candidate-block arm's block structure (counts, newest block, containment).
   ``cake_cb_scan`` runs the same call on its ``scan_blocks`` program where
   every row keeps all its blocks (the dispatch before ``iota``, which runs the
-  plain programs and writes the rows after them: ``plan`` records ``cb_iota``),
+  plain programs and writes the rows before them: ``plan`` records ``cb_iota``),
   and ``cake_main_cb`` / ``cake_main_cb_aa`` / ``cake_main_in`` are the
   candidate-block and candidate-restricted calls of the ``--main-package``
   copy.

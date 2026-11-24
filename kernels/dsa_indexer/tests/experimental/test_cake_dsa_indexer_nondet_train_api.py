@@ -366,7 +366,7 @@ def test_candidate_block_facades_are_stable(fn):
 
 
 # key segments past 2048 blocks (the scan_blocks program) and of at most 2048 blocks (the plain programs and the rows
-# written after them)
+# written before them)
 CB_FACADE_SHAPES = {
     "scan_blocks": ([48, 16], [17000, 900]),
     "iota": ([48, 16], [16000, 384]),

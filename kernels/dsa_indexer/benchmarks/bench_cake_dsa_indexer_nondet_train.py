@@ -49,7 +49,7 @@ timed next to ``nondet`` / ``det``, the plain call of the same ``top_k``;
 (counts, newest block, containment).  ``nondet_cb_scan`` runs this package's
 call on its ``scan_blocks`` program where every row keeps all its blocks (the
 dispatch before ``iota``, which runs the plain programs and writes the rows
-after them: ``plan`` records ``cb_iota``).  ``nondet_in`` / ``nondet_in_aa`` (this
+before them: ``plan`` records ``cb_iota``).  ``nondet_in`` / ``nondet_in_aa`` (this
 package's ``prepare_dsa_indexer_nondet_topk_in_candidates``) and ``det_in``
 (the deterministic package's) time the top-k restricted to the row's own
 candidate blocks (computed once by the package's candidate-block call outside

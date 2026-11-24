@@ -2340,6 +2340,14 @@ def test_rank_small_k_rule_ranks_small_top_k_rows_of_bounded_pools():
         _select(flat, 16384, 16384, K=512).finalize_key
         == "finalize_rank:t256:w16384:staged:bulk"
     )
+    # so do they without the two-level rule; with the master switch off every call keeps CUB
+    unruled = DispatchPolicy.from_record(dict(new.record(), rank_two_level_rule=None))
+    assert unruled.finalize_rank_small_k_for(512, 65536, 1) is None
+    assert unruled.finalize_rank_small_k_for(512, 16384, 1) == 16384
+    off = DispatchPolicy.from_record(dict(new.record(), rank_finalize=False))
+    for Tkv in (4096, 16384, 65536):
+        assert off.finalize_rank_small_k_for(512, Tkv, 1) is None
+        assert _select(off, 16384, Tkv, K=512).finalize_key == "finalize:t64"
 
 
 # 0.6.0 registry: the top_k-keyed wide-first floor and the rank small-k rule of each architecture, and the scan / finalize
@@ -5881,6 +5889,50 @@ def test_merge_rank_fuses_the_slab_rank_finalize_into_split_merges():
                 dtype=torch.float8_e4m3fn,
             )
             assert not fp8.merge_rank and fp8.merge_key in (None, MERGE_KEY), arch
+        # top_k 257 to 512 (rank_small_k_rule): a split call whose pool fits the 16384-key slab window runs the merge
+        # with the 256-thread rank finalize fused in; without the rule it keeps the merge + its CUB finalize program,
+        # with the same scan program and split count
+        small = DispatchPolicy.from_record(
+            dict(policy.record(), rank_small_k_rule=None)
+        )
+        for K in (257, 300, 384, 511, 512):
+            fused_calls = 0
+            for T, Tkv, S in ((1, 16384, 1), (16, 16384, 1), (64, 16384, 1)):
+                call = dict(
+                    num_queries=T,
+                    num_keys=Tkv,
+                    num_segments=S,
+                    ratio=1,
+                    top_k=K,
+                    grid=grid,
+                    scan_keys=keys,
+                )
+                fused = select_program(policy, **call)
+                cub = select_program(small, **call)
+                if not fused.split:
+                    continue
+                fused_calls += 1
+                assert fused.merge_rank and fused.merge_key == "merge:rank:w16384", (
+                    arch,
+                    K,
+                    T,
+                    fused.merge_key,
+                )
+                assert fused.merge_key in keys and fused.keys == (
+                    fused.scan_key,
+                    fused.merge_key,
+                )
+                assert fused.finalize_key.startswith(
+                    "finalize_rank:t256:w16384:staged"
+                ), (arch, K, T, fused.finalize_key)
+                assert cub.split and not cub.merge_rank, (arch, K, T)
+                assert cub.keys == (
+                    cub.scan_key,
+                    MERGE_KEY,
+                    f"finalize:t{small.finalize_threads_for(K)}",
+                ), (arch, K, T, cub.keys)
+                assert (cub.scan_key, cub.n_split) == (fused.scan_key, fused.n_split)
+            assert fused_calls, (arch, K)
         # a call above the fused programs' top_k bound, an unsplit call and a two-level window keep the finalize program
         for call in (
             dict(num_queries=4, num_keys=22018, num_segments=1, top_k=4096),
@@ -5891,10 +5943,13 @@ def test_merge_rank_fuses_the_slab_rank_finalize_into_split_merges():
             assert not c.merge_rank and c.keys[-1] == c.finalize_key, (arch, call)
 
 
-def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch):
+@pytest.mark.parametrize("top_k", [2048, 512, 300, 257])
+def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch, top_k):
     """The fused merge writes the bits of the merge + slab rank finalize pair: every output of a split call is bitwise the
     same with the architecture's record and with ``merge_rank`` off (Gaussian and integer inputs; the integer ones
-    held to the exact contract), and the fused call launches no finalize program."""
+    held to the exact contract), and the fused call launches no finalize program.  At top_k 257 to 512 the split calls
+    of the 16384-key slab window (``rank_small_k_rule``) also give the bits of the merge + CUB finalize pair of the
+    record without that rule; at every top_k at least one row runs the fused merge."""
     _require_program()
     arch = arch_for(torch.device("cuda"))
     if not policy_for(arch).merge_rank:
@@ -5904,39 +5959,49 @@ def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch):
         ([64], [16384]),
         ([64, 64], [16384, 16384]),
         ([3, 5], [7000, 30000]),
+        ([16], [16384]),
+        ([5, 11], [4000, 12000]),
     )
+    original = cake_backend.policy_for
+    arms = {"merge_rank": False}
+    if top_k < policy_for(arch).rank_top_k_min:
+        arms["rank_small_k_rule"] = None
+    fused_rows = 0
     for make, (seed, (seg_q, seg_k)) in itertools.product(
         (ref.make_random_inputs, ref.make_integer_inputs), enumerate(rows)
     ):
-        inputs = make(seg_q, seg_k, top_k=2048, seed=700 + seed, device="cuda")
+        inputs = make(seg_q, seg_k, top_k=top_k, seed=700 + seed, device="cuda")
         runner = _prepare(inputs)
         if not runner.choice.split or not runner.choice.merge_rank:
             continue
+        fused_rows += 1
         assert runner.stages == ("scan", "merge"), (seg_q, seg_k, runner.stages)
         fused = _cloned(runner())
-        with monkeypatch.context() as m:
-            original = cake_backend.policy_for
+        for field_name, value in arms.items():
+            with monkeypatch.context() as m:
 
-            def merge_rank_off(arch, form=cake_policy.BF16):
-                return DispatchPolicy.from_record(
-                    dict(original(arch, form).record(), merge_rank=False)
-                )
+                def changed(arch, form=cake_policy.BF16):
+                    return DispatchPolicy.from_record(
+                        dict(original(arch, form).record(), **{field_name: value})
+                    )
 
-            m.setattr(cake_backend, "policy_for", merge_rank_off)
-            plain_runner = _prepare(inputs)
-            assert plain_runner.stages == (
-                "scan",
-                "merge",
-                plain_runner.choice.finalize_role,
-            )
-            plain = _cloned(plain_runner())
-        assert torch.equal(fused[0], plain[0]), (seg_q, seg_k)
-        assert torch.equal(fused[1].view(torch.int32), plain[1].view(torch.int32)), (
-            seg_q,
-            seg_k,
-        )
+                m.setattr(cake_backend, "policy_for", changed)
+                plain_runner = _prepare(inputs)
+                assert plain_runner.stages == (
+                    "scan",
+                    "merge",
+                    plain_runner.choice.finalize_role,
+                ), (field_name, plain_runner.stages)
+                if field_name == "rank_small_k_rule":
+                    assert plain_runner.choice.finalize_key.startswith("finalize:t")
+                plain = _cloned(plain_runner())
+            assert torch.equal(fused[0], plain[0]), (field_name, seg_q, seg_k)
+            assert torch.equal(
+                fused[1].view(torch.int32), plain[1].view(torch.int32)
+            ), (field_name, seg_q, seg_k)
         if make is ref.make_integer_inputs:
             naive.assert_exact(fused, inputs)
+    assert fused_rows, (arch, top_k)
 
 
 def test_device_facts_are_queried_once_per_device(monkeypatch):

@@ -1342,10 +1342,16 @@ def scan_key_form(key: str) -> Optional[str]:
     return None if fields is None else fields.form
 
 
+# the fields of a ``POLICY`` record the FP8 form does not take over unless its FP8 record names them: the top_k-keyed
+# wide-first floor was measured on the BF16 programs only, so the FP8 plans keep the programs of their own records
+FP8_UNSET_FIELDS = {"wide_first_k_rule": None}
+
+
 def fp8_policy_record(record: dict, fp8_record: dict) -> dict:
     """The FP8 form's dispatch record of an architecture: its record ``record`` (``POLICY[arch]``) with the fields of
-    its FP8 record ``fp8_record`` (``POLICY_FP8[arch]``) replaced.  ``fp8_record`` names its own ``static_scan_kinds``
-    (the FP8 programs never keep the BF16 programs' static kinds) and no field outside ``POLICY_FIELDS``."""
+    its FP8 record ``fp8_record`` (``POLICY_FP8[arch]``) replaced and the ``FP8_UNSET_FIELDS`` it does not name unset.
+    ``fp8_record`` names its own ``static_scan_kinds`` (the FP8 programs never keep the BF16 programs' static kinds) and
+    no field outside ``POLICY_FIELDS``."""
     if (
         not isinstance(fp8_record, dict)
         or "static_scan_kinds" not in fp8_record
@@ -1354,7 +1360,7 @@ def fp8_policy_record(record: dict, fp8_record: dict) -> dict:
         raise ValueError(
             f"an FP8 dispatch record must name static_scan_kinds and only fields of {POLICY_FIELDS}, got {fp8_record!r}"
         )
-    return {**record, **fp8_record}
+    return {**record, **FP8_UNSET_FIELDS, **fp8_record}
 
 
 def fp8_scan_programs(scan_keys: Collection[str]) -> dict:
@@ -1839,7 +1845,7 @@ def select_fp8_program(
 # ``n_split = 1``.  ``top_k`` is at most ``CB_MAX_TOP_K``: then every returned id lies in a returned block.
 # A call whose longest key segment holds at most ``CB_SLOTS`` blocks (``cb_block_cap`` 0) keeps every block of every
 # row, so no block score decides a row: it runs the plain call's plan as dispatched (any unit, pair, split with its
-# merge, and order) and the backend writes each row's ``0 .. nb - 1`` and ``-1`` tail on the device after it (stage
+# merge, and order) and the backend writes each row's ``0 .. nb - 1`` and ``-1`` tail on the device before it (stage
 # ``CB_IOTA_STAGE``; ``CandidateBlocksChoice.iota``).
 CB_ROLE = "scan_blocks"
 CB_IOTA_STAGE = "cb_iota"

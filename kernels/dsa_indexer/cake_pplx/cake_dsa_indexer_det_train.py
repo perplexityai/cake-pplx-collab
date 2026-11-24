@@ -132,7 +132,11 @@ def cake_dsa_indexer_det_train_topk(
         shows the host whether every key segment of a packed call has the same
         length (``Tkv == S * max_seqlen_k``): such a call runs its scan program
         without the longest-segment-first unit order (the ``:lsf`` copy).  A
-        value above ``Tkv`` or below ``ceil(Tkv / S)`` is rejected.
+        value above ``Tkv`` or below ``ceil(Tkv / S)`` is rejected.  A value
+        that passes those checks but is below a key segment is undefined
+        behavior (no trap) wherever it sizes the rank finalize's pool: BF16
+        calls of ``top_k`` 257 to 512 and every call from the record's
+        ``rank_top_k_min`` on.
     workspace_buffer : Optional[torch.Tensor]
         Scratch of at least :func:`cake_dsa_indexer_det_train_topk_workspace_size`
         bytes for the call's geometry (uint8, 8-byte aligned); allocated through
