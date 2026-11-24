@@ -284,7 +284,8 @@ def test_the_prebuilt_library_is_preferred() -> None:
     for name, rec in cake_jit.MODULES.items():
         for arch in rec["arches"]:
             library = cake_backend.library_name(name, arch)
-            assert cake_build.prebuilt_path(library) == PACKAGE_DIR / "aot" / f"{library}.so"
+            # Resolved on both sides: an install under a symlinked directory names the same file twice.
+            assert cake_build.prebuilt_path(library).resolve() == (PACKAGE_DIR / "aot" / f"{library}.so").resolve()
             assert cake_backend.is_prebuilt(name, arch) == cake_build.prebuilt_path(library).is_file()
 
 

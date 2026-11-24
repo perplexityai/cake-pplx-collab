@@ -23,10 +23,16 @@ an FP32 ``[7168]`` leaf):
   softmax over the scores, a batched matmul) in eager PyTorch FP32 on the BF16 values (``v.float()``), one BF16
   rounding of ``out``; its backward is PyTorch autograd (the value gradients rounded once to BF16 by the casts).
 * ``torch_compile``: ``torch.compile(fullgraph=True, dynamic=False)`` of the same function.
+* ``fla``: flash-linear-attention's fused AttnRes (``fla.ops.attnres.fused_attnres``, Triton, forward and backward)
+  with ``query = w``, an all-ones FP32 key-norm weight, ``scale = 1`` and ``checkpoint_level = 1`` (``O(T n)`` FP32
+  state kept for the backward).  It takes the values as separate tensors, returns BF16 ``out`` and ``dv_j`` and an FP32
+  ``dw`` (its query gradient): the same contract as the Cake arms.
+* ``fla_gluon``: the opt-in Gluon backend of the same operation (``fla.ops.attnres.backends.gluon``), same arguments.
 * ``cake_nondet`` / ``cake_det``: ``cake_pplx.cake_attn_res_<mode>_train.cake_attn_res_<mode>``.
 
 The cuDNN frontend (NVIDIA/cudnn-frontend main) has no operation with these semantics (a softmax over per-value RMS-
-scaled dot products followed by a weighted sum of the separate values), so the baselines are the two PyTorch arms.
+scaled dot products followed by a weighted sum of the separate values).  The flash-linear-attention arms run when the
+package imports (``pip install flash-linear-attention``) and are reported as unsupported otherwise.
 
 Timing boundary (identical for all arms): ``fwd`` = one training forward ``fn(values, w)`` (output and saved-state
 allocation, autograd graph recorded and dropped); ``bwd`` = ``torch.autograd.backward`` of a recorded forward
@@ -52,7 +58,7 @@ are at most 1.005 times those of the naive BF16 evaluation, ``dw`` when they are
 issue's FP32 sum on the CPU.  A baseline that misses the bar is reported as a diagnostic, not as a speedup reference.
 
 Subcommands: ``run`` (all rows on one GPU, JSON) and ``report`` (JSON to markdown, with the speedup of each Cake arm
-over the faster baseline arm that meets the bar).
+over the fastest baseline arm that meets the bar, and the latency of every baseline arm).
 
 Example (one GPU)::
 
@@ -86,7 +92,7 @@ from torch.utils.checkpoint import checkpoint
 H = 7168
 EPS = 1e-5
 CAKE_ARMS = ("cake_nondet", "cake_det")
-BASELINE_ARMS = ("torch_compile", "eager")
+BASELINE_ARMS = ("fla", "fla_gluon", "torch_compile", "eager")
 DEFAULT_ARMS = CAKE_ARMS + BASELINE_ARMS
 PHASES = ("fwd", "bwd", "ckpt")
 MODES = ("eager", "graph")
@@ -367,6 +373,42 @@ class CompileArm(Arm):
         return self.compiled
 
 
+@functools.cache
+def _ones(hidden: int, device: torch.device) -> torch.Tensor:
+    return torch.ones(hidden, dtype=torch.float32, device=device)
+
+
+class FlaArm(Arm):
+    """flash-linear-attention's fused AttnRes: ``query = w``, all-ones key-norm weight, so its logit is
+    ``r_j (v_j . w)`` and its query gradient is ``dw``."""
+
+    def __init__(self, gluon):
+        self.name = "fla_gluon" if gluon else "fla"
+        self.gluon = gluon
+        try:
+            if gluon:
+                from fla.ops.attnres.backends.gluon import fused_attnres_gluon as entry
+            else:
+                from fla.ops.attnres import fused_attnres as entry
+        except Exception as exc:  # noqa: BLE001
+            raise Unsupported(f"flash-linear-attention not importable: {type(exc).__name__}: {exc}") from exc
+        self.entry = entry
+
+    def library(self) -> str:
+        backend = "Gluon backend" if self.gluon else "Triton"
+        return (
+            f"flash-linear-attention {_dist('flash-linear-attention')} (fla.ops.attnres, {backend}, checkpoint_level=1)"
+        )
+
+    def layer(self):
+        entry = self.entry
+
+        def fn(values, w):
+            return entry(w, list(values), _ones(w.shape[-1], w.device), rms_eps=EPS, scale=1.0, checkpoint_level=1)
+
+        return fn
+
+
 class CakeArm(Arm):
     def __init__(self, mode):
         self.name = f"cake_{mode}"
@@ -396,6 +438,8 @@ def make_arm(name):
         return EagerArm()
     if name == "torch_compile":
         return CompileArm()
+    if name in ("fla", "fla_gluon"):
+        return FlaArm(gluon=name == "fla_gluon")
     if name in CAKE_ARMS:
         return CakeArm(name.split("_", 1)[1])
     raise ValueError(f"unknown arm {name}")
@@ -710,7 +754,14 @@ def environment():
         "torch_cuda": torch.version.cuda,
         "timer": timer_kind(),
     }
-    for dist in ("triton", "apache-tvm-ffi", "cupti-python", "nvidia-ml-py", "cake-pplx-attn-res"):
+    for dist in (
+        "triton",
+        "apache-tvm-ffi",
+        "cupti-python",
+        "nvidia-ml-py",
+        "flash-linear-attention",
+        "cake-pplx-attn-res",
+    ):
         env[f"dist:{dist}"] = _dist(dist)
     if torch.cuda.is_available():
         i = torch.cuda.current_device()
@@ -812,12 +863,12 @@ def cmd_report(args):
             keys = sorted(k for k in by if k[0] == mode and k[1] == phase)
             if not keys:
                 continue
+            present = [a for a in BASELINE_ARMS if any(a in by[k] for k in keys)]
             lines += [f"### {phase}, {mode}", ""]
-            lines += [
-                "| T | n | bytes | baseline (us) | cake_nondet (us) | speedup | GB/s | HBM util | cake_det (us) | "
-                "speedup | GB/s | HBM util |"
-            ]
-            lines += ["|---|---|---|---|---|---|---|---|---|---|---|---|"]
+            head = ["T", "n", "bytes", *(f"{a} (us)" for a in present), "best baseline (us)"]
+            for arm in CAKE_ARMS:
+                head += [f"{arm} (us)", "speedup", "GB/s", "HBM util"]
+            lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
             for key in keys:
                 arms = by[key]
                 T, n = key[2], key[3]
@@ -826,6 +877,12 @@ def cmd_report(args):
                 ]
                 best = min(base, key=lambda r: r["median_us"]) if base else None
                 cells = [str(T), str(n), f"{bytes_moved(phase, T, n) / 1e6:.0f} MB"]
+                for a in present:
+                    r = arms.get(a, {})
+                    if "median_us" in r:
+                        cells.append(f"{r['median_us']:.1f}" + ("" if meets.get((a, n), True) else " (misses bar)"))
+                    else:
+                        cells.append("unsupported" if "unsupported" in r else ("error" if "error" in r else "n/a"))
                 cells.append(f"{best['median_us']:.1f} ({best['arm']})" if best else "n/a")
                 for arm in CAKE_ARMS:
                     r = arms.get(arm)
