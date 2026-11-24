@@ -133,15 +133,17 @@ bits on either grid, and every band is unchanged.
 ``packed``, ``cake_jit.forward_packed``); ``run_module`` computes the same
 grid for the device's architecture and the call's own test, with the fewest
 host operations.
-Version 0.2.15 changes no bits.  The deterministic package's forward and
-this package's pipelined forwards warm in L2 the CTA's next block and the
-first block of the CTA a wave later, ``x`` and ``z`` each by its own layout:
-packed rows as one byte range, rows of head stride 128 and another token
-stride (a gate sliced from a projection, a broadcast over tokens, one token)
-as one range a token, and rows of other layouts (head-major) as one 256-byte
-range a row on sm_103a and sm_107a and none on sm_100a; 0.2.14 warmed ``x``
-and ``z`` only where both held packed rows.  Their program names and grids
-are those of 0.2.14.  Rows of other layouts of a BF16 weight gradient run
+Version 0.2.15 changes no bits.  The deterministic package's forward warms
+in L2 the CTA's next block and the first block of the CTA a wave later,
+``x`` and ``z`` each by its own layout: packed rows as one byte range, rows
+of head stride 128 and another token stride (a gate sliced from a
+projection, a broadcast over tokens, one token) as one range a token, and
+rows of other layouts (head-major) as one 256-byte range a row on sm_103a
+and sm_107a and none on sm_100a; 0.2.14 warmed ``x`` and ``z`` only where
+both held packed rows.  Its program names and grids are those of 0.2.14.
+This package's pipelined forwards keep the programs of 0.2.14, which warm
+``x`` and ``z`` only where both hold packed rows.  Rows of other layouts of
+a BF16 weight gradient run
 the repeatable backward's long program (``bwd_bf16_rep_long``) in its place
 from ``cake_jit.LONG_BACKWARD_STRIDED_ROWS_PER_SM`` rows per SM (6145 on
 sm_100a and sm_103a, 4097 on sm_107a), with the same bits; an FP32 weight
@@ -394,10 +396,7 @@ Host design (the input layout rules are the deterministic package's):
   rows each; sm_100a), the extra-long forward (the long forward whose thread
   0 also warms the CTA's next block in L2) and the pipelined forwards (the
   deterministic package's forward programs with a gate that does not flush: the
-  mid forward's schedule and L2 prefetches, there of x and z each by its own
-  layout (packed rows one byte range, head stride 128 one range a token,
-  other layouts one 256-byte range a row on sm_103a and none on sm_100a),
-  with the L2 ``evict_first`` policy
+  mid forward's schedule and L2 prefetches with the L2 ``evict_first`` policy
   on the loads of x and z, one CTA per block below that package's cut of rows
   per SM of the architecture and whole waves from there, their records'
   ``persistent_from_rows_per_sm``, and on sm_100a and sm_103a, for rows the

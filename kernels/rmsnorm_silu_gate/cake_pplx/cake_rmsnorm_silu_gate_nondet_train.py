@@ -134,14 +134,16 @@ gain from whole waves from far fewer rows per SM, it is 500 on SM100 and
 ``cake_jit.launch_grid`` takes the architecture (keyword ``arch``) and
 whether the rows are read as packed (keyword ``packed``) for those
 forwards.
-Version 0.2.15 changes no bits.  The deterministic forward and the
-pipelined forwards warm in L2 each CTA's next block and the first block of
-the CTA a wave later, ``x`` and ``z`` each by its own layout: packed rows as
-one byte range, rows of head stride 128 and another token stride (a gate
-sliced from a projection, a broadcast over tokens, one token) as one range a
-token, and rows of other layouts (head-major) as one 256-byte range a row on
-SM103 and SM107 and none on SM100; 0.2.14 warmed ``x`` and ``z`` only where
-both held packed rows.  Rows of other layouts of a BF16 weight gradient run
+Version 0.2.15 changes no bits.  The deterministic package's forward warms
+in L2 each CTA's next block and the first block of the CTA a wave later,
+``x`` and ``z`` each by its own layout: packed rows as one byte range, rows
+of head stride 128 and another token stride (a gate sliced from a
+projection, a broadcast over tokens, one token) as one range a token, and
+rows of other layouts (head-major) as one 256-byte range a row on SM103 and
+SM107 and none on SM100; 0.2.14 warmed ``x`` and ``z`` only where both held
+packed rows.  The pipelined forwards keep the programs of 0.2.14, which warm
+``x`` and ``z`` only where both hold packed rows.  Rows of other layouts of
+a BF16 weight gradient run
 the repeatable backward's look-ahead program from 6145 rows per SM on SM100
 and SM103 and from 4097 on SM107, with the same bits; an FP32 weight
 gradient and a call with ``compute_grad_weight=False`` run it on packed rows

@@ -129,15 +129,16 @@ band is unchanged.
 `packed`, `cake_jit.forward_packed`); `run_module` computes the same grid
 for the device's architecture and the call's own test, with the fewest host
 operations.
-Version 0.2.15 changes no bits.  The deterministic package's forward and
-this package's pipelined forwards (`fwd_pipe`, `fwd_pipe_packed`) warm in L2
-the CTA's next block and the first block of the CTA a wave later, `x` and
-`z` each by its own layout: packed rows as one byte range, rows of head
+Version 0.2.15 changes no bits.  The deterministic package's forward warms
+in L2 the CTA's next block and the first block of the CTA a wave later, `x`
+and `z` each by its own layout: packed rows as one byte range, rows of head
 stride 128 and another token stride (a gate sliced from a projection, a
 broadcast over tokens, one token) as one range a token, and rows of other
 layouts (head-major) as one 256-byte range a row on `sm_103a` and `sm_107a`
 and none on `sm_100a`; 0.2.14 warmed `x` and `z` only where both held packed
-rows.  Their program names and grids are those of 0.2.14.  Rows of other
+rows.  Its program names and grids are those of 0.2.14.  This package's
+pipelined forwards (`fwd_pipe`, `fwd_pipe_packed`) keep the programs of
+0.2.14, which warm `x` and `z` only where both hold packed rows.  Rows of other
 layouts of a BF16 `dw` run the repeatable backward's long program
 `bwd_bf16_rep_long` in its place from
 `cake_jit.LONG_BACKWARD_STRIDED_ROWS_PER_SM` rows per SM (6145 on `sm_100a`
@@ -369,7 +370,7 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | `fwd_mid` | whole waves of 6 CTAs per SM (as many waves as the rows need), each CTA at most 2 blocks of 16 rows | its forward bands |
 | `fwd_long` | whole waves of 3 CTAs per SM (as many waves as the rows need), each CTA at most 6 blocks of 32 rows | its forward band (`sm_100a`) |
 | `fwd_xlong` | the long forward's grid, also prefetching the next block with one bulk prefetch | its forward bands |
-| `fwd_pipe` (`sm_100a`, `sm_103a`) | pipelined forward: the deterministic package's forward program (the same build and grid) with a gate that does not flush (`split_gate`): 128 threads, 8 lanes a row, one CTA per 16-row block below a cut of rows per SM (the deterministic package's): on rows the kernel reads as packed (`x` and `z` of head stride 128 and token stride `H * 128`; `persistent_from_rows_per_sm`) 8192 on `sm_100a` (past its bands of packed rows there, so it runs them one CTA a block) and 5600 on `sm_103a`, on other rows (`x` or `z` broadcast over tokens, or one token; `persistent_from_rows_per_sm_strided`) 500 on `sm_100a` and 400 on `sm_103a`; from there whole waves of 6 CTAs per SM, each CTA at most 2 blocks, a thread loading its row of the CTA's next block while it computes the current one, warp 0 warming the CTA's next block and the first block of the CTA a wave later in L2, `x` and `z` each by its own layout (packed rows one byte range, head stride 128 one range a token, other layouts one 256-byte range a row on `sm_103a` and none on `sm_100a`), `x` and `z` loaded with the L2 `evict_first` policy | its forward bands |
+| `fwd_pipe` (`sm_100a`, `sm_103a`) | pipelined forward: the deterministic package's forward program (the same build and grid) with a gate that does not flush (`split_gate`): 128 threads, 8 lanes a row, one CTA per 16-row block below a cut of rows per SM (the deterministic package's): on rows the kernel reads as packed (`x` and `z` of head stride 128 and token stride `H * 128`, which get its L2 prefetches; `persistent_from_rows_per_sm`) 8192 on `sm_100a` (past its bands of packed rows there, so it runs them one CTA a block) and 5600 on `sm_103a`, on other rows (`x` or `z` broadcast over tokens, or one token; `persistent_from_rows_per_sm_strided`) 500 on `sm_100a` and 400 on `sm_103a`; from there whole waves of 6 CTAs per SM, each CTA at most 2 blocks, a thread loading its row of the CTA's next block while it computes the current one, `x` and `z` loaded with the L2 `evict_first` policy | its forward bands |
 | `fwd_pipe_packed` (`sm_107a`) | the pipelined forward of packed rows (the deterministic package's packed-rows program on `sm_107a` with a gate that does not flush: the pipelined forward's schedule with four sum chains, `rsqrt.approx.ftz` and one 32-byte store a lane; one CTA per 16-row block below 8192 rows per SM, whole waves from there) | its band of `FORWARD_BANDS` (packed rows, fewer than `PACKED_ROWS`) |
 | `bwd_bf16_short` | short backward (a BF16 weight gradient; every architecture): one cluster of 16 CTAs of 256 threads, 16 lanes a row, CTA `r` running the 16-row blocks `r`, `r + 16`, ... with the row-claims backward's row arithmetic; CTA `r` adds every CTA's FP32 partials of the columns `8r` .. `8r + 7` in rank order in FP32 (a fixed order), no workspace | the rows of its band (at most 256) |
 | `bwd_bf16_t512` (`sm_100a`, `sm_107a`), `bwd_f32_t512` | exact tiny backward: one cluster of 16 CTAs of 4 teams of 128 threads, its FP32 weight-gradient terms summed on chip in plain FP32 words in an order of its own, no workspace | the rows of its band (at most 512) |

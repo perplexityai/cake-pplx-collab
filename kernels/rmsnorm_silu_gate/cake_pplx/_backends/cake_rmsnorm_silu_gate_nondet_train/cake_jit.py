@@ -107,11 +107,7 @@ than this package's own, and on sm_107a from 281 rows per SM, where with them
 the forward alone is about 10 % faster and the step at most about 3.5 %
 slower: 128-thread CTAs walking 16-row blocks, each thread
 loading its row of the CTA's next block into registers while it computes the
-current one, warming in L2 the CTA's next block and the first block of the
-CTA a wave later (``x`` and ``z`` each by its own layout: packed rows as one
-byte range, rows of head stride 128 and another token stride as one range a
-token, other layouts as one 256-byte range a row on sm_103a, none on
-sm_100a), with the L2 ``evict_first``
+current one, with the mid forward's L2 prefetches and the L2 ``evict_first``
 policy on the loads of ``x`` and ``z``, one CTA per block below the
 deterministic package's cut of rows per SM of the architecture and whole
 waves from there (``fwd_pipe`` on sm_100a and sm_103a; on sm_107a
@@ -748,13 +744,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # a gate that does not flush (split_gate 1, under this package's name): 128
     # threads, 8 lanes per row (16-row blocks), at most 6 CTAs per SM, each
     # thread loading its row of the CTA's next block into registers while it
-    # computes the current one, warp 0 warming the CTA's next block and the
-    # first block of the CTA one wave later in L2, x and z each by its own
-    # layout (packed rows one range, head stride 128 one range a token, other
-    # layouts one row a lane on sm_103a and none on sm_100a) (build
-    # {"min_blocks": 6, "packed_rows": 0, "prefetch_ahead": 1,
-    # "prefetch_wave": 1, "rsqrt_ftz": 0, "split_gate": 1, "store_width": 128,
-    # "sum_pairs": 0, "threads": 128, "w_late": 0});
+    # computes the current one, thread 0 warming the CTA's next block and the
+    # first block of the CTA one wave later in L2 (build {"min_blocks": 6,
+    # "packed_rows": 0, "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz":
+    # 0, "split_gate": 1, "store_width": 128, "sum_pairs": 0, "threads": 128,
+    # "w_late": 0});
     # one CTA per block below the deterministic package's cut of rows per SM
     # on each architecture (persistent_from_rows_per_sm; on rows it does not
     # read as packed persistent_from_rows_per_sm_strided), whole waves of at
@@ -3592,11 +3586,9 @@ def forward_packed(
     """Whether the persistent forward kernels read ``x`` and ``z`` of
     ``heads`` heads, given their token and head strides (in elements), as
     packed rows: both head strides 128 and both token strides ``heads * 128``
-    (the kernels' test of each tensor by which they warm its rows in L2 as
-    one byte range, here of both; the pipelined forwards warm the rows of
-    other layouts too, by tensor; a single token's stride, passed as 0, a
-    broadcast over tokens, head-major rows and a gate sliced from a
-    projection fail it).  :func:`launch_grid` takes it
+    (the kernels' own test, which turns on their L2 prefetches; a single
+    token's stride, passed as 0, a broadcast over tokens, head-major rows and
+    a gate sliced from a projection fail it).  :func:`launch_grid` takes it
     as ``packed``, and :func:`run_module` makes the same comparisons of a
     call's own arguments where a record's rule has a cut of rows not read as
     packed and the rows lie between its two cuts."""
