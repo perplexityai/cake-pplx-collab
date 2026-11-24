@@ -345,7 +345,7 @@ def test_manifest_covers_every_record_and_its_sources() -> None:
     wanted = {f"{record['library']}_{arch}" for record in cake_jit.MODULES.values() for arch in record["arches"]}
     assert set(entries) == wanted
     assert len(entries) == len(RECORDS) * len(ARCHES)
-    pattern = r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[037]a"
+    pattern = r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[03]a"
     for name, entry in entries.items():
         assert re.fullmatch(pattern, name), name
         assert entry["arch"] in ARCHES and name.endswith("_" + entry["arch"]), name

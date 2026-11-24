@@ -200,8 +200,8 @@ def test_package_identity_and_build_identity():
     assert manifest["package"] == BACKEND
     names = {entry["name"] for entry in manifest["libraries"]}
     assert names == {f"{rec['library']}_{arch}" for rec in jit.MODULES.values() for arch in rec["arches"]}
-    assert all(re.fullmatch(r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[037]a", n) for n in names), names
-    assert len(names) == len(jit.MODULES) * 3 == 12
+    assert all(re.fullmatch(r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[03]a", n) for n in names), names
+    assert len(names) == len(jit.MODULES) * len(jit.ARCHES) == 8
 
 
 def test_manifest_numerics_flags():
