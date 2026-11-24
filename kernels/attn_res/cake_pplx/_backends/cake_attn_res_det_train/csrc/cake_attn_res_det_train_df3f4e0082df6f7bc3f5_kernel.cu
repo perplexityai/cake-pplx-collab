@@ -805,6 +805,8 @@ kernel_cake_attn_res_det_train_df3f4e0082df6f7bc3f5(__nv_bfloat16* __restrict__ 
         }
         reinterpret_cast<int4*>(out + ((long long)t * 7168ll + (long long)(base + 5376)))[0] = reinterpret_cast<int4*>(ss_packed_2)[0];
     }
+    asm volatile("cp.async.commit_group;");
+    asm volatile("cp.async.wait_group 0;");
 }
 
 } // extern "C"
