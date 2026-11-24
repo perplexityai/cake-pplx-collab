@@ -1784,14 +1784,16 @@ ROW_RULES: dict[tuple, dict] = {
     #      (212 SMs) and 0.991 / 0.990 (216 SMs), so the row plans its rule from T 7169.  The 212-SM range of 4096 -> 16
     #      rests on T 3072, where the rule was faster than the plan before on that part; on the 216-SM part it was flat
     #      in eager launches and slower in CUDA graph replays there.
-    #      Post-ship medians of the plan before over the new plan [[TBD0323_RANGE_212]] (212 SMs) and
-    #      [[TBD0323_RANGE_216]] (216 SMs).  Against version 0.3.22 the bits are the same where the two-way split runs
-    #      at an even number of 64-token K blocks up to T 8192 (the plan before split every 128-row tile into the same
-    #      two K halves, without promoted chunks: 65 of the 110 measured changed cells had the digest of the plan
-    #      before) and differ elsewhere (an odd number of K blocks, three or four parts, promoted chunks)
-    #      [[TBD0323_BITS_CONFIRMED]].  The 208- and 224-SM parts are not measured and plan these tiers.  The generic
-    #      call of 4096 -> 16 / 96 and 6144 -> 48 / 64 keeps T 8193 as its swap floor (``_SINGLE_WGRAD_SWAP_MIN_K``);
-    #      the indexer_hw generic call swaps at every token count and runs these plans ----
+    #      Post-ship medians of the plan before over the new plan at the timed changed cells were 1.008 to 1.720 (eager
+    #      launches) and 1.008 to 1.723 (CUDA graph replays) on the 212-SM part and 1.018 to 1.497 and 1.018 to 1.615 on
+    #      the 216-SM part.  Against version 0.3.22 the bits are the same where the two-way split runs at an even number
+    #      of 64-token K blocks up to T 8192 (the plan before split every 128-row tile into the same two K halves,
+    #      without promoted chunks: 65 of the 110 measured changed cells had the digest of the plan before) and differ
+    #      elsewhere (an odd number of K blocks, three or four parts, promoted chunks), as the post-ship A/B found on
+    #      every timed cell of both parts.  The 208- and 224-SM parts are not measured and plan these tiers.  The
+    #      generic call of 4096 -> 16 / 96 and 6144 -> 48 / 64 keeps T 8193 as its swap floor
+    #      (``_SINGLE_WGRAD_SWAP_MIN_K``); the indexer_hw generic call swaps at every token count and runs these
+    #      plans ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 96, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 48, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},
@@ -2869,20 +2871,24 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ('sm_107a', False, True, False, False, False, 8192, 128, None): ((16172, 16384, {**_W8RELF_DGRAD_BF16, "group_m": 16}),),
         # version 0.3.23: the 4096 -> 16 BF16 weight gradient plans its three-way 64-row rule (``ROW_RULES``) from T 3072
         # on this part, below the key's floor (T 4096): measured faster than the plan of version 0.3.22 at T 3072 here
-        # [[TBD0323_212_3072]]; on the 216-SM part it was flat in eager launches and slower in CUDA graph replays
+        # (post-ship medians of that plan over the rule 1.021 / 1.024, eager / CUDA graph); on the 216-SM part it was
+        # flat in eager launches and slower in CUDA graph replays
         ('sm_107a', True, True, False, True, False, 16, None, 4096): ((3072, 4095, {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')}),),
     },
     # The 216-SM part (version 0.3.23).
     # - The indexer_hw BF16 weight gradient plans its 64-row exact two-way split (``ROW_RULES``) at T 1024 - 15360.  There
     #   it measured faster than its plan of version 0.3.21 at every measured token count (T 1024 - 8192 and
-    #   8193 - 15360, medians of that plan over the split 1.03 to 1.33 at T 8193 - 15360 [[TBD0323_RANGE_216_INDEXER]]).
-    #   From T 15361 on it keeps its plan of version 0.3.21, the tier rule ``{"block_n": 128, "sk_exact": 3}``: the
-    #   split measured slower at T 16171, 16172, 32768 and 65536.  The unmeasured T 15361 - 16170, between the last
-    #   measured win and the first measured loss, keep that rule too.
+    #   8193 - 15360, medians of that plan over the split 1.03 to 1.33 at T 8193 - 15360 before shipping; post-ship
+    #   1.018 to 1.332 / 1.018 to 1.374 (eager / CUDA graph) at the timed T 1024 - 15360).  From T 15361 on it keeps its
+    #   plan of version 0.3.21, the tier rule ``{"block_n": 128, "sk_exact": 3}``: the split measured slower at T 16171,
+    #   16172, 32768 and 65536.  The unmeasured T 15361 - 16170, between the last measured win and the first measured
+    #   loss, keep that rule too.
     # - The 6144 -> 48 BF16 weight gradient plans the four-way exact split of its 24 128-row tiles at T 65536 - 131072
     #   (``cta_rows`` 128 and ``pro`` 7 by default, the hint from the 128-row gate:
     #   ``dense_proj_det_gemm_nn_n128_hen_t_skx_kc64_pro7``): it measured faster than its two-way 64-row rule at T 65536,
-    #   98304 and 131072 here [[TBD0323_Q3_216]] and slower on the 212-SM part.  Token counts above 131072 keep the rule.
+    #   98304 and 131072 here (post-ship medians of that rule over the four-way split 1.023 / 1.022, 1.036 / 1.035 and
+    #   1.054 / 1.055 at these T, eager / CUDA graph) and slower on the 212-SM part.  Token counts above 131072 keep the
+    #   rule.
     # - The generic call follows both: it swaps at every token count on indexer_hw (no ``_SINGLE_WGRAD_SWAP_MIN_K``
     #   entry) and from T 8193 on on 6144 -> 48.
     # - The other three rows of version 0.3.22 plan their tiers on this part.

@@ -1573,10 +1573,12 @@ rounds, with cold L2 in eager launches and CUDA graph replays, at ten token coun
 an NVIDIA VR200 (`sm_107a`, 212 SMs) and one R200 board (216 SMs): at each measured token count where a part plans a new
 plan, that plan was faster than the plan of version 0.3.22 beyond the A/A band in both modes, with one bit pattern run
 to run and within the naive BF16 tier on five seeds.  This package's post-ship A/B against its version 0.3.22:
-[[TBD0323_ND_SENTENCE]].  Against version 0.3.22 the bits are the same where the two-way 64-row split runs at an even
-number of 64-token K blocks up to 8192 tokens and differ elsewhere [[TBD0323_BITS_CONFIRMED]].  The unbatched BF16
-`G.T @ X` call of the generic entry on `4096 -> 16`, `4096 -> 96`, `6144 -> 48` and `6144 -> 64` keeps its orientation
-of version 0.3.21 below 8193 tokens.  Every other row, architecture and SM count plans as in version 0.3.22.
+medians of version 0.3.22 over version 0.3.23 at the timed changed cells of 1.006 to 1.680 (eager launches) and 1.009 to
+1.684 (CUDA graph replays) on the 212-SM part and 1.017 to 1.503 and 1.020 to 1.582 on the 216-SM part.  Against version
+0.3.22 the bits are the same where the two-way 64-row split runs at an even number of 64-token K blocks up to 8192
+tokens and differ elsewhere, as the post-ship A/B found on every timed cell of both parts.  The unbatched BF16 `G.T @ X`
+call of the generic entry on `4096 -> 16`, `4096 -> 96`, `6144 -> 48` and `6144 -> 64` keeps its orientation of version
+0.3.21 below 8193 tokens.  Every other row, architecture and SM count plans as in version 0.3.22.
 
 ## Helpers of this package
 
