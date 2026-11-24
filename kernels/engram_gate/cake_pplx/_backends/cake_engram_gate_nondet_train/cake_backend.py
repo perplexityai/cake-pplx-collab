@@ -59,17 +59,25 @@ sum with an error-free two-sum, the error words added once at the end), slower,
 which rounds fewer output elements away from the correctly rounded result where
 the products nearly cancel.  The backward is the same for both: it recomputes
 ``P`` from the inputs as a compensated dot product (``bwd_dot2``, or
-``bwd_dot2_stage`` with the same bits; :func:`.cake_jit.backward_record`), so
-the gradients do not depend on the forward's choice.
+``bwd_dot2_stage`` with the same bits, or with a token mask ``bwd_dot2_order``;
+:func:`.cake_jit.backward_record`), so the gradients do not depend on the
+forward's choice.
 
 ``fwd`` and ``bwd`` run a persistent grid of four-CTA clusters: as many as the
 token count and as the device holds at once (:func:`.cake_jit.clusters`, from
-a table per architecture, SM count and record); any grid is correct, so the
-token count is a run-time value (no recompilation, no shape list).  Every
-launch is a plain stream-ordered launch on the current torch stream of the
-operands' device: nothing cooperative.  Nothing here reads an environment
-variable, reads device memory or synchronizes; grids and buffer sizes come
-from tensor shapes, the architecture and the SM count.
+a table per architecture, SM count and record; a backward call of many tokens
+takes its own count on the devices of :data:`.cake_jit.LARGE_BWD_CLUSTERS`);
+any grid is correct, so the token count is a run-time value (no
+recompilation, no shape list).  From :data:`.cake_jit.CTA1_FWD_MIN_TOKENS`
+tokens on the devices that table names, a forward call launches the ``cta1``
+form of its record instead (:func:`.cake_jit.forward_record`): one CTA of 640
+threads a token, one CTA an SM, the same bits.  Every launch is a plain
+stream-ordered launch on the current torch stream of the operands' device:
+nothing cooperative.  Nothing here reads an environment variable, reads
+device memory or synchronizes; grids and buffer sizes come from tensor
+shapes, the architecture and the SM count.  A call takes its record and grid
+from a plan built once per device, forward summation or backward mask choice
+and token class (:func:`.cake_jit.token_bounds`).
 
 This is the non-deterministic package of its family: ``out``, ``dx``,
 ``dkey`` and ``dvalue`` have one fixed order, and ``dq_weight`` and
@@ -87,6 +95,7 @@ from __future__ import annotations
 
 import functools
 import math
+from bisect import bisect_right
 from typing import Any, Optional, Union
 
 import torch
@@ -136,7 +145,9 @@ KV_WIDTH: int = (STREAMS + 1) * HIDDEN
 # suffix of the ``fwd`` record it launches (:data:`.cake_jit.ACC_MODES`): ``"fp32"`` (the default) one FP32 word,
 # ``"compensated"`` (opt-in) a compensated FP32 dot product.  Every backward launches ``bwd_dot2`` or, without a
 # token mask on an architecture of :data:`.cake_jit.STAGE_BWD_ARCHES` and with at least
-# :data:`.cake_jit.STAGE_BWD_MIN_TOKENS` tokens, ``bwd_dot2_stage`` (the same bits).
+# :data:`.cake_jit.STAGE_BWD_MIN_TOKENS` tokens, ``bwd_dot2_stage`` (the same bits), or, with a token mask and at least
+# the :data:`.cake_jit.ORDER_BWD_MIN_TOKENS` tokens of the architecture, ``bwd_dot2_order`` (the same dx, dkey and
+# dvalue).
 _DOT_SUMS: dict[str, str] = {"fp32": "f32", "compensated": "dot2"}
 
 # Token strides of the strided operands are multiples of 8 elements and every
@@ -150,9 +161,10 @@ _BF16 = torch.bfloat16
 _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 # Bytes of one FP32 [4, 5120] row (a partial row of the backward's weight gradients).
 _ROW_BYTES = STREAMS * HIDDEN * 4
-# The records the launches use, looked up once: the forward record of each summation and ``dw_reduce`` with its grid
-# (the same for every call).  The backward record follows the call (:func:`.cake_jit.backward_record`).
-_FWD_RECORDS: dict[str, str] = {acc: cake_jit.record("fwd", acc) for acc in cake_jit.ACC_MODES["fwd"]}
+# The records the launches use, looked up once: ``dw_reduce`` with its grid (the same for every call) and the CTAs
+# of one grid unit of every record (for the stage launchers).  The forward and backward records and grids follow the
+# call (:func:`_forward_classes`, :func:`_backward_classes`).
+_UNIT_CTAS: dict[str, int] = {name: cake_jit.unit_ctas(name) for name in cake_jit.MODULES}
 _DW_REDUCE_RECORD: str = cake_jit.record("dw_reduce")
 _DW_REDUCE_GRID: tuple[int, int, int] = cake_jit.dw_reduce_grid()
 
@@ -194,17 +206,43 @@ def sm_count(device_index: int) -> int:
     return int(torch.cuda.get_device_properties(device_index).multi_processor_count)
 
 
+# The launch plan of a call: ``(bounds, classes)``, the device's :func:`.cake_jit.token_bounds` and per token class
+# (below the first bound, then from each bound on) ``(record, units, ctas)``: the record the call launches, the units of
+# its grid before the token count caps them (four-CTA clusters, or the CTAs of a ``cta1`` forward) and the CTAs of a
+# unit.  A call of ``T >= 1`` tokens takes ``classes[bisect_right(bounds, T)]`` and launches ``record`` on
+# ``ctas * min(T, units)`` CTAs: the record and the grid the :mod:`.cake_jit` functions give for ``T`` tokens.
+_Plan = tuple[tuple[int, ...], tuple[tuple[str, int, int], ...]]
+
+
+def _token_class(name: str, arch: str, sms: int, least: int) -> tuple[str, int, int]:
+    """``(name, units, ctas)`` of record ``name`` for the token class from ``least`` tokens on a device of ``arch``
+    with ``sms`` SMs: the units of :func:`.cake_jit.persistent_clusters` (at least one) and the CTAs of a unit
+    (:func:`.cake_jit.unit_ctas`)."""
+    units = cake_jit.persistent_clusters(name, arch, sms, least >= cake_jit.LARGE_BWD_MIN_TOKENS)
+    return name, max(1, units), cake_jit.unit_ctas(name)
+
+
 @functools.cache
-def _resident(name: str, device_index: int) -> int:
-    """The resident clusters of the ``fwd`` or ``bwd`` record ``name`` on one CUDA device
-    (:func:`.cake_jit.resident_clusters`), looked up once per record and device."""
-    return cake_jit.resident_clusters(name, device_arch(device_index), sm_count(device_index))
+def _forward_classes(arch: str, device_index: int, acc: str) -> _Plan:
+    """The launch plan of a forward call summing ``P`` as ``acc`` on CUDA device ``device_index`` of ``arch``, with
+    the record of :func:`.cake_jit.forward_record`; built once per architecture, device and summation from the
+    :mod:`.cake_jit` tables (after a table changes, or a device is faked, ``cache_clear()`` it)."""
+    sms = sm_count(device_index)
+    bounds = cake_jit.token_bounds(arch, sms)
+    tokens = (1, *bounds)
+    return bounds, tuple(_token_class(cake_jit.forward_record(arch, sms, acc, t), arch, sms, t) for t in tokens)
 
 
-def _clusters(name: str, T: int, device_index: int) -> int:
-    """:func:`.cake_jit.clusters` of record ``name`` for ``T`` tokens on one CUDA device: the resident clusters, never
-    more than ``T``, at least one."""
-    return max(1, min(T, _resident(name, device_index)))
+@functools.cache
+def _backward_classes(arch: str, device_index: int, masked: bool) -> _Plan:
+    """The launch plan of a backward call with a token mask (``masked``) or without one on CUDA device
+    ``device_index`` of ``arch``, with the record of :func:`.cake_jit.backward_record`; built once per architecture,
+    device and mask choice from the :mod:`.cake_jit` tables (after a table changes, or a device is faked,
+    ``cache_clear()`` it)."""
+    sms = sm_count(device_index)
+    bounds = cake_jit.token_bounds(arch, sms)
+    tokens = (1, *bounds)
+    return bounds, tuple(_token_class(cake_jit.backward_record(arch, masked, t), arch, sms, t) for t in tokens)
 
 
 def _device_index(device: Union[torch.device, int, str, None]) -> Optional[int]:
@@ -357,12 +395,13 @@ def launch_fwd(
     clamp_value: float,
     clusters: int,
 ) -> None:
-    """Launch the forward record ``name`` over ``T = x.shape[0] >= 1`` tokens on ``clusters`` four-CTA clusters:
+    """Launch the forward record ``name`` over ``T = x.shape[0] >= 1`` tokens on ``clusters`` four-CTA clusters
+    (``clusters`` CTAs for a ``cta1`` record):
     ``out = bf16(x + gate * value)`` from ``x`` (BF16 ``[T, 4, 5120]``, contiguous), ``key`` (BF16 ``[T, 4, 5120]``,
     token stride a multiple of 8), ``value`` (BF16 ``[T, 5120]``, same), the weights' 32-bit words ``q_weight`` and
     ``k_weight`` (:func:`_words`) with their mode ``wmode`` (:func:`_wmode`, bits 0 and 1) and ``mask`` (bool ``[T]``
     or None)."""
-    grid = cake_jit.CLUSTER_CTAS * int(clusters)
+    grid = _UNIT_CTAS[name] * int(clusters)
     args = (x, key, value, q_weight, k_weight, mask, out, int(x.shape[0]), float(eps), float(clamp_value), int(wmode))
     _run(name, "fwd", x.get_device(), (*args, grid, 1, 1))
 
@@ -719,13 +758,13 @@ def _forward(
     if T == 0:
         return out, eps_f, clamp_f
     index = x.get_device()
-    device_arch(index)  # RuntimeError on a device outside ARCHES
-    name = _FWD_RECORDS[acc]
-    clusters = _clusters(name, T, index)
+    # The record and the grid of the call (device_arch: RuntimeError on a device outside ARCHES).
+    bounds, classes = _forward_classes(device_arch(index), index, acc)
+    name, units, ctas = classes[bisect_right(bounds, T)]
     # The weights as stored (their 32-bit words), the product formed in the kernel: one launch.
     args = (x, key, value, _words(q_weight), _words(k_weight), _mask(token_mask), out, T, eps_f, clamp_f)
     wmode = _wmode(q_weight.dtype, k_weight.dtype)
-    _run(name, "fwd", index, (*args, wmode, cake_jit.CLUSTER_CTAS * clusters, 1, 1))
+    _run(name, "fwd", index, (*args, wmode, ctas * (T if T < units else units), 1, 1))
     return out, eps_f, clamp_f
 
 
@@ -801,9 +840,10 @@ def _launch_backward(
     if dvalue is None:
         dvalue = torch.empty(T, HIDDEN, dtype=torch.bfloat16, device=device)
     # One backward for either forward sum: it recomputes P as a compensated dot product, in the program that is the
-    # faster one for the call (a token mask given or not, the tokens, the architecture); both give the same bits.
-    name = cake_jit.backward_record(arch, token_mask is not None, T)
-    clusters = _clusters(name, T, index)
+    # faster one for the call (a token mask given or not, the tokens, the architecture), on the call's grid.
+    bounds, classes = _backward_classes(arch, index, token_mask is not None)
+    name, units, ctas = classes[bisect_right(bounds, T)]
+    clusters = T if T < units else units
     # One row per cluster, each written in full by its cluster.
     dw = torch.empty(clusters, STREAMS, HIDDEN, dtype=torch.float32, device=device)
     dq = torch.empty(STREAMS, HIDDEN, dtype=dq_dtype, device=device)
@@ -811,7 +851,7 @@ def _launch_backward(
     # The weights as stored (their 32-bit words), the product formed in the kernels.
     qw, kw = _words(q_weight), _words(k_weight)
     wmode = _wmode(q_weight.dtype, k_weight.dtype, dq_dtype, dk_dtype)
-    grid = cake_jit.CLUSTER_CTAS * clusters
+    grid = ctas * clusters
     bwd = (dout, x, key, value, qw, kw, _mask(token_mask), dx, dkey, dvalue, dw, T, eps, clamp_value, wmode & 3)
     finish = (dw, qw, kw, dq.view(torch.int32), dk.view(torch.int32), clusters, wmode)
     _run(name, "bwd", index, (*bwd, grid, 1, 1))
