@@ -19,7 +19,12 @@ counts per rank are supported. `prepare_mok_bf16(router_weight_position="before_
 FP32 router weight to the SwiGLU activation before the down projection (`h = BF16(w * a)`, an unweighted
 combine, router-weight gradient `dot(dh, a)`): top-k 6 over 384 routed experts at EP 4/8/16/32/64 (and top-k
 2 on the diagnostic layouts), clamped SwiGLU, FP32 weight gradients, BF16 routed weights, on `sm_100a`, `sm_103a`
-and `sm_107a`; `recompute_forward_context` then takes the router weights. The backend README
+and `sm_107a`; `recompute_forward_context` then takes the router weights. The explicit modes
+`router_weight_gradient="direct"` (a router-weight gradient `dot(dh, h)` from the unscaled `dy`, defined at a zero
+weight) and `shared_expert="scaled"` (a per-token FP32 shared-expert scale `s`, `y = s * S(x) + sum_k w_k E_k(x)`,
+with its gradient as a ninth `backward` item) run 512 routed experts at EP8 `(8, 64)`, top-k 10, plain SwiGLU,
+FP32 weight gradients and BF16 routed weights on `sm_100a` and `sm_103a`; their defaults keep every earlier bit.
+The backend README
 ([`cake_pplx/_backends/cake_mok_bf16/README.md`](cake_pplx/_backends/cake_mok_bf16/README.md)) has the
 full API, contract, memory rules and measured communication-SM tables.
 
@@ -27,8 +32,8 @@ full API, contract, memory rules and measured communication-SM tables.
 
 The module is deterministic. Each output repeats bit for bit from run to run: `y`, the forward context,
 the recomputed context (identical to the forward's), `dx`, `dscores` and the six weight gradients (or the
-six FP32 accumulators), for BF16 and MXFP8, for plain and clamped SwiGLU and for both router-weight
-positions. The scope is the same inputs, weights, `MoKConfig` values other than the communication-SM split,
+six FP32 accumulators), for BF16 and MXFP8, for plain and clamped SwiGLU, for both router-weight
+positions and for the explicit modes (`d_shared_scale` included). The scope is the same inputs, weights, `MoKConfig` values other than the communication-SM split,
 precision, `swiglu_limit`, `fp32_wgrad`, `router_weight_position`, EP group, package build and GPU model.
 No bit depends on the communication-SM split, on CUDA Graph replay versus eager launches, or on other kernels
 resident on other streams. Every reduction runs in a fixed order; atomics act on integers only.
@@ -37,12 +42,12 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 | Item | Requirement |
 |---|---|
-| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7), both router-weight positions |
+| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7), both router-weight positions; the 512-expert top-10 group (`router_weight_gradient="direct"`, `shared_expert="scaled"`) on `sm_100a` and `sm_103a` only |
 | CUDA toolkit (`nvcc`, JIT) | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` |
 | `torch` | with `torch.distributed` and symmetric memory (multicast) |
 | Process group | Initialized, its CUDA device current; all ranks in one peer-accessible NVLink domain with multicast |
 | EP sizes | 1, 4, 8, 16, 32, 64 (EP1 uses plain tensors) |
-| Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2 |
+| Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2. `(8, 64)` at top-k 10 with `router_weight_gradient="direct"` and `shared_expert="scaled"` |
 | Schedule capacity | `schedule_capacity_multiplier` at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` holds every routing (`E` local experts, `T` the workspace's physical source rows, at least the largest rank's source rows or `source_capacity`); the same multiplier on every rank, computed from a row bound all ranks agree on (the bound decreases as `T` grows); no upper bound |
 
 ## Builds

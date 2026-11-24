@@ -26,6 +26,13 @@ Shared-expert weight gradients remain source-rank local.
   unweighted; top-k 6 over 384 routed experts (`(4, 96)`, `(8, 48)`,
   `(16, 24)`, `(32, 12)`, `(64, 6)`) and top-k 2 on the diagnostic layouts,
   with clamped SwiGLU and FP32 weight-gradient accumulation (see Contract).
+- **Explicit modes** (`router_weight_gradient`, `shared_expert`, `activation`;
+  defaults `"quotient"`, `"unscaled"`, `"swiglu"` keep every earlier bit):
+  the direct router-weight gradient (`"direct"`: `dot(dh, h)` from the
+  unscaled `dy`, defined at a zero weight) and the per-token shared-expert
+  scale (`"scaled"`: `y = s * S(x) + sum_k w_k E_k(x)` with its gradient
+  `d_s`), run by the 512-routed-expert group at EP8 `(8, 64)`, top-k 10, on
+  SM100a and SM103a (see Contract, "Explicit modes").
 
 The implementation uses standalone generated CUDA sources, loaded prebuilt
 from `aot/` when the package ships them and otherwise built by the package's
@@ -257,6 +264,17 @@ clamped roles (`weight_peers`, the uint64 table of the ranks' router-weight
 buffers, and `row_weights`, the per-call FP32 `[macro_size]` ring); the
 backward takes the clamped FP32 backward's arguments.
 
+The 512-expert top-10 group's kernels (`MODE_GROUPS["scaled_top10"]`) are
+generated for SM100a and SM103a only: the direct-gradient backward
+`backward_fp32_direct` (the arguments of `backward_fp32` and `dy_scaled_ptr`,
+the second per-call `[macro_size, hidden]` BF16 ring that holds the scaled
+`dy` rows the down-projection weight gradient reads), the scaled top-10
+epilogues `epilogue_forward_scaled_10` and `epilogue_backward_scaled_10` (the
+arguments of the top-8 ones and `shared_scale`, FP32 `[tokens]`), the two
+shared-scale helpers `shared_scale_rows` and `shared_scale_dot`, and the count /
+rows kernels of `(8, 64)`. The adapter refuses the group on any other target
+before it loads a kernel.
+
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
 over the two dies of an SM107a GPU, are not shipped: this package has no such
 library, and no entry point selects one.
@@ -386,6 +404,29 @@ across communication-SM splits and under CUDA Graph replay.
   | `"after_down"` (default) | the layouts above | 2 or 8 | plain or clamped | BF16 or FP32 | BF16 or MXFP8 | SM100a, SM103a, SM107a |
   | `"before_down"` | `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` | 6 | clamped | FP32 | BF16 | SM100a, SM103a, SM107a |
   | `"before_down"` | `(1, 4)`, `(4, 4)` (diagnostic) | 2 | clamped | FP32 | BF16 | SM100a, SM103a, SM107a |
+
+- Explicit modes (`prepare_mok_bf16` keywords; the first value of each table is
+  the default and keeps every earlier bit). Their types are checked with the
+  other types (`TypeError`), their values after them (`ValueError`):
+
+  | Keyword | Values | Meaning |
+  | --- | --- | --- |
+  | `router_weight_gradient` (`ROUTER_WEIGHT_GRADIENTS`) | `"quotient"`, `"direct"` | `"after_down"` router-weight gradient. `"quotient"`: `dh = BF16(BF16(w * dy) Wd)`, `d_w = dot(dh, h) / w`, zero at a zero weight. `"direct"`: `dh = BF16(dy Wd)` from the unscaled `dy`, activation gradient `w * dh` in FP32, `d_w = dot(dh, h)` (FP32, fixed order), defined at a zero weight; the down-projection weight gradient reads `BF16(w * dy)` in both, bit for bit the same |
+  | `shared_expert` (`SHARED_EXPERT_MODES`) | `"unscaled"`, `"scaled"`, `"none"` | `"scaled"`: `forward` and `backward` take `shared_scale` (FP32 `[tokens]`, the forward's on the backward), `y = BF16(s * BF16(S(x)) + sum_k w_k o_k)` in FP32; `dx` adds `s * dx_shared` (`dx_shared` from the unscaled `dy`); the shared down-projection weight gradient reads `BF16(s * dy)`, the shared gate/up weight gradients `BF16(s * x)`; `backward` returns `d_shared_scale = dot(dh_shared, hidden_shared)` (FP32, fixed order; `dh_shared = BF16(dy Wd_shared)`) as a ninth item, defined at `s = 0`. `s = 1` gives the unscaled values bit for bit. `"none"` has no build in this package yet |
+  | `activation` (`ACTIVATIONS`) | `"swiglu"`, `"clamped_swiglu"`, `"situ_glu"` | `"clamped_swiglu"` is `clamped_swiglu=True`; `"situ_glu"` has no build in this package yet |
+
+  A configuration that uses a layout, the top-k or a mode of a kernel group
+  (`MODE_GROUPS`) runs exactly that group's configuration:
+
+  | Group | Layouts (EP, local experts) | Top-k | Position | SwiGLU | Weight gradients | `router_weight_gradient` | `shared_expert` | Routed weights | Targets |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `"scaled_top10"` | `(8, 64)` (512 routed experts) | 10 | `"after_down"` | plain | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a |
+
+  Recompute (`recompute_forward_context`) is unchanged by the modes. The group's
+  backward holds, beyond the unscaled backward, the scaled `dy` ring
+  (`macro_size x hidden` BF16) and the two shared operands `BF16(s * dy)` and
+  `BF16(s * x)` (`source rows x hidden` BF16 each) until its launch ends, and
+  `dh_shared` until its row dots are taken.
 
 - BF16 inputs, shared weights and outputs; FP32 router scores (positive with
   `"after_down"`, nonnegative with `"before_down"`); contiguous int64 expert
