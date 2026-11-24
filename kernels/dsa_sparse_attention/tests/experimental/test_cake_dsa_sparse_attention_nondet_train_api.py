@@ -3194,9 +3194,9 @@ def test_public_entries_refuse_other_head_counts(heads, monkeypatch):
         kv[:, D_LATENT:],
         idx,
     )
-    with pytest.raises(ValueError, match=r"\[T, 64, 512\]"):
+    with pytest.raises(ValueError, match=r"\(64, 96, 128\)"):
         cake_dsa_sparse_attention_nondet(*args)
-    with pytest.raises(ValueError, match=r"\[T, 64, 512\]"):
+    with pytest.raises(ValueError, match=r"\(64, 96, 128\)"):
         public_api.cake_dsa_sparse_attention_nondet_train_forward(*args)
 
 

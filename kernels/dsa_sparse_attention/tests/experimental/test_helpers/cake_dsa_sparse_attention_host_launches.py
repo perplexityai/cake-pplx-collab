@@ -21,17 +21,20 @@ resolver and the FFI stream context -- and records every stage launch: its stage
 launch is also *simulated* on its operands by a stand-in of its kernel with the kernel's addressing and an easily
 predicted per-head result, so the outputs of a call show which launch wrote each query head:
 
-- a forward launch writes ``out = q_latent``, ``o_lo = -q_latent`` (unless it is a ``with_o_lo=False`` twin) and
-  ``lse = q_rope[..., 0] + TAG * n`` (``n``: the launch's ordinal among the forward launches of the harness);
+- a forward launch writes ``out = q_latent``, ``o_lo = -q_latent`` with channel 0 set to ``TAG * (n + 1)`` (unless
+  it is a ``with_o_lo=False`` twin) and ``lse = q_rope[..., 0] + TAG * n`` (``n``: the launch's ordinal among the
+  forward launches of the harness), so ``o_lo`` and ``lse`` both show which launch wrote each query head;
 - the delta launch writes, for row ``r`` of ``num_rows`` (token ``r // 64``, head ``r % 64`` of the virtual strides),
   ``delta[r] = dout[r, 0] + 2 out[r, 0] (+ 4 o_lo[r, 0])`` read at the kernel's own offsets (``dout_token_stride``,
   ``dout_head_stride``, ``dout_offset``; ``out`` / ``o_lo`` flat at ``r * 512``);
 - a main launch reads ``lse`` / ``delta`` as ``[T, 64]`` (``token * 64 + lane``), and every lane ``j`` whose ``lse`` is
   finite adds ``own = b + j + 1`` -- ``b`` the first query head of its window (found by content: the launch's
-  ``q_latent`` operand equals the caller's ``q_latent[:, b:b + 64]``) -- to its ``dq`` (``dq_mode`` 0: write; 1 / 2 /
-  3: the FP32 partial, then ``dq = partial + own``), and adds ``(1, own)`` per such (token, lane) into the first two
-  accumulator elements; a lane whose ``lse`` is ``+inf`` (a pad head) or ``-inf`` (a row without a valid slot) adds
-  nothing and writes ``dq = 0``, as the kernel's ``p = exp2(s * c - lse)`` and its validity bits give;
+  ``q_latent`` operand equals the caller's ``q_latent[:, b:b + 64]``; its ``q_rope`` and ``dout`` operands must hold
+  the caller's ``[:, b:b + 64]`` too, and a forward launch's ``q_rope`` likewise) -- to its ``dq`` (``dq_mode`` 0:
+  write; 1 / 2 / 3: the FP32 partial, then ``dq = partial + own``), and adds ``(1, own)`` per such (token, lane) into
+  the first two accumulator elements; a lane whose ``lse`` is ``+inf`` (a pad head) or ``-inf`` (a row without a
+  valid slot) adds nothing and writes ``dq = 0``, as the kernel's ``p = exp2(s * c - lse)`` and its validity bits
+  give;
 - the cast copies (or adds, through the destination map) the first two accumulator elements.
 
 :func:`check_forward` and :func:`check_backward` hold a call's outputs and launches to the head-window contract of
@@ -136,6 +139,8 @@ class HostLaunches:
         self.launches: list[Launch] = []
         self.allocs: list[tuple] = []
         self.q_latent: Optional[torch.Tensor] = None
+        self.q_rope: Optional[torch.Tensor] = None
+        self.dout: Optional[torch.Tensor] = None
         self._fwd_count = 0
         cpu = torch.device("cpu")
         real_alloc = backend._alloc
@@ -196,9 +201,17 @@ class HostLaunches:
 
     # -- recording -------------------------------------------------------------------------------------------
 
-    def bind(self, q_latent: torch.Tensor) -> None:
-        """The caller's ``q_latent`` the windows are found in (by content)."""
+    def bind(
+        self,
+        q_latent: torch.Tensor,
+        q_rope: Optional[torch.Tensor] = None,
+        dout: Optional[torch.Tensor] = None,
+    ) -> None:
+        """The caller's ``q_latent`` the windows are found in (by content), and its ``q_rope`` / ``dout`` (optional)
+        that every windowed launch's operands of those names must match on the same heads."""
         self.q_latent = q_latent
+        self.q_rope = q_rope
+        self.dout = dout
 
     def mark(self) -> int:
         """The index of the next launch (slice ``launches[mark:]`` for the launches of the calls after it)."""
@@ -216,12 +229,32 @@ class HostLaunches:
             f"a launch's q_latent operand {tuple(q.shape)} is no {width}-head window of the caller's q_latent"
         )
 
+    def _same_heads(self, rec: "Launch", values: dict, names: tuple[str, ...]) -> None:
+        """Each of ``names`` (``q_rope``, ``dout``) of a windowed launch holds the caller's tensor of that name on the
+        launch's heads ``[b, b + 64)`` (by content: a dense copy of the same heads is accepted)."""
+        if rec.window is None:
+            return
+        b = rec.window
+        for name in names:
+            src = getattr(self, name)
+            if src is None:
+                continue
+            got = values[name]
+            want = src[:, b : b + WINDOW]
+            assert tuple(got.shape) == tuple(want.shape) and torch.equal(got, want), (
+                f"{rec.stage}: the {name} operand is not the caller's {name}[:, {b}:{b + WINDOW}] "
+                "(the window of its q_latent operand)"
+            )
+
     def _launcher(self, run, values, grid) -> None:
         stage = str(run)
         kind = family(stage)
         rec = Launch(stage, tuple(grid), dict(values))
         if kind in ("fwd", "main", "main_pass"):
             rec.window = self._window(values["q_latent"])
+            self._same_heads(
+                rec, values, ("q_rope",) if kind == "fwd" else ("q_rope", "dout")
+            )
         if kind == "fwd":
             rec.ordinal = self._fwd_count
             self._fwd_count += 1
@@ -237,6 +270,7 @@ class HostLaunches:
         v["out"].copy_(q)
         if v["o_lo"].numel():
             v["o_lo"].copy_(-q)
+            v["o_lo"][..., 0] = TAG * (rec.ordinal + 1)
         v["lse"].copy_(qr[..., 0].float() + TAG * rec.ordinal)
 
     def _sim_delta(self, rec: Launch, v: dict) -> None:
@@ -439,7 +473,12 @@ def check_forward(
         "lse: a query head comes from the wrong window (heads both windows cover come from the later one)"
     )
     if with_o_lo:
-        assert o_lo is not None and torch.equal(o_lo, -inp.q_latent)
+        want_o_lo = -inp.q_latent
+        for rec in fwd:  # launch order, as lse: channel 0 holds the tag of the launch that wrote the head
+            want_o_lo[:, rec.window : rec.window + WINDOW, 0] = TAG * (rec.ordinal + 1)
+        assert o_lo is not None and torch.equal(o_lo, want_o_lo), (
+            "o_lo: a query head comes from the wrong window (heads both windows cover come from the later one)"
+        )
     else:
         assert o_lo is None
 
@@ -494,6 +533,10 @@ def check_backward(
         assert modes == per_window * (chunks * len(wins)), modes
     accs = {rec.values["dkv_f32"].untyped_storage().data_ptr() for rec in mains}
     assert len(accs) == 1, "the windows add into different accumulators"
+    douts = {rec.values["dout"].untyped_storage().data_ptr() for rec in [dl, *mains]}
+    assert len(douts) == 1, (
+        "the delta and the main launches read different dout buffers (the dense copy when one is made)"
+    )
     for rec in mains:
         b = rec.window
         lse_w, delta_w = rec.snap["lse"], rec.snap["delta"]
@@ -660,7 +703,7 @@ def run_case(
     """Run one case of :data:`H64_CASES` (or the same keys at another head count) under ``h``; returns the call's
     tensors by role."""
     inp = inp or _case_inputs(case)
-    h.bind(inp.q_latent)
+    h.bind(inp.q_latent, inp.q_rope, inp.dout)
     with_o_lo = case.get("with_o_lo", True)
     lengths = inp.topk_length if case.get("lengths", True) else None
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)

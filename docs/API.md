@@ -1354,7 +1354,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 
 The autograd entries run the forward eagerly and the backward through autograd; the `*_train*_forward` / `*_train*_backward` step entries run them as two explicit calls without autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only. On `sm_107a` the nondet rope form takes 64 query heads; a 96- or 128-head call raises `NotImplementedError` before any launch.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only. On `sm_107a` the nondet rope form takes 64 query heads; a 96- or 128-head call with at least one query row raises `NotImplementedError` before any launch (a call with T = 0 returns empty outputs).
 
 **Inputs (rope form).**
 

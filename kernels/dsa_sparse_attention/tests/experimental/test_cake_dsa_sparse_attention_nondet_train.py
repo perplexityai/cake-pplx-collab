@@ -1186,7 +1186,6 @@ def test_main_accumulator_constants_and_direct_bound_values():
         accumulate_dkv=True,
         dkv_direct=True,
         key_passes=1,
-        dout_copy=False,  # a 64-head plan reads dout in place
     )
     values = cake_backend._bound_values(plan, t)
     assert values["dkv_f32"] is packed and values["dkr_f32"] is packed
@@ -2786,7 +2785,6 @@ def test_bound_values_serve_the_accumulating_cast_operands():
         accumulate_dkv=True,
         dkv_direct=False,
         key_passes=1,
-        dout_copy=False,  # a 64-head plan reads dout in place
     )
     values = cake_backend._bound_values(plan, dict(t, dkv_acc=acc, dkv_dst_map=dst_map))
     assert values["dst_packed"] is acc and values["dst_map"] is dst_map
@@ -2814,7 +2812,6 @@ def test_bound_values_serve_the_accumulating_cast_operands():
         accumulate_dkv=False,
         dkv_direct=False,
         key_passes=1,
-        dout_copy=False,  # a 64-head plan reads dout in place
     )
     values = cake_backend._bound_values(plan, t)
     assert values["dst_packed"] is t["dkv_latent_acc"]

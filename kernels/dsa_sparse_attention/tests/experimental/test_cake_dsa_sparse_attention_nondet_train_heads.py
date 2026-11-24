@@ -27,7 +27,9 @@ Host tests (CPU, no device): the launches of the eager entries and the prepared 
 the windows, their order, the window statistics and the accumulator at 64, 96 and 128 heads -- plus the retained
 state of the autograd entry, validation and the calls without query rows.  Device tests judge every floating output
 against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_100a / sm_103a (96 and 128 heads ship
-there first; sm_107a runs the 64-head cases).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the T = 16380 case.
+there first; sm_107a runs the 64-head cases).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the T = 16380 case
+(:func:`test_large_t_heads`), which a default run skips: the GPU validation of this form sets it and reports that
+case on its own.
 """
 
 import itertools
@@ -71,6 +73,8 @@ HEADS = (96, 64)
 REDUCED_HEADS = (128,)
 #: The softmax scale of the issue's model (192-wide query-key head dimension).
 SCALE = 192**-0.5
+#: Run-time softmax scales of :func:`test_heads_and_counts_load_no_new_module` (192-, 576- and 128-wide heads).
+SCALES = (SCALE, 576**-0.5, 128**-0.5)
 TOPK = 2048
 LARGE_TESTS_ENV = "CAKE_PPLX_DSA_LARGE_TESTS"
 MIB = 2**20
@@ -265,7 +269,7 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(
         t.detach().clone().requires_grad_()
         for t in (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
     ]
-    h.bind(leaves[0])
+    h.bind(leaves[0], leaves[1], inp.dout)
     saved = []
 
     def pack(t):
@@ -381,7 +385,7 @@ def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
     )
     for head_major in (False, True):
         inp = hl.host_inputs(T, S, K, heads, head_major=head_major)
-        h.bind(inp.q_latent)
+        h.bind(inp.q_latent, inp.q_rope, inp.dout)
         runner = prepare_dsa_train(
             inp.q_latent,
             inp.q_rope,
@@ -482,7 +486,7 @@ def test_validate_accepts_the_supported_head_counts(heads, packed):
 @pytest.mark.parametrize("heads", (1, 32, 63, 65, 80, 160, 192))
 def test_validate_rejects_other_head_counts(heads):
     """Any other query head count is refused with ``ValueError`` naming the supported counts."""
-    with pytest.raises(ValueError, match="64"):
+    with pytest.raises(ValueError, match=r"\(64, 96, 128\)"):
         _validate(heads)
 
 
@@ -506,17 +510,26 @@ def test_validate_rejects_mismatched_head_counts(q_heads, rope_heads, dout_heads
 @pytest.mark.parametrize("heads", (96, 128))
 def test_nope_and_det_forms_reject_more_heads(heads):
     """The NoPE form and the deterministic package keep 64 query heads: 96 and 128 are refused with
-    ``ValueError`` (host validation)."""
-    q = torch.zeros(8, heads, D_LATENT, dtype=torch.bfloat16)
+    ``ValueError`` saying so (host validation), while the same tensors at 64 heads validate."""
     kv = torch.zeros(16, D_LATENT, dtype=torch.bfloat16)
     idx = torch.zeros(8, 5, dtype=torch.int32)
-    with pytest.raises(ValueError):
-        cake_backend.validate_dsa_nope_inputs(q, kv, idx)
-    inp = hl.host_inputs(8, 16, 5, heads)
-    with pytest.raises(ValueError):
-        det_backend.validate_dsa_train_inputs(
-            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices
+    assert tuple(
+        cake_backend.validate_dsa_nope_inputs(
+            torch.zeros(8, 64, D_LATENT, dtype=torch.bfloat16), kv, idx
         )
+    ) == (8, 16, 5)
+    with pytest.raises(ValueError, match="64 query heads only"):
+        cake_backend.validate_dsa_nope_inputs(
+            torch.zeros(8, heads, D_LATENT, dtype=torch.bfloat16), kv, idx
+        )
+    for h in (64, heads):
+        inp = hl.host_inputs(8, 16, 5, h)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
+        if h == 64:
+            assert tuple(det_backend.validate_dsa_train_inputs(*args)[:3]) == (8, 16, 5)
+            continue
+        with pytest.raises(ValueError, match="64 query heads only"):
+            det_backend.validate_dsa_train_inputs(*args)
 
 
 @pytest.mark.parametrize("heads", (96, 128))
@@ -525,15 +538,20 @@ def test_sm107a_refuses_more_than_64_heads(monkeypatch, heads):
     architecture stood in); 64 heads launch as before."""
     h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
     inp = hl.host_inputs(8, 64, 16, heads)
-    h.bind(inp.q_latent)
+    h.bind(inp.q_latent, inp.q_rope, inp.dout)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
-    with pytest.raises((NotImplementedError, ValueError), match="sm_107a|64"):
+    refused = "sm_107a serves 64 query heads only"
+    with pytest.raises(NotImplementedError, match=refused):
         cake_backend.forward(*args)
-    with pytest.raises((NotImplementedError, ValueError), match="sm_107a|64"):
+    with pytest.raises(NotImplementedError, match=refused):
+        cake_backend.backward(*args, inp.q_latent, -inp.q_latent, inp.lse, inp.dout)
+    with pytest.raises(NotImplementedError, match=refused):
         prepare_dsa_train(*args, dout=inp.dout)
+    with pytest.raises(NotImplementedError, match=refused):
+        cake_backend.dsa_train_workspace_size(8, 64, 16, num_heads=heads)
     assert not h.launches
     small = hl.host_inputs(8, 64, 16, 64)
-    h.bind(small.q_latent)
+    h.bind(small.q_latent, small.q_rope, small.dout)
     out, lse, o_lo = cake_backend.forward(
         small.q_latent, small.q_rope, small.kv_latent, small.k_rope, small.indices
     )
@@ -704,8 +722,11 @@ def test_varlen_causal_heads(with_o_lo, heads, record_property):
 def test_dkv_acc_repeated_dst_heads(with_o_lo, heads, record_property):
     """``dkv_acc`` through a many-to-few destination map (1024 key rows into 300 destination rows, repeated
     destinations summing as ``index_add_``) at ``heads`` query heads: the natural-layout main stage and the cast's
-    accumulate path, one pass and two forced key passes; each call's ``dq`` and buffer increment judged (unmapped
-    destination rows and the columns past 576 keep their bits)."""
+    accumulate path, one pass and two forced key passes, through the eager backward and through a prepared runner's
+    step (two forced key passes: the window launches per pass reuse the runner's carved window statistics and dQ
+    partial); each call's ``dq`` and buffer increment judged (unmapped destination rows and the columns past 576
+    keep their bits), the runner's forward outputs too.  The same draw also judges the eager backward's natural FP32
+    key gradients (``dkv_fp32=True``, one and two key passes)."""
     _require_heads(heads, backward=True)
     _require_key_passes_and_direct()
 
@@ -739,6 +760,45 @@ def test_dkv_acc_repeated_dst_heads(with_o_lo, heads, record_property):
                     grads=grads,
                     dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map),
                 )
+            acc = torch.randn(300, 704, device="cuda", generator=gen)
+            before = acc.clone()
+            runner = prepare_dsa_train(
+                *args,
+                dout=inp.dout,
+                softmax_scale=SCALE,
+                key_passes=2,
+                dkv_acc=acc,
+                dkv_dst_map=dst_map,
+                dkv_direct=direct,
+            )
+            assert runner.num_heads == heads and runner.dkv_direct == direct
+            windows = {
+                (key.head0, key.key[2])
+                for key in runner.backward_order
+                if isinstance(key, cake_backend.WindowLaunch)
+                and isinstance(key.key, tuple)
+            }
+            assert windows == {(b, p) for b in (heads - 64, 0) for p in (0, 1)}, windows
+            grads = runner.step()
+            assert grads[2] is None and grads[3] is None
+            runs[f"runner {'direct' if direct else 'cast'} 2 passes"] = _rope_outputs(
+                (runner.out, runner.lse, runner.o_lo),
+                grads,
+                dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map),
+            )
+        for p in (1, 2):
+            grads = cake_backend.backward(
+                *args,
+                out,
+                o_lo,
+                lse,
+                inp.dout,
+                softmax_scale=SCALE,
+                key_passes=p,
+                dkv_fp32=True,
+            )
+            assert grads[2].dtype == torch.float32 and grads[3].dtype == torch.float32
+            runs[f"fp32 dkv {p} pass"] = _rope_outputs(grads=grads)
         torch.cuda.synchronize()
         return nv.judged(nv.rope_problem(inp, scale=SCALE), runs)
 
@@ -782,7 +842,9 @@ def test_large_t_heads(with_o_lo, heads, record_property):
     """T = 16380 queries, one causal document of 16380 keys, top-k 2048, at ``heads`` query heads (the issue's
     per-rank row): the forward and the backward (the key-pass policy's plan, then two forced passes over the token
     chunks) judged over the draws.  The oracle runs in blocks of query rows (``nv.BLOCK_SLOTS`` (row, slot) pairs),
-    about 2e13 FP64 operations per draw at 96 heads: opt in with ``CAKE_PPLX_DSA_LARGE_TESTS=1``."""
+    about 2e13 FP64 operations per draw at 96 heads: opt in with ``CAKE_PPLX_DSA_LARGE_TESTS=1``.  A default run
+    skips it; the GPU validation runs it on sm_100a and sm_103a with that variable and reports its four cases
+    (heads x ``with_o_lo``) as their own gate, with a step time limit sized for the FP64 oracle of the device."""
     if os.environ.get(LARGE_TESTS_ENV, "") != "1":
         pytest.skip(
             f"set {LARGE_TESTS_ENV}=1 to run the T = 16380 case (minutes of FP64 oracle per draw)"
@@ -912,38 +974,41 @@ def test_packed_views_head_major_dout_and_lengths_heads(with_o_lo, record_proper
 
 
 def test_heads_and_counts_load_no_new_module(with_o_lo, record_property):
-    """64, 96 and 128 query heads and new token / key counts run on the modules already loaded (no head count or
-    shape in a build): after one warm-up step per head count, the step of every draw -- its own head count, ``T``
-    and ``S`` -- adds no entry and no miss to the module loader's cache; its outputs are judged."""
+    """64, 96 and 128 query heads, new token / key counts and run-time softmax scales run on the modules already
+    loaded (no head count, shape or scale in a build): after one warm-up step per head count at scale
+    ``192**-0.5``, the step of every draw -- its own head count, ``T``, ``S`` and scale (:data:`SCALES`, every head
+    count meeting each scale) -- adds no entry and no miss to the module loader's cache; its outputs are judged."""
     _require_heads(96, backward=True)
 
-    def step(inp):
+    def step(inp, scale):
         args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-        fwd = cake_backend.forward(*args, softmax_scale=SCALE)
+        fwd = cake_backend.forward(*args, softmax_scale=scale)
         out, lse, o_lo = fwd
         grads = cake_backend.backward(
-            *args, out, o_lo, lse, inp.dout, softmax_scale=SCALE
+            *args, out, o_lo, lse, inp.dout, softmax_scale=scale
         )
         torch.cuda.synchronize()
         return _rope_outputs(fwd, grads)
 
     for heads in (64, 96, 128):
-        step(make_inputs([64], [512], seed=SEED + 8000, topk=256, heads=heads))
+        step(make_inputs([64], [512], seed=SEED + 8000, topk=256, heads=heads), SCALE)
     loaded = cake_jit.load_cake_dsa_train_module.cache_info()
 
     def draw(s, j):
         heads = (64, 96, 128)[j % 3]
+        scale = SCALES[(j // 3) % len(SCALES)]
         T = 100 + 37 * j
         inp = make_inputs([T], [T + 211 * j], seed=s, topk=256, heads=heads)
-        run = step(inp)
+        run = step(inp, scale)
         after = cake_jit.load_cake_dsa_train_module.cache_info()
         assert (after.misses, after.currsize) == (loaded.misses, loaded.currsize), (
             heads,
             T,
+            scale,
             loaded,
             after,
         )
-        return nv.judged(nv.rope_problem(inp, scale=SCALE), {"": run})
+        return nv.judged(nv.rope_problem(inp, scale=scale), {"": run})
 
     nv.judge_draws(record_property, draw, seed=SEED + 8000)
 
@@ -1188,7 +1253,7 @@ def test_sm107a_device_refuses_more_than_64_heads():
     ):
         pytest.skip("an sm_107a device")
     inp = make_inputs([64], [512], seed=SEED, topk=128, heads=96)
-    with pytest.raises((NotImplementedError, ValueError), match="sm_107a|64"):
+    with pytest.raises(NotImplementedError, match="sm_107a serves 64 query heads only"):
         cake_backend.forward(
             inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
         )
