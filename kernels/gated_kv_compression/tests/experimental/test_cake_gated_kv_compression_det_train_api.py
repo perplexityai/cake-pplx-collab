@@ -91,7 +91,7 @@ ENTRIES = {
     "cake_gated_kv_compression_det_train_backward": ["dout", "c", "z", "cu_seqlens", "dc", "dz", "pair_offsets"],
     "cake_gated_kv_compression_det": ["c", "z", "cu_seqlens", "num_pairs"],
     "cake_gated_kv_compression_det_cz": ["cz", "cu_seqlens", "num_pairs"],
-    "cake_gated_kv_compression_det_train_memory_bytes": ["num_tokens", "num_docs"],
+    "cake_gated_kv_compression_det_train_memory_bytes": ["num_tokens", "num_docs", "device"],
 }
 MIXED = Pack((127, 256, 1, 641))
 JUDGED_PACKS = (Pack((0, 1, 3, 2, 7, 4)), MIXED, *PERF_PACKS)
@@ -623,6 +623,32 @@ def test_the_autograd_node_saves_its_inputs_and_the_pair_table_only(form) -> Non
     out.backward(x.dout)
 
 
+# The large-pack pair tables' routes on each architecture: ``(lo, hi, roles)``, the roles a pair-table launch of ``lo``
+# to ``hi`` documents runs in order.
+TABLE_ROUTES = {
+    "sm_100a": (
+        (8193, 131071, ("pair_table_chunks1",)),
+        (131072, 16777216, ("pair_table_totals8", "pair_table_scan8")),
+    ),
+    "sm_103a": (
+        (8193, 131071, ("pair_table_chunks1",)),
+        (131072, 16777216, ("pair_table_totals8", "pair_table_scan8")),
+    ),
+    "sm_107a": (
+        (8193, 65536, ("pair_table_chunks1",)),
+        (65537, 16777216, ("pair_table_totals1", "pair_table_scan1")),
+    ),
+}
+
+
+def _table_roles(arch: str, docs: int) -> list[str]:
+    """The pair-table roles a launch of ``docs`` documents runs on ``arch``: ``pair_table_small`` for at most 512, the
+    roles of the route of ``TABLE_ROUTES`` holding ``docs``, else ``pair_table``."""
+    if docs <= 512:
+        return ["pair_table_small"]
+    return next((list(roles) for lo, hi, roles in TABLE_ROUTES[arch] if lo <= docs <= hi), ["pair_table"])
+
+
 # Packs at the forward's fused bound (256 documents), past it, and on either side of the small pair table's bound (512
 # documents): one document, 256, 257, 512 and 513 documents of 0 to 6 tokens.
 BOUND_PACKS = tuple(Pack((2, *(i * 5 % 7 for i in range(1, n))), f"S{n}") for n in (1, 256, 257, 512, 513))
@@ -643,8 +669,7 @@ def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launc
     c = x.c.detach().clone().requires_grad_(True)
     with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append(t) or t, lambda t: t):
         out = api.cake_gated_kv_compression_det(c, x.z, x.cu, x.G)
-    table = "pair_table_small" if pack.S <= 512 else "pair_table"
-    assert launches == (["fwd"] if pack.S <= 256 else [table, "fwd_unfused"]), pack.id
+    assert launches == (["fwd"] if pack.S <= 256 else [*_table_roles(arch, pack.S), "fwd_unfused"]), pack.id
     tables = [t for t in saved if t.dtype == torch.int32 and t.data_ptr() != x.cu.data_ptr()]
     assert len(tables) == 1
     assert torch.equal(tables[0], pair_table_of(pack.lengths, device)), f"{pack.id}: saved pair table"
@@ -707,14 +732,14 @@ def test_every_backward_runs_the_role_of_its_documents(pack, launches) -> None:
     role = "bwd" if BWD_SMALL_DOCS[arch] < pack.S and (high is None or pack.S <= high) else "bwd_small"
     if pack.S > BWD_WARP_DOCS[arch] or (span is not None and span[0] <= pack.S <= span[1]):
         role = "bwd_warp"
-    table_role = "pair_table_small" if pack.S <= 512 else "pair_table"
-    forward = ["fwd"] if pack.S <= 256 else [table_role, "fwd_unfused"]
+    table_roles = _table_roles(arch, pack.S)
+    forward = ["fwd"] if pack.S <= 256 else [*table_roles, "fwd_unfused"]
     x = make_inputs(pack, seed=59, device=device, layout="halves")
     table = pair_table_of(pack.lengths, device)
     _, dc, dz = nan_halves(x.T, device)
     launches.clear()
     api.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu, dc=dc, dz=dz)
-    assert launches == [table_role, role], pack.id
+    assert launches == [*table_roles, role], pack.id
     _, given_dc, given_dz = nan_halves(x.T, device)
     launches.clear()
     api.cake_gated_kv_compression_det_train_backward(
@@ -856,7 +881,18 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         jit.device_arch.cache_clear()
     entries = [entry for entry in json.loads(path.read_text())["libraries"] if entry["arch"] == "sm_107a"]
     roles = [role for role in jit.ROLES if "sm_107a" in jit.ROLE_ARCHES.get(role, jit.ARCHES)]
-    assert roles == ["pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small", "bwd_warp"]
+    assert roles == [
+        "pair_table",
+        "pair_table_small",
+        "fwd",
+        "fwd_unfused",
+        "bwd",
+        "bwd_small",
+        "bwd_warp",
+        "pair_table_chunks1",
+        "pair_table_totals1",
+        "pair_table_scan1",
+    ]
     assert sorted(entry["name"] for entry in entries) == sorted(
         f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in roles
     )

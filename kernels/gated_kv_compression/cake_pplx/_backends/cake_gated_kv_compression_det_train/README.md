@@ -80,25 +80,34 @@ reads a contiguous, aligned copy of an incoming gradient of another layout.
 
 | Role | Kernel | Grid |
 |---|---|---|
-| `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA of 1024 threads with a carried running total, 8 documents a thread | `(1, 1, 1)` |
+| `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA of 1024 threads with a carried running total, 8 documents a thread; launched for 513 to 8192 documents (above `small_docs`, below the large-pack pair tables) | `(1, 1, 1)` |
 | `pair_table_small` | the same table by one CTA of 256 threads, one document a thread; launched for `S <= small_docs` (512) | `(1, 1, 1)` |
 | `fwd` | per output row `r < G`: the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros.  Launched for `S <= fuse_docs` (256): the launch builds the pair table itself and does not search: row `r`'s first token is `cu_seqlens[0] + 2 r` plus the number of odd-length documents before its document, counted from `cu_seqlens`, and CTA 0 writes `cu_pairs` | rows `G` |
-| `fwd_unfused` | the same forward without the table build: the document of row `r` by a search of the `cu_pairs` the pair-table launch wrote, by the 32 lanes of a warp (one probe a lane in each of `ceil(log2(S) / 5)` rounds, no shared memory and no barrier); launched for `S > fuse_docs` | rows `G` |
+| `fwd_unfused` | the same forward without the table build: the document of row `r` by a search of the `cu_pairs` the pair-table launch wrote, by the 32 lanes of a warp (one probe a lane in each of `ceil(log2(S) / 5)` rounds, no shared memory and no barrier); launched for `S > fuse_docs` | rows `G`; on SM100 for `capped_min_docs <= S <= capped_max_docs` (2048 to 16777216) at most `ctas_per_sm` (6) CTAs a multiprocessor, whose CTAs stride over the row blocks |
 | `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens, its document by a binary search of `cu_pairs`.  With `S <= 16384` the search has two levels: each CTA with pair rows copies every 16th entry of `cu_pairs` to shared memory, and a row picks its window of 16 entries there and searches only that window; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd.  Launched for `bwd_small_docs < S <= bwd_max_docs` (no upper bound on SM100 / SM103, 16384 on SM107) outside the `bwd_warp` documents: 27 to 16384 on SM100, 33 to 16384 on SM103, 126 to 16384 on SM107 | rows `G + S` |
 | `bwd_small` | the same backward with the search of all of `cu_pairs` in one level; launched for `S <= bwd_small_docs` (26 on SM100 / SM103, 125 on SM107) outside the `bwd_warp` documents (1 to 26 on SM100, 1 to 14 on SM103, 1 to 125 on SM107), and on SM107 for `bwd_max_docs < S <= bwd_warp_docs` (an empty range in this version: both are 16384) | rows `G + S` |
 | `bwd_warp` | the same backward with the search of the unfused forward: the 32 lanes of a warp probe `cu_pairs`, one probe a lane in each of `ceil(log2(S) / 5)` rounds, no shared memory and no barrier; launched for `S > bwd_warp_docs` (16384) and for `bwd_warp_min_docs <= S <= bwd_warp_max_docs` (15 to 32 on SM103; none on SM100 / SM107) | rows `G + S` |
+| `pair_table_chunks1` | the bytes of `pair_table` by one CTA a chunk of 1024 documents, 1024 threads of one document, each CTA also summing the pair counts of the earlier documents: one kernel; launched in place of `pair_table` for `table_min_docs <= S <= table_max_docs` (8193 to 131071 on SM100 / SM103, 8193 to 65536 on SM107) | rows `S`, 1024 a CTA |
+| `pair_table_totals8`, `pair_table_scan8` | the bytes of `pair_table` in two kernels on one stream, chunks of 8192 documents (1024 threads of 8): the pair count of each chunk into a `workspace` of `ceil(S / 8192)` int32 words, then the scan of each chunk; launched in place of `pair_table` for 131072 to 16777216 documents on SM100 / SM103 | rows `S`, 8192 a CTA |
+| `pair_table_totals1`, `pair_table_scan1` | the same two kernels with chunks of 1024 documents (1024 threads of one) and a `workspace` of `ceil(S / 1024)` words; launched in place of `pair_table` for 65537 to 16777216 documents on SM107 | rows `S`, 1024 a CTA |
 
-Each role has one registry record per architecture it serves.  Each forward role has two,
-one kernel in two schedules, each the faster on its architectures: records `fwd` and
-`fwd_unfused` on SM100 / SM103 read `C` and `Z` in 128-bit lanes (4 FP32 channels, 128
-lanes a row, 2 rows per 256-thread CTA); records `fwd_sm_107a` and `fwd_unfused_sm_107a` on
-SM107 read them in 256-bit lanes (8 channels, 64 lanes a row, 4 rows per CTA).  The
+Each role has one registry record per architecture it serves.  Each forward role has two
+programs, one kernel in two schedules, each the faster on its architectures: record `fwd` on
+SM100 / SM103 and records `fwd_unfused` on SM100 and `fwd_unfused_sm_103a` on SM103 (one
+program, a record an architecture, so each carries its own grid leaves) read `C` and `Z` in
+128-bit lanes (4 FP32 channels, 128 lanes a row, 2 rows per 256-thread CTA); records
+`fwd_sm_107a` and `fwd_unfused_sm_107a` on SM107 read them in 256-bit lanes (8 channels, 64
+lanes a row, 4 rows per CTA).  The
 backward is one kernel with three searches: role `bwd` (two levels, 256-bit lanes) has two
 records of one program, `bwd` on SM100 / SM103 and `bwd_sm_107a` on SM107; role
 `bwd_small` (one level, 256-bit lanes) two records of one program, `bwd_small` on SM100 /
 SM103 and `bwd_small_sm_107a` on SM107; role `bwd_warp` (the warp search, 256-bit lanes)
 three records of one program, `bwd_warp` on SM100, `bwd_warp_sm_103a` on SM103 and
 `bwd_warp_sm_107a` on SM107.  `pair_table` and `pair_table_small` are one record each on all three.
+Each large-pack pair table is one program with a record an architecture: `pair_table_chunks1`,
+`pair_table_chunks1_sm_103a` and `pair_table_chunks1_sm_107a`; `pair_table_totals8` /
+`pair_table_scan8` on SM100 and `pair_table_totals8_sm_103a` / `pair_table_scan8_sm_103a` on
+SM103; `pair_table_totals1_sm_107a` / `pair_table_scan1_sm_107a` on SM107.
 A launch picks the
 record of the operands' device.
 
@@ -119,7 +128,11 @@ two-level search was slower in some packs of 125 documents and fewer, in none of
 documents measured, and above 16384 documents, where its shared-memory level covers no more
 and it searches the whole table in one level.  Every backward writes the same bytes.  The pair table is
 `pair_table_small` for at most `small_docs` documents (512; `cake_jit.small_docs`), the
-faster there, and `pair_table` for more; both write the same bytes.  Every launch is a plain
+faster there, the large-pack pair table of the route of `S` where one holds it
+(`cake_jit.pair_table_routes`: `pair_table_chunks1` for 8193 to 131071 documents on SM100 /
+SM103 and 8193 to 65536 on SM107; `pair_table_totals8` then `pair_table_scan8` for 131072 to
+16777216 on SM100 / SM103; `pair_table_totals1` then `pair_table_scan1` for 65537 to 16777216
+on SM107), and `pair_table` for the others; all write the same bytes.  Every launch is a plain
 stream-ordered launch on the current torch stream of the operands' device; nothing
 synchronizes.  Host work per call: the operands' device index, its architecture and the
 roles are looked up once and passed to the launches, and each record's argument plan and
@@ -137,12 +150,14 @@ about 87.3 and more give a subnormal or zero `e` (zero from about 104), and exac
 | Item | Bytes | Held |
 |---|---|---|
 | pair table (`cu_pairs`) | `4 (S + 1)` | workspace of an explicit forward, and of an explicit backward without `pair_offsets`; freed on return |
+| chunk totals of a pair table in two phases | `4 ceil(S / chunk)` | for 131072 to 16777216 documents on SM100 / SM103 (chunks of 8192) and 65537 to 16777216 on SM107 (chunks of 1024): a separate int32 tensor of the call that launches the pair table, freed on return |
 | autograd node | `4 (S + 1)` | its forward's pair table, retained until its backward |
 | inputs the autograd node references | `4096 T + 4 (S + 1)` | `C` and `Z` (or `cz`) and `cu_seqlens`, the caller's tensors: no copy |
 | incoming-gradient copy | `1024 G` | workspace of the autograd backward only when its incoming gradient is not contiguous and 16-byte aligned (for example the expanded gradient of `out.sum().backward()`); freed on return |
 
-`cake_gated_kv_compression_det_train_memory_bytes(num_tokens, num_docs)` returns the figures
-of the first three rows; it takes no `G` and leaves out the incoming-gradient copy, the only
+`cake_gated_kv_compression_det_train_memory_bytes(num_tokens, num_docs, device=None)` returns
+the figures of the first four rows, the chunk totals of `device`'s architecture (`None`: the
+most of the three); it takes no `G` and leaves out the incoming-gradient copy, the only
 workspace of the autograd backward.  The autograd node saves its inputs and the pair table
 only (no activation, no probability); under `torch.utils.checkpoint(..., use_reentrant=False)`
 the recompute rebuilds the same bits.  The outputs (`out`, `dC`, `dZ`) are allocated from

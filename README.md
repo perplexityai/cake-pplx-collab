@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 21 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 22 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -29,6 +29,7 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | mok | `cake-pplx-mok` | `cake_mok_det_train` | Expert-parallel MoE layer training (BF16 or MXFP8 routed experts) | [API](docs/API.md#mok) |
 | lm_head | `cake-pplx-lm-head` | `cake_lm_head_{det,nondet}_train` | Chunked LM-head loss, log-probs and support KL | [API](docs/API.md#lm_head) |
 | act_qdq | `cake-pplx-act-qdq` | `cake_act_qdq_det_train` | FP4 / MXFP4 / MXFP8 quantize-dequantize of BF16 activations (forward only) | [API](docs/API.md#act_qdq) |
+| route_weight_scale | `cake-pplx-route-weight-scale` | `cake_route_weight_scale_det_train` | Routed-expert row scaling by the FP32 route weight, with the FP32 row-dot `dw` (H = 4096, 3584) | [API](docs/API.md#route_weight_scale) |
 
 Each family's source is in `kernels/<family>/`. Distribution names use hyphens, and the subdirectory names use underscores. pip treats `-` and `_` in distribution names as the same character.
 
