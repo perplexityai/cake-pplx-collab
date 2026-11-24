@@ -1500,7 +1500,14 @@ _SINGLE_WGRAD_SWAP_MIN_K = {
     ("sm_107a", 576, 6144, False): 6144,
     # no entry for the four sm_107a bf16 rows of version 0.3.22 (4096 -> 16 / 96, 6144 -> 48 / 64): the post-ship A/B
     # floor of each was T 1024 on both parts (version 0.3.24); since version 0.3.25 the call swaps from T 960 on the
-    # 64-row whole tiles (post-ship A/B of the generic call: [[TBD0325_GENERIC_AB]])
+    # 64-row whole tiles (post-ship A/B of the generic call: medians of version 0.3.24 over version 0.3.25 at the timed
+    # changed cells were 1.037 to 4.206 (eager launches) and 1.038 to 4.256 (CUDA graph replays) on the 212-SM part
+    # (2.058 to 4.206 and 1.998 to 4.256 at the 13 cells where it now swaps); on the 216-SM part the A/B did not
+    # complete (cells whose plan is the same in both versions read faster in version 0.3.25 in their paired comparison,
+    # at one cell in the first timing and at four in a re-time (one of them moved between two timing states), so the
+    # control check fixed in advance voided the result on that part), and its observed medians were 1.021 to 4.033 and
+    # 1.024 to 3.972 (1.953 to 4.033 and 1.911 to 3.972 at the 14 cells where it now swaps), with no changed cell
+    # slower)
 }
 
 
@@ -1862,10 +1869,15 @@ ROW_RULES: dict[tuple, dict] = {
     #      6144 -> 48 and of this package on indexer_hw), while this package's entries were faster at every measured
     #      token count of T 960 - 3584, so these three bands end at T 3584; the 216-SM part, where the whole tiles were
     #      faster at T 4096 before shipping, uses the same edge (one edge on every sm_107a part;
-    #      its post-ship result: [[TBD0325_AB_216]]).
+    #      its post-ship result: the A/B there did not complete, since cells whose plan is the same in both versions
+    #      read faster in version 0.3.25 in their paired comparison, at one cell in the first timing and at four in a
+    #      re-time (one of them moved between two timing states) and the control check fixed in advance voided the
+    #      result on that part; the medians it observed, given below, show no changed cell slower than version 0.3.24).
     #      At T 3585 - 4096 these rows plan as in version 0.3.24, with its bits, and their generic call runs that plan.
-    #      Post-ship medians of the plan before over the new plan at the timed changed cells: [[TBD0325_AB_212]] on the
-    #      212-SM part and [[TBD0325_AB_216]] on the 216-SM part.  Against version 0.3.24 the bits are the same at T 960
+    #      Post-ship medians of the plan before over the new plan at the timed changed cells: 1.035 to 1.571 (eager
+    #      launches) and 1.035 to 1.582 (CUDA graph replays) on the 212-SM part and 1.023 to 1.552 and 1.020 to 1.570
+    #      (observed in the incomplete A/B at the last timing of each cell, not judged; no changed cell was slower in
+    #      any timing) on the 216-SM part.  Against version 0.3.24 the bits are the same at T 960
     #      (both plans sum a tile's K in one chain) and on the twin at an even number of K blocks (its two chunks are
     #      the two halves of the exact split before), except for an output whose two halves both sum to -0.0 (stored
     #      -0.0 now, +0.0 before), and differ elsewhere (one chain over a tile's K blocks instead of two or three

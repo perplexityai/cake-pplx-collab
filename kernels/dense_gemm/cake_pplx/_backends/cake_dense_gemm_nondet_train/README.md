@@ -1599,8 +1599,16 @@ part)).  At 3585 to 4096 tokens `4096 -> 96`, `6144 -> 48` and `6144 -> 32` plan
 A/B on the 212-SM part, at 4096 tokens on these rows an entry was not faster than the plan of version 0.3.24 in either
 launch mode (this package's weight-gradient entry on `4096 -> 96` and `6144 -> 48` and its generic call on
 `4096 -> 96`, the deterministic package's weight-gradient entry on `4096 -> 96` and `6144 -> 32`).  This package's
-post-ship A/B against its version 0.3.24: [[TBD0325_ND_AB_212]] on the 212-SM part and [[TBD0325_ND_AB_216]] on the
-216-SM part; generic call [[TBD0325_NDGEN_AB]].  Against version 0.3.24 its bits change where the deterministic
+post-ship A/B against its version 0.3.24: medians of version 0.3.24 over version 0.3.25 of 1.027 to 1.586 (eager
+launches) and 1.033 to 1.593 (CUDA graph replays) at the 58 timed changed cells of the weight-gradient entry on the
+212-SM part and 1.009 to 1.564 and 1.010 to 1.585 (observed at the last timing of each cell in an A/B that did not
+complete, as cells whose plan is the same in both versions read faster in version 0.3.25 in their paired comparison, at
+one cell in the first timing and at four in a re-time (one of them moved between two timing states) and the control
+check fixed in advance voided the result on that part; not judged, and no changed cell was slower in any timing) on the
+216-SM part; generic call 1.036 to 4.203 and 1.038 to 4.260 on the 212-SM part (2.055 to 4.203 and 1.990 to 4.260 at the
+13 cells where it now swaps) and, observed in the same incomplete A/B, 1.011 to 4.066 and 1.014 to 4.000 on the 216-SM
+part (1.946 to 4.066 and 1.918 to 4.000 at the 14 cells where it now swaps), with no changed cell slower.  Against
+version 0.3.24 its bits change where the deterministic
 package's do; those of the generic call may also change where it now swaps (it ran the direct plan there before).
 Every other row, architecture and SM count plans as in version 0.3.24.
 
