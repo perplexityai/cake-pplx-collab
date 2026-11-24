@@ -175,8 +175,8 @@ SM_COUNTS = (148, 152, 212)
 # here, and the route tests expect these windows.
 WINDOWS = {
     "fwd_large": {"sm_100a": [[112, None]], "sm_103a": [[208, None]], "sm_107a": [[384, None]]},
-    "bwd_large": {"sm_100a": [[13, 21]], "sm_103a": [[14, 21]], "sm_107a": [[16, 21]]},
-    "bwd_relay": {"sm_100a": [[3, 5], [25, None]], "sm_103a": [[12, 13], [25, 647]], "sm_107a": [[3, 6], [31, None]]},
+    "bwd_large": {"sm_100a": [[13, 21]], "sm_103a": [[12, 21]], "sm_107a": [[16, 21]]},
+    "bwd_relay": {"sm_100a": [[3, 5], [25, None]], "sm_103a": [[25, 647]], "sm_107a": [[3, 6], [31, None]]},
     "fwd_fine": {"sm_100a": [[0, 8]], "sm_103a": [[0, 4]], "sm_107a": [[0, 4]]},
     "bwd_fine": {"sm_100a": [[0, 2]], "sm_103a": [[0, 2]], "sm_107a": [[0, 2]]},
     "bwd_unweighted_fine": {"sm_100a": [[0, 4]], "sm_103a": [[0, 4]], "sm_107a": [[0, 2]]},

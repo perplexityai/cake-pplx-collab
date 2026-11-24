@@ -113,8 +113,8 @@ a relay program of a stage runs the small-R one in its place.  A fine window may
 | `fwd` fine | up to 8 rows per SM | up to 4 | up to 4 |
 | `fwd` large-R | from 112 rows per SM | from 208 | from 384 |
 | `bwd` fine | up to 2 rows per SM | up to 2 | up to 2 |
-| `bwd` relay | [3, 5], from 25 rows per SM | [12, 13], [25, 647] | [3, 6], from 31 |
-| `bwd` large-R | [13, 21] rows per SM | [14, 21] | [16, 21] |
+| `bwd` relay | [3, 5], from 25 rows per SM | [25, 647] | [3, 6], from 31 |
+| `bwd` large-R | [13, 21] rows per SM | [12, 21] | [16, 21] |
 | `bwd_unweighted` fine | up to 4 rows per SM | up to 4 | up to 2 |
 
 The forward's large-R windows change 0.1.1's route only where forced small/large sweeps showed the other program not
@@ -165,10 +165,14 @@ on B200, GB300 and VR200 (at full memory clock):
 
 The small-R and the large-R backward programs run 4 rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows per SM a
 wave), the large-R one 5 (20 rows).  The relay program runs one row a CTA and is sized for 9 CTAs on an SM (9 rows per
-SM a wave).  On `sm_103a` the second relay window ends at 647 rows per SM, the first whole number at or above 98304 /
-152 SMs (646.7).  At 196608 rows there the relay program's geometric mean is within 0.1 % of the small-R one's, so the
-small-R program runs above 647 rows per SM.  Every program of a stage stores the same bits for every input, so the
-route changes no output bit.
+SM a wave).  The rule gives these windows, but for one change on `sm_103a`.  There the rule gave the relay program 12 to
+13 rows per SM and the large-R one 14 to 21.  Two windows may not touch, so the rows between them (R = 1977 to 2127 on
+152 SMs) ran the small-R program.  There the release A/B measured the backward alone 1.3 to 2.7 % slower than 0.1.9's
+large-R program (cold L2, merged and split inputs, four GPUs).  So on `sm_103a` the large-R program keeps 0.1.9's window
+from 12 rows per SM, and the relay program has no window below 25.  On `sm_103a` the relay window ends at 647 rows per
+SM, the first whole number at or above 98304 / 152 SMs (646.7).  At 196608 rows there the relay program's geometric mean
+is within 0.1 % of the small-R one's, so the small-R program runs above 647 rows per SM.  Every program of a stage
+stores the same bits for every input, so the route changes no output bit.
 
 At a few rows per SM, a small-R program runs each row (in `bwd_unweighted`, each run of 768 columns) on one warp, alone
 on its SM sub-partition.  Its time is that warp's serial chain of loads.  A fine program splits a row over 9 tasks, one

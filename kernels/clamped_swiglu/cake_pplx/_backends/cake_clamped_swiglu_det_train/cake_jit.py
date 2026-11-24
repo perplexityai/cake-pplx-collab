@@ -223,7 +223,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
-        "rows_per_sm_windows": {"sm_100a": [[13, 21]], "sm_103a": [[14, 21]], "sm_107a": [[16, 21]]},
+        "rows_per_sm_windows": {"sm_100a": [[13, 21]], "sm_103a": [[12, 21]], "sm_107a": [[16, 21]]},
         "role": "bwd_large",
         "stage": "bwd",
     },
@@ -266,7 +266,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_clamped_swiglu_det_train_b161c9eed1166d9766b9",
         "rows_per_sm_windows": {
             "sm_100a": [[3, 5], [25, None]],
-            "sm_103a": [[12, 13], [25, 647]],
+            "sm_103a": [[25, 647]],
             "sm_107a": [[3, 6], [31, None]],
         },
         "role": "bwd_relay",
