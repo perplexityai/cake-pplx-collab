@@ -1662,12 +1662,13 @@ class MoKRecompute:
 class MoKBackward:
     """Native-signature BF16 backward and its separate empty-expert zeroing.
 
-    The router-score gradient is fused into SwiGLU backward as
-    ``dot(d_hidden, hidden) / score``, as in native MoK; a zero score yields a
-    zero gradient. ``fp32_wgrad`` kernels add every weight-gradient
-    contribution into caller-owned FP32 accumulators. Launch-invariant
-    geometry is memoised per geometry; the counters are one zero-filled slab
-    per call.
+    By default (``"quotient"``) the router-score gradient is fused into SwiGLU
+    backward as ``dot(d_hidden, hidden) / score``, as in native MoK; a zero
+    score yields a zero gradient (``weight_before_down`` and ``"direct"``
+    below define it at a zero weight). ``fp32_wgrad`` kernels add every
+    weight-gradient contribution into caller-owned FP32 accumulators.
+    Launch-invariant geometry is memoised per geometry; the counters are one
+    zero-filled slab per call.
 
     ``weight_before_down=True`` (clamped SwiGLU with ``fp32_wgrad`` only)
     loads the router-weight-before-down backward (role

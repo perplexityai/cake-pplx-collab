@@ -195,9 +195,13 @@ A forward context holds the shared-expert activations and the routed
 activations of the first macrobatch, which stays resident in the forward ring
 (MXFP8 keeps the routed x and activation transposed in MXFP8 and gate/up in
 E4M3). Backward replays later macrobatches inside the fused kernel. No routed
-expert output is saved: the router-score gradient is fused into SwiGLU
-backward as `dot(d_hidden, hidden) / score`, as in native MoK. Scores must be
-positive; a zero score yields a zero score gradient. With
+expert output is saved: with the default
+`router_weight_gradient="quotient"` the router-score gradient is fused into
+SwiGLU backward as `dot(d_hidden, hidden) / score`, as in native MoK. Scores
+must be positive there; a zero score yields a zero score gradient. With
+`router_weight_gradient="direct"` (the 512-expert top-10 group) the
+router-weight gradient is `dot(dh, h)` with `dh` from the unscaled `dy`, with
+no division: router weights are `>= 0` and a zero weight has its gradient. With
 `router_weight_position="before_down"` the router-weight gradient is
 `dot(dh, a)` (`dh` the gradient of the down projection's input `h`, `a` the
 SwiGLU activation), with no division: it is defined at a zero weight, whose
@@ -454,9 +458,10 @@ across communication-SM splits and under CUDA Graph replay.
   `dh_shared` until its row dots are taken.
 
 - BF16 inputs, shared weights and outputs; FP32 router scores (positive with
-  `"after_down"`, nonnegative with `"before_down"`); contiguous int64 expert
-  IDs. Each token selects distinct, valid expert IDs. Scores are already
-  normalized/scaled by the caller.
+  `"after_down"` and the default `"quotient"` gradient; nonnegative with
+  `"before_down"` and with `"direct"`, where a zero weight has a defined
+  gradient); contiguous int64 expert IDs. Each token selects distinct, valid
+  expert IDs. Scores are already normalized/scaled by the caller.
 - Logical source token counts may differ across ranks and may be zero. Hidden
   and intermediate widths are positive multiples of 256; MXFP8 also requires a
   hidden width that is a multiple of 512. Below CUDA 13.1 the MXFP8 forward

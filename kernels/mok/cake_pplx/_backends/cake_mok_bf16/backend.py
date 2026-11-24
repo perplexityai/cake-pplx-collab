@@ -1796,7 +1796,8 @@ class MoKFunctional:
         the FP32 ``[tokens]`` ``d_shared_scale``.
 
         ``dscores`` is ``dot(d_hidden, hidden) / score`` with
-        ``router_weight_position="after_down"`` (zero at a zero score),
+        ``router_weight_position="after_down"`` and the default
+        ``router_weight_gradient="quotient"`` (zero at a zero score),
         ``dot(dh, hidden)`` with ``router_weight_gradient="direct"`` (``dh``
         from the unscaled ``dy``; defined at a zero weight) and ``dot(dh, a)``
         with ``"before_down"`` (``dh`` the gradient of the down projection's
