@@ -51,10 +51,11 @@ Host design (every control is a keyword; no environment variable):
   at all on SM100; a prefetch changes no bits.  One module per architecture,
   and a second one for packed rows (``x`` and ``z`` both read as contiguous
   ``[T, H, 128]``, fewer than 2^24 rows; ``cake_jit.forward_module``): on
-  SM107 one that reads each row at its linear offset, on SM100 and SM103 the
-  module of version 0.2.14, which warms only rows packed in both ``x`` and
-  ``z`` (next to the per-layout prefetches, packed rows measured slower at
-  small and mid row counts).  Each computes a row with the same FP32
+  SM107 one that reads each row at its linear offset, on SM100 and SM103 a
+  new module with the forward code of version 0.2.14, which warms only rows
+  packed in both ``x`` and ``z`` (next to the per-layout prefetches, packed
+  rows measured slower at small and mid row counts).  Each computes a row
+  with the same FP32
   operations in the same order, so the layout changes no bits.  Up to
   ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
   rows of ``cake_jit.FWD_TINY_GAP_ROWS`` (17 to 32 on SM107), inputs whose

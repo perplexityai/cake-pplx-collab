@@ -4314,7 +4314,7 @@ def test_forward_grid_is_one_cta_a_block_then_whole_waves(sm_count):
 
 
 # (rows, SMs, architecture, CTAs) of the forward of rows the kernel reads as
-# packed (each forward record of the architecture: ``fwd`` and, on sm_107a,
+# packed (each forward record of the architecture: ``fwd`` and, where routed,
 # ``fwd_packed``): one CTA per 16-row block below the architecture's cut of
 # rows per SM times the SMs, from there the fewest whole waves of 6 CTAs per
 # SM whose CTAs walk at most 2 blocks.  A row less than the cut times the SMs

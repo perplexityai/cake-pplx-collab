@@ -150,9 +150,10 @@ gradient and a call with ``compute_grad_weight=False`` run it on packed rows
 only, as in 0.2.14.
 Version 0.2.16 changes no bits.  On SM100 and SM103 the deterministic
 package runs packed rows (``x`` and ``z`` both contiguous ``[T, H, 128]``,
-fewer than 2^24 rows) on a second forward program, the forward of 0.2.14,
-which warms in L2 only rows packed in both ``x`` and ``z``; its first
-forward, which warms each tensor by its own layout, runs the other rows.
+fewer than 2^24 rows) outside its tiny forward's rows on a second forward
+program, the forward of 0.2.14, which warms in L2 only rows packed in both
+``x`` and ``z``; its first forward, which warms each tensor by its own
+layout, runs the other rows outside the tiny forward's.
 The kernels of this package are those of 0.2.15.
 A band runs a
 backward whose weight gradient may vary only where the band-selection

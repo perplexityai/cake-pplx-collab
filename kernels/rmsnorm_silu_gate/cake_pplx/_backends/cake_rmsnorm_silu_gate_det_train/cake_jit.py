@@ -1933,8 +1933,9 @@ HEAD_DIM = 128
 ALIGNMENT_ELEMENTS = 16
 # The kernels index rows with 32-bit integers.
 INT32_MAX = 2**31 - 1
-# A forward of packed rows takes the offset of an element of row ``n`` as
-# ``n * 128 + column`` in 32-bit arithmetic: it serves fewer rows than this.
+# The ``fwd_packed`` forward serves fewer rows than this: the sm_107a one
+# takes the offset of an element of row ``n`` as ``n * 128 + column`` in
+# 32-bit arithmetic, and the sm_100a and sm_103a one keeps the same cut.
 PACKED_ROWS = 2**31 // HEAD_DIM
 
 

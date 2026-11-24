@@ -149,11 +149,12 @@ deterministic package's `cake_jit.backward_module` take
 `compute_grad_weight` (default true).
 Version 0.2.16 changes no bits.  On `sm_100a` and `sm_103a` the
 deterministic package runs packed rows (`x` and `z` both contiguous
-`[T, H, 128]`, fewer than 2^24 rows) on a second forward program
+`[T, H, 128]`, fewer than 2^24 rows) outside its tiny forward's rows
+(`cake_jit.FWD_TINY_ROWS_PER_SM`) on a second forward program
 (`fwd_packed`), the forward of 0.2.14, which warms in L2 only rows packed in
 both `x` and `z`; its `fwd` program, which warms each tensor by its own
-layout, runs the other rows.  This package's programs, routes and grids are
-those of 0.2.15.
+layout, runs the other rows outside the tiny forward's.  This package's
+programs, routes and grids are those of 0.2.15.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
