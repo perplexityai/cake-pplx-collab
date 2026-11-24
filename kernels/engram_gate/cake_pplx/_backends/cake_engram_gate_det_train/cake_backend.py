@@ -64,12 +64,14 @@ the gradients do not depend on the forward's choice.
 
 ``fwd`` and ``bwd`` run a persistent grid of four-CTA clusters: as many as the
 token count and as the device holds at once (:func:`.cake_jit.clusters`, from
-a table per architecture, SM count and record); any grid is correct, so the
-token count is a run-time value (no recompilation, no shape list).  Every
-launch is a plain stream-ordered launch on the current torch stream of the
-operands' device: nothing cooperative.  Nothing here reads an environment
-variable, reads device memory or synchronizes; grids and buffer sizes come
-from tensor shapes, the architecture and the SM count.
+a table per architecture, SM count and record; a backward call of many tokens
+takes its own count on the devices of :data:`.cake_jit.LARGE_BWD_CLUSTERS`);
+any grid is correct, so the token count is a run-time value (no
+recompilation, no shape list).  Every launch is a plain stream-ordered launch
+on the current torch stream of the operands' device: nothing cooperative.
+Nothing here reads an environment variable, reads device memory or
+synchronizes; grids and buffer sizes come from tensor shapes, the
+architecture and the SM count.
 
 This is the deterministic package of its family: every sum has one fixed
 order (each cluster writes its own row of weight-gradient partial sums and
@@ -150,6 +152,8 @@ _ROW_BYTES = STREAMS * HIDDEN * 4
 _FWD_RECORDS: dict[str, str] = {acc: cake_jit.record("fwd", acc) for acc in cake_jit.ACC_MODES["fwd"]}
 _DW_REDUCE_RECORD: str = cake_jit.record("dw_reduce")
 _DW_REDUCE_GRID: tuple[int, int, int] = cake_jit.dw_reduce_grid()
+# The least token count of a call whose backward takes the grid of many tokens (:func:`.cake_jit.clusters`).
+_LARGE_BWD_MIN_TOKENS: int = cake_jit.LARGE_BWD_MIN_TOKENS
 
 # This package's module prefix (the vendored name of a vendored copy).
 _PACKAGE = __name__.rpartition(".")[0]
@@ -190,16 +194,17 @@ def sm_count(device_index: int) -> int:
 
 
 @functools.cache
-def _resident(name: str, device_index: int) -> int:
-    """The resident clusters of the ``fwd`` or ``bwd`` record ``name`` on one CUDA device
-    (:func:`.cake_jit.resident_clusters`), looked up once per record and device."""
-    return cake_jit.resident_clusters(name, device_arch(device_index), sm_count(device_index))
+def _resident(name: str, device_index: int, large: bool) -> int:
+    """The clusters of the ``fwd`` or ``bwd`` record ``name`` on one CUDA device before the token count caps them, for
+    a call of at least ``cake_jit.LARGE_BWD_MIN_TOKENS`` tokens (``large``) or fewer
+    (:func:`.cake_jit.persistent_clusters`), looked up once per record, device and token class."""
+    return cake_jit.persistent_clusters(name, device_arch(device_index), sm_count(device_index), large)
 
 
 def _clusters(name: str, T: int, device_index: int) -> int:
-    """:func:`.cake_jit.clusters` of record ``name`` for ``T`` tokens on one CUDA device: the resident clusters, never
-    more than ``T``, at least one."""
-    return max(1, min(T, _resident(name, device_index)))
+    """:func:`.cake_jit.clusters` of record ``name`` for ``T`` tokens on one CUDA device: the clusters of the call's
+    grid, never more than ``T``, at least one."""
+    return max(1, min(T, _resident(name, device_index, T >= _LARGE_BWD_MIN_TOKENS)))
 
 
 def _device_index(device: Union[torch.device, int, str, None]) -> Optional[int]:

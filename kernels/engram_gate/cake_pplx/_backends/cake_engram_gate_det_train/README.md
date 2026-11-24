@@ -81,6 +81,12 @@ than any measured device holds. Any grid is correct. A larger grid than the devi
 resident starts only after a resident one has walked all of its tokens. Every launch is a plain stream-ordered launch
 on the current torch stream: nothing cooperative.
 
+B300 (`sm_103a`, 148 SMs) has no entry, so it takes the fallback: 125 forward and 94 backward clusters (it holds 142 /
+104). A backward call of at least `cake_jit.LARGE_BWD_MIN_TOKENS` (2048) tokens on a device of
+`cake_jit.LARGE_BWD_CLUSTERS` runs that table's count instead (`cake_jit.persistent_clusters`): 104 on B300, all it
+holds. Below 2048 tokens the B300 backward keeps 94 clusters: at 129 tokens with a token mask, 104 were slower. The B300
+forward keeps 125: at 142 clusters it ran slower with every second token masked.
+
 The two forward records differ only in the sum of `P`, which the autograd entries and the explicit forward select
 with `dot_sum`:
 

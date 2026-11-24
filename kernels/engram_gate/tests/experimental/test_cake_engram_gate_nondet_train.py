@@ -218,21 +218,65 @@ def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
 
 
 @pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))
-@pytest.mark.parametrize("T", (1, 2, 3, 129, 4096, 16384, 65536, 2**31 - 1))
+@pytest.mark.parametrize("T", (1, 2, 3, 129, 2047, 2048, 4096, 16384, 65536, 2**31 - 1))
 def test_grids_are_persistent_clusters(T, sms) -> None:
-    """``fwd`` and ``bwd`` run ``min(T, resident clusters)`` clusters (at least one) of four CTAs; ``dw_reduce`` covers
-    the 20480 weight-gradient columns on any device."""
+    """``fwd`` and ``bwd`` run ``min(T, resident clusters)`` clusters (at least one) of four CTAs, but a ``bwd`` call of
+    at least ``LARGE_BWD_MIN_TOKENS`` tokens on a device of ``LARGE_BWD_CLUSTERS`` runs ``min(T, its entry)``;
+    ``dw_reduce`` covers the 20480 weight-gradient columns on any device."""
     for arch in ARCHES:
         for name in PERSISTENT_RECORDS:
             resident = cake_jit.resident_clusters(name, arch, sms)
+            large = T >= cake_jit.LARGE_BWD_MIN_TOKENS
+            want = resident
+            if large and cake_jit.MODULES[name]["stage"] == "bwd":
+                want = cake_jit.LARGE_BWD_CLUSTERS.get((arch, sms), resident)
+            assert cake_jit.persistent_clusters(name, arch, sms, large) == want
             clusters = cake_jit.clusters(name, T, arch, sms)
             assert 1 <= clusters <= T
-            assert clusters == max(1, min(T, resident))
+            assert clusters == max(1, min(T, want))
             assert resident <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
+            assert want <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
             assert cake_jit.grid(name, T, arch, sms) == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
         assert cake_jit.grid("dw_reduce", T, arch, sms) == cake_jit.dw_reduce_grid()
     assert cake_jit.dw_reduce_grid() == (STREAMS * HIDDEN // cake_jit.DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
     assert STREAMS * HIDDEN % cake_jit.DW_REDUCE_COLUMNS_PER_CTA == 0
+
+
+def test_b300_backward_of_many_tokens_runs_its_own_grid() -> None:
+    """B300 (``sm_103a``, 148 SMs) has no resident entry: below ``LARGE_BWD_MIN_TOKENS`` tokens the backward and the
+    forward keep the fallback grids (94 and 125 clusters); from it the backward runs 104 clusters (it holds 104) and
+    the forward still 125."""
+    assert cake_jit.LARGE_BWD_MIN_TOKENS == 2048
+    assert cake_jit.LARGE_BWD_CLUSTERS == {("sm_103a", 148): 104}
+    assert ("sm_103a", 148) not in cake_jit.RESIDENT_CLUSTERS
+    for name in ("bwd_dot2", "bwd_dot2_stage"):
+        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (1, 94, 129, 2047)] == [1, 94, 94, 94]
+        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (2048, 4096, 65536, 2**31 - 1)] == [104] * 4
+    for name in ("fwd_dot2", "fwd_f32"):
+        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (129, 2047, 2048, 65536)] == [125] * 4
+    for (arch, sms), entry in cake_jit.LARGE_BWD_CLUSTERS.items():
+        assert arch in ARCHES
+        assert 1 <= entry <= 3 * sms // cake_jit.CLUSTER_CTAS, (arch, sms)
+
+
+def test_the_launch_grid_and_the_workspace_follow_the_call(monkeypatch) -> None:
+    """On a faked device of each measured kind (nothing launched), the launch grid of a call (``_clusters``) and the
+    workspace query give ``cake_jit.clusters`` of the call's token count, on both sides of ``LARGE_BWD_MIN_TOKENS``."""
+    workspace = cake_backend.cake_engram_gate_nondet_train_workspace_bytes
+    for arch, sms in (("sm_103a", 148), ("sm_100a", 148), ("sm_103a", 152), ("sm_107a", 212)):
+        monkeypatch.setattr(cake_backend, "device_arch", lambda index, arch=arch: arch)
+        monkeypatch.setattr(cake_backend, "sm_count", lambda index, sms=sms: sms)
+        cake_backend._resident.cache_clear()
+        try:
+            for T in (1, 129, 2047, 2048, 4096, 65536):
+                for name in PERSISTENT_RECORDS:
+                    assert cake_backend._clusters(name, T, 0) == cake_jit.clusters(name, T, arch, sms), (arch, name, T)
+                rows = cake_jit.clusters("bwd_dot2", T, arch, sms)
+                assert workspace(T, 0) == rows * STREAMS * HIDDEN * 4, (arch, T)
+        finally:
+            cake_backend._resident.cache_clear()
+    monkeypatch.undo()
+    cake_backend._resident.cache_clear()
 
 
 class _Recorder:
