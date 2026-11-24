@@ -38,9 +38,10 @@ rows of contiguous ``[T, H, 128]`` inputs, on sm_107a one that addresses them
 as one packed array, without the token and head strides, and on sm_100a and
 sm_103a the forward of version 0.2.14, whose L2 prefetches warm only rows
 packed in both ``x`` and ``z`` (below).  :func:`forward_module` runs it for
-such inputs and ``fwd`` otherwise; both compute a row with the same FP32
-operations in the same order, so ``y`` is the same bits on either route.  An
-architecture may also route ``fwd_tiny`` (``TINY_ROLES``): a forward of
+such inputs (on an architecture with a cut in ``FWD_PACKED_ROWS_PER_SM``, up
+to that many rows per SM) and ``fwd`` otherwise; both compute a row with the
+same FP32 operations in the same order, so ``y`` is the same bits on either
+route.  An architecture may also route ``fwd_tiny`` (``TINY_ROLES``): a forward of
 packed rows only (row ``n`` of ``x`` and ``z`` at element ``128 n``; it takes
 no strides) that runs one block of its rule's ``rows_per_cta`` rows a CTA,
 with no loop.  :func:`forward_module` runs it in the place of ``fwd_packed``
@@ -214,7 +215,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # on sm_103a and none on sm_100a), the gate and rstd by the approximate
     # instructions (build {"min_blocks": 6, "prefetch_ahead": 1,
     # "prefetch_wave": 1, "threads": 128}); whole waves of at most 2 blocks
-    # per CTA.  Packed rows below 2^24 rows run ``fwd_packed`` instead.
+    # per CTA.  Packed rows below 2^24 rows run ``fwd_packed`` instead (on
+    # sm_100a and sm_103a up to ``FWD_PACKED_ROWS_PER_SM`` rows per SM).
     "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05": {
         "arches": [
             "sm_100a",
@@ -401,11 +403,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "fwd_packed",
     },
     # The sm_100a / sm_103a forward of packed rows (contiguous ``[T, H, 128]``
-    # x and z, fewer than 2^24 rows): the first forward with the L2 prefetches
-    # of version 0.2.14, which warm only rows packed in both x and z (build
-    # {"layout_prefetch": 0, "min_blocks": 6, "prefetch_ahead": 1,
-    # "prefetch_wave": 1, "threads": 128}); whole waves of at most 2 blocks per
-    # CTA.
+    # x and z, fewer than 2^24 rows, up to ``FWD_PACKED_ROWS_PER_SM`` rows per
+    # SM): the first forward with the L2 prefetches of version 0.2.14, which
+    # warm only rows packed in both x and z (build {"layout_prefetch": 0,
+    # "min_blocks": 6, "prefetch_ahead": 1, "prefetch_wave": 1, "threads":
+    # 128}); whole waves of at most 2 blocks per CTA.
     "cake_rmsnorm_silu_gate_det_train_3c42d6e202fd8d5c994b": {
         "arches": [
             "sm_100a",
@@ -1925,6 +1927,20 @@ FWD_TINY_GAP_ROWS: dict[str, tuple[int, int]] = {
     "sm_103a": (0, 0),
     "sm_107a": (16, 32),
 }
+# Packed rows past the tiny forward's rows run ``fwd_packed`` up to this many
+# rows per SM and ``fwd`` past it, by architecture (:func:`forward_module`); an
+# architecture not named here runs ``fwd_packed``, where it routes one, on
+# packed rows at every row count below ``PACKED_ROWS``.  On sm_100a and
+# sm_103a the ``fwd_packed`` forward (the forward of 0.2.14) was faster than
+# ``fwd`` or within noise of it up to 3000 rows per SM, and no faster past
+# them: up to 0.9 % slower from 4000 to 8000 rows per SM on sm_100a, and up
+# to 0.8 % slower at 5000 and 5500 rows per SM on sm_103a, alone and in the
+# checkpointed training step (cold L2, contiguous rows of 8 and 48 heads).
+# Host plan only.
+FWD_PACKED_ROWS_PER_SM: dict[str, int] = {
+    "sm_100a": 3000,
+    "sm_103a": 3000,
+}
 # Elements of one normalized row.
 HEAD_DIM = 128
 # The forward reads rows with 32-byte vector accesses (the backward with
@@ -2014,29 +2030,36 @@ def module_for_rows(
     return route_module(arch, role)
 
 
-def _fwd_plan(arch: str) -> tuple[str | None, int, str | None, str | None, int, int]:
+def _fwd_plan(
+    arch: str,
+) -> tuple[str | None, int, str | None, str | None, int, int, int]:
     """``arch``'s forward plan: its ``fwd_tiny`` module and cut
     (``FWD_TINY_ROWS_PER_SM[arch]``) where it routes one and the cut is
     above 0, else None and 0; its ``fwd_packed`` module where it routes one,
     else None; its ``fwd`` module where it routes no long ``fwd`` module
     (then :func:`module_for_rows` of ``fwd`` names it at every row count),
-    else None; and the rows ``(lo, hi]`` of its tiny band that run without
-    it (``FWD_TINY_GAP_ROWS[arch]``, ``(0, 0)`` where none)."""
+    else None; the rows ``(lo, hi]`` of its tiny band that run without it
+    (``FWD_TINY_GAP_ROWS[arch]``, ``(0, 0)`` where none); and the rows per SM
+    up to which packed rows run its ``fwd_packed`` module
+    (``FWD_PACKED_ROWS_PER_SM[arch]``, 0 where it has no such cut)."""
 
     routes = ROUTES[arch]
     cut = FWD_TINY_ROWS_PER_SM.get(arch, 0)
     base = routes.get("fwd") if "fwd" + LONG not in routes else None
     lo, hi = FWD_TINY_GAP_ROWS.get(arch, (0, 0))
+    packed = routes.get("fwd_packed")
+    packed_cut = FWD_PACKED_ROWS_PER_SM.get(arch, 0)
     if "fwd_tiny" in routes and cut > 0:
-        return routes["fwd_tiny"], cut, routes.get("fwd_packed"), base, lo, hi
-    return None, 0, routes.get("fwd_packed"), base, 0, 0
+        return routes["fwd_tiny"], cut, packed, base, lo, hi, packed_cut
+    return None, 0, packed, base, 0, 0, packed_cut
 
 
 # The forward plan of every routed architecture, read once at import: a
 # forward looks its plan up once, tests its strides, compares ints and
 # returns a module of the plan (its host path is most of the time of a small
-# call).  Patching ``ROUTES``, ``FWD_TINY_ROWS_PER_SM`` or
-# ``FWD_TINY_GAP_ROWS`` alone changes no forward route.
+# call).  Patching ``ROUTES``, ``FWD_TINY_ROWS_PER_SM``,
+# ``FWD_TINY_GAP_ROWS`` or ``FWD_PACKED_ROWS_PER_SM`` alone changes no forward
+# route.
 _FWD_PLANS = {arch: _fwd_plan(arch) for arch in ROUTES}
 
 
@@ -2062,13 +2085,15 @@ def forward_module(
       an address (a broadcast of more tokens is not packed rows);
     - else the arch's ``fwd_packed`` module when it routes one and the rows
       are packed (both head strides 128, both token strides ``heads * 128``,
-      fewer than ``PACKED_ROWS`` rows);
+      fewer than ``PACKED_ROWS`` rows and, where the arch has a cut in
+      ``FWD_PACKED_ROWS_PER_SM``, at most ``FWD_PACKED_ROWS_PER_SM[arch] *
+      sm_count`` rows);
     - else :func:`module_for_rows` of ``fwd``.
 
     All give the same bits.  The tiny module, its cut, the packed module,
-    the ``fwd`` module and the gap come from ``_FWD_PLANS``, read once at
-    import; an architecture with no plan, or one that routes a long ``fwd``
-    module, asks :func:`module_for_rows`."""
+    the ``fwd`` module, the gap and the packed module's cut come from
+    ``_FWD_PLANS``, read once at import; an architecture with no plan, or
+    one that routes a long ``fwd`` module, asks :func:`module_for_rows`."""
 
     plan = _FWD_PLANS.get(arch)
     if plan is None:
@@ -2078,7 +2103,11 @@ def forward_module(
         if x_tok == row and z_tok == row:
             if rows <= plan[1] * sm_count and not plan[4] < rows <= plan[5]:
                 return plan[0]
-            if plan[2] is not None and rows < PACKED_ROWS:
+            if (
+                plan[2] is not None
+                and rows < PACKED_ROWS
+                and (not plan[6] or rows <= plan[6] * sm_count)
+            ):
                 return plan[2]
         elif (
             # one token: its token index is 0, so its stride is never read
@@ -2717,6 +2746,7 @@ __all__ = [
     "CLUSTER_MIN_SMS",
     "CLUSTER_ROLES",
     "DW_SMALL_ROWS",
+    "FWD_PACKED_ROWS_PER_SM",
     "FWD_TINY_GAP_ROWS",
     "FWD_TINY_ROWS_PER_SM",
     "GRID_KINDS",

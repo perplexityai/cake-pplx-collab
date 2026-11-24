@@ -156,8 +156,9 @@ package runs packed rows (``x`` and ``z`` both contiguous ``[T, H, 128]``,
 fewer than 2^24 rows) outside its tiny forward's rows
 (``cake_jit.FWD_TINY_ROWS_PER_SM``) on a second forward program
 (``fwd_packed``), the forward of 0.2.14, which warms in L2 only rows packed
-in both ``x`` and ``z``; its ``fwd`` program, which warms each tensor by its
-own layout, runs the other rows outside the tiny forward's.  This package's
+in both ``x`` and ``z``, up to ``cake_jit.FWD_PACKED_ROWS_PER_SM`` rows per
+SM; its ``fwd`` program, which warms each tensor by its own layout, runs the
+other rows outside the tiny forward's.  This package's
 programs, routes and grids are those of 0.2.15.
 A band runs a
 backward whose weight gradient may vary only where the band-selection

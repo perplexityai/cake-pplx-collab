@@ -54,7 +54,9 @@ Host design (every control is a keyword; no environment variable):
   SM107 one that reads each row at its linear offset, on SM100 and SM103 a
   new module with the forward code of version 0.2.14, which warms only rows
   packed in both ``x`` and ``z`` (next to the per-layout prefetches, packed
-  rows measured slower at small and mid row counts).  Each computes a row
+  rows measured slower at small and mid row counts), up to
+  ``cake_jit.FWD_PACKED_ROWS_PER_SM`` rows per SM (past them it measured no
+  faster than the first module, and up to 0.9 % slower).  Each computes a row
   with the same FP32
   operations in the same order, so the layout changes no bits.  Up to
   ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the

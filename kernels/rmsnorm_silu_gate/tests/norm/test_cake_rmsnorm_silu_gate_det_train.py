@@ -784,6 +784,16 @@ def _packed_route():
     return arch, name
 
 
+def _packed_rows(arch, sm_count):
+    """The most packed rows ``fwd_packed`` runs on ``arch`` with ``sm_count``
+    SMs past the tiny forward's rows (this test's own reading of the
+    tables): ``FWD_PACKED_ROWS_PER_SM[arch] * sm_count`` where ``arch`` has a
+    cut there, at most ``PACKED_ROWS - 1``."""
+    cut = loader.FWD_PACKED_ROWS_PER_SM.get(arch)
+    last = loader.PACKED_ROWS - 1
+    return last if cut is None else min(cut * sm_count, last)
+
+
 def _tiny_rows(arch, sm_count):
     """The most rows the tiny forward runs on ``arch`` with ``sm_count`` SMs
     (this test's own reading of the routes and the cut table):
@@ -813,10 +823,21 @@ def _tiny_route():
 
 def _plans_without_tiny():
     """``_FWD_PLANS`` with no tiny forward on any architecture (each plan's
-    packed and ``fwd`` modules kept, no gap): the routes without the tiny
-    forward."""
+    packed and ``fwd`` modules and packed cut kept, no gap): the routes
+    without the tiny forward."""
     return {
-        arch: (None, 0, *plan[2:4], 0, 0) for arch, plan in loader._FWD_PLANS.items()
+        arch: (None, 0, *plan[2:4], 0, 0, plan[6])
+        for arch, plan in loader._FWD_PLANS.items()
+    }
+
+
+def _plans_packed_only():
+    """``_FWD_PLANS`` with no tiny forward and no cut of the forward of
+    packed rows on any architecture (each plan's packed and ``fwd`` modules
+    kept): packed rows run ``fwd_packed``, where routed, at every row count
+    below ``PACKED_ROWS``."""
+    return {
+        arch: (None, 0, *plan[2:4], 0, 0, 0) for arch, plan in loader._FWD_PLANS.items()
     }
 
 
@@ -827,12 +848,12 @@ def _forward_launch(arch, rows, sm_count, layout, tiny=True):
     128, token strides ``H * 128``), ``"one_token"`` (head stride 128, token
     stride 0) or ``"other"``.  The tiny forward within ``_in_tiny_band`` for
     packed rows and one token (where ``tiny``: with ``False``, the routes
-    without it), else ``fwd_packed`` for packed rows below ``PACKED_ROWS``
+    without it), else ``fwd_packed`` for packed rows up to ``_packed_rows``
     where routed, else ``fwd``."""
     routes = loader.ROUTES[arch]
     if tiny and layout != "other" and _in_tiny_band(arch, rows, sm_count):
         return routes["fwd_tiny"]
-    if layout == "packed" and rows < loader.PACKED_ROWS:
+    if layout == "packed" and rows <= _packed_rows(arch, sm_count):
         return routes.get("fwd_packed", routes["fwd"])
     return routes["fwd"]
 
@@ -890,10 +911,11 @@ def test_forward_routes_give_the_same_bits(shape, data, launches, monkeypatch):
     """On an architecture that routes a forward of packed rows: ``REPEATS``
     forwards of contiguous inputs run the module ``_forward_launch`` names
     (the tiny forward up to its rows where routed, past them the forward of
-    packed rows, a single token ``fwd``); with the tiny forward taken away
-    (``_FWD_PLANS`` patched without it) a forward runs the forward of packed
-    rows (a single token ``fwd``); all give the bits of the ``fwd`` program on
-    the same inputs (``forward_module`` patched to ``fwd``), finite or not."""
+    packed rows up to its cut, a single token and rows past that cut
+    ``fwd``); with the tiny forward and the cut taken away (``_FWD_PLANS``
+    patched without them) a forward runs the forward of packed rows (a single
+    token ``fwd``); all give the bits of the ``fwd`` program on the same
+    inputs (``forward_module`` patched to ``fwd``), finite or not."""
     arch, packed = _packed_route()
     _, sms = _device()
     x, z, w, tokens = _route_inputs(shape, data)
@@ -904,7 +926,7 @@ def test_forward_routes_give_the_same_bits(shape, data, launches, monkeypatch):
     got = [forward(x, z, w, EPS) for _ in range(REPEATS)]
     name = _forward_launch(arch, rows, sms, layout)
     assert launches == [name] * REPEATS, launches
-    monkeypatch.setattr(loader, "_FWD_PLANS", _plans_without_tiny())
+    monkeypatch.setattr(loader, "_FWD_PLANS", _plans_packed_only())
     launches.clear()
     got.append(forward(x, z, w, EPS))
     assert launches == [packed if tokens > 1 else strided], launches
@@ -942,6 +964,9 @@ PACKED_LAYOUTS = ("contiguous", "flat", "misaligned")
         ("flat", "past", "fwd_packed"),
         ("projection", "past", "fwd"),
         ("broadcast", "past", "fwd"),
+        ("contiguous", "packed_cut", "fwd_packed"),
+        ("contiguous", "packed_past", "fwd"),
+        ("flat", "packed_past", "fwd"),
     ],
 )
 def test_forward_route_follows_the_layout(layout, T, route, launches):
@@ -951,12 +976,19 @@ def test_forward_route_follows_the_layout(layout, T, route, launches):
     projection, head-major rows and a token-stride-0 broadcast run ``fwd``;
     but packed rows and a single token run the tiny forward up to its rows
     (``_tiny_rows``; ``T`` "past": the fewest tokens, at least 2, past
-    them).  Each gives the bits of its rows as contiguous tensors."""
+    them), and on an architecture with a cut of the forward of packed rows
+    (``FWD_PACKED_ROWS_PER_SM``) packed rows past it run ``fwd`` (``T``
+    "packed_cut": the most tokens within it, "packed_past": the fewest past
+    it).  Each gives the bits of its rows as contiguous tensors."""
     arch, _ = _packed_route()
     _, sms = _device()
     H = 48
     if T == "past":
         T = max(2, _tiny_rows(arch, sms) // H + 1)
+    elif T in ("packed_cut", "packed_past"):
+        if arch not in loader.FWD_PACKED_ROWS_PER_SM:
+            pytest.skip(f"{arch} has no cut of the forward of packed rows")
+        T = _packed_rows(arch, sms) // H + (T == "packed_past")
     if layout == "broadcast":
         x, z, w, _ = make(1, H, seed=43)
         x, z = x.expand(T, H, D), z.expand(T, H, D)
@@ -975,9 +1007,11 @@ def test_forward_module_runs_packed_rows_only():
     """``forward_module`` (host only), on 148 SMs past the tiny forward's
     rows (``_tiny_rows``): an architecture's ``fwd_packed`` program for head
     strides of 128 and token strides of ``H * 128`` on both ``x`` and ``z``
-    and fewer than ``PACKED_ROWS`` rows; ``fwd`` for any other strides, a
-    single token (token stride 0), a token-stride-0 broadcast and from
-    ``PACKED_ROWS`` rows, and always on an architecture without one.  Up to
+    and fewer than ``PACKED_ROWS`` rows, up to its cut
+    (``FWD_PACKED_ROWS_PER_SM``) where it has one; ``fwd`` for any other
+    strides, a single token (token stride 0), a token-stride-0 broadcast,
+    past that cut and from ``PACKED_ROWS`` rows, and always on an
+    architecture without one.  Up to
     the tiny forward's rows, where routed, packed rows and a single token run
     it, and a broadcast and other strides ``fwd``; in its gap
     (``FWD_TINY_GAP_ROWS``) packed rows and a single token run as past it."""
@@ -991,10 +1025,15 @@ def test_forward_module_runs_packed_rows_only():
         tiny_rows = _tiny_rows(arch, sms)
         # the fewest tokens of H heads, and of one head, past the tiny rows
         T, n = max(65, tiny_rows // H + 1), max(65, tiny_rows + 1)
+        # the most packed rows fwd_packed runs, and past them fwd
+        cut = _packed_rows(arch, sms)
+        assert cut > T * H and cut > n, arch
         cases = [
             (T * H, H, (row, D, row, D), packed),
             (n, 1, (D, D, D, D), packed),
-            (last, 1, (D, D, D, D), packed),
+            (cut, 1, (D, D, D, D), packed),
+            (cut // H * H, H, (row, D, row, D), packed),
+            (last, 1, (D, D, D, D), packed if cut == last else fwd),
             (loader.PACKED_ROWS, 1, (D, D, D, D), fwd),
             (2**31 - 1, 1, (D, D, D, D), fwd),
             (n, n, (0, D, 0, D), fwd),
@@ -1004,6 +1043,12 @@ def test_forward_module_runs_packed_rows_only():
             (T * H, H, (D, T * D, D, T * D), fwd),
             (T * H, H, (row, D, D, T * D), fwd),
         ]
+        if cut < last:
+            # the cut's first row past it, of one head and of H heads
+            cases += [
+                (cut + 1, 1, (D, D, D, D), fwd),
+                (cut // H * H + H, H, (row, D, row, D), fwd),
+            ]
         if tiny_rows:
             tiny = loader.ROUTES[arch]["fwd_tiny"]
             cases += [
@@ -3857,6 +3902,12 @@ def test_registry_records_reference_the_build_manifest():
         assert isinstance(lo, int) and isinstance(hi, int) and 0 <= lo <= hi, arch
         if loader.FWD_TINY_ROWS_PER_SM[arch] == 0:
             assert gap == (0, 0), arch
+    # the cut of the forward of packed rows: rows per SM, an int above the
+    # tiny forward's cut, only for an architecture that routes it
+    for arch, per_sm in loader.FWD_PACKED_ROWS_PER_SM.items():
+        assert "fwd_packed" in loader.ROUTES[arch], arch
+        assert isinstance(per_sm, int), arch
+        assert per_sm > loader.FWD_TINY_ROWS_PER_SM[arch], arch
     assert set(loader.NODW_STRIDED_ROWS_PER_SM) == set(loader.ARCHES)
     for arch, cuts in loader.NODW_STRIDED_ROWS_PER_SM.items():
         both = {NODW_STRIDED, NODW_CLAIMED} <= set(loader.ROUTES[arch])
@@ -4935,19 +4986,21 @@ def test_the_tiny_plans_are_those_of_the_routes():
     # every architecture, the tiny forward and its cut where it routes one
     # with a cut above 0 (else None and 0), the forward of packed rows where
     # routed (else None), the fwd module where no long fwd module is routed
-    # (else None) and the gap's rows (lo, hi] where it routes the tiny
-    # forward (else 0, 0), so a patch of the cut or gap table alone routes
-    # nothing
+    # (else None), the gap's rows (lo, hi] where it routes the tiny forward
+    # (else 0, 0) and the cut of the forward of packed rows (else 0), so a
+    # patch of a cut or gap table alone routes nothing
     want = {}
     for arch, routes in loader.ROUTES.items():
         cut = loader.FWD_TINY_ROWS_PER_SM.get(arch, 0)
         base = None if "fwd" + loader.LONG in routes else routes.get("fwd")
+        packed_cut = loader.FWD_PACKED_ROWS_PER_SM.get(arch, 0)
         if "fwd_tiny" in routes and cut > 0:
             lo, hi = loader.FWD_TINY_GAP_ROWS[arch]
             tiny, packed = routes["fwd_tiny"], routes.get("fwd_packed")
-            want[arch] = (tiny, cut, packed, base, lo, hi)
+            want[arch] = (tiny, cut, packed, base, lo, hi, packed_cut)
         else:
-            want[arch] = (None, 0, routes.get("fwd_packed"), base, 0, 0)
+            packed = routes.get("fwd_packed")
+            want[arch] = (None, 0, packed, base, 0, 0, packed_cut)
     assert loader._FWD_PLANS == want
 
 
