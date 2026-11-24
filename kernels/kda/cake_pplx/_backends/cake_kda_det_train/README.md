@@ -519,8 +519,10 @@ the per-architecture few-chain counts).
 That count `P_old` is the occupancy rule.  By default a plan takes the
 token-aware rule (`cake_backend.plan(..., segment_rule="tokens")`,
 `cake_jit.segment_route(..., num_tokens=S)`, constants in
-`cake_jit.TOKEN_SEGMENTS`).  On GB300 (`sm_103a` with 152 SMs) with 4, 8 or 16
-heads it also reads the token count `S`: a pack too short for the occupancy
+`cake_jit.TOKEN_SEGMENTS`).  On B200 (`sm_100a` with 148 SMs), GB300
+(`sm_103a` with 152 SMs) and VR200 (`sm_107a` with 212 SMs) with 4, 8 or 16
+heads (16 heads take the serial route on `sm_100a`) it also reads the token
+count `S`: a pack too short for the occupancy
 plan to save the segment states (`S < 384 * num_docs * P_old`) takes `P_u =
 max(P_ns, 12, ceil(S / 1408))` segments per document when `P_u < P_old`, where
 `P_ns = S // (384 * num_docs) + 1` is the fewest that save no state either.
@@ -533,11 +535,30 @@ most of the tokens), with 2k to 262k tokens.  Every slower uniform table on a
 skewed pack had 8 or fewer segments per document; on the skewed packs of 16384
 tokens the slower ones had segments of 1501 tokens or more, and 1334 was not
 slower.  So the rule keeps at least 12 segments per document and segments of
-at most 1408 tokens.  Other architectures, SM counts and head counts, and the
-serial route, keep the occupancy rule.  `segment_rule="occupancy"` selects the
+at most 1408 tokens.  On B200 and VR200 the same constants were measured
+against the occupancy plan: <<FILL: B200 and VR200 rows, kernel time and
+memory from the validation>>.  Other architectures and SM counts (`sm_100a`
+with 152 SMs, `sm_107a` with 216 SMs), other head counts, and the serial
+route keep the occupancy rule.  `segment_rule="occupancy"` selects the
 occupancy rule everywhere; the context-parallel package's local plans take
 it.  The records whose rules read the segment count (`walk_ctas_*`,
 `segments_heads_*`) are selected at the plan's count.
+
+| GPU | packs whose plan changes | fwd time | bwd time | step time | ckpt step time | peak, step | peak, ckpt step | saved set per layer |
+|---|---|---|---|---|---|---|---|---|
+| B200 (`sm_100a`, 148 SMs) | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> |
+| GB300 (`sm_103a`, 152 SMs) | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> |
+| VR200 (`sm_107a`, 212 SMs) | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> | <<FILL>> |
+
+* <<FILL: what was measured: KDA 0.2.2 against 0.2.1 (the occupancy rule) on
+  the same GPU, CUDA and torch versions, both packages, the gate and L2-norm
+  modes, the timer (summed GPU kernel time, CUPTI), rounds and statistic, and
+  the spread of two identical arms; times are new / old ratios, a ratio below
+  1 means faster; memory in MiB (2^20 bytes)>>
+* <<FILL: the packs whose plan does not change run the same programs with the
+  same bits as 0.2.1; on the changed packs the deterministic package is
+  bitwise identical from run to run and its outputs meet the accuracy rule of
+  the family README>>
 
 Forward (`fwd`): the chunk tables from `cu_seqlens` -- on the segmented route
 up to 256 documents no table launch: the intra program `fwd_intra_v14`, launched

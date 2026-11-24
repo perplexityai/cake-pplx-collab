@@ -469,8 +469,9 @@ SEGMENTS: dict[str, Any] = {
 # pack's token count S; the backend's plans pass it by default).  The rule
 # above reads the occupancy alone and gives P_old segments per document.  On
 # the measured envelope (an architecture of ``sm_counts_by_arch`` with one of
-# its SM counts: GB300, ``sm_103a`` with 152 SMs; a head count of ``heads``;
-# the segmented route) a pack too short for the occupancy plan to save the
+# its SM counts: B200, ``sm_100a`` with 148 SMs; GB300, ``sm_103a`` with 152
+# SMs; VR200, ``sm_107a`` with 212 SMs; a head count of ``heads``; the
+# segmented route) a pack too short for the occupancy plan to save the
 # segment states takes fewer segments: ``P_ns = S // (save_min_tokens_per_seg
 # * N) + 1`` segments per document save no state either, and the plan takes
 # ``P_u = max(P_ns, min_uniform_segments, ceil(S / max_segment_tokens))`` when
@@ -491,13 +492,16 @@ SEGMENTS: dict[str, Any] = {
 #   the pack: on the skewed packs of 16384 tokens the slower rows had segments
 #   of 1501 tokens or more, 1334 was not slower.
 # Host scalars cannot tell a skewed pack from an even one, so every bound is
-# the one measured safe on both.  Outside the envelope (other architectures,
-# SM counts or head counts, the serial route) and without a token count the
-# occupancy rule alone decides: the constants were fitted on GB300 only.
+# the one measured safe on both.  The same constants were measured on B200
+# (148 SMs) and VR200 (212 SMs) against the occupancy plan: <<FILL: B200 and
+# VR200 evidence (rows, kernel time, memory) from the validation>>.  Outside
+# the envelope (other architectures and SM counts, such as ``sm_100a`` with
+# 152 SMs or ``sm_107a`` with 216 SMs; other head counts; the serial route)
+# and without a token count the occupancy rule alone decides.
 # ``save_min_tokens_per_seg`` is the backend's ``SEG_SAVE_MIN_TOKENS_PER_SEG``
 # (a test holds the two equal).
 TOKEN_SEGMENTS: dict[str, Any] = {
-    "sm_counts_by_arch": {"sm_103a": [152]},
+    "sm_counts_by_arch": {"sm_100a": [148], "sm_103a": [152], "sm_107a": [212]},
     "heads": [4, 8, 16],
     "save_min_tokens_per_seg": 384,
     "min_uniform_segments": 12,

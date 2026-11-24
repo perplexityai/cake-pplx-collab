@@ -181,11 +181,12 @@ SAVED_VERSION_TAPE = (
 # no larger than the Aqk / Akk set (2 * S * H * 256 B); shorter packs recompute them in the backward
 SEG_SAVE_MIN_TOKENS_PER_SEG = 384
 # The segment rules of a plan (:func:`plan`'s ``segment_rule``).  ``"tokens"`` (the default) is the token-aware rule of
-# ``cake_jit.TOKEN_SEGMENTS``: on its measured envelope (``sm_103a`` with 152 SMs, 4 / 8 / 16 heads) a pack too short
-# to save the segment states takes fewer segments per document, never more than the occupancy rule's, so the saved
-# set and the arena never grow.  ``"occupancy"`` is the rule of ``cake_jit.SEGMENTS`` alone, the plans of releases
-# before the token-aware rule, which the context-parallel package's local plans keep.  A saved set has the tables
-# and segment states of its forward's plan, so its backward takes a plan of the same rule.
+# ``cake_jit.TOKEN_SEGMENTS``: on its measured envelope (``sm_100a`` with 148 SMs, ``sm_103a`` with 152 SMs and
+# ``sm_107a`` with 212 SMs; 4 / 8 / 16 heads) a pack too short to save the segment states takes fewer segments per
+# document, never more than the occupancy rule's, so the saved set and the arena never grow.  ``"occupancy"`` is
+# the rule of ``cake_jit.SEGMENTS`` alone, the plans of releases before the token-aware rule, which the
+# context-parallel package's local plans keep.  A saved set has the tables and segment states of its forward's
+# plan, so its backward takes a plan of the same rule.
 SEGMENT_RULES = ("tokens", "occupancy")
 SAVE_MODES = ("light", "tape")
 # The in-kernel Q/K L2 norm modes of a plan (:attr:`Plan.l2n`): ``"off"`` (the caller's normalized q / k),
