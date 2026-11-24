@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 22 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 23 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -44,6 +44,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | mok | Has no nondet module | — |
 | act_qdq | Has no nondet module | — |
 | gated_kv_compression | Has no nondet module | — |
+| route_weight_scale | Has no nondet module | — |
 
 ---
 
@@ -941,7 +942,7 @@ out[t,s] = BF16(h + gate v)
 
 The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `dK`, `dV` (BF16) and `dq_weight = dw * k_weight`, `dk_weight = dw * q_weight` with `dw = sum_t c h k` in FP32. The square root's derivative is 0 where `|dot| <= clamp_value`. `dot = +0` gives `+sqrt(clamp_value)` and `-0` gives `-sqrt(clamp_value)`. A masked token gives `out = X` and `dX = dOut` exactly, zero `dK` and `dV`, and no weight-gradient contribution.
 
-**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward ships two programs per architecture, one for each way to sum the dot product `P`. The backward ships two programs per architecture with the same bits and the same grid. A call without a `token_mask` of at least 4096 tokens launches the one that copies the next token's inputs into shared memory ahead of use; every other call launches the other.
+**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward ships two programs per architecture, one for each way to sum the dot product `P`. The FP32 one also ships a form that runs one CTA of 640 threads per token instead of a cluster of four CTAs, with the same bits: a call with `dot_sum="fp32"` of at least 16384 tokens launches it on an `sm_107a` device with 212 SMs (VR200), and every other forward call launches the cluster program. The backward ships three programs per architecture on the same grid. Two give the same bits: a call without a `token_mask` of at least 4096 tokens launches the one that copies the next token's inputs into shared memory ahead of use. The third serves a call with a `token_mask` of at least 8192 tokens on `sm_100a` and `sm_103a` or 4096 tokens on `sm_107a`: it reads the mask itself and serves each cluster's kept tokens in order, then its masked tokens. It gives the same `dX`, `dK` and `dV` bits; `dq_weight` and `dk_weight` can differ in the last bits, and with every token kept every output is the same. Every other call launches the first program.
 
 **Sum of the dot product.** The autograd entries and the explicit forward take the keyword-only `dot_sum`. It selects the forward's sum of `P`.
 
@@ -1018,7 +1019,7 @@ out.backward(torch.randn_like(out))      # x.grad, kv.grad [T, 25600], q_weight.
 **Caveats.**
 
 - State kept for the backward: the inputs only. Workspace of a backward call: the FP32 `[4, 5120]` weight-gradient partial rows, 80 KiB each, one per cluster of the backward grid (det and nondet). The workspace query reads the device's architecture and SM count for `T > 0`: a device that is not a CUDA device raises `ValueError`, a CUDA device outside the architectures `RuntimeError`. The backward reads BF16 and FP32 weights as stored, and the autograd entries get their weight gradients in each parameter's dtype from the kernel (one rounding, as `.to(dtype)` rounds). A forward is one kernel launch: it reads BF16 and FP32 weights as stored and allocates its output alone.
-- The forward and the backward run one cluster of four CTAs per token, persistently: `min(T, resident clusters)` clusters, where the resident clusters come from a table measured per architecture, SM count and CTAs per SM of the program (for example 148 for the forward on a 152-SM GB300). A device the table does not hold runs 0.85 of `CTAs per SM * SM count / 4` clusters. The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
+- The forward and the backward run one cluster of four CTAs per token, persistently: `min(T, resident clusters)` clusters, where the resident clusters come from a table measured per architecture, SM count and CTAs per SM of the program (for example 148 for the forward on a 152-SM GB300). A device the table does not hold runs 0.85 of `CTAs per SM * SM count / 4` clusters. On a 148-SM B300 (`sm_103a`, which the table does not hold) the backward of at least 2048 tokens runs 104 clusters instead of that fallback's 94. The FP32 forward's one-CTA program (a `dot_sum="fp32"` forward of at least 16384 tokens on a 212-SM `sm_107a` device) runs one CTA of 640 threads per token instead, persistently: `min(T, SM count)` CTAs, one per SM. The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
 - `X`, `dOut` and `dX` must be contiguous. Output rows must not overlap.
 - No double backward.
 - Capture in a CUDA graph only after one eager call has loaded the programs (of each `dot_sum` the graph's forward uses).
@@ -1253,8 +1254,8 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - **Forward:** `(p0, p1) = softmax(Z[t0, d], Z[t1, d])` and `out[r, d] = BF16(p0 * C[t0, d] + p1 * C[t1, d])`, in FP32 with one rounding.
 - **Backward:** with `g = float32(dout[r, d])`, `dC[t0, d] = p0 * g`, `dC[t1, d] = p1 * g`, `dZ[t0, d] = p0 * p1 * (C[t0, d] - C[t1, d]) * g` and `dZ[t1, d] = -dZ[t0, d]`. The BF16 cast counts as the identity. The pairwise form of `dZ` stays accurate when the two values of a pair are close.
 - The last token of an odd-length document belongs to no pair. It changes no output, and its `dC` and `dZ` rows are exactly zero.
-- Three kernels run on the current stream: a pair table (the int32 `[S + 1]` exclusive prefix of the pair counts), the forward (one row per pair) and the backward (every token row written once). The kernels compute in FP32 only, with IEEE round to nearest and no FP64. Gate gaps of 100 and more and exact ties give finite outputs.
-- The forward ships one schedule per architecture, the faster one on each: 128-bit loads of `C` and `Z` on `sm_100a` and `sm_103a`, 256-bit loads on `sm_107a`. The call picks the build of the operands' device. The forward of more than 256 documents searches the document of its row with the 32 lanes of a warp. The backward uses 256-bit loads on all three. On `sm_100a` and `sm_103a` it finds the document of a pair in one search level for packs of at most 26 documents and in two levels for more. On `sm_107a` it uses two levels for packs of 126 to 16384 documents and one level for the others. On all three, the backward of more than 16384 documents searches with the 32 lanes of a warp, as the forward does, and so does the backward of 15 to 32 documents on `sm_103a`. Every forward and backward build writes the same bytes.
+- Three kernels run on the current stream: a pair table (the int32 `[S + 1]` exclusive prefix of the pair counts), the forward (one row per pair) and the backward (every token row written once). The pair table of 8193 or more documents runs one of the large-pack programs, which write the same bytes. From 131072 documents on `sm_100a` and `sm_103a` and from 65537 on `sm_107a`, it is two kernels: the pair count of each chunk of documents (8192 on `sm_100a` and `sm_103a`, 1024 on `sm_107a`) into an int32 workspace of `ceil(S / chunk)` words, then the scan of each chunk. The kernels compute in FP32 only, with IEEE round to nearest and no FP64. Gate gaps of 100 and more and exact ties give finite outputs.
+- The forward ships one schedule per architecture, the faster one on each: 128-bit loads of `C` and `Z` on `sm_100a` and `sm_103a`, 256-bit loads on `sm_107a`. The call picks the build of the operands' device. The forward of more than 256 documents searches the document of its row with the 32 lanes of a warp. On `sm_100a` that forward caps its grid at 6 CTAs per multiprocessor for packs of 2048 to 16777216 documents. The backward uses 256-bit loads on all three. On `sm_100a` and `sm_103a` it finds the document of a pair in one search level for packs of at most 26 documents and in two levels for more. On `sm_107a` it uses two levels for packs of 126 to 16384 documents and one level for the others. On all three, the backward of more than 16384 documents searches with the 32 lanes of a warp, as the forward does, and so does the backward of 15 to 32 documents on `sm_103a`. Every forward and backward build writes the same bytes.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` (12.9 for the backward libraries, which use 256-bit loads and stores), 12.9 for `sm_103a` and 13.5 for `sm_107a`. The GPU suites and the benchmark ran on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5, against the acceptance criteria of issue #76: each `out` element is within 1 BF16 ulp of the FP64 result rounded once to BF16, or its absolute error is at most 1 BF16 ulp of `max(|C[t0, d]|, |C[t1, d]|)` (near-cancelling pairs), and `dC` and `dZ` have a relative L2 error of at most 1e-6 against FP64.
 
@@ -1277,7 +1278,7 @@ The only module of the family. Every output element is one fixed chain of FP32 o
 | `cake_gated_kv_compression_det_cz` | `(cz, cu_seqlens, num_pairs)` | `cz` FP32 `[T, 1024]` (`C` \| `Z`), may require grad; `num_pairs` a Python int, at least the pair count | Autograd. Returns BF16 `out [G, 512]`. The gradient of `cz` is one FP32 `[T, 1024]` buffer that one launch writes, with no slice-backward copy. The node saves `cz`, `cu_seqlens` and the pair table only. |
 | `cake_gated_kv_compression_det_train_forward` | `(c, z, cu_seqlens, num_pairs=None, *, out=None)` | `num_pairs` or a preallocated `out` (both given must agree) | Returns `out`. Rows past the pair count are zero. `G == 0` launches nothing, and `T == 0` or `S == 0` zero-fills `out` without a kernel. Not autograd. |
 | `cake_gated_kv_compression_det_train_backward` | `(dout, c, z, cu_seqlens, *, dc=None, dz=None, pair_offsets=None)` | `dout` rows `G` at least the pair count; `pair_offsets` the int32 `[S + 1]` pair table, which skips the pair-table launch | Returns FP32 `(dc, dz)`, every row written; these are the caller's tensors when given. `T == 0` launches nothing, and `G == 0` or `S == 0` zero-fills both without a kernel. |
-| `cake_gated_kv_compression_det_train_memory_bytes` | `(num_tokens, num_docs)` | `T`, `S` | Returns a dict. `forward_workspace` and `backward_workspace` are `4 (S + 1)`: the pair table one explicit call allocates and frees. The autograd backward allocates no workspace, except a `1024 G`-byte copy of an incoming gradient that is not contiguous and 16-byte aligned (for example from `out.sum().backward()`), which the report leaves out. `retained_for_backward` is `4 (S + 1)`: the pair table the autograd node keeps. `retained_inputs` is `4096 T + 4 (S + 1)`: the caller's tensors the node references, with no copy. |
+| `cake_gated_kv_compression_det_train_memory_bytes` | `(num_tokens, num_docs, device=None)` | `T`, `S`; `device` a CUDA device for the figures of its architecture, `None` for the most of the three | Returns a dict. `forward_workspace` and `backward_workspace` are `4 (S + 1)`: the pair table one explicit call allocates and frees, plus `4 ceil(S / chunk)` for a pair table in two phases (`S` from 131072 on `sm_100a` and `sm_103a`, chunks of 8192; from 65537 on `sm_107a`, chunks of 1024), a separate int32 tensor freed on return. The autograd backward allocates no workspace, except a `1024 G`-byte copy of an incoming gradient that is not contiguous and 16-byte aligned (for example from `out.sum().backward()`), which the report leaves out. `retained_for_backward` is `4 (S + 1)`: the pair table the autograd node keeps. `retained_inputs` is `4096 T + 4 (S + 1)`: the caller's tensors the node references, with no copy. |
 
 Other public names:
 
@@ -1318,7 +1319,7 @@ cake_gated_kv_compression_det_train_backward(torch.randn_like(out), c, z, cu_seq
 
 - The host never reads `cu_seqlens`. The caller keeps its contract (non-decreasing, last bound `T`) and passes `G`. A `G` below the pair count gives the first `G` rows in the forward and leaves the gradient rows of the later pairs unwritten in the backward. The autograd entries need `num_pairs` at least the pair count: their gradient buffers are not zero-filled, so with a smaller `num_pairs` the gradient rows of the tokens of the later pairs are uninitialized.
 - A layout the kernels cannot read or write in place raises `ValueError`, and no call copies an operand silently. The autograd backward copies a non-contiguous or misaligned incoming gradient once.
-- Capture a call in a CUDA graph only after one eager call on the device. That call loads every program of the architecture, both pair tables and both forward programs included, so a later pack of any size loads none.
+- Capture a call in a CUDA graph only after one eager call on the device. That call loads every program of the architecture, every pair table and both forward programs included, so a later pack of any size loads none.
 - Only ratio 2 and width 512 are supported.
 
 ---
@@ -2267,3 +2268,76 @@ if torch.cuda.get_device_capability() == (10, 7):
 - Finite inputs can give `±inf`: with MXFP8 an element with `|x| >= 248*2^120`, with MXFP4 one with `|x| >= 224*2^120` (the rule's own BF16 rounding of `q * s`).
 - Only the dequantized BF16 values and the FP32 scales are returned, not the packed FP4/FP8 codes.
 - `locality="domain"` gains only where the caller places both `x` and `out` in the helper's memory. A call with `out=None` allocates default memory and runs the `"off"` program; so does an in-place call.
+
+---
+
+## route_weight_scale
+
+**Computes.** The route-weight row scaling of a routed MoE expert for training, hidden size `H` 4096 or 3584. After the down projection, each received token copy (row `r < rows`) is scaled by its FP32 route weight `w[r]` before the combine:
+
+- **Forward:** `y = BF16(w * x)`, the FP32 product rounded once. Bit for bit `(w[:, None] * x.float()).bfloat16()`.
+- **Backward:** `dx = BF16(w * dy)`, bit for bit `(w[:, None] * dy.float()).bfloat16()`, and the FP32 `dw = sum_c dy * x`, one word per row. `dw` does not divide by `w`, so a zero-weight row gets signed zeros in `y` and `dx` and keeps its `dw`.
+- One kernel per call. The backward reads `x` and `dy` once and writes `dx` and `dw` once: no `[rows, H]` FP32 product is formed.
+- The products of two BF16 values in `dw` are exact in FP32; the additions form a balanced binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd halves, then five XOR shuffles across the row's 32 lanes). Every product rounds to nearest without flushing subnormals; nothing is FP64.
+
+**Architectures.** `sm_100a`, `sm_103a`; `sm_107a` follows once it runs on an SM107 device. Other devices, SM107 included, raise `RuntimeError`, also for `rows = 0`. The `build.json` of the package gives the minimum CUDA toolkit of each library.
+
+**Inputs.**
+
+- `x`, `dy`: BF16 `[rows, H]`, `H` 4096 or 3584. Each BF16 operand, inputs and outputs, has a unit column stride, a row stride that is a multiple of 8 elements and a 16-byte aligned base, so row slices of wider or longer buffers are read and written in place. An output's row stride is at least `H`. A single row's stride is not read.
+- `w`: FP32 `[rows]`, contiguous. Any value; zeros allowed.
+- `rows` is any count from 0 to `2**31 - 257`, read from the tensor shape. Row offsets are 64-bit, so 1,048,576 rows at `H = 4096` (more than 2^31 elements) are one call. `rows` and the strides are launch arguments: one library per program and architecture serves every call, with no recompilation.
+- Every operand is on one CUDA device. An operand of another dtype, shape or layout raises `ValueError` before any allocation or launch; nothing is copied.
+
+### `cake_pplx.cake_route_weight_scale_det_train`
+
+This family has a det module only, with no nondet or KCP module: nothing sums across rows, and the one sum, `dw` within a row, has one fixed order. Every call gives the same bits for the same inputs on the same architecture, whatever `rows`, the layout, the stream or a CUDA graph, and no call alerts under `torch.use_deterministic_algorithms(True)`. Source: [`kernels/route_weight_scale/cake_pplx/cake_route_weight_scale_det_train.py`](../kernels/route_weight_scale/cake_pplx/cake_route_weight_scale_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_route_weight_scale_det` | `(x, w)` | As above | Autograd. Returns contiguous BF16 `y [rows, H]`. `x.grad` is BF16 `[rows, H]`, `w.grad` FP32 `[rows]`. Saves only `x` and `w`. Works under `torch.utils.checkpoint(..., use_reentrant=False)`. An upstream gradient the kernels cannot read (an expanded one, say) is copied once. |
+| `cake_route_weight_scale_det_train_forward` | `(x, w, *, out=None)` | `out` optional preallocated BF16 `[rows, H]` (the layout rules above) | Returns `y` (`out` when given). Not autograd. `rows == 0` returns an empty `y` without a launch. |
+| `cake_route_weight_scale_det_train_backward` | `(x, dy, w, *, dx=None, dw=None)` | `dy` BF16 `[rows, H]`; optional preallocated `dx` BF16 `[rows, H]` and contiguous FP32 `dw [rows]` | Returns `(dx, dw)`. Not autograd. One launch for both outputs. |
+
+Other public names:
+
+- `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `WIDTHS` (4096, 3584).
+- `CakeRouteWeightScaleDetFunction`: the autograd class, `apply(x, w)`.
+- `is_cake_route_weight_scale_det_train_supported(device)`.
+
+**Options and environment.** `out`, `dx` and `dw` are the only keywords. The facade reads no environment variable.
+
+**Cross-family.** None. `x` is the output of moe_grouped_gemm's down projection; `y` goes to the combine.
+
+**Example.**
+
+```python
+import torch
+import torch.utils.checkpoint
+from cake_pplx.cake_route_weight_scale_det_train import (
+    cake_route_weight_scale_det,
+    cake_route_weight_scale_det_train_forward,
+)
+
+rows, H = 327_680, 4096
+x = torch.randn(rows, H, device="cuda", dtype=torch.bfloat16, requires_grad=True)  # down projection output
+w = torch.rand(rows, device="cuda").requires_grad_()                               # FP32 route weights
+
+y = cake_route_weight_scale_det(x, w)  # BF16 [rows, H]
+y.backward(torch.randn_like(y))        # x.grad BF16 [rows, H], w.grad FP32 [rows]
+
+# Activation checkpointing (the forward runs again in the backward).
+y = torch.utils.checkpoint.checkpoint(cake_route_weight_scale_det, x, w, use_reentrant=False)
+
+# Row slices of a preallocated receive buffer, without autograd.
+buffer = torch.empty(655_360, H, device="cuda", dtype=torch.bfloat16)
+cake_route_weight_scale_det_train_forward(x.detach(), w.detach(), out=buffer[:rows])
+```
+
+**Caveats.**
+
+- `H` is 4096 or 3584 only.
+- Workspace: none. A call allocates only the outputs it is not given. Retained state of the autograd function: `x` and `w` (references, no copy).
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills each output a call allocates with NaN before the kernel writes it: one more fill launch per new output. Output buffers passed to every call avoid the fills. The bits do not change.
+- No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. Not tested under `torch.compile`.
+- A program's library builds at its first launch. Before capturing a CUDA graph, run an eager call of each stage and width the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.

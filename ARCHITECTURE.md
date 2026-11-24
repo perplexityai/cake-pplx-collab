@@ -47,7 +47,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 
 Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks. mok has no `benchmarks/` directory.
 
-The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. act_qdq has no `nondet` and no KCP module: no step of the op has an order to relax, and the op works on each token alone; its tests compare every output bit for bit with an FP64 oracle. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row. gated_kv_compression has a `det` module only, because each of its outputs depends on one token pair and no non-deterministic step exists; its tests also use an FP64 oracle beside the same math in BF16.
+The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. act_qdq has no `nondet` and no KCP module: no step of the op has an order to relax, and the op works on each token alone; its tests compare every output bit for bit with an FP64 oracle. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row. route_weight_scale has a `det` module only for the same reason: nothing sums across rows, so `nondet` and KCP are not applicable. gated_kv_compression has a `det` module only, because each of its outputs depends on one token pair and no non-deterministic step exists; its tests also use an FP64 oracle beside the same math in BF16.
 
 ## Overview
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 22 families and 41 backend packages, about 274 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 23 families and 42 backend packages, about 274 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -101,6 +101,7 @@ The repository has 22 families and 41 backend packages, about 274 MB in total. M
 | `engram_lookup` | det | `cake-pplx-engram-lookup` |
 | `mok` | det (backend package `cake_mok_bf16`) | `cake-pplx-mok` |
 | `act_qdq` | det | `cake-pplx-act-qdq` |
+| `route_weight_scale` | det | `cake-pplx-route-weight-scale` |
 
 pip normalizes `_` and `-` in distribution names. Both spellings resolve to the same distribution.
 
