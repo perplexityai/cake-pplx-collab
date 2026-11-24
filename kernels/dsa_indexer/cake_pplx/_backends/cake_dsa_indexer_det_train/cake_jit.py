@@ -1414,7 +1414,7 @@ POLICY: dict[str, dict[str, Any]] = {
         "rank_finalize": True,
         "rank_window_variants": [8192, 16384, 65536, 131072, 262144, 524288],
         "rank_top_k_min": 1025,
-        "rank_small_k_rule": None,
+        "rank_small_k_rule": [257, 512, 16384, 131072],
         "rank_rule": [524288, 262144],
         "rank_staged": True,
         "rank_staged_rule": [262144],

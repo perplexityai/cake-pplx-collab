@@ -2384,13 +2384,13 @@ _SHIPPED_K512 = {
     "sm_107a": (
         212,
         None,
-        None,
+        [257, 512, 16384, 131072],
         {
-            "tail16k": ("scan:l6:u1:s1:f1", "finalize:t64"),
-            "tail64k": ("scan:wide:u2:s0:f0", "finalize:t64"),
+            "tail16k": ("scan:l6:u1:s1:f1", _SLAB + ":persist"),
+            "tail64k": ("scan:wide:u2:s0:f0", _TWO),
             "tail256k": ("scan:wide:u2:s0:f0", "finalize:t64"),
             "P1": ("scan:l6:u1:s0:f0:lsf", "finalize:t64"),
-            "P1_bound": ("scan:l6:u1:s0:f0:lsf", "finalize:t64"),
+            "P1_bound": ("scan:l6:u1:s0:f0:lsf", _TWO),
         },
     ),
 }

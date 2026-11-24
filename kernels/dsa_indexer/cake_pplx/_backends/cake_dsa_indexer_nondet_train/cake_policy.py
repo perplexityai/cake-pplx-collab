@@ -986,8 +986,10 @@ class DispatchPolicy:
         tiles) faster than the CTA-pair l6 program these calls ran before (16384 queries over 16384-65536 keys, 8 x 2048
         queries over 8 x 17408 keys and an 8-segment packed call of 16231 queries over 268757 keys; same finalize
         program in both arms); ``sm_100a`` measured parity at 64 and 96 mean unit tiles, so its floor stays at 128.
-        The ``wide_wave_rule`` records (the FP8 form on ``sm_100a`` / ``sm_103a``) decide by waves instead and never
-        read it."""
+        ``sm_107a`` sets no floor: with one at 0 its ``top_k = 512`` calls of 64-192 mean unit tiles ran the same programs
+        as without it (its unpaired-l6 preference and CTA-pair rule decide them after the floor), and the single-CTA wide
+        program ran 3.9 % slower than its l6 program at 64 mean unit tiles.  The ``wide_wave_rule`` records (the FP8 form
+        on ``sm_100a`` / ``sm_103a``) decide by waves instead and never read it."""
         rule = self.wide_first_k_rule
         if rule is not None and int(top_k) <= int(rule[0]):
             return float(rule[1])

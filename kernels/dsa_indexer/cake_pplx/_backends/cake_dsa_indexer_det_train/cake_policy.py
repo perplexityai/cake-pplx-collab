@@ -1172,8 +1172,10 @@ class DispatchPolicy:
         tiles) faster than the CTA-pair l6 program these calls ran before (16384 queries over 16384-65536 keys, 8 x 2048
         queries over 8 x 17408 keys and an 8-segment packed call of 16231 queries over 268757 keys; same finalize
         program in both arms); ``sm_100a`` measured parity at 64 and 96 mean unit tiles, so its floor stays at 128.
-        The ``wide_wave_rule`` records (the FP8 form on ``sm_100a`` / ``sm_103a``) decide by waves instead and never
-        read it."""
+        ``sm_107a`` sets no floor: with one at 0 its ``top_k = 512`` calls of 64-192 mean unit tiles ran the same programs
+        as without it (its unpaired-l6 preference and CTA-pair rule decide them after the floor), and the single-CTA wide
+        program ran 3.4 % slower than its l6 program at 64 mean unit tiles.  The ``wide_wave_rule`` records (the FP8 form
+        on ``sm_100a`` / ``sm_103a``) decide by waves instead and never read it."""
         rule = self.wide_first_k_rule
         if rule is not None and int(top_k) <= int(rule[0]):
             return float(rule[1])
@@ -1596,7 +1598,10 @@ class DispatchPolicy:
         ``top_k = 512`` the 256-thread staged program of the 2^14 slab window ranked the 16384-key pool 1.56x (``sm_103a``)
         and 1.59x (``sm_100a``) faster than the 64-thread CUB program, and the two-level 2^17 window the 65536- and
         67923-key pools 1.25-1.40x faster, where the 2^16 slab window measured parity; the 2^18 and 2^19 two-level
-        windows measured 0.74-0.92x, so a larger pool keeps CUB.  Both forms give the CUB program's rows bit for bit."""
+        windows measured 0.74-0.92x, so a larger pool keeps CUB.  On ``sm_107a``, where the slab window runs the persistent
+        form (``rank_persist_max_k``), the same rule took 3.3 % off the whole ``top_k = 512`` call over the 16384-key pool
+        (the one-row staged form 2.2 %) and 1.5 % off a 20480-key pool (two-level 2^17 window), with the 24576- to
+        65536-key pools at parity.  Both forms give the CUB program's rows bit for bit."""
         rule = self.rank_small_k_rule
         k = int(top_k)
         if rule is None or not int(rule[0]) <= k <= int(rule[1]):
