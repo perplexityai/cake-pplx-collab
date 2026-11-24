@@ -80,13 +80,19 @@ tokens; on SM100 / SM103 ``collapse_backward`` runs
 ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens (but
 ``collapse_bwd__vjpwd_sp4_mb4``, the same split VJP without the shared-memory
 stage, from 31 to 37 tokens on SM100 and from 31 to 38 tokens on SM103, each
-band under its own record name) and ``collapse_bwd`` from 1024 tokens, and
-between them ``collapse_bwd__vjpwa_sp2_mb4``: on SM100 from 216 to
-1023 tokens under the record name ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``,
-on SM103 from 216 to 247 and from 320 to 1023 tokens under the record names
+band under its own record name), then ``collapse_bwd__vjpwa_sp2_mb4``: on SM100
+from 216 to 1023 tokens under the record name
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``, on SM103 from 216 to 247 and
+from 320 to 1023 tokens under the record names
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
 ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, with ``collapse_bwd``
-from 248 to 319 tokens under the record name ``collapse_bwd__h5120__le319``).
+from 248 to 319 tokens under the record name ``collapse_bwd__h5120__le319``;
+from 1024 tokens ``collapse_bwd__vjpwa_pf0``, the one-CTA VJP that prefetches
+its own token's rows into L2 before its ``cp.async`` stage, up to 6143 tokens
+on SM100 and up to 8191 tokens on SM103 (on SM103 under the record name
+``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``), and
+``collapse_bwd__vjpwd``, the one-CTA VJP without the shared-memory stage,
+above (on SM103 under the record name ``collapse_bwd__vjpwd__h5120__gt8191``)).
 ``handoff_prepare`` is the autograd node; ``dU`` / ``dpre_next`` from autograd
 are made contiguous, of their dtype and 32-byte aligned before the launch.  No
 run-to-run bit promise.
