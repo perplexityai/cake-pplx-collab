@@ -2122,6 +2122,31 @@ def _raw_finalize_scratch(NC_pad: int, H: int, device: torch.device) -> dict[str
     }
 
 
+# PyTorch's CUDA caching allocator (default configuration) serves a request of more than 1 MiB from its large pool and
+# hands out a free large block whole when at most 1 MiB of it would remain; it rounds the segment of a request of
+# 10 MiB or more up to 2 MiB, so the free end of such a segment (the arena's, a saved tensor's) is under 2 MiB.
+_ALLOC_SMALL_MAX = 1 << 20
+_ALLOC_SEGMENT_ROUND = 2 << 20
+
+
+def _raw_partials(
+    NC_pad: int, H: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The raw backward's per-call parameter partials ``dA_part`` / ``db_part`` (:func:`_raw_partials_bytes`): FP32
+    ``[NC_pad, H, 128, 2]`` each, contiguous.  Two allocations, except when the bytes of each lie between 1 MiB and
+    2 MiB: then the two halves of one ``[2, NC_pad, H, 128, 2]`` allocation.  A partial in that band could take a free
+    segment end whole (:data:`_ALLOC_SEGMENT_ROUND`) and count up to 1 MiB of it as allocated; the pair is over 2 MiB
+    and fits none.  From 2 MiB on, a partial fits no such end, while one allocation of both could round to a segment
+    whose end (at most 1 MiB) counts as allocated, so the two stay separate.  The bytes, each partial's layout and their
+    lifetime (both are dropped with the call) are the same either way."""
+    shape = (int(NC_pad), int(H), D, 2)
+    half = int(NC_pad) * int(H) * D * 2 * 4
+    if _ALLOC_SMALL_MAX < half < _ALLOC_SEGMENT_ROUND:
+        dA_part, db_part = _alloc((2, *shape), torch.float32, device).unbind(0)
+        return dA_part, db_part
+    return _alloc(shape, torch.float32, device), _alloc(shape, torch.float32, device)
+
+
 def _raw_partials_bytes(NC_pad: int, H: int) -> int:
     """The raw backward's per-call parameter partials ``dA_part`` / ``db_part``: FP32 ``[NC_pad, H, 128, 2]`` each
     (the per-chunk ``(hi, lo)`` pairs of the GLM intra program), plus ``param_finalize``'s FP32 per-segment scratch
@@ -5175,10 +5200,11 @@ def _backward(
         dbeta = _alloc((S, H), torch.bfloat16, ws.device)
         if gp is None:
             return {"dv": dv, "dg": dg, "dbeta": dbeta}
+        dA_part, db_part = _raw_partials(p.NC_pad, H, ws.device)
         raw_out.update(
             dg_raw=dg,
-            dA_part=_alloc((p.NC_pad, H, D, 2), torch.float32, ws.device),
-            db_part=_alloc((p.NC_pad, H, D, 2), torch.float32, ws.device),
+            dA_part=dA_part,
+            db_part=db_part,
             dA_log=_alloc((H,), torch.float32, ws.device),
             ddt_bias=_alloc((H * D,), torch.float32, ws.device),
         )
