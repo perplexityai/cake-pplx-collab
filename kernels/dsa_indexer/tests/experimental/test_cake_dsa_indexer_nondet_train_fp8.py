@@ -235,9 +235,8 @@ def test_fp8_record_replaces_only_its_fields_and_leaves_the_bf16_record():
         ]
         assert {f: fp8[f] for f in kept} == {f: record[f] for f in kept}, arch
         unset = [f for f in FP8_UNSET_FIELDS if f not in fields]
-        assert {f: fp8[f] for f in unset} == {
-            f: FP8_UNSET_FIELDS[f] for f in unset
-        }, arch
+        want = {f: FP8_UNSET_FIELDS[f] for f in unset}
+        assert {f: fp8[f] for f in unset} == want, arch
         DispatchPolicy.from_record(fp8)  # a valid record
     assert before == (cake_jit.POLICY, cake_jit.POLICY_FP8)
     assert {
