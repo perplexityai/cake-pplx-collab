@@ -13,7 +13,11 @@ Install this family alone, pinned to a commit:
 pip install "cake-pplx-kda @ git+https://github.com/perplexityai/cake-pplx-collab@<sha>#subdirectory=kernels/kda"
 ```
 
-The version is in [`VERSION`](VERSION). Since 0.2.0 every `sm_107a` library needs CUDA 13.5 or newer.
+The version is in [`VERSION`](VERSION). Since 0.2.0 every `sm_107a` library needs CUDA 13.5 or newer. Since 0.2.2 the
+single-rank packages also read the pack's token count when they choose the segments per document of the segmented
+route, on the architectures and SM counts that `cake_jit.TOKEN_SEGMENTS` lists (the token-aware segment rule; see
+[Kernel structure of one training step](cake_pplx/_backends/cake_kda_det_train/README.md#kernel-structure-of-one-training-step)).
+The context-parallel packages keep the occupancy rule.
 
 The tests judge every floating output of the four packages by its error against an FP64 reference over 32 random
 draws (`tests/cake_naive.py`). Two references run on the same inputs: a naive BF16 PyTorch implementation, and
