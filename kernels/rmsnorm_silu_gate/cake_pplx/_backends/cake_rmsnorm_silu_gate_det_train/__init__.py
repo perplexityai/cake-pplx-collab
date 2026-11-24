@@ -49,10 +49,13 @@ Host design (every control is a keyword; no environment variable):
   projection, a broadcast, one token) as one range a token, other layouts
   (head-major rows) as one 256-byte range a row on SM103 and SM107 and not
   at all on SM100; a prefetch changes no bits.  One module per architecture,
-  and on SM107 a second one for packed rows (``x`` and ``z`` both read as
-  contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a
-  row with the same FP32 operations in the same order, so the layout changes
-  no bits.  Up to
+  and a second one for packed rows (``x`` and ``z`` both read as contiguous
+  ``[T, H, 128]``, fewer than 2^24 rows; ``cake_jit.forward_module``): on
+  SM107 one that reads each row at its linear offset, on SM100 and SM103 the
+  module of version 0.2.14, which warms only rows packed in both ``x`` and
+  ``z`` (next to the per-layout prefetches, packed rows measured slower at
+  small and mid row counts).  Each computes a row with the same FP32
+  operations in the same order, so the layout changes no bits.  Up to
   ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
   rows of ``cake_jit.FWD_TINY_GAP_ROWS`` (17 to 32 on SM107), inputs whose
   rows are packed (``x`` and ``z`` both read as contiguous ``[T, H, 128]``,

@@ -151,6 +151,13 @@ gradient and a call with ``compute_grad_weight=False`` run the long programs
 on packed rows only, as in 0.2.14.  ``cake_jit.module_for_rows`` of both
 packages and the deterministic package's ``cake_jit.backward_module`` take
 ``compute_grad_weight`` (default true).
+Version 0.2.16 changes no bits.  On sm_100a and sm_103a the deterministic
+package runs packed rows (``x`` and ``z`` both contiguous ``[T, H, 128]``,
+fewer than 2^24 rows) on a second forward program (``fwd_packed``), the
+forward of 0.2.14, which warms in L2 only rows packed in both ``x`` and
+``z``; its ``fwd`` program, which warms each tensor by its own layout, runs
+the other rows.  This package's programs, routes and grids are those of
+0.2.15.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
