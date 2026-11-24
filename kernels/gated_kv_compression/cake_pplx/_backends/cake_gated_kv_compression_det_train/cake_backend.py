@@ -20,8 +20,9 @@ The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
 one record per role and program (``pair_table``, ``pair_table_small``, ``fwd``
 and ``fwd_unfused`` on SM100 / SM103, ``fwd_sm_107a`` and
 ``fwd_unfused_sm_107a`` on SM107, ``bwd`` and ``bwd_small`` on SM100 / SM103,
-``bwd_sm_107a`` and ``bwd_small_sm_107a`` on SM107; the ``build.json``
-entries are ``<library>_<arch>``), :func:`.cake_jit.launch_grid` the grids and
+``bwd_sm_107a`` and ``bwd_small_sm_107a`` on SM107, ``bwd_warp`` on SM100,
+``bwd_warp_sm_103a`` on SM103 and ``bwd_warp_sm_107a`` on SM107; the
+``build.json`` entries are ``<library>_<arch>``), :func:`.cake_jit.launch_grid` the grids and
 :func:`.cake_jit.run_module` the launch of a role: the record serving it on
 the device's architecture (:func:`.cake_jit.role_record`).  :mod:`.cake_build` serves a
 library from a prebuilt ``aot/`` file when a builder compiled it and otherwise
@@ -36,10 +37,12 @@ runs a pair table, then ``fwd_unfused``, the same forward without the table
 build, which reads that table (:func:`launch_fwd`).  A backward call runs a
 pair table (unless the caller passes the table as ``pair_offsets``) and the
 backward (the ``dC`` / ``dZ`` rows of every pair's two tokens and the zero
-rows of the odd-length documents' tail tokens): ``bwd`` for more than
+rows of the odd-length documents' tail tokens): ``bwd_warp`` for the
+documents of :func:`.cake_jit.bwd_warp_region` (more than 16384, and 15 to 32
+on SM103), else ``bwd`` for more than
 :func:`.cake_jit.bwd_small_docs` and at most :func:`.cake_jit.bwd_max_docs`
 documents (no upper bound on SM100 / SM103) and ``bwd_small`` for the
-others (:func:`launch_bwd`); both write the same bytes.  The pair table is
+others (:func:`launch_bwd`); all write the same bytes.  The pair table is
 ``pair_table_small`` for at most :func:`.cake_jit.small_docs` documents and
 ``pair_table`` for more (:func:`launch_pair_table`); both write the same
 bytes.  A call looks up the operands' device index, its architecture and the
@@ -423,7 +426,8 @@ def _launch_bwd(
     index: int,
     arch: str | None,
 ) -> None:
-    """The backward launch of :func:`launch_bwd`: role ``bwd`` or ``bwd_small`` on ``G + S`` virtual rows."""
+    """The backward launch of :func:`launch_bwd`: a backward role (``bwd``, ``bwd_small`` or ``bwd_warp``) on ``G + S``
+    virtual rows."""
     values = {
         "dout": dout,
         "c": c,
@@ -443,9 +447,16 @@ def _launch_bwd(
 
 
 def _bwd_role(S: int, arch: str) -> str:
-    """The backward role of a launch of ``S`` documents on ``arch``: ``bwd_small`` for ``S <=
-    cake_jit.bwd_small_docs(arch)`` or ``S > cake_jit.bwd_max_docs(arch)`` (no upper bound when that is ``None``), else
-    ``bwd``."""
+    """The backward role of a launch of ``S`` documents on ``arch``: ``bwd_warp`` for ``S > above`` or ``lo <= S <=
+    hi`` of ``(lo, hi, above) = cake_jit.bwd_warp_region(arch)`` (never when that is ``None``; no ``lo`` to ``hi``
+    range when they are ``None``); else ``bwd_small`` for ``S <= cake_jit.bwd_small_docs(arch)`` or ``S >
+    cake_jit.bwd_max_docs(arch)`` (no upper bound when that is ``None``), else ``bwd``.  Each bound is a cached lookup,
+    made at most once a call."""
+    region = cake_jit.bwd_warp_region(arch)
+    if region is not None:
+        lo, hi, above = region
+        if S > above or (lo is not None and hi is not None and lo <= S <= hi):
+            return "bwd_warp"
     high = cake_jit.bwd_max_docs(arch)
     if S <= cake_jit.bwd_small_docs(arch) or (high is not None and S > high):
         return "bwd_small"
@@ -521,12 +532,14 @@ def launch_bwd(
 ) -> None:
     """Launch the backward: every ``dc`` and ``dz`` row (FP32, row strides ``dc_ld`` and ``dz_ld``) of a token below
     ``cu_seqlens[S]`` from ``dout [G, 512]`` (BF16), ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``,
-    ``G >= 1``), on ``G + S`` virtual rows.  For ``cake_jit.bwd_small_docs(arch) < S <= cake_jit.bwd_max_docs(arch)``
-    (no upper bound when that is ``None``, as on SM100 / SM103) the ``bwd`` role (record ``bwd`` on SM100 / SM103,
-    ``bwd_sm_107a`` on SM107), for the other ``S`` the ``bwd_small`` role (record ``bwd_small`` on SM100 / SM103,
-    ``bwd_small_sm_107a`` on SM107): the same bytes.  ``role`` (``bwd`` or ``bwd_small``), ``device_index`` and
-    ``arch``: the role the caller chose by that rule, the index of the operands' device and its architecture when the
-    caller has them; ``None`` looks them up."""
+    ``G >= 1``), on ``G + S`` virtual rows.  For the ``S`` of ``cake_jit.bwd_warp_region(arch)`` (more than 16384;
+    15 to 32 on SM103) the ``bwd_warp`` role (record ``bwd_warp`` on SM100, ``bwd_warp_sm_103a``
+    on SM103, ``bwd_warp_sm_107a`` on SM107); else for ``cake_jit.bwd_small_docs(arch) < S <=
+    cake_jit.bwd_max_docs(arch)`` (no upper bound when that is ``None``, as on SM100 / SM103) the ``bwd`` role
+    (record ``bwd`` on SM100 / SM103, ``bwd_sm_107a`` on SM107), for the other ``S`` the ``bwd_small`` role (record
+    ``bwd_small`` on SM100 / SM103, ``bwd_small_sm_107a`` on SM107): the same bytes.  ``role`` (a backward role:
+    ``bwd``, ``bwd_small`` or ``bwd_warp``), ``device_index`` and ``arch``: the role the caller chose, the index of the
+    operands' device and its architecture when the caller has them; ``None`` looks them up (the role by that rule)."""
     S, G = int(cu_seqlens.numel()) - 1, int(dout.shape[0])
     lds = int(c_ld), int(z_ld), int(dc_ld), int(dz_ld)
     if device_index is None:
@@ -741,9 +754,9 @@ def _backward(
         dc.zero_()
         dz.zero_()
         return dc, dz
-    # The device, its architecture and the role are looked up once and passed to the launches: a backward of more than
-    # bwd_small_docs and at most bwd_max_docs documents runs bwd, of the others bwd_small, with the table given or
-    # launched here.
+    # The device, its architecture and the role are looked up once and passed to the launches: a backward of the
+    # documents of bwd_warp_region runs bwd_warp; else of more than bwd_small_docs and at most bwd_max_docs documents
+    # bwd, of the others bwd_small, with the table given or launched here.
     role = _bwd_role(S, arch)
     cu_pairs = pair_offsets
     if cu_pairs is None:
@@ -831,12 +844,12 @@ def _halves(cz: Any) -> tuple[torch.Tensor, torch.Tensor]:
 class CakeGatedKvCompressionDetFunction(torch.autograd.Function):
     """Autograd node of :func:`cake_gated_kv_compression_det`: forward
     :func:`cake_gated_kv_compression_det_train_forward`, backward :func:`cake_gated_kv_compression_det_train_backward`
-    (one launch writes ``dC`` and ``dZ``: ``bwd_small`` or ``bwd`` by the explicit backward's rule, on the ``S`` of the
-    forward's plan).  The node saves ``c``, ``z``, ``cu_seqlens`` and its forward's pair table (int32 ``[S + 1]``)
-    only: no activation and no probability, and the backward reuses the table (no pair-table launch).  The backward
-    also reuses what the forward checked and looked up (``T``, ``S``, ``G``, the row strides, the device and its
-    architecture; autograd refuses a saved tensor changed in place since) and writes gradients it allocates itself, so
-    it checks nothing again.  Under ``torch.utils.checkpoint(..., use_reentrant=False)`` the recompute gives the same
+    (one launch writes ``dC`` and ``dZ``: ``bwd_warp``, ``bwd`` or ``bwd_small`` by the explicit backward's rule, on the
+    ``S`` of the forward's plan).  The node saves ``c``, ``z``, ``cu_seqlens`` and its forward's pair table (int32
+    ``[S + 1]``) only: no activation and no probability, and the backward reuses the table (no pair-table launch).  The
+    backward also reuses what the forward checked and looked up (``T``, ``S``, ``G``, the row strides, the device and
+    its architecture; autograd refuses a saved tensor changed in place since) and writes gradients it allocates itself,
+    so it checks nothing again.  Under ``torch.utils.checkpoint(..., use_reentrant=False)`` the recompute gives the same
     bits."""
 
     @staticmethod
