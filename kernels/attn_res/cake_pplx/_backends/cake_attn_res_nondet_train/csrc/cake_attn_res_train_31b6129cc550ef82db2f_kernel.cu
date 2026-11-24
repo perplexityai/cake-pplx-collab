@@ -81,6 +81,13 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx(int mbar_addr, uint32_
 }
 
 
+__device__ __forceinline__ float max_noftz(float a, float b) {
+    float c;
+    asm("max.f32 %0, %1, %2;" : "=f"(c) : "f"(a), "f"(b));
+    return c;
+}
+
+
 __device__ __forceinline__ float2 mul_f32x2_noftz(float2 a, float2 b) {
     float2 r;
     asm("mul.rn.f32x2 %0, %1, %2;"
@@ -114,6 +121,12 @@ __device__ __forceinline__ __nv_bfloat162 __as_bf16x2(unsigned int v) {
 __device__ __forceinline__ float2 cake_bf16x2_to_f32x2(__nv_bfloat162 v) {
     const unsigned int w = *reinterpret_cast<const unsigned int*>(&v);
     return make_float2(__uint_as_float(w << 16), __uint_as_float(w & 0xffff0000u));
+}
+
+__device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
+    float r;
+    asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
 }
 
 extern "C" {
@@ -398,12 +411,21 @@ kernel_cake_attn_res_train_31b6129cc550ef82db2f(__nv_bfloat16* __restrict__ dout
         float tk_p = st[0];
         float tk_r = st[1];
         float tk_d = st[2];
-        float tk_pd = ((act != 0) ? tk_p * tk_dp : 0.0f);
-        float tk_S = tk_pd;
+        float tk_pm = ((act != 0) ? tk_p : -1.0f);
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            tk_pm = max_noftz(tk_pm, __shfl_xor_sync(0xFFFFFFFF, tk_pm, offset));
+        int tk_cl = ((act != 0) ? ((tk_p == tk_pm) ? lane : 32) : 32);
+        int tk_c;
+        asm volatile("redux.sync.min.s32 %0, %1, 0xFFFFFFFF;" : "=r"(tk_c) : "r"(tk_cl));
+        float _shfl_sync_17 = __shfl_sync(0xFFFFFFFF, tk_dp, tk_c);
+        float tk_q = tk_dp - _shfl_sync_17;
+        float tk_pq = ((act != 0) ? mul_f32_rn_noftz(tk_p, tk_q) : 0.0f);
+        float tk_S = tk_pq;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1)
             tk_S += __shfl_xor_sync(0xFFFFFFFF, tk_S, offset);
-        float tk_ds = tk_p * (tk_dp - tk_S);
+        float tk_ds = tk_p * (tk_q - tk_S);
         float tk_a = tk_ds * tk_r;
         float tk_b = __fdiv_rn(tk_ds * tk_d * (tk_r * tk_r * tk_r), 7168.0f);
         float tk_w[8];
@@ -414,9 +436,9 @@ kernel_cake_attn_res_train_31b6129cc550ef82db2f(__nv_bfloat16* __restrict__ dout
         if (0 < n) {
             float tj_p_0 = __shfl_sync(0xFFFFFFFF, tk_p, 0);
             float tj_a_0 = __shfl_sync(0xFFFFFFFF, tk_a, 0);
-            float _shfl_sync_17 = __shfl_sync(0xFFFFFFFF, tk_b, 0);
+            float _shfl_sync_18 = __shfl_sync(0xFFFFFFFF, tk_b, 0);
             float tj_nb_0;
-            asm("neg.f32 %0, %1;" : "=f"(tj_nb_0) : "f"(_shfl_sync_17));
+            asm("neg.f32 %0, %1;" : "=f"(tj_nb_0) : "f"(_shfl_sync_18));
             float2 tj_p2_0 = make_float2(tj_p_0, tj_p_0);
             float2 tj_a2_0 = make_float2(tj_a_0, tj_a_0);
             float2 tj_b2_0 = make_float2(tj_nb_0, tj_nb_0);
@@ -444,9 +466,9 @@ kernel_cake_attn_res_train_31b6129cc550ef82db2f(__nv_bfloat16* __restrict__ dout
         if (1 < n) {
             float tj_p_1 = __shfl_sync(0xFFFFFFFF, tk_p, 1);
             float tj_a_1 = __shfl_sync(0xFFFFFFFF, tk_a, 1);
-            float _shfl_sync_18 = __shfl_sync(0xFFFFFFFF, tk_b, 1);
+            float _shfl_sync_19 = __shfl_sync(0xFFFFFFFF, tk_b, 1);
             float tj_nb_1;
-            asm("neg.f32 %0, %1;" : "=f"(tj_nb_1) : "f"(_shfl_sync_18));
+            asm("neg.f32 %0, %1;" : "=f"(tj_nb_1) : "f"(_shfl_sync_19));
             float2 tj_p2_1 = make_float2(tj_p_1, tj_p_1);
             float2 tj_a2_1 = make_float2(tj_a_1, tj_a_1);
             float2 tj_b2_1 = make_float2(tj_nb_1, tj_nb_1);
@@ -473,17 +495,17 @@ kernel_cake_attn_res_train_31b6129cc550ef82db2f(__nv_bfloat16* __restrict__ dout
         }
         #pragma unroll
         for (int i_5 = 0; i_5 < 8; i_5++) {
-            float _add_19;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_19) : "f"(blk[i_5]), "f"(tk_w[i_5]));
-            blk[i_5] = _add_19;
+            float _add_20;
+            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_20) : "f"(blk[i_5]), "f"(tk_w[i_5]));
+            blk[i_5] = _add_20;
         }
         nblk = nblk + 1;
         if (nblk == 64) {
             #pragma unroll
             for (int i_6 = 0; i_6 < 8; i_6++) {
-                float _add_20;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_20) : "f"(tot[i_6]), "f"(blk[i_6]));
-                tot[i_6] = _add_20;
+                float _add_21;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_21) : "f"(tot[i_6]), "f"(blk[i_6]));
+                tot[i_6] = _add_21;
                 blk[i_6] = 0.0f;
             }
             nblk = 0;
@@ -511,9 +533,9 @@ kernel_cake_attn_res_train_31b6129cc550ef82db2f(__nv_bfloat16* __restrict__ dout
     }
     #pragma unroll
     for (int i_8 = 0; i_8 < 8; i_8++) {
-        float _add_21;
-        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_21) : "f"(tot[i_8]), "f"(blk[i_8]));
-        tot[i_8] = _add_21;
+        float _add_22;
+        asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_22) : "f"(tot[i_8]), "f"(blk[i_8]));
+        tot[i_8] = _add_22;
     }
     #pragma unroll
     for (int half_1 = 0; half_1 < 2; half_1++) {
