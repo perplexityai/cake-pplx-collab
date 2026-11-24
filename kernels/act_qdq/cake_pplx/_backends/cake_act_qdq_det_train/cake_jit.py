@@ -94,8 +94,9 @@ call with ``locality="domain"`` runs it, out of place, when
 ``grid_rule["chunk_bytes"]`` alternate between the two dies (chunk ``k`` of a
 buffer in die ``k & 1``), at the same offset in their chunks and in chunks of
 the same die, and ``n_vecs`` in the record's ``vectors`` range.  Such a
-program takes the main program's tiles (64 threads, 256 vectors) and each CTA
-claims its next item, ``2^batch_shift`` tiles of one chunk, from its own die's
+program takes its own tiles of 128 threads, 1,024 vectors for FP4 (8 a
+thread) and 512 for MXFP4 and MXFP8 (4 a thread), and each CTA claims its
+next item, ``2^batch_shift`` tiles of one chunk (one tile), from its own die's
 counter first and then from the other die's; the record's ``counters`` field
 gives the claim workspace: ``words`` words a die of ``dtype`` ``"uint32"``,
 which every launch leaves zero (``rearm`` ``"kernel"``), so a workspace is
@@ -596,9 +597,10 @@ MODULES: dict[str, dict[str, Any]] = {
         },
     },
     # The interleaved-domain build of each route, SM107 only (``DOMAIN_ROUTES``):
-    # the main program's tiles over memory whose 2 MB chunks alternate between
-    # the two dies, each CTA claiming items of its own die's chunks first, out
-    # of place, for the n_vecs of its ``vectors``; a call with
+    # tiles of 128 threads (1,024 vectors for FP4, 512 for MXFP4 and MXFP8),
+    # one tile an item, over memory whose 2 MB chunks alternate between the two
+    # dies, each CTA claiming items of its own die's chunks first, out of
+    # place, for the n_vecs of its ``vectors``; a call with
     # ``locality="domain"`` runs it when :func:`domain_route` places ``x`` and
     # ``y`` in such memory.
     "fp4_e4m3_g16_domain": {
@@ -608,17 +610,17 @@ MODULES: dict[str, dict[str, Any]] = {
         "ffi_entry": "run",
         "format": "fp4_e4m3_g16",
         "grid_rule": {
-            "batch_shift": {"sm_107a": 1},
+            "batch_shift": {"sm_107a": 0},
             "chunk_bytes": 2097152,
-            "ctas_per_sm": {"sm_107a": 16},
+            "ctas_per_sm": {"sm_107a": 7},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 256},
+            "tile_vectors": {"sm_107a": 1024},
             "vector_elements": 8,
         },
         "group": 16,
         "kernel_symbol": "kernel_cake_act_qdq_dfdafec075fee7302f3b",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -626,7 +628,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_dfdafec075fee7302f3b",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147482624)}},
     },
     "fp4_e4m3_g16_scales_domain": {
         "arches": ["sm_107a"],
@@ -635,17 +637,17 @@ MODULES: dict[str, dict[str, Any]] = {
         "ffi_entry": "run",
         "format": "fp4_e4m3_g16",
         "grid_rule": {
-            "batch_shift": {"sm_107a": 1},
+            "batch_shift": {"sm_107a": 0},
             "chunk_bytes": 2097152,
-            "ctas_per_sm": {"sm_107a": 16},
+            "ctas_per_sm": {"sm_107a": 7},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 256},
+            "tile_vectors": {"sm_107a": 1024},
             "vector_elements": 8,
         },
         "group": 16,
         "kernel_symbol": "kernel_cake_act_qdq_851b2cd815bd9f70bd34",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -653,7 +655,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_851b2cd815bd9f70bd34",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147482624)}},
     },
     "mxfp4_e8m0_g32_domain": {
         "arches": ["sm_107a"],
@@ -662,17 +664,17 @@ MODULES: dict[str, dict[str, Any]] = {
         "ffi_entry": "run",
         "format": "mxfp4_e8m0_g32",
         "grid_rule": {
-            "batch_shift": {"sm_107a": 1},
+            "batch_shift": {"sm_107a": 0},
             "chunk_bytes": 2097152,
-            "ctas_per_sm": {"sm_107a": 16},
+            "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 256},
+            "tile_vectors": {"sm_107a": 512},
             "vector_elements": 8,
         },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_3fcef995964af95f49e7",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -680,7 +682,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_3fcef995964af95f49e7",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
     },
     "mxfp4_e8m0_g32_scales_domain": {
         "arches": ["sm_107a"],
@@ -689,17 +691,17 @@ MODULES: dict[str, dict[str, Any]] = {
         "ffi_entry": "run",
         "format": "mxfp4_e8m0_g32",
         "grid_rule": {
-            "batch_shift": {"sm_107a": 1},
+            "batch_shift": {"sm_107a": 0},
             "chunk_bytes": 2097152,
-            "ctas_per_sm": {"sm_107a": 16},
+            "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 256},
+            "tile_vectors": {"sm_107a": 512},
             "vector_elements": 8,
         },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_db936c037a2c98a5db5c",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -707,7 +709,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_db936c037a2c98a5db5c",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
     },
     "mxfp8_e8m0_g32_domain": {
         "arches": ["sm_107a"],
@@ -716,17 +718,17 @@ MODULES: dict[str, dict[str, Any]] = {
         "ffi_entry": "run",
         "format": "mxfp8_e8m0_g32",
         "grid_rule": {
-            "batch_shift": {"sm_107a": 1},
+            "batch_shift": {"sm_107a": 0},
             "chunk_bytes": 2097152,
-            "ctas_per_sm": {"sm_107a": 16},
+            "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 256},
+            "tile_vectors": {"sm_107a": 512},
             "vector_elements": 8,
         },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_c3252edeaabce416eab7",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -734,7 +736,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_c3252edeaabce416eab7",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
     },
     "mxfp8_e8m0_g32_scales_domain": {
         "arches": ["sm_107a"],
@@ -743,17 +745,17 @@ MODULES: dict[str, dict[str, Any]] = {
         "ffi_entry": "run",
         "format": "mxfp8_e8m0_g32",
         "grid_rule": {
-            "batch_shift": {"sm_107a": 1},
+            "batch_shift": {"sm_107a": 0},
             "chunk_bytes": 2097152,
-            "ctas_per_sm": {"sm_107a": 16},
+            "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 256},
+            "tile_vectors": {"sm_107a": 512},
             "vector_elements": 8,
         },
         "group": 32,
         "kernel_symbol": "kernel_cake_act_qdq_48c0dbfaea5f3b9c07f7",
         "launch": {
-            "block": (64, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
@@ -761,7 +763,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_48c0dbfaea5f3b9c07f7",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483392)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
     },
 }
 
@@ -883,8 +885,9 @@ INT32_MAX = 2**31 - 1
 # ``n_vecs`` is a signed 32-bit kernel argument, and the kernel forms
 # ``n_vecs + 255`` (its tile count on SM107, ``+ 127`` on SM100 / SM103) and
 # its vector indices below that in signed 32 bits.  A small or wide program
-# forms ``n_vecs + 511`` and a large one ``n_vecs + 2047``; a call runs each
-# only inside its ``vectors`` range.
+# forms ``n_vecs + 511``, a large one ``n_vecs + 2047`` and an
+# interleaved-domain one ``n_vecs + 1023`` (FP4) or ``n_vecs + 511`` (MXFP4,
+# MXFP8); a call runs each only inside its ``vectors`` range.
 MAX_VECTORS = INT32_MAX - 255
 
 
@@ -1131,9 +1134,9 @@ def domain_launch(
     of ``chunk_bytes`` holds ``2^chunk_tile_shift`` tiles.  Tile ``c`` of ``x``
     lies in slot ``first_tile + c``: ``first_tile`` is ``x``'s offset in its
     chunk in whole tiles, rounded down (an ``x`` that starts inside a tile
-    moves a few bytes of a tile across the dies, never what it computes), and
-    chunk ``k`` lies in die ``first_die ^ (k & 1)``.  An item is
-    ``2^batch_shift`` slots of one chunk (``batch_shift`` at most
+    moves less than one tile of bytes across the dies, never what it
+    computes), and chunk ``k`` lies in die ``first_die ^ (k & 1)``.  An item
+    is ``2^batch_shift`` slots of one chunk (``batch_shift`` at most
     ``chunk_tile_shift``).  The chunks ``0`` to ``last_chunk = (first_tile +
     tiles - 1) >> chunk_tile_shift`` hold the items, each die's chunks in turn,
     and the grid is one CTA per item, at most ``ctas_per_sm[arch]`` per SM; any
