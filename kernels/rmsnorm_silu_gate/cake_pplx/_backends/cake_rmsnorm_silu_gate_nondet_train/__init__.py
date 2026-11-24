@@ -171,7 +171,25 @@ pipelined forward (0.2.16 ran the mid forward), whose ``y`` can differ in its
 last bits (the programs associate a row's sum of squares differently).  On
 sm_107a packed rows of 17 to 32 rows run the short forward
 (``cake_jit.FORWARD_TINY_GAP``; 0.2.16 ran the tiny forward), with the same
-bits.  The deterministic package is that of 0.2.16.
+bits.  Four forward roles are new (six programs), builds of the pipelined
+forwards that change no value (each gives the bits of ``fwd_pipe`` on sm_100a and sm_103a,
+of ``fwd_pipe_packed`` on sm_107a): ``fwd_keep_pipe`` and
+``fwd_keep_pipe_packed`` load ``x`` and ``z`` with the L2's default policy in
+place of ``evict_first``, ``fwd_layout_pipe`` warms rows of any layout in L2
+by their layout (the deterministic package's per-layout prefetch walk), and
+``fwd_layout_keep_pipe`` does both.  Packed rows run ``fwd_keep_pipe`` on
+sm_100a from 37 to 85 rows per SM and on sm_103a from 2000 to 3000 (an ``x``
+or ``z`` broadcast over more than one token keeps ``fwd_pipe``) and
+``fwd_keep_pipe_packed`` on sm_107a past 8192, where 0.2.16 ran ``fwd_pipe``
+and ``fwd_pipe_packed``, the same bits.  Rows that are not packed are classed
+(``cake_jit.forward_layout``): a gate sliced from a wider projection with
+packed ``x`` runs ``cake_jit.PROJECTION_FORWARD_BANDS`` and head-major ``x``
+and ``z`` on sm_107a ``cake_jit.HEAD_MAJOR_FORWARD_BANDS``, whose bands run
+``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` where 0.2.16 ran the forwards
+of ``cake_jit.STRIDED_FORWARD_BANDS``, so ``y`` can differ there in its last
+bits; other layouts keep the programs of 0.2.16.  ``cake_jit.module_for_rows``
+takes the class (keyword ``layout``).  The deterministic package is that of
+0.2.16.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -394,15 +412,20 @@ Host design (the input layout rules are the deterministic package's):
   outputs and, in the backward, ``grad_weight`` and the refusal of an FP32
   workspace, then returns without a launch (the deterministic package's
   order).
-- Grids (``cake_jit.module_for_rows`` picks the module from the rows and
-  the device's SM count, the forward's by the bands of rows per SM of
-  ``cake_jit.FORWARD_BANDS`` where ``x`` and ``z`` hold packed rows, row
-  ``n`` at element ``128 n``, else of ``cake_jit.STRIDED_FORWARD_BANDS``; an
-  ``x`` or ``z`` broadcast over more than one token counts as packed rows,
-  but runs the band of other layouts where its band of packed rows runs a
-  program that reads them at their linear offsets): a
-  call runs a tiny, the short, the plain, the mid, the long, the
-  extra-long or a pipelined forward.  The 32-lane tiny forward (packed rows
+- Grids (``cake_jit.module_for_rows`` picks the module from the rows and the
+  device's SM count, the forward's by the bands of rows per SM of
+  ``cake_jit.FORWARD_BANDS`` where ``x`` and ``z`` hold packed rows, row ``n``
+  at element ``128 n``, else of the table of the rows' class
+  (``cake_jit.forward_layout``): ``cake_jit.PROJECTION_FORWARD_BANDS`` where
+  ``x`` holds packed rows and ``z`` the gate columns of a wider projection,
+  ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major
+  on an architecture with such a table (sm_107a), else
+  ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
+  than one token counts as packed rows, but runs the band of other layouts
+  where its band of packed rows runs a program that reads them at their linear
+  offsets, and ``fwd_pipe`` where it runs ``fwd_keep_pipe``): a call runs a
+  tiny, the short, the plain, the mid, the long, the extra-long or a pipelined
+  forward.  The 32-lane tiny forward (packed rows
   up to 4 rows per SM on sm_100a and 12 on sm_103a) launches one 128-thread
   CTA per block of 4 rows, two lanes to each group of 8 elements, and the tiny
   forward (packed rows, from there up to 36 rows per SM on sm_100a and
@@ -426,38 +449,53 @@ Host design (the input layout rules are the deterministic package's):
   ``_kernel_view``), the long forward (3 CTAs per SM, at most 6 blocks of 32
   rows each; sm_100a), the extra-long forward (the long forward whose thread
   0 also warms the CTA's next block in L2) and the pipelined forwards (the
-  deterministic package's forward programs with a gate that does not flush: the
-  mid forward's schedule and L2 prefetches with the L2 ``evict_first`` policy
-  on the loads of x and z, one CTA per block below that package's cut of rows
-  per SM of the architecture and whole waves from there, their records'
-  ``persistent_from_rows_per_sm``, and on sm_100a and sm_103a, for rows the
-  kernel does not read as packed (x or z broadcast over tokens, or one
-  token: ``cake_jit.forward_packed``), ``persistent_from_rows_per_sm_strided``;
-  on sm_107a its program of packed rows).
-  The bands past the tiny forwards' (packed rows; measured with the
-  pipelined forwards' grid of 0.2.13, one CTA per block below 8192 rows per
-  SM): on sm_100a the pipelined forward up to 85 rows per SM, the mid
-  forward up to 160, the long forward up to 400, the extra-long forward up to
-  520 and the pipelined forward past it (to version 0.2.16 up to 6500, and
-  the mid forward past it; measured again with 0.2.17's grids); on
-  sm_103a the mid forward up to 240, the extra-long forward up to 600, the
-  pipelined forward up to 6000, the mid forward up to 8192 and the pipelined
-  forward past it; on sm_107a the mid forward up to 175, the extra-long
-  forward up to 280 and the pipelined forward past it.  Past the short
-  forward's (other layouts): on sm_100a the mid forward up to 140, the long
-  forward up to 400, the extra-long forward up to 700 and the plain forward
-  past it; on sm_103a the mid forward up to 250, the extra-long forward up to
-  700 and the plain forward past it; on sm_107a the mid forward up to 480 and
-  the plain forward past it.  The forward programs
+  deterministic package's forward programs with a gate that does not flush:
+  the mid forward's schedule and L2 prefetches with the L2 ``evict_first``
+  policy on the loads of x and z, or the L2's default policy in
+  ``fwd_keep_pipe``, ``fwd_keep_pipe_packed`` and ``fwd_layout_keep_pipe``,
+  and in ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` the L2 prefetches of
+  rows of any layout by their layout; one CTA per block below that package's
+  cut of rows per SM of the architecture and whole waves from there, their
+  records' ``persistent_from_rows_per_sm``, and in a program of rows of any
+  layout, for rows the kernel does not read as packed (x or z broadcast over
+  tokens, one token, or not packed: ``cake_jit.forward_packed``),
+  ``persistent_from_rows_per_sm_strided``; on sm_107a ``fwd_pipe_packed`` and
+  ``fwd_keep_pipe_packed`` read packed rows only).  The bands past the tiny
+  forwards' (packed rows; measured with the pipelined forwards' grid of
+  0.2.13, one CTA per block below 8192 rows per SM, but those of version
+  0.2.17, measured with its grids): on sm_100a ``fwd_keep_pipe`` up to 85 rows
+  per SM, the mid forward up to 160, the long forward up to 400, the
+  extra-long forward up to 520 and the pipelined forward past it (to version
+  0.2.16 up to 6500, and the mid forward past it); on sm_103a the mid forward
+  up to 240, the extra-long forward up to 600, the pipelined forward up to
+  1999, ``fwd_keep_pipe`` up to 3000, the pipelined forward up to 6000, the
+  mid forward up to 8192 and the pipelined forward past it; on sm_107a the mid
+  forward up to 175, the extra-long forward up to 280, the pipelined forward
+  up to 8192 and ``fwd_keep_pipe_packed`` past it.  Past the short forward's,
+  for a gate sliced from a projection: on sm_100a the mid forward up to 140,
+  the long forward up to 400, the extra-long forward up to 650,
+  ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 4400 and the
+  plain forward past it; on sm_103a the mid forward up to 250, the extra-long
+  forward up to 699, ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe``
+  up to 6445 and the plain forward past it; on sm_107a
+  ``fwd_layout_keep_pipe`` up to 442, ``fwd_layout_pipe`` up to 2999 and
+  ``fwd_layout_keep_pipe`` past it.  For head-major rows on sm_107a:
+  ``fwd_layout_keep_pipe`` up to 120, the mid forward up to 442,
+  ``fwd_layout_pipe`` up to 1000 and the plain forward past it.  For other
+  layouts (and head-major rows on sm_100a and sm_103a): on sm_100a the mid
+  forward up to 140, the long forward up to 400, the extra-long forward up to
+  700 and the plain forward past it; on sm_103a the mid forward up to 250, the
+  extra-long forward up to 700 and the plain forward past it; on sm_107a the
+  mid forward up to 480 and the plain forward past it.  The forward programs
   associate a row's sum of squares differently, on FP32 FMA chains (the
   lanes of ``.f32x2`` FMA chains where a program runs two or four): the tiny
   and the short forward four 2-term chains of 16 lanes added in pairs, then
   folded by XOR shuffles 1, 2, 4, 8, and the 32-lane tiny forward the same
   chains on its 16 lane pairs, then folded by XOR shuffles 2, 4, 8, 16 (the
   same additions); the mid forward, the extra-long forward
-  but on sm_100a and the sm_107a pipelined forward four 4-term chains of 8
+  but on sm_100a and the sm_107a pipelined forwards four 4-term chains of 8
   lanes added in pairs, then folded by 1, 2, 4; the plain forward and the
-  pipelined forward on sm_100a and sm_103a two 8-term chains of 8 lanes (the
+  pipelined forwards on sm_100a and sm_103a two 8-term chains of 8 lanes (the
   even and the odd elements) added, then folded by 1, 2, 4; the long forward,
   and the extra-long forward on sm_100a, 16-term chains of 8 lanes folded by
   1, 2, 4.  So ``y``'s bits can differ between bands while each program
@@ -555,6 +593,7 @@ from .cake_jit import (
     backward_ctas,
     current_raw_stream,
     device_sm_count,
+    forward_layout,
     module_for_rows,
     nodw_module,
     workspace_bytes,
@@ -900,21 +939,29 @@ def _forward(
         and (z_tok == 0 or z_tok == packed_tok)
     )
     sms = device_sm_count(index)
-    name = module_for_rows(arch, "fwd", rows, sms, packed=packed)
-    if (
-        packed
-        and (x_tok == 0 or z_tok == 0)
-        and rows != heads
-        and name in _linear_forwards(arch)
-    ):
-        # x or z broadcast over more than one token: a program that reads
-        # packed rows at their linear offsets (the tiny forwards take
-        # contiguous x and z only; the pipelined forward of packed rows is
-        # passed the token stride H * 128) cannot read it, so the band of
-        # other layouts runs, which reads the token stride
-        name = module_for_rows(arch, "fwd", rows, sms, packed=False)
-    if name == ROUTES[arch].get("fwd_pipe_packed"):
-        # this program requires the token stride H * 128 of packed rows; a
+    # rows that are not packed run the table of their layout's class: the
+    # gate columns of a wider projection, head-major rows, or another layout
+    layout = (
+        None
+        if packed
+        else forward_layout(tokens, heads, x_tok, x_head, z_tok, z_head)
+    )
+    name = module_for_rows(arch, "fwd", rows, sms, packed=packed, layout=layout)
+    if packed and (x_tok == 0 or z_tok == 0) and rows != heads:
+        # x or z broadcast over more than one token
+        if name in _linear_forwards(arch):
+            # a program that reads packed rows at their linear offsets (the
+            # tiny forwards take contiguous x and z only; the pipelined
+            # forwards of packed rows are passed the token stride H * 128)
+            # cannot read it, so the band of other layouts runs, which reads
+            # the token stride
+            name = module_for_rows(arch, "fwd", rows, sms, packed=False)
+        elif name == ROUTES[arch].get("fwd_keep_pipe"):
+            # measured on contiguous rows only: the program of 0.2.16 there,
+            # fwd_pipe (the same bits), runs
+            name = ROUTES[arch]["fwd_pipe"]
+    if name in _packed_only_forwards(arch):
+        # these programs require the token stride H * 128 of packed rows; a
         # single token's stride (passed as 0) is never read
         values["x_tok"] = values["z_tok"] = heads * HEAD_DIM
     _loader.run_module(name, values, rows=rows, device_index=index)
@@ -967,13 +1014,27 @@ def _workspace_bytes(arch: str) -> int:
 def _linear_forwards(arch: str) -> frozenset[str]:
     """The forward modules of ``arch`` that read packed rows at their linear
     offsets (the tiny forwards, of 16 and of 32 lanes a row, and the
-    pipelined forward of packed rows): a broadcast ``x`` or ``z`` runs the
-    band of other layouts instead."""
+    pipelined forwards of packed rows, ``fwd_pipe_packed`` and
+    ``fwd_keep_pipe_packed``): a broadcast ``x`` or ``z`` runs the band of
+    other layouts instead."""
 
     return frozenset(
         name
         for role, name in ROUTES[arch].items()
         if role.startswith("fwd") and role.endswith(("_tiny", "_packed"))
+    )
+
+
+@functools.cache
+def _packed_only_forwards(arch: str) -> frozenset[str]:
+    """The pipelined forward modules of ``arch`` of packed rows only
+    (``fwd_pipe_packed`` and ``fwd_keep_pipe_packed`` on sm_107a), which
+    require the token stride ``H * 128`` of packed rows."""
+
+    return frozenset(
+        name
+        for role, name in ROUTES[arch].items()
+        if role.startswith("fwd") and role.endswith("_pipe_packed")
     )
 
 

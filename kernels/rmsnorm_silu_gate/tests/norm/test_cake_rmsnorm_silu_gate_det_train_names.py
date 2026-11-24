@@ -363,16 +363,23 @@ def test_the_two_modes_are_separate_modules() -> None:
         for name in det_backend.cake_jit.MODULES
     )
     # the non-deterministic package routes its call roles, the roles its
-    # forward and backward bands name, the long roles of its banded roles and
-    # backward roles of a BF16 weight gradient that no band runs; a backward
-    # call role has no module where its bands, whose last has no end, take
-    # every row count: the BF16 one on sm_100a and sm_103a, the FP32 one (its
-    # static backward, which a band runs on sm_100a and sm_103a) on sm_107a
+    # forward bands (of packed rows, of each layout class of rows that are not
+    # packed and of other rows) and backward bands name, the long roles of its
+    # banded roles and backward roles of a BF16 weight gradient that no band
+    # runs; a backward call role has no module where its bands, whose last has
+    # no end, take every row count: the BF16 one on sm_100a and sm_103a, the
+    # FP32 one (its static backward, which a band runs on sm_100a and sm_103a)
+    # on sm_107a
     loader = nd_backend.cake_jit
     roles = {record["role"] for record in loader.MODULES.values()}
+    forward_tables = (
+        loader.FORWARD_BANDS,
+        *loader.LAYOUT_FORWARD_BANDS.values(),
+        loader.STRIDED_FORWARD_BANDS,
+    )
     banded = {
         role
-        for table in (loader.FORWARD_BANDS, loader.STRIDED_FORWARD_BANDS)
+        for table in forward_tables
         for bands in table.values()
         for _, role in bands
     } | {

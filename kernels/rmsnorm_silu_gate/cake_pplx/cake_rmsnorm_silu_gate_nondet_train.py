@@ -165,7 +165,18 @@ there (0.2.16 ran the short backward); a call with
 SM100 packed rows past 6500 rows per SM run the pipelined forward (0.2.16
 ran the mid forward), whose ``y`` can differ in its last bits.  On SM107
 packed rows of 17 to 32 rows run the short forward (0.2.16 ran the tiny
-forward), with the same bits.  The deterministic package is that of 0.2.16.
+forward), with the same bits.  Four forward roles are new (six programs),
+builds of the pipelined forwards that change no value: two load ``x`` and
+``z`` with the L2's default policy in place of ``evict_first``, one warms rows
+of any layout in L2 by their layout, and one does both.  Packed rows run the
+first on SM100 from 37 to 85 rows per SM, on SM103 from 2000 to 3000 and on
+SM107 past 8192 (0.2.16 ran the pipelined forward there, the same bits; an
+``x`` or ``z`` broadcast over more than one token keeps it).  A gate sliced
+from a wider projection with packed ``x``, and on SM107 head-major ``x`` and
+``z``, take bands of their own that run the other two (0.2.16 ran the forwards
+of other layouts there, so ``y`` can differ there in its last bits); other
+layouts keep the programs of 0.2.16.  The deterministic package is that of
+0.2.16.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -185,15 +196,24 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   which run the forward of other layouts there); other layouts run a
   forward with 16 threads to a row up to 12 rows per SM on SM100 and SM103
   (59 on SM107); and past that, in bands of rows per SM, the pipelined
-  forwards (builds of the deterministic package's forward program with a
-  gate that does not flush), forwards whose CTAs each walk several row
-  blocks and, for other layouts past 700 rows per SM on SM100 and SM103 (480
-  on SM107), a forward with 8 threads to a row and one CTA per 8-row block.
-  An ``x`` or ``z`` broadcast over more than one token (token stride 0)
-  counts as packed rows, but where the band of packed rows runs a forward
-  that reads rows at their linear offsets (the 32- and 16-thread forwards of
-  packed rows, and on SM107 the pipelined forward of packed rows past 280
-  rows per SM) it runs the forward of other layouts.
+  forwards (builds of the deterministic package's forward program with a gate
+  that does not flush), forwards whose CTAs each walk several row blocks and,
+  for other layouts past 700 rows per SM on SM100 and SM103 (480 on SM107), a
+  forward with 8 threads to a row and one CTA per 8-row block.  Rows that are
+  not packed take the bands of their class: a gate sliced from a wider
+  projection with packed ``x`` and, on SM107, head-major ``x`` and ``z`` have
+  bands of their own, which run pipelined forwards that warm rows of any
+  layout in L2 by their layout (the projection's past 650 rows per SM on SM100
+  and 699 on SM103 and past 59 on SM107, the head-major ones from 60 to 120
+  and from 443 to 1000 rows per SM) and the 8-thread forward past their last
+  pipelined band (on SM107 the projection's has none).  An ``x`` or ``z``
+  broadcast over more than one token (token stride 0) counts as packed rows,
+  but where the band of packed rows runs a forward that reads rows at their
+  linear offsets (the 32- and 16-thread forwards of packed rows, and on SM107
+  the pipelined forwards of packed rows past 280 rows per SM) it runs the
+  forward of other layouts, and where it runs the pipelined forward with ``x``
+  and ``z`` at the L2's default policy (SM100 from 37 to 85 rows per SM, SM103
+  from 2000 to 3000) the pipelined forward of 0.2.16.
   Each forward program's arithmetic is fixed, but the programs
   associate a row's sum of squares differently, on FP32 FMA chains (the
   lanes of ``.f32x2`` FMA chains where a program runs two or four: the
@@ -503,18 +523,22 @@ def cake_rmsnorm_silu_gate_nondet_train_forward(
     per SM on SM100 / SM103 and up to 65 on SM107 (but from 17 to 32 rows,
     which run the one of other layouts there); one with 16 threads to a
     row runs other layouts up to 12 on SM100 / SM103 (59 on SM107); and past
-    that, in bands of rows per SM, the pipelined
-    forwards, forwards whose CTAs each walk several row blocks and (other
-    layouts past 700 rows per SM on SM100 / SM103, 480 on SM107) a forward of
-    one CTA per 8-row block; the programs associate a row's sum of
-    squares differently (the row count, the SM count and the layout pick the
-    program), so ``y``'s bits can differ between bands.  An ``x`` or ``z``
-    broadcast over more than one token counts as packed rows, but where the
-    band of packed rows runs a forward that reads rows at their linear
-    offsets (the 32- and 16-thread forwards of packed rows, and on SM107 the
-    pipelined forward of packed rows past 280 rows per SM) it runs the
-    forward of other layouts.  The forward does not alert under
-    ``torch.use_deterministic_algorithms(True)``.
+    that, in bands of rows per SM, the pipelined forwards, forwards whose CTAs
+    each walk several row blocks and (other layouts past 700 rows per SM on
+    SM100 / SM103, 480 on SM107) a forward of one CTA per 8-row block; a gate
+    sliced from a wider projection with packed ``x`` and, on SM107, head-major
+    ``x`` and ``z`` take bands of their own, with pipelined forwards that warm
+    rows of any layout in L2; the programs associate a row's sum of squares
+    differently (the row count, the SM count and the layout pick the program),
+    so ``y``'s bits can differ between bands.  An ``x`` or ``z`` broadcast
+    over more than one token counts as packed rows, but where the band of
+    packed rows runs a forward that reads rows at their linear offsets (the
+    32- and 16-thread forwards of packed rows, and on SM107 the pipelined
+    forwards of packed rows past 280 rows per SM) it runs the forward of other
+    layouts, and where it runs the pipelined forward with ``x`` and ``z`` at
+    the L2's default policy (SM100 from 37 to 85 rows per SM, SM103 from 2000
+    to 3000) the pipelined forward of 0.2.16.  The forward does not alert
+    under ``torch.use_deterministic_algorithms(True)``.
 
     Parameters
     ----------

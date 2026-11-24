@@ -83,12 +83,17 @@ checks:
   accumulated ``dw`` from the same starting value too) but a BF16 ``dw`` in
   the fused and the row-claims bands, and every output is judged; so are
   the forward around the ends of its ``FORWARD_BANDS`` bands (packed rows;
-  and of ``FORWARD_TINY_GAP``) and ``STRIDED_FORWARD_BANDS`` bands (other
-  layouts), the forward of ``x``
+  and of ``FORWARD_TINY_GAP``), ``PROJECTION_FORWARD_BANDS`` bands (``z``
+  the gate columns of a wider projection), ``HEAD_MAJOR_FORWARD_BANDS``
+  bands (head-major rows; ``STRIDED_FORWARD_BANDS`` where the architecture
+  has no such table) and ``STRIDED_FORWARD_BANDS`` bands (``x`` and ``z``
+  both sliced from wider projections), each call's table that of its
+  rows' class (``forward_layout``), the forward of ``x``
   or ``z`` broadcast over more than one token (token stride 0: the band of
   other layouts where the band of packed rows runs a program that reads them
-  at their linear offsets, else the program of packed rows with the token
-  stride 0) and the backward at
+  at their linear offsets, ``fwd_pipe`` where it runs ``fwd_keep_pipe``,
+  else the program of packed rows with the token stride 0) and the
+  backward at
   the first and the last rows of each ``BACKWARD_BANDS`` band of this device
   (the small-row backwards, one cluster each but the solo backward, one
   CTA, the static backward of an
@@ -1552,8 +1557,9 @@ def _band_of(arch: str, role: str, rows: int, sms: int) -> tuple[str, int]:
 def _start_rows(arch: str, name: str, sms: int, packed: bool = True) -> int:
     """The fewest rows the routed module ``name`` runs for on ``arch`` with
     ``sms`` SMs: for a forward module the first row of its first
-    ``FORWARD_BANDS`` band (``STRIDED_FORWARD_BANDS`` where the rows are not
-    ``packed``; one more than the previous band's ``last * SMs``), for a
+    ``FORWARD_BANDS`` band (``STRIDED_FORWARD_BANDS``, the bands of rows of
+    no class of their own, where the rows are not ``packed``; one more than
+    the previous band's ``last * SMs``), for a
     backward module the first row of its ``BACKWARD_BANDS`` band
     (:func:`_band_modules`), for a long role's module the first of its
     packed rows (:func:`_long_band_modules`)."""
@@ -1575,15 +1581,70 @@ def _start_rows(arch: str, name: str, sms: int, packed: bool = True) -> int:
     raise AssertionError(f"{arch} has no forward band of {role}")
 
 
+def _forward_class(x: torch.Tensor, z: torch.Tensor) -> tuple[bool, str | None]:
+    """``(packed, layout)`` of a forward of ``x`` and ``z`` as the host routes
+    it, from the strides the kernels get (``backend._kernel_view``: a single
+    token's passed as 0, a single head's as 128): packed rows (both head
+    strides 128, both token strides 0 or ``H * 128``) have no class, other
+    rows the class of ``loader.forward_layout``."""
+    shape = x.shape
+    tokens, heads = backend._rows_shape(shape)
+    _, x_tok, x_head = backend._kernel_view(x, "x", shape=shape, device=x.device)
+    _, z_tok, z_head = backend._kernel_view(z, "z", shape=shape, device=z.device)
+    row = heads * D
+    if x_head == D and z_head == D and x_tok in (0, row) and z_tok in (0, row):
+        return True, None
+    return False, loader.forward_layout(tokens, heads, x_tok, x_head, z_tok, z_head)
+
+
+def _forward_table(arch: str, rows: int, packed: bool, layout: str | None):
+    """The forward bands of ``arch`` that run ``rows`` rows of ``packed`` rows
+    or of the class ``layout`` (:func:`_forward_class`): ``FORWARD_BANDS`` for
+    packed rows fewer than ``PACKED_ROWS``, else the class's table
+    (``LAYOUT_FORWARD_BANDS``) where the architecture has one, else
+    ``STRIDED_FORWARD_BANDS``."""
+    if packed and rows < loader.PACKED_ROWS:
+        return loader.FORWARD_BANDS[arch]
+    by_arch = loader.LAYOUT_FORWARD_BANDS.get(layout, {})
+    return by_arch.get(arch) or loader.STRIDED_FORWARD_BANDS[arch]
+
+
+def _made_class(tokens: int, heads: int, layout: str) -> tuple[bool, str | None]:
+    """``(packed, layout)`` (:func:`_forward_class`) of the inputs of
+    ``suite.make(tokens, heads, layout=layout)`` by their layout
+    (``suite._packed``, ``suite._layout_class``)."""
+    return (
+        suite._packed(tokens, heads, layout),
+        suite._layout_class(tokens, heads, layout),
+    )
+
+
+# The band kinds of ``FORWARD_CASES``: ``(heads, layout)`` of their inputs
+# (``suite.make``'s layout; ``None`` heads: one token of the rows as heads)
+# and ``(packed, layout)`` of their rows, whose table (:func:`_forward_table`)
+# holds the band.
+FORWARD_KINDS = {
+    "flat": (1, "flat", True, None),
+    "token": (None, "contiguous", True, None),
+    "projection": (1, "projection", False, loader.PROJECTION_LAYOUT),
+    "headmajor": (4, "head_major", False, loader.HEAD_MAJOR_LAYOUT),
+    "other": (1, "both_sliced", False, None),
+}
+
+
 # Forward inputs around and past the ends of the forward's bands: (tokens,
-# heads, layout); ``heads=None`` takes ``last * SMs + tokens`` rows of one
-# head, ``last`` the rows per SM of the architecture's ``FORWARD_BANDS`` band
-# ``i`` of ``layout`` ``flat<i>`` (packed rows: one flat [rows, 128] tensor) or
-# of its ``STRIDED_FORWARD_BANDS`` band ``i`` of ``layout`` ``strided<i>``
-# (the projection layout, whose ``z`` rows are not packed); ``token<i>`` takes
-# one token of that many heads past ``FORWARD_BANDS`` band ``i`` (packed rows
-# whose token stride is passed as 0); skipped where the architecture has no
-# such band with an end.
+# heads, layout); ``heads=None`` takes, with ``end`` the last row of band
+# ``i`` of a ``FORWARD_KINDS`` kind (``last * SMs``), ``end // h + tokens``
+# tokens of ``h`` heads: of one head for ``flat<i>`` (the architecture's
+# ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor),
+# ``projection<i>`` (its ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns
+# of a wider projection) and ``other<i>`` (its ``STRIDED_FORWARD_BANDS``; ``x``
+# and ``z`` both sliced from wider projections), of 4 heads for
+# ``headmajor<i>`` (its ``HEAD_MAJOR_FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS``
+# where it has none; 4 divides 148, 152 and 212, so ``end`` is whole tokens
+# there); ``token<i>`` takes one token of ``end + 1`` heads (packed rows whose
+# token stride is passed as 0); skipped where the architecture has no such
+# band with an end.
 FORWARD_CASES = [
     pytest.param(1, 48, "contiguous", id="1x48"),
     pytest.param(16, 1, "contiguous", id="16x1"),
@@ -1598,10 +1659,18 @@ FORWARD_CASES = [
     pytest.param(1, None, "flat0", id="band0-end+1"),
     pytest.param(0, None, "flat1", id="band1-end"),
     pytest.param(1, None, "flat1", id="band1-end+1"),
-    pytest.param(0, None, "strided0", id="strided-band0-end"),
-    pytest.param(1, None, "strided0", id="strided-band0-end+1"),
-    pytest.param(0, None, "strided1", id="strided-band1-end"),
-    pytest.param(1, None, "strided1", id="strided-band1-end+1"),
+    pytest.param(0, None, "projection0", id="projection-band0-end"),
+    pytest.param(1, None, "projection0", id="projection-band0-end+1"),
+    pytest.param(0, None, "projection1", id="projection-band1-end"),
+    pytest.param(1, None, "projection1", id="projection-band1-end+1"),
+    pytest.param(0, None, "headmajor0", id="headmajor-band0-end"),
+    pytest.param(1, None, "headmajor0", id="headmajor-band0-end+1"),
+    pytest.param(0, None, "headmajor1", id="headmajor-band1-end"),
+    pytest.param(1, None, "headmajor1", id="headmajor-band1-end+1"),
+    pytest.param(0, None, "other0", id="other-band0-end"),
+    pytest.param(1, None, "other0", id="other-band0-end+1"),
+    pytest.param(0, None, "other1", id="other-band1-end"),
+    pytest.param(1, None, "other1", id="other-band1-end+1"),
     pytest.param(2048, 48, "contiguous", id="2048x48"),
     pytest.param(4097, 48, "contiguous", id="4097x48"),
     pytest.param(4097, 48, "projection", id="4097x48-projection"),
@@ -1617,6 +1686,8 @@ FORWARD_CASES = [
     pytest.param(1, None, "flat5", id="band5-end+1"),
     pytest.param(0, None, "flat6", id="band6-end"),
     pytest.param(1, None, "flat6", id="band6-end+1"),
+    pytest.param(0, None, "flat7", id="band7-end"),
+    pytest.param(1, None, "flat7", id="band7-end+1"),
     pytest.param(1, None, "token0", id="one-token-band0-end+1"),
     pytest.param(1, None, "token1", id="one-token-band1-end+1"),
     pytest.param(1, None, "token2", id="one-token-band2-end+1"),
@@ -1624,12 +1695,23 @@ FORWARD_CASES = [
     pytest.param(1, None, "token4", id="one-token-band4-end+1"),
     pytest.param(1, None, "token5", id="one-token-band5-end+1"),
     pytest.param(1, None, "token6", id="one-token-band6-end+1"),
-    pytest.param(0, None, "strided2", id="strided-band2-end"),
-    pytest.param(1, None, "strided2", id="strided-band2-end+1"),
-    pytest.param(0, None, "strided3", id="strided-band3-end"),
-    pytest.param(1, None, "strided3", id="strided-band3-end+1"),
-    pytest.param(0, None, "strided4", id="strided-band4-end"),
-    pytest.param(1, None, "strided4", id="strided-band4-end+1"),
+    pytest.param(1, None, "token7", id="one-token-band7-end+1"),
+    pytest.param(0, None, "projection2", id="projection-band2-end"),
+    pytest.param(1, None, "projection2", id="projection-band2-end+1"),
+    pytest.param(0, None, "projection3", id="projection-band3-end"),
+    pytest.param(1, None, "projection3", id="projection-band3-end+1"),
+    pytest.param(0, None, "projection4", id="projection-band4-end"),
+    pytest.param(1, None, "projection4", id="projection-band4-end+1"),
+    pytest.param(0, None, "projection5", id="projection-band5-end"),
+    pytest.param(1, None, "projection5", id="projection-band5-end+1"),
+    pytest.param(0, None, "headmajor2", id="headmajor-band2-end"),
+    pytest.param(1, None, "headmajor2", id="headmajor-band2-end+1"),
+    pytest.param(0, None, "headmajor3", id="headmajor-band3-end"),
+    pytest.param(1, None, "headmajor3", id="headmajor-band3-end+1"),
+    pytest.param(0, None, "other2", id="other-band2-end"),
+    pytest.param(1, None, "other2", id="other-band2-end+1"),
+    pytest.param(0, None, "other3", id="other-band3-end"),
+    pytest.param(1, None, "other3", id="other-band3-end+1"),
     pytest.param(7685, 48, "contiguous", id="7685x48"),
     pytest.param(7685, 48, "projection", id="7685x48-projection"),
     pytest.param(7685, 48, "head_major", id="7685x48-head_major"),
@@ -1656,47 +1738,53 @@ def test_forward_around_its_bands_meets_the_naive_tier(
     record_property,
 ) -> None:
     """On both sides of the ends of the forward's bands and past them, the
-    forward launches ``module_for_rows``' module: the module of the first
-    ``FORWARD_BANDS`` band of the architecture (``STRIDED_FORWARD_BANDS``
-    band where the rows are not packed) with ``rows <= last * SMs`` (the
-    tiny, short, pipelined, mid, long, extra-long and plain forwards, each
-    where the architecture's bands name it), but on packed rows of
+    forward launches ``module_for_rows``' module for the class of its rows
+    (:func:`_forward_class`, from the strides of the inputs as the host gets
+    them): the module of the first band of the class's table
+    (:func:`_forward_table`: ``FORWARD_BANDS`` for packed rows,
+    ``PROJECTION_FORWARD_BANDS`` or ``HEAD_MAJOR_FORWARD_BANDS`` for rows of
+    those classes where the architecture has the table, else
+    ``STRIDED_FORWARD_BANDS``) with ``rows <= last * SMs`` (the tiny, short,
+    pipelined, mid, long, extra-long and plain forwards, each where the
+    architecture's bands name it), but on packed rows of
     ``FORWARD_TINY_GAP`` (16, 17, 32 and 33 rows: its edges) the module of
-    its role.  ``y`` repeats bit for bit and,
-    on the inputs of every draw of ``judge``, is judged against the naive
-    implementation."""
+    its role; the inputs' class is their layout's (:func:`_made_class`).
+    ``y`` repeats bit for bit and, on the inputs of every draw of ``judge``,
+    is judged against the naive implementation."""
     sms = _sm_count()
     arch = loader.device_arch(torch.cuda.current_device())
     routes = loader.ROUTES[arch]
     if heads is None:
-        kind = next(k for k in ("strided", "flat", "token") if layout.startswith(k))
+        kind = next(k for k in FORWARD_KINDS if layout.startswith(k))
         i = int(layout[len(kind) :])
-        table = (
-            loader.STRIDED_FORWARD_BANDS if kind == "strided" else loader.FORWARD_BANDS
-        )
-        if i >= len(table[arch]) or table[arch][i][0] is None:
+        kind_heads, layout, kind_packed, kind_layout = FORWARD_KINDS[kind]
+        table = _forward_table(arch, 0, kind_packed, kind_layout)
+        if i >= len(table) or table[i][0] is None:
             pytest.skip(f"{arch} has no {kind} forward band {i} with an end")
-        rows = int(table[arch][i][0]) * sms + tokens
-        if kind == "token":
-            tokens, heads, layout = 1, rows, "contiguous"
+        end = int(table[i][0]) * sms
+        if kind_heads is None:
+            tokens, heads = 1, end + tokens
         else:
-            tokens, heads = rows, 1
-            layout = "projection" if kind == "strided" else "flat"
+            tokens, heads = end // kind_heads + tokens, kind_heads
     rows = tokens * heads
-    packed = suite._packed(tokens, heads, layout)
-    bands = (loader.FORWARD_BANDS if packed else loader.STRIDED_FORWARD_BANDS)[arch]
-    name = loader.module_for_rows(arch, "fwd", rows, sms, packed=packed)
-    want = next(
-        routes[band] for last, band in bands if last is None or rows <= last * sms
-    )
-    gap = loader.FORWARD_TINY_GAP.get(arch)
-    if packed and gap is not None and gap[0] < rows <= gap[1]:
-        want = routes[gap[2]]
-    assert name == want, (arch, rows, sms)
+    want_class = _made_class(tokens, heads, layout)
     launched = _spy_launches(monkeypatch)
 
     def run(j, s):
         x, z, w, _ = suite.make(tokens, heads, layout=layout, seed=s)
+        packed, layout_class = _forward_class(x, z)
+        assert (packed, layout_class) == want_class, (layout, tokens, heads)
+        bands = _forward_table(arch, rows, packed, layout_class)
+        want = next(
+            routes[band] for last, band in bands if last is None or rows <= last * sms
+        )
+        gap = loader.FORWARD_TINY_GAP.get(arch)
+        if packed and gap is not None and gap[0] < rows <= gap[1]:
+            want = routes[gap[2]]
+        name = loader.module_for_rows(
+            arch, "fwd", rows, sms, packed=packed, layout=layout_class
+        )
+        assert name == want, (arch, rows, sms, layout_class)
         launched.clear()
         y = nd_forward(x, z, w, EPS)
         assert_same_bits("y", nd_forward(x, z, w, EPS), y)
@@ -1714,39 +1802,52 @@ GATE_TAIL = (-87.5, -88.0, -88.5)
 
 
 @requires_device
-@pytest.mark.parametrize("band", range(8))
-@pytest.mark.parametrize("kind", ["flat", "strided"])
+@pytest.mark.parametrize("band", range(9))
+@pytest.mark.parametrize("kind", ["flat", "projection", "headmajor", "other"])
 def test_forward_keeps_the_gate_tail_in_every_band(
     kind, band, determinism_setting, monkeypatch: pytest.MonkeyPatch, record_property
 ) -> None:
-    """At the first row count of every forward band (``FORWARD_BANDS``, or
-    ``STRIDED_FORWARD_BANDS`` where the rows are not packed), with every ``z``
-    in :data:`GATE_TAIL`, the forward launches the band's module and, on the
+    """At the first whole tokens of every forward band of each class's table
+    (``FORWARD_KINDS``: ``FORWARD_BANDS`` of packed rows,
+    ``PROJECTION_FORWARD_BANDS`` of one head, ``HEAD_MAJOR_FORWARD_BANDS`` of
+    4 heads, ``STRIDED_FORWARD_BANDS`` where the architecture has no such
+    table, and ``STRIDED_FORWARD_BANDS`` of ``x`` and ``z`` both sliced from
+    wider projections), with every ``z`` in :data:`GATE_TAIL`, the inputs are
+    of the kind's class (:func:`_forward_class`), the forward launches the
+    band's module (``module_for_rows``' module for that class) and, on the
     inputs of every draw of ``judge`` (``x`` and ``w`` of the draw), ``y`` is
     judged against the naive implementation: no forward program flushes the
     gate to 0 where FP32 keeps it."""
     sms = _sm_count()
     arch = loader.device_arch(torch.cuda.current_device())
-    table = (
-        loader.STRIDED_FORWARD_BANDS if kind == "strided" else loader.FORWARD_BANDS
-    )[arch]
+    heads, layout, packed, layout_class = FORWARD_KINDS[kind]
+    table = _forward_table(arch, 0, packed, layout_class)
     if band >= len(table):
         pytest.skip(f"{arch} has {len(table)} {kind} forward bands")
-    # The band's first row count; two rows in the first strided band, where one row
-    # is packed whatever its strides.
-    rows = int(table[band - 1][0]) * sms + 1 if band else 1 + (kind == "strided")
+    # The band's first whole tokens past the previous band's end; in the first
+    # band one token of packed rows, two of other rows, as one token is packed
+    # whatever its strides.
+    if band:
+        tokens = int(table[band - 1][0]) * sms // heads + 1
+    else:
+        tokens = 1 if packed else 2
+    rows = tokens * heads
+    name = loader.ROUTES[arch][table[band][1]]
+    routed = loader.module_for_rows(
+        arch, "fwd", rows, sms, packed=packed, layout=layout_class
+    )
+    assert routed == name, (arch, kind, rows, routed)
     launched = _spy_launches(monkeypatch)
 
     def run(j, s):
-        x, z, w, _ = suite.make(
-            rows, 1, layout="projection" if kind == "strided" else "flat", seed=s
-        )
+        x, z, w, _ = suite.make(tokens, heads, layout=layout, seed=s)
+        assert _forward_class(x, z) == (packed, layout_class), (kind, tokens)
         tail = torch.tensor(GATE_TAIL, dtype=z.dtype, device=z.device)
         index = torch.arange(z.numel(), device=z.device) % len(GATE_TAIL)
         z.copy_(tail[index].view(z.shape))
         launched.clear()
         y = nd_forward(x, z, w, EPS)
-        assert launched == [loader.ROUTES[arch][table[band][1]]], (arch, rows, launched)
+        assert launched == [name], (arch, rows, launched)
         return silu_draw(x, z, w, None, EPS, [{"y": y}], {"y": "y"})
 
     judge(record_property, run, seed=23)
@@ -1756,18 +1857,22 @@ def test_forward_keeps_the_gate_tail_in_every_band(
 # token of its own storage broadcast over more tokens (``expand``: token
 # stride 0), at row counts at which packed rows run a program that reads
 # packed rows at their linear offsets: a tiny forward (no stride; on 148 SMs
-# or more) or, on sm_107a past 280 rows per SM, the pipelined forward of
-# packed rows (passed the token stride ``H * 128``).  Such a program cannot
-# read them (the tiny forward takes contiguous ``x`` and ``z`` only, and the
-# pipelined forward of packed rows would read rows past the broadcast token),
-# so they run the forward of other layouts (``STRIDED_FORWARD_BANDS``), which
-# reads the token stride.
+# or more) or, on sm_107a past 280 rows per SM, a pipelined forward of packed
+# rows (passed the token stride ``H * 128``: ``fwd_pipe_packed`` up to 8192
+# rows per SM, at 1300 x 48 rows, and ``fwd_keep_pipe_packed`` past it, at
+# 36865 x 48 rows on 212 and 216 SMs).  Such a program cannot read them (the
+# tiny forward takes contiguous ``x`` and ``z`` only, and the pipelined
+# forwards of packed rows would read rows past the broadcast token), so they
+# run the forward of rows of no class of their own (``module_for_rows`` with
+# ``packed=False`` and no layout: ``STRIDED_FORWARD_BANDS``), which reads the
+# token stride.
 BROADCAST_CASES = [
     pytest.param(2, 1, "both", id="2x1"),
     pytest.param(3, 48, "both", id="3x48"),
     pytest.param(37, 48, "both", id="37x48"),
     pytest.param(100, 48, "both", id="100x48"),
     pytest.param(1300, 48, "both", id="1300x48"),
+    pytest.param(36865, 48, "both", id="36865x48"),
     pytest.param(3, 48, "x", id="3x48-x"),
     pytest.param(3, 48, "z", id="3x48-z"),
 ]
@@ -1785,9 +1890,10 @@ def test_forward_of_inputs_broadcast_over_tokens_runs_the_forward_of_other_layou
 ) -> None:
     """``BROADCAST_CASES``: the forward passes a broadcast input's token
     stride 0 and launches ``module_for_rows``' module of other layouts
-    (``packed=False``), no program of packed rows at their linear offsets,
-    where packed rows of the same count run one (skipped elsewhere:
-    ``BROADCAST_STRIDED_CASES``); ``y`` repeats bit for bit and, on the
+    (``packed=False``, no layout), no program of packed rows at their linear
+    offsets, where packed rows of the same count run one (skipped elsewhere:
+    ``BROADCAST_STRIDED_CASES``, ``BROADCAST_KEEP_PIPE_CASES``); ``y``
+    repeats bit for bit and, on the
     inputs of every draw of ``judge``, is judged against the naive
     implementation."""
     sms = _sm_count()
@@ -1803,7 +1909,8 @@ def test_forward_of_inputs_broadcast_over_tokens_runs_the_forward_of_other_layou
 
 def _linear_forwards(arch):
     """The forward modules of ``arch`` that read packed rows at their linear
-    offsets: the tiny forwards and the pipelined forward of packed rows."""
+    offsets: the tiny forwards and the pipelined forwards of packed rows
+    (``fwd_pipe_packed`` and ``fwd_keep_pipe_packed``)."""
     return {
         name
         for role, name in loader.ROUTES[arch].items()
@@ -1844,16 +1951,20 @@ def _judge_broadcast(
 
 # Broadcast inputs as in ``BROADCAST_CASES`` at row counts at which packed
 # rows run a program that reads the token stride (on 148 SMs or more: the
-# mid forward at 441 x 48 rows on every architecture, the pipelined forward
-# of sm_100a at 185 x 48, the long forward of sm_100a and the extra-long
-# forward of sm_103a and sm_107a at 883 x 48, the extra-long forward of
-# sm_100a and sm_103a at 1300 x 48): such a call runs the program of packed
-# rows of the same count, as 0.2.11 did, with the token stride 0.
+# mid forward at 441 x 48 rows on every architecture and at 185 x 48 on
+# sm_103a, the long forward of sm_100a and the extra-long forward of sm_103a
+# and sm_107a at 883 x 48, the extra-long forward of sm_100a and sm_103a at
+# 1300 x 48, the pipelined forward of sm_100a and sm_103a at 4000 x 48, whole
+# waves of such rows): such a call runs the program of packed rows of the
+# same count, as 0.2.11 did, with the token stride 0.  A count in a band of
+# ``fwd_keep_pipe`` (185 x 48 on sm_100a) skips here
+# (``BROADCAST_KEEP_PIPE_CASES``).
 BROADCAST_STRIDED_CASES = [
     pytest.param(185, 48, "both", id="185x48"),
     pytest.param(441, 48, "both", id="441x48"),
     pytest.param(883, 48, "both", id="883x48"),
     pytest.param(1300, 48, "both", id="1300x48"),
+    pytest.param(4000, 48, "both", id="4000x48"),
     pytest.param(883, 48, "x", id="883x48-x"),
     pytest.param(883, 48, "z", id="883x48-z"),
 ]
@@ -1873,9 +1984,10 @@ def test_forward_of_inputs_broadcast_over_tokens_elsewhere_runs_the_program_of_p
     a program that reads the token stride, the forward of a broadcast input
     launches that program (``module_for_rows``' module of packed rows) with
     the token stride 0 (skipped where packed rows run a program that reads
-    them at their linear offsets: ``BROADCAST_CASES``); ``y`` repeats bit for
-    bit and, on the inputs of every draw of ``judge``, is judged against the
-    naive implementation."""
+    them at their linear offsets, ``BROADCAST_CASES``, or ``fwd_keep_pipe``,
+    ``BROADCAST_KEEP_PIPE_CASES``); ``y`` repeats bit for bit and, on the
+    inputs of every draw of ``judge``, is judged against the naive
+    implementation."""
     sms = _sm_count()
     arch = loader.device_arch(torch.cuda.current_device())
     rows = tokens * heads
@@ -1884,7 +1996,56 @@ def test_forward_of_inputs_broadcast_over_tokens_elsewhere_runs_the_program_of_p
         pytest.skip(
             f"{rows} rows on {sms} SMs: packed rows run {name} (BROADCAST_CASES)"
         )
+    if name == loader.ROUTES[arch].get("fwd_keep_pipe"):
+        pytest.skip(
+            f"{rows} rows on {sms} SMs: packed rows run fwd_keep_pipe "
+            "(BROADCAST_KEEP_PIPE_CASES)"
+        )
     _judge_broadcast(tokens, heads, broadcast, name, monkeypatch, record_property, 29)
+
+
+# Broadcast inputs as in ``BROADCAST_CASES`` (``x``, ``z`` or both) of
+# ``BROADCAST_KEEP_PIPE_HEADS`` heads at rows per SM in a band of
+# ``fwd_keep_pipe`` (``FORWARD_BANDS``: 59 on sm_100a, in its band from 37 to
+# 85, and 2500 on sm_103a, in its band from 2000 to 3000; the tokens
+# ``rows_per_sm * SMs // BROADCAST_KEEP_PIPE_HEADS``, so the rows are exactly
+# that many rows per SM on 148 and 152 SMs).  The pipelined forward with ``x``
+# and ``z`` loaded with the L2's default policy was measured on packed rows
+# only, so such a call runs ``fwd_pipe`` (the program of 0.2.16 there, the
+# same bits) with the token stride 0; a case where packed rows of its count
+# run another program skips.
+BROADCAST_KEEP_PIPE_HEADS = 4
+BROADCAST_KEEP_PIPE_CASES = [
+    pytest.param(rows_per_sm, broadcast, id=f"{rows_per_sm}-per-SM-{broadcast}")
+    for rows_per_sm in (59, 2500)
+    for broadcast in ("both", "x", "z")
+]
+
+
+@requires_device
+@pytest.mark.parametrize("rows_per_sm,broadcast", BROADCAST_KEEP_PIPE_CASES)
+def test_broadcast_forward_in_a_keep_pipe_band_runs_fwd_pipe(
+    rows_per_sm,
+    broadcast,
+    determinism_setting,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property,
+) -> None:
+    """``BROADCAST_KEEP_PIPE_CASES``: where packed rows of the same count run
+    ``fwd_keep_pipe``, the forward of a broadcast input launches ``fwd_pipe``
+    with the token stride 0 (skipped where packed rows run another program);
+    ``y`` repeats bit for bit and, on the inputs of every draw of ``judge``,
+    is judged against the naive implementation."""
+    sms = _sm_count()
+    arch = loader.device_arch(torch.cuda.current_device())
+    heads = BROADCAST_KEEP_PIPE_HEADS
+    tokens = rows_per_sm * sms // heads
+    rows = tokens * heads
+    routes = loader.ROUTES[arch]
+    if loader.module_for_rows(arch, "fwd", rows, sms) != routes.get("fwd_keep_pipe"):
+        pytest.skip(f"{rows} rows on {sms} SMs: packed rows run no fwd_keep_pipe")
+    name = routes["fwd_pipe"]
+    _judge_broadcast(tokens, heads, broadcast, name, monkeypatch, record_property, 31)
 
 
 # Gate inputs at and past the edges of the packed gate's range: below -41,
@@ -1918,12 +2079,15 @@ GATE_EDGE_VALUES = [
 ]
 # Forward inputs (``x`` and ``z`` packed rows, or ``z`` the gate columns of a
 # wider projection) the tiny or the short forward runs, and those at the end
-# of the short forward's band on sm_100a and sm_103a, 12 rows per SM, on 148 SMs (37x48, 253x7, 55x32) and on
-# 152 SMs (38x48, 260x7, 57x32), and on sm_107a, 59 rows per SM, on 212 SMs
-# (260x48, 1786x7, 390x32), and one token past it (261x48, 1787x7, 391x32),
-# with forward inputs at and past 48 rows per SM on 148 and 152 SMs (148x48,
-# 1014x7, 222x32, 152x48, 1042x7, 228x32 and one token more), which the tiny
-# or the pipelined forward runs there.
+# of the short forward's band on sm_100a and sm_103a, 12 rows per SM, on 148
+# SMs (37x48, 253x7, 55x32) and on 152 SMs (38x48, 260x7, 57x32), and on
+# sm_107a, 59 rows per SM, on 212 SMs (260x48, 1786x7, 390x32), and one token
+# past it (261x48, 1787x7, 391x32; of the projection layout
+# ``fwd_layout_keep_pipe`` runs there), with forward inputs at and past 48
+# rows per SM on 148 and 152 SMs (148x48, 1014x7, 222x32, 152x48, 1042x7,
+# 228x32 and one token more), whose packed rows run ``fwd_keep_pipe`` on
+# sm_100a and the mid forward on sm_103a, and the projection layout's the mid
+# forward.
 GATE_EDGE_CASES = [
     pytest.param(1, 48, id="1x48"),
     pytest.param(13, 48, id="13x48"),
@@ -2005,20 +2169,27 @@ def test_forward_gate_edges_keep_the_fp64_classes(
     """With gate inputs at and past the packed gate's range in two of every
     three rows (a quarter of their elements, so the range check fails for some
     threads of a row and holds for others) and ordinary ones in the rest, the
-    forward launches ``module_for_rows``' module and ``y`` repeats bit for bit
+    forward launches ``module_for_rows``' module for the class of its rows
+    (:func:`_forward_class`: packed rows, or rows of the projection class
+    with more than one token) and ``y`` repeats bit for bit
     and has the float64 oracle's ``NaN``, ``+inf`` and ``-inf`` positions;
     with the finite gate edges alone, on the inputs of every draw of
     ``judge``, ``y`` is judged against the naive implementation."""
     sms = _sm_count()
     arch = loader.device_arch(torch.cuda.current_device())
-    packed = suite._packed(tokens, heads, layout)
-    name = loader.module_for_rows(arch, "fwd", tokens * heads, sms, packed=packed)
+    rows = tokens * heads
+    want_class = _made_class(tokens, heads, layout)
     launched = _spy_launches(monkeypatch)
 
     def forward(finite, seed):
         x, z, w, dy = _gate_edge_inputs(tokens, heads, seed=seed, finite=finite)
         if layout == "projection":
             z = _projected(z)
+        packed, layout_class = _forward_class(x, z)
+        assert (packed, layout_class) == want_class, (layout, tokens, heads)
+        name = loader.module_for_rows(
+            arch, "fwd", rows, sms, packed=packed, layout=layout_class
+        )
         launched.clear()
         y = nd_forward(x, z, w, EPS)
         assert_same_bits("y", nd_forward(x, z, w, EPS), y)
@@ -3075,7 +3246,9 @@ def test_launch_placeholder_converts_a_legacy_dlpack_capsule(monkeypatch) -> Non
 # of either weight gradient.
 # The one-head inputs take one row past the start of each one's band
 # (``_start_rows``); a module that no band of this device runs (a forward
-# module: no ``STRIDED_FORWARD_BANDS`` band) skips.
+# module: no ``STRIDED_FORWARD_BANDS`` band, the table of the one-head layout
+# whose rows do not follow one another, a class of no table of its own)
+# skips.
 ONE_HEAD_ROUTES = [
     pytest.param("fwd", "fwd_mid", id="fwd_mid"),
     pytest.param("fwd", "fwd_xlong", id="fwd_xlong"),
@@ -3099,7 +3272,8 @@ def test_one_head_inputs_give_the_same_bits_for_every_layout(
     repeatable backwards (of either weight gradient) and the long roles'
     packed rows: a one-head input of
     every layout (``ONE_HEAD_LAYOUTS``) launches ``module_for_rows``' module
-    (the module of its layout's packing) with head stride 128, passes the
+    (the module of its layout's packing and, for the forward, its rows'
+    class, :func:`_forward_class`) with head stride 128, passes the
     packed-rows test exactly when its rows follow one another (or the host
     copied it), and returns the same ``y``, or ``dx``, ``dz`` and ``dw``,
     bits for every layout launching the same module and every repeat (but a
@@ -3139,7 +3313,12 @@ def test_one_head_inputs_give_the_same_bits_for_every_layout(
         launches = []
         for layout, (packed, _) in ONE_HEAD_LAYOUTS.items():
             x, z, dy = (_one_head(t, layout) for t in (x0, z0, dy0))
-            module = loader.module_for_rows(arch, role, rows, sms, packed=packed)
+            # the forward's class of the rows (a backward reads no class)
+            rows_packed, layout_class = _forward_class(x, z)
+            assert rows_packed == packed, (layout, layout_class)
+            module = loader.module_for_rows(
+                arch, role, rows, sms, packed=packed, layout=layout_class
+            )
             modules.add(module)
             want = wants.get(module)
             launched.clear()

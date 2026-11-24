@@ -167,7 +167,25 @@ repeatable backward's bits there (0.2.16 ran the short backward); a call with
 bits (the programs associate a row's sum of squares differently).  On
 `sm_107a` packed rows of 17 to 32 rows run the short forward `fwd_short`
 (`cake_jit.FORWARD_TINY_GAP`; 0.2.16 ran the tiny forward), with the same
-bits.  The deterministic package is that of 0.2.16.
+bits.  Four forward roles are new (six programs), builds of the pipelined
+forwards that change no value (each gives the bits of `fwd_pipe` on
+`sm_100a` and `sm_103a`, of `fwd_pipe_packed` on `sm_107a`):
+`fwd_keep_pipe` and `fwd_keep_pipe_packed` load `x` and `z` with the L2's
+default policy in place of `evict_first`, `fwd_layout_pipe` warms rows of any
+layout in L2 by their layout (the deterministic package's per-layout prefetch
+walk), and `fwd_layout_keep_pipe` does both.  Packed rows run
+`fwd_keep_pipe` on `sm_100a` from 37 to 85 rows per SM and on `sm_103a` from
+2000 to 3000 (an `x` or `z` broadcast over more than one token keeps
+`fwd_pipe`) and `fwd_keep_pipe_packed` on `sm_107a` past 8192, where 0.2.16
+ran `fwd_pipe` and `fwd_pipe_packed`, the same bits.  Rows that are not
+packed are classed (`cake_jit.forward_layout`): a gate sliced from a wider
+projection with packed `x` runs `cake_jit.PROJECTION_FORWARD_BANDS` and
+head-major `x` and `z` on `sm_107a` `cake_jit.HEAD_MAJOR_FORWARD_BANDS`,
+whose bands run `fwd_layout_pipe` and `fwd_layout_keep_pipe` where 0.2.16
+ran the forwards of `cake_jit.STRIDED_FORWARD_BANDS`, so `y` can differ there
+in its last bits; other layouts keep the programs of 0.2.16.
+`cake_jit.module_for_rows` takes the class (keyword `layout`).  The
+deterministic package is that of 0.2.16.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -362,7 +380,8 @@ rows the same way).
 ## Programs and routes
 
 `cake_jit.py` routes each call by its row count `rows = T * H`, the device's
-SM count and, for the forward, whether `x` and `z` hold packed rows.  Each
+SM count and, for the forward, whether `x` and `z` hold packed rows and, if
+not, the class of their layout (`forward_layout`).  Each
 program's arithmetic is fixed; every forward program takes the deterministic
 forward's split gate.  The backward
 programs' `.f32x2` FMA chains for a row's sums differ by program and by
@@ -376,9 +395,9 @@ added in pairs, then folded by XOR shuffles 1, 2, 4, 8, and the 32-lane tiny
 forward the same chains on its 16 lane pairs (both lanes of a pair sum the
 same 8 elements), then folds them by XOR shuffles 2, 4, 8, 16: the same
 additions, so the tiny forward's bits; the mid forward, the
-extra-long forward but on `sm_100a` and the pipelined forward on `sm_107a`
+extra-long forward but on `sm_100a` and the pipelined forwards on `sm_107a`
 four 4-term chains of 8 lanes added in pairs, then folded by 1, 2, 4; the
-plain forward and the pipelined forward on `sm_100a` and `sm_103a` two
+plain forward and the pipelined forwards on `sm_100a` and `sm_103a` two
 8-term chains of 8 lanes (the even and the odd elements) added, then folded
 by 1, 2, 4; the long forward, and the extra-long forward on `sm_100a`,
 16-term chains of 8 lanes folded by 1, 2, 4.  So `y`'s bits can differ
@@ -389,13 +408,17 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | --- | --- | --- |
 | `fwd_tiny` | forward of packed rows, 128 threads, 16 lanes a row, one CTA per 8-row block (not persistent), the short forward's arithmetic and bits | its band of `FORWARD_BANDS` (packed rows), but not the rows of `FORWARD_TINY_GAP` |
 | `fwd_l32_tiny` (`sm_100a`, `sm_103a`) | the tiny forward with 32 lanes a row (two lanes to each group of 8 elements, each lane the outputs of its 4), 128 threads, one CTA per 4-row block (not persistent), the tiny forward's sum of squares, so the short forward's bits | its band of `FORWARD_BANDS` (packed rows) |
-| `fwd_short` | forward, 256 threads, 16 lanes a row, one CTA per 16-row block (not persistent) | its band of `STRIDED_FORWARD_BANDS` (other layouts); on `sm_107a` packed rows of 17 to 32 rows (`FORWARD_TINY_GAP`) |
-| `fwd` | plain forward, 64 threads, 8 lanes a row, one CTA per 8-row block (not persistent) | the call role; its band of `STRIDED_FORWARD_BANDS` (other layouts, past the persistent forwards' bands) |
+| `fwd_short` | forward, 256 threads, 16 lanes a row, one CTA per 16-row block (not persistent) | its bands of `PROJECTION_FORWARD_BANDS`, `HEAD_MAJOR_FORWARD_BANDS` and `STRIDED_FORWARD_BANDS` (rows that are not packed); on `sm_107a` packed rows of 17 to 32 rows (`FORWARD_TINY_GAP`) |
+| `fwd` | plain forward, 64 threads, 8 lanes a row, one CTA per 8-row block (not persistent) | the call role; its bands of `PROJECTION_FORWARD_BANDS`, `HEAD_MAJOR_FORWARD_BANDS` and `STRIDED_FORWARD_BANDS` (rows that are not packed, past the persistent forwards' bands) |
 | `fwd_mid` | whole waves of 6 CTAs per SM (as many waves as the rows need), each CTA at most 2 blocks of 16 rows | its forward bands |
-| `fwd_long` | whole waves of 3 CTAs per SM (as many waves as the rows need), each CTA at most 6 blocks of 32 rows | its forward band (`sm_100a`) |
+| `fwd_long` | whole waves of 3 CTAs per SM (as many waves as the rows need), each CTA at most 6 blocks of 32 rows | its forward bands (`sm_100a`) |
 | `fwd_xlong` | the long forward's grid, also prefetching the next block with one bulk prefetch | its forward bands |
 | `fwd_pipe` (`sm_100a`, `sm_103a`) | pipelined forward, the program of 0.2.14: a build of the deterministic package's forward kernel (the same grid) with a gate that does not flush (`split_gate`), which warms in L2 only rows packed in both `x` and `z`: 128 threads, 8 lanes a row, one CTA per 16-row block below a cut of rows per SM (the deterministic package's): on rows the kernel reads as packed (`x` and `z` of head stride 128 and token stride `H * 128`, which get its L2 prefetches; `persistent_from_rows_per_sm`) 8192 on `sm_100a` and 5600 on `sm_103a`, on other rows (`x` or `z` broadcast over tokens, or one token; `persistent_from_rows_per_sm_strided`) 500 on `sm_100a` and 400 on `sm_103a`; from there whole waves of 6 CTAs per SM, each CTA at most 2 blocks, a thread loading its row of the CTA's next block while it computes the current one, `x` and `z` loaded with the L2 `evict_first` policy | its forward bands |
 | `fwd_pipe_packed` (`sm_107a`) | the pipelined forward of packed rows (the deterministic package's packed-rows program on `sm_107a` with a gate that does not flush: the pipelined forward's schedule with four sum chains, `rsqrt.approx.ftz` and one 32-byte store a lane; one CTA per 16-row block below 8192 rows per SM, whole waves from there) | its band of `FORWARD_BANDS` (packed rows, fewer than `PACKED_ROWS`) |
+| `fwd_keep_pipe` (`sm_100a`, `sm_103a`) | `fwd_pipe` with `x` and `z` loaded with the L2's default policy in place of `evict_first` (its build and `"xz_evict_first": 0`): its grid, cuts and L2 prefetches, so its bits | its bands of `FORWARD_BANDS` (packed rows; an `x` or `z` broadcast over more than one token runs `fwd_pipe` there) |
+| `fwd_keep_pipe_packed` (`sm_107a`) | `fwd_pipe_packed` with `x` and `z` loaded with the L2's default policy in place of `evict_first` (its build and `"xz_evict_first": 0`): its grid, so its bits | its band of `FORWARD_BANDS` (packed rows past 8192 rows per SM, fewer than `PACKED_ROWS`) |
+| `fwd_layout_pipe` | the pipelined forward of rows of any layout with the deterministic package's per-layout L2 prefetch walk (`"split_layout_prefetch": 1`): on `sm_100a` and `sm_103a` `fwd_pipe`'s build, on `sm_107a` the deterministic package's forward of rows of any layout (four sum chains, `rsqrt.approx.ftz`), each with the gate that does not flush; it warms the CTA's next block and the first block of the CTA a wave later in L2, `x` and `z` each by its own layout (as the deterministic package's forward of 0.2.15), `x` and `z` loaded with the L2 `evict_first` policy; `fwd_pipe`'s cuts (on rows the kernel reads as packed 8192 on `sm_100a` and `sm_107a` and 5600 on `sm_103a`, on other rows 500 on `sm_100a` and 400 on `sm_103a` and `sm_107a`); the bits of `fwd_pipe`, on `sm_107a` of `fwd_pipe_packed` | its bands of `PROJECTION_FORWARD_BANDS` and `HEAD_MAJOR_FORWARD_BANDS` |
+| `fwd_layout_keep_pipe` | `fwd_layout_pipe` with `x` and `z` loaded with the L2's default policy in place of `evict_first` (its build and `"xz_evict_first": 0`): its grid, cuts and L2 prefetches, so its bits | its bands of `PROJECTION_FORWARD_BANDS` and `HEAD_MAJOR_FORWARD_BANDS` |
 | `bwd_bf16_solo` | solo backward (a BF16 weight gradient; every architecture): the repeatable backward `bwd_bf16_rep` built for one CTA (its build with `"cluster": 1`), the deterministic package's solo program under this package's name: one CTA of 256 threads, 16 lanes a row, that runs the call's one 16-row block as the repeatable backward runs a block and adds its FP32 column words exactly into its own fixed-point digits, rounding each column's sum once; no ticket, no claim and no workspace word (its workspace parameters unread); `bwd_bf16_rep`'s `dx`, `dz` and `dw` bits | the rows of its band (at most 16) of a call that computes the weight gradient |
 | `bwd_bf16_short` | short backward (a BF16 weight gradient; every architecture): one cluster of 16 CTAs of 256 threads, 16 lanes a row, CTA `r` running the 16-row blocks `r`, `r + 16`, ... with the row-claims backward's row arithmetic; CTA `r` adds every CTA's FP32 partials of the columns `8r` .. `8r + 7` in rank order in FP32 (a fixed order), no workspace | the rows of its band (at most 256) |
 | `bwd_bf16_t512` (`sm_100a`, `sm_107a`), `bwd_f32_t512` | exact tiny backward: one cluster of 16 CTAs of 4 teams of 128 threads, its FP32 weight-gradient terms summed on chip in plain FP32 words in an order of its own, no workspace | the rows of its band (at most 512) |
@@ -433,6 +456,10 @@ the 20 hex digits shown):
 | `fwd_xlong` | `ff8010718cbdf7cfa830` | `ff8010718cbdf7cfa830` | `ff8010718cbdf7cfa830` |
 | `fwd_pipe` | `e6e0bf4c758851cabc99` | `e6e0bf4c758851cabc99` | (none) |
 | `fwd_pipe_packed` | (none) | (none) | `9cb071b2dfe75474aaa7` |
+| `fwd_layout_pipe` | `f99efa1083ef8ff2189a` | `f99efa1083ef8ff2189a` | `0a7f917d9c7922f9c2d2` |
+| `fwd_layout_keep_pipe` | `92eca43778aed20f8f96` | `92eca43778aed20f8f96` | `db508dc3390bc479f749` |
+| `fwd_keep_pipe` | `978d2fa31ffda703d8bd` | `978d2fa31ffda703d8bd` | (none) |
+| `fwd_keep_pipe_packed` | (none) | (none) | `0e472c8f137ccde90b25` |
 | `bwd_bf16_solo` | `36a3f270afc1a27290b7` | `36a3f270afc1a27290b7` | `36a3f270afc1a27290b7` |
 | `bwd_bf16_short` | `cb597a0bebd6145e2024` | `cb597a0bebd6145e2024` | `cb597a0bebd6145e2024` |
 | `bwd_bf16_t512` | `f6a3420d9aaa20a99e8d` | (none) | `f6a3420d9aaa20a99e8d` |
@@ -457,51 +484,85 @@ the 20 hex digits shown):
 | `bwd_bf16_rep_nodw` | `cefc51faec88b7212f3c` | `cefc51faec88b7212f3c` | (none) |
 | `bwd_bf16_rep_nodw_long` | `d8dd2e7dae0ca8233241` | `d8dd2e7dae0ca8233241` | `d8dd2e7dae0ca8233241` |
 
-The forward bands (rows per SM: a call of `rows` rows on a device of `SMs`
-SMs runs the first band with `rows <= last * SMs`): `FORWARD_BANDS` where `x`
-and `z` hold packed rows (row `n` at element `128 n`, as contiguous
-`[T, H, 128]` and `[T * H, 128]` inputs do) and there are fewer than
-`PACKED_ROWS` (2^24) rows, `STRIDED_FORWARD_BANDS` otherwise.  An `x` or
-`z` broadcast over more than one token (token stride 0) counts as packed rows,
-but where its band of packed rows runs a program that reads the rows at their
-linear offsets (a tiny forward, or on `sm_107a` the pipelined forward of
-packed rows) it runs the band of other layouts.  The cuts
-follow the checkpointed training step (two forwards and the backward) on
-every architecture, measured with the one-CTA-per-block pipelined grid of
-0.2.13 (one CTA per block below 8192 rows per SM; from 0.2.14 the pipelined
-forwards launch whole waves from their cuts of each architecture, and the
-bands are unchanged): the pipelined forward loads `x` and `z` with the
-L2 `evict_first` policy, so where the rows fit in L2 it is faster alone but
-makes the step slower.  On `sm_103a` the mid forward up to 240 rows per SM
-and the extra-long forward up to 600 made the step 4 % .. 10 % faster than
-the pipelined forward, which alone was at most 4.5 % faster.  On `sm_107a`
-the pipelined forward runs packed rows past 280 rows per SM, where alone it
-was about 10 % faster than the extra-long forward and made the step at most
-about 3.5 % slower.  On `sm_100a` the pipelined forward runs packed rows
-past 520 rows per SM with no end: up to 0.2.16 the mid forward ran them past
-6500, but with 0.2.17's grids the pipelined forward alone was 1 % .. 3.4 %
-faster there and the step 0.2 % .. 0.9 % faster (7000 to 21255 rows per SM,
-CUDA Graph replays, CUPTI, cold L2).  On `sm_107a` packed rows of 17 to 32
+The forward bands (rows per SM: a call of `rows` rows on a device of `SMs` SMs
+runs the first band with `rows <= last * SMs`): `FORWARD_BANDS` where `x` and
+`z` hold packed rows (row `n` at element `128 n`, as contiguous `[T, H, 128]`
+and `[T * H, 128]` inputs do) and there are fewer than `PACKED_ROWS` (2^24)
+rows; otherwise the table of the rows' class (`forward_layout`):
+`PROJECTION_FORWARD_BANDS` where `x` holds packed rows and `z` the gate
+columns of a wider projection (head stride 128, a token stride past
+`H * 128`), `HEAD_MAJOR_FORWARD_BANDS` where `x` and `z` are head-major (token
+stride 128, head stride `T * 128`: a `[H, T, 128]` tensor viewed as
+`[T, H, 128]`) on `sm_107a`, and `STRIDED_FORWARD_BANDS` for every other
+layout (`x` and `z` both sliced, a broadcast over heads, a mixed or padded
+layout, head-major rows on `sm_100a` and `sm_103a`) and for packed rows from
+`PACKED_ROWS` on.  An `x` or `z` broadcast over more than one token (token
+stride 0) counts as packed rows, but where its band of packed rows runs a
+program that reads the rows at their linear offsets (a tiny forward, or on
+`sm_107a` a pipelined forward of packed rows) it runs the band of
+`STRIDED_FORWARD_BANDS`, and where it runs `fwd_keep_pipe` it runs `fwd_pipe`
+(the program of 0.2.16 there, the same bits; `fwd_keep_pipe` was measured on
+contiguous rows only).  The cuts follow the checkpointed training step (two
+forwards and the backward) on every architecture, measured with the
+one-CTA-per-block pipelined grid of 0.2.13 (one CTA per block below 8192 rows
+per SM; from 0.2.14 the pipelined forwards launch whole waves from their cuts
+of each architecture, and the bands are unchanged): the pipelined forward
+loads `x` and `z` with the L2 `evict_first` policy, so where the rows fit in
+L2 it is faster alone but makes the step slower.  On `sm_103a` the mid forward
+up to 240 rows per SM and the extra-long forward up to 600 made the step 4 %
+.. 10 % faster than the pipelined forward, which alone was at most 4.5 %
+faster.  On `sm_107a` the pipelined forward runs packed rows past 280 rows per
+SM, where alone it was about 10 % faster than the extra-long forward and made
+the step at most about 3.5 % slower (past 8192 rows per SM
+`fwd_keep_pipe_packed`, below).  On `sm_100a` the pipelined forward runs
+packed rows past 520 rows per SM with no end: up to 0.2.16 the mid forward ran
+them past 6500, but with 0.2.17's grids the pipelined forward alone was 1 % ..
+3.4 % faster there and the step 0.2 % .. 0.9 % faster (7000 to 21255 rows per
+SM, CUDA Graph replays, CUPTI, cold L2).  On `sm_107a` packed rows of 17 to 32
 rows run the short forward (`FORWARD_TINY_GAP`, whatever the SMs): its two
 16-row blocks took 0.87 .. 0.94 of the time of the tiny forward's three or
-four 8-row blocks (cold L2), the same bits.  Other layouts run the plain forward (`fwd`) past the
-persistent forwards' bands: where measured there (from 1000 rows per SM on
-`sm_100a` and `sm_103a`, from 520 on `sm_107a`) it was the fastest forward
-alone and made the step 1 % .. 6 % faster; no band of other layouts runs a
-pipelined forward.  The tiny forwards and the short forward end where beside
-a kernel holding 16 SMs they still end no later than the deterministic
-package's forward as it routes the rows.  The 32-lane tiny forward
-(`sm_100a` and `sm_103a`), which has that package's tiny row blocks and so
-twice as many CTAs as the tiny forward, ends at 4 rows per SM on `sm_100a`,
-past which CUDA Graph replays of back-to-back calls run it up to about 1.5 %
-slower than the tiny forward, and at 12 on `sm_103a`, past which, with the
-rows in L2, it is slower.  The bands:
+four 8-row blocks (cold L2), the same bits.  Rows of `STRIDED_FORWARD_BANDS`
+run the plain forward (`fwd`) past the persistent forwards' bands: where
+measured there (from 1000 rows per SM on `sm_100a` and `sm_103a`, from 520 on
+`sm_107a`; with the pipelined forward's grid of 0.2.13) it was the fastest
+forward alone and made the step 1 % .. 6 % faster; no band of
+`STRIDED_FORWARD_BANDS` runs a pipelined forward.  Version 0.2.17's pipelined
+forwards with `x` and `z` loaded with the L2's default policy
+(`fwd_keep_pipe`, `fwd_keep_pipe_packed`), measured with its grids (CUDA Graph
+replays, CUPTI, cold L2) on packed rows of 1, 16 and 48 heads against the
+pipelined forward, made the checkpointed step of either weight gradient faster
+and were no slower alone on `sm_100a` at 59 rows per SM (the step 0.960 ..
+0.980 of its time), on `sm_103a` at 2000 and 3000 (0.991 .. 0.997) and on
+`sm_107a` at 9000 and 15000 (the forward and the step about 0.987 .. 0.990).
+A gate sliced from a projection ran the bands of other layouts up to 0.2.16;
+measured in 0.2.17 (16 and 48 heads, `z` sliced from a projection
+`2 * H * 128 + 16` elements wide) against those forwards, on `sm_100a`
+`fwd_layout_pipe` from 700 to 2000 rows per SM made the forward alone 4.5 % ..
+8 % faster and `fwd_layout_keep_pipe` at 3000 the forward 3 % and the step
+0.3 % .. 0.4 % faster; on `sm_103a` `fwd_layout_pipe` from 700 to 2000 the
+forward 4 % .. 8 % faster and `fwd_layout_keep_pipe` at 3000 and 6445 the
+forward 1 % .. 2.5 % faster; on `sm_107a` `fwd_layout_keep_pipe` from 100 to
+332 rows per SM the forward 2.5 % .. 10 % faster and from 3000 the forward and
+the step faster than the deterministic package's, and `fwd_layout_pipe` from
+443 to 2000 every op at the deterministic package's time.  On `sm_107a`
+head-major rows ran `fwd_layout_keep_pipe` at 100 rows per SM 9 % .. 10 %
+faster alone than the mid forward and made the step 3 % .. 4 % faster, and
+`fwd_layout_pipe` from 443 to 1000 every op at the deterministic package's
+time; the mid forward runs between them and the plain forward past 1000.  On
+`sm_100a` and `sm_103a` neither made the step of head-major rows faster.  The
+tiny forwards and the short forward end where beside a kernel holding 16 SMs
+they still end no later than the deterministic package's forward as it routes
+the rows.  The 32-lane tiny forward (`sm_100a` and `sm_103a`), which has that
+package's tiny row blocks and so twice as many CTAs as the tiny forward, ends
+at 4 rows per SM on `sm_100a`, past which CUDA Graph replays of back-to-back
+calls run it up to about 1.5 % slower than the tiny forward, and at 12 on
+`sm_103a`, past which, with the rows in L2, it is slower.  The bands:
 
-| architecture | packed rows (rows per SM) | other layouts (rows per SM) |
-| --- | --- | --- |
-| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` |
-| `sm_103a` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` |
-| `sm_107a` | 1-65 `tiny` (but 17-32 rows `short`), 66-175 `mid`, 176-280 `xlong`, past 280 `pipe_packed` | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
+| architecture | packed rows (rows per SM) | gate sliced from a projection (rows per SM) | head-major rows (rows per SM) | other layouts (rows per SM) |
+| --- | --- | --- | --- | --- |
+| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `keep_pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-650 `xlong`, 651-2000 `layout_pipe`, 2001-4400 `layout_keep_pipe`, past 4400 `fwd` | as other layouts | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` |
+| `sm_103a` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-1999 `pipe`, 2000-3000 `keep_pipe`, 3001-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-699 `xlong`, 700-2000 `layout_pipe`, 2001-6445 `layout_keep_pipe`, past 6445 `fwd` | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` |
+| `sm_107a` | 1-65 `tiny` (but 17-32 rows `short`), 66-175 `mid`, 176-280 `xlong`, 281-8192 `pipe_packed`, past 8192 `keep_pipe_packed` | 1-59 `short`, 60-442 `layout_keep_pipe`, 443-2999 `layout_pipe`, past 2999 `layout_keep_pipe` | 1-59 `short`, 60-120 `layout_keep_pipe`, 121-442 `mid`, 443-1000 `layout_pipe`, past 1000 `fwd` | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
 
 The backward bands (`BACKWARD_BANDS`, in order: a call of `rows` rows on a
 device of `SMs` SMs runs the first band it fits, a small-row band while
@@ -751,7 +812,8 @@ captured call.  With none ready, the graph zero-fills a workspace of its own.
   points.
 * `cake_jit.py` -- the `MODULES` registry (one record per program; the
   exporter writes the derived fields), `ROUTES`, the row-count routing
-  (`FORWARD_BANDS`, `STRIDED_FORWARD_BANDS`, `BACKWARD_BANDS`,
+  (`FORWARD_BANDS`, `PROJECTION_FORWARD_BANDS`, `HEAD_MAJOR_FORWARD_BANDS`,
+  `STRIDED_FORWARD_BANDS`, `forward_layout`, `BACKWARD_BANDS`,
   `module_for_rows`; without the weight gradient `NODW_STRIDED_ROWS_PER_SM`,
   `PACKED_SMALL_ROWS_PER_SM`, `nodw_module` and the plans it reads,
   `_NODW_PLANS`, read once at import), the backward's chunks and grid (`backward_chunks`,
@@ -775,7 +837,10 @@ each captured call takes its own reserve workspace); the JIT fallback of
   run-to-run bits on every path (a BF16 `dw` in the fused band: judged on
   every launch instead, and varying), workspaces, CUDA Graphs, routing and
   grids (the pipelined forwards' `y` bits on both of their grids, packed
-  and broadcast rows), the programs without the weight gradient (the `dx`
+  and broadcast rows; the classes of `forward_layout`; the pipelined
+  forwards of 0.2.17 give the `y` bits of `fwd_pipe`, on `sm_107a` of
+  `fwd_pipe_packed`, on packed, projection, head-major, one-token and
+  broadcast rows), the programs without the weight gradient (the `dx`
   and `dz` bits of
   the BF16 call around their strided cut, on packed rows and other layouts
   and at small grids, no workspace for the strided and one-cluster ones,
@@ -791,9 +856,11 @@ each captured call takes its own reserve workspace); the JIT fallback of
 * `tests/norm/test_cake_rmsnorm_silu_gate_nondet_train_api.py` -- the public
   module: no mode keyword, the alerts, the facade and the backend, the
   workspace refusals, and each output judged against the PyTorch BF16 naive
-  implementation around the forward's and the backward's bands and on the
-  paths of the public module; no comparison with the deterministic
+  implementation around the forward's bands (packed rows, a gate sliced from
+  a projection, head-major rows and other layouts) and the backward's bands
+  and on the paths of the public module; no comparison with the deterministic
   package.
 * `tests/norm/test_cake_rmsnorm_silu_gate_nondet_train_stall.py` -- the speed
-  beside kernels resident on other streams.
+  beside kernels resident on other streams (packed rows, a gate sliced from a
+  projection, head-major rows and `x` and `z` both sliced).
 * `benchmarks/bench_cake_rmsnorm_silu_gate_nondet_train.py` -- timing.
