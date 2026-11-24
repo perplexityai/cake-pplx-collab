@@ -85,9 +85,10 @@ CKPT_RETAINED_LIMIT_MIB = 2.0
     "name, arch", hl.h64_case_names(), ids=[f"{n}@{a}" for n, a in hl.h64_case_names()]
 )
 def test_h64_plan_is_unchanged(monkeypatch, name, arch):
-    """A 64-head call launches what the entries launched before the head windows: every stage launch (stage, grid,
-    every scalar value, every tensor operand's role, shape, strides, dtype and offset) and every allocation of the
-    backend equal the golden capture (``cake_dsa_sparse_attention_h64_launches.json``) of the same case."""
+    """A 64-head call launches what the entries launched before the head windows: every stage launch (stage, grid
+    and every argument its kernel receives: the scalar values, each tensor operand's role, shape, strides, dtype and
+    offset) and every allocation of the backend equal the golden capture
+    (``cake_dsa_sparse_attention_h64_launches.json``) of the same case."""
     golden = json.loads(hl.GOLDEN.read_text())[f"{name}@{arch}"]
     found = json.loads(
         json.dumps(hl.capture_case(monkeypatch, cake_backend, cake_jit, cake_launch, name, arch))
@@ -175,6 +176,8 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
     passes = case.get("key_passes") or 1
     chunks = -(-inp.total_q // case["token_chunk"]) if passes > 1 and case.get("token_chunk") else 1
     direct = bool(case.get("dkv_direct"))
+    if entry == "runner":
+        direct = roles["runner"].dkv_direct  # the record's rule decides a runner without dkv_direct
     if entry == "forward":
         hl.check_forward(h.launches, inp, roles["out"], roles["lse"], roles["o_lo"], with_o_lo=with_o_lo)
         return

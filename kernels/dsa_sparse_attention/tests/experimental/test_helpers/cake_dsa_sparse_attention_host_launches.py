@@ -41,8 +41,9 @@ cover come from the later one), one delta launch over ``T * H`` rows, the window
 head adds once per key pass, and one cast (none on a direct binding).
 
 :func:`capture_h64_cases` records the launches of :data:`H64_CASES` (64 heads) in the form of the golden file
-``cake_dsa_sparse_attention_h64_launches.json``: per case, every stage launch (stage, grid, every scalar value, every
-tensor operand's role, shape, strides, dtype and offset) and every allocation of the backend.  The golden holds the
+``cake_dsa_sparse_attention_h64_launches.json``: per case, every stage launch (stage, grid and every argument its
+kernel receives: the scalar values, each tensor operand's role, shape, strides, dtype and offset) and every allocation
+of the backend.  The golden holds the
 launches of the 64-head entries as they were before the head-window plans; ``python -m
 tests.experimental.test_helpers.cake_dsa_sparse_attention_host_launches --write PATH`` writes the capture of the
 installed package.
@@ -55,7 +56,6 @@ import contextlib
 import copy
 import json
 import math
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -520,10 +520,16 @@ def _describe(value: Any, roles: list[tuple[str, torch.Tensor]]) -> Any:
     raise TypeError(f"launch value of type {type(value).__name__}")
 
 
-def describe(launches: list[Launch], roles: list[tuple[str, torch.Tensor]]) -> list:
-    """Each launch as ``[stage, grid, {name: value}]`` (tensors as ``[role, shape, strides, dtype, offset]``)."""
+def describe(launches: list[Launch], roles: list[tuple[str, torch.Tensor]], launch) -> list:
+    """Each launch as ``[stage, grid, {name: value}]`` over the arguments the stage's kernel receives
+    (``launch.STAGE_ARGS[stage]``, the generated launcher's positional order; tensors as ``[role, shape, strides,
+    dtype, offset]``)."""
     return [
-        [rec.stage, list(rec.grid), {k: _describe(v, roles) for k, v in sorted(rec.values.items())}]
+        [
+            rec.stage,
+            list(rec.grid),
+            {name: _describe(rec.values[name], roles) for name in sorted(launch.STAGE_ARGS[rec.stage])},
+        ]
         for rec in launches
     ]
 
@@ -674,7 +680,7 @@ def capture_case(monkeypatch, backend, jit, launch, name: str, arch: str) -> dic
     roles = run_case(h, backend, case)
     ordered = [(role, roles.get(role)) for role in _ROLE_ORDER]
     ordered = [(role, t) for role, t in ordered if isinstance(t, torch.Tensor)]
-    return dict(launches=describe(h.launches, ordered), allocs=h.allocs)
+    return dict(launches=describe(h.launches, ordered, launch), allocs=h.allocs)
 
 
 def capture_h64_cases(backend, jit, launch) -> dict:
