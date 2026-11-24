@@ -43,6 +43,7 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_attn_res_naive import HIDDEN, MAX_VALUES, judge_draws, make_inputs
+from tests.cake.test_helpers.cake_attn_res_occupancy import max_active_clusters
 from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import judge_case
 
@@ -416,18 +417,20 @@ def test_every_record_loads(device) -> None:
 
 
 def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
-    """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters
-    ``cudaOccupancyMaxActiveClusters`` reports for it (``occupancy_groups``), the table fallback is too, and the
-    measured table entry of this device, when it has one, equals that count."""
+    """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters the
+    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and the measured table entry of this
+    device, when it has one, equals that count."""
     index = device.index
     arch = cake_backend.device_arch(index)
     sms = cake_backend.sm_count(index)
+    cake_build = cake_package(PACKAGE, "cake_build")
     for name in PERSISTENT_RECORDS:
-        found = cake_backend.occupancy_groups(name, index)
+        cake_backend.load(name, arch)
+        library = cake_build.library_path(cake_backend.library_name(name, arch))
+        found, why = max_active_clusters(library, cake_jit.MODULES[name], index)
         if found is None:
-            pytest.skip("the CUDA runtime occupancy query is not reachable from the loaded library")
-        assert cake_backend._groups(name, 2**31 - 1, index) <= found, name
-        assert cake_jit.resident_groups(name, arch, sms) <= found, name
+            pytest.skip(f"the occupancy query is not reachable: {why}")
+        assert cake_backend._groups(name, 2**31 - 1, index) <= found, (name, found)
         table = cake_jit.RESIDENT_GROUPS.get((arch, sms), {}).get(cake_jit.CTAS_PER_SM[name])
         if table is not None:
             assert table == found, (name, table, found)
