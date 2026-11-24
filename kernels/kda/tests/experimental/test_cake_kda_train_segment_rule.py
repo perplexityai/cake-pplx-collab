@@ -31,7 +31,8 @@ arena option, in the deterministic and the non-deterministic package.
 - Over a grid of scalars: the route and the block table form never change, the
   segment count never grows, the light set saves the segment states exactly
   where the occupancy plan does, and the rule changes nothing outside its
-  envelope.
+  envelope nor in its bands that keep the occupancy plan (VR200's 16-head
+  packs of 8193 to 16383 tokens).
 - The memory of the token-aware plan (saved set, tables, arenas, the totals of
   the memory report) is at or below the occupancy plan's on every measured row
   of every entry of the envelope.
@@ -224,8 +225,9 @@ MEASURED_ROWS = (
 MEASURED_KINDS = {"P": 53, "=": 78}
 
 # The same rows on B200 (``sm_100a``, 148 SMs; 16 heads take the serial route
-# there) and on VR200 (``sm_107a``, 212 SMs), in the columns of
-# :data:`MEASURED_ROWS`.
+# there) and on VR200 (``sm_107a``, 212 SMs; the 16-head pack of 12288 tokens
+# keeps the occupancy plan there, a band of ``occupancy_bands_by_arch``), in the
+# columns of :data:`MEASURED_ROWS`.
 MEASURED_ROWS_B200 = (
     ("2048x1:4:g:0", 37, "P12"),
     ("2048x3:16:g:0", None, "="),
@@ -392,7 +394,7 @@ MEASURED_ROWS_VR200 = (
     ("12288x16:4:g:0", 14, "P12"),
     ("12288x1:4:g:0", 38, "P33"),
     ("12288x2:4:g:0", 53, "P17"),
-    ("12288x3:16:g:0", 13, "P12"),
+    ("12288x3:16:g:0", 13, "="),
     ("12288x6:8:g:0", 18, "P12"),
     ("12288x8:4:g:0", 27, "P12"),
     ("12288xskew16:4:g:0", 14, "P12"),
@@ -497,7 +499,7 @@ MEASURED_ROWS_VR200 = (
 MEASURED_BY_ENVELOPE = {
     (ARCH, SM): (MEASURED_ROWS, MEASURED_KINDS),
     ("sm_100a", 148): (MEASURED_ROWS_B200, {"P": 53, "=": 78}),
-    ("sm_107a", 212): (MEASURED_ROWS_VR200, {"P": 81, "=": 50}),
+    ("sm_107a", 212): (MEASURED_ROWS_VR200, {"P": 80, "=": 51}),
 }
 ENVELOPE_IDS = tuple(f"{arch}-{sm}" for arch, sm in MEASURED_BY_ENVELOPE)
 
@@ -566,6 +568,9 @@ def test_the_rule_constants() -> None:
             "save_min_tokens_per_seg": 384,
             "min_uniform_segments": 12,
             "max_segment_tokens": 1408,
+            "occupancy_bands_by_arch": {
+                "sm_107a": [{"heads": 16, "tokens_above": 8192, "tokens_below": 16384}]
+            },
         }
         assert set(MEASURED_BY_ENVELOPE) == {
             (arch, sm)
@@ -757,6 +762,14 @@ def test_the_bounds_of_each_branch() -> None:
             ("sm_107a", 212, 16384, 3, 4, ("seg", 15, 45, 0)),  # P_old 53
             ("sm_107a", 212, 16384, 16, 4, ("seg", 12, 192, 0)),  # P_old 14
             ("sm_107a", 212, 65536, 4, 4, ("seg", 47, 188, 0)),  # P_old 53
+            # VR200's band: 16 heads and 8192 < S < 16384 keep the occupancy
+            # plan (P_old 13); at its bounds and at 8 heads the rule decides
+            ("sm_107a", 212, 8192, 3, 16, ("seg", 12, 36, 0)),
+            ("sm_107a", 212, 8193, 3, 16, ("seg", 13, 39, 0)),
+            ("sm_107a", 212, 12288, 3, 16, ("seg", 13, 39, 0)),
+            ("sm_107a", 212, 16383, 4, 16, ("seg", 13, 52, 0)),
+            ("sm_107a", 212, 16384, 4, 16, ("seg", 12, 48, 0)),
+            ("sm_107a", 212, 12288, 3, 8, ("seg", 12, 36, 0)),  # P_old 26
         ):
             assert jit.segment_route(N, H, sm, arch, num_tokens=S) == want, (
                 arch,
@@ -792,13 +805,15 @@ def test_the_rule_never_grows_the_plan() -> None:
     and the segment bound's thresholds): the token-aware route and block table
     form are the occupancy rule's, its segment count is at most the occupancy
     count, the light set saves the segment states exactly where the occupancy
-    plan's does, and outside the envelope the occupancy plan itself; the two
-    packages agree everywhere."""
+    plan's does, and outside the envelope and in a band of
+    ``occupancy_bands_by_arch`` the occupancy plan itself; the two packages
+    agree everywhere."""
     det, nondet = JIT[PACKAGES[0]], JIT[PACKAGES[1]]
     rule = BACKEND[PACKAGES[0]].seg_states_saved
     per_seg = det.TOKEN_SEGMENTS["save_min_tokens_per_seg"]
-    changed = 0
+    changed = banded = 0
     envelope = det.TOKEN_SEGMENTS["sm_counts_by_arch"]
+    bands = det.TOKEN_SEGMENTS["occupancy_bands_by_arch"]
     sm_counts = (132, 148, 152, 160, 212, 216)
     for arch, sm in itertools.product((*det.ARCHES, None), sm_counts):
         served = arch is not None and sm in envelope.get(arch, ())
@@ -824,7 +839,13 @@ def test_the_rule_never_grows_the_plan() -> None:
                         assert served and H in det.TOKEN_SEGMENTS["heads"], key
                         assert route[1] >= det.TOKEN_SEGMENTS["min_uniform_segments"]
                         changed += 1
-    assert changed > 0
+                    if served and any(
+                        H == b["heads"] and b["tokens_above"] < S < b["tokens_below"]
+                        for b in bands.get(arch, ())
+                    ):
+                        assert route == occupancy, key
+                        banded += occupancy[0] == "seg"
+    assert changed > 0 and banded > 0
 
 
 def _saved_state_bytes(backend, S: int, H: int, p, save_mode: str) -> int:

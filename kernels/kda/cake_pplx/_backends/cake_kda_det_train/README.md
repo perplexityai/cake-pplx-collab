@@ -539,7 +539,12 @@ at most 1408 tokens.  On B200 and VR200 the same constants were measured
 against the occupancy plan: <<FILL: B200 and VR200 rows, kernel time and
 memory from the validation>>.  Other architectures and SM counts (`sm_100a`
 with 152 SMs, `sm_107a` with 216 SMs), other head counts, and the serial
-route keep the occupancy rule.  `segment_rule="occupancy"` selects the
+route keep the occupancy rule.  On VR200 the 16-head packs of 8193 to 16383
+tokens keep it too (`occupancy_bands_by_arch`): there the FP32 `qk_rstd` of
+the in-kernel Q/K L2 norm (1 to 2 MiB) can fill a free end that the smaller
+arena leaves in a caching-allocator segment, which measured 491,520 B more
+memory above the live tensors at 12288 tokens in three documents.  The band
+holds in every L2 norm mode.  `segment_rule="occupancy"` selects the
 occupancy rule everywhere; the context-parallel package's local plans take
 it.  The records whose rules read the segment count (`walk_ctas_*`,
 `segments_heads_*`) are selected at the plan's count.

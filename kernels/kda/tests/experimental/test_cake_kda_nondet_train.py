@@ -175,9 +175,12 @@ SEG_P_SMALL_MAX_NH = 4
 # The token-aware segment rule (the plans' default, given the pack's token count S): on its envelope (an SM count of
 # SEG_TOKEN_SM_COUNTS_BY_ARCH on its architecture, a head count of SEG_TOKEN_HEADS, the segmented route) a document
 # takes P_u = max(S // (SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG * N) + 1, SEG_TOKEN_MIN_UNIFORM_SEGMENTS,
-# ceil(S / SEG_TOKEN_MAX_SEGMENT_TOKENS)) segments where that is below the occupancy count above; elsewhere, and
-# without a token count (the registry's selection without num_tokens), the occupancy count stays.
+# ceil(S / SEG_TOKEN_MAX_SEGMENT_TOKENS)) segments where that is below the occupancy count above, except the packs of a
+# band of SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH ((heads, more than, fewer than tokens) on the architecture: VR200's 16-head
+# packs of 8193 to 16383 tokens); elsewhere, and without a token count (the registry's selection without num_tokens),
+# the occupancy count stays.
 SEG_TOKEN_SM_COUNTS_BY_ARCH = {"sm_100a": (148,), "sm_103a": (152,), "sm_107a": (212,)}
+SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH = {"sm_107a": ((16, 8192, 16384),)}
 SEG_TOKEN_HEADS = (4, 8, 16)
 SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG = 384
 SEG_TOKEN_MIN_UNIFORM_SEGMENTS = 12
@@ -1177,7 +1180,9 @@ def _expected_segments(
         if n * h <= SEG_P_SMALL_MAX_NH:
             p = min(p, SEG_P_SMALL_BY_ARCH.get(arch, SEG_P_SMALL))
         envelope = SEG_TOKEN_SM_COUNTS_BY_ARCH.get(arch, ()) if arch is not None else ()
-        if S is not None and h in SEG_TOKEN_HEADS and sm in envelope:
+        bands = SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH.get(arch, ())
+        banded = S is not None and any(h == bh and lo < S < hi for bh, lo, hi in bands)
+        if S is not None and h in SEG_TOKEN_HEADS and sm in envelope and not banded:
             p_u = max(
                 S // (SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG * n) + 1,
                 SEG_TOKEN_MIN_UNIFORM_SEGMENTS,

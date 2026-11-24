@@ -497,7 +497,17 @@ SEGMENTS: dict[str, Any] = {
 # VR200 evidence (rows, kernel time, memory) from the validation>>.  Outside
 # the envelope (other architectures and SM counts, such as ``sm_100a`` with
 # 152 SMs or ``sm_107a`` with 216 SMs; other head counts; the serial route)
-# and without a token count the occupancy rule alone decides.
+# and without a token count the occupancy rule alone decides.  So do the
+# packs of a band of ``occupancy_bands_by_arch`` (``heads`` heads and more
+# than ``tokens_above``, fewer than ``tokens_below`` tokens on the
+# architecture): on VR200 the 16-head packs of 8193 to 16383 tokens.  There
+# the FP32 ``qk_rstd`` of the in-kernel Q/K L2 norm (``8 * S * H`` bytes,
+# between 1 and 2 MiB) can fill a free end that the token-aware plan's
+# smaller arena leaves in a caching-allocator segment, and the allocator then
+# counts the whole end: measured on 12288 tokens in three documents, 491,520 B
+# more memory above the live tensors than the occupancy plan at the forward,
+# the step and the checkpointed step.  The byte queries do not all read the
+# L2 norm mode, so the band keeps the occupancy plan in every mode.
 # ``save_min_tokens_per_seg`` is the backend's ``SEG_SAVE_MIN_TOKENS_PER_SEG``
 # (a test holds the two equal).
 TOKEN_SEGMENTS: dict[str, Any] = {
@@ -506,6 +516,9 @@ TOKEN_SEGMENTS: dict[str, Any] = {
     "save_min_tokens_per_seg": 384,
     "min_uniform_segments": 12,
     "max_segment_tokens": 1408,
+    "occupancy_bands_by_arch": {
+        "sm_107a": [{"heads": 16, "tokens_above": 8192, "tokens_below": 16384}]
+    },
 }
 # The two-level segment carry (``seg_carry_v8``: the segments of each
 # document's chain in groups of ``gsize``, the groups' products formed in
@@ -11197,6 +11210,17 @@ def _token_rule_serves(h: int, sm: int, arch: str | None) -> bool:
     return sm in sms and h in TOKEN_SEGMENTS["heads"]
 
 
+def _occupancy_band(h: int, s: int, arch: str | None) -> bool:
+    """Whether a pack of ``s`` tokens at ``h`` heads on ``arch`` lies in a band
+    of ``TOKEN_SEGMENTS["occupancy_bands_by_arch"]``: inside the envelope, the
+    packs that keep the occupancy plan (``arch=None`` has no entry)."""
+    bands = TOKEN_SEGMENTS["occupancy_bands_by_arch"].get(arch, ()) if arch else ()
+    return any(
+        h == int(b["heads"]) and int(b["tokens_above"]) < s < int(b["tokens_below"])
+        for b in bands
+    )
+
+
 def segment_route(
     num_seqs: int,
     num_heads: int,
@@ -11217,10 +11241,12 @@ def segment_route(
     on its envelope (an architecture and SM count of ``sm_counts_by_arch``, a
     head count of ``heads``, the segmented route): a pack too short to save the
     segment states takes ``P_u < P_old`` segments per document, in the table
-    form of the occupancy rule (a negative count raises ``ValueError`` there);
-    elsewhere the occupancy rule stays and ``num_tokens`` is not read.  So
-    ``num_segments`` never exceeds the occupancy rule's, and neither the route
-    nor the table form changes.  A pure function of the scalars.
+    form of the occupancy rule (a negative count raises ``ValueError`` there),
+    except the packs of a band of ``occupancy_bands_by_arch``, which keep the
+    occupancy plan; elsewhere the occupancy rule stays and ``num_tokens`` is
+    not read.  So ``num_segments`` never exceeds the occupancy rule's, and
+    neither the route nor the table form changes.  A pure function of the
+    scalars.
     """
     n, h, sm = int(num_seqs), int(num_heads), int(sm_count)
     if n < 1 or h < 1 or sm < 1:
@@ -11236,6 +11262,8 @@ def segment_route(
     s = int(num_tokens)
     if s < 0:
         raise ValueError(f"segment_plan: num_tokens={num_tokens} must be >= 0")
+    if _occupancy_band(h, s, arch):
+        return occupancy
     # P_ns or more segments per document save no state (the backend's size rule)
     p_ns = s // (int(TOKEN_SEGMENTS["save_min_tokens_per_seg"]) * n) + 1
     p_u = max(
