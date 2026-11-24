@@ -18,7 +18,7 @@ Backend suite of the Cake deterministic route-weight row scaling training packag
 ``cake_pplx.cake_route_weight_scale_det_train``): ``y = bf16(w x)``, ``dx = bf16(w dy)`` and the FP32
 ``dw = sum over c of dy x``, ``H`` 4096 and 3584, on SM100 and SM103.
 
-Without a device: the registry (four records ``<stage>_h<width>``, each delivered for the three architectures, its
+Without a device: the registry (four records ``<stage>_h<width>``, each delivered for the two architectures, its
 launch facts and its argument plan in the order the host passes it; a literal table the exporter reads), the launch
 grid (``ceil(rows / 4)`` CTAs), the refusal of a record that takes its parameters in another order, the capability
 map, the operand checks (dtype, shape, width, strides, alignment, ``w`` and ``dw`` layout, CPU tensors), the build
@@ -249,7 +249,7 @@ def test_a_record_that_takes_another_order_is_refused(monkeypatch) -> None:
 
 
 @pytestmark_cpu
-def test_capabilities_map_to_the_three_architectures(monkeypatch) -> None:
+def test_capabilities_map_to_the_two_architectures(monkeypatch) -> None:
     for capability, arch in ARCH_BY_CAPABILITY.items():
         assert pkg.arch_for_capability(capability) == arch
     for capability in ((9, 0), (10, 1), (10, 7), (11, 0), (12, 0), (12, 1)):

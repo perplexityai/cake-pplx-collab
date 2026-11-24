@@ -47,7 +47,7 @@ dx, dw = cake_route_weight_scale_det_train_backward(x, dy, w, dx=dx_buffer[:rows
 | Workspace | 0 bytes: the forward allocates only `y`, the backward only `dx` and `dw` (none when passed in) |
 | Retained state | The autograd function saves `x` and `w` only |
 | Empty input | `rows = 0`: empty outputs, no launch, no library load |
-| Programs | Four records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h3584`, `bwd_h4096`, `bwd_h3584`, each built for the three architectures |
+| Programs | Four records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h3584`, `bwd_h4096`, `bwd_h3584`, each built for the two architectures |
 | Minimum CUDA | The `min_cuda` of each library in `build.json`; an older local toolkit raises `RuntimeError` when the library is built |
 
 A violation of the operand rules is a `ValueError` (a non-tensor operand a
