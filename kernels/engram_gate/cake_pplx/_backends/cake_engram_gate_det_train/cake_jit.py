@@ -58,9 +58,16 @@ word.  ``fwd`` ships both (``fwd_f32`` the default, ``fwd_dot2`` opt-in);
 ``bwd_dot2_stage``, which also stages the next token's ``dout``, ``x`` and
 ``key`` slices in shared memory by ``cp.async``.  A call without a token mask
 of at least :data:`STAGE_BWD_MIN_TOKENS` tokens on an architecture of
-:data:`STAGE_BWD_ARCHES` launches ``bwd_dot2_stage``, every other call
-``bwd_dot2`` (:func:`backward_record`).  Every other sum is
-one FP32 word.  Nothing launches cooperatively.
+:data:`STAGE_BWD_ARCHES` launches ``bwd_dot2_stage``.  A call with a token
+mask of at least the :data:`ORDER_BWD_MIN_TOKENS` tokens of its architecture
+launches ``bwd_dot2_order``, which reads the mask itself: each cluster serves
+its kept tokens in ascending order on the stage program's path, then its
+masked tokens with only ``dout`` read.  Its ``dx``, ``dkey`` and ``dvalue``
+are the bits of ``bwd_dot2``; its weight-gradient row of a cluster adds that
+cluster's kept tokens in their order, and with every token kept every output
+is the output of ``bwd_dot2``.  Every other call launches ``bwd_dot2``
+(:func:`backward_record`).  Every other sum is one FP32 word.  Nothing
+launches cooperatively.
 
 The ``fwd_f32`` record also has a ``cta1`` form, ``fwd_f32_cta1``: one CTA
 of 640 threads per token (the warps of the cluster's four CTAs in one CTA,
@@ -108,6 +115,21 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_engram_gate_det_train_d0c6b3417c9cd0b85e9f",
+        "stage": "bwd",
+    },
+    "bwd_dot2_order": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_part"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_engram_gate_det_train_d025b699fdc9fd358684",
+        "launch": {
+            "block": (160, 1, 1),
+            "cluster": (4, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 75008,
+            "use_pdl": False,
+        },
+        "library": "cake_engram_gate_det_train_d025b699fdc9fd358684",
         "stage": "bwd",
     },
     "bwd_dot2_stage": {
@@ -192,7 +214,7 @@ CLUSTER_CTAS = 4
 # CTAs per SM each ``fwd`` / ``bwd`` program holds at once: the launch bound of
 # its build, which its register count reaches on every architecture (its
 # threads and shared memory would allow more).
-CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3}
+CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3, "bwd_dot2_order": 3}
 # The backward program a call launches (:func:`backward_record`): the two give the
 # same bits; ``bwd_dot2_stage`` is the faster one in a call without a token mask
 # of at least ``STAGE_BWD_MIN_TOKENS`` tokens on these architectures, and the
@@ -200,6 +222,13 @@ CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3}
 # all-true one, fewer tokens, or another architecture).
 STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_100a", "sm_103a", "sm_107a"})
 STAGE_BWD_MIN_TOKENS = 4096
+# A call with a token mask launches ``bwd_dot2_order`` from these token counts
+# on these architectures: from there it is no slower with any mask measured
+# (every token kept, every second, fourth or tenth token kept, a random half,
+# runs of 576 tokens) and faster with the sparse ones; below them it is slower
+# with every token or nine in ten kept at some counts (measured on B200,
+# GB300 and VR200).
+ORDER_BWD_MIN_TOKENS: dict[str, int] = {"sm_100a": 8192, "sm_103a": 8192, "sm_107a": 4096}
 # The forward record a call launches (:func:`forward_record`): ``fwd_f32``'s
 # ``cta1`` form gives the same bits; it is the faster one from
 # ``CTA1_FWD_MIN_TOKENS[(arch, sm_count, acc)]`` tokens on a device (its
@@ -237,8 +266,9 @@ RESIDENT_CLUSTERS: dict[tuple[str, int], dict[int, int]] = {
 # twice the time at a large token count), a smaller one leaves CTA slots idle.
 UNMEASURED_CLUSTER_FRACTION = 0.85
 # The backward grid of a call of many tokens where it is not the resident
-# count: (architecture, SM count) -> the clusters of the ``bwd`` records for a
-# call of at least :data:`LARGE_BWD_MIN_TOKENS` tokens.  Every smaller call and
+# count: (architecture, SM count) -> the clusters of the ``bwd`` records (all
+# three backward programs) for a call of at least
+# :data:`LARGE_BWD_MIN_TOKENS` tokens.  Every smaller call and
 # every ``fwd`` call keeps :func:`resident_clusters`.  B300 (148 SMs) has no
 # ``RESIDENT_CLUSTERS`` entry (the fallback gives 125 forward and 94 backward
 # clusters) and holds 142 / 104 clusters.  From 2048 tokens its backward runs
@@ -269,8 +299,14 @@ def backward_record(arch: str, masked: bool, T: int) -> str:
     """The ``bwd`` record a backward call of ``T`` tokens launches on ``arch``:
     ``bwd_dot2_stage`` for a call without a token mask (``masked`` False) of at
     least :data:`STAGE_BWD_MIN_TOKENS` tokens on an architecture of
-    :data:`STAGE_BWD_ARCHES`, else ``bwd_dot2``.  Both give the same bits."""
-    staged = not masked and T >= STAGE_BWD_MIN_TOKENS and arch in STAGE_BWD_ARCHES
+    :data:`STAGE_BWD_ARCHES`, ``bwd_dot2_order`` for a call with a token mask
+    of at least the :data:`ORDER_BWD_MIN_TOKENS` tokens of ``arch``, else
+    ``bwd_dot2``.  ``bwd_dot2_stage`` gives the bits of ``bwd_dot2``;
+    ``bwd_dot2_order`` gives its ``dx``, ``dkey`` and ``dvalue``."""
+    if masked:
+        least = ORDER_BWD_MIN_TOKENS.get(arch)
+        return "bwd_dot2_order" if least is not None and T >= least else "bwd_dot2"
+    staged = T >= STAGE_BWD_MIN_TOKENS and arch in STAGE_BWD_ARCHES
     return "bwd_dot2_stage" if staged else "bwd_dot2"
 
 

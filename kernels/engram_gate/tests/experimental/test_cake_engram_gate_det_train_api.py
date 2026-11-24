@@ -410,8 +410,9 @@ def test_a_call_from_the_cta1_threshold_launches_the_cta1_forward_with_the_same_
 @pytest.mark.parametrize("T", (1, 129, 4096))
 def test_a_call_without_a_mask_launches_the_backward_of_its_architecture(T, monkeypatch) -> None:
     """Without a token mask the backward launches ``bwd_dot2_stage`` from ``STAGE_BWD_MIN_TOKENS`` tokens on an
-    architecture of ``STAGE_BWD_ARCHES`` and ``bwd_dot2`` otherwise; an all-true mask tensor launches ``bwd_dot2``.
-    The two calls give the same bits of every gradient (an all-true mask is no mask), so the two backward programs
+    architecture of ``STAGE_BWD_ARCHES`` and ``bwd_dot2`` otherwise; an all-true mask tensor launches
+    ``bwd_dot2_order`` from the ``ORDER_BWD_MIN_TOKENS`` tokens of the architecture and ``bwd_dot2`` otherwise.
+    The two calls give the same bits of every gradient (an all-true mask is no mask), so the backward programs
     agree on the call's inputs."""
     device = _device_or_skip()
     backend = _backend()
@@ -437,7 +438,9 @@ def test_a_call_without_a_mask_launches_the_backward_of_its_architecture(T, monk
     launched.clear()
     kept = torch.ones(T, dtype=torch.bool, device=device)
     masked = api.cake_engram_gate_det_train_backward(ns.dout, *args, kept)
-    assert launched == ["bwd_dot2", "dw_reduce"]
+    order = backend.cake_jit.ORDER_BWD_MIN_TOKENS.get(backend.device_arch(device.index))
+    ordered = order is not None and T >= order
+    assert launched == ["bwd_dot2_order" if ordered else "bwd_dot2", "dw_reduce"]
     for name, a, b in zip(GRADS, unmasked, masked):
         if name in EXACT_GRADS:
             assert _same_bits(a, b), name

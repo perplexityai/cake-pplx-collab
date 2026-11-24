@@ -59,8 +59,9 @@ sum with an error-free two-sum, the error words added once at the end), slower,
 which rounds fewer output elements away from the correctly rounded result where
 the products nearly cancel.  The backward is the same for both: it recomputes
 ``P`` from the inputs as a compensated dot product (``bwd_dot2``, or
-``bwd_dot2_stage`` with the same bits; :func:`.cake_jit.backward_record`), so
-the gradients do not depend on the forward's choice.
+``bwd_dot2_stage`` with the same bits, or with a token mask ``bwd_dot2_order``;
+:func:`.cake_jit.backward_record`), so the gradients do not depend on the
+forward's choice.
 
 ``fwd`` and ``bwd`` run a persistent grid of four-CTA clusters: as many as the
 token count and as the device holds at once (:func:`.cake_jit.clusters`, from
@@ -141,7 +142,9 @@ KV_WIDTH: int = (STREAMS + 1) * HIDDEN
 # suffix of the ``fwd`` record it launches (:data:`.cake_jit.ACC_MODES`): ``"fp32"`` (the default) one FP32 word,
 # ``"compensated"`` (opt-in) a compensated FP32 dot product.  Every backward launches ``bwd_dot2`` or, without a
 # token mask on an architecture of :data:`.cake_jit.STAGE_BWD_ARCHES` and with at least
-# :data:`.cake_jit.STAGE_BWD_MIN_TOKENS` tokens, ``bwd_dot2_stage`` (the same bits).
+# :data:`.cake_jit.STAGE_BWD_MIN_TOKENS` tokens, ``bwd_dot2_stage`` (the same bits), or, with a token mask and at least
+# the :data:`.cake_jit.ORDER_BWD_MIN_TOKENS` tokens of the architecture, ``bwd_dot2_order`` (the same dx, dkey and
+# dvalue).
 _DOT_SUMS: dict[str, str] = {"fp32": "f32", "compensated": "dot2"}
 
 # Token strides of the strided operands are multiples of 8 elements and every
@@ -811,7 +814,7 @@ def _launch_backward(
     if dvalue is None:
         dvalue = torch.empty(T, HIDDEN, dtype=torch.bfloat16, device=device)
     # One backward for either forward sum: it recomputes P as a compensated dot product, in the program that is the
-    # faster one for the call (a token mask given or not, the tokens, the architecture); both give the same bits.
+    # faster one for the call (a token mask given or not, the tokens, the architecture).
     name = cake_jit.backward_record(arch, token_mask is not None, T)
     clusters = _clusters(name, T, index)
     # One row per cluster, each written in full by its cluster.
