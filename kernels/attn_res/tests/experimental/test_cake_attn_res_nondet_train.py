@@ -398,6 +398,24 @@ def test_every_record_loads(device) -> None:
         assert callable(cake_backend.load(name, arch).run), name
 
 
+def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
+    """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters
+    ``cudaOccupancyMaxActiveClusters`` reports for it (``occupancy_groups``), the table fallback is too, and the
+    measured table entry of this device, when it has one, equals that count."""
+    index = device.index
+    arch = cake_backend.device_arch(index)
+    sms = cake_backend.sm_count(index)
+    for name in PERSISTENT_RECORDS:
+        found = cake_backend.occupancy_groups(name, index)
+        if found is None:
+            pytest.skip("the CUDA runtime occupancy query is not reachable from the loaded library")
+        assert cake_backend._groups(name, 2**31 - 1, index) <= found, name
+        assert cake_jit.resident_groups(name, arch, sms) <= found, name
+        table = cake_jit.RESIDENT_GROUPS.get((arch, sms), {}).get(cake_jit.CTAS_PER_SM[name])
+        if table is not None:
+            assert table == found, (name, table, found)
+
+
 # (n, T, data, weights): every value count 1 to 9 (every program); one token, a few, past one wave of groups.
 CASES = (
     (1, 7, "scaled", "small"),

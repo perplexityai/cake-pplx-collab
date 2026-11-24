@@ -50,10 +50,11 @@ held in registers); a call of ``n`` values runs the program of the smallest boun
 compiles a new one.
 
 ``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once
-(:func:`.cake_jit.groups`, from a table per architecture and SM count); any grid is correct.  Every launch is a plain
-stream-ordered launch on the current torch stream of the operands' device: nothing cooperative.  Nothing here reads an
-environment variable, reads device memory or synchronizes; grids and buffer sizes come from tensor shapes, the
-architecture and the SM count.
+(:func:`occupancy_groups`: ``cudaOccupancyMaxActiveClusters`` of the loaded program, asked once per program and device;
+:func:`.cake_jit.resident_groups`, a table of measured counts and a fallback under them, when the query is not
+reachable); any grid is correct.  Every launch is a plain stream-ordered launch on the current torch stream of the
+operands' device: nothing cooperative.  Nothing here reads an environment variable, reads device memory or
+synchronizes; grids and buffer sizes come from tensor shapes and the device's occupancy.
 
 This is the deterministic package of its family: every sum has one fixed order, so every output repeats bit for bit
 for identical inputs on one device (one grid per token count and device).  Nothing reads torch's deterministic mode:
@@ -62,6 +63,7 @@ there is nothing to alert about.
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import math
 from collections.abc import Sequence
@@ -92,6 +94,7 @@ __all__ = [
     "launch_fwd",
     "library_name",
     "load",
+    "occupancy_groups",
     "parameters",
     "record",
     "sm_count",
@@ -155,10 +158,56 @@ def sm_count(device_index: int) -> int:
     return int(torch.cuda.get_device_properties(device_index).multi_processor_count)
 
 
+class _LaunchConfig(ctypes.Structure):
+    """``cudaLaunchConfig_t``: grid, block, dynamic shared memory, stream, launch attributes."""
+
+    _fields_ = [
+        ("grid", ctypes.c_uint * 3),
+        ("block", ctypes.c_uint * 3),
+        ("dynamic_smem_bytes", ctypes.c_size_t),
+        ("stream", ctypes.c_void_p),
+        ("attrs", ctypes.c_void_p),
+        ("num_attrs", ctypes.c_uint),
+    ]
+
+
+@functools.cache
+def occupancy_groups(name: str, device_index: int) -> Optional[int]:
+    """The launch groups (clusters) of the ``fwd`` or ``bwd`` record ``name`` one CUDA device holds at once, as
+    ``cudaOccupancyMaxActiveClusters`` reports them for the loaded program (its block, dynamic shared memory and
+    compile-time cluster), looked up once per record and device; None when the query is not reachable (the library
+    does not export the kernel symbol or the CUDA runtime query, or the query fails).  A host-only runtime call: it
+    reads no device memory and does not synchronize."""
+    found = record(name)
+    try:
+        arch = device_arch(device_index)
+        load(name, arch)
+        library = ctypes.CDLL(str(cake_build.library_path(library_name(name, arch))))
+        kernel = ctypes.cast(getattr(library, found["kernel_symbol"]), ctypes.c_void_p)
+        query = library.cudaOccupancyMaxActiveClusters
+    except (AttributeError, OSError, RuntimeError):
+        return None
+    query.restype = ctypes.c_int
+    query.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_void_p, ctypes.POINTER(_LaunchConfig)]
+    launch = found["launch"]
+    config = _LaunchConfig()
+    config.grid[:] = (int(launch["cluster"][0]) * 1024, 1, 1)
+    config.block[:] = tuple(int(x) for x in launch["block"])
+    config.dynamic_smem_bytes = int(launch["dynamic_smem_bytes"])
+    count = ctypes.c_int(0)
+    with torch.cuda.device(device_index):
+        status = query(ctypes.byref(count), kernel, ctypes.byref(config))
+    return count.value if status == 0 and count.value >= 1 else None
+
+
 @functools.cache
 def _resident(name: str, device_index: int) -> int:
-    """The resident launch groups of record ``name`` on one CUDA device (:func:`.cake_jit.resident_groups`), looked
-    up once per record and device."""
+    """The resident launch groups of record ``name`` on one CUDA device, looked up once per record and device: the
+    runtime count (:func:`occupancy_groups`) when the query is reachable, else :func:`.cake_jit.resident_groups` (a
+    table of measured counts and a fallback under every measured count)."""
+    found = occupancy_groups(name, device_index)
+    if found is not None:
+        return found
     return cake_jit.resident_groups(name, device_arch(device_index), sm_count(device_index))
 
 
@@ -496,7 +545,8 @@ def cake_attn_res_det_train_workspace_bytes(T: int, n: int, device: Union[torch.
     index = _device_index(device)
     if index is None:
         raise ValueError(f"device must be a CUDA device, got {device}")
-    rows = cake_jit.groups(cake_jit.record("bwd", n), T, device_arch(index), sm_count(index))
+    device_arch(index)  # RuntimeError on a device outside ARCHES
+    rows = _groups(cake_jit.record("bwd", n), T, index)
     return _ROW_BYTES * rows
 
 
