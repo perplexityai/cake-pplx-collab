@@ -1094,8 +1094,9 @@ def test_k1_det_0324_generic_call_runs_the_deterministic_generic_plan(monkeypatc
 
 def _det_tables_0324(m):
     """Put the deterministic package's tables of version 0.3.24 back for the rows of DET_0322_WGRAD_ROWS (``m``: a
-    monkeypatch context): its token tiers and its 212- / 216-SM ranges of those rows, which its version 0.3.25
-    changes."""
+    monkeypatch context), on its generic-call swap of version 0.3.25 (:func:`_det_tables_0325`): its token tiers and
+    its 212- / 216-SM ranges of those rows, which its version 0.3.25 changes."""
+    _det_tables_0325(m)
     x2 = {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ("evict_first", "none")}
     tier = {"block_n": 128, "sk_exact": 3}
 
@@ -1118,6 +1119,14 @@ def _det_tables_0324(m):
         key(6144, 32),
         ((1024, 15360, x2), (15361, 2**31 - 1, tier)),
     )
+
+
+def _det_tables_0325(m):
+    """Put the deterministic package's generic-call swap of version 0.3.25 back (``m``: a monkeypatch context): no
+    follow floor (its ``_SINGLE_WGRAD_FOLLOW_MIN_K`` empty), so its generic call swaps only where the swapped key's
+    measured rule is not empty.  Its version 0.3.26 changes nothing else."""
+    for key in list(det_backend._SINGLE_WGRAD_FOLLOW_MIN_K):
+        m.delitem(det_backend._SINGLE_WGRAD_FOLLOW_MIN_K, key)
 
 
 #: The bands of the deterministic package's version 0.3.25 (token counts, inclusive): (d_in, d_out) -> (lo, hi), where
@@ -1146,7 +1155,10 @@ def test_k1_det_0325_wgrad_rows_run_the_64_row_whole_tiles(monkeypatch):
     deterministic tables of version 0.3.24 (:func:`_det_tables_0324`; ``4096 -> 96``, ``6144 -> 48`` and ``6144 -> 32``
     at 3585 to 4096 tokens among them).  The generic call swaps wherever the deterministic rule is not empty: since
     version 0.3.25 also inside the bands where version 0.3.24 named no rule.  The counts of the cells of each kind are
-    those of the bands and of :func:`_det_0323_split`.  This is a plan check: it asserts no bits."""
+    those of the bands and of :func:`_det_0323_split`.  This is a plan check: it asserts no bits.  The check reads the
+    deterministic generic call of version 0.3.25 (:func:`_det_tables_0325`; its version 0.3.26:
+    ``test_k1_det_0326_generic_call_follows_the_det_entry``)."""
+    _det_tables_0325(monkeypatch)  # the deterministic generic call of version 0.3.25: version 0.3.26 is checked below
     _register_k1(monkeypatch, "sm_107a")
     tokens = (
         959, 960, 1001, 1023, 1024, 1536, 2048, 2049, 3072, 3073, 3584, 3585, 4095, 4096, 4097, 5120, 5121, 7168, 7169,
@@ -1237,6 +1249,100 @@ def test_k1_det_0325_wgrad_rows_run_the_64_row_whole_tiles(monkeypatch):
     print(f"K1_DET_0325 {seen}")
     assert seen == want, (seen, want)
     assert set(seen["in_band"]) == set(DET_0322_WGRAD_ROWS) and seen["twin"] and seen["flipped"], seen
+
+
+#: The follow floors of the deterministic package's version 0.3.26 (its ``_SINGLE_WGRAD_FOLLOW_MIN_K``):
+#: (d_in, d_out) -> T, from which its unbatched generic call of the row swaps at every token count, also where its rule
+#: is empty.
+DET_0326_FOLLOW_MIN_K = {(4096, 16): 1, (4096, 96): 1, (6144, 48): 1, (6144, 64): 1}
+
+
+def test_k1_det_0326_generic_call_follows_the_det_entry(monkeypatch):
+    """The unbatched generic call ``G.T @ X`` (both operands MN-major, no transposed store) of the rows of
+    :data:`DET_0322_WGRAD_ROWS` on every ``sm_107a`` part (208, 212, 216 and 224 SMs), BF16, below 960 tokens, at 960,
+    and around 3073 - 4095 tokens (3584 and 3585 on both sides of the end of the bands of :data:`DET_0325_BANDS` that
+    end at 3584 tokens): :func:`plan_atomic_gemm` keeps it on the deterministic program, with the K1 programs
+    registered, and this package's plan is the deterministic package's generic plan (with its registry fallback), field
+    for field.  The deterministic package's version 0.3.26 swaps that call where the swapped key's measured rule on the
+    part is not empty (:data:`DET_0325_BANDS` and :func:`_det_0323_split`; indexer_hw at every token count), as its
+    version 0.3.25 (:func:`_det_tables_0325`), and from the row's follow floor (:data:`DET_0326_FOLLOW_MIN_K`) on at
+    every token count.  Where it swaps since that version alone the plan is the deterministic weight-gradient plan,
+    served as planned (no fallback), with the transposed store; every other plan is that of the deterministic generic
+    call of version 0.3.25.  This is a plan check: it asserts no bits."""
+    _register_k1(monkeypatch, "sm_107a")
+    tokens = (
+        1, 16, 64, 65, 128, 129, 192, 256, 320, 384, 512, 640, 768, 896, 959, 960, 3072, 3073, 3328, 3584, 3585, 3840,
+        4095, 4096,
+    )  # fmt: skip
+    assert det_backend._SINGLE_WGRAD_FOLLOW_MIN_K == {
+        ("sm_107a", d_out, d_in, False): floor for (d_in, d_out), floor in DET_0326_FOLLOW_MIN_K.items()
+    }
+
+    def det_wgrad_plan(G, X, out, sm_count):
+        A, B, transposed = det_backend.wgrad_views(G, X, arch="sm_107a")
+        assert transposed, tuple(out.shape)
+        return det_backend.cake_dense_gemm_det_train_projection_plan(
+            A, B, out, sm_count=sm_count, l2_bytes=126 << 20, transposed_out=transposed, arch="sm_107a"
+        )[0]
+
+    def det_generic_plan(G, X, out, sm_count):
+        return det_backend.cake_dense_gemm_det_train_projection_plan(
+            G.t(), X, out, sm_count=sm_count, l2_bytes=126 << 20, arch="sm_107a"
+        )[0]
+
+    seen = {"swapped": 0, "flipped": {}}
+    want = {"swapped": 0, "flipped": {}}
+    for d_in, d_out in DET_0322_WGRAD_ROWS:
+        key = ("sm_107a", True, True, False, True, False, d_out, None, d_in)
+        lo, hi = DET_0325_BANDS[(d_in, d_out)]
+        floor = DET_0326_FOLLOW_MIN_K.get((d_in, d_out))
+        for sm_count in (208, 212, 216, 224):
+            for T in tokens:
+                where = (d_in, d_out, sm_count, T)
+                # the deterministic rule of version 0.3.25 (the tables of version 0.3.26) is not empty
+                ruled = (
+                    lo <= T <= hi
+                    or _det_0323_split(d_in, d_out, sm_count, T) is not None
+                    or (d_in, d_out) == (6144, 32)
+                )
+                follows = floor is not None and floor <= T
+                want["swapped"] += ruled or follows
+                if follows and not ruled:
+                    want["flipped"][(d_in, d_out)] = want["flipped"].get((d_in, d_out), 0) + 1
+                G = torch.empty(T, d_out, dtype=torch.bfloat16)
+                X = torch.empty(T, d_in, dtype=torch.bfloat16)
+                out = torch.empty(d_out, d_in, dtype=torch.bfloat16)
+                plan, *_, reason = cake_backend.plan_atomic_gemm(
+                    G.t(), X, out, transposed_out=False, arch="sm_107a", sm_count=sm_count
+                )
+                assert plan is None, (where, plan)
+                assert reason == "the planner keeps the row on the deterministic program", (where, reason)
+                det = det_generic_plan(G, X, out, sm_count)
+                nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(
+                    G.t(), X, out, sm_count=sm_count, l2_bytes=126 << 20, arch="sm_107a"
+                )[0]
+                assert nd == det, (where, nd.template, det.template)
+                assert bool(det_backend._measured_row_rule(*key[:6], d_out, T, d_in, sm_count=sm_count)) == ruled, where
+                swaps = det_backend._single_wgrad_swap("sm_107a", d_out, d_in, T, True, True, False, sm_count=sm_count)
+                with monkeypatch.context() as m:
+                    _det_tables_0325(m)
+                    old_swaps = det_backend._single_wgrad_swap(
+                        "sm_107a", d_out, d_in, T, True, True, False, sm_count=sm_count
+                    )
+                    old = det_generic_plan(G, X, out, sm_count)
+                assert (swaps, old_swaps) == (ruled or follows, ruled), where
+                seen["swapped"] += swaps
+                if not swaps or old_swaps:
+                    assert det == old and det.transposed_out == swaps, (where, det.template, old.template)
+                    continue
+                seen["flipped"][(d_in, d_out)] = seen["flipped"].get((d_in, d_out), 0) + 1
+                wgrad = det_wgrad_plan(G, X, out, sm_count)
+                assert det == wgrad and det.transposed_out, (where, det.template, wgrad.template)
+                assert not (det.rule_fallback or det.knob_fallback or det.swap_fallback), (where, det.template)
+                assert not old.transposed_out and det != old, (where, old.template)
+    print(f"K1_DET_0326 generic {seen}")
+    assert seen == want, (seen, want)
+    assert set(seen["flipped"]) == set(DET_0326_FOLLOW_MIN_K), seen
 
 
 def test_k1_excluded_token_counts(no_k1_chains):
