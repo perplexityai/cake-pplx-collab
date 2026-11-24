@@ -17,19 +17,20 @@ Registry of the Cake route-weight row scaling training kernels of a routed MoE
 expert (SM100 / SM103), deterministic.  The sm_107a builds follow once they
 run on an SM107 device.
 
-``MODULES`` has five records.  Four, keyed ``<stage>_h<width>``, serve one
-stage and width each; the fifth, ``fwd_h4096_t32``, is a second forward
-program at H = 4096 that the host takes for few rows (:data:`SMALL_ROWS`).
-Each record is one exported program (a CUDA device translation unit plus a
-tvm-ffi binding), compiled once per architecture.  A record carries the host
-plan: the ``stage`` it serves (``fwd`` or ``bwd``), its ``width`` (the hidden
-size H), the rows one CTA owns (``rows_per_cta``), the architectures it is
-delivered for and the ``run`` entry.  The derived leaves (``library``,
+``MODULES`` has six records.  Four, keyed ``<stage>_h<width>``, serve one
+stage and width each; the other two are second programs that the host takes in
+a band of row counts (:data:`ROUTES`): ``fwd_h4096_t32``, a forward at
+H = 4096, and ``bwd_h3584_warp``, a backward at H = 3584.  Each record is one
+exported program (a CUDA device translation unit plus a tvm-ffi binding),
+compiled once per architecture.  A record carries the host plan: the
+``stage`` it serves (``fwd`` or ``bwd``), its ``width`` (the hidden size H),
+the rows one CTA owns (``rows_per_cta``), the architectures it is delivered
+for and the ``run`` entry.  The derived leaves (``library``,
 ``kernel_symbol``, ``launch``, ``arg_plan``) are written by the exporter from
 the rendered binding; ``library`` is the program identity
 (``cake_route_weight_scale_det_train_<20 hex>``), so a kernel change renames
 it.  ``MODULES`` is a literal table (the exporter and the manifest checker
-read it with ``ast.literal_eval``), and so is ``SMALL_ROWS``.
+read it with ``ast.literal_eval``), and so is ``ROUTES``.
 
 The stages, per row ``r < rows`` and column ``c < H``:
 
@@ -43,14 +44,14 @@ The stages, per row ``r < rows`` and column ``c < H``:
 
 Launch geometry.  A row's columns are spread over 32 lanes: lane ``l`` makes
 ``H / 256`` loads of 8 elements at columns ``(p * 32 + l) * 8``, so each load
-of a warp is contiguous.  Three kinds of program:
+of a warp is contiguous.  Four kinds of program:
 
 - ``fwd_h4096`` and ``fwd_h3584``: a CTA of 128 threads owns 4 consecutive
   rows, one warp a row (``rows_per_cta`` 4).
 - ``fwd_h4096_t32``: a CTA of 32 threads owns one row (``rows_per_cta`` 1)
   and runs the per-element instructions of ``fwd_h4096``, so it stores the
-  same bits.  The host takes it at H = 4096 below the bound of
-  :data:`SMALL_ROWS` (:func:`record_name`), ``fwd_h4096`` from the bound on.
+  same bits.  The host takes it at H = 4096 in its band of :data:`ROUTES`
+  (:func:`route`), ``fwd_h4096`` above it.
 - ``bwd_h4096`` and ``bwd_h3584``: a CTA of 4 warps (128 threads) owns one
   row (``rows_per_cta`` 1).  Each warp sums one run of each lane's loads
   (H = 4096: 4, 4, 4, 4 loads; H = 3584: 4, 4, 4, 2) as a subtree of the
@@ -59,18 +60,26 @@ of a warp is contiguous.  Three kinds of program:
   four roots pairwise in the same order, adds the even and odd halves and
   makes the five XOR shuffles across its 32 lanes.  So ``dw`` is summed in
   the order above, bit for bit.
+- ``bwd_h3584_warp``: a CTA of 128 threads owns 4 consecutive rows, one warp
+  a row (``rows_per_cta`` 4).  Each lane sums its 14 loads in the order of
+  the ``dw`` tree above and the warp makes the five XOR shuffles, so it
+  stores the same ``dx`` and ``dw`` bits as ``bwd_h3584``.  The host takes it
+  at H = 3584 in its band of :data:`ROUTES`.
 
 Every program of one stage and width stores the same bits, whatever the row
-count.  Every program strides over the blocks of ``rows_per_cta`` rows with a
-32-bit block counter, so a grid of ``g`` CTAs covers ``nblocks = ceil(rows /
-rows_per_cta)`` blocks only while ``nblocks + g <= 2**31``.  The host
-launches ``min(nblocks, 2**31 - nblocks)`` CTAs (:func:`grid`), which is
-``nblocks`` up to ``2**30`` blocks.  Every kernel takes the row count and
-every BF16 row stride (in elements) as launch arguments, so one library per
-program and architecture serves every row count and every row slice.  Row
-offsets are 64-bit.  The launch is a plain stream-ordered launch: nothing
-cooperative, no PDL, no dynamic shared memory (the backward uses 1 KiB of
-static shared memory a CTA), no workspace.  The host launches nothing for
+count and the grid.  Every program strides over the blocks of
+``rows_per_cta`` rows with a 32-bit block counter, so a grid of ``g`` CTAs
+covers ``nblocks = ceil(rows / rows_per_cta)`` blocks only while
+``nblocks + g <= 2**31``.  The host launches ``min(nblocks, 2**31 -
+nblocks)`` CTAs (:func:`grid`), which is ``nblocks`` up to ``2**30`` blocks;
+in a band of :data:`ROUTES` with a cap it launches at most ``ctas_per_sm``
+CTAs per SM of the device (a persistent grid, each CTA striding over several
+blocks).  Every kernel takes the row count and every BF16 row stride (in
+elements) as launch arguments, so one library per program and architecture
+serves every row count and every row slice.  Row offsets are 64-bit.  The
+launch is a plain stream-ordered launch: nothing cooperative, no PDL, no
+dynamic shared memory (``bwd_h4096`` and ``bwd_h3584`` use 1 KiB of static
+shared memory a CTA), no workspace.  The host launches nothing for
 ``rows == 0``.
 """
 
@@ -94,10 +103,24 @@ VECTOR_ELEMENTS = 8
 ALIGNMENT_BYTES = 16
 # The row count is a 32-bit kernel parameter: the host refuses ``rows >= MAX_ROWS``.
 MAX_ROWS = 2**31 - 256
-# ``record: (bound, small)``: below ``bound`` rows the host launches record ``small`` in place of ``record`` (the same
-# bits).  Here the H = 4096 forward at one row a CTA of 32 threads, the faster of the two up to 8192 rows on B200 and
-# GB300; from 10240 rows on, the 128-thread program is as fast or faster.
-SMALL_ROWS: dict[str, tuple[int, str]] = {"fwd_h4096": (10240, "fwd_h4096_t32")}
+# The program and grid of each call, keyed by the call's ``<stage>_h<width>``: bands ``(first_row, record,
+# ctas_per_sm)`` in strictly increasing ``first_row`` order, the first from 1.  A call of ``rows`` rows takes the last
+# band whose ``first_row <= rows``; ``ctas_per_sm > 0`` caps its grid at that many CTAs per SM of the device, 0 leaves
+# it uncapped.  Every record of one stage and width stores the same bits.  Measured on B200 and GB300: the H = 4096
+# forward at one row a CTA of 32 threads is the faster for few rows, and the four-warp backward on a grid of 8 CTAs per
+# SM is the faster while the call's three BF16 row tensors fit in L2, except in the band of the one-warp-a-row
+# H = 3584 backward, the fastest there.
+ROUTES: dict[str, tuple[tuple[int, str, int], ...]] = {
+    "fwd_h4096": ((1, "fwd_h4096_t32", 0), (10240, "fwd_h4096", 0)),
+    "fwd_h3584": ((1, "fwd_h3584", 0),),
+    "bwd_h4096": ((1, "bwd_h4096", 8), (4864, "bwd_h4096", 0)),
+    "bwd_h3584": (
+        (1, "bwd_h3584", 8),
+        (3328, "bwd_h3584_warp", 0),
+        (4352, "bwd_h3584", 8),
+        (5632, "bwd_h3584", 0),
+    ),
+}
 
 MODULES: dict[str, dict[str, Any]] = {
     # The forward, H = 4096: a CTA of 128 threads owns 4 rows, one warp a row.
@@ -119,7 +142,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "width": 4096,
     },
     # The forward, H = 4096, for few rows: a CTA of 32 threads owns one row, with the instructions of fwd_h4096 (the
-    # same bits).  The host takes it below the bound of SMALL_ROWS.
+    # same bits).  The host takes it in its band of ROUTES.
     "fwd_h4096_t32": {
         "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
@@ -193,31 +216,59 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "bwd",
         "width": 3584,
     },
+    # The backward, H = 3584, one warp a row: a CTA of 128 threads owns 4 rows, each lane sums its 14 loads in the
+    # order of the dw tree (the same bits as bwd_h3584).  The host takes it in its band of ROUTES.
+    "bwd_h3584_warp": {
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "dy"], ["buffer", "w"], ["buffer", "dx"], ["buffer", "dw"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "dy_stride"], ["parameter", "dx_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653",
+        "rows_per_cta": 4,
+        "stage": "bwd",
+        "width": 3584,
+    },
 }
 
 
-def record_name(stage: str, width: int, rows: int) -> str:
-    """The record (a key of :data:`MODULES`) that serves ``rows >= 1`` rows of ``stage`` at hidden size ``width``:
-    ``<stage>_h<width>``, except below the bound :data:`SMALL_ROWS` sets for that record, which takes the record
-    :data:`SMALL_ROWS` names in its place."""
+def route(stage: str, width: int, rows: int) -> tuple[str, int]:
+    """``(record, ctas_per_sm)`` of a call of ``rows >= 1`` rows of ``stage`` at hidden size ``width``: the record (a
+    key of :data:`MODULES`) and the grid cap of the last band of :data:`ROUTES` under ``<stage>_h<width>`` whose first
+    row is at most ``rows``; a cap of 0 leaves the grid uncapped."""
     if stage not in STAGES:
         raise KeyError(f"{stage!r} is not a stage of {STAGES}")
     if width not in WIDTHS:
         raise KeyError(f"H = {width} is not one of the built widths {WIDTHS}")
     if rows < 1:
         raise ValueError(f"a launch needs at least one row, got {rows}")
-    name = f"{stage}_h{width}"
-    if name in SMALL_ROWS and rows < SMALL_ROWS[name][0]:
-        return SMALL_ROWS[name][1]
-    return name
+    bands = ROUTES[f"{stage}_h{width}"]
+    _, name, ctas_per_sm = bands[0]  # the first band starts at row 1
+    for first_row, record, cap in bands[1:]:
+        if first_row > rows:
+            break
+        name, ctas_per_sm = record, cap
+    return name, ctas_per_sm
 
 
-def grid(rows: int, name: str) -> tuple[int, int, int]:
-    """The launch grid of record ``name`` for ``rows >= 1`` rows: one CTA per block of its ``rows_per_cta`` rows,
-    ``nblocks = ceil(rows / rows_per_cta)`` CTAs, at most ``2**31 - nblocks``.  The program strides over the blocks
-    with a 32-bit counter, so a grid of ``g`` CTAs covers at most ``2**31 - g`` blocks; the bound binds only above
-    ``2**30`` blocks."""
+def grid(rows: int, name: str, ctas_per_sm: int = 0, sm_count: int = 0) -> tuple[int, int, int]:
+    """The launch grid of record ``name`` for ``rows >= 1`` rows.  The program owns ``nblocks = ceil(rows /
+    rows_per_cta)`` blocks of its ``rows_per_cta`` rows and strides over them with a 32-bit counter, so any grid of
+    ``g >= 1`` CTAs covers every block while ``nblocks + g <= 2**31``.  The grid is ``min(nblocks, 2**31 - nblocks)``
+    CTAs (one CTA per block up to ``2**30`` blocks) and, with ``ctas_per_sm > 0``, at most ``ctas_per_sm *
+    sm_count`` CTAs: a persistent grid over the ``sm_count >= 1`` SMs of the device, the same bits."""
     if rows < 1:
         raise ValueError(f"a launch needs at least one row, got {rows}")
     blocks = -(-int(rows) // MODULES[name]["rows_per_cta"])
-    return (min(blocks, 2**31 - blocks), 1, 1)
+    ctas = min(blocks, 2**31 - blocks)
+    if ctas_per_sm > 0:
+        if sm_count < 1:
+            raise ValueError(f"a grid capped at {ctas_per_sm} CTAs per SM needs the SM count, got {sm_count}")
+        ctas = min(ctas, ctas_per_sm * sm_count)
+    return (ctas, 1, 1)

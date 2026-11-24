@@ -47,7 +47,7 @@ dx, dw = cake_route_weight_scale_det_train_backward(x, dy, w, dx=dx_buffer[:rows
 | Workspace | 0 bytes: the forward allocates only `y`, the backward only `dx` and `dw` (none when passed in) |
 | Retained state | The autograd function saves `x` and `w` only |
 | Empty input | `rows = 0`: empty outputs, no launch, no library load |
-| Programs | Five records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h4096_t32`, `fwd_h3584`, `bwd_h4096`, `bwd_h3584`, each built for the two architectures |
+| Programs | Six records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h4096_t32`, `fwd_h3584`, `bwd_h4096`, `bwd_h3584`, `bwd_h3584_warp`, each built for the two architectures |
 | Minimum CUDA | The `min_cuda` of each library in `build.json`; an older local toolkit raises `RuntimeError` when the library is built |
 
 A violation of the operand rules is a `ValueError` (a non-tensor operand a
@@ -61,17 +61,18 @@ One call launches one kernel on the current torch stream of the operands'
 device, a plain stream-ordered launch: nothing cooperative, no PDL, no dynamic
 shared memory.  A row's columns are spread over 32 lanes: lane `l` makes
 `H / 256` loads of 8 elements at columns `(p * 32 + l) * 8`, so each load of a
-warp is contiguous.  Three kinds of program serve the calls:
+warp is contiguous.  Four kinds of program serve the calls:
 
 | Records | CTA | Rows a CTA (`rows_per_cta`) | Taken for |
 |---|---|---|---|
-| `fwd_h4096`, `fwd_h3584` | 128 threads, one warp a row | 4 consecutive rows | the forward (at `H = 4096` from the bound of `cake_jit.SMALL_ROWS` on) |
-| `fwd_h4096_t32` | 32 threads | 1 row | the forward at `H = 4096` below the bound of `cake_jit.SMALL_ROWS` |
-| `bwd_h4096`, `bwd_h3584` | 4 warps (128 threads) | 1 row | the backward |
+| `fwd_h4096`, `fwd_h3584` | 128 threads, one warp a row | 4 consecutive rows | the forward (at `H = 4096` in its band of `cake_jit.ROUTES`) |
+| `fwd_h4096_t32` | 32 threads | 1 row | the forward at `H = 4096` in its band of `cake_jit.ROUTES` |
+| `bwd_h4096`, `bwd_h3584` | 4 warps (128 threads) | 1 row | the backward (at `H = 3584` outside the band of `bwd_h3584_warp`), on a grid of at most 8 CTAs per SM while a call's rows fit in L2 (`cake_jit.ROUTES`) |
+| `bwd_h3584_warp` | 128 threads, one warp a row | 4 consecutive rows | the backward at `H = 3584` in its band of `cake_jit.ROUTES` |
 
-`cake_jit.record_name(stage, H, rows)` picks the record.  The forward
-multiplies each pair of elements by the row's weight in FP32 and rounds the
-pair to BF16; `fwd_h4096_t32` runs the per-element instructions of
+`cake_jit.route(stage, H, rows)` picks the record and the grid cap.  The
+forward multiplies each pair of elements by the row's weight in FP32 and
+rounds the pair to BF16; `fwd_h4096_t32` runs the per-element instructions of
 `fwd_h4096`, so the two store the same bits.  The backward loads `dy` beside
 `x` and stores `dx` and `dw` in one pass: it never forms a `[rows, H]` FP32
 product.  Each of its four warps sums one run of each lane's loads
@@ -80,14 +81,18 @@ product.  Each of its four warps sums one run of each lane's loads
 lane, to static shared memory (1 KiB a CTA).  After a CTA barrier, warp 0
 joins the four roots pairwise in the same order, adds the even and odd halves
 and makes the five XOR shuffles across its 32 lanes.  So `dw` is summed in
-the order of Numerics, bit for bit, and each stage and width gives the same
-bits at every row count.
+the order of Numerics, bit for bit.  In `bwd_h3584_warp` each lane sums its
+14 loads in the same order and the warp makes the five XOR shuffles, so it
+stores the same `dx` and `dw` bits as `bwd_h3584`.  Each stage and width
+gives the same bits at every row count.
 
 Every program strides over the blocks of its rows with a 32-bit block counter.
 A grid of `g` CTAs covers `nblocks = ceil(rows / rows_per_cta)` blocks only
 while `nblocks + g <= 2**31`, so the host launches
 `min(nblocks, 2**31 - nblocks)` CTAs (`cake_jit.grid`): `nblocks` up to
-`2**30` blocks.  Every row offset is 64-bit.
+`2**30` blocks.  In a band of `cake_jit.ROUTES` with a cap, the host launches
+at most that many CTAs per SM of the device: a persistent grid, each CTA
+striding over several rows, with the same bits.  Every row offset is 64-bit.
 
 ## Numerics
 

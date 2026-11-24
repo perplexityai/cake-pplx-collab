@@ -75,10 +75,10 @@ Every argument is checked before a call allocates an output, so a call refused
 for its arguments allocates and launches nothing.  Workspace: none; a call
 allocates only the outputs it is not given.  A program's library loads (and,
 without a prebuilt one, JIT-builds) at its first launch.  The forward at
-``H = 4096`` runs one of two programs by the row count (the same bits), so
-before capturing a CUDA graph, run an eager call of each stage, width and row
-count the graph captures (or build every library of the architecture with the
-backend's ``specs_for_arch``).  This module imports its backend package on
+``H = 4096`` and the backward at both widths pick a program and a grid by the
+row count (the same bits), so before capturing a CUDA graph, run an eager call
+of each stage, width and row count the graph captures (or build every library
+of the architecture with the backend's ``specs_for_arch``).  This module imports its backend package on
 first use and reads no environment variable.
 
 Usage::
