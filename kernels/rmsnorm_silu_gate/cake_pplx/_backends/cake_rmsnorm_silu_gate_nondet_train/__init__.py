@@ -119,9 +119,9 @@ rows that get its L2 prefetches; the records'
 on sm_103a and, unchanged, 8192 on sm_100a and sm_107a (on B200 the whole
 waves of packed rows were up to about 1 % slower per call with a cold L2
 from 6500 to 8000 rows per SM; the pipelined forward of sm_100a, whose
-bands of packed rows end at 6500 rows per SM, runs them one CTA a block as
-in 0.2.13); on other rows of a program that reads any layout (strided,
-broadcast over tokens or one token; a new
+bands of packed rows ended at 6500 rows per SM until version 0.2.17, ran
+them one CTA a block as in 0.2.13); on other rows of a program that reads
+any layout (strided, broadcast over tokens or one token; a new
 ``persistent_from_rows_per_sm_strided``: the deterministic forward of rows
 of any layout, and the pipelined forward of sm_100a and sm_103a), which run
 without the prefetches and gain from whole waves from far fewer rows per
@@ -160,6 +160,18 @@ in both ``x`` and ``z``, up to ``cake_jit.FWD_PACKED_ROWS_PER_SM`` rows per
 SM; its ``fwd`` program, which warms each tensor by its own layout, runs the
 other rows outside the tiny forward's.  This package's
 programs, routes and grids are those of 0.2.15.
+Version 0.2.17 changes bits only where it changes a program.  A BF16 weight
+gradient of up to 16 rows runs the solo backward (``bwd_bf16_solo``, every
+architecture): the repeatable backward built for one CTA, the deterministic
+package's solo program under this package's name, so ``dx``, ``dz`` and
+``dw`` are the repeatable backward's bits there (0.2.16 ran the short
+backward); a call with ``compute_grad_weight=False`` keeps the programs and
+bits of 0.2.16.  On sm_100a packed rows past 6500 rows per SM run the
+pipelined forward (0.2.16 ran the mid forward), whose ``y`` can differ in its
+last bits (the programs associate a row's sum of squares differently).  On
+sm_107a packed rows of 17 to 32 rows run the short forward
+(``cake_jit.FORWARD_TINY_GAP``; 0.2.16 ran the tiny forward), with the same
+bits.  The deterministic package is that of 0.2.16.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -178,7 +190,7 @@ same inputs on the same device.  Each backward program repeats ``dx`` and
 ``.f32x2`` FMA chains for a row's sums differ by program and by
 architecture, so the last bits of ``dx`` and ``dz`` can differ between bands
 (the deterministic package's backward need not give these bits; in the
-repeatable bands they are the deterministic package's bits).  The chunked
+solo and the repeatable bands they are the deterministic package's bits).  The chunked
 backwards (the static backward of an FP32 weight gradient on sm_100a and
 sm_103a, ``bwd_f32``, past 64 and up to 128 rows per SM; the static and the
 claimed backward of a BF16 weight gradient, which no band runs) compute the
@@ -192,7 +204,12 @@ An infinite or ``NaN`` partial makes its column's
 ``dw`` infinite or ``NaN`` with the class the exact sum of the partials gives
 it (a ``NaN``'s sign and payload need not be its).  A call of few rows runs a small-row
 backward instead (``cake_jit.BACKWARD_BANDS``, by architecture and
-weight-gradient dtype; ``compute_grad_weight=False`` takes the BF16 bands):
+weight-gradient dtype; ``compute_grad_weight=False`` takes the BF16 bands but
+the solo band): up to 16 rows of a BF16 weight gradient the solo backward
+(``bwd_bf16_solo``: the repeatable backward below built for one CTA, which
+adds the call's FP32 column words exactly into its own fixed-point digits
+and rounds each column's sum once, with no workspace, so its ``dx``, ``dz``
+and ``dw`` are the repeatable backward's bits), else
 one thread-block cluster of 16 CTAs that sums the weight gradient on chip in
 a fixed order and rounds it once, the same bits on every call.  The exact
 tiny backward (4 teams of the 128-thread CTA of the deterministic backward
@@ -245,7 +262,9 @@ wave claiming blocks from the workspace's claim counter) give ``dx`` and
 each CTA's FP32 column sums added into 4 FP32 replicas in the workspace with
 FP32 atomic adds, which the CTA that arrives last sums in FP32 (no FP64), so
 the sum's order, and the last bits of ``dw``, depend on scheduling.
-A call with ``compute_grad_weight=False`` takes the BF16 bands and runs, in
+A call with ``compute_grad_weight=False`` takes the BF16 bands (but the solo
+band: no solo program without the weight gradient ships, so the short
+backward's band starts at 1 row) and runs, in
 its band module's place, that program built without the weight gradient
 where the architecture routes one (``cake_jit.nodw_module``; all of its
 weight-gradient work removed at build time), so ``dx`` and ``dz`` are the
@@ -328,7 +347,8 @@ Host design (the input layout rules are the deterministic package's):
   ticket (and all but the static one claim their chunks or blocks from the
   counter), and so does a claimed or long program without the weight
   gradient (on its band program's layout), so it uses a workspace.  The
-  small-row backwards and the strided and small-row programs without the
+  small-row backwards (the solo backward among them) and the strided and
+  small-row programs without the
   weight gradient take none: they read no workspace, and a caller workspace
   passed to one is checked as for any backward and left as it is.  The
   workspace size does not depend on ``compute_grad_weight``.  The kernel
@@ -386,10 +406,12 @@ Host design (the input layout rules are the deterministic package's):
   up to 4 rows per SM on sm_100a and 12 on sm_103a) launches one 128-thread
   CTA per block of 4 rows, two lanes to each group of 8 elements, and the tiny
   forward (packed rows, from there up to 36 rows per SM on sm_100a and
-  sm_103a, up to 65 on sm_107a) one 128-thread CTA per block of 8 rows, both
+  sm_103a, up to 65 on sm_107a but from 17 to 32 rows,
+  ``cake_jit.FORWARD_TINY_GAP``) one 128-thread CTA per block of 8 rows, both
   with the short forward's arithmetic, so the same ``y`` bits; the short
   forward (other layouts, up to 12 rows per SM on sm_100a and sm_103a, 59 on
-  sm_107a) launches one 256-thread CTA per block of 16 rows; the plain
+  sm_107a, and packed rows of 17 to 32 rows on sm_107a) launches one
+  256-thread CTA per block of 16 rows; the plain
   forward (the call role ``fwd``; other
   layouts past 700 rows per SM on sm_100a and sm_103a and past 480 on
   sm_107a) one 64-thread CTA per block of 8 rows; the other forwards a grid
@@ -416,7 +438,8 @@ Host design (the input layout rules are the deterministic package's):
   pipelined forwards' grid of 0.2.13, one CTA per block below 8192 rows per
   SM): on sm_100a the pipelined forward up to 85 rows per SM, the mid
   forward up to 160, the long forward up to 400, the extra-long forward up to
-  520, the pipelined forward up to 6500 and the mid forward past it; on
+  520 and the pipelined forward past it (to version 0.2.16 up to 6500, and
+  the mid forward past it; measured again with 0.2.17's grids); on
   sm_103a the mid forward up to 240, the extra-long forward up to 600, the
   pipelined forward up to 6000, the mid forward up to 8192 and the pipelined
   forward past it; on sm_107a the mid forward up to 175, the extra-long
@@ -1075,7 +1098,8 @@ def _no_workspace(device_index: int) -> dict[str, Any]:
     tensor of its dtype (``_WORKSPACE_DTYPES``, the dtypes the bindings
     check) on CUDA device ``device_index`` (:func:`_launch_placeholder`): the
     workspace parameters of a launch that reads no workspace (a strided
-    program without the weight gradient).  Never modified."""
+    program without the weight gradient, the solo backward).  Never
+    modified."""
 
     return {
         buffer: _launch_placeholder(device_index, dtype)
@@ -1499,9 +1523,9 @@ def _backward(
         # and left as it is).
         if workspace is not None:
             _caller_workspace(workspace, device, arch)
-        if dw is None:
-            # empty tensors of the binding's dtypes for the unread buffers
-            buffers = _no_workspace(index)
+        # empty tensors of the binding's dtypes for the unread buffers (the
+        # solo backward's, which computes the weight gradient, among them)
+        buffers = _no_workspace(index)
     else:
         # Every launch of the others, weight_grad=0 included, takes the arrival
         # ticket (and the claimed, the row-claims, the fused and the repeatable
@@ -1617,8 +1641,11 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     last bits of ``dx`` and ``dz`` can differ between bands.  Every
     call with rows uses a workspace but one of few rows (by architecture and
     weight-gradient dtype): there one cluster of 16 CTAs runs (summing a
-    weight gradient on chip in a fixed order) and uses none.  A call with
-    ``compute_grad_weight=False`` takes the BF16 bands and runs the band's
+    weight gradient on chip in a fixed order), or up to 16 rows of a BF16
+    weight gradient the solo backward (``bwd_bf16_solo``: one CTA, the
+    repeatable backward's ``dx``, ``dz`` and ``dw`` bits), and uses none.  A
+    call with ``compute_grad_weight=False`` takes the BF16 bands (but the
+    solo band) and runs the band's
     program built without the weight gradient (``cake_jit.nodw_module``):
     ``dx`` and ``dz`` the bits of the call that computes it, but on sm_100a
     and sm_103a on packed rows (and one token of head stride 128) up to

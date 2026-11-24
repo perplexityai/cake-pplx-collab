@@ -44,8 +44,8 @@ extra-long forward launch whole waves of 3 CTAs per SM that each walk at most
 6 blocks of 32 rows.  Their bands past the tiny forwards' or the short
 forward's: packed rows on SM100 run the pipelined forward up to 85 rows per
 SM, the mid forward up to 160, the long forward up to 400, the extra-long
-forward up to 520, the pipelined forward up to 6500 and the mid forward past
-it; on SM103 the mid
+forward up to 520 and the pipelined forward past it (until version 0.2.17
+up to 6500, and the mid forward past it); on SM103 the mid
 forward up to 240, the extra-long forward up to 600, the pipelined forward up
 to 6000, the mid forward up to 8192 and the pipelined forward past it; on
 SM107 the mid forward up to 175, the extra-long forward up to 280 and the
@@ -158,9 +158,10 @@ gradients, and without one) and the forward start beside it and cost at most
 ``MAX_ALL_SM_EXTRA_MS`` more than alone, far below the side kernel's
 ``ALL_SM_SPIN_MS`` lifetime; so do the small-row backwards of a BF16 and an
 FP32 weight gradient at 1 and 5 tokens (48 and 240 rows, where a small-row
-band of the role holds them) and at the first whole tokens of the role's
-second small-row band (the exact tiny backward of a BF16 weight gradient on
-SM100 and SM107, past the short backward's band), which on SM100 and SM103 also start
+band of the role holds them) and at the first whole tokens of the second of
+the role's small-row bands that hold whole tokens (the exact tiny backward
+of a BF16 weight gradient on SM100 and SM107, past the short backward's
+band; the solo band, up to 16 rows, holds none), which on SM100 and SM103 also start
 beside it with the default and the maximum-L1 carveout, and the backward that
 takes the rows past the role's small-row bands, at its first whole tokens
 (``SHORT_BACKWARD_PROBES``).  On SM107 they do not start beside the side
@@ -211,7 +212,7 @@ whole row blocks each past the previous band's end and the most up to its
 band's end, or four times the fewest in the last band, which has no end: the
 mid forward of the strided layout 1 block of 16 rows on SM100, 1 and 2 on
 SM103 and 1 and 5 on SM107 (one band each), of packed rows 1 in its first band
-and 68 and 272 in its second on SM100, 1 and 2 in its first band and 63 and 85
+on SM100 (one band), 1 and 2 in its first band and 63 and 85
 in its second on SM103 and 1 on SM107; the long forward 2 and 4 blocks of 32
 rows on SM100; the extra-long forward of the strided layout 5 and 7 on SM100
 and 3 and 7 on SM103, of packed rows 5 on SM100, 3 and 6 on SM103 and 2 on
@@ -224,12 +225,12 @@ fewest whole waves from there and four times that: on packed rows 85, 86
 and 344 on SM100 and SM107 and 58, 60 and 240 on SM103; on broadcast rows
 5, 6 and 24 on SM100 and 4, 6 and 24 on SM103) and at the cut itself,
 one-head tokens whose rows are exactly the cut times the SMs (the first row
-count of whole waves).  The cut of packed rows on SM100 (8192 rows per SM)
-lies past the pipelined forward's bands of packed rows (up to 6500 rows per
-SM; the mid forward runs them past it), so the pipelined forward runs every
-packed row it is routed there one CTA a block, and none of the probes
-around that cut runs on SM100: the bands' last rows (85 and 6500 rows per
-SM) hold its most rows of one CTA a block.  The cut of broadcast rows (500
+count of whole waves).  On SM100 the pipelined forward's last band of
+packed rows has no end (from 521 rows per SM; until version 0.2.17 it ended
+at 6500, past which the mid forward ran and no probe around the cut ran on
+SM100), so the probes around its cut of packed rows (8192 rows per SM) run
+in it, as on SM107; its first band's last rows (85 rows per SM) hold its
+most rows of one CTA a block there.  The cut of broadcast rows (500
 rows per SM on SM100, 400 on SM103) lies in the extra-long forward's band,
 so no pipelined forward runs such rows at it: on SM100 the pipelined
 forward runs them one CTA a block in its
@@ -1405,8 +1406,8 @@ def test_repeatable_backward_long_role_slows_in_proportion_to_the_sms_held(
 # past the previous band's end ("first") and at the most up to the band's end,
 # or four times "first" in the last band, which has no end ("last"): the mid
 # forward of other layouts 1 block per slot on SM100 (its fewest and most), 1
-# and 2 on SM103 and 1 and 5 on SM107 (one band each), of packed rows 1 in its
-# first band and 68 and 272 in its second on SM100, 1 and 2 in its first band
+# and 2 on SM103 and 1 and 5 on SM107 (one band each), of packed rows 1 on
+# SM100 (one band since version 0.2.17), 1 and 2 in its first band
 # and 63 and 85 in its second on SM103 and 1 on SM107; the long forward 2 and
 # 4 on SM100; the extra-long forward of other layouts 5 and 7 on SM100 and 3
 # and 7 on SM103, of packed rows 5 on SM100, 3 and 6 on SM103 and 2 on SM107.
@@ -1621,11 +1622,9 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # columns of a projection) run no pipelined forward, and on sm_107a neither do
 # broadcast rows.  The probes on packed rows, as blocks per slot (a slot's
 # block is 96 rows per SM): below, first and last 85, 86 and 344 on sm_100a
-# (8160, 8256 and 33024 rows per SM, and "cut", 8192: all past the second
-# band, which ends at 6500, where the mid forward runs packed rows, so on
-# sm_100a no probe around the cut runs and the pipelined forward's edge of
-# whole waves on packed rows is not reachable; its bands' last rows, 85 and
-# 6500, run its most rows of one CTA a block), 58, 60 and 240 on sm_103a
+# (8160, 8256 and 33024 rows per SM, and "cut", 8192: all in the second band,
+# from 521, which has no end since version 0.2.17; its first band's last
+# rows, 85, run its most rows of one CTA a block), 58, 60 and 240 on sm_103a
 # (5568, 5760 and 23040: "below", "first" and "cut", 5600, in the first band,
 # up to 6000, "last" in the last, from 8193) and 85, 86 and 344 on sm_107a
 # (8160, 8256 and 33024, and "cut", 8192, in its band from 281).  The probes on
@@ -1635,7 +1634,7 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # cut lies in the extra-long forward's band (sm_100a: 401 to 520 rows per SM;
 # sm_103a: 241 to 600), so the pipelined forward does not run broadcast rows
 # at it, and "below" and "cut" skip on both and "first" on sm_103a: on
-# sm_100a "first" and "last" run in the second band (521 to 6500), whose first
+# sm_100a "first" and "last" run in the second band (from 521), whose first
 # row is the fewest of whole waves, and the first band (37 to 85) runs one CTA
 # a block up to its last row; on sm_103a "last" runs in the first band (601 to
 # 6000), whose rows are all whole waves.  A probe outside the band skips.
@@ -1965,10 +1964,12 @@ def test_first_band_forward_ends_no_later_than_the_forward_beside_held_sms(
 
 # The small-row backwards of a BF16 and an FP32 weight gradient: one token and
 # five tokens of H heads (48 and 240 rows, in the role's first small-row
-# BACKWARD_BANDS band on every architecture: for a BF16 weight gradient the
-# short backward), and "second_band": the first whole tokens of H heads in
-# the role's second small-row band (the exact tiny backward of a BF16 weight
-# gradient on SM100 and SM107, past the short backward's band; skipped where the role has one small-row band), beside the short
+# BACKWARD_BANDS band that holds whole tokens of H heads on every
+# architecture: for a BF16 weight gradient the short backward, past the solo
+# band, up to 16 rows, which holds none), and "second_band": the first whole
+# tokens of H heads in the second of the role's small-row bands that hold
+# such tokens (the exact tiny backward of a BF16 weight
+# gradient on SM100 and SM107, past the short backward's band; skipped where the role has one such band), beside the short
 # forward's side kernels; their held test takes the short forward's bound,
 # slack and SHORT_MAX_ALONE_SPREAD.  And "past": the first whole tokens of H
 # heads past the role's last small-row band (by the band ends of
@@ -2041,7 +2042,8 @@ def _short_backward(
     """``(tokens, the probed backward, the backward it replaces)`` of the
     ``SHORT_BACKWARD_PROBES`` entry ``probe`` for a ``dw_dtype`` weight
     gradient: the tokens of H heads (for ``second_band`` the first whole
-    tokens in the role's second small-row ``BACKWARD_BANDS`` band, for
+    tokens in the second of the role's small-row ``BACKWARD_BANDS`` bands
+    that hold whole tokens of H heads, for
     ``past`` the first whole tokens past the role's small-row bands), the
     module that runs their rows and the module of the role's first band past
     its small-row bands (``_past_small_row_bands``).  ``past`` probes run that
@@ -2059,9 +2061,18 @@ def _short_backward(
         assert name == replaced, (arch, role, tokens, name)
         return tokens, name, replaced
     if probe == "second_band":
-        bands = _small_row_bands(arch, role, sms)
+        # the small-row bands that hold whole tokens of H heads (the solo band
+        # of a BF16 weight gradient, up to 16 rows, holds none)
+        bands = [
+            (band_first, band_last, name)
+            for band_first, band_last, name in _small_row_bands(arch, role, sms)
+            if -(-band_first // H) * H <= band_last
+        ]
         if len(bands) < 2:
-            pytest.skip(f"{arch} has {len(bands)} small-row band(s) of {role}")
+            pytest.skip(
+                f"{arch} has {len(bands)} small-row band(s) of {role} holding "
+                f"whole tokens of {H} heads"
+            )
         band_first, band_last, name = bands[1]
         tokens = -(-band_first // H)
         if tokens * H > band_last:

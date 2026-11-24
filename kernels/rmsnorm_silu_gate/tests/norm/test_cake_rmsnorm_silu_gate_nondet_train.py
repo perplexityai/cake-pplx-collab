@@ -28,9 +28,9 @@ terminal summary); no output has an error bound of its own, and no test
 compares this package with the deterministic one.  ``y``, ``dx``, ``dz`` and an
 FP32 weight gradient (accumulated or not) must be the same bits on every
 launch and on every path: streams, CUDA Graph replays, autograd,
-``compute_grad_weight`` (``False`` the bits of the BF16 bands' module, but
-on the packed rows of the build of packed rows only, the repeatable
-backward's), grids
+``compute_grad_weight`` (``False`` the bits of the module of the BF16 bands
+it takes, every one but the solo band, but on the packed rows of the build
+of packed rows only, the repeatable backward's), grids
 smaller than the work (the static backward of an FP32 weight gradient on
 sm_100a and sm_103a, the fused backward and the repeatable backwards of
 both weight-gradient dtypes and their long roles at 1, 3 and 7
@@ -57,9 +57,13 @@ column (each into a BF16 and an FP32 weight gradient), FP32 and BF16 weight
 gradients,
 accumulation, ``compute_grad_weight=False``, the small-row backwards (one
 cluster each, in the rows of their ``BACKWARD_BANDS`` bands: the short
-backward of a BF16 weight gradient and the exact tiny backwards; no workspace made
-or touched, a caller workspace checked and left as it is, the first row count
-past them on the backward), empty work, a workspace reused across shapes (zero after every
+backward of a BF16 weight gradient and the exact tiny backwards; and one CTA,
+the solo backward of a BF16 weight gradient up to 16 rows, with the ``dx``,
+``dz`` and weight-gradient bits of the repeatable backward, fresh and
+accumulated, also in CUDA Graph capture, in a call that computes the weight
+gradient only: a call without it runs what it ran before the solo band
+shipped; no workspace made or touched, a caller workspace checked and left
+as it is, the first row count past them on the backward), empty work, a workspace reused across shapes (zero after every
 call), a caller workspace's checked buffers serving its later calls, made
 again once its storage was freed in place and the tensor rebound, and going
 with the tensor, a workspace with nonzero scratch returned to zero by
@@ -577,10 +581,18 @@ def _nodw_bits(nodw: str, dy, x, z, w, *, workspace=None):
     """``dx`` and ``dz`` whose bits a call with ``compute_grad_weight=False``
     that runs ``nodw`` gives: the repeatable backward's for the build of
     packed rows only (:func:`_rep_bits`), else the BF16 call's on the same
-    inputs (the band's module)."""
+    inputs on its twin (``NODW_TWINS``: the band's module, forced through
+    ``module_for_rows``, :func:`_forcing`, so that on the rows of the solo
+    band, which a call without the weight gradient skips, the module of the
+    band it takes), or on the module the host names for a program that is
+    none of ``NODW_TWINS`` (a long module run with ``weight_grad`` 0)."""
     if _is_small(nodw):
         return _rep_bits(dy, x, z, w, workspace=workspace)
-    dx, dz, _ = backward(dy, x, z, w, EPS, workspace=workspace)
+    twin = NODW_TWINS.get(loader.MODULES[nodw]["role"])
+    with pytest.MonkeyPatch.context() as patch:
+        if twin is not None:
+            patch.setattr(pkg, "module_for_rows", _forcing(twin))
+        dx, dz, _ = backward(dy, x, z, w, EPS, workspace=workspace)
     return dx, dz
 
 
@@ -614,16 +626,20 @@ def _band_end(last, sm_count: int) -> int | None:
 
 
 def _backward_bands(
-    arch: str, role: str, sm_count: int
+    arch: str, role: str, sm_count: int, *, solo: bool = True
 ) -> list[tuple[str, int, int | None]]:
     """``(band role, first rows, last rows or None)`` of each
     ``BACKWARD_BANDS`` band of the backward ``role`` (``bwd_bf16`` or
     ``bwd_f32``) on ``arch`` with ``sm_count`` SMs that runs at least one row
     count, in order: a band runs the rows past the ends of the bands before it
-    up to its own end (:func:`_band_end`); the last band has no end."""
+    up to its own end (:func:`_band_end`); the last band has no end.  With
+    ``solo`` false the bands of a call without the weight gradient, which
+    skips a solo role's band (``SOLO``)."""
     bands = []
     covered = 0
     for last, band in loader.BACKWARD_BANDS[arch][role]:
+        if not solo and band.endswith(loader.SOLO):
+            continue
         end = _band_end(last, sm_count)
         if end is None or end > covered:
             bands.append((band, covered + 1, end))
@@ -2905,7 +2921,13 @@ def test_registry_records_reference_the_build_manifest():
         assert record["launch"]["cooperative"] is False
         assert record["launch"]["use_pdl"] is False
         clustered = record["grid_rule"]["kind"] == "cluster"
-        assert (record["launch"]["cluster"] != (1, 1, 1)) == clustered, name
+        # a cluster of the grid rule's CTAs (one CTA, launched without a
+        # cluster, for a solo role only); no other program launches a cluster
+        size = int(record["grid_rule"]["cluster"]) if clustered else 1
+        assert record["launch"]["cluster"] == (size, 1, 1), name
+        assert (size == 1) == (
+            not clustered or record["role"].endswith(loader.SOLO)
+        ), name
         plan = [key for _kind, key in record["arg_plan"]]
         if record["role"] in loader.NODW_ROLES:
             role = record["role"]
@@ -3237,8 +3259,7 @@ FORWARD_BANDS = {
         (160, "fwd_mid"),
         (400, "fwd_long"),
         (520, "fwd_xlong"),
-        (6500, "fwd_pipe"),
-        (None, "fwd_mid"),
+        (None, "fwd_pipe"),
     ),
     "sm_103a": (
         (12, "fwd_l32_tiny"),
@@ -3256,6 +3277,11 @@ FORWARD_BANDS = {
         (None, "fwd_pipe_packed"),
     ),
 }
+# The packed rows ``lo < rows <= hi`` (counts of rows, not rows per SM) on
+# which an architecture runs the forward ``role`` in the place of its tiny
+# forward's ``FORWARD_BANDS`` band: ``(lo, hi, role)``; the short forward on
+# sm_107a from 17 to 32 rows.
+FORWARD_TINY_GAP = {"sm_107a": (16, 32, "fwd_short")}
 # The forward bands of inputs whose rows are not packed (the tiny forwards
 # read packed rows only), and of packed rows from PACKED_ROWS on, as
 # FORWARD_BANDS.
@@ -3351,11 +3377,15 @@ def _tier_module(arch, role, rows, sm_count, packed=True):
     """The module of ``role`` for ``rows`` rows: the forward's by
     ``FORWARD_BANDS`` (by ``STRIDED_FORWARD_BANDS`` where the rows are not
     ``packed`` or are ``PACKED_ROWS`` or more), the module of the first forward
-    band whose rows per SM hold ``rows``; a backward role's by
-    :func:`_band_module` (its long roles of ``packed`` rows, or of other
-    rows)."""
+    band whose rows per SM hold ``rows``, but on packed rows in the
+    architecture's ``FORWARD_TINY_GAP`` the module of its role; a backward
+    role's by :func:`_band_module` (its long roles of ``packed`` rows, or of
+    other rows)."""
     if role == "fwd":
         packed = packed and rows < PACKED_ROWS
+        gap = FORWARD_TINY_GAP.get(arch)
+        if packed and gap is not None and gap[0] < rows <= gap[1]:
+            return loader.ROUTES[arch][gap[2]]
         table = FORWARD_BANDS if packed else STRIDED_FORWARD_BANDS
         for last, band in table[arch]:
             if last is None or rows <= last * sm_count:
@@ -3371,11 +3401,14 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     not packed) with ``rows <= last * sm_count`` (rows per SM; the tiny
     forwards of 32 lanes a row, sm_100a and sm_103a, and of 16, the short,
     pipelined, mid, long, extra-long and plain forwards, each where the
-    architecture's bands name it), a backward role's module of the first
-    ``BACKWARD_BANDS`` band whose ``last`` holds (:func:`_band_module`).  The
-    backward bands of each architecture and role: the small-row bands (a
-    ``BAND_ROLES`` role each, whose module is one cluster), each ending at a
-    count of rows ``(ROWS, n)`` with ``n`` at most its module's ``max_rows``,
+    architecture's bands name it), but on packed rows of
+    ``FORWARD_TINY_GAP`` (sm_107a: 17 to 32 rows) the short forward, a
+    backward role's module of the first ``BACKWARD_BANDS`` band whose
+    ``last`` holds (:func:`_band_module`).  The backward bands of each
+    architecture and role: the small-row bands (a ``BAND_ROLES`` role each,
+    whose module is one cluster: of one CTA for the solo role), each ending at
+    a count of rows ``(ROWS, n)`` with ``n`` at most its module's
+    ``max_rows``,
     and the bands of rows per SM, each running a static, a row-claims (a BF16
     weight gradient on sm_100a and sm_103a only), a fused (``FUSED_ROLES``), a
     repeatable (``REP_ROLES``) or a claimed backward by its grid rule, the
@@ -3397,7 +3430,13 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     ``PACKED_ROWS`` or more run by ``STRIDED_FORWARD_BANDS``."""
     assert loader.PACKED_ROWS == PACKED_ROWS == 2**31 // D
     assert loader.FORWARD_BANDS == FORWARD_BANDS
+    assert loader.FORWARD_TINY_GAP == FORWARD_TINY_GAP
     assert loader.STRIDED_FORWARD_BANDS == STRIDED_FORWARD_BANDS
+    for arch, (lo, hi, role) in FORWARD_TINY_GAP.items():
+        # the gap lies in the tiny forward's first band on any SM count
+        assert FORWARD_BANDS[arch][0][1] == "fwd_tiny", arch
+        assert 0 < lo < hi <= FORWARD_BANDS[arch][0][0], (arch, lo, hi)
+        assert role in loader.ROUTES[arch], (arch, role)
     clustered = {
         loader.MODULES[name]["role"]
         for routes in loader.ROUTES.values()
@@ -3521,6 +3560,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         ):
             edges |= {start * sm_count - 1, start * sm_count, start * sm_count + 1}
         edges |= {PACKED_ROWS - 1, PACKED_ROWS, PACKED_ROWS + 1}
+        for lo, hi, _ in FORWARD_TINY_GAP.values():
+            edges |= {lo - 1, lo, lo + 1, hi - 1, hi, hi + 1}
         for role in loader.ROLES:
             for rows in sorted(edges):
                 want = _tier_module(arch, role, rows, sm_count)
@@ -3532,10 +3573,11 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     # the forward on sm_100a: packed rows the 32-lane tiny forward up to 4
     # rows per SM, the tiny forward up to 36, the pipelined forward up to 85,
     # the mid forward up to 160, the long forward up to 400, the extra-long
-    # forward up to 520, the pipelined forward up to 6500, the mid forward
-    # past it; other layouts the short forward up to 12 rows per SM, the mid
-    # forward up to 140, the long forward up to 400, the extra-long forward up
-    # to 700, the plain forward past it
+    # forward up to 520, the pipelined forward past it (with no end: past
+    # 6500 rows per SM too, where the mid forward ran until version 0.2.17);
+    # other layouts the short forward up to 12 rows per SM, the mid forward
+    # up to 140, the long forward up to 400, the extra-long forward up to
+    # 700, the plain forward past it
     routes = loader.ROUTES["sm_100a"]
     for rows, packed, strided in (
         (1, "fwd_l32_tiny", "fwd_short"),
@@ -3558,8 +3600,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (700 * sm_count, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count + 1, "fwd_pipe", "fwd"),
         (6500 * sm_count, "fwd_pipe", "fwd"),
-        (6500 * sm_count + 1, "fwd_mid", "fwd"),
-        (PACKED_ROWS - 1, "fwd_mid", "fwd"),
+        (6500 * sm_count + 1, "fwd_pipe", "fwd"),
+        (8192 * sm_count + 1, "fwd_pipe", "fwd"),
+        (PACKED_ROWS - 1, "fwd_pipe", "fwd"),
         (PACKED_ROWS, "fwd", "fwd"),
         (2**31 - 1, "fwd", "fwd"),
     ):
@@ -3604,14 +3647,21 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         assert got == routes[strided], (rows, strided)
     assert "fwd_long" not in routes
     # the forward on sm_107a: packed rows the tiny forward up to 65 rows per
-    # SM, the mid forward up to 175, the extra-long forward up to 280, the
-    # pipelined forward of packed rows past it; other layouts the short
+    # SM but from 17 to 32 rows (counts of rows, FORWARD_TINY_GAP) the short
+    # forward, the mid forward up to 175, the extra-long forward up to 280,
+    # the pipelined forward of packed rows past it; other layouts the short
     # forward up to 59, the mid forward up to 480, the plain forward past it
     # (sm_107a routes no long forward, no pipelined forward of other layouts
     # and no 32-lane tiny forward)
     routes = loader.ROUTES["sm_107a"]
     for rows, packed, strided in (
         (1, "fwd_tiny", "fwd_short"),
+        (16, "fwd_tiny", "fwd_short"),
+        (17, "fwd_short", "fwd_short"),
+        (24, "fwd_short", "fwd_short"),
+        (32, "fwd_short", "fwd_short"),
+        (33, "fwd_tiny", "fwd_short"),
+        (48, "fwd_tiny", "fwd_short"),
         (10 * sm_count + 1, "fwd_tiny", "fwd_short"),
         (59 * sm_count, "fwd_tiny", "fwd_short"),
         (59 * sm_count + 1, "fwd_tiny", "fwd_mid"),
@@ -3642,8 +3692,10 @@ def _check_backward_bands(arch: str, sm_count: int) -> None:
     at its first and at its last rows (the last band, which has no end, at
     ``INT32_MAX`` rows), on packed rows below its long role's first rows and
     on other rows below the first rows of its long role of other rows, and
-    at every row count in a call without the weight gradient
-    (:func:`_band_module`); neighbouring bands run different modules, and
+    at those rows in a call without the weight gradient (the band's module,
+    but on a solo band's rows, which such a call skips, the module of the
+    band of :func:`_backward_bands` with ``solo=False`` that holds them, the
+    next band's); neighbouring bands run different modules, and
     the row after a band's end runs the next band's module, so the bands
     cover every row count without a gap; a band of a count of rows, ``(ROWS,
     n)``, ends at most at its cluster module's ``max_rows``.  A long role
@@ -3663,6 +3715,7 @@ def _check_backward_bands(arch: str, sm_count: int) -> None:
             bands,
         )
         assert bands[0][1] == 1 and bands[-1][2] is None, (arch, role, bands)
+        nodw_bands = _backward_bands(arch, role, sm_count, solo=False)
         for i, (band, first, last) in enumerate(bands):
             name = loader.ROUTES[arch][band]
             assert loader.MODULES[name]["role"] == band, (arch, band)
@@ -3673,7 +3726,15 @@ def _check_backward_bands(arch: str, sm_count: int) -> None:
                 got = loader.module_for_rows(
                     arch, role, rows, sm_count, packed=False, compute_grad_weight=False
                 )
-                assert got == name, (arch, role, band, rows, "no weight gradient")
+                want = name
+                if band.endswith(loader.SOLO):
+                    (want,) = (
+                        loader.ROUTES[arch][b]
+                        for b, f, e in nodw_bands
+                        if f <= rows and (e is None or rows <= e)
+                    )
+                    assert want == loader.ROUTES[arch][bands[i + 1][0]], (arch, band)
+                assert got == want, (arch, role, band, rows, "no weight gradient")
                 got = loader.module_for_rows(arch, role, rows, sm_count)
                 want = _band_module(arch, role, rows, sm_count)
                 assert got == want, (arch, role, band, rows, "packed")
@@ -4415,7 +4476,7 @@ MID_FORWARD_GRIDS = [
     (976 * 148, 148, 5328),  # 9028 blocks, 6 waves
     (2400 * 148 - 1, 148, 11544),  # 22200 blocks, 13 waves
     (4097 * 48, 148, 6216),  # 12291 blocks, 7 waves of 888
-    (6500 * 148 + 1, 148, 30192),  # B200 last packed mid band: 34 waves
+    (6500 * 148 + 1, 148, 30192),  # B200 packed mid band to 0.2.16: 34 waves
     (36 * 152 + 1, 152, 343),  # GB300 first packed mid band's first row
     (240 * 152, 152, 1824),  # GB300 first packed mid band's last row: 2 waves
     (250 * 152, 152, 1824),  # GB300 strided mid band's last row: 2 waves
@@ -4481,15 +4542,16 @@ STRIDED_CUT = "persistent_from_rows_per_sm_strided"
 # 6 CTAs per SM whose CTAs walk at most 2 blocks, never more CTAs than
 # blocks.  A row less than the cut times the SMs and the cut times the SMs on
 # 148, 152 and 212 SMs on every architecture, and the rows of the bands.  On
-# sm_100a the cut lies past the bands of packed rows of the pipelined forward
-# (up to 6500 rows per SM; the mid forward runs packed rows past it), so the
-# pipelined forward runs every packed row it is routed one CTA a block there.
+# sm_100a the pipelined forward's second band of packed rows (from 521 rows
+# per SM) has no end since version 0.2.17 (it ended at 6500, past which the
+# mid forward ran), so it runs packed rows one CTA a block below the cut and
+# whole waves from it there too.
 PIPE_FORWARD_GRIDS = [
     (1, 148, "sm_100a", 1),
     (36 * 148 + 1, 148, "sm_100a", 334),  # B200 first pipelined band's first row
     (85 * 148, 148, "sm_100a", 787),  # its last row: 787 blocks
     (520 * 148 + 1, 148, "sm_100a", 4811),  # B200 second pipelined band's first row
-    (6500 * 148, 148, "sm_100a", 60125),  # its last row: a CTA a block
+    (6500 * 148, 148, "sm_100a", 60125),  # its last row to 0.2.16: a CTA a block
     (32737 * 48, 212, "sm_100a", 98211),  # 7412 rows per SM: a CTA a block
     (8192 * 148 - 1, 148, "sm_100a", 75776),  # a row below the cut: a CTA a block
     (8192 * 148, 148, "sm_100a", 38184),  # the cut: 75776 blocks, 43 waves of 888
@@ -4498,6 +4560,7 @@ PIPE_FORWARD_GRIDS = [
     (8192 * 212 - 1, 212, "sm_100a", 108544),
     (8192 * 212, 212, "sm_100a", 54696),  # 108544 blocks, 43 waves of 1272
     (32737 * 48, 148, "sm_100a", 49728),  # 98211 blocks, 56 waves of 888
+    (2**24 - 1, 148, "sm_100a", 524808),  # B200 second band's last row: 591 waves
     (600 * 152 + 1, 152, "sm_103a", 5701),  # GB300 first pipelined band's first row
     (5600 * 148 - 1, 148, "sm_103a", 51800),
     (5600 * 148, 148, "sm_103a", 26640),  # 51800 blocks, 30 waves of 888
@@ -4536,7 +4599,7 @@ STRIDED_PIPE_FORWARD_GRIDS = [
     (500 * 212 - 1, 212, "sm_100a", 6625),
     (500 * 212, 212, "sm_100a", 3816),  # 6625 blocks, 3 waves of 1272
     (2000 * 148, 148, "sm_100a", 9768),  # 18500 blocks, 11 waves of 888
-    (6500 * 148, 148, "sm_100a", 30192),  # second band's last row: 34 waves
+    (6500 * 148, 148, "sm_100a", 30192),  # 6500 rows per SM: 34 waves
     (600 * 152 + 1, 152, "sm_103a", 3648),  # GB300 first band's first row: 4 waves
     (400 * 148 - 1, 148, "sm_103a", 3700),
     (400 * 148, 148, "sm_103a", 2664),  # 3700 blocks, 3 waves of 888
@@ -5444,13 +5507,16 @@ SHORT_BACKWARD_GRIDS = [
 ROW_LANES = 16
 # role -> (threads a CTA, teams a CTA, CTAs of the cluster) of each small-row
 # backward (``BAND_ROLES``), one cluster each, whose CTAs each run their
-# teams' row blocks: the short backward of a BF16 weight gradient (on every
-# architecture; one 256-thread team a CTA, CTA ``r`` running the 16-row blocks
-# ``r``, ``r + 16``, ...) and the exact tiny backwards (``_t512``: 4 teams of
-# the 128-thread CTA of the deterministic backward at 2e989556 a CTA, team ``q``
-# of CTA ``r`` running the 8-row block ``r + 16 q``).  A row block holds
-# :func:`_cluster_block_rows` rows.
+# teams' row blocks: the solo backward of a BF16 weight gradient (on every
+# architecture; one CTA of one 256-thread team, launched without a cluster,
+# running the call's one 16-row block), the short backward of a BF16 weight
+# gradient (on every architecture; one 256-thread team a CTA, CTA ``r``
+# running the 16-row blocks ``r``, ``r + 16``, ...) and the exact tiny
+# backwards (``_t512``: 4 teams of the 128-thread CTA of the deterministic
+# backward at 2e989556 a CTA, team ``q`` of CTA ``r`` running the 8-row block
+# ``r + 16 q``).  A row block holds :func:`_cluster_block_rows` rows.
 SMALL_ROW_BACKWARDS = {
+    "bwd_bf16_solo": (256, 1, 1),
     "bwd_bf16_short": (256, 1, 16),
     "bwd_bf16_t512": (512, 4, 16),
     "bwd_f32_t512": (512, 4, 16),
@@ -5461,9 +5527,9 @@ def _cluster_block_rows(name: str) -> int:
     """The rows of one row block of the small-row backward module ``name``
     (grid kind ``cluster``), derived from its record: the threads of its
     launch block over the teams of its role's CTA (``SMALL_ROW_BACKWARDS``),
-    over ``ROW_LANES`` threads a row: 256 / 1 / 16 = 16 rows for the short
-    backward, 512 / 4 / 16 = 8 rows (a team's block) for the exact tiny
-    backwards."""
+    over ``ROW_LANES`` threads a row: 256 / 1 / 16 = 16 rows for the solo
+    and the short backward, 512 / 4 / 16 = 8 rows (a team's block) for the
+    exact tiny backwards."""
     record = loader.MODULES[name]
     assert record["grid_rule"]["kind"] == "cluster", (name, record["grid_rule"])
     threads = int(record["launch"]["block"][0])
@@ -5477,7 +5543,8 @@ def test_small_row_backwards_are_one_cluster(rows, sm_count):
     """Every small-row backward (the module each ``BAND_ROLES`` role routes,
     ``SMALL_ROW_BACKWARDS``): one module a role, shipped for exactly the
     architectures that route it; one cluster of its grid rule's ``cluster``
-    CTAs of its role's threads whatever the rows and the SMs, up to its
+    CTAs (one CTA, ``cluster`` 1 and no launch cluster, for the solo
+    backward) of its role's threads whatever the rows and the SMs, up to its
     rule's ``max_rows``, which is one row block (:func:`_cluster_block_rows`)
     for each team of the cluster, so up to it no team runs more than one
     block; no workspace and no chunks."""
@@ -5513,13 +5580,17 @@ def test_small_row_backwards_are_one_cluster(rows, sm_count):
 @pytest.mark.parametrize(("rows", "sm_count"), SHORT_BACKWARD_GRIDS)
 def test_short_backward_is_one_cluster_up_to_its_max_rows(rows, sm_count):
     """The short backward (``bwd_bf16_short``): one module, routed on the
-    architectures whose BF16 ``BACKWARD_BANDS`` start with its band, a count
-    of rows ``(ROWS, n)`` with ``n`` at most its rule's ``max_rows`` (no FP32
-    band runs it); ``module_for_rows`` runs it for 1 to ``n`` rows whatever
-    the SMs and the next band's module (:func:`_band_module`) from ``n + 1``
-    rows; one cluster of 16 CTAs of 256 threads, 6144 bytes of dynamic shared
-    memory each, so that up to ``max_rows`` no CTA runs more than one 16-row
-    block (:func:`_cluster_block_rows`); no workspace."""
+    architectures whose BF16 ``BACKWARD_BANDS`` start with its band after the
+    solo band (the bands of :func:`_backward_bands` with ``solo=False``, the
+    bands of a call without the weight gradient, start with it), a count of
+    rows ``(ROWS, n)`` with ``n`` at most its rule's ``max_rows`` (no FP32
+    band runs it); ``module_for_rows`` runs it for the rows past the solo
+    band's (from 17) to ``n`` whatever the SMs in a call that computes the
+    weight gradient, for 1 to ``n`` rows in one without it, and the next
+    band's module (:func:`_band_module`) from ``n + 1`` rows; one cluster of
+    16 CTAs of 256 threads, 6144 bytes of dynamic shared memory each, so that
+    up to ``max_rows`` no CTA runs more than one 16-row block
+    (:func:`_cluster_block_rows`); no workspace."""
     role = "bwd_bf16_short"
     routed_on = [arch for arch in loader.ARCHES if role in loader.ROUTES[arch]]
     assert routed_on, role
@@ -5539,15 +5610,26 @@ def test_short_backward_is_one_cluster_up_to_its_max_rows(rows, sm_count):
         assert (role in banded) == (arch in routed_on), (arch, banded)
         assert role not in [band for _, band in loader.BACKWARD_BANDS[arch]["bwd_f32"]]
     for arch in routed_on:
-        last, band = loader.BACKWARD_BANDS[arch]["bwd_bf16"][0]
+        (solo_last, solo), (last, band) = loader.BACKWARD_BANDS[arch]["bwd_bf16"][:2]
+        assert solo == "bwd_bf16" + loader.SOLO, (arch, solo)
+        assert solo_last == (loader.ROWS, 16), (arch, solo_last)
         assert band == role and isinstance(last, tuple), (arch, last, band)
-        assert last[0] == loader.ROWS and 0 < int(last[1]) <= most, (arch, last)
+        assert last[0] == loader.ROWS and 16 < int(last[1]) <= most, (arch, last)
         end = int(last[1])
+        assert _backward_bands(arch, "bwd_bf16", sm_count, solo=False)[0] == (
+            role,
+            1,
+            end,
+        ), arch
         got = loader.module_for_rows(arch, "bwd_bf16", rows, sm_count)
-        if rows <= end:
+        if 16 < rows <= end:
             assert got == name, (arch, rows)
         else:
             assert got != name, (arch, rows)
+        got = loader.module_for_rows(
+            arch, "bwd_bf16", rows, sm_count, compute_grad_weight=False
+        )
+        assert (got == name) == (rows <= end), (arch, rows, "no weight gradient")
         after = loader.module_for_rows(arch, "bwd_bf16", end + 1, sm_count)
         assert after != name, arch
         assert after == _band_module(arch, "bwd_bf16", end + 1, sm_count), arch
@@ -5561,9 +5643,17 @@ def test_short_backward_is_one_cluster_up_to_its_max_rows(rows, sm_count):
 
 
 # Small-row backward shapes (T, H, layout): T * H rows in the bands in every
-# layout, and row counts past them.
+# layout (1, 8, 15 and 16 rows: the solo band of a BF16 weight gradient; 17
+# rows its first past it), and row counts past them.
 SHORT_BACKWARD_SHAPES = [
     (1, 1, "contiguous"),
+    (8, 1, "contiguous"),
+    (3, 5, "contiguous"),
+    (1, 16, "contiguous"),
+    (16, 1, "flat"),
+    (4, 4, "projection"),
+    (2, 8, "head_major"),
+    (17, 1, "flat"),
     (1, 48, "contiguous"),
     (2, 48, "contiguous"),
     (5, 48, "contiguous"),
@@ -5694,6 +5784,328 @@ def test_short_backward_accumulates_and_skips_the_weight_gradient(
     assert dw is None
     assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d)
     assert torch.equal(main, torch.full_like(main, 3.0))
+
+
+# The solo backward's module: the deterministic package's solo program
+# (``bwd_bf16_solo``, cake_rmsnorm_silu_gate_det_train_36a3f270afc1a27290b7)
+# built under this package's name, the same build and so the same name hash.
+SOLO_MODULE = "cake_rmsnorm_silu_gate_train_36a3f270afc1a27290b7"
+SOLO_ROLE = "bwd_bf16_solo"
+SOLO_MAX_ROWS = 16
+
+
+@pytest.mark.parametrize(("rows", "sm_count"), SHORT_BACKWARD_GRIDS)
+def test_solo_backward_is_one_cta_up_to_its_max_rows(rows, sm_count):
+    """The solo backward (``bwd_bf16_solo``, the BF16 call role and
+    ``SOLO``): one module, ``SOLO_MODULE``, routed on every architecture; one
+    CTA of 256 threads (grid kind ``cluster`` of one CTA, launched without a
+    cluster), 18176 bytes of dynamic shared memory, the call's one 16-row
+    block (:func:`_cluster_block_rows`), up to its rule's ``max_rows`` (16);
+    the first BF16 ``BACKWARD_BANDS`` band of every architecture, ``(ROWS,
+    16)``, and no FP32 band; ``module_for_rows`` runs it for 1 to 16 rows of a
+    call that computes a BF16 weight gradient whatever the SMs and the layout,
+    the short backward from 17 rows, and the short backward for 1 to 16 rows
+    of a call without the weight gradient (no solo program without the
+    weight gradient ships) and the exact tiny backward for an FP32 weight
+    gradient; its record names the repeatable backward's buffers (``acc``,
+    ``flags`` and ``done``, which it does not read: the host passes empty
+    tensors) but no workspace, and it has no chunks."""
+    role = SOLO_ROLE
+    assert loader.SOLO == "_solo" and role == "bwd_bf16" + loader.SOLO
+    assert role in loader.BAND_ROLES
+    assert {loader.ROUTES[arch][role] for arch in loader.ARCHES} == {SOLO_MODULE}
+    assert [r for r in loader.BAND_ROLES if r.endswith(loader.SOLO)] == [role]
+    record = loader.MODULES[SOLO_MODULE]
+    assert record["role"] == role
+    assert record["arches"] == list(loader.ARCHES), record["arches"]
+    rule = record["grid_rule"]
+    assert rule == {"cluster": 1, "kind": "cluster", "max_rows": SOLO_MAX_ROWS}, rule
+    assert record["launch"] == {
+        "block": (256, 1, 1),
+        "cluster": (1, 1, 1),
+        "cooperative": False,
+        "dynamic_smem_bytes": 18176,
+        "use_pdl": False,
+    }, record["launch"]
+    plan = [key for _kind, key in record["arg_plan"]]
+    assert {"acc", "flags", "done", "dw", "weight_grad", "accumulate"} <= set(plan)
+    assert "workspace" not in record
+    assert loader.workspace_layout(SOLO_MODULE) == ()
+    assert loader.workspace_bytes(SOLO_MODULE) == 0
+    assert _cluster_block_rows(SOLO_MODULE) == SOLO_MAX_ROWS
+    for arch in loader.ARCHES:
+        routes = loader.ROUTES[arch]
+        assert role + loader.NODW not in routes, arch
+        bands = loader.BACKWARD_BANDS[arch]
+        assert bands["bwd_bf16"][0] == ((loader.ROWS, SOLO_MAX_ROWS), role), arch
+        assert bands["bwd_bf16"][1][1] == "bwd_bf16_short", arch
+        assert [b for _, b in bands["bwd_bf16"]].count(role) == 1, arch
+        assert not [b for _, b in bands["bwd_f32"] if b.endswith(loader.SOLO)], arch
+        for packed in (True, False):
+            kw = {"packed": packed}
+            nodw_kw = {"packed": packed, "compute_grad_weight": False}
+            for r in sorted({1, 8, 15, 16, 17, rows}):
+                got = loader.module_for_rows(arch, "bwd_bf16", r, sm_count, **kw)
+                want = SOLO_MODULE if r <= SOLO_MAX_ROWS else None
+                if r == 17:
+                    want = routes["bwd_bf16_short"]
+                if want is not None:
+                    assert got == want, (arch, r, packed)
+                else:
+                    assert got != SOLO_MODULE, (arch, r, packed)
+                got = loader.module_for_rows(arch, "bwd_bf16", r, sm_count, **nodw_kw)
+                assert got != SOLO_MODULE, (arch, r, packed, "no weight gradient")
+                if r <= 17:
+                    assert got == routes["bwd_bf16_short"], (arch, r, packed)
+                    got = loader.module_for_rows(arch, "bwd_f32", r, sm_count, **kw)
+                    assert got == routes["bwd_f32_t512"], (arch, r, packed, "f32")
+    if rows > SOLO_MAX_ROWS:
+        return
+    assert loader.backward_ctas(SOLO_MODULE, rows, sm_count) == 1
+    grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=1)
+    assert grid == (1, 1, 1)
+    with pytest.raises(ValueError, match="chunks"):
+        loader.backward_chunks(SOLO_MODULE, rows)
+
+
+# The SM counts at which the backward's routes are compared with those of the
+# bands without the solo band.
+SOLO_SKIP_SM_COUNTS = (1, 2, 7, 16, 66, 148, 152, 160, 212, 216)
+
+
+@pytest.mark.parametrize("sm_count", SOLO_SKIP_SM_COUNTS)
+def test_calls_without_the_weight_gradient_skip_the_solo_band(sm_count, monkeypatch):
+    """A call without the weight gradient runs what it ran before the solo
+    band shipped (version 0.2.16, whose ``BACKWARD_BANDS`` are these without
+    the solo band): on every architecture, for every row count up to 600,
+    around every band end (rows per SM and counts of rows) and at
+    ``INT32_MAX``, packed and not, ``module_for_rows`` with
+    ``compute_grad_weight=False`` and ``nodw_module`` of the module it names
+    give the same modules as with ``BACKWARD_BANDS`` patched to drop every
+    solo band (``SOLO``); a call that computes the weight gradient the same
+    modules too but for 1 to 16 rows of a BF16 weight gradient, which run
+    the solo backward (``SOLO_MODULE``) instead of the short backward."""
+
+    def plan():
+        got = {}
+        for arch in loader.ARCHES:
+            rows_set = set(range(1, 601)) | {loader.INT32_MAX}
+            for role in ("bwd_bf16", "bwd_f32"):
+                for _, _, end in _backward_bands(arch, role, sm_count)[:-1]:
+                    rows_set |= {end - 1, end, end + 1}
+            for role in ("bwd_bf16", "bwd_f32"):
+                for rows in sorted(rows_set):
+                    for packed in (True, False):
+                        for weight in (True, False):
+                            name = loader.module_for_rows(
+                                arch,
+                                role,
+                                rows,
+                                sm_count,
+                                packed=packed,
+                                compute_grad_weight=weight,
+                            )
+                            nodw = None
+                            if not weight and role == "bwd_bf16":
+                                nodw = loader.nodw_module(
+                                    arch, name, rows, sm_count, packed=packed
+                                )
+                            got[arch, role, rows, packed, weight] = (name, nodw)
+        return got
+
+    shipped = plan()
+    for arch in loader.ARCHES:
+        bands = {
+            role: tuple(b for b in table if not b[1].endswith(loader.SOLO))
+            for role, table in loader.BACKWARD_BANDS[arch].items()
+        }
+        assert sum(map(len, bands.values())) + 1 == sum(
+            map(len, loader.BACKWARD_BANDS[arch].values())
+        ), arch
+        monkeypatch.setitem(loader.BACKWARD_BANDS, arch, bands)
+    without = plan()
+    assert shipped.keys() == without.keys()
+    changed = 0
+    for key, (name, nodw) in shipped.items():
+        arch, role, rows, _packed, weight = key
+        if weight and role == "bwd_bf16" and rows <= SOLO_MAX_ROWS:
+            assert name == SOLO_MODULE, key
+            assert without[key] == (loader.ROUTES[arch]["bwd_bf16_short"], None), key
+            changed += 1
+            continue
+        assert (name, nodw) == without[key], key
+        assert name != SOLO_MODULE and nodw != SOLO_MODULE, key
+    assert changed == len(loader.ARCHES) * SOLO_MAX_ROWS * 2, changed
+
+
+# Shapes of a call that computes a BF16 weight gradient in the solo band, as
+# ``(T, H)``: 1, 8, 15 and 16 rows; and 17 rows (``17x1``), the first rows of
+# the short backward's band past it.
+SOLO_SHAPES = ((1, 1), (8, 1), (3, 5), (1, 16), (2, 8), (17, 1))
+SOLO_LAYOUTS = ("contiguous", "flat", "projection", "head_major", "misaligned")
+
+
+@pytest.mark.parametrize("data", ["normal", *EDGE_DATA])
+@pytest.mark.parametrize("layout", SOLO_LAYOUTS)
+@pytest.mark.parametrize("shape", [f"{T}x{H}" for T, H in SOLO_SHAPES])
+def test_solo_backward_gives_the_bits_of_the_repeatable_backward(
+    shape, layout, data, launches, monkeypatch
+):
+    """``SOLO_SHAPES`` in every layout of ``make`` (``SOLO_LAYOUTS``) with
+    ``data`` (normal and ``EDGE_DATA``): ``REPEATS`` rounds of a call that
+    computes a BF16 weight gradient and one that accumulates it onto 0.25,
+    each without a workspace and with a caller workspace filled with 7, run
+    the solo backward (``SOLO_MODULE``) on 1 to 16 rows and the short
+    backward on 17; on the solo backward's rows they give the ``dx``, ``dz``
+    and weight-gradient bits, fresh and accumulated, of the repeatable
+    backward (``bwd_bf16_rep`` forced, :func:`_forcing`, on a zero
+    workspace) on every round, make no stream workspace and leave the caller
+    workspace as it is.  A call with ``compute_grad_weight=False`` runs the
+    program it ran before the solo band shipped (the short backward's band:
+    ``nodw_module`` of the short backward) and gives the ``dx`` and ``dz``
+    bits of that program's twin (:func:`_nodw_bits`)."""
+    T, H = (int(v) for v in shape.split("x"))
+    rows = T * H
+    routes = _routes()
+    packed = _backward_packed(T, H, layout)
+    name = _backward_module(rows, packed=packed)
+    solo = rows <= SOLO_MAX_ROWS
+    assert name == (SOLO_MODULE if solo else routes["bwd_bf16_short"]), name
+    x, z, w, dy = make(T, H, layout=layout, data=data, seed=82)
+    ws = workspace_for(rows, x.device)
+    ws.fill_(7)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(pkg, "_STREAM_WORKSPACES", {})
+
+    def calls(workspaces):
+        out = []
+        for workspace in workspaces:
+            dx, dz, dw = backward(dy, x, z, w, EPS, workspace=workspace)
+            acc = torch.full((D,), 0.25, dtype=torch.bfloat16, device=x.device)
+            dx_a, dz_a, dw_a = backward(
+                dy,
+                x,
+                z,
+                w,
+                EPS,
+                grad_weight=acc,
+                accumulate_grad_weight=True,
+                workspace=workspace,
+            )
+            assert dw_a is acc
+            out += [dx, dz, dw, dx_a, dz_a, dw_a]
+        return out
+
+    runs = []
+    for i in range(REPEATS):
+        launches.clear()
+        runs.append(calls((None, ws)))
+        assert launches == [name] * 4, (i, launches)
+    torch.cuda.synchronize()
+    assert bool((ws == 7).all()), f"{name} wrote the caller workspace"
+    assert pkg._STREAM_WORKSPACES == {}
+    for i, got in enumerate(runs[1:]):
+        for a, b in zip(got, runs[0], strict=True):
+            assert torch.equal(a, b), (shape, layout, data, i)
+    if solo:
+        rep = routes["bwd_bf16_rep"]
+        zero = workspace_for(rows, x.device)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(pkg, "module_for_rows", _forcing("bwd_bf16_rep"))
+            launches.clear()
+            want = calls((zero, zero))
+            assert launches == [rep] * 4, launches
+        torch.cuda.synchronize()
+        assert not bool(zero.any()), "the repeatable backward's workspace"
+        names = ("dx", "dz", "dw", "accumulated dx", "accumulated dz", "accumulated dw")
+        for k, (a, b) in enumerate(zip(runs[0], want, strict=True)):
+            what = names[k % len(names)]
+            assert torch.equal(a, b), f"{shape} {layout} {data}: {what}"
+    nodw_name = _backward_module(rows, packed=packed, compute_grad_weight=False)
+    assert nodw_name == routes["bwd_bf16_short"], nodw_name
+    nodw = _nodw_module(nodw_name, rows, packed=_nodw_packed(T, H, layout))
+    dx_d, dz_d = _nodw_bits(nodw, dy, x, z, w)
+    launches.clear()
+    dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws)
+    assert launches == [nodw], launches
+    assert dw is None
+    assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), (shape, layout, data)
+    torch.cuda.synchronize()
+    assert bool((ws == 7).all()), f"{nodw} wrote the caller workspace"
+
+
+# Shapes and ``make`` layouts of the solo backward in CUDA Graph capture.
+SOLO_GRAPH_SHAPES = [(1, 1, "contiguous"), (1, 16, "contiguous"), (16, 1, "projection")]
+
+
+@pytest.mark.parametrize("T,H,layout", SOLO_GRAPH_SHAPES)
+def test_solo_backward_in_cuda_graph_capture_takes_no_workspace(
+    T, H, layout, monkeypatch, launches
+):
+    """The solo backward (1 to 16 rows of a call that computes a BF16 weight
+    gradient) takes no workspace: a call that computes the weight gradient
+    and one that accumulates it onto 0.25, each without a workspace and with
+    a caller workspace filled with 7 (checked and left as it is), make no
+    stream workspace, eagerly and in CUDA Graph capture, and take no reserve
+    or capture workspace; the graph holds their four kernels only (no fill
+    kernel, memset or event wait), and every replay gives the eager calls'
+    ``dx``, ``dz`` and weight-gradient bits, fresh and accumulated."""
+    pytest.importorskip("cuda.bindings.runtime")
+    rows = T * H
+    name = _backward_module(rows, packed=_backward_packed(T, H, layout))
+    assert name == SOLO_MODULE, name
+    x, z, w, dy = make(T, H, layout=layout, seed=83)
+    ws = workspace_for(rows, x.device)
+    ws.fill_(7)
+    start = torch.full((D,), 0.25, dtype=torch.bfloat16, device=x.device)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(pkg, "_STREAM_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_RESERVES", {})
+    monkeypatch.setattr(pkg, "_CAPTURE_WORKSPACES", {})
+    want = backward(dy, x, z, w, EPS)
+    want_acc = backward(
+        dy, x, z, w, EPS, grad_weight=start.clone(), accumulate_grad_weight=True
+    )
+    accs = [start.clone() for _ in range(2)]
+    launches.clear()
+    graph = _kept_graph()
+    with torch.cuda.graph(graph):
+        outs = []
+        for workspace, acc in zip((None, ws), accs, strict=True):
+            outs.append(backward(dy, x, z, w, EPS, workspace=workspace))
+            outs.append(
+                backward(
+                    dy,
+                    x,
+                    z,
+                    w,
+                    EPS,
+                    grad_weight=acc,
+                    accumulate_grad_weight=True,
+                    workspace=workspace,
+                )
+            )
+    assert launches == [name] * 4, launches
+    types = _graph_node_types(graph)
+    assert types == ["KERNEL"] * 4, types
+    assert pkg._STREAM_WORKSPACES == {} and pkg._RESERVES == {}
+    assert pkg._CAPTURE_WORKSPACES == {}
+    for k in range(3):
+        for i, (dx, dz, dw) in enumerate(outs):
+            dx.zero_()
+            dz.zero_()
+            if i % 2:
+                dw.copy_(start)
+            else:
+                dw.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        for i, (dx, dz, dw) in enumerate(outs):
+            ref = want_acc if i % 2 else want
+            assert dw is not None and (dw is accs[i // 2]) == bool(i % 2), (k, i)
+            for what, a, b in zip(("dx", "dz", "dw"), (dx, dz, dw), ref, strict=True):
+                assert torch.equal(a, b), (k, i, what)
+    assert bool((ws == 7).all()), "the solo backward wrote the workspace"
 
 
 def test_calls_without_workspace_share_one_buffer_per_stream():
@@ -7054,7 +7466,9 @@ def test_one_token_runs_as_packed_rows_without_the_weight_gradient(
     backward's ``dx`` and ``dz`` bits; elsewhere (sm_107a) token strides 0
     and the program for rows that are not packed, with the bits of the BF16
     call on the band's module.  The call that computes the weight gradient
-    keeps token stride 0 and the band's module."""
+    keeps token stride 0 and runs the module of its own band (at up to 16
+    rows the solo backward, whose band a call without the weight gradient
+    skips)."""
     arch = loader.device_arch(torch.cuda.current_device())
     seen = []
     run_module = loader.run_module
@@ -7079,7 +7493,8 @@ def test_one_token_runs_as_packed_rows_without_the_weight_gradient(
     assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), layout
     seen.clear()
     backward(dy, x, z, w, EPS)
-    assert seen == [(name, (0, D, 0, D, 0, D))], (layout, seen)
+    dw_name = _backward_module(H, packed=False)
+    assert seen == [(dw_name, (0, D, 0, D, 0, D))], (layout, seen)
 
 
 @pytest.mark.parametrize("layout", ["projection", "head_major"])

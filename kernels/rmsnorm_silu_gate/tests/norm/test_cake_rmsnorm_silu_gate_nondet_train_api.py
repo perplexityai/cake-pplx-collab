@@ -82,14 +82,16 @@ checks:
   and non-reentrant checkpointing) every output repeats bit for bit (an
   accumulated ``dw`` from the same starting value too) but a BF16 ``dw`` in
   the fused and the row-claims bands, and every output is judged; so are
-  the forward around the ends of its ``FORWARD_BANDS`` bands (packed rows)
-  and ``STRIDED_FORWARD_BANDS`` bands (other layouts), the forward of ``x``
+  the forward around the ends of its ``FORWARD_BANDS`` bands (packed rows;
+  and of ``FORWARD_TINY_GAP``) and ``STRIDED_FORWARD_BANDS`` bands (other
+  layouts), the forward of ``x``
   or ``z`` broadcast over more than one token (token stride 0: the band of
   other layouts where the band of packed rows runs a program that reads them
   at their linear offsets, else the program of packed rows with the token
   stride 0) and the backward at
   the first and the last rows of each ``BACKWARD_BANDS`` band of this device
-  (the small-row backwards, one cluster each, the static backward of an
+  (the small-row backwards, one cluster each but the solo backward, one
+  CTA, the static backward of an
   FP32 weight gradient on sm_100a and sm_103a, the fused backward and the
   repeatable backward of either weight gradient), each call launching
   ``module_for_rows``' module, and, where its band holds such rows, where a
@@ -1584,6 +1586,10 @@ def _start_rows(arch: str, name: str, sms: int, packed: bool = True) -> int:
 # such band with an end.
 FORWARD_CASES = [
     pytest.param(1, 48, "contiguous", id="1x48"),
+    pytest.param(16, 1, "contiguous", id="16x1"),
+    pytest.param(17, 1, "contiguous", id="17x1"),
+    pytest.param(2, 16, "contiguous", id="2x16"),
+    pytest.param(33, 1, "contiguous", id="33x1"),
     pytest.param(13, 7, "contiguous", id="13x7"),
     pytest.param(13, 48, "projection", id="13x48-projection"),
     pytest.param(21, 48, "head_major", id="21x48-head_major"),
@@ -1654,7 +1660,9 @@ def test_forward_around_its_bands_meets_the_naive_tier(
     ``FORWARD_BANDS`` band of the architecture (``STRIDED_FORWARD_BANDS``
     band where the rows are not packed) with ``rows <= last * SMs`` (the
     tiny, short, pipelined, mid, long, extra-long and plain forwards, each
-    where the architecture's bands name it).  ``y`` repeats bit for bit and,
+    where the architecture's bands name it), but on packed rows of
+    ``FORWARD_TINY_GAP`` (16, 17, 32 and 33 rows: its edges) the module of
+    its role.  ``y`` repeats bit for bit and,
     on the inputs of every draw of ``judge``, is judged against the naive
     implementation."""
     sms = _sm_count()
@@ -1681,6 +1689,9 @@ def test_forward_around_its_bands_meets_the_naive_tier(
     want = next(
         routes[band] for last, band in bands if last is None or rows <= last * sms
     )
+    gap = loader.FORWARD_TINY_GAP.get(arch)
+    if packed and gap is not None and gap[0] < rows <= gap[1]:
+        want = routes[gap[2]]
     assert name == want, (arch, rows, sms)
     launched = _spy_launches(monkeypatch)
 
@@ -2520,12 +2531,13 @@ def test_backward_with_infinite_grad_out_keeps_the_fp64_classes(
     rows = first + 4097 if last is None else last
     assert loader.module_for_rows(arch, role, rows, sms) == name
     x, z, w, dy = suite.make(rows, 1, layout="flat", seed=27)
-    # (row, column, sign): +inf twice in column 3, -inf in column 40, +inf and
-    # -inf in column 77; no infinite term in the last row
+    # (row, column, sign): +inf twice in column 3, -inf in column 40 (row 17,
+    # or two rows before the last of the solo band's 16), +inf and -inf in
+    # column 77; no infinite term in the last row
     for r, c, sign in (
         (0, 3, 1.0),
         (rows // 2, 3, 1.0),
-        (17, 40, -1.0),
+        (min(17, rows - 2), 40, -1.0),
         (rows // 3, 77, 1.0),
         (rows // 3 + 5, 77, -1.0),
     ):
@@ -2568,9 +2580,9 @@ def _block_rows(name: str) -> int:
     the fused and a row-claims backward (``row_claims``, 16), and for a
     small-row backward (``cluster``) its launch block's threads over the
     teams of its CTA over 16 threads a row (``suite._cluster_block_rows``):
-    16 rows for the short backward (one 256-thread team a CTA), 8 for the
-    exact tiny backwards (4 teams of the deterministic backward's 128-thread
-    CTA in a 512-thread CTA, each team its own 8-row block)."""
+    16 rows for the solo and the short backward (one 256-thread team a CTA),
+    8 for the exact tiny backwards (4 teams of the deterministic backward's
+    128-thread CTA in a 512-thread CTA, each team its own 8-row block)."""
     rule = loader.MODULES[name]["grid_rule"]
     if rule["kind"] in ("chunks", "claimed_row_blocks"):
         return int(rule["rows_per_block"])
@@ -2586,10 +2598,14 @@ def _last_block_rows(block: int, first: int, last: int | None) -> dict[str, int]
     in the last block and ``half`` half a block in it (``block // 2`` rows: 8
     rows of a 16-row block, whose padded rows must not turn an infinite
     ``grad_out`` in the last row into a ``NaN`` weight gradient), each the
-    smallest such count from ``2 * block + 1`` rows and ``first``, and
-    ``remmax`` one row short of a whole block (the largest up to ``last``, or
-    4096 rows past ``rem1`` for the last band, which has no last row)."""
+    smallest such count from ``2 * block + 1`` rows and ``first`` (from 2
+    rows and ``first`` where ``last`` is below that: the solo band, 1 to 16
+    rows, one block), and ``remmax`` one row short of a whole block (the
+    largest up to ``last``, or 4096 rows past ``rem1`` for the last band,
+    which has no last row)."""
     lo = max(first, 2 * block + 1)
+    if last is not None and lo > last:
+        lo = max(first, 2)
     low = lo + (1 - lo) % block
     half = lo + (block // 2 - lo) % block
     high = low + 4096 + block - 2 if last is None else last - (last + 1) % block
