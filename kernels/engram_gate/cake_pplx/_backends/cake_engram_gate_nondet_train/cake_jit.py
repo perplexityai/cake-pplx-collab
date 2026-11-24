@@ -321,6 +321,25 @@ def forward_record(arch: str, sm_count: int, acc: str, T: int) -> str:
     return f"{name}_cta1" if least is not None and T >= least else name
 
 
+def token_bounds(arch: str, sm_count: int) -> tuple[int, ...]:
+    """The token counts, in ascending order, from which a call on a device of
+    ``arch`` with ``sm_count`` SMs may launch another record or another grid:
+    :data:`LARGE_BWD_MIN_TOKENS`, :data:`STAGE_BWD_MIN_TOKENS`, the
+    :data:`ORDER_BWD_MIN_TOKENS` of ``arch`` and the
+    :data:`CTA1_FWD_MIN_TOKENS` of the device (those above one token).  Below
+    the first, between two neighbours and from the last,
+    :func:`forward_record`, :func:`backward_record` and
+    :func:`persistent_clusters` give one answer for every token count, so the
+    host looks a call's record and grid up once per device and token class
+    (:mod:`.cake_backend`).  A rule on another token count adds it here."""
+    found = {LARGE_BWD_MIN_TOKENS, STAGE_BWD_MIN_TOKENS}
+    order = ORDER_BWD_MIN_TOKENS.get(arch)
+    if order is not None:
+        found.add(order)
+    found.update(least for (at, sms, _), least in CTA1_FWD_MIN_TOKENS.items() if (at, sms) == (arch, sm_count))
+    return tuple(sorted(least for least in found if least > 1))
+
+
 def unit_ctas(record_name: str) -> int:
     """CTAs of one unit of the persistent grid of the ``fwd`` or ``bwd`` record
     ``record_name``: its launch's cluster (four CTAs, one for a ``cta1``

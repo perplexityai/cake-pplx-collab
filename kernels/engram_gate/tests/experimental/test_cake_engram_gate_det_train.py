@@ -18,7 +18,8 @@ context gate (four streams of width 5120).
 
 Without a device: the registry's records, stages, architectures and launch facts; the record of each stage and dot
 product summation (two forwards, one backward), and the forward record of each ``dot_sum`` choice; the persistent grid
-sizes and the resident cluster table they come from; every stage launcher passes every kernel parameter of its records
+sizes and the resident cluster table they come from; the launch plans a call takes its record and grid from give the
+registry's record and grid at every token count; every stage launcher passes every kernel parameter of its records
 in plan order (the FFI entry replaced by a recorder); ``build.json`` covers every record on every architecture and its
 source digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment
 variable but the JIT shim's.
@@ -33,6 +34,7 @@ FP32 ones over 2^24 FP32 patterns.
 from __future__ import annotations
 
 import ast
+import bisect
 import hashlib
 import json
 import math
@@ -289,24 +291,103 @@ def test_b300_backward_of_many_tokens_runs_its_own_grid() -> None:
         assert 1 <= entry <= 3 * sms // cake_jit.CLUSTER_CTAS, (arch, sms)
 
 
-def test_the_launch_grid_and_the_workspace_follow_the_call(monkeypatch) -> None:
-    """On a faked device of each measured kind (nothing launched), the launch grid of a call (``_clusters``) and the
-    workspace query give ``cake_jit.clusters`` of the call's token count, on both sides of ``LARGE_BWD_MIN_TOKENS``."""
+# Devices (architecture, SM count) the launch plans are checked on: every measured kind, B300 (no resident entry, its
+# own backward grid of many tokens) and SM counts no table holds.
+PLAN_DEVICES = (
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_100a", 160),
+    ("sm_103a", 148),
+    ("sm_103a", 152),
+    ("sm_107a", 212),
+    ("sm_107a", 216),
+)
+
+
+def _clear_plans() -> None:
+    cake_backend._forward_classes.cache_clear()
+    cake_backend._backward_classes.cache_clear()
+
+
+def _fake_device(monkeypatch, arch: str, sms: int) -> None:
+    """Device 0 reads as ``arch`` with ``sms`` SMs; the launch plans built so far are dropped."""
+    monkeypatch.setattr(cake_backend, "device_arch", lambda index, arch=arch: arch)
+    monkeypatch.setattr(cake_backend, "sm_count", lambda index, sms=sms: sms)
+    _clear_plans()
+
+
+def _plan_tokens(bounds: tuple[int, ...]) -> list[int]:
+    """Every token count from 1 to twice the largest bound (at least 16384), each bound and its neighbours, and every
+    power of two up to 2^30 with its neighbours and 2^31 - 1, the largest count."""
+    top = max((16384, *(2 * least for least in bounds)))
+    tokens = set(range(1, top + 1)) | {2**31 - 1}
+    for least in (*bounds, *(2**e for e in range(31))):
+        tokens |= {least - 1, least, least + 1}
+    return sorted(t for t in tokens if 1 <= t <= 2**31 - 1)
+
+
+def _launch(plan, T: int) -> tuple[str, int]:
+    """The record and the grid (CTAs) of a call of ``T`` tokens with the launch plan ``plan``, looked up as
+    ``_forward`` and ``_launch_backward`` look them up."""
+    bounds, classes = plan
+    name, units, ctas = classes[bisect.bisect_right(bounds, T)]
+    return name, ctas * (T if T < units else units)
+
+
+def _check_plans(arch: str, sms: int) -> None:
+    """Every forward plan (each summation) and backward plan (with and without a token mask) of device 0 gives, for
+    every token count of :func:`_plan_tokens`, the record of ``cake_jit.forward_record`` / ``backward_record`` and the
+    grid of ``cake_jit.grid``; the bounds are ``cake_jit.token_bounds`` (ascending, each above one token)."""
+    bounds = cake_jit.token_bounds(arch, sms)
+    assert list(bounds) == sorted(set(bounds)) and all(least > 1 for least in bounds), bounds
+    tokens = _plan_tokens(bounds)
+    for acc in FWD_ACCS:
+        plan = cake_backend._forward_classes(arch, 0, acc)
+        assert plan[0] == bounds and len(plan[1]) == len(bounds) + 1, (arch, sms, acc)
+        for T in tokens:
+            name = cake_jit.forward_record(arch, sms, acc, T)
+            assert _launch(plan, T) == (name, cake_jit.grid(name, T, arch, sms)[0]), (arch, sms, acc, T)
+    for masked in (False, True):
+        plan = cake_backend._backward_classes(arch, 0, masked)
+        assert plan[0] == bounds and len(plan[1]) == len(bounds) + 1, (arch, sms, masked)
+        for T in tokens:
+            name = cake_jit.backward_record(arch, masked, T)
+            assert _launch(plan, T) == (name, cake_jit.grid(name, T, arch, sms)[0]), (arch, sms, masked, T)
+
+
+def test_the_launch_plan_gives_the_record_and_the_grid_of_cake_jit(monkeypatch) -> None:
+    """On a faked device of each kind of ``PLAN_DEVICES`` (nothing launched), the plans a forward and a backward call
+    look their record and grid up in (built once per device, summation or mask choice and token class) give the record
+    and the grid the ``cake_jit`` functions give for every token count up to twice the largest bound and around every
+    bound and power of two; the workspace query gives ``cake_jit.clusters`` of the backward.  A plan is built from the
+    tables: after a table changes (a ``cta1`` entry, an ordered or staged threshold, a backward grid of many tokens)
+    and the plans are cleared, the plans follow the changed tables, and the shipped ones again after the undo."""
     workspace = cake_backend.cake_engram_gate_det_train_workspace_bytes
-    for arch, sms in (("sm_103a", 148), ("sm_100a", 148), ("sm_103a", 152), ("sm_107a", 212)):
-        monkeypatch.setattr(cake_backend, "device_arch", lambda index, arch=arch: arch)
-        monkeypatch.setattr(cake_backend, "sm_count", lambda index, sms=sms: sms)
-        cake_backend._resident.cache_clear()
-        try:
+    try:
+        for arch, sms in PLAN_DEVICES:
+            _fake_device(monkeypatch, arch, sms)
+            _check_plans(arch, sms)
             for T in (1, 129, 2047, 2048, 4096, 65536):
-                for name in PERSISTENT_RECORDS + tuple(sorted(cake_jit.CTA1_RECORDS)):
-                    assert cake_backend._clusters(name, T, 0) == cake_jit.clusters(name, T, arch, sms), (arch, name, T)
                 rows = cake_jit.clusters("bwd_dot2", T, arch, sms)
                 assert workspace(T, 0) == rows * STREAMS * HIDDEN * 4, (arch, T)
-        finally:
-            cake_backend._resident.cache_clear()
-    monkeypatch.undo()
-    cake_backend._resident.cache_clear()
+        _fake_device(monkeypatch, "sm_100a", 148)
+        shipped = {acc: cake_backend._forward_classes("sm_100a", 0, acc) for acc in FWD_ACCS}
+        monkeypatch.setitem(cake_jit.CTA1_FWD_MIN_TOKENS, ("sm_100a", 148, "f32"), 3000)
+        monkeypatch.setitem(cake_jit.ORDER_BWD_MIN_TOKENS, "sm_100a", 5000)
+        monkeypatch.setitem(cake_jit.LARGE_BWD_CLUSTERS, ("sm_100a", 148), 100)
+        monkeypatch.setattr(cake_jit, "STAGE_BWD_MIN_TOKENS", 6000)
+        _clear_plans()
+        assert cake_jit.token_bounds("sm_100a", 148) == (2048, 3000, 5000, 6000)
+        assert _launch(cake_backend._forward_classes("sm_100a", 0, "f32"), 3000) == ("fwd_f32_cta1", 148)
+        assert _launch(cake_backend._backward_classes("sm_100a", 0, True), 5000) == ("bwd_dot2_order", 400)
+        _check_plans("sm_100a", 148)
+        monkeypatch.undo()
+        _fake_device(monkeypatch, "sm_100a", 148)
+        assert {acc: cake_backend._forward_classes("sm_100a", 0, acc) for acc in FWD_ACCS} == shipped
+        _check_plans("sm_100a", 148)
+    finally:
+        monkeypatch.undo()
+        _clear_plans()
 
 
 @pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))

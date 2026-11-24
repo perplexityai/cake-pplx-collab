@@ -23,7 +23,8 @@ not) and refuse another choice before they look at the operands, the entries doc
 maps to ``sm_107a``.
 
 On SM100 / SM103 / SM107, for both ``dot_sum`` choices unless a test names the default: each choice launches its own
-forward record and the one backward record (also under checkpoint), and the gradients of both choices are the same
+forward record and the one backward record (also under checkpoint), every call around the device's token bounds
+launches the registry's record on its grid, and the gradients of both choices are the same
 bits (the weight gradients of the non-deterministic package excepted); the autograd entry
 (``key`` and ``value`` contiguous or views of a packed ``kv``; BF16, FP32 or mixed weights; with and without a mask)
 and the packed entry meet the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws) for the
@@ -396,7 +397,7 @@ def test_a_call_from_the_cta1_threshold_launches_the_cta1_forward_with_the_same_
                 out=ref,
                 eps=1e-20,
                 clamp_value=1e-6,
-                clusters=backend._clusters(f"fwd_{acc}", least, device.index),
+                clusters=backend.cake_jit.clusters(f"fwd_{acc}", least, arch, sms),
             )
             torch.cuda.synchronize()
             assert _same_bits(out, ref), (dot_sum, mask)
@@ -405,6 +406,41 @@ def test_a_call_from_the_cta1_threshold_launches_the_cta1_forward_with_the_same_
         fewer_args = (fewer.x, fewer.key, fewer.value, fewer.q_weight, fewer.k_weight, None)
         api.cake_engram_gate_nondet_train_forward(*fewer_args, dot_sum=dot_sum)
         assert launched == [f"fwd_{acc}"], dot_sum
+
+
+def test_every_call_launches_the_record_and_the_grid_of_cake_jit(monkeypatch) -> None:
+    """A forward call (each ``dot_sum``) and a backward call (without a token mask and with one) launch, at 1, 2 and
+    129 tokens and on both sides of every ``cake_jit.token_bounds`` count of the device, the record
+    ``cake_jit.forward_record`` / ``backward_record`` names on the grid ``cake_jit.grid`` gives, and ``dw_reduce`` on
+    its grid (``_entry`` replaced by a recorder: nothing is launched, the outputs are not read)."""
+    device = _device_or_skip()
+    backend = _backend()
+    cake_jit = backend.cake_jit
+    arch = backend.device_arch(device.index)
+    sms = backend.sm_count(device.index)
+    launched: list[tuple[str, int]] = []
+
+    def recorder(name, arch):
+        return lambda *args: launched.append((name, args[-3]))
+
+    monkeypatch.setattr(backend, "_entry", recorder)
+    bf16 = dict(dtype=torch.bfloat16, device=device)
+    for T in sorted({1, 2, 129} | {t for least in cake_jit.token_bounds(arch, sms) for t in (least - 1, least)}):
+        x = torch.empty(T, STREAMS, HIDDEN, **bf16)
+        kv = torch.empty(T, KV_WIDTH, **bf16)
+        key, value = kv[:, : STREAMS * HIDDEN].unflatten(1, (STREAMS, HIDDEN)), kv[:, STREAMS * HIDDEN :]
+        qw, kw = torch.ones(STREAMS, HIDDEN, **bf16), torch.ones(STREAMS, HIDDEN, dtype=torch.float32, device=device)
+        for mask in (None, torch.arange(T, device=device) % 4 != 0):
+            for dot_sum, acc in DOT_SUMS.items():
+                launched.clear()
+                api.cake_engram_gate_nondet_train_forward(x, key, value, qw, kw, mask, dot_sum=dot_sum)
+                name = cake_jit.forward_record(arch, sms, acc, T)
+                assert launched == [(name, cake_jit.grid(name, T, arch, sms)[0])], (T, dot_sum, mask is None)
+            launched.clear()
+            api.cake_engram_gate_nondet_train_backward(x, x, key, value, qw, kw, mask)
+            name = cake_jit.backward_record(arch, mask is not None, T)
+            want = [(name, cake_jit.grid(name, T, arch, sms)[0]), ("dw_reduce", cake_jit.dw_reduce_grid()[0])]
+            assert launched == want, (T, mask is None)
 
 
 @pytest.mark.parametrize("T", (1, 129, 4096))
