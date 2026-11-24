@@ -156,7 +156,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y[_lp*2 + 0], y[_lp*2+1 + 0]));
             yb[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(qn + (((long long)t0 * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb)[0];
+        reinterpret_cast<int4*>(qn + (((long long)t0 * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb)[0];
     }
     if (t0 + 16 < num_tokens) {
         {
@@ -177,7 +177,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y_1[_lp*2 + 0], y_1[_lp*2+1 + 0]));
             yb_1[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(qn + (((long long)(t0 + 16) * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_1)[0];
+        reinterpret_cast<int4*>(qn + (((long long)(t0 + 16) * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_1)[0];
     }
     if (t0 + 32 < num_tokens) {
         {
@@ -198,7 +198,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y_2[_lp*2 + 0], y_2[_lp*2+1 + 0]));
             yb_2[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(qn + (((long long)(t0 + 32) * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_2)[0];
+        reinterpret_cast<int4*>(qn + (((long long)(t0 + 32) * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_2)[0];
     }
     if (t0 + 48 < num_tokens) {
         {
@@ -219,7 +219,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y_3[_lp*2 + 0], y_3[_lp*2+1 + 0]));
             yb_3[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(qn + (((long long)(t0 + 48) * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_3)[0];
+        reinterpret_cast<int4*>(qn + (((long long)(t0 + 48) * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_3)[0];
     }
     float x4_0[32];
     int _min_8 = ((t0) < (num_tokens - 1) ? (t0) : (num_tokens - 1));
@@ -302,7 +302,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y_4[_lp*2 + 0], y_4[_lp*2+1 + 0]));
             yb_4[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(kn + (((long long)t0 * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_4)[0];
+        reinterpret_cast<int4*>(kn + (((long long)t0 * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_4)[0];
     }
     if (t0 + 16 < num_tokens) {
         {
@@ -323,7 +323,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y_5[_lp*2 + 0], y_5[_lp*2+1 + 0]));
             yb_5[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(kn + (((long long)(t0 + 16) * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_5)[0];
+        reinterpret_cast<int4*>(kn + (((long long)(t0 + 16) * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_5)[0];
     }
     if (t0 + 32 < num_tokens) {
         {
@@ -344,7 +344,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y_6[_lp*2 + 0], y_6[_lp*2+1 + 0]));
             yb_6[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(kn + (((long long)(t0 + 32) * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_6)[0];
+        reinterpret_cast<int4*>(kn + (((long long)(t0 + 32) * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_6)[0];
     }
     if (t0 + 48 < num_tokens) {
         {
@@ -365,7 +365,7 @@ kernel_cake_kda_det_train_f793454fc9c70b991661(__nv_bfloat16* __restrict__ q, __
             __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(y_7[_lp*2 + 0], y_7[_lp*2+1 + 0]));
             yb_7[_lp] = *(uint32_t*)&_bf2;
         }
-        reinterpret_cast<int4*>(kn + (((long long)(t0 + 48) * (long long)num_heads + (long long)h) * 128 + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_7)[0];
+        reinterpret_cast<int4*>(kn + (((long long)(t0 + 48) * (long long)num_heads + (long long)h) * 128ll + (long long)(c * 8)))[0] = reinterpret_cast<int4*>(yb_7)[0];
     }
 }
 

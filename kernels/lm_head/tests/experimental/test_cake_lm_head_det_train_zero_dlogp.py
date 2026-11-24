@@ -513,8 +513,9 @@ def test_make_plan_counts_the_dz_and_dw_gemms_only(arch, rows):
     """A counted plan (``dcnt=True``) keeps the plan without the skip's chunks, dX slice counts and dX forms (Phase 1a:
     the dX GEMM computes every row) and runs the counted forms of the dz arm and of every weight-gradient GEMM -- the
     last chunk's TMA cast in its counted form where ``dw_cast_tma_rule`` takes it, the counted per-thread cast with
-    ``counted_tma_cast=False``.  A pinned weight-gradient TMA epilogue, a loss-entry plan, the hidden valid-row count, a
-    plan without the dz arm and the reference path (no architecture) take no counted form."""
+    ``counted_tma_cast=False``; its recompute keeps the ``rlab_zero`` step right before chunk 0's counted arm, which the
+    plan without the skip does not run.  A pinned weight-gradient TMA epilogue, a loss-entry plan, the hidden valid-row
+    count, a plan without the dz arm and the reference path (no architecture) take no counted form."""
     problem = _problem(65031)
     kw = _plan_kw(arch, valid_rows=rows)
     plain = cake_backend.make_plan(problem, **kw)
@@ -541,8 +542,13 @@ def test_make_plan_counts_the_dz_and_dw_gemms_only(arch, rows):
         ("gemm_logits_dz_dcnt", i) for i in range(plan.num_chunks)
     ]
     assert all(k[0].endswith("_dcnt") for k in keys if k[0].startswith("gemm_dw"))
+    # the counted dz arm leaves the rows past its count: the zero step, right before chunk 0's arm; the plan without
+    # the skip stores every row a fold reads and has none
+    zero = (cake_backend.RLAB_ZERO_STAGE, None)
+    assert keys.count(zero) == 1
+    assert keys[keys.index(zero) + 1] == ("gemm_logits_dz_dcnt", 0)
     assert cake_backend.recompute_keys(plain) == tuple(
-        (k[0].removesuffix("_dcnt"), k[1]) for k in keys
+        (k[0].removesuffix("_dcnt"), k[1]) for k in keys if k != zero
     )
     pinned = dict(kw, gemm_tuning={"dw": {"epi_store": "tma"}})
     shipped = cake_backend.make_plan(problem, **pinned)

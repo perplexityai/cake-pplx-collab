@@ -78,7 +78,9 @@ rows of every band of ``BACKWARD_BANDS`` run the band's program; packed rows
 of the last repeatable band of either weight gradient from
 ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on run its long role,
 ``bwd_bf16_rep_long`` or ``bwd_f32_rep_long``, the bits of the repeatable
-backward), the programs without the weight gradient (``NODW_ROLES``, which
+backward; the grid ``run_module`` launches is ``launch_grid``'s for
+every record, also with a forward's rule changed at run time), the programs
+without the weight gradient (``NODW_ROLES``, which
 ``nodw_module`` names in place of a BF16 band's module for
 ``compute_grad_weight=False``: one cluster in the small-row bands, in the
 fused and the repeatable bands the strided program up to
@@ -118,11 +120,13 @@ imports nothing else from ``cake_pplx``.  The facade is
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import inspect
 import math
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy
 import pytest
@@ -365,6 +369,36 @@ def launches(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         return run_module(name, values, rows=rows, device_index=device_index)
 
     monkeypatch.setattr(loader, "run_module", spy)
+    return launched
+
+
+def _launched_grid(name, args):
+    """The grid of a launch of module ``name`` with the kernel arguments
+    ``args``: the arguments at its grid slots (``_arguments``), by axis."""
+    grid = [None, None, None]
+    for arg, (axis, slot, _) in zip(args, loader._arguments(name), strict=True):
+        if axis:
+            grid[slot] = arg
+    return tuple(grid)
+
+
+def _record_launches(patch):
+    """Patch the registry's ``_entry`` so that each launch appends ``(name,
+    grid)`` (``_launched_grid``: the grid the kernel is launched with) to the
+    returned list, then runs the kernel."""
+    launched = []
+    entry = loader._entry
+
+    def entry_spy(name, device_index):
+        run = entry(name, device_index)
+
+        def launch(*args):
+            launched.append((name, _launched_grid(name, args)))
+            return run(*args)
+
+        return launch
+
+    patch.setattr(loader, "_entry", entry_spy)
     return launched
 
 
@@ -4052,19 +4086,23 @@ def test_long_forward_grid_is_whole_waves_of_at_most_six_blocks_a_cta(
     assert "fwd_long" not in loader.ROUTES["sm_107a"]
     # the extra-long forward launches the same grid
     xlong = loader.MODULES[loader.ROUTES["sm_107a"]["fwd_xlong"]]
-    assert loader.launch_grid(xlong, rows=rows, sm_count=sm_count) == (ctas, 1, 1)
-    grid = loader.launch_grid(record, rows=rows, sm_count=sm_count)
+    got = loader.launch_grid(xlong, rows=rows, sm_count=sm_count, arch="sm_107a")
+    assert got == (ctas, 1, 1)
+    grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, arch="sm_100a")
     assert grid == (ctas, 1, 1)
     blocks, wave = -(-rows // 32), 3 * sm_count
     assert -(-blocks // ctas) <= 6
     assert ctas == blocks or ctas % wave == 0
     assert ctas == blocks or (ctas - wave) * 6 < blocks
     # the grid is the long forward's whatever ``ctas`` the call passes
-    assert loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=7) == grid
+    got = loader.launch_grid(
+        record, rows=rows, sm_count=sm_count, ctas=7, arch="sm_100a"
+    )
+    assert got == grid
     # the forward: one 64-thread CTA per 8-row block
     fwd = loader.MODULES[loader.route_module("sm_100a", "fwd")]
     assert fwd["launch"]["block"] == (64, 1, 1)
-    assert loader.launch_grid(fwd, rows=rows, sm_count=sm_count) == (
+    assert loader.launch_grid(fwd, rows=rows, sm_count=sm_count, arch="sm_100a") == (
         -(-rows // 8),
         1,
         1,
@@ -4102,8 +4140,10 @@ def test_extra_long_forward_is_the_long_forwards_grid():
         (2**31 - 1, 216),
     ):
         assert loader.launch_grid(
-            record, rows=rows, sm_count=sm_count
-        ) == loader.launch_grid(long_record, rows=rows, sm_count=sm_count)
+            record, rows=rows, sm_count=sm_count, arch="sm_103a"
+        ) == loader.launch_grid(
+            long_record, rows=rows, sm_count=sm_count, arch="sm_100a"
+        )
 
 
 # (rows, SMs, CTAs) of the mid forward: 16-row blocks, the fewest whole waves
@@ -4159,46 +4199,111 @@ def test_mid_forward_grid_is_whole_waves_of_at_most_two_blocks_a_cta(
             "rows_per_block": 16,
         }
         assert record["launch"]["block"] == (128, 1, 1)
-        records.append(record)
-    record = records[0]
-    grid = loader.launch_grid(record, rows=rows, sm_count=sm_count)
-    for other in records[1:]:
-        assert loader.launch_grid(other, rows=rows, sm_count=sm_count) == grid
+        records.append((arch, record))
+    arch, record = records[0]
+    grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, arch=arch)
+    for each, other in records[1:]:
+        got = loader.launch_grid(other, rows=rows, sm_count=sm_count, arch=each)
+        assert got == grid, each
     assert grid == (ctas, 1, 1)
     blocks, wave = -(-rows // 16), 6 * sm_count
     assert -(-blocks // ctas) <= 2
     assert ctas == blocks or ctas % wave == 0
     assert ctas == blocks or (ctas - wave) * 2 < blocks
-    assert loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=7) == grid
+    got = loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=7, arch=arch)
+    assert got == grid
 
 
-# (rows, SMs, CTAs) of the pipelined forwards: one CTA per 16-row block below
-# 8192 rows per SM, from there the fewest whole waves of 6 CTAs per SM whose
-# CTAs walk at most 2 blocks, never more CTAs than blocks.
+# The pipelined forwards' cut of rows per SM of rows the kernel reads as
+# packed, and that of other rows where the rule has one (``fwd_pipe``, which
+# reads rows of any layout; ``fwd_pipe_packed`` reads packed rows only).
+CUT = "persistent_from_rows_per_sm"
+STRIDED_CUT = "persistent_from_rows_per_sm_strided"
+# (rows, SMs, architecture, CTAs) of the pipelined forward of the architecture
+# (``fwd_pipe`` on sm_100a and sm_103a, ``fwd_pipe_packed`` on sm_107a) on
+# rows the kernel reads as packed: one CTA per 16-row block below the
+# architecture's cut of rows per SM times the SMs (8192 rows per SM on
+# sm_100a and sm_107a, 5600 on sm_103a), from there the fewest whole waves of
+# 6 CTAs per SM whose CTAs walk at most 2 blocks, never more CTAs than
+# blocks.  A row less than the cut times the SMs and the cut times the SMs on
+# 148, 152 and 212 SMs on every architecture, and the rows of the bands.  On
+# sm_100a the cut lies past the bands of packed rows of the pipelined forward
+# (up to 6500 rows per SM; the mid forward runs packed rows past it), so the
+# pipelined forward runs every packed row it is routed one CTA a block there.
 PIPE_FORWARD_GRIDS = [
-    (1, 148, 1),
-    (36 * 148 + 1, 148, 334),  # B200 first pipelined band's first row
-    (85 * 148, 148, 787),  # its last row: 787 blocks
-    (520 * 148 + 1, 148, 4811),  # B200 second pipelined band's first row
-    (6500 * 148, 148, 60125),  # its last row: 60125 blocks
-    (8192 * 148 - 1, 148, 75776),  # below 8192 rows per SM: a CTA a block
-    (8192 * 148, 148, 38184),  # from 8192 rows per SM: 75776 blocks, 43 waves
-    (32737 * 48, 148, 49728),  # 98211 blocks, 56 waves of 888
-    (600 * 152 + 1, 152, 5701),  # GB300 first pipelined band's first row
-    (6000 * 152, 152, 57000),  # its last row: 57000 blocks
-    (8192 * 152 + 1, 152, 39216),  # GB300 last band's first row: 43 waves
-    (280 * 212 + 1, 212, 3711),  # R200 pipelined band's first row: 3711 blocks
-    (32737 * 48, 212, 98211),  # 98211 blocks, below 8192 rows per SM
-    (8192 * 212, 212, 54696),  # 108544 blocks, 43 waves of 1272
-    (65536 * 48, 212, 99216),  # 196608 blocks, 78 waves of 1272
-    (2**24 - 1, 212, 525336),  # R200 pipelined band's last row: 413 waves
+    (1, 148, "sm_100a", 1),
+    (36 * 148 + 1, 148, "sm_100a", 334),  # B200 first pipelined band's first row
+    (85 * 148, 148, "sm_100a", 787),  # its last row: 787 blocks
+    (520 * 148 + 1, 148, "sm_100a", 4811),  # B200 second pipelined band's first row
+    (6500 * 148, 148, "sm_100a", 60125),  # its last row: a CTA a block
+    (32737 * 48, 212, "sm_100a", 98211),  # 7412 rows per SM: a CTA a block
+    (8192 * 148 - 1, 148, "sm_100a", 75776),  # a row below the cut: a CTA a block
+    (8192 * 148, 148, "sm_100a", 38184),  # the cut: 75776 blocks, 43 waves of 888
+    (8192 * 152 - 1, 152, "sm_100a", 77824),
+    (8192 * 152, 152, "sm_100a", 39216),  # 77824 blocks, 43 waves of 912
+    (8192 * 212 - 1, 212, "sm_100a", 108544),
+    (8192 * 212, 212, "sm_100a", 54696),  # 108544 blocks, 43 waves of 1272
+    (32737 * 48, 148, "sm_100a", 49728),  # 98211 blocks, 56 waves of 888
+    (600 * 152 + 1, 152, "sm_103a", 5701),  # GB300 first pipelined band's first row
+    (5600 * 148 - 1, 148, "sm_103a", 51800),
+    (5600 * 148, 148, "sm_103a", 26640),  # 51800 blocks, 30 waves of 888
+    (5600 * 152 - 1, 152, "sm_103a", 53200),  # a row below the cut: a CTA a block
+    (5600 * 152, 152, "sm_103a", 27360),  # the cut: 53200 blocks, 30 waves of 912
+    (5600 * 212 - 1, 212, "sm_103a", 74200),
+    (5600 * 212, 212, "sm_103a", 38160),  # 74200 blocks, 30 waves of 1272
+    (6000 * 152, 152, "sm_103a", 29184),  # first band's last row: 32 waves
+    (8192 * 152 + 1, 152, "sm_103a", 39216),  # GB300 last band's first row: 43 waves
+    (32737 * 48, 212, "sm_103a", 49608),  # 7412 rows per SM: 39 waves of 1272
+    (280 * 212 + 1, 212, "sm_107a", 3711),  # R200 pipelined band's first row
+    (32737 * 48, 212, "sm_107a", 98211),  # 7412 rows per SM: a CTA a block
+    (8192 * 148 - 1, 148, "sm_107a", 75776),
+    (8192 * 148, 148, "sm_107a", 38184),  # 75776 blocks, 43 waves of 888
+    (8192 * 152 - 1, 152, "sm_107a", 77824),
+    (8192 * 152, 152, "sm_107a", 39216),  # 77824 blocks, 43 waves of 912
+    (8192 * 212 - 1, 212, "sm_107a", 108544),  # a row below the cut: a CTA a block
+    (8192 * 212, 212, "sm_107a", 54696),  # the cut: 108544 blocks, 43 waves
+    (65536 * 48, 212, "sm_107a", 99216),  # 196608 blocks, 78 waves of 1272
+    (2**24 - 1, 212, "sm_107a", 525336),  # R200 pipelined band's last row: 413 waves
+]
+# (rows, SMs, architecture, CTAs) of ``fwd_pipe`` (sm_100a and sm_103a) on rows
+# the kernel does not read as packed (``x`` or ``z`` broadcast over tokens, or
+# one token): its cut of such rows, 500 rows per SM on sm_100a and 400 on
+# sm_103a, a row less than it times the SMs and it times the SMs on 148, 152
+# and 212 SMs, and rows of its bands (the second band of sm_100a, from 521
+# rows per SM, and the first of sm_103a, from 601, lie past the cut: whole
+# waves from their first rows on).
+STRIDED_PIPE_FORWARD_GRIDS = [
+    (85 * 148, 148, "sm_100a", 787),  # B200 first pipelined band's last row
+    (520 * 148 + 1, 148, "sm_100a", 2664),  # B200 second band's first row: 3 waves
+    (500 * 148 - 1, 148, "sm_100a", 4625),  # a row below the cut: a CTA a block
+    (500 * 148, 148, "sm_100a", 2664),  # the cut: 4625 blocks, 3 waves of 888
+    (500 * 152 - 1, 152, "sm_100a", 4750),
+    (500 * 152, 152, "sm_100a", 2736),  # 4750 blocks, 3 waves of 912
+    (500 * 212 - 1, 212, "sm_100a", 6625),
+    (500 * 212, 212, "sm_100a", 3816),  # 6625 blocks, 3 waves of 1272
+    (2000 * 148, 148, "sm_100a", 9768),  # 18500 blocks, 11 waves of 888
+    (6500 * 148, 148, "sm_100a", 30192),  # second band's last row: 34 waves
+    (600 * 152 + 1, 152, "sm_103a", 3648),  # GB300 first band's first row: 4 waves
+    (400 * 148 - 1, 148, "sm_103a", 3700),
+    (400 * 148, 148, "sm_103a", 2664),  # 3700 blocks, 3 waves of 888
+    (400 * 152 - 1, 152, "sm_103a", 3800),  # a row below the cut: a CTA a block
+    (400 * 152, 152, "sm_103a", 2736),  # the cut: 3800 blocks, 3 waves of 912
+    (400 * 212 - 1, 212, "sm_103a", 5300),
+    (400 * 212, 212, "sm_103a", 3816),  # 5300 blocks, 3 waves of 1272
+    (2000 * 152, 152, "sm_103a", 10032),  # 19000 blocks, 11 waves of 912
+    (5600 * 152 - 1, 152, "sm_103a", 27360),  # 53200 blocks, 30 waves of 912
+    (6000 * 152, 152, "sm_103a", 29184),  # first band's last row: 32 waves
 ]
 
 
-@pytest.mark.parametrize(("rows", "sm_count", "ctas"), PIPE_FORWARD_GRIDS)
-def test_pipelined_forward_grid_is_a_block_a_cta_then_whole_waves(rows, sm_count, ctas):
-    # every pipelined forward module (the deterministic package's grid rule)
-    records = []
+def _pipelined_records():
+    """``{arch: record}`` of the pipelined forward each architecture routes
+    (``fwd_pipe`` or ``fwd_pipe_packed``), each checked: the deterministic
+    package's grid rule (16-row blocks, whole waves of 6 CTAs per SM of at
+    most 2 blocks a CTA) with its positive cuts keyed by exactly the record's
+    architectures, ``CUT`` and, for ``fwd_pipe`` only, ``STRIDED_CUT``, and
+    128 threads."""
+    records = {}
     for arch in ("sm_100a", "sm_103a", "sm_107a"):
         for role in ("fwd_pipe", "fwd_pipe_packed"):
             name = loader.ROUTES[arch].get(role)
@@ -4206,27 +4311,626 @@ def test_pipelined_forward_grid_is_a_block_a_cta_then_whole_waves(rows, sm_count
                 continue
             record = loader.MODULES[name]
             assert arch in record["arches"]
-            assert record["grid_rule"] == {
+            rule = dict(record["grid_rule"])
+            cuts = (CUT, STRIDED_CUT) if role == "fwd_pipe" else (CUT,)
+            for key in cuts:
+                cut = rule.pop(key)
+                assert isinstance(cut, dict), (name, key)
+                assert list(cut) == sorted(record["arches"]), (name, key)
+                assert all(isinstance(v, int) and v >= 1 for v in cut.values())
+            assert rule == {
                 "ctas_per_sm": 6,
                 "kind": "persistent_row_blocks",
                 "max_blocks_per_cta": 2,
-                "persistent_from_rows_per_sm": 8192,
                 "rows_per_block": 16,
-            }
+            }, name
             assert record["launch"]["block"] == (128, 1, 1)
-            records.append(record)
-    assert len(records) == 3
-    grid = loader.launch_grid(records[0], rows=rows, sm_count=sm_count)
-    for other in records[1:]:
-        assert loader.launch_grid(other, rows=rows, sm_count=sm_count) == grid
-    assert grid == (ctas, 1, 1)
+            assert arch not in records, arch
+            records[arch] = record
+    assert sorted(records) == ["sm_100a", "sm_103a", "sm_107a"]
+    return records
+
+
+def _check_pipelined_grid(record, arch, rows, sm_count, packed):
+    """The grid of pipelined forward ``record`` on ``arch`` for ``rows`` rows
+    (``packed``: read as packed rows) on ``sm_count`` SMs: one CTA a block
+    below its cut of such rows (this test's own reading of the rule) times
+    the SMs, from there whole waves of at most 2 blocks a CTA, never more
+    CTAs than blocks; the same whatever ``ctas`` the call passes.  Returns
+    the CTAs."""
+    rule = record["grid_rule"]
+    key = STRIDED_CUT if not packed and STRIDED_CUT in rule else CUT
+    grid = loader.launch_grid(
+        record, rows=rows, sm_count=sm_count, arch=arch, packed=packed
+    )
+    again = loader.launch_grid(
+        record, rows=rows, sm_count=sm_count, ctas=7, arch=arch, packed=packed
+    )
+    assert again == grid, (arch, rows, packed)
+    ctas = grid[0]
+    assert grid[1:] == (1, 1), grid
     blocks, wave = -(-rows // 16), 6 * sm_count
-    if rows < 8192 * sm_count:
-        assert ctas == blocks
+    if rows < rule[key][arch] * sm_count:
+        assert ctas == blocks, (arch, rows, packed, ctas)
     else:
-        assert -(-blocks // ctas) <= 2
-        assert ctas == blocks or ctas % wave == 0
-        assert ctas == blocks or (ctas - wave) * 2 < blocks
+        assert -(-blocks // ctas) <= 2, (arch, rows, packed, ctas)
+        assert ctas == blocks or ctas % wave == 0, (arch, rows, packed, ctas)
+        assert ctas == blocks or (ctas - wave) * 2 < blocks, (arch, rows, ctas)
+    return ctas
+
+
+@pytest.mark.parametrize(("rows", "sm_count", "arch", "ctas"), PIPE_FORWARD_GRIDS)
+def test_pipelined_forward_grid_is_a_block_a_cta_then_whole_waves(
+    rows, sm_count, arch, ctas
+):
+    # the pipelined forward of ``arch`` launches ``ctas`` CTAs on packed rows
+    # (``packed`` True, the default); every architecture's pipelined forward
+    # launches one CTA a block below its cut, whole waves from it
+    records = _pipelined_records()
+    record = records[arch]
+    assert loader.launch_grid(record, rows=rows, sm_count=sm_count, arch=arch) == (
+        ctas,
+        1,
+        1,
+    )
+    assert _check_pipelined_grid(record, arch, rows, sm_count, True) == ctas
+    for each, other in records.items():
+        _check_pipelined_grid(other, each, rows, sm_count, True)
+
+
+@pytest.mark.parametrize(
+    ("rows", "sm_count", "arch", "ctas"), STRIDED_PIPE_FORWARD_GRIDS
+)
+def test_pipelined_forward_grid_of_rows_not_read_as_packed(rows, sm_count, arch, ctas):
+    # fwd_pipe launches ``ctas`` CTAs on rows the kernel does not read as
+    # packed; the pipelined forward of packed rows only (sm_107a) launches the
+    # grid of packed rows on any rows
+    records = _pipelined_records()
+    assert _check_pipelined_grid(records[arch], arch, rows, sm_count, False) == ctas
+    packed_only = records["sm_107a"]
+    assert STRIDED_CUT not in packed_only["grid_rule"]
+    assert loader.launch_grid(
+        packed_only, rows=rows, sm_count=sm_count, arch="sm_107a", packed=False
+    ) == loader.launch_grid(packed_only, rows=rows, sm_count=sm_count, arch="sm_107a")
+
+
+def test_pipelined_forward_grid_needs_an_architecture_its_cut_keys():
+    """A pipelined forward record's cuts are keyed by architecture:
+    ``launch_grid`` without ``arch``, with ``arch`` None, or with an
+    architecture a cut does not key (another product's, or an exported one the
+    record does not ship on) raises ``ValueError`` naming the record's
+    kernel, the cut, the architecture and the keys, at any rows (below the cut
+    too) and for rows read as packed or not; with each of its architectures
+    it gives a grid.  A forward whose rule has no cut (the mid forward)
+    takes whole waves whatever ``arch``, and a rule whose cut is a single
+    number serves every architecture and none."""
+    for record in {id(r): r for r in _pipelined_records().values()}.values():
+        name = record["kernel"]
+        rule = record["grid_rule"]
+        others = [arch for arch in loader.ARCHES if arch not in record["arches"]]
+        for packed in (True, False):
+            key = STRIDED_CUT if not packed and STRIDED_CUT in rule else CUT
+            keys = str(sorted(rule[key]))
+            for rows in (1, 16 * 1024 * 148, 2**31 - 1):
+                for arch in (None, "sm_90a", *others):
+                    with pytest.raises(ValueError) as raised:
+                        loader.launch_grid(
+                            record, rows=rows, sm_count=148, arch=arch, packed=packed
+                        )
+                    message = str(raised.value)
+                    for part in (name, key, repr(arch), keys):
+                        assert part in message, (name, arch, packed, message)
+                with pytest.raises(ValueError, match=name):
+                    loader.launch_grid(record, rows=rows, sm_count=148, packed=packed)
+                for arch in record["arches"]:
+                    got = loader.launch_grid(
+                        record, rows=rows, sm_count=148, arch=arch, packed=packed
+                    )
+                    assert got[1:] == (1, 1) and got[0] >= 1, (name, arch, got)
+    mid = loader.MODULES[loader.ROUTES["sm_100a"]["fwd_mid"]]
+    for arch in (None, "sm_90a", *loader.ARCHES):
+        for packed in (True, False):
+            got = loader.launch_grid(
+                mid, rows=16 * 888 * 2 + 1, sm_count=148, arch=arch, packed=packed
+            )
+            assert got == (1776, 1, 1), (arch, packed, got)
+    # one number: 100 rows per SM on 7 SMs, a CTA a block up to 699 rows
+    single = {
+        "ctas_per_sm": 6,
+        "kind": "persistent_row_blocks",
+        "max_blocks_per_cta": 2,
+        CUT: 100,
+        "rows_per_block": 16,
+    }
+    for arch in (None, "sm_90a", *loader.ARCHES):
+        for packed in (True, False):
+            for rows, ctas in ((699, 44), (700, 42)):
+                got = loader.launch_grid(
+                    {"grid_rule": single},
+                    rows=rows,
+                    sm_count=7,
+                    arch=arch,
+                    packed=packed,
+                )
+                assert got == (ctas, 1, 1), (arch, packed, rows, got)
+
+
+def test_forward_packed_is_the_kernels_packed_rows_test():
+    """``forward_packed`` (host only): the persistent forward kernels' test of
+    packed rows, both head strides 128 and both token strides ``heads *
+    128``; a single token's stride (passed as 0), a broadcast of ``x`` or
+    ``z`` over tokens, a gate or an ``x`` sliced from a projection,
+    head-major rows and heads of another stride fail it, and so does any
+    one stride off."""
+    for strides, want in (
+        ((48, 48 * D, D, 48 * D, D), True),
+        ((1, D, D, D, D), True),
+        ((48, 0, D, 0, D), False),
+        ((48, 0, D, 48 * D, D), False),
+        ((48, 48 * D, D, 0, D), False),
+        ((48, 48 * D, D, 2 * 48 * D + 16, D), False),
+        ((48, 2 * 48 * D + 16, D, 48 * D, D), False),
+        ((48, D, 257 * D, D, 257 * D), False),
+        ((48, 2 * 48 * D, 2 * D, 2 * 48 * D, 2 * D), False),
+    ):
+        assert loader.forward_packed(*strides) is want, strides
+    for heads in (1, 2, 48, 3120):
+        row = heads * D
+        assert loader.forward_packed(heads, row, D, row, D) is True, heads
+        for slot in range(1, 5):
+            for delta in (-16, 16):
+                strides = [heads, row, D, row, D]
+                strides[slot] += delta
+                assert loader.forward_packed(*strides) is False, (heads, strides)
+
+
+# SM counts of the host's comparison of the grids ``run_module`` launches
+# with ``launch_grid``'s: the products' (148, 152, 212) and one more.
+HOST_GRID_SM_COUNTS = (148, 152, 160, 212)
+# The architectures of that comparison: the exported ones and one that no
+# record's cut keys.
+HOST_GRID_ARCHES = (*loader.ARCHES, "sm_90a")
+# Strides (in elements) of ``x`` and ``z`` the host passes a kernel in that
+# comparison (``(heads, x_tok, x_head, z_tok, z_head)``): packed rows (48
+# heads, one head) and rows the kernels do not read as packed (one token,
+# whose stride is passed as 0; a gate or an ``x`` sliced from a projection;
+# head-major rows; ``x`` and ``z`` broadcast over tokens, or one of them;
+# heads of stride 256; mixed strides).
+HOST_STRIDES = {
+    "contiguous": (48, 48 * D, D, 48 * D, D),
+    "one_head": (1, D, D, D, D),
+    "one_token": (48, 0, D, 0, D),
+    "projection": (48, 48 * D, D, 2 * 48 * D + 16, D),
+    "x_projection": (48, 2 * 48 * D + 16, D, 48 * D, D),
+    "head_major": (48, D, 257 * D, D, 257 * D),
+    "broadcast": (48, 0, D, 0, D),
+    "x_broadcast": (48, 0, D, 48 * D, D),
+    "z_broadcast": (48, 48 * D, D, 0, D),
+    "wide_heads": (48, 2 * 48 * D, 2 * D, 2 * 48 * D, 2 * D),
+    "mixed": (48, 48 * D, D, D, 257 * D),
+}
+
+
+def _forward_names():
+    """Every record of the forwards of whole waves (grid kind
+    ``persistent_row_blocks``: the extra-long, long, mid and pipelined
+    forwards)."""
+    return sorted(
+        name
+        for name, record in loader.MODULES.items()
+        if record["grid_rule"]["kind"] == "persistent_row_blocks"
+    )
+
+
+def _keyed(rule):
+    """Whether a cut of ``rule`` is keyed by architecture: then a call on an
+    architecture it does not key (``sm_90a``, which no cut keys) raises
+    ``launch_grid``'s ``ValueError``, for rows of that cut's reading."""
+    return any(isinstance(rule.get(key), dict) for key in (CUT, STRIDED_CUT))
+
+
+def _computes_grid(rule, arch):
+    """Whether ``run_module`` computes the grid of a forward of ``rule`` on
+    ``arch`` itself, with no call of ``launch_grid``: each cut of the rule (it
+    may have none: whole waves at any rows) is keyed by architecture, with
+    ``arch`` among the keys.  A cut of one number or None, or one keyed
+    without ``arch``, takes ``launch_grid``."""
+    return all(
+        isinstance(rule[key], dict) and arch in rule[key]
+        for key in (CUT, STRIDED_CUT)
+        if key in rule
+    )
+
+
+def _host_launches(patch, device):
+    """Patch the registry so that ``run_module`` runs no kernel: each launch
+    appends ``(name, grid)`` (``_launched_grid``) to the returned list, on a
+    device of ``device[0]`` SMs and architecture ``device[1]`` (a list the
+    caller sets before each call), with no stream."""
+    launched = []
+
+    def entry(name, device_index):
+        return lambda *args: launched.append((name, _launched_grid(name, args)))
+
+    patch.setattr(loader, "_sm_count_and_arch", lambda index: tuple(device))
+    patch.setattr(loader, "_entry", entry)
+    patch.setattr(loader, "_ffi_device", lambda index: None)
+    patch.setattr(loader, "current_raw_stream", lambda: lambda index: None)
+    patch.setattr(
+        loader,
+        "tvm_ffi",
+        SimpleNamespace(use_raw_stream=lambda *_: contextlib.nullcontext()),
+    )
+    return launched
+
+
+def _launch_grid_calls(patch):
+    """Patch the registry's ``launch_grid`` so that each call adds one to the
+    returned one-item list, then gives its grid (or raises its
+    ``ValueError``)."""
+    calls = [0]
+    launch_grid = loader.launch_grid
+
+    def spy(*args, **kwargs):
+        calls[0] += 1
+        return launch_grid(*args, **kwargs)
+
+    patch.setattr(loader, "launch_grid", spy)
+    return calls
+
+
+def _host_grid_rows(rule, arch, sm_count):
+    """Row counts of ``rule``'s grid on ``arch`` with ``sm_count`` SMs: a few
+    rows, a block and multiples of it, about one and two waves (of
+    ``max_blocks_per_cta`` blocks a CTA), the kernels' row limit, and each
+    cut of the rule (a single number, or keyed by ``arch``) times the SMs and
+    the fewest rows of whole waves at or above it: each of them, a row less
+    and a row more."""
+    per_block = rule.get("rows_per_block", rule.get("rows_per_cta", 16))
+    wave = rule.get("ctas_per_sm", 1) * sm_count
+    step = wave * rule.get("max_blocks_per_cta", 1) * per_block
+    edges = [per_block, 2 * per_block, 3 * per_block, 7 * per_block]
+    edges += [wave * per_block, step, 2 * step, 7 * step + 3 * per_block, 2**31 - 1]
+    for key in (CUT, STRIDED_CUT):
+        cut = rule.get(key)
+        if isinstance(cut, dict):
+            cut = cut.get(arch)
+        if cut is not None:
+            edges += [cut * sm_count, -(-cut * sm_count // step) * step]
+    rows = {1, 2, 3}
+    for edge in edges:
+        rows |= {edge - 1, edge, edge + 1}
+    return sorted(r for r in rows if 1 <= r < 2**31)
+
+
+def _host_values(record, strides, ctas):
+    """Logical arguments of a launch of ``record`` without a kernel: the
+    ``heads``, ``x_tok``, ``x_head``, ``z_tok`` and ``z_head`` of ``strides``
+    where the record takes them, the backward's ``ctas``, 0 for every other
+    argument."""
+    logical = record["logical"]
+    values = dict.fromkeys(logical.values(), 0)
+    keys = ("heads", "x_tok", "x_head", "z_tok", "z_head")
+    for key, value in zip(keys, strides, strict=True):
+        if key in logical:
+            values[logical[key]] = value
+    values["ctas"] = ctas
+    return values
+
+
+def _launched_or_raised(launched, name, values, rows):
+    """The grid ``run_module`` launches for module ``name`` (``launched``:
+    ``_host_launches``'s list), or the type and text of the ``ValueError`` it
+    raises."""
+    launched.clear()
+    try:
+        loader.run_module(name, values, rows=rows, device_index=0)
+    except ValueError as error:
+        assert not launched, (name, launched)
+        return ValueError, str(error)
+    ((kernel, grid),) = launched
+    assert kernel == name, (kernel, name)
+    return grid
+
+
+def _grid_or_raised(record, rows, sm_count, ctas, arch, packed):
+    """``launch_grid``'s grid, or the type and text of its ``ValueError``."""
+    try:
+        return loader.launch_grid(
+            record, rows=rows, sm_count=sm_count, ctas=ctas, arch=arch, packed=packed
+        )
+    except ValueError as error:
+        return ValueError, str(error)
+
+
+def _check_host_grids(launched, calls, device, name, layouts):
+    """``run_module``'s grid (or ``ValueError``) of module ``name`` is
+    ``launch_grid``'s, with ``packed`` ``forward_packed`` of the strides and
+    ``ctas`` the call's, for each of ``layouts`` (``HOST_STRIDES``), on each
+    of ``HOST_GRID_ARCHES`` and ``HOST_GRID_SM_COUNTS`` at
+    ``_host_grid_rows`` of its rule as it is now; each ``run_module`` call
+    calls ``launch_grid`` (``calls``: ``_launch_grid_calls``'s list) never
+    where it computes a forward's grid itself (``_computes_grid``), else
+    once.  Returns ``(raised, differ)``: whether some call raised
+    ``ValueError``, and the architectures on which the grids of rows read as
+    packed and of other rows differ at some row count."""
+    record = loader.MODULES[name]
+    rule = record["grid_rule"]
+    forward = rule["kind"] == "persistent_row_blocks"
+    raised, differ = False, set()
+    for arch in HOST_GRID_ARCHES:
+        want_calls = 0 if forward and _computes_grid(rule, arch) else 1
+        for sm_count in HOST_GRID_SM_COUNTS:
+            device[:] = (sm_count, arch)
+            for rows in _host_grid_rows(rule, arch, sm_count):
+                ctas = rows % 4093 + 1
+                grids = {}
+                for layout in layouts:
+                    strides = HOST_STRIDES[layout]
+                    packed = loader.forward_packed(*strides)
+                    values = _host_values(record, strides, ctas)
+                    before = calls[0]
+                    got = _launched_or_raised(launched, name, values, rows)
+                    made = calls[0] - before
+                    want = _grid_or_raised(record, rows, sm_count, ctas, arch, packed)
+                    what = (name, arch, sm_count, rows, layout)
+                    assert got == want, (*what, got, want)
+                    assert made == want_calls, (*what, made, want_calls)
+                    if want[0] is ValueError:
+                        raised = True
+                    else:
+                        grids[packed] = want
+                if len(set(grids.values())) > 1:
+                    differ.add(arch)
+    return raised, differ
+
+
+def test_run_module_launches_the_grids_of_launch_grid():
+    """Without a device (``_host_launches``): every record of every grid kind,
+    on each of ``HOST_GRID_ARCHES`` (its own and others) and
+    ``HOST_GRID_SM_COUNTS`` SMs, at ``_host_grid_rows`` of its rule (its
+    cuts times the SMs and a row either side, multiples of its blocks, few
+    rows), launches ``launch_grid``'s grid for the call's rows, SM count,
+    ``ctas`` and architecture and ``forward_packed`` of its strides (every
+    layout of ``HOST_STRIDES`` for a forward of whole waves: rows read as
+    packed and not; a packed and a strided one for the others), and raises
+    its ``ValueError`` where it does.  A record whose cuts are keyed by
+    architecture raises it on one they do not key, and on each of its
+    architectures the grids of the two readings differ at some row count
+    where its rule has a cut of rows not read as packed.  ``run_module``
+    calls ``launch_grid`` never for a forward on its own architectures
+    (``_computes_grid``), and once for a forward on an architecture its cuts
+    do not key and for a record of every other grid kind."""
+    forwards = _forward_names()
+    assert any(_keyed(loader.MODULES[name]["grid_rule"]) for name in forwards)
+    device = [0, ""]
+    with pytest.MonkeyPatch.context() as patch:
+        launched = _host_launches(patch, device)
+        calls = _launch_grid_calls(patch)
+        for name, record in loader.MODULES.items():
+            rule = record["grid_rule"]
+            if name in forwards:
+                layouts = tuple(HOST_STRIDES)
+                for arch in record["arches"]:
+                    assert _computes_grid(rule, arch), (name, arch)
+            else:
+                layouts = ("contiguous", "projection")
+            raised, differ = _check_host_grids(launched, calls, device, name, layouts)
+            assert raised is _keyed(rule), (name, raised)
+            if name in forwards and STRIDED_CUT in rule:
+                assert differ == set(record["arches"]), (name, differ)
+            else:
+                assert not differ, (name, differ)
+
+
+# A cut that a variant of ``FORWARD_RULE_VARIANTS`` deletes from the rule.
+DELETE = object()
+# Forward rules changed at run time, as functions of the record's
+# architectures giving the cuts to set (``DELETE``: delete the cut): the cut
+# of rows not read as packed above the other; cuts of one number (on any
+# architecture), also beside a cut keyed by architecture; cuts of 0 (whole
+# waves at any rows); one cut keyed by the first architecture only; no cut of
+# rows not read as packed; no cut (whole waves at any rows, as the mid
+# forward); a cut of rows not read as packed only; cuts of None (no cut, as
+# ``launch_grid`` reads them).  Where a variant sets a cut a forward's rule
+# has not, the rule gains it.
+FORWARD_RULE_VARIANTS = {
+    "strided_above": lambda arches: {
+        CUT: dict.fromkeys(arches, 400),
+        STRIDED_CUT: dict.fromkeys(arches, 5600),
+    },
+    "numbers": lambda arches: {CUT: 100, STRIDED_CUT: 50},
+    "number_and_keyed": lambda arches: {
+        CUT: 6000,
+        STRIDED_CUT: dict.fromkeys(arches, 500),
+    },
+    "zero": lambda arches: {
+        CUT: dict.fromkeys(arches, 0),
+        STRIDED_CUT: dict.fromkeys(arches, 0),
+    },
+    "packed_first_only": lambda arches: {
+        CUT: {arches[0]: 8192},
+        STRIDED_CUT: dict.fromkeys(arches, 500),
+    },
+    "strided_first_only": lambda arches: {
+        CUT: dict.fromkeys(arches, 5600),
+        STRIDED_CUT: {arches[0]: 400},
+    },
+    "no_strided": lambda arches: {STRIDED_CUT: DELETE},
+    "no_cut": lambda arches: {CUT: DELETE, STRIDED_CUT: DELETE},
+    "strided_only": lambda arches: {
+        CUT: DELETE,
+        STRIDED_CUT: dict.fromkeys(arches, 400),
+    },
+    "none": lambda arches: {CUT: None, STRIDED_CUT: None},
+}
+# The layouts of those rules' host comparison: rows read as packed (of 48
+# heads and of one) and not (one token, a projection, head-major rows and a
+# broadcast over tokens).
+VARIANT_LAYOUTS = (
+    "contiguous",
+    "one_head",
+    "one_token",
+    "projection",
+    "head_major",
+    "broadcast",
+)
+
+
+def test_run_module_reads_the_forward_rule_at_each_call():
+    """Without a device (``_host_launches``), each forward record's rule
+    (every forward of whole waves) changed at run time to each of
+    ``FORWARD_RULE_VARIANTS`` in turn (and then restored): ``run_module``'s
+    grid at the next call is ``launch_grid``'s for the changed rule, or its
+    ``ValueError``, on every architecture of ``HOST_GRID_ARCHES`` and
+    ``HOST_GRID_SM_COUNTS`` SMs, at ``_host_grid_rows`` of the changed rule,
+    for ``VARIANT_LAYOUTS``; it calls ``launch_grid`` once where
+    ``_computes_grid`` does not hold for the changed rule (a cut of one
+    number or None, or one keyed without the architecture), else never."""
+    device = [0, ""]
+    with pytest.MonkeyPatch.context() as patch:
+        launched = _host_launches(patch, device)
+        calls = _launch_grid_calls(patch)
+        for name in _forward_names():
+            record = loader.MODULES[name]
+            rule = record["grid_rule"]
+            for variant, cuts in FORWARD_RULE_VARIANTS.items():
+                with pytest.MonkeyPatch.context() as change:
+                    for key, cut in cuts(record["arches"]).items():
+                        if cut is DELETE:
+                            change.delitem(rule, key, raising=False)
+                        else:
+                            change.setitem(rule, key, cut)
+                    raised, _ = _check_host_grids(
+                        launched, calls, device, name, VARIANT_LAYOUTS
+                    )
+                    assert raised is _keyed(rule), (name, variant, raised)
+            raised, _ = _check_host_grids(
+                launched, calls, device, name, VARIANT_LAYOUTS
+            )
+            assert raised is _keyed(rule), (name, raised)
+
+
+# The pipelined forward's grids on this device, forced: its record's cuts
+# patched to 1 row per SM (whole waves at every row count of its bands) and to
+# 2**31 rows per SM (one CTA a block), and as shipped.  Its rows: packed rows
+# (contiguous ``[T, H, 128]`` and flat ``[T * H, 128]``); ``x`` and ``z``, or
+# one of them, broadcast over tokens (token stride 0, rows the kernel does not
+# read as packed: on sm_100a and sm_103a the pipelined forward reads them at
+# their token stride; on sm_107a its program of packed rows does not run
+# them); and the same rows as one token ``[1, T * H, 128]`` (its token stride
+# passed as 0: on sm_100a and sm_103a rows the kernel does not read as packed;
+# on sm_107a the program of packed rows runs it, passed the token stride
+# ``H * 128``).  Tokens of 47 heads: partial last row blocks.
+PIPE_GRID_LAYOUTS = (
+    "contiguous",
+    "flat",
+    "broadcast",
+    "x_broadcast",
+    "z_broadcast",
+    "one_token",
+)
+PIPE_GRID_HEADS = 47
+
+
+def _pipe_grid_tokens(arch: str, sm_count: int) -> list[int]:
+    """Token counts of ``PIPE_GRID_HEADS`` heads in each band of packed rows
+    of ``arch``'s pipelined forward (``FORWARD_BANDS``) on ``sm_count`` SMs:
+    the fewest past the band's first row per SM, the most up to its last
+    (four times its first where it has no end) and their middle."""
+    tokens, first = [], 1
+    for last, role in loader.FORWARD_BANDS[arch]:
+        if role in ("fwd_pipe", "fwd_pipe_packed"):
+            end = 4 * first if last is None else int(last)
+            low = -(-first * sm_count // PIPE_GRID_HEADS)
+            high = end * sm_count // PIPE_GRID_HEADS
+            tokens += [low, (low + high) // 2, high]
+        if last is not None:
+            first = int(last) + 1
+    return sorted(set(tokens))
+
+
+@pytest.mark.parametrize("layout", PIPE_GRID_LAYOUTS)
+def test_pipelined_forward_gives_the_same_bits_on_both_grids(layout, launches):
+    """The pipelined forward of this device (``fwd_pipe`` or
+    ``fwd_pipe_packed``), at ``_pipe_grid_tokens`` of ``PIPE_GRID_HEADS``
+    heads, in each of
+    ``PIPE_GRID_LAYOUTS``: with its cuts forced to whole waves and to one CTA
+    a block (the rule changed at run time) and as shipped, the call launches
+    the pipelined forward on ``launch_grid``'s grid (``_record_launches``:
+    the grid the kernel is launched with) for the device's SM count and
+    architecture and whether the kernel reads the rows as packed
+    (``forward_packed``; for the program of packed rows only the same grid
+    either way), and gives the same ``y`` bits on every grid; at some row
+    count the two forced grids differ, and where the rule has a cut of rows
+    not read as packed the shipped grid at some row count is not that of the
+    other reading of the rows."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    sms = loader.device_sm_count(device_index)
+    routes = loader.ROUTES[arch]
+    role = "fwd_pipe" if "fwd_pipe" in routes else "fwd_pipe_packed"
+    name = routes[role]
+    record = loader.MODULES[name]
+    broadcast = layout.endswith("broadcast")
+    if broadcast and role == "fwd_pipe_packed":
+        pytest.skip(f"{arch}: rows broadcast over tokens run no pipelined forward")
+    rule = record["grid_rule"]
+    cuts = [key for key in (CUT, STRIDED_CUT) if key in rule]
+    # rows broadcast over tokens and one token: not packed rows to the
+    # pipelined forward of a rule with a cut of such rows
+    packed = not (broadcast or layout == "one_token") or STRIDED_CUT not in rule
+    differ = other_reading = 0
+    for T in _pipe_grid_tokens(arch, sms):
+        rows = T * PIPE_GRID_HEADS
+        assert loader.module_for_rows(arch, "fwd", rows, sms) == name, rows
+        if layout == "one_token":
+            tokens, heads = 1, rows
+        else:
+            tokens, heads = T, PIPE_GRID_HEADS
+        base = "flat" if layout == "flat" else "contiguous"
+        x, z, w, _ = make(tokens, heads, layout=base, seed=41)
+        if layout in ("broadcast", "x_broadcast"):
+            x = x[:1].expand(x.shape)
+        if layout in ("broadcast", "z_broadcast"):
+            z = z[:1].expand(z.shape)
+        ys, grids = [], []
+        for forced in (None, 1, 2**31):
+            with pytest.MonkeyPatch.context() as patch:
+                if forced is not None:
+                    for key in cuts:
+                        patch.setitem(rule, key, {each: forced for each in rule[key]})
+                launched = _record_launches(patch)
+                launches.clear()
+                ys.append(forward(x, z, w, EPS))
+                assert launches == [name], (rows, forced, launches)
+                ((kernel, grid),) = launched
+                assert kernel == name, (kernel, name)
+                want = loader.launch_grid(
+                    record, rows=rows, sm_count=sms, arch=arch, packed=packed
+                )
+                assert grid == want, (layout, rows, forced, grid, want)
+                if forced is None:
+                    other = loader.launch_grid(
+                        record, rows=rows, sm_count=sms, arch=arch, packed=not packed
+                    )
+                    other_reading += other != grid
+                grids.append(grid)
+        blocks = -(-rows // 16)
+        assert grids[2] == (blocks, 1, 1), (rows, grids)
+        assert grids[1][0] <= blocks and grids[1][1:] == (1, 1), (rows, grids)
+        differ += grids[1] != grids[2]
+        for y, forced in zip(ys[1:], (1, 2**31), strict=True):
+            assert torch.equal(y.view(torch.int16), ys[0].view(torch.int16)), (
+                f"{layout} {tokens}x{heads} on {arch}: y with the cut at "
+                f"{forced} rows per SM"
+            )
+    assert differ, (arch, layout, "the forced grids never differ")
+    assert other_reading or STRIDED_CUT not in rule, (
+        arch,
+        layout,
+        "the other reading of the rows never gives another grid",
+    )
 
 
 # (rows, SMs) of the short forward: one CTA per 16-row block, up to 12 rows per
@@ -4287,14 +4991,17 @@ def test_short_forward_grid_is_one_cta_a_block_beside_16_held_sms(rows, sm_count
     assert record["launch"]["block"] == (256, 1, 1)
     assert record["launch"]["dynamic_smem_bytes"] == 0
     assert record["arches"] == ["sm_100a", "sm_103a", "sm_107a"]
-    grid = loader.launch_grid(record, rows=rows, sm_count=sm_count)
-    assert grid == (-(-rows // 16), 1, 1)
     for arch in routed:
+        grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, arch=arch)
+        assert grid == (-(-rows // 16), 1, 1), arch
         assert grid[0] <= SHORT_FORWARD_MAX_CTAS[arch](sm_count), (arch, grid)
-    assert loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=7) == grid
+        got = loader.launch_grid(
+            record, rows=rows, sm_count=sm_count, ctas=7, arch=arch
+        )
+        assert got == grid, arch
     # the plain forward: one 64-thread CTA per 8-row block
     fwd = loader.MODULES[loader.route_module("sm_100a", "fwd")]
-    assert loader.launch_grid(fwd, rows=rows, sm_count=sm_count) == (
+    assert loader.launch_grid(fwd, rows=rows, sm_count=sm_count, arch="sm_100a") == (
         -(-rows // 8),
         1,
         1,
@@ -4309,7 +5016,7 @@ def test_short_forward_grid_bound_holds_from_its_fewest_sms(arch):
         rows = _short_end(arch, sm_count)
         got = loader.module_for_rows(arch, "fwd", rows, sm_count, packed=False)
         assert got == name
-        grid = loader.launch_grid(record, rows=rows, sm_count=sm_count)
+        grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, arch=arch)
         fits = grid[0] <= SHORT_FORWARD_MAX_CTAS[arch](sm_count)
         assert fits == (sm_count >= SHORT_FORWARD_MIN_SMS[arch]), (
             arch,
@@ -4336,7 +5043,9 @@ def test_short_forward_grid_at_its_bands_end_keeps_the_bound_on_this_device():
     rows = _short_end(arch, sm_count)
     assert loader.module_for_rows(arch, "fwd", rows, sm_count, packed=False) == name
     assert loader.module_for_rows(arch, "fwd", rows + 1, sm_count, packed=False) != name
-    grid = loader.launch_grid(loader.MODULES[name], rows=rows, sm_count=sm_count)
+    grid = loader.launch_grid(
+        loader.MODULES[name], rows=rows, sm_count=sm_count, arch=arch
+    )
     assert grid == (-(-rows // 16), 1, 1)
     assert grid[0] <= SHORT_FORWARD_MAX_CTAS[arch](sm_count), (arch, sm_count, grid)
 
@@ -4372,11 +5081,12 @@ def test_l32_tiny_forward_runs_packed_rows_one_cta_a_4_row_block(sm_count):
             assert loader.module_for_rows(arch, "fwd", rows, sm_count) == name
             got = loader.module_for_rows(arch, "fwd", rows, sm_count, packed=False)
             assert got != name, (arch, rows)
-            grid = loader.launch_grid(record, rows=rows, sm_count=sm_count)
+            grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, arch=arch)
             assert grid == (-(-rows // 4), 1, 1)
-            assert (
-                loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=7) == grid
+            got = loader.launch_grid(
+                record, rows=rows, sm_count=sm_count, ctas=7, arch=arch
             )
+            assert got == grid
         got = loader.module_for_rows(arch, "fwd", end + 1, sm_count)
         assert got == loader.ROUTES[arch]["fwd_tiny"], (arch, got)
 
@@ -4406,11 +5116,12 @@ def test_tiny_forward_runs_packed_rows_one_cta_an_8_row_block(sm_count):
             assert loader.module_for_rows(arch, "fwd", rows, sm_count) == name
             got = loader.module_for_rows(arch, "fwd", rows, sm_count, packed=False)
             assert got != name, (arch, rows)
-            grid = loader.launch_grid(record, rows=rows, sm_count=sm_count)
+            grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, arch=arch)
             assert grid == (-(-rows // 8), 1, 1)
-            assert (
-                loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=7) == grid
+            got = loader.launch_grid(
+                record, rows=rows, sm_count=sm_count, ctas=7, arch=arch
             )
+            assert got == grid
         assert loader.module_for_rows(arch, "fwd", end + 1, sm_count) != name
 
 

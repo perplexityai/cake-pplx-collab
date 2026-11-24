@@ -56,6 +56,30 @@ class MoKConfig:
     # value is compared across ranks at workspace creation like every field; a
     # later ``dataclasses.replace`` on one rank only changes that rank's log.
     comm_split_log: bool = False
+    # Per-launch source split of the router-weight-before-down BF16 forward,
+    # decided by the forward kernel on the device: a rank whose source rows
+    # exceed ``source_split_threshold`` times the mean source rows of the
+    # ranks runs ``source_split_comm_sms`` forward communication SMs instead of
+    # the forward count in force (when smaller), so its extra shared-expert
+    # tiles get more compute SMs. The mean comes from the launch's own schedule
+    # (``MoKSchedule.owner_routes``), so CUDA Graph replays and layers that
+    # share a workspace decide from their own routing; the split changes no
+    # output bit. ``None`` keeps the forward count.
+    source_split_comm_sms: int | None = None
+    source_split_threshold: float = 1.5
+    # Fixed (forward, backward) split per routed precision: launches with BF16
+    # routed weights use ``bf16_comm_sms``, launches with MXFP8 routed weights
+    # ``mxfp8_comm_sms``; ``None`` (the default) uses ``fwd_num_comm_sms`` /
+    # ``bwd_num_comm_sms``. The facade's ``"auto"`` sets both from the measured
+    # rows of the device and EP group size, so one workspace gives BF16 and
+    # MXFP8 launches the row of their own routed precision; integer counts
+    # leave both ``None``. When set they take precedence over
+    # ``fwd_num_comm_sms`` / ``bwd_num_comm_sms``, so a ``dataclasses.replace``
+    # of those two alone changes no launch. The imbalance split above replaces
+    # either while the load is skewed. The split changes time only, never an
+    # output bit.
+    bf16_comm_sms: tuple[int, int] | None = None
+    mxfp8_comm_sms: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +96,11 @@ class MoKSchedule:
     # A copy made with ``dataclasses.replace`` that changes ``peer_rank``,
     # ``tokens_per_expert`` or the capacity must pass ``layout=None``.
     layout: torch.Tensor | None = None
+    # Routes per owning rank, (ep_size,) int32, the same on every rank: their
+    # sum is every rank's valid routes, from which the before-down forward's
+    # source split reads the mean source rows. ``None`` on a schedule built
+    # without it; that schedule's forward keeps its communication count.
+    owner_routes: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)

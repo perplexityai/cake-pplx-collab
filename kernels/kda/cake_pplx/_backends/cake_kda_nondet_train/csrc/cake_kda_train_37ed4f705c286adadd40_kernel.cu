@@ -365,7 +365,7 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
             int qrs = num_qk_heads * 128;
             long long ext0 = (long long)chunk_bos[chunk];
             int clen = chunk_len[chunk];
-            long long gbase_t = (ext0 * (long long)num_heads + (long long)hv) * 128;
+            long long gbase_t = (ext0 * (long long)num_heads + (long long)hv) * 128ll;
             float* dg_base = dg_ext + (gbase_t + (long long)d_lane);
             long long qoff0 = ext0 * (long long)qrs + (long long)(qk_head * 128 + d_lane);
             __nv_bfloat16* dq_base = dq_ext + qoff0;
@@ -3392,52 +3392,52 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
             asm volatile("tcgen05.fence::before_thread_sync;");
             mbarrier_arrive(p1a_t2_drained_addr);
             if (32 + 8 * th < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th)) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th)) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + d_lane];
             }
             if (32 + 8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 128 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 128 + d_lane];
             }
             if (32 + 8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 256 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 256 + d_lane];
             }
             if (32 + 8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 384 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 384 + d_lane];
             }
             if (32 + 8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 512 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 512 + d_lane];
             }
             if (32 + 8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 640 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 640 + d_lane];
             }
             if (32 + 8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 768 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 768 + d_lane];
             }
             if (32 + 8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 896 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (32 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 896 + d_lane];
             }
             if (32 + 8 * th < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th)) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1024 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th)) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1024 + d_lane];
             }
             if (32 + 8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1152 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1152 + d_lane];
             }
             if (32 + 8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1280 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1280 + d_lane];
             }
             if (32 + 8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1408 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1408 + d_lane];
             }
             if (32 + 8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1536 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1536 + d_lane];
             }
             if (32 + 8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1664 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1664 + d_lane];
             }
             if (32 + 8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1792 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1792 + d_lane];
             }
             if (32 + 8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1920 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (32 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1920 + d_lane];
             }
             mbarrier_arrive(epi_empty_addr + (th) * 8);
             mbarrier_wait(epi_full_addr + (th) * 8, 1);
@@ -3802,52 +3802,52 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
             v1_1241 = v1_1241 + _shfl_xor_sync_265;
             asm volatile("tcgen05.fence::before_thread_sync;");
             if (48 + 8 * th < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th)) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th)) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + d_lane];
             }
             if (48 + 8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 128 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 128 + d_lane];
             }
             if (48 + 8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 256 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 256 + d_lane];
             }
             if (48 + 8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 384 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 384 + d_lane];
             }
             if (48 + 8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 512 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 512 + d_lane];
             }
             if (48 + 8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 640 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 640 + d_lane];
             }
             if (48 + 8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 768 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 768 + d_lane];
             }
             if (48 + 8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 896 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (48 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 896 + d_lane];
             }
             if (48 + 8 * th < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th)) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1024 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th)) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1024 + d_lane];
             }
             if (48 + 8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1152 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1152 + d_lane];
             }
             if (48 + 8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1280 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1280 + d_lane];
             }
             if (48 + 8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1408 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1408 + d_lane];
             }
             if (48 + 8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1536 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1536 + d_lane];
             }
             if (48 + 8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1664 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1664 + d_lane];
             }
             if (48 + 8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1792 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1792 + d_lane];
             }
             if (48 + 8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1920 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (48 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1920 + d_lane];
             }
             mbarrier_arrive(epi_empty_addr + (th) * 8);
             {
@@ -4415,52 +4415,52 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
             v1_1484 = v1_1484 + _shfl_xor_sync_292;
             asm volatile("tcgen05.fence::before_thread_sync;");
             if (16 + 8 * th < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th)) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th)) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + d_lane];
             }
             if (16 + 8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 128 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 128 + d_lane];
             }
             if (16 + 8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 256 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 256 + d_lane];
             }
             if (16 + 8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 384 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 384 + d_lane];
             }
             if (16 + 8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 512 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 512 + d_lane];
             }
             if (16 + 8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 640 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 640 + d_lane];
             }
             if (16 + 8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 768 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 768 + d_lane];
             }
             if (16 + 8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 896 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + (16 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 896 + d_lane];
             }
             if (16 + 8 * th < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th)) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1024 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th)) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1024 + d_lane];
             }
             if (16 + 8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1152 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1152 + d_lane];
             }
             if (16 + 8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1280 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1280 + d_lane];
             }
             if (16 + 8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1408 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1408 + d_lane];
             }
             if (16 + 8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1536 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1536 + d_lane];
             }
             if (16 + 8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1664 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1664 + d_lane];
             }
             if (16 + 8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1792 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1792 + d_lane];
             }
             if (16 + 8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1920 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + (16 + 8 * th) + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(81920 - 32768 * th >> 2) + 1920 + d_lane];
             }
             mbarrier_arrive(epi_empty_addr + (2 + th) * 8);
             asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&off_acc[0])) : "r"(pool_f32_addr + (unsigned int)(112640 + 4 * (qd * 64 + th * 32 + lane_1))));
@@ -4932,52 +4932,52 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
             float _shfl_xor_sync_311 = __shfl_xor_sync(0xFFFFFFFF, v1_1706, 1);
             v1_1706 = v1_1706 + _shfl_xor_sync_311;
             if (8 * th < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + d_lane];
             }
             if (8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 128 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 128 + d_lane];
             }
             if (8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 256 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 256 + d_lane];
             }
             if (8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 384 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 384 + d_lane];
             }
             if (8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 512 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 512 + d_lane];
             }
             if (8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 640 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 640 + d_lane];
             }
             if (8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 768 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 768 + d_lane];
             }
             if (8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 896 + d_lane];
+                *(reinterpret_cast<float*>(dq_f + (((long long)(row0 + 8 * th + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 896 + d_lane];
             }
             if (8 * th < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1024 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1024 + d_lane];
             }
             if (8 * th + 1 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 1) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1152 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 1) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1152 + d_lane];
             }
             if (8 * th + 2 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 2) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1280 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 2) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1280 + d_lane];
             }
             if (8 * th + 3 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 3) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1408 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 3) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1408 + d_lane];
             }
             if (8 * th + 4 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 4) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1536 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 4) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1536 + d_lane];
             }
             if (8 * th + 5 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 5) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1664 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 5) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1664 + d_lane];
             }
             if (8 * th + 6 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 6) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1792 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 6) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1792 + d_lane];
             }
             if (8 * th + 7 < clen) {
-                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 7) * (long long)num_heads + (long long)hv) * 128 + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1920 + d_lane];
+                *(reinterpret_cast<float*>(dk_f + (((long long)(row0 + 8 * th + 7) * (long long)num_heads + (long long)hv) * 128ll + (long long)d_lane)) + (0)) = pool_f32[(98304 - 32768 * th >> 2) + 1920 + d_lane];
             }
             asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&off_acc[0])) : "r"(pool_f32_addr + (unsigned int)(113664 + 4 * (qd * 64 + th * 32 + lane_1))));
             {
@@ -5219,6 +5219,7 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(100464 + r_1 * 128)), "f"(z[0]), "f"(z[1]), "f"(z[2]), "f"(z[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr);
                 }
@@ -5325,6 +5326,7 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(104560 + r_2 * 128)), "f"(z_1[0]), "f"(z_1[1]), "f"(z_1[2]), "f"(z_1[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 8);
                 }
@@ -5475,6 +5477,7 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(100464 + r_3 * 128)), "f"(z_2[0]), "f"(z_2[1]), "f"(z_2[2]), "f"(z_2[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 16);
                 }
@@ -5657,6 +5660,7 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(104560 + r_40 * 128)), "f"(z_3[0]), "f"(z_3[1]), "f"(z_3[2]), "f"(z_3[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 24);
                 }
@@ -5856,16 +5860,16 @@ kernel_cake_kda_train_37ed4f705c286adadd40(const __grid_constant__ CUtensorMap d
                 asm volatile("cp.async.bulk.prefetch.tensor.3d.L2.global.tile [%0, {%1, %2, %3}];" :: "l"((uint64_t)((&q_e))), "r"((int)(64)), "r"((int)(qk_head_h)), "r"((int)(kq0_setup + 56)) : "memory");
             }
             int pf_lane = tid & 31;
-            long long pf_base = ((long long)(row0_h + (pf_lane >> 2)) * (long long)num_heads + (long long)hv_h) * 128 + (long long)((pf_lane & 3) * 32);
-            long long pf_off_2_0 = pf_base + (long long)num_heads * 5120;
+            long long pf_base = ((long long)(row0_h + (pf_lane >> 2)) * (long long)num_heads + (long long)hv_h) * 128ll + (long long)((pf_lane & 3) * 32);
+            long long pf_off_2_0 = pf_base + (long long)num_heads * 5120ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_2_0)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_2_0)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_2_0)));
-            long long pf_off_2_1 = pf_base + (long long)num_heads * 6144;
+            long long pf_off_2_1 = pf_base + (long long)num_heads * 6144ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_2_1)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_2_1)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_2_1)));
-            long long pf_off_2_2 = pf_base + (long long)num_heads * 7168;
+            long long pf_off_2_2 = pf_base + (long long)num_heads * 7168ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_2_2)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_2_2)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_2_2)));

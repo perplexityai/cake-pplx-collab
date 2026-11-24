@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -523,6 +523,7 @@ kernel_cake_mhc_det_train_fwd_map__pair(const __grid_constant__ CUtensorMap X, c
                         qsum[24] = _sub_1;
                         qsum[0] = add;
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     __syncwarp();
                     if (elect_sync()) {
                         mbarrier_arrive(a_empty_addr + (r_stage) * 8);

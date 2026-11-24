@@ -53,8 +53,8 @@ partial-last-tile channel counts and at small and large ``S``: the backward laun
 grid, its outputs are judged against the naive tier, the workspace (the same size at every multiple) reads back zero
 after every launch, under CUDA Graph capture / replay and through the autograd entry (plain and checkpointed).
 
-The narrower channel tiles of ``TILE_OVERRIDES``: each row of ``OVERRIDE_CASES`` (one per architecture, on sm_107a on
-both routes that plan by it) launches the row's
+The narrower channel tiles of ``TILE_OVERRIDES``: each row of ``OVERRIDE_CASES`` (one per architecture, on sm_107a with
+FP32 and with BF16 taps) launches the row's
 tiles, on a caller-owned workspace of the public size and on the package's, with every output judged against the
 naive tier and the workspace zero after the call.  The 32-vector tiles of ``NARROW_TILES`` the same way at every key of the architecture's table
 (``NARROW_CASES``: the key's channel ends and an inner channel count, at token counts inside the key's range), and
@@ -64,9 +64,9 @@ architecture, the row's route and the taps' dtype,
 ``forward_narrow_min_s`` and ``FORWARD_WIDTH_FLOORS``, and one token below a floor or inside a single-tile range of
 ``FORWARD_SINGLE_TILE_ROWS``) launch their 32-vector, width or single tiles on a caller-owned forward workspace of the
 public size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the call.  The
-backward rows of ``FALLBACK_ROWS`` (each key's channel ends, C 640 / 896 and its one-tile channel counts at the key's
-last token count and the next, the inner ones also at S 1000) launch the route's fallback program inside the key's
-token range and the rules' program above it.  The rows of
+backward rows of ``FALLBACK_ROWS`` (each key's channel ends, C 640 / 896 and its C 768 at the key's last token count
+and the next, and at the bound of the C 768 ``NARROW_TILES`` key inside the key, the inner ones also at S 1000) launch
+the route's fallback program inside the key's token range and the rules' program above it.  The rows of
 ``SM_WIDE_ROWS`` (route ``bwd``: each key's lowest, an inner and its highest channel count on both sides of every
 segment's first token count) launch the segment's SM-wide program (one CTA per SM), judged against the naive tier, on a
 caller-owned workspace and the package's (sm_107a's program from 131072 tokens keeps two accumulator copies in the
@@ -75,12 +75,32 @@ programmatic dependent launch, through autograd and checkpointing, beside a kern
 another stream, and beside the deterministic package's SM-wide program in one process.  The forward's narrow rows of
 C 520 to 568 (every one, at the row's token floor and one token below it), the ``fwd_bias`` rows with BF16 taps (their
 own floor and single-tile ranges on sm_103a), and a CUDA Graph capture at a forward row's floor after an eager call one
-token below it.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` (C 576 to 768, one token range per key): at
-S 1000 inside a range and on both sides of each range's ends the static, direct or dynamic program the tables name, the
-static and direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs
-too), with ``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static or direct row);
-a capture above a direct range after an eager call inside it (that call refills no pre-zeroed buffer, so the capture
-zeroes its own); and both packages in one process at a direct row.
+token below it.  The forward keys of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS`` (C 512 to 1024, one token
+range per key; a pair range runs ahead of the static and direct ranges it covers): at S 1000 inside a range and on both
+sides of each range's ends the static, direct, pair direct or dynamic program the tables name, the static, direct and
+pair direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs too),
+with ``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static, direct or pair row);
+at each pair key the pair direct program's plan and token-block grid, its ``y`` bit for bit that of the forward
+without ``PAIR_ROWS`` and of the static program; a capture above a direct range after an eager call inside it (that
+call refills no pre-zeroed buffer, so the capture zeroes its own); and both packages in one process at a direct row
+and at a pair row.  The backward keys of ``DIRECT_ROWS`` (routes ``bwd``, ``bwd_dt`` and ``bwd_bias`` under every
+label of ``BACKWARD_DIRECT_LABELS``; per architecture and route, channel ranges within C 512 to 1024, each with its own
+token range): at each key's channel ends and the channel counts of ``BACKWARD_DIRECT_CHANNELS`` inside it, at its
+first token count, two tokens where it holds them and one token below it in one document, and at S 1000 where it holds
+it, its last token count and one token above it in one, four, 32 and 100 documents, the route's direct program inside
+the range (its split and its grid capped by the call's token blocks) and the program the other tables name outside it,
+on NaN-poisoned outputs and a caller-owned workspace that reads back zero after every call; at every ``bwd_grid_mult``
+(that many times the direct grid) eager and under CUDA Graph replay; every output judged against the naive tier, and
+``dx`` bit for bit that of the route's staged program (the backward keys removed) on the same inputs.  At C 512 the
+backward keys also run S 7 in documents of 1, 2, 1 and 3 tokens and S 5 in documents of 1, 0, 1 and 3 tokens.  A row
+of the channel-switch test inside a backward key runs the direct program there and again one token above the key; a
+``NARROW_CASES`` token count inside one moves one token above it.  The small-S grid cap of
+the single-wave backward (``GRID_CAP_ROWS``, under every label of ``GRID_CAP_LABELS``): at each key's channel ends, at
+each span's ends and one token outside them in one document and at its middle in one, four and 32 documents, the
+programs and splits of the uncapped table; inside a span of the architecture's key ``max(n_ch_tiles, min(grid,
+n_ch_tiles x ceil(S / (n_sub x tokens))))`` CTAs (``grid`` the uncapped launch's), elsewhere and on an architecture
+without a key the uncapped grid; every output judged against the naive tier, the workspace zero after every call and
+``dx`` bit for bit that of the uncapped launch.
 
 This suite names its package once, through ``tests.cake.test_helpers.cake_package`` (key
 ``cake_causal_conv1d_nondet_train``).  Every test skips until the exporter has rendered the package (``build.json``
@@ -157,8 +177,8 @@ CASES = (
     (1000, 1600, "perf"),
 )
 # The rows of every backward route (the first three also under CUDA Graph replay); C 768 at S 4097 lies inside the
-# ``FALLBACK_ROWS`` keys of the bias routes (and of ``bwd_dt_bf16_taps`` on sm_100a), whose fallback runs
-# ``channel_split``'s one tile there.
+# ``FALLBACK_ROWS`` keys of ``bwd_bias`` and ``bwd_dt``, whose fallback runs the 32-vector tiles of
+# their C 768 ``NARROW_TILES`` keys there.
 ROUTE_CASES = (
     (1000, 512, "perf"),
     (4097, 1280, (1000, 0, 3, 3094)),
@@ -174,57 +194,102 @@ REPEAT_CASES = (
     (4097, 1160, (1000, 0, 3, 3094)),
 )
 PRECISION_CASES = ((250340, 512, "perf"), (250340, 1280, "perf"))
-# Rows of ``TILE_OVERRIDES`` per architecture (route, S, C): the backward runs its narrower channel tiles there.  The
-# sm_107a ``bwd_dt`` row serves both routes that plan by it: ``bwd_dt_bf16_taps`` (BF16 taps, through
-# ``TILE_ROUTE``) and ``bwd_dt`` (FP32 taps with a BF16 ``dweight`` out).
+# Rows of ``TILE_OVERRIDES`` per architecture (label, S, C; :data:`ROUTE_LABELS`): the backward runs its narrower
+# channel tiles there.  The sm_107a ``bwd_dt`` row of C 768 serves the route's calls with FP32 and with BF16 taps:
+# label ``"bwd_dt-bf16"`` (BF16 taps) and label ``bwd_dt`` (FP32 taps with a BF16 ``dweight`` out).
 OVERRIDE_CASES = {
     "sm_100a": (("bwd_bias_fp32g", 62585, 2048),),
     "sm_103a": (("bwd", 62585, 1536),),
-    "sm_107a": (("bwd_dt_bf16_taps", 62585, 768), ("bwd_dt", 62585, 768)),
+    "sm_107a": (("bwd_dt-bf16", 62585, 768), ("bwd_dt", 62585, 768)),
 }
 # The token counts a ``NARROW_TILES`` key over every S (one token to ``INT32_MAX``) launches its rows at, in the perf
 # packing: the largest S of ``CASES`` and a longer stream.
 EVERY_S_TOKENS = (4097, 31292)
+# The token counts a ``NARROW_TILES`` key from one token to a token bound (a key that ends below a ``TILE_OVERRIDES``
+# row) launches its rows at besides those of :data:`EVERY_S_TOKENS` inside its range and its last token count: its low
+# edge (one and two tokens, in the one-document packing: :func:`_narrow_docs`) and a short stream.
+BOUNDED_KEY_TOKENS = (1, 2, 1000)
+# The other labels of a backward route's calls (:data:`ROUTE_SETTINGS`), by route: a route's name labels its calls of
+# the first settings.  Route ``bwd_dt`` (SiLU' at the unrounded FP32 preactivation with FP32 and with BF16 taps) runs
+# its calls with BF16 taps under the label ``"bwd_dt-bf16"`` as well (the BF16-taps ``dt`` storage keeps its coverage
+# on route ``bwd_dt``), and route ``bwd_bias`` (the same with FP32 and with BF16 taps) its calls with BF16 taps and a
+# BF16 bias under the label ``"bwd_bias-bf16"``.
+ROUTE_LABELS = {"bwd_dt": ("bwd_dt-bf16",), "bwd_bias": ("bwd_bias-bf16",)}
+
+
+def _route_of(kind: str) -> str:
+    """The backward route a label resolves to (:data:`ROUTE_LABELS`; a route's name labels the route itself)."""
+
+    for route, labels in ROUTE_LABELS.items():
+        if kind in labels:
+            return route
+    return kind
 
 
 def _key_tokens(s_min: int, s_max: int) -> tuple[int, ...]:
-    """The token counts a ``NARROW_TILES`` key's rows launch at: its smallest token count and one token above it
-    (inside its range), or :data:`EVERY_S_TOKENS` for a key over every S."""
+    """The token counts a ``NARROW_TILES`` key's rows launch at: :data:`EVERY_S_TOKENS` for a key over every S; for a
+    key from one token to a token bound (a key that ends below a ``TILE_OVERRIDES`` row), the token counts of
+    :data:`BOUNDED_KEY_TOKENS` and :data:`EVERY_S_TOKENS` inside its range and its last token count; else its smallest
+    token count and one token above it (inside its range)."""
 
     if (s_min, s_max) == (1, loader.INT32_MAX):
         return EVERY_S_TOKENS
+    if s_min == 1:
+        tokens = (*BOUNDED_KEY_TOKENS, *EVERY_S_TOKENS)
+        return tuple(sorted({S for S in tokens if S <= s_max} | {s_max}))
     return tuple(sorted({s_min, min(s_min + 1, s_max)}))
+
+
+def _narrow_docs(S: int) -> str | None:
+    """The packing a ``NARROW_CASES`` row launches in at ``S`` tokens: the perf packing (:func:`doc_lengths`) where
+    each of its :data:`PERF_FRACTIONS` holds a token, else one document (the low edge of a key from one token)."""
+
+    return "perf" if all(int(fraction * S) > 0 for fraction in PERF_FRACTIONS) else None
 
 
 def _narrow_tokens(arch: str, route: str, C: int, s_min: int, s_max: int) -> tuple[int, ...]:
     """The token counts of :func:`_key_tokens` at which the narrow tiles run for ``(arch, route, C)``: a token count
-    inside a segment of ``SM_WIDE_ROWS`` (where the SM-wide program runs its own one-tile split, not the narrow
-    tiles) is replaced by one token below the first segment of the key covering ``C``, when the narrow key's range
-    holds it."""
+    inside a backward range of ``DIRECT_ROWS`` (where the route's direct program runs its own tiles) is replaced by
+    one token above that range, and a token count inside a segment of ``SM_WIDE_ROWS`` (where the SM-wide program
+    runs its own one-tile split, not the narrow tiles) by one token below the first segment of the key covering
+    ``C``, each when the narrow key's range holds it."""
 
     tokens = _key_tokens(s_min, s_max)
+    kept = {S for S in tokens if not loader.direct_row(arch, route, C, S)}
+    direct = loader.direct_row_range(arch, route, C)
+    if (
+        len(kept) < len(tokens)
+        and direct is not None
+        and s_min <= direct[1] + 1 <= s_max
+    ):
+        kept.add(direct[1] + 1)
     segments = loader.sm_wide_segments(arch, route, C)
     if segments is None:
-        return tokens
-    kept = {S for S in tokens if loader.sm_wide_module(arch, route, C, S) is None}
+        return tuple(sorted(kept))
+    wide = {S for S in kept if loader.sm_wide_module(arch, route, C, S) is None}
     below = segments[0][0] - 1
-    if len(kept) < len(tokens) and s_min <= below <= s_max:
-        kept.add(below)
-    return tuple(sorted(kept))
+    if (
+        len(wide) < len(kept)
+        and s_min <= below <= s_max
+        and not loader.direct_row(arch, route, C, below)
+    ):
+        wide.add(below)
+    return tuple(sorted(wide))
 
 
 # The rows of ``NARROW_TILES`` (rendered with the table; empty for an architecture without rows) the narrow-tile
-# test launches, per architecture (route, S, C): each key's lowest, an inner and its highest channel count at the
-# token counts of :func:`_narrow_tokens` (inside the delivered range; ``CASES`` stop at S = 4097; at a channel count
-# of ``SM_WIDE_ROWS`` the token count below its first segment), on the key's route and on every route that plans by
-# its rows (``TILE_ROUTE``).
+# test launches, per architecture (label, S, C): each key's lowest, an inner and its highest channel count at the
+# token counts of :func:`_narrow_tokens` (inside the delivered range; ``CASES`` stop at S = 4097; inside a backward
+# range of ``DIRECT_ROWS`` the token count above it; at a channel count of ``SM_WIDE_ROWS`` the token count below its
+# first segment), on the key's route (every route plans by its own rows), under each label of the route
+# (:data:`ROUTE_LABELS`).
 NARROW_CASES = {
     arch: tuple(
-        (route, S, C)
-        for (base, c_lo, c_hi), (s_min, s_max) in sorted(rows.items())
-        for route in (base, *sorted(t for t, b in loader.TILE_ROUTE.items() if b == base))
+        (label, S, C)
+        for (route, c_lo, c_hi), (s_min, s_max) in sorted(rows.items())
         for C in sorted({int(c_lo), (int(c_lo) + int(c_hi)) // 16 * 8, int(c_hi)})
         for S in _narrow_tokens(arch, route, C, int(s_min), int(s_max))
+        for label in (route, *ROUTE_LABELS.get(route, ()))
     )
     for arch, rows in loader.NARROW_TILES.items()
 }
@@ -290,10 +355,12 @@ LARGE_CASE = (262401, 8192, "perf")
 # The large case's inputs and outputs (x, dy, y, dx: 4 x 4.3 GB), its float64 oracle of y and dx (2 x 17.2 GB) and
 # the naive tier's BF16 y and dx with their blocks (about 4 x 4.3 GB), with headroom.
 LARGE_CASE_FREE_BYTES = 96 * 2**30
+# ``GRAPH_CASES[2]`` is the small row of the capture buffer tests: C 384, below the forward keys (C 512 to 1024), so
+# that its forward takes token-chunk counters.
 GRAPH_CASES = (
     (65, 256, (64, 1)),
     (5, 136, (2, 0, 3)),
-    (1000, 512, "perf"),
+    (1000, 384, "perf"),
     (4097, 1280, (1000, 0, 3, 3094)),
     (4097, 2560, (1000, 0, 3, 3094)),
 )
@@ -309,36 +376,42 @@ GRID_MULT_CASES = (
     (65536, 1280, "perf"),
     (250340, 512, "perf"),
 )
-# The call settings that resolve to each backward route.  ``dweight_dtype`` is the dtype of the preallocated
-# ``dweight`` out a call of the route passes (``None``: none, the taps' dtype): ``bwd_dt`` is FP32 taps with a BF16
-# ``dweight`` out (:func:`_backward` with ``kind`` allocates a fresh one per call).
+# The call settings of each label (a backward route's name, or another label of the route, :data:`ROUTE_LABELS`),
+# which resolve to the label's route.  ``dweight_dtype`` is the dtype of the preallocated ``dweight`` out a call of
+# the route passes (``None``: none, the taps' dtype): label ``bwd_dt`` is FP32 taps with a BF16 ``dweight`` out
+# (:func:`_backward` with ``kind`` allocates a fresh one per call), label ``"bwd_dt-bf16"`` BF16 taps.
 ROUTE_SETTINGS = {
     "bwd": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=None),
     "bwd_dt": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=BF16),
     "bwd_bias": dict(weight_dtype=F32, bias_dtype=F32, policy="bf16", dweight_dtype=None),
     "bwd_fp32g": dict(weight_dtype=F32, bias_dtype=None, policy="fp32", dweight_dtype=None),
     "bwd_bias_fp32g": dict(weight_dtype=F32, bias_dtype=F32, policy="fp32", dweight_dtype=None),
-    "bwd_dt_bf16_taps": dict(weight_dtype=BF16, bias_dtype=None, policy="bf16", dweight_dtype=None),
-    "bwd_bias_bf16_taps": dict(weight_dtype=BF16, bias_dtype=BF16, policy="bf16", dweight_dtype=None),
+    "bwd_dt-bf16": dict(
+        weight_dtype=BF16, bias_dtype=None, policy="bf16", dweight_dtype=None
+    ),
+    "bwd_bias-bf16": dict(weight_dtype=BF16, bias_dtype=BF16, policy="bf16", dweight_dtype=None),
 }
-# The backward routes the autograd entry reaches: it returns ``dweight`` in the taps' dtype, so ``bwd_dt`` (FP32 taps
-# with a BF16 ``dweight`` out) is a route of direct backward calls only.
+# The labels the autograd entry reaches: it returns ``dweight`` in the taps' dtype, so label ``bwd_dt`` (FP32 taps
+# with a BF16 ``dweight`` out) is one of direct backward calls only (the entry reaches route ``bwd_dt`` with BF16
+# taps, label ``"bwd_dt-bf16"``).
 AUTOGRAD_KINDS = tuple(
     kind for kind, settings in ROUTE_SETTINGS.items() if settings["dweight_dtype"] is None
 )
+# The forward route of each label's calls (:func:`_require_route`: the label's own entry, else its route's): a
+# BF16-taps call without a bias runs ``fwd_dt``.
 FORWARD_OF = {
     "bwd": "fwd",
     "bwd_dt": "fwd",
     "bwd_bias": "fwd_bias",
     "bwd_fp32g": "fwd",
     "bwd_bias_fp32g": "fwd_bias",
-    "bwd_dt_bf16_taps": "fwd_dt",
-    "bwd_bias_bf16_taps": "fwd_bias",
+    "bwd_dt-bf16": "fwd_dt",
 }
 # Every dtype combination a backward call takes: taps x bias (none, FP32, BF16) x SiLU' policy x the dweight /
 # dbias out dtypes (each FP32 or BF16, independently of its parameter).  Each resolves to one route: BF16 taps on
-# the fp32g routes, BF16 taps under the "bf16" policy (bwd_dt_bf16_taps, bwd_bias_bf16_taps, with either dweight
-# dtype) and FP32 taps with a BF16 dweight (bwd_dt, and bwd_bias with a bias) are among them.
+# the fp32g routes, every call without a bias under the "bf16" policy with BF16 taps or a BF16 dweight (bwd_dt:
+# FP32 taps with a BF16 dweight, BF16 taps with either dweight dtype) and every bias under the "bf16" policy
+# (bwd_bias, FP32 or BF16 taps and bias) are among them.
 DTYPE_COMBOS = tuple(
     (weight_dtype, bias_dtype, policy, dweight_dtype, dbias_dtype)
     for policy in ("bf16", "fp32")
@@ -427,6 +500,7 @@ def _arch() -> str:
 
 
 def _route_pending(arch: str, kind: str) -> str | None:
+    kind = _route_of(kind)
     if kind not in loader.ROUTES.get(arch, {}):
         return f"route {kind!r} is not exported for {arch}"
     libraries = cake_build.libraries_by_name()
@@ -439,7 +513,8 @@ def _route_pending(arch: str, kind: str) -> str | None:
 
 def _require_route(*kinds: str) -> None:
     for kind in kinds:
-        for needed in (kind, FORWARD_OF.get(kind, kind)):
+        route = _route_of(kind)
+        for needed in (route, FORWARD_OF.get(kind, FORWARD_OF.get(route, route))):
             pending = _route_pending(_arch(), needed)
             if pending:
                 pytest.skip(pending)
@@ -449,6 +524,7 @@ def _backward_thresholds(arch: str, kind: str) -> tuple[int, ...]:
     """The channel thresholds of the programs route ``kind`` selects by channel count on ``arch`` (empty when the
     route ships its fallback program only there)."""
 
+    kind = _route_of(kind)
     thresholds = set()
     for name in loader.route_modules(arch, kind):
         rule = loader.select_rule(loader.MODULES[name])
@@ -461,6 +537,7 @@ def _token_floors(arch: str, kind: str) -> dict[str, tuple[int, int]]:
     """The programs of route ``kind`` on ``arch`` whose rule carries a token floor: name -> (channel threshold,
     token floor)."""
 
+    kind = _route_of(kind)
     floors = {}
     for name in loader.route_modules(arch, kind):
         rule = loader.select_rule(loader.MODULES[name])
@@ -473,34 +550,40 @@ def _token_floors(arch: str, kind: str) -> dict[str, tuple[int, int]]:
 FALLBACK_INNER_CHANNELS = (640, 896)
 
 
-def _one_tile_channels(arch: str, kind: str) -> tuple[int, ...]:
-    """The channel counts inside backward route ``kind``'s ``FALLBACK_ROWS`` keys on ``arch`` that no
-    ``NARROW_TILES`` key of the route covers: there the route's fallback runs :func:`channel_split`'s plan, one tile
-    (C 768 of the bias routes, and of ``bwd_dt_bf16_taps`` on sm_100a), where every other channel count of the key
-    runs the 32-vector tiles."""
+def _narrow_bound_channels(arch: str, kind: str) -> tuple[int, ...]:
+    """The channel counts inside backward route ``kind``'s ``FALLBACK_ROWS`` keys on ``arch`` whose 32-vector tiles
+    of ``NARROW_TILES`` do not run at every token count: there the route's fallback runs them only up to a token
+    bound, and :func:`channel_split`'s plan, one tile, above it (C 768 of ``bwd_bias`` and ``bwd_dt`` on sm_100a and
+    sm_103a), where every other channel count of the key runs the 32-vector tiles at every S."""
 
     found = set()
+    every = (1, loader.INT32_MAX)
     for route, c_lo, c_hi in loader.FALLBACK_ROWS.get(arch, {}):
         if route == kind:
             found.update(
                 C
                 for C in range(int(c_lo), int(c_hi) + 1, loader.CHANNEL_MULTIPLE)
-                if loader.narrow_tile_range(arch, kind, C) is None
+                if loader.narrow_tile_range(arch, kind, C) != every
             )
     return tuple(sorted(found))
 
 
 def _fallback_rows(arch: str, kind: str) -> list[tuple[int, int]]:
-    """``(C, S_max)`` of the ``FALLBACK_ROWS`` keys of route ``kind`` on ``arch``: each key's channel ends and the
-    channel counts of :data:`FALLBACK_INNER_CHANNELS` and :func:`_one_tile_channels` the key covers, with the key's
-    last token count."""
+    """``(C, S)`` of the ``FALLBACK_ROWS`` keys of route ``kind`` on ``arch``: each key's channel ends and the
+    channel counts of :data:`FALLBACK_INNER_CHANNELS` and :func:`_narrow_bound_channels` the key covers, with the key's
+    last token count, and with the last token count of the channel count's ``NARROW_TILES`` range where that range
+    ends inside the key (sm_100a's ``bwd_dt`` at C 768)."""
 
-    inner = (*FALLBACK_INNER_CHANNELS, *_one_tile_channels(arch, kind))
+    kind = _route_of(kind)
+    inner = (*FALLBACK_INNER_CHANNELS, *_narrow_bound_channels(arch, kind))
     rows = set()
     for (route, c_lo, c_hi), (_s_min, s_max) in loader.FALLBACK_ROWS.get(arch, {}).items():
         if route == kind:
             for C in (int(c_lo), int(c_hi), *(c for c in inner if c_lo <= c <= c_hi)):
                 rows.add((C, int(s_max)))
+                bounds = loader.narrow_tile_range(arch, kind, C)
+                if bounds is not None and bounds[1] < int(s_max):
+                    rows.add((C, bounds[1]))
     return sorted(rows)
 
 
@@ -508,6 +591,7 @@ def _fallback_program(arch: str, kind: str) -> str | None:
     """The route's fallback program on ``arch`` (its record without a selection rule); ``None`` when the route is not
     exported there."""
 
+    kind = _route_of(kind)
     names = [
         name for name in loader.route_modules(arch, kind) if loader.select_rule(loader.MODULES[name]) is None
     ] if kind in loader.ROUTES.get(arch, {}) else []
@@ -517,20 +601,20 @@ def _fallback_program(arch: str, kind: str) -> str | None:
 # The default backward route's channel counts at its ``FALLBACK_ROWS`` keys that the graph, PDL, grid-multiple,
 # repeated-launch and two-stream tests add (C 768: the 768 key; C 1016: the top of the 776-1016 key), with the
 # document layout of their S 4097 rows.  Every other backward route with a key adds its keys' channel ends and
-# one-tile channel counts (:func:`_one_tile_channels`).
+# the channel counts whose 32-vector tiles end at a token bound (:func:`_narrow_bound_channels`).
 FALLBACK_ROW_CHANNELS = (768, 1016)
 FALLBACK_ROW_DOCS = (1000, 0, 3, 3094)
 # The token count of those rows inside a key (the key's last token count where it ends below it).
 FALLBACK_ROW_TOKENS = 4097
 # The architectures that ship ``FALLBACK_ROWS`` keys at those channel counts (asserted by the tests that use them).
 FALLBACK_ROW_ARCHES = ("sm_100a", "sm_103a")
-# The backward routes with a ``FALLBACK_ROWS`` key on one of those architectures, read from the table: the default
-# route first, then the others in :data:`ROUTE_SETTINGS` order.
+# The labels of the backward routes with a ``FALLBACK_ROWS`` key on one of those architectures, read from the table:
+# the default route first, then the others in :data:`ROUTE_SETTINGS` order.
 FALLBACK_ROW_KINDS = tuple(
     kind
     for kind in ROUTE_SETTINGS
     if any(
-        route == kind
+        route == _route_of(kind)
         for arch in FALLBACK_ROW_ARCHES
         for route, _, _ in loader.FALLBACK_ROWS.get(arch, {})
     )
@@ -542,6 +626,7 @@ def _fallback_key_arch(kind: str) -> str:
     one where it has a key of the route, else the first of :data:`FALLBACK_ROW_ARCHES` that has one (an architecture
     without one, such as sm_107a, runs the same rows on its own plan)."""
 
+    kind = _route_of(kind)
     for arch in (_arch(), *FALLBACK_ROW_ARCHES):
         if any(route == kind for route, _, _ in loader.FALLBACK_ROWS.get(arch, {})):
             return arch
@@ -552,20 +637,22 @@ def _fallback_key_arch(kind: str) -> str:
 
 def _fallback_row_channels(kind: str = "bwd") -> tuple[int, ...]:
     """The channel counts of the fallback-row tests on route ``kind``: :data:`FALLBACK_ROW_CHANNELS` on the default
-    route, the channel ends and one-tile channel counts (:func:`_one_tile_channels`) of the route's keys
+    route, the channel ends and the channel counts of :func:`_narrow_bound_channels` of the route's keys
     (:func:`_fallback_key_arch`) on every other."""
 
+    kind = _route_of(kind)
     if kind == "bwd":
         return FALLBACK_ROW_CHANNELS
     arch = _fallback_key_arch(kind)
     ends = {int(C) for route, lo, hi in loader.FALLBACK_ROWS[arch] if route == kind for C in (lo, hi)}
-    return tuple(sorted(ends | set(_one_tile_channels(arch, kind))))
+    return tuple(sorted(ends | set(_narrow_bound_channels(arch, kind))))
 
 
 def _fallback_row_bounds(C: int, kind: str = "bwd") -> tuple[int, int]:
     """The token range of route ``kind``'s ``FALLBACK_ROWS`` key covering ``C`` on this architecture, or on an
     architecture without one (sm_107a, which runs the same rows on its own plan) that of :func:`_fallback_key_arch`."""
 
+    kind = _route_of(kind)
     arch = _arch()
     bounds = loader.fallback_row_range(arch, kind, C)
     if kind == "bwd" and arch in FALLBACK_ROW_ARCHES:
@@ -601,22 +688,27 @@ def _fallback_row_large_cases(kind: str = "bwd") -> tuple:
 
 def _expected_program(arch: str, kind: str, S: int, C: int) -> str:
     """The program route ``kind`` launches at ``(S, C)`` on ``arch``, read from the tables (asserted against
-    ``selected_modules``): inside an ``SM_WIDE_ROWS`` segment the segment's program, else inside a ``DIRECT_ROWS``
-    range the route's direct program, else inside a ``FALLBACK_ROWS`` key's token range the route's fallback program
-    (a forward route's static program), else the rules' program (the three tables emptied)."""
+    ``selected_modules``): inside a ``PAIR_ROWS`` range the route's pair direct program, else inside a
+    ``DIRECT_ROWS`` range (forward or backward) the key's direct program, else inside an ``SM_WIDE_ROWS`` segment the
+    segment's program, else inside a ``FALLBACK_ROWS`` key's token range the route's fallback program (a forward
+    route's static program), else the rules' program (the four tables emptied)."""
 
+    kind = _route_of(kind)
     (selected,) = loader.selected_modules(arch, kind, C=C, S=S)
     segment = [name for s_lo, s_hi, name in loader.sm_wide_segments(arch, kind, C) or () if s_lo <= S <= s_hi]
     bounds = loader.fallback_row_range(arch, kind, C)
     with pytest.MonkeyPatch.context() as rules_only:
         rules_only.setitem(loader.FALLBACK_ROWS, arch, {})
         rules_only.setitem(loader.SM_WIDE_ROWS, arch, {})
+        rules_only.setitem(loader.PAIR_ROWS, arch, {})
         rules_only.setitem(loader.DIRECT_ROWS, arch, {})
         (by_rules,) = loader.selected_modules(arch, kind, C=C, S=S)
-    if segment:
-        expected = segment[0]
+    if loader.pair_row(arch, kind, C, S):
+        expected = _forward_program(arch, kind, "pair")
     elif loader.direct_row(arch, kind, C, S):
-        expected = _forward_program(arch, kind, "direct")
+        expected = _direct_program(arch, kind, C)
+    elif segment:
+        expected = segment[0]
     elif bounds is not None and bounds[0] <= S <= bounds[1]:
         expected = _fallback_program(arch, kind)
     else:
@@ -625,23 +717,60 @@ def _expected_program(arch: str, kind: str, S: int, C: int) -> str:
     return selected
 
 
-def _forward_program(arch: str, kind: str, form: str) -> str | None:
-    """The static (``form`` ``"static"``: the record without a selection rule) or direct (``"direct"``: the record of
-    selection-rule kind ``rows``) program of forward route ``kind`` on ``arch``; ``None`` when the route lists none."""
+# The geometry ``vec`` (channels per thread) of each forward program form: the pair direct program runs two.
+FORM_VEC = {"static": 8, "direct": 8, "pair": 2}
 
-    want = {"static": None, "direct": loader.ROWS_KIND}[form]
+
+def _forward_program(arch: str, kind: str, form: str) -> str | None:
+    """The static (``form`` ``"static"``: the record without a selection rule), direct (``"direct"``: the record of
+    selection-rule kind ``rows`` with eight channels per thread) or pair direct (``"pair"``: the record of
+    selection-rule kind ``rows`` with two channels per thread) program of forward route ``kind`` on ``arch``; ``None``
+    when the route lists none."""
+
+    want = {"static": None, "direct": loader.ROWS_KIND, "pair": loader.ROWS_KIND}[form]
     names = [
         name
         for name in loader.route_modules(arch, kind)
         if (loader.select_rule(loader.MODULES[name]) or {"kind": None})["kind"] == want
+        and int(loader.MODULES[name]["grid_rule"]["geometry"]["vec"]) == FORM_VEC[form]
     ]
     assert len(names) <= 1, (arch, kind, form, names)
     return names[0] if names else None
 
 
+def _direct_program(arch: str, kind: str, C: int) -> str | None:
+    """The program the ``DIRECT_ROWS`` key of route ``kind`` covering ``C`` on ``arch`` names (a forward route's direct
+    program or a backward route's direct backward program), read from the table; ``None`` without a key."""
+
+    names = [
+        name
+        for (route, c_lo, c_hi), (_, _, name) in loader.DIRECT_ROWS.get(
+            arch, {}
+        ).items()
+        if route == kind and int(c_lo) <= C <= int(c_hi) and C % 8 == 0
+    ]
+    assert len(names) <= 1, (arch, kind, C, names)
+    return names[0] if names else None
+
+
+def _backward_direct_keys(arch: str, kind: str) -> list[tuple[int, int, int, int, str]]:
+    """``(C_lo, C_hi, S_lo, S_hi, program)`` of the backward ``DIRECT_ROWS`` keys of label ``kind``'s route on
+    ``arch`` (empty for a route without one)."""
+
+    route = _route_of(kind)
+    return [
+        (int(c_lo), int(c_hi), int(s_lo), int(s_hi), name)
+        for (key_route, c_lo, c_hi), (s_lo, s_hi, name) in loader.DIRECT_ROWS.get(
+            arch, {}
+        ).items()
+        if key_route == route and loader.route_role(key_route) == "bwd"
+    ]
+
+
 def _forward_keys(arch: str) -> list[tuple[str, int, int, int, int, str]]:
     """``(route, C_lo, C_hi, S_lo, S_hi, form)`` of the forward keys of ``arch``: each ``FALLBACK_ROWS`` key of a
-    forward route (form ``"static"``) and each ``DIRECT_ROWS`` key (form ``"direct"``)."""
+    forward route (form ``"static"``), each ``DIRECT_ROWS`` key of a forward route (form ``"direct"``) and each
+    ``PAIR_ROWS`` key (form ``"pair"``)."""
 
     keys = [
         (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), "static")
@@ -650,12 +779,12 @@ def _forward_keys(arch: str) -> list[tuple[str, int, int, int, int, str]]:
         ).items()
         if loader.route_role(route) == "fwd"
     ]
-    keys += [
-        (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), "direct")
-        for (route, c_lo, c_hi), (s_lo, s_hi, _) in loader.DIRECT_ROWS.get(
-            arch, {}
-        ).items()
-    ]
+    for form, table in (("direct", loader.DIRECT_ROWS), ("pair", loader.PAIR_ROWS)):
+        keys += [
+            (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), form)
+            for (route, c_lo, c_hi), (s_lo, s_hi, _) in table.get(arch, {}).items()
+            if loader.route_role(route) == "fwd"
+        ]
     return sorted(keys)
 
 
@@ -663,14 +792,20 @@ def _forward_keys(arch: str) -> list[tuple[str, int, int, int, int, str]]:
 def _forward_rules_only(
     arch: str, route: str | None = None, static_from: tuple[int, int] | None = None
 ):
-    """Inside the block the forward keys of ``arch`` are gone (``DIRECT_ROWS`` emptied, ``FALLBACK_ROWS`` without its
-    forward keys), so every forward call selects by the rules (the dynamic programs, which run every call above the
-    keys); with ``route`` and ``static_from`` (``(C_lo, C_hi)``) one key over every token count puts the route's
-    static program on those channel counts instead.  The host's row plans are dropped on entry and on exit."""
+    """Inside the block the forward keys of ``arch`` are gone (``PAIR_ROWS`` emptied, ``DIRECT_ROWS`` and
+    ``FALLBACK_ROWS`` without their forward keys), so every forward call selects by the rules (the dynamic programs,
+    which run every call above the keys); with ``route`` and ``static_from`` (``(C_lo, C_hi)``) one key over every
+    token count puts the route's static program on those channel counts instead.  The backward keys stay.  The
+    host's row plans are dropped on entry and on exit."""
 
     rows = {
         key: value
         for key, value in loader.FALLBACK_ROWS.get(arch, {}).items()
+        if loader.route_role(key[0]) != "fwd"
+    }
+    direct = {
+        key: value
+        for key, value in loader.DIRECT_ROWS.get(arch, {}).items()
         if loader.route_role(key[0]) != "fwd"
     }
     if route is not None:
@@ -678,7 +813,8 @@ def _forward_rules_only(
     pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
     try:
         with pytest.MonkeyPatch.context() as m:
-            m.setitem(loader.DIRECT_ROWS, arch, {})
+            m.setitem(loader.PAIR_ROWS, arch, {})
+            m.setitem(loader.DIRECT_ROWS, arch, direct)
             m.setitem(loader.FALLBACK_ROWS, arch, rows)
             yield
     finally:
@@ -754,7 +890,7 @@ def _record_programs(monkeypatch) -> list:
 def _backward_programs(seen: list, kind: str = "bwd") -> set:
     """Backward route ``kind``'s programs (the default route's by default) among the launches ``seen``."""
 
-    route = set(loader.route_modules(_arch(), kind))
+    route = set(loader.route_modules(_arch(), _route_of(kind)))
     return {name for name, _, _ in seen if name in route}
 
 
@@ -762,7 +898,7 @@ def _backward_programs_by_shape(seen: list, kind: str = "bwd") -> dict:
     """Backward route ``kind``'s programs (the default route's by default) among the launches ``seen``, per launched
     ``(S, C)``."""
 
-    route = set(loader.route_modules(_arch(), kind))
+    route = set(loader.route_modules(_arch(), _route_of(kind)))
     found: dict = {}
     for name, S, C in seen:
         if name in route:
@@ -847,9 +983,10 @@ def _forward(x, w, cu, **kwargs) -> torch.Tensor:
 
 
 def _backward(x, w, cu, dy, b=None, policy="bf16", *, kind=None, **kwargs):
-    """``(dx, dweight, dbias_or_None)`` of one non-deterministic backward call.  With ``kind`` (a backward route of
+    """``(dx, dweight, dbias_or_None)`` of one non-deterministic backward call.  With ``kind`` (a label of
     :data:`ROUTE_SETTINGS`) and no ``dweight`` out passed, the call writes a fresh NaN-filled ``dweight`` out of the
-    route's ``dweight_dtype`` when it names one (``bwd_dt``), and the call's arguments must resolve to ``kind``."""
+    label's ``dweight_dtype`` when it names one (``bwd_dt``), and the call's arguments must resolve to the label's
+    route."""
 
     if kind is not None:
         dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"]
@@ -861,7 +998,9 @@ def _backward(x, w, cu, dy, b=None, policy="bf16", *, kind=None, **kwargs):
         route = _combo_route(
             w.dtype, None if b is None else b.dtype, policy, None if dweight is None else dweight.dtype
         )
-        assert route == kind, f"the call resolves to route {route}, not {kind}"
+        assert route == _route_of(kind), (
+            f"the call resolves to route {route}, not {kind}"
+        )
     grads = pkg.cake_causal_conv1d_nondet_train_backward(
         x,
         w,
@@ -1043,13 +1182,13 @@ def test_routes_match_reference(case, combo) -> None:
     )
 
 
-# BF16 taps without a bias (bwd_dt_bf16_taps) and with a BF16 bias (bwd_bias_bf16_taps) under the "bf16" policy, at
-# keys whose draws put dx past the naive tier when SiLU' is evaluated at the BF16-rounded preactivation (C 512 runs
-# other programs on sm_107a than on sm_100a / sm_103a; each architecture misses on some of these keys).
+# BF16 taps without a bias (route bwd_dt, label "bwd_dt-bf16") and with a BF16 bias (bwd_bias) under the "bf16"
+# policy, at keys whose draws put dx past the naive tier when SiLU' is evaluated at the BF16-rounded preactivation
+# (C 512 runs other programs on sm_107a than on sm_100a / sm_103a; each architecture misses on some of these keys).
 BF16_TAPS_KEYS = (
-    ("bwd_dt_bf16_taps", None, 33),
-    ("bwd_bias_bf16_taps", BF16, 11),
-    ("bwd_bias_bf16_taps", BF16, 56),
+    ("bwd_dt-bf16", None, 33),
+    ("bwd_bias", BF16, 11),
+    ("bwd_bias", BF16, 56),
 )
 
 
@@ -1071,6 +1210,110 @@ def test_bf16_taps_routes_match_reference(kind, bias_dtype, key) -> None:
 
     _judge(1000, 512, "perf", call, weight_dtype=BF16, bias_dtype=bias_dtype, policy="bf16", key=key,
            label=f"{kind} BF16 taps key {key}")
+
+
+# The taps and bias dtypes of route ``bwd_bias``'s calls whose taps and bias differ in dtype (``(weight_dtype,
+# bias_dtype)``): FP32 taps with a BF16 bias and BF16 taps with an FP32 bias.
+BIAS_CROSS_STORAGES = ((F32, BF16), (BF16, F32))
+
+
+@pytest.mark.parametrize(
+    "weight_dtype, bias_dtype",
+    BIAS_CROSS_STORAGES,
+    ids=[f"w{_dtype_id(w)}-b{_dtype_id(b)}" for w, b in BIAS_CROSS_STORAGES],
+)
+def test_bias_route_cross_storages_match_reference(
+    weight_dtype, bias_dtype, monkeypatch
+) -> None:
+    """Route ``bwd_bias`` under the "bf16" policy with FP32 taps and a BF16 bias and with BF16 taps and an FP32 bias,
+    at S = 1000, C = 512 ("perf" documents) and at the route's ``FALLBACK_ROWS`` rows (:func:`_fallback_row_cases`:
+    inside the keys' token ranges and above one): each call launches the program the tables name, and ``y``,
+    ``dx``, ``dweight`` and ``dbias`` are judged against the naive tier."""
+
+    kind = "bwd_bias"
+    _require_route(kind)
+    assert _combo_route(weight_dtype, bias_dtype, "bf16") == kind
+    seen = _record_programs(monkeypatch)
+    for S, C, docs in ((1000, 512, "perf"), *_fallback_row_cases(kind)):
+        expected = _expected_backward_program(S, C, kind)
+        label = f"{kind} w{_dtype_id(weight_dtype)}-b{_dtype_id(bias_dtype)} S={S} C={C} program={expected}"
+
+        def call(x, w, cu, dy, b, policy, expected=expected, label=label):
+            seen.clear()
+            y = _forward(x, w, cu, bias=b)
+            dx, dw, db = _backward(x, w, cu, dy, b, policy, kind=kind)
+            assert _backward_programs(seen, kind) == {expected}, (
+                f"{label}: launched {seen}"
+            )
+            return {"y": y, **_grads(dx, dw, db)}
+
+        _judge(
+            S,
+            C,
+            docs,
+            call,
+            weight_dtype=weight_dtype,
+            bias_dtype=bias_dtype,
+            policy="bf16",
+            key=57,
+            label=label,
+        )
+
+
+# The taps and ``dweight`` out dtypes of route ``bwd_dt``'s calls whose taps and ``dweight`` out differ in dtype
+# (``(weight_dtype, dweight_dtype)``): FP32 taps with a BF16 ``dweight`` out and BF16 taps with an FP32 ``dweight``
+# out.
+DT_CROSS_STORAGES = ((F32, BF16), (BF16, F32))
+
+
+@pytest.mark.parametrize(
+    "weight_dtype, dweight_dtype",
+    DT_CROSS_STORAGES,
+    ids=[f"w{_dtype_id(w)}-dw{_dtype_id(dw)}" for w, dw in DT_CROSS_STORAGES],
+)
+def test_dt_route_cross_storages_match_reference(
+    weight_dtype,
+    dweight_dtype,
+    monkeypatch,
+) -> None:
+    """Route ``bwd_dt`` under the "bf16" policy without a bias, with FP32 taps and a BF16 ``dweight`` out and with
+    BF16 taps and an FP32 ``dweight`` out, at S = 1000, C = 512 and S = 250340, C = 128 ("perf" documents) and at
+    the route's ``FALLBACK_ROWS`` rows (:func:`_fallback_row_cases`: inside the keys' token ranges, which calls with
+    FP32 taps take as well, and above one): each call launches the program the tables name, and ``y``, ``dx`` and
+    ``dweight`` are judged against the naive tier."""
+
+    kind = "bwd_dt"
+    _require_route(kind, *ROUTE_LABELS[kind])
+    assert _combo_route(weight_dtype, None, "bf16", dweight_dtype) == kind
+    storage = f"w{_dtype_id(weight_dtype)}-dw{_dtype_id(dweight_dtype)}"
+    seen = _record_programs(monkeypatch)
+    for S, C, docs in (
+        (1000, 512, "perf"),
+        (250340, 128, "perf"),
+        *_fallback_row_cases(kind),
+    ):
+        expected = _expected_backward_program(S, C, kind)
+        label = f"{kind} {storage} S={S} C={C} program={expected}"
+
+        def call(x, w, cu, dy, b, policy, expected=expected, label=label):
+            seen.clear()
+            y = _forward(x, w, cu)
+            dweight = torch.full_like(w, float("nan"), dtype=dweight_dtype)
+            dx, dw, _ = _backward(x, w, cu, dy, b, policy, kind=kind, dweight=dweight)
+            assert dw is dweight and dw.dtype == dweight_dtype, label
+            assert _backward_programs(seen, kind) == {expected}, (label, seen)
+            return {"y": y, **_grads(dx, dw, None)}
+
+        _judge(
+            S,
+            C,
+            docs,
+            call,
+            weight_dtype=weight_dtype,
+            policy="bf16",
+            key=57,
+            label=label,
+        )
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
@@ -1096,11 +1339,13 @@ def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
     ``FALLBACK_ROWS`` key the route's fallback program runs at the key's last token count and the rules' program (or
     an ``SM_WIDE_ROWS`` segment's program) at the next; at an ``SM_WIDE_ROWS`` key each segment's program runs from
     the segment's first token count at the key's channel ends, and the program below the key's first segment one
-    token before it."""
+    token before it.  Inside a backward range of ``DIRECT_ROWS`` the route's direct program runs (at the key's
+    channel ends at its last token count, besides the rows above that fall inside it); each such row runs again one
+    token above the range, so every other program of the route keeps a row."""
 
     _require_route(kind)
     arch, device = _arch(), _device()
-    names = loader.route_modules(arch, kind)
+    names = loader.route_modules(arch, _route_of(kind))
     thresholds = _backward_thresholds(arch, kind)
     channels = sorted({C for T in thresholds for C in (T - 8, T, T + 8)} | {8192})
     rows = [
@@ -1109,19 +1354,35 @@ def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
     # A token-floored program runs from its floor only: both sides of the floor at its channel threshold.
     for T, floor in _token_floors(arch, kind).values():
         rows += [(S, "perf", C) for S in (floor - 8, floor) for C in (T - 8, T, T + 8)]
-    # The rows of ``FALLBACK_ROWS``: each key's channel ends (and C 640 / 896 and the one-tile channel counts inside
-    # a key) at the key's last token count (the route's fallback program) and the next (the rules' program); the inner
-    # ones also at S 1000.
+    # The rows of ``FALLBACK_ROWS``: each key's channel ends (and C 640 / 896 and the channel counts inside a key
+    # whose 32-vector tiles end at a token bound) at the key's last token count (the route's fallback program) and the
+    # next (the rules' program), and at that bound and the next where it ends inside the key; the inner ones also at
+    # S 1000.
     fallback = _fallback_rows(arch, kind)
-    inner = (*FALLBACK_INNER_CHANNELS, *_one_tile_channels(arch, kind))
+    inner = (*FALLBACK_INNER_CHANNELS, *_narrow_bound_channels(arch, kind))
     rows += [(S, "perf", C) for C, S_max in fallback for S in (S_max, S_max + 1)]
-    rows += [(1000, "perf", C) for C, _ in fallback if C in inner]
+    rows += [(1000, "perf", C) for C in sorted({C for C, _ in fallback if C in inner})]
     # The rows of ``SM_WIDE_ROWS``: each segment's first token count (and one token below the first segment) at the
     # key's channel ends.
     for (route, c_lo, c_hi), segments in loader.SM_WIDE_ROWS.get(arch, {}).items():
-        if route == kind:
+        if route == _route_of(kind):
             starts = [int(segments[0][0]) - 1, *(int(s_lo) for s_lo, _, _ in segments)]
             rows += [(S, "perf", C) for S in starts for C in (int(c_lo), int(c_hi))]
+    # The backward rows of ``DIRECT_ROWS``: the key's channel ends at its last token count (the route's direct
+    # program) and the next; a row above inside the key's range runs again one token above it, where the program the
+    # row checks (by channel threshold, token floor or table key) runs.
+    direct = {
+        (S, "perf", C)
+        for c_lo, c_hi, _, s_hi, _ in _backward_direct_keys(arch, kind)
+        for S in (s_hi, s_hi + 1)
+        for C in (c_lo, c_hi)
+    }
+    direct |= {
+        (loader.direct_row_range(arch, _route_of(kind), C)[1] + 1, "perf", C)
+        for S, _, C in rows
+        if loader.direct_row(arch, _route_of(kind), C, S)
+    }
+    rows += sorted(direct - set(rows))
     seen = []
     launch = pkg.run_module
 
@@ -1133,11 +1394,18 @@ def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
     launched = set()
     fallback_program = _fallback_program(arch, kind)
     for S, docs, C in rows:
-        # inside an SM-wide segment its program, inside a fallback key's token range the route's fallback program,
-        # elsewhere the rules' program
+        # inside a backward direct range the route's direct program, inside an SM-wide segment its program, inside a
+        # fallback key's token range the route's fallback program, elsewhere the rules' program
         selected = _expected_program(arch, kind, S, C)
-        bounds = loader.fallback_row_range(arch, kind, C)
-        if bounds is not None and bounds[0] <= S <= bounds[1]:
+        bounds = loader.fallback_row_range(arch, _route_of(kind), C)
+        if loader.direct_row(arch, _route_of(kind), C, S):
+            assert selected == _direct_program(arch, _route_of(kind), C), (
+                kind,
+                S,
+                C,
+                selected,
+            )
+        elif bounds is not None and bounds[0] <= S <= bounds[1]:
             assert selected == fallback_program, (kind, S, C, selected)
         label = f"{kind} S={S} C={C} docs={docs} program={selected}"
         workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
@@ -1195,8 +1463,8 @@ def test_repeated_launches_worst_case(case, kind, record_property) -> None:
 @pytest.mark.parametrize("kind", FALLBACK_ROW_KINDS)
 def test_fallback_row_repeated_launches(kind, monkeypatch, record_property) -> None:
     """The repeated-launch rows at each backward route's ``FALLBACK_ROWS`` channel counts (the default route's C 768
-    and C 1016, every other route's keys' channel ends and one-tile channel counts; many CTAs per channel tile, inside
-    the keys' token ranges): each row launches the expected program (the route's fallback program on sm_100a /
+    and C 1016, every other route's keys' channel ends and C 768; many CTAs per channel tile, inside the keys' token
+    ranges): each row launches the expected program (the route's fallback program on sm_100a /
     sm_103a, the architecture's own plan elsewhere), every launch judged against the naive tier and the workspace zero
     after each."""
 
@@ -1259,9 +1527,10 @@ def test_tile_override_row(own_workspace, monkeypatch, record_property) -> None:
 
     monkeypatch.setattr(pkg, "run_module", record_launch)
     for kind, S, C in rows:
-        ct_vec = loader.tile_override(arch, kind, C, S)
+        route = _route_of(kind)
+        ct_vec = loader.tile_override(arch, route, C, S)
         assert ct_vec is not None, f"{arch} {kind} C={C} S={S} is no TILE_OVERRIDES row"
-        (name,) = loader.selected_modules(arch, kind, C=C, S=S)
+        (name,) = loader.selected_modules(arch, route, C=C, S=S)
         geometry = loader.MODULES[name]["grid_rule"]["geometry"]
         wanted = {
             "ct_vec": ct_vec,
@@ -1322,10 +1591,12 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
     monkeypatch.setattr(pkg, "run_module", record_launch)
     for kind, S, C in cases:
         _require_route(kind)
+        route = _route_of(kind)
         label = f"{arch} {kind} S={S} C={C}"
-        assert loader.narrow_tile_row(arch, kind, C, S), label
-        assert loader.sm_wide_module(arch, kind, C, S) is None, label
-        (name,) = loader.selected_modules(arch, kind, C=C, S=S)
+        docs = _narrow_docs(S)
+        assert loader.narrow_tile_row(arch, route, C, S), label
+        assert loader.sm_wide_module(arch, route, C, S) is None, label
+        (name,) = loader.selected_modules(arch, route, C=C, S=S)
         geometry = loader.MODULES[name]["grid_rule"]["geometry"]
         wanted = {
             "ct_vec": 32,
@@ -1341,10 +1612,10 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
         ), f"{label}: the row must differ from the default split"
         _, _, _, grid, _ = pkg._call_plan(
             arch,
-            kind,
+            route,
             S,
             C,
-            len(doc_lengths(S, "perf")),
+            len(doc_lengths(S, docs)),
             device_index=device.index,
             policy=ROUTE_SETTINGS[kind]["policy"],
         )
@@ -1363,7 +1634,7 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
             assert held is not None and int(torch.count_nonzero(held)) == 0, label
             return _grads(dx, dw, db)
 
-        _route_judge(S, C, "perf", kind, call, key=11, label=label)
+        _route_judge(S, C, docs, kind, call, key=11, label=label)
     record_property("narrow_rows", len(cases))
 
 
@@ -1470,9 +1741,9 @@ def test_forward_narrow_row(kind, C, tiles, taps, monkeypatch, record_property) 
     ``forward_narrow_min_s`` floor, the row's ``FORWARD_NARROW_WIDTHS`` tiles at its width floor, one tile of ``C /
     vec`` vectors one token below the floor and inside a single-tile range -- once on a caller-owned forward workspace
     of the public size and once on the package's, each holding the launch's counters and zero after the call; ``y``
-    of both launches judged against the naive tier.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` are
-    removed for the test (:func:`_forward_rules_only`): these are the dynamic program's rows, which it runs outside the
-    keys' token ranges (the keys' own programs: :func:`test_forward_small_s_row`)."""
+    of both launches judged against the naive tier.  The forward keys of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and
+    ``PAIR_ROWS`` are removed for the test (:func:`_forward_rules_only`): these are the dynamic program's rows, which
+    it runs outside the keys' token ranges (the keys' own programs: :func:`test_forward_small_s_row`)."""
 
     _require_route(kind)
     with _forward_rules_only(_arch()):
@@ -1571,15 +1842,16 @@ def _small_s_docs(S: int):
     "kind, taps", tuple(FORWARD_SETTINGS), ids=[f"{k}-{t}" for k, t in FORWARD_SETTINGS]
 )
 def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
-    """Every forward key of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` of route ``kind`` on the device's architecture
-    (:func:`_small_s_rows`: S 1000 inside the range, both sides of the range's first and last token count, at the
-    key's channel ends): the public forward launches the program the tables name (the static program inside a static
-    range, the direct program inside a direct range, the dynamic program elsewhere), the static and direct programs
-    with no ``work`` counters (a passed forward workspace is checked, not passed on, and stays zero).  On each of the
-    32 draws every ``y`` is judged against the naive tier: 3 launches with and without a caller workspace, the route's
-    static program on the same inputs (one key over every token count of the key's channel counts), a launch with
-    ``enable_pdl`` 0 and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured after
-    one eager warm-up, whose capture at a static or direct row has no fill node and counts no capture fallback.  A row
+    """Every forward key of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS`` of route ``kind`` on the device's
+    architecture (:func:`_small_s_rows`: S 1000 inside the range, both sides of the range's first and last token
+    count, at the key's channel ends): the public forward launches the program the tables name (the pair direct
+    program inside a pair range, else the direct program inside a direct range, else the static program inside a
+    static range, the dynamic program elsewhere), the static, direct and pair direct programs with no ``work``
+    counters (a passed forward workspace is checked, not passed on, and stays zero).  On each of the 32 draws every
+    ``y`` is judged against the naive tier: 3 launches with and without a caller workspace, the route's static program
+    on the same inputs (one key over every token count of the key's channel counts), a launch with ``enable_pdl`` 0
+    and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured after one eager
+    warm-up, whose capture at a static, direct or pair row has no fill node and counts no capture fallback.  A row
     packs the ``"perf"`` documents, or one document below the packing's minimum (:func:`_small_s_docs`)."""
 
     _require_route(kind)
@@ -1591,9 +1863,10 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
         )
         == kind
     )
-    static, direct = (
+    static, direct, pair = (
         _forward_program(arch, kind, "static"),
         _forward_program(arch, kind, "direct"),
+        _forward_program(arch, kind, "pair"),
     )
     rows = _small_s_rows(arch, kind)
     assert static is not None and rows, f"{arch} {kind}: no forward key"
@@ -1609,7 +1882,7 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     forms = set()
     for S, C, c_lo, c_hi in rows:
         name = _expected_program(arch, kind, S, C)
-        form = "direct" if name == direct else "static" if name == static else "dynamic"
+        form = {direct: "direct", pair: "pair", static: "static"}.get(name, "dynamic")
         forms.add(form)
         no_work = form != "dynamic"
         docs = _small_s_docs(S)
@@ -1723,6 +1996,130 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     assert {"static", "dynamic"} <= forms and ("direct" in forms) is (
         direct is not None
     ), (arch, kind, forms)
+    assert ("pair" in forms) is (pair is not None), (arch, kind, forms)
+
+
+# The channel counts of the pair rows' launch test besides both ends of each pair key: C 512 to 1024 and C 776, whose
+# last pair tile is partial.
+PAIR_ROW_CHANNELS = (512, 776, 1024)
+
+
+@pytest.mark.parametrize(
+    "kind, taps", tuple(FORWARD_SETTINGS), ids=[f"{k}-{t}" for k, t in FORWARD_SETTINGS]
+)
+def test_pair_rows_launch_and_keep_y_bits(kind, taps, monkeypatch) -> None:
+    """At each ``PAIR_ROWS`` key of forward route ``kind`` on the device's architecture, at both ends of its C range
+    and at each C of :data:`PAIR_ROW_CHANNELS` it holds: at the range's first token count on one document, at S 1000
+    and at its last token count the public forward launches the route's pair direct program on its ``PAIR_PLANS``
+    form (16 channel pairs per tile, 8 token sub-tiles, ``ceil(C / 2 / 16)`` tiles), its token-block grid
+    (``min(ctas_per_sm x SMs, n_ch_tiles x ceil(S / (8 x n_sub)))`` CTAs) and no ``work`` counters; one token outside
+    the range it launches another program.  Where the route has two pair keys, each key's C also runs at the other
+    key's last token count and one token beyond it.  On each draw ``y`` repeats bit for bit, equals bit for bit the
+    forward's without ``PAIR_ROWS`` (the static, direct or dynamic program the other tables and the rules pick) and
+    the route's static program's (one key over every token count of the channel count, :func:`_forward_rules_only`),
+    and every ``y`` is judged against the naive tier."""
+
+    _require_route(kind)
+    arch, device = _arch(), _device()
+    weight_dtype, bias_dtype = FORWARD_SETTINGS[(kind, taps)]
+    keys = [key for key in _forward_keys(arch) if key[0] == kind and key[5] == "pair"]
+    assert keys, (arch, kind)
+    ends = sorted({key[4] for key in keys})
+    cases = []
+    for _, c_lo, c_hi, s_lo, s_hi, _ in keys:
+        rows = [
+            (s_lo, None),
+            (1000, "perf"),
+            (s_hi, "perf"),
+            (s_lo - 1, _small_s_docs(s_lo - 1)),
+            (s_hi + 1, "perf"),
+        ]
+        rows += [(S, "perf") for end in ends if end != s_hi for S in (end, end + 1)]
+        held = {C for C in PAIR_ROW_CHANNELS if c_lo <= C <= c_hi}
+        cases += [(C, (s_lo, s_hi), rows) for C in sorted({c_lo, c_hi} | held)]
+    pair = _forward_program(arch, kind, "pair")
+    static = _forward_program(arch, kind, "static")
+    assert pair is not None and static is not None, (arch, kind, pair, static)
+    record = loader.MODULES[pair]
+    geometry = record["grid_rule"]["geometry"]
+    assert geometry == {"threads": 128, "vec": 2}, (pair, geometry)
+    form = tuple(loader.PAIR_PLANS[arch][kind])
+    assert form == (16, 8), (arch, kind, form)
+    sms = loader.sm_count(device.index)
+    split_keys = ("ct_vec", "n_sub", "n_ch_tiles")
+    seen = []
+    launch = pkg.run_module
+
+    def record_launch(name, values, *, device_index, grid=None):
+        split = tuple(int(values[key]) for key in split_keys)
+        shape = None if grid is None else tuple(grid)
+        seen.append((name, split, values.get("work"), shape))
+        return launch(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record_launch)
+    for C, (s_lo, s_hi), rows in cases:
+        for S, docs in rows:
+            if S < 1:
+                continue
+            inside = s_lo <= S <= s_hi
+            label = f"{arch} {kind} taps={taps} pair S={S} C={C} docs={docs or 'one'}"
+            tiles = -(-(C // 2) // 16)
+            ctas = int(record["grid_rule"]["ctas_per_sm"]) * sms
+            blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * 8))
+            want_grid = (min(ctas, tiles * blocks), 1, 1)
+
+            def call(
+                x,
+                w,
+                cu,
+                dy,
+                b,
+                policy,
+                C=C,
+                inside=inside,
+                label=label,
+                want_grid=want_grid,
+            ):
+                seen.clear()
+                y = _forward(x, w, cu, bias=b)
+                assert len(seen) == 1, (label, seen)
+                name, split, work, grid = seen[0]
+                if inside:
+                    assert name == pair, (label, name)
+                    assert split == (16, 8, -(-(C // 2) // 16)), (label, split)
+                    assert grid == want_grid, (label, grid, want_grid)
+                    assert work is None, label
+                else:
+                    assert name != pair, (label, name)
+                again = _forward(x, w, cu, bias=b)
+                assert torch.equal(_bits(again), _bits(y)), (label, "repeat")
+                try:
+                    with pytest.MonkeyPatch.context() as m:
+                        m.setitem(loader.PAIR_ROWS, arch, {})
+                        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                        seen.clear()
+                        y_rest = _forward(x, w, cu, bias=b)
+                        assert [n for n, *_ in seen] != [pair], (label, seen)
+                finally:
+                    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                assert torch.equal(_bits(y_rest), _bits(y)), (label, "no PAIR_ROWS")
+                with _forward_rules_only(arch, kind, (C, C)):
+                    seen.clear()
+                    y_static = _forward(x, w, cu, bias=b)
+                    assert [n for n, *_ in seen] == [static], (label, seen)
+                assert torch.equal(_bits(y_static), _bits(y)), (label, static)
+                return {"y": [y, again, y_rest, y_static]}
+
+            _judge(
+                S,
+                C,
+                docs,
+                call,
+                weight_dtype=weight_dtype,
+                bias_dtype=bias_dtype,
+                key=229,
+                label=label,
+            )
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
@@ -2254,7 +2651,7 @@ def test_two_streams_with_two_workspaces() -> None:
 @pytest.mark.parametrize("kind", FALLBACK_ROW_KINDS)
 def test_fallback_row_two_streams(kind, monkeypatch) -> None:
     """The two-stream test at each backward route's ``FALLBACK_ROWS`` channel counts (the default route's C 768 and
-    C 1016, every other route's keys' channel ends and one-tile channel counts; inside the keys' token ranges): the
+    C 1016, every other route's keys' channel ends and C 768; inside the keys' token ranges): the
     expected program on both streams, both calls judged against the naive tier on every draw, every workspace zero
     afterwards."""
 
@@ -2654,14 +3051,22 @@ FLOOR_CAPTURE_C = 528
 
 
 def test_forward_capture_at_a_floor_after_an_eager_call_below_it(fresh_pool) -> None:
-    """An eager forward one token below a narrow row's floor (C 528: its row plan is cached, the package's pre-zeroed
-    forward buffers sized for its one tile), then a CUDA Graph capture of the forward at the floor (six tiles, six
-    times the counter words) with no eager call at the floor: the captured call takes the plan of the floor from the
-    cached row, finds no pre-zeroed buffer large enough and zeroes its own (one fill node, counted in
-    ``_CAPTURE_FILL_FALLBACKS``); after an eager call at the floor, a second capture takes a pre-zeroed buffer (no
-    fill node, no fallback).  Every replay of both graphs is judged against the naive tier."""
+    """With the forward keys removed (:func:`_forward_rules_only`: the row's floor is the dynamic program's, and on
+    sm_100a / sm_103a C 528's key holds it), an eager forward one token below a narrow row's floor (C 528: its row
+    plan is cached, the package's pre-zeroed forward buffers sized for its one tile), then a CUDA Graph capture of the
+    forward at the floor (six tiles, six times the counter words) with no eager call at the floor: the captured call
+    takes the plan of the floor from the cached row, finds no pre-zeroed buffer large enough and zeroes its own (one
+    fill node, counted in ``_CAPTURE_FILL_FALLBACKS``); after an eager call at the floor, a second capture takes a
+    pre-zeroed buffer (no fill node, no fallback).  Every replay of both graphs is judged against the naive tier."""
 
     _require_route("bwd")
+    with _forward_rules_only(_arch()):
+        _forward_capture_at_a_floor()
+
+
+def _forward_capture_at_a_floor() -> None:
+    """The body of :func:`test_forward_capture_at_a_floor_after_an_eager_call_below_it`."""
+
     arch, device = _arch(), _device()
     C = FLOOR_CAPTURE_C
     floor = loader.forward_narrow_min_s(arch, C // 8, route="fwd")
@@ -2706,9 +3111,9 @@ def test_forward_capture_after_an_eager_call_inside_a_forward_key(
     program: no counters) refills no pre-zeroed forward buffer.  A CUDA Graph capture of the forward one token above
     the range (the dynamic program, with counters) then finds none and zeroes its own (one fill node, counted in
     ``_CAPTURE_FILL_FALLBACKS``); a capture inside the range has no fill node; a capture one token below the range
-    has none when the static program runs there, else (the dynamic program, the pool still empty) one; after an eager
-    call one token above the range a capture there takes a pre-zeroed buffer (no fill node, no fallback).  Every
-    replay is judged against the naive tier."""
+    has none when the static or the pair direct program runs there, else (the dynamic program, the pool still empty)
+    one; after an eager call one token above the range a capture there takes a pre-zeroed buffer (no fill node, no
+    fallback).  Every replay is judged against the naive tier."""
 
     _require_route("bwd")
     arch, device = _arch(), _device()
@@ -2720,6 +3125,7 @@ def test_forward_capture_after_an_eager_call_inside_a_forward_key(
     no_work = {
         _forward_program(arch, "fwd", "static"),
         _forward_program(arch, "fwd", "direct"),
+        _forward_program(arch, "fwd", "pair"),
     }
     inside = _draw_inputs(s_hi, C, "perf", "bwd", key=227)
     _forward(inside[0], inside[1], inside[2])
@@ -3350,7 +3756,7 @@ def test_more_captures_than_the_pool_keep_no_capture_memory(fresh_pool, monkeypa
 
 def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypatch) -> None:
     """The pre-zeroed backward buffers hold the largest need of the eager calls that omitted ``workspace=``: an eager
-    backward at C 1280 with a caller-owned workspace fills no pool, one at C 512 without one fills it at C 512's
+    backward at C 1280 with a caller-owned workspace fills no pool, one at C 384 without one fills it at C 384's
     size.  A backward captured at C 1280 needs more: it takes no buffer (the idle ones stay as they were), zeroes one
     of its own (one fill node, one fallback) and the package keeps no reference to it; the replays are judged against
     the naive tier, with that buffer zero after each."""
@@ -3393,7 +3799,7 @@ def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypa
 
 
 def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool) -> None:
-    """The pool grows with the eager need.  Graph G1, captured at C 512, takes one buffer per kind; eager steps at
+    """The pool grows with the eager need.  Graph G1, captured at C 384, takes one buffer per kind; eager steps at
     C 1280 and then C 2560 on another stream (their programs launched once before on caller-owned workspaces; the
     steps in the hold launch no other program), held on the device until the checks end (:func:`_stream_held`: their
     zero fills and readiness copies wait; the host never waits for the stream), each raise the pool size: the idle
@@ -3728,8 +4134,9 @@ def test_cudagraph_tree_with_more_backward_nodes_than_the_pool(fresh_pool, monke
     _assert_tables_hold_only_pool_buffers()
 
 
-# The shape of the PDL tests (each route's forward and backward take package workspaces there).
-PDL_CASE = (1000, 512, "perf")
+# The shape of the PDL tests (each route's forward and backward take package workspaces there: C 384 is below the
+# forward keys).
+PDL_CASE = (1000, 384, "perf")
 # GPU clock cycles of the ``torch.cuda._sleep`` in front of a PDL test's producer or reader kernels, so the package's
 # launch is queued while they wait to run.
 PDL_SLEEP_CYCLES = 20_000_000
@@ -4081,12 +4488,13 @@ def _pdl_chain(kind: str, mode: str, case, monkeypatch) -> None:
 
 def _fallback_row_pdl_cases(kind: str) -> tuple:
     """The rows of the fallback-row PDL tests on route ``kind``: the first row of :func:`_fallback_row_cases` (inside
-    the key: the default route's C 768 at S 4097), then its rows at the one-tile channel counts of the route's keys
-    (:func:`_one_tile_channels` on :func:`_fallback_key_arch`; C 768 at S 4097)."""
+    the key: the default route's C 768 at S 4097), then its rows at the channel counts of the route's keys whose
+    32-vector tiles end at a token bound (:func:`_narrow_bound_channels` on :func:`_fallback_key_arch`; C 768 at S
+    4097)."""
 
     cases = _fallback_row_cases(kind)
-    one_tile = _one_tile_channels(_fallback_key_arch(kind), kind)
-    return (cases[0], *(case for case in cases[1:-1] if case[1] in one_tile))
+    bounded = _narrow_bound_channels(_fallback_key_arch(kind), kind)
+    return (cases[0], *(case for case in cases[1:-1] if case[1] in bounded))
 
 
 @pytest.mark.parametrize("kind", FALLBACK_ROW_KINDS)
@@ -4513,11 +4921,13 @@ def test_det_and_nondet_sm_wide_programs_in_one_process(monkeypatch) -> None:
 
 def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     """The deterministic and the non-deterministic packages loaded in one process, their calls interleaved on one
-    stream (policy forced on), at :data:`PDL_CASE` and at the first token count of the default route's first
-    ``DIRECT_ROWS`` range (where both packages launch the direct program): the non-deterministic launches are of
-    records with ``launch.use_pdl`` ``"runtime"`` and pass ``enable_pdl`` 1; each forward program both packages launch
-    has two names, and the deterministic record of it launches without PDL.  Every output of both packages is judged
-    against the naive tier (no comparison between them)."""
+    stream (policy forced on), at :data:`PDL_CASE`, at the first token count of the default route's first
+    ``DIRECT_ROWS`` range outside every ``PAIR_ROWS`` range (where both packages launch the direct program) and at a
+    token count of the default route's first ``PAIR_ROWS`` range (S 1000 when the range holds it, where both packages
+    launch the pair direct program): the non-deterministic launches are of records with ``launch.use_pdl``
+    ``"runtime"`` and pass ``enable_pdl`` 1; each forward program both packages launch has two names, and the
+    deterministic record of it launches without PDL.  Every output of both packages is judged against the naive tier
+    (no comparison between them)."""
 
     _pdl_mode("eager", monkeypatch)
     seen = _record_pdl(monkeypatch)
@@ -4538,10 +4948,20 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     monkeypatch.setattr(det, "run_modules", det_record_many)
     arch = _arch()
     direct = [
-        key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "direct"
+        key
+        for key in _forward_keys(arch)
+        if key[0] == "fwd"
+        and key[5] == "direct"
+        and not loader.pair_row(arch, "fwd", key[1], key[3])
     ]
-    assert direct, f"{arch}: no DIRECT_ROWS key on route fwd"
+    assert direct, (
+        f"{arch}: no DIRECT_ROWS key on route fwd outside the PAIR_ROWS ranges"
+    )
     _, c_lo, _, s_lo, _, _ = direct[0]
+    pair = [key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "pair"]
+    assert pair, f"{arch}: no PAIR_ROWS key on route fwd"
+    _, pair_c, _, pair_lo, pair_hi, _ = pair[0]
+    pair_s = 1000 if pair_lo <= 1000 <= pair_hi else pair_lo
 
     def call(x, w, cu, dy, b, policy):
         found = {"y": [], "dx": [], "dweight": []}
@@ -4554,7 +4974,7 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
             found["dweight"] += [dw, det_dw]
         return found
 
-    for S, C, docs in (PDL_CASE, (s_lo, c_lo, "perf")):
+    for S, C, docs in (PDL_CASE, (s_lo, c_lo, "perf"), (pair_s, pair_c, "perf")):
         _route_judge(
             S,
             C,
@@ -4567,6 +4987,8 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     _assert_pdl(seen, 1, "nondet")
     assert _forward_program(arch, "fwd", "direct") in {name for name, _ in seen}, seen
     assert det_jit.direct_module(arch, "fwd", c_lo, s_lo) in det_seen, det_seen
+    assert _forward_program(arch, "fwd", "pair") in {name for name, _ in seen}, seen
+    assert det_jit.pair_module(arch, "fwd", pair_c, pair_s) in det_seen, det_seen
     # the programs both packages launch (the forward: one program, two names and bindings)
     shared = [
         (name, det_name)
@@ -4577,6 +4999,548 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     assert shared, (det_seen, seen)
     for name, det_name in shared:
         assert name != det_name and det_jit.MODULES[det_name]["launch"]["use_pdl"] is False, det_name
+
+
+# The backward rows of ``DIRECT_ROWS`` (routes ``bwd``, ``bwd_dt`` and ``bwd_bias``; per architecture and route,
+# channel ranges within C 512 to 1024, each with its own token range): the labels of those routes (:data:`ROUTE_LABELS`:
+# FP32 and BF16 taps on ``bwd_dt`` and ``bwd_bias``), the channel counts besides each key's ends where a key covers
+# them (C 512 and C 1024 in 128-channel tiles; C 576 and C 520 in 64-channel tiles, C 520 with a partial last tile)
+# and the document counts of the rows of 1000 tokens and more (one,
+# four in the perf packing, 32, and 100 from :data:`BACKWARD_DIRECT_MANY_DOCS_FROM` tokens).
+BACKWARD_DIRECT_LABELS = ("bwd", "bwd_dt", "bwd_dt-bf16", "bwd_bias", "bwd_bias-bf16")
+BACKWARD_DIRECT_CHANNELS = (512, 576, 1024, 520)
+BACKWARD_DIRECT_DOCS = (1, 4, 32, 100)
+BACKWARD_DIRECT_MANY_DOCS_FROM = 400
+# The direct backward programs' grid: a CTA takes token blocks of ``n_sub`` sub-tiles of 4 tokens, at most 2 CTAs per
+# SM.
+BACKWARD_DIRECT_BLOCK_TOKENS = 4
+BACKWARD_DIRECT_CTAS_PER_SM = 2
+
+
+def _direct_docs(S: int, n: int):
+    """The packing of ``n`` documents over ``S`` tokens: one document (``None``) for one, the perf packing for four,
+    else ``n`` documents of ``S // n`` tokens or one token more (the longer ones first)."""
+
+    if n == 1:
+        return None
+    if n == len(PERF_FRACTIONS) + 1:
+        return "perf"
+    return tuple(S // n + (1 if i < S % n else 0) for i in range(n))
+
+
+def _backward_direct_cases(arch: str, kind: str) -> tuple:
+    """``(S, C, docs)`` of the backward direct rows of label ``kind`` on ``arch``, per key of the route: at its channel
+    ends and the channel counts of :data:`BACKWARD_DIRECT_CHANNELS` inside it, its first token count, two tokens where
+    the key holds them and one token below the key (above one token) in one document, and S 1000 where the key holds
+    it, the key's last token count and one token above it in each packing of :data:`BACKWARD_DIRECT_DOCS`; each row
+    once; empty without a key."""
+
+    cases = []
+    for c_lo, c_hi, s_lo, s_hi, _ in _backward_direct_keys(arch, kind):
+        inner = (C for C in BACKWARD_DIRECT_CHANNELS if c_lo <= C <= c_hi)
+        for C in dict.fromkeys((c_lo, c_hi, *inner)):
+            cases += [
+                (S, C, None)
+                for S in (s_lo - 1, s_lo, 2)
+                if S >= 1 and (S == s_lo - 1 or s_lo <= S <= s_hi)
+            ]
+            cases += [
+                (S, C, _direct_docs(S, n))
+                for S in (1000, s_hi, s_hi + 1)
+                if s_lo <= S <= s_hi + 1
+                for n in BACKWARD_DIRECT_DOCS
+                if n < 100 or S >= BACKWARD_DIRECT_MANY_DOCS_FROM
+            ]
+    return tuple(dict.fromkeys(cases))
+
+
+def _direct_backward_grid(sms: int, S: int, n_sub: int, n_ch_tiles: int) -> int:
+    """The grid of a direct backward launch at ``bwd_grid_mult`` 1: ``CTAS_PER_SM x SM count`` CTAs, but no more than
+    one per token block of each channel tile (``ceil(S / (4 x n_sub))`` blocks) and at least one per channel tile."""
+
+    blocks = max(1, -(-S // (BACKWARD_DIRECT_BLOCK_TOKENS * n_sub)))
+    return max(n_ch_tiles, min(BACKWARD_DIRECT_CTAS_PER_SM * sms, n_ch_tiles * blocks))
+
+
+@contextlib.contextmanager
+def _staged_backward(arch: str):
+    """Inside the block ``DIRECT_ROWS`` of ``arch`` keeps its forward keys only, so a backward call runs the program
+    the other tables and the rules select (the route's staged program).  The host's row plans are dropped on entry and
+    on exit."""
+
+    rows = {
+        key: value
+        for key, value in loader.DIRECT_ROWS.get(arch, {}).items()
+        if loader.route_role(key[0]) == "fwd"
+    }
+    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as m:
+            m.setitem(loader.DIRECT_ROWS, arch, rows)
+            yield
+    finally:
+        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+
+
+def _direct_backward_record(arch: str, kind: str) -> tuple[str, dict]:
+    """The direct backward program of label ``kind``'s route on ``arch`` and its record, whose grid rule caps the
+    grid by the call's token blocks (:data:`BACKWARD_DIRECT_BLOCK_TOKENS`, :data:`BACKWARD_DIRECT_CTAS_PER_SM`)."""
+
+    names = {name for _, _, _, _, name in _backward_direct_keys(arch, kind)}
+    assert len(names) == 1, (arch, kind, names)
+    (name,) = names
+    record = loader.MODULES[name]
+    rule = record["grid_rule"]
+    assert name in loader.route_modules(arch, _route_of(kind)), (arch, kind, name)
+    assert (
+        rule["kind"],
+        rule["cap"],
+        int(rule["block_tokens"]),
+        int(rule["ctas_per_sm"]),
+    ) == (
+        "co_resident",
+        "token_blocks",
+        BACKWARD_DIRECT_BLOCK_TOKENS,
+        BACKWARD_DIRECT_CTAS_PER_SM,
+    ), (name, rule)
+    return name, record
+
+
+@pytest.mark.parametrize("kind", BACKWARD_DIRECT_LABELS)
+def test_backward_direct_rows(kind, monkeypatch) -> None:
+    """Every row of :func:`_backward_direct_cases` on the device's architecture: inside the key's range the call
+    launches the route's direct program with the split of ``cake_jit.direct_split`` on ``max(n_ch_tiles, min(2 x SM
+    count, n_ch_tiles x ceil(S / (4 x n_sub))))`` CTAs, outside it (one token below or above) the program the other
+    tables name;
+    on a caller-owned workspace of the public size, with NaN-poisoned ``dx``, ``dweight`` and ``dbias`` outs: every
+    output judged against the naive tier, the workspace zero after every call, and inside the range ``dx`` bit for
+    bit that of the route's staged program on the same inputs (:func:`_staged_backward`)."""
+
+    _require_route(kind)
+    _direct_rows_check(
+        kind, _backward_direct_cases(_arch(), kind), monkeypatch, key=241
+    )
+
+
+# Short documents at a direct backward key: ``(S, document lengths)`` at C :data:`BACKWARD_DIRECT_SHORT_DOCS_C`, inside
+# every architecture's backward ``DIRECT_ROWS`` key of each route (C 512 from S 1); documents of 1 to 3 tokens and an
+# empty one, which the rows of :func:`_backward_direct_cases` (documents of equal length) do not reach.
+BACKWARD_DIRECT_SHORT_DOCS = ((7, (1, 2, 1, 3)), (5, (1, 0, 1, 3)))
+BACKWARD_DIRECT_SHORT_DOCS_C = 512
+
+
+@pytest.mark.parametrize("kind", BACKWARD_DIRECT_LABELS)
+def test_backward_direct_rows_short_documents(kind, monkeypatch) -> None:
+    """At C 512, inside the backward ``DIRECT_ROWS`` key of the label's route on the device's architecture, S 7 in
+    documents of 1, 2, 1 and 3 tokens and S 5 in documents of 1, 0, 1 and 3 tokens (:data:`BACKWARD_DIRECT_SHORT_DOCS`):
+    the checks of :func:`test_backward_direct_rows` (the direct program on its split and token-block grid, NaN-poisoned
+    outs on a caller-owned workspace that reads back zero, every output judged against the naive tier, ``dx`` bit for
+    bit that of the route's staged program)."""
+
+    _require_route(kind)
+    arch, route, C = _arch(), _route_of(kind), BACKWARD_DIRECT_SHORT_DOCS_C
+    cases = tuple((S, C, docs) for S, docs in BACKWARD_DIRECT_SHORT_DOCS)
+    assert all(loader.direct_row(arch, route, C, S) for S, _, _ in cases), (arch, kind)
+    _direct_rows_check(kind, cases, monkeypatch, key=245)
+
+
+def _direct_rows_check(kind: str, cases: tuple, monkeypatch, *, key: int) -> None:
+    """The checks of :func:`test_backward_direct_rows` on the rows ``cases`` (``(S, C, docs)``) of label ``kind`` on
+    the device's architecture, the inputs drawn with ``key``."""
+
+    arch, device = _arch(), _device()
+    route = _route_of(kind)
+    assert cases, f"{arch}: no backward DIRECT_ROWS key on route {route}"
+    direct, record = _direct_backward_record(arch, kind)
+    geometry = record["grid_rule"]["geometry"]
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    launched = []
+    run_module = pkg.run_module
+
+    def record_launch(name, values, *, device_index, grid=None):
+        split = tuple(int(values[key]) for key in ("ct_vec", "n_sub", "n_ch_tiles"))
+        launched.append((name, split, tuple(int(v) for v in grid)))
+        return run_module(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record_launch)
+    inside_rows = 0
+    for S, C, docs in cases:
+        inside = loader.direct_row(arch, route, C, S)
+        expected = _expected_program(arch, kind, S, C)
+        assert (expected == direct) == inside, (kind, S, C, expected)
+        inside_rows += inside
+        split = (
+            loader.direct_split(C, geometry=geometry, route=route, arch=arch)
+            if inside
+            else None
+        )
+        tag = (
+            "one" if docs is None else (docs if docs == "perf" else f"{len(docs)}docs")
+        )
+        label = f"{arch} {kind} S={S} C={C} docs={tag} program={expected}"
+        workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
+
+        def call(
+            x, w, cu, dy, b, policy, S=S, C=C, inside=inside, expected=expected, split=split, workspace=workspace,
+            label=label,
+        ):  # fmt: skip
+            dx = torch.full_like(x, float("nan"))
+            dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"] or w.dtype
+            dw = torch.full(
+                (C, WIDTH), float("nan"), dtype=dweight_dtype, device=device
+            )
+            db = (
+                None
+                if b is None
+                else torch.full((C,), float("nan"), dtype=b.dtype, device=device)
+            )
+            launched.clear()
+            got = _backward(
+                x,
+                w,
+                cu,
+                dy,
+                b,
+                policy,
+                kind=kind,
+                workspace=workspace,
+                dx=dx,
+                dweight=dw,
+                dbias=db,
+            )
+            torch.cuda.synchronize(device)
+            assert got[0] is dx and got[1] is dw and got[2] is db, label
+            assert [name for name, _, _ in launched] == [expected], (
+                f"{label}: launched {launched}"
+            )
+            assert int(torch.count_nonzero(workspace)) == 0, (
+                f"{label}: workspace not zero"
+            )
+            if inside:
+                _, launched_split, grid = launched[0]
+                assert launched_split == split, (label, launched_split, split)
+                assert grid == (
+                    _direct_backward_grid(sms, S, split[1], split[2]),
+                    1,
+                    1,
+                ), (label, grid)
+                launched.clear()
+                with _staged_backward(arch):
+                    staged = _backward(
+                        x, w, cu, dy, b, policy, kind=kind, workspace=workspace
+                    )
+                    torch.cuda.synchronize(device)
+                assert len(launched) == 1 and launched[0][0] != direct, (
+                    f"{label}: staged launches {launched}"
+                )
+                assert int(torch.count_nonzero(workspace)) == 0, (
+                    f"{label}: workspace not zero after the staged call"
+                )
+                assert torch.equal(_bits(dx), _bits(staged[0])), (
+                    f"{label}: dx differs from the staged program's"
+                )
+            return _grads(dx, dw, db)
+
+        _route_judge(S, C, docs, kind, call, key=key, label=label)
+    assert inside_rows, f"{arch} {kind}: no row inside the key"
+
+
+@pytest.mark.parametrize("kind", BACKWARD_DIRECT_LABELS)
+def test_backward_direct_rows_bwd_grid_mult_and_graph_replays(
+    kind, monkeypatch
+) -> None:
+    """At each channel count of :data:`BACKWARD_DIRECT_CHANNELS` a key covers, at two tokens (one document), S 1000
+    (the perf packing) and the key's last token count (100 documents), each where the key holds it: each
+    ``bwd_grid_mult`` of ``BWD_GRID_MULTS`` launches the route's direct program on that many times its grid of
+    ``bwd_grid_mult`` 1, on the package's workspace, and a CUDA Graph of the call at each multiple (on a caller-owned
+    workspace of the public size) is replayed on every draw's inputs into NaN-filled outputs.  Every eager and
+    replayed output is judged against the naive tier, every workspace reads back zero after every call and replay,
+    and every ``dx`` is bit for bit that of the route's staged program on the draw's inputs
+    (:func:`_staged_backward`)."""
+
+    _require_route(kind)
+    arch, device = _arch(), _device()
+    route = _route_of(kind)
+    direct, record = _direct_backward_record(arch, kind)
+    geometry = record["grid_rule"]["geometry"]
+    keys = _backward_direct_keys(arch, kind)
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    launched = []
+    run_module = pkg.run_module
+
+    def record_launch(name, values, *, device_index, grid=None):
+        launched.append((name, tuple(int(v) for v in grid)))
+        return run_module(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record_launch)
+    cases = [
+        (S, C, docs)
+        for C in BACKWARD_DIRECT_CHANNELS
+        for c_lo, c_hi, s_lo, s_hi, _ in keys
+        if c_lo <= C <= c_hi
+        for S, docs in ((2, None), (1000, "perf"), (s_hi, _direct_docs(s_hi, 100)))
+        if s_lo <= S <= s_hi
+    ]
+    assert cases, (arch, kind, keys)
+    current = torch.cuda.current_stream(device)
+    side = torch.cuda.Stream(device=device)
+    for S, C, docs in cases:
+        assert loader.direct_row(arch, route, C, S), (kind, S, C)
+        _, n_sub, n_ch_tiles = loader.direct_split(
+            C, geometry=geometry, route=route, arch=arch
+        )
+        grid = _direct_backward_grid(sms, S, n_sub, n_ch_tiles)
+        x0, w0, cu0, dy0, b0, policy = _route_inputs(S, C, docs, kind, key=243)
+        dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"] or w0.dtype
+        graphs = []
+        for mult in pkg.BWD_GRID_MULTS:
+            outs = (
+                torch.empty_like(x0),
+                torch.empty(C, WIDTH, dtype=dweight_dtype, device=device),
+                None if b0 is None else torch.empty(C, dtype=b0.dtype, device=device),
+            )
+            workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(
+                S, C, device, bwd_grid_mult=mult
+            )
+
+            def step(
+                mult=mult,
+                outs=outs,
+                workspace=workspace,
+                x0=x0,
+                w0=w0,
+                cu0=cu0,
+                dy0=dy0,
+                b0=b0,
+                policy=policy,
+            ):
+                _backward(
+                    x0, w0, cu0, dy0, b0, policy, kind=kind, workspace=workspace, dx=outs[0], dweight=outs[1],
+                    dbias=outs[2], bwd_grid_mult=mult,
+                )  # fmt: skip
+
+            side.wait_stream(current)
+            with torch.cuda.stream(side):
+                step()
+            current.wait_stream(side)
+            torch.cuda.synchronize(device)
+            graph = torch.cuda.CUDAGraph()
+            launched.clear()
+            with torch.cuda.graph(graph, stream=side):
+                step()
+            torch.cuda.synchronize(device)
+            assert launched == [(direct, (grid * mult, 1, 1))], (
+                kind,
+                S,
+                C,
+                mult,
+                launched,
+            )
+            graphs.append((mult, graph, outs, workspace))
+        label = f"{arch} {kind} S={S} C={C} grid={grid}"
+
+        def call(
+            x, w, cu, dy, b, policy, grid=grid, graphs=graphs, inputs=(x0, w0, cu0, dy0, b0), label=label,
+        ):  # fmt: skip
+            with _staged_backward(arch):
+                staged = _backward(x, w, cu, dy, b, policy, kind=kind)
+                torch.cuda.synchronize(device)
+            found = {}
+            for mult in pkg.BWD_GRID_MULTS:
+                launched.clear()
+                run = _backward(x, w, cu, dy, b, policy, kind=kind, bwd_grid_mult=mult)
+                torch.cuda.synchronize(device)
+                assert launched == [(direct, (grid * mult, 1, 1))], (
+                    f"{label} bwd_grid_mult={mult}: {launched}"
+                )
+                held = _stream_workspace(device)
+                assert held is not None and int(torch.count_nonzero(held)) == 0, (
+                    f"{label} bwd_grid_mult={mult}"
+                )
+                assert torch.equal(_bits(run[0]), _bits(staged[0])), (
+                    f"{label} bwd_grid_mult={mult}: dx"
+                )
+                for out, value in _grads(*run).items():
+                    found.setdefault(out, []).append(value)
+            for mult, graph, outs, workspace in graphs:
+                for held, value in zip(inputs, (x, w, cu, dy, b), strict=True):
+                    if held is not None:
+                        held.copy_(value)
+                for t in outs:
+                    if t is not None:
+                        t.fill_(float("nan"))
+                graph.replay()
+                torch.cuda.synchronize(device)
+                assert int(torch.count_nonzero(workspace)) == 0, (
+                    f"{label} replay bwd_grid_mult={mult}: workspace"
+                )
+                assert torch.equal(_bits(outs[0]), _bits(staged[0])), (
+                    f"{label} replay bwd_grid_mult={mult}: dx"
+                )
+                for out, value in _grads(*outs).items():
+                    found.setdefault(out, []).append(value)
+            return found
+
+        _route_judge(S, C, docs, kind, call, key=243, label=label)
+
+
+# The small-S grid cap of the single-wave backward (``GRID_CAP_ROWS``): the labels of its routes (``bwd``, the one
+# route with keys) and the document counts of a span's middle (one, four in the perf packing, 32).
+GRID_CAP_LABELS = ("bwd",)
+GRID_CAP_DOCS = (1, 4, 32)
+
+
+def _grid_cap_keys(kind: str) -> list[tuple[int, int, tuple]]:
+    """``(C_lo, C_hi, spans)`` of the ``GRID_CAP_ROWS`` keys of label ``kind``'s route on every architecture: the
+    rows of one architecture's keys run on every architecture, and where it has no key no grid is capped."""
+
+    route = _route_of(kind)
+    keys = {}
+    for rows in loader.GRID_CAP_ROWS.values():
+        for (key_route, c_lo, c_hi), spans in rows.items():
+            if key_route == route:
+                keys[int(c_lo), int(c_hi)] = tuple(spans)
+    return [(c_lo, c_hi, spans) for (c_lo, c_hi), spans in sorted(keys.items())]
+
+
+def _grid_cap_cases(kind: str) -> tuple:
+    """``(S, C, docs)`` of the grid cap rows of label ``kind``: at each key's channel ends, each span's first and last
+    token count and one token outside each end in one document, and the span's middle in each packing of
+    :data:`GRID_CAP_DOCS`; each row once."""
+
+    cases = []
+    for c_lo, c_hi, spans in _grid_cap_keys(kind):
+        for C in dict.fromkeys((c_lo, c_hi)):
+            for s_lo, s_hi, _ in spans:
+                cases += [(S, C, None) for S in (s_lo - 1, s_lo, s_hi, s_hi + 1)]
+                S = (s_lo + s_hi) // 2
+                cases += [(S, C, _direct_docs(S, n)) for n in GRID_CAP_DOCS]
+    return tuple(dict.fromkeys(cases))
+
+
+@contextlib.contextmanager
+def _uncapped_backward():
+    """Inside the block ``GRID_CAP_ROWS`` is empty, so every backward launches its grid without the cap.  The host's
+    row plans are dropped on entry and on exit."""
+
+    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(loader, "GRID_CAP_ROWS", {})
+            yield
+    finally:
+        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+
+
+@pytest.mark.parametrize("kind", GRID_CAP_LABELS)
+def test_grid_cap_rows(kind, monkeypatch) -> None:
+    """Every row of :func:`_grid_cap_cases` on the device's architecture, on a caller-owned workspace of the public
+    size and NaN-poisoned ``dx``, ``dweight`` and ``dbias`` outs: the call launches the programs and splits of the
+    uncapped table (:func:`_uncapped_backward`) on the same inputs; inside a span of a key of the architecture the
+    main launch's grid is ``max(n_ch_tiles, min(grid, n_ch_tiles x ceil(S / (n_sub x tokens))))`` of the uncapped
+    launch's ``grid``, below it on some rows, and elsewhere (one token outside a span, an architecture without a key)
+    the uncapped grid; every output judged against the naive tier, the workspace zero after every call, and ``dx``
+    bit for bit that of the uncapped launch."""
+
+    _require_route(kind)
+    arch, device = _arch(), _device()
+    route = _route_of(kind)
+    cases = _grid_cap_cases(kind)
+    assert cases, f"no GRID_CAP_ROWS key on route {route}"
+    launched = []
+    capped_rows = []
+    run_module = pkg.run_module
+
+    def record_launch(name, values, *, device_index, grid=None):
+        split = tuple(int(values[key]) for key in ("ct_vec", "n_sub", "n_ch_tiles"))
+        launched.append((name, split, tuple(int(v) for v in grid)))
+        return run_module(name, values, device_index=device_index, grid=grid)
+
+    monkeypatch.setattr(pkg, "run_module", record_launch)
+    for S, C, docs in cases:
+        tokens = loader.grid_cap_tokens(arch, route, C, S)
+        assert not (tokens and loader.direct_row(arch, route, C, S)), (kind, S, C)
+        tag = (
+            "one" if docs is None else (docs if docs == "perf" else f"{len(docs)}docs")
+        )
+        label = f"{arch} {kind} S={S} C={C} docs={tag} tokens={tokens}"
+        workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
+
+        def call(
+            x,
+            w,
+            cu,
+            dy,
+            b,
+            policy,
+            S=S,
+            C=C,
+            tokens=tokens,
+            label=label,
+            workspace=workspace,
+        ):
+            dx = torch.full_like(x, float("nan"))
+            dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"] or w.dtype
+            dw = torch.full(
+                (C, WIDTH), float("nan"), dtype=dweight_dtype, device=device
+            )
+            db = (
+                None
+                if b is None
+                else torch.full((C,), float("nan"), dtype=b.dtype, device=device)
+            )
+            launched.clear()
+            got = _backward(
+                x,
+                w,
+                cu,
+                dy,
+                b,
+                policy,
+                kind=kind,
+                workspace=workspace,
+                dx=dx,
+                dweight=dw,
+                dbias=db,
+            )
+            torch.cuda.synchronize(device)
+            assert got[0] is dx and got[1] is dw and got[2] is db, label
+            capped = list(launched)
+            assert int(torch.count_nonzero(workspace)) == 0, (
+                f"{label}: workspace not zero"
+            )
+            launched.clear()
+            with _uncapped_backward():
+                base = _backward(
+                    x, w, cu, dy, b, policy, kind=kind, workspace=workspace
+                )
+                torch.cuda.synchronize(device)
+            uncapped = list(launched)
+            assert int(torch.count_nonzero(workspace)) == 0, (
+                f"{label}: workspace not zero after the uncapped call"
+            )
+            plans = [row[:2] for row in uncapped]
+            assert capped, label
+            assert [row[:2] for row in capped] == plans, (label, capped, uncapped)
+            assert capped[1:] == uncapped[1:], (label, capped, uncapped)
+            (_, n_sub, n_ch_tiles), grid = uncapped[0][1], uncapped[0][2]
+            want = grid
+            if tokens is not None:
+                cap = n_ch_tiles * -(-S // (n_sub * tokens))
+                want = (max(n_ch_tiles, min(grid[0], cap)), 1, 1)
+            assert capped[0][2] == want, (label, capped[0][2], grid)
+            if want != grid:
+                capped_rows.append((S, C))
+            assert torch.equal(_bits(dx), _bits(base[0])), (
+                f"{label}: dx differs from the uncapped launch's"
+            )
+            return _grads(dx, dw, db)
+
+        _route_judge(S, C, docs, kind, call, key=251, label=label)
+    if loader.GRID_CAP_ROWS.get(arch):
+        assert capped_rows, f"{arch} {kind}: no row's grid is capped"
+    else:
+        assert not capped_rows, f"{arch} {kind}: capped {capped_rows}"
 
 
 def test_backward_is_one_launch_with_zeroed_accumulators(monkeypatch) -> None:
@@ -4604,7 +5568,7 @@ def test_backward_is_one_launch_with_zeroed_accumulators(monkeypatch) -> None:
         _backward(x, w, cu, dy, b, policy, kind=kind)
         assert len(launched) == 1, f"{kind}: {len(launched)} launches"
         name, values, grid, acc_nonzero, work_nonzero = launched[0]
-        assert name == loader.selected_modules(arch, kind, C=C, S=S)[0]
+        assert name == loader.selected_modules(arch, _route_of(kind), C=C, S=S)[0]
         record = loader.MODULES[name]
         assert "reduce" not in record and record["launch"]["cooperative"] is False
         assert grid == pkg._one_sm_trim(
@@ -4657,7 +5621,7 @@ def test_bwd_grid_mult_launches_that_many_times_the_untrimmed_grid(
         (5, 136, (2, 0, 3)),
     ):
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind, key=32)
-        name = loader.selected_modules(arch, kind, C=C, S=S)[0]
+        name = loader.selected_modules(arch, _route_of(kind), C=C, S=S)[0]
         record = loader.MODULES[name]
         untrimmed = loader.launch_grid(record, device_index=device.index)
         for mult in pkg.BWD_GRID_MULTS:
@@ -4704,7 +5668,7 @@ def test_backward_grid_gives_up_one_sm_when_the_last_rank_is_partial(
     monkeypatch.setattr(pkg, "run_module", record_launch)
     rows = {}
     for C in range(1024, 16385, 1024):
-        name = loader.selected_modules(arch, kind, C=C, S=S)[0]
+        name = loader.selected_modules(arch, _route_of(kind), C=C, S=S)[0]
         record = loader.MODULES[name]
         rule = record["grid_rule"]
         k = int(rule["ctas_per_sm"])
@@ -5153,6 +6117,202 @@ def test_fp32_dweight_must_be_16_byte_aligned() -> None:
             label=f"bf16 outs at element offsets {dweight_offset} / {dbias_offset}",
         )
     assert int(torch.count_nonzero(workspace)) == 0
+
+
+def _bits(t: torch.Tensor) -> torch.Tensor:
+    """The bit pattern of a BF16 or FP32 tensor (``torch.equal`` of two of them compares bits)."""
+
+    return t.view(torch.int16) if t.dtype == BF16 else t.view(torch.int32)
+
+
+def _view_at(base: torch.Tensor, offset: int, shape: tuple[int, ...]) -> torch.Tensor:
+    """A ``shape`` view of fresh zeroed storage of ``base``'s dtype that starts ``offset`` elements past a 32-byte
+    aligned address, holding ``base``'s values."""
+
+    n = base.numel()
+    buf = torch.zeros(n + offset, dtype=base.dtype, device=base.device)
+    assert buf.data_ptr() % 32 == 0
+    view = buf[offset : offset + n].view(shape)
+    view.copy_(base.reshape(shape))
+    return view
+
+
+def test_bias_must_be_aligned() -> None:
+    """The forward programs load eight bias channels per vector (32 bytes in FP32, 16 in BF16), the backward
+    programs as 16-byte vectors.  A bias off that grid (FP32 or BF16, 1 to 7 elements past a 32-byte boundary) is
+    refused (``ValueError``) by the forward and the autograd entry, and off the 16-byte grid by the standalone
+    backward, before anything launches: ``out``, the gradient outs and both workspaces stay zero.  A bias view on the
+    grid inside a larger buffer gives ``y`` and ``dx`` bitwise equal to a fresh bias (an FP32 bias 16 bytes past a
+    32-byte boundary runs the standalone backward too), and ``dweight`` / ``dbias`` judged against the naive tier (the
+    FP32 bias with FP32 taps, the BF16 bias with BF16 taps)."""
+
+    S, C, docs = 1000, 512, "perf"
+    device = _device()
+    x, w, cu, dy = _inputs(S, C, docs, key=9)
+    out, dx = torch.zeros_like(x), torch.zeros_like(x)
+    dw = torch.zeros(C, WIDTH, dtype=F32, device=device)
+    fws = pkg.cake_causal_conv1d_nondet_train_forward_workspace(S, C, device)
+    bws = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
+    for dtype, need in ((F32, 32), (BF16, 16)):
+        big = torch.zeros(C + 8, dtype=dtype, device=device)
+        assert big.data_ptr() % 32 == 0
+        db = torch.zeros(C, dtype=dtype, device=device)
+        for k in range(1, 8):
+            bias = big[k : k + C]
+            assert bias.data_ptr() % need != 0
+            with pytest.raises(ValueError, match=f"bias must be {need}-byte aligned"):
+                _forward(x, w, cu, bias=bias, out=out, workspace=fws)
+            with pytest.raises(ValueError, match=f"bias must be {need}-byte aligned"):
+                pkg.cake_causal_conv1d_nondet(x, w, cu, bias)
+            if bias.data_ptr() % 16 == 0:
+                continue  # FP32, k = 4: the standalone backward takes it (below)
+            with pytest.raises(ValueError, match="bias must be 16-byte aligned"):
+                _backward(
+                    x, w, cu, dy, bias, dx=dx, dweight=dw, dbias=db, workspace=bws
+                )
+        torch.cuda.synchronize(device)
+        for t in (big, db, out, dx, dw, fws, bws):
+            assert int(torch.count_nonzero(t)) == 0
+
+    # the FP32 bias with FP32 taps, the BF16 bias with BF16 taps
+    for dtype, taps in ((F32, F32), (BF16, BF16)):
+
+        def offset_bias(x, w, cu, dy, b, policy):
+            # 8 elements: 32 bytes (FP32) / 16 bytes (BF16) past a 32-byte boundary;
+            # 4 FP32 elements: 16 bytes past one
+            views = [_view_at(b, 8, (C,))]
+            if b.dtype == F32:
+                views.append(_view_at(b, 4, (C,)))
+            y = _forward(x, w, cu, bias=views[0])
+            assert torch.equal(_bits(y), _bits(_forward(x, w, cu, bias=b)))
+            dx_ref = _backward(x, w, cu, dy, b, policy)[0]
+            grads = [_backward(x, w, cu, dy, view, policy) for view in views]
+            for g in grads:
+                assert torch.equal(_bits(g[0]), _bits(dx_ref))
+            return {
+                "y": y,
+                "dx": [g[0] for g in grads],
+                "dweight": [g[1] for g in grads],
+                "dbias": [g[2] for g in grads],
+            }
+
+        _judge(
+            S,
+            C,
+            docs,
+            offset_bias,
+            weight_dtype=taps,
+            bias_dtype=dtype,
+            key=9,
+            label=f"aligned {_dtype_id(dtype)} bias views, {_dtype_id(taps)} taps",
+        )
+
+
+def test_tokens_and_taps_must_be_aligned() -> None:
+    """The programs move the token rows (``x``, ``dy``, ``out``, ``dx``) as 16-byte vectors and one channel's taps as
+    one vector (16 bytes FP32, 8 bytes BF16).  A token tensor 1 to 7 elements past a 32-byte boundary and taps 1 to 3
+    elements past one are refused (``ValueError``) by the forward, the backward and the autograd entry before
+    anything launches: the outputs and both workspaces stay zero.  Views that start at a whole row of a larger buffer
+    (``x``, ``dy``, ``out``, ``dx`` and the taps one row in) are read and written in place: ``y`` and ``dx`` bitwise
+    equal to fresh tensors, and ``dweight`` judged against the naive tier, with FP32 and BF16 taps."""
+
+    S, C, docs = 1000, 512, "perf"
+    device = _device()
+    x, w, cu, dy = _inputs(S, C, docs, key=10)
+    out, dx = torch.zeros_like(x), torch.zeros_like(x)
+    fws = pkg.cake_causal_conv1d_nondet_train_forward_workspace(S, C, device)
+    bws = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
+
+    def refused(name: str, need: int, fn, *args, **kwargs) -> None:
+        with pytest.raises(ValueError, match=f"{name} must be {need}-byte aligned"):
+            fn(*args, **kwargs)
+
+    flat = torch.zeros(S * C + 8, dtype=BF16, device=device)
+    assert flat.data_ptr() % 32 == 0
+    for k in range(1, 8):
+        v = flat[k : k + S * C].view(S, C)
+        assert v.data_ptr() % 16 != 0
+        refused("x", 16, _forward, v, w, cu, out=out, workspace=fws)
+        refused("x", 16, _backward, v, w, cu, dy, dx=dx, workspace=bws)
+        refused("x", 16, pkg.cake_causal_conv1d_nondet, v, w, cu)
+        refused("dy", 16, _backward, x, w, cu, v, dx=dx, workspace=bws)
+        refused("out", 16, _forward, x, w, cu, out=v, workspace=fws)
+        refused("dx", 16, _backward, x, w, cu, dy, dx=v, workspace=bws)
+    for dtype, need in ((F32, 16), (BF16, 8)):
+        for k in range(1, 4):
+            taps = torch.zeros(C * WIDTH + k, dtype=dtype, device=device)
+            taps = taps[k:].view(C, WIDTH)
+            assert taps.data_ptr() % need != 0
+            refused("weight", need, _forward, x, taps, cu, out=out, workspace=fws)
+            refused("weight", need, _backward, x, taps, cu, dy, dx=dx, workspace=bws)
+            refused("weight", need, pkg.cake_causal_conv1d_nondet, x, taps, cu)
+    torch.cuda.synchronize(device)
+    for t in (flat, out, dx, fws, bws):
+        assert int(torch.count_nonzero(t)) == 0
+
+    def row_views(x, w, cu, dy, b, policy):
+        xv, dyv = _view_at(x, C, (S, C)), _view_at(dy, C, (S, C))
+        wv = _view_at(w, WIDTH, (C, WIDTH))
+        outv = _view_at(torch.zeros_like(x), C, (S, C))
+        dxv = _view_at(torch.zeros_like(x), C, (S, C))
+        y = _forward(xv, wv, cu, out=outv)
+        dxo, dwo, _ = _backward(xv, wv, cu, dyv, None, policy, dx=dxv)
+        assert y is outv and dxo is dxv
+        assert torch.equal(_bits(y), _bits(_forward(x, w, cu)))
+        assert torch.equal(_bits(dxo), _bits(_backward(x, w, cu, dy, None, policy)[0]))
+        return {"y": y, **_grads(dxo, dwo, None)}
+
+    for weight_dtype in (F32, BF16):
+        _judge(
+            S,
+            C,
+            docs,
+            row_views,
+            weight_dtype=weight_dtype,
+            key=10,
+            label=f"row views, {_dtype_id(weight_dtype)} taps",
+        )
+
+
+def test_autograd_copies_a_misaligned_incoming_gradient() -> None:
+    """Autograd can hand the backward a contiguous BF16 gradient off the 16-byte grid: the backward of
+    ``torch.cat([pad, y.reshape(-1)])`` narrows its gradient one element in, 2 bytes past an aligned address.  The
+    autograd entry copies it, so the backward runs (no ``ValueError``): ``dx`` bitwise equal to the direct backward
+    of the same gradient, and ``dweight`` / ``dbias`` judged against the naive tier, without a bias and with an FP32
+    bias."""
+
+    S, C, docs = 1000, 512, "perf"
+
+    def through_cat(x, w, cu, dy, b, policy):
+        xg = x.detach().clone().requires_grad_(True)
+        wg = w.detach().clone().requires_grad_(True)
+        bg = None if b is None else b.detach().clone().requires_grad_(True)
+        y = pkg.cake_causal_conv1d_nondet(
+            xg, wg, cu, bg, silu_grad_preactivation=policy
+        )
+        seen = []
+        y.register_hook(lambda g: seen.append(g.data_ptr() % 16))
+        pad = y.new_zeros(1)
+        torch.cat([pad, y.reshape(-1)]).backward(torch.cat([pad, dy.reshape(-1)]))
+        assert seen == [2], seen
+        dx_ref = _backward(x, w, cu, dy, b, policy)[0]
+        assert torch.equal(_bits(xg.grad), _bits(dx_ref))
+        return {
+            "y": y.detach(),
+            **_grads(xg.grad, wg.grad, None if bg is None else bg.grad),
+        }
+
+    for bias_dtype in (None, F32):
+        bias = "none" if bias_dtype is None else _dtype_id(bias_dtype)
+        _judge(
+            S,
+            C,
+            docs,
+            through_cat,
+            bias_dtype=bias_dtype,
+            key=11,
+            label=f"incoming gradient off the grid, bias {bias}",
+        )
 
 
 # ----------------------------------------------------------------------------------------------------------------

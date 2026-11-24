@@ -28,12 +28,32 @@ S = 32768 on sm_107a) that launch is an SM-wide program: one CTA per SM for
 the whole launch, each CTA a whole token stream, so a kernel that keeps an SM
 busy on another stream can delay it.  On sm_100a and sm_103a, at the backward
 rows of ``cake_jit.FALLBACK_ROWS`` (the default backward route at C = 520 to
-1016; from release 0.2.7 also the ``bwd_bias``, ``bwd_bias_bf16_taps`` and
-``bwd_dt_bf16_taps`` routes at C = 520 to 1016 and small S,
-``bwd_dt_bf16_taps`` not at C = 768 on sm_103a; each row up to its own token
-bound), that launch runs the route's fallback program, the one the route runs
-at its smallest channel counts, in place of the program its channel thresholds
-pick.  This module never runs the deterministic package.
+1016; from release 0.2.7 also the ``bwd_bias`` route and the calls of the
+``bwd_dt`` route with BF16 taps, from release 0.2.9 every call of the
+``bwd_dt`` route, at C = 520 to 1016 and small S, ``bwd_dt`` at C = 768 on
+sm_103a from release 0.2.11; each row up to its own token bound), that launch
+runs the route's fallback program, the one the route runs at its smallest
+channel counts, in place of the program its channel thresholds pick.  At the
+backward rows of ``cake_jit.DIRECT_ROWS`` (the ``bwd``, ``bwd_dt`` and
+``bwd_bias`` routes; per architecture and route, channel ranges within C = 512
+to 1024, each with its own token range within S = 1 to 4096) that launch runs
+the route's direct program, ahead of every table above and the thresholds: no
+TMA and no staged pipeline, each CTA the next token blocks of its channel tile,
+``dx`` bit for bit the route's staged programs', and the same accumulators and
+counters.  From release 0.2.15 the sm_107a ``bwd`` and ``bwd_bias`` direct
+rows run to S = 4096 at C = 512 and 1024 and to S = 2561 at C = 640.  From
+release 0.2.14, at the small-S rows of ``cake_jit.GRID_CAP_ROWS`` (sm_107a:
+the ``bwd`` route at C = 584 to 760 but 640, from S = 512 to 1000, to 999 at
+C = 600 to 616 and 704, and at C = 768 at S = 512) a launch at
+``bwd_grid_mult`` 1 runs the same program on fewer CTAs: at most
+``n_ch_tiles x ceil(S / (n_sub x tokens))``, ``tokens`` 3, and at least one
+per channel tile.  Here ``n_ch_tiles`` is the plan's number of channel tiles
+(3 at these keys) and ``n_sub`` is the number of token sub-tiles of one CTA
+(4 at these keys).  ``tokens`` is the length of one token stream: the CTAs of
+a channel tile split ``S`` into ``CTAs x n_sub`` streams, the tail streams
+shorter, so each CTA takes about ``n_sub x tokens`` tokens.  The ``bwd_bias``
+row of release 0.2.14 at C = 512 from S = 2049 to 3072 is a direct row from
+release 0.2.15.  This module never runs the deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.
@@ -73,21 +93,28 @@ output dtypes, masks, layouts, dynamic shapes and parameter-gradient ownership
 are the deterministic package's.
 
 The forward programs (each the deterministic package's program of the same row):
-at C = 576 to 768, inside the token range of a row of the backend's
-``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` (by architecture and
-route), the static program (a fixed token range per CTA) or the direct
-program (the next token blocks per CTA, no shared memory) runs, neither with
-``work`` counters: a passed forward ``workspace`` is checked and not passed
-to the program, and such a call zeroes no package buffer.  Each row gives its
-own token range.  From release 0.2.6, every architecture and route has a row
-at each ``C`` = 576 to 768 (0.2.5 had none for sm_100a ``fwd_bias`` at
-C = 640, sm_103a ``fwd_bias`` at C = 576 and 712, and sm_103a ``fwd`` at
-C = 768).  For most ``C`` the first range starts at S = 1.  The sm_103a
-``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and
-have only a static range.  Every other call (outside a row's range, or where an
-architecture, route and ``C`` have no row) runs the dynamic program, as in
-0.2.4, which takes its token chunks from zeroed int32 counters.  The forward
-workspace size is the same in every case.
+at C = 512 to 1024, inside the token range of a row of the backend's
+``cake_jit.FALLBACK_ROWS``, ``cake_jit.DIRECT_ROWS`` or, from release 0.2.12,
+``cake_jit.PAIR_ROWS`` (by architecture and route), the static program (a
+fixed token range per CTA), the direct program (the next token blocks per CTA,
+no shared memory) or the pair direct program (the direct program with each
+thread on a pair of channels) runs, none with ``work`` counters: a passed
+forward ``workspace`` is checked and not passed to the program, and such a call
+zeroes no package buffer.  Each row gives its own token range; a ``PAIR_ROWS``
+range runs ahead of the other two tables where it holds the call.  From release
+0.2.10, every architecture and route has a row at each ``C`` = 512 to 1024
+(0.2.6 to 0.2.9: at each ``C`` = 576 to 768; 0.2.5 had none for sm_100a
+``fwd_bias`` at C = 640, sm_103a ``fwd_bias`` at C = 576 and 712, and sm_103a
+``fwd`` at C = 768).  For most ``C`` the first range starts at S = 1.  Where a
+key has no ``DIRECT_ROWS`` range (for example the sm_107a ``fwd_bias`` rows at
+C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over
+the key's range outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows
+at C = 720 to 768 have no ``DIRECT_ROWS`` range: they run the pair direct
+program from S = 16 to 1536 and the static program from S = 13824 (C = 736:
+14336).  Every other call (outside a row's range, or where an architecture,
+route and ``C`` have no row) runs the dynamic program, as in 0.2.4, which takes
+its token chunks from zeroed int32 counters.  The forward workspace size is the
+same in every case.
 
 The backward workspace holds zeroed accumulators and counters that every
 launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`
@@ -102,7 +129,8 @@ its instantiations are destroyed and their launches have completed; it
 returns to the package, zero again, at the package's next refill).  The
 replays of one graph must not overlap.  Only eager calls without
 ``workspace=`` that take counters zero these buffers (a forward inside the
-token range of a row of ``FALLBACK_ROWS`` / ``DIRECT_ROWS`` takes none), the
+token range of a row of ``FALLBACK_ROWS`` / ``DIRECT_ROWS`` / ``PAIR_ROWS``
+takes none), the
 forward's and the backward's separately, sized to the largest need of such a call whose
 zeroing succeeded (one that runs out of memory keeps no new buffer and keeps
 their size).
@@ -361,21 +389,26 @@ def cake_causal_conv1d_nondet_train_forward(
     The package's copy of the deterministic forward programs; the forward runs (without an alert) under torch's
     deterministic mode.
 
+    The kernels access ``x``, ``weight``, ``bias`` and ``out`` as vectors, so each address (``data_ptr()``) must be
+    aligned as stated below; a misaligned one raises ``ValueError`` before anything launches.  A fresh tensor or a
+    ``.clone()`` is aligned, and so is a view that starts at a whole row (``x[1:]``, ``weight[1:]``).
+
     Parameters
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations of every
-        document; ``C`` is a multiple of 8.
+        document; ``C`` is a multiple of 8.  16-byte aligned.
     weight : torch.Tensor
         FP32 or BF16 ``[C, 4]`` contiguous taps; ``weight[c, 3]`` multiplies the
-        current token.
+        current token.  FP32 taps are 16-byte aligned, BF16 taps 8-byte aligned.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` contiguous device prefix sums of the document
         lengths; the host reads its metadata only.
     bias : torch.Tensor, optional
         FP32 or BF16 ``[C]`` contiguous per-channel bias, added after the taps.
+        An FP32 bias is 32-byte aligned, a BF16 bias 16-byte aligned.
     out : torch.Tensor, optional
-        Preallocated BF16 output of ``x``'s shape, contiguous.
+        Preallocated BF16 output of ``x``'s shape, contiguous, 16-byte aligned.
     workspace : torch.Tensor, optional
         Caller-owned zeroed int32 buffer from
         :func:`cake_causal_conv1d_nondet_train_forward_workspace`.
@@ -422,22 +455,24 @@ def cake_causal_conv1d_nondet_train_backward(
     Parameters
     ----------
     x, weight, cu_seqlens, bias
-        The forward's inputs; nothing else is saved.
+        The forward's inputs (an FP32 ``bias`` needs only 16-byte alignment
+        here); nothing else is saved.
     dy : torch.Tensor
-        BF16 gradient of ``y``, ``x``'s shape, contiguous.
+        BF16 gradient of ``y``, ``x``'s shape, contiguous, 16-byte aligned.
     silu_grad_preactivation : {"bf16", "fp32"}
-        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation with an
-        FP32 ``weight``, at the unrounded FP32 preactivation with a BF16
-        ``weight``.
+        ``"bf16"``: SiLU' at the unrounded FP32 preactivation with a ``bias``
+        (FP32 or BF16 ``weight``), a BF16 ``weight`` or a BF16 ``dweight``
+        out, at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` and ``dweight`` and no ``bias``.
         ``"fp32"``: at the unrounded FP32 preactivation.  Both accumulate in
         plain FP32 words by default (see ``dweight_sum``).
     workspace : torch.Tensor, optional
         Caller-owned buffer from :func:`cake_causal_conv1d_nondet_train_backward_workspace`.
     dx, dweight, dbias : torch.Tensor, optional
         Preallocated outputs: BF16 of ``x``'s shape, ``[C, 4]`` and ``[C]``
-        (FP32 or BF16 each; the parameter's dtype when omitted).  An FP32
-        ``dweight`` must be 16-byte aligned (one 16-byte store per channel;
-        ``ValueError`` otherwise).
+        (FP32 or BF16 each; the parameter's dtype when omitted).  ``dx`` must
+        be 16-byte aligned, and so must an FP32 ``dweight`` (one 16-byte store
+        per channel); ``ValueError`` otherwise.
     bwd_grid_mult : {1, 2, 3, 4}
         Opt-in finer static partition of the token axis (default 1, the
         default grid): the backward launches ``bwd_grid_mult`` times its
@@ -500,13 +535,16 @@ def cake_causal_conv1d_nondet(
     Parameters
     ----------
     x : torch.Tensor
-        BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations.
+        BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations, 16-byte
+        aligned.
     weight : torch.Tensor
-        FP32 or BF16 ``[C, 4]`` contiguous taps.
+        FP32 (16-byte aligned) or BF16 (8-byte aligned) ``[C, 4]`` contiguous
+        taps.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` device prefix sums of the document lengths.
     bias : torch.Tensor, optional
-        FP32 or BF16 ``[C]`` contiguous per-channel bias.
+        FP32 (32-byte aligned) or BF16 (16-byte aligned) ``[C]`` contiguous
+        per-channel bias.  A misaligned tensor raises ``ValueError``.
     silu_grad_preactivation : {"bf16", "fp32"}
         The weight gradient's SiLU' policy.
     bwd_grid_mult : {1, 2, 3, 4}

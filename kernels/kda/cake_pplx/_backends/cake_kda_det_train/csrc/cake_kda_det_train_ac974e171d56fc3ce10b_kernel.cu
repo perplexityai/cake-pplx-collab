@@ -410,7 +410,7 @@ kernel_cake_kda_det_train_ac974e171d56fc3ce10b(const __grid_constant__ CUtensorM
                 int row0_1 = chunk_1 * 64;
                 int hrow0_1 = (chunk_1 * num_heads + head_1) * 128;
                 int grow = row0_1 + t_row;
-                long long ibase = (long long)(row0_1 * num_heads + head_1) * 128;
+                long long ibase = (long long)(row0_1 * num_heads + head_1) * 128ll;
                 int roff = t_row * num_heads * 128;
                 float* dq_item = dq_out + ibase;
                 float* dk_item = dk_out + ibase;
@@ -419,7 +419,7 @@ kernel_cake_kda_det_train_ac974e171d56fc3ce10b(const __grid_constant__ CUtensorM
                 int bbase = (it_i & 1) * 64;
                 float beta_t = beta_s[t_row + bbase];
                 int cbos = rec_s[(it_i & 1) * 2];
-                __nv_bfloat16* dv_item = dv_out + (long long)(cbos * num_heads + head_1) * 128;
+                __nv_bfloat16* dv_item = dv_out + (long long)(cbos * num_heads + head_1) * 128ll;
                 int clen = rec_s[(it_i & 1) * 2 + 1];
                 float dgk_inter = 0.0f;
                 mbarrier_wait(h_full_addr, _phase_h_full_0);

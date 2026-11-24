@@ -1466,7 +1466,7 @@ def test_zero_rows(hidden: int) -> None:
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
-@pytest.mark.parametrize("rows", (129, 16231))
+@pytest.mark.parametrize("rows", (129, 4096, 16231))
 def test_deterministic_dw_is_bitwise_reproducible(hidden: int, rows: int) -> None:
     _skip_unless_hidden(hidden)
     eps = EPS[hidden]

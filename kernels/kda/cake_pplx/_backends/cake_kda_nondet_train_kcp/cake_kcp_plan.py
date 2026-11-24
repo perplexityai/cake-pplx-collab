@@ -3255,12 +3255,12 @@ LEAN_DQKG_RECORDS = ("dqkg_int_davq", "dqkg_int_davq_v24", "dqkg_int_davq_nohint
 # bind the same libraries); below 16 heads the serial route's ``dqkg_int*`` (``davq = 0``) takes its dAqk from
 # ``kcp_dav``, and no statement covers a davq record there.  The architectures are those of each record's select
 # rule on the replay path at H >= 16.  The two S1 forms (``_v24``: 94dcf92d, dc809e51) are davq forms by that
-# statement's wording, not by kernel hash; the lean layout above relies on the same property of them.
+# statement's wording, not by kernel hash; the lean layout above relies on the same property of them.  No record
+# of an in-kernel Q / K L2 norm mode is listed: its fused gradient (``davq`` 0) stores no ``dAqk``, so the plan
+# dispatches ``dav`` on every row of the mode and ``kcp_dav_l2n``'s ``dAqk`` is live.
 DAV_DAQK_COVERED: dict[str, frozenset[str]] = {
     "dqkg_int_davq": frozenset({"sm_103a"}),  # 1f9c46f9
-    "dqkg_int_davq_l2n": frozenset({"sm_100a", "sm_103a"}),  # 1f9c46f9
     "dqkg_int_davq_raw": frozenset({"sm_100a", "sm_103a"}),  # 1f9c46f9
-    "dqkg_int_davq_nohint_l2n": frozenset({"sm_107a"}),  # 3b9b3f9a
     "dqkg_int_davq_nohint_raw": frozenset({"sm_107a"}),  # 3b9b3f9a
     "dqkg_int_davq_v24": frozenset({"sm_100a"}),  # 94dcf92d (S1 form)
     "dqkg_int_davq_nohint_v24": frozenset({"sm_107a"}),  # dc809e51 (S1 form)
@@ -3365,7 +3365,11 @@ def kcp_dav_needed(plan) -> bool:
     (``dqkg_int`` and its raw / L2N forms) stores no ``dAqk``, so GLM intra reads ``kcp_dav``'s.  Everywhere else the
     plan's fused gradient stores every ``dAqk`` row GLM intra reads, pad rows included (the plan's own correctness
     rests on it: it launches no dav stage there), and the adjoint walks form ``dv1`` from ``aqk_int`` themselves (their
-    ``fuse_dv1`` builds), so no kernel reads ``kcp_dav``'s outputs and the backward skips it."""
+    ``fuse_dv1`` builds), so no kernel reads ``kcp_dav``'s outputs and the backward skips it.  In an in-kernel Q / K
+    L2 norm mode the plan dispatches ``dav`` on every row (the ``dav_l2n_replay*`` records: its fused gradient,
+    ``dqkg_int*l2n``, stores no ``dAqk``), so the backward launches the mode's output backward ``kcp_dav_l2n`` on
+    every problem (``cake_kcp.kcp_local_record``); it forms no ``dv1``, which every adjoint walk record forms
+    itself (each is its form's ``fuse_dv1`` build)."""
     return bool(plan.dispatched("dav", LOCAL_PATH_BWD))
 
 
@@ -3642,11 +3646,16 @@ def _qk_l2norm_readers(mode: str, picked: dict[tuple[str, str], str]) -> str | N
 def qk_l2norm_twin(record: str) -> bool:
     """Whether the existing backend's record ``record`` is the ``_l2n`` twin of its stage, the program that normalizes
     the raw q / k rows itself: the registry's ``l2n`` key of the record lists the fused mode only (absent:
-    ``["off"]``).  The key decides, not the name: a twin may carry a version suffix (``fwd_intra_l2n_v37``)."""
+    ``["off"]``) and the record reads the raw rows (its ``logical`` names hold ``q_raw`` and ``k_raw``).  A fused-mode
+    record that reads the rows another program normalized is no twin: ``bwd_prep_g8_replay_kbonce_raw_l2n``, the
+    replay prep of the raw gate's segmented route up to 256 documents, reads the rows ``fwd_intra_v14_raw_l2n``
+    normalized before it.  The keys decide, not the name: a twin may carry a version suffix (``fwd_intra_l2n_v37``)."""
     from . import _single_rank
 
     cake_jit = _single_rank.module("cake_jit")
-    return list(cake_jit.MODULES[record].get("l2n", ("off",))) == ["fused"]
+    entry = cake_jit.MODULES[record]
+    reads = set(entry.get("logical", {}).values())
+    return list(entry.get("l2n", ("off",))) == ["fused"] and {"q_raw", "k_raw"} <= reads
 
 
 # The saved-rstd twins of the existing backend's records: a launch that reads the saved rstd (``read_rstd = 1``, the

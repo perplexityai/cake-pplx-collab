@@ -67,6 +67,7 @@ from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import TierJudge, judge_case
 from tests.experimental import _mok_naive as naive
 from tests.experimental._mok_one_gpu import bound_multiplier
+from tests.experimental._mok_reference import rand, randn, randn_like
 
 api = cake_package("cake_mok_bf16", "api")
 jit = cake_package("cake_mok_bf16", "jit")
@@ -118,15 +119,15 @@ def _weights(ep, local_experts, hidden, intermediate, device, seed=32471):
     options = dict(dtype=torch.bfloat16, device=device)
     torch.manual_seed(seed)
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     total = ep * local_experts
     global_routed = [
-        torch.randn(total, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(total, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(total, hidden, intermediate, **options) / intermediate**0.5,
+        randn(total, intermediate, hidden, **options) / hidden**0.5,
+        randn(total, intermediate, hidden, **options) / hidden**0.5,
+        randn(total, hidden, intermediate, **options) / intermediate**0.5,
     ]
     rank = dist.get_rank()
     routed = [w[rank * local_experts : (rank + 1) * local_experts].contiguous() for w in global_routed]
@@ -138,13 +139,13 @@ def _random_data(counts, hidden, topk, experts, device, weight_before_down=False
     ``weight_before_down`` the router weights are in [0, 1.5) and every 5th token's first one is exactly 0."""
     total = sum(counts)
     options = dict(dtype=torch.bfloat16, device=device)
-    x = torch.randn(total, hidden, **options) * 0.125
-    dy = torch.randn(total, hidden, **options) * 0.125
-    ids = torch.rand(total, experts, device=device).argsort(-1)[:, :topk].contiguous()
-    scores = torch.rand(total, topk, device=device) + 0.1
+    x = randn(total, hidden, **options) * 0.125
+    dy = randn(total, hidden, **options) * 0.125
+    ids = rand(total, experts, device=device).argsort(-1)[:, :topk].contiguous()
+    scores = rand(total, topk, device=device) + 0.1
     scores = scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
     if weight_before_down:
-        scores = torch.rand(total, topk, device=device) * 1.5
+        scores = rand(total, topk, device=device) * 1.5
         scores[::5, 0] = 0.0
     return dict(x=x, d_output=dy, expert_ids=ids, scores=scores)
 
@@ -469,9 +470,9 @@ def training_graph():
 
         def fill(generation, empty):
             torch.manual_seed(8291 + generation)
-            all_x = torch.randn(tokens * ep, hidden, **options) * 0.125
-            all_dy = torch.randn_like(all_x) * 0.125
-            all_scores = torch.rand(tokens * ep, topk, device=device) + 0.1
+            all_x = randn(tokens * ep, hidden, **options) * 0.125
+            all_dy = randn_like(all_x) * 0.125
+            all_scores = rand(tokens * ep, topk, device=device) + 0.1
             all_scores.div_(all_scores.sum(-1, keepdim=True)).mul_(2.5)
             rows = torch.arange(tokens * ep, device=device) + generation
             all_ids = torch.stack(
@@ -537,9 +538,9 @@ def unequal_sources():
         def data_for(lengths, seed, empty_experts):
             torch.manual_seed(seed)
             total = sum(lengths)
-            x = torch.randn(total, hidden, **options) * 0.125
-            dy = torch.randn_like(x) * 0.125
-            scores = torch.rand(total, topk, device=device) + 0.1
+            x = randn(total, hidden, **options) * 0.125
+            dy = randn_like(x) * 0.125
+            scores = rand(total, topk, device=device) + 0.1
             scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
             row = torch.arange(total, device=device) + seed
             expert_count = topk if empty_experts else ep * local_experts
@@ -891,14 +892,12 @@ def backward_scratch():
     )
     generator = torch.Generator(device=device).manual_seed(2026 + dist.get_rank())
     options = dict(device=device, dtype=torch.bfloat16)
-    x = torch.randn(n, h, generator=generator, **options) * 0.125
-    dy = torch.randn(n, h, generator=generator, **options) * 0.125
-    scores = torch.rand(n, k, device=device, generator=generator) + 0.1
-    shared = [
-        torch.randn(h, h, generator=generator, **options) / h**0.5 for _ in range(3)
-    ]
+    x = randn(n, h, generator=generator, **options) * 0.125
+    dy = randn(n, h, generator=generator, **options) * 0.125
+    scores = rand(n, k, device=device, generator=generator) + 0.1
+    shared = [randn(h, h, generator=generator, **options) / h**0.5 for _ in range(3)]
     routed = [
-        torch.randn(le, h, h, generator=generator, **options) / h**0.5 for _ in range(3)
+        randn(le, h, h, generator=generator, **options) / h**0.5 for _ in range(3)
     ]
     row = torch.arange(n, device=device)
     ids = torch.stack([(row + slot) % (ep * le) for slot in range(k)], -1)
@@ -992,7 +991,7 @@ def _source_rows(count, topk):
 def _r8_signs(hidden, device):
     """The ``+-1`` row of the pinned token's ``x`` (fixed seed)."""
     generator = torch.Generator(device=device).manual_seed(R8_SIGN_SEED)
-    return torch.where(torch.randn(hidden, device=device, generator=generator) < 0, -1.0, 1.0)
+    return torch.where(randn(hidden, device=device, generator=generator) < 0, -1.0, 1.0)
 
 
 def _r8_weights(ep, local_experts, hidden, intermediate, device, pinned, limit=R8_LIMIT, seed=32479):
@@ -1007,7 +1006,7 @@ def _r8_weights(ep, local_experts, hidden, intermediate, device, pinned, limit=R
     total = ep * local_experts
 
     def draw(*shape, scale):
-        return (torch.randn(*shape, device=device) * scale).bfloat16()
+        return (randn(*shape, device=device) * scale).bfloat16()
 
     shared = [
         draw(intermediate, hidden, scale=gate_up),
@@ -1032,7 +1031,7 @@ def _r8_weights(ep, local_experts, hidden, intermediate, device, pinned, limit=R
 
 def _r8_scores(tokens, experts, device):
     """The requester's router scores ``sqrt(softplus(randn))`` (current random state)."""
-    return torch.nn.functional.softplus(torch.randn(tokens, experts, device=device)).sqrt()
+    return torch.nn.functional.softplus(randn(tokens, experts, device=device)).sqrt()
 
 
 def _r8_data(counts, hidden, topk, experts, device, *, ids=None, pinned=R8_PINNED):
@@ -1044,7 +1043,7 @@ def _r8_data(counts, hidden, topk, experts, device, *, ids=None, pinned=R8_PINNE
     scores' order).  Token 1 is pinned: its ``x`` row is :func:`_r8_signs` and its first expert ``pinned``, the expert
     :func:`_r8_weights` pinned (moved to the first slot, or replacing its first expert)."""
     total = sum(counts)
-    x = torch.randn(total, hidden, device=device)
+    x = randn(total, hidden, device=device)
     x = x / x.square().mean(-1, keepdim=True).sqrt()
     top, chosen = _r8_scores(total, experts, device).topk(topk, dim=-1)
     weights = top / top.sum(-1, keepdim=True) * 1.5
@@ -1061,7 +1060,7 @@ def _r8_data(counts, hidden, topk, experts, device, *, ids=None, pinned=R8_PINNE
         if held.numel():
             ids[1, int(held[0, 0])] = int(ids[1, 0])
         ids[1, 0] = pinned
-    dy = torch.randn(total, hidden, device=device).bfloat16()
+    dy = randn(total, hidden, device=device).bfloat16()
     return dict(x=x.bfloat16(), d_output=dy, expert_ids=ids.contiguous(), scores=weights.float().contiguous())
 
 
@@ -1647,3 +1646,95 @@ def before_down_digests(local_experts):
     torch.cuda.synchronize()
     dist.barrier()
     return out
+
+
+#: Source rows per rank of :func:`before_down_source_split` by group size: unaligned counts, an empty rank, and a group
+#: total whose full skew to the last rank's experts fits :func:`_skew_ids` (every expert's routes padded the most).
+SOURCE_SPLIT_COUNTS = {4: (2277, 300, 0, 1517), 8: (2277, 300, 0, 1025, 64, 1, 426, 1)}
+#: ``(name, rich_comm_sms(rank), source_split_threshold)`` of the forward source splits :func:`before_down_source_split`
+#: runs beside the split off (all below the workspace's 8 forward communication SMs); ``held`` sets a threshold no rank
+#: reaches.
+SOURCE_SPLITS = (
+    ("rich2", lambda rank: 2, 1.5),
+    ("rich4-low", lambda rank: 4, 1.1),
+    ("per-rank", lambda rank: 2 + 2 * (rank % 2), 1.25),
+    ("held", lambda rank: 2, 64.0),
+)
+
+
+def source_rich(counts, threshold):
+    """Per rank, whether the forward kernel's source split takes the rich count (host form of its rule): the rank's
+    shared rows (its source rows rounded up to 256, at least 256) less 256 exceed ``threshold`` (in 1/256 steps, as
+    the adapter rounds it) times the mean source rows of the group."""
+    total, ep, units = sum(counts), len(counts), round(threshold * 256)
+    return [total > 0 and (max(256, -(-n // 256) * 256) - 256) * ep * 256 > units * total for n in counts]
+
+
+def before_down_source_split(local_experts):
+    """The forward source split at a 384-expert layout on the requester's inputs (weights pinned at expert
+    :data:`R8_PINNED`): source rows :data:`SOURCE_SPLIT_COUNTS` (one or two source-rich ranks, an empty rank), the
+    random routes, the placement mix and the full skew to the last rank's experts.  Per routing, the step with the
+    split off, then each split of :data:`SOURCE_SPLITS` (the context forward, and the context-free forward with the
+    recompute): every output of every rank has the split-off bytes.  One step captured under CUDA Graph with the
+    ``rich2`` split and replayed after loading each routing's inputs (the kernel decides per launch from the replayed
+    schedule) gives the same bytes.  Returns per routing the ranks the host rule finds rich per split."""
+    _exact_matmul()
+    device = torch.device("cuda", torch.cuda.current_device())
+    rank, ep = dist.get_rank(), dist.get_world_size()
+    topk = kernels.BEFORE_DOWN_LAYOUTS[(ep, local_experts)]
+    counts = list(SOURCE_SPLIT_COUNTS[ep])
+    functional, config, workspace = _before_down_group(local_experts, counts)
+    off = dataclasses.replace(config, source_split_comm_sms=None, imbalance_comm_sms=None)
+    assert off.fwd_num_comm_sms == 8
+    splits = [
+        (name, dataclasses.replace(off, source_split_comm_sms=rich(rank), source_split_threshold=threshold), threshold)
+        for name, rich, threshold in SOURCE_SPLITS
+    ]
+    rich_ranks = {name: [r for r, hit in enumerate(source_rich(counts, t)) if hit] for name, _, t in splits}
+    assert all(rich_ranks[name] for name, _, _ in SOURCE_SPLITS if name != "held"), rich_ranks
+    assert not rich_ranks["held"], rich_ranks
+    shared, _, routed = _r8_weights(
+        ep, local_experts, BEFORE_DOWN_HIDDEN, BEFORE_DOWN_INTERMEDIATE, device, R8_PINNED
+    )
+    weights = (*shared, *routed)
+    accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+    torch.manual_seed(8571)
+    routings = (
+        ("random", None),
+        ("placement-mixed", _placement_ids(counts, ep, local_experts, topk, device)),
+        ("full-skew-last", _skew_ids(counts, local_experts, topk, ep - 1, device)[0]),
+    )
+    graph, records = None, []
+    for index, (name, ids) in enumerate(routings):
+        torch.manual_seed(8581 + index)
+        data = _r8_data(counts, BEFORE_DOWN_HIDDEN, topk, ep * local_experts, device, ids=ids)
+        x, local_ids, scores, dy = _section(data, counts)
+
+        def iteration(cfg, recompute=False, save_context=True, x=x, ids=local_ids, scores=scores, dy=dy):
+            return TrainingIteration(
+                cfg, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=R8_LIMIT,
+                accumulators=accumulators, recompute=recompute, save_context=save_context,
+            )  # fmt: skip
+
+        outputs = _snapshot(iteration(off).run())
+        _contract(outputs, counts[rank], BEFORE_DOWN_HIDDEN, topk)
+        dist.barrier()
+        for split, cfg, _ in splits:
+            for recompute, save_context in ((False, True), (True, False)):
+                values = _snapshot(iteration(cfg, recompute, save_context).run())
+                differs = [n for n, a, b in zip(RESULT_NAMES, outputs, values, strict=True) if not torch.equal(a, b)]
+                assert not differs, (rank, name, split, "context-free" if recompute else "context", differs)
+            dist.barrier()
+        if graph is None:
+            graph = iteration(splits[0][1])
+            graph.capture()
+        else:
+            _load(graph, data, counts)
+        replays = [_snapshot(graph.run()) for _ in range(2)]
+        assert all(_same(outputs, other) for other in replays), (rank, name, "graph replay")
+        dist.barrier()
+        records.append(dict(case=f"bf16-clamped-before-down-source-split-{name}", counts=counts, rich=rich_ranks))
+    del graph
+    torch.cuda.synchronize()
+    dist.barrier()
+    return records

@@ -972,23 +972,23 @@ def test_package_byte_queries_take_the_in_kernel_qk_norm(monkeypatch) -> None:
             )
 
 
-def test_gate_parameter_grads_reduce_like_the_deterministic_helper() -> None:
+def test_gate_parameter_grads_reduce_to_copies_on_one_rank() -> None:
     """``cake_kda_nondet_train_kcp_reduce_gate_param_grads`` (facade and package) takes no mode and returns, on one
-    rank, the bits of the deterministic package's ``cake_kda_det_train_kcp_reduce_gate_param_grads``."""
+    rank (``world_size == 1``: no other rank's partial sums to add), fresh copies of its inputs: the same shapes,
+    dtypes and bytes in new storage."""
     one = type("OneRank", (), {"world_size": 1, "group": None})()
     dA_log = torch.arange(4, dtype=torch.float32)
     ddt_bias = torch.linspace(-1.0, 1.0, 4 * 128).view(4, 128)
-    det_res = _det("cake_kcp").cake_kda_det_train_kcp_reduce_gate_param_grads(
-        one, dA_log, ddt_bias
-    )
     for fn in (
         kcp_api.cake_kda_nondet_train_kcp_reduce_gate_param_grads,
         _mod("cake_kcp").cake_kda_nondet_train_kcp_reduce_gate_param_grads,
     ):
         assert list(inspect.signature(fn).parameters) == ["ctx", "dA_log", "ddt_bias"]
         res = fn(one, dA_log, ddt_bias)
-        for a, b in zip(res, det_res, strict=True):
+        assert len(res) == 2
+        for a, b in zip(res, (dA_log, ddt_bias), strict=True):
             assert a.shape == b.shape and a.dtype == b.dtype and torch.equal(a, b)
+            assert a.untyped_storage().data_ptr() != b.untyped_storage().data_ptr()
 
 
 # ----------------------------------------------------------------------------------------------------------------

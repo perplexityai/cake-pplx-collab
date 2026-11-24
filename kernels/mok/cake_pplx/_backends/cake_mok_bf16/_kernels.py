@@ -53,7 +53,7 @@ BEFORE_DOWN_LAYOUTS = {
     (64, 6): 6,
 }
 # Targets with the router-weight-before-down kernels (top-k 6, 384-expert layouts).
-BEFORE_DOWN_TARGETS = ("sm_100a", "sm_103a")
+BEFORE_DOWN_TARGETS = ("sm_100a", "sm_103a", "sm_107a")
 SWIGLU_BWD_TILES = 8  # 128 x 128 tiles per backward SwiGLU task half.
 
 
@@ -146,7 +146,8 @@ def check_target(router_weight_position, arch):
     if router_weight_position == "before_down" and arch not in BEFORE_DOWN_TARGETS:
         raise ValueError(
             "router_weight_position='before_down' (top-k 6 and the 384-expert layouts) "
-            f"has no {arch} build in this package; use an sm_100a or sm_103a device"
+            f"has no {arch} build in this package; use an sm_100a, sm_103a or "
+            "sm_107a device"
         )
 
 
@@ -635,6 +636,62 @@ def _check_weight_ptrs(weight_before_down, weight_ptrs, x_ptrs):
         )
 
 
+# The source split's threshold unit: ``rich_threshold`` counts 1/256 steps of
+# the source-row ratio (384 = 1.5).
+SOURCE_SPLIT_UNIT = 256
+
+
+def _source_split_arguments(
+    comm_sms, ep_size, source_split, owner_routes=None, stand_in=None
+):
+    """The source-split kernel arguments of a router-weight-before-down
+    forward launch: ``ep_size``, ``rich_comm_sms`` and ``rich_threshold``, and
+    ``owner_routes`` when ``stand_in`` is given (an unplanned launch).
+    ``source_split`` is ``(rich_comm_sms, rich_threshold)``: an even count in
+    ``[2, comm_sms]`` and a threshold in 1/256 steps above 256. ``None``, or no
+    ``owner_routes`` on an unplanned launch, keeps ``comm_sms``: the kernel then
+    reads no route total, so ``stand_in`` takes their place. ``owner_routes``,
+    when given, is the schedule's int32 ``[ep_size]`` route totals."""
+    rich_comm_sms, rich_threshold = (
+        (comm_sms, 3 * SOURCE_SPLIT_UNIT // 2) if source_split is None else source_split
+    )
+    if (
+        type(rich_comm_sms) is not int
+        or type(rich_threshold) is not int
+        or rich_comm_sms <= 0
+        or rich_comm_sms % 2
+        or rich_comm_sms > comm_sms
+        or not SOURCE_SPLIT_UNIT < rich_threshold < 2**31
+    ):
+        raise ValueError(
+            "source_split must be an even communication-SM count no larger than "
+            "comm_sms and a threshold above 256 (1/256 steps)"
+        )
+    if owner_routes is not None:
+        _check_owner_routes(owner_routes, ep_size)
+    elif stand_in is not None:
+        rich_comm_sms = comm_sms
+    arguments = dict(
+        ep_size=ep_size, rich_comm_sms=rich_comm_sms, rich_threshold=rich_threshold
+    )
+    if stand_in is not None:
+        arguments["owner_routes"] = stand_in if owner_routes is None else owner_routes
+    return arguments
+
+
+def _check_owner_routes(owner_routes, ep_size):
+    import torch
+
+    if (
+        not isinstance(owner_routes, torch.Tensor)
+        or owner_routes.dtype != torch.int32
+        or owner_routes.numel() != ep_size
+    ):
+        raise ValueError(
+            "owner_routes must be the schedule's int32 [ep_size] route totals"
+        )
+
+
 class MoKForward:
     """Low-level native-signature BF16 forward; caller owns peer barriers.
 
@@ -657,7 +714,13 @@ class MoKForward:
     pointer per rank) into a per-call ``[macro_size]`` FP32 ring, the routed
     hidden is ``BF16(w * a)`` (``a`` the SwiGLU output) and the combine rows
     are the down projections of that hidden: the weighted routed outputs, to
-    be summed unweighted.
+    be summed unweighted. Its kernel also splits the SMs per launch by the
+    source rows (``source_split=(rich_comm_sms, rich_threshold)``,
+    :func:`_source_split_arguments`): a rank whose source rows exceed
+    ``rich_threshold / 256`` times the ranks' mean, which it reads from the
+    schedule's owner-rank route totals ``owner_routes``, runs
+    ``rich_comm_sms`` communication SMs instead of ``comm_sms``; no output
+    bit depends on the count.
     """
 
     def __init__(self, clamped=False, context=True, weight_before_down=False):
@@ -708,6 +771,8 @@ class MoKForward:
         *,
         layout=None,
         weight_ptrs=None,
+        owner_routes=None,
+        source_split=None,
     ):
         import torch
 
@@ -740,6 +805,14 @@ class MoKForward:
                 row_weights=torch.empty(
                     macro_size, dtype=torch.float32, device=x.device
                 ),
+                **_source_split_arguments(
+                    comm_sms, len(x_ptrs), source_split, owner_routes, num_tokens
+                ),
+            )
+        elif source_split is not None or owner_routes is not None:
+            raise ValueError(
+                "source_split and owner_routes are read only by the "
+                "router-weight-before-down forward"
             )
         options = dict(device=x.device, dtype=torch.bfloat16)
         x_routed = torch.empty((macro_size, hidden), **options)
@@ -855,6 +928,7 @@ class MoKForward:
         mini_size,
         *,
         weight_ptrs=None,
+        source_split=None,
     ):
         """Validated launch plan for one geometry, split and SwiGLU variant.
 
@@ -866,6 +940,9 @@ class MoKForward:
         checks as ``__call__`` run here, once. ``weight_ptrs``: as in
         ``__call__`` (router-weight-before-down only); the per-call FP32
         ``row_weights`` ring is allocated by :meth:`launch_planned`.
+        ``source_split``: as in ``__call__``, bound into the plan; the
+        schedule's ``owner_routes`` are a per-call argument of
+        :meth:`launch_planned`.
         """
         import torch
 
@@ -903,10 +980,20 @@ class MoKForward:
         slab, (x_ready, hidden_ready, y_ready, y_done) = _counter_slab(
             x.device, g.minis, g.shared_rows + g.routed_rows, g.minis, capacity // 128
         )
-        router_weight = {}
+        router_weight, split_ranks = {}, None
         if self.weight_before_down:
             (router_weight["weight_peers"],) = _peer_table(
                 self._peer_tables, x.device, weight_ptrs
+            )
+            router_weight.update(
+                _source_split_arguments(comm_sms, len(x_ptrs), source_split)
+            )
+            if router_weight["rich_comm_sms"] < comm_sms:
+                # Each launch of this plan reads the route totals.
+                split_ranks = len(x_ptrs)
+        elif source_split is not None:
+            raise ValueError(
+                "source_split is read only by the router-weight-before-down forward"
             )
         return _Plan(
             self.module,
@@ -954,7 +1041,7 @@ class MoKForward:
                 "schedule_token",
                 "num_tokens",
                 "counts",
-                *(("row_weights",) if self.weight_before_down else ()),
+                *(("row_weights", "owner_routes") if self.weight_before_down else ()),
             ),
             slab=slab,
             extra=(
@@ -965,6 +1052,7 @@ class MoKForward:
                 3 * experts + capacity // 256,
                 self.context,
                 macro_size if self.weight_before_down else None,
+                split_ranks,
             ),
         )
 
@@ -981,12 +1069,16 @@ class MoKForward:
         peer_token,
         num_tokens,
         layout,
+        owner_routes=None,
     ):
         """Launch a :meth:`plan` on the current stream; returns the nine
         outputs of ``__call__`` (``None`` in the four gate/up places for a
         context-free launcher). The caller resets ``plan.slab`` on this
         stream before the launch, validated the weights against the plan's
-        geometry and runs this inside ``_ffi_stream()``."""
+        geometry and runs this inside ``_ffi_stream()``. ``owner_routes``:
+        the schedule's owner-rank route totals, required by a before-down plan
+        with the source split (``rich_comm_sms`` below ``comm_sms``), which
+        reads them; otherwise unread (``num_tokens`` stands in)."""
         import torch
 
         (
@@ -997,9 +1089,12 @@ class MoKForward:
             layout_numel,
             context,
             weight_ring,
+            split_ranks,
         ) = plan.extra
         if layout.numel() != layout_numel:
             raise ValueError("layout does not match the schedule geometry")
+        if split_ranks is not None:
+            _check_owner_routes(owner_routes, split_ranks)
         x_routed = x.new_empty(routed_rows)
         if context:
             gate_shared = x.new_empty(shared_shape)
@@ -1020,7 +1115,10 @@ class MoKForward:
         row_weights = (
             ()
             if weight_ring is None
-            else (x.new_empty((weight_ring,), dtype=torch.float32),)
+            else (
+                x.new_empty((weight_ring,), dtype=torch.float32),
+                num_tokens if owner_routes is None else owner_routes,
+            )
         )
         plan.launch(
             (
@@ -2863,7 +2961,8 @@ class MoKCommunication:
         self.gather_module = load_kernel("gather")
         self.barrier_module = load_kernel("barrier")
 
-    def all_gather_top_experts(self, routes, gathered, multicast_address, rank):
+    def _check_gather(self, routes, gathered, multicast_address, rank):
+        """The checks of :meth:`all_gather_top_experts`; returns the EP size."""
         import torch
 
         if (
@@ -2894,6 +2993,10 @@ class MoKCommunication:
             raise ValueError(
                 "Metadata chunk must divide each rank's route-buffer bytes"
             )
+        return ep
+
+    def all_gather_top_experts(self, routes, gathered, multicast_address, rank):
+        ep = self._check_gather(routes, gathered, multicast_address, rank)
         if ep == 1:
             gathered[0].copy_(routes)
         else:
@@ -2905,6 +3008,26 @@ class MoKCommunication:
                     rank=rank,
                     numel=routes.numel(),
                 )
+
+    def gather_plan(self, routes, gathered, multicast_address, rank):
+        """:meth:`all_gather_top_experts` validated once for caller-owned
+        ``routes`` and ``gathered`` buffers that outlive the plan: a
+        :class:`_Plan` to launch with ``plan.launch(())`` inside
+        ``_ffi_stream()`` (the same kernel and arguments), or None at EP 1,
+        where the gather is a copy (call :meth:`all_gather_top_experts`)."""
+        if self._check_gather(routes, gathered, multicast_address, rank) == 1:
+            return None
+        return _Plan(
+            self.gather_module,
+            (routes.numel() * 4 // self.chunk_bytes, 1, 1),
+            dict(
+                local_routes=routes,
+                multicast_address=multicast_address,
+                rank=rank,
+                numel=routes.numel(),
+            ),
+            (),
+        )
 
     def barrier_all(self, counter, peer_pointers, multicast_address, target):
         import torch
@@ -2969,6 +3092,30 @@ class MoKCommunication:
         )
 
 
+class _SchedulerPlan:
+    """A validated schedule build (see :meth:`MoKScheduler.plan`): the count,
+    pad, rows and layout launches bound to their launch-invariant arguments,
+    the int32 element ranges of one schedule buffer and the template of its
+    initialized prefix."""
+
+    __slots__ = (
+        "count",
+        "pad",
+        "rows",
+        "layout",
+        "template",
+        "capacity",
+        "slab",
+        "layout_range",
+        "total",
+        "device",
+    )
+
+    def __init__(self, **values):
+        for name, value in values.items():
+            setattr(self, name, value)
+
+
 class MoKScheduler:
     """Three prepared kernel modules; allocations/resets match native MoK.
 
@@ -2980,6 +3127,13 @@ class MoKScheduler:
     created on demand, valid until :meth:`release_counts`). :meth:`layout`
     derives the expert layout of a schedule once, with the ``expert_layout``
     module loaded here, before capture.
+
+    :meth:`plan` / :meth:`launch_planned` / :meth:`layout_planned` are the
+    same launches validated once per (gathered-routes buffer, capacity,
+    rank): per call one int32 allocation holds the whole schedule
+    (``peer_token``, ``peer_rank``, the counter slab and the layout), and one
+    copy from the plan's template writes the ``-1`` sentinel and the zero
+    counters that ``__call__`` writes with a fill and a zero slab.
     """
 
     def __init__(self, world_size: int, local_experts: int):
@@ -2995,7 +3149,8 @@ class MoKScheduler:
         self.layout_module = load_kernel("expert_layout")
         self._counts = None
 
-    def __call__(self, topk_all, schedule_capacity: int, rank: int):
+    def _check(self, topk_all, schedule_capacity, rank):
+        """The argument checks of :meth:`__call__` and :meth:`plan`."""
         import torch
 
         if (
@@ -3014,6 +3169,12 @@ class MoKScheduler:
             raise ValueError(
                 "Schedule capacity must be aligned and hold one source rank"
             )
+        return world, local_tokens, top_k
+
+    def __call__(self, topk_all, schedule_capacity: int, rank: int):
+        import torch
+
+        world, local_tokens, top_k = self._check(topk_all, schedule_capacity, rank)
         kwargs = dict(device=topk_all.device, dtype=torch.int32)
         peer_rank = torch.empty(schedule_capacity, **kwargs)
         peer_token = torch.empty(schedule_capacity, **kwargs)
@@ -3072,6 +3233,109 @@ class MoKScheduler:
         """The expert layout of a schedule: one launch per schedule, consumed by
         every fused launch of it."""
         return expert_layout(self.layout_module, tokens_per_expert, capacity, peer_rank)
+
+    def plan(self, topk_all, schedule_capacity: int, rank: int):
+        """:meth:`__call__` and :meth:`layout` validated once for a caller-owned
+        gathered-routes buffer ``topk_all`` that outlives the plan, a schedule
+        capacity and a rank (a workspace's): a :class:`_SchedulerPlan` for
+        :meth:`launch_planned` and :meth:`layout_planned`.
+
+        A schedule is one int32 buffer ``[peer_token | peer_rank | counter
+        slab | layout]``: ``peer_rank`` and the slab are adjacent, so one copy
+        of the plan's template (``-1`` sentinel, then zeros) initializes both;
+        the slab keeps the layout of :func:`_zero_slab` (counts, then the
+        aligned ``num_tokens`` / ``tokens_per_expert`` group) and the layout
+        starts 512-B aligned. Build the plan outside CUDA Graph capture (its
+        template is written here).
+        """
+        import torch
+
+        world, local_tokens, top_k = self._check(topk_all, schedule_capacity, rank)
+        experts = self.local_experts
+        pieces, keep, slab_total = _slab_pieces((experts * world + world, (1, experts)))
+        views, offset = [], 2 * schedule_capacity
+        for size, kept in zip(pieces, keep, strict=True):
+            if kept:
+                views.append((offset, offset + size))
+            offset += size
+        # 512 B, the caching allocator's alignment of a separate allocation.
+        layout_start = offset + (-offset % 128)
+        layout_end = layout_start + 3 * experts + schedule_capacity // 256
+        kwargs = dict(device=topk_all.device, dtype=torch.int32)
+        template = torch.cat(
+            (
+                torch.full((schedule_capacity,), -1, **kwargs),
+                torch.zeros(slab_total, **kwargs),
+            )
+        )
+        sizes = dict(local_tokens=local_tokens, top_k=top_k, rank=rank)
+        return _SchedulerPlan(
+            count=_Plan(
+                self.count,
+                ((topk_all.numel() + 1023) // 1024, 1, 1),
+                dict(topk_all=topk_all, **sizes),
+                ("counts",),
+            ),
+            pad=_Plan(
+                self.pad,
+                (experts, 1, 1),
+                {},
+                ("counts", "tokens_per_expert", "num_tokens"),
+            ),
+            rows=_Plan(
+                self.rows,
+                (experts * world, 1, 1),
+                dict(topk_all=topk_all, capacity=schedule_capacity, **sizes),
+                (
+                    "counts",
+                    "tokens_per_expert",
+                    "num_tokens",
+                    "schedule_peer_rank",
+                    "schedule_peer_token_idx",
+                ),
+            ),
+            layout=_Plan(
+                self.layout_module,
+                (1, 1, 1),
+                dict(experts=experts),
+                ("counts", "schedule_rank", "layout"),
+            ),
+            template=template,
+            capacity=schedule_capacity,
+            slab=tuple(views),
+            layout_range=(layout_start, layout_end),
+            total=layout_end,
+            device=topk_all.device,
+        )
+
+    def launch_planned(self, plan):
+        """:meth:`__call__` of a :meth:`plan` inside ``_ffi_stream()``: the
+        count, pad and rows launches over one new schedule buffer. Returns
+        ``(peer_rank, peer_token, num_tokens, tokens_per_expert, layout)``,
+        views of that buffer (``layout`` not yet written; see
+        :meth:`layout_planned`). :meth:`owner_loads` reads this call's counts
+        until :meth:`release_counts`."""
+        import torch
+
+        capacity = plan.capacity
+        buffer = torch.empty(plan.total, dtype=torch.int32, device=plan.device)
+        buffer[capacity : capacity + plan.template.numel()].copy_(plan.template)
+        peer_token, peer_rank = buffer[:capacity], buffer[capacity : 2 * capacity]
+        (c0, c1), (n0, n1), (e0, e1) = plan.slab
+        counts, num_tokens, per_expert = buffer[c0:c1], buffer[n0:n1], buffer[e0:e1]
+        plan.count.launch((counts,))
+        plan.pad.launch((counts, per_expert, num_tokens))
+        plan.rows.launch((counts, per_expert, num_tokens, peer_rank, peer_token))
+        self._counts = counts
+        start, end = plan.layout_range
+        return peer_rank, peer_token, num_tokens, per_expert, buffer[start:end]
+
+    @staticmethod
+    def layout_planned(plan, tokens_per_expert, peer_rank, layout):
+        """:meth:`layout` of a :meth:`plan` inside ``_ffi_stream()``, written
+        into the ``layout`` view :meth:`launch_planned` returned."""
+        plan.layout.launch((tokens_per_expert, peer_rank, layout))
+        return layout
 
 
 class MoKEpilogues:

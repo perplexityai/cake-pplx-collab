@@ -106,15 +106,15 @@ kernel_cake_kda_det_train_a8921482bf37aaee0133(float* __restrict__ g, __nv_bfloa
     int d0 = lane_1 * 4;
     long long ext0 = (long long)chunk_bos[chunk];
     int clen = chunk_len[chunk];
-    long long int0 = (long long)chunk * 64;
+    long long int0 = (long long)chunk * 64ll;
     int clast = clen - 1;
     if (clast < 0) {
         clast = 0;
     }
     int rs = num_heads * 128;
     int qs = num_qk_heads * 128;
-    long long ibase = (int0 * (long long)num_heads + (long long)head) * 128 + (long long)d0;
-    long long qbase = (ext0 * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)d0;
+    long long ibase = (int0 * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
+    long long qbase = (ext0 * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)d0;
     long long bbase = ext0 * (long long)num_heads + (long long)head;
     long long qrbase = (long long)qk_head * (long long)q_raw_head_stride + (long long)d0;
     long long krbase = (long long)qk_head * (long long)k_raw_head_stride + (long long)d0;
@@ -122,7 +122,7 @@ kernel_cake_kda_det_train_a8921482bf37aaee0133(float* __restrict__ g, __nv_bfloa
     if (head == qk_head * group) {
         l2n_lead = 1;
     }
-    long long ebase_g = (ext0 * (long long)num_heads + (long long)head) * 128 + (long long)d0;
+    long long ebase_g = (ext0 * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
     float x[32];
     #pragma unroll
     for (int u = 0; u < 8; u++) {
@@ -229,12 +229,12 @@ kernel_cake_kda_det_train_a8921482bf37aaee0133(float* __restrict__ g, __nv_bfloa
         }
         float lr_r = 0.0f;
         if (read_rstd != 0) {
-            lr_r = qk_rstd[(0 * (long long)num_tokens + (long long)(ext0 + (long long)t_c_1)) * (long long)num_qk_heads + (long long)qk_head];
+            lr_r = qk_rstd[(0ll * (long long)num_tokens + (long long)(ext0 + (long long)t_c_1)) * (long long)num_qk_heads + (long long)qk_head];
         }
         float rq = lr_r;
         float lr_r_0 = 0.0f;
         if (read_rstd != 0) {
-            lr_r_0 = qk_rstd[(1 * (long long)num_tokens + (long long)(ext0 + (long long)t_c_1)) * (long long)num_qk_heads + (long long)qk_head];
+            lr_r_0 = qk_rstd[(1ll * (long long)num_tokens + (long long)(ext0 + (long long)t_c_1)) * (long long)num_qk_heads + (long long)qk_head];
         }
         float rk = lr_r_0;
         int t_n = t_u_2;
@@ -301,7 +301,7 @@ kernel_cake_kda_det_train_a8921482bf37aaee0133(float* __restrict__ g, __nv_bfloa
                 if (l2n_lead != 0) {
                     if (t_u_2 < clen) {
                         if (lane_1 == 0) {
-                            *(reinterpret_cast<float*>(qk_rstd + ((0 * (long long)num_tokens + (long long)(ext0 + (long long)t_n)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = r;
+                            *(reinterpret_cast<float*>(qk_rstd + ((0ll * (long long)num_tokens + (long long)(ext0 + (long long)t_n)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = r;
                         }
                     }
                 }
@@ -392,7 +392,7 @@ kernel_cake_kda_det_train_a8921482bf37aaee0133(float* __restrict__ g, __nv_bfloa
                 if (l2n_lead != 0) {
                     if (t_u_2 < clen) {
                         if (lane_1 == 0) {
-                            *(reinterpret_cast<float*>(qk_rstd + ((1 * (long long)num_tokens + (long long)(ext0 + (long long)t_n)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = r_0;
+                            *(reinterpret_cast<float*>(qk_rstd + ((1ll * (long long)num_tokens + (long long)(ext0 + (long long)t_n)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = r_0;
                         }
                     }
                 }
@@ -516,7 +516,7 @@ kernel_cake_kda_det_train_a8921482bf37aaee0133(float* __restrict__ g, __nv_bfloa
             beta_int[(int0 + (long long)t_u_2) * (long long)num_heads + (long long)head] = bt;
         }
     }
-    long long ebase = (ext0 * (long long)num_heads + (long long)head) * 128 + (long long)d0;
+    long long ebase = (ext0 * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
     unsigned int dwa[16];
     int t_u_0 = warp_0 * 8;
     int t_c_0 = t_u_0;

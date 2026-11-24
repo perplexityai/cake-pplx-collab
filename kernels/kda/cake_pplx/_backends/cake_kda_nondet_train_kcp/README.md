@@ -160,6 +160,11 @@ dq, dk, dv, dbeta, dg = cake_kda_nondet_train_kcp_backward(q_local, k_local, v_l
                                           dout_local, saved=saved)
 ```
 
+The KCP entry points support `save_mode="light"` only: `save_mode="tape"`
+raises `NotImplementedError` (`save_mode='tape' is not supported on the KCP
+route (light only)`). `saved_rows="tape"` ("Saved rows" below) is a separate
+keyword and is not affected.
+
 The context is a plain frozen object, not a dataclass: the pre-forward hooks
 of FSDP2 (`fully_shard`) walk every dataclass, dict, list and tuple of a
 module's arguments, and see the context as one leaf. Per-layer metadata that
@@ -387,12 +392,20 @@ in the call's launches, like a fused-away gate epilogue).
 `LAST_CALL["bwd"]["kcp_dav"]` records `"launched"` or `"skipped"`.  The
 private test knob `kcp_dav="always"` launches it on every backward of the
 replay layout; the outputs and gradients are bitwise those of `"auto"`.
+With the in-kernel Q/K L2 norm the single-rank plan dispatches `dav` on
+every row (its fused gradient, `davq` 0, stores no `dA_qk` there), so every
+backward launches the mode's output backward `kcp_dav_l2n` after the K1 tape
+replay: `dA_qk` alone, from an FP32 `v_new` it recomputes from `akk_int`,
+`beta`, `v`, `w` and the `h` tape, one CTA per (chunk, head) tile.  It forms
+no `dv1`; the adjoint walks form it.
 
 Backward tape order (default `"under_b1"`; private test knob
 `bwd_tape_order`): the saved-mode backward issues its K1 tape replay after
 the b1 exchange and before its wait, instead of before the `dav` stage.  It
 applies only where the backward skips `kcp_dav` (the K1 tape replay's one
-earlier reader of `v_new`), at `P = 1` with the a2a exchange, the
+earlier reader of its tapes: `v_new` for `kcp_dav`, `h` for `kcp_dav_l2n`,
+which every in-kernel Q/K L2 norm backward launches), at `P = 1` with the
+a2a exchange, the
 `wait_first` schedule, no hand-off tape set and the replay arena (a lean
 arena only with a kept `u`, `saved_rows="wy"`); every other backward runs
 `"first"` (the replay before the `dav` stage), which the knob value
@@ -1032,7 +1045,7 @@ families of a phase in one launch; off by default).
 
 The files of this package:
 
-* `cake_kcp_jit.py` -- the `MODULES` registry of the sixteen shipped programs (copies of the deterministic
+* `cake_kcp_jit.py` -- the `MODULES` registry of the seventeen shipped programs (copies of the deterministic
   package's records under the `cake_kda_train_` library prefix, the same twenty hex digits; the
   fragment walks of the forward and backward state recurrences in their
   `offset` and `tape` forms, the BF16x3 transfer walk (two CTAs per segment
@@ -1040,7 +1053,10 @@ The files of this package:
   merge in one record per register-blocked build, and the two chunk stages of the
   context-parallel route, `kcp_fwd_o` (the output from the K1 tapes) and
   `kcp_dav` (`dA_qk` where the single-rank plan dispatches its `dav`
-  stage; the K2 adjoint walks form `dv1` from `aqk_int`), and the fused
+  stage; the K2 adjoint walks form `dv1` from `aqk_int`), the output
+  backward of the in-kernel Q/K L2 norm modes `kcp_dav_l2n` (`dA_qk` from an
+  FP32 `v_new` it recomputes; the single-rank `dav_l2n_replay` build under
+  this package's `_kcp` name), and the fused
   forward walk `kcp_fwdh_o` (the forward state walk with the chunk output inside it: the
   same bits as the tape walk followed by `kcp_fwd_o`, no tape written; in its
   full-width and two-CTA records), which the forward that keeps no tape
@@ -1070,12 +1086,13 @@ The files of this package:
   tests; without the file those tests skip.  The package reads no
   environment variable.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
-  package (byte-identical copies) and the manifest of the sixteen shipped
+  package (byte-identical copies) and the manifest of the seventeen shipped
   programs (schema `cake-build/1`, one entry per `<library>_<arch>`);
   `aot/` is never tracked (`.gitignore`).
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include.
-* `csrc/cake_kda_train_<digest>_kcp_{kernel,binding}.cu` of the twenty-one
-  context-parallel programs (the chunk stage `kcp_fwd_o` among them) and
+* `csrc/cake_kda_train_<digest>_kcp_{kernel,binding}.cu` of the twenty-two
+  context-parallel programs (the chunk stages `kcp_fwd_o` and `kcp_dav_l2n`
+  among them) and
   `csrc/cake_kda_train_<digest>_{kernel,binding}.cu` of the chunk stage
   `kcp_dav`, rendered like the single-rank ones (digests in `build.json` and
   `build.test.json`); the units of the deterministic package's programs under
@@ -1095,7 +1112,7 @@ packages.  Without the sibling, importing `cake_kcp` or `cake_kcp_jit` raises
 
 ## Status
 
-The registry holds sixteen shipped programs (`cake_kcp_jit.MODULES`, in
+The registry holds seventeen shipped programs (`cake_kcp_jit.MODULES`, in
 `build.json`) and six test-only programs (`cake_kcp_jit.TEST_MODULES`, in
 `build.test.json`) for `sm_100a`, `sm_103a` and `sm_107a`.
 

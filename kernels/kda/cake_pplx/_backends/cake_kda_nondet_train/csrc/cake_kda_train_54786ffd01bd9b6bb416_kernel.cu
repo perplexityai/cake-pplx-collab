@@ -354,7 +354,7 @@ kernel_cake_kda_train_54786ffd01bd9b6bb416(const __grid_constant__ CUtensorMap d
             int row_base = qd * 32 << 16;
             int rs_g = num_heads * 128;
             int qrs = num_qk_heads * 128;
-            long long gbase_c = ((long long)row0 * (long long)num_heads + (long long)hv) * 128;
+            long long gbase_c = ((long long)row0 * (long long)num_heads + (long long)hv) * 128ll;
             long long ext0 = (long long)chunk_bos[chunk];
             int clen = chunk_len[chunk];
             float* dg_base = dg_out + (gbase_c + (long long)d_lane);
@@ -4934,6 +4934,7 @@ kernel_cake_kda_train_54786ffd01bd9b6bb416(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(100464 + r_347 * 128)), "f"(z[0]), "f"(z[1]), "f"(z[2]), "f"(z[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr);
                 }
@@ -5035,6 +5036,7 @@ kernel_cake_kda_train_54786ffd01bd9b6bb416(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(104560 + r_348 * 128)), "f"(z_1[0]), "f"(z_1[1]), "f"(z_1[2]), "f"(z_1[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 8);
                 }
@@ -5175,6 +5177,7 @@ kernel_cake_kda_train_54786ffd01bd9b6bb416(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(100464 + r_349 * 128)), "f"(z_2[0]), "f"(z_2[1]), "f"(z_2[2]), "f"(z_2[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 16);
                 }
@@ -5342,6 +5345,7 @@ kernel_cake_kda_train_54786ffd01bd9b6bb416(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(104560 + r_350 * 128)), "f"(z_3[0]), "f"(z_3[1]), "f"(z_3[2]), "f"(z_3[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 24);
                 }
@@ -5521,16 +5525,16 @@ kernel_cake_kda_train_54786ffd01bd9b6bb416(const __grid_constant__ CUtensorMap d
                 asm volatile("cp.async.bulk.prefetch.tensor.3d.L2.global.tile [%0, {%1, %2, %3}];" :: "l"((uint64_t)((&q_e))), "r"((int)(64)), "r"((int)(qk_head_h)), "r"((int)(kq0_setup + 56)) : "memory");
             }
             int pf_lane = tid & 31;
-            long long pf_base = ((long long)(row0_h + (pf_lane >> 2)) * (long long)num_heads + (long long)hv_h) * 128 + (long long)((pf_lane & 3) * 32);
-            long long pf_off_0 = pf_base + (long long)num_heads * 5120;
+            long long pf_base = ((long long)(row0_h + (pf_lane >> 2)) * (long long)num_heads + (long long)hv_h) * 128ll + (long long)((pf_lane & 3) * 32);
+            long long pf_off_0 = pf_base + (long long)num_heads * 5120ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_0)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_0)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_0)));
-            long long pf_off_1 = pf_base + (long long)num_heads * 6144;
+            long long pf_off_1 = pf_base + (long long)num_heads * 6144ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_1)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_1)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_1)));
-            long long pf_off_2 = pf_base + (long long)num_heads * 7168;
+            long long pf_off_2 = pf_base + (long long)num_heads * 7168ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_2)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_2)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_2)));

@@ -349,7 +349,7 @@ def test_public_entry_point_under_torch_deterministic_mode():
 
 
 # ---------------------------------------------------------------------------
-# The candidate-block call (``*_topk_with_candidates``, sm_100a / sm_103a)
+# The candidate-block call (``*_topk_with_candidates``, sm_100a / sm_103a / sm_107a)
 # ---------------------------------------------------------------------------
 
 
@@ -370,10 +370,6 @@ def test_candidate_block_facade_matches_backend_and_owns_no_policy():
     warning (the same sets), ``None`` in place of the scores with ``return_scores=False`` (``scores`` given then is a
     ``ValueError``), the caller's output tensors when given, and the backend's workspace bound."""
     _require_program()
-    if cake_backend.arch_for(torch.device("cuda")) not in ("sm_100a", "sm_103a"):
-        pytest.skip(
-            "the candidate-block programs are registered for sm_100a and sm_103a only"
-        )
     inputs = ref.make_random_inputs(
         [48, 16], [17000, 900], top_k=512, seed=7810, device="cuda"
     )
@@ -423,7 +419,7 @@ def test_candidate_block_facade_matches_backend_and_owns_no_policy():
 
 
 # ---------------------------------------------------------------------------
-# The candidate-restricted top-k (``*_topk_in_candidates``, sm_100a / sm_103a)
+# The candidate-restricted top-k (``*_topk_in_candidates``, sm_100a / sm_103a / sm_107a)
 # ---------------------------------------------------------------------------
 
 
@@ -445,10 +441,6 @@ def test_candidate_restricted_facade_matches_backend_and_owns_no_policy():
     ``return_scores=False`` (``scores`` given then is a ``ValueError``), the caller's output tensors when given, and
     the backend's workspace bound."""
     _require_program()
-    if cake_backend.arch_for(torch.device("cuda")) not in ("sm_100a", "sm_103a"):
-        pytest.skip(
-            "the candidate-restricted program is registered for sm_100a and sm_103a only"
-        )
     inputs = ref.make_random_inputs(
         [48, 16], [17000, 900], top_k=512, seed=7820, device="cuda"
     )

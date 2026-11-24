@@ -18,8 +18,8 @@ Plain and clamped SwiGLU, BF16 or FP32 weight-gradient accumulation, and unequal
 counts per rank are supported. `prepare_mok_bf16(router_weight_position="before_down")` applies each route's
 FP32 router weight to the SwiGLU activation before the down projection (`h = BF16(w * a)`, an unweighted
 combine, router-weight gradient `dot(dh, a)`): top-k 6 over 384 routed experts at EP 4/8/16/32/64 (and top-k
-2 on the diagnostic layouts), clamped SwiGLU, FP32 weight gradients, BF16 routed weights, on `sm_100a` and
-`sm_103a`; `recompute_forward_context` then takes the router weights. The backend README
+2 on the diagnostic layouts), clamped SwiGLU, FP32 weight gradients, BF16 routed weights, on `sm_100a`, `sm_103a`
+and `sm_107a`; `recompute_forward_context` then takes the router weights. The backend README
 ([`cake_pplx/_backends/cake_mok_bf16/README.md`](cake_pplx/_backends/cake_mok_bf16/README.md)) has the
 full API, contract, memory rules and measured communication-SM tables.
 
@@ -37,7 +37,7 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 | Item | Requirement |
 |---|---|
-| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7); `router_weight_position="before_down"`: `sm_100a` or `sm_103a` |
+| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7), both router-weight positions |
 | CUDA toolkit (`nvcc`, JIT) | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` |
 | `torch` | with `torch.distributed` and symmetric memory (multicast) |
 | Process group | Initialized, its CUDA device current; all ranks in one peer-accessible NVLink domain with multicast |
@@ -47,14 +47,13 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 ## Builds
 
-`build.json` lists 182 builds of 67 kernels: 50 kernels for each of `sm_100a`, `sm_103a` and `sm_107a`, 15 more for
-`sm_100a` and `sm_103a` only (the router-weight-before-down fused kernels, the top-k 6 epilogue and the scheduler
-kernels of the 384-expert layouts) and two more for `sm_107a` only. Every build is generated from one kernel source
-revision.
+`build.json` lists 197 builds of 67 kernels: 65 kernels for each of `sm_100a`, `sm_103a` and `sm_107a` (the
+router-weight-before-down fused kernels, the top-k 6 epilogue and the scheduler kernels of the 384-expert layouts
+included) and two more for `sm_107a` only. Every build is generated from one kernel source revision.
 
 | Group | Kernels |
 |---|---|
-| BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); router weight before the down projection (`sm_100a`, `sm_103a`): clamped forward (with or without the saved context), clamped recompute, clamped backward with FP32 weight gradients |
+| BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); router weight before the down projection: clamped forward (with or without the saved context), clamped recompute, clamped backward with FP32 weight gradients |
 | MXFP8 fused | forward, context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); `sm_107a` only: the multi-macrobatch forward (plain, clamped) |
 | Scheduler | count and rows per scheduler layout, pad per EP size |
 | Layout | the expert layout, zero |
@@ -115,27 +114,31 @@ judge every floating output of the fused kernels (`tests/cake_naive.py`):
   inputs and the max norm passes with at least 56 of the 128. The error is 0 wherever the naive error is 0.
   `x`'s E4M3 codes and scales are exact against the recipe.
 
-Known gaps are judged in test items of their own. On an architecture where a gap's miss is accepted, the item
-carries a strict expected-failure marker with caps (`tests/experimental/_mok_gaps.py`), one for each norm the miss is
-accepted in there: the largest ratio of the kernel's median and largest error over the naive implementation's, over
-every recorded run on every GPU model, rounded up to 4 decimals (at least 1.005). One item has caps per architecture
-instead, each from that architecture's runs: the EP4 unequal-sources routed gate weight gradient, whose largest max-norm
-ratio on `sm_107a` (1.89) is above the other architectures' (1.31). A ratio above a cap fails the item,
-and so does a miss in a norm without a cap. A fix makes the item pass, and the strict marker then fails the item
-until the marker is removed. On an architecture without caps the item is judged like any output, and a miss fails it.
-Every other output of the same case stays judged in the case's main item. The outputs that miss the rule, with their
-ratios (kernel error / naive error, median / largest over the inputs):
+Known gaps are judged in test items of their own. On an architecture where a gap's miss is accepted, the item carries a
+strict expected-failure marker with caps (`tests/experimental/_mok_gaps.py`), one for each norm the miss is accepted in
+there: the largest ratio of the kernel's median and largest error over the naive implementation's, over every recorded
+run on every GPU model, rounded up to 4 decimals (at least 1.005). One item keeps caps per architecture, each from that
+architecture's runs: the EP4 unequal-sources routed gate weight gradient. With inputs drawn independently of the SM
+count, its three architectures give the same ratios (L2 1.03 / 1.03, max 1.30 / 1.20), so its three caps are equal. A
+ratio above a cap fails the item, and so does a miss in a norm without a cap. A fix makes the item pass, and the strict
+marker then fails the item until the marker is removed. On an architecture without caps the item is judged like any
+output, and a miss fails it. Every other output of the same case stays judged in the case's main item. The outputs that
+miss the rule, with their ratios (kernel error / naive error, median / largest over the inputs):
 
-| Outputs | Items | `sm_100a`, `sm_103a` (GB200, GB300) | `sm_107a` (VR200) |
-|---|---|---|---|
-| MXFP8 `d_scores`, unclamped SwiGLU | every unclamped MXFP8 case, single GPU | L2 1.02 / 1.02-1.05 | L2 1.03 / 1.01-1.02 |
-| MXFP8 `d_scores`, clamped SwiGLU | every clamped MXFP8 case and the local-experts cases, single GPU | L2 1.15-1.16 / 1.10-1.15, max 1.12-1.20 / 0.91-1.34 | L2 1.14-1.15 / 1.14-1.17, max 1.10-1.17 / 0.98-1.23 |
-| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 at EP4 (gate, up, down); EP1 clamped cases (down) | L2 1.03 / 1.03-1.07, max 1.22-1.33 / 1.16-1.42 | L2 1.03-1.04 / 1.03-1.07, max 1.23-1.34 / 1.16-1.89 |
-| same | single-GPU empty-experts cases with 768-row macrobatches; EP1 unclamped recompute (gate, up, down) | max 1.05-1.14 / 0.96-1.24 | max 1.05-1.14 / 0.93-1.24 |
+| Outputs | Items | `sm_100a`, `sm_103a`, `sm_107a` (B200, GB200, B300, GB300, VR200) |
+|---|---|---|
+| MXFP8 `d_scores`, unclamped SwiGLU | every unclamped MXFP8 case, single GPU | L2 1.03-1.04 / 1.01-1.03 |
+| MXFP8 `d_scores`, clamped SwiGLU | every clamped MXFP8 case and the local-experts cases, single GPU | L2 1.15-1.16 / 1.12-1.18, max 1.09-1.21 / 1.05-1.18 |
+| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 at EP4 (gate, up, down); EP1 clamped cases (down) | L2 1.03-1.05 / 1.03-1.07, max 1.28-1.31 / 1.20-1.38 |
+| same | single-GPU empty-experts cases with 768-row macrobatches; EP1 unclamped recompute (gate, up, down) | max 1.04-1.16 / 0.91-1.48 |
+| MXFP8 routed gate weight gradient with FP32 weight-gradient accumulation | EP1 MXFP8 case with FP32 weight gradients (gate) | max 1.02 / 1.03 |
 
-GB200 and GB300 give the same ratios (single GPU, EP1 and EP4).
+The five GPU models give the same ratios (single GPU, EP1 and EP4): B200, GB200, B300 and GB300 bit for bit; VR200
+differs only in some MXFP8 `d_scores` L2 ratios, by less than 0.001 %.
 
-The MXFP8 score gradient is formed as `sum(dh * hidden) / score` from the kernel's own intermediate values, and the
-BF16 routed weight gradient is rounded to BF16 per macrobatch; follow-up kernel changes remove both gaps.
+The MXFP8 score gradient is formed as `sum(dh * hidden) / score` from the kernel's own intermediate values, and the BF16
+routed weight gradient is rounded to BF16 per macrobatch. The EP1 MXFP8 routed gate weight gradient with FP32
+weight-gradient accumulation misses only the max norm; its L2 norm meets the tier. Follow-up kernel changes remove these
+three gaps.
 
 The repository rules are in [`ARCHITECTURE.md`](../../ARCHITECTURE.md).

@@ -678,16 +678,17 @@ def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launc
 
 
 # The backward's bounds on each architecture: the most documents of ``bwd_small`` below ``bwd``, the most documents
-# of ``bwd`` (``None``: no bound), above which ``bwd_small`` runs again, the most documents of either, above which
-# ``bwd_warp`` runs, and the documents below that ``bwd_warp`` also runs for (``None``: none).
+# of ``bwd`` (``None``: no bound), above which ``bwd_small`` runs again (a range that is empty on sm_107a in this
+# version: both bounds are 16384), the most documents of either, above which ``bwd_warp`` runs, and the documents
+# below that ``bwd_warp`` also runs for (``None``: none).
 BWD_SMALL_DOCS = {"sm_100a": 26, "sm_103a": 26, "sm_107a": 125}
 BWD_MAX_DOCS = {"sm_100a": None, "sm_103a": None, "sm_107a": 16384}
 BWD_WARP_DOCS = {"sm_100a": 16384, "sm_103a": 16384, "sm_107a": 16384}
 BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": None}
-# Packs on either side of the documents bounds (14, 26, 32, 40, 125, 1024 and 16384) and of the forward's fused bound
-# (256 documents): one document, 14, 15, 16, 26, 27, 32, 33, 40, 41, 124, 125, 126, 256, 257, 1024, 1025, 16384, 16385
-# and 32769 documents of 0 to 6 tokens; and log-normal packs of 16383 to 65536 tokens on either side of the documents
-# bounds (the role does not depend on the tokens).
+# Packs on either side of the documents bounds (14, 26, 32, 125 and 16384) and of the forward's fused bound (256
+# documents), and at 40, 41, 1024 and 1025 documents: one document, 14, 15, 16, 26, 27, 32, 33, 40, 41, 124, 125,
+# 126, 256, 257, 1024, 1025, 16384, 16385 and 32769 documents of 0 to 6 tokens; and log-normal packs of 16383 to 65536
+# tokens on either side of the documents bounds (the role does not depend on the tokens).
 BWD_BOUND_PACKS = (
     *(
         Pack((2, *(i * 5 % 7 for i in range(1, n))), f"S{n}")

@@ -41,6 +41,10 @@ dq, dk, dv, dbeta, dg = cake_kda_det_train_kcp_backward(q_local, k_local, v_loca
                                           dout_local, saved=saved)
 ```
 
+The KCP entry points support `save_mode="light"` only: `save_mode="tape"`
+raises `NotImplementedError` (`save_mode='tape' is not supported on the KCP
+route (light only)`).
+
 The context is a plain frozen object, not a dataclass: the pre-forward hooks
 of FSDP2 (`fully_shard`) walk every dataclass, dict, list and tuple of a
 module's arguments, and see the context as one leaf. Per-layer metadata that
@@ -472,7 +476,8 @@ the adjoint tape walk, whose `dh` shares bytes with `u` in both backward
 layouts.  In between, the b1 / b2 exchange and the merges read no tape and
 write only the call's pools, so the replay runs beside them.  The first
 replay of a table set, a backward that launches `kcp_dav` (it reads
-`v_new`), the ring exchange and the `overlap` schedule keep the call's
+`v_new`) or `kcp_dav_l2n` (it reads `h`: every backward with the in-kernel
+Q/K L2 norm), the ring exchange and the `overlap` schedule keep the call's
 stream.  Placement changes no bit.  The private test knob
 `bwd_tape_stream` keeps the one-stream form (`"one"`) and the other fork,
 issue and priority forms selectable for the A/B record;
@@ -480,7 +485,7 @@ issue and priority forms selectable for the A/B record;
 
 The files of this package:
 
-* `cake_kcp_jit.py` -- the `MODULES` registry of the sixteen shipped programs (the
+* `cake_kcp_jit.py` -- the `MODULES` registry of the seventeen shipped programs (the
   fragment walks of the forward and backward state recurrences in their
   `offset` and `tape` forms, the BF16x3 transfer walk (two CTAs per segment
   and head, each over one 64-column half of the state), the affine
@@ -488,7 +493,11 @@ The files of this package:
   context-parallel route, `kcp_fwd_o` (the output from the K1 tapes) and
   `kcp_dav` (`dA_qk`, launched only where the single-rank plan dispatches
   its `dav` stage; the K2 adjoint walks form `dv1 = Aqk^T dO` themselves from
-  the internal `Aqk` rows), and the fused forward walk
+  the internal `Aqk` rows), the output backward of the in-kernel Q/K L2 norm
+  modes `kcp_dav_l2n` (launched on every backward of those modes, after the
+  K1 tape replay: `dA_qk` from an FP32 `v_new` it recomputes from `akk_int`,
+  `beta`, `v`, `w` and the `h` tape, one CTA per (chunk, head) tile; no
+  `dv1`), and the fused forward walk
   `kcp_fwdh_o` (the forward state walk with the chunk output inside it: the
   same bits as the tape walk followed by `kcp_fwd_o`, no tape written; in its
   full-width and two-CTA records), which the forward that keeps no tape
@@ -518,14 +527,15 @@ The files of this package:
   tests; without the file those tests skip.  The package reads no
   environment variable.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
-  package (byte-identical copies) and the manifest of the sixteen shipped
+  package (byte-identical copies) and the manifest of the seventeen shipped
   programs (schema `cake-build/1`, one entry per `<library>_<arch>`);
   `aot/` is never tracked (`.gitignore`).
 * `csrc/cake_ffi_checks.h` -- the TVM-FFI helper header the bindings include.
 * `csrc/cake_kda_det_train_<digest>_kcp_{kernel,binding}.cu` of the twenty
-  context-parallel-only programs and `csrc/cake_kda_det_train_<digest>_{kernel,binding}.cu`
-  of the two chunk stages (`kcp_fwd_o`, `kcp_dav`), rendered like the
-  single-rank ones (digests in `build.json` and `build.test.json`).
+  context-parallel-only programs and of the chunk stages `kcp_fwd_o` and
+  `kcp_dav_l2n`, and `csrc/cake_kda_det_train_<digest>_{kernel,binding}.cu`
+  of the chunk stage `kcp_dav`, rendered like the single-rank ones (digests
+  in `build.json` and `build.test.json`).
 
 ## Determinism
 
@@ -560,7 +570,7 @@ packages.
 
 ## Status
 
-The registry holds sixteen shipped programs (`cake_kcp_jit.MODULES`, in
+The registry holds seventeen shipped programs (`cake_kcp_jit.MODULES`, in
 `build.json`) and six test-only programs (`cake_kcp_jit.TEST_MODULES`, in
 `build.test.json`) for `sm_100a`, `sm_103a` and `sm_107a`.
 
