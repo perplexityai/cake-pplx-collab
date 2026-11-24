@@ -1492,12 +1492,12 @@ _NARROW_N_SWAP_ARCHES = ("sm_100a", "sm_103a")
 #: the swapped key's measured rule at ``K`` on the part (``ROW_RULE_MIN_T``, ``ROW_RULE_RANGES_BY_SM``) is not empty,
 #: and so runs the weight-gradient entry's plan, program and bits there; it keeps the direct plan without a rule where
 #: that rule is empty (below T 1024, and 4096 -> 16 at T 2049 - 4095, T 2049 - 3071 on the 212-SM part).  Post-ship
-#: medians of the direct plan over the swapped one [[TBD0324_GENERIC_AB_212]] (212 SMs) and
-#: [[TBD0324_GENERIC_AB_216]] (216 SMs).
+#: medians of the direct plan over the swapped one at the timed changed cells were 2.012 to 3.352 (eager launches) and
+#: 2.004 to 3.357 (CUDA graph replays) on the 212-SM part and 1.785 to 3.205 and 1.772 to 3.131 on the 216-SM part.
 _SINGLE_WGRAD_SWAP_MIN_K = {
     ("sm_107a", 576, 6144, False): 6144,
-    # [[TBD0324_FLOORS]]: an entry ("sm_107a", d_out, d_in, False): F only for a row of the four whose post-ship A/B
-    # floor F is above T 1024; a row without a measured floor keeps T 8193
+    # no entry for the four sm_107a bf16 rows of version 0.3.22 (4096 -> 16 / 96, 6144 -> 48 / 64): the post-ship A/B
+    # floor of each was T 1024 on both parts
 }
 
 
@@ -1818,10 +1818,12 @@ ROW_RULES: dict[tuple, dict] = {
     #      (``_SINGLE_WGRAD_SWAP_MIN_K``); the indexer_hw generic call swaps at every token count and runs these
     #      plans ----
     # ---- version 0.3.24: the generic call of 4096 -> 16 / 96 and 6144 -> 48 / 64 has no ``_SINGLE_WGRAD_SWAP_MIN_K``
-    #      entry [[TBD0324_FLOORS]]: it swaps, and runs the plan, program and bits of the weight-gradient entry,
-    #      wherever these rules and tiers give the swapped key a rule on the part (``_single_wgrad_swap``), and keeps
-    #      the direct plan without a rule where they give none.  Post-ship medians of the direct plan over the swapped
-    #      one [[TBD0324_GENERIC_AB_212]] (212 SMs) and [[TBD0324_GENERIC_AB_216]] (216 SMs) ----
+    #      entry (the post-ship A/B floor of each was T 1024 on both parts): it swaps, and runs the plan, program and
+    #      bits of the weight-gradient entry, wherever these rules and tiers give the swapped key a rule on the part
+    #      (``_single_wgrad_swap``), and keeps the direct plan without a rule where they give none.  Post-ship medians
+    #      of the direct plan over the swapped one at the timed changed cells were 2.012 to 3.352 (eager launches) and
+    #      2.004 to 3.357 (CUDA graph replays) on the 212-SM part and 1.785 to 3.205 and 1.772 to 3.131 on the 216-SM
+    #      part ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 96, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 48, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},

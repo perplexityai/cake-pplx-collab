@@ -22943,8 +22943,8 @@ def test_gpu_0323_wgrad_rows_meet_the_naive_tier_and_repeat_bitwise(case, monkey
 # ---------------------------------------------------------------------------
 
 #: The generic-call swap floors of the version (``_SINGLE_WGRAD_SWAP_MIN_K``): (d_in, d_out) -> T, only for a row of the
-#: four whose post-ship A/B floor is above T 1024 [[TBD0324_FLOORS]]; a row without an entry swaps wherever its rule is
-#: not empty.
+#: four whose post-ship A/B floor is above T 1024 (none: the post-ship A/B floor of each row was T 1024 on both parts);
+#: a row without an entry swaps wherever its rule is not empty.
 SM107A_0324_SWAP_FLOOR = {}
 #: The token counts of the generic-call check of the version: every band edge of the five rows' rules on the sm_107a
 #: parts and the post-ship A/B midpoints inside T 1024 - 4096.
