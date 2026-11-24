@@ -212,6 +212,36 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_fmha_train_f52478391bbcd6308069",
         "stage": "bwd_main",
     },
+    "bwd_main_2cta_qsplit2": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK_part"], ["buffer", "dV_part"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_cd2c9b670b9df03ff0b7",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (2, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 231424,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_cd2c9b670b9df03ff0b7",
+        "stage": "bwd_main",
+    },
+    "bwd_main_2cta_qsplit4": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK_part"], ["buffer", "dV_part"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_8cd7046dce10a4ee6908",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (2, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 231424,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_8cd7046dce10a4ee6908",
+        "stage": "bwd_main",
+    },
     "bwd_post": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "dQ"], ["parameter", "seqlen_q"], ["parameter", "softmax_scale"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
@@ -255,6 +285,36 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_fmha_train_1a125639d68d30b57111",
+        "stage": "bwd_post",
+    },
+    "bwd_post_pair_qsplit2": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ_accum"], ["buffer", "dQ"], ["buffer", "dK_part"], ["buffer", "dV_part"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_d35767c0136e7222051a",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 65536,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_d35767c0136e7222051a",
+        "stage": "bwd_post",
+    },
+    "bwd_post_pair_qsplit4": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ_accum"], ["buffer", "dQ"], ["buffer", "dK_part"], ["buffer", "dV_part"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_55b721f6ac9852210dc4",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 65536,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_55b721f6ac9852210dc4",
         "stage": "bwd_post",
     },
     "bwd_fused": {
@@ -323,14 +383,19 @@ MODULES: dict[str, dict[str, Any]] = {
 # The preprocess depends on the head dimension only; the postprocess reads the
 # dQ accumulator in the order of the variant's main stage: the pair-row order
 # of the 2-CTA main kernels (``pair`` True, head dimension 128 only) or the
-# tile order of the others.
-RECORD_OF: dict[tuple[int, bool, bool], tuple[str, str, str]] = {
+# tile order of the others.  A key (head dim, causal, pair, q_split) names
+# the pair route split along the queries (no mask, head dimension 128): its
+# main stage writes q_split FP32 dK / dV partials, one per range of the query
+# blocks, and its postprocess folds them.
+RECORD_OF: dict[tuple[Any, ...], tuple[str, str, str]] = {
     (128, False, False): ("bwd_pre", "bwd_main", "bwd_post"),
     (128, True, False): ("bwd_pre", "bwd_main_causal", "bwd_post"),
     (64, False, False): ("bwd_pre_hd64", "bwd_main_hd64", "bwd_post_hd64"),
     (64, True, False): ("bwd_pre_hd64", "bwd_main_hd64_causal", "bwd_post_hd64"),
     (128, False, True): ("bwd_pre", "bwd_main_2cta", "bwd_post_pair"),
     (128, True, True): ("bwd_pre", "bwd_main_2cta_causal", "bwd_post_pair"),
+    (128, False, True, 2): ("bwd_pre", "bwd_main_2cta_qsplit2", "bwd_post_pair_qsplit2"),
+    (128, False, True, 4): ("bwd_pre", "bwd_main_2cta_qsplit4", "bwd_post_pair_qsplit4"),
 }
 
 # (head dim, causal, pair) -> the host sequence of the variant: one library whose ``run`` launches the three records
@@ -365,6 +430,16 @@ SEQUENCES: dict[tuple[int, bool, bool], dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "library": "cake_fmha_train_011ecf5b8485c428cdc9",
         "records": ("bwd_pre", "bwd_main_2cta_causal", "bwd_post_pair"),
+    },
+    (128, False, True, 2): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_b1178bca2279ba9ae8e1",
+        "records": ("bwd_pre", "bwd_main_2cta_qsplit2", "bwd_post_pair_qsplit2"),
+    },
+    (128, False, True, 4): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_38554f8faf328d46197e",
+        "records": ("bwd_pre", "bwd_main_2cta_qsplit4", "bwd_post_pair_qsplit4"),
     },
 }
 
