@@ -134,6 +134,7 @@ from __future__ import annotations
 
 import functools
 import math
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 
@@ -1119,8 +1120,8 @@ def _offsets_placeholder(index: int) -> torch.Tensor:
 
 
 # row ``nb`` (``0 .. CB_SLOTS``) of the int32 ``[CB_SLOTS + 1, CB_SLOTS]`` table: ``0 .. nb - 1`` and a ``-1`` tail, per
-# device, with the event its creating stream recorded right after writing it
-_IOTA_ROWS: dict[int, tuple[torch.Tensor, torch.cuda.Event]] = {}
+# device, held weakly (the runners that read it hold it), with the event its creating stream recorded right after writing it
+_IOTA_ROWS: dict[int, tuple[weakref.ref, torch.cuda.Event]] = {}
 # the row base and limit of the rows outside every query segment (before ``cu_seqlens_q[0]`` or from
 # ``cu_seqlens_q[S]`` on): ``min(base + t + 8, limit)`` clamps to 7, so the row's visible count is 0
 _IOTA_NO_SEGMENT = -(1 << 62)
@@ -1128,13 +1129,16 @@ _IOTA_NO_SEGMENT = -(1 << 62)
 
 def _iota_rows(index: int) -> tuple[torch.Tensor, Optional[torch.cuda.Event]]:
     """The candidate-block rows of every block count on device ``index``: row ``nb`` of the int32 ``[CB_SLOTS + 1,
-    CB_SLOTS]`` table holds ``0 .. nb - 1`` and a ``-1`` tail.  One table per device (16 MiB), made on first use on the
-    current stream, with an event recorded there right after it: a reader on another stream waits on that event
-    (:class:`_IotaBlocks`) before it reads the table.  Made during a CUDA graph capture, it is the call's own (the
-    capture's pool; the capture orders its reads after its writes), not kept, and comes without an event."""
+    CB_SLOTS]`` table holds ``0 .. nb - 1`` and a ``-1`` tail.  One table per device (16 MiB), shared by the runners
+    that read it and freed with the last of them (the module holds it weakly, so no device memory outlives the runners;
+    the next prepare makes it again), made on the current stream with an event recorded there right after it: a reader
+    on another stream waits on that event (:class:`_IotaBlocks`) before it reads the table.  Made during a CUDA graph
+    capture, it is the call's own (the capture's pool; the capture orders its reads after its writes), not shared, and
+    comes without an event."""
     entry = _IOTA_ROWS.get(index)
-    if entry is not None:
-        return entry
+    rows = None if entry is None else entry[0]()
+    if rows is not None:
+        return rows, entry[1]
     device = f"cuda:{index}"
     slots = torch.arange(CB_SLOTS, dtype=torch.int32, device=device)
     counts = torch.arange(CB_SLOTS + 1, dtype=torch.int32, device=device)
@@ -1143,7 +1147,7 @@ def _iota_rows(index: int) -> tuple[torch.Tensor, Optional[torch.cuda.Event]]:
         return rows, None
     ready = torch.cuda.Event()
     ready.record()
-    _IOTA_ROWS[index] = (rows, ready)
+    _IOTA_ROWS[index] = (weakref.ref(rows), ready)
     return rows, ready
 
 
@@ -1155,7 +1159,8 @@ class _IotaBlocks:
     ``cu_seqlens_q[S]`` on).  Every run reads the bound ``cu_seqlens_q`` / ``cu_seqlens_k`` / ``q_causal_offsets``
     (new values written into them are followed, also by a CUDA graph capturing the run), with no host synchronization
     and no allocation: the per-segment and per-row scratch is made here, by three small device launches (one ``full``,
-    two ``arange``) on every prepare -- so on every call of the eager entry, which prepares per call.  Per segment
+    two ``arange``) on every prepare -- so on every call of the eager entry, which prepares per call and, with no other
+    runner holding the row table, makes that table again (two ``arange`` and one ``where``, 16 MiB).  Per segment
     ``s`` (``q0 / q1`` its query bounds, ``L`` its keys) ``base`` and ``lim`` give ``n + 7 = max(min(t + 8 + base,
     lim), 7)``: with offsets ``base = offset - q0`` and ``lim = L + 7``; without them ``base = L - q1`` (the default
     offset ``L - (q1 - q0)``), and no row of the segment reaches ``lim``, so it is skipped.  ``searchsorted`` over

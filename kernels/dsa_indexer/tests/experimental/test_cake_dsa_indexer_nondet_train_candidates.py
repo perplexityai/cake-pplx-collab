@@ -28,6 +28,7 @@ programs' sets, a CUDA graph replaying new segment boundaries, and no allocation
 
 import contextlib
 import functools
+import gc
 import json
 import math
 import random
@@ -1167,6 +1168,37 @@ def test_iota_table_made_on_a_busy_stream_is_waited_for():
         if saved is not None:
             cake_backend._IOTA_ROWS[device.index] = saved
 
+
+def test_iota_table_lives_only_while_a_runner_holds_it():
+    """The per-device row table is shared by the fills that read it and held only by them: a second fill reads the
+    first one's table, and once no fill holds it the module's entry is dead (its memory goes back to the allocator, so
+    no device memory of the package outlives its runners); the next fill makes a new table with the kernel rule's rows."""
+    _require_cb_program()
+    device = torch.device("cuda", torch.cuda.current_device())
+    T = 64
+    cq = torch.tensor([0, T], dtype=torch.int32, device=device)
+    ck = torch.tensor([0, 512], dtype=torch.int32, device=device)
+    want = _iota_reference(T, cq, ck, None)
+    saved = cake_backend._IOTA_ROWS.pop(device.index, None)
+    try:
+        blocks = torch.full((T, CB_SLOTS), 7, dtype=torch.int32, device=device)
+        first = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
+        second = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
+        assert second.rows is first.rows
+        table = cake_backend._IOTA_ROWS[device.index][0]
+        assert table() is first.rows
+        del first, second
+        gc.collect()
+        assert table() is None
+        third = cake_backend._IotaBlocks(blocks, cq, ck, None, 1, device.index)
+        assert cake_backend._IOTA_ROWS[device.index][0]() is third.rows
+        third()
+        torch.cuda.synchronize()
+        assert torch.equal(blocks.cpu(), want)
+    finally:
+        cake_backend._IOTA_ROWS.pop(device.index, None)
+        if saved is not None:
+            cake_backend._IOTA_ROWS[device.index] = saved
 
 def test_iota_call_with_a_max_seqlen_k_below_a_key_segment_stops_before_its_programs():
     """A call whose ``max_seqlen_k`` holds at most 2048 blocks takes the plain plan with the ``cb_iota`` fill first;

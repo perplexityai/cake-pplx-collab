@@ -340,9 +340,12 @@ write comes first, so such a call stops before any of its programs runs.
 A prepared runner launches the
 write with no allocation; preparing one (the eager entry prepares on every
 call) adds three small device launches for the write's scratch.  The
-16 MiB table the write copies rows from is made once per device, on the
-stream of its first call; a call on another stream waits for that stream's
-event while the table is not complete.
+16 MiB table the write copies rows from is shared per device by the runners
+that use it and freed with the last of them, so no device memory outlives
+the runners (an eager call while no prepared runner holds the table makes it
+again: one more allocation and three small launches); it is made on the stream
+of the prepare that needs it, and a call on another stream waits for that
+stream's event while the table is not complete.
 `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` reports
 the bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
 `scan_blocks` programs are listed in `ticket_arg_arches` and draw from a
