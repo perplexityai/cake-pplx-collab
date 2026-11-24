@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -380,11 +380,18 @@ kernel_cake_moe_grouped_gemm_55833be10c8515562245(const __grid_constant__ CUtens
                     mbarrier_wait(work_full_addr + (work_stage) * 8, _phase_work_full);
                     unsigned int ticket = work_ring[work_stage * 4];
                     if (cta_rank != 0) {
+#if __CUDA_ARCH__ == 1030
+                        asm volatile("fence.release.sync_restrict::shared::cta.cluster;" ::: "memory");
+#endif
                         asm volatile(
                             "{\n\t"
                             ".reg .b32 remAddr32;\n\t"
                             "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+#if __CUDA_ARCH__ == 1030
+                            "mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [remAddr32];\n\t"
+#else
                             "mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remAddr32];\n\t"
+#endif
                             "}"
                             :: "r"(work_empty_addr + (work_stage) * 8), "r"(0) : "memory");
                     } else {
