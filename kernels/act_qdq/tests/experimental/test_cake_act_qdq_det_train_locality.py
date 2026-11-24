@@ -25,12 +25,13 @@ order, and the launch arguments and grid, against the kernel's own decoding of
 its items; and, against a fake driver, the unwind of a mapping that fails (out
 of memory, retried once; any other error, not retried) and the error without
 cuda-python; the free of a range queued while another call holds the module's
-lock; the per-thread default stream's key per thread; and the read-only launch
-arguments a placed call keeps.  The GPU tests check that ``"domain"`` runs the
-``"off"`` program on other architectures and on default memory, that ``"off"``
-loads none of the route's state, that a launch keys its claim workspace by
-torch's current stream, and that on the per-thread default stream each thread
-takes its own claim workspace.  The
+lock; the per-thread default stream's key per thread; the two dies' rows of a
+claim workspace; and the read-only launch arguments a placed call keeps.  The
+GPU tests check that ``"domain"`` runs the ``"off"`` program on other
+architectures and on default memory, that ``"off"`` loads none of the route's
+state, that a launch keys its claim workspace by torch's current stream, and
+that on the per-thread default stream each thread takes its own claim
+workspace.  The
 SM107 tests (skipped elsewhere; an SM107 whose driver reports fewer than two
 locality domains fails them) check the allocation (dies, registry, zero copy,
 the free, the free deferred past a capture, the refusal during capture, and
@@ -40,8 +41,9 @@ a caller's scales buffer), out of place above the route's first size and at
 offsets inside a chunk, every domain program against the FP64 rule on any grid
 and on the plain programs' rule inputs (edge rows, every finite BF16 under
 every scale, group scales from 2^-120 to 2^120), each plain reason, the claim
-counters left zero, a launch that raises, two streams at once, CUDA graph
-replay with a graph workspace and with none left, and steady-state calls
+counters left zero, a launch that raises, two streams at once, each die's
+claim counters in that die's memory, an eager call with no slot left, CUDA
+graph replay with a graph workspace and with none left, and steady-state calls
 without host synchronization.
 
 This suite names the backend package once, through
@@ -75,9 +77,11 @@ domain_empty = pkg.cake_act_qdq_det_train_domain_empty
 FORMATS = reference.FORMATS
 KINDS = tuple(loader.KINDS)
 ARCH = "sm_107a"
-# The chunk of the memory that alternates dies, and the bytes of a tile of the interleaved-domain programs.
+# The chunk of the memory that alternates dies; the bytes of the largest tile of the interleaved-domain programs
+# (FP4's), a whole number of every program's tiles; and the bytes of each format's tile.
 CHUNK = 2097152
-TILE_BYTES = 256 * 16
+TILE_BYTES = 1024 * 16
+DOMAIN_TILE_BYTES = {"fp4_e4m3_g16": 1024 * 16, "mxfp4_e8m0_g32": 512 * 16, "mxfp8_e8m0_g32": 512 * 16}
 BF16 = 2
 # The width of the inputs of the size tests: 12 vectors a row, so a size just above a bound ends inside a tile.
 WIDTH = 96
@@ -230,35 +234,44 @@ def _kernel_item(slot: int, first_die: int, shift: int, batch_shift: int) -> tup
 
 
 @pytest.mark.cpu_only
-def test_domain_launch_covers_every_tile() -> None:
-    """``domain_launch``: the first tile rounds down, the chunk holds 512 tiles of 4,096 bytes, an item is 2 of
-    them, and the grid is one CTA per item of the chunks that hold the input, at most 16 a SM.  Every tile of the
-    input lies in an item below its die's item count, as the kernel decodes the item back to its slots."""
-    record = loader.MODULES["mxfp8_e8m0_g32_domain"]
+@pytest.mark.parametrize(
+    ("name", "tile", "chunk_tile_shift", "ctas_per_sm"),
+    (("fp4_e4m3_g16_domain", 1024, 7, 7), ("mxfp8_e8m0_g32_domain", 512, 8, 8)),
+    ids=("fp4", "mx"),
+)
+def test_domain_launch_covers_every_tile(name: str, tile: int, chunk_tile_shift: int, ctas_per_sm: int) -> None:
+    """``domain_launch``: the first tile rounds down, the chunk holds the format's tiles (FP4: 128 of 16,384 bytes;
+    MXFP4 and MXFP8: 256 of 8,192 bytes), an item is one of them, and the grid is one CTA per item of the chunks that
+    hold the input, at most 7 (FP4) or 8 (MXFP4, MXFP8) a SM.  Every tile of the input lies in an item below its
+    die's item count, as the kernel decodes the item back to its slots."""
+    record = loader.MODULES[name]
+    tile_bytes = DOMAIN_TILE_BYTES[record["format"]]
+    chunk_vectors = CHUNK // 16
     sms = 212
-    resident = 16 * sms
+    resident = ctas_per_sm * sms
 
     def launch(n_vecs, offset, die):
         return loader.domain_launch(record, n_vecs=n_vecs, x_place=(offset, die), sm_count=sms, arch=ARCH)
 
-    assert launch(512 * 256, 0, 0) == {
+    assert launch(chunk_vectors, 0, 0) == {
         "first_tile": 0,
         "first_die": 0,
-        "chunk_tile_shift": 9,
-        "batch_shift": 1,
-        "grid": (256, 1, 1),
+        "chunk_tile_shift": chunk_tile_shift,
+        "batch_shift": 0,
+        "grid": (1 << chunk_tile_shift, 1, 1),
     }
-    got = launch(512 * 256 + 1, 3 * TILE_BYTES + 48, 1)
-    assert (got["first_tile"], got["first_die"], got["grid"]) == (3, 1, (512, 1, 1))
-    assert launch(loader.MAX_VECTORS, 0, 0)["grid"] == (resident, 1, 1)
-    for offset in (0, 16, TILE_BYTES, 3 * TILE_BYTES + 48, CHUNK - TILE_BYTES, CHUNK - 16):
-        for n_vecs in (1, 255, 256, 257, 4 * 256 + 3, 512 * 256 - 1, 512 * 256, 3 * 512 * 256 + 7):
+    got = launch(chunk_vectors + 1, 3 * tile_bytes + 48, 1)
+    assert (got["first_tile"], got["first_die"], got["grid"]) == (3, 1, (2 << chunk_tile_shift, 1, 1))
+    assert launch(record["vectors"][ARCH]["out_of_place"][1], 0, 0)["grid"] == (resident, 1, 1)
+    sizes = (1, tile - 1, tile, tile + 1, 4 * tile + 3, chunk_vectors - 1, chunk_vectors, 3 * chunk_vectors + 7)
+    for offset in (0, 16, tile_bytes, 3 * tile_bytes + 48, CHUNK - tile_bytes, CHUNK - 16):
+        for n_vecs in sizes:
             for first_die in (0, 1):
                 got = launch(n_vecs, offset, first_die)
                 shift, batch_shift = got["chunk_tile_shift"], got["batch_shift"]
                 first_tile = got["first_tile"]
-                assert first_tile == offset // TILE_BYTES and got["first_die"] == first_die
-                tiles = -(-n_vecs // 256)
+                assert first_tile == offset // tile_bytes and got["first_die"] == first_die
+                tiles = -(-n_vecs // tile)
                 last_chunk = (first_tile + tiles - 1) >> shift
                 items = {die: ((last_chunk - (die ^ first_die) + 2) >> 1) << (shift - batch_shift) for die in (0, 1)}
                 assert got["grid"] == (min(items[0] + items[1], resident), 1, 1)
@@ -498,6 +511,22 @@ def test_the_per_thread_default_stream_has_a_key_per_thread() -> None:
     assert all(key[:2] == (0, memory.PER_THREAD_STREAM) for key in (here, *keys))
     assert memory._stream_key(0, 0) == (0, 0)
     assert memory._stream_key(1, 0x7F00) == (1, 0x7F00)
+
+
+@pytest.mark.cpu_only
+def test_a_workspace_gives_each_die_its_row() -> None:
+    """A claim workspace's counters are its two rows, die 0's first: one-dimensional contiguous unsigned views of
+    ``words`` words each, as the binding takes them, over a slot of a larger block, kept per count."""
+    block = torch.arange(memory.DIES * 4 * memory.SLOT_WORDS, dtype=torch.int32).view(memory.DIES, -1)
+    words = block[:, memory.SLOT_WORDS : 2 * memory.SLOT_WORDS]
+    workspace = memory._Workspace(words)
+    for count in (1, 3):
+        counters = workspace.counters(count)
+        assert workspace.counters(count) is counters and len(counters) == memory.DIES
+        for d, row in enumerate(counters):
+            assert row.dtype == torch.uint32 and row.shape == (count,) and row.is_contiguous(), (count, d)
+            assert row.data_ptr() == words[d].data_ptr(), (count, d)
+            assert row.view(torch.int32).tolist() == words[d, :count].tolist(), (count, d)
 
 
 @pytest.mark.cpu_only
@@ -828,7 +857,7 @@ def test_domain_route_gives_the_off_bytes(big, fmt: str, scale_out: bool, offset
     got = plan(x, format=fmt, out=y, return_scales=scale_out)
     assert got["route"] == "domain" and got["reason"] == "placed", got
     assert got["program"] == _domain_name(kind)
-    assert (got["first_tile"], got["first_die"]) == ((offset % CHUNK) // TILE_BYTES, (offset // CHUNK) & 1)
+    assert (got["first_tile"], got["first_die"]) == ((offset % CHUNK) // DOMAIN_TILE_BYTES[fmt], (offset // CHUNK) & 1)
     launched = _spy(monkeypatch)
     result = forward(x, format=fmt, out=y, return_scales=scale_out, locality="domain")
     assert launched == [_domain_name(kind)], launched
@@ -898,8 +927,8 @@ RULE_INPUTS = {
     "sweep": lambda fmt: reference.sweep_input(fmt),
     "wide": lambda fmt: reference.randn_input((33, 8, 512), fmt, lo=120, hi=120, seed=31),
 }
-# Byte offsets of those inputs in memory that alternates dies: 3 tiles before the end of a die-0 chunk (an input of
-# more than 3 tiles reaches die 1), and inside the first tile of a die-1 chunk.
+# Byte offsets of those inputs in memory that alternates dies: 3 FP4 tiles (6 MXFP4 or MXFP8 tiles) before the end of
+# a die-0 chunk (a longer input reaches die 1), and inside the first tile of a die-1 chunk.
 RULE_OFFSETS = (CHUNK - 3 * TILE_BYTES + 16, CHUNK + 16)
 
 
@@ -1008,8 +1037,8 @@ def test_counters_are_zero_after_calls(big) -> None:
 
 
 def test_a_raising_launch_drops_its_workspace(big, monkeypatch) -> None:
-    """An eager launch that raises drops its stream's claim workspace; the next call on that stream makes a zeroed
-    one and gives the ``"off"`` bytes."""
+    """An eager launch that raises drops its stream's claim workspace, whose slot no later call takes; the next call
+    on that stream takes another zeroed one and gives the ``"off"`` bytes."""
     fmt = "mxfp8_e8m0_g32"
     offset = OFFSETS[0]
     x0 = big.input(fmt)
@@ -1024,7 +1053,8 @@ def test_a_raising_launch_drops_its_workspace(big, monkeypatch) -> None:
 
     with torch.cuda.stream(side):
         forward(x, format=fmt, out=y, locality="domain")
-        assert memory.stream_workspace(0, side.cuda_stream) is not None
+        dropped = memory.stream_workspace(0, side.cuda_stream)
+        assert dropped is not None
         monkeypatch.setattr(loader, "run_module", refuse)
         with pytest.raises(RuntimeError, match="launch refused"):
             forward(x, format=fmt, out=y, locality="domain")
@@ -1033,7 +1063,7 @@ def test_a_raising_launch_drops_its_workspace(big, monkeypatch) -> None:
         y.fill_(float("nan"))
         forward(x, format=fmt, out=y, locality="domain")
         words = memory.stream_workspace(0, side.cuda_stream)
-        assert words is not None
+        assert words is not None and words.data_ptr() != dropped.data_ptr()
     torch.cuda.current_stream().wait_stream(side)
     torch.cuda.synchronize()
     _assert_same("after a raising launch", y, want)
@@ -1085,6 +1115,87 @@ def test_two_streams_at_once(big) -> None:
     words = [memory.stream_workspace(0, stream.cuda_stream) for stream in streams]
     assert words[0] is not None and words[1] is not None and words[0].data_ptr() != words[1].data_ptr()
     assert all(int(w.count_nonzero()) == 0 for w in words)
+
+
+def test_claim_counters_lie_in_their_dies(big, monkeypatch) -> None:
+    """Each die's claim counters lie in that die's memory: the rows of the device's counter chunks, and the counters
+    the launch receives for a new stream's eager call (an eager slot) and for a captured call (a graph workspace the
+    capture takes); a replay gives the eager bytes."""
+    fmt = "mxfp8_e8m0_g32"
+    offset = OFFSETS[1]
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    want = forward(x0, format=fmt)
+    dies = list(range(memory.DIES))
+    block = memory._GRAPH_WORKSPACES[0]["block"]
+    assert block.shape == (memory.DIES, CHUNK // 4) and block.dtype == torch.int32
+    for d in dies:
+        for at in (block[d].data_ptr(), block[d].data_ptr() + CHUNK - 1):
+            assert memory.domain_of(at) == d, (d, at)
+    # die 0's row of the first eager slot: the graph workspaces lie below it
+    eager = block[0, memory.GRAPH_WORKSPACES * memory.SLOT_WORDS].data_ptr()
+    counters: list[tuple[int, int]] = []
+    run_module = loader.run_module
+
+    def spy(name, values, **kwargs):
+        counters.append((values["counters0"].data_ptr(), values["counters1"].data_ptr()))
+        return run_module(name, values, **kwargs)
+
+    monkeypatch.setattr(loader, "run_module", spy)
+    monkeypatch.setattr(memory, "_STREAM_WORKSPACES", {})
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        forward(x, format=fmt, out=y, locality="domain")
+    torch.cuda.current_stream().wait_stream(side)
+    words = memory.stream_workspace(0, side.cuda_stream)
+    assert words.shape == (memory.DIES, memory.SLOT_WORDS)
+    assert counters == [tuple(words[d].data_ptr() for d in dies)], counters
+    assert [memory.domain_of(at) for at in counters[0]] == dies
+    assert counters[0][0] >= eager, (counters[0], eager)
+    left = memory.graph_workspaces_left(0)
+    assert left > 0
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward(x, format=fmt, out=y, locality="domain")
+    assert memory.graph_workspaces_left(0) == left - 1
+    assert len(counters) == 2, counters
+    assert [memory.domain_of(at) for at in counters[1]] == dies
+    assert counters[1][0] < eager, (counters[1], eager)
+    y.fill_(float("nan"))
+    graph.replay()
+    torch.cuda.synchronize()
+    _assert_same("replay", y, want)
+
+
+def test_an_eager_call_with_no_slot_left_keeps_its_counters_in_default_memory(big, monkeypatch) -> None:
+    """With every eager slot of the device taken, the first call on a stream makes a zeroed workspace outside the
+    device's counter chunks, in default memory, and gives the ``"off"`` bytes."""
+    fmt = "fp4_e4m3_g16"
+    offset = OFFSETS[0]
+    x0 = big.input(fmt)
+    x, y = big.view(big.x_buf, offset), big.view(big.y_buf, offset)
+    x.copy_(x0)
+    want = forward(x0, format=fmt)
+    held = memory._GRAPH_WORKSPACES[0]
+    monkeypatch.setitem(held, "eager", held["slots"])
+    monkeypatch.setattr(memory, "_STREAM_WORKSPACES", {})
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        y.fill_(float("nan"))
+        forward(x, format=fmt, out=y, locality="domain")
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    words = memory.stream_workspace(0, side.cuda_stream)
+    assert words.shape == (memory.DIES, memory.SLOT_WORDS)
+    start = held["block"].data_ptr()
+    for d in range(memory.DIES):
+        assert not start <= words[d].data_ptr() < start + memory.DIES * CHUNK, d
+    assert held["eager"] == held["slots"]
+    _assert_same("no eager slot left", y, want)
+    assert int(words.count_nonzero()) == 0, words.tolist()
 
 
 @pytest.mark.parametrize("fmt", FORMATS)

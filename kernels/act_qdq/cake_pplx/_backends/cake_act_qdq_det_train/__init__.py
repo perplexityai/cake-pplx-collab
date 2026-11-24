@@ -205,9 +205,9 @@ def cake_act_qdq_det_train_forward_workspace_bytes(
 ) -> int:
     """The workspace of one forward call of an input of ``shape``: always 0
     bytes, as a call takes no caller workspace.  A ``locality="domain"`` call
-    keeps its claim counters in the package's own 128-byte workspace per
-    stream.  Raises ``ValueError`` for a format or shape the forward
-    refuses."""
+    keeps its claim counters in the package's own workspace per stream, 128
+    bytes in each die's memory.  Raises ``ValueError`` for a format or shape
+    the forward refuses."""
 
     _check_shape(shape, _group_size(format))
     return 0

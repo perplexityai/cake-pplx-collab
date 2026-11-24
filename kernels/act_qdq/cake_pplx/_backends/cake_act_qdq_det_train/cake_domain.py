@@ -28,9 +28,10 @@ address alone, with no driver call.  The plain programs run over such memory
 at about the speed of default memory: out-of-place calls of 131,072 to
 4,194,304 vectors ran at 0.95-1.03x of it in the package benchmark on VR200,
 the slowest for buffers of one chunk, which lie wholly in die 0; in-place
-calls and larger ones were not measured.  The driver maps this memory outside
-torch's caching allocator, so ``torch.cuda.memory_allocated`` and the other
-``torch.cuda.memory_*`` counters do not count it.
+calls and larger ones were not measured.  The driver maps this memory, and the
+4 MB of claim counters below, outside torch's caching allocator, so
+``torch.cuda.memory_allocated`` and the other ``torch.cuda.memory_*`` counters
+do not count it.
 
 The tensor and every view of it keep the range alive.  Once the last one is
 gone, its finalizer queues the range and frees it: it synchronizes the device,
@@ -50,21 +51,29 @@ end that capture.
 
 Claim workspaces (:func:`launch`): an interleaved-domain launch takes its two
 dies' claim counters, ``words`` unsigned words each (the record's
-``counters``), from a workspace of :data:`SLOT_WORDS` words that no launch in
-flight shares; every launch leaves its counters zero.  Eager calls use one
-workspace per (device, stream), zeroed once when it is made; on the per-thread
-default stream (``cudaStreamPerThread``, one handle that names another stream
-in each thread) one per (device, thread), kept for the process.  The calls of
-one CUDA graph capture on one capture stream share one taken for good from the
-:data:`GRAPH_WORKSPACES` zeroed workspaces that the device's first
-:func:`domain_empty` call makes; once all are taken, each captured call takes
-one from the graph's pool, which the graph zeroes at every replay.  The
-replays of one instantiated graph never overlap, but a capture instantiated
-more than once, or added to other graphs as a child graph, shares its
-workspace between those copies: run them one at a time.  An eager launch that
-raises drops its stream's workspace, so the next call makes a zeroed one.
-After the first call on a stream, a call reads no device memory on the host
-and does not synchronize.
+``counters``), from a workspace that no launch in flight shares: two rows of
+:data:`SLOT_WORDS` words, row ``d`` die ``d``'s counters; every launch leaves
+its counters zero.  The device's first :func:`domain_empty` call maps one
+chunk in each die for the device's claim counters (chunk ``d`` in die ``d``,
+4 MB in all, kept for the process), zeroes them and synchronizes once, so each
+die's counters lie in that die's memory.  Each workspace of those chunks (a
+slot) is handed out once: the first :data:`GRAPH_WORKSPACES` to CUDA graph
+captures, the rest to eager calls, which need no fill.  Eager calls use one
+workspace per (device, stream); on the per-thread default stream
+(``cudaStreamPerThread``, one handle that names another stream in each thread)
+one per (device, thread), kept for the process.  The calls of one CUDA graph
+capture on one capture stream share one graph workspace, taken for good.  An
+eager call with no slot left (or before the device's first
+:func:`domain_empty` call) makes a workspace in default memory and zeroes it,
+and once every graph workspace is taken each captured call takes one from the
+graph's pool, which the graph zeroes at every replay (die memory cannot be
+mapped during a capture); either keeps both dies' counters in default memory,
+with the same bytes.  The replays of one instantiated graph never overlap, but
+a capture instantiated more than once, or added to other graphs as a child
+graph, shares its workspace between those copies: run them one at a time.  An
+eager launch that raises drops its stream's workspace and its slot, so the
+next call takes a zeroed one.  After the first call on a stream, a call reads
+no device memory on the host and does not synchronize.
 
 cuda-python is imported on first use of this module's driver calls, and the
 names they need are checked then (:data:`DRIVER_NAMES`; the ``locality``
@@ -98,11 +107,12 @@ DRIVER_NAMES = (
 )
 # The dies of an R200 (its locality domains): chunk ``k`` of a buffer lies in die ``k & 1``.
 DIES = 2
-# The words of one claim workspace (128 bytes, so no two workspaces share a line); a launch uses the first
-# ``2 * words`` of them.
+# The words of one die's row of a claim workspace (128 bytes, so no two workspaces share a line in either die's
+# chunk); a launch uses the first ``words`` of each row.
 SLOT_WORDS = 32
-# The zeroed claim workspaces each device keeps for CUDA graph captures (128 KB in all), made by its first
-# :func:`domain_empty` call.
+# The claim workspaces each device keeps for CUDA graph captures: the first GRAPH_WORKSPACES slots of its claim
+# counter chunks (128 KB of each die's chunk), mapped by its first :func:`domain_empty` call; the other slots serve
+# eager calls.
 GRAPH_WORKSPACES = 1024
 
 
@@ -538,8 +548,10 @@ def domain_empty(
     that is not CUDA; ``torch.cuda.OutOfMemoryError`` when the device has no room, after torch's cached free memory
     is returned to the driver once; ``RuntimeError`` during a CUDA graph capture on any device in this thread, on
     another architecture, with fewer than two locality domains, without cuda-python's locality-domain names, or when
-    the driver refuses the memory.  The device's first call zeroes its :data:`GRAPH_WORKSPACES` graph workspaces and
-    synchronizes the current stream once.  Each call first frees the ranges whose owners are gone.
+    the driver refuses the memory.  The device's first call also maps its claim counters (one chunk in each die, 4 MB
+    in all, kept for the process), zeroes them and synchronizes the current stream once; it raises
+    ``torch.cuda.OutOfMemoryError`` when the device has no room for them.  Each call first frees the ranges whose
+    owners are gone.
     """
 
     if not isinstance(dtype, torch.dtype):
@@ -590,7 +602,8 @@ def domain_empty(
 
 
 class _Workspace:
-    """One claim workspace (:data:`SLOT_WORDS` int32 words) and its unsigned counter views per count."""
+    """One claim workspace (int32 words ``[DIES, SLOT_WORDS]``, row ``d`` die ``d``'s counter words: in die ``d``'s
+    memory, or both rows in default memory) and its unsigned counter views per count, one row each."""
 
     __slots__ = ("words", "_views")
 
@@ -602,12 +615,15 @@ class _Workspace:
         views = self._views.get(count)
         if views is None:
             unsigned = self.words.view(torch.uint32)
-            views = self._views[count] = (unsigned[:count], unsigned[count : 2 * count])
+            views = self._views[count] = (unsigned[0, :count], unsigned[1, :count])
         return views
 
 
-# device index -> {"block": the zeroed words of its GRAPH_WORKSPACES graph workspaces, "taken": how many are taken}
+# device index -> {"block": int32 [DIES, chunk / 4] over its two claim counter chunks (row d in die d), "taken": the
+# graph slots taken, "eager": its next eager slot, "slots": the slots of a row}
 _GRAPH_WORKSPACES: dict[int, dict[str, Any]] = {}
+# Guards each device's next eager slot; a call holds it only to take one.
+_SLOTS = threading.Lock()
 # _stream_key(device index, stream handle) -> the workspace of the eager calls on that stream
 _STREAM_WORKSPACES: dict[tuple[int, ...], _Workspace] = {}
 # _stream_key(device index, capture stream handle) -> (capture id, the graph workspace of that capture's calls on
@@ -648,15 +664,48 @@ def _stream_key(index: int, stream: int) -> tuple[int, ...]:
 
 
 def _make_graph_workspaces(index: int) -> None:
-    """Under ``_LOCK``, outside any capture: zero the device's graph workspaces once and wait for the fill, so a
-    capture on any stream may take one."""
+    """Under ``_LOCK``, outside any capture, on a device with :data:`DIES` locality domains: map one chunk in each die
+    for the device's claim counters (chunk ``d`` in die ``d``), zero them once and wait for the fill, so a capture on
+    any stream may take a graph workspace and an eager call a slot with no fill.  The range is not registered and
+    lives for the process.  When a step after the mapping raises, the range is freed (a free that fails too leaves it
+    mapped) and nothing is recorded, so the next call maps it again."""
 
     if index in _GRAPH_WORKSPACES:
         return
-    device = torch.device("cuda", index)
-    block = torch.zeros(GRAPH_WORKSPACES * SLOT_WORDS, dtype=torch.int32, device=device)
-    torch.cuda.current_stream(device).synchronize()
-    _GRAPH_WORKSPACES[index] = {"block": block, "taken": 0}
+    chunk = cake_jit.domain_chunk_bytes(cake_jit.device_arch(index))
+    base, size = _map_or_out_of_memory(_driver(), index, chunk, DIES)
+    try:
+        block = torch.from_dlpack(_Export(base, size, index, _Range())).view(torch.int32).view(DIES, chunk // 4)
+        block.zero_()
+        torch.cuda.current_stream(torch.device("cuda", index)).synchronize()
+    except BaseException:
+        with contextlib.suppress(Exception):  # the first error is the one to report
+            _free(_Mapped(index, base, size, chunk))
+        raise
+    # Published last: a reader without the lock finds no entry or a zeroed block.
+    _GRAPH_WORKSPACES[index] = {
+        "block": block,
+        "taken": 0,
+        "eager": GRAPH_WORKSPACES,
+        "slots": chunk // (4 * SLOT_WORDS),
+    }
+
+
+def _eager_workspace(index: int) -> _Workspace:
+    """A zeroed workspace no launch has used, for the eager calls on one stream of CUDA device ``index``: the device's
+    next eager slot, else (before its first :func:`domain_empty` call, or once every slot is taken) one made in
+    default memory and zeroed, with both dies' counters there."""
+
+    held = _GRAPH_WORKSPACES.get(index)
+    k = None
+    if held is not None:
+        with _SLOTS:
+            if held["eager"] < held["slots"]:
+                k = held["eager"]
+                held["eager"] = k + 1
+    if k is None:
+        return _Workspace(torch.zeros((DIES, SLOT_WORDS), dtype=torch.int32, device=torch.device("cuda", index)))
+    return _Workspace(held["block"][:, k * SLOT_WORDS : (k + 1) * SLOT_WORDS])
 
 
 def graph_workspaces_left(index: int) -> int:
@@ -683,9 +732,10 @@ def _capture_id(stream: int) -> Optional[int]:
 def _capture_workspace(key: tuple[int, ...]) -> _Workspace:
     """The workspace of a call during a capture on the stream of ``key``: the one this capture's calls on that
     stream already hold, else a graph workspace taken for good (without a capture id, one per call), else, with none
-    left, one from the graph's pool that the graph zeroes at every replay.  Only a graph workspace is kept across
-    calls: a pool workspace is freed when its call returns, as the graph's own temporary, so no later capture can
-    reuse its bytes while this graph still writes them."""
+    left, one from the graph's pool that the graph zeroes at every replay, in default memory (die memory cannot be
+    mapped during a capture).  Only a graph workspace is kept across calls: a pool workspace is freed when its call
+    returns, as the graph's own temporary, so no later capture can reuse its bytes while this graph still writes
+    them."""
 
     capture = _capture_id(key[1])
     if capture is not None:
@@ -698,10 +748,10 @@ def _capture_workspace(key: tuple[int, ...]) -> _Workspace:
         if workspaces is not None and workspaces["taken"] < GRAPH_WORKSPACES:
             k = workspaces["taken"]
             workspaces["taken"] = k + 1
-            words = workspaces["block"][k * SLOT_WORDS : (k + 1) * SLOT_WORDS]
+            words = workspaces["block"][:, k * SLOT_WORDS : (k + 1) * SLOT_WORDS]
     _drain()
     if words is None:
-        return _Workspace(torch.zeros(SLOT_WORDS, dtype=torch.int32, device=torch.device("cuda", key[0])))
+        return _Workspace(torch.zeros((DIES, SLOT_WORDS), dtype=torch.int32, device=torch.device("cuda", key[0])))
     workspace = _Workspace(words)
     if capture is not None:
         _CAPTURE_WORKSPACES[key] = (capture, workspace)
@@ -710,7 +760,8 @@ def _capture_workspace(key: tuple[int, ...]) -> _Workspace:
 
 def stream_workspace(index: int, stream: int) -> Optional[torch.Tensor]:
     """The words of the eager calls' workspace on ``stream`` of device ``index`` (of this thread, for the per-thread
-    default stream), or None before its first call."""
+    default stream): int32 ``[DIES, SLOT_WORDS]``, row ``d`` die ``d``'s counter words; or None before its first
+    call."""
 
     workspace = _STREAM_WORKSPACES.get(_stream_key(index, stream))
     return None if workspace is None else workspace.words
@@ -724,8 +775,8 @@ def launch(name: str, values: dict[str, Any], *, device_index: int, grid: tuple[
 
     spec = cake_jit.MODULES[name]["counters"]
     words = int(spec["words"])
-    if 2 * words > SLOT_WORDS:
-        raise RuntimeError(f"the claim workspace of {name} ({2 * words} words) exceeds {SLOT_WORDS} words")
+    if words > SLOT_WORDS:
+        raise RuntimeError(f"the claim workspace of {name} ({words} words a die) exceeds {SLOT_WORDS} words a die")
     with torch.cuda.device(device_index):
         key = _stream_key(device_index, _current_stream_handle(device_index))
         captured = torch.cuda.is_current_stream_capturing()
@@ -734,9 +785,7 @@ def launch(name: str, values: dict[str, Any], *, device_index: int, grid: tuple[
         else:
             workspace = _STREAM_WORKSPACES.get(key)
             if workspace is None:
-                workspace = _STREAM_WORKSPACES[key] = _Workspace(
-                    torch.zeros(SLOT_WORDS, dtype=torch.int32, device=torch.device("cuda", device_index))
-                )
+                workspace = _STREAM_WORKSPACES[key] = _eager_workspace(device_index)
         counters0, counters1 = workspace.counters(words)
         try:
             cake_jit.run_module(

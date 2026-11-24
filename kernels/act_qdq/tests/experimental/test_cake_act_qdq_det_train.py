@@ -146,20 +146,28 @@ LARGE_RULE = {
 # place: a range bound above it (the last of the wide and the large ranges) is checked by the registry tests only.
 BOUNDARY_LIMIT = 33554432
 # The interleaved-domain program of each route, on sm_107a only and out of place only (``cake_jit.DOMAIN_ROUTES``):
-# its inclusive n_vecs range, from the first size it runs (per route) to the last n_vecs whose tile count
-# (n_vecs + 255) fits in signed 32 bits; its grid rule; and its kernel parameters besides the grid.
-DOMAIN_LAST = 2**31 - 256
+# its tile per format (128 threads, 8 vectors each for FP4 and 4 for MXFP4 and MXFP8) and its CTAs per SM; its
+# inclusive n_vecs range, from the first size it runs (per route) to the last n_vecs whose tile count
+# (n_vecs + tile - 1) fits in signed 32 bits; its grid rule (one tile an item); and its kernel parameters besides the
+# grid.
+DOMAIN_TILE = {"fp4_e4m3_g16": 1024, "mxfp4_e8m0_g32": 512, "mxfp8_e8m0_g32": 512}
+DOMAIN_CTAS_PER_SM = {"fp4_e4m3_g16": 7, "mxfp4_e8m0_g32": 8, "mxfp8_e8m0_g32": 8}
+DOMAIN_LAST = {fmt: 2**31 - tile for fmt, tile in DOMAIN_TILE.items()}
 DOMAIN_FIRST = {kind: 8388608 for kind in (f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))}
 DOMAIN_VECTORS = {
-    kind: {"sm_107a": {"in_place": None, "out_of_place": (first, DOMAIN_LAST)}} for kind, first in DOMAIN_FIRST.items()
+    kind: {"sm_107a": {"in_place": None, "out_of_place": (first, DOMAIN_LAST[kind.removesuffix("_scales")])}}
+    for kind, first in DOMAIN_FIRST.items()
 }
 DOMAIN_RULE = {
-    "batch_shift": {"sm_107a": 1},
-    "chunk_bytes": 2097152,
-    "ctas_per_sm": {"sm_107a": 16},
-    "kind": "domain_items",
-    "tile_vectors": {"sm_107a": 256},
-    "vector_elements": 8,
+    fmt: {
+        "batch_shift": {"sm_107a": 0},
+        "chunk_bytes": 2097152,
+        "ctas_per_sm": {"sm_107a": DOMAIN_CTAS_PER_SM[fmt]},
+        "kind": "domain_items",
+        "tile_vectors": {"sm_107a": tile},
+        "vector_elements": 8,
+    }
+    for fmt, tile in DOMAIN_TILE.items()
 }
 DOMAIN_PARAMS = ["counters0", "counters1", "n_vecs", "first_tile", "first_die", "chunk_tile_shift", "batch_shift"]
 
@@ -917,14 +925,15 @@ def test_registry_records_reference_the_build_manifest() -> None:
         arches = ("sm_107a",) if domain else ("sm_100a", "sm_103a") if wide or large else loader.ARCHES
         assert tuple(record["arches"]) == arches, name
         assert record["ffi_entry"] == "run", name
-        rule = (
-            DOMAIN_RULE if domain else SMALL_RULE if small else WIDE_RULE if wide else LARGE_RULE if large else MAIN_RULE
-        )
+        rule = SMALL_RULE if small else WIDE_RULE if wide else LARGE_RULE if large else MAIN_RULE
+        if domain:
+            rule = DOMAIN_RULE[record["format"]]
         assert record["grid_rule"] == rule, name
         assert record["grid_rule"]["vector_elements"] == loader.VECTOR, name
         assert record["group"] == loader.GROUP_SIZES[record["format"]], name
         launch = record["launch"]
-        assert tuple(launch["block"]) == (256 if small else 128 if wide else 1024 if large else 64, 1, 1), name
+        block = 256 if small else 128 if wide or domain else 1024 if large else 64
+        assert tuple(launch["block"]) == (block, 1, 1), name
         assert tuple(launch["cluster"]) == (1, 1, 1), name
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
         if domain:
