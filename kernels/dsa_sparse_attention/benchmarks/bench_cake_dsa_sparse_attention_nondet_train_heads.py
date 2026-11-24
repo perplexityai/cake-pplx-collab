@@ -346,15 +346,21 @@ class ArmCudnnFe(_Accumulating):
         return self.grads(dq[..., :D_LATENT], dq[..., D_LATENT:], acc)
 
     def backend(self):
-        """The backward backend(s) the frontend's cached plans selected (e.g. ``h96_d576_2cta_m64``)."""
+        """The backward backend(s) the frontend's cached plans of this arm's query shape selected (e.g.
+        ``h96_d576_2cta_m64``); the plan cache is keyed by the input shapes, the query shape third."""
         try:
             from cudnn.deepseek_sparse_attention.sparse_attention_backward import (
                 api as bapi,
             )
 
             cache = getattr(bapi, "_cache_of_SparseAttentionBackwardObjects", {})
+            shape = tuple(self.inp.q_latent.shape[:2]) + (D_QK,)
             return sorted(
-                {str(getattr(obj, "_backend", None)) for obj in cache.values()}
+                {
+                    str(getattr(obj, "_backend", None))
+                    for key, obj in cache.items()
+                    if len(key) > 2 and tuple(key[2]) == shape
+                }
             )
         except Exception as exc:  # noqa: BLE001 - informational
             return [f"{type(exc).__name__}: {exc}"]
