@@ -127,7 +127,8 @@ FUSE_DOCS = 256
 # record serving the role); a backward of more runs ``bwd``, up to ``BWD_MAX_DOCS``.
 BWD_SMALL_DOCS = {"sm_100a": 26, "sm_103a": 26, "sm_107a": 125}
 # The most documents a backward launch runs ``bwd`` for (the rendered ``bwd_max_docs`` of the record serving the role;
-# ``None``: the record has no such leaf, no bound); a backward of more runs ``bwd_small``.
+# ``None``: the record has no such leaf, no bound); a backward of more runs ``bwd_small`` up to ``BWD_WARP_DOCS``, a
+# range that is empty on sm_107a in this version (both bounds are 16384).
 BWD_MAX_DOCS = {"sm_100a": None, "sm_103a": None, "sm_107a": 16384}
 # The most documents a backward launch runs ``bwd`` or ``bwd_small`` for outside ``BWD_WARP_RANGES`` (the rendered
 # ``bwd_warp_docs`` of the record serving ``bwd_warp``); a backward of more runs ``bwd_warp``.
@@ -708,7 +709,7 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     16384, 16385 and 32769 documents runs the record of its role on the architecture (``_bwd_role``): on sm_100a
     ``bwd_small`` for 5 and 26, ``bwd`` for 27 to 16384, ``bwd_warp`` for more; on sm_103a ``bwd_small`` for 5,
     ``bwd_warp_sm_103a`` for 26 and 27, ``bwd`` for 124 to 16384, ``bwd_warp_sm_103a`` for more; on sm_107a
-    ``bwd_small_sm_107a`` for 5 to 27, ``bwd_warp_sm_107a`` for 124 to 126, ``bwd_sm_107a`` for 16384,
+    ``bwd_small_sm_107a`` for 5 to 125, ``bwd_sm_107a`` for 126 and 16384,
     ``bwd_warp_sm_107a`` for more (no device: the architecture is given and the binding entry is a recorder)."""
     if not all(rec["arg_plan"] for rec in cake_jit.MODULES.values()):
         pytest.skip("the records' argument plans are not rendered yet")
