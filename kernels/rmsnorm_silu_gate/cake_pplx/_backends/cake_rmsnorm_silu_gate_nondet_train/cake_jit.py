@@ -740,12 +740,14 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "fwd_l32_tiny",
     },
-    # The pipelined forward: the deterministic package's forward program with
-    # a gate that does not flush (split_gate 1, under this package's name): 128
-    # threads, 8 lanes per row (16-row blocks), at most 6 CTAs per SM, each
-    # thread loading its row of the CTA's next block into registers while it
-    # computes the current one, thread 0 warming the CTA's next block and the
-    # first block of the CTA one wave later in L2 (build {"min_blocks": 6,
+    # The pipelined forward, the program of 0.2.14: a build of the
+    # deterministic package's forward kernel with a gate that does not flush
+    # (split_gate 1, under this package's name): 128 threads, 8 lanes per row
+    # (16-row blocks), at most 6 CTAs per SM, each thread loading its row of
+    # the CTA's next block into registers while it computes the current one,
+    # thread 0 warming the CTA's next block and the first block of the CTA one
+    # wave later in L2 where x and z both hold packed rows (head stride 128,
+    # token stride H * 128) and no other rows (build {"min_blocks": 6,
     # "packed_rows": 0, "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz":
     # 0, "split_gate": 1, "store_width": 128, "sum_pairs": 0, "threads": 128,
     # "w_late": 0});

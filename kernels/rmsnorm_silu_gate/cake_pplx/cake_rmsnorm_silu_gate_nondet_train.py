@@ -257,9 +257,9 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   and ``z`` each with head stride
   128 and token stride ``H * 128``, more than one token) run its copy of
   the deterministic package's look-ahead program, the same build, from
-  2560 rows per SM on SM100 and SM103 and from 1536 on SM107, and rows of
-  other layouts from 6145 rows per SM on SM100 and SM103 and from 4097 on
-  SM107, with the same bits.
+  2560 rows per SM on SM100 and SM103 and from 1536 on SM107, and, in a
+  call that computes the weight gradient, rows of other layouts from 6145
+  rows per SM on SM100 and SM103 and from 4097 on SM107, with the same bits.
 - Past 512 rows an FP32 weight gradient runs, on every architecture but in
   the static band of SM100 and SM103 (above), the repeatable backward of an
   FP32 weight gradient, this package's copy of the
