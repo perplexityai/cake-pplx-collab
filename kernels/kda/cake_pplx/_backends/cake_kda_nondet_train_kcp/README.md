@@ -160,6 +160,11 @@ dq, dk, dv, dbeta, dg = cake_kda_nondet_train_kcp_backward(q_local, k_local, v_l
                                           dout_local, saved=saved)
 ```
 
+The KCP entry points support `save_mode="light"` only: `save_mode="tape"`
+raises `NotImplementedError` (`save_mode='tape' is not supported on the KCP
+route (light only)`). `saved_rows="tape"` ("Saved rows" below) is a separate
+keyword and is not affected.
+
 The context is a plain frozen object, not a dataclass: the pre-forward hooks
 of FSDP2 (`fully_shard`) walk every dataclass, dict, list and tuple of a
 module's arguments, and see the context as one leaf. Per-layer metadata that

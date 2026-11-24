@@ -44,9 +44,12 @@ _PACKAGE_NAMES = (
     "IMBALANCE_THRESHOLDS",
     "MOK_PRECISIONS",
     "ROUTER_WEIGHT_POSITIONS",
+    "SOURCE_SPLIT_COMM_SMS",
+    "SOURCE_SPLIT_THRESHOLD",
     "resolve_comm_sms",
     "resolve_imbalance_comm_sms",
     "resolve_imbalance_threshold",
+    "resolve_source_split_comm_sms",
 )
 
 
@@ -149,6 +152,8 @@ def create_mok_bf16_workspace(
     precision="bf16",
     imbalance_comm_sms="auto",
     imbalance_threshold="auto",
+    source_split_comm_sms="auto",
+    source_split_threshold=1.5,
 ):
     """Collectively create a caller-owned ``(config, workspace)`` pair.
 
@@ -211,6 +216,17 @@ def create_mok_bf16_workspace(
     ``MoKConfig.comm_split_log`` (default ``False``; ``dataclasses.replace(config,
     comm_split_log=True)`` on the returned config) prints each split change per
     rank to stderr.
+    ``source_split_comm_sms`` is the forward communication-SM count of a rank
+    whose source rows exceed ``source_split_threshold`` times the mean source
+    rows of the ranks, for the router-weight-before-down BF16 forward: its
+    kernel decides per launch on the device from that launch's schedule, so
+    CUDA Graph replays and layers that share a workspace decide from their
+    own routing, and only such a rank changes its count (when the count is
+    below the forward count in force). ``"auto"`` (default) takes the measured
+    row of the device and EP group size (:func:`resolve_source_split_comm_sms`,
+    :data:`SOURCE_SPLIT_COMM_SMS`) and ``None`` where there is none; ``None``
+    keeps the forward count and an even count sets it. The split changes time
+    only, never an output bit.
     """
     from ._backends.cake_mok_bf16 import api as _api
 
@@ -229,6 +245,8 @@ def create_mok_bf16_workspace(
         precision=precision,
         imbalance_comm_sms=imbalance_comm_sms,
         imbalance_threshold=imbalance_threshold,
+        source_split_comm_sms=source_split_comm_sms,
+        source_split_threshold=source_split_threshold,
     )
 
 

@@ -288,6 +288,17 @@ No rule selects the twin.
   parity rows passed, bitwise.
 - The launch count, the arena and the gradients do not change.
 
+The memory and time trade-off of `save_mode="light"` and `"tape"` is in
+[Choosing `save_mode`](../cake_kda_det_train/README.md#choosing-save_mode) of
+the deterministic package's README; its table covers this package too. Those
+figures come from a CUDA 13.5.37 build, on which neither the checkpoint
+hand-off nor the tape WY twin engaged; where they engage (the devices and
+toolkits of `cake_backend.HANDOFF_VERIFIED` and
+`cake_backend.TAPE_WY_VERIFIED`), this package's backward and
+checkpointed-step ratios were not measured and can differ from the table:
+the twin changes the tape backward, and the hand-off changes the light
+checkpointed step.
+
 ## Names
 
 | | deterministic package | this package |

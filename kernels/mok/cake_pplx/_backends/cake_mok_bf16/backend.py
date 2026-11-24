@@ -37,6 +37,7 @@ from ._kernels import (
     MoKRecompute,
     MoKRecomputeMXFP8,
     MoKScheduler,
+    SOURCE_SPLIT_UNIT,
     _ffi_stream,
     _recall,
     _remember,
@@ -593,9 +594,12 @@ class MoKFunctional:
         if workspace.num_local_tokens * workspace.topk * 4 % 2048:
             raise ValueError("The route buffer must contain complete metadata chunks")
         plan = self._schedule_plan(workspace)
+        # The before-down forward's source split reads the owner-rank route
+        # totals of this schedule (``MoKSchedule.owner_routes``).
+        split = config.source_split_comm_sms is not None
         if plan is None:
-            rank, token, num_tokens, counts, layout = self._schedule_launches(
-                workspace, config, top_experts, count
+            rank, token, num_tokens, counts, layout, owner_routes = (
+                self._schedule_launches(workspace, config, top_experts, count, split)
             )
         else:
             with _ffi_stream():
@@ -623,6 +627,7 @@ class MoKFunctional:
                 )
                 self._observe_load(workspace, config, num_tokens)
                 self.scheduler.layout_planned(plan.scheduler, counts, rank, layout)
+                owner_routes = self.scheduler.owner_loads() if split else None
                 self.scheduler.release_counts()
         if owner is not None:
             return MoKSourceSchedule(
@@ -631,6 +636,7 @@ class MoKFunctional:
                 num_tokens=num_tokens,
                 tokens_per_expert=counts,
                 layout=layout,
+                owner_routes=owner_routes,
                 num_source_tokens=count,
                 workspace=owner,
             )
@@ -640,6 +646,7 @@ class MoKFunctional:
             num_tokens=num_tokens,
             tokens_per_expert=counts,
             layout=layout,
+            owner_routes=owner_routes,
         )
 
     def _check_schedule_config(self, config, device):
@@ -698,6 +705,25 @@ class MoKFunctional:
                 raise ValueError(
                     "imbalance_threshold must be a finite number above 1.0"
                 )
+        split = config.source_split_comm_sms
+        if split is not None and (
+            type(split) is not int or split <= 0 or split % 2 or split >= sms
+        ):
+            raise ValueError(
+                "source_split_comm_sms must be a positive, even communication-SM "
+                "count that leaves compute SMs"
+            )
+        threshold = config.source_split_threshold
+        if (
+            type(threshold) not in (int, float)
+            or not math.isfinite(threshold)
+            or not 1.0 < threshold <= 65536
+            or round(threshold * SOURCE_SPLIT_UNIT) <= SOURCE_SPLIT_UNIT
+        ):
+            raise ValueError(
+                "source_split_threshold must be a finite number at most 65536 "
+                "that stays above 1.0 in 1/256 steps"
+            )
         if type(config.comm_split_log) is not bool:
             raise TypeError("comm_split_log must be a boolean")
         if (
@@ -762,10 +788,11 @@ class MoKFunctional:
                 )
         return plan
 
-    def _schedule_launches(self, workspace, config, top_experts, count):
+    def _schedule_launches(self, workspace, config, top_experts, count, split=False):
         """The schedule's copies and launches without a plan (first build under
         CUDA Graph capture): ``(peer_rank, peer_token, num_tokens,
-        tokens_per_expert, layout)``."""
+        tokens_per_expert, layout, owner_routes)``, ``owner_routes`` None
+        unless ``split``."""
         if count == workspace.num_local_tokens:
             top_experts_int32 = top_experts.to(torch.int32)
         else:
@@ -790,8 +817,9 @@ class MoKFunctional:
         )
         self._observe_load(workspace, config, num_tokens)
         layout = self.scheduler.layout(counts, workspace.schedule_capacity, rank)
+        owner_routes = self.scheduler.owner_loads() if split else None
         self.scheduler.release_counts()
-        return rank, token, num_tokens, counts, layout
+        return rank, token, num_tokens, counts, layout, owner_routes
 
     def _load_entry(self, workspace, create):
         entry = self._load_state.get(id(workspace))
@@ -951,6 +979,37 @@ class MoKFunctional:
                     flush=True,
                 )
         return split
+
+    def _source_split(self, config, workspace, schedule, fwd_comm_sms):
+        """``(rich_comm_sms, rich_threshold, owner_routes)`` of a forward
+        launch: the router-weight-before-down kernel's communication-SM count
+        for a source-rich rank (``MoKConfig.source_split_comm_sms``), its
+        threshold in 1/256 steps and the schedule's owner-rank route totals the
+        kernel reads the ranks' mean source rows from. The split is off (the
+        count in force, and ``num_tokens`` in place of the totals, which the
+        kernel then never reads) for the router weight after the down
+        projection, without a count, with a count not below the forward count
+        in force (``fwd_comm_sms``), or for a schedule without totals."""
+        rich = config.source_split_comm_sms
+        threshold = round(config.source_split_threshold * SOURCE_SPLIT_UNIT)
+        routes = schedule.owner_routes
+        if (
+            not self.weight_before_down
+            or rich is None
+            or rich >= fwd_comm_sms
+            or routes is None
+        ):
+            return fwd_comm_sms, threshold, schedule.num_tokens
+        if (
+            routes.numel() != workspace.ep_size
+            or routes.dtype != torch.int32
+            or routes.get_device() != workspace.device.index
+        ):
+            raise ValueError(
+                "schedule.owner_routes must be the schedule's int32 [ep_size] "
+                "route totals on the workspace device"
+            )
+        return rich, threshold, routes
 
     @staticmethod
     def _schedule(schedule):
@@ -1156,6 +1215,9 @@ class MoKFunctional:
         intermediate = shared_gate_weights.shape[0]
         experts = schedule.tokens_per_expert.numel()
         before_down = self.weight_before_down
+        rich_comm_sms, rich_threshold, owner_routes = self._source_split(
+            config, workspace, schedule, fwd_comm_sms
+        )
 
         def build():
             x_rows = workspace.x_buffer[:shared_rows]
@@ -1175,6 +1237,9 @@ class MoKFunctional:
                     config.minibatch_size,
                     weight_ptrs=(
                         workspace.router_weight_buffer_ptrs if before_down else None
+                    ),
+                    source_split=(
+                        (rich_comm_sms, rich_threshold) if before_down else None
                     ),
                 ),
                 barrier=self._barrier_plan(workspace),
@@ -1200,6 +1265,8 @@ class MoKFunctional:
                 config.minibatch_size,
                 intermediate,
                 experts,
+                rich_comm_sms,
+                rich_threshold,
             ),
             build,
         )
@@ -1249,6 +1316,7 @@ class MoKFunctional:
                 schedule.peer_token_idx,
                 schedule.num_tokens,
                 schedule.layout,
+                owner_routes,
             )
             if barrier is not None:
                 barrier.launch(())
@@ -1310,6 +1378,13 @@ class MoKFunctional:
         program = {"multimacro": self._multimacro(config, workspace)} if mxfp8 else {}
         if self.weight_before_down:
             program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
+            if not mxfp8:
+                rich_comm_sms, rich_threshold, owner_routes = self._source_split(
+                    config, workspace, schedule, fwd_comm_sms
+                )
+                program["source_split"] = (rich_comm_sms, rich_threshold)
+                if rich_comm_sms < fwd_comm_sms:
+                    program["owner_routes"] = owner_routes
         values = forward_kernel(
             workspace.x_buffer[:shared_rows],
             workspace.x_buffer_ptrs,

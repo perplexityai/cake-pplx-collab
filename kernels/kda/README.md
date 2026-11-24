@@ -48,4 +48,8 @@ The benchmarks `benchmarks/bench_cake_kda_baselines.py` (one GPU) and `benchmark
 (KCP, `torchrun`) time both packages against the cuDNN frontend's KDA (plan `kda_frost`, `batch_invariant=True` for
 `det` and `False` for `nondet`) and, on one GPU, against flash-linear-attention's `chunk_kda`.
 
+For the memory and time trade-off between `save_mode="light"` (the default) and `"tape"` in the single-rank
+packages, see [Choosing `save_mode`](cake_pplx/_backends/cake_kda_det_train/README.md#choosing-save_mode); the KCP
+packages support `"light"` only.
+
 The repository rules are in [`ARCHITECTURE.md`](../../ARCHITECTURE.md).

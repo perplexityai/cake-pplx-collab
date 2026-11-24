@@ -831,6 +831,11 @@ BACKWARD_DIRECT_PROGRAMS = {
 # Each architecture's keys were then timed again at those channel counts and at C 544, 616, 672, 736, 800, 864, 928
 # and 992 (B200 and GB200 for sm_100a, GB300 for sm_103a, VR200 for sm_107a): a point slower there in two runs on one
 # GPU leaves the table by the same rules over all 20 channel counts, inside the first keys.
+# On sm_107a the bwd and bwd_bias keys at C 512, 640 and 1024 were then extended past S 2048 on VR200: timed at S 2049,
+# 2560, 2561, 3072, 3073 and 4096 against the programs the other tables pick and the deterministic program, every
+# point with a slower cell timed again in fresh processes, a key runs to the last timed S before the first point where
+# its training step or checkpointed step ran slower.  C 640 stops at S 2561 (S 3072, 3073 and 4096 on bwd and S 3072
+# and 3073 on bwd_bias ran slower in both runs), so the bwd_bias key there leaves C 520-632 and 648-832 at S 1000-2048.
 BACKWARD_DIRECT_ROWS_OF_RECORD = {
     "sm_100a": {
         ("bwd", 512, 832): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
@@ -963,7 +968,7 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
         ),
     },
     "sm_107a": {
-        ("bwd", 512, 512): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 512, 512): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 520, 576): (
             1000,
             2048,
@@ -974,7 +979,7 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
             2048,
             "cake_causal_conv1d_train_a9deef7249fb422bc28a",
         ),
-        ("bwd", 640, 640): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 640, 640): (1, 2561, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 704, 704): (
             1000,
             2048,
@@ -991,7 +996,7 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
             "cake_causal_conv1d_train_a9deef7249fb422bc28a",
         ),
         ("bwd", 992, 992): (1, 1000, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
-        ("bwd", 1024, 1024): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 512): (
             1,
             4096,
@@ -1044,17 +1049,27 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
         ),
         ("bwd_bias", 512, 512): (
             1,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 520, 632): (
+            1000,
             2048,
             "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
         ),
-        ("bwd_bias", 520, 832): (
+        ("bwd_bias", 640, 640): (
+            1000,
+            2561,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 648, 832): (
             1000,
             2048,
             "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
         ),
         ("bwd_bias", 1024, 1024): (
             1,
-            2048,
+            4096,
             "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
         ),
     },
@@ -1105,7 +1120,7 @@ BACKWARD_OUTSIDE_PLANS_OF_RECORD = {
         "cake_causal_conv1d_train_092af77575f0fdbf3615",
         (128, 1, 1),
     ),
-    ("sm_107a", "bwd_bias", 1024, 2049): (
+    ("sm_107a", "bwd_bias", 1024, 4097): (
         "cake_causal_conv1d_train_4c8b21939791ace6e830",
         (128, 1, 1),
     ),
@@ -5420,8 +5435,8 @@ def test_kcp_is_unchanged_by_the_backward_direct_rows(arch, fake_device) -> None
 
     kcp = cake_package(KEY, "kcp")
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
-    channels = (504, 512, 576, 768, 1024, 1032, 2048)
-    tokens = (1, 2, 1000, 2048, 2049, 4096, 4097, 65536)
+    channels = (504, 512, 576, 640, 768, 1024, 1032, 2048)
+    tokens = (1, 2, 1000, 2048, 2049, 2561, 2562, 4096, 4097, 65536)
 
     def read() -> dict:
         out = {}
@@ -5792,7 +5807,6 @@ GRID_CAP_ROWS_OF_RECORD = {
         ("bwd", 704, 704): ((512, 999, 3),),
         ("bwd", 712, 760): ((512, 1000, 3),),
         ("bwd", 768, 768): ((512, 512, 3),),
-        ("bwd_bias", 512, 512): ((2049, 3072, 5),),
     },
 }
 # Device SM counts the cap is checked at: VR200's, one more and one of a smaller part.
@@ -5816,11 +5830,11 @@ def _without_grid_cap_rows():
 @pytest.mark.cpu_only
 def test_grid_cap_rows_are_the_literal_rows() -> None:
     """``GRID_CAP_ROWS`` is the table of record: sm_107a alone, seven ``bwd`` keys of 3 tokens per token stream (a
-    CTA runs ``n_sub`` streams) and one ``bwd_bias`` key of 5.  Each key is on a backward route of the architecture,
-    with multiples of 8 at both ends and ascending, disjoint spans of at least one token; at every channel count of a
-    key and both ends of each span ``grid_cap_tokens`` gives the span's tokens, and no backward ``DIRECT_ROWS`` range,
-    ``SM_WIDE_ROWS`` segment or ``FALLBACK_ROWS`` range holds the call; one token outside a span, off the 8-channel
-    grid and on another route there is no cap."""
+    CTA runs ``n_sub`` streams).  Each key is on a backward route of the architecture, with multiples of 8 at both
+    ends and ascending, disjoint spans of at least one token; at every channel count of a key and both ends of each
+    span ``grid_cap_tokens`` gives the span's tokens, and no backward ``DIRECT_ROWS`` range, ``SM_WIDE_ROWS`` segment
+    or ``FALLBACK_ROWS`` range holds the call; one token outside a span, off the 8-channel grid and on another route
+    there is no cap."""
 
     assert cake_jit.GRID_CAP_ROWS == GRID_CAP_ROWS_OF_RECORD
     for arch, rows in cake_jit.GRID_CAP_ROWS.items():

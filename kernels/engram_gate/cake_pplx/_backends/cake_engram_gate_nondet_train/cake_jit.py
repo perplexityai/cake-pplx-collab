@@ -107,7 +107,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (160, 1, 1),
             "cluster": (4, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 74240,
+            "dynamic_smem_bytes": 74880,
             "use_pdl": False,
         },
         "library": "cake_engram_gate_train_f432570962d690736ab8",
@@ -171,7 +171,7 @@ CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3}
 # of at least ``STAGE_BWD_MIN_TOKENS`` tokens on these architectures, and the
 # slower one or no faster one everywhere else (a call with a mask tensor, even an
 # all-true one, fewer tokens, or another architecture).
-STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_103a"})
+STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_100a", "sm_103a", "sm_107a"})
 STAGE_BWD_MIN_TOKENS = 4096
 # Whole four-CTA clusters one device holds at once, by the CTAs per SM of a
 # program: (architecture, SM count) -> {CTAs per SM: clusters}, as
