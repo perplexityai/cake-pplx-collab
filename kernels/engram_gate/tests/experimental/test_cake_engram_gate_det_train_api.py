@@ -343,6 +343,70 @@ def test_each_dot_sum_launches_its_forward_record_and_the_one_backward(dot_sum, 
         assert launched == ["fwd_f32", "bwd_dot2", "dw_reduce"], "the default is the one-word FP32 sum"
 
 
+def test_a_call_from_the_cta1_threshold_launches_the_cta1_forward_with_the_same_bits(monkeypatch) -> None:
+    """From ``CTA1_FWD_MIN_TOKENS`` tokens on its device a forward call launches the ``cta1`` form of its
+    record, one token below the cluster program; the ``cta1`` output has the bits of the cluster program's at the
+    same tokens (the stage launcher at its own grid), with and without a token mask. A record without a threshold
+    on the device (its architecture and SM count) launches its cluster program at 16384 tokens."""
+    device = _device_or_skip()
+    backend = _backend()
+    arch = backend.device_arch(device.index)
+    sms = backend.sm_count(device.index)
+    table = {
+        acc: least for (at, n, acc), least in backend.cake_jit.CTA1_FWD_MIN_TOKENS.items() if (at, n) == (arch, sms)
+    }
+    launched: list[str] = []
+    entry = backend._entry
+
+    def recording(name, arch):
+        run = entry(name, arch)
+
+        def call(*args):
+            launched.append(name)
+            return run(*args)
+
+        return call
+
+    monkeypatch.setattr(backend, "_entry", recording)
+    for dot_sum, acc in DOT_SUMS.items():
+        if acc not in table:
+            many = make_inputs(16384, seed=97, device=device, weights="bf16", mask="none", layout="kv")
+            launched.clear()
+            many_args = (many.x, many.key, many.value, many.q_weight, many.k_weight, None)
+            api.cake_engram_gate_det_train_forward(*many_args, dot_sum=dot_sum)
+            assert launched == [f"fwd_{acc}"], dot_sum
+            continue
+        least = table[acc]
+        for mask in ("none", "some"):
+            ns = make_inputs(least, seed=83, device=device, weights="bf16", mask=mask, layout="kv")
+            args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
+            launched.clear()
+            out = api.cake_engram_gate_det_train_forward(*args, dot_sum=dot_sum)
+            assert launched == [f"fwd_{acc}_cta1"], (dot_sum, mask)
+            ref = torch.empty_like(out)
+            backend.launch_fwd(
+                f"fwd_{acc}",
+                x=ns.x,
+                key=ns.key,
+                value=ns.value,
+                q_weight=backend._words(ns.q_weight),
+                k_weight=backend._words(ns.k_weight),
+                wmode=backend._wmode(ns.q_weight.dtype, ns.k_weight.dtype),
+                mask=backend._mask(ns.token_mask),
+                out=ref,
+                eps=1e-20,
+                clamp_value=1e-6,
+                clusters=backend._clusters(f"fwd_{acc}", least, device.index),
+            )
+            torch.cuda.synchronize()
+            assert _same_bits(out, ref), (dot_sum, mask)
+        fewer = make_inputs(least - 1, seed=89, device=device, weights="bf16", mask="none", layout="kv")
+        launched.clear()
+        fewer_args = (fewer.x, fewer.key, fewer.value, fewer.q_weight, fewer.k_weight, None)
+        api.cake_engram_gate_det_train_forward(*fewer_args, dot_sum=dot_sum)
+        assert launched == [f"fwd_{acc}"], dot_sum
+
+
 @pytest.mark.parametrize("T", (1, 129, 4096))
 def test_a_call_without_a_mask_launches_the_backward_of_its_architecture(T, monkeypatch) -> None:
     """Without a token mask the backward launches ``bwd_dot2_stage`` from ``STAGE_BWD_MIN_TOKENS`` tokens on an

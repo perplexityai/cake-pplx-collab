@@ -58,6 +58,7 @@ Output rows must not overlap.
 | Stage | Records | Grid | Work |
 | --- | --- | --- | --- |
 | `fwd` | `fwd_dot2`, `fwd_f32` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: the four CTAs of a cluster each sum 1280 columns of every stream, exchange the partial sums, and write `out` |
+| `fwd` | `fwd_f32_cta1` | `(ctas, 1, 1)`, one CTA of 640 threads an SM | per token: the warps of the cluster's four CTAs in one CTA, the partial sums exchanged through shared memory in the same order (the same bits), and write `out` |
 | `bwd` | `bwd_dot2`, `bwd_dot2_stage` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: recompute the sums (and `sum_d g v`), write `dx`, `dkey`, `dvalue`; sum `c h k` over the cluster's tokens |
 | `dw_reduce` | `dw_reduce` | over the `4 * 5120` weight-gradient columns | sum the partial rows, multiply by `k_weight` / `q_weight` |
 
@@ -101,6 +102,12 @@ uses the forward's `dot_sum`. The backward has two programs with the same bits a
 stage with `cp.async`. A call without a `token_mask` of at least `cake_jit.STAGE_BWD_MIN_TOKENS` (4096) tokens on an
 architecture of `cake_jit.STAGE_BWD_ARCHES` (`sm_100a`, `sm_103a` and `sm_107a`) launches `bwd_dot2_stage`; every
 other call launches `bwd_dot2` (`cake_jit.backward_record`).
+
+`fwd_f32` has a `cta1` form with the same bits, `fwd_f32_cta1`: one CTA of 640 threads a token, one CTA an SM, on
+`ctas = min(T, SM count)` CTAs (`cake_jit.resident_units`), so it fills every SM where the four-CTA clusters leave some
+idle (VR200 holds 184 clusters on 212 SMs). A forward call with `dot_sum="fp32"` launches it from 16384 tokens on a
+`sm_107a` device of 212 SMs (VR200; `cake_jit.CTA1_FWD_MIN_TOKENS`, keyed on the architecture and the SM count) and the
+cluster program otherwise (`cake_jit.forward_record`). `fwd_dot2` has no `cta1` form.
 
 ## Accuracy
 

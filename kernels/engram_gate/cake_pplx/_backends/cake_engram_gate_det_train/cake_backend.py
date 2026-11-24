@@ -67,11 +67,14 @@ token count and as the device holds at once (:func:`.cake_jit.clusters`, from
 a table per architecture, SM count and record; a backward call of many tokens
 takes its own count on the devices of :data:`.cake_jit.LARGE_BWD_CLUSTERS`);
 any grid is correct, so the token count is a run-time value (no
-recompilation, no shape list).  Every launch is a plain stream-ordered launch
-on the current torch stream of the operands' device: nothing cooperative.
-Nothing here reads an environment variable, reads device memory or
-synchronizes; grids and buffer sizes come from tensor shapes, the
-architecture and the SM count.
+recompilation, no shape list).  From :data:`.cake_jit.CTA1_FWD_MIN_TOKENS`
+tokens on the devices that table names, a forward call launches the ``cta1``
+form of its record instead (:func:`.cake_jit.forward_record`): one CTA of 640
+threads a token, one CTA an SM, the same bits.  Every launch is a plain
+stream-ordered launch on the current torch stream of the operands' device:
+nothing cooperative.  Nothing here reads an environment variable, reads
+device memory or synchronizes; grids and buffer sizes come from tensor
+shapes, the architecture and the SM count.
 
 This is the deterministic package of its family: every sum has one fixed
 order (each cluster writes its own row of weight-gradient partial sums and
@@ -147,9 +150,10 @@ _BF16 = torch.bfloat16
 _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 # Bytes of one FP32 [4, 5120] row (a partial row of the backward's weight gradients).
 _ROW_BYTES = STREAMS * HIDDEN * 4
-# The records the launches use, looked up once: the forward record of each summation and ``dw_reduce`` with its grid
-# (the same for every call).  The backward record follows the call (:func:`.cake_jit.backward_record`).
-_FWD_RECORDS: dict[str, str] = {acc: cake_jit.record("fwd", acc) for acc in cake_jit.ACC_MODES["fwd"]}
+# The records the launches use, looked up once: ``dw_reduce`` with its grid (the same for every call) and the CTAs
+# of one grid unit of every record.  The forward and backward records follow the call
+# (:func:`.cake_jit.forward_record`, :func:`.cake_jit.backward_record`).
+_UNIT_CTAS: dict[str, int] = {name: cake_jit.unit_ctas(name) for name in cake_jit.MODULES}
 _DW_REDUCE_RECORD: str = cake_jit.record("dw_reduce")
 _DW_REDUCE_GRID: tuple[int, int, int] = cake_jit.dw_reduce_grid()
 # The least token count of a call whose backward takes the grid of many tokens (:func:`.cake_jit.clusters`).
@@ -195,15 +199,15 @@ def sm_count(device_index: int) -> int:
 
 @functools.cache
 def _resident(name: str, device_index: int, large: bool) -> int:
-    """The clusters of the ``fwd`` or ``bwd`` record ``name`` on one CUDA device before the token count caps them, for
-    a call of at least ``cake_jit.LARGE_BWD_MIN_TOKENS`` tokens (``large``) or fewer
-    (:func:`.cake_jit.persistent_clusters`), looked up once per record, device and token class."""
+    """The units (four-CTA clusters, or the CTAs of a ``cta1`` forward) of the ``fwd`` or ``bwd`` record ``name`` on
+    one CUDA device before the token count caps them, for a call of at least ``cake_jit.LARGE_BWD_MIN_TOKENS`` tokens
+    (``large``) or fewer (:func:`.cake_jit.persistent_clusters`), looked up once per record, device and token class."""
     return cake_jit.persistent_clusters(name, device_arch(device_index), sm_count(device_index), large)
 
 
 def _clusters(name: str, T: int, device_index: int) -> int:
-    """:func:`.cake_jit.clusters` of record ``name`` for ``T`` tokens on one CUDA device: the clusters of the call's
-    grid, never more than ``T``, at least one."""
+    """:func:`.cake_jit.clusters` of record ``name`` for ``T`` tokens on one CUDA device: the units (four-CTA clusters,
+    or the CTAs of a ``cta1`` forward) of the call's grid, never more than ``T``, at least one."""
     return max(1, min(T, _resident(name, device_index, T >= _LARGE_BWD_MIN_TOKENS)))
 
 
@@ -357,12 +361,13 @@ def launch_fwd(
     clamp_value: float,
     clusters: int,
 ) -> None:
-    """Launch the forward record ``name`` over ``T = x.shape[0] >= 1`` tokens on ``clusters`` four-CTA clusters:
+    """Launch the forward record ``name`` over ``T = x.shape[0] >= 1`` tokens on ``clusters`` four-CTA clusters
+    (``clusters`` CTAs for a ``cta1`` record):
     ``out = bf16(x + gate * value)`` from ``x`` (BF16 ``[T, 4, 5120]``, contiguous), ``key`` (BF16 ``[T, 4, 5120]``,
     token stride a multiple of 8), ``value`` (BF16 ``[T, 5120]``, same), the weights' 32-bit words ``q_weight`` and
     ``k_weight`` (:func:`_words`) with their mode ``wmode`` (:func:`_wmode`, bits 0 and 1) and ``mask`` (bool ``[T]``
     or None)."""
-    grid = cake_jit.CLUSTER_CTAS * int(clusters)
+    grid = _UNIT_CTAS[name] * int(clusters)
     args = (x, key, value, q_weight, k_weight, mask, out, int(x.shape[0]), float(eps), float(clamp_value), int(wmode))
     _run(name, "fwd", x.get_device(), (*args, grid, 1, 1))
 
@@ -719,13 +724,13 @@ def _forward(
     if T == 0:
         return out, eps_f, clamp_f
     index = x.get_device()
-    device_arch(index)  # RuntimeError on a device outside ARCHES
-    name = _FWD_RECORDS[acc]
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    name = cake_jit.forward_record(arch, sm_count(index), acc, T)
     clusters = _clusters(name, T, index)
     # The weights as stored (their 32-bit words), the product formed in the kernel: one launch.
     args = (x, key, value, _words(q_weight), _words(k_weight), _mask(token_mask), out, T, eps_f, clamp_f)
     wmode = _wmode(q_weight.dtype, k_weight.dtype)
-    _run(name, "fwd", index, (*args, wmode, cake_jit.CLUSTER_CTAS * clusters, 1, 1))
+    _run(name, "fwd", index, (*args, wmode, _UNIT_CTAS[name] * clusters, 1, 1))
     return out, eps_f, clamp_f
 
 
