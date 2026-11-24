@@ -284,6 +284,36 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_fmha_train_535529048441929389ae",
         "stage": "bwd_fused",
     },
+    "bwd_fused_causal": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ"], ["buffer", "LSE"], ["buffer", "O_gmem"], ["buffer", "dO_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_n_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_45471caca3efd9427760",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 199168,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_45471caca3efd9427760",
+        "stage": "bwd_fused",
+    },
+    "bwd_fused_hd64_causal": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ"], ["buffer", "LSE"], ["buffer", "O_gmem"], ["buffer", "dO_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_n_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_38ec1d22736060c57a93",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 117248,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_38ec1d22736060c57a93",
+        "stage": "bwd_fused",
+    },
 }
 
 # (head dim, causal, pair) -> the records of the three stages, in launch order.
