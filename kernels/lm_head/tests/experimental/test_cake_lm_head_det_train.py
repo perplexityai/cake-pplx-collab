@@ -5462,7 +5462,6 @@ def test_a_extent_rule():
     assert cake_backend.A_EXTENT_ROWS_BY_ARCH == {"sm_107a": 256}
     assert cake_backend.DX_A_EXTENT_ROWS_BY_ARCH == {"sm_107a": 256}
     assert (cake_backend.A_EXTENT_MIN_ROWS, cake_backend.A_EXTENT_MAX_ROWS) == (14, 182)
-    assert cake_backend.DX_A_EXTENT_MIN_ROWS == 2
     pad_of = cake_backend.a_extent_pad
     assert pad_of(4096, "sm_107a") == pad_of(4096, "sm_107a", dx=True) == 256
     assert pad_of(256, "sm_107a") == 256 and pad_of(255, "sm_107a") == 0

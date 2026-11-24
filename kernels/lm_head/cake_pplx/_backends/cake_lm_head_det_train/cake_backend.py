@@ -4650,13 +4650,13 @@ class _KeptPlan(Plan):
 # path's plain logits GEMM of ``logprob_lbl=False`` / ``logprob_dz=False``) of a chunk of
 # :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` valid rows read their A operand -- the gathered rows --
 # through a tensor map of this many rows, the rows past the chunk zero; on the architectures of
-# :data:`DX_A_EXTENT_ROWS_BY_ARCH` the recompute backward's dX GEMM reads the chunk's ``dz`` the same way (from
-# :data:`DX_A_EXTENT_MIN_ROWS` rows on).  On R200 (sm_107a) the shipped programs run a chunk of a few rows slower than
-# one of 256 rows: the A operand's row extent, not the row count, sets their time there (CUPTI, us, the logits GEMM of a
-# log-probability forward + backward step at 14 / 182 / 242 valid rows: 325.6 -> 167.2 / 237.7 -> 175.2 / 178.6 ->
-# 178.6; the default autograd step at T = 16 / 192, 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3; its
-# checkpointed step, which runs the recompute backward and its dX GEMM, at T = 16 2142.5 -> 1594.8).  The row window and
-# the forms are the measured ones: the forward at 242 valid rows measured slower with the extent, no call below 14
+# :data:`DX_A_EXTENT_ROWS_BY_ARCH` the recompute backward's dX GEMM reads the chunk's ``dz`` the same way.  On R200
+# (sm_107a) the shipped programs run a chunk of a few rows slower than one of 256 rows: the A operand's row extent, not
+# the row count, sets their time there (CUPTI, us, the logits GEMM of a log-probability forward + backward step at 14 /
+# 182 / 242 valid rows: 325.6 -> 167.2 / 237.7 -> 175.2 / 178.6 -> 178.6; the default autograd step at T = 16 / 192,
+# 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3, against 0.3.4 at T = 16 1402.3 -> 1230.7; its checkpointed
+# step, which runs the recompute backward and its dX GEMM, at T = 16 2142.5 -> 1594.8).  The row window and the forms
+# are the measured ones: the forward at 242 valid rows measured slower with the extent, no call below 14
 # valid rows was measured, and the loss entry (its zero-weight rows' log-probability pass included), the temperature
 # forms and the prepared runners (CUDA graphs included) were not measured with the extent, so they keep the chunk's
 # rows.  B200 and GB300 keep the chunk's rows (a 16-row extent made no call faster there).  ``M`` (the epilogues' row
@@ -4667,7 +4667,6 @@ A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
 DX_A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
 A_EXTENT_MIN_ROWS = 14
 A_EXTENT_MAX_ROWS = 182
-DX_A_EXTENT_MIN_ROWS = 2
 
 
 def a_extent_pad(chunk: int, arch: Optional[str], *, dx: bool = False) -> int:
@@ -4683,13 +4682,10 @@ def a_extent_rows(
     rows: int, chunk: int, arch: Optional[str], *, dx: bool = False
 ) -> int:
     """The padded A extent (rows) of a compacted one-chunk call of ``rows`` valid rows on ``arch``
-    (:func:`a_extent_pad`) when ``rows`` lies in the window :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS`
-    (with ``dx`` also from :data:`DX_A_EXTENT_MIN_ROWS` rows on) and below the extent; else 0 (the chunk keeps its own
-    rows)."""
+    (:func:`a_extent_pad`) when ``rows`` lies in the window :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` and
+    below the extent (``dx``: the dX GEMM's extent, the same window); else 0 (the chunk keeps its own rows)."""
     rows = int(rows)
     if rows <= 0 or not A_EXTENT_MIN_ROWS <= rows <= A_EXTENT_MAX_ROWS:
-        return 0
-    if dx and rows < DX_A_EXTENT_MIN_ROWS:
         return 0
     pad = a_extent_pad(chunk, arch, dx=dx)
     return pad if rows < pad else 0

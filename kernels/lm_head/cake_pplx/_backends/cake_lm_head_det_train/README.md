@@ -1505,8 +1505,9 @@ one of 256 rows there (CUPTI, the logits GEMM of a log-probability step at
 14 valid rows 325.6 -> 167.2 us, at 182 valid rows 237.7 -> 175.2 us; at
 242 valid rows the forward measured slower, so the window stops at the
 measured 182).  Measured on the default autograd call: the step at `T` = 16
-(15 valid rows) 1450.7 -> 1230.7 us, its checkpointed step (the recompute
-backward and its dX GEMM) 2142.5 -> 1594.8 us.  The padded rows are zeroed
+(15 valid rows) 1450.7 -> 1230.7 us (against 0.3.4: 1402.3 -> 1230.7 us), its
+checkpointed step (the recompute backward and its dX GEMM) 2142.5 -> 1594.8
+us.  The padded rows are zeroed
 where the buffer is allocated (per call) and add up to `2 * 256 * V` bytes of
 logits buffer, which `memory_report` does not count.  The loss entry (its
 zero-weight rows' log-probability pass included), the temperature forms,
