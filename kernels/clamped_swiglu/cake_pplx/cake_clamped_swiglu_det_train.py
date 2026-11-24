@@ -106,9 +106,9 @@ host; every kernel runs on the current torch stream of the operands' device.
 Every argument is checked before a call copies an input or allocates an
 output, so a call refused for its arguments copies, allocates and launches
 nothing.  Each stage has a small-``R`` program and a fine program for the
-fewest rows, and the forward and the weighted backward also have a
-large-``R`` program; the rows per SM of the device (``R`` over its SM count)
-choose the program.  The programs of a stage store the same bits, and the
+fewest rows, the forward and the weighted backward also have a large-``R``
+program, and the weighted backward a relay program; the rows per SM of the
+device (``R`` over its SM count) choose the program.  The programs of a stage store the same bits, and the
 unweighted backward's programs store the bits of the weighted backward's
 programs at ``w = 1``.  A program's library loads (and, without a prebuilt
 one, JIT-builds) at its first launch.  Before capturing a CUDA
