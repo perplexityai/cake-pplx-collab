@@ -447,7 +447,9 @@ def _snapshot(kw: dict, H: int = 4) -> dict:
 # CUDA device: the byte queries plan for the first exported architecture) on the tree of the commit named under
 # ``"captured"`` with the rest of the capture's provenance (first taken on the base of the in-kernel L2 norm change,
 # retaken after the workspace byte queries began passing the context device's architecture, ``arch``, to the existing
-# backend's plan calls).
+# backend's plan calls, and again after the local plans began passing the occupancy segment rule,
+# ``segment_rule="occupancy"``, at the SM and head counts of the backend's token-aware rule, 148 SMs and 4 heads among
+# them: that capture is the base's with the keyword added to the 4-head calls and no other change).
 GOLDEN_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "test_cake_kda_det_train_kcp_l2n_golden.json",

@@ -507,9 +507,12 @@ def _snapshot(kw: dict, H: int = 4) -> dict:
     return _jsonable(snap)
 
 
-# The literal flag-off expectations of :func:`_snapshot` ({}), captured once by executing the base of this change on
-# the CPU (no CUDA device: the byte queries plan for the first exported architecture) with this file copied onto it:
-# ``_golden_view(_snapshot({}))``.  The capture's provenance is under ``"captured"``.
+# The literal flag-off expectations of :func:`_snapshot` ({}): ``_golden_view(_snapshot({}))`` executed on the CPU (no
+# CUDA device: the byte queries plan for the first exported architecture) on the tree of the commit named under
+# ``"captured"`` with the rest of the capture's provenance (first taken on the base of this change with this file
+# copied onto it, retaken after the local plans began passing the occupancy segment rule,
+# ``segment_rule="occupancy"``, at the SM and head counts of the backend's token-aware rule, 148 SMs and 4 heads among
+# them: that capture is the base's with the keyword added to the 4-head calls and no other change).
 GOLDEN_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "test_cake_kda_nondet_train_kcp_l2n_golden.json",
