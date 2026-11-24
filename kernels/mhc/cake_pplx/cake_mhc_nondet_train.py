@@ -28,7 +28,8 @@ keyword (passing one is a ``TypeError``), and nothing falls back to the
 deterministic package ``cake_pplx.cake_mhc_det_train``.
 
 Numerical contract: no bit promise.  Every sum of the current programs is a
-plain FP32 sum in an order fixed by the token count and the device, but the
+plain FP32 sum in an order fixed by the token count and the device, except
+``dfn`` on SM107 (below); the
 package does not promise that an output repeats bit for bit from run to run,
 and its outputs are not compared bitwise with the deterministic package's.
 ``backward_finish`` has no final reduction kernel: the column-slab pass
@@ -40,7 +41,14 @@ order as one FP32 sum from +0.0, the caller's ``dfn`` last under
 ``accumulate=True``: within ``gamma_n (|start| + sum |x_p|)`` of the exact
 sum (``x_p`` the partials, ``n`` the additions, ``gamma_n = n u / (1 - n
 u)``, ``u = 2^-24``).  The column-slab pass also folds ``dscale`` and
-``dbase`` from the token-owner pass's parameter rows in a fixed order.
+``dbase`` from the token-owner pass's parameter rows in a fixed order.  On
+SM107 (``accumulation="fp32"``) the column-slab pass adds each unit's FP32
+``dfn`` sums into ``dfn`` with relaxed reductions instead of the slots, in
+the order the units end:
+``dfn`` is summed in a run-dependent order (in the fold's fixed order while
+PyTorch's deterministic-algorithms mode is on) and may differ in its last
+bits from run to run.  Its accuracy is checked against the FP64 reference
+like every other output.
 By default (``accumulation="fp32"``) every sum is one plain FP32 word: no
 FP64 accumulation or reduction and no compensation word (a few scalar
 epilogues of the RMS scale, a finished FP32 sum times ``1/(4H)`` plus
@@ -55,7 +63,8 @@ records are unchanged.  The mode serves hidden 4096 with
 ``sinkhorn_iters=20`` only (otherwise ``NotImplementedError``).  The forward, the statistics replay and ``backward_prepare`` run copies
 of the deterministic package's programs.  Under
 ``torch.use_deterministic_algorithms(True)`` no entry point raises PyTorch's
-alert or warning.
+alert or warning, and no launch adds in a run-dependent order: the backward
+then runs the slot fold on SM107 too.
 
 Workspaces: the forward workspace has one layout in both packages.  The
 backward workspace has this package's own layout: a 256-byte ticket region
@@ -119,7 +128,7 @@ Usage::
     )
 
     U, handle = cake_mhc_nondet_train_prepare(X, fn, scale, base)
-    Y = cake_mhc_nondet_train_finish(X, branch(U), handle)  # backward: folded dfn
+    Y = cake_mhc_nondet_train_finish(X, branch(U), handle)  # backward: dfn as in backward_finish
 
     ws_b = cake_mhc_nondet_train_backward_workspace(T, X.device, hidden=X.shape[2])
     dX, dfn, dscale, dbase = cake_mhc_nondet_train_backward_finish(
@@ -546,14 +555,22 @@ def cake_mhc_nondet_train_backward_finish(
     The arguments and outputs are those of
     :func:`~cake_pplx.cake_mhc_det_train.cake_mhc_det_train_backward_finish`;
     the call runs the backend package's backward, with no final reduction
-    kernel.  Its sums run in a fixed order today, but no output is promised
-    to repeat bit for bit from run to run.
-    Each element of ``dfn`` adds its ``P <= 32`` per-chunk FP32 partials
-    ``x_p`` in ascending chunk order as one FP32 sum from +0.0, the caller's
-    ``dfn`` last under ``accumulate=True``: within ``gamma_n (|start| + sum
-    |x_p|)`` of the exact sum (``n`` the additions, ``gamma_n = n u / (1 - n
-    u)``, ``u = 2^-24``; see the module docstring).  ``dscale`` and ``dbase``
-    are fixed-order FP32 sums of the token-owner pass's parameter rows.
+    kernel.  Apart from ``dfn`` on SM107, its sums run in a fixed order
+    today, but no output is promised to repeat bit for bit from run to run.
+    Under the one-word fold (SM100 and SM103, and SM107 while PyTorch's
+    deterministic-algorithms mode is on), each element of ``dfn`` adds its
+    ``P <= 32`` per-chunk FP32 partials ``x_p`` in ascending chunk order as
+    one FP32 sum from +0.0, the caller's ``dfn`` last under
+    ``accumulate=True``: within ``gamma_n (|start| + sum |x_p|)`` of the
+    exact sum (``n`` the additions, ``gamma_n = n u / (1 - n u)``,
+    ``u = 2^-24``; see the module docstring).  On SM107 with the mode off,
+    each column-slab unit adds its FP32 ``dfn`` sums into ``dfn`` (the
+    caller's value under ``accumulate=True``, else zero) with relaxed
+    reductions when it ends: ``dfn`` is summed in a run-dependent order, and
+    its accuracy is checked against the FP64 reference like every other
+    output.  The ``accumulation="fp32x2"`` opt-in runs the two-word folds on
+    every architecture.  ``dscale`` and ``dbase`` are fixed-order FP32 sums
+    of the token-owner pass's parameter rows.
 
     Parameters
     ----------

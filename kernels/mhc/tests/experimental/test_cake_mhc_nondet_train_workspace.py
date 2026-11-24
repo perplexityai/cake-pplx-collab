@@ -31,7 +31,9 @@ the last CTA of a launch leaves both words zero).  The deterministic regions
 follow (the token owner's records and parameter rows: the per-CTA partials, or
 the group rows inside ``BWD_ROW_BANDS``), then the column slab's per-chunk
 ``dfn`` slots, so
-the workspace is larger than the deterministic package's.  A caller-owned buffer
+the workspace is larger than the deterministic package's.  The column slab's
+fold records use the arrival counts and the slots; its reduction forms on SM107
+leave both untouched (one layout serves both forms).  A caller-owned buffer
 sized by ``cake_mhc_nondet_train_backward_workspace_bytes(T_max)`` serves
 every token count up to ``T_max`` (at its ``hidden``) and CUDA Graph replays
 at a smaller ``T``.
@@ -205,7 +207,7 @@ def hidden(request) -> int:
 
 
 def _parts(T: int, hidden: int = HIDDEN) -> int:
-    """``P``: the chunk count of the column-slab pass, the number of partials each ``dfn`` element folds."""
+    """``P``: the chunk count of the column-slab pass, the number of partials added into each ``dfn`` element."""
     parts = loader.host_plan(T, _sm_count(), _arch(), hidden)["parts"]
     assert 1 <= parts <= 32, (T, hidden, parts)
     return parts

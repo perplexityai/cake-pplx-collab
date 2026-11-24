@@ -27,7 +27,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | causal_conv1d | `dweight` / `dbias` use unordered reductions. The nondet package makes no bit promise. | Backward raises |
 | kda | Bitwise reproducible. `dg` differs from det by FP32 rounding; everything else is bitwise det. | No alert |
 | gdn | Fixed order today, with no run-to-run promise. Not bitwise det. As with det, the tests record each output's error against an FP64 reference beside the BF16 naive implementation's. | Runs unchanged |
-| mhc | Plain FP32 sums in a fixed order today. No bit promise; not compared bitwise with det. | No alert |
+| mhc | Plain FP32 sums. On `sm_107a` with the default `accumulation="fp32"` the backward adds `dfn` with FP32 atomic reductions in arrival order; every other sum has a fixed order today. No bit promise; not compared bitwise with det. | No alert. The `sm_107a` backward then runs the fixed-order `dfn` fold in place of the arrival-order reductions |
 | mhc_head | Same kernels as det | No alert |
 | engram_gate | Same kernels as det. `out`, `dX`, `dK`, `dV` have one fixed order; no bit promise for `dq_weight` / `dk_weight`. | No alert |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
@@ -730,7 +730,7 @@ Other public names:
 
 ### `cake_pplx.cake_mhc_nondet_train`
 
-There is no final reduction kernel. The column-slab pass adds the P <= 32 per-chunk FP32 `dfn` partials in ascending chunk order as one plain FP32 sum, and folds `dscale` and `dbase` from the token-owner rows in a fixed order. By default no sum or reduction uses FP64 or a compensation word (a few scalar epilogues compute in FP64 and round once to FP32); see **Accumulation** below for the opt-in two-word mode. The forward, the stats replay and `backward_prepare` run copies of the det programs. The sums run in a fixed order today, but nondet makes no run-to-run bit promise, and its outputs are not compared bitwise with det. Source: [`kernels/mhc/cake_pplx/cake_mhc_nondet_train.py`](../kernels/mhc/cake_pplx/cake_mhc_nondet_train.py).
+There is no final reduction kernel. The column-slab pass adds the P <= 32 per-chunk FP32 `dfn` partials in ascending chunk order as one plain FP32 sum, and folds `dscale` and `dbase` from the token-owner rows in a fixed order. On `sm_107a` with the default `accumulation="fp32"` the column-slab pass instead adds each unit's FP32 `dfn` sums into `dfn` with relaxed FP32 atomic reductions when the unit ends, so `dfn` is summed in a run-dependent order and can differ in its last bits from run to run. Under `torch.use_deterministic_algorithms(True)` the `sm_107a` backward runs the fixed-order fold instead. The accuracy of `dfn` is checked against the FP64 reference like every other output. By default no sum or reduction uses FP64 or a compensation word (a few scalar epilogues compute in FP64 and round once to FP32); see **Accumulation** below for the opt-in two-word mode. The forward, the stats replay and `backward_prepare` run copies of the det programs. Apart from `dfn` on `sm_107a`, the sums run in a fixed order today, but nondet makes no run-to-run bit promise, and its outputs are not compared bitwise with det. Source: [`kernels/mhc/cake_pplx/cake_mhc_nondet_train.py`](../kernels/mhc/cake_pplx/cake_mhc_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -740,7 +740,7 @@ There is no final reduction kernel. The column-slab pass adds the P <= 32 per-ch
 | `cake_mhc_nondet_train_forward_stats` | Same as det | As forward_prepare | Returns FP32 `[T, 64]`. |
 | `cake_mhc_nondet_train_forward_finish` | `(X, B, stats, *, out=None)` | As det | Returns `Y`. |
 | `cake_mhc_nondet_train_backward_prepare` | `(dY, B, X, stats, *, dB=None, grad_stats_out=None)` | As det | Returns `(dB, grad_stats)`. |
-| `cake_mhc_nondet_train_backward_finish` | Same as det | `workspace` must come from the nondet factory; the det layout differs | Returns `(dX, dfn, dscale, dbase)`. `dfn` is one FP32 sum of the chunk partials, with the caller's `dfn` added last under `accumulate=True`. It is within `gamma_n (abs(start) + sum abs(x_p))` of the exact sum, with `n` the additions and `gamma_n = n u / (1 - n u)`. |
+| `cake_mhc_nondet_train_backward_finish` | Same as det | `workspace` must come from the nondet factory; the det layout differs | Returns `(dX, dfn, dscale, dbase)`. Under the one-word fold (`sm_100a`, `sm_103a`, and `sm_107a` while deterministic algorithms are on), `dfn` is one FP32 sum of the chunk partials, with the caller's `dfn` added last under `accumulate=True`. It is within `gamma_n (abs(start) + sum abs(x_p))` of the exact sum, with `n` the additions and `gamma_n = n u / (1 - n u)`. On `sm_107a` with `accumulation="fp32"` while deterministic algorithms are off, `dfn` is summed in a run-dependent order, and its accuracy is checked against the FP64 reference like every other output. `accumulation="fp32x2"` runs the two-word folds on every architecture (see **Accumulation**). |
 
 Other public names:
 
