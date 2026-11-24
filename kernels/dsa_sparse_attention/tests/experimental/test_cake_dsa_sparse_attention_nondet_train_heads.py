@@ -30,6 +30,7 @@ against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_1
 there first; sm_107a runs the 64-head cases).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the T = 16380 case.
 """
 
+import itertools
 import json
 import os
 from types import SimpleNamespace
@@ -260,6 +261,79 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(monkeypatch, heads
         grads[0],
         grads[1],
     )
+
+
+@pytest.mark.parametrize("heads", (64, 96, 128))
+def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
+    """The per-call scratch (workspace) and the state a step keeps from its forward to its backward (retained) are
+    reported apart.  Workspace: a 64-head layout is the first release's, region for region; above 64 heads the
+    forward adds ``fwd_lse`` ``[T, 64]`` FP32 and (``with_o_lo``) ``fwd_o_lo`` ``[T, 64, 512]`` BF16, the backward
+    ``delta`` ``[T, H]`` FP32, ``window_lse`` / ``window_delta`` ``[2, T, 64]`` FP32 and (a ``dout`` that is not
+    dense over its rows) ``dout_copy`` ``[T, H, 512]`` BF16, the dQ partials staying 64 heads per token; every
+    region aligned and apart.  A prepared runner (host) carves exactly that layout, of
+    ``dsa_train_workspace_size`` bytes.  Retained: ``lse`` ``[T, H]`` FP32, ``o_lo`` ``[T, H, 512]`` BF16 with
+    ``with_o_lo``, the derived ``topk_length`` ``[T]`` int32 without caller lengths; ``out`` is the caller's."""
+    T, S, K, chunk = 40, 96, 16, 16
+    windows = heads != 64
+    for backward, passes, direct, with_o_lo, dout_copy in itertools.product(
+        (False, True), (1, 3), (False, True), (True, False), (False, True)
+    ):
+        kw = dict(backward=backward, key_passes=passes, dkv_direct=direct, token_chunk=chunk)
+        layout = cake_backend.workspace_layout(
+            T, S, K, num_heads=heads, with_o_lo=with_o_lo, dout_copy=dout_copy, **kw
+        )
+        base = cake_backend.workspace_layout(T, S, K, **kw)
+        if not windows:
+            assert layout == base
+        want = {name: entry[1] for name, entry in base.items() if name != "total"}
+        if backward:
+            want["delta"] = T * heads * 4
+        if windows:
+            want["fwd_lse"] = T * 64 * 4
+            if with_o_lo:
+                want["fwd_o_lo"] = T * 64 * D_LATENT * 2
+            if backward:
+                want["window_lse"] = want["window_delta"] = 2 * T * 64 * 4
+                if dout_copy:
+                    want["dout_copy"] = T * heads * D_LATENT * 2
+        regions = {name: entry for name, entry in layout.items() if name != "total"}
+        assert {name: entry[1] for name, entry in regions.items()} == want
+        spans = sorted(regions.values())
+        assert all(off % cake_backend.WORKSPACE_ALIGN == 0 for off, _ in spans)
+        assert all(a[0] + a[1] <= b[0] for a, b in zip(spans, spans[1:]))
+        assert layout["total"] >= spans[-1][0] + spans[-1][1]
+    for with_o_lo, derive in itertools.product((True, False), (True, False)):
+        retained = cake_backend.retained_layout(
+            T, num_heads=heads, with_o_lo=with_o_lo, derive_topk_length=derive
+        )
+        want = {"lse": T * heads * 4}
+        if with_o_lo:
+            want["o_lo"] = T * heads * D_LATENT * 2
+        if derive:
+            want["topk_length"] = T * 4
+        want["total"] = sum(want.values())
+        assert retained == want
+        assert cake_backend.dsa_train_retained_size(
+            T, num_heads=heads, with_o_lo=with_o_lo, derive_topk_length=derive
+        ) == want["total"]
+    h = hl.HostLaunches(
+        monkeypatch, cake_backend, cake_jit, cake_launch, "sm_100a", token_chunk=chunk
+    )
+    for head_major in (False, True):
+        inp = hl.host_inputs(T, S, K, heads, head_major=head_major)
+        h.bind(inp.q_latent)
+        runner = prepare_dsa_train(
+            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices,
+            dout=inp.dout, key_passes=2,
+        )
+        copy = windows and head_major
+        want = cake_backend.workspace_layout(
+            T, S, K, backward=True, key_passes=2, token_chunk=chunk, num_heads=heads, dout_copy=copy
+        )
+        assert runner.layout == want
+        assert runner.workspace.numel() == want["total"] == cake_backend.dsa_train_workspace_size(
+            T, S, K, key_passes=2, num_heads=heads, dout_copy=copy
+        )
 
 
 @pytest.mark.parametrize("heads", (96, 128))
