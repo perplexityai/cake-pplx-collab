@@ -33,12 +33,15 @@ A role is one kernel of a call: ``fwd`` (the forward) and ``bwd_bf16`` /
 kernel, the weight gradient rounded once to FP32, then to BF16 for a BF16
 weight gradient).
 ``ROUTES[arch][role]`` names the module a role runs on an architecture.  An
-architecture may also route ``fwd_packed`` (``PACKED_ROLES``): a forward that
-addresses the rows of contiguous ``[T, H, 128]`` inputs as one packed array,
-without the token and head strides.  :func:`forward_module` runs it for such
-inputs and ``fwd`` otherwise; both compute a row with the same FP32 operations
-in the same order, so ``y`` is the same bits on either route.  An
-architecture may also route ``fwd_tiny`` (``TINY_ROLES``): a forward of
+architecture may also route ``fwd_packed`` (``PACKED_ROLES``): a forward of the
+rows of contiguous ``[T, H, 128]`` inputs, on sm_107a one that addresses them
+as one packed array, without the token and head strides, and on sm_100a and
+sm_103a the forward of version 0.2.14, whose L2 prefetches warm only rows
+packed in both ``x`` and ``z`` (below).  :func:`forward_module` runs it for
+such inputs (on an architecture with a cut in ``FWD_PACKED_ROWS_PER_SM``, up
+to that many rows per SM) and ``fwd`` otherwise; both compute a row with the
+same FP32 operations in the same order, so ``y`` is the same bits on either
+route.  An architecture may also route ``fwd_tiny`` (``TINY_ROLES``): a forward of
 packed rows only (row ``n`` of ``x`` and ``z`` at element ``128 n``; it takes
 no strides) that runs one block of its rule's ``rows_per_cta`` rows a CTA,
 with no loop.  :func:`forward_module` runs it in the place of ``fwd_packed``
@@ -52,9 +55,12 @@ role also routes a long role (``LONG_ROLES``: ``bwd_bf16_long``,
 the previous block's row math runs, faster where a CTA runs many blocks.
 :func:`backward_module` runs it in the role's place when ``dy``, ``x`` and
 ``z`` hold packed rows and the rows are at least its rule's
-``min_rows_per_sm`` times the SM count, and the role's module otherwise; both
-compute the rows and the weight gradient with the same FP32 operations in the
-same order, so ``dx``, ``dz`` and ``dw`` are the same bits on either route.
+``min_rows_per_sm`` times the SM count, on other rows (a call that computes
+the weight gradient) from its rule's ``min_rows_per_sm_strided`` times the SM
+count (the BF16 long module only: the FP32 one's rule says ``packed_rows``),
+and the role's module otherwise; both compute the rows and the weight
+gradient with the same FP32 operations in the same order, so ``dx``, ``dz``
+and ``dw`` are the same bits on either route.
 Each backward role also routes two small-row roles (``CLUSTER_ROLES``): the
 same backward built for one CTA of at most 16 rows (``role + SOLO``:
 ``bwd_bf16_solo``, ``bwd_f32_solo``) and for one cluster of 16 CTAs of at
@@ -80,8 +86,8 @@ backward's 256-thread CTAs of 16-row blocks, CTA ``b`` running the blocks
 to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM, the claimed program
 (``bwd_bf16_nodw``: the BF16 backward's claims, ticket and workspace;
 sm_100a and sm_103a) past it, and the long one (``bwd_bf16_nodw_long``: its
-look-ahead loop) where :func:`backward_module` runs ``bwd_bf16_long``;
-sm_107a routes no claimed program, so there the strided program runs every
+look-ahead loop) where :func:`backward_module` runs ``bwd_bf16_long`` for
+such a call (packed rows only); sm_107a routes no claimed program, so there the strided program runs every
 row count short of the long one.  Two 128-thread builds run in the strided
 program's place (8-row blocks, a row to each 16 lanes as in the BF16
 backward): ``bwd_bf16_nodw_strided_packed`` on packed rows and, up to
@@ -105,11 +111,20 @@ by architecture (the record's ``arches``; :func:`launch_grid` takes
 ``arch``, and :func:`run_module` computes the same grid for the device's
 with the fewest host operations).  The forward of rows of any layout has
 two cuts: ``persistent_from_rows_per_sm`` for rows the kernel reads as
-packed (:func:`forward_packed`, its own test, which turns on its L2
-prefetches of the CTA's next block and of the first block of the CTA a wave
-later) and ``persistent_from_rows_per_sm_strided`` for other rows (strided,
-broadcast over tokens, or one token, whose token stride is passed as 0),
-which take no prefetch; the forward of packed rows only has the first.  On
+packed (:func:`forward_packed`, its own test) and
+``persistent_from_rows_per_sm_strided`` for other rows (strided, broadcast
+over tokens, or one token, whose token stride is passed as 0); a ``fwd_packed``
+forward has the first only.  The forward warms in L2 the CTA's next
+block and the first block of the CTA a wave later, each of ``x`` and ``z``
+by its own layout: packed rows as one byte range, rows of head stride 128
+and another token stride (a gate sliced from a projection, a broadcast over
+tokens, one token) as one range a token, and rows of any other layout
+(head-major) as one 256-byte range a row on sm_103a and sm_107a, not at all
+on sm_100a (where those prefetches measured slower than none); a prefetch
+writes no register and no memory, so ``y`` is the same bits.  On sm_100a and
+sm_103a the ``fwd_packed`` forward warms only rows packed in both ``x`` and
+``z``, as the forward of 0.2.14 did: next to the per-layout prefetch code,
+packed rows measured slower at small and mid row counts.  On
 packed rows the cut is 5600 on sm_103a, the fewest rows per SM measured
 from which the whole waves are faster than one CTA per block every way:
 with idle gaps between the calls (full clocks), back to back, and in each
@@ -122,12 +137,13 @@ slower with idle gaps from 1000 rows per SM down (the forward up to 7 %
 at 400).
 On B200 (sm_100a, 148 SMs) the whole waves of packed rows are up to about
 1 % slower in each call's GPU time with a cold L2 from 6500 to 8000 rows
-per SM, so sm_100a keeps the cut of 8192.  On other rows, which run without
-the prefetches, the whole waves gain from far fewer rows per SM, so their
-cut is 500 rows per SM on sm_100a and 400 on sm_103a and sm_107a: from there
-strided rows and rows broadcast over tokens are faster on whole waves, or
-within noise, in three measurements: back to back, with idle gaps (cold
-L2), and each call's GPU time with a cold L2 (CUPTI).  On B200 strided rows
+per SM, so sm_100a keeps the cut of 8192.  On other rows the whole waves
+gain from far fewer rows per SM, so their cut is 500 rows per SM on sm_100a
+and 400 on sm_103a and sm_107a: from there strided rows and rows broadcast
+over tokens are faster on whole waves, or within noise, in three
+measurements of the forward without the L2 prefetches of these rows: back
+to back, with idle gaps (cold L2), and each call's GPU time with a cold L2
+(CUPTI).  On B200 strided rows
 are faster from 300 rows per SM, broadcast rows faster or equal from 500 (at
 300 they are 1.3 % slower in GPU time and 5.3 % slower with idle gaps); on
 GB300 both are faster from 300 in GPU time and within 0.9 % with idle gaps
@@ -194,9 +210,13 @@ MODULES: dict[str, dict[str, Any]] = {
     # The forward: 128 threads, 8 lanes per row (16-row blocks), at most 6
     # CTAs per SM, each loading its next block while it computes the current
     # one, with the L2 prefetch of its next block and of the first block of
-    # the CTA a wave later, the gate and rstd by the approximate instructions
-    # (build {"min_blocks": 6, "prefetch_ahead": 1, "prefetch_wave": 1,
-    # "threads": 128}); whole waves of at most 2 blocks per CTA.
+    # the CTA a wave later (x and z each by its own layout: packed rows one
+    # range, head stride 128 one range a token, other layouts one row a lane
+    # on sm_103a and none on sm_100a), the gate and rstd by the approximate
+    # instructions (build {"min_blocks": 6, "prefetch_ahead": 1,
+    # "prefetch_wave": 1, "threads": 128}); whole waves of at most 2 blocks
+    # per CTA.  Packed rows below 2^24 rows run ``fwd_packed`` instead (on
+    # sm_100a and sm_103a up to ``FWD_PACKED_ROWS_PER_SM`` rows per SM).
     "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05": {
         "arches": [
             "sm_100a",
@@ -367,6 +387,69 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_rmsnorm_silu_gate_det_train_8a371a49c065b60c88a9",
+        "logical": {
+            "eps": "eps",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "y": "y",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "fwd_packed",
+    },
+    # The sm_100a / sm_103a forward of packed rows (contiguous ``[T, H, 128]``
+    # x and z, fewer than 2^24 rows, up to ``FWD_PACKED_ROWS_PER_SM`` rows per
+    # SM): the first forward with the L2 prefetches of version 0.2.14, which
+    # warm only rows packed in both x and z (build {"layout_prefetch": 0,
+    # "min_blocks": 6, "prefetch_ahead": 1, "prefetch_wave": 1, "threads":
+    # 128}); whole waves of at most 2 blocks per CTA.
+    "cake_rmsnorm_silu_gate_det_train_3c42d6e202fd8d5c994b": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "y"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 6,
+            "kind": "persistent_row_blocks",
+            "max_blocks_per_cta": 2,
+            "persistent_from_rows_per_sm": {
+                "sm_100a": 8192,
+                "sm_103a": 5600,
+            },
+            "rows_per_block": 16,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_3c42d6e202fd8d5c994b",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_3c42d6e202fd8d5c994b",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_3c42d6e202fd8d5c994b",
         "logical": {
             "eps": "eps",
             "heads": "heads",
@@ -564,8 +647,9 @@ MODULES: dict[str, dict[str, Any]] = {
     # the look-ahead loop (a block's rows load while the previous block's row
     # math runs; the same FP32 operations in the same order, so dx, dz and dw
     # are that backward's bits at every row count and grid), run in its place
-    # on packed rows from min_rows_per_sm rows per SM (build
-    # {"lookahead": True, "math": "ax", "min_blocks": 4, "out": "bf16",
+    # from min_rows_per_sm rows per SM on packed rows and, by a call that
+    # computes the weight gradient, from min_rows_per_sm_strided on other rows
+    # (build {"lookahead": True, "math": "ax", "min_blocks": 4, "out": "bf16",
     # "prefetch_share": None, "threads": 256}).
     "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992": {
         "arches": [
@@ -608,7 +692,11 @@ MODULES: dict[str, dict[str, Any]] = {
                 "sm_103a": 2560,
                 "sm_107a": 1536,
             },
-            "packed_rows": True,
+            "min_rows_per_sm_strided": {
+                "sm_100a": 6145,
+                "sm_103a": 6145,
+                "sm_107a": 4097,
+            },
             "rows_per_block": 16,
         },
         "kernel": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
@@ -1178,9 +1266,11 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The long program without the weight gradient: the BF16 long program
     # built without the weight gradient (its look-ahead loop, claims, ticket,
-    # grid rule and workspace), so dx and dz are the BF16 backward's bits; a
-    # call with compute_grad_weight=False runs it where backward_module runs
-    # the BF16 long program (build {"dw": False, "lookahead": True, "math":
+    # grid and workspace), so dx and dz are the BF16 backward's bits; a call
+    # with compute_grad_weight=False runs it where backward_module runs the
+    # BF16 long program for such a call, on packed rows only: its rule has
+    # the BF16 long program's min_rows_per_sm and packed_rows in place of its
+    # min_rows_per_sm_strided (build {"dw": False, "lookahead": True, "math":
     # "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None,
     # "threads": 256}).
     "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241": {
@@ -1604,6 +1694,7 @@ MODULES: dict[str, dict[str, Any]] = {
 ROUTES: dict[str, dict[str, str]] = {
     "sm_100a": {
         "fwd": "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05",
+        "fwd_packed": "cake_rmsnorm_silu_gate_det_train_3c42d6e202fd8d5c994b",
         "fwd_tiny": "cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_cluster": "cake_rmsnorm_silu_gate_det_train_1bc627a7e9eaa9aee52c",
@@ -1621,6 +1712,7 @@ ROUTES: dict[str, dict[str, str]] = {
     },
     "sm_103a": {
         "fwd": "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05",
+        "fwd_packed": "cake_rmsnorm_silu_gate_det_train_3c42d6e202fd8d5c994b",
         "fwd_tiny": "cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_cluster": "cake_rmsnorm_silu_gate_det_train_1bc627a7e9eaa9aee52c",
@@ -1663,7 +1755,7 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 }
 # The kernels of a call, routed on every architecture.
 ROLES = ("fwd", "bwd_bf16", "bwd_f32")
-# The forwards of packed rows, routed on some architectures beside ``fwd``.
+# The forwards of packed rows, routed on every architecture beside ``fwd``.
 PACKED_ROLES = ("fwd_packed",)
 # The tiny forward of packed rows, routed on the architectures with a cut in
 # ``FWD_TINY_ROWS_PER_SM``: one block of its rule's ``rows_per_cta`` rows a
@@ -1673,8 +1765,26 @@ PACKED_ROLES = ("fwd_packed",)
 # ``PACKED_ROLES``.
 TINY_ROLES = ("fwd_tiny",)
 # The suffix of a backward role's long role, and the long roles: a module that
-# runs in its role's place from its rule's ``min_rows_per_sm`` rows per SM, on
-# packed rows only when its rule says ``packed_rows`` (:func:`module_for_rows`).
+# runs in its role's place on packed rows from its rule's ``min_rows_per_sm``
+# rows per SM and, for a call that computes the weight gradient, on other rows
+# from its ``min_rows_per_sm_strided`` (on packed rows only when its rule says
+# ``packed_rows``; :func:`module_for_rows`).  The BF16 long module has both
+# cuts; the FP32 one runs packed rows only.  The strided cuts are one row per
+# SM past the default loop's L2 prefetch share (96 blocks per CTA on sm_100a
+# and sm_103a, 64 on sm_107a) times 64 (16 rows a block, 4 CTAs per SM): 6145
+# rows per SM on sm_100a and sm_103a, 4097 on sm_107a.  At the share and
+# below it the default loop still warms each CTA's next block in L2 and is as
+# fast as the look-ahead loop or faster; past it the default loop stops
+# prefetching.  On GB300 (the package's programs, CUDA Graph replays, CUPTI
+# kernel time with a cold L2) the look-ahead loop is 0.1 to 0.5 % slower at
+# exactly 6144 rows per SM and 3.6 to 4.5 % faster from 6444 to 15000 on
+# projection and head-major rows.  On a gate and ``grad_out`` sliced from
+# projections (the same GPU, CUDA Graph replays, CUPTI kernel time with a
+# cold L2, the same bits) the look-ahead loop is 4.4 to 5.3 % faster on B200
+# and 4.2 to 4.7 % on GB300 from 7000 rows per SM and 3.5 to 4.0 % on VR200
+# from 4500; it is at parity at 4500 on B200 and GB300 and 1.3 to 2.4 %
+# slower at lower row counts below the share.  Only the BF16 weight gradient
+# was measured.
 LONG = "_long"
 LONG_ROLES = ("bwd_bf16_long", "bwd_f32_long")
 # The suffixes of the roles of a backward without the weight gradient, and
@@ -1817,6 +1927,20 @@ FWD_TINY_GAP_ROWS: dict[str, tuple[int, int]] = {
     "sm_103a": (0, 0),
     "sm_107a": (16, 32),
 }
+# Packed rows past the tiny forward's rows run ``fwd_packed`` up to this many
+# rows per SM and ``fwd`` past it, by architecture (:func:`forward_module`); an
+# architecture not named here runs ``fwd_packed``, where it routes one, on
+# packed rows at every row count below ``PACKED_ROWS``.  On sm_100a and
+# sm_103a the ``fwd_packed`` forward (the forward of 0.2.14) was faster than
+# ``fwd`` or within noise of it up to 3000 rows per SM, and no faster past
+# them: up to 0.9 % slower from 4000 to 8000 rows per SM on sm_100a, and up
+# to 0.8 % slower at 5000 and 5500 rows per SM on sm_103a, alone and in the
+# checkpointed training step (cold L2, contiguous rows of 8 and 48 heads).
+# Host plan only.
+FWD_PACKED_ROWS_PER_SM: dict[str, int] = {
+    "sm_100a": 3000,
+    "sm_103a": 3000,
+}
 # Elements of one normalized row.
 HEAD_DIM = 128
 # The forward reads rows with 32-byte vector accesses (the backward with
@@ -1825,8 +1949,9 @@ HEAD_DIM = 128
 ALIGNMENT_ELEMENTS = 16
 # The kernels index rows with 32-bit integers.
 INT32_MAX = 2**31 - 1
-# A forward of packed rows takes the offset of an element of row ``n`` as
-# ``n * 128 + column`` in 32-bit arithmetic: it serves fewer rows than this.
+# The ``fwd_packed`` forward serves fewer rows than this: the sm_107a one
+# takes the offset of an element of row ``n`` as ``n * 128 + column`` in
+# 32-bit arithmetic, and the sm_100a and sm_103a one keeps the same cut.
 PACKED_ROWS = 2**31 // HEAD_DIM
 
 
@@ -1853,54 +1978,88 @@ def route_module(arch: str, role: str) -> str:
 
 def min_rows_per_sm(name: str, arch: str) -> int:
     """The rows per SM from which long module ``name`` runs in its role's
-    place on ``arch`` (its rule's ``min_rows_per_sm``)."""
+    place on ``arch`` on packed rows (its rule's ``min_rows_per_sm``)."""
 
     return int(MODULES[name]["grid_rule"]["min_rows_per_sm"][arch])
 
 
+def min_rows_per_sm_strided(name: str, arch: str) -> int | None:
+    """The rows per SM from which long module ``name`` runs in its role's
+    place on ``arch`` on rows that are not packed, for a call that computes
+    the weight gradient: its rule's ``min_rows_per_sm_strided``, else None
+    where its rule says ``packed_rows`` (packed rows only), else its
+    :func:`min_rows_per_sm`."""
+
+    rule = MODULES[name]["grid_rule"]
+    if "min_rows_per_sm_strided" in rule:
+        return int(rule["min_rows_per_sm_strided"][arch])
+    if rule.get("packed_rows", False):
+        return None
+    return min_rows_per_sm(name, arch)
+
+
 def module_for_rows(
-    arch: str, role: str, rows: int, sm_count: int, packed: bool = False
+    arch: str,
+    role: str,
+    rows: int,
+    sm_count: int,
+    packed: bool = False,
+    compute_grad_weight: bool = True,
 ) -> str:
     """The module that runs ``role`` (one of ``ROLES``) for ``rows`` rows on
     ``arch`` with ``sm_count`` SMs, ``packed`` telling whether the kernel reads
-    packed rows: the role's long module (``role + LONG``) when ``arch`` routes
-    one, the rows are at least its :func:`min_rows_per_sm` times ``sm_count``
-    and ``packed`` holds or its rule does not say ``packed_rows``; else
-    :func:`route_module`.  Both give the same bits."""
+    packed rows and ``compute_grad_weight`` whether the call computes the
+    weight gradient: the role's long module (``role + LONG``) when ``arch``
+    routes one and the rows are at least its cut times ``sm_count``, on packed
+    rows its :func:`min_rows_per_sm`, on other rows its
+    :func:`min_rows_per_sm_strided` (none for a module of packed rows only,
+    and none for a call without the weight gradient, whose long program
+    without it runs packed rows only); else :func:`route_module`.  Both give
+    the same bits."""
 
     name = ROUTES.get(arch, {}).get(role + LONG)
-    if (
-        name is not None
-        and (packed or not MODULES[name]["grid_rule"].get("packed_rows", False))
-        and int(rows) >= min_rows_per_sm(name, arch) * int(sm_count)
-    ):
-        return name
+    if name is not None:
+        if packed:
+            per_sm: int | None = min_rows_per_sm(name, arch)
+        elif compute_grad_weight:
+            per_sm = min_rows_per_sm_strided(name, arch)
+        else:
+            per_sm = None
+        if per_sm is not None and int(rows) >= per_sm * int(sm_count):
+            return name
     return route_module(arch, role)
 
 
-def _fwd_plan(arch: str) -> tuple[str | None, int, str | None, str | None, int, int]:
+def _fwd_plan(
+    arch: str,
+) -> tuple[str | None, int, str | None, str | None, int, int, int]:
     """``arch``'s forward plan: its ``fwd_tiny`` module and cut
     (``FWD_TINY_ROWS_PER_SM[arch]``) where it routes one and the cut is
     above 0, else None and 0; its ``fwd_packed`` module where it routes one,
     else None; its ``fwd`` module where it routes no long ``fwd`` module
     (then :func:`module_for_rows` of ``fwd`` names it at every row count),
-    else None; and the rows ``(lo, hi]`` of its tiny band that run without
-    it (``FWD_TINY_GAP_ROWS[arch]``, ``(0, 0)`` where none)."""
+    else None; the rows ``(lo, hi]`` of its tiny band that run without it
+    (``FWD_TINY_GAP_ROWS[arch]``, ``(0, 0)`` where none); and the rows per SM
+    up to which packed rows run its ``fwd_packed`` module
+    (``FWD_PACKED_ROWS_PER_SM[arch]``, 0 where it has no such cut)."""
 
     routes = ROUTES[arch]
     cut = FWD_TINY_ROWS_PER_SM.get(arch, 0)
     base = routes.get("fwd") if "fwd" + LONG not in routes else None
     lo, hi = FWD_TINY_GAP_ROWS.get(arch, (0, 0))
+    packed = routes.get("fwd_packed")
+    packed_cut = FWD_PACKED_ROWS_PER_SM.get(arch, 0)
     if "fwd_tiny" in routes and cut > 0:
-        return routes["fwd_tiny"], cut, routes.get("fwd_packed"), base, lo, hi
-    return None, 0, routes.get("fwd_packed"), base, 0, 0
+        return routes["fwd_tiny"], cut, packed, base, lo, hi, packed_cut
+    return None, 0, packed, base, 0, 0, packed_cut
 
 
 # The forward plan of every routed architecture, read once at import: a
 # forward looks its plan up once, tests its strides, compares ints and
 # returns a module of the plan (its host path is most of the time of a small
-# call).  Patching ``ROUTES``, ``FWD_TINY_ROWS_PER_SM`` or
-# ``FWD_TINY_GAP_ROWS`` alone changes no forward route.
+# call).  Patching ``ROUTES``, ``FWD_TINY_ROWS_PER_SM``,
+# ``FWD_TINY_GAP_ROWS`` or ``FWD_PACKED_ROWS_PER_SM`` alone changes no forward
+# route.
 _FWD_PLANS = {arch: _fwd_plan(arch) for arch in ROUTES}
 
 
@@ -1926,13 +2085,15 @@ def forward_module(
       an address (a broadcast of more tokens is not packed rows);
     - else the arch's ``fwd_packed`` module when it routes one and the rows
       are packed (both head strides 128, both token strides ``heads * 128``,
-      fewer than ``PACKED_ROWS`` rows);
+      fewer than ``PACKED_ROWS`` rows and, where the arch has a cut in
+      ``FWD_PACKED_ROWS_PER_SM``, at most ``FWD_PACKED_ROWS_PER_SM[arch] *
+      sm_count`` rows);
     - else :func:`module_for_rows` of ``fwd``.
 
     All give the same bits.  The tiny module, its cut, the packed module,
-    the ``fwd`` module and the gap come from ``_FWD_PLANS``, read once at
-    import; an architecture with no plan, or one that routes a long ``fwd``
-    module, asks :func:`module_for_rows`."""
+    the ``fwd`` module, the gap and the packed module's cut come from
+    ``_FWD_PLANS``, read once at import; an architecture with no plan, or
+    one that routes a long ``fwd`` module, asks :func:`module_for_rows`."""
 
     plan = _FWD_PLANS.get(arch)
     if plan is None:
@@ -1942,7 +2103,11 @@ def forward_module(
         if x_tok == row and z_tok == row:
             if rows <= plan[1] * sm_count and not plan[4] < rows <= plan[5]:
                 return plan[0]
-            if plan[2] is not None and rows < PACKED_ROWS:
+            if (
+                plan[2] is not None
+                and rows < PACKED_ROWS
+                and (not plan[6] or rows <= plan[6] * sm_count)
+            ):
                 return plan[2]
         elif (
             # one token: its token index is 0, so its stride is never read
@@ -1963,10 +2128,11 @@ def forward_packed(
 ) -> bool:
     """Whether the forward kernels read ``x`` and ``z`` of ``heads`` heads,
     given their token and head strides (in elements), as packed rows: both
-    head strides 128 and both token strides ``heads * 128`` (the kernel's own
-    test, which turns on its L2 prefetches; a single token's stride, passed
-    as 0, a broadcast over tokens, head-major rows and a gate sliced from a
-    projection fail it).  :func:`launch_grid` takes it as ``packed``, and
+    head strides 128 and both token strides ``heads * 128`` (the kernel's test
+    of each tensor by which it warms that tensor's rows in L2 as one byte
+    range, here of both; a single token's stride, passed as 0, a broadcast
+    over tokens, head-major rows and a gate sliced from a projection fail
+    it).  :func:`launch_grid` takes it as ``packed``, and
     :func:`run_module` makes the same comparisons of a call's own arguments
     where a record's rule has a cut of rows not read as packed and the rows
     lie between its two cuts."""
@@ -2012,12 +2178,14 @@ def backward_module(
     x_head: int,
     z_tok: int,
     z_head: int,
+    compute_grad_weight: bool = True,
 ) -> str:
     """The module of backward ``role`` (``bwd_bf16`` or ``bwd_f32``) for
     ``rows`` rows of ``heads`` heads on ``arch`` with ``sm_count`` SMs, given
     the token and head strides (in elements) the kernel reads ``dy``, ``x`` and
-    ``z`` with: :func:`module_for_rows`, told the rows are packed when all
-    three head strides are 128 and all three token strides ``heads * 128`` (the
+    ``z`` with and whether the call computes the weight gradient:
+    :func:`module_for_rows`, told the rows are packed when all three head
+    strides are 128 and all three token strides ``heads * 128`` (the
     kernel's own test, :func:`backward_packed`, spelled out here: a call of
     it would cost a small backward's host path more than the test).  Every
     module of the role gives the same bits."""
@@ -2031,7 +2199,7 @@ def backward_module(
         and x_tok == row
         and z_tok == row
     )
-    return module_for_rows(arch, role, rows, sm_count, packed)
+    return module_for_rows(arch, role, rows, sm_count, packed, compute_grad_weight)
 
 
 def _nodw_keys(role: str) -> tuple[str | None, str, str, str, str]:
@@ -2063,7 +2231,8 @@ def nodw_module(
     """The module of a backward without the weight gradient for ``rows``
     rows on ``arch`` with ``sm_count`` SMs, given ``name``, the module
     :func:`backward_module` names for the call's role (``bwd_bf16``), rows
-    and layout, and ``packed``, whether the kernel reads packed rows
+    and layout with ``compute_grad_weight`` false (so a long module only on
+    packed rows), and ``packed``, whether the kernel reads packed rows
     (:func:`backward_packed`; the backward also passes one token of head
     stride 128 as packed rows where ``PACKED_SMALL_ROWS_PER_SM[arch]`` has a
     cut, on an architecture without a strided cut only up to that cut):
@@ -2577,6 +2746,7 @@ __all__ = [
     "CLUSTER_MIN_SMS",
     "CLUSTER_ROLES",
     "DW_SMALL_ROWS",
+    "FWD_PACKED_ROWS_PER_SM",
     "FWD_TINY_GAP_ROWS",
     "FWD_TINY_ROWS_PER_SM",
     "GRID_KINDS",
@@ -2613,6 +2783,7 @@ __all__ = [
     "library_name",
     "load",
     "min_rows_per_sm",
+    "min_rows_per_sm_strided",
     "module_for_rows",
     "nodw_module",
     "route_module",

@@ -28,15 +28,19 @@ no other), the one-launch record of each head dimension without the mask (``FUSE
 or ``FUSED_OF``, and no variant or host sequence names a one-launch record) and the host sequence of each variant
 (``SEQUENCES``: its three records), the route of a call (``variant``: the pair route for head dimension 128, a key
 length that is a multiple of 256, at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
-``PAIR_REGIONS``; every measured crossover call on its decided route, ``DECIDED_LEAST``; ``fused_record``: the
-one-launch route inside any piece of the region of ``FUSED_REGION``, on both sides of each bound of a region of one
-piece and of two pieces; the shipped region of each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both
-sides of each bound of each of its pieces and, for each piece, a call that no other piece of its region holds, and the
-long calls of the benchmark's ``T1`` to ``T4`` rows on the three-kernel routes on every architecture), the launch grids,
-the stage launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
-registry-ordered launch), the two layouts of the dQ accumulator in the judge's helper, the build manifest (every
-record's and host sequence's library, the recorded source digests), the standalone loader, the prebuilt libraries served
-first, and no environment read outside the JIT shim.
+``PAIR_REGIONS``; every measured crossover call on its decided route, ``DECIDED_LEAST``; the long-sequence causal region
+of ``sm_103a`` on both sides of each bound, ``CAUSAL_PAIR_CALLS``; the pair route without the mask for fewer queries
+than keys within the bounds ``PAIR_FEWER_QUERIES`` of the architecture, the shipped bounds
+``SHIPPED_PAIR_FEWER_QUERIES``, on both sides of each bound and refused with the mask, and every measured call with
+fewer queries than keys on its decided route, ``DECIDED_FEWER_QUERIES``; ``fused_record``: the one-launch route inside
+any piece of the region of ``FUSED_REGION``, on both sides of each bound of a region of one piece and of two pieces;
+the shipped region of each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both sides of each bound of
+each of its pieces and, for each piece, a call that no other piece of its region holds, every measured long call on
+its decided route, ``DECIDED_LONG_CALLS``, and the long calls of the benchmark's ``T1`` to ``T4`` rows on the
+three-kernel routes on every architecture), the launch grids, the stage launchers' keywords, their positional launch of
+every routed record (the FFI arguments and grid of the registry-ordered launch), the two layouts of the dQ accumulator
+in the judge's helper, the build manifest (every record's and host sequence's library, the recorded source digests), the
+standalone loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, each stage judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error
 against an FP64 oracle of the same inputs over 32 independent draws, in the L2 and the max norm, median and largest,
@@ -54,7 +58,10 @@ other: the one-launch record alone, without a host sequence, or the three record
 ``dq``, ``dk`` and ``dv`` within the tier, when the host sequence's ``run`` returns ``False`` (the workspace from
 Python) and without a host sequence (the stage launchers).  Where ``torch.profiler`` records no kernel of a plain torch
 operation on the device (a CUPTI that does not support it), the tests that observe kernels run every other check, then
-skip the observation.
+skip the observation.  The public backward is also judged on the shipped tables on the least call with fewer queries
+than keys within the bounds of the pair route (the pair route on SM103 and SM107, the 1-CTA route on SM100), and on
+the least causal call of the long-sequence causal region of SM103 (``B * H`` 32, 8192 queries and keys: the pair route
+on SM103 and SM107, the 1-CTA route on SM100).
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -139,7 +146,12 @@ LAUNCHER_KEYWORDS = {
 # so was every longer call of its ``B * H``.  On ``sm_107a`` one-head causal calls (``B * H`` 1) with 1024 keys stay on
 # the 1-CTA route, because the final measurement found the pair route slower there than 0.1.4.  On ``sm_107a`` four-head
 # non-causal calls (``B * H`` 4) under 2048 keys stay on the 1-CTA route, because the final measurement found the pair
-# route slower than 0.1.4 there in eager calls.  ``PAIR_REGIONS`` must reproduce it.
+# route slower than 0.1.4 there in eager calls.  On ``sm_103a`` the causal calls of ``B * H`` 32 and 128 take the pair
+# route from 8192 keys since a later measurement against the 1-CTA route: every measured causal call of ``B * H`` 32,
+# 64, 128 and 256 with 8192 and 16384 keys was faster in every counted round of both replicate runs, eager and in
+# CUDA-graph replays; ``B * H`` 16 stays on the 1-CTA route (its eager calls with 8192 keys were not faster beyond the
+# identical-kernel controls' noise), and so do the calls of ``B * H`` 16 or more with 4096 keys.  ``PAIR_REGIONS``
+# must reproduce it.
 MEASURED_COUNTS = (1, 4, 16, 32, 128)
 MEASURED_LENGTHS = (256, 512, 1024, 2048, 4096, 8192)
 DECIDED_LEAST = {
@@ -149,19 +161,84 @@ DECIDED_LEAST = {
     },
     "sm_103a": {
         False: {1: 2048, 4: 2048, 16: 8192, 32: 8192, 128: 8192},
-        True: {1: 2048, 4: 2048, 16: None, 32: None, 128: None},
+        True: {1: 2048, 4: 2048, 16: None, 32: 8192, 128: 8192},
     },
     "sm_107a": {
         False: {1: 2048, 4: 2048, 16: 4096, 32: 4096, 128: 4096},
         True: {1: 2048, 4: 2048, 16: 4096, 32: 8192, 128: 8192},
     },
 }
+# Causal calls (``Sq == Skv``) on both sides of each bound of the long-sequence causal region of ``sm_103a`` (``B * H``
+# 32 or more, 8192 keys or more), as ((B * H, S), routed on ``sm_103a``): the least call inside; ``B * H`` 31, and 16
+# (the measured neighbour); 7936 keys; 8320 keys (not a multiple of 256) and 8448 keys there; then more heads and more
+# keys inside, 4096 keys outside, and both sides of the region of four heads or fewer beside it.
+CAUSAL_PAIR_CALLS = (
+    ((32, 8192), True),
+    ((31, 8192), False),
+    ((16, 8192), False),
+    ((32, 7936), False),
+    ((32, 8320), False),
+    ((32, 8448), True),
+    ((256, 8192), True),
+    ((4096, 16384), True),
+    ((128, 4096), False),
+    ((16, 16384), False),
+    ((4, 2048), True),
+    ((5, 2048), False),
+)
+# The shipped bounds of the pair route for a call without the mask with fewer queries than keys, per architecture:
+# ``(least B * H, least Sq, least Skv, most Skv / Sq)``, or None (no such call on the pair route).
+# ``PAIR_FEWER_QUERIES`` must be this table.
+SHIPPED_PAIR_FEWER_QUERIES = {"sm_100a": None, "sm_103a": (8, 4096, 8192, 2), "sm_107a": (8, 4096, 8192, 2)}
+# Calls with fewer queries than keys on both sides of each shipped bound, as ((B * H, Sq, Skv), routed where the
+# architecture has the bounds (8, 4096, 8192, 2)): the least call inside; B * H at 7; 3968 queries (then 8192 keys are
+# also more than twice the queries); 7936 keys; keys at twice the queries and 256 past it (4096 and 6144 queries); 8320
+# keys, not a multiple of 256 (against 4224 queries), and 8448 keys there; then more heads, more keys and fewer keys per
+# query inside, fewer heads and fewer queries outside.
+FEWER_QUERIES_CALLS = (
+    ((8, 4096, 8192), True),
+    ((7, 4096, 8192), False),
+    ((8, 3968, 8192), False),
+    ((8, 4096, 7936), False),
+    ((8, 4096, 8448), False),
+    ((8, 6144, 12288), True),
+    ((8, 6144, 12544), False),
+    ((8, 4224, 8320), False),
+    ((8, 4224, 8448), True),
+    ((256, 4096, 8192), True),
+    ((8, 8192, 16384), True),
+    ((16, 6144, 8192), True),
+    ((4, 4096, 8192), False),
+    ((32, 2048, 8192), False),
+)
+# The decided route of the measured calls with fewer queries than keys (head dimension 128, no mask), as ((B, H, Sq,
+# Skv), routed where the architecture has the bounds: ``sm_103a`` and ``sm_107a``).  This is the decision taken from the
+# measurement, not a measurement: the routed calls were faster than 0.1.8 (the 1-CTA route) in both replicate runs on
+# SM103 and SM107; 32 heads of 1024 queries against 4096 keys and four heads of 2048 queries against 8192 keys were
+# not, and stay on the 1-CTA route.  ``PAIR_FEWER_QUERIES`` must reproduce it.
+DECIDED_FEWER_QUERIES = (
+    ((1, 32, 4096, 8192), True),
+    ((2, 32, 4096, 8192), True),
+    ((4, 32, 4096, 8192), True),
+    ((1, 32, 1024, 4096), False),
+    ((1, 4, 2048, 8192), False),
+)
+
+
+def _inside_fewer_queries(bounds: tuple[int, int, int, int] | None, count: int, Sq: int, Skv: int) -> bool:
+    """A call with fewer queries than keys inside the bounds ``(least B * H, least Sq, least Skv, most Skv / Sq)`` of
+    the pair route (None: no call), at ``B * H`` ``count``; the key length a multiple of 256 is checked apart."""
+    if bounds is None:
+        return False
+    least_count, least_q, least_kv, most_per_q = bounds
+    return count >= least_count and Sq >= least_q and least_kv <= Skv <= most_per_q * Sq
 
 
 def _pin_route(monkeypatch, pin: bool | None) -> None:
     """The pair regions a test runs under: ``pin`` True, one region holding every call on every architecture and mask
     (the pair route wherever the head dimension, the key length and ``Sq >= Skv`` allow it); False, no region (the
-    1-CTA route); None, the shipped ``PAIR_REGIONS``.  ``PAIR_LEAST`` is pinned with them."""
+    1-CTA route); None, the shipped ``PAIR_REGIONS``.  ``PAIR_LEAST`` is pinned with them, and with True or False
+    ``PAIR_FEWER_QUERIES`` holds no bounds (no call with fewer queries than keys on the pair route)."""
     if pin is None:
         return
     regions = ((1, None, 2 * cake_jit.BLOCK),) if pin else ()
@@ -169,6 +246,7 @@ def _pin_route(monkeypatch, pin: bool | None) -> None:
     for arch in ARCHES:
         monkeypatch.setitem(cake_jit.PAIR_REGIONS, arch, {False: regions, True: regions})
         monkeypatch.setitem(cake_jit.PAIR_LEAST, arch, {False: least, True: least})
+        monkeypatch.setitem(cake_jit.PAIR_FEWER_QUERIES, arch, None)
 
 
 def main_cases(causal: bool, pair: bool = False) -> list[Case]:
@@ -221,9 +299,9 @@ FUSED_CASES = (
 FUSED_PARAMS = [pytest.param(D, case, id=f"d{D}-{case.id}") for D in HEAD_DIMS for case in FUSED_CASES]
 # The backward's cases: the main stage's, each call on its variant's route (``_pin_route``), with the one-launch route
 # turned off (``fused`` False: ``fused_record`` patched to give None).  A pair case with more keys than queries takes
-# the 1-CTA route through the backward (such a call never takes the pair route), so its id names the variant it runs
-# (``d128``).  Then the one-launch stage's cases at each head dimension without the mask, unpatched (``fused`` True: the
-# route ``fused_record`` gives).
+# the 1-CTA route through the backward (under ``_pin_route`` no such call takes the pair route), so its id names the
+# variant it runs (``d128``).  Then the one-launch stage's cases at each head dimension without the mask, unpatched
+# (``fused`` True: the route ``fused_record`` gives).
 BACKWARD_PARAMS = [
     pytest.param(
         D,
@@ -261,12 +339,16 @@ ROUTE_PARAMS = [
 # The shipped regions on the device (``pin`` None), with the one-launch route turned off (``fused`` False): 8192
 # queries and keys at four (head, batch) pairs, on the route ``DECIDED_LEAST`` names for the architecture (the pair
 # route without the mask everywhere, with it on sm_103a and sm_107a); 1024 queries and keys at sixteen (head, batch)
-# pairs, on the 1-CTA route on every architecture.
+# pairs, on the 1-CTA route on every architecture; with the mask at 32 (head, batch) pairs, 8192 queries and keys and
+# 7936 (both sides of the length bound of the long-sequence causal region of sm_103a), on the route ``DECIDED_LEAST``
+# names for the architecture.
 SHIPPED_ROUTE_PARAMS = [
     pytest.param(128, False, Case(1, 4, 8192), None, False, id="d128-S8192"),
     pytest.param(128, True, Case(1, 4, 8192), None, False, id="d128_causal-S8192"),
     pytest.param(128, False, Case(1, 16, 1024), None, False, id="d128-S1024"),
     pytest.param(128, True, Case(1, 16, 1024), None, False, id="d128_causal-S1024"),
+    pytest.param(128, True, Case(1, 32, 8192), None, False, id="d128_causal-H32-S8192"),
+    pytest.param(128, True, Case(1, 32, 7936), None, False, id="d128_causal-H32-S7936"),
 ]
 # The source tests' preprocess cases at four heads, then one head and an odd head count.
 PRE_CASES = (Case(1, 4, 128), Case(3, 4, 384), Case(2, 4, 1024), Case(2, 1, 256), Case(3, 5, 384))
@@ -379,12 +461,18 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
 def test_the_route_of_a_call() -> None:
     """``variant(D, causal, *, batch, heads, seqlen_q, seqlen_kv, arch)`` is the ``RECORD_OF`` key of a call: ``(D,
     causal, pair)`` with ``pair`` True for head dimension 128, a key length that is a multiple of 256 (an even key-block
-    count: the 2-CTA kernel's CTA pairs), at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
-    ``PAIR_REGIONS[arch][causal]``, False otherwise (every head-dimension 64 call, every odd key-block count, every call
-    with more keys than queries).  Every bound is a measured value and ``PAIR_LEAST`` the least length of each table;
-    every measured crossover call is on its decided route (``DECIDED_LEAST``); a longer call stays on the pair route; an
-    unmeasured ``B * H`` or length is on it exactly where its measured neighbours are."""
+    count: the 2-CTA kernel's CTA pairs), and either at least as many queries as keys and ``B * H`` and ``Skv`` in a
+    region of ``PAIR_REGIONS[arch][causal]`` (each call of ``CAUSAL_PAIR_CALLS`` on its side of each bound of the
+    long-sequence causal region of ``sm_103a``), or no mask and fewer queries than keys within the bounds
+    ``PAIR_FEWER_QUERIES[arch]`` (the shipped table ``SHIPPED_PAIR_FEWER_QUERIES``; each call of
+    ``FEWER_QUERIES_CALLS`` on its side of each bound), False otherwise (every head-dimension 64 call, every odd
+    key-block count, every other call with more keys than queries).  Every bound is a measured value and ``PAIR_LEAST``
+    the least length of each table; every measured crossover call is on its decided route (``DECIDED_LEAST``), and so
+    is every measured call with fewer queries than keys (``DECIDED_FEWER_QUERIES``); a longer call stays on the pair
+    route; an unmeasured ``B * H`` or length is on it exactly where its measured neighbours are; a call with at least
+    as many queries as keys takes the route of ``PAIR_REGIONS`` alone."""
     assert set(cake_jit.PAIR_REGIONS) == set(ARCHES) and set(cake_jit.PAIR_LEAST) == set(ARCHES)
+    assert dict(cake_jit.PAIR_FEWER_QUERIES) == SHIPPED_PAIR_FEWER_QUERIES
     for arch, regions in cake_jit.PAIR_REGIONS.items():
         assert set(regions) == {False, True}, arch
         for causal, boxes in regions.items():
@@ -404,7 +492,27 @@ def test_the_route_of_a_call() -> None:
         return found[2]
 
     step = 2 * cake_jit.BLOCK
+    # The causal calls on both sides of each bound of the long-sequence causal region of sm_103a, each on its side, and
+    # the same calls at head dimension 64 on the 1-CTA route.
+    for (count, S), routed in CAUSAL_PAIR_CALLS:
+        assert pair("sm_103a", True, count, S, S) == routed, (count, S)
+        found = cake_jit.variant(64, True, batch=1, heads=count, seqlen_q=S, seqlen_kv=S, arch="sm_103a")
+        assert found == (64, True, False), (count, S, found)
     for arch in ARCHES:
+        bounds = SHIPPED_PAIR_FEWER_QUERIES[arch]
+        # Fewer queries than keys: each call on its side of each bound where the architecture has the bounds, and no
+        # call on the pair route with the mask, at head dimension 64 or where the architecture has no bounds.
+        for (count, Sq, Skv), routed in FEWER_QUERIES_CALLS:
+            inside = Skv % step == 0 and _inside_fewer_queries((8, 4096, 8192, 2), count, Sq, Skv)
+            assert Sq < Skv and routed == inside, (count, Sq, Skv)
+            assert pair(arch, False, count, Sq, Skv) == (bounds is not None and routed), (arch, count, Sq, Skv)
+            assert not pair(arch, True, count, Sq, Skv), (arch, count, Sq, Skv)
+            found = cake_jit.variant(64, False, batch=1, heads=count, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+            assert found == (64, False, False), (arch, count, Sq, Skv, found)
+        # Every measured call with fewer queries than keys on its decided route.
+        for (B, H, Sq, Skv), routed in DECIDED_FEWER_QUERIES:
+            found = cake_jit.variant(128, False, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+            assert Sq < Skv and found == (128, False, bounds is not None and routed), (arch, B, H, Sq, Skv, found)
         for causal in (False, True):
             for count, least in DECIDED_LEAST[arch][causal].items():
                 for S in MEASURED_LENGTHS:
@@ -413,26 +521,31 @@ def test_the_route_of_a_call() -> None:
             for count in (1, 32, 128):
                 assert not pair(arch, False, count, 128, 8192), (arch, count)
                 assert not pair(arch, False, count, 8192, 256), (arch, count)
-            # Every call: the head dimension, the key-block count, Sq >= Skv and the regions decide the route.
+            # Every call: the head dimension, the key-block count, Sq >= Skv and the regions decide the route, and with
+            # fewer queries than keys the mask and the bounds.
             for D in HEAD_DIMS:
-                for count in (1, 2, 3, 4, 5, 15, 16, 17, 31, 32, 33, 127, 128, 129, 256):
+                for count in (1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 128, 129, 256):
                     for blocks in range(1, 70):
                         Skv = blocks * cake_jit.BLOCK
-                        for Sq in (Skv,) if causal else (Skv, 128, 2048, 4096, 8192, 16384):
+                        for Sq in (Skv,) if causal else (Skv, 128, 2048, 3968, 4096, 6144, 8192, 16384):
                             found = cake_jit.variant(
                                 D, causal, batch=1, heads=count, seqlen_q=Sq, seqlen_kv=Skv, arch=arch
                             )
-                            inside = Sq >= Skv and any(
-                                least <= count and (most is None or count <= most) and Skv >= length
-                                for least, most, length in cake_jit.PAIR_REGIONS[arch][causal]
-                            )
+                            if Sq >= Skv:
+                                inside = any(
+                                    least <= count and (most is None or count <= most) and Skv >= length
+                                    for least, most, length in cake_jit.PAIR_REGIONS[arch][causal]
+                                )
+                            else:
+                                inside = not causal and _inside_fewer_queries(bounds, count, Sq, Skv)
                             expected = (D, causal, D == 128 and blocks % 2 == 0 and inside)
                             assert found == expected, (D, causal, count, Sq, Skv, arch, found)
                             assert type(found[1]) is bool and type(found[2]) is bool, found
                             assert found in cake_jit.RECORD_OF, found
             # A longer call stays on the pair route; a call with more queries than keys takes the route of its key
-            # length and one with more keys than queries the 1-CTA route; an unmeasured B * H or length is on the pair
-            # route exactly where its measured neighbours are (the largest measured value stands for every larger one).
+            # length and one with twice as many keys as queries the pair route exactly within the bounds; an unmeasured
+            # B * H or length is on the pair route exactly where its measured neighbours are (the largest measured value
+            # stands for every larger one).
             for count in range(1, 300):
                 below = max(c for c in MEASURED_COUNTS if c <= count)
                 above = min((c for c in MEASURED_COUNTS if c >= count), default=below)
@@ -446,7 +559,8 @@ def test_the_route_of_a_call() -> None:
                         assert pair(arch, causal, count, S + step, S + step), (arch, causal, count, S)
                     if not causal:
                         assert pair(arch, causal, count, 2 * S, S) == on, (arch, count, S)
-                        assert not pair(arch, causal, count, S, 2 * S), (arch, count, S)
+                        fewer = _inside_fewer_queries(bounds, count, S, 2 * S)
+                        assert pair(arch, causal, count, S, 2 * S) == fewer, (arch, count, S)
 
 
 # Calls on both sides of each bound of the region of one piece (max_ctas, s_max, skv_any, skv_per_sq) =
@@ -538,6 +652,7 @@ SHIPPED_FUSED_REGION = {
         (152, 1024, 0, 3),
         (640, 512, 256, 0),
         (301, 1024, 128, 0),
+        (128, 8192, 0, 1),
     ),
     ("sm_100a", 64): (
         (152, 2048, 512, 2),
@@ -552,6 +667,7 @@ SHIPPED_FUSED_REGION = {
         (152, 1024, 0, 3),
         (303, 512, 256, 0),
         (301, 1024, 128, 0),
+        (128, 8192, 0, 1),
     ),
     ("sm_103a", 64): (
         (204, 2048, 256, 0),
@@ -566,6 +682,7 @@ SHIPPED_FUSED_REGION = {
         (423, 512, 256, 0),
         (210, 2048, 768, 2),
         (423, 1024, 128, 0),
+        (128, 8192, 0, 1),
     ),
     ("sm_107a", 64): (
         (212, 2048, 512, 2),
@@ -853,9 +970,34 @@ SHIPPED_FUSED_CALLS = {
         ((1, 1, 128, 256), False),
         ((1, 1, 1024, 256), False),
     ),
+    (128, 8192, 0, 1): (
+        ((1, 64, 128, 128), True),
+        ((65, 1, 128, 128), False),
+        ((1, 32, 256, 256), True),
+        ((33, 1, 256, 256), False),
+        ((1, 1, 8192, 128), True),
+        ((1, 1, 8320, 128), False),
+        ((1, 1, 8192, 8192), True),
+        ((1, 1, 8320, 8320), False),
+        ((1, 1, 128, 128), True),
+        ((1, 1, 128, 256), False),
+    ),
 }
 # The benchmark's long rows ``T1`` to ``T4``, 8192 queries and keys, as (B, H, D, causal).
 LONG_ROWS = ((4, 32, 128, False), (4, 32, 128, True), (8, 32, 64, False), (8, 32, 64, True))
+# The decided route of the measured long calls (head dimension 128, no mask, 4096 or 8192 queries and keys, up to four
+# heads), as ((B, H, Sq, Skv), routed) on every architecture.  This is the decision taken from the measurement, not a
+# measurement: the routed calls (128 CTAs or fewer) were faster on the one-launch route than 0.1.8 (the three-kernel
+# routes) in both replicate runs on SM100, SM103 and SM107; the calls on 256 CTAs or more were slower there and stay on
+# the three-kernel routes.  ``FUSED_REGION`` must reproduce it.
+DECIDED_LONG_CALLS = (
+    ((1, 1, 4096, 4096), True),
+    ((1, 1, 8192, 4096), True),
+    ((1, 2, 4096, 4096), True),
+    ((1, 2, 8192, 8192), False),
+    ((1, 4, 8192, 4096), False),
+    ((1, 4, 8192, 8192), False),
+)
 
 
 def _inside_piece(piece: tuple[int, int, int, int], B: int, H: int, Sq: int, Skv: int) -> bool:
@@ -865,8 +1007,9 @@ def _inside_piece(piece: tuple[int, int, int, int], B: int, H: int, Sq: int, Skv
     return fits and (Skv <= skv_any or Skv <= skv_per_sq * Sq)
 
 
-# The query and key lengths searched for a call that only one piece of a region holds.
-PIECE_ONLY_LENGTHS = (128, 256, 512, 768, 1024, 2048)
+# The query and key lengths searched for a call that only one piece of a region holds (up to the longest ``s_max`` of
+# a shipped piece).
+PIECE_ONLY_LENGTHS = (128, 256, 512, 768, 1024, 2048, 4096, 8192)
 
 
 def _piece_only_call(region: tuple[tuple[int, int, int, int], ...], index: int) -> tuple[int, int, int, int] | None:
@@ -887,7 +1030,8 @@ def test_the_shipped_one_launch_regions() -> None:
     sides of each bound of each of its pieces: the one-launch record for a call inside any piece of the region (a call
     one step past a bound of one piece may lie inside another piece), None for a call inside no piece and for every
     causal call.  Every piece of a region routes a call that no other piece of the region holds.  The benchmark's long
-    rows take the three-kernel routes on every architecture."""
+    rows take the three-kernel routes on every architecture, and every measured long call its decided route
+    (``DECIDED_LONG_CALLS``)."""
     assert dict(cake_jit.FUSED_REGION) == SHIPPED_FUSED_REGION
     pieces = {piece for region in SHIPPED_FUSED_REGION.values() for piece in region}
     assert set(SHIPPED_FUSED_CALLS) == pieces, sorted(set(SHIPPED_FUSED_CALLS) ^ pieces)
@@ -908,6 +1052,9 @@ def test_the_shipped_one_launch_regions() -> None:
     for arch in ARCHES:
         for B, H, D, causal in LONG_ROWS:
             assert cake_jit.fused_record(arch, B, H, 8192, 8192, D, causal) is None, (arch, B, H, D, causal)
+        for (B, H, Sq, Skv), routed in DECIDED_LONG_CALLS:
+            found = cake_jit.fused_record(arch, B, H, Sq, Skv, 128, False)
+            assert found == (FUSED_OF[(128, False)] if routed else None), (arch, B, H, Sq, Skv, found)
 
 
 def test_the_accumulator_layouts() -> None:
@@ -1363,6 +1510,71 @@ def test_the_backward_matches_the_reference(D, causal, pair, case, fused, device
     judge_draws(record_property, draw)
 
 
+# The backward's calls with fewer queries than keys on the shipped tables (no pin): the least call within the bounds of
+# ``PAIR_FEWER_QUERIES`` (``B * H`` 8, 4096 queries, 8192 keys), on the pair route where the architecture has the bounds
+# and on the 1-CTA route where it has none; outside every one-launch piece.
+FEWER_QUERIES_CASES = (Case(1, 8, 4096, 8192),)
+
+
+@pytest.mark.parametrize("case", FEWER_QUERIES_CASES, ids=[f"d128-{case.id}" for case in FEWER_QUERIES_CASES])
+def test_the_backward_with_fewer_queries_matches_the_reference(case, device, monkeypatch, record_property) -> None:
+    """A head-dimension 128 call without the mask with fewer queries than keys, on the shipped tables: ``variant``
+    gives it the pair route exactly when the call is within the bounds ``SHIPPED_PAIR_FEWER_QUERIES`` of the device's
+    architecture, ``fused_record`` gives it no one-launch record, and ``dq``, ``dk`` and ``dv`` of the backward hold the
+    contract and meet the tier of the backward formula on the same inputs."""
+    arch = cake_backend.device_arch(device.index)
+    bounds = SHIPPED_PAIR_FEWER_QUERIES[arch]
+    on = case.kv % (2 * cake_jit.BLOCK) == 0 and _inside_fewer_queries(bounds, case.B * case.H, case.S, case.kv)
+    assert case.S < case.kv and on == (bounds is not None), (arch, case)
+    found = cake_jit.variant(128, False, batch=case.B, heads=case.H, seqlen_q=case.S, seqlen_kv=case.kv, arch=arch)
+    assert found == (128, False, on), (arch, found)
+    assert cake_jit.fused_record(arch, case.B, case.H, case.S, case.kv, 128, False) is None, arch
+    launches = _count_fused_launches(monkeypatch)
+
+    def draw(seed: int):
+        x = make_inputs(case, 128, causal=False, seed=seed, device=device)
+        launches.clear()
+        dq, dk, dv = cake_backend.cake_fmha_nondet_train_backward(
+            x.q, x.k, x.v, x.out, x.lse, x.dout, softmax_scale=x.softmax_scale, causal=False
+        )
+        assert launches == [], launches
+        return judged_backward(x, {"backward": {"dq": dq, "dk": dk, "dv": dv}})
+
+    judge_draws(record_property, draw)
+
+
+# The backward's causal calls on the shipped tables (no pin): the least call of the long-sequence causal region of
+# ``sm_103a`` (``B * H`` 32, 8192 queries and keys), on the route ``DECIDED_LEAST`` names for the architecture (the pair
+# route on SM103 and SM107, the 1-CTA route on SM100); outside every one-launch piece.
+LONG_CAUSAL_CASES = (Case(1, 32, 8192),)
+
+
+@pytest.mark.parametrize("case", LONG_CAUSAL_CASES, ids=[f"d128_causal-{case.id}" for case in LONG_CAUSAL_CASES])
+def test_the_long_causal_backward_matches_the_reference(case, device, monkeypatch, record_property) -> None:
+    """A head-dimension 128 call with the mask on the shipped tables: ``variant`` gives it the route ``DECIDED_LEAST``
+    names for the device's architecture, ``fused_record`` gives it no one-launch record, and ``dq``, ``dk`` and ``dv``
+    of the backward hold the contract and meet the tier of the backward formula on the same inputs."""
+    arch = cake_backend.device_arch(device.index)
+    least = DECIDED_LEAST[arch][True][case.B * case.H]
+    on = least is not None and case.kv >= least
+    assert case.S == case.kv and on == (arch != "sm_100a"), (arch, case)
+    found = cake_jit.variant(128, True, batch=case.B, heads=case.H, seqlen_q=case.S, seqlen_kv=case.kv, arch=arch)
+    assert found == (128, True, on), (arch, found)
+    assert cake_jit.fused_record(arch, case.B, case.H, case.S, case.kv, 128, True) is None, arch
+    launches = _count_fused_launches(monkeypatch)
+
+    def draw(seed: int):
+        x = make_inputs(case, 128, causal=True, seed=seed, device=device)
+        launches.clear()
+        dq, dk, dv = cake_backend.cake_fmha_nondet_train_backward(
+            x.q, x.k, x.v, x.out, x.lse, x.dout, softmax_scale=x.softmax_scale, causal=True
+        )
+        assert launches == [], launches
+        return judged_backward(x, {"backward": {"dq": dq, "dk": dk, "dv": dv}})
+
+    judge_draws(record_property, draw)
+
+
 def _kernels(call, trace: Path) -> tuple[object, list[str]]:
     """``(result, names)``: ``call()``'s result and the names of the CUDA kernels it ran, in launch order, observed on
     the device (``torch.profiler``; the trace is written to ``trace``)."""
@@ -1426,9 +1638,10 @@ def test_the_backward_launches_the_records_of_its_variant(
     gives it, alone and without a host sequence, or else, in order, the preprocess, main-stage and postprocess records
     that ``RECORD_OF`` names for its variant (``variant(D, causal, *, batch, heads, seqlen_q, seqlen_kv, arch)``: at
     head dimension 128 the pair route for 256 keys in a pinned region and the 1-CTA route without one, the 1-CTA route
-    for 384 keys, the shipped regions' route for 8192 queries and keys at ``B * H`` 4 and the 1-CTA route for 1024
-    queries and keys at ``B * H`` 16 on every architecture); the kernels one call runs, observed on the device, are
-    those records' kernels; it writes none of its inputs."""
+    for 384 keys, the shipped regions' route for 8192 queries and keys at ``B * H`` 4 and, with the mask, for 8192 and
+    7936 queries and keys at ``B * H`` 32, and the 1-CTA route for 1024 queries and keys at ``B * H`` 16 on every
+    architecture); the kernels one call runs, observed on the device, are those records' kernels; it writes none of
+    its inputs."""
     _pin_route(monkeypatch, pin)
     variant, record = _route(D, causal, case, fused, device, monkeypatch)
     arch = cake_backend.device_arch(device.index)

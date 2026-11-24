@@ -43,9 +43,11 @@ cooperative, no PDL.  Each of these kernels runs on the grid
 ``(S / 128, H, B)``: S is the query length for ``bwd_pre`` and ``bwd_post``
 and the key length for ``bwd_main``.
 
-The pair route (head dimension 128, a key length that is a multiple of 256, at
-least as many queries as keys, and ``B * H`` and the key length in a region of
-``PAIR_REGIONS`` for the architecture and mask): the main stage is the 2-CTA
+The pair route (head dimension 128, a key length that is a multiple of 256, and
+either at least as many queries as keys with ``B * H`` and the key length in a
+region of ``PAIR_REGIONS`` for the architecture and mask, or no mask and fewer
+queries than keys within the bounds of ``PAIR_FEWER_QUERIES`` for the
+architecture): the main stage is the 2-CTA
 kernel (``bwd_main_2cta`` / ``bwd_main_2cta_causal``, clusters of two CTAs
 along x: one CTA pair per 256 keys), which adds the dQ tiles in the pair-row
 order, and the postprocess is the build that reads that order
@@ -57,8 +59,9 @@ takes it.
 
 The one-launch route (head dimension 128 or 64, no mask): one kernel, the
 ``bwd_fused`` stage (``bwd_fused`` / ``bwd_fused_hd64``), does the whole
-backward of a small shape.  On the grid ``(Sq / 128 + Skv / 128, H, B)`` the
-first ``Sq / 128`` CTAs of a (head, batch) are Q-owners, each the dq of one
+backward of a call on few CTAs (short sequences, or long ones with few
+heads).  On the grid ``(Sq / 128 + Skv / 128, H, B)`` the first
+``Sq / 128`` CTAs of a (head, batch) are Q-owners, each the dq of one
 query block, and the others are KV-owners, each dk and dv of one key block;
 the kernel makes ``LSE * log2(e)`` and ``dPsum`` itself, needs no workspace
 and writes dq, dk and dv once each in one fixed order.  ``FUSED_OF`` names its
@@ -353,13 +356,18 @@ def grid(stage: str, batch: int, heads: int, seqlen_q: int, seqlen_kv: int) -> t
 
 # Architecture -> mask (``causal``) -> the regions of the pair route (:func:`variant`).  A region ``(least, most,
 # length)`` holds the calls with ``least <= B * H`` (and ``B * H <= most`` unless ``most`` is None) and at least
-# ``length`` keys; :func:`variant` routes only calls with at least as many queries as keys.  Every measured call inside
+# ``length`` keys; the regions route only calls with at least as many queries as keys.  Every measured call inside
 # a region was FASTER than 0.1.4 in every counted round of the crossover run, beyond the identical-kernel controls'
-# single-round noise, and every bound is a measured value (``B * H`` 1, 4, 16, 32 and 128; lengths 256 to 8192).  An
-# empty tuple routes no call: the ``sm_100a`` causal pair build ships and no call takes it.
+# single-round noise, and every bound is a measured value (``B * H`` 1, 4, 16, 32 and 128; lengths 256 to 8192).  The
+# ``sm_103a`` causal region ``(32, None, 8192)`` comes from a later measurement against the 1-CTA route (``B * H`` 16,
+# 32, 64, 128 and 256 with 4096, 8192 and 16384 keys): every measured call inside it was faster in every counted round
+# of both replicate runs, in eager calls and in CUDA-graph replays, beyond the identical-kernel controls' noise; at
+# ``B * H`` 128 and 256 with 4096 keys, and at ``B * H`` 16 with 8192 keys, not every run was, so calls with fewer
+# keys or fewer heads keep the 1-CTA route.  An empty tuple routes no call: the ``sm_100a`` causal pair build ships
+# and no call takes it.
 PAIR_REGIONS: dict[str, dict[bool, tuple[tuple[int, int | None, int], ...]]] = {
     "sm_100a": {False: ((1, 1, 4096), (1, 4, 8192), (128, None, 8192)), True: ()},
-    "sm_103a": {False: ((1, 4, 2048), (1, None, 8192)), True: ((1, 4, 2048),)},
+    "sm_103a": {False: ((1, 4, 2048), (1, None, 8192)), True: ((1, 4, 2048), (32, None, 8192))},
     "sm_107a": {
         False: ((1, 4, 2048), (1, None, 4096)),
         True: ((1, 4, 2048), (1, 16, 4096), (1, None, 8192)),
@@ -371,6 +379,18 @@ PAIR_LEAST: dict[str, dict[bool, int | None]] = {
     arch: {causal: min((length for _, _, length in regions), default=None) for causal, regions in masks.items()}
     for arch, masks in PAIR_REGIONS.items()
 }
+# Architecture -> the bounds of the pair route for a call without the mask with fewer queries than keys, or None (no
+# such call takes it): ``(least_count, least_q, least_kv, most_per_q)``.  :func:`variant` routes such a call (head
+# dimension 128, a key length that is a multiple of 256) to the pair route when ``B * H >= least_count``, ``Sq >=
+# least_q``, ``Skv >= least_kv`` and ``Skv <= most_per_q * Sq``.  Every measured call inside the bounds was faster than
+# 0.1.8 (the 1-CTA route) in every counted round of both replicate runs of the CUDA-graph timing, beyond the
+# identical-kernel controls' noise, and every bound is a measured value (``B * H`` 8, 4096 queries, 8192 keys, twice
+# the queries).  ``sm_100a`` has none: no measured call was faster there in both replicate runs.
+PAIR_FEWER_QUERIES: dict[str, tuple[int, int, int, int] | None] = {
+    "sm_100a": None,
+    "sm_103a": (8, 4096, 8192, 2),
+    "sm_107a": (8, 4096, 8192, 2),
+}
 
 
 def variant(
@@ -379,14 +399,23 @@ def variant(
     """The ``RECORD_OF`` key of a call on ``arch``: ``(D, causal, pair)``.
     ``pair`` is True for the pair route: head dimension 128, a key length that
     is a multiple of ``2 * BLOCK`` (a CTA pair of the 2-CTA main kernel covers
-    two key blocks), at least as many queries as keys, and ``batch * heads``
-    and ``seqlen_kv`` in a region of ``PAIR_REGIONS[arch][causal]``.  ``arch``
+    two key blocks), and either at least as many queries as keys with
+    ``batch * heads`` and ``seqlen_kv`` in a region of
+    ``PAIR_REGIONS[arch][causal]``, or no mask and fewer queries than keys
+    within the bounds ``PAIR_FEWER_QUERIES[arch]``.  ``arch``
     is one of ``ARCHES``; every argument after ``causal`` is keyword-only.  An
     unknown ``arch`` raises ``KeyError`` (the backend's ``device_arch`` raises
     ``RuntimeError`` for a device outside ``ARCHES`` before the call)."""
     causal = bool(causal)
     least = PAIR_LEAST[arch][causal]
-    if D != 128 or least is None or seqlen_kv < least or seqlen_q < seqlen_kv or seqlen_kv % (2 * BLOCK):
+    if seqlen_q < seqlen_kv:
+        bounds = PAIR_FEWER_QUERIES[arch]
+        if D != 128 or causal or bounds is None or seqlen_kv % (2 * BLOCK):
+            return (D, causal, False)
+        least_count, least_q, least_kv, most_per_q = bounds
+        pair = batch * heads >= least_count and seqlen_q >= least_q and least_kv <= seqlen_kv <= most_per_q * seqlen_q
+        return (D, causal, pair)
+    if D != 128 or least is None or seqlen_kv < least or seqlen_kv % (2 * BLOCK):
         return (D, causal, False)
     count = batch * heads
     for low, high, length in PAIR_REGIONS[arch][causal]:
@@ -412,6 +441,7 @@ FUSED_REGION: dict[tuple[str, int], tuple[tuple[int, int, int, int], ...] | None
         (152, 1024, 0, 3),
         (640, 512, 256, 0),
         (301, 1024, 128, 0),
+        (128, 8192, 0, 1),
     ),
     ("sm_100a", 64): (
         (152, 2048, 512, 2),
@@ -426,6 +456,7 @@ FUSED_REGION: dict[tuple[str, int], tuple[tuple[int, int, int, int], ...] | None
         (152, 1024, 0, 3),
         (303, 512, 256, 0),
         (301, 1024, 128, 0),
+        (128, 8192, 0, 1),
     ),
     ("sm_103a", 64): (
         (204, 2048, 256, 0),
@@ -440,6 +471,7 @@ FUSED_REGION: dict[tuple[str, int], tuple[tuple[int, int, int, int], ...] | None
         (423, 512, 256, 0),
         (210, 2048, 768, 2),
         (423, 1024, 128, 0),
+        (128, 8192, 0, 1),
     ),
     ("sm_107a", 64): (
         (212, 2048, 512, 2),

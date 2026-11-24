@@ -77,7 +77,9 @@ in a band of rows per SM) and its repeatable role (``_rep``: a BF16
 weight gradient past the fused band, and on sm_107a also before it; an FP32
 weight gradient past its small-row band but in the band of its call role on
 sm_100a and sm_103a; on packed rows from ``LONG_BACKWARD_ROWS_PER_SM``
-rows per SM its long role ``_rep_long`` in its place), its call role (the
+rows per SM, and for a BF16 weight gradient on other rows from
+``LONG_BACKWARD_STRIDED_ROWS_PER_SM``, its long role ``_rep_long`` in its
+place), its call role (the
 static backward, where an architecture routes one for the role: an FP32
 weight gradient on sm_100a and sm_103a, in a band of rows per SM; a BF16
 one on sm_107a, which no band runs), for a BF16 weight gradient its
@@ -196,7 +198,9 @@ arithmetic runs, with the same FP32 operations in the same order, so its
 outputs are the repeatable backward's bits at every row count and grid.  It
 runs in the repeatable backward's place on packed rows (``dy``, ``x`` and
 ``z`` with head stride 128 and token stride ``H * 128``) from
-``LONG_BACKWARD_ROWS_PER_SM`` rows per SM, where it is faster.
+``LONG_BACKWARD_ROWS_PER_SM`` rows per SM and, in a call that computes the
+weight gradient, on other rows from ``LONG_BACKWARD_STRIDED_ROWS_PER_SM``,
+where it is faster.
 The repeatable backward of an FP32 weight gradient (``bwd_f32_rep``, every
 architecture; build ``{"math": "ax", "min_blocks": 4, "out": "f32",
 "prefetch_share": None, "threads": 256}``) and its long program
@@ -241,9 +245,10 @@ claimed program, the fused and the repeatable band run their strided
 programs at every row count, the repeatable band's on packed rows in its
 128-thread build (``<band>_nodw_strided_packed``: 8-row blocks, a row to
 each 16 lanes, as in the 256-thread programs) and on other layouts in
-256-thread CTAs of 16-row blocks.  The repeatable band's long role runs its
-long program built so (``bwd_bf16_rep_nodw_long``), or, where none is
-routed, the long role with ``weight_grad`` 0.  A band whose architecture
+256-thread CTAs of 16-row blocks.  The repeatable band's long role, which
+such a call runs on packed rows only, runs its long program built so
+(``bwd_bf16_rep_nodw_long``), or, where none is routed, the long role with
+``weight_grad`` 0.  A band whose architecture
 routes no such program runs its own module with ``weight_grad`` 0, the
 same bits.  On packed rows (``dy``, ``x`` and ``z`` of head stride 128 and
 token stride ``H * 128``; the call also passes one token of head stride 128
@@ -735,12 +740,14 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "fwd_l32_tiny",
     },
-    # The pipelined forward: the deterministic package's forward program with
-    # a gate that does not flush (split_gate 1, under this package's name): 128
-    # threads, 8 lanes per row (16-row blocks), at most 6 CTAs per SM, each
-    # thread loading its row of the CTA's next block into registers while it
-    # computes the current one, thread 0 warming the CTA's next block and the
-    # first block of the CTA one wave later in L2 (build {"min_blocks": 6,
+    # The pipelined forward, the program of 0.2.14: a build of the
+    # deterministic package's forward kernel with a gate that does not flush
+    # (split_gate 1, under this package's name): 128 threads, 8 lanes per row
+    # (16-row blocks), at most 6 CTAs per SM, each thread loading its row of
+    # the CTA's next block into registers while it computes the current one,
+    # thread 0 warming the CTA's next block and the first block of the CTA one
+    # wave later in L2 where x and z both hold packed rows (head stride 128,
+    # token stride H * 128) and no other rows (build {"min_blocks": 6,
     # "packed_rows": 0, "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz":
     # 0, "split_gate": 1, "store_width": 128, "sum_pairs": 0, "threads": 128,
     # "w_late": 0});
@@ -1798,7 +1805,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # FP32 operations in the same order, so dx, dz and dw are the repeatable
     # backward's bits at every row count and grid; it runs in the repeatable
     # backward's place on packed rows from LONG_BACKWARD_ROWS_PER_SM rows per
-    # SM.
+    # SM and, in a call that computes the weight gradient, on other rows from
+    # LONG_BACKWARD_STRIDED_ROWS_PER_SM rows per SM.
     "cake_rmsnorm_silu_gate_train_fef9d1cc2cc267219992": {
         "arches": [
             "sm_100a",
@@ -1972,7 +1980,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # a block's rows load while the previous block's row arithmetic runs,
     # with the same FP32 operations in the same order, so dx, dz and dw are
     # the repeatable backward's bits at every row count and grid; it runs in
-    # the repeatable backward's place on packed rows from
+    # the repeatable backward's place on packed rows only, from
     # LONG_BACKWARD_ROWS_PER_SM rows per SM.
     "cake_rmsnorm_silu_gate_train_be861a132bbc76cb6433": {
         "arches": [
@@ -2718,9 +2726,10 @@ MODULES: dict[str, dict[str, Any]] = {
     # (its build plus "dw": False: the look-ahead loop, claims, ticket, grid
     # rule and workspace), so dx and dz are the repeatable backward's bits; a
     # call with compute_grad_weight=False runs it where the long role
-    # bwd_bf16_rep_long runs (build {"dw": False, "lookahead": True, "math":
-    # "ax", "min_blocks": 4, "out": "bf16", "prefetch_share": None,
-    # "threads": 256}).
+    # bwd_bf16_rep_long runs on packed rows (such a call runs no long role on
+    # other rows) (build {"dw": False, "lookahead": True, "math": "ax",
+    # "min_blocks": 4, "out": "bf16", "prefetch_share": None, "threads":
+    # 256}).
     "cake_rmsnorm_silu_gate_train_d8dd2e7dae0ca8233241": {
         "arches": [
             "sm_100a",
@@ -3089,13 +3098,37 @@ BACKWARD_BANDS: dict[
 # on sm_100a and sm_103a and 1536 on sm_107a; of a role with two repeatable
 # bands only the last reaches it (of a BF16 weight gradient on sm_107a past
 # ``SM107A_BF16_FUSED_LAST``, of an FP32 one on sm_100a and sm_103a past
-# ``F32_STATIC_LAST``).  Other layouts and fewer rows run the band's module.
-# Host plan only, as the bands.
+# ``F32_STATIC_LAST``).  Other layouts run the band's module, except a BF16
+# weight gradient from ``LONG_BACKWARD_STRIDED_ROWS_PER_SM`` (below); fewer
+# rows always.  Host plan only, as the bands.
 LONG = "_long"
 LONG_BACKWARD_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16_rep": 2560, "bwd_f32_rep": 2560},
     "sm_103a": {"bwd_bf16_rep": 2560, "bwd_f32_rep": 2560},
     "sm_107a": {"bwd_bf16_rep": 1536, "bwd_f32_rep": 1536},
+}
+# The rows per SM from which a band role's long role runs in its place on
+# rows that are not packed, for a call that computes the weight gradient, by
+# architecture and band role: the repeatable band of a BF16 weight gradient
+# only (an FP32 one, and a call without the weight gradient, run the long
+# role on packed rows only).  The cuts are the deterministic package's for
+# the same pair of programs: one row per SM past the default loop's L2
+# prefetch share (96 blocks per CTA on sm_100a and sm_103a, 64 on sm_107a)
+# times 64 (16 rows a block, 4 CTAs per SM), 6145 rows per SM on sm_100a and
+# sm_103a and 4097 on sm_107a.  At the share and below it the default loop
+# still warms each CTA's next block in L2 and is as fast as the look-ahead
+# loop or faster; past it the default loop stops prefetching.  On sm_103a
+# (GB300) the look-ahead loop is 0.1 to 0.5 % slower at exactly 6144 rows per
+# SM and 3.6 to 4.5 % faster from 6444 to 15000 on projection and head-major
+# rows.  On a gate and ``grad_out`` sliced from projections the look-ahead
+# loop is 4.2 to 5.3 % faster from 7000 rows per SM on sm_100a and sm_103a
+# and 3.5 to 4.0 % from 4500 on sm_107a, at parity at 4500 on sm_100a and
+# sm_103a and slower at lower row counts below the share.  Host plan only, as
+# the bands.
+LONG_BACKWARD_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
+    "sm_100a": {"bwd_bf16_rep": 6145},
+    "sm_103a": {"bwd_bf16_rep": 6145},
+    "sm_107a": {"bwd_bf16_rep": 4097},
 }
 
 # The suffixes of the roles of a backward without the weight gradient
@@ -3171,7 +3204,9 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 # and ``bwd_f32_rep``, every architecture) and the repeatable roles' long
 # roles (``bwd_bf16_rep_long`` and ``bwd_f32_rep_long``, every
 # architecture, on packed rows from ``LONG_BACKWARD_ROWS_PER_SM`` rows per
-# SM) in the rows of their ``BACKWARD_BANDS`` bands, which cover every row
+# SM, ``bwd_bf16_rep_long`` also on other rows from
+# ``LONG_BACKWARD_STRIDED_ROWS_PER_SM``) in the rows of their
+# ``BACKWARD_BANDS`` bands, which cover every row
 # count; for a BF16 weight gradient its row-claims roles (``<role>_rc``,
 # ``<role>_rc_mid``; sm_100a and sm_103a) and its mid role (``<role>_mid``,
 # the claimed backward) are routed, but no band runs them; the programs
@@ -3274,8 +3309,8 @@ def routes_every_call(arch: str) -> bool:
     of each backward role's ``BACKWARD_BANDS`` names a role ``ROUTES[arch]``
     routes, a role whose bands do not end with a ``None`` band routes its
     own module (:func:`module_for_rows` falls back to it past the bands), and
-    every band role ``LONG_BACKWARD_ROWS_PER_SM[arch]`` names routes its long
-    role."""
+    every band role ``LONG_BACKWARD_ROWS_PER_SM[arch]`` or
+    ``LONG_BACKWARD_STRIDED_ROWS_PER_SM[arch]`` names routes its long role."""
 
     routes = ROUTES.get(arch, {})
     tables: list[tuple[str, tuple[tuple[object, str], ...]]] = [
@@ -3291,7 +3326,9 @@ def routes_every_call(arch: str) -> bool:
         if all(last is not None for last, _ in bands) and role not in routes:
             return False
     return all(
-        band + LONG in routes for band in LONG_BACKWARD_ROWS_PER_SM.get(arch, {})
+        band + LONG in routes
+        for cuts in (LONG_BACKWARD_ROWS_PER_SM, LONG_BACKWARD_STRIDED_ROWS_PER_SM)
+        for band in cuts.get(arch, {})
     )
 
 
@@ -3311,7 +3348,13 @@ def backward_chunks(name: str, rows: int) -> tuple[int, int]:
 
 
 def module_for_rows(
-    arch: str, role: str, rows: int, sm_count: int, *, packed: bool = True
+    arch: str,
+    role: str,
+    rows: int,
+    sm_count: int,
+    *,
+    packed: bool = True,
+    compute_grad_weight: bool = True,
 ) -> str:
     """The module that runs ``role`` (one of ``ROLES``) for ``rows`` rows on
     ``arch`` with ``sm_count`` SMs: for the forward the module of the first of
@@ -3322,11 +3365,15 @@ def module_for_rows(
     backward role the module of the first of its ``BACKWARD_BANDS[arch]``
     bands whose ``last`` holds: ``(ROWS, n)`` with ``rows <= n``, a number
     with ``rows <= last * sm_count``, or ``None``, and in its place the
-    band's long role (``band + LONG``, the same bits) when ``packed`` holds
-    (``dy``, ``x`` and ``z`` hold packed rows: the caller's test) and the
-    rows reach the band's ``LONG_BACKWARD_ROWS_PER_SM[arch]`` cut, ``rows >=
-    cut * sm_count``; else :func:`route_module`.  ``packed`` defaults to
-    true, the forward's packed rows: a backward caller passes its own test."""
+    band's long role (``band + LONG``, the same bits) when the rows reach the
+    band's cut, ``rows >= cut * sm_count``: where ``packed`` holds (``dy``,
+    ``x`` and ``z`` hold packed rows: the caller's test) its
+    ``LONG_BACKWARD_ROWS_PER_SM[arch]`` cut, else, where
+    ``compute_grad_weight`` holds (the call computes the weight gradient),
+    its ``LONG_BACKWARD_STRIDED_ROWS_PER_SM[arch]`` cut (a call without the
+    weight gradient runs the long role on packed rows only); else
+    :func:`route_module`.  ``packed`` defaults to true, the forward's packed
+    rows: a backward caller passes its own test."""
 
     if role == "fwd":
         packed = packed and int(rows) < PACKED_ROWS
@@ -3342,8 +3389,13 @@ def module_for_rows(
         else:
             runs = bound is None or int(rows) <= bound * int(sm_count)
         if runs:
-            cut = LONG_BACKWARD_ROWS_PER_SM.get(arch, {}).get(band)
-            if packed and cut is not None and int(rows) >= cut * int(sm_count):
+            if packed:
+                cut = LONG_BACKWARD_ROWS_PER_SM.get(arch, {}).get(band)
+            elif compute_grad_weight:
+                cut = LONG_BACKWARD_STRIDED_ROWS_PER_SM.get(arch, {}).get(band)
+            else:
+                cut = None
+            if cut is not None and int(rows) >= cut * int(sm_count):
                 return route_module(arch, band + LONG)
             return name
     return route_module(arch, role)
@@ -3377,7 +3429,8 @@ def nodw_module(
     """The module of a backward without the weight gradient for ``rows``
     rows on ``arch`` with ``sm_count`` SMs, given ``name``, the module
     :func:`module_for_rows` names for the call (the BF16 bands' role
-    ``bwd_bf16``) and its band role ``band`` (the record's role), and
+    ``bwd_bf16``, with ``compute_grad_weight`` false, so a long role only on
+    packed rows) and its band role ``band`` (the record's role), and
     ``packed``, whether ``dy``, ``x`` and ``z`` hold packed rows (the
     caller's test, as for :func:`module_for_rows`; the backward also passes
     one token of head stride 128 as packed rows where
@@ -3856,6 +3909,7 @@ __all__ = [
     "INT32_MAX",
     "LONG",
     "LONG_BACKWARD_ROWS_PER_SM",
+    "LONG_BACKWARD_STRIDED_ROWS_PER_SM",
     "MODULES",
     "NODW",
     "NODW_ROLES",

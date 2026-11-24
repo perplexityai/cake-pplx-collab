@@ -131,6 +131,41 @@ COMM_SMS = {
 }
 _FACTORY_COMM_SMS = (40, 40)
 
+# Per-launch source split of the router-weight-before-down BF16 forward
+# (``MoKConfig.source_split_comm_sms``): the forward communication-SM count of a
+# rank whose source rows exceed ``SOURCE_SPLIT_THRESHOLD`` times the mean source
+# rows of the ranks, keyed by device compute capability, SM count and EP group
+# size. The forward kernel decides per launch from its own schedule (the
+# owner-rank route totals every rank holds alike), so only a source-rich rank
+# moves SMs from its communication program to its compute tiles, whose shared
+# expert grows with its source rows while its routed rows match the other
+# ranks'. Only devices and group sizes with a measured gain have a row; "auto"
+# resolves to None (the split off) elsewhere. Protocol and absolute times:
+# backend README, "Source split".
+SOURCE_SPLIT_COMM_SMS = {
+    (10, 0): {148: {8: 16}, 152: {4: 16}},
+    (10, 3): {152: {4: 16}},
+}
+SOURCE_SPLIT_THRESHOLD = 1.5
+
+
+def resolve_source_split_comm_sms(ep_size, device=None):
+    """Forward communication-SM count of a source-rich rank measured for EP
+    group size ``ep_size`` on ``device`` (:data:`SOURCE_SPLIT_COMM_SMS`), or
+    ``None`` when the device (compute capability and SM count) or group size
+    has no row (the source split stays off).
+    """
+    import torch
+
+    ep_size = int(ep_size)
+    if ep_size < 1:
+        raise ValueError(f"ep_size must be a positive group size, got {ep_size}")
+    if device is None:
+        device = torch.cuda.current_device()
+    capability = tuple(torch.cuda.get_device_capability(device))
+    sm_count = int(torch.cuda.get_device_properties(device).multi_processor_count)
+    return SOURCE_SPLIT_COMM_SMS.get(capability, {}).get(sm_count, {}).get(ep_size)
+
 
 def resolve_imbalance_comm_sms(precision, device=None):
     """(forward, backward) communication-SM split used under imbalanced routing
@@ -286,6 +321,8 @@ def create_mok_bf16_workspace(
     precision="bf16",
     imbalance_comm_sms="auto",
     imbalance_threshold="auto",
+    source_split_comm_sms="auto",
+    source_split_threshold=1.5,
 ):
     """Collectively create a caller-owned ``(config, workspace)`` pair.
 
@@ -348,6 +385,17 @@ def create_mok_bf16_workspace(
     ``MoKConfig.comm_split_log`` (default ``False``; ``dataclasses.replace(config,
     comm_split_log=True)`` on the returned config) prints each split change per
     rank to stderr.
+    ``source_split_comm_sms`` is the forward communication-SM count of a rank
+    whose source rows exceed ``source_split_threshold`` times the mean source
+    rows of the ranks, for the router-weight-before-down BF16 forward: its
+    kernel decides per launch on the device from that launch's schedule, so
+    CUDA Graph replays and layers that share a workspace decide from their
+    own routing, and only such a rank changes its count (when the count is
+    below the forward count in force). ``"auto"`` (default) takes the measured
+    row of the device and EP group size (:func:`resolve_source_split_comm_sms`,
+    :data:`SOURCE_SPLIT_COMM_SMS`) and ``None`` where there is none; ``None``
+    keeps the forward count and an even count sets it. The split changes time
+    only, never an output bit.
     """
     from .workspace import MoKConfig
     from .backend import create_source_workspace
@@ -377,6 +425,8 @@ def create_mok_bf16_workspace(
             )
     if isinstance(imbalance_threshold, str) and imbalance_threshold != "auto":
         raise ValueError('imbalance_threshold must be "auto" or a number')
+    if isinstance(source_split_comm_sms, str) and source_split_comm_sms != "auto":
+        raise ValueError('source_split_comm_sms must be "auto", None or a count')
     routed_comm_sms = {}
     if all(auto):
         import torch.distributed as dist
@@ -395,6 +445,12 @@ def create_mok_bf16_workspace(
         imbalance_threshold = resolve_imbalance_threshold(
             precision, torch.cuda.current_device() if device is None else device
         )
+    if isinstance(source_split_comm_sms, str):
+        import torch.distributed as dist
+
+        source_split_comm_sms = resolve_source_split_comm_sms(
+            dist.get_world_size(group), device
+        )
     config = MoKConfig(
         fwd_num_comm_sms=fwd_num_comm_sms,
         bwd_num_comm_sms=bwd_num_comm_sms,
@@ -403,6 +459,8 @@ def create_mok_bf16_workspace(
         minibatch_size=minibatch_size,
         macrobatch_size=macrobatch_size,
         schedule_capacity_multiplier=schedule_capacity_multiplier,
+        source_split_comm_sms=source_split_comm_sms,
+        source_split_threshold=source_split_threshold,
         bf16_comm_sms=routed_comm_sms.get("bf16"),
         mxfp8_comm_sms=routed_comm_sms.get("mxfp8"),
     )

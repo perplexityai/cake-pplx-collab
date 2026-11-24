@@ -44,14 +44,16 @@ operands' device, in this order:
    the dQ tiles added into the FP32 accumulator by bulk reductions.
 3. ``bwd_post``: ``dq = bf16(acc * softmax_scale)`` in the layout of ``q``.
 
-A head-dimension 128 call whose key length is a multiple of 256, with at least
-as many queries as keys, takes the pair route where a region of
+A head-dimension 128 call whose key length is a multiple of 256 takes the pair
+route (long sequences; :func:`.cake_jit.variant` picks the ``RECORD_OF``
+variant) where, with at least as many queries as keys, a region of
 ``cake_jit.PAIR_REGIONS`` for its architecture and mask holds its ``B * H`` and
-key length (long sequences; :func:`.cake_jit.variant` picks the ``RECORD_OF``
-variant): its main stage is the 2-CTA kernel, one CTA pair per 256 keys, which
-adds the dQ tiles in the pair-row order, and its postprocess is the build that
-reads that order.  The kernel parameters, grids and workspace are the same on
-both three-kernel routes.
+key length, or where, with no mask and fewer queries than keys, the call is
+inside the bounds ``cake_jit.PAIR_FEWER_QUERIES`` of its architecture: its main
+stage is the 2-CTA kernel, one CTA pair per 256 keys, which adds the dQ tiles
+in the pair-row order, and its postprocess is the build that reads that order.
+The kernel parameters, grids and workspace are the same on both three-kernel
+routes.
 
 The three-kernel backward runs the three launches in one host call: the library
 of the variant's host sequence compiles the three kernel units beside a host

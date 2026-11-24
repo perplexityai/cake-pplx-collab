@@ -250,13 +250,22 @@ def test_candidate_block_facades_are_stable(fn):
     assert not getattr(fn, "is_experimental", False)
 
 
-def test_candidate_block_facade_matches_backend_and_owns_no_policy():
+# key segments past 2048 blocks (the scan_blocks program) and of at most 2048 blocks (the plain programs and the rows
+# written before them)
+CB_FACADE_SHAPES = {
+    "scan_blocks": ([48, 16], [17000, 900]),
+    "iota": ([48, 16], [16000, 384]),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(CB_FACADE_SHAPES))
+def test_candidate_block_facade_matches_backend_and_owns_no_policy(shape):
     """The public candidate-block call returns the backend call's ``(indices, scores, candidate_blocks)`` without a
     warning (bit for bit), ``None`` in place of the scores with ``return_scores=False`` (``scores`` given then is a
     ``ValueError``), the caller's output tensors when given, and the backend's workspace bound."""
     _require_program()
     inputs = ref.make_random_inputs(
-        [48, 16], [17000, 900], top_k=512, seed=7810, device="cuda"
+        *CB_FACADE_SHAPES[shape], top_k=512, seed=7810, device="cuda"
     )
     args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
     kwargs = inputs.kwargs()

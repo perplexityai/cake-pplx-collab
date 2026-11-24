@@ -5,7 +5,8 @@
 """MoK functional adapter over the generated training kernels.
 
 Copies, barriers, scheduler, epilogues and empty-expert zeroing retain the
-native launch boundaries. Unequal source lengths use masked rows in common
+native launch boundaries (a padded source prefix is staged with its constant
+padding rows by one copy). Unequal source lengths use masked rows in common
 symmetric storage; the fused kernels keep the same runtime-shape entrypoints.
 Routed experts run in BF16, or natively in MXFP8 when the routed weights are
 passed as caller-prequantized MXFP8 tuples, as in MoK's functional API. The FP32
@@ -14,7 +15,7 @@ router weight multiplies each routed expert's output in the combine
 down projection, with an unweighted combine (``"before_down"``).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 import sys
 
@@ -36,6 +37,7 @@ from ._kernels import (
     MoKRecompute,
     MoKRecomputeMXFP8,
     MoKScheduler,
+    SOURCE_SPLIT_UNIT,
     _ffi_stream,
     _recall,
     _remember,
@@ -136,6 +138,18 @@ class _StepPlan:
     x_rows: torch.Tensor
     scores: torch.Tensor | None = None
     dy_rows: torch.Tensor | None = None
+    # Padded staging per padding row count (``MoKFunctional._padding``).
+    padding: dict = field(default_factory=dict)
+
+
+@dataclass(slots=True, eq=False)
+class _PaddingRows:
+    """Constant padding rows of one workspace (``MoKFunctional._padding_rows``):
+    BF16 zeros ``[256, hidden]`` and FP32 ones ``[256, topk]``, never written
+    after they are filled."""
+
+    zeros: torch.Tensor
+    ones: torch.Tensor
 
 
 @dataclass(slots=True, eq=False)
@@ -456,10 +470,74 @@ class MoKFunctional:
             destination[count:rows].fill_(padding)
 
     @staticmethod
+    def _cat_rows(*stagings):
+        """Stage each ``(source, padding_rows, destination)``, ``destination``
+        a plan's ``[rows]`` prefix view, with one ``torch.cat``: the bytes of
+        ``_copy_source`` (source rows, then the constant padding rows), one
+        launch instead of a copy and a fill; None entries are skipped. False
+        when ``cat`` rejects a staging (a source that autograd records, or one
+        that overlaps the workspace); the caller then stages every buffer by
+        ``_copy_source``."""
+        try:
+            for staging in stagings:
+                if staging is not None:
+                    source, padding, destination = staging
+                    torch.cat((source, padding), out=destination)
+        except RuntimeError:
+            return False
+        return True
+
+    @staticmethod
     def _shared_rows(source_count):
         # Peer addressing retains the symmetric allocation. Shared-expert work
         # only needs the active local prefix rounded to the existing MMA tile.
         return max(256, (source_count + 255) // 256 * 256)
+
+    @staticmethod
+    def _padding_rows(workspace):
+        """The workspace's constant padding rows (BF16 zeros ``[256, hidden]``,
+        FP32 ones ``[256, topk]``; a padded prefix has 1 to 256 padding rows),
+        filled on first use and shared by the adapters of the workspace. None
+        during CUDA Graph capture before they exist: a fill recorded by the
+        capture would only run at replay. Normal tensors also when first used
+        under ``torch.inference_mode()``."""
+        key = ("padding_rows",)
+        plans = workspace.launch_plans
+        rows = plans.get(key)
+        if rows is None and not torch.cuda.is_current_stream_capturing():
+            with torch.inference_mode(False):
+                rows = plans[key] = _PaddingRows(
+                    zeros=torch.zeros(
+                        (256, workspace.hidden_size),
+                        dtype=torch.bfloat16,
+                        device=workspace.device,
+                    ),
+                    ones=torch.ones(
+                        (256, workspace.topk),
+                        dtype=torch.float32,
+                        device=workspace.device,
+                    ),
+                )
+        return rows
+
+    def _padding(self, workspace, plan, pad, tails=()):
+        """The views of a padded staging with ``pad`` padding rows: zeros and
+        ones of ``pad`` rows, then for each ``(buffer, width)`` of ``tails`` the
+        buffer's padding rows ``[(rows - pad) * width, rows * width)`` (``rows``
+        the plan's shared rows). Kept in the plan per ``pad`` (at most 256
+        entries). None when the padding rows do not exist yet (capture)."""
+        views = plan.padding.get(pad)
+        if views is None:
+            rows = self._padding_rows(workspace)
+            if rows is None:
+                return None
+            end = plan.x_rows.shape[0]
+            views = plan.padding[pad] = (
+                rows.zeros[:pad],
+                rows.ones[:pad],
+                *(buffer[(end - pad) * width : end * width] for buffer, width in tails),
+            )
+        return views
 
     def _check_device(self, workspace):
         if (
@@ -516,9 +594,12 @@ class MoKFunctional:
         if workspace.num_local_tokens * workspace.topk * 4 % 2048:
             raise ValueError("The route buffer must contain complete metadata chunks")
         plan = self._schedule_plan(workspace)
+        # The before-down forward's source split reads the owner-rank route
+        # totals of this schedule (``MoKSchedule.owner_routes``).
+        split = config.source_split_comm_sms is not None
         if plan is None:
-            rank, token, num_tokens, counts, layout = self._schedule_launches(
-                workspace, config, top_experts, count
+            rank, token, num_tokens, counts, layout, owner_routes = (
+                self._schedule_launches(workspace, config, top_experts, count, split)
             )
         else:
             with _ffi_stream():
@@ -546,6 +627,7 @@ class MoKFunctional:
                 )
                 self._observe_load(workspace, config, num_tokens)
                 self.scheduler.layout_planned(plan.scheduler, counts, rank, layout)
+                owner_routes = self.scheduler.owner_loads() if split else None
                 self.scheduler.release_counts()
         if owner is not None:
             return MoKSourceSchedule(
@@ -554,6 +636,7 @@ class MoKFunctional:
                 num_tokens=num_tokens,
                 tokens_per_expert=counts,
                 layout=layout,
+                owner_routes=owner_routes,
                 num_source_tokens=count,
                 workspace=owner,
             )
@@ -563,6 +646,7 @@ class MoKFunctional:
             num_tokens=num_tokens,
             tokens_per_expert=counts,
             layout=layout,
+            owner_routes=owner_routes,
         )
 
     def _check_schedule_config(self, config, device):
@@ -621,6 +705,25 @@ class MoKFunctional:
                 raise ValueError(
                     "imbalance_threshold must be a finite number above 1.0"
                 )
+        split = config.source_split_comm_sms
+        if split is not None and (
+            type(split) is not int or split <= 0 or split % 2 or split >= sms
+        ):
+            raise ValueError(
+                "source_split_comm_sms must be a positive, even communication-SM "
+                "count that leaves compute SMs"
+            )
+        threshold = config.source_split_threshold
+        if (
+            type(threshold) not in (int, float)
+            or not math.isfinite(threshold)
+            or not 1.0 < threshold <= 65536
+            or round(threshold * SOURCE_SPLIT_UNIT) <= SOURCE_SPLIT_UNIT
+        ):
+            raise ValueError(
+                "source_split_threshold must be a finite number at most 65536 "
+                "that stays above 1.0 in 1/256 steps"
+            )
         if type(config.comm_split_log) is not bool:
             raise TypeError("comm_split_log must be a boolean")
         if (
@@ -685,10 +788,11 @@ class MoKFunctional:
                 )
         return plan
 
-    def _schedule_launches(self, workspace, config, top_experts, count):
+    def _schedule_launches(self, workspace, config, top_experts, count, split=False):
         """The schedule's copies and launches without a plan (first build under
         CUDA Graph capture): ``(peer_rank, peer_token, num_tokens,
-        tokens_per_expert, layout)``."""
+        tokens_per_expert, layout, owner_routes)``, ``owner_routes`` None
+        unless ``split``."""
         if count == workspace.num_local_tokens:
             top_experts_int32 = top_experts.to(torch.int32)
         else:
@@ -713,8 +817,9 @@ class MoKFunctional:
         )
         self._observe_load(workspace, config, num_tokens)
         layout = self.scheduler.layout(counts, workspace.schedule_capacity, rank)
+        owner_routes = self.scheduler.owner_loads() if split else None
         self.scheduler.release_counts()
-        return rank, token, num_tokens, counts, layout
+        return rank, token, num_tokens, counts, layout, owner_routes
 
     def _load_entry(self, workspace, create):
         entry = self._load_state.get(id(workspace))
@@ -874,6 +979,37 @@ class MoKFunctional:
                     flush=True,
                 )
         return split
+
+    def _source_split(self, config, workspace, schedule, fwd_comm_sms):
+        """``(rich_comm_sms, rich_threshold, owner_routes)`` of a forward
+        launch: the router-weight-before-down kernel's communication-SM count
+        for a source-rich rank (``MoKConfig.source_split_comm_sms``), its
+        threshold in 1/256 steps and the schedule's owner-rank route totals the
+        kernel reads the ranks' mean source rows from. The split is off (the
+        count in force, and ``num_tokens`` in place of the totals, which the
+        kernel then never reads) for the router weight after the down
+        projection, without a count, with a count not below the forward count
+        in force (``fwd_comm_sms``), or for a schedule without totals."""
+        rich = config.source_split_comm_sms
+        threshold = round(config.source_split_threshold * SOURCE_SPLIT_UNIT)
+        routes = schedule.owner_routes
+        if (
+            not self.weight_before_down
+            or rich is None
+            or rich >= fwd_comm_sms
+            or routes is None
+        ):
+            return fwd_comm_sms, threshold, schedule.num_tokens
+        if (
+            routes.numel() != workspace.ep_size
+            or routes.dtype != torch.int32
+            or routes.get_device() != workspace.device.index
+        ):
+            raise ValueError(
+                "schedule.owner_routes must be the schedule's int32 [ep_size] "
+                "route totals on the workspace device"
+            )
+        return rich, threshold, routes
 
     @staticmethod
     def _schedule(schedule):
@@ -1079,6 +1215,9 @@ class MoKFunctional:
         intermediate = shared_gate_weights.shape[0]
         experts = schedule.tokens_per_expert.numel()
         before_down = self.weight_before_down
+        rich_comm_sms, rich_threshold, owner_routes = self._source_split(
+            config, workspace, schedule, fwd_comm_sms
+        )
 
         def build():
             x_rows = workspace.x_buffer[:shared_rows]
@@ -1098,6 +1237,9 @@ class MoKFunctional:
                     config.minibatch_size,
                     weight_ptrs=(
                         workspace.router_weight_buffer_ptrs if before_down else None
+                    ),
+                    source_split=(
+                        (rich_comm_sms, rich_threshold) if before_down else None
                     ),
                 ),
                 barrier=self._barrier_plan(workspace),
@@ -1123,6 +1265,8 @@ class MoKFunctional:
                 config.minibatch_size,
                 intermediate,
                 experts,
+                rich_comm_sms,
+                rich_threshold,
             ),
             build,
         )
@@ -1130,14 +1274,24 @@ class MoKFunctional:
         with _ffi_stream():
             # Stage: counters, source rows, then the peer barrier (B2).
             plan.fused.slab.zero_()
-            if shared_rows > source_count:
-                self._copy_source(workspace.x_buffer, x, 0, shared_rows)
-                self._copy_source(
-                    workspace.router_weight_buffer, router_weights, 1, shared_rows
+            pad = shared_rows - source_count
+            if pad:
+                padding = self._padding(
+                    workspace, plan, pad, ((workspace.combine_buffer, topk),)
                 )
-                workspace.combine_buffer[
-                    source_count * topk : shared_rows * topk
-                ].zero_()
+                if padding is not None and self._cat_rows(
+                    (x, padding[0], plan.x_rows),
+                    (router_weights, padding[1], plan.scores),
+                ):
+                    padding[2].zero_()
+                else:
+                    self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    self._copy_source(
+                        workspace.router_weight_buffer, router_weights, 1, shared_rows
+                    )
+                    workspace.combine_buffer[
+                        source_count * topk : shared_rows * topk
+                    ].zero_()
                 scores = plan.scores
             elif before_down:
                 plan.x_rows.copy_(x)
@@ -1162,6 +1316,7 @@ class MoKFunctional:
                 schedule.peer_token_idx,
                 schedule.num_tokens,
                 schedule.layout,
+                owner_routes,
             )
             if barrier is not None:
                 barrier.launch(())
@@ -1223,6 +1378,13 @@ class MoKFunctional:
         program = {"multimacro": self._multimacro(config, workspace)} if mxfp8 else {}
         if self.weight_before_down:
             program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
+            if not mxfp8:
+                rich_comm_sms, rich_threshold, owner_routes = self._source_split(
+                    config, workspace, schedule, fwd_comm_sms
+                )
+                program["source_split"] = (rich_comm_sms, rich_threshold)
+                if rich_comm_sms < fwd_comm_sms:
+                    program["owner_routes"] = owner_routes
         values = forward_kernel(
             workspace.x_buffer[:shared_rows],
             workspace.x_buffer_ptrs,
@@ -1365,12 +1527,21 @@ class MoKFunctional:
         barrier = plan.barrier
         with _ffi_stream():
             plan.fused.slab.zero_()
-            if shared_rows > source_count:
-                self._copy_source(workspace.x_buffer, x, 0, shared_rows)
-                if before_down:
-                    self._copy_source(
-                        workspace.router_weight_buffer, router_weights, 1, shared_rows
-                    )
+            pad = shared_rows - source_count
+            if pad:
+                padding = self._padding(workspace, plan, pad)
+                if padding is None or not self._cat_rows(
+                    (x, padding[0], plan.x_rows),
+                    (router_weights, padding[1], plan.scores) if before_down else None,
+                ):
+                    self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    if before_down:
+                        self._copy_source(
+                            workspace.router_weight_buffer,
+                            router_weights,
+                            1,
+                            shared_rows,
+                        )
             else:
                 plan.x_rows.copy_(x)
                 if before_down:
@@ -1571,31 +1742,55 @@ class MoKFunctional:
         context = forward_context
         with _ffi_stream():
             plan.fused.slab.zero_()
+            padding = None
             if padded:
-                self._copy_source(workspace.d_y_buffer, grad_output, 0, shared_rows)
-            else:
-                plan.dy_rows.copy_(grad_output)
-            # Peers read this rank's x_buffer only to replay a second macrobatch.
-            # Without one, the shared-expert path reads the caller's x when it
-            # needs no padding rows.
-            if workspace.schedule_capacity <= config.macrobatch_size and not padded:
-                x_local = x
+                padding = self._padding(
+                    workspace,
+                    plan,
+                    shared_rows - source_count,
+                    (
+                        (workspace.d_x_routed_buffer, topk),
+                        (workspace.d_router_weight_buffer, 1),
+                    ),
+                )
+                if padding is not None and not self._cat_rows(
+                    (grad_output, padding[0], plan.dy_rows),
+                    (x, padding[0], plan.x_rows),
+                    (router_weights, padding[1], plan.scores),
+                ):
+                    padding = None
+            if padding is not None:
+                # Padded: dy, x and the router weights staged with their padding
+                # rows (``_cat_rows``), then the gradient buffers' padding rows.
+                padding[2].zero_()
+                padding[3].zero_()
+                x_local = plan.x_rows
             else:
                 if padded:
-                    self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    self._copy_source(workspace.d_y_buffer, grad_output, 0, shared_rows)
                 else:
-                    plan.x_rows.copy_(x)
-                x_local = plan.x_rows
-            if padded:
-                self._copy_source(
-                    workspace.router_weight_buffer, router_weights, 1, shared_rows
-                )
-                workspace.d_x_routed_buffer[
-                    source_count * topk : shared_rows * topk
-                ].zero_()
-                workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
-            else:
-                plan.scores.copy_(router_weights)
+                    plan.dy_rows.copy_(grad_output)
+                # Peers read this rank's x_buffer only to replay a second
+                # macrobatch. Without one, the shared-expert path reads the
+                # caller's x when it needs no padding rows.
+                if workspace.schedule_capacity <= config.macrobatch_size and not padded:
+                    x_local = x
+                else:
+                    if padded:
+                        self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                    else:
+                        plan.x_rows.copy_(x)
+                    x_local = plan.x_rows
+                if padded:
+                    self._copy_source(
+                        workspace.router_weight_buffer, router_weights, 1, shared_rows
+                    )
+                    workspace.d_x_routed_buffer[
+                        source_count * topk : shared_rows * topk
+                    ].zero_()
+                    workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
+                else:
+                    plan.scores.copy_(router_weights)
             if barrier is not None:
                 barrier.launch(())
             values = backward_kernel.launch_planned(

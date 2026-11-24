@@ -120,6 +120,7 @@ _COMMON = dict(
     cand_cap_ceiling=None,
     cand_cap_ceiling_unsampled=None,
     wide_first_rule=None,
+    wide_first_k_rule=None,
     wide_wave_rule=None,
     desc_walk_kinds=None,
     split_max=32,
@@ -166,6 +167,7 @@ _COMMON = dict(
     rank_finalize=True,
     rank_window_variants=[8192, 16384, 65536, 131072, 262144, 524288],
     rank_top_k_min=1025,
+    rank_small_k_rule=None,
     rank_staged=False,
     rank_seg_window=False,
     rank_window_variants_seg_only=[131072],
@@ -411,8 +413,8 @@ def test_registry_records_are_well_formed():
                 if k.startswith("scan:split_")
             }
         ), arch
-        # the wide-first precedence reaches the unrolled wide program in both fit forms
-        if policy.wide_first_rule is not None:
+        # the wide-first precedence (and its top_k-keyed form) reaches the unrolled wide program in both fit forms
+        if policy.wide_first_rule is not None or policy.wide_first_k_rule is not None:
             assert {"scan:wide:u2:s0:f0", "scan:wide:u2:s0:f1"} <= set(keys), arch
         # the sampled rank shift rule: a top_k floor a call can reach, a shift the default does not already give
         if policy.sample_shift_rule is not None:
@@ -769,6 +771,27 @@ def test_policy_record_round_trip_and_validation():
         dict(wide_first_rule=[512.0, 1]),
         dict(wide_first_rule=[-1.0]),
         dict(wide_first_rule=[True]),
+        # the top_k-keyed wide-first floor: [max top_k (an int >= 1), min mean unit tiles >= 0] or None
+        dict(wide_first_k_rule=512),
+        dict(wide_first_k_rule=[512]),
+        dict(wide_first_k_rule=[512, 64.0, 1]),
+        dict(wide_first_k_rule=[0, 64.0]),
+        dict(wide_first_k_rule=[512.0, 64.0]),
+        dict(wide_first_k_rule=[512, -1.0]),
+        dict(wide_first_k_rule=[512, True]),
+        # the rank finalize below rank_top_k_min: [min top_k, max top_k (below rank_top_k_min, at most
+        # finalize_threads_small x finalize_items), a slab variant within rank_slab_window_max holding one word per
+        # finalize_threads_small thread, a two-level variant] or None
+        dict(rank_small_k_rule=512),
+        dict(rank_small_k_rule=[257, 512, 16384]),
+        dict(rank_small_k_rule=[513, 512, 16384, 131072]),
+        dict(rank_small_k_rule=[257, 1025, 16384, 131072]),
+        dict(rank_small_k_rule=[0, 512, 16384, 131072]),
+        dict(rank_small_k_rule=[257, 512, 4096, 131072]),
+        dict(rank_small_k_rule=[257, 512, 131072, 131072]),
+        dict(rank_small_k_rule=[257, 512, 16384, 65536]),
+        dict(rank_small_k_rule=[257, 512, 16384.0, 131072]),
+        dict(rank_small_k_rule=[257, 512, 16384, 3]),
         # the wave rule: [min narrow / wide wave ratio, min l6 / wide wave ratio, min mean unit tiles], or that with
         # [top_k (an int >= 1), exponent, packed minimum (>= the one-segment one), rise per wave, waves (an int >= 1),
         # low wave ratio (>= element 1), its tile coefficient, its packed coefficient, the one-document cap
@@ -1421,6 +1444,16 @@ def test_policy_record_round_trip_and_validation():
     assert first.wide_first_rule == [192.0]
     assert first.record()["wide_first_rule"] == [192.0]
     assert DispatchPolicy.from_record(first.record()) == first
+    first_k = DispatchPolicy.from_record(dict(record, wide_first_k_rule=[512, 64.0]))
+    assert first_k.wide_first_k_rule == [512, 64.0]
+    assert first_k.record()["wide_first_k_rule"] == [512, 64.0]
+    assert DispatchPolicy.from_record(first_k.record()) == first_k
+    small = DispatchPolicy.from_record(
+        dict(record, rank_small_k_rule=[257, 512, 16384, 131072])
+    )
+    assert small.rank_small_k_rule == [257, 512, 16384, 131072]
+    assert small.record()["rank_small_k_rule"] == [257, 512, 16384, 131072]
+    assert DispatchPolicy.from_record(small.record()) == small
     waved = DispatchPolicy.from_record(dict(record, wide_wave_rule=[1.6, 1.3, 80.0]))
     assert waved.wide_wave_rule == [1.6, 1.3, 80.0]
     assert waved.record()["wide_wave_rule"] == [1.6, 1.3, 80.0]
@@ -2166,6 +2199,236 @@ def test_wide_first_precedence_and_pair_units_guard():
     assert _select(hostile_open, 131072, 131072).kind == "pair_wide"
 
 
+def test_wide_first_k_rule_keys_the_wide_first_floor_by_top_k():
+    """``wide_first_k_rule`` = [max top_k, min mean unit tiles] replaces ``wide_first_rule`` up to that top_k: the
+    sm_103a rule shape (``l6_rule`` to 1024 tiles at top_k >= 512, ``pair_rule`` 64..1024 tiles, floor 512 tiles) with
+    the top_k-512 floor at 64 tiles moves the 16384-query rows of 64 / 192 / 448 mean tiles and the 8-segment packed
+    row of 254.5 mean tiles from the CTA-pair l6 program to the wide program at top_k 512 only; the sm_100a shape (no
+    wide-first rule, ``pair_rule`` 128..256 tiles) with the floor at 128 tiles keeps the 64-tile row on the l6
+    program.  The three-warpgroup unit serves top_k from 512 on, so the rule never adds a wide call below it."""
+    base = dict(
+        NARROW_PAIR_POLICY.record(),
+        l6_rule=[1024.0, 512],
+        pair_rule=[64.0, 1024.0, 512],
+        wide_first_rule=[512.0],
+    )
+    old = DispatchPolicy.from_record(base)
+    new = DispatchPolicy.from_record(dict(base, wide_first_k_rule=[512, 64.0]))
+    assert new.wide_first_for(512) == 64.0 and new.wide_first_for(513) == 512.0
+    assert old.wide_first_for(512) == 512.0
+    p1_q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
+    p1_k = (1777, 56842, 2123, 67923, 2123, 67923, 2123, 67923)
+    rows = [
+        (16384, 16384, 1),
+        (16384, 32768, 1),
+        (16384, 65536, 1),
+        (sum(p1_q), sum(p1_k), 8),
+    ]
+    for T, Tkv, S in rows:
+        before = _select(old, T, Tkv, S=S, K=512, grid=152)
+        after = _select(new, T, Tkv, S=S, K=512, grid=152)
+        assert before.kind == "pair_l6" and after.kind == "wide", (T, Tkv, S)
+        assert after.block_q == 8 and not after.pair and not after.split, (T, Tkv, S)
+        # every other top_k keeps the record's floor: 2048 and 1024 keep the CTA pair, 256 never reaches the l6 unit
+        for K in (1024, 2048):
+            assert _select(new, T, Tkv, S=S, K=K, grid=152) == _select(
+                old, T, Tkv, S=S, K=K, grid=152
+            ), (T, Tkv, S, K)
+        assert _select(new, T, Tkv, S=S, K=256, grid=152) == _select(
+            old, T, Tkv, S=S, K=256, grid=152
+        )
+    # 8192 queries over 8192 keys: 32 mean tiles, below the floor -- the plain l6 unit stays
+    assert _select(new, 8192, 8192, K=512, grid=152) == _select(
+        old, 8192, 8192, K=512, grid=152
+    )
+    # the sm_100a shape: no wide-first rule, the CTA pair from 128 tiles; the 64-tile row keeps l6, the packed row
+    # of 254.5 tiles moves from pair_l6 to wide
+    b_old = NARROW_PAIR_POLICY
+    b_new = DispatchPolicy.from_record(
+        dict(NARROW_PAIR_POLICY.record(), wide_first_k_rule=[512, 128.0])
+    )
+    assert b_old.wide_first_for(512) is None and b_new.wide_first_for(4096) is None
+    assert _select(b_new, 16384, 16384, K=512) == _select(b_old, 16384, 16384, K=512)
+    assert _select(b_old, 16384, 16384, K=512).kind == "l6"
+    T, Tkv = sum(p1_q), sum(p1_k)
+    assert _select(b_old, T, Tkv, S=8, K=512).kind == "pair_l6"
+    assert _select(b_new, T, Tkv, S=8, K=512).kind == "wide"
+    # a wide-ineligible call (4096 queries: 3.4 rounds) is never moved
+    assert _select(b_new, 4096, 65536, K=512) == _select(b_old, 4096, 65536, K=512)
+    # the wave rule decides by waves and never reads the floor
+    waved = dict(NARROW_PAIR_POLICY.record(), wide_wave_rule=[1.7, 1.3, 84.0])
+    for T, Tkv, S in rows:
+        assert _select(
+            DispatchPolicy.from_record(dict(waved, wide_first_k_rule=[512, 0.0])),
+            T,
+            Tkv,
+            S=S,
+            K=512,
+        ) == _select(DispatchPolicy.from_record(waved), T, Tkv, S=S, K=512)
+
+
+def test_rank_small_k_rule_ranks_small_top_k_rows_of_bounded_pools():
+    """``rank_small_k_rule`` = [min top_k, max top_k, slab window, two-level window]: a call of top_k in the range at its
+    default finalize threads (the right-sized CUB program) runs the 256-thread staged rank program of the slab window
+    where ``max(pool, 32 x 256)`` fits it, else of the two-level window, else keeps CUB; the pool is ``Tkv`` or, under
+    lever RW, ``max_seqlen_k``.  An explicit ``finalize_threads`` keeps its CUB program, and the rule never reaches the
+    rank_top_k_min range (the rank finalize there is ``finalize_rank_for``'s)."""
+    record = dict(
+        NARROW_PAIR_POLICY.record(),
+        rank_staged=True,
+        rank_seg_window=True,
+        rank_two_level=True,
+        rank_bulk_io=True,
+    )
+    old = DispatchPolicy.from_record(record)
+    new = DispatchPolicy.from_record(
+        dict(record, rank_small_k_rule=[257, 512, 16384, 131072])
+    )
+    p1_q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
+    p1_k = (1777, 56842, 2123, 67923, 2123, 67923, 2123, 67923)
+    T1, Tkv1 = sum(p1_q), sum(p1_k)
+    cases = [
+        # (T, Tkv, S, max_seqlen_k, top_k) -> finalize key
+        ((16384, 16384, 1, None, 512), "finalize_rank:t256:w16384:staged:bulk"),
+        ((16384, 4096, 1, None, 512), "finalize_rank:t256:w16384:staged:bulk"),
+        ((16384, 65536, 1, None, 512), "finalize_rank:t256:w131072:two:staged:bulk"),
+        ((16384, 65536, 1, None, 300), "finalize_rank:t256:w131072:two:staged:bulk"),
+        (
+            (16384, 65536, 1, None, 257),
+            "finalize_rank:t256:w131072:two:staged",
+        ),  # 257 x 4 B: not a bulk row
+        ((T1, Tkv1, 8, 67923, 512), "finalize_rank:t256:w131072:two:staged:bulk"),
+        ((16384, 131072, 1, None, 512), "finalize_rank:t256:w131072:two:staged:bulk"),
+        ((16384, 131073, 1, None, 512), "finalize:t64"),
+        ((16384, 262144, 1, None, 512), "finalize:t64"),
+        ((T1, Tkv1, 8, None, 512), "finalize:t64"),
+        ((16384, 16384, 1, None, 256), "finalize:t32"),
+        ((16384, 16384, 1, None, 513), "finalize:t128"),
+    ]
+    for (T, Tkv, S, seg, K), key in cases:
+        c = _select(new, T, Tkv, S=S, K=K, max_seqlen_k=seg)
+        assert c.finalize_key == key, (T, Tkv, S, seg, K, c.finalize_key)
+        assert _select(old, T, Tkv, S=S, K=K, max_seqlen_k=seg).finalize_key == (
+            f"finalize:t{old.finalize_threads_for(K)}"
+        )
+        assert new.finalize_rank_small_k_for(K, Tkv, S, max_seqlen_k=seg) == (
+            None
+            if key.startswith("finalize:")
+            else int(key.split(":w")[1].split(":")[0])
+        )
+        # the plan's thread count is the program's
+        assert c.finalize_threads == (
+            256 if key.startswith("finalize_rank") else old.finalize_threads_for(K)
+        )
+    # an explicit finalize_threads keeps its CUB program; the scan plan never changes
+    assert (
+        _select(new, 16384, 16384, K=512, finalize_threads=64).finalize_key
+        == "finalize:t64"
+    )
+    for T, Tkv, S, seg, K in [c[0] for c in cases]:
+        a = _select(new, T, Tkv, S=S, K=K, max_seqlen_k=seg)
+        b = _select(old, T, Tkv, S=S, K=K, max_seqlen_k=seg)
+        assert (a.scan_key, a.merge_key, a.workspace_bytes) == (
+            b.scan_key,
+            b.merge_key,
+            b.workspace_bytes,
+        )
+    # without the two-level form the larger pools keep CUB
+    flat = DispatchPolicy.from_record(dict(new.record(), rank_two_level=False))
+    assert _select(flat, 16384, 65536, K=512).finalize_key == "finalize:t64"
+    assert (
+        _select(flat, 16384, 16384, K=512).finalize_key
+        == "finalize_rank:t256:w16384:staged:bulk"
+    )
+    # so do they without the two-level rule; with the master switch off every call keeps CUB
+    unruled = DispatchPolicy.from_record(dict(new.record(), rank_two_level_rule=None))
+    assert unruled.finalize_rank_small_k_for(512, 65536, 1) is None
+    assert unruled.finalize_rank_small_k_for(512, 16384, 1) == 16384
+    off = DispatchPolicy.from_record(dict(new.record(), rank_finalize=False))
+    for Tkv in (4096, 16384, 65536):
+        assert off.finalize_rank_small_k_for(512, Tkv, 1) is None
+        assert _select(off, 16384, Tkv, K=512).finalize_key == "finalize:t64"
+
+
+# 0.6.0 registry: the top_k-keyed wide-first floor and the rank small-k rule of each architecture, and the scan / finalize
+# programs they give the top_k-512 rows of the candidate-block bench (16384 queries at the tail of 16384 / 65536 / 262144
+# keys; the 8-segment packed row, without and with max_seqlen_k)
+_P1_Q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
+_P1_K = (1777, 56842, 2123, 67923, 2123, 67923, 2123, 67923)
+_K512_ROWS = {
+    "tail16k": ((16384,), (16384,), False),
+    "tail64k": ((16384,), (65536,), False),
+    "tail256k": ((16384,), (262144,), False),
+    "P1": (_P1_Q, _P1_K, False),
+    "P1_bound": (_P1_Q, _P1_K, True),
+}
+_SLAB = "finalize_rank:t256:w16384:staged:bulk"
+_TWO = "finalize_rank:t256:w131072:two:staged:bulk"
+_SHIPPED_K512 = {
+    "sm_100a": (
+        148,
+        [512, 128.0],
+        [257, 512, 16384, 131072],
+        {
+            "tail16k": ("scan:l6:u1:s0:f1", _SLAB),
+            "tail64k": ("scan:wide:u2:s0:f0", _TWO),
+            "tail256k": ("scan:wide:u2:s0:f0", "finalize:t64"),
+            "P1": ("scan:wide:u2:s0:f0:lsf", "finalize:t64"),
+            "P1_bound": ("scan:wide:u2:s0:f0:lsf", _TWO),
+        },
+    ),
+    "sm_103a": (
+        152,
+        [512, 64.0],
+        [257, 512, 16384, 131072],
+        {
+            "tail16k": ("scan:wide:u2:s0:f1", _SLAB),
+            "tail64k": ("scan:wide:u2:s0:f0", _TWO),
+            "tail256k": ("scan:wide:u2:s0:f0", "finalize:t64"),
+            "P1": ("scan:wide:u2:s0:f0:lsf", "finalize:t64"),
+            "P1_bound": ("scan:wide:u2:s0:f0:lsf", _TWO),
+        },
+    ),
+    "sm_107a": (
+        212,
+        None,
+        [257, 512, 16384, 131072],
+        {
+            "tail16k": ("scan:l6:u1:s1:f1", _SLAB + ":persist"),
+            "tail64k": ("scan:wide:u2:s0:f0", _TWO),
+            "tail256k": ("scan:wide:u2:s0:f0", "finalize:t64"),
+            "P1": ("scan:l6:u1:s0:f0:lsf", "finalize:t64"),
+            "P1_bound": ("scan:l6:u1:s0:f0:lsf", _TWO),
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("arch", sorted(_SHIPPED_K512))
+def test_shipped_top_k_512_rules_and_programs_of_the_bench_rows(arch):
+    """The shipped records' top_k <= 512 rules (``wide_first_k_rule``, ``rank_small_k_rule``; the FP8 records leave them
+    to the BF16 record) and the programs the host dispatch gives the top_k-512 bench rows on the architecture's SM
+    count, host-only."""
+    sms, wide_first_k, rank_small_k, rows = _SHIPPED_K512[arch]
+    record = cake_jit.POLICY[arch]
+    assert record["wide_first_k_rule"] == wide_first_k
+    assert record["rank_small_k_rule"] == rank_small_k
+    assert "wide_first_k_rule" not in cake_jit.POLICY_FP8.get(arch, {})
+    for name, (seg_q, seg_k, bound) in _K512_ROWS.items():
+        plan = cake_backend.plan_dsa_indexer_det_topk(
+            sum(seg_q),
+            sum(seg_k),
+            len(seg_q),
+            top_k=512,
+            arch=arch,
+            num_sms=sms,
+            max_seqlen_k=max(seg_k) if bound else None,
+        )
+        assert (plan.scan_key, plan.finalize_key) == rows[name], (arch, name)
+        assert plan.scan_key in cake_jit.PROGRAM_KEYS[arch], (arch, name)
+        assert plan.finalize_key in cake_jit.PROGRAM_KEYS[arch], (arch, name)
+
+
 def test_wide_wave_rule_compares_waves_of_the_persistent_grid():
     """``wide_wave_rule`` replaces ``wide_rule`` and ``wide_first_rule``: the wide unit takes a call when the unit the
     other rules leave needs at least the record's ratio of the wide unit's waves of the grid (``ceil(units / grid)``),
@@ -2405,8 +2668,9 @@ def test_policy_selects_registered_programs_on_a_dense_geometry_grid():
         for grid in _FROZEN_GRIDS[arch]:
             for T, Tkv, S, ratio, top_k in _dense_geometries(policy):
                 bounds = [None]
-                if (
-                    top_k >= policy.rank_top_k_min
+                small = policy.rank_small_k_rule
+                if top_k >= policy.rank_top_k_min or (
+                    small is not None and small[0] <= top_k <= small[1]
                 ):  # lever RW: S equal segments and one long segment
                     bounds += sorted({-(-Tkv // S), Tkv})
                 for bound in bounds:
@@ -5625,6 +5889,50 @@ def test_merge_rank_fuses_the_slab_rank_finalize_into_split_merges():
                 dtype=torch.float8_e4m3fn,
             )
             assert not fp8.merge_rank and fp8.merge_key in (None, MERGE_KEY), arch
+        # top_k 257 to 512 (rank_small_k_rule): a split call whose pool fits the 16384-key slab window runs the merge
+        # with the 256-thread rank finalize fused in; without the rule it keeps the merge + its CUB finalize program,
+        # with the same scan program and split count
+        small = DispatchPolicy.from_record(
+            dict(policy.record(), rank_small_k_rule=None)
+        )
+        for K in (257, 300, 384, 511, 512):
+            fused_calls = 0
+            for T, Tkv, S in ((1, 16384, 1), (16, 16384, 1), (64, 16384, 1)):
+                call = dict(
+                    num_queries=T,
+                    num_keys=Tkv,
+                    num_segments=S,
+                    ratio=1,
+                    top_k=K,
+                    grid=grid,
+                    scan_keys=keys,
+                )
+                fused = select_program(policy, **call)
+                cub = select_program(small, **call)
+                if not fused.split:
+                    continue
+                fused_calls += 1
+                assert fused.merge_rank and fused.merge_key == "merge:rank:w16384", (
+                    arch,
+                    K,
+                    T,
+                    fused.merge_key,
+                )
+                assert fused.merge_key in keys and fused.keys == (
+                    fused.scan_key,
+                    fused.merge_key,
+                )
+                assert fused.finalize_key.startswith(
+                    "finalize_rank:t256:w16384:staged"
+                ), (arch, K, T, fused.finalize_key)
+                assert cub.split and not cub.merge_rank, (arch, K, T)
+                assert cub.keys == (
+                    cub.scan_key,
+                    MERGE_KEY,
+                    f"finalize:t{small.finalize_threads_for(K)}",
+                ), (arch, K, T, cub.keys)
+                assert (cub.scan_key, cub.n_split) == (fused.scan_key, fused.n_split)
+            assert fused_calls, (arch, K)
         # a call above the fused programs' top_k bound, an unsplit call and a two-level window keep the finalize program
         for call in (
             dict(num_queries=4, num_keys=22018, num_segments=1, top_k=4096),
@@ -5635,10 +5943,13 @@ def test_merge_rank_fuses_the_slab_rank_finalize_into_split_merges():
             assert not c.merge_rank and c.keys[-1] == c.finalize_key, (arch, call)
 
 
-def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch):
+@pytest.mark.parametrize("top_k", [2048, 512, 300, 257])
+def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch, top_k):
     """The fused merge writes the bits of the merge + slab rank finalize pair: every output of a split call is bitwise the
     same with the architecture's record and with ``merge_rank`` off (Gaussian and integer inputs; the integer ones
-    held to the exact contract), and the fused call launches no finalize program."""
+    held to the exact contract), and the fused call launches no finalize program.  At top_k 257 to 512 the split calls
+    of the 16384-key slab window (``rank_small_k_rule``) also give the bits of the merge + CUB finalize pair of the
+    record without that rule; at every top_k at least one row runs the fused merge."""
     _require_program()
     arch = arch_for(torch.device("cuda"))
     if not policy_for(arch).merge_rank:
@@ -5648,39 +5959,49 @@ def test_merge_rank_runs_are_bitwise_the_merge_plus_finalize_runs(monkeypatch):
         ([64], [16384]),
         ([64, 64], [16384, 16384]),
         ([3, 5], [7000, 30000]),
+        ([16], [16384]),
+        ([5, 11], [4000, 12000]),
     )
+    original = cake_backend.policy_for
+    arms = {"merge_rank": False}
+    if top_k < policy_for(arch).rank_top_k_min:
+        arms["rank_small_k_rule"] = None
+    fused_rows = 0
     for make, (seed, (seg_q, seg_k)) in itertools.product(
         (ref.make_random_inputs, ref.make_integer_inputs), enumerate(rows)
     ):
-        inputs = make(seg_q, seg_k, top_k=2048, seed=700 + seed, device="cuda")
+        inputs = make(seg_q, seg_k, top_k=top_k, seed=700 + seed, device="cuda")
         runner = _prepare(inputs)
         if not runner.choice.split or not runner.choice.merge_rank:
             continue
+        fused_rows += 1
         assert runner.stages == ("scan", "merge"), (seg_q, seg_k, runner.stages)
         fused = _cloned(runner())
-        with monkeypatch.context() as m:
-            original = cake_backend.policy_for
+        for field_name, value in arms.items():
+            with monkeypatch.context() as m:
 
-            def merge_rank_off(arch, form=cake_policy.BF16):
-                return DispatchPolicy.from_record(
-                    dict(original(arch, form).record(), merge_rank=False)
-                )
+                def changed(arch, form=cake_policy.BF16):
+                    return DispatchPolicy.from_record(
+                        dict(original(arch, form).record(), **{field_name: value})
+                    )
 
-            m.setattr(cake_backend, "policy_for", merge_rank_off)
-            plain_runner = _prepare(inputs)
-            assert plain_runner.stages == (
-                "scan",
-                "merge",
-                plain_runner.choice.finalize_role,
-            )
-            plain = _cloned(plain_runner())
-        assert torch.equal(fused[0], plain[0]), (seg_q, seg_k)
-        assert torch.equal(fused[1].view(torch.int32), plain[1].view(torch.int32)), (
-            seg_q,
-            seg_k,
-        )
+                m.setattr(cake_backend, "policy_for", changed)
+                plain_runner = _prepare(inputs)
+                assert plain_runner.stages == (
+                    "scan",
+                    "merge",
+                    plain_runner.choice.finalize_role,
+                ), (field_name, plain_runner.stages)
+                if field_name == "rank_small_k_rule":
+                    assert plain_runner.choice.finalize_key.startswith("finalize:t")
+                plain = _cloned(plain_runner())
+            assert torch.equal(fused[0], plain[0]), (field_name, seg_q, seg_k)
+            assert torch.equal(
+                fused[1].view(torch.int32), plain[1].view(torch.int32)
+            ), (field_name, seg_q, seg_k)
         if make is ref.make_integer_inputs:
             naive.assert_exact(fused, inputs)
+    assert fused_rows, (arch, top_k)
 
 
 def test_device_facts_are_queried_once_per_device(monkeypatch):

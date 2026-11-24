@@ -54,7 +54,7 @@ extern "C" __device__ float __nv_expf(float);
 extern "C" {
 
 __global__ __launch_bounds__(256) void
-kernel_cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9(float* c, float* z, int* cu_seqlens, int* cu_pairs, __nv_bfloat16* out, int num_docs, int G, long long c_ld, long long z_ld)
+kernel_cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903(float* c, float* z, int* cu_seqlens, int* cu_pairs, __nv_bfloat16* out, int num_docs, int G, long long c_ld, long long z_ld)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -71,141 +71,159 @@ kernel_cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9(float* c, float*
     int slot = tid >> 7;
     long long col = (long long)((tid & 127) * 4);
     int pooled_rows = ((G) < (cu_pairs[num_docs]) ? (G) : (cu_pairs[num_docs]));
+    int _count_leading_zeros_0 = __clz(num_docs - 1 | 1);
+    int rounds = (36 - _count_leading_zeros_0) / 5;
     int nblocks = (G + 1) / 2;
     #pragma unroll 1
     for (int blk = bid; blk < nblocks; blk += num_bids) {
         int row_0 = blk * 2 + slot;
         float vals_0[16];
         if (row_0 < pooled_rows) {
-            int doc = 0;
-            int doc_hi = num_docs - 1;
-            while (doc < doc_hi) {
-                int mid = doc + doc_hi + 1 >> 1;
-                if (row_0 >= cu_pairs[mid]) {
-                    doc = mid;
-                } else {
-                    doc_hi = mid - 1;
+            int lo = 0;
+            int shift = 5 * (rounds - 1);
+            int hits = 1;
+            int entry = 0;
+            int origin = 0;
+            #pragma unroll 1
+            for (int _trip = 0; _trip < rounds; _trip++) {
+                int probe = lo + (lane << shift);
+                int hit = 0;
+                if (probe < num_docs) {
+                    entry = cu_pairs[probe];
+                    if (shift == 0) {
+                        origin = cu_seqlens[probe];
+                    }
+                    if (entry <= row_0) {
+                        hit = 1;
+                    }
                 }
+                int _warp_redux_1;
+                asm volatile("redux.sync.add.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_1) : "r"(hit));
+                hits = (int)_warp_redux_1;
+                lo = lo + (hits - 1 << shift);
+                shift = shift - 5;
             }
-            int start = cu_seqlens[doc] + 2 * (row_0 - cu_pairs[doc]);
+            int _shfl_sync_2 = __shfl_sync(0xFFFFFFFF, origin, hits - 1);
+            int _shfl_sync_3 = __shfl_sync(0xFFFFFFFF, entry, hits - 1);
+            int start = _shfl_sync_2 + 2 * (row_0 - _shfl_sync_3);
             int start_0 = start;
             long long at_c_0 = (long long)start_0 * c_ld + col;
             long long at_z_0 = (long long)start_0 * z_ld + col;
             {
-                unsigned _v4_0_0;
-                unsigned _v4_0_1;
-                unsigned _v4_0_2;
-                unsigned _v4_0_3;
+                unsigned _v4_4_0;
+                unsigned _v4_4_1;
+                unsigned _v4_4_2;
+                unsigned _v4_4_3;
                 asm volatile("ld.global.L1::no_allocate.v4.b32 {%0, %1, %2, %3}, [%4];"
-                    : "=r"(_v4_0_0), "=r"(_v4_0_1), "=r"(_v4_0_2), "=r"(_v4_0_3) : "l"((const void*)(c + at_c_0 + (0))) : "memory");
-                vals_0[0 + 0] = __uint_as_float(_v4_0_0);
-                vals_0[0 + 1] = __uint_as_float(_v4_0_1);
-                vals_0[0 + 2] = __uint_as_float(_v4_0_2);
-                vals_0[0 + 3] = __uint_as_float(_v4_0_3);
+                    : "=r"(_v4_4_0), "=r"(_v4_4_1), "=r"(_v4_4_2), "=r"(_v4_4_3) : "l"((const void*)(c + at_c_0 + (0))) : "memory");
+                vals_0[0 + 0] = __uint_as_float(_v4_4_0);
+                vals_0[0 + 1] = __uint_as_float(_v4_4_1);
+                vals_0[0 + 2] = __uint_as_float(_v4_4_2);
+                vals_0[0 + 3] = __uint_as_float(_v4_4_3);
             }
             {
-                unsigned _v4_1_0;
-                unsigned _v4_1_1;
-                unsigned _v4_1_2;
-                unsigned _v4_1_3;
+                unsigned _v4_5_0;
+                unsigned _v4_5_1;
+                unsigned _v4_5_2;
+                unsigned _v4_5_3;
                 asm volatile("ld.global.L1::no_allocate.v4.b32 {%0, %1, %2, %3}, [%4];"
-                    : "=r"(_v4_1_0), "=r"(_v4_1_1), "=r"(_v4_1_2), "=r"(_v4_1_3) : "l"((const void*)(c + (at_c_0 + c_ld) + (0))) : "memory");
-                vals_0[4 + 0] = __uint_as_float(_v4_1_0);
-                vals_0[4 + 1] = __uint_as_float(_v4_1_1);
-                vals_0[4 + 2] = __uint_as_float(_v4_1_2);
-                vals_0[4 + 3] = __uint_as_float(_v4_1_3);
+                    : "=r"(_v4_5_0), "=r"(_v4_5_1), "=r"(_v4_5_2), "=r"(_v4_5_3) : "l"((const void*)(c + (at_c_0 + c_ld) + (0))) : "memory");
+                vals_0[4 + 0] = __uint_as_float(_v4_5_0);
+                vals_0[4 + 1] = __uint_as_float(_v4_5_1);
+                vals_0[4 + 2] = __uint_as_float(_v4_5_2);
+                vals_0[4 + 3] = __uint_as_float(_v4_5_3);
             }
             {
-                unsigned _v4_2_0;
-                unsigned _v4_2_1;
-                unsigned _v4_2_2;
-                unsigned _v4_2_3;
+                unsigned _v4_6_0;
+                unsigned _v4_6_1;
+                unsigned _v4_6_2;
+                unsigned _v4_6_3;
                 asm volatile("ld.global.L1::no_allocate.v4.b32 {%0, %1, %2, %3}, [%4];"
-                    : "=r"(_v4_2_0), "=r"(_v4_2_1), "=r"(_v4_2_2), "=r"(_v4_2_3) : "l"((const void*)(z + at_z_0 + (0))) : "memory");
-                vals_0[8 + 0] = __uint_as_float(_v4_2_0);
-                vals_0[8 + 1] = __uint_as_float(_v4_2_1);
-                vals_0[8 + 2] = __uint_as_float(_v4_2_2);
-                vals_0[8 + 3] = __uint_as_float(_v4_2_3);
+                    : "=r"(_v4_6_0), "=r"(_v4_6_1), "=r"(_v4_6_2), "=r"(_v4_6_3) : "l"((const void*)(z + at_z_0 + (0))) : "memory");
+                vals_0[8 + 0] = __uint_as_float(_v4_6_0);
+                vals_0[8 + 1] = __uint_as_float(_v4_6_1);
+                vals_0[8 + 2] = __uint_as_float(_v4_6_2);
+                vals_0[8 + 3] = __uint_as_float(_v4_6_3);
             }
             {
-                unsigned _v4_3_0;
-                unsigned _v4_3_1;
-                unsigned _v4_3_2;
-                unsigned _v4_3_3;
+                unsigned _v4_7_0;
+                unsigned _v4_7_1;
+                unsigned _v4_7_2;
+                unsigned _v4_7_3;
                 asm volatile("ld.global.L1::no_allocate.v4.b32 {%0, %1, %2, %3}, [%4];"
-                    : "=r"(_v4_3_0), "=r"(_v4_3_1), "=r"(_v4_3_2), "=r"(_v4_3_3) : "l"((const void*)(z + (at_z_0 + z_ld) + (0))) : "memory");
-                vals_0[12 + 0] = __uint_as_float(_v4_3_0);
-                vals_0[12 + 1] = __uint_as_float(_v4_3_1);
-                vals_0[12 + 2] = __uint_as_float(_v4_3_2);
-                vals_0[12 + 3] = __uint_as_float(_v4_3_3);
+                    : "=r"(_v4_7_0), "=r"(_v4_7_1), "=r"(_v4_7_2), "=r"(_v4_7_3) : "l"((const void*)(z + (at_z_0 + z_ld) + (0))) : "memory");
+                vals_0[12 + 0] = __uint_as_float(_v4_7_0);
+                vals_0[12 + 1] = __uint_as_float(_v4_7_1);
+                vals_0[12 + 2] = __uint_as_float(_v4_7_2);
+                vals_0[12 + 3] = __uint_as_float(_v4_7_3);
             }
         }
         unsigned int words[2] = {0};
         if (row_0 < pooled_rows) {
             float gap;
             asm("sub.rn.f32 %0, %1, %2;" : "=f"(gap) : "f"(vals_0[12]), "f"(vals_0[8]));
-            float _abs_5;
-            asm("abs.f32 %0, %1;" : "=f"(_abs_5) : "f"(gap));
-            float _neg_4;
-            asm("neg.f32 %0, %1;" : "=f"(_neg_4) : "f"(_abs_5));
-            float e = __nv_expf(_neg_4);
+            float _abs_9;
+            asm("abs.f32 %0, %1;" : "=f"(_abs_9) : "f"(gap));
+            float _neg_8;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_8) : "f"(_abs_9));
+            float e = __nv_expf(_neg_8);
             float den;
             asm("add.rn.f32 %0, %1, %2;" : "=f"(den) : "f"(e), "f"(1.0f));
             int first = ((gap <= 0.0f) ? 1 : 0);
             float big = ((first == 1) ? vals_0[0] : vals_0[4]);
             float small = ((first == 1) ? vals_0[4] : vals_0[0]);
-            float _fma_7;
-            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_7) : "f"(e), "f"(small), "f"(big));
-            float _fdiv_6 = __fdiv_rn(_fma_7, den);
-            vals_0[0] = _fdiv_6;
+            float _fma_11;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_11) : "f"(e), "f"(small), "f"(big));
+            float _fdiv_10 = __fdiv_rn(_fma_11, den);
+            vals_0[0] = _fdiv_10;
             float gap_0;
             asm("sub.rn.f32 %0, %1, %2;" : "=f"(gap_0) : "f"(vals_0[13]), "f"(vals_0[9]));
-            float _abs_9;
-            asm("abs.f32 %0, %1;" : "=f"(_abs_9) : "f"(gap_0));
-            float _neg_8;
-            asm("neg.f32 %0, %1;" : "=f"(_neg_8) : "f"(_abs_9));
-            float e_0 = __nv_expf(_neg_8);
+            float _abs_13;
+            asm("abs.f32 %0, %1;" : "=f"(_abs_13) : "f"(gap_0));
+            float _neg_12;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_12) : "f"(_abs_13));
+            float e_0 = __nv_expf(_neg_12);
             float den_0;
             asm("add.rn.f32 %0, %1, %2;" : "=f"(den_0) : "f"(e_0), "f"(1.0f));
             int first_0 = ((gap_0 <= 0.0f) ? 1 : 0);
             float big_0 = ((first_0 == 1) ? vals_0[1] : vals_0[5]);
             float small_0 = ((first_0 == 1) ? vals_0[5] : vals_0[1]);
-            float _fma_11;
-            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_11) : "f"(e_0), "f"(small_0), "f"(big_0));
-            float _fdiv_10 = __fdiv_rn(_fma_11, den_0);
-            vals_0[1] = _fdiv_10;
+            float _fma_15;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_15) : "f"(e_0), "f"(small_0), "f"(big_0));
+            float _fdiv_14 = __fdiv_rn(_fma_15, den_0);
+            vals_0[1] = _fdiv_14;
             float gap_1;
             asm("sub.rn.f32 %0, %1, %2;" : "=f"(gap_1) : "f"(vals_0[14]), "f"(vals_0[10]));
-            float _abs_13;
-            asm("abs.f32 %0, %1;" : "=f"(_abs_13) : "f"(gap_1));
-            float _neg_12;
-            asm("neg.f32 %0, %1;" : "=f"(_neg_12) : "f"(_abs_13));
-            float e_1 = __nv_expf(_neg_12);
+            float _abs_17;
+            asm("abs.f32 %0, %1;" : "=f"(_abs_17) : "f"(gap_1));
+            float _neg_16;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_16) : "f"(_abs_17));
+            float e_1 = __nv_expf(_neg_16);
             float den_1;
             asm("add.rn.f32 %0, %1, %2;" : "=f"(den_1) : "f"(e_1), "f"(1.0f));
             int first_1 = ((gap_1 <= 0.0f) ? 1 : 0);
             float big_1 = ((first_1 == 1) ? vals_0[2] : vals_0[6]);
             float small_1 = ((first_1 == 1) ? vals_0[6] : vals_0[2]);
-            float _fma_15;
-            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_15) : "f"(e_1), "f"(small_1), "f"(big_1));
-            float _fdiv_14 = __fdiv_rn(_fma_15, den_1);
-            vals_0[2] = _fdiv_14;
+            float _fma_19;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_19) : "f"(e_1), "f"(small_1), "f"(big_1));
+            float _fdiv_18 = __fdiv_rn(_fma_19, den_1);
+            vals_0[2] = _fdiv_18;
             float gap_2;
             asm("sub.rn.f32 %0, %1, %2;" : "=f"(gap_2) : "f"(vals_0[15]), "f"(vals_0[11]));
-            float _abs_17;
-            asm("abs.f32 %0, %1;" : "=f"(_abs_17) : "f"(gap_2));
-            float _neg_16;
-            asm("neg.f32 %0, %1;" : "=f"(_neg_16) : "f"(_abs_17));
-            float e_2 = __nv_expf(_neg_16);
+            float _abs_21;
+            asm("abs.f32 %0, %1;" : "=f"(_abs_21) : "f"(gap_2));
+            float _neg_20;
+            asm("neg.f32 %0, %1;" : "=f"(_neg_20) : "f"(_abs_21));
+            float e_2 = __nv_expf(_neg_20);
             float den_2;
             asm("add.rn.f32 %0, %1, %2;" : "=f"(den_2) : "f"(e_2), "f"(1.0f));
             int first_2 = ((gap_2 <= 0.0f) ? 1 : 0);
             float big_2 = ((first_2 == 1) ? vals_0[3] : vals_0[7]);
             float small_2 = ((first_2 == 1) ? vals_0[7] : vals_0[3]);
-            float _fma_19;
-            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_19) : "f"(e_2), "f"(small_2), "f"(big_2));
-            float _fdiv_18 = __fdiv_rn(_fma_19, den_2);
-            vals_0[3] = _fdiv_18;
+            float _fma_23;
+            asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_23) : "f"(e_2), "f"(small_2), "f"(big_2));
+            float _fdiv_22 = __fdiv_rn(_fma_23, den_2);
+            vals_0[3] = _fdiv_22;
             #pragma unroll
             for (int _lp = 0; _lp < 1; _lp++) {
                 __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(vals_0[_lp*2 + 0], vals_0[_lp*2+1 + 0]));

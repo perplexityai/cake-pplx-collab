@@ -79,9 +79,10 @@ ALERT = f"{ENTRY} does not have a deterministic implementation"
 SLEEP_CYCLES = 200_000_000
 # Head-dimension 128 calls without the mask on three routes: 256 queries and 384 keys (an odd key-block count: the
 # 1-CTA route in any region) and 512 queries and keys with every call in a pair region (``_pin_route``: the pair route,
-# the 2-CTA main kernel and the pair-row postprocess; the shipped regions hold long sequences only, and a call with more
-# keys than queries never takes the pair route), both with the one-launch route turned off; and one head pair of 256
-# queries and keys, unpatched (the route ``fused_record`` gives: the one-launch kernel inside its region).
+# the 2-CTA main kernel and the pair-row postprocess; the shipped regions and bounds hold long sequences only, and under
+# ``_pin_route`` a call with more keys than queries never takes the pair route), both with the one-launch route turned
+# off; and one head pair of 256 queries and keys, unpatched (the route ``fused_record`` gives: the one-launch kernel
+# inside its region).
 ROUTE_CASES = (Case(2, 3, 256, 384), Case(2, 3, 512), Case(1, 2, 256))
 ROUTE_IDS = ("one_cta", "pair", "fused")
 
@@ -94,8 +95,9 @@ def _backend():
 
 def _pin_route(monkeypatch, pair: bool) -> None:
     """Every call in a pair region of every architecture and mask (``pair`` True: the pair route wherever the head
-    dimension, the key length and ``Sq >= Skv`` allow it) or in none (False: the 1-CTA route); the shipped regions
-    hold long sequences only."""
+    dimension, the key length and ``Sq >= Skv`` allow it) or in none (False: ``variant`` gives every call the 1-CTA
+    route); with True and with False ``PAIR_FEWER_QUERIES`` holds no bounds on any architecture (no call with fewer
+    queries than keys on the pair route).  The shipped regions and bounds hold long sequences only."""
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
     regions = ((1, None, 2 * cake_jit.BLOCK),) if pair else ()
@@ -103,6 +105,7 @@ def _pin_route(monkeypatch, pair: bool) -> None:
     for arch in cake_jit.ARCHES:
         monkeypatch.setitem(cake_jit.PAIR_REGIONS, arch, {False: regions, True: regions})
         monkeypatch.setitem(cake_jit.PAIR_LEAST, arch, {False: least, True: least})
+        monkeypatch.setitem(cake_jit.PAIR_FEWER_QUERIES, arch, None)
 
 
 def _assert_route(device: torch.device, case: Case, pair: bool, causal: bool = False) -> None:

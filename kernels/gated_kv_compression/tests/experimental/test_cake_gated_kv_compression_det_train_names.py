@@ -250,9 +250,10 @@ def test_capabilities_map_to_the_three_architectures(monkeypatch):
 def test_package_identity_and_build_identity():
     """``build.json`` and the registry name the package; every library stem is a
     ``cake_gated_kv_compression_det_train`` program built for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and the
-    registry's library names are the stems of ``build.json``.  Each record names its own program, but ``bwd_small``
-    and ``bwd_sm_107a``, one program on disjoint architectures, and no library is built twice for one
-    architecture."""
+    registry's library names are the stems of ``build.json``.  Each record names its own program, but the records of
+    each backward role (``bwd`` and ``bwd_sm_107a``, ``bwd_small`` and ``bwd_small_sm_107a``, ``bwd_warp``,
+    ``bwd_warp_sm_103a`` and ``bwd_warp_sm_107a``), each one program on disjoint architectures, and no library is built
+    twice for one architecture."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_gated_kv_compression_det_train"
@@ -267,8 +268,14 @@ def test_package_identity_and_build_identity():
     assert all(re.fullmatch(pattern, name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
     stems = {rec["library"] for rec in jit.MODULES.values()}
-    assert len(stems) == len(jit.MODULES) - 1 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
-    assert jit.MODULES["bwd_small"]["library"] == jit.MODULES["bwd_sm_107a"]["library"]
+    assert len(stems) == len(jit.MODULES) - 4 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
+    for first, second in (
+        ("bwd", "bwd_sm_107a"),
+        ("bwd_small", "bwd_small_sm_107a"),
+        ("bwd_warp", "bwd_warp_sm_103a"),
+        ("bwd_warp", "bwd_warp_sm_107a"),
+    ):
+        assert jit.MODULES[first]["library"] == jit.MODULES[second]["library"], first
 
 
 # The forward record of each architecture and the width of its C / Z loads: 128-bit (4 FP32 channels a lane, 128 lanes

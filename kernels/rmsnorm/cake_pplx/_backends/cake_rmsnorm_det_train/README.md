@@ -81,7 +81,9 @@ first eight hex digits of the program name.
 | `bwd_w32_h1024` | (12288, 24576] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
 | `bwd_w32_h1024` | (24576, inf) | 58305d0f | plain | row-strided slots | 3b5dc80e (chain) |
 | `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
-| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h128` | (1024, 2048] | 401a018c | column task | - | - |
+| `bwd_h128` | (2048, 11201] | d197bcc3 | plain | row-strided slots, 8 SMs left out | 096e5efb (chain, column-split) |
+| `bwd_h128` | (11201, inf) | 401a018c | column task | - | - |
 | `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
 | `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
 | `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
@@ -174,7 +176,9 @@ first eight hex digits of the program name.
 | `bwd_w32_h1024` | (16384, 24576] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
 | `bwd_w32_h1024` | (24576, inf) | 58305d0f | plain | row-strided slots | 3b5dc80e (chain) |
 | `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
-| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h128` | (1024, 2048] | 401a018c | column task | - | - |
+| `bwd_h128` | (2048, 12288] | d197bcc3 | plain | row-strided slots, 8 SMs left out | 096e5efb (chain, column-split) |
+| `bwd_h128` | (12288, inf) | 401a018c | column task | - | - |
 | `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
 | `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
 | `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
@@ -244,7 +248,9 @@ first eight hex digits of the program name.
 | `bwd_h1024` | (2048, 24576] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
 | `bwd_h1024` | (24576, inf) | 4294c01f | plain | row-strided slots | e21352ee (chain, column-split) |
 | `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
-| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h128` | (1024, 2047] | 401a018c | column task | - | - |
+| `bwd_h128` | (2047, 65536] | d197bcc3 | plain | row-strided slots | 096e5efb (chain, column-split) |
+| `bwd_h128` | (65536, inf) | 401a018c | column task | - | - |
 | `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
 | `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
 | `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |

@@ -588,7 +588,7 @@ def test_build_schedule_plan_matches_the_unplanned_launches(count):
     ]
     plan = workspace.storage.launch_plans[key]
     assert len([k for k in workspace.storage.launch_plans if k[0] == "schedule"]) == 1
-    rank, token, total, counts, layout = functional._schedule_launches(
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
         workspace.storage, config, ids, count
     )
     unplanned = fields(
@@ -644,7 +644,7 @@ def test_build_schedule_plan_built_under_inference_mode():
             functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
         )
     assert workspace.storage.launch_plans[key] is plan
-    rank, token, total, counts, layout = functional._schedule_launches(
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
         workspace.storage, config, ids, count
     )
     unplanned = _schedule_fields(
@@ -2132,6 +2132,222 @@ def test_before_down_launchers_pass_exactly_the_registry_arguments(monkeypatch):
         MoKForward(True, weight_before_down=1)
 
 
+def _source_split_launcher_setup(monkeypatch):
+    """Stub kernels (no launch) and the arguments of a router-weight-before-down forward at EP4, 4 forward
+    communication SMs."""
+    calls = _stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    tokens, hidden, intermediate, experts, topk, macro, mini, comm, ep, limit = (
+        512, 256, 256, 4, 2, 768, 256, 4, 4, 10.0,
+    )  # fmt: skip
+    capacity = 4096
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(tokens, hidden, **options)
+    combine = torch.zeros(tokens * topk, hidden, **options)
+    ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
+    weight_ptrs = [65536 * (rank + 1) for rank in range(ep)]
+    shared = [
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(hidden, intermediate, **options),
+    ]
+    routed = [torch.zeros(experts, intermediate, hidden, **options) for _ in range(2)]
+    routed.append(torch.zeros(experts, hidden, intermediate, **options))
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    schedule = (
+        torch.full((capacity,), -1, dtype=torch.int32),
+        torch.zeros(capacity, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(experts, dtype=torch.int32),
+    )
+    layout = torch.zeros(3 * experts + capacity // 256, dtype=torch.int32)
+    call = (x, ptrs, combine, ptrs, *weights, *schedule, topk, limit, comm, macro, mini)
+    plan = (x, ptrs, ptrs, intermediate, experts, capacity, topk, limit, comm, macro, mini)
+    return calls, call, plan, weights, schedule, layout, weight_ptrs
+
+
+@pytest.mark.parametrize("context", [True, False], ids=["context", "context-free"])
+def test_source_split_launcher_arguments(monkeypatch, context):
+    """Host only (stub kernels, no launch): the router-weight-before-down forward hands the kernel ``ep_size``,
+    ``rich_comm_sms``, ``rich_threshold`` (1/256 steps) and ``owner_routes``.  Without a split the count in force
+    goes in as the rich count and ``num_tokens`` stands in for the route totals (never read); an unplanned call
+    with a split but without the totals keeps the count in force; a plan with a split needs the schedule's int32
+    ``[ep_size]`` totals at every launch.  Malformed splits and totals are refused before any launch, and the other
+    launchers refuse the split."""
+    calls, call, plan_args, weights, schedule, layout, weight_ptrs = _source_split_launcher_setup(monkeypatch)
+    forward = MoKForward(True, context=context, weight_before_down=True)
+    routes = torch.tensor([7, 0, 3, 5], dtype=torch.int32)
+
+    def launched(**expected):
+        ((role, arguments),) = calls
+        calls.clear()
+        assert role.endswith("_wbd"), role
+        for name, value in expected.items():
+            if isinstance(value, torch.Tensor):
+                got = arguments[name]
+                assert got.data_ptr() == value.data_ptr() and torch.equal(got, value), name
+            else:
+                assert arguments[name] == value, (name, arguments[name])
+
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs)
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=384, owner_routes=schedule[2])
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 300))
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=300, owner_routes=schedule[2])
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 300), owner_routes=routes)
+    launched(ep_size=4, rich_comm_sms=2, rich_threshold=300, owner_routes=routes)
+    plan = forward.plan(*plan_args, weight_ptrs=weight_ptrs)
+    MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=384, owner_routes=schedule[2])
+    plan = forward.plan(*plan_args, weight_ptrs=weight_ptrs, source_split=(2, 257))
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        MoKForward.launch_planned(plan, *weights, *schedule[:3], layout, routes.long())
+    MoKForward.launch_planned(plan, *weights, *schedule[:3], layout, routes)
+    launched(ep_size=4, rich_comm_sms=2, rich_threshold=257, owner_routes=routes)
+    for split in ((3, 384), (6, 384), (0, 384), (2, 256), (2, 2**31), (2.0, 384), (2, 384.0)):
+        with pytest.raises(ValueError, match="source_split must be"):
+            forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=split)
+        with pytest.raises(ValueError, match="source_split must be"):
+            forward.plan(*plan_args, weight_ptrs=weight_ptrs, source_split=split)
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 384), owner_routes=routes[:3])
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context)(*call, layout=layout, source_split=(2, 384))
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context)(*call, layout=layout, owner_routes=routes)
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context).plan(*plan_args, source_split=(2, 384))
+    assert calls == []
+
+
+def test_source_split_follows_the_config():
+    """Host only: the adapter's source split of a forward launch: off (the forward count in force, the threshold,
+    ``num_tokens`` in place of the totals) for the router weight after the down projection, without a count, with a
+    count not below the forward count in force and for a schedule without totals; on, the count, the threshold in
+    1/256 steps (rounded) and the schedule's totals; totals of another shape, type or device are refused."""
+    from types import SimpleNamespace
+
+    functional = object.__new__(backend.MoKFunctional)
+    device = torch.device("cpu")
+    workspace = SimpleNamespace(ep_size=4, device=SimpleNamespace(index=-1))
+    routes = torch.tensor([7, 0, 3, 5], dtype=torch.int32, device=device)
+    tokens = torch.zeros(1, dtype=torch.int32, device=device)
+    schedule = SimpleNamespace(owner_routes=routes, num_tokens=tokens)
+    on = dataclasses.replace(MoKConfig(), source_split_comm_sms=16, source_split_threshold=1.25)
+    functional.weight_before_down = False
+    assert functional._source_split(on, workspace, schedule, 24) == (24, 320, tokens)
+    functional.weight_before_down = True
+    off = dataclasses.replace(on, source_split_comm_sms=None)
+    assert functional._source_split(off, workspace, schedule, 24) == (24, 320, tokens)
+    assert functional._source_split(on, workspace, schedule, 16) == (16, 320, tokens)
+    no_routes = SimpleNamespace(owner_routes=None, num_tokens=tokens)
+    assert functional._source_split(on, workspace, no_routes, 24) == (24, 320, tokens)
+    rich, threshold, totals = functional._source_split(on, workspace, schedule, 24)
+    assert (rich, threshold) == (16, 320) and totals is routes
+    assert functional._source_split(
+        dataclasses.replace(on, source_split_threshold=1.5009), workspace, schedule, 24
+    )[1] == 384
+    for bad in (routes[:3], routes.long(), routes.float()):
+        with pytest.raises(ValueError, match="owner_routes must be"):
+            functional._source_split(
+                on, workspace, SimpleNamespace(owner_routes=bad, num_tokens=tokens), 24
+            )
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        functional._source_split(on, SimpleNamespace(ep_size=4, device=SimpleNamespace(index=0)), schedule, 24)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source_split_comm_sms", 0),
+        ("source_split_comm_sms", 3),
+        ("source_split_comm_sms", -2),
+        ("source_split_comm_sms", 148),
+        ("source_split_comm_sms", 16.0),
+        ("source_split_comm_sms", True),
+        ("source_split_threshold", 1.0),
+        ("source_split_threshold", 1.001),
+        ("source_split_threshold", 0.5),
+        ("source_split_threshold", 65536.5),
+        ("source_split_threshold", float("inf")),
+        ("source_split_threshold", float("nan")),
+        ("source_split_threshold", "1.5"),
+    ],
+)
+def test_source_split_config_is_validated(field, value):
+    """Host only: the schedule check refuses a source-split count that is not a positive, even count leaving
+    compute SMs and a threshold that is not finite, above 1.0 in 1/256 steps and at most 65536; the default and
+    in-range values pass."""
+    functional = object.__new__(backend.MoKFunctional)
+    functional._schedule_configs, functional._sm_count = {}, {0: 148}
+    device = torch.device("cuda", 0)
+    with pytest.raises(ValueError, match=field):
+        functional._check_schedule_config(dataclasses.replace(MoKConfig(), **{field: value}), device)
+    for good in (
+        MoKConfig(),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=16, source_split_threshold=1.002),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=2, source_split_threshold=65536),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=146, source_split_threshold=4),
+    ):
+        functional._check_schedule_config(good, device)
+
+
+@pytest.mark.parametrize(
+    "capability,sm_count,ep_size,expected",
+    [
+        ((10, 0), 148, 8, 16),  # B200, EP8
+        ((10, 0), 148, 4, None),
+        ((10, 0), 152, 4, 16),  # GB200, EP4
+        ((10, 0), 152, 8, None),
+        ((10, 3), 148, 8, None),  # B300, EP8: measured, no gain (README)
+        ((10, 3), 148, 4, None),
+        ((10, 3), 152, 4, 16),  # GB300, EP4
+        ((10, 3), 152, 8, None),
+        ((10, 3), 160, 4, None),  # other SM count
+        ((10, 7), 212, 8, None),  # Rubin: no row
+        ((12, 0), 170, 4, None),
+    ],
+)
+def test_source_split_auto_follows_the_device_and_group(monkeypatch, capability, sm_count, ep_size, expected):
+    """Host-only: ``"auto"`` for the source split resolves through the per-device, per-group-size table; devices and
+    group sizes without a measured row keep the split off (``None``)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: capability)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    assert api.resolve_source_split_comm_sms(ep_size) == expected
+
+
+def test_source_split_defaults_resolve_the_measured_rows():
+    """Host-only: the config default keeps the source split off, the facade default ``"auto"`` resolves the
+    measured row (threshold 1.5), the measured rows are the shipped table (a change here is a shipping change) and
+    malformed arguments are rejected before any collective."""
+    import inspect
+
+    config = MoKConfig()
+    assert config.source_split_comm_sms is None
+    assert config.source_split_threshold == api.SOURCE_SPLIT_THRESHOLD == 1.5
+    facade = inspect.signature(api.create_mok_bf16_workspace).parameters
+    assert facade["source_split_comm_sms"].default == "auto"
+    assert facade["source_split_threshold"].default == 1.5
+    assert kernels.SOURCE_SPLIT_UNIT == 256
+    assert api.SOURCE_SPLIT_COMM_SMS == {
+        (10, 0): {148: {8: 16}, 152: {4: 16}},
+        (10, 3): {152: {4: 16}},
+    }
+    with pytest.raises(ValueError, match="ep_size must be a positive"):
+        api.resolve_source_split_comm_sms(0)
+    kwargs = dict(group=None, device=None, num_local_tokens=512, hidden_size=256, topk=2)
+    with pytest.raises(ValueError, match='"auto"'):
+        api.create_mok_bf16_workspace(source_split_comm_sms="fast", **kwargs)
+
+
 def test_before_down_call_refusals_come_before_device_work(monkeypatch):
     """Host only: with ``router_weight_position="before_down"`` plain SwiGLU (``swiglu_limit=None``), MXFP8 routed
     weights and a recompute without the router weights are refused by every operation and ``prepare`` before any
@@ -2512,6 +2728,56 @@ def test_before_down_recompute_and_context_free_forward(macro, experts, topk):
         assert torch.equal(a, b)
 
 
+@pytest.mark.parametrize("experts,topk", [(4, 2), (6, 6)], ids=["top2", "top6"])
+@pytest.mark.parametrize("macro", [768, 4096], ids=["replay", "resident"])
+def test_before_down_source_split_is_bitwise(macro, experts, topk):
+    """The router-weight-before-down forward (context and context-free) with the source split taken on one GPU
+    (route totals of one route, so the rank's 1024 source rows count as rich; 2, 4 and 6 of 8 communication SMs) and
+    held (the schedule's real totals): every launch writes the split-off bytes of y, the combine rows, the shared
+    gate, up and hidden and, on the resident macrobatch, the routed x, gate, up and hidden."""
+    _require_role("forward_clamped_wbd")
+    tokens, hidden, intermediate, mini, comm, limit = 1024, 512, 256, 256, 8, 0.125
+    x, _, shared, routed, scores = _before_down_problem(tokens, hidden, intermediate, experts, topk, 4127)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    row = torch.arange(tokens, device="cuda")
+    routes = torch.stack([(row * 5 + slot) % experts for slot in range(topk)], -1)
+    s = single_rank_schedule(routes, experts)
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    pointers = [scores.data_ptr()]
+    rows = min(s["actual"], macro)
+    taken = torch.ones(1, dtype=torch.int32, device="cuda")
+    held = torch.full((1,), tokens * topk, dtype=torch.int32, device="cuda")
+    for context in (True, False):
+        kernel = MoKForward(True, context=context, weight_before_down=True)
+
+        def run(**split):
+            combine = torch.zeros(tokens * topk, hidden, **options)
+            values = kernel(
+                x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+                *schedule, topk, limit, comm, macro, mini, weight_ptrs=pointers, **split,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return values, combine
+
+        base, base_combine = run()
+        assert torch.count_nonzero(base_combine).item() > 0
+        for split in (
+            dict(source_split=(2, 257), owner_routes=taken),
+            dict(source_split=(4, 300), owner_routes=taken),
+            dict(source_split=(6, 384), owner_routes=taken),
+            dict(source_split=(2, 257), owner_routes=held),
+        ):
+            values, combine = run(**split)
+            assert torch.equal(combine, base_combine), split
+            for index in (1, 3, 5, 7):  # shared gate, up, hidden, y
+                if base[index] is not None:
+                    assert torch.equal(values[index], base[index]), (split, index)
+            for index in (0, 2, 4, 6):  # routed x, gate, up, hidden of the resident macrobatch
+                if base[index] is not None:
+                    assert torch.equal(values[index][:rows], base[index][:rows]), (split, index)
+
+
 def test_before_down_clamp_at_the_limit():
     """The clamped SwiGLU of the router-weight-before-down kernels at exactly the limit 10, on the requester's input
     distribution (:func:`production_inputs`, hidden 2048, 6 local experts, top-6), with one macrobatch holding every
@@ -2868,3 +3134,223 @@ def test_before_down_adapter_top6_changed_counts(ep, experts):
         if loads is None:
             loads = misses
         assert misses == loads, (count, "kernel loads", loads, misses)
+
+
+def test_cat_rows_matches_copy_source_and_rejects_what_cat_rejects():
+    """Host only: ``_cat_rows`` writes a destination prefix with the bytes of ``_copy_source`` (the source rows, then
+    the padding rows), leaves the rows past the prefix alone, and returns False when ``torch.cat`` rejects a staging,
+    so the caller stages by ``_copy_source``: a source that autograd records under grad mode, and a source that
+    overlaps its destination."""
+    functional = backend.MoKFunctional
+    source = torch.arange(20.0).reshape(5, 4)
+    for value, padding in ((0.0, torch.zeros(3, 4)), (1.0, torch.ones(3, 4))):
+        expected = torch.full((10, 4), 7.0)
+        functional._copy_source(expected, source, value, 8)
+        destination = torch.full((10, 4), 7.0)
+        assert functional._cat_rows((source, padding, destination[:8]), None)
+        assert torch.equal(destination, expected)
+    destination = torch.full((10, 4), 7.0)
+    with torch.enable_grad():
+        recorded = source.clone().requires_grad_(True)
+        assert not functional._cat_rows((recorded, torch.zeros(3, 4), destination[:8]))
+    buffer = torch.full((10, 4), 7.0)
+    buffer[:5] = source
+    assert not functional._cat_rows((buffer[:5], torch.zeros(3, 4), buffer[:8]))
+
+
+def test_padding_rows_are_constant_normal_tensors_built_outside_capture(monkeypatch):
+    """Host only: a workspace's padding rows are BF16 zeros ``[256, hidden]`` and FP32 ones ``[256, topk]`` with the
+    launch plans, built once (normal tensors also under ``torch.inference_mode()``), and not built during CUDA Graph
+    capture (the caller then stages by ``_copy_source``)."""
+    import types
+
+    workspace = types.SimpleNamespace(launch_plans={}, hidden_size=512, topk=6, device=torch.device("cpu"))
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    assert backend.MoKFunctional._padding_rows(workspace) is None and workspace.launch_plans == {}
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    with torch.inference_mode():
+        rows = backend.MoKFunctional._padding_rows(workspace)
+    assert workspace.launch_plans == {("padding_rows",): rows}
+    assert rows.zeros.dtype == torch.bfloat16 and tuple(rows.zeros.shape) == (256, 512) and not rows.zeros.any()
+    assert rows.ones.dtype == torch.float32 and tuple(rows.ones.shape) == (256, 6) and bool((rows.ones == 1).all())
+    assert not rows.zeros.is_inference() and not rows.ones.is_inference()
+    assert backend.MoKFunctional._padding_rows(workspace) is rows
+
+
+@pytest.mark.parametrize(
+    "position,ep,experts,topk",
+    [("before_down", 8, 48, 6), ("after_down", 4, 4, 2)],
+    ids=["before_down-ep8-local48", "after_down-ep4-local4"],
+)
+def test_padded_staging_matches_the_copy_and_fill_form(position, ep, experts, topk, monkeypatch):
+    """The padded staging of the planned forward, recompute and backward (``_cat_rows``: one ``torch.cat`` per source
+    buffer from the workspace's padding rows) over the changing source counts of :data:`CHANGED_COUNTS` on one source
+    workspace, as rank 0 of its EP group emulated on one GPU (:class:`OneGpuGroup`).  Before each step every
+    workspace buffer holds other values.  After the context step and after the checkpointed step the workspace rows
+    ``[0, shared_rows)`` of ``x``, the router weights and ``dy`` hold the source rows and the padding values, the
+    padding rows of the combine and gradient buffers hold 0, and the rows past ``shared_rows`` keep their values;
+    every output (``y``, ``dx``, ``dscores``, the six FP32 weight-gradient accumulators) equals bit for bit the same
+    step with every padded staging in the copy-and-fill form (``_copy_source``), and so does a step whose ``x`` is a
+    view of the workspace's own ``x`` rows (``cat`` rejects it, the copy-and-fill form stages it)."""
+    before = position == "before_down"
+    if before:
+        _require_role("forward_clamped_wbd")
+        _require_role(f"count_{ep}_{experts}")
+    else:
+        require_gpu()
+    hidden, intermediate, macro, mini = 512, 256, 1536, 256
+    limit = 0.125 if before else None
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=before, fp32_wgrad=True, router_weight_position=position
+    )
+    functional.communication = OneGpuGroup()
+    functional.prepare(limit, save_context=False)
+    functional.prepare_recompute(limit)
+    workspace, multiplier = one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)
+    storage = workspace.storage
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    original = backend.MoKFunctional._cat_rows
+    staged = []
+
+    def spy(*stagings):
+        staged.append(original(*stagings))
+        return staged[-1]
+
+    sources = (
+        (storage.x_buffer, 3.0, 0.0),
+        (storage.d_y_buffer, -5.0, 0.0),
+        (storage.router_weight_buffer, 0.75, 1.0),
+    )
+    targets = (
+        (storage.combine_buffer, topk, 7.0),
+        (storage.d_x_routed_buffer, topk, -7.0),
+        (storage.d_router_weight_buffer, 1, 9.0),
+    )
+    for index, count in enumerate(CHANGED_COUNTS):
+        rows = backend.MoKFunctional._shared_rows(count)
+        x, dy, shared, routed, scores = _before_down_problem(count, hidden, intermediate, experts, topk, 6301 + index)
+        ids = rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        weights = (*shared, *routed)
+
+        def step(checkpointed, x=x):
+            schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+            accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+            y, context = functional.forward(
+                config, workspace, schedule, x, scores, *weights, swiglu_limit=limit, save_context=not checkpointed
+            )  # fmt: skip
+            if checkpointed:
+                context = functional.recompute_forward_context(
+                    config, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4], swiglu_limit=limit,
+                    router_weights=scores,
+                )  # fmt: skip
+            grads = functional.backward(
+                config, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return tuple(value.clone() for value in (y, *grads))
+
+        def poison():
+            for buffer, value, _ in sources:
+                buffer.fill_(value)
+            for buffer, _, value in targets:
+                buffer.fill_(value)
+
+        def check_staged():
+            torch.cuda.synchronize()
+            pad = rows - count
+            for (buffer, rest, value), source in zip(sources, (x, dy, scores), strict=True):
+                filler = source.new_full((pad, source.shape[1]), value)
+                assert torch.equal(buffer[:rows], torch.cat((source, filler))), (count, value)
+                assert bool((buffer[rows:] == rest).all()), (count, rest)
+            for buffer, width, rest in targets:
+                assert not buffer[count * width : rows * width].any(), (count, width)
+                assert bool((buffer[rows * width :] == rest).all()), (count, rest)
+
+        values = {}
+        for form in ("cat", "copy"):
+            if form == "cat":
+                monkeypatch.setattr(backend.MoKFunctional, "_cat_rows", staticmethod(spy))
+            else:
+                monkeypatch.setattr(backend.MoKFunctional, "_cat_rows", staticmethod(lambda *stagings: False))
+            for checkpointed in (False, True):
+                staged.clear()
+                poison()
+                values[form, checkpointed] = step(checkpointed)
+                check_staged()
+                if form == "cat":
+                    padded = rows > count
+                    assert staged == ([True] * (3 if checkpointed else 2) if padded else []), (count, staged)
+            monkeypatch.undo()
+        for checkpointed in (False, True):
+            assert _same(values["cat", checkpointed], values["copy", checkpointed]), (count, checkpointed)
+        poison()
+        storage.x_buffer[:count].copy_(x)
+        assert _same(values["cat", True], step(True, x=storage.x_buffer[:count])), count
+
+
+def test_build_schedule_route_buffer_over_changing_counts():
+    """``build_schedule`` through the schedule plan over changing source counts on one source workspace (one-GPU
+    emulation of rank 0 of EP 4, :class:`OneGpuGroup`): after each eager build the plan's route buffer holds the
+    count's expert IDs and ``-1`` in every other row (repeated, growing and shrinking counts), and the schedule equals
+    the unplanned launches' bit for bit.  Replays of a build captured in a CUDA Graph, which write IDs past a later
+    eager count, leave every later eager schedule exact, and the captured schedule replays exactly."""
+    require_gpu()
+    ep, experts, topk, hidden = 4, 4, 2, 256
+    counts = (777, 777, 900, 1024, 300, 300, 901, 513)
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
+    workspace, _ = one_gpu_source_workspace(ep, experts, counts, hidden, topk, device)
+    storage = workspace.storage
+    rows = storage.num_local_tokens
+    assert rows == max(counts)
+    key = ("schedule", functional.scheduler, functional.communication)
+    generator = torch.Generator(device=device).manual_seed(5501)
+
+    def problem(count):
+        return rand(count, ep * experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
+
+    def unplanned(ids, count):
+        rank, token, total, tokens, layout, _ = functional._schedule_launches(storage, config, ids, count)
+        return _schedule_fields(
+            workspace_module.MoKSchedule(
+                peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=tokens, layout=layout
+            ),
+            experts,
+        )
+
+    def eager(count):
+        ids = problem(count)
+        schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+        torch.cuda.synchronize()
+        expected = torch.full((rows, topk), -1, dtype=torch.int32, device=device)
+        expected[:count] = ids
+        assert torch.equal(storage.launch_plans[key].routes, expected), count
+        assert _same(_schedule_fields(schedule, experts), unplanned(ids, count)), count
+
+    for count in counts:
+        eager(count)
+    plan = storage.launch_plans[key]
+    eager(300)
+    graph_ids = problem(901)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = functional.build_schedule(workspace, config, graph_ids, num_local_experts=experts)
+    assert storage.launch_plans[key] is plan
+    for count in (600, 600, 1024, 450):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same(_schedule_fields(captured, experts), unplanned(graph_ids, 901))
+        graph.replay()
+        eager(count)

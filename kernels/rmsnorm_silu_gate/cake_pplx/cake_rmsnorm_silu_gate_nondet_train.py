@@ -134,6 +134,28 @@ gain from whole waves from far fewer rows per SM, it is 500 on SM100 and
 ``cake_jit.launch_grid`` takes the architecture (keyword ``arch``) and
 whether the rows are read as packed (keyword ``packed``) for those
 forwards.
+Version 0.2.15 changes no bits.  The deterministic package's forward warms
+in L2 each CTA's next block and the first block of the CTA a wave later,
+``x`` and ``z`` each by its own layout: packed rows as one byte range, rows
+of head stride 128 and another token stride (a gate sliced from a
+projection, a broadcast over tokens, one token) as one range a token, and
+rows of other layouts (head-major) as one 256-byte range a row on SM103 and
+SM107 and none on SM100; 0.2.14 warmed ``x`` and ``z`` only where both held
+packed rows.  The pipelined forwards keep the programs of 0.2.14, which warm
+``x`` and ``z`` only where both hold packed rows.  Rows of other layouts of
+a BF16 weight gradient run
+the repeatable backward's look-ahead program from 6145 rows per SM on SM100
+and SM103 and from 4097 on SM107, with the same bits; an FP32 weight
+gradient and a call with ``compute_grad_weight=False`` run it on packed rows
+only, as in 0.2.14.
+Version 0.2.16 changes no bits.  On SM100 and SM103 the deterministic
+package runs packed rows (``x`` and ``z`` both contiguous ``[T, H, 128]``,
+fewer than 2^24 rows) outside its tiny forward's rows on a second forward
+program, the forward of 0.2.14, which warms in L2 only rows packed in both
+``x`` and ``z``, up to 3000 rows per SM; its first forward, which
+warms each tensor by its own layout, runs the other rows outside the tiny
+forward's.
+The kernels of this package are those of 0.2.15.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -243,8 +265,9 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   and ``z`` each with head stride
   128 and token stride ``H * 128``, more than one token) run its copy of
   the deterministic package's look-ahead program, the same build, from
-  2560 rows per SM on SM100 and SM103 and from 1536 on SM107, with the same
-  bits.
+  2560 rows per SM on SM100 and SM103 and from 1536 on SM107, and, in a
+  call that computes the weight gradient, rows of other layouts from 6145
+  rows per SM on SM100 and SM103 and from 4097 on SM107, with the same bits.
 - Past 512 rows an FP32 weight gradient runs, on every architecture but in
   the static band of SM100 and SM103 (above), the repeatable backward of an
   FP32 weight gradient, this package's copy of the
@@ -275,10 +298,11 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   repeatable bands on SM107; the
   claimed program on the workspace past those cuts and in the repeatable
   band on SM100 and SM103; where packed rows run the look-ahead program,
-  that program without the weight gradient.  On SM100 and SM103, on packed
-  rows (and one token of head stride 128, whose token stride is never read:
-  the call passes it as ``H * 128``) up to 128 rows per SM, every band runs
-  instead the repeatable band's build of packed rows only (128-thread CTAs
+  that program without the weight gradient (other layouts run no
+  look-ahead program without the weight gradient).  On SM100 and SM103, on
+  packed rows (and one token of head stride 128, whose token stride is never
+  read: the call passes it as ``H * 128``) up to 128 rows per SM, every band
+  runs instead the repeatable band's build of packed rows only (128-thread CTAs
   of 8-row blocks with no claim, no ticket and no workspace, no stride
   test, every row read at its linear offset, a row's two reductions across
   its lanes overlapped): its ``dx`` and ``dz`` are the repeatable backward's
@@ -663,7 +687,9 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     digits in the workspace: ``dx``, ``dz`` and
     ``dw`` the deterministic package's bits, the same for the rows and the SM
     count (packed rows from 2560 rows per SM on SM100 and SM103 and from 1536
-    on SM107 run its look-ahead program, with the same bits).  Past 512 rows
+    on SM107, and rows of other layouts from 6145 rows per SM on SM100 and
+    SM103 and from 4097 on SM107, run its look-ahead program, with the same
+    bits).  Past 512 rows
     an FP32 ``dw`` runs, on every architecture but in the static band of
     SM100 and SM103, the repeatable backward of an
     FP32 weight gradient, this package's copy of the deterministic package's
