@@ -5024,11 +5024,12 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
 # The backward rows of ``DIRECT_ROWS`` (routes ``bwd``, ``bwd_dt`` and ``bwd_bias``; per architecture and route,
 # channel ranges within C 512 to 1024, each with its own token range): the labels of those routes (:data:`ROUTE_LABELS`:
 # FP32 and BF16 taps on ``bwd_dt`` and ``bwd_bias``), the channel counts besides each key's ends where a key covers
-# them (C 512 and C 1024 in 128-channel tiles; C 576 and C 520 in 64-channel tiles, C 520 with a partial last tile)
+# them (C 512 and C 1024 in 128-channel tiles; C 576 and C 520 in 64-channel tiles, C 520 with a partial last tile;
+# C 632, 856 and 928, measured channel counts of the sm_100a and sm_103a keys between wider ones)
 # and the document counts of the rows of 1000 tokens and more (one,
 # four in the perf packing, 32, and 100 from :data:`BACKWARD_DIRECT_MANY_DOCS_FROM` tokens).
 BACKWARD_DIRECT_LABELS = ("bwd", "bwd_dt", "bwd_dt-bf16", "bwd_bias", "bwd_bias-bf16")
-BACKWARD_DIRECT_CHANNELS = (512, 576, 1024, 520)
+BACKWARD_DIRECT_CHANNELS = (512, 576, 1024, 520, 632, 856, 928)
 BACKWARD_DIRECT_DOCS = (1, 4, 32, 100)
 BACKWARD_DIRECT_MANY_DOCS_FROM = 400
 # The direct backward programs' grid: a CTA takes token blocks of ``n_sub`` sub-tiles of 4 tokens, at most 2 CTAs per
