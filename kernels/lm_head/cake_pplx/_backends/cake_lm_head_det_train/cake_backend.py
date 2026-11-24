@@ -4637,9 +4637,10 @@ class _KeptPlan(Plan):
 
 # The padded A extent of a small compacted one-chunk call of the log-probability entry's eager forms without a
 # temperature (the plans :func:`prepare_lm_head_det_loss` builds with ``_a_extent``: the forward, the kept forward, the
-# recompute backward and the kept backward of :func:`forward_logprob` / :func:`backward_logprob` and their kept forms),
-# per architecture: the logits GEMMs (the kept forward's, the label-column arm's forward and the ``dz`` arm's recompute;
-# not the previous path's plain logits GEMM of ``logprob_lbl=False`` / ``logprob_dz=False``) of a chunk of
+# recompute backward and the kept backward of :func:`forward_logprob` / :func:`backward_logprob` and their kept forms;
+# not the loss entry's zero-weight rows' log-probability pass, :func:`_zero_weight_logp`), per architecture: the
+# logits GEMMs (the kept forward's, the label-column arm's forward and the ``dz`` arm's recompute; not the previous
+# path's plain logits GEMM of ``logprob_lbl=False`` / ``logprob_dz=False``) of a chunk of
 # :data:`A_EXTENT_MIN_ROWS` to :data:`A_EXTENT_MAX_ROWS` valid rows read their A operand -- the gathered rows --
 # through a tensor map of this many rows, the rows past the chunk zero; on the architectures of
 # :data:`DX_A_EXTENT_ROWS_BY_ARCH` the recompute backward's dX GEMM reads the chunk's ``dz`` the same way (from
@@ -4649,12 +4650,12 @@ class _KeptPlan(Plan):
 # 178.6; the default autograd step at T = 16 / 192, 15 / 182 valid rows, 1450.7 -> 1230.7 / 1231.4 -> 1183.3; its
 # checkpointed step, which runs the recompute backward and its dX GEMM, at T = 16 2142.5 -> 1594.8).  The row window and
 # the forms are the measured ones: the forward at 242 valid rows measured slower with the extent, no call below 14
-# valid rows was measured, and the loss entry, the temperature forms and the prepared runners (CUDA graphs included)
-# were not measured with the extent, so they keep the chunk's rows.  B200 and GB300 keep the chunk's rows (a 16-row
-# extent made no call faster there).  ``M`` (the epilogues' row bound), ``C``, the
-# statistics, every per-row operand, the grid and the K slices keep the chunk's rows, so the extra rows only form
-# accumulator rows that no epilogue stores and no per-row read reaches: every output keeps its bits.  At most a chunk
-# (``pad <= chunk``).
+# valid rows was measured, and the loss entry (its zero-weight rows' log-probability pass included), the temperature
+# forms and the prepared runners (CUDA graphs included) were not measured with the extent, so they keep the chunk's
+# rows.  B200 and GB300 keep the chunk's rows (a 16-row extent made no call faster there).  ``M`` (the epilogues' row
+# bound), ``C``, the statistics, every per-row operand, the grid and the K slices keep the chunk's rows, so the extra
+# rows only form accumulator rows that no epilogue stores and no per-row read reaches: every output keeps its bits.  At
+# most a chunk (``pad <= chunk``).
 A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
 DX_A_EXTENT_ROWS_BY_ARCH = {"sm_107a": 256}
 A_EXTENT_MIN_ROWS = 14
@@ -10710,7 +10711,9 @@ def _zero_weight_logp(
     loop compacted to those rows (:func:`_forward_logprob_rows`: ``gemm_logits_lbl`` + ``row_finalize`` where
     registered, chunk-bounded buffers, the call's ``chunk_size`` and logits GEMM knobs, no count, no host
     synchronization).  ``logp`` is compact (``[|Z|]``); per row the same logits and row-statistics arithmetic as the
-    loss path's, so the same bits.  ``arena`` (:func:`_arena_views`): the pass's chunk buffers are views of its storage."""
+    loss path's, so the same bits.  ``arena`` (:func:`_arena_views`): the pass's chunk buffers are views of its storage.
+    The pass keeps the chunk's rows (``a_extent=False``: no padded A extent, :data:`A_EXTENT_ROWS_BY_ARCH`, which was
+    not measured on it)."""
     zproblem = replace(
         problem,
         objective="ce",
@@ -10729,6 +10732,7 @@ def _zero_weight_logp(
         tuning=gemm_tuning,
         lbl=_resolve_logprob_lbl(None),
         arena=arena,
+        a_extent=False,
     )
     return logp, memory
 
@@ -11450,13 +11454,17 @@ def _forward_logprob_rows(
     tuning: dict[str, dict[str, Any]],
     lbl: bool,
     arena: Optional[torch.Tensor] = None,
+    a_extent: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
     """``(logp, lse, memory)`` of the log-probability forward's chunk loop over the rows ``row_index`` (``None`` =
     every row; non-empty otherwise), through the remembered binding or a new one: :func:`forward_logprob`'s body after
     its count, and the zero-weight rows' logp-only pass of a loss call (:func:`_zero_weight_logp`).  ``logp`` / ``lse``
     are compact when ``row_index`` is given.  ``arena`` (the zero-weight pass, :func:`_arena_views`): the chunk buffers are
     views of its storage, so the first call launches through the binding too (the runner's workspace is never
-    written)."""
+    written).  ``a_extent`` (:func:`prepare_lm_head_det_loss`'s ``_a_extent``): the eager log-probability forward's
+    plan may take the padded A extents; the zero-weight pass passes ``False`` (the chunk's rows) and keys its binding
+    apart (the key ends with ``"chunk_rows"``), so neither form takes the other's binding of the same inputs and
+    rows."""
     chunk_size = problem.chunk
     valid_rows = None if row_index is None else int(row_index.numel())
     cache = BINDING_CACHE
@@ -11480,6 +11488,8 @@ def _forward_logprob_rows(
             hidden_count=hc is not None,
             logprob_lbl=lbl,
         )
+        if not a_extent:
+            key += ("chunk_rows",)
         binding = cache.lookup(key)
         if binding is not None:
             logp, lse = binding.forward(
@@ -11500,7 +11510,7 @@ def _forward_logprob_rows(
         logprob_lbl=lbl,
         _template_only=arena is not None and backend == "cake",
         _chunk_views=hc,
-        _a_extent=True,
+        _a_extent=bool(a_extent),
     )
     if hc is not None or (arena is not None and backend == "cake"):
         # the hidden valid-row count: chunk 0's logits already sit in the prologue's buffers, so the first call launches

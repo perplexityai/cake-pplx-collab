@@ -5544,8 +5544,9 @@ def test_a_extent_forms(monkeypatch):
     """Which calls plan with the padded A extents (``make_plan``'s ``a_extent``, the reference backend; the extent itself
     is the record architecture's, none here): the log-probability entry's eager forward and backward (the default arms
     and the previous path's plain arms; the plan decides by its arms) pass it; the loss entry, the temperature forms and
-    a prepared runner (log-prob or loss) never do.  A forward plan passes it with ``need_dx`` / ``need_dw`` off, a
-    backward plan with them on."""
+    a prepared runner (log-prob or loss) never do (nor the loss entry's zero-weight rows' pass:
+    ``test_a_extent_zero_weight_pass``).  A forward plan passes it with ``need_dx`` / ``need_dw`` off, a backward plan
+    with them on."""
     real = cake_backend.make_plan
     seen: list = []
 
@@ -5588,6 +5589,111 @@ def test_a_extent_forms(monkeypatch):
         prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
         assert seen and not any(a for *_, a in seen), (entry, seen)
 
+
+
+@pytest.mark.parametrize("zero_rows", [14, 100, 182])
+@pytest.mark.parametrize("module_name", ["cake_backend", "opt_in"])
+def test_a_extent_zero_weight_pass(monkeypatch, module_name, zero_rows):
+    """The loss entry's zero-weight rows' log-probability pass (``_zero_weight_logp``) keeps the chunk's rows: a policy
+    call of ``zero_weight_min_rows() + 1`` rows with ``return_logp`` and 14 / 100 / 182 zero-weight rows (the sm_107a
+    window) runs the pass -- the log-probability plans formed inside the loss call, compacted to the zero-weight rows,
+    one chunk, no gradient -- with ``a_extent=False``; the same plan formed for sm_107a with the label-column arm (the
+    registered programs' default arm) keeps (0, 0), where the eager forms' flag would give it (256, 0).  Through the
+    main module's loss entry and the opt-in module's default call (the reference backend; the extent itself is the
+    record architecture's)."""
+    real = cake_backend.make_plan
+    seen: list = []
+
+    def pads(plan):
+        return plan.a_rows, plan.dx_a_rows
+
+    def spy(problem, **kw):
+        if problem.entry == "logprob":
+            arm = dict(kw, arch="sm_107a", logprob_lbl=True)
+            seen.append(
+                (
+                    bool(kw.get("a_extent", False)),
+                    kw.get("valid_rows"),
+                    bool(kw.get("need_dx") or kw.get("need_dw")),
+                    pads(real(problem, **arm)),
+                    pads(real(problem, **dict(arm, a_extent=True))),
+                )
+            )
+        return real(problem, **kw)
+
+    T = cake_backend.zero_weight_min_rows() + 1
+    inp = _host_inputs(T, objective="policy", ignore_frac=0.05)
+    weights = inp.loss_weights.clone()
+    weights[weights == 0] = 1.0
+    weights[inp.valid.nonzero().squeeze(1)[:zero_rows]] = 0.0
+    inp = replace(inp, loss_weights=weights.contiguous())
+    assert int((inp.valid & (inp.loss_weights == 0)).sum()) == zero_rows
+    monkeypatch.setattr(cake_backend, "make_plan", spy)
+    switches = dict(memory_mode=None) if module_name == "opt_in" else {}
+    _run(inp, 4096, entry="loss", **switches)
+    case = (module_name, zero_rows)
+    assert seen, case  # the call split: its pass formed its plans
+    for a_extent, valid, grad, shipped, eager in seen:
+        assert valid == zero_rows and not grad, (case, seen)
+        assert a_extent is False, (case, seen)
+        assert shipped == (0, 0), (case, seen)
+        assert eager == (256, 0), (case, seen)
+
+
+def test_zero_weight_pass_binding_key(monkeypatch):
+    """The zero-weight rows' pass remembers its binding apart from an eager log-probability forward of the same inputs
+    and rows (``_forward_logprob_rows``, whose eager form may take the padded A extents): on the cake path with the
+    runner and the binding stubbed, the pass prepares with ``_a_extent=False`` under a key that ends with
+    ``"chunk_rows"`` and the eager form with ``_a_extent=True`` under the plain key; neither finds the other's binding,
+    and a second call of each finds its own."""
+    inp = _host_inputs(40, ignore_frac=0.25)
+    row_index = cake_backend.valid_row_index(inp.labels)
+    n = int(row_index.numel())
+    problem = validate_lm_head_det_inputs(
+        inp.X, inp.W, inp.labels, chunk_size=4096, entry="logprob"
+    )
+    prepared: list = []
+
+    def prepare(*args, **kw):
+        prepared.append(kw["_a_extent"])
+        out = (torch.zeros(n), torch.zeros(n))
+        return SimpleNamespace(forward=lambda: out, memory={"form": kw["_a_extent"]})
+
+    def from_runner(cls, runner, hidden=None):
+        out = runner.forward()
+        return SimpleNamespace(
+            owned_bytes=0, memory=runner.memory, forward=lambda *a, **k: out
+        )
+
+    def call(a_extent):
+        return cake_backend._forward_logprob_rows(
+            problem,
+            inp.X,
+            inp.W,
+            inp.labels,
+            row_index,
+            None,
+            backend="cake",
+            tuning={},
+            lbl=True,
+            a_extent=a_extent,
+        )[2]
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_det_loss", prepare)
+    monkeypatch.setattr(cake_backend._Binding, "from_runner", classmethod(from_runner))
+    with _cache(True) as cache:
+        cache.clear()
+        try:
+            assert call(True) == {"form": True} and prepared == [True]
+            assert call(False) == {"form": False} and prepared == [True, False]
+            assert call(True) == {"form": True} and call(False) == {"form": False}
+            assert prepared == [True, False]  # each found its own binding
+            keys = list(cache._bindings)
+            assert len(keys) == 2, keys
+            plain = [k for k in keys if k[-1] != "chunk_rows"]
+            assert len(plain) == 1 and plain[0] + ("chunk_rows",) in keys, keys
+        finally:
+            cache.clear()
 
 def test_a_extent_runner_operands(monkeypatch):
     """A runner of a plan with padded A extents (the reference backend's runner given sm_107a's extents by a wrapped

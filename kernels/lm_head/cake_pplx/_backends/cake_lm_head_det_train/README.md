@@ -1500,9 +1500,10 @@ measured 182).  Measured on the default autograd call: the step at `T` = 16
 (15 valid rows) 1450.7 -> 1230.7 us, its checkpointed step (the recompute
 backward and its dX GEMM) 2142.5 -> 1594.8 us.  The padded rows are zeroed
 where the buffer is allocated (per call) and add up to `2 * 256 * V` bytes of
-logits buffer, which `memory_report` does not count.  The loss entry, the
-temperature forms, the prepared runners (`prepare_lm_head_det_loss`, CUDA
-graphs included), the previous path's plain logits GEMM
+logits buffer, which `memory_report` does not count.  The loss entry (its
+zero-weight rows' log-probability pass included), the temperature forms,
+the prepared runners (`prepare_lm_head_det_loss`, CUDA graphs included), the
+previous path's plain logits GEMM
 (`logprob_lbl=False` / `logprob_dz=False`), calls with every row valid
 (uncompacted), longer calls, the hidden valid-row count and the other
 architectures keep the chunk's rows: the extent was measured only on the
