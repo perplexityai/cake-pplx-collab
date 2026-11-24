@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Seeded inputs and the chunked FP64 reference of the DSA sparse-attention
-training problem (64 query heads, 512 latent + 64 rope, top-k selection),
+training problem (``H`` query heads -- 64 by default, 96 or 128 in the RoPE
+form -- 512 latent + 64 rope, top-k selection),
 shared by ``tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py``,
 ``tests/experimental/test_cake_dsa_sparse_attention_nondet_train_api.py`` and
 ``benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py``.  The protocol follows the reference
@@ -30,7 +31,10 @@ from typing import Optional
 
 import torch
 
+#: The default query head count of the inputs (the NoPE form's only count); RoPE inputs take ``heads``.
 NUM_HEADS = 64
+#: The query head counts of the RoPE form's inputs.
+ROPE_HEADS = (64, 96, 128)
 D_LATENT = 512
 D_ROPE = 64
 D_QK = D_LATENT + D_ROPE
@@ -110,6 +114,11 @@ class Inputs:
         return int(self.kv_latent.shape[0])
 
     @property
+    def heads(self) -> int:
+        """The query head count ``H`` (``q_latent [T, H, 512]``)."""
+        return int(self.q_latent.shape[1])
+
+    @property
     def max_seqlen_q(self) -> int:
         return max(self.seq_q)
 
@@ -171,14 +180,16 @@ def globalize_gather_indices_loop(
 DOUT_LAYOUTS = ("contiguous", "head_major")
 
 
-def _randn_dout(total_q: int, layout: str, gen, device) -> torch.Tensor:
-    """``dout [T, 64, 512]`` BF16: contiguous, or the ``[T, 64, 512]`` view of a ``[64, T, 512]`` buffer
-    (strides ``[512, T * 512, 1]``, the layout an output projection hands back)."""
+def _randn_dout(
+    total_q: int, layout: str, gen, device, heads: int = NUM_HEADS
+) -> torch.Tensor:
+    """``dout [T, H, 512]`` BF16 (``H = heads``): contiguous, or the ``[T, H, 512]`` view of a ``[H, T, 512]``
+    buffer (strides ``[512, T * 512, 1]``, the layout an output projection hands back)."""
     if layout not in DOUT_LAYOUTS:
         raise ValueError(f"dout_layout must be one of {DOUT_LAYOUTS}, got {layout!r}")
     if layout == "head_major":
-        return _randn_bf16((NUM_HEADS, total_q, D_LATENT), gen, device).permute(1, 0, 2)
-    return _randn_bf16((total_q, NUM_HEADS, D_LATENT), gen, device)
+        return _randn_bf16((heads, total_q, D_LATENT), gen, device).permute(1, 0, 2)
+    return _randn_bf16((total_q, heads, D_LATENT), gen, device)
 
 
 def last_valid_plus_one(
@@ -257,15 +268,22 @@ def make_inputs(
     beta: float = 0.0,
     dout_layout: str = "contiguous",
     device="cuda",
+    heads: int = NUM_HEADS,
 ) -> Inputs:
-    """Seeded BF16 inputs for documents of lengths ``seq_q`` / ``seq_k``.
+    """Seeded BF16 inputs for documents of lengths ``seq_q`` / ``seq_k`` with ``heads`` query heads (``q_latent
+    [T, heads, 512]``, ``q_rope [T, heads, 64]``, ``dout [T, heads, 512]``; the key side has no head axis).  The
+    random stream does not depend on ``heads`` beyond the sizes it draws: 64-head inputs are those of a call
+    without the keyword.
 
     ``beta > 0`` adds ``beta * (own key)`` to every query so its own key
     dominates the softmax (peaked attention); the query's own key must be in
     the selection (``self_including``) for that to be meaningful.
-    ``dout_layout="head_major"`` stores ``dout`` as ``[64, T, 512]`` and returns the
-    ``[T, 64, 512]`` view with strides ``[512, T * 512, 1]`` (the recorded trainer layout).
+    ``dout_layout="head_major"`` stores ``dout`` as ``[heads, T, 512]`` and returns the
+    ``[T, heads, 512]`` view with strides ``[512, T * 512, 1]`` (the recorded trainer layout).
     """
+    heads = int(heads)
+    if heads <= 0:
+        raise ValueError(f"heads must be positive, got {heads}")
     seq_q, seq_k = [int(x) for x in seq_q], [int(x) for x in seq_k]
     if len(seq_q) != len(seq_k) or any(
         lq > lk for lq, lk in zip(seq_q, seq_k, strict=True)
@@ -277,11 +295,11 @@ def make_inputs(
     gen = torch.Generator(device=device)
     gen.manual_seed(seed)
     total_q, total_k = sum(seq_q), sum(seq_k)
-    q_latent = _randn_bf16((total_q, NUM_HEADS, D_LATENT), gen, device)
-    q_rope = _randn_bf16((total_q, NUM_HEADS, D_ROPE), gen, device)
+    q_latent = _randn_bf16((total_q, heads, D_LATENT), gen, device)
+    q_rope = _randn_bf16((total_q, heads, D_ROPE), gen, device)
     kv_latent = _randn_bf16((total_k, D_LATENT), gen, device)
     k_rope = _randn_bf16((total_k, D_ROPE), gen, device)
-    dout = _randn_dout(total_q, dout_layout, gen, device)
+    dout = _randn_dout(total_q, dout_layout, gen, device, heads)
     cu_q = [0] + torch.tensor(seq_q).cumsum(0).tolist()
     cu_k = [0] + torch.tensor(seq_k).cumsum(0).tolist()
     locals_, globals_, own = [], [], []
@@ -334,8 +352,9 @@ def reference_fp64(
 ) -> dict:
     """Chunked FP64 reference from the BF16 inputs.
 
-    Returns ``out [T, 64, 512]``, natural-log ``lse [T, 64]`` (``-inf`` for
-    fully masked rows) and, with ``dout``, ``dq_latent``, ``dq_rope``,
+    Returns ``out [T, H, 512]``, natural-log ``lse [T, H]`` (``-inf`` for
+    fully masked rows; ``H = q_latent.shape[1]``, any head count) and, with
+    ``dout``, ``dq_latent``, ``dq_rope``,
     ``dkv_latent [S, 512]`` and ``dk_rope [S, 64]``; with ``own_key`` also the
     mean softmax mass on the query's own key (``self_weight``).  Slots that are
     ``-1``, ``>= S`` or ``>= topk_length[t]`` are invalid.  ``compact=True``
@@ -354,6 +373,7 @@ def reference_fp64(
     """
     device = q_latent.device
     total_q, total_k = int(q_latent.shape[0]), int(kv_latent.shape[0])
+    heads = int(q_latent.shape[1])
     if compact:
         indices, topk_length = compact_rows(indices, total_k, topk_length)
     kf, vf = k_rope.double(), kv_latent.double()
@@ -362,12 +382,12 @@ def reference_fp64(
     out = lse = dql = dqr = None
     if not stream:
         out = torch.empty(
-            total_q, NUM_HEADS, D_LATENT, dtype=torch.float64, device=device
+            total_q, heads, D_LATENT, dtype=torch.float64, device=device
         )
-        lse = torch.empty(total_q, NUM_HEADS, dtype=torch.float64, device=device)
+        lse = torch.empty(total_q, heads, dtype=torch.float64, device=device)
         dql = torch.empty_like(out) if want_grad else None
         dqr = (
-            torch.empty(total_q, NUM_HEADS, D_ROPE, dtype=torch.float64, device=device)
+            torch.empty(total_q, heads, D_ROPE, dtype=torch.float64, device=device)
             if want_grad
             else None
         )
@@ -429,7 +449,7 @@ def reference_fp64(
             result.update(dq_latent=dql, dq_rope=dqr)
         result.update(dkv_latent=dkvl, dk_rope=dkr)
     if own_key is not None:
-        result["self_weight"] = (self_w / (total_q * NUM_HEADS)).item()
+        result["self_weight"] = (self_w / (total_q * heads)).item()
     return result
 
 
@@ -440,9 +460,11 @@ def calibrate_beta(
     probe_len: int = 4096,
     topk: int = DEFAULT_TOPK,
     device="cuda",
+    heads: int = NUM_HEADS,
 ) -> float:
     """``beta`` of :func:`make_inputs` giving the mean own-key softmax mass ``target``
-    on a ``probe_len x probe_len`` peaked problem (bisection on the FP64 reference)."""
+    on a ``probe_len x probe_len`` peaked problem with ``heads`` query heads (bisection on
+    the FP64 reference)."""
     lo, hi = 0.0, 8.0
     for _ in range(18):
         mid = 0.5 * (lo + hi)
@@ -454,6 +476,7 @@ def calibrate_beta(
             self_including=True,
             beta=mid,
             device=device,
+            heads=heads,
         )
         w = reference_fp64(
             inp.q_latent,
