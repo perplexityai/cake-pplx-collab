@@ -330,6 +330,14 @@ kernel_cake_attn_res_det_train_c94faaec10a30a5c18a5(__nv_bfloat16* __restrict__ 
                 sn[2] = d[sg_at];
             }
         }
+        float tk_p = st[0];
+        float tk_pm = ((act != 0) ? tk_p : -1.0f);
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            tk_pm = max_noftz(tk_pm, __shfl_xor_sync(0xFFFFFFFF, tk_pm, offset));
+        int tk_cl = ((act != 0) ? ((tk_p == tk_pm) ? lane : 32) : 32);
+        int tk_c;
+        asm volatile("redux.sync.min.s32 %0, %1, 0xFFFFFFFF;" : "=r"(tk_c) : "r"(tk_cl));
         int xp_slot = xk % 2;
         int xp_row = xp_slot * 28 + warp * 4;
         #pragma unroll
@@ -408,16 +416,8 @@ kernel_cake_attn_res_det_train_c94faaec10a30a5c18a5(__nv_bfloat16* __restrict__ 
         }
         float tk_dp = xt_t;
         xk += 1;
-        float tk_p = st[0];
         float tk_r = st[1];
         float tk_d = st[2];
-        float tk_pm = ((act != 0) ? tk_p : -1.0f);
-        #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1)
-            tk_pm = max_noftz(tk_pm, __shfl_xor_sync(0xFFFFFFFF, tk_pm, offset));
-        int tk_cl = ((act != 0) ? ((tk_p == tk_pm) ? lane : 32) : 32);
-        int tk_c;
-        asm volatile("redux.sync.min.s32 %0, %1, 0xFFFFFFFF;" : "=r"(tk_c) : "r"(tk_cl));
         float _shfl_sync_17 = __shfl_sync(0xFFFFFFFF, tk_dp, tk_c);
         float tk_q = tk_dp - _shfl_sync_17;
         float tk_pq = ((act != 0) ? mul_f32_rn_noftz(tk_p, tk_q) : 0.0f);
