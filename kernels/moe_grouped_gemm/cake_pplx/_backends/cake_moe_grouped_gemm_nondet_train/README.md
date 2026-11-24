@@ -366,7 +366,16 @@ domain-scheduled twin; sm_107a, the A-collector twin) from the architecture's
 (`dgrad_evict_first`), the forward pass's on those of `fwd_lwh_ef_archs`
 (sm_107a) for `K <= fwd_lwh_ef_max_k` (`fwd_lwh_ef`) and on those of
 `fwd_evict_first_archs` (sm_100a, sm_103a) for `K >= fwd_evict_first_min_k`
-(`fwd_evict_first`). The eviction priority changes no arithmetic. Differences:
+(`fwd_evict_first`). The eviction priority changes no arithmetic. A forward
+or data gradient whose output span passes 2^31 - 1 elements launches in row
+chunks on the architectures of `wide_rows_archs` (`sm_100a`, `sm_103a`,
+`sm_107a`) as in
+the deterministic package (wide outputs; `plan["row_chunks"]`,
+`plan["grids"]`, the chunk row tables retained by the launch, with the same
+rules: one prepared wide launch must not be in flight on two streams at once,
+must be kept alive while a CUDA graph that captured it may replay and, after a
+launch on another stream, must be kept alive until that launch completes).
+Differences:
 
 - Ordered one-launch tail (`plan_wgrad(..., ordered_tail=True)`): the
   512-wide k tile on the architectures of
@@ -537,7 +546,7 @@ still fails.
 ## Tests and benchmark
 
 ```bash
-pytest tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_api.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_names.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_device_slice.py
+pytest tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_api.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_names.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_device_slice.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_wide_rows.py
 python benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py --help
 ```
 
@@ -576,6 +585,23 @@ moved to row 0 (bitwise) and the `[E]` call over the slice's rows alone
 outside poisoned, padded rows, graph replay over device-copied routings, two
 streams, accumulation, the autograd entry and the bits of the judged `[E]`
 cases.
+`test_cake_moe_grouped_gemm_nondet_train_wide_rows.py` covers the wide
+outputs (host plan, above): on the CPU the chunk arithmetic, the chunks' row
+tables against the rows of each group in each chunk, a call within the span
+bound as one launch, a wide call's chunks, rows and row tables and the
+refusals (an architecture outside `wide_rows_archs`, a row pitch past the
+span); on a GPU forced chunks of
+every served `fwd` / `dgrad` stage bitwise against one launch (an empty chunk,
+a first group past the first chunk, both row tables), the issue's 655,360
+rows over 64 and 32 skewed groups and the boundary row counts 524,287,
+524,288, 524,289 and 1,048,576 against the naive BF16 tier with windows of
+rows (each chunk boundary, row 524,288) bitwise against independent calls
+within the span, an `m_indptr` device slice into a slice of a larger `out`,
+changing device routings eager and from one CUDA graph with no host
+synchronization and no new program load, a checkpointed MoE block bitwise
+against the block without checkpoint, a weight gradient whose operands pass
+2^31 elements against the naive BF16 tier, and repeats. These GPU tests skip
+on a device with too little free memory (up to 72 GiB for the block).
 `test_cake_moe_grouped_gemm_nondet_train_standalone.py` imports a copy under another
 top-level name. `test_cake_moe_grouped_gemm_nondet_train_acc.py` covers the accumulate mode: the
 `_acc` stages against the shipped set and their twins, the plans, the routes
@@ -591,12 +617,18 @@ weight gradient) rows time the accumulation arms (`ovw`, `acc`, `mgB`, `mgF`,
 against `torch._grouped_mm` and a per-group cuBLAS loop. Its rows include
 `E = 1` and `E = 32` at 112,576 and 136,064 rows, and the note of a Cake
 weight-gradient row records its plan (`tail_splits`, `ordered_tail`,
-`unordered_tail`).
+`unordered_tail`). `--wide-rows` runs the wide-output rows instead (the down
+projection's forward and the gate/up projection's data gradient, `[rows, 4096]`
+at 327,680 and 655,360 rows over 64 and 32 balanced or skewed groups).
 
 ## Limitations
 
-- bf16 inputs only; `E`, `sum_m`, `N`, `K` and the output span must fit
-  32-bit element addressing.
+- bf16 inputs only; `E`, `sum_m`, `N` and `K` must fit 32-bit integers. On
+  `sm_100a`, `sm_103a` and `sm_107a`, a forward or data-gradient output whose
+  span passes 2^31 - 1 elements runs the selected program once per row chunk
+  whose span fits 32-bit element addressing (`plan["row_chunks"]`); the chunk
+  row tables are computed on the device. The weight-gradient output span must
+  fit 32-bit addressing.
 - The deterministic package's alignment rules; compute capability 10.0, 10.3
   or 10.7 only.
 - The autograd entry does not support summing the `x` gradients of several
