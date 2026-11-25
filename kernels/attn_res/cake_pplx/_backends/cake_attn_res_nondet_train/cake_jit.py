@@ -77,7 +77,7 @@ NMAX = (2, 3, 4, 5, 6, 7, 8, 9)
 MODULES: dict[str, dict[str, Any]] = {
     "bwd_n2": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_31b6129cc550ef82db2f",
         "launch": {
@@ -92,7 +92,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_n3": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_d70ef24ea048f7e6a52a",
         "launch": {
@@ -107,7 +107,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_n4": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_8c57f9e0cf69473355f8",
         "launch": {
@@ -122,7 +122,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_n5": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_a703c67e3a5c562472b6",
         "launch": {
@@ -137,7 +137,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_n6": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_6209813f6f2f9260adc1",
         "launch": {
@@ -152,7 +152,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_n7": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_a621fc4d9694beaa3114",
         "launch": {
@@ -167,7 +167,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_n8": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_839a85061c559c58a67c",
         "launch": {
@@ -182,7 +182,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_n9": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "v0"], ["buffer", "v1"], ["buffer", "v2"], ["buffer", "v3"], ["buffer", "v4"], ["buffer", "v5"], ["buffer", "v6"], ["buffer", "v7"], ["buffer", "v8"], ["buffer", "w"], ["buffer", "p"], ["buffer", "r"], ["buffer", "d"], ["buffer", "dv0"], ["buffer", "dv1"], ["buffer", "dv2"], ["buffer", "dv3"], ["buffer", "dv4"], ["buffer", "dv5"], ["buffer", "dv6"], ["buffer", "dv7"], ["buffer", "dv8"], ["buffer", "dw"], ["parameter", "T"], ["parameter", "n"], ["zero", "zero_region"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_attn_res_train_02e4d1fdd0ece4985916",
         "launch": {
