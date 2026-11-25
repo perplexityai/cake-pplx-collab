@@ -72,7 +72,7 @@ hold row ``n`` at element ``128 n``, fewer than ``PACKED_ROWS`` rows) by
 ``FORWARD_BANDS``, of rows that are not packed by the table of their class
 (:func:`forward_layout`): the gate columns of a wider projection, of more than
 one head, by ``PROJECTION_FORWARD_BANDS``, head-major rows by
-``HEAD_MAJOR_FORWARD_BANDS`` where an architecture has one, other layouts by
+``HEAD_MAJOR_FORWARD_BANDS``, other layouts by
 ``STRIDED_FORWARD_BANDS``; bands of rows per SM (the tiny forwards, which read
 packed rows only, the short forward, the mid, long and extra-long forwards, the
 pipelined forwards and the forward of the call role, each where the
@@ -3508,9 +3508,8 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # The forward bands of a call whose rows are neither packed nor of a layout with
 # a table of its own (``forward_layout``: ``x`` and ``z`` both sliced, a gate of
 # one head sliced from a projection, a broadcast over heads or a mixed or padded
-# layout; head-major rows on an architecture without
-# ``HEAD_MAJOR_FORWARD_BANDS``, sm_100a and sm_103a; a broadcast over tokens
-# that its band of packed rows does not run, below), or of packed rows from
+# layout; a broadcast over tokens that its band of packed rows does not run,
+# below), or of packed rows from
 # ``PACKED_ROWS`` on, as ``FORWARD_BANDS`` (the tiny forwards read packed rows
 # only).  The cuts follow the checkpointed training step as ``FORWARD_BANDS``
 # do, except the short forward's end: 12 rows per SM on sm_100a and sm_103a,
@@ -3538,9 +3537,8 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # than the deterministic package's beyond noise; at 2000 rows per SM the step
 # of a gate of one head took 1.0132 to 1.0147 of 0.2.17's time on B200 and
 # 1.0047 to 1.0051 on GB300, so the band ends at 1500, a measured point.
-# Head-major rows, a broadcast over heads and mixed or padded layouts were not
-# measured in that band.  On sm_107a no band of this table runs a pipelined
-# forward.
+# Head-major rows keep 0.2.17's programs there (``HEAD_MAJOR_FORWARD_BANDS``).
+# On sm_107a no band of this table runs a pipelined forward.
 STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3643,16 +3641,17 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # The forward bands of a call of head-major rows (``forward_layout`` gives
 # ``HEAD_MAJOR_LAYOUT``: ``x`` and ``z`` of token stride 128 and head stride ``T
 # * 128``, a ``[H, T, 128]`` tensor viewed as ``[T, H, 128]``), by architecture,
-# by rows per SM as ``FORWARD_BANDS``; an architecture without a table here
-# (sm_100a and sm_103a, where in version 0.2.17's measurement neither pipelined
-# forward with the per-layout walk made the step faster) runs
-# ``STRIDED_FORWARD_BANDS``, from version 0.2.18 its band of
-# ``fwd_layout_pipe`` (701 to 1500 rows per SM, measured on other layouts)
-# too.  On sm_107a version
-# 0.2.17's measurement (as ``PROJECTION_FORWARD_BANDS``; 16 and 48 heads) found
-# ``fwd_layout_keep_pipe`` at 100 rows per SM 9 to 10 % faster alone and the
-# step 3 to 4 % faster than the mid forward of ``STRIDED_FORWARD_BANDS``.  The
-# release measurement of 0.2.17 against 0.2.16 (driver 620.70) found its
+# by rows per SM as ``FORWARD_BANDS``.  On sm_100a and sm_103a the table is
+# version 0.2.17's ``STRIDED_FORWARD_BANDS`` (the extra-long forward up to 700
+# rows per SM, the plain forward past it), which these rows ran until 0.2.18:
+# in 0.2.17's measurement neither pipelined forward with the per-layout walk
+# made their step faster, and 0.2.18's band of ``fwd_layout_pipe`` in
+# ``STRIDED_FORWARD_BANDS`` (701 to 1500 rows per SM) was measured on other
+# layouts, so head-major rows keep 0.2.17's programs.  On sm_107a version
+# 0.2.17's measurement (as ``PROJECTION_FORWARD_BANDS``; 16 and 48 heads)
+# found ``fwd_layout_keep_pipe`` at 100 rows per SM 9 to 10 % faster alone and
+# the step 3 to 4 % faster than the mid forward of ``STRIDED_FORWARD_BANDS``.
+# The release measurement of 0.2.17 against 0.2.16 (driver 620.70) found its
 # checkpointed step 0.9 to 1.3 % slower at 120 rows per SM, and that of
 # ``fwd_layout_pipe`` 0.6 to 3.9 % slower from 442 to 1000, so
 # ``fwd_layout_keep_pipe`` runs up to 100 rows per SM, a measured point, and
@@ -3660,6 +3659,19 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # forward up to 480, the plain forward past it), the programs of 0.2.16.  Host
 # plan only, as the other tables.
 HEAD_MAJOR_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
+    "sm_100a": (
+        (12, "fwd_short"),
+        (140, "fwd_mid"),
+        (400, "fwd_long"),
+        (700, "fwd_xlong"),
+        (None, "fwd"),
+    ),
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
+        (700, "fwd_xlong"),
+        (None, "fwd"),
+    ),
     "sm_107a": (
         (59, "fwd_short"),
         (100, "fwd_layout_keep_pipe"),

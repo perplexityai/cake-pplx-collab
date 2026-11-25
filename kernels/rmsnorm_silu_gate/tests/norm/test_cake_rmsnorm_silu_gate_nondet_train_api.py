@@ -87,8 +87,7 @@ checks:
   the forward around the ends of its ``FORWARD_BANDS`` bands (packed rows;
   and of ``FORWARD_TINY_GAP``), ``PROJECTION_FORWARD_BANDS`` bands (``z``
   the gate columns of a wider projection), ``HEAD_MAJOR_FORWARD_BANDS``
-  bands (head-major rows; ``STRIDED_FORWARD_BANDS`` where the architecture
-  has no such table) and ``STRIDED_FORWARD_BANDS`` bands (``x`` and ``z``
+  bands (head-major rows) and ``STRIDED_FORWARD_BANDS`` bands (``x`` and ``z``
   both sliced from wider projections), each call's table that of its
   rows' class (``forward_layout``), the forward of ``x``
   or ``z`` broadcast over more than one token (token stride 0: the band of
@@ -1665,19 +1664,25 @@ def test_forward_plan_differs_from_0_2_17_only_in_the_moved_bands(
     class (none, ``PROJECTION_LAYOUT``, ``HEAD_MAJOR_LAYOUT``), at every whole
     rows per SM up to 3200, at every cut of either version's tables and a row
     either side and at ``PACKED_ROWS`` and ``INT32_MAX``, gives the module it
-    gives with version 0.2.17's tables put back (``suite.V0217_FORWARD_BANDS``)
-    but in the bands of ``suite.V0218_MOVED_BANDS``, where it gives
-    ``fwd_layout_pipe`` in the place of 0.2.17's module: on sm_100a and
-    sm_103a a gate of more than one head sliced from a projection past 599 and
-    629 rows per SM up to 650 and 699 (0.2.17's extra-long forward), and the
-    rows of ``STRIDED_FORWARD_BANDS``, head-major rows among them, from 701 to
-    1500 rows per SM (0.2.17's plain forward).  Every moved band holds rows of
-    the comparison; packed rows, sm_107a and every other band run what 0.2.17
-    ran."""
+    gives with version 0.2.17's tables put back (``suite.V0217_FORWARD_BANDS``;
+    no ``HEAD_MAJOR_FORWARD_BANDS`` entry of sm_100a and sm_103a) but in the
+    bands of ``suite.V0218_MOVED_BANDS``, where it gives ``fwd_layout_pipe`` in
+    the place of 0.2.17's module: on sm_100a and sm_103a a gate of more than
+    one head sliced from a projection past 599 and 629 rows per SM up to 650
+    and 699 (0.2.17's extra-long forward), and the rows of
+    ``STRIDED_FORWARD_BANDS`` (no class) from 701 to 1500 rows per SM (0.2.17's
+    plain forward).  Every moved band holds rows of the comparison; packed
+    rows, head-major rows, sm_107a and every other band run what 0.2.17 ran:
+    head-major rows on sm_100a and sm_103a from 701 to 1500 rows per SM the
+    plain forward, beside rows of no class on ``fwd_layout_pipe``."""
     assert loader.PROJECTION_FORWARD_BANDS == suite.PROJECTION_FORWARD_BANDS
     assert loader.STRIDED_FORWARD_BANDS == suite.STRIDED_FORWARD_BANDS
+    assert loader.HEAD_MAJOR_FORWARD_BANDS == suite.HEAD_MAJOR_FORWARD_BANDS
     assert loader.LAYOUT_FORWARD_BANDS[loader.PROJECTION_LAYOUT] is (
         loader.PROJECTION_FORWARD_BANDS
+    )
+    assert loader.LAYOUT_FORWARD_BANDS[loader.HEAD_MAJOR_LAYOUT] is (
+        loader.HEAD_MAJOR_FORWARD_BANDS
     )
     rows_by_arch = {}
     for arch in loader.ARCHES:
@@ -1686,7 +1691,7 @@ def test_forward_plan_differs_from_0_2_17_only_in_the_moved_bands(
         rows |= {loader.PACKED_ROWS + 1, loader.INT32_MAX}
         tables = [loader.FORWARD_BANDS[arch], loader.STRIDED_FORWARD_BANDS[arch]]
         tables += [t[arch] for t in loader.LAYOUT_FORWARD_BANDS.values() if arch in t]
-        tables += [t[arch] for t in suite.V0217_FORWARD_BANDS.values() if arch in t]
+        tables += [t[arch] for t in suite.V0217_FORWARD_BANDS.values() if t.get(arch)]
         for bands in tables:
             for last, _ in bands[:-1]:
                 rows |= {last * sm_count + d for d in (-1, 0, 1)}
@@ -1709,7 +1714,10 @@ def test_forward_plan_differs_from_0_2_17_only_in_the_moved_bands(
         assert set(by_arch) < set(current), table
         for arch, bands in by_arch.items():
             assert bands != current[arch], (table, arch)
-            monkeypatch.setitem(current, arch, bands)
+            if bands is None:
+                monkeypatch.delitem(current, arch)
+            else:
+                monkeypatch.setitem(current, arch, bands)
     old = plan()
     assert shipped.keys() == old.keys()
     moved = set()
@@ -1723,6 +1731,18 @@ def test_forward_plan_differs_from_0_2_17_only_in_the_moved_bands(
         assert (old[key], name) == (routes[want[0]], routes[want[1]]), key
         moved.add((arch, None if packed else layout))
     assert moved == set(suite.V0218_MOVED_BANDS), moved
+    # head-major rows where rows of no class moved keep the plain forward
+    kept = 0
+    for (arch, rows, packed, layout), name in shipped.items():
+        if packed or layout != loader.HEAD_MAJOR_LAYOUT:
+            continue
+        if _v0218_moved(arch, rows, sm_count, False, None) is None:
+            continue
+        routes = loader.ROUTES[arch]
+        assert name == old[arch, rows, packed, layout] == routes["fwd"], arch
+        assert shipped[arch, rows, packed, None] == routes["fwd_layout_pipe"]
+        kept += 1
+    assert kept, sm_count
 
 
 # Forward inputs around and past the ends of the forward's bands: (tokens,
@@ -1734,10 +1754,10 @@ def test_forward_plan_differs_from_0_2_17_only_in_the_moved_bands(
 # projections), of 4 heads for ``projection<i>`` (its
 # ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns of a wider projection, a
 # class of more than one head) and ``headmajor<i>`` (its
-# ``HEAD_MAJOR_FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` where it has none; 4
-# divides 148, 152 and 212, so ``end`` is whole tokens there); ``token<i>``
-# takes one token of ``end + 1`` heads (packed rows whose token stride is
-# passed as 0); skipped where the architecture has no such band with an end.
+# ``HEAD_MAJOR_FORWARD_BANDS``; 4 divides 148, 152 and 212, so ``end`` is whole
+# tokens there); ``token<i>`` takes one token of ``end + 1`` heads (packed rows
+# whose token stride is passed as 0); skipped where the architecture has no
+# such band with an end.
 FORWARD_CASES = [
     pytest.param(1, 48, "contiguous", id="1x48"),
     pytest.param(16, 1, "contiguous", id="16x1"),
@@ -1799,8 +1819,6 @@ FORWARD_CASES = [
     pytest.param(1, None, "other2", id="other-band2-end+1"),
     pytest.param(0, None, "other3", id="other-band3-end"),
     pytest.param(1, None, "other3", id="other-band3-end+1"),
-    pytest.param(0, None, "headmajor4", id="headmajor-band4-end"),
-    pytest.param(1, None, "headmajor4", id="headmajor-band4-end+1"),
     pytest.param(0, None, "other4", id="other-band4-end"),
     pytest.param(1, None, "other4", id="other-band4-end+1"),
     pytest.param(7685, 48, "contiguous", id="7685x48"),
@@ -1901,8 +1919,7 @@ def test_forward_keeps_the_gate_tail_in_every_band(
     """At the first whole tokens of every forward band of each class's table
     (``FORWARD_KINDS``: ``FORWARD_BANDS`` of packed rows,
     ``PROJECTION_FORWARD_BANDS`` and ``HEAD_MAJOR_FORWARD_BANDS`` of 4 heads,
-    ``STRIDED_FORWARD_BANDS`` where the architecture has no such table, and
-    ``STRIDED_FORWARD_BANDS`` of ``x`` and ``z`` both sliced from wider
+    and ``STRIDED_FORWARD_BANDS`` of ``x`` and ``z`` both sliced from wider
     projections), with every ``z`` in :data:`GATE_TAIL`, the inputs are of the
     kind's class (:func:`_forward_class`), the forward launches the
     band's module (``module_for_rows``' module for that class) and, on the

@@ -204,7 +204,10 @@ bits there (by at most one BF16 ulp on a few elements where measured: the
 programs associate a row's sum of squares differently); the rows of
 ``cake_jit.STRIDED_FORWARD_BANDS`` run ``fwd_layout_pipe`` from 701 to 1500
 rows per SM on sm_100a and sm_103a (0.2.17 ran the plain forward), with the
-same ``y`` bits.  ``dx``, ``dz``
+same ``y`` bits.  Head-major ``x`` and ``z`` on sm_100a and sm_103a, which
+ran ``cake_jit.STRIDED_FORWARD_BANDS`` until 0.2.17, take
+``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` there too, 0.2.17's bands of other
+layouts, so they keep 0.2.17's programs.  ``dx``, ``dz``
 and the weight gradient do not change.  Measured against 0.2.17 on the same
 GPU (B200, GB300; a gate of 1, 16, 48 or 64 heads sliced from a projection,
 ``x`` and ``z`` of 16 and 48 heads both sliced), neither the forward nor the
@@ -440,9 +443,8 @@ Host design (the input layout rules are the deterministic package's):
   (``cake_jit.forward_layout``): ``cake_jit.PROJECTION_FORWARD_BANDS`` where
   ``x`` holds packed rows of more than one head and ``z`` the gate columns of
   a wider projection,
-  ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major
-  on an architecture with such a table (sm_107a), else
-  ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
+  ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major,
+  else ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
   than one token counts as packed rows, but runs the band of other layouts
   where its band of packed rows runs a program that reads them at their linear
   offsets, and ``fwd_pipe`` where it runs ``fwd_keep_pipe``): a call runs a
@@ -459,7 +461,8 @@ Host design (the input layout rules are the deterministic package's):
   256-thread CTA per block of 16 rows; the plain
   forward (the call role ``fwd``; other
   layouts past 1500 rows per SM on sm_100a and sm_103a and past 480 on
-  sm_107a) one 64-thread CTA per block of 8 rows; the other forwards a grid
+  sm_107a, head-major rows past 700 on sm_100a and sm_103a) one 64-thread
+  CTA per block of 8 rows; the other forwards a grid
   whose CTA ``b`` walks the blocks ``b``, ``b + grid``, ...,
   loading each next block while it computes the current one, in the fewest
   whole waves that give no CTA more than a few blocks (past one wave the
@@ -500,11 +503,13 @@ Host design (the input layout rules are the deterministic package's):
   extra-long forward up to 629, ``fwd_layout_pipe`` up to 2000 and the plain
   forward past it; on sm_107a ``fwd_layout_keep_pipe`` up to 300, the mid
   forward up to 442, ``fwd_layout_pipe`` up to 2999 and
-  ``fwd_layout_keep_pipe`` past it.  For head-major rows on sm_107a:
-  ``fwd_layout_keep_pipe`` up to 100, the mid forward up to 480 and the plain
-  forward past it.  For other
-  layouts (such a gate of one head, and head-major rows on sm_100a and
-  sm_103a): on sm_100a the mid
+  ``fwd_layout_keep_pipe`` past it.  For head-major rows: on sm_100a the mid
+  forward up to 140, the long forward up to 400, the extra-long forward up to
+  700 and the plain forward past it; on sm_103a the mid forward up to 250, the
+  extra-long forward up to 700 and the plain forward past it (the bands of
+  other layouts in 0.2.17); on sm_107a ``fwd_layout_keep_pipe`` up to 100, the
+  mid forward up to 480 and the plain forward past it.  For other
+  layouts (such a gate of one head): on sm_100a the mid
   forward up to 140, the long forward up to 400, the extra-long forward up to
   700, ``fwd_layout_pipe`` up to 1500 and the plain forward past it; on
   sm_103a the mid forward up to 250, the extra-long forward up to 700,

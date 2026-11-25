@@ -74,7 +74,11 @@ the mid forward up to 250, the extra-long forward up to 629,
 ``fwd_layout_keep_pipe`` up to 300, the mid forward up to 442,
 ``fwd_layout_pipe`` up to 2999 and ``fwd_layout_keep_pipe`` past it.
 Head-major rows on SM107 run ``fwd_layout_keep_pipe`` up to 100 rows per SM,
-the mid forward up to 480 and the plain forward past it.  The rows of
+the mid forward up to 480 and the plain forward past it; on SM100 and SM103
+they run the bands of ``STRIDED_FORWARD_BANDS`` of version 0.2.17 (the mid
+forward up to 140 rows per SM, the long forward up to 400 and the extra-long
+forward up to 700 on SM100, the mid forward up to 250 and the extra-long
+forward up to 700 on SM103, the plain forward past 700).  The rows of
 ``STRIDED_FORWARD_BANDS`` on SM100 run the mid
 forward up to 140 rows per SM, the long forward up to 400, the extra-long
 forward up to 700, ``fwd_layout_pipe`` up to 1500 and the plain forward past
@@ -234,9 +238,10 @@ slot the side kernel
 holds walks all of its blocks once it starts), plus ``PROPORTIONAL_SLACK``,
 in each band of the module, of packed rows (``FORWARD_BANDS``), of
 projection rows (``PROJECTION_FORWARD_BANDS``), of head-major rows
-(``HEAD_MAJOR_FORWARD_BANDS`` on SM107, ``STRIDED_FORWARD_BANDS`` on SM100
-and SM103) and of ``x`` and ``z`` both sliced from wider projections
-(``STRIDED_FORWARD_BANDS``), at the band's first and last rows
+(``HEAD_MAJOR_FORWARD_BANDS``; on SM100 and SM103 the bands of
+``STRIDED_FORWARD_BANDS`` up to 700 rows per SM, so the probes of the rows of
+``STRIDED_FORWARD_BANDS`` below) and of ``x`` and ``z`` both sliced from
+wider projections (``STRIDED_FORWARD_BANDS``), at the band's first and last rows
 per SM and at the token counts that give the module's CTA slots the fewest
 whole row blocks each past the previous band's end and the most up to its
 band's end, or four times the fewest in the last band, which has no end: the
@@ -254,8 +259,8 @@ forwards (``fwd_pipe``, ``fwd_keep_pipe``, ``fwd_layout_pipe``,
 ``fwd_layout_keep_pipe``, ``fwd_pipe_packed`` and ``fwd_keep_pipe_packed``,
 each with the grid rule of the deterministic package's program it is built
 from) by the same bound, in each of their bands, on packed rows, on
-projection rows, on head-major rows and, on SM100 and SM103, on ``x`` and
-``z`` both sliced (``fwd_layout_pipe`` from 701 to 1500 rows per SM, from
+projection rows, on head-major rows (SM107) and, on SM100 and SM103, on
+``x`` and ``z`` both sliced (``fwd_layout_pipe`` from 701 to 1500 rows per SM, from
 version 0.2.18) and broadcast over tokens, at its first and last rows per
 SM, at the deterministic package's probes the band holds (the most whole
 blocks of
@@ -1469,9 +1474,11 @@ def test_repeatable_backward_long_role_slows_in_proportion_to_the_sms_held(
 # forward's (6 per SM) row blocks of 16 rows, in the module's ``nth`` band of
 # the forward bands of ``layout`` (``_forward_bands``: "packed", packed rows,
 # FORWARD_BANDS; "projection", ``z`` the gate columns of a wider projection,
-# PROJECTION_FORWARD_BANDS; "head_major", HEAD_MAJOR_FORWARD_BANDS on sm_107a;
-# "both_sliced", ``x`` and ``z`` both sliced from wider projections, and
-# head-major rows on sm_100a and sm_103a, STRIDED_FORWARD_BANDS), at the
+# PROJECTION_FORWARD_BANDS; "head_major", HEAD_MAJOR_FORWARD_BANDS, on
+# sm_100a and sm_103a the bands of STRIDED_FORWARD_BANDS up to 700 rows per SM
+# and the plain forward past it, so the probes below of the rows of
+# STRIDED_FORWARD_BANDS; "both_sliced", ``x`` and ``z`` both sliced from wider
+# projections, STRIDED_FORWARD_BANDS), at the
 # band's first and last row per SM ("band_first", "band_last"; the last band
 # has no last), at the fewest whole blocks per slot past the previous band's
 # end ("first") and at the most up to the band's end, or four times "first"
@@ -1809,8 +1816,8 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # ``fwd_layout_keep_pipe`` on sm_100a (2001 to 3000); the bands of
 # ``fwd_layout_pipe`` (sm_100a 600 to 2000, sm_103a 630 to 2000) lie past the
 # cut and hold their first and last rows only, and so does its band of
-# ``both_sliced`` rows, and of head-major rows, on sm_100a and sm_103a (701 to
-# 1500: past "first", 576 rows per SM, and below "last"); on sm_107a "below"
+# ``both_sliced`` rows on sm_100a and sm_103a (701 to 1500: past "first", 576
+# rows per SM, and below "last"); on sm_107a "below"
 # and "cut" lie in the mid forward's band (301 to 442), so the first band of
 # ``fwd_layout_keep_pipe`` (60 to 300) holds its first and last rows only,
 # "first" and "last" run in the band of ``fwd_layout_pipe`` (443 to 2999), and

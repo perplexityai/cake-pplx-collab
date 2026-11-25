@@ -200,8 +200,11 @@ in its last bits there (by at most one BF16 ulp on a few elements where
 measured: the programs associate a row's sum of squares differently); the
 rows of `cake_jit.STRIDED_FORWARD_BANDS` run `fwd_layout_pipe` from 701 to
 1500 rows per SM on `sm_100a` and `sm_103a` (0.2.17 ran the plain forward),
-with the same `y` bits.  `dx`, `dz` and `dw` do not change.  The measurement
-behind the new cuts is under "Programs and routes".
+with the same `y` bits.  Head-major `x` and `z` on `sm_100a` and `sm_103a`,
+which ran `cake_jit.STRIDED_FORWARD_BANDS` until 0.2.17, take
+`cake_jit.HEAD_MAJOR_FORWARD_BANDS` there too, 0.2.17's bands of other
+layouts, so they keep 0.2.17's programs.  `dx`, `dz` and `dw` do not change.
+The measurement behind the new cuts is under "Programs and routes".
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -509,10 +512,9 @@ rows; otherwise the table of the rows' class (`forward_layout`):
 and `z` the gate columns of a wider projection (head stride 128, a token
 stride past `H * 128`), `HEAD_MAJOR_FORWARD_BANDS` where `x` and `z` are
 head-major (token stride 128, head stride `T * 128`: a `[H, T, 128]` tensor
-viewed as `[T, H, 128]`) on `sm_107a`, and `STRIDED_FORWARD_BANDS` for every
+viewed as `[T, H, 128]`), and `STRIDED_FORWARD_BANDS` for every
 other layout (`x` and `z` both sliced, such a gate of one head, a broadcast
-over heads, a mixed or padded layout, head-major rows on `sm_100a` and
-`sm_103a`) and for packed rows from
+over heads, a mixed or padded layout) and for packed rows from
 `PACKED_ROWS` on.  An `x` or `z` broadcast over more than one token (token
 stride 0) counts as packed rows, but where its band of packed rows runs a
 program that reads the rows at their linear offsets (a tiny forward, or on
@@ -555,9 +557,9 @@ plain forward's time alone on B200 and 0.9320 .. 0.9646 on GB300, and
 and 0.9514 .. 0.9857 on GB300, its forward not slower than the deterministic
 package's beyond noise; at 2000 rows per SM the step of a gate of one head took
 1.0132 .. 1.0147 of 0.2.17's time on B200 and 1.0047 .. 1.0051 on GB300, so
-the band ends at 1500.  Head-major rows (`sm_100a`, `sm_103a`), a broadcast
-over heads and mixed or padded layouts were not measured in that band.  No
-band of `STRIDED_FORWARD_BANDS` on `sm_107a` runs a pipelined forward.
+the band ends at 1500.  Head-major rows keep 0.2.17's programs there
+(`HEAD_MAJOR_FORWARD_BANDS`, below).  No band of `STRIDED_FORWARD_BANDS` on
+`sm_107a` runs a pipelined forward.
 Version 0.2.17's pipelined
 forwards with `x` and `z` loaded with the L2's default policy
 (`fwd_keep_pipe`, `fwd_keep_pipe_packed`), measured with its grids (CUDA Graph
@@ -611,9 +613,11 @@ found their step with it 0.9 % .. 1.3 % slower at 120 rows per SM and with
 `fwd_layout_keep_pipe` runs up to 100 rows per SM and past it head-major rows
 run the bands of other layouts (the mid forward up to 480, the plain forward
 past it).  On `sm_100a` and `sm_103a` neither made the step of head-major rows
-faster in 0.2.17's measurement, so head-major rows there run the bands of
-other layouts (from 0.2.18 `fwd_layout_pipe` from 701 to 1500 rows per SM
-among them).  The tiny forwards and the short forward end where beside a kernel
+faster in 0.2.17's measurement, and 0.2.18's band of `fwd_layout_pipe` in
+`STRIDED_FORWARD_BANDS` (701 to 1500 rows per SM) was measured on other
+layouts, so head-major rows there run 0.2.17's bands of other layouts (their
+own table from 0.2.18, the plain forward from 701 rows per SM).  The tiny
+forwards and the short forward end where beside a kernel
 holding 16 SMs they still end no later than the deterministic package's
 forward as it routes the rows.  The 32-lane tiny forward (`sm_100a` and
 `sm_103a`), which has that package's tiny row blocks and so twice as many
@@ -624,8 +628,8 @@ slower.  The bands:
 
 | architecture | packed rows (rows per SM) | gate of more than one head sliced from a projection (rows per SM) | head-major rows (rows per SM) | other layouts (rows per SM) |
 | --- | --- | --- | --- | --- |
-| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `keep_pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, 2001-3000 `layout_keep_pipe`, past 3000 `fwd` | as other layouts | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` |
-| `sm_103a` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-629 `xlong`, 630-2000 `layout_pipe`, past 2000 `fwd` | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` |
+| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `keep_pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, 2001-3000 `layout_keep_pipe`, past 3000 `fwd` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` |
+| `sm_103a` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-629 `xlong`, 630-2000 `layout_pipe`, past 2000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` |
 | `sm_107a` | 1-65 `tiny` (but 17-32 rows `short`), 66-175 `mid`, 176-280 `xlong`, 281-8192 `pipe_packed`, past 8192 `keep_pipe_packed` | 1-59 `short`, 60-300 `layout_keep_pipe`, 301-442 `mid`, 443-2999 `layout_pipe`, past 2999 `layout_keep_pipe` | 1-59 `short`, 60-100 `layout_keep_pipe`, 101-480 `mid`, past 480 `fwd` | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
 
 The backward bands (`BACKWARD_BANDS`, in order: a call of `rows` rows on a
