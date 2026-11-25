@@ -2365,7 +2365,7 @@ if torch.cuda.get_device_capability() == (10, 7):
 - One kernel per call. The backward reads `x` and `dy` once and writes `dx` and `dw` once: no `[rows, H]` FP32 product is formed.
 - The products of two BF16 values in `dw` are exact in FP32; the additions form a balanced binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd halves, then five XOR shuffles across 32 lanes). Every product rounds to nearest without flushing subnormals; nothing is FP64.
 
-**Architectures.** `sm_100a`, `sm_103a`; `sm_107a` follows once it runs on an SM107 device. Other devices, SM107 included, raise `RuntimeError`, also for `rows = 0`. The `build.json` of the package gives the minimum CUDA toolkit of each library.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`, also for `rows = 0`. The `build.json` of the package gives the minimum CUDA toolkit of each library.
 
 **Inputs.**
 

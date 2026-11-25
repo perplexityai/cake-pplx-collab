@@ -192,7 +192,7 @@ def test_the_backend_never_reads_the_torch_deterministic_setting():
 
 def test_package_identity_and_build_identity():
     """``build.json`` and the registry name the package; each of the eight records is one
-    ``cake_route_weight_scale_det_train`` program built for ``sm_100a`` and ``sm_103a``."""
+    ``cake_route_weight_scale_det_train`` program built for ``sm_100a``, ``sm_103a`` and ``sm_107a``."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_route_weight_scale_det_train"
@@ -200,8 +200,8 @@ def test_package_identity_and_build_identity():
     assert manifest["package"] == BACKEND
     names = {entry["name"] for entry in manifest["libraries"]}
     assert names == {f"{rec['library']}_{arch}" for rec in jit.MODULES.values() for arch in rec["arches"]}
-    assert all(re.fullmatch(r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[03]a", n) for n in names), names
-    assert len(names) == len(jit.MODULES) * len(jit.ARCHES) == 16
+    assert all(re.fullmatch(r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[037]a", n) for n in names), names
+    assert len(names) == len(jit.MODULES) * len(jit.ARCHES) == 24
 
 
 def test_manifest_numerics_flags():
