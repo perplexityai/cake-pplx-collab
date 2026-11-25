@@ -38,9 +38,9 @@ outputs and launches nothing), and so are ``I`` and the scalars: one build
 serves every call, with no recompilation.  ``beta`` and ``lb`` default to 4.0
 and 25.0, the values of Kimi-K3.1-Pro (``activation_situ_beta`` and
 ``activation_situ_linear_beta``).  They must be positive and finite in FP32,
-with ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb`` finite in FP32
-(``ValueError`` otherwise); the tests cover ``beta`` in ``[2.5, 4]`` and
-``lb`` in ``[10, 40]``.
+with ``2.88539 / beta``, ``2.88539 / lb``, ``beta lb``, ``beta (1 + 2^-21)``
+and ``lb (1 + 2^-21)`` finite in FP32 (``ValueError`` otherwise); the tests
+cover ``beta`` in ``[2.5, 4]`` and ``lb`` in ``[10, 40]``.
 
 The kernels take every exponential as a power of two of a negative argument
 (the approximate base-2 exponential), every tanh as ``(1 - E) / (1 + E)`` of

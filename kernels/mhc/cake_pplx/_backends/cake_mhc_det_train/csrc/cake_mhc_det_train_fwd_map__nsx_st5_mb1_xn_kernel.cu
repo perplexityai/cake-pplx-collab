@@ -205,12 +205,12 @@ kernel_cake_mhc_det_train_fwd_map__nsx_st5_mb1_xn(const __grid_constant__ CUtens
             mbarrier_init(smem + 16, 1);
             mbarrier_init(smem + 24, 1);
             mbarrier_init(smem + 32, 1);
-            // a_empty: 5 barriers, init_count=5
-            mbarrier_init(smem + 40, 5);
-            mbarrier_init(smem + 48, 5);
-            mbarrier_init(smem + 56, 5);
-            mbarrier_init(smem + 64, 5);
-            mbarrier_init(smem + 72, 5);
+            // a_empty: 5 barriers, init_count=129
+            mbarrier_init(smem + 40, 129);
+            mbarrier_init(smem + 48, 129);
+            mbarrier_init(smem + 56, 129);
+            mbarrier_init(smem + 64, 129);
+            mbarrier_init(smem + 72, 129);
             // --- pipeline 'chunk_pipe' ---
             // big_full: 2 barriers, init_count=1
             mbarrier_init(smem + 80, 1);
@@ -605,10 +605,7 @@ kernel_cake_mhc_det_train_fwd_map__nsx_st5_mb1_xn(const __grid_constant__ CUtens
                         qsum[0] = _add_1;
                     }
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
-                    __syncwarp();
-                    if (elect_sync()) {
-                        mbarrier_arrive(a_empty_addr + (r_stage) * 8);
-                    }
+                    mbarrier_arrive(a_empty_addr + (r_stage) * 8);
                     r_stage += 1;
                     if (r_stage == 5) { r_stage = 0; _phase_a_full_1 ^= 1; }
                     if (st_2 % 2 == 1) {

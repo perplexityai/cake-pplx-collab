@@ -28,9 +28,9 @@ terminal summary); no output has an error bound of its own, and no test
 compares this package with the deterministic one.  ``y``, ``dx``, ``dz`` and an
 FP32 weight gradient (accumulated or not) must be the same bits on every
 launch and on every path: streams, CUDA Graph replays, autograd,
-``compute_grad_weight`` (``False`` the bits of the BF16 bands' module, but
-on the packed rows of the build of packed rows only, the repeatable
-backward's), grids
+``compute_grad_weight`` (``False`` the bits of the module of the BF16 bands
+it takes, every one but the solo band, but on the packed rows of the build
+of packed rows only, the repeatable backward's), grids
 smaller than the work (the static backward of an FP32 weight gradient on
 sm_100a and sm_103a, the fused backward and the repeatable backwards of
 both weight-gradient dtypes and their long roles at 1, 3 and 7
@@ -57,9 +57,13 @@ column (each into a BF16 and an FP32 weight gradient), FP32 and BF16 weight
 gradients,
 accumulation, ``compute_grad_weight=False``, the small-row backwards (one
 cluster each, in the rows of their ``BACKWARD_BANDS`` bands: the short
-backward of a BF16 weight gradient and the exact tiny backwards; no workspace made
-or touched, a caller workspace checked and left as it is, the first row count
-past them on the backward), empty work, a workspace reused across shapes (zero after every
+backward of a BF16 weight gradient and the exact tiny backwards; and one CTA,
+the solo backward of a BF16 weight gradient up to 16 rows, with the ``dx``,
+``dz`` and weight-gradient bits of the repeatable backward, fresh and
+accumulated, also in CUDA Graph capture, in a call that computes the weight
+gradient only: a call without it runs what it ran before the solo band
+shipped; no workspace made or touched, a caller workspace checked and left
+as it is, the first row count past them on the backward), empty work, a workspace reused across shapes (zero after every
 call), a caller workspace's checked buffers serving its later calls, made
 again once its storage was freed in place and the tensor rebound, and going
 with the tensor, a workspace with nonzero scratch returned to zero by
@@ -73,7 +77,15 @@ checkpointed step keeps, the registry's routes (a
 module for every call, which the support query requires; none of the programs
 the package no longer ships, the claimed backwards of an FP32 weight
 gradient and its static backward of sm_107a among them), bands, chunks and
-grids (the first and the last
+grids (the forward's tables: ``FORWARD_BANDS`` of packed rows, and of rows
+that are not packed the table of their class, ``forward_layout``: a gate
+sliced from a wider projection, head-major rows on sm_107a, else
+``STRIDED_FORWARD_BANDS``, the host passing the class of the call's strides;
+in the bands of ``fwd_keep_pipe`` rows broadcast over tokens run
+``fwd_pipe``; the pipelined forwards of 0.2.17, run by name, give the ``y``
+bits of their base programs on packed, projection, head-major, one-token and
+broadcast rows on both sides of their persistent cuts, and the same bits on
+both of their grids; the first and the last
 rows of every band of ``BACKWARD_BANDS`` run the band's program; packed rows
 of the last repeatable band of either weight gradient from
 ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on run its long role,
@@ -420,11 +432,17 @@ def _routes() -> dict[str, str]:
 
 
 def _module(
-    role: str, rows: int, *, packed: bool = True, compute_grad_weight: bool = True
+    role: str,
+    rows: int,
+    *,
+    packed: bool = True,
+    compute_grad_weight: bool = True,
+    layout: str | None = None,
 ) -> str:
     """The module ``module_for_rows`` runs for ``role`` and ``rows`` rows on
     this device (``packed``: the inputs hold packed rows;
-    ``compute_grad_weight``: a backward call computes the weight gradient)."""
+    ``compute_grad_weight``: a backward call computes the weight gradient;
+    ``layout``: the forward's class of rows that are not packed)."""
     device_index = torch.cuda.current_device()
     return loader.module_for_rows(
         loader.device_arch(device_index),
@@ -433,6 +451,7 @@ def _module(
         loader.device_sm_count(device_index),
         packed=packed,
         compute_grad_weight=compute_grad_weight,
+        layout=layout,
     )
 
 
@@ -443,11 +462,25 @@ def _packed(T: int, H: int, layout: str = "contiguous") -> bool:
     copies a misaligned input to packed rows."""
     if layout in ("contiguous", "flat", "misaligned"):
         return True
-    if layout == "projection":
+    if layout in ("projection", "both_sliced"):
         return T == 1
     if layout == "head_major":
         return T == 1 or H == 1
     raise ValueError(layout)
+
+
+def _layout_class(T: int, H: int, layout: str = "contiguous") -> str | None:
+    """The class ``forward_layout`` gives ``make(T, H, layout=layout)``'s ``x``
+    and ``z`` where they do not hold packed rows (:func:`_packed`): the gate
+    columns of a wider projection with packed ``x`` of more than one head
+    (``projection``; of one head None), head-major ``x`` and ``z``
+    (``head_major``), else None (``both_sliced``: ``x`` and ``z`` both sliced
+    from wider projections)."""
+    if _packed(T, H, layout):
+        return None
+    if layout == "projection":
+        return PROJECTION_LAYOUT if H > 1 else None
+    return {"head_major": HEAD_MAJOR_LAYOUT}.get(layout)
 
 
 def _backward_packed(T: int, H: int, layout: str = "contiguous") -> bool:
@@ -462,18 +495,25 @@ def _backward_packed(T: int, H: int, layout: str = "contiguous") -> bool:
         return False
     if layout in ("contiguous", "flat", "misaligned"):
         return True
-    if layout == "projection":
+    if layout in ("projection", "both_sliced"):
         return False
     if layout == "head_major":
         return H == 1
     raise ValueError(layout)
 
 
-def _forward_module(rows: int, packed: bool = True) -> str:
+def _forward_module(rows: int, packed: bool = True, layout: str | None = None) -> str:
     """The forward module ``module_for_rows`` runs for ``rows`` rows on this
-    device (the program of the architecture's ``FORWARD_BANDS`` band, of its
-    ``STRIDED_FORWARD_BANDS`` band where the rows are not ``packed``)."""
-    return _module("fwd", rows, packed=packed)
+    device (the program of the architecture's ``FORWARD_BANDS`` band, where
+    the rows are not ``packed`` of the band of the table of their class
+    ``layout``, :func:`_forward_table`)."""
+    return _module("fwd", rows, packed=packed, layout=layout)
+
+
+def _made_forward_module(T: int, H: int, layout: str = "contiguous") -> str:
+    """The forward module of ``make(T, H, layout=layout)``'s rows on this
+    device (:func:`_packed`, :func:`_layout_class`)."""
+    return _forward_module(T * H, _packed(T, H, layout), _layout_class(T, H, layout))
 
 
 def _backward_module(
@@ -577,10 +617,18 @@ def _nodw_bits(nodw: str, dy, x, z, w, *, workspace=None):
     """``dx`` and ``dz`` whose bits a call with ``compute_grad_weight=False``
     that runs ``nodw`` gives: the repeatable backward's for the build of
     packed rows only (:func:`_rep_bits`), else the BF16 call's on the same
-    inputs (the band's module)."""
+    inputs on its twin (``NODW_TWINS``: the band's module, forced through
+    ``module_for_rows``, :func:`_forcing`, so that on the rows of the solo
+    band, which a call without the weight gradient skips, the module of the
+    band it takes), or on the module the host names for a program that is
+    none of ``NODW_TWINS`` (a long module run with ``weight_grad`` 0)."""
     if _is_small(nodw):
         return _rep_bits(dy, x, z, w, workspace=workspace)
-    dx, dz, _ = backward(dy, x, z, w, EPS, workspace=workspace)
+    twin = NODW_TWINS.get(loader.MODULES[nodw]["role"])
+    with pytest.MonkeyPatch.context() as patch:
+        if twin is not None:
+            patch.setattr(pkg, "module_for_rows", _forcing(twin))
+        dx, dz, _ = backward(dy, x, z, w, EPS, workspace=workspace)
     return dx, dz
 
 
@@ -614,16 +662,20 @@ def _band_end(last, sm_count: int) -> int | None:
 
 
 def _backward_bands(
-    arch: str, role: str, sm_count: int
+    arch: str, role: str, sm_count: int, *, solo: bool = True
 ) -> list[tuple[str, int, int | None]]:
     """``(band role, first rows, last rows or None)`` of each
     ``BACKWARD_BANDS`` band of the backward ``role`` (``bwd_bf16`` or
     ``bwd_f32``) on ``arch`` with ``sm_count`` SMs that runs at least one row
     count, in order: a band runs the rows past the ends of the bands before it
-    up to its own end (:func:`_band_end`); the last band has no end."""
+    up to its own end (:func:`_band_end`); the last band has no end.  With
+    ``solo`` false the bands of a call without the weight gradient, which
+    skips a solo role's band (``SOLO``)."""
     bands = []
     covered = 0
     for last, band in loader.BACKWARD_BANDS[arch][role]:
+        if not solo and band.endswith(loader.SOLO):
+            continue
         end = _band_end(last, sm_count)
         if end is None or end > covered:
             bands.append((band, covered + 1, end))
@@ -826,6 +878,12 @@ def make(T, H, *, layout="contiguous", data="normal", seed=0, device="cuda"):
         x = randn(H, T, D).permute(1, 0, 2)
         z = randn(H, T, D).permute(1, 0, 2)
         dy = randn(T, H, D)
+    elif layout == "both_sliced":
+        # x and z (and dy) all sliced from wider projections, read in place:
+        # rows of no class of ``forward_layout`` (STRIDED_FORWARD_BANDS).
+        x = randn(T, 2 * H * D + 16)[:, : H * D].view(T, H, D)
+        z = randn(T, 2 * H * D + 16)[:, H * D : 2 * H * D].view(T, H, D)
+        dy = randn(T, 2 * H * D + 16)[:, : H * D].view(T, H, D)
     elif layout == "misaligned":
         # Storage offsets of 8 elements: materialized once by the host.
         x = randn(T * H * D + 8)[8:].view(T, H, D)
@@ -1067,7 +1125,7 @@ def test_layouts_in_the_row_claims_and_claimed_backward_bands(
         dw_dtype=dw_dtype,
         seed=90,
     )
-    fwd = _forward_module(rows, _packed(T, H, layout))
+    fwd = _made_forward_module(T, H, layout)
     assert launches == [fwd, name, name] * _launch_count(), launches
     gw = None
     if dw_dtype != torch.bfloat16:
@@ -2852,9 +2910,7 @@ def test_registry_records_reference_the_build_manifest():
     for arch in loader.ARCHES:
         routed = set(loader.ROUTES[arch])
         forward_bands = {
-            band
-            for table in (loader.FORWARD_BANDS, loader.STRIDED_FORWARD_BANDS)
-            for _, band in table[arch]
+            band for bands in _loader_forward_tables(arch) for _, band in bands
         }
         assert forward_bands <= set(FORWARD_ROLES), (arch, forward_bands)
         assert set(loader.BACKWARD_BANDS[arch]) == {"bwd_bf16", "bwd_f32"}, arch
@@ -2905,7 +2961,13 @@ def test_registry_records_reference_the_build_manifest():
         assert record["launch"]["cooperative"] is False
         assert record["launch"]["use_pdl"] is False
         clustered = record["grid_rule"]["kind"] == "cluster"
-        assert (record["launch"]["cluster"] != (1, 1, 1)) == clustered, name
+        # a cluster of the grid rule's CTAs (one CTA, launched without a
+        # cluster, for a solo role only); no other program launches a cluster
+        size = int(record["grid_rule"]["cluster"]) if clustered else 1
+        assert record["launch"]["cluster"] == (size, 1, 1), name
+        assert (size == 1) == (
+            not clustered or record["role"].endswith(loader.SOLO)
+        ), name
         plan = [key for _kind, key in record["arg_plan"]]
         if record["role"] in loader.NODW_ROLES:
             role = record["role"]
@@ -2939,6 +3001,10 @@ def test_registry_records_reference_the_build_manifest():
             "fwd_mid",
             "fwd_pipe",
             "fwd_pipe_packed",
+            "fwd_keep_pipe",
+            "fwd_keep_pipe_packed",
+            "fwd_layout_pipe",
+            "fwd_layout_keep_pipe",
         ):
             assert record["grid_rule"]["kind"] == "persistent_row_blocks"
             assert record.get("workspace") is None
@@ -3225,7 +3291,9 @@ def test_repeatable_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
 # end no later than the deterministic package's forward as it routes the rows:
 # the 32-lane tiny forward up to 4 rows per SM on sm_100a and 12 on sm_103a,
 # past which it is slower than the tiny forward, then the tiny forward up to
-# 36).
+# 36; the pipelined forward with ``x`` and ``z`` loaded with the L2's default
+# policy, ``fwd_keep_pipe``, on sm_100a from 37 to 85 rows per SM, and
+# ``fwd_keep_pipe_packed`` on sm_107a past 8192).
 # The forward's band roles, the call role ``fwd`` among them (the plain
 # forward, the last band of other layouts); the backward's are
 # ``BACKWARD_BANDS``.
@@ -3233,12 +3301,11 @@ FORWARD_BANDS = {
     "sm_100a": (
         (4, "fwd_l32_tiny"),
         (36, "fwd_tiny"),
-        (85, "fwd_pipe"),
+        (85, "fwd_keep_pipe"),
         (160, "fwd_mid"),
         (400, "fwd_long"),
         (520, "fwd_xlong"),
-        (6500, "fwd_pipe"),
-        (None, "fwd_mid"),
+        (None, "fwd_pipe"),
     ),
     "sm_103a": (
         (12, "fwd_l32_tiny"),
@@ -3253,12 +3320,21 @@ FORWARD_BANDS = {
         (65, "fwd_tiny"),
         (175, "fwd_mid"),
         (280, "fwd_xlong"),
-        (None, "fwd_pipe_packed"),
+        (8192, "fwd_pipe_packed"),
+        (None, "fwd_keep_pipe_packed"),
     ),
 }
-# The forward bands of inputs whose rows are not packed (the tiny forwards
-# read packed rows only), and of packed rows from PACKED_ROWS on, as
-# FORWARD_BANDS.
+# The packed rows ``lo < rows <= hi`` (counts of rows, not rows per SM) on
+# which an architecture runs the forward ``role`` in the place of its tiny
+# forward's ``FORWARD_BANDS`` band: ``(lo, hi, role)``; the short forward on
+# sm_107a from 17 to 32 rows.
+FORWARD_TINY_GAP = {"sm_107a": (16, 32, "fwd_short")}
+# The forward bands of inputs whose rows are not packed and of no class with a
+# table of its own (``forward_layout`` gives None: ``x`` and ``z`` both sliced,
+# a gate sliced from a projection of one head, a broadcast over heads, a mixed
+# or padded layout; head-major rows on sm_100a and sm_103a; the tiny forwards
+# read packed rows only), and of packed rows
+# from PACKED_ROWS on, as FORWARD_BANDS.
 STRIDED_FORWARD_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3279,6 +3355,83 @@ STRIDED_FORWARD_BANDS = {
         (None, "fwd"),
     ),
 }
+# The forward bands of a gate sliced from a wider projection (more than one
+# head, ``x`` of packed rows, ``z`` of head stride 128 and a token stride past
+# ``H * 128``: ``forward_layout`` gives PROJECTION_LAYOUT; such rows of one
+# head run STRIDED_FORWARD_BANDS), as FORWARD_BANDS: the pipelined forwards
+# with the per-layout L2 prefetch walk, ``fwd_layout_pipe`` and
+# ``fwd_layout_keep_pipe`` (``x`` and ``z`` loaded with the L2's default
+# policy; on sm_100a and sm_107a), in the place of parts of the extra-long
+# and the plain forward of STRIDED_FORWARD_BANDS on sm_100a and sm_103a, and
+# of parts of its mid forward and all of its plain forward on sm_107a.
+PROJECTION_FORWARD_BANDS = {
+    "sm_100a": (
+        (12, "fwd_short"),
+        (140, "fwd_mid"),
+        (400, "fwd_long"),
+        (650, "fwd_xlong"),
+        (2000, "fwd_layout_pipe"),
+        (3000, "fwd_layout_keep_pipe"),
+        (None, "fwd"),
+    ),
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
+        (699, "fwd_xlong"),
+        (2000, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+    "sm_107a": (
+        (59, "fwd_short"),
+        (300, "fwd_layout_keep_pipe"),
+        (442, "fwd_mid"),
+        (2999, "fwd_layout_pipe"),
+        (None, "fwd_layout_keep_pipe"),
+    ),
+}
+# The forward bands of head-major rows (``x`` and ``z`` of token stride 128
+# and head stride ``T * 128``: ``forward_layout`` gives HEAD_MAJOR_LAYOUT), by
+# architecture; an architecture without an entry (sm_100a, sm_103a) runs
+# STRIDED_FORWARD_BANDS.  On sm_107a ``fwd_layout_keep_pipe`` runs up to 100
+# rows per SM; past it the bands of STRIDED_FORWARD_BANDS.
+HEAD_MAJOR_FORWARD_BANDS = {
+    "sm_107a": (
+        (59, "fwd_short"),
+        (100, "fwd_layout_keep_pipe"),
+        (480, "fwd_mid"),
+        (None, "fwd"),
+    ),
+}
+PROJECTION_LAYOUT = "projection"
+HEAD_MAJOR_LAYOUT = "head_major"
+# The table of each class of ``forward_layout``.
+LAYOUT_FORWARD_BANDS = {
+    PROJECTION_LAYOUT: PROJECTION_FORWARD_BANDS,
+    HEAD_MAJOR_LAYOUT: HEAD_MAJOR_FORWARD_BANDS,
+}
+# The pipelined forwards of 0.2.17: builds of ``fwd_pipe`` (sm_100a, and
+# sm_103a for ``fwd_layout_pipe``) and, on sm_107a, of the deterministic
+# package's forward of rows of any layout with the gate that does not flush
+# (``fwd_layout_pipe``, ``fwd_layout_keep_pipe``) or of ``fwd_pipe_packed``
+# (``fwd_keep_pipe_packed``), with the y bits of ``fwd_pipe`` (sm_100a,
+# sm_103a) or ``fwd_pipe_packed`` (sm_107a): ``{role: {arch: base role}}``.
+NEW_PIPE_BASES = {
+    "fwd_layout_pipe": {
+        "sm_100a": "fwd_pipe",
+        "sm_103a": "fwd_pipe",
+        "sm_107a": "fwd_pipe_packed",
+    },
+    "fwd_layout_keep_pipe": {
+        "sm_100a": "fwd_pipe",
+        "sm_107a": "fwd_pipe_packed",
+    },
+    "fwd_keep_pipe": {"sm_100a": "fwd_pipe"},
+    "fwd_keep_pipe_packed": {"sm_107a": "fwd_pipe_packed"},
+}
+NEW_PIPE_ROLES = tuple(NEW_PIPE_BASES)
+# The pipelined forwards of packed rows only (no cut of rows not read as
+# packed; token stride ``H * 128``).
+PACKED_ONLY_PIPES = ("fwd_pipe_packed", "fwd_keep_pipe_packed")
 FORWARD_ROLES = (
     "fwd",
     "fwd_tiny",
@@ -3289,6 +3442,7 @@ FORWARD_ROLES = (
     "fwd_xlong",
     "fwd_pipe",
     "fwd_pipe_packed",
+    *NEW_PIPE_ROLES,
 )
 # The first ``FORWARD_BANDS`` band of each architecture (packed rows): the
 # 32-lane tiny forward on sm_100a and sm_103a, the tiny forward on sm_107a.
@@ -3347,17 +3501,53 @@ def _band_module(arch, role, rows, sm_count, packed=True):
     raise AssertionError(f"no {role} band of {arch} holds {rows} rows")
 
 
-def _tier_module(arch, role, rows, sm_count, packed=True):
+def _forward_table(arch, packed=True, layout=None):
+    """The forward bands of ``arch`` for rows ``packed`` (``FORWARD_BANDS``)
+    or not: the table of the rows' class ``layout`` (``LAYOUT_FORWARD_BANDS``)
+    where it has an entry for ``arch``, else ``STRIDED_FORWARD_BANDS``."""
+    if packed:
+        return FORWARD_BANDS[arch]
+    return LAYOUT_FORWARD_BANDS.get(layout, {}).get(arch) or STRIDED_FORWARD_BANDS[arch]
+
+
+def _forward_tables(arch):
+    """Every forward table of ``arch``: ``FORWARD_BANDS``,
+    ``STRIDED_FORWARD_BANDS`` and the class tables with an entry for it."""
+    tables = [FORWARD_BANDS[arch], STRIDED_FORWARD_BANDS[arch]]
+    tables += [t[arch] for t in LAYOUT_FORWARD_BANDS.values() if arch in t]
+    return tables
+
+
+def _loader_forward_tables(arch):
+    """Every forward table of ``arch`` the registry holds now:
+    ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` and the class tables of
+    ``LAYOUT_FORWARD_BANDS`` with an entry for it."""
+    tables = [loader.FORWARD_BANDS[arch], loader.STRIDED_FORWARD_BANDS[arch]]
+    for table in loader.LAYOUT_FORWARD_BANDS.values():
+        if arch in table:
+            tables.append(table[arch])
+    return tables
+
+
+def _tier_module(arch, role, rows, sm_count, packed=True, layout=None):
     """The module of ``role`` for ``rows`` rows: the forward's by
-    ``FORWARD_BANDS`` (by ``STRIDED_FORWARD_BANDS`` where the rows are not
-    ``packed`` or are ``PACKED_ROWS`` or more), the module of the first forward
-    band whose rows per SM hold ``rows``; a backward role's by
-    :func:`_band_module` (its long roles of ``packed`` rows, or of other
-    rows)."""
+    ``FORWARD_BANDS`` (where the rows are not ``packed``, by the table of
+    their class ``layout``, :func:`_forward_table`; packed rows of
+    ``PACKED_ROWS`` or more by ``STRIDED_FORWARD_BANDS``), the module of the
+    first forward band whose rows per SM hold ``rows``, but on packed rows in
+    the architecture's ``FORWARD_TINY_GAP`` the module of its role; a
+    backward role's by :func:`_band_module` (its long roles of ``packed``
+    rows, or of other rows)."""
     if role == "fwd":
-        packed = packed and rows < PACKED_ROWS
-        table = FORWARD_BANDS if packed else STRIDED_FORWARD_BANDS
-        for last, band in table[arch]:
+        gap = FORWARD_TINY_GAP.get(arch)
+        small = packed and rows < PACKED_ROWS
+        if small and gap is not None and gap[0] < rows <= gap[1]:
+            return loader.ROUTES[arch][gap[2]]
+        if packed:
+            # packed rows read no class: STRIDED_FORWARD_BANDS from PACKED_ROWS
+            layout = None
+        table = _forward_table(arch, small, layout)
+        for last, band in table:
             if last is None or rows <= last * sm_count:
                 return loader.ROUTES[arch][band]
         return loader.route_module(arch, role)
@@ -3367,15 +3557,21 @@ def _tier_module(arch, role, rows, sm_count, packed=True):
 @pytest.mark.parametrize("sm_count", [148, 152, 212, 216])
 def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     """``module_for_rows``: the forward's module of the first
-    ``FORWARD_BANDS`` band (``STRIDED_FORWARD_BANDS`` band where the rows are
-    not packed) with ``rows <= last * sm_count`` (rows per SM; the tiny
-    forwards of 32 lanes a row, sm_100a and sm_103a, and of 16, the short,
-    pipelined, mid, long, extra-long and plain forwards, each where the
-    architecture's bands name it), a backward role's module of the first
-    ``BACKWARD_BANDS`` band whose ``last`` holds (:func:`_band_module`).  The
-    backward bands of each architecture and role: the small-row bands (a
-    ``BAND_ROLES`` role each, whose module is one cluster), each ending at a
-    count of rows ``(ROWS, n)`` with ``n`` at most its module's ``max_rows``,
+    ``FORWARD_BANDS`` band (where the rows are not packed, of the table of
+    their class ``layout``: ``PROJECTION_FORWARD_BANDS``,
+    ``HEAD_MAJOR_FORWARD_BANDS`` where the architecture has one, else
+    ``STRIDED_FORWARD_BANDS``) with ``rows <= last * sm_count`` (rows per SM;
+    the tiny forwards of 32 lanes a row, sm_100a and sm_103a, and of 16, the
+    short, pipelined, mid, long, extra-long and plain forwards, each where the
+    architecture's bands name it; every table's first band of rows that are
+    not packed is the short forward's, with the same end), but on packed rows of
+    ``FORWARD_TINY_GAP`` (sm_107a: 17 to 32 rows) the short forward, a
+    backward role's module of the first ``BACKWARD_BANDS`` band whose
+    ``last`` holds (:func:`_band_module`).  The backward bands of each
+    architecture and role: the small-row bands (a ``BAND_ROLES`` role each,
+    whose module is one cluster: of one CTA for the solo role), each ending at
+    a count of rows ``(ROWS, n)`` with ``n`` at most its module's
+    ``max_rows``,
     and the bands of rows per SM, each running a static, a row-claims (a BF16
     weight gradient on sm_100a and sm_103a only), a fused (``FUSED_ROLES``), a
     repeatable (``REP_ROLES``) or a claimed backward by its grid rule, the
@@ -3397,7 +3593,26 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     ``PACKED_ROWS`` or more run by ``STRIDED_FORWARD_BANDS``."""
     assert loader.PACKED_ROWS == PACKED_ROWS == 2**31 // D
     assert loader.FORWARD_BANDS == FORWARD_BANDS
+    assert loader.FORWARD_TINY_GAP == FORWARD_TINY_GAP
     assert loader.STRIDED_FORWARD_BANDS == STRIDED_FORWARD_BANDS
+    assert loader.PROJECTION_FORWARD_BANDS == PROJECTION_FORWARD_BANDS
+    assert loader.HEAD_MAJOR_FORWARD_BANDS == HEAD_MAJOR_FORWARD_BANDS
+    assert loader.PROJECTION_LAYOUT == PROJECTION_LAYOUT
+    assert loader.HEAD_MAJOR_LAYOUT == HEAD_MAJOR_LAYOUT
+    assert loader.LAYOUT_FORWARD_BANDS == LAYOUT_FORWARD_BANDS
+    assert loader.LAYOUT_FORWARD_BANDS[PROJECTION_LAYOUT] is (
+        loader.PROJECTION_FORWARD_BANDS
+    )
+    assert loader.LAYOUT_FORWARD_BANDS[HEAD_MAJOR_LAYOUT] is (
+        loader.HEAD_MAJOR_FORWARD_BANDS
+    )
+    assert set(PROJECTION_FORWARD_BANDS) == set(loader.ARCHES)
+    assert set(HEAD_MAJOR_FORWARD_BANDS) == {"sm_107a"}
+    for arch, (lo, hi, role) in FORWARD_TINY_GAP.items():
+        # the gap lies in the tiny forward's first band on any SM count
+        assert FORWARD_BANDS[arch][0][1] == "fwd_tiny", arch
+        assert 0 < lo < hi <= FORWARD_BANDS[arch][0][0], (arch, lo, hi)
+        assert role in loader.ROUTES[arch], (arch, role)
     clustered = {
         loader.MODULES[name]["role"]
         for routes in loader.ROUTES.values()
@@ -3412,14 +3627,15 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     assert set(loader.BACKWARD_BANDS) == set(loader.ARCHES)
     for arch in loader.ARCHES:
         forward = {"fwd"}
-        for table, first in (
-            (FORWARD_BANDS, FIRST_FORWARD_BAND[arch]),
-            (STRIDED_FORWARD_BANDS, "fwd_short"),
-        ):
-            bands = table[arch]
+        for bands in _forward_tables(arch):
+            first = FIRST_FORWARD_BAND[arch] if bands is FORWARD_BANDS[arch] else None
             lasts = [last for last, _ in bands[:-1]]
             assert lasts == sorted(set(lasts)) and bands[-1][0] is None, arch
-            assert bands[0][1] == first, arch
+            if first is None:
+                # the short forward's band ends where its grid bound holds
+                assert bands[0] == STRIDED_FORWARD_BANDS[arch][0], arch
+            else:
+                assert bands[0][1] == first, arch
             forward |= {band for _, band in bands}
             for _, band in bands:
                 record = loader.MODULES[loader.ROUTES[arch][band]]
@@ -3507,7 +3723,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         for role in loader.BACKWARD_BANDS[arch]:
             for _, _, end in _backward_bands(arch, role, sm_count)[:-1]:
                 edges |= {end - 1, end, end + 1}
-        for table in (FORWARD_BANDS, STRIDED_FORWARD_BANDS):
+        tables = (FORWARD_BANDS, STRIDED_FORWARD_BANDS, *LAYOUT_FORWARD_BANDS.values())
+        for table in tables:
             for bands in table.values():
                 for last, _ in bands[:-1]:
                     edges |= {last * sm_count + d for d in (-1, 0, 1)}
@@ -3521,6 +3738,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         ):
             edges |= {start * sm_count - 1, start * sm_count, start * sm_count + 1}
         edges |= {PACKED_ROWS - 1, PACKED_ROWS, PACKED_ROWS + 1}
+        for lo, hi, _ in FORWARD_TINY_GAP.values():
+            edges |= {lo - 1, lo, lo + 1, hi - 1, hi, hi + 1}
         for role in loader.ROLES:
             for rows in sorted(edges):
                 want = _tier_module(arch, role, rows, sm_count)
@@ -3529,11 +3748,27 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 want = _tier_module(arch, role, rows, sm_count, packed=False)
                 got = loader.module_for_rows(arch, role, rows, sm_count, packed=False)
                 assert got == want, (arch, role, rows, "strided")
+                for layout in (None, *LAYOUT_FORWARD_BANDS):
+                    want = _tier_module(
+                        arch, role, rows, sm_count, packed=False, layout=layout
+                    )
+                    got = loader.module_for_rows(
+                        arch, role, rows, sm_count, packed=False, layout=layout
+                    )
+                    assert got == want, (arch, role, rows, layout)
+                    # a call of packed rows reads no class
+                    want = _tier_module(arch, role, rows, sm_count)
+                    got = loader.module_for_rows(
+                        arch, role, rows, sm_count, packed=True, layout=layout
+                    )
+                    assert got == want, (arch, role, rows, layout, "packed")
     # the forward on sm_100a: packed rows the 32-lane tiny forward up to 4
-    # rows per SM, the tiny forward up to 36, the pipelined forward up to 85,
-    # the mid forward up to 160, the long forward up to 400, the extra-long
-    # forward up to 520, the pipelined forward up to 6500, the mid forward
-    # past it; other layouts the short forward up to 12 rows per SM, the mid
+    # rows per SM, the tiny forward up to 36, the pipelined forward with the
+    # L2's default policy up to 85 (the pipelined forward until version
+    # 0.2.17), the mid forward up to 160, the long forward up to 400, the
+    # extra-long forward up to 520, the pipelined forward past it (with no
+    # end: past 6500 rows per SM too, where the mid forward ran until version
+    # 0.2.17); other layouts the short forward up to 12 rows per SM, the mid
     # forward up to 140, the long forward up to 400, the extra-long forward up
     # to 700, the plain forward past it
     routes = loader.ROUTES["sm_100a"]
@@ -3545,8 +3780,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (12 * sm_count + 1, "fwd_tiny", "fwd_mid"),
         (24 * sm_count, "fwd_tiny", "fwd_mid"),
         (36 * sm_count, "fwd_tiny", "fwd_mid"),
-        (36 * sm_count + 1, "fwd_pipe", "fwd_mid"),
-        (85 * sm_count, "fwd_pipe", "fwd_mid"),
+        (36 * sm_count + 1, "fwd_keep_pipe", "fwd_mid"),
+        (59 * sm_count, "fwd_keep_pipe", "fwd_mid"),
+        (85 * sm_count, "fwd_keep_pipe", "fwd_mid"),
         (85 * sm_count + 1, "fwd_mid", "fwd_mid"),
         (140 * sm_count + 1, "fwd_mid", "fwd_long"),
         (160 * sm_count, "fwd_mid", "fwd_long"),
@@ -3558,8 +3794,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (700 * sm_count, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count + 1, "fwd_pipe", "fwd"),
         (6500 * sm_count, "fwd_pipe", "fwd"),
-        (6500 * sm_count + 1, "fwd_mid", "fwd"),
-        (PACKED_ROWS - 1, "fwd_mid", "fwd"),
+        (6500 * sm_count + 1, "fwd_pipe", "fwd"),
+        (8192 * sm_count + 1, "fwd_pipe", "fwd"),
+        (PACKED_ROWS - 1, "fwd_pipe", "fwd"),
         (PACKED_ROWS, "fwd", "fwd"),
         (2**31 - 1, "fwd", "fwd"),
     ):
@@ -3569,11 +3806,11 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         assert got == routes[strided], (rows, strided)
     # the forward on sm_103a: packed rows the 32-lane tiny forward up to 12
     # rows per SM, the tiny forward up to 36, the mid forward up to 240, the
-    # extra-long forward up to 600, the pipelined forward up to 6000, the mid
-    # forward up to 8192, the pipelined forward past it; other layouts the
-    # short forward up to 12, the mid forward up to 250, the extra-long
+    # extra-long forward up to 600, the pipelined forward up to 6000, the
+    # mid forward up to 8192, the pipelined forward past it; other layouts
+    # the short forward up to 12, the mid forward up to 250, the extra-long
     # forward up to 700, the plain forward past it (sm_103a routes no long
-    # forward)
+    # forward and no forward with the L2's default policy)
     routes = loader.ROUTES["sm_103a"]
     for rows, packed, strided in (
         (1, "fwd_l32_tiny", "fwd_short"),
@@ -3590,6 +3827,11 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (600 * sm_count + 1, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count + 1, "fwd_pipe", "fwd"),
+        (1999 * sm_count, "fwd_pipe", "fwd"),
+        (1999 * sm_count + 1, "fwd_pipe", "fwd"),
+        (2500 * sm_count, "fwd_pipe", "fwd"),
+        (3000 * sm_count, "fwd_pipe", "fwd"),
+        (3000 * sm_count + 1, "fwd_pipe", "fwd"),
         (6000 * sm_count, "fwd_pipe", "fwd"),
         (6000 * sm_count + 1, "fwd_mid", "fwd"),
         (8192 * sm_count, "fwd_mid", "fwd"),
@@ -3602,16 +3844,25 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         assert got == routes[packed], (rows, packed)
         got = loader.module_for_rows("sm_103a", "fwd", rows, sm_count, packed=False)
         assert got == routes[strided], (rows, strided)
-    assert "fwd_long" not in routes
+    assert "fwd_long" not in routes and "fwd_keep_pipe" not in routes
+    assert "fwd_layout_keep_pipe" not in routes
     # the forward on sm_107a: packed rows the tiny forward up to 65 rows per
-    # SM, the mid forward up to 175, the extra-long forward up to 280, the
-    # pipelined forward of packed rows past it; other layouts the short
-    # forward up to 59, the mid forward up to 480, the plain forward past it
-    # (sm_107a routes no long forward, no pipelined forward of other layouts
-    # and no 32-lane tiny forward)
+    # SM but from 17 to 32 rows (counts of rows, FORWARD_TINY_GAP) the short
+    # forward, the mid forward up to 175, the extra-long forward up to 280,
+    # the pipelined forward of packed rows up to 8192 and the same with the
+    # L2's default policy past it; other layouts the short forward up to 59,
+    # the mid forward up to 480, the plain forward past it (sm_107a routes no
+    # long forward, no ``fwd_pipe``, no ``fwd_keep_pipe`` and no 32-lane tiny
+    # forward)
     routes = loader.ROUTES["sm_107a"]
     for rows, packed, strided in (
         (1, "fwd_tiny", "fwd_short"),
+        (16, "fwd_tiny", "fwd_short"),
+        (17, "fwd_short", "fwd_short"),
+        (24, "fwd_short", "fwd_short"),
+        (32, "fwd_short", "fwd_short"),
+        (33, "fwd_tiny", "fwd_short"),
+        (48, "fwd_tiny", "fwd_short"),
         (10 * sm_count + 1, "fwd_tiny", "fwd_short"),
         (59 * sm_count, "fwd_tiny", "fwd_short"),
         (59 * sm_count + 1, "fwd_tiny", "fwd_mid"),
@@ -3623,8 +3874,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (280 * sm_count + 1, "fwd_pipe_packed", "fwd_mid"),
         (480 * sm_count, "fwd_pipe_packed", "fwd_mid"),
         (480 * sm_count + 1, "fwd_pipe_packed", "fwd"),
-        (65536 * 48, "fwd_pipe_packed", "fwd"),
-        (PACKED_ROWS - 1, "fwd_pipe_packed", "fwd"),
+        (8192 * sm_count, "fwd_pipe_packed", "fwd"),
+        (8192 * sm_count + 1, "fwd_keep_pipe_packed", "fwd"),
+        (65536 * 48, "fwd_keep_pipe_packed", "fwd"),
+        (PACKED_ROWS - 1, "fwd_keep_pipe_packed", "fwd"),
         (PACKED_ROWS, "fwd", "fwd"),
         (2**31 - 1, "fwd", "fwd"),
     ):
@@ -3633,7 +3886,112 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         got = loader.module_for_rows("sm_107a", "fwd", rows, sm_count, packed=False)
         assert got == routes[strided], (rows, strided)
     assert "fwd_long" not in routes and "fwd_pipe" not in routes
-    assert "fwd_l32_tiny" not in routes
+    assert "fwd_keep_pipe" not in routes and "fwd_l32_tiny" not in routes
+    # the classes of rows that are not packed: a gate sliced from a projection
+    # (PROJECTION_FORWARD_BANDS) and head-major rows (HEAD_MAJOR_FORWARD_BANDS
+    # on sm_107a, STRIDED_FORWARD_BANDS elsewhere), at each cut of their tables
+    for arch, layout, cases in (
+        (
+            "sm_100a",
+            PROJECTION_LAYOUT,
+            (
+                (12 * sm_count, "fwd_short"),
+                (12 * sm_count + 1, "fwd_mid"),
+                (140 * sm_count + 1, "fwd_long"),
+                (400 * sm_count + 1, "fwd_xlong"),
+                (650 * sm_count, "fwd_xlong"),
+                (650 * sm_count + 1, "fwd_layout_pipe"),
+                (2000 * sm_count, "fwd_layout_pipe"),
+                (2000 * sm_count + 1, "fwd_layout_keep_pipe"),
+                (3000 * sm_count, "fwd_layout_keep_pipe"),
+                (3000 * sm_count + 1, "fwd"),
+                (4400 * sm_count, "fwd"),
+                (2**31 - 1, "fwd"),
+            ),
+        ),
+        (
+            "sm_103a",
+            PROJECTION_LAYOUT,
+            (
+                (12 * sm_count, "fwd_short"),
+                (12 * sm_count + 1, "fwd_mid"),
+                (250 * sm_count + 1, "fwd_xlong"),
+                (699 * sm_count, "fwd_xlong"),
+                (699 * sm_count + 1, "fwd_layout_pipe"),
+                (2000 * sm_count, "fwd_layout_pipe"),
+                (2000 * sm_count + 1, "fwd"),
+                (6445 * sm_count, "fwd"),
+                (2**31 - 1, "fwd"),
+            ),
+        ),
+        (
+            "sm_107a",
+            PROJECTION_LAYOUT,
+            (
+                (59 * sm_count, "fwd_short"),
+                (59 * sm_count + 1, "fwd_layout_keep_pipe"),
+                (100 * sm_count, "fwd_layout_keep_pipe"),
+                (300 * sm_count, "fwd_layout_keep_pipe"),
+                (300 * sm_count + 1, "fwd_mid"),
+                (309 * sm_count, "fwd_mid"),
+                (332 * sm_count, "fwd_mid"),
+                (442 * sm_count, "fwd_mid"),
+                (442 * sm_count + 1, "fwd_layout_pipe"),
+                (2999 * sm_count, "fwd_layout_pipe"),
+                (2999 * sm_count + 1, "fwd_layout_keep_pipe"),
+                (2**31 - 1, "fwd_layout_keep_pipe"),
+            ),
+        ),
+        (
+            "sm_107a",
+            HEAD_MAJOR_LAYOUT,
+            (
+                (59 * sm_count, "fwd_short"),
+                (59 * sm_count + 1, "fwd_layout_keep_pipe"),
+                (100 * sm_count, "fwd_layout_keep_pipe"),
+                (100 * sm_count + 1, "fwd_mid"),
+                (120 * sm_count, "fwd_mid"),
+                (442 * sm_count, "fwd_mid"),
+                (442 * sm_count + 1, "fwd_mid"),
+                (480 * sm_count, "fwd_mid"),
+                (480 * sm_count + 1, "fwd"),
+                (1000 * sm_count, "fwd"),
+                (1000 * sm_count + 1, "fwd"),
+                (2**31 - 1, "fwd"),
+            ),
+        ),
+    ):
+        routes = loader.ROUTES[arch]
+        for rows, role in cases:
+            got = loader.module_for_rows(
+                arch, "fwd", rows, sm_count, packed=False, layout=layout
+            )
+            assert got == routes[role], (arch, layout, rows, role)
+            # the same rows of packed x and z run FORWARD_BANDS
+            got = loader.module_for_rows(arch, "fwd", rows, sm_count, layout=layout)
+            assert got == _tier_module(arch, "fwd", rows, sm_count), (arch, rows)
+    # head-major rows on sm_107a past 100 rows per SM run the programs of
+    # STRIDED_FORWARD_BANDS
+    for rows in (101, 120, 442, 443, 480, 481, 1000, 1001):
+        rows *= sm_count
+        got = loader.module_for_rows(
+            "sm_107a", "fwd", rows, sm_count, packed=False, layout=HEAD_MAJOR_LAYOUT
+        )
+        want = loader.module_for_rows("sm_107a", "fwd", rows, sm_count, packed=False)
+        assert got == want, rows
+    for arch in ("sm_100a", "sm_103a"):
+        # no table of head-major rows: STRIDED_FORWARD_BANDS
+        for last, _ in STRIDED_FORWARD_BANDS[arch][:-1]:
+            for rows in (last * sm_count, last * sm_count + 1):
+                got = loader.module_for_rows(
+                    arch, "fwd", rows, sm_count, packed=False, layout=HEAD_MAJOR_LAYOUT
+                )
+                want = loader.module_for_rows(arch, "fwd", rows, sm_count, packed=False)
+                assert got == want, (arch, rows)
+        for rows in (PACKED_ROWS, 2**31 - 1):
+            # packed rows from PACKED_ROWS on: STRIDED_FORWARD_BANDS
+            got = loader.module_for_rows(arch, "fwd", rows, sm_count)
+            assert got == loader.ROUTES[arch]["fwd"], (arch, rows)
 
 
 def _check_backward_bands(arch: str, sm_count: int) -> None:
@@ -3642,8 +4000,10 @@ def _check_backward_bands(arch: str, sm_count: int) -> None:
     at its first and at its last rows (the last band, which has no end, at
     ``INT32_MAX`` rows), on packed rows below its long role's first rows and
     on other rows below the first rows of its long role of other rows, and
-    at every row count in a call without the weight gradient
-    (:func:`_band_module`); neighbouring bands run different modules, and
+    at those rows in a call without the weight gradient (the band's module,
+    but on a solo band's rows, which such a call skips, the module of the
+    band of :func:`_backward_bands` with ``solo=False`` that holds them, the
+    next band's); neighbouring bands run different modules, and
     the row after a band's end runs the next band's module, so the bands
     cover every row count without a gap; a band of a count of rows, ``(ROWS,
     n)``, ends at most at its cluster module's ``max_rows``.  A long role
@@ -3663,6 +4023,7 @@ def _check_backward_bands(arch: str, sm_count: int) -> None:
             bands,
         )
         assert bands[0][1] == 1 and bands[-1][2] is None, (arch, role, bands)
+        nodw_bands = _backward_bands(arch, role, sm_count, solo=False)
         for i, (band, first, last) in enumerate(bands):
             name = loader.ROUTES[arch][band]
             assert loader.MODULES[name]["role"] == band, (arch, band)
@@ -3673,7 +4034,15 @@ def _check_backward_bands(arch: str, sm_count: int) -> None:
                 got = loader.module_for_rows(
                     arch, role, rows, sm_count, packed=False, compute_grad_weight=False
                 )
-                assert got == name, (arch, role, band, rows, "no weight gradient")
+                want = name
+                if band.endswith(loader.SOLO):
+                    (want,) = (
+                        loader.ROUTES[arch][b]
+                        for b, f, e in nodw_bands
+                        if f <= rows and (e is None or rows <= e)
+                    )
+                    assert want == loader.ROUTES[arch][bands[i + 1][0]], (arch, band)
+                assert got == want, (arch, role, band, rows, "no weight gradient")
                 got = loader.module_for_rows(arch, role, rows, sm_count)
                 want = _band_module(arch, role, rows, sm_count)
                 assert got == want, (arch, role, band, rows, "packed")
@@ -4243,7 +4612,9 @@ def test_capture_runs_the_long_role_and_the_repeatable_backward(reserve, launche
 def test_support_query_needs_a_route_for_every_call(monkeypatch):
     """``routes_every_call``: every exported architecture routes a module for
     every call (the role of every band of its ``FORWARD_BANDS``,
-    ``STRIDED_FORWARD_BANDS`` and ``BACKWARD_BANDS``, and the long role of
+    ``STRIDED_FORWARD_BANDS``, the class tables of ``LAYOUT_FORWARD_BANDS`` (a
+    role only they run, the pipelined forwards with the per-layout walk,
+    among them) and ``BACKWARD_BANDS``, and the long role of
     every band role of its ``LONG_BACKWARD_ROWS_PER_SM`` and
     ``LONG_BACKWARD_STRIDED_ROWS_PER_SM``; a role whose bands
     end without a ``None`` band, its own module), so the support query is
@@ -4257,10 +4628,28 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
     for arch in loader.ARCHES:
         assert loader.routes_every_call(arch), arch
         band_roles = {
+            band for bands in _loader_forward_tables(arch) for _, band in bands
+        }
+        # the roles only a table of a class of ``forward_layout`` runs (the
+        # pipelined forwards with the per-layout walk): removing one's route
+        # fails the query too
+        classed = {
+            band
+            for table in loader.LAYOUT_FORWARD_BANDS.values()
+            for _, band in table.get(arch, ())
+        }
+        plain = {
             band
             for table in (loader.FORWARD_BANDS, loader.STRIDED_FORWARD_BANDS)
             for _, band in table[arch]
         }
+        layout_pipes = {
+            role
+            for role in ("fwd_layout_pipe", "fwd_layout_keep_pipe")
+            if arch in NEW_PIPE_BASES[role]
+        }
+        assert "fwd_layout_pipe" in layout_pipes, arch
+        assert layout_pipes <= classed - plain, arch
         band_roles |= {
             band for bands in loader.BACKWARD_BANDS[arch].values() for _, band in bands
         }
@@ -4415,7 +4804,7 @@ MID_FORWARD_GRIDS = [
     (976 * 148, 148, 5328),  # 9028 blocks, 6 waves
     (2400 * 148 - 1, 148, 11544),  # 22200 blocks, 13 waves
     (4097 * 48, 148, 6216),  # 12291 blocks, 7 waves of 888
-    (6500 * 148 + 1, 148, 30192),  # B200 last packed mid band: 34 waves
+    (6500 * 148 + 1, 148, 30192),  # B200 packed mid band to 0.2.16: 34 waves
     (36 * 152 + 1, 152, 343),  # GB300 first packed mid band's first row
     (240 * 152, 152, 1824),  # GB300 first packed mid band's last row: 2 waves
     (250 * 152, 152, 1824),  # GB300 strided mid band's last row: 2 waves
@@ -4480,16 +4869,20 @@ STRIDED_CUT = "persistent_from_rows_per_sm_strided"
 # sm_100a and sm_107a, 5600 on sm_103a), from there the fewest whole waves of
 # 6 CTAs per SM whose CTAs walk at most 2 blocks, never more CTAs than
 # blocks.  A row less than the cut times the SMs and the cut times the SMs on
-# 148, 152 and 212 SMs on every architecture, and the rows of the bands.  On
-# sm_100a the cut lies past the bands of packed rows of the pipelined forward
-# (up to 6500 rows per SM; the mid forward runs packed rows past it), so the
-# pipelined forward runs every packed row it is routed one CTA a block there.
+# 148, 152 and 212 SMs on every architecture, and the rows of the bands of
+# the pipelined forwards of the grid (from 0.2.17 ``fwd_keep_pipe`` on sm_100a
+# up to 85 rows per SM and ``fwd_keep_pipe_packed`` on sm_107a past 8192 run
+# the bands of packed rows that ``fwd_pipe`` and ``fwd_pipe_packed`` ran
+# before, with the same grid rule).  On sm_100a the pipelined forward's band
+# from 521 rows per SM has no end since version 0.2.17 (it ended at 6500, past
+# which the mid forward ran), so it runs packed rows one CTA a block below the
+# cut and whole waves from it there too.
 PIPE_FORWARD_GRIDS = [
     (1, 148, "sm_100a", 1),
-    (36 * 148 + 1, 148, "sm_100a", 334),  # B200 first pipelined band's first row
+    (36 * 148 + 1, 148, "sm_100a", 334),  # B200 fwd_keep_pipe band's first row
     (85 * 148, 148, "sm_100a", 787),  # its last row: 787 blocks
-    (520 * 148 + 1, 148, "sm_100a", 4811),  # B200 second pipelined band's first row
-    (6500 * 148, 148, "sm_100a", 60125),  # its last row: a CTA a block
+    (520 * 148 + 1, 148, "sm_100a", 4811),  # B200 fwd_pipe band's first row
+    (6500 * 148, 148, "sm_100a", 60125),  # its last row to 0.2.16: a CTA a block
     (32737 * 48, 212, "sm_100a", 98211),  # 7412 rows per SM: a CTA a block
     (8192 * 148 - 1, 148, "sm_100a", 75776),  # a row below the cut: a CTA a block
     (8192 * 148, 148, "sm_100a", 38184),  # the cut: 75776 blocks, 43 waves of 888
@@ -4498,7 +4891,8 @@ PIPE_FORWARD_GRIDS = [
     (8192 * 212 - 1, 212, "sm_100a", 108544),
     (8192 * 212, 212, "sm_100a", 54696),  # 108544 blocks, 43 waves of 1272
     (32737 * 48, 148, "sm_100a", 49728),  # 98211 blocks, 56 waves of 888
-    (600 * 152 + 1, 152, "sm_103a", 5701),  # GB300 first pipelined band's first row
+    (2**24 - 1, 148, "sm_100a", 524808),  # B200 fwd_pipe band's last row: 591 waves
+    (600 * 152 + 1, 152, "sm_103a", 5701),  # GB300 first fwd_pipe band's first row
     (5600 * 148 - 1, 148, "sm_103a", 51800),
     (5600 * 148, 148, "sm_103a", 26640),  # 51800 blocks, 30 waves of 888
     (5600 * 152 - 1, 152, "sm_103a", 53200),  # a row below the cut: a CTA a block
@@ -4508,7 +4902,7 @@ PIPE_FORWARD_GRIDS = [
     (6000 * 152, 152, "sm_103a", 29184),  # first band's last row: 32 waves
     (8192 * 152 + 1, 152, "sm_103a", 39216),  # GB300 last band's first row: 43 waves
     (32737 * 48, 212, "sm_103a", 49608),  # 7412 rows per SM: 39 waves of 1272
-    (280 * 212 + 1, 212, "sm_107a", 3711),  # R200 pipelined band's first row
+    (280 * 212 + 1, 212, "sm_107a", 3711),  # R200 fwd_pipe_packed band's first row
     (32737 * 48, 212, "sm_107a", 98211),  # 7412 rows per SM: a CTA a block
     (8192 * 148 - 1, 148, "sm_107a", 75776),
     (8192 * 148, 148, "sm_107a", 38184),  # 75776 blocks, 43 waves of 888
@@ -4517,18 +4911,19 @@ PIPE_FORWARD_GRIDS = [
     (8192 * 212 - 1, 212, "sm_107a", 108544),  # a row below the cut: a CTA a block
     (8192 * 212, 212, "sm_107a", 54696),  # the cut: 108544 blocks, 43 waves
     (65536 * 48, 212, "sm_107a", 99216),  # 196608 blocks, 78 waves of 1272
-    (2**24 - 1, 212, "sm_107a", 525336),  # R200 pipelined band's last row: 413 waves
+    (2**24 - 1, 212, "sm_107a", 525336),  # R200 keep band's last row: 413 waves
 ]
 # (rows, SMs, architecture, CTAs) of ``fwd_pipe`` (sm_100a and sm_103a) on rows
 # the kernel does not read as packed (``x`` or ``z`` broadcast over tokens, or
 # one token): its cut of such rows, 500 rows per SM on sm_100a and 400 on
 # sm_103a, a row less than it times the SMs and it times the SMs on 148, 152
-# and 212 SMs, and rows of its bands (the second band of sm_100a, from 521
-# rows per SM, and the first of sm_103a, from 601, lie past the cut: whole
-# waves from their first rows on).
+# and 212 SMs, and rows of the pipelined bands (the band of sm_100a from 521
+# rows per SM and the first of sm_103a, from 601, lie past the cut: whole
+# waves from their first rows on; the rows of ``fwd_keep_pipe`` on sm_100a, up
+# to 85 rows per SM, below it).
 STRIDED_PIPE_FORWARD_GRIDS = [
-    (85 * 148, 148, "sm_100a", 787),  # B200 first pipelined band's last row
-    (520 * 148 + 1, 148, "sm_100a", 2664),  # B200 second band's first row: 3 waves
+    (85 * 148, 148, "sm_100a", 787),  # B200 fwd_keep_pipe band's last row
+    (520 * 148 + 1, 148, "sm_100a", 2664),  # B200 fwd_pipe band's first row: 3 waves
     (500 * 148 - 1, 148, "sm_100a", 4625),  # a row below the cut: a CTA a block
     (500 * 148, 148, "sm_100a", 2664),  # the cut: 4625 blocks, 3 waves of 888
     (500 * 152 - 1, 152, "sm_100a", 4750),
@@ -4536,7 +4931,7 @@ STRIDED_PIPE_FORWARD_GRIDS = [
     (500 * 212 - 1, 212, "sm_100a", 6625),
     (500 * 212, 212, "sm_100a", 3816),  # 6625 blocks, 3 waves of 1272
     (2000 * 148, 148, "sm_100a", 9768),  # 18500 blocks, 11 waves of 888
-    (6500 * 148, 148, "sm_100a", 30192),  # second band's last row: 34 waves
+    (6500 * 148, 148, "sm_100a", 30192),  # 6500 rows per SM: 34 waves
     (600 * 152 + 1, 152, "sm_103a", 3648),  # GB300 first band's first row: 4 waves
     (400 * 148 - 1, 148, "sm_103a", 3700),
     (400 * 148, 148, "sm_103a", 2664),  # 3700 blocks, 3 waves of 888
@@ -4736,6 +5131,246 @@ def test_forward_packed_is_the_kernels_packed_rows_test():
                 strides = [heads, row, D, row, D]
                 strides[slot] += delta
                 assert loader.forward_packed(*strides) is False, (heads, strides)
+
+
+# ``(T, H, x_tok, x_head, z_tok, z_head)`` as the kernels get them (a single
+# token's stride passed as 0, a single head's as 128) and the class
+# ``forward_layout`` gives the rows: a gate sliced from a wider projection with
+# packed ``x`` of more than one head, head-major ``x`` and ``z``; no class for
+# such a gate of one head, padded head-major rows, ``x`` sliced too, a ``z``
+# broadcast over tokens, mixed layouts, packed rows (which the host classes
+# before), one token, one packed head, ``x`` broadcast with a ``z`` sliced
+# from a projection, a ``z`` interleaved per head and an ``x`` broadcast over
+# heads.
+FORWARD_LAYOUT_CASES = [
+    pytest.param((64, 16, 2048, 128, 4112, 128), PROJECTION_LAYOUT, id="projection"),
+    pytest.param((64, 2, 256, 128, 528, 128), PROJECTION_LAYOUT, id="projection_h2"),
+    pytest.param((64, 1, 128, 128, 272, 128), None, id="projection_h1"),
+    pytest.param((64, 1, 128, 128, 4112, 128), None, id="projection_h1_wide"),
+    pytest.param((64, 16, 128, 8192, 128, 8192), HEAD_MAJOR_LAYOUT, id="head_major"),
+    pytest.param((64, 16, 128, 16384, 128, 16384), None, id="padded_head_major"),
+    pytest.param((64, 16, 4112, 128, 4112, 128), None, id="x_also_sliced"),
+    pytest.param((64, 16, 2048, 128, 0, 128), None, id="broadcast_z"),
+    pytest.param((64, 16, 128, 8192, 4112, 128), None, id="mixed"),
+    pytest.param((64, 16, 2048, 128, 2048, 128), None, id="packed"),
+    pytest.param((1, 16, 0, 128, 0, 128), None, id="one_token"),
+    pytest.param((64, 1, 128, 128, 128, 128), None, id="packed_h1"),
+    pytest.param((64, 16, 0, 128, 4112, 128), None, id="x_broadcast_z_projection"),
+    pytest.param((64, 16, 2048, 128, 4096, 256), None, id="z_per_head_interleaved"),
+    pytest.param((64, 16, 128, 0, 2048, 128), None, id="x_broadcast_over_heads"),
+]
+
+
+@pytest.mark.parametrize(("strides", "want"), FORWARD_LAYOUT_CASES)
+def test_forward_layout_classes(strides, want):
+    """``forward_layout`` (host only) gives each call of
+    ``FORWARD_LAYOUT_CASES`` its class: ``PROJECTION_LAYOUT`` where ``x``
+    holds packed rows of more than one head (head stride 128, token stride
+    ``H * 128``) and ``z`` has head stride 128 and a token stride past ``H *
+    128`` (such rows of one head run ``STRIDED_FORWARD_BANDS``);
+    ``HEAD_MAJOR_LAYOUT`` where ``x`` and ``z`` have token stride 128 and
+    head stride ``T * 128``; else None."""
+    assert loader.forward_layout(*strides) == want, strides
+
+
+def _host_forward(monkeypatch, arch: str, sm_count: int) -> list:
+    """Run the backend's forward on CPU tensors with no device and no kernel:
+    the device's architecture ``arch`` and ``sm_count`` SMs, each launch
+    appending ``(module, the launch's arguments)`` to the returned list."""
+    calls: list = []
+    monkeypatch.setattr(pkg, "_device_arch", lambda device: arch)
+    monkeypatch.setattr(pkg, "_device_index", lambda device: 0)
+    monkeypatch.setattr(pkg, "device_sm_count", lambda index: sm_count)
+
+    def record(name, values, *, rows, device_index):
+        calls.append((name, dict(values)))
+
+    monkeypatch.setattr(loader, "run_module", record)
+    return calls
+
+
+def _host_inputs(T: int, H: int, layout: str):
+    """Uninitialised CPU ``x`` and ``z`` of ``make``'s ``layout`` (and
+    ``broadcast``, ``x_broadcast``, ``z_broadcast``: contiguous, the named
+    tensors broadcast over tokens), and a weight."""
+    if layout == "contiguous":
+        x, z = torch.empty(T, H, D, dtype=torch.bfloat16), None
+    elif layout == "projection":
+        x = torch.empty(T, H, D, dtype=torch.bfloat16)
+        z = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)
+        z = z[:, H * D : 2 * H * D].view(T, H, D)
+    elif layout == "head_major":
+        x = torch.empty(H, T, D, dtype=torch.bfloat16).permute(1, 0, 2)
+        z = torch.empty(H, T, D, dtype=torch.bfloat16).permute(1, 0, 2)
+    elif layout == "both_sliced":
+        x = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)[:, : H * D]
+        z = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)
+        x, z = x.view(T, H, D), z[:, H * D : 2 * H * D].view(T, H, D)
+    elif layout.endswith("broadcast"):
+        one = torch.empty(1, H, D, dtype=torch.bfloat16).expand(T, H, D)
+        full = torch.empty(T, H, D, dtype=torch.bfloat16)
+        x = one if layout in ("broadcast", "x_broadcast") else full
+        z = one if layout in ("broadcast", "z_broadcast") else full
+    else:
+        raise ValueError(layout)
+    if z is None:
+        z = torch.empty(T, H, D, dtype=torch.bfloat16)
+    return x, z, torch.ones(D, dtype=torch.bfloat16)
+
+
+def test_forward_runs_the_table_of_the_rows_class(monkeypatch):
+    """Without a device or a kernel (``_host_forward``, 2 SMs): the backend's
+    forward of ``make``'s layouts of 4 heads (packed rows, a gate sliced from a
+    projection, head-major rows, ``x`` and ``z`` both sliced) at each cut of
+    every forward table of the architecture and a row either side launches the
+    module of the table of the rows' class (:func:`_layout_class`,
+    :func:`_tier_module`): ``forward_layout`` of the host's strides reaches
+    ``module_for_rows``.  A gate sliced from a projection runs another module
+    than the same rows of no class at some row count on every architecture,
+    and so do head-major rows on sm_107a."""
+    sm_count, heads = 2, 4
+    for arch in loader.ARCHES:
+        calls = _host_forward(monkeypatch, arch, sm_count)
+        edges = {1, 2, 3}
+        for bands in _forward_tables(arch):
+            for last, _ in bands[:-1]:
+                edges |= {last * sm_count + d for d in (-1, 0, 1)}
+        apart = {PROJECTION_LAYOUT: 0, HEAD_MAJOR_LAYOUT: 0}
+        for edge in sorted(edges):
+            T = max(2, -(-edge // heads))
+            rows = T * heads
+            for layout in ("contiguous", "projection", "head_major", "both_sliced"):
+                x, z, w = _host_inputs(T, heads, layout)
+                calls.clear()
+                pkg._forward(x, z, w, EPS, out=None)
+                packed = _packed(T, heads, layout)
+                cls = _layout_class(T, heads, layout)
+                want = _tier_module(arch, "fwd", rows, sm_count, packed, cls)
+                assert [name for name, _ in calls] == [want], (arch, layout, rows)
+                if cls is not None:
+                    other = _tier_module(arch, "fwd", rows, sm_count, False)
+                    apart[cls] += want != other
+        assert apart[PROJECTION_LAYOUT], arch
+        assert bool(apart[HEAD_MAJOR_LAYOUT]) == (arch in HEAD_MAJOR_FORWARD_BANDS)
+
+
+# Calls in the bands of the pipelined forwards with the L2's default policy:
+# ``(arch, rows per SM, layout, role launched)`` on 4 heads (``_host_inputs``)
+# and as one token (``one_token``: 4 x rows-per-SM-times-SMs heads).  In the
+# band of ``fwd_keep_pipe`` (sm_100a, at 59 rows per SM) a call with ``x``,
+# ``z`` or both broadcast over more than one token runs ``fwd_pipe``, the
+# program of 0.2.16 there (the same bits); packed rows and one token run
+# ``fwd_keep_pipe``.  In the band of ``fwd_keep_pipe_packed``
+# (sm_107a, past 8192 rows per SM), a program of packed rows only, a broadcast
+# runs the band of ``STRIDED_FORWARD_BANDS`` (the plain forward), and one
+# token runs it, passed the token stride ``H * 128``.
+HOST_KEEP_CASES = [
+    (arch, per_sm, layout, role)
+    for arch, per_sm, keep, broadcast in (
+        ("sm_100a", 59, "fwd_keep_pipe", "fwd_pipe"),
+        ("sm_107a", 8193, "fwd_keep_pipe_packed", "fwd"),
+    )
+    for layout, role in (
+        ("contiguous", keep),
+        ("one_token", keep),
+        ("x_broadcast", broadcast),
+        ("z_broadcast", broadcast),
+        ("broadcast", broadcast),
+    )
+]
+HOST_KEEP_SM_COUNTS = {"sm_100a": (16, 148), "sm_107a": (4, 16)}
+
+
+@pytest.mark.parametrize(("arch", "per_sm", "layout", "role"), HOST_KEEP_CASES)
+def test_forward_of_rows_broadcast_over_tokens_keeps_its_program_in_the_keep_bands(
+    arch, per_sm, layout, role, monkeypatch
+):
+    """``HOST_KEEP_CASES`` without a device or a kernel (``_host_forward``, on
+    ``HOST_KEEP_SM_COUNTS`` SMs): the forward launches the role's module with
+    the token strides of the call (0 for a tensor broadcast over tokens and
+    for one token, but ``H * 128`` for one token on a program of packed rows
+    only), and the band's own module is the pipelined forward with the L2's
+    default policy (so the broadcast calls run another program there)."""
+    for sm_count in HOST_KEEP_SM_COUNTS[arch]:
+        calls = _host_forward(monkeypatch, arch, sm_count)
+        rows = per_sm * sm_count
+        band = loader.module_for_rows(arch, "fwd", rows, sm_count)
+        assert loader.MODULES[band]["role"] in ("fwd_keep_pipe", "fwd_keep_pipe_packed")
+        if layout == "one_token":
+            T, H = 1, rows
+            x, z, w = _host_inputs(T, H, "contiguous")
+        else:
+            T, H = rows // 4, 4
+            x, z, w = _host_inputs(T, H, layout)
+        assert T * H == rows
+        pkg._forward(x, z, w, EPS, out=None)
+        ((name, values),) = calls
+        assert name == loader.ROUTES[arch][role], (sm_count, name)
+        packed_only = role in PACKED_ONLY_PIPES
+        x_tok = 0 if layout in ("broadcast", "x_broadcast") else H * D
+        z_tok = 0 if layout in ("broadcast", "z_broadcast") else H * D
+        if layout == "one_token":
+            x_tok = z_tok = H * D if packed_only else 0
+        assert (values["x_tok"], values["z_tok"]) == (x_tok, z_tok), (sm_count, values)
+        assert (values["x_head"], values["z_head"], values["rows"]) == (D, D, rows)
+
+
+def test_new_pipelined_forward_records_keep_their_base_grid_rule():
+    """Each pipelined forward of 0.2.17 (``NEW_PIPE_BASES``) is routed on the
+    architectures of its entry there (``fwd_keep_pipe`` and
+    ``fwd_layout_keep_pipe`` not on sm_103a), built for those it is routed on,
+    and launches as its base (128 threads, the same arguments): on sm_100a and
+    sm_103a ``fwd_pipe``'s grid rule, both cuts, keyed by the record's
+    architectures; on sm_107a ``fwd_keep_pipe_packed`` ``fwd_pipe_packed``'s
+    (packed rows only, no cut of rows not read as packed) and
+    ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` that rule with the cut of
+    rows not read as packed of a program of rows of any layout (400 rows per
+    SM); none takes a workspace, and its grid is its base's at the rows of
+    ``PIPE_FORWARD_GRIDS`` and ``STRIDED_PIPE_FORWARD_GRIDS`` (rows read as
+    packed or not, but on sm_107a ``fwd_layout_pipe`` and
+    ``fwd_layout_keep_pipe`` on rows read as packed only: their cut of other
+    rows is not their base's)."""
+    for role, bases in NEW_PIPE_BASES.items():
+        for arch in loader.ARCHES:
+            name = loader.ROUTES[arch].get(role)
+            assert (name is not None) == (arch in bases), (role, arch)
+            if name is None:
+                continue
+            record = loader.MODULES[name]
+            base = loader.MODULES[loader.ROUTES[arch][bases[arch]]]
+            assert record["role"] == role and arch in record["arches"], (role, arch)
+            routed = [a for a in loader.ARCHES if loader.ROUTES[a].get(role) == name]
+            assert record["arches"] == routed, (role, arch, record["arches"])
+            assert record["logical"] == base["logical"], (role, arch)
+            assert record["arg_plan"] == base["arg_plan"], (role, arch)
+            assert record["launch"] == base["launch"], (role, arch)
+            assert record["launch"]["block"] == (128, 1, 1)
+            assert loader.workspace_bytes(name) == 0, (role, arch)
+            rule = dict(record["grid_rule"])
+            want = {
+                key: (
+                    {a: cut for a, cut in value.items() if a in record["arches"]}
+                    if key in (CUT, STRIDED_CUT)
+                    else value
+                )
+                for key, value in base["grid_rule"].items()
+            }
+            layout_walk = role in ("fwd_layout_pipe", "fwd_layout_keep_pipe")
+            if layout_walk and arch == "sm_107a":
+                assert STRIDED_CUT not in want
+                want[STRIDED_CUT] = {"sm_107a": 400}
+            assert rule == want, (role, arch, rule)
+            for rows, sm_count, _, _ in PIPE_FORWARD_GRIDS + STRIDED_PIPE_FORWARD_GRIDS:
+                for packed in (True, False):
+                    got = loader.launch_grid(
+                        record, rows=rows, sm_count=sm_count, arch=arch, packed=packed
+                    )
+                    if layout_walk and arch == "sm_107a" and not packed:
+                        continue
+                    same = loader.launch_grid(
+                        base, rows=rows, sm_count=sm_count, arch=arch, packed=packed
+                    )
+                    assert got == same, (role, arch, rows, sm_count, packed)
 
 
 # SM counts of the host's comparison of the grids ``run_module`` launches
@@ -5075,7 +5710,12 @@ def test_run_module_reads_the_forward_rule_at_each_call():
 # them); and the same rows as one token ``[1, T * H, 128]`` (its token stride
 # passed as 0: on sm_100a and sm_103a rows the kernel does not read as packed;
 # on sm_107a the program of packed rows runs it, passed the token stride
-# ``H * 128``).  Tokens of 47 heads: partial last row blocks.
+# ``H * 128``).  Tokens of 47 heads: partial last row blocks.  The same for
+# each pipelined forward of 0.2.17 (``NEW_PIPE_ROLES``) the device routes, on a
+# forced route (``_force_route``: every forward call runs it), at the rows of
+# its own bands and of the pipelined forward's; no call runs
+# ``fwd_keep_pipe`` on rows broadcast over tokens (``fwd_pipe`` runs them) and
+# no program of packed rows only runs them: those cases skip.
 PIPE_GRID_LAYOUTS = (
     "contiguous",
     "flat",
@@ -5085,65 +5725,86 @@ PIPE_GRID_LAYOUTS = (
     "one_token",
 )
 PIPE_GRID_HEADS = 47
+PIPE_GRID_ROLES = ("pipe", *NEW_PIPE_ROLES)
 
 
-def _pipe_grid_tokens(arch: str, sm_count: int) -> list[int]:
-    """Token counts of ``PIPE_GRID_HEADS`` heads in each band of packed rows
-    of ``arch``'s pipelined forward (``FORWARD_BANDS``) on ``sm_count`` SMs:
-    the fewest past the band's first row per SM, the most up to its last
-    (four times its first where it has no end) and their middle."""
-    tokens, first = [], 1
-    for last, role in loader.FORWARD_BANDS[arch]:
-        if role in ("fwd_pipe", "fwd_pipe_packed"):
-            end = 4 * first if last is None else int(last)
-            low = -(-first * sm_count // PIPE_GRID_HEADS)
-            high = end * sm_count // PIPE_GRID_HEADS
-            tokens += [low, (low + high) // 2, high]
-        if last is not None:
-            first = int(last) + 1
+def _pipe_grid_tokens(arch: str, sm_count: int, role: str | None = None) -> list[int]:
+    """Token counts of ``PIPE_GRID_HEADS`` heads in each band of ``role``
+    (default: ``arch``'s pipelined forward, ``fwd_pipe`` or
+    ``fwd_pipe_packed``) on ``sm_count`` SMs, in every forward table of
+    ``arch``: the fewest past the band's first row per SM, the most up to its
+    last (four times its first where it has no end) and their middle."""
+    roles = ("fwd_pipe", "fwd_pipe_packed") if role is None else (role,)
+    tokens = []
+    for bands in _loader_forward_tables(arch):
+        first = 1
+        for last, band in bands:
+            if band in roles:
+                end = 4 * first if last is None else int(last)
+                low = -(-first * sm_count // PIPE_GRID_HEADS)
+                high = end * sm_count // PIPE_GRID_HEADS
+                tokens += [low, (low + high) // 2, high]
+            if last is not None:
+                first = int(last) + 1
     return sorted(set(tokens))
 
 
+@pytest.mark.parametrize("role", PIPE_GRID_ROLES)
 @pytest.mark.parametrize("layout", PIPE_GRID_LAYOUTS)
-def test_pipelined_forward_gives_the_same_bits_on_both_grids(layout, launches):
-    """The pipelined forward of this device (``fwd_pipe`` or
-    ``fwd_pipe_packed``), at ``_pipe_grid_tokens`` of ``PIPE_GRID_HEADS``
-    heads, in each of
-    ``PIPE_GRID_LAYOUTS``: with its cuts forced to whole waves and to one CTA
-    a block (the rule changed at run time) and as shipped, the call launches
-    the pipelined forward on ``launch_grid``'s grid (``_record_launches``:
-    the grid the kernel is launched with) for the device's SM count and
-    architecture and whether the kernel reads the rows as packed
-    (``forward_packed``; for the program of packed rows only the same grid
-    either way), and gives the same ``y`` bits on every grid; at some row
-    count the two forced grids differ, and where the rule has a cut of rows
-    not read as packed the shipped grid at some row count is not that of the
-    other reading of the rows."""
+def test_pipelined_forward_gives_the_same_bits_on_both_grids(
+    layout, role, launches, monkeypatch
+):
+    """The pipelined forward of this device (``pipe``: ``fwd_pipe`` or
+    ``fwd_pipe_packed``; or a role of ``NEW_PIPE_ROLES`` the device routes, on
+    a forced route), at ``_pipe_grid_tokens`` of ``PIPE_GRID_HEADS`` heads, in
+    each of ``PIPE_GRID_LAYOUTS``: with its cuts forced to whole waves and to
+    one CTA a block (the rule changed at run time) and as shipped, the call
+    launches the pipelined forward on ``launch_grid``'s grid
+    (``_record_launches``: the grid the kernel is launched with) for the
+    device's SM count and architecture and whether the kernel reads the rows
+    as packed (``forward_packed``; for a program of packed rows only the same
+    grid either way), and gives the same ``y`` bits on every grid; at some
+    row count the two forced grids differ, and where the rule has a cut of
+    rows not read as packed the shipped grid at some row count is not that of
+    the other reading of the rows."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     sms = loader.device_sm_count(device_index)
     routes = loader.ROUTES[arch]
-    role = "fwd_pipe" if "fwd_pipe" in routes else "fwd_pipe_packed"
+    broadcast = layout.endswith("broadcast")
+    if role == "pipe":
+        role = "fwd_pipe" if "fwd_pipe" in routes else "fwd_pipe_packed"
+        tokens = _pipe_grid_tokens(arch, sms)
+    else:
+        if role not in routes:
+            pytest.skip(f"{arch} routes no {role} module")
+        # its bands' rows and, on the forced route, those of the pipelined
+        # forward's bands (where the forced grids and the two readings differ)
+        tokens = sorted(
+            {*_pipe_grid_tokens(arch, sms, role), *_pipe_grid_tokens(arch, sms)}
+        )
+        if broadcast and role == "fwd_keep_pipe":
+            pytest.skip("rows broadcast over tokens run fwd_pipe in its bands")
+        _force_route(monkeypatch, role, routes[role])
     name = routes[role]
     record = loader.MODULES[name]
-    broadcast = layout.endswith("broadcast")
-    if broadcast and role == "fwd_pipe_packed":
-        pytest.skip(f"{arch}: rows broadcast over tokens run no pipelined forward")
+    if broadcast and role in PACKED_ONLY_PIPES:
+        pytest.skip(f"{arch}: rows broadcast over tokens run no {role}")
     rule = record["grid_rule"]
     cuts = [key for key in (CUT, STRIDED_CUT) if key in rule]
     # rows broadcast over tokens and one token: not packed rows to the
     # pipelined forward of a rule with a cut of such rows
     packed = not (broadcast or layout == "one_token") or STRIDED_CUT not in rule
     differ = other_reading = 0
-    for T in _pipe_grid_tokens(arch, sms):
+    for T in tokens:
         rows = T * PIPE_GRID_HEADS
         assert loader.module_for_rows(arch, "fwd", rows, sms) == name, rows
         if layout == "one_token":
-            tokens, heads = 1, rows
+            tokens_, heads = 1, rows
         else:
-            tokens, heads = T, PIPE_GRID_HEADS
+            tokens_, heads = T, PIPE_GRID_HEADS
         base = "flat" if layout == "flat" else "contiguous"
-        x, z, w, _ = make(tokens, heads, layout=base, seed=41)
+        x, z, w, _ = make(tokens_, heads, layout=base, seed=41)
         if layout in ("broadcast", "x_broadcast"):
             x = x[:1].expand(x.shape)
         if layout in ("broadcast", "z_broadcast"):
@@ -5176,15 +5837,142 @@ def test_pipelined_forward_gives_the_same_bits_on_both_grids(layout, launches):
         differ += grids[1] != grids[2]
         for y, forced in zip(ys[1:], (1, 2**31), strict=True):
             assert torch.equal(y.view(torch.int16), ys[0].view(torch.int16)), (
-                f"{layout} {tokens}x{heads} on {arch}: y with the cut at "
+                f"{role} {layout} {tokens_}x{heads} on {arch}: y with the cut at "
                 f"{forced} rows per SM"
             )
-    assert differ, (arch, layout, "the forced grids never differ")
+    assert differ, (arch, role, layout, "the forced grids never differ")
     assert other_reading or STRIDED_CUT not in rule, (
         arch,
+        role,
         layout,
         "the other reading of the rows never gives another grid",
     )
+
+
+# The inputs of the pipelined forwards of 0.2.17 against their bases: packed
+# rows, a gate sliced from a projection, head-major rows, one token and ``x``
+# and ``z`` broadcast over tokens (a program of packed rows only: packed rows
+# and one token); normal values, saturated gates and the gate's tail (``z`` of
+# -87.5, -88 and -88.5 in every row, where the sigmoid of the gate that does
+# not flush is still nonzero).
+NEW_PIPE_LAYOUTS = ("contiguous", "projection", "head_major", "one_token", "broadcast")
+NEW_PIPE_DATA = ("normal", "saturated", "gate_tail")
+NEW_PIPE_GATE_TAIL = (-87.5, -88.0, -88.5)
+NEW_PIPE_HEADS = 48
+
+
+def _forward_as(monkeypatch, name: str) -> list[str]:
+    """Run every forward launch of this package as module ``name`` with the
+    host's arguments of the call (a program of packed rows only is passed the
+    token stride ``H * 128``, as the host passes it): a forward call then
+    runs ``name`` by name through ``run_module``.  Returns the list of the
+    modules run."""
+    run_module = loader.run_module
+    ran: list[str] = []
+    packed_only = loader.MODULES[name]["role"] in PACKED_ONLY_PIPES
+
+    def spy(module, values, *, rows, device_index):
+        if loader.MODULES[module]["role"].startswith("fwd"):
+            values = dict(values)
+            if packed_only:
+                values["x_tok"] = values["z_tok"] = values["heads"] * D
+            module = name
+        ran.append(module)
+        return run_module(module, values, rows=rows, device_index=device_index)
+
+    monkeypatch.setattr(loader, "run_module", spy)
+    return ran
+
+
+def _new_pipe_inputs(T: int, H: int, layout: str, data: str, seed: int):
+    """``x``, ``z`` and ``w`` of ``NEW_PIPE_LAYOUTS``' ``layout`` (``broadcast``:
+    contiguous, both broadcast over tokens) with ``NEW_PIPE_DATA``'s
+    ``data``."""
+    base = "contiguous" if layout in ("one_token", "broadcast") else layout
+    kind = "saturated" if data == "saturated" else "normal"
+    x, z, w, _ = make(T, H, layout=base, data=kind, seed=seed)
+    if data == "gate_tail":
+        tail = torch.tensor(NEW_PIPE_GATE_TAIL, device=z.device).bfloat16()
+        z[..., :48] = tail.repeat(16)
+    if layout == "broadcast":
+        x, z = x[:1].expand(x.shape), z[:1].expand(z.shape)
+    return x, z, w
+
+
+@pytest.mark.parametrize("data", NEW_PIPE_DATA)
+@pytest.mark.parametrize("layout", NEW_PIPE_LAYOUTS)
+@pytest.mark.parametrize("role", NEW_PIPE_ROLES)
+def test_new_pipelined_forwards_give_their_base_programs_bits(
+    role, layout, data, monkeypatch
+):
+    """Each pipelined forward of 0.2.17 this device routes, run by name
+    (:func:`_forward_as`) on ``NEW_PIPE_LAYOUTS`` with ``NEW_PIPE_DATA``, at a
+    row count below and one above its record's persistent cut for the rows'
+    reading (``forward_packed``: ``persistent_from_rows_per_sm``, else the cut
+    of rows not read as packed where the rule has one), gives the ``y`` bits
+    of its base program (``NEW_PIPE_BASES``: ``fwd_pipe`` on the same inputs on
+    sm_100a and sm_103a; ``fwd_pipe_packed``, a program of packed rows only, on
+    contiguous copies on sm_107a).  One token of the band of
+    ``fwd_keep_pipe_packed`` (sm_107a, past 8192 rows per SM) also runs it on
+    its own route with those bits."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    sms = loader.device_sm_count(device_index)
+    routes = loader.ROUTES[arch]
+    if role not in routes:
+        pytest.skip(f"{arch} routes no {role} module")
+    if role in PACKED_ONLY_PIPES and layout not in ("contiguous", "one_token"):
+        pytest.skip(f"{role} reads packed rows only")
+    name, base = routes[role], routes[NEW_PIPE_BASES[role][arch]]
+    rule = loader.MODULES[name]["grid_rule"]
+    packed = layout == "contiguous"
+    if layout == "one_token":
+        # a single token's stride is passed as 0: not packed rows to a program
+        # of rows of any layout
+        packed = role in PACKED_ONLY_PIPES
+    key = CUT if packed or STRIDED_CUT not in rule else STRIDED_CUT
+    cut = rule[key][arch] * sms
+    H = NEW_PIPE_HEADS
+    for i, T in enumerate(((cut - 1) // H, cut // H + 1)):
+        if layout == "one_token":
+            T, heads = 1, T * H
+        else:
+            heads = H
+        x, z, w = _new_pipe_inputs(T, heads, layout, data, seed=300 + i)
+        with pytest.MonkeyPatch.context() as patch:
+            ran = _forward_as(patch, name)
+            y = forward(x, z, w, EPS)
+            assert ran == [name], ran
+        if base in (routes.get("fwd_pipe_packed"),):
+            xb, zb = x.contiguous(), z.contiguous()
+        else:
+            xb, zb = x, z
+        with pytest.MonkeyPatch.context() as patch:
+            ran = _forward_as(patch, base)
+            y_base = forward(xb, zb, w, EPS)
+            assert ran == [base], ran
+        what = f"{role} vs {NEW_PIPE_BASES[role][arch]}: {layout} {data} {T}x{heads}"
+        assert torch.equal(y.view(torch.int16), y_base.view(torch.int16)), what
+        if role == "fwd_keep_pipe_packed" and layout == "one_token" and i == 1:
+            rows = T * heads
+            assert loader.module_for_rows(arch, "fwd", rows, sms) == name, rows
+            ran = []
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(loader, "run_module", _record_names(ran))
+                again = forward(x, z, w, EPS)
+            assert ran == [name], ran
+            assert torch.equal(again.view(torch.int16), y.view(torch.int16)), what
+
+
+def _record_names(ran: list[str]):
+    """A ``run_module`` that appends each module it runs to ``ran``."""
+    run_module = loader.run_module
+
+    def spy(module, values, *, rows, device_index):
+        ran.append(module)
+        return run_module(module, values, rows=rows, device_index=device_index)
+
+    return spy
 
 
 # (rows, SMs) of the short forward: one CTA per 16-row block, up to 12 rows per
@@ -5444,13 +6232,16 @@ SHORT_BACKWARD_GRIDS = [
 ROW_LANES = 16
 # role -> (threads a CTA, teams a CTA, CTAs of the cluster) of each small-row
 # backward (``BAND_ROLES``), one cluster each, whose CTAs each run their
-# teams' row blocks: the short backward of a BF16 weight gradient (on every
-# architecture; one 256-thread team a CTA, CTA ``r`` running the 16-row blocks
-# ``r``, ``r + 16``, ...) and the exact tiny backwards (``_t512``: 4 teams of
-# the 128-thread CTA of the deterministic backward at 2e989556 a CTA, team ``q``
-# of CTA ``r`` running the 8-row block ``r + 16 q``).  A row block holds
-# :func:`_cluster_block_rows` rows.
+# teams' row blocks: the solo backward of a BF16 weight gradient (on every
+# architecture; one CTA of one 256-thread team, launched without a cluster,
+# running the call's one 16-row block), the short backward of a BF16 weight
+# gradient (on every architecture; one 256-thread team a CTA, CTA ``r``
+# running the 16-row blocks ``r``, ``r + 16``, ...) and the exact tiny
+# backwards (``_t512``: 4 teams of the 128-thread CTA of the deterministic
+# backward at 2e989556 a CTA, team ``q`` of CTA ``r`` running the 8-row block
+# ``r + 16 q``).  A row block holds :func:`_cluster_block_rows` rows.
 SMALL_ROW_BACKWARDS = {
+    "bwd_bf16_solo": (256, 1, 1),
     "bwd_bf16_short": (256, 1, 16),
     "bwd_bf16_t512": (512, 4, 16),
     "bwd_f32_t512": (512, 4, 16),
@@ -5461,9 +6252,9 @@ def _cluster_block_rows(name: str) -> int:
     """The rows of one row block of the small-row backward module ``name``
     (grid kind ``cluster``), derived from its record: the threads of its
     launch block over the teams of its role's CTA (``SMALL_ROW_BACKWARDS``),
-    over ``ROW_LANES`` threads a row: 256 / 1 / 16 = 16 rows for the short
-    backward, 512 / 4 / 16 = 8 rows (a team's block) for the exact tiny
-    backwards."""
+    over ``ROW_LANES`` threads a row: 256 / 1 / 16 = 16 rows for the solo
+    and the short backward, 512 / 4 / 16 = 8 rows (a team's block) for the
+    exact tiny backwards."""
     record = loader.MODULES[name]
     assert record["grid_rule"]["kind"] == "cluster", (name, record["grid_rule"])
     threads = int(record["launch"]["block"][0])
@@ -5477,7 +6268,8 @@ def test_small_row_backwards_are_one_cluster(rows, sm_count):
     """Every small-row backward (the module each ``BAND_ROLES`` role routes,
     ``SMALL_ROW_BACKWARDS``): one module a role, shipped for exactly the
     architectures that route it; one cluster of its grid rule's ``cluster``
-    CTAs of its role's threads whatever the rows and the SMs, up to its
+    CTAs (one CTA, ``cluster`` 1 and no launch cluster, for the solo
+    backward) of its role's threads whatever the rows and the SMs, up to its
     rule's ``max_rows``, which is one row block (:func:`_cluster_block_rows`)
     for each team of the cluster, so up to it no team runs more than one
     block; no workspace and no chunks."""
@@ -5513,13 +6305,17 @@ def test_small_row_backwards_are_one_cluster(rows, sm_count):
 @pytest.mark.parametrize(("rows", "sm_count"), SHORT_BACKWARD_GRIDS)
 def test_short_backward_is_one_cluster_up_to_its_max_rows(rows, sm_count):
     """The short backward (``bwd_bf16_short``): one module, routed on the
-    architectures whose BF16 ``BACKWARD_BANDS`` start with its band, a count
-    of rows ``(ROWS, n)`` with ``n`` at most its rule's ``max_rows`` (no FP32
-    band runs it); ``module_for_rows`` runs it for 1 to ``n`` rows whatever
-    the SMs and the next band's module (:func:`_band_module`) from ``n + 1``
-    rows; one cluster of 16 CTAs of 256 threads, 6144 bytes of dynamic shared
-    memory each, so that up to ``max_rows`` no CTA runs more than one 16-row
-    block (:func:`_cluster_block_rows`); no workspace."""
+    architectures whose BF16 ``BACKWARD_BANDS`` start with its band after the
+    solo band (the bands of :func:`_backward_bands` with ``solo=False``, the
+    bands of a call without the weight gradient, start with it), a count of
+    rows ``(ROWS, n)`` with ``n`` at most its rule's ``max_rows`` (no FP32
+    band runs it); ``module_for_rows`` runs it for the rows past the solo
+    band's (from 17) to ``n`` whatever the SMs in a call that computes the
+    weight gradient, for 1 to ``n`` rows in one without it, and the next
+    band's module (:func:`_band_module`) from ``n + 1`` rows; one cluster of
+    16 CTAs of 256 threads, 6144 bytes of dynamic shared memory each, so that
+    up to ``max_rows`` no CTA runs more than one 16-row block
+    (:func:`_cluster_block_rows`); no workspace."""
     role = "bwd_bf16_short"
     routed_on = [arch for arch in loader.ARCHES if role in loader.ROUTES[arch]]
     assert routed_on, role
@@ -5539,15 +6335,26 @@ def test_short_backward_is_one_cluster_up_to_its_max_rows(rows, sm_count):
         assert (role in banded) == (arch in routed_on), (arch, banded)
         assert role not in [band for _, band in loader.BACKWARD_BANDS[arch]["bwd_f32"]]
     for arch in routed_on:
-        last, band = loader.BACKWARD_BANDS[arch]["bwd_bf16"][0]
+        (solo_last, solo), (last, band) = loader.BACKWARD_BANDS[arch]["bwd_bf16"][:2]
+        assert solo == "bwd_bf16" + loader.SOLO, (arch, solo)
+        assert solo_last == (loader.ROWS, 16), (arch, solo_last)
         assert band == role and isinstance(last, tuple), (arch, last, band)
-        assert last[0] == loader.ROWS and 0 < int(last[1]) <= most, (arch, last)
+        assert last[0] == loader.ROWS and 16 < int(last[1]) <= most, (arch, last)
         end = int(last[1])
+        assert _backward_bands(arch, "bwd_bf16", sm_count, solo=False)[0] == (
+            role,
+            1,
+            end,
+        ), arch
         got = loader.module_for_rows(arch, "bwd_bf16", rows, sm_count)
-        if rows <= end:
+        if 16 < rows <= end:
             assert got == name, (arch, rows)
         else:
             assert got != name, (arch, rows)
+        got = loader.module_for_rows(
+            arch, "bwd_bf16", rows, sm_count, compute_grad_weight=False
+        )
+        assert (got == name) == (rows <= end), (arch, rows, "no weight gradient")
         after = loader.module_for_rows(arch, "bwd_bf16", end + 1, sm_count)
         assert after != name, arch
         assert after == _band_module(arch, "bwd_bf16", end + 1, sm_count), arch
@@ -5561,9 +6368,17 @@ def test_short_backward_is_one_cluster_up_to_its_max_rows(rows, sm_count):
 
 
 # Small-row backward shapes (T, H, layout): T * H rows in the bands in every
-# layout, and row counts past them.
+# layout (1, 8, 15 and 16 rows: the solo band of a BF16 weight gradient; 17
+# rows its first past it), and row counts past them.
 SHORT_BACKWARD_SHAPES = [
     (1, 1, "contiguous"),
+    (8, 1, "contiguous"),
+    (3, 5, "contiguous"),
+    (1, 16, "contiguous"),
+    (16, 1, "flat"),
+    (4, 4, "projection"),
+    (2, 8, "head_major"),
+    (17, 1, "flat"),
     (1, 48, "contiguous"),
     (2, 48, "contiguous"),
     (5, 48, "contiguous"),
@@ -5617,7 +6432,7 @@ def test_short_backward_dw_is_the_same_bits_and_takes_no_workspace(
         repeats=5,
         seed=80,
     )
-    fwd = _forward_module(T * H, _packed(T, H, layout))
+    fwd = _made_forward_module(T, H, layout)
     assert launches == [fwd, name, name] * _launch_count(5), launches
     if short is None:
         return
@@ -5694,6 +6509,328 @@ def test_short_backward_accumulates_and_skips_the_weight_gradient(
     assert dw is None
     assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d)
     assert torch.equal(main, torch.full_like(main, 3.0))
+
+
+# The solo backward's module: the deterministic package's solo program
+# (``bwd_bf16_solo``, cake_rmsnorm_silu_gate_det_train_36a3f270afc1a27290b7)
+# built under this package's name, the same build and so the same name hash.
+SOLO_MODULE = "cake_rmsnorm_silu_gate_train_36a3f270afc1a27290b7"
+SOLO_ROLE = "bwd_bf16_solo"
+SOLO_MAX_ROWS = 16
+
+
+@pytest.mark.parametrize(("rows", "sm_count"), SHORT_BACKWARD_GRIDS)
+def test_solo_backward_is_one_cta_up_to_its_max_rows(rows, sm_count):
+    """The solo backward (``bwd_bf16_solo``, the BF16 call role and
+    ``SOLO``): one module, ``SOLO_MODULE``, routed on every architecture; one
+    CTA of 256 threads (grid kind ``cluster`` of one CTA, launched without a
+    cluster), 18176 bytes of dynamic shared memory, the call's one 16-row
+    block (:func:`_cluster_block_rows`), up to its rule's ``max_rows`` (16);
+    the first BF16 ``BACKWARD_BANDS`` band of every architecture, ``(ROWS,
+    16)``, and no FP32 band; ``module_for_rows`` runs it for 1 to 16 rows of a
+    call that computes a BF16 weight gradient whatever the SMs and the layout,
+    the short backward from 17 rows, and the short backward for 1 to 16 rows
+    of a call without the weight gradient (no solo program without the
+    weight gradient ships) and the exact tiny backward for an FP32 weight
+    gradient; its record names the repeatable backward's buffers (``acc``,
+    ``flags`` and ``done``, which it does not read: the host passes empty
+    tensors) but no workspace, and it has no chunks."""
+    role = SOLO_ROLE
+    assert loader.SOLO == "_solo" and role == "bwd_bf16" + loader.SOLO
+    assert role in loader.BAND_ROLES
+    assert {loader.ROUTES[arch][role] for arch in loader.ARCHES} == {SOLO_MODULE}
+    assert [r for r in loader.BAND_ROLES if r.endswith(loader.SOLO)] == [role]
+    record = loader.MODULES[SOLO_MODULE]
+    assert record["role"] == role
+    assert record["arches"] == list(loader.ARCHES), record["arches"]
+    rule = record["grid_rule"]
+    assert rule == {"cluster": 1, "kind": "cluster", "max_rows": SOLO_MAX_ROWS}, rule
+    assert record["launch"] == {
+        "block": (256, 1, 1),
+        "cluster": (1, 1, 1),
+        "cooperative": False,
+        "dynamic_smem_bytes": 18176,
+        "use_pdl": False,
+    }, record["launch"]
+    plan = [key for _kind, key in record["arg_plan"]]
+    assert {"acc", "flags", "done", "dw", "weight_grad", "accumulate"} <= set(plan)
+    assert "workspace" not in record
+    assert loader.workspace_layout(SOLO_MODULE) == ()
+    assert loader.workspace_bytes(SOLO_MODULE) == 0
+    assert _cluster_block_rows(SOLO_MODULE) == SOLO_MAX_ROWS
+    for arch in loader.ARCHES:
+        routes = loader.ROUTES[arch]
+        assert role + loader.NODW not in routes, arch
+        bands = loader.BACKWARD_BANDS[arch]
+        assert bands["bwd_bf16"][0] == ((loader.ROWS, SOLO_MAX_ROWS), role), arch
+        assert bands["bwd_bf16"][1][1] == "bwd_bf16_short", arch
+        assert [b for _, b in bands["bwd_bf16"]].count(role) == 1, arch
+        assert not [b for _, b in bands["bwd_f32"] if b.endswith(loader.SOLO)], arch
+        for packed in (True, False):
+            kw = {"packed": packed}
+            nodw_kw = {"packed": packed, "compute_grad_weight": False}
+            for r in sorted({1, 8, 15, 16, 17, rows}):
+                got = loader.module_for_rows(arch, "bwd_bf16", r, sm_count, **kw)
+                want = SOLO_MODULE if r <= SOLO_MAX_ROWS else None
+                if r == 17:
+                    want = routes["bwd_bf16_short"]
+                if want is not None:
+                    assert got == want, (arch, r, packed)
+                else:
+                    assert got != SOLO_MODULE, (arch, r, packed)
+                got = loader.module_for_rows(arch, "bwd_bf16", r, sm_count, **nodw_kw)
+                assert got != SOLO_MODULE, (arch, r, packed, "no weight gradient")
+                if r <= 17:
+                    assert got == routes["bwd_bf16_short"], (arch, r, packed)
+                    got = loader.module_for_rows(arch, "bwd_f32", r, sm_count, **kw)
+                    assert got == routes["bwd_f32_t512"], (arch, r, packed, "f32")
+    if rows > SOLO_MAX_ROWS:
+        return
+    assert loader.backward_ctas(SOLO_MODULE, rows, sm_count) == 1
+    grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=1)
+    assert grid == (1, 1, 1)
+    with pytest.raises(ValueError, match="chunks"):
+        loader.backward_chunks(SOLO_MODULE, rows)
+
+
+# The SM counts at which the backward's routes are compared with those of the
+# bands without the solo band.
+SOLO_SKIP_SM_COUNTS = (1, 2, 7, 16, 66, 148, 152, 160, 212, 216)
+
+
+@pytest.mark.parametrize("sm_count", SOLO_SKIP_SM_COUNTS)
+def test_calls_without_the_weight_gradient_skip_the_solo_band(sm_count, monkeypatch):
+    """A call without the weight gradient runs what it ran before the solo
+    band shipped (version 0.2.16, whose ``BACKWARD_BANDS`` are these without
+    the solo band): on every architecture, for every row count up to 600,
+    around every band end (rows per SM and counts of rows) and at
+    ``INT32_MAX``, packed and not, ``module_for_rows`` with
+    ``compute_grad_weight=False`` and ``nodw_module`` of the module it names
+    give the same modules as with ``BACKWARD_BANDS`` patched to drop every
+    solo band (``SOLO``); a call that computes the weight gradient the same
+    modules too but for 1 to 16 rows of a BF16 weight gradient, which run
+    the solo backward (``SOLO_MODULE``) instead of the short backward."""
+
+    def plan():
+        got = {}
+        for arch in loader.ARCHES:
+            rows_set = set(range(1, 601)) | {loader.INT32_MAX}
+            for role in ("bwd_bf16", "bwd_f32"):
+                for _, _, end in _backward_bands(arch, role, sm_count)[:-1]:
+                    rows_set |= {end - 1, end, end + 1}
+            for role in ("bwd_bf16", "bwd_f32"):
+                for rows in sorted(rows_set):
+                    for packed in (True, False):
+                        for weight in (True, False):
+                            name = loader.module_for_rows(
+                                arch,
+                                role,
+                                rows,
+                                sm_count,
+                                packed=packed,
+                                compute_grad_weight=weight,
+                            )
+                            nodw = None
+                            if not weight and role == "bwd_bf16":
+                                nodw = loader.nodw_module(
+                                    arch, name, rows, sm_count, packed=packed
+                                )
+                            got[arch, role, rows, packed, weight] = (name, nodw)
+        return got
+
+    shipped = plan()
+    for arch in loader.ARCHES:
+        bands = {
+            role: tuple(b for b in table if not b[1].endswith(loader.SOLO))
+            for role, table in loader.BACKWARD_BANDS[arch].items()
+        }
+        assert sum(map(len, bands.values())) + 1 == sum(
+            map(len, loader.BACKWARD_BANDS[arch].values())
+        ), arch
+        monkeypatch.setitem(loader.BACKWARD_BANDS, arch, bands)
+    without = plan()
+    assert shipped.keys() == without.keys()
+    changed = 0
+    for key, (name, nodw) in shipped.items():
+        arch, role, rows, _packed, weight = key
+        if weight and role == "bwd_bf16" and rows <= SOLO_MAX_ROWS:
+            assert name == SOLO_MODULE, key
+            assert without[key] == (loader.ROUTES[arch]["bwd_bf16_short"], None), key
+            changed += 1
+            continue
+        assert (name, nodw) == without[key], key
+        assert name != SOLO_MODULE and nodw != SOLO_MODULE, key
+    assert changed == len(loader.ARCHES) * SOLO_MAX_ROWS * 2, changed
+
+
+# Shapes of a call that computes a BF16 weight gradient in the solo band, as
+# ``(T, H)``: 1, 8, 15 and 16 rows; and 17 rows (``17x1``), the first rows of
+# the short backward's band past it.
+SOLO_SHAPES = ((1, 1), (8, 1), (3, 5), (1, 16), (2, 8), (17, 1))
+SOLO_LAYOUTS = ("contiguous", "flat", "projection", "head_major", "misaligned")
+
+
+@pytest.mark.parametrize("data", ["normal", *EDGE_DATA])
+@pytest.mark.parametrize("layout", SOLO_LAYOUTS)
+@pytest.mark.parametrize("shape", [f"{T}x{H}" for T, H in SOLO_SHAPES])
+def test_solo_backward_gives_the_bits_of_the_repeatable_backward(
+    shape, layout, data, launches, monkeypatch
+):
+    """``SOLO_SHAPES`` in every layout of ``make`` (``SOLO_LAYOUTS``) with
+    ``data`` (normal and ``EDGE_DATA``): ``REPEATS`` rounds of a call that
+    computes a BF16 weight gradient and one that accumulates it onto 0.25,
+    each without a workspace and with a caller workspace filled with 7, run
+    the solo backward (``SOLO_MODULE``) on 1 to 16 rows and the short
+    backward on 17; on the solo backward's rows they give the ``dx``, ``dz``
+    and weight-gradient bits, fresh and accumulated, of the repeatable
+    backward (``bwd_bf16_rep`` forced, :func:`_forcing`, on a zero
+    workspace) on every round, make no stream workspace and leave the caller
+    workspace as it is.  A call with ``compute_grad_weight=False`` runs the
+    program it ran before the solo band shipped (the short backward's band:
+    ``nodw_module`` of the short backward) and gives the ``dx`` and ``dz``
+    bits of that program's twin (:func:`_nodw_bits`)."""
+    T, H = (int(v) for v in shape.split("x"))
+    rows = T * H
+    routes = _routes()
+    packed = _backward_packed(T, H, layout)
+    name = _backward_module(rows, packed=packed)
+    solo = rows <= SOLO_MAX_ROWS
+    assert name == (SOLO_MODULE if solo else routes["bwd_bf16_short"]), name
+    x, z, w, dy = make(T, H, layout=layout, data=data, seed=82)
+    ws = workspace_for(rows, x.device)
+    ws.fill_(7)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(pkg, "_STREAM_WORKSPACES", {})
+
+    def calls(workspaces):
+        out = []
+        for workspace in workspaces:
+            dx, dz, dw = backward(dy, x, z, w, EPS, workspace=workspace)
+            acc = torch.full((D,), 0.25, dtype=torch.bfloat16, device=x.device)
+            dx_a, dz_a, dw_a = backward(
+                dy,
+                x,
+                z,
+                w,
+                EPS,
+                grad_weight=acc,
+                accumulate_grad_weight=True,
+                workspace=workspace,
+            )
+            assert dw_a is acc
+            out += [dx, dz, dw, dx_a, dz_a, dw_a]
+        return out
+
+    runs = []
+    for i in range(REPEATS):
+        launches.clear()
+        runs.append(calls((None, ws)))
+        assert launches == [name] * 4, (i, launches)
+    torch.cuda.synchronize()
+    assert bool((ws == 7).all()), f"{name} wrote the caller workspace"
+    assert pkg._STREAM_WORKSPACES == {}
+    for i, got in enumerate(runs[1:]):
+        for a, b in zip(got, runs[0], strict=True):
+            assert torch.equal(a, b), (shape, layout, data, i)
+    if solo:
+        rep = routes["bwd_bf16_rep"]
+        zero = workspace_for(rows, x.device)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(pkg, "module_for_rows", _forcing("bwd_bf16_rep"))
+            launches.clear()
+            want = calls((zero, zero))
+            assert launches == [rep] * 4, launches
+        torch.cuda.synchronize()
+        assert not bool(zero.any()), "the repeatable backward's workspace"
+        names = ("dx", "dz", "dw", "accumulated dx", "accumulated dz", "accumulated dw")
+        for k, (a, b) in enumerate(zip(runs[0], want, strict=True)):
+            what = names[k % len(names)]
+            assert torch.equal(a, b), f"{shape} {layout} {data}: {what}"
+    nodw_name = _backward_module(rows, packed=packed, compute_grad_weight=False)
+    assert nodw_name == routes["bwd_bf16_short"], nodw_name
+    nodw = _nodw_module(nodw_name, rows, packed=_nodw_packed(T, H, layout))
+    dx_d, dz_d = _nodw_bits(nodw, dy, x, z, w)
+    launches.clear()
+    dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws)
+    assert launches == [nodw], launches
+    assert dw is None
+    assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), (shape, layout, data)
+    torch.cuda.synchronize()
+    assert bool((ws == 7).all()), f"{nodw} wrote the caller workspace"
+
+
+# Shapes and ``make`` layouts of the solo backward in CUDA Graph capture.
+SOLO_GRAPH_SHAPES = [(1, 1, "contiguous"), (1, 16, "contiguous"), (16, 1, "projection")]
+
+
+@pytest.mark.parametrize("T,H,layout", SOLO_GRAPH_SHAPES)
+def test_solo_backward_in_cuda_graph_capture_takes_no_workspace(
+    T, H, layout, monkeypatch, launches
+):
+    """The solo backward (1 to 16 rows of a call that computes a BF16 weight
+    gradient) takes no workspace: a call that computes the weight gradient
+    and one that accumulates it onto 0.25, each without a workspace and with
+    a caller workspace filled with 7 (checked and left as it is), make no
+    stream workspace, eagerly and in CUDA Graph capture, and take no reserve
+    or capture workspace; the graph holds their four kernels only (no fill
+    kernel, memset or event wait), and every replay gives the eager calls'
+    ``dx``, ``dz`` and weight-gradient bits, fresh and accumulated."""
+    pytest.importorskip("cuda.bindings.runtime")
+    rows = T * H
+    name = _backward_module(rows, packed=_backward_packed(T, H, layout))
+    assert name == SOLO_MODULE, name
+    x, z, w, dy = make(T, H, layout=layout, seed=83)
+    ws = workspace_for(rows, x.device)
+    ws.fill_(7)
+    start = torch.full((D,), 0.25, dtype=torch.bfloat16, device=x.device)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(pkg, "_STREAM_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_RESERVES", {})
+    monkeypatch.setattr(pkg, "_CAPTURE_WORKSPACES", {})
+    want = backward(dy, x, z, w, EPS)
+    want_acc = backward(
+        dy, x, z, w, EPS, grad_weight=start.clone(), accumulate_grad_weight=True
+    )
+    accs = [start.clone() for _ in range(2)]
+    launches.clear()
+    graph = _kept_graph()
+    with torch.cuda.graph(graph):
+        outs = []
+        for workspace, acc in zip((None, ws), accs, strict=True):
+            outs.append(backward(dy, x, z, w, EPS, workspace=workspace))
+            outs.append(
+                backward(
+                    dy,
+                    x,
+                    z,
+                    w,
+                    EPS,
+                    grad_weight=acc,
+                    accumulate_grad_weight=True,
+                    workspace=workspace,
+                )
+            )
+    assert launches == [name] * 4, launches
+    types = _graph_node_types(graph)
+    assert types == ["KERNEL"] * 4, types
+    assert pkg._STREAM_WORKSPACES == {} and pkg._RESERVES == {}
+    assert pkg._CAPTURE_WORKSPACES == {}
+    for k in range(3):
+        for i, (dx, dz, dw) in enumerate(outs):
+            dx.zero_()
+            dz.zero_()
+            if i % 2:
+                dw.copy_(start)
+            else:
+                dw.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        for i, (dx, dz, dw) in enumerate(outs):
+            ref = want_acc if i % 2 else want
+            assert dw is not None and (dw is accs[i // 2]) == bool(i % 2), (k, i)
+            for what, a, b in zip(("dx", "dz", "dw"), (dx, dz, dw), ref, strict=True):
+                assert torch.equal(a, b), (k, i, what)
+    assert bool((ws == 7).all()), "the solo backward wrote the workspace"
 
 
 def test_calls_without_workspace_share_one_buffer_per_stream():
@@ -5830,23 +6967,28 @@ def test_no_entry_point_takes_a_mode_keyword(launches):
     assert not bool(ws.any())
 
 
-def _forward_rows() -> dict[str, tuple[int, bool]]:
-    """One row count of each forward module this device routes, the first row
-    of the module's first ``FORWARD_BANDS`` band, else (a module only other
-    layouts run) of its first ``STRIDED_FORWARD_BANDS`` band, at least 2 rows
-    so that a projection layout's rows are not packed: ``{module: (rows,
-    packed)}``."""
+def _forward_rows() -> dict[str, tuple[int, int, str]]:
+    """One shape of each forward module this device's bands run: the first
+    row of the module's first band of ``FORWARD_BANDS`` (contiguous rows),
+    else of ``PROJECTION_FORWARD_BANDS`` (two heads, ``z`` sliced from a
+    wider projection), of ``HEAD_MAJOR_FORWARD_BANDS`` where the architecture has
+    one (two heads, head-major) or of ``STRIDED_FORWARD_BANDS`` (one head,
+    ``x`` and ``z`` both sliced), at least 2 tokens so that the rows of the
+    last three are not packed: ``{module: (T, H, make's layout)}``."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     sm_count = loader.device_sm_count(device_index)
-    found: dict[str, tuple[int, bool]] = {}
-    for packed, table in (
-        (True, loader.FORWARD_BANDS),
-        (False, loader.STRIDED_FORWARD_BANDS),
+    found: dict[str, tuple[int, int, str]] = {}
+    for layout, heads, bands in (
+        ("contiguous", 1, loader.FORWARD_BANDS[arch]),
+        ("projection", 2, loader.PROJECTION_FORWARD_BANDS[arch]),
+        ("head_major", 2, loader.HEAD_MAJOR_FORWARD_BANDS.get(arch, ())),
+        ("both_sliced", 1, loader.STRIDED_FORWARD_BANDS[arch]),
     ):
-        start = 1 if packed else 2
-        for last, _role in table[arch]:
-            found.setdefault(_forward_module(start, packed), (start, packed))
+        start = 1 if layout == "contiguous" else 2 * heads
+        for last, _role in bands:
+            T = -(-start // heads)
+            found.setdefault(_made_forward_module(T, heads, layout), (T, heads, layout))
             if last is not None:
                 start = last * sm_count + 1
     return found
@@ -5902,8 +7044,7 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
     assert all(T > 1 for (T, _), gate in zip(shapes, gates, strict=True) if gate)
     empty = torch.empty(0, 48, D, dtype=torch.bfloat16, device="cuda")
     inputs = [
-        make(rows, 1, layout="contiguous" if packed else "projection", seed=72)
-        for rows, packed in forward_rows.values()
+        make(T, H, layout=layout, seed=72) for T, H, layout in forward_rows.values()
     ]
     ws = workspace_for(1, empty.device)
 
@@ -6385,10 +7526,11 @@ def test_deterministic_workspace_is_refused_naming_both_modes():
 
 # The libraries (a module record built for one architecture, ``build.json``'s
 # ``<library>_<arch>``) that no band of their architecture selects: no
-# ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` or ``BACKWARD_BANDS`` band names
-# their role, they are no long role of ``LONG_BACKWARD_ROWS_PER_SM`` and no
-# role whose bands end without a ``None`` band falls back to them, so no call of
-# the public API runs them and the band tests skip them.  ``(module role,
+# ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS``, ``LAYOUT_FORWARD_BANDS`` or
+# ``BACKWARD_BANDS`` band names their role, they are no long role of
+# ``LONG_BACKWARD_ROWS_PER_SM`` and no role whose bands end without a ``None``
+# band falls back to them, so no call of the public API runs them and the band
+# tests skip them.  ``(module role,
 # architecture)``: the long forward on sm_103a and sm_107a (routed on sm_100a
 # only), the static backward of a BF16 weight gradient on sm_107a, the
 # row-claims backwards on sm_100a and sm_103a and the claimed backward of a
@@ -6431,7 +7573,8 @@ FORCED_BACKWARD_ROLES = ("bwd_bf16", "bwd_bf16_rc", "bwd_bf16_rc_mid", "bwd_bf16
 def _unbanded_libraries() -> set[tuple[str, str]]:
     """``(module role, architecture)`` of every module record built for an
     architecture whose bands never select it: not the route of a role of its
-    ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` or ``BACKWARD_BANDS`` bands,
+    ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS``, ``LAYOUT_FORWARD_BANDS`` or
+    ``BACKWARD_BANDS`` bands,
     of a long role of ``LONG_BACKWARD_ROWS_PER_SM``, of a backward role
     whose bands end without a ``None`` band (:func:`module_for_rows` falls
     back to its own module), or of a program without the weight gradient
@@ -6439,11 +7582,7 @@ def _unbanded_libraries() -> set[tuple[str, str]]:
     found = set()
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
-        roles = {
-            band
-            for table in (loader.FORWARD_BANDS, loader.STRIDED_FORWARD_BANDS)
-            for _, band in table[arch]
-        }
+        roles = {band for bands in _loader_forward_tables(arch) for _, band in bands}
         for role, bands in loader.BACKWARD_BANDS[arch].items():
             roles |= {band for _, band in bands}
             if all(last is not None for last, _ in bands):
@@ -6488,7 +7627,8 @@ def _forced_module(role: str) -> str:
 def _force_route(monkeypatch: pytest.MonkeyPatch, role: str, name: str) -> None:
     """Route every call of ``role``'s kind on this device's architecture to
     module ``name``: ``ROUTES[arch][role]`` names it, and the forward's
-    ``FORWARD_BANDS`` and ``STRIDED_FORWARD_BANDS`` (a forward role) or the
+    ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` and the tables of
+    ``LAYOUT_FORWARD_BANDS`` (a forward role) or the
     BF16 weight gradient's ``BACKWARD_BANDS`` (a backward role; also the
     bands of ``compute_grad_weight=False``) are the one band ``(None,
     role)``.  Copies of the tables, restored by ``monkeypatch``."""
@@ -6505,6 +7645,11 @@ def _force_route(monkeypatch: pytest.MonkeyPatch, role: str, name: str) -> None:
             bands = dict(getattr(loader, table))
             bands[arch] = ((None, role),)
             monkeypatch.setattr(loader, table, bands)
+        layouts = {
+            layout: {**by_arch, arch: ((None, role),)}
+            for layout, by_arch in loader.LAYOUT_FORWARD_BANDS.items()
+        }
+        monkeypatch.setattr(loader, "LAYOUT_FORWARD_BANDS", layouts)
     else:
         bands = {a: dict(by_role) for a, by_role in loader.BACKWARD_BANDS.items()}
         bands[arch]["bwd_bf16"] = ((None, role),)
@@ -7054,7 +8199,9 @@ def test_one_token_runs_as_packed_rows_without_the_weight_gradient(
     backward's ``dx`` and ``dz`` bits; elsewhere (sm_107a) token strides 0
     and the program for rows that are not packed, with the bits of the BF16
     call on the band's module.  The call that computes the weight gradient
-    keeps token stride 0 and the band's module."""
+    keeps token stride 0 and runs the module of its own band (at up to 16
+    rows the solo backward, whose band a call without the weight gradient
+    skips)."""
     arch = loader.device_arch(torch.cuda.current_device())
     seen = []
     run_module = loader.run_module
@@ -7079,7 +8226,8 @@ def test_one_token_runs_as_packed_rows_without_the_weight_gradient(
     assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), layout
     seen.clear()
     backward(dy, x, z, w, EPS)
-    assert seen == [(name, (0, D, 0, D, 0, D))], (layout, seen)
+    dw_name = _backward_module(H, packed=False)
+    assert seen == [(dw_name, (0, D, 0, D, 0, D))], (layout, seen)
 
 
 @pytest.mark.parametrize("layout", ["projection", "head_major"])

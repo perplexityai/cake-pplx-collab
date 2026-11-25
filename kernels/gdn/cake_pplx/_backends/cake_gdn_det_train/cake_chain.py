@@ -50,8 +50,16 @@ on a host-built table runs its pass 2 on ``dhu_tc2`` from the stitched segment
 states when its rule (:func:`sdt_pricing`) prices that pass 2 below the
 register one, and then launches no ``dv_local``: its pre-scan
 (``dhu_pre_dvl_r64k1``) computes the ``dv_local`` tiles of the chunks it scans
-(the same bits).  On ``sm_107a``, on a host-built table of a value-head group
-of two, a split adjoint plan the serial-scan rule (:func:`serial_scan_pricing`)
+(the same bits); where that pass 2 is ``dhu_tc2_dvl32`` at a value-head group
+of three, on the architectures of ``ADJOINT_MAP_ARCHS``, the segment maps the
+stitch composes come from ``dhu_tc2_dvl32_gm`` over every segment but each
+sequence's first instead (:func:`split_map_stage`), on two CTAs per entry
+(``dhu_tc2_dvl32_gm2``, the same bits) where that grid fits one wave of the
+SMs (:func:`split_map_launch`); on the architectures of
+``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`` (``sm_107a``) such a grid keeps the
+pre-scan.  On ``sm_107a``, on a
+host-built table of a value-head group of two, a split adjoint plan the
+serial-scan rule (:func:`serial_scan_pricing`)
 prices slower than ``dhu_tc2`` over whole sequences becomes that serial plan
 (other bits of ``dk`` / ``dv`` / ``dg`` / ``dbeta``).  A host-built table
 without plan pins then takes the adjoint table priced for ``dhu_tc2``
@@ -62,16 +70,22 @@ chains (:func:`chain_plan_pricing`); a table whose adjoint scan runs as two
 groups beside the fused tail keeps its form.  The backward runs such a table on
 ``dhu_tc2``; the bits follow the table.  Then, for a
 value-head group of two or of three, the fused
-tcgen05 tail (``tail_g2`` / ``tail_g3``), else ``dqkwg``, the WY pullback and
-the finalize.  On the architectures of ``F32X_TAIL_ARCHS`` the tail of a
+tcgen05 tail (``tail_g2`` / ``tail_g3``); for any other group on the
+architectures of ``PACKAGE_TAIL_ARCHS`` the package tail (``tail``: one CTA per
+(chunk, value head), the group's FP32 ``dq`` / ``dk`` partials summed in
+value-head order before one BF16 rounding, :func:`tail_segments`), at a group
+of four or more only when the call's mean tokens per sequence reach the
+architecture's ``PACKAGE_TAIL_MIN_TOKENS_PER_SEQ``; else ``dqkwg``, the WY
+pullback and the finalize, which a ``finalize`` pin keeps for every group but
+two.  On the architectures of ``F32X_TAIL_ARCHS`` the tail of a
 group of three is the round-once ``tail_g3_f32x`` (the group's FP32 ``dq`` /
 ``dk`` partials summed in value-head order before one BF16 rounding, written
 through token-row strides, so the head views of one packed row get one packed
 gradient row, :class:`CakeGDNDetPackedFunction`), and on those of
-``DVL32_ARCHS`` its tcgen05 adjoint scan is ``dhu_tc2_dvl32`` (the FP32
-``dv_local`` values added to ``dv2`` before its one rounding: other ``dk`` /
-``dv`` / ``dg`` / ``dbeta`` / initial-state-gradient bits than the register
-scan's);
+``DVL32_ARCHS`` the tcgen05 adjoint scan of every group but two is
+``dhu_tc2_dvl32`` (the FP32 ``dv_local`` values added to ``dv2`` before its one
+rounding: other ``dk`` / ``dv`` / ``dg`` / ``dbeta`` / initial-state-gradient
+bits than the register scan's);
 :func:`fused_tail_stage`, :func:`dhu_tc2_stage`.  A host-built table lists
 the sequences longest first (:func:`lpt_sequence_order`; every chunk keeps its
 token offset, the state rows are gathered into that order and the final state
@@ -107,8 +121,10 @@ the backward runs them as the wavefront pair
 stored it, counted per tile in a workspace; the same math and the same bits.
 
 The chain is deterministic: no atomic on a value (the wavefront pair's ready
-counts are atomic counters whose order no value depends on), no data-dependent
-ordering, and the two groups of a two-stream stage write disjoint outputs (as do
+counts and the package tail's arrival counters are atomic integer counters whose
+order no value depends on: the package tail's last CTA of a (chunk, key head)
+tile sums the group's slots in value-head order whichever CTA it is), no
+data-dependent ordering, and the two groups of a two-stream stage write disjoint outputs (as do
 the first pieces and the middle pieces' maps of the split forward), so the
 outputs and gradients are bitwise run to run for one layout and one plan, with
 one or two streams.  Every route is chosen from host facts (shapes, dtypes, the
@@ -136,6 +152,11 @@ import torch
 from . import cake_backend, cake_jit, cake_plan
 
 __all__ = [
+    "ADJOINT_MAP_ARCHS",
+    "ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS",
+    "ADJOINT_MAP_SPLIT_ARCHS",
+    "ADJOINT_MAP_SPLIT_STAGE",
+    "ADJOINT_MAP_STAGE",
     "CHAIN_PLAN",
     "CHUNK",
     "DVL32_ARCHS",
@@ -147,9 +168,13 @@ __all__ = [
     "FWD_A_SERIAL_KEEP",
     "FWD_SPLIT_ARCHS",
     "HEAD_DIM",
+    "PACKAGE_TAILS",
+    "PACKAGE_TAIL_ARCHS",
+    "PACKAGE_TAIL_MIN_TOKENS_PER_SEQ",
     "PACKED_ROW",
     "PRESCAN_CONFIGS",
     "REG_SCAN_CONFIGS",
+    "SPLIT_WARM",
     "TC_PLAN",
     "TC_PLAN_GAIN",
     "TC_PLAN_MIN_SAVING",
@@ -189,7 +214,11 @@ __all__ = [
     "sdt_pricing",
     "serial_scan_pricing",
     "sequence_groups",
+    "split_map_launch",
+    "split_map_stage",
+    "split_summary_entries",
     "stage_set",
+    "tail_segments",
     "tc_plan_pricing",
     "tc_plan_thresholds",
     "two_stream_split",
@@ -246,6 +275,15 @@ _DHU_PRE_DVL_ARGS = tuple(a for a in _DHU_PRE_ARGS if a != "dv_local")
 _DHU_TC2_ARGS = ("qn_tma", "kn_tma", "w_tma", "do_tma") + tuple(
     a for a in _DHU_ARGS[4:] if a != "dv_local"
 )
+# the segment maps of a split pass 2 on dhu_tc2_dvl32 (dhu_tc2_dvl32_gm): the scan's arguments, the entry table (segment
+# index and mode bits per CTA row), the warm-up threshold and the segment flags
+_DHU_TC2_GM_ARGS = (
+    *_DHU_TC2_ARGS,
+    "seg_index",
+    "seg_mode",
+    "warmup_thresh_log2",
+    "seg_flag",
+)
 _DQKWG_ARGS = ("qn", "kn", "v_new", "do", "dv2", "h", "dh", "g_cs", "dq_out", "dk_out", "dw_out", "dg_out",
                "chunk_start", "chunk_len", "num_heads", "num_v_heads", "scale")  # fmt: skip
 _WY_BWD_ARGS = ("kn", "v", "A", "dw", "du", "g_cs", "beta", "dk2_out", "dv_out", "dbeta_out", "dg2_out",
@@ -264,6 +302,9 @@ _TAIL_F32X_ARGS = (
     "dk_row_stride",
     "dv_row_stride",
 )
+# the package tail of any other value-head group: the operands of tail_g2, then the workspace, its arrival counters and
+# its tiles
+_TAIL_WS_ARGS = (*_TAIL_ARGS[:18], "ws", "ws_count", *_TAIL_ARGS[18:], "ws_tiles")
 # the wavefront pair: dhu_tc2 / tail_g2_bf16 with the ready counts (and the tail's chunk order)
 _DHU_TC2_WAVEFRONT_ARGS = _DHU_TC2_ARGS + ("ready",)
 _TAIL_WAVEFRONT_ARGS = _TAIL_ARGS + ("ready", "tile_order")
@@ -304,6 +345,8 @@ LAUNCH_ARGS: dict[str, tuple[str, ...]] = {
     "dv_local": _DV_LOCAL_ARGS,
     "dhu_tc2": _DHU_TC2_ARGS,
     "dhu_tc2_dvl32": _DHU_TC2_ARGS,
+    "dhu_tc2_dvl32_gm": _DHU_TC2_GM_ARGS,
+    "dhu_tc2_dvl32_gm2": _DHU_TC2_GM_ARGS,
     "dhu_tc2_wavefront": _DHU_TC2_WAVEFRONT_ARGS,
     "dhu_tc2_wavefront_split": _DHU_TC2_WAVEFRONT_ARGS,
     "dqkwg": _DQKWG_ARGS,
@@ -318,6 +361,8 @@ LAUNCH_ARGS: dict[str, tuple[str, ...]] = {
     "tail_g3_bf16": _TAIL_ARGS + ("v_row_heads",),
     "tail_g3_f32x": _TAIL_F32X_ARGS,
     "tail_g3_f32x_bf16": _TAIL_F32X_ARGS,
+    "tail": _TAIL_WS_ARGS + ("v_row_heads",),
+    "tail_bf16": _TAIL_WS_ARGS + ("v_row_heads",),
     "dhu_pre_dvl_r64k1": _DHU_PRE_DVL_ARGS,
     **{f"fwd_h_r{vb}k{ks}": _FWD_H_ARGS for vb, ks in REG_SCAN_CONFIGS},
     **{f"fwd_h_r{vb}k{ks}_split": _FWD_H_SPLIT_ARGS for vb, ks in PRESCAN_CONFIGS},
@@ -394,14 +439,14 @@ class ChainOptions:
     ``scan_config`` forces the register-scan configuration ``(value block, key split)`` of both scans;
     ``segment_chunks`` forces the segment length in chunks (0: the serial scan; above the chunks one pre-scan
     CTA covers, 128, a plan that splits a sequence raises); ``finalize`` forces the finalize stage of the unfused tail
-    (value-head groups other than two; a value-head group of three then runs the unfused tail instead of its fused
-    tail, :func:`fused_tail_stage`); ``warmup_log2`` overrides the pre-scans' warm-up threshold; ``dhu_scan``
-    forces the adjoint scan of a serial plan (``"reg"``: ``dv_local`` + the register scan, ``"tc"``: ``dhu_tc2``;
-    ``None``: the selection rule) and the pass 2 of a split ``SDT_CONFIG`` plan on a host-built table (``"reg"``:
-    ``dv_local`` + the register scan, ``"tc"``: ``dhu_tc2`` after the fused pre-scan).  ``"tc"`` runs the tcgen05
-    scan of :func:`dhu_tc2_stage`: on ``dhu_tc2`` it gives the bits of ``"reg"``; on ``dhu_tc2_dvl32`` (a value-head
-    group of three on ``DVL32_ARCHS``, dv2 rounded once) o and the final state keep the bits of ``"reg"`` and the
-    gradients take others; ``prep``
+    (value-head groups other than two, which then run the unfused tail instead of the fused tail of a group of three
+    or the package tail of the other groups, :func:`fused_tail_stage`); ``warmup_log2`` overrides the pre-scans'
+    warm-up threshold; ``dhu_scan`` forces the adjoint scan of a serial plan (``"reg"``: ``dv_local`` + the register
+    scan, ``"tc"``: ``dhu_tc2``; ``None``: the selection rule) and the pass 2 of a split ``SDT_CONFIG`` plan on a
+    host-built table (``"reg"``: ``dv_local`` + the register scan, ``"tc"``: ``dhu_tc2`` after the fused pre-scan).
+    ``"tc"`` runs the tcgen05 scan of :func:`dhu_tc2_stage`: on ``dhu_tc2`` it gives the bits of ``"reg"``; on
+    ``dhu_tc2_dvl32`` (every value-head group but two on ``DVL32_ARCHS``, dv2 rounded once) o and the final state keep
+    the bits of ``"reg"`` and the gradients take others; ``prep``
     forces the prep (``"plain"``: grid (chunks, HV); ``"tma"``: ``prep_tma``,
     grid (chunks, H), where q and k are 16-byte aligned; ``None``: the dispatch rule) and with it the prep forward (a
     ``prep``, ``scan_config`` or ``segment_chunks`` pin keeps a call off the forwards on wy_a's A, :func:`fwd_a_route`,
@@ -567,6 +612,15 @@ class SegmentTable:
     scan_config: tuple[int, int]
     # fwd_ho's segment order (CTA group b runs walk[b]); None: the identity
     walk: torch.Tensor | None = None
+    # the entry table of the segment maps (``dhu_tc2_dvl32_gm``, :func:`split_map_stage`) of a host-built adjoint table
+    # that splits a sequence: row 0 every segment but each sequence's first, in table order, row 1 its mode
+    # (``SPLIT_WARM``); None: the other tables
+    summary: torch.Tensor | None = None
+    num_summary: int = 0
+    # the two rows of ``summary``, the map launch's ``seg_index`` and ``seg_mode``, taken once with the table; None with
+    # ``summary``
+    seg_index: torch.Tensor | None = None
+    seg_mode: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -638,6 +692,18 @@ def _segment_lists(seq_chunk_start: list[int], segment_len: int):
     return seg_chunk_start, seg_seq, seq_seg_start
 
 
+def split_summary_entries(seq_seg_start) -> list[int]:
+    """The segments whose maps the stitch composes, over a segment table whose sequence ``vs`` owns the segments
+    ``seq_seg_start[vs] .. seq_seg_start[vs + 1]``: every segment but each sequence's first, in table order (empty
+    when no sequence splits)."""
+    starts = [int(x) for x in seq_seg_start]
+    return [
+        seg
+        for s0, s1 in zip(starts[:-1], starts[1:], strict=True)
+        for seg in range(s0 + 1, s1)
+    ]
+
+
 def lpt_sequence_order(seq_lens) -> tuple[int, ...] | None:
     """The sequences longest first by chunk count, ties in the caller's order (``None`` when that is the caller's
     order)."""
@@ -663,7 +729,8 @@ def build_chunk_meta(
 
     ``lpt`` dispatches longest first: the tables list the sequences in :func:`lpt_sequence_order` (each chunk keeps its
     token offset; the state rows follow ``order_index``) and ``fwd_ho`` walks the forward segments in
-    :func:`lpt_walk` order.  Every CTA computes what it computes in the caller's order: the same bits."""
+    :func:`lpt_walk` order.  Every CTA computes what it computes in the caller's order: the same bits.  An adjoint table
+    that splits a sequence carries the entry table of its segment maps (``SegmentTable.summary``)."""
     lengths = [int(x) for x in seq_lens]
     offsets = [0]
     for n in lengths:
@@ -686,6 +753,11 @@ def build_chunk_meta(
     if walk is not None:
         extra["walk"] = len(parts)
         parts.append(walk)
+    # the adjoint table's map entries (parts[8]: its seq_seg_start)
+    summary = split_summary_entries(parts[8])
+    if summary:
+        extra["summary"] = len(parts)
+        parts.append(summary + [SPLIT_WARM] * len(summary))
     if order is not None:
         inverse = [0] * len(order)
         for vs, seq in enumerate(order):
@@ -704,6 +776,9 @@ def build_chunk_meta(
     for part in parts:
         views.append(table[offset : offset + len(part)])
         offset += len(part)
+    summary_table = views[extra["summary"]].view(2, -1) if "summary" in extra else None
+    seg_index = summary_table[0] if summary_table is not None else None
+    seg_mode = summary_table[1] if summary_table is not None else None
     segments = [
         SegmentTable(
             seg_chunk_start=views[3 + 3 * i],
@@ -713,6 +788,10 @@ def build_chunk_meta(
             segment_len=int(scan_plans[i].segment_len),
             scan_config=cast("tuple[int, int]", tuple(scan_plans[i].config)),
             walk=views[extra["walk"]] if i == 0 and "walk" in extra else None,
+            summary=summary_table if i == 1 else None,
+            num_summary=len(summary) if i == 1 else 0,
+            seg_index=seg_index if i == 1 else None,
+            seg_mode=seg_mode if i == 1 else None,
         )
         for i in range(2)
     ]
@@ -741,6 +820,18 @@ _FORWARD_SPLITS: dict = {}
 _FORWARD_SPLITS_LIMIT = 256
 _GRAPH_TABLES: dict[int, torch.Tensor] = {}
 
+# The handle of the current stream of a device without building a ``torch.cuda.Stream`` (that costs microseconds of
+# host time per call); ``torch.cuda.current_stream`` where this PyTorch build lacks the getter.
+_RAW_STREAM = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+
+
+def _current_stream_handle(device_index: int) -> int:
+    return torch.cuda.current_stream(device_index).cuda_stream
+
+
+# the handle of the current stream of a device: the C getter itself where PyTorch has it
+_raw_stream = _RAW_STREAM if _RAW_STREAM is not None else _current_stream_handle
+
 
 def _table_ready(device_index: int) -> TableReady:
     """The :class:`TableReady` of a table just written on the current stream."""
@@ -760,7 +851,7 @@ def _use_table(
         return
     if torch.cuda.is_current_stream_capturing():
         _GRAPH_TABLES.setdefault(table.untyped_storage().data_ptr(), table)
-    elif torch._C._cuda_getCurrentRawStream(device_index) != ready.stream:
+    elif _raw_stream(device_index) != ready.stream:
         stream = torch.cuda.current_stream(device_index)
         stream.wait_event(ready.event)
         table.record_stream(stream)
@@ -1261,9 +1352,37 @@ WORKSPACE_SHAPES_PER_ROLE = 4
 class Workspaces:
     def __init__(self):
         self.tables: dict = {}
+        # self-cleaning buffers per (device, stream): zero when created, left zero by every launch that uses them (the
+        # package tail's arrival counters)
+        self.zeroed: dict = {}
 
-    def table(self, device_index: int) -> dict:
-        key = (device_index, torch.cuda.current_stream(device_index).cuda_stream)
+    def stream_key(self, device_index: int) -> tuple[int, int] | None:
+        """(device, stream): the key of the buffers of the current stream of ``device_index`` (:meth:`table`,
+        :meth:`take_zeroed`).  The stream is its handle (:func:`_raw_stream`), the ``cuda_stream`` of
+        ``torch.cuda.current_stream(device_index)``."""
+        return (device_index, _raw_stream(device_index))
+
+    def take_zeroed(
+        self, key, role: str, rows: int, row_shape: tuple, dtype, device
+    ) -> torch.Tensor:
+        """The first ``rows`` rows of the ``role`` buffer of the stream ``key`` (:meth:`stream_key` of the call's
+        stream, so launches that may run concurrently, on other streams, take distinct buffers): created (or grown) by
+        ``torch.zeros`` on that stream, then reused without a memset, since every launch leaves it zero."""
+        buffers = self.zeroed.setdefault(key, {})
+        buffer = buffers.get(role)
+        if (
+            buffer is None
+            or buffer.shape[0] < rows
+            or tuple(buffer.shape[1:]) != tuple(row_shape)
+        ):
+            buffer = buffers[role] = _zeros((rows, *row_shape), dtype, device)
+        return buffer if buffer.shape[0] == rows else buffer[:rows]
+
+    def table(self, device_index: int, key: tuple[int, int] | None = None) -> dict:
+        """The workspace table of the stream ``key`` (default: the current stream of ``device_index``, under the
+        key of :meth:`stream_key`)."""
+        if key is None:
+            key = self.stream_key(device_index)
         return self.tables.setdefault(key, {})
 
     def take(self, table, role, shape, dtype, device):
@@ -1276,13 +1395,60 @@ class Workspaces:
                 buffers.pop(next(iter(buffers)), None)
         return buffer
 
+    def take_rows(self, table, role, rows, row_shape, dtype, device):
+        """The first ``rows`` rows of the one ``role`` buffer of a stream's ``table`` (:meth:`table`): made without a
+        fill (:func:`_empty_unfilled`) and grown to the largest call, for rows that every launch writes before it
+        reads them (the package tail's FP32 workspace slots)."""
+        key = (tuple(row_shape), dtype)
+        buffers = table.setdefault(role, {})
+        buffer = buffers.get(key)
+        if buffer is None or buffer.shape[0] < rows:
+            buffers.clear()  # one buffer per role: a larger one replaces it
+            buffer = buffers[key] = _empty_unfilled((rows, *row_shape), dtype, device)
+        return buffer if buffer.shape[0] == rows else buffer[:rows]
+
 
 class FreshWorkspaces(Workspaces):
-    def table(self, device_index):
+    def stream_key(self, device_index):
+        return None  # fresh buffers belong to no stream's pool
+
+    def table(self, device_index, key=None):
         return {}
 
     def take(self, table, role, shape, dtype, device):
         return torch.empty(shape, dtype=dtype, device=device)
+
+    def take_rows(self, table, role, rows, row_shape, dtype, device):
+        return _empty_unfilled((rows, *row_shape), dtype, device)
+
+    def take_zeroed(self, key, role, rows, row_shape, dtype, device):
+        return _zeros((rows, *row_shape), dtype, device)
+
+
+def _empty_unfilled(shape: tuple, dtype, device) -> torch.Tensor:
+    """``torch.empty`` with no fill, also under ``torch.use_deterministic_algorithms(True)``, where PyTorch fills each
+    new tensor (NaN for floating point) while ``torch.utils.deterministic.fill_uninitialized_memory`` is on, its
+    default: for rows that every launch writes before it reads them, where that fill (up to 256 MiB of tail slots per
+    uncached call and per CUDA graph replay) changes no value.  The setting is turned off around the allocation only
+    and restored."""
+    deterministic = torch.utils.deterministic
+    if not (
+        torch.are_deterministic_algorithms_enabled()
+        and deterministic.fill_uninitialized_memory
+    ):
+        return torch.empty(shape, dtype=dtype, device=device)
+    deterministic.fill_uninitialized_memory = False
+    try:
+        return torch.empty(shape, dtype=dtype, device=device)
+    finally:
+        deterministic.fill_uninitialized_memory = True
+
+
+def _zeros(shape: tuple, dtype, device) -> torch.Tensor:
+    """``torch.zeros`` on the current stream; an unsigned 32-bit buffer is zeroed as int32 and viewed."""
+    if dtype == torch.uint32:
+        return torch.zeros(shape, dtype=torch.int32, device=device).view(torch.uint32)
+    return torch.zeros(shape, dtype=dtype, device=device)
 
 
 _POOLED = Workspaces()
@@ -1404,9 +1570,10 @@ def _dhu_tc_selected(
 # A split plan at ``SDT_CONFIG`` runs the pre-scan and the stitch, then pass 2 either as ``dv_local`` + the register
 # scan or on ``dhu_tc2`` (one CTA per (segment, value head), ``dv_local`` fused) from the stitched per-segment ``dht``;
 # on the ``dhu_tc2`` form the pre-scan is ``dhu_pre_dvl_r64k1``, which computes the ``dv_local`` tiles of the chunks it
-# scans, so no ``dv_local`` stage runs.  Both forms give the same bits at the same segment table on ``dhu_tc2``; on
-# ``dhu_tc2_dvl32`` (:func:`dhu_tc2_stage`: a value-head group of three on ``DVL32_ARCHS``) dv2 rounds once, so dk / dv
-# / dg / dbeta / dh0 take other bits than the register pass 2's, and this rule, the ``dhu_scan``
+# scans, so no ``dv_local`` stage runs (on ``dhu_tc2_dvl32`` the maps of ``dhu_tc2_dvl32_gm`` take its place where
+# :func:`split_map_stage` names them, below).  Both forms give the same bits at the same segment table on
+# ``dhu_tc2``; on ``dhu_tc2_dvl32`` (:func:`dhu_tc2_stage`: every value-head group but two on ``DVL32_ARCHS``) dv2
+# rounds once, so dk / dv / dg / dbeta / dh0 take other bits than the register pass 2's, and this rule, the ``dhu_scan``
 # pin and the table route (a device-built table keeps the register pass 2) choose between them.  The rule prices pass
 # 2 the way :func:`dhu_tc_pricing` prices a serial scan: T_tc2 = steps x t(n), steps the makespan of the segment table
 # at one CTA per (segment, value head) and one CTA per SM, n = min(segments x HV, SMs) and t(n) the ``dhu_tc2``
@@ -1498,6 +1665,134 @@ def _sdt_selected(meta: ChunkMeta, segs: SegmentTable, num_v_heads: int, device_
                 _SDT_AUTO.pop(next(iter(_SDT_AUTO)), None)
             _SDT_AUTO[key] = hit
     return hit
+
+
+# --------------------------------------------------------------------------- #
+# the segment maps of a split pass 2 on dhu_tc2_dvl32: dhu_tc2_dvl32_gm in place of the register pre-scan
+# --------------------------------------------------------------------------- #
+# A split plan of a value-head group of three whose pass 2 runs on ``dhu_tc2_dvl32`` (:func:`_sdt_selected` on
+# ``DVL32_ARCHS``) forms the segment maps the stitch composes with ``dhu_tc2_dvl32_gm`` on the architectures of
+# ``ADJOINT_MAP_ARCHS`` (off value ``()``) instead of the register pre-scan ``SDT_PRESCAN``: one CTA per (entry, value
+# head) over the table's ``summary`` entries (every segment but each sequence's first, whose map the stitch never
+# reads; built on the host with the table, mode ``SPLIT_WARM``).  Each CTA walks two states in one pass with the
+# tcgen05 scan of ``dhu_tc2_dvl32`` and stores the segment's map ``[B | M]`` into ``seg_state`` (``B`` from zero with
+# ``do``, ``M`` from the identity) with the pre-scan's warm-up threshold (:func:`warmup_thresh_log2`): where the
+# running sum of a segment's log2 chunk decays from its start falls below the threshold before its last chunk, the map
+# keeps only the chunks up to there, ``B`` alone, and ``seg_flag`` is 0; elsewhere the whole segment and 1.  The rule
+# is not the pre-scan's bound: where the sum first falls below the threshold in the last chunk the pre-scan keeps
+# ``B`` alone (``seg_flag`` 0) and this map is whole, and from a segment's 65th chunk on the running sum adds the
+# chunk decays in another order than the pre-scan's, so at a near tie the two can end a map at different chunks.  The
+# workspaces, the stitch, pass 2 (one launch, or the two groups beside the fused tail), the tails and the tables are
+# unchanged; the table prices of :func:`tc_plan_pricing` and :func:`chain_plan_pricing` still price the register
+# pre-scan.  The maps add the FP32 ``dv_local`` values where the pre-scan rounds its tiles to BF16, so where a map
+# carries state into the segment before it (slowly decaying gates) dk / dv / dg / dbeta / dh0 take other bits than
+# with the pre-scan; o, dq and the final state keep theirs, and each form is bitwise run to run.  The stage follows
+# host facts only (:func:`split_map_stage`, :func:`split_map_launch`); the maps' extent follows the gates through the
+# warm-up threshold, as the pre-scan's does.
+ADJOINT_MAP_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
+ADJOINT_MAP_STAGE = "dhu_tc2_dvl32_gm"
+# The same maps over two CTAs per (entry, value head) (``dhu_tc2_dvl32_gm2``, grid z 2: ``B`` and ``seg_flag`` on z 0,
+# ``M`` on z 1, each CTA with gm's products, roundings and orders on its half: the same bits) on the architectures of
+# ``ADJOINT_MAP_SPLIT_ARCHS`` (off value ``()``: gm for every grid that takes a map form; on the architectures of
+# ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`` a grid that fits one wave still keeps the pre-scan while that switch is on),
+# where its ``2 x entries x HV`` CTAs fit one wave of the SMs (:func:`split_map_launch`).  The bound is measured: past
+# one wave gm2 is still faster than gm where the gates decay slowly (whole maps), but slower where they decay fast (maps
+# that end within their first chunks); the gates are on the device and the rule reads host facts only, so a grid of
+# more than one wave keeps gm.
+ADJOINT_MAP_SPLIT_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
+ADJOINT_MAP_SPLIT_STAGE = "dhu_tc2_dvl32_gm2"
+# On the architectures of ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`` (off value ``()``: the maps on every grid) a grid
+# that fits one wave keeps the fused pre-scan ``SDT_PRESCAN`` instead of either map form, the 0.2.7 route with its
+# bits.  Measured on ``sm_107a`` at such a grid, gm2 ran faster than the pre-scan where the gates decay slowly (whole
+# maps) and slower where they decay fast (maps that end within their first chunks); the gates are on the device and
+# the rule reads host facts only, so such a grid keeps the pre-scan under every gate, and gives up gm2's gain where
+# the gates decay slowly.
+ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS: tuple[str, ...] = ("sm_107a",)
+# the mode bit of a map entry: bound the map by the warm-up threshold and write its seg_flag
+SPLIT_WARM = 16
+
+
+def split_map_launch(
+    arch: str, num_summary: int, num_v_heads: int, sm_count: int
+) -> tuple[str, int] | None:
+    """The stage and grid z of the segment maps that :func:`split_map_stage` names ``ADJOINT_MAP_STAGE``, over
+    ``num_summary`` entries of ``num_v_heads`` value heads on ``sm_count`` SMs.  Where ``2 x num_summary x
+    num_v_heads`` CTAs fit one wave (one CTA per SM): None (no map launch: the fused pre-scan ``SDT_PRESCAN`` forms
+    the maps) on an architecture of ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS``, else ``(ADJOINT_MAP_SPLIT_STAGE, 2)`` on
+    one of ``ADJOINT_MAP_SPLIT_ARCHS`` whose registry delivers it; every other grid ``(ADJOINT_MAP_STAGE, 1)``.  Both
+    map forms give the same bits.  Host facts only.  The most entries of the one-wave answer, and that answer, are
+    decided once per (switches, architecture, value heads, SMs) and cached (:func:`_split_map_entries`), so a call
+    compares two integers."""
+    most, one_wave = _split_map_entries(
+        ADJOINT_MAP_SPLIT_ARCHS,
+        ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS,
+        arch,
+        num_v_heads,
+        sm_count,
+    )
+    if num_summary <= most:
+        return one_wave
+    return ADJOINT_MAP_STAGE, 1
+
+
+@cache
+def _split_map_entries(
+    split_archs: tuple[str, ...],
+    prescan_archs: tuple[str, ...],
+    arch: str,
+    num_v_heads: int,
+    sm_count: int,
+) -> tuple[int, tuple[str, int] | None]:
+    """The most map entries whose two-CTA grid (``2 x entries x num_v_heads`` CTAs) fits one wave of ``sm_count`` SMs
+    and :func:`split_map_launch`'s answer there: None where ``prescan_archs`` names ``arch``, else
+    ``(ADJOINT_MAP_SPLIT_STAGE, 2)`` where ``split_archs`` names ``arch`` and its registry delivers the stage; else
+    ``(-1, None)`` (every grid keeps ``ADJOINT_MAP_STAGE``).  ``split_archs`` and ``prescan_archs`` are the
+    switches' values."""
+    most = int(sm_count) // (2 * int(num_v_heads))
+    if arch in prescan_archs:
+        return most, None
+    if arch in split_archs and _available(ADJOINT_MAP_SPLIT_STAGE, arch):
+        return most, (ADJOINT_MAP_SPLIT_STAGE, 2)
+    return -1, None
+
+
+def split_map_stage(arch: str, num_heads: int, num_v_heads: int) -> str:
+    """The stage that forms the segment maps of a split plan whose pass 2 runs on the tcgen05 scan:
+    ``ADJOINT_MAP_STAGE`` for a value-head group of three whose scan is ``dhu_tc2_dvl32`` (:func:`dhu_tc2_stage`) on an
+    architecture of ``ADJOINT_MAP_ARCHS`` whose registry delivers it, else the fused pre-scan ``SDT_PRESCAN``.  The
+    maps' grid then decides their launch (:func:`split_map_launch`: on ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`` a grid
+    that fits one wave keeps the pre-scan)."""
+    if (
+        num_v_heads == 3 * num_heads
+        and arch in ADJOINT_MAP_ARCHS
+        and dhu_tc2_stage(arch, num_heads, num_v_heads) == "dhu_tc2_dvl32"
+        and _available(ADJOINT_MAP_STAGE, arch)
+    ):
+        return ADJOINT_MAP_STAGE
+    return SDT_PRESCAN
+
+
+@lru_cache(maxsize=1024)
+def _split_map_call(
+    map_archs: tuple[str, ...],
+    dvl32_archs: tuple[str, ...],
+    split_archs: tuple[str, ...],
+    prescan_archs: tuple[str, ...],
+    arch: str,
+    num_heads: int,
+    num_v_heads: int,
+    num_summary: int,
+    sm_count: int,
+) -> tuple[str, int] | None:
+    """The map launch of a backward whose split pass 2 runs on the tcgen05 scan over a table of ``num_summary`` map
+    entries: :func:`split_map_launch` where :func:`split_map_stage` names ``ADJOINT_MAP_STAGE``, else None (the fused
+    pre-scan forms the maps).  ``map_archs``, ``dvl32_archs``, ``split_archs`` and ``prescan_archs`` are the values of
+    the switches those rules read (``ADJOINT_MAP_ARCHS``, ``DVL32_ARCHS``, ``ADJOINT_MAP_SPLIT_ARCHS``,
+    ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS``), so the answer is decided once per (switches, architecture, heads, entries,
+    SMs) and a backward reads it with one lookup."""
+    if split_map_stage(arch, num_heads, num_v_heads) != ADJOINT_MAP_STAGE:
+        return None
+    return split_map_launch(arch, num_summary, num_v_heads, sm_count)
 
 
 # --------------------------------------------------------------------------- #
@@ -3587,7 +3882,7 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
 
 
 # --------------------------------------------------------------------------- #
-# the round-once tail of a value-head group of three and the FP32 dv_local adjoint
+# the round-once tail of a value-head group of three, the package tail and the FP32 dv_local adjoint
 # --------------------------------------------------------------------------- #
 # A value-head group of three runs its fused tail as tail_g3_f32x on the architectures of F32X_TAIL_ARCHS: the
 # cluster kernel of tail_g3 whose three CTAs exchange the group's FP32 dq / dk partials over distributed shared memory
@@ -3596,19 +3891,66 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
 # dq / dk round once (the non-deterministic package's tail_g3_f32x, the same program in its plain build).  The tail
 # reads v and writes dq / dk / dv through token-row strides in elements taken at launch (v, dq, dk, dv; the launcher
 # requires dq and dk at one stride), so a call on the head views of one packed row writes one packed gradient row
-# (:class:`CakeGDNDetPackedFunction`).  On the architectures of DVL32_ARCHS the tcgen05 adjoint scan of a group of
-# three adds the FP32 dv_local values to dv2 before its one rounding (dhu_tc2_dvl32: dhu_tc2's arguments, tables and
+# (:class:`CakeGDNDetPackedFunction`).  On the architectures of DVL32_ARCHS the tcgen05 adjoint scan of every group but
+# two adds the FP32 dv_local values to dv2 before its one rounding (dhu_tc2_dvl32: dhu_tc2's arguments, tables and
 # selection constants), so dv2 rounds once; dk / dv / dg / dbeta / dh0 take other bits than on dhu_tc2 and than on
 # dv_local + the register scan (dhu_tc2's bits), so the selection rules and the ``dhu_scan`` pin choose between two sets
 # of gradient bits (o and the final state keep theirs; each choice bitwise run to run).  B200 kernel
 # times (CUPTI, cold L2, four processes): tail_g3_f32x 1.024-1.051 x tail_g3, dhu_tc2_dvl32 0.990-0.995 x dhu_tc2;
 # GB300 1.039-1.045 x and 0.994-0.996 x.  Both switches are module constants whose off value is ``()``: with both off
 # a group of three runs tail_g3 on dhu_tc2 again (the non-deterministic package's tests that compare its tail_g3 with
-# this package switch both off by name).  Groups of two keep tail_g2 and dhu_tc2 (the wavefront pair has dhu_tc2's
-# bits); other groups keep the unfused tail.
+# this package switch both off by name).  Groups of two keep tail_g2 and dhu_tc2: the wavefront pair has dhu_tc2's bits
+# and a CUDA graph capture runs the separate launches instead, so an FP32 dv_local adjoint there would give an eager
+# call and its capture other bits.
+#
+# The other groups (one, and four or more) run the package tail on the architectures of PACKAGE_TAIL_ARCHS (``tail`` /
+# ``tail_bf16``: the non-deterministic package's programs, one CTA per (chunk, value head), no cluster).  At a group of
+# one each CTA keeps its dq / dk tile and writes it: no workspace slot is read and no counter is touched.  At a larger
+# group each CTA writes its FP32 dq / dk partials to its own workspace slot and then takes a ticket from the arrival
+# counter of its (chunk, key head) tile (an integer atomic increment that wraps to zero at the group size, so every
+# complete launch leaves its counters zero); the CTA that draws the last ticket, G - 1, sums the group's slots in
+# value-head order, its own included, and rounds dq / dk to BF16 once.  The operands and their order do not depend on
+# which CTA draws the last ticket, and every other output (dv, dg, dbeta) has one writer with the unfused tail's bits,
+# so the tail is bitwise run to run; dq / dk round once.  The workspace slots (FP32 rows of 64 dq rows then 64 dk rows,
+# one slot per (chunk, value head) of a launch) are never zeroed or filled, also not under
+# torch.use_deterministic_algorithms (:func:`_empty_unfilled`): the last CTA of a tile reads only the slot rows of the
+# chunk's tokens, which each CTA of the tile writes in that launch before it takes its ticket
+# (:meth:`Workspaces.take_rows`).  The u32 counters (one per (chunk, key head) tile) are created zero
+# (:meth:`Workspaces.take_zeroed`).  Both are kept per (device, stream of the launch); uncached calls and a CUDA graph
+# capture take buffers of their own (the counters zeroed on the caller's stream, inside the graph for a capture), and
+# a backward launches its chunk table in segments of at most ``TAIL_WORKSPACE_TILES`` slots in stream order
+# (:func:`tail_segments`; at least one chunk), so a workspace holds at most ``max(TAIL_WORKSPACE_TILES, num_v_heads)``
+# slots.  A ``finalize`` pin keeps the unfused tail.  The switch is a module constant whose off value is ``()``: off,
+# these groups run the unfused tail again.
+#
+# At a group of four or more the package tail serves a call only when its mean tokens per sequence, total tokens /
+# sequences, reaches PACKAGE_TAIL_MIN_TOKENS_PER_SEQ[arch] (an architecture missing from the table, or 0: no
+# threshold); below it the call runs the unfused tail on the same adjoint scan (dhu_tc2_dvl32 on DVL32_ARCHS).  A group
+# of one is not affected.  Both counts are host facts on either table route (the tokens of q, the offsets of
+# cu_seqlens less one or the batch, empty sequences included; never the device route's bound on the chunks), so the
+# host and the device tables, an eager call and its CUDA graph capture take the same tail.  The package tail runs full
+# 64-row tiles, so its cost per (chunk, value head) CTA stays about the same on short chunks, where the three unfused
+# stages cost less.  Each value is the smallest mean tokens per sequence from which no backward on the tail the
+# threshold picks ran slower than 0.2.3 (the unfused tail on dhu_tc2) beyond the noise band, in a sweep with the slots
+# unfilled: G = 4 and 8, sequences of 4, 8, 16, 24, 32, 48 and 64 tokens over 4096, 16384 and 32768 (chunk, value head)
+# CTAs and mixed layouts, the backward and the checkpointed step, eager and CUDA graph.  sm_100a (B200, 148 SMs) and
+# sm_103a (GB300, 152 SMs): at G = 4 the package tail ran slower over sequences of 4 tokens (by up to 1.9 %, most at
+# 32768 CTAs), and from 8 tokens on it was faster or within the band.  sm_107a (R200, 212 SMs): at G = 4 it ran slower
+# up to 24 tokens (at 16384 and 32768 CTAs; at 24 tokens on each GPU's own band), and from 32 on it was faster or
+# within the band.  Below each value the package tail still ran faster than the unfused tail on some layouts (at G = 8
+# and at 4096 CTAs among them); one threshold cannot keep those gains and drop every loss.
 F32X_TAIL_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 DVL32_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 F32X_TAILS: tuple[str, ...] = ("tail_g3_f32x", "tail_g3_f32x_bf16")
+PACKAGE_TAIL_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
+PACKAGE_TAIL_MIN_TOKENS_PER_SEQ: dict[str, int] = {
+    "sm_100a": 8,
+    "sm_103a": 8,
+    "sm_107a": 32,
+}
+PACKAGE_TAILS: tuple[str, ...] = ("tail", "tail_bf16")
+TAIL_TILE_FLOATS = 2 * CHUNK * HEAD_DIM
+TAIL_WORKSPACE_TILES = 4096
 
 
 def fused_tail_stage(
@@ -3616,33 +3958,73 @@ def fused_tail_stage(
     num_heads: int,
     num_v_heads: int,
     *,
+    total_tokens: int,
+    num_seqs: int,
     dbeta_bf16: bool,
     finalize: str | None = None,
 ) -> str | None:
-    """The fused tail of a backward on ``arch`` (``_bf16``: the BF16-``dbeta`` form): ``tail_g2`` for a value-head
-    group of two; for a group of three without a ``finalize`` pin ``tail_g3_f32x`` on an architecture of
-    ``F32X_TAIL_ARCHS`` whose registry delivers it, else ``tail_g3`` where delivered; ``None`` otherwise (``dqkwg``,
-    the WY pullback and the finalize)."""
+    """The fused tail of a backward on ``arch`` over ``total_tokens`` tokens in ``num_seqs`` sequences (``_bf16``:
+    the BF16-``dbeta`` form): ``tail_g2`` for a value-head group of two; ``None`` under a ``finalize`` pin for any
+    other group; for a group of three ``tail_g3_f32x`` on an architecture of ``F32X_TAIL_ARCHS`` whose registry
+    delivers it, else ``tail_g3`` where delivered; for any other group the package tail ``tail`` on an architecture of
+    ``PACKAGE_TAIL_ARCHS`` whose registry delivers it, at a group of four or more only when ``total_tokens /
+    num_seqs`` reaches ``PACKAGE_TAIL_MIN_TOKENS_PER_SEQ[arch]``; ``None`` otherwise (``dqkwg``, the WY pullback and
+    the finalize)."""
     suffix = "_bf16" if dbeta_bf16 else ""
     if num_v_heads == 2 * num_heads:
         return "tail_g2" + suffix
-    if num_v_heads != 3 * num_heads or finalize:
+    if finalize:
         return None
-    if arch in F32X_TAIL_ARCHS and _available("tail_g3_f32x" + suffix, arch):
-        return "tail_g3_f32x" + suffix
-    return "tail_g3" + suffix if _available("tail_g3" + suffix, arch) else None
+    if num_v_heads == 3 * num_heads:
+        if arch in F32X_TAIL_ARCHS and _available("tail_g3_f32x" + suffix, arch):
+            return "tail_g3_f32x" + suffix
+        return "tail_g3" + suffix if _available("tail_g3" + suffix, arch) else None
+    if arch not in PACKAGE_TAIL_ARCHS or not _available("tail" + suffix, arch):
+        return None
+    # a group of four or more below its mean tokens per sequence: the unfused tail
+    threshold = PACKAGE_TAIL_MIN_TOKENS_PER_SEQ.get(arch, 0)
+    if num_v_heads != num_heads and int(total_tokens) < threshold * int(num_seqs):
+        return None
+    return "tail" + suffix
 
 
 def dhu_tc2_stage(arch: str, num_heads: int, num_v_heads: int) -> str:
-    """The tcgen05 adjoint scan of a backward on ``arch``: ``dhu_tc2_dvl32`` for a value-head group of three on an
+    """The tcgen05 adjoint scan of a backward on ``arch``: ``dhu_tc2_dvl32`` for any value-head group but two on an
     architecture of ``DVL32_ARCHS`` whose registry delivers it, else ``dhu_tc2``."""
     if (
-        num_v_heads == 3 * num_heads
+        num_v_heads != 2 * num_heads
         and arch in DVL32_ARCHS
         and _available("dhu_tc2_dvl32", arch)
     ):
         return "dhu_tc2_dvl32"
     return "dhu_tc2"
+
+
+def tail_segments(num_chunks: int, num_heads: int, num_v_heads: int,
+                  slots: int | None = None) -> tuple[tuple[tuple[int, int], ...], int]:  # fmt: skip
+    """The chunk ranges ``[c0, c1)`` the package tail launches in stream order over a chunk table of ``num_chunks``
+    chunks, and the (chunk, key head) tiles a launch may index (a tile is the group's ``num_v_heads // num_heads``
+    workspace slots and one arrival counter): one launch and no tile at a value-head group of one, else ranges of
+    ``max(1, slots // num_v_heads)`` chunks (``slots``: the workspace slots, default ``TAIL_WORKSPACE_TILES``, read at
+    the call).  Kept per (chunks, heads, value heads, slots) for the last 64 of them (:func:`_tail_segments`): a
+    varlen batch changes its chunk count from call to call, and a kept result holds one range per launch."""
+    cap = TAIL_WORKSPACE_TILES if slots is None else slots
+    return _tail_segments(int(num_chunks), int(num_heads), int(num_v_heads), int(cap))
+
+
+@lru_cache(maxsize=64)
+def _tail_segments(
+    num_chunks: int, num_heads: int, num_v_heads: int, cap: int
+) -> tuple[tuple[tuple[int, int], ...], int]:
+    """:func:`tail_segments` of a workspace of ``cap`` slots."""
+    if num_chunks <= 0:
+        return (), 0
+    if num_v_heads == num_heads:
+        return ((0, num_chunks),), 0
+    per = min(num_chunks, max(1, cap // num_v_heads))
+    return tuple(
+        (c, min(c + per, num_chunks)) for c in range(0, num_chunks, per)
+    ), per * num_heads
 
 
 def _row_stride(t: torch.Tensor) -> int:
@@ -3703,7 +4085,10 @@ def cake_gdn_det_train_backward(
     callable that returns them (optionally followed by their common token-row stride, which the tail then takes
     without reading their strides).  When the call's tail is the round-once tail (:data:`F32X_TAILS`) it writes
     ``dq`` / ``dk`` / ``dv`` into them in place (a callable is called then, right before the tail, and only then) and
-    the returned ``dq`` / ``dk`` / ``dv`` are those tensors; any other tail returns tensors of its own."""
+    the returned ``dq`` / ``dk`` / ``dv`` are those tensors; any other tail returns tensors of its own.  The package
+    tail (:data:`PACKAGE_TAILS`) runs on the workspace slots and the arrival counters of the caller's stream
+    (:meth:`Workspaces.take_rows`, :meth:`Workspaces.take_zeroed`), so the backwards of one stream run one at a time
+    on them, in stream order."""
     if forward.get("mode") != _TAPE_MODE:
         raise ValueError("cake_gdn_det_train_backward reads the tape of a deterministic forward "
                          "(cake_gdn_det_train_forward, tag 'mode': 'det'); this tape does not carry that tag "
@@ -3719,7 +4104,9 @@ def cake_gdn_det_train_backward(
     total_tokens = qn.numel() // (num_heads * qn.shape[-1])
     device = qn.device
     index = _tensor_index(qn)
-    table = workspaces.table(index)
+    # the caller's stream, read once: the key of the workspace table and of the package tail's counters
+    stream = workspaces.stream_key(index)
+    table = workspaces.table(index, stream)
     v_rows = _v_rows(v)
     if v_rows is None:  # a tape whose v is not one the stages read in place
         v, v_rows = _aligned(v, ROW_ALIGN_BYTES), num_v_heads
@@ -3766,16 +4153,24 @@ def cake_gdn_det_train_backward(
         meta.bwd_tc or _sdt_selected(meta, segs, num_v_heads, index, options, arch)
     )
     dbeta_bf16 = dbeta_dtype == torch.bfloat16
-    # the fused tail (fused_tail_stage): tail_g2 for a value-head group of two; for three (unless a finalize pin) the
-    # round-once tail_g3_f32x on the architectures of F32X_TAIL_ARCHS, else tail_g3; else None
-    fused_tail = fused_tail_stage(arch, num_heads, num_v_heads, dbeta_bf16=dbeta_bf16,
+    # the fused tail (fused_tail_stage): tail_g2 for a value-head group of two; unless a finalize pin, for three the
+    # round-once tail_g3_f32x on the architectures of F32X_TAIL_ARCHS, else tail_g3, and for any other group the
+    # package tail on those of PACKAGE_TAIL_ARCHS (for four or more from PACKAGE_TAIL_MIN_TOKENS_PER_SEQ mean tokens
+    # per sequence on: the tokens and the sequences of the call, host facts on either table route); else None
+    fused_tail = fused_tail_stage(arch, num_heads, num_v_heads, total_tokens=total_tokens, num_seqs=meta.num_seqs,
+                                  dbeta_bf16=dbeta_bf16,
                                   finalize=options.finalize or forward.get("finalize_stage"))  # fmt: skip
-    # the tcgen05 adjoint scan (dhu_tc2_stage): dhu_tc2_dvl32 for a group of three on DVL32_ARCHS, else dhu_tc2
+    # the tcgen05 adjoint scan (dhu_tc2_stage): dhu_tc2_dvl32 for any group but two on DVL32_ARCHS, else dhu_tc2
     tc_stage = dhu_tc2_stage(arch, num_heads, num_v_heads)
     # two groups: the tcgen05 adjoint scan feeding the fused tail, for a serial plan beside tail_g2 (beside a group of
     # three's tail on the architectures of TWO_STREAM_SERIAL_G3_ARCHS) and for the pass 2 of a split plan beside a
-    # group of three's tail (a split plan beside tail_g2 runs one stream); either form of a group's tail is its kind
-    tail_kind = None if fused_tail is None else f"tail_g{num_v_heads // num_heads}"
+    # group of three's tail (a split plan beside tail_g2 runs one stream); either form of a group's tail is its kind;
+    # the package tail runs on the caller's stream after the whole adjoint scan
+    tail_kind = (
+        None
+        if fused_tail is None or fused_tail in PACKAGE_TAILS
+        else f"tail_g{num_v_heads // num_heads}"
+    )
     serial_kinds = (
         ("tail_g2", "tail_g3") if arch in TWO_STREAM_SERIAL_G3_ARCHS else ("tail_g2",)
     )
@@ -3792,6 +4187,19 @@ def cake_gdn_det_train_backward(
         and groups is None
         and not torch.cuda.is_current_stream_capturing()
     )
+    # the register scan's stages and the segmented scan's refusals (host checks): before the adjoint scan's launches
+    # and before the package tail's outputs and workspace (made after those launches), so a refused call takes no
+    # workspace
+    scan_stage, vb, pre, pre_threads = _scan_stages("dhu", segs.scan_config, arch)
+    if not serial:
+        if pre is None or not _available("stitch", arch):
+            raise NotImplementedError(f"the segmented dhu scan needs {scan_stage.replace('dhu_r', 'dhu_pre_r')} and "
+                                      f"stitch for {arch}")  # fmt: skip
+        if segs.segment_len > pre_threads:
+            raise ValueError(
+                f"segment_len {segs.segment_len} exceeds the {pre_threads} chunks of {pre}"
+            )
+    package_tail = fused_tail in PACKAGE_TAILS
     if not (use_tc or split_tc):
         dv_local = workspaces.take(table, "b_dv_local", token_hv, v.dtype, device)
         _launch("dv_local", meta.num_chunks, num_v_heads, 1, qn, kn, do, g_cs, dv_local, meta.chunk_start,
@@ -3819,7 +4227,6 @@ def cake_gdn_det_train_backward(
         use_dht = 1
     else:
         dht32, use_dht = dh0, 0
-    scan_stage, vb, pre, pre_threads = _scan_stages("dhu", segs.scan_config, arch)
     if use_tc and groups is None and not wavefront:
         # dv_local fused into the tcgen05 serial scan (seg_state is not read): on dhu_tc2 the register scan's dh / dv2 /
         # dh0; dhu_tc2_dvl32 rounds dv2 once (other dh / dv2 / dh0 bits)
@@ -3827,19 +4234,32 @@ def cake_gdn_det_train_backward(
                 meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, num_heads,
                 num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
     elif segs.segment_len > 0 and segs.num_segments > meta.num_seqs:
-        if pre is None or not _available("stitch", arch):
-            raise NotImplementedError(f"the segmented dhu scan needs {scan_stage.replace('dhu_r', 'dhu_pre_r')} and "
-                                      f"stitch for {arch}")  # fmt: skip
-        if segs.segment_len > pre_threads:
-            raise ValueError(
-                f"segment_len {segs.segment_len} exceeds the {pre_threads} chunks of {pre}"
-            )
+        # (the refusals above checked the pre-scan, the stitch and the segment length)
         seg_state = workspaces.take(table, "b_seg_state", (segs.num_segments, num_v_heads, HEAD_DIM, 2 * HEAD_DIM),
                                     torch.float32, device)  # fmt: skip
         seg_flag = workspaces.take(
             table, "b_seg_flag", (segs.num_segments, num_v_heads), torch.int32, device
         )
-        if split_tc:
+        # the launch of the maps that split_map_stage names (split_map_launch): on two CTAs per (entry, value head),
+        # grid z 2, where that grid fits one wave (the same bits), else on one; None where split_map_stage names the
+        # fused pre-scan or such a grid keeps it (ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS); read with one lookup of the
+        # answer decided once per (switches, architecture, heads, entries, SMs) (_split_map_call)
+        map_launch = (
+            _split_map_call(ADJOINT_MAP_ARCHS, DVL32_ARCHS, ADJOINT_MAP_SPLIT_ARCHS, ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS,
+                            arch, num_heads, num_v_heads, segs.num_summary, _device_props(index)[0])
+            if split_tc and segs.summary is not None
+            else None
+        )  # fmt: skip
+        if map_launch is not None:
+            # the maps [B | M] of every segment but each sequence's first on the tcgen05 walk of dhu_tc2_dvl32, with
+            # the pre-scan's warm-up threshold (a bound in a segment's last chunk keeps the whole map; the same
+            # seg_state / seg_flag; a sequence's first map is never read)
+            gm_stage, gm_z = map_launch
+            _launch(gm_stage, segs.num_summary, num_v_heads, gm_z, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0,
+                    seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
+                    meta.seq_chunk_start, num_heads, num_v_heads, 0, 0, scale, segs.seg_index, segs.seg_mode,
+                    warmup_thresh_log2(options), seg_flag)  # fmt: skip
+        elif split_tc:
             # the pre-scan with the dv_local tiles of its chunks computed in the CTA (the same seg_state / seg_flag)
             _launch(SDT_PRESCAN, segs.num_segments, num_v_heads, 2 * HEAD_DIM // vb, qn, kn, w, do, g_cs, dht32, dh,
                     dv2, dh0, seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
@@ -3868,8 +4288,9 @@ def cake_gdn_det_train_backward(
     if fused_tail is not None:
         # a value-head group of two / three: dqkwg, the WY pullback and the finalize as one cluster kernel (the same
         # bits as the three stages; the round-once tail of a group of three sums the group's dq / dk partials in FP32
-        # before one rounding: the three stages' dv / dg / dbeta); a finalize pin keeps the three stages of a group of
-        # three
+        # before one rounding: the three stages' dv / dg / dbeta); any other group: the package tail, one kernel per
+        # (chunk, value head) that sums the group's dq / dk partials in FP32 before one rounding (the three stages'
+        # dv / dg / dbeta); a finalize pin keeps the three stages of every group but two
         tail = fused_tail
         round_once = tail in F32X_TAILS
         if groups is not None:
@@ -3893,6 +4314,7 @@ def cake_gdn_det_train_backward(
             if len(qkv) > 3:
                 stride = qkv[3]
         else:
+            # every tail's outputs after the adjoint scan's launches: the device runs the scan while the host makes them
             dv = torch.empty(v.shape, dtype=v.dtype, device=device)
             dq = torch.empty(qn.shape, dtype=qn.dtype, device=device)
             dk = torch.empty(kn.shape, dtype=kn.dtype, device=device)
@@ -3936,6 +4358,27 @@ def cake_gdn_det_train_backward(
             finally:
                 join.record(side)  # the join
                 main.wait_event(join)
+        elif package_tail:
+            # the package tail on the caller's stream (never grouped, no wavefront pair): the chunk table in launches of
+            # at most the workspace's slots, in stream order (tail_segments), on the workspace slots (written before
+            # they are read, never zeroed) and the arrival counters (zero when created, left zero by every launch) of
+            # the caller's stream, taken like the outputs after the adjoint scan's launches (the counters' zero fill,
+            # when they are created, is queued between the scan and the tail)
+            ranges, tiles = tail_segments(meta.num_chunks, num_heads, num_v_heads)
+            ws = workspaces.take_rows(table, "tail_ws", max(tiles * (num_v_heads // num_heads), 1),
+                                      (TAIL_TILE_FLOATS,), torch.float32, device)  # fmt: skip
+            ws_count = workspaces.take_zeroed(
+                stream, "tail_count", max(tiles, 1), (), torch.uint32, device
+            )
+            for a, b in ranges:
+                # the chunk rows [a, b) of the per-chunk tensors: the tensors themselves for the whole table
+                rows = (h, dh, meta.chunk_start, meta.chunk_len)
+                if (a, b) != (0, meta.num_chunks):
+                    rows = tuple(t[a:b] for t in rows)
+                h_r, dh_r, cs_r, cl_r = rows
+                _launch(tail, (b - a) * num_v_heads, 1, 1, qn, kn, forward["rstd_q"], forward["rstd_k"], v_new, do,
+                        dv2, h_r, dh_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, ws, ws_count, cs_r, cl_r, num_heads,
+                        num_v_heads, scale, normalize, tiles, v_rows)  # fmt: skip
         elif groups is None:
             _launch(tail, meta.num_chunks * num_v_heads, 1, 1, qn, kn, forward["rstd_q"], forward["rstd_k"], v_new, do,
                     dv2, h, dh, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, meta.chunk_start, meta.chunk_len, num_heads,
@@ -4419,16 +4862,23 @@ class CakeGDNDetPackedFunction(torch.autograd.Function):
         return d_row, dg, dbeta, None, dh0, None, None, None, None, None, None
 
 
-def _packed_route(q, v, beta, options: ChainOptions) -> bool:
-    """Whether a call on the head views of a packed row (:func:`_packed_row`) takes :class:`CakeGDNDetPackedFunction`:
-    ``PACKED_ROW`` and a backward whose tail is the round-once tail (:func:`fused_tail_stage`; the BF16-``dbeta`` form
-    for BF16 ``beta``)."""
-    if not PACKED_ROW:
-        return False
+def _packed_route(
+    q, k, v, beta, cu_seqlens, options: ChainOptions
+) -> torch.Tensor | None:
+    """The packed row a call takes :class:`CakeGDNDetPackedFunction` on, or ``None``: under ``PACKED_ROW``, when ``q``,
+    ``k`` and ``v`` are the head views of a packed row (:func:`_packed_row`) and the backward's tail is the round-once
+    tail (:func:`fused_tail_stage`; the BF16-``dbeta`` form for BF16 ``beta``).  Only a value-head group of three
+    takes the round-once tail, so any other group is refused before the row's checks and the rule."""
+    if not PACKED_ROW or v.shape[2] != 3 * q.shape[2]:
+        return None
+    row = _packed_row(q, k, v)
+    if row is None:
+        return None
     arch = cake_backend.device_arch(_tensor_index(q))
-    tail = fused_tail_stage(arch, q.shape[2], v.shape[2], dbeta_bf16=beta.dtype == torch.bfloat16,
-                            finalize=options.finalize)  # fmt: skip
-    return tail in F32X_TAILS
+    num_seqs = q.shape[0] if cu_seqlens is None else int(cu_seqlens.numel()) - 1
+    tail = fused_tail_stage(arch, q.shape[2], v.shape[2], total_tokens=q.shape[0] * q.shape[1], num_seqs=num_seqs,
+                            dbeta_bf16=beta.dtype == torch.bfloat16, finalize=options.finalize)  # fmt: skip
+    return row if tail in F32X_TAILS else None
 
 
 def cake_gdn_det(
@@ -4501,8 +4951,8 @@ def cake_gdn_det(
     )
     if records:
         # the head views of one packed row under the round-once tail: the row is the autograd input
-        row = _packed_row(q, k, v)
-        if row is not None and _packed_route(q, v, beta, options):
+        row = _packed_route(q, k, v, beta, cu_seqlens, options)
+        if row is not None:
             return CakeGDNDetPackedFunction.apply(row, g, beta, float(scale), initial_state, output_final_state,
                                                   cu_seqlens, cu_seqlens_cpu, use_qk_l2norm_in_kernel, options,
                                                   (q, k, v))  # fmt: skip
