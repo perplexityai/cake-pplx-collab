@@ -51,9 +51,10 @@ a cluster: group ``g`` serves the tokens ``g, g + G, ...``.  The ``fwd``
 programs of 2 to 4 values (``fwd_n2``, ``fwd_n3``, ``fwd_n4``) serve whole
 tokens per CTA and exchange nothing: CTA ``r`` of group ``g`` serves the
 tokens ``4 g + r, 4 g + r + 4 G, ...``.  The grid is ``(cluster_ctas * G, 1,
-1)`` with ``G = min(T, resident groups)``, the groups one device holds at once
-(:func:`resident_groups`); any grid is correct (the groups never wait on each
-other).  Nothing launches cooperatively.
+1)`` with ``G = min(T, resident groups)``, the groups one device holds at once,
+or a measured cap below them for a program that runs faster with fewer groups
+(:func:`resident_groups`, :data:`GROUP_CAPS`); any grid is correct (the groups
+never wait on each other).  Nothing launches cooperatively.
 """
 
 from __future__ import annotations
@@ -355,6 +356,17 @@ RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_107a", 208): {2: 104, 3: 153, 4: 208, 5: 208},
     ("sm_107a", 212): {2: 92, 3: 138, 4: 184, 5: 184},
 }
+# Launch groups a program takes at most, below the groups the device holds: (architecture, SM count) -> {record:
+# groups}.  ``fwd_n4`` (the whole-token forward of four values, two CTAs per SM) runs 1 to 6 % faster at 64 groups
+# than at all 74 resident groups on GB200 and GB300 and all 71 on B200 (CUDA graph replays, cold L2, T = 4097, 16380
+# and 32768, two to four GPUs of each, both packages); 62 to 66 groups measure within 2 % of 64.  Every other
+# program, ``fwd_n2`` and ``fwd_n3`` included, shows no consistent gain below its resident groups on these devices
+# and has no cap.  A device without an entry here takes the resident groups.
+GROUP_CAPS: dict[tuple[str, int], dict[str, int]] = {
+    ("sm_100a", 148): {"fwd_n4": 64},
+    ("sm_100a", 152): {"fwd_n4": 64},
+    ("sm_103a", 152): {"fwd_n4": 64},
+}
 # On a device or a count of CTAs per SM the table does not hold, the grid takes this fraction of min(CTAs per SM,
 # UNMEASURED_MAX_CTAS_PER_SM) * SMs / cluster CTAs groups: less than every measured device holds (the least, VR200,
 # holds 0.868 of CTAs per SM * SMs / 4 at 2 to 4 CTAs per SM, and at 5 the count of 4).  Any grid is correct; a grid
@@ -387,20 +399,22 @@ def cluster_ctas(record_name: str) -> int:
 
 
 def resident_groups(record_name: str, arch: str, sm_count: int) -> int:
-    """The launch groups of the ``fwd`` or ``bwd`` record ``record_name`` one device of ``arch`` with ``sm_count`` SMs
-    holds at once: the :data:`RESIDENT_GROUPS` entry of its ``CTAS_PER_SM``, else :data:`UNMEASURED_FRACTION` of
-    ``min(CTAS_PER_SM, UNMEASURED_MAX_CTAS_PER_SM) * sm_count / cluster_ctas``; at least one."""
+    """The launch groups the persistent grid of the ``fwd`` or ``bwd`` record ``record_name`` fills on one device of
+    ``arch`` with ``sm_count`` SMs: the groups the device holds at once (the :data:`RESIDENT_GROUPS` entry of its
+    ``CTAS_PER_SM``), at most the record's :data:`GROUP_CAPS` entry of the device; else :data:`UNMEASURED_FRACTION`
+    of ``min(CTAS_PER_SM, UNMEASURED_MAX_CTAS_PER_SM) * sm_count / cluster_ctas``; at least one."""
     per_sm = CTAS_PER_SM[record_name]
     measured = RESIDENT_GROUPS.get((arch, sm_count), {}).get(per_sm)
     if measured is not None:
-        return measured
+        return min(measured, GROUP_CAPS.get((arch, sm_count), {}).get(record_name, measured))
     per_sm = min(per_sm, UNMEASURED_MAX_CTAS_PER_SM)
     return max(1, int(UNMEASURED_FRACTION * per_sm * sm_count) // cluster_ctas(record_name))
 
 
 def groups(record_name: str, tokens: int, arch: str, sm_count: int) -> int:
     """The launch groups of the persistent grid of the ``fwd`` or ``bwd`` record ``record_name``: the groups the
-    device holds at once (:func:`resident_groups`), never more groups than tokens, at least one."""
+    device holds at once, or the record's cap (:func:`resident_groups`), never more groups than tokens, at least
+    one."""
     return max(1, min(tokens, resident_groups(record_name, arch, sm_count)))
 
 
