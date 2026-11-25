@@ -358,6 +358,16 @@ and a workspace eviction leaves it in place.  At most 512 records are kept
 on the general path; `cake_chain.FWD_PLAN_GATE = False` records each class at
 its first call.
 
+The record gate and the recordings cost host time.  Against 0.2.8, over 15
+layouts per GPU (host time of an eager forward call, fresh processes, 95 %
+confidence intervals), the first sighting of a layout (the call the gate has
+no entry for, which runs the general path) took 1.9 to 4.0 us more on B200
+(`sm_100a`; more on 9 layouts, within the noise on 6) and 1.1 to 2.4 us more
+on R200 (`sm_107a`; more on 14 layouts, within the noise on 1); on GB300
+(`sm_103a`) it was within the noise of about 10 us either way on every
+layout.  A recording call took 109 to 205 us more than the 0.2.8 call on
+B200, 98 to 225 us more on GB300 and 60 to 119 us more on R200.
+
 On the host-table route, where the `dhu_tc2` adjoint scan (serial, or the second
 pass of a split plan) feeds the fused tail of a value-head group of two with a
 BF16 `beta` on the caller's stream, and its `segments x HV` CTAs take at most
