@@ -4035,9 +4035,9 @@ _FWD_OUTPUTS = ("qn", "kn", "rstd_q", "rstd_k", "v", "g_cs", "beta32", "A", "w",
 
 
 def _stream_key(device_index: int) -> tuple[int, int]:
-    """(device, handle of its current stream): the key of the stream's pooled workspaces (:meth:`Workspaces.table`)
-    and of its side stream."""
-    return device_index, torch._C._cuda_getCurrentRawStream(device_index)
+    """(device, handle of its current stream): the key of the stream's pooled workspaces (:meth:`Workspaces.table`,
+    :meth:`Workspaces.stream_key`) and of its side stream."""
+    return device_index, _raw_stream(device_index)
 
 
 # the cache fill context of the direct executor (:meth:`_DirectExecutor.fill`), one object for every call
