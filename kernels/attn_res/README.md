@@ -17,8 +17,9 @@ once, with FP32 atomic reductions, so `dw` makes no bit promise. Under `torch.us
 nondet backward of `T > 0` tokens alerts; the forward and the det module never do. Details are in
 [`docs/API.md`](../../docs/API.md#attn_res).
 
-The GPU suites and the benchmark ran on B200 (`sm_100a`) and GB300 (`sm_103a`). The `sm_107a` libraries pass the
-package tests on VR200; R200 runs and `sm_107a` sanitizer runs are pending.
+The GPU suites ran on B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`), the benchmark on
+B200, GB300, VR200 and R200. On VR200 and R200 the `sm_107a` kernels also pass compute-sanitizer (memcheck, racecheck,
+synccheck and initcheck).
 
 Install this family alone, pinned to a commit:
 
