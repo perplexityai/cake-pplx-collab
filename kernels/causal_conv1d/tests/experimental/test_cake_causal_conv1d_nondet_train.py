@@ -81,7 +81,10 @@ sides of each range's ends the static, direct, pair direct or dynamic program th
 pair direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs too),
 with ``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static, direct or pair row);
 at each pair key the pair direct program's plan and token-block grid, its ``y`` bit for bit that of the forward
-without ``PAIR_ROWS`` and of the static program; a capture above a direct range after an eager call inside it (that
+without ``PAIR_ROWS`` and of the static program, also at ten token counts from S 1 to 63 (``PAIR_SHORT_TOKENS``) in
+the two packings of ``_pair_short_docs`` (an empty document, a one-token document, another empty one and the other
+``S - 1`` tokens; ``S`` one-token documents with an empty document between each two); a capture above a direct range
+after an eager call inside it (that
 call refills no pre-zeroed buffer, so the capture zeroes its own); and both packages in one process at a direct row
 and at a pair row.  The backward keys of ``DIRECT_ROWS`` (routes ``bwd``, ``bwd_dt`` and ``bwd_bias`` under every
 label of ``BACKWARD_DIRECT_LABELS``; per architecture and route, channel ranges within C 512 to 1024, each with its own
@@ -1814,7 +1817,8 @@ def _small_s_rows(arch: str, kind: str) -> list[tuple[int, int, int, int]]:
     """``(S, C, C_lo, C_hi)`` of the forward keys of route ``kind`` on ``arch`` (:func:`_forward_keys`): at the key's
     lowest channel count S 1000 (inside the key's range), the range's first token count and the one below it; at its
     highest channel count the range's last token count and the one above it (so ``S_x`` and ``S_x + 1`` of a key
-    with both ranges, and ``S_hi`` and ``S_hi + 1``)."""
+    whose direct range starts above its static range, both sides of both ends of a direct range inside a static
+    range, and ``S_hi`` and ``S_hi + 1``)."""
 
     rows = set()
     for route, c_lo, c_hi, s_lo, s_hi, _ in _forward_keys(arch):
@@ -1829,7 +1833,8 @@ def _small_s_rows(arch: str, kind: str) -> list[tuple[int, int, int, int]]:
 def _small_s_docs(S: int):
     """The documents of a small-S row: the ``"perf"`` packing where it fits ``S`` (every document at least one
     token), else ONE document (``None``: ``cu_seqlens`` [0, S]), so the rows below the packing's minimum (S = 1 at a
-    static range's start) keep their token count."""
+    range's start; S 3 (one token below the range) and S 4 (its first S) of the sm_107a ``fwd`` pair range C 520-736)
+    keep their token count."""
 
     try:
         doc_lengths(S, "perf")
@@ -2002,6 +2007,17 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
 # The channel counts of the pair rows' launch test besides both ends of each pair key: C 512 to 1024 and C 776, whose
 # last pair tile is partial.
 PAIR_ROW_CHANNELS = (512, 776, 1024)
+# The token counts below 64 of the pair rows' launch test, each in the two packings of :func:`_pair_short_docs`.
+PAIR_SHORT_TOKENS = (1, 2, 3, 4, 8, 15, 16, 31, 32, 63)
+
+
+def _pair_short_docs(S: int) -> tuple:
+    """Two packings of ``S`` tokens with one-token and empty documents: an empty document, a one-token document,
+    another empty one and the other ``S - 1`` tokens (``(0, 1, 0)`` at S 1); ``S`` one-token documents with an empty
+    document between each two (more than 31 documents from S 17)."""
+
+    mixed = (0, 1, 0, S - 1) if S > 1 else (0, 1, 0)
+    return mixed, (1, 0) * (S - 1) + (1,)
 
 
 @pytest.mark.parametrize(
@@ -2013,11 +2029,14 @@ def test_pair_rows_launch_and_keep_y_bits(kind, taps, monkeypatch) -> None:
     and at its last token count the public forward launches the route's pair direct program on its ``PAIR_PLANS``
     form (16 channel pairs per tile, 8 token sub-tiles, ``ceil(C / 2 / 16)`` tiles), its token-block grid
     (``min(ctas_per_sm x SMs, n_ch_tiles x ceil(S / (8 x n_sub)))`` CTAs) and no ``work`` counters; one token outside
-    the range it launches another program.  Where the route has two pair keys, each key's C also runs at the other
-    key's last token count and one token beyond it.  On each draw ``y`` repeats bit for bit, equals bit for bit the
-    forward's without ``PAIR_ROWS`` (the static, direct or dynamic program the other tables and the rules pick) and
-    the route's static program's (one key over every token count of the channel count, :func:`_forward_rules_only`),
-    and every ``y`` is judged against the naive tier."""
+    the range (below it above S 1) it launches another program.  Where the route has more than one pair key, each
+    key's C also runs at the other keys' last token counts and one token beyond each.  Each C also runs every S of
+    :data:`PAIR_SHORT_TOKENS` in both packings of :func:`_pair_short_docs` (an empty document, a one-token document,
+    another empty one and the other ``S - 1`` tokens; ``S`` one-token documents with an empty document between each
+    two), inside the range or below it.  On each draw ``y`` repeats bit for bit, equals bit for bit the forward's
+    without ``PAIR_ROWS`` (the static, direct or dynamic program the other tables and the rules pick) and the route's
+    static program's (one key over every token count of the channel count, :func:`_forward_rules_only`), and every
+    ``y`` is judged against the naive tier."""
 
     _require_route(kind)
     arch, device = _arch(), _device()
@@ -2031,10 +2050,11 @@ def test_pair_rows_launch_and_keep_y_bits(kind, taps, monkeypatch) -> None:
             (s_lo, None),
             (1000, "perf"),
             (s_hi, "perf"),
-            (s_lo - 1, _small_s_docs(s_lo - 1)),
+            *(((s_lo - 1, _small_s_docs(s_lo - 1)),) if s_lo > 1 else ()),
             (s_hi + 1, "perf"),
         ]
         rows += [(S, "perf") for end in ends if end != s_hi for S in (end, end + 1)]
+        rows += [(S, docs) for S in PAIR_SHORT_TOKENS for docs in _pair_short_docs(S)]
         held = {C for C in PAIR_ROW_CHANNELS if c_lo <= C <= c_hi}
         cases += [(C, (s_lo, s_hi), rows) for C in sorted({c_lo, c_hi} | held)]
     pair = _forward_program(arch, kind, "pair")
@@ -5004,11 +5024,12 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
 # The backward rows of ``DIRECT_ROWS`` (routes ``bwd``, ``bwd_dt`` and ``bwd_bias``; per architecture and route,
 # channel ranges within C 512 to 1024, each with its own token range): the labels of those routes (:data:`ROUTE_LABELS`:
 # FP32 and BF16 taps on ``bwd_dt`` and ``bwd_bias``), the channel counts besides each key's ends where a key covers
-# them (C 512 and C 1024 in 128-channel tiles; C 576 and C 520 in 64-channel tiles, C 520 with a partial last tile)
+# them (C 512 and C 1024 in 128-channel tiles; C 576 and C 520 in 64-channel tiles, C 520 with a partial last tile;
+# C 632, 856 and 928, measured channel counts of the sm_100a and sm_103a keys between wider ones)
 # and the document counts of the rows of 1000 tokens and more (one,
 # four in the perf packing, 32, and 100 from :data:`BACKWARD_DIRECT_MANY_DOCS_FROM` tokens).
 BACKWARD_DIRECT_LABELS = ("bwd", "bwd_dt", "bwd_dt-bf16", "bwd_bias", "bwd_bias-bf16")
-BACKWARD_DIRECT_CHANNELS = (512, 576, 1024, 520)
+BACKWARD_DIRECT_CHANNELS = (512, 576, 1024, 520, 632, 856, 928)
 BACKWARD_DIRECT_DOCS = (1, 4, 32, 100)
 BACKWARD_DIRECT_MANY_DOCS_FROM = 400
 # The direct backward programs' grid: a CTA takes token blocks of ``n_sub`` sub-tiles of 4 tokens, at most 2 CTAs per

@@ -5263,7 +5263,10 @@ def test_device_no_added_synchronization(glm_weight, T, objective):
     synchronization debug mode does not report), ``torch.cuda.Stream.synchronize``, ``torch.cuda.synchronize`` and the
     debug mode's synchronizing operations.  On the hidden count path (three chunks or more) the call waits exactly once,
     and the forward's memory report records that path; the K-sliced reduction with its slab sum and the zero-weight
-    split (``policy_zero``: 16.6 % zero-weight rows) add none."""
+    split (``policy_zero``: 16.6 % zero-weight rows) add none.  A one-chunk call the deterministic package serves with
+    its hidden count (its ``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH`` window; its forward's memory report records the count)
+    waits once in each package: the deterministic package on the count's event, this package on the host count's
+    copy."""
     _require_program(entry="loss")
     base = _device_inputs(T, "policy" if objective != "ce" else "ce", W=glm_weight)
     inp = (
@@ -5345,9 +5348,27 @@ def test_device_no_added_synchronization(glm_weight, T, objective):
                 best = counts
         return best
 
+    def det_one_chunk_count():
+        if -(-T // 4096) >= cake_backend.HIDDEN_COUNT_MIN_CHUNKS:
+            return False
+        fwd = det_backend.forward_loss(
+            inp.X,
+            inp.W,
+            inp.labels,
+            chunk_size=4096,
+            hidden_count=True,
+            **kw,
+        )
+        return bool(fwd.memory.get("hidden_count"))
+
     for hidden in (False, True):
         nd, det = waits("nd", hidden), waits("det", hidden)
         print(f"\nsyncs T={T} {objective} hidden_count={hidden}: ND {nd} det {det}")
+        if hidden and det_one_chunk_count():
+            one_copy = dict(event=0, stream=0, device=0, debug=1)
+            one_event = dict(event=1, stream=0, device=0, debug=0)
+            assert (nd, det) == (one_copy, one_event), (T, objective, nd, det)
+            continue
         assert nd == det, (T, objective, hidden, nd, det)
         if hidden and -(-T // 4096) >= cake_backend.HIDDEN_COUNT_MIN_CHUNKS:
             assert sum(nd.values()) == 1 and nd["event"] == 1, nd
@@ -13405,6 +13426,49 @@ def test_device_loss_binding_binds_no_cast_launch(
     _assert_same_bits(new, old)
 
 
+@pytest.mark.parametrize("T", [16, 256])
+def test_device_template_loss_runner_has_no_cast_output(glm_weight, monkeypatch, T):
+    """The template-only runner a loss forward prepares on a binding-cache miss (``forward_loss``, one chunk) holds no
+    ``dx_out`` / ``dw_out`` -- the call's backward casts into its own outputs --, the miss's forward peak stays below
+    one ``[V, H]`` BF16 tensor (the weight-gradient output the template no longer allocates), and the step's loss,
+    logp, dX and dW are bitwise those of the next step, which finds the remembered binding."""
+    _require_program(entry="loss")
+    inp = _device_inputs(T, W=glm_weight)
+    V, H = (int(n) for n in inp.W.shape)
+    kw = dict(loss_div=inp.loss_div, chunk_size=4096, backend="cake")
+    real = cake_backend.prepare_lm_head_loss
+    runners: list = []
+
+    def recording(*args, **kwargs):
+        runners.append((real(*args, **kwargs), kwargs.get("_template_only", False)))
+        return runners[-1][0]
+
+    def step():
+        fr = cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
+        torch.cuda.synchronize()
+        peak = torch.cuda.max_memory_allocated() - base
+        dx, dw = fr.backward(None)
+        torch.cuda.synchronize()
+        return peak, dict(loss=fr.loss, logp=fr.logp, dX=dx, dW=dw)
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_loss", recording)
+    with _cache(True) as cache:
+        cache.clear()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        peak, first = step()
+        assert [flag for _, flag in runners] == [True], runners
+        template = runners[0][0].tensors
+        runners.clear()
+        assert "dx_acc" in template, sorted(template)
+        assert "dx_out" not in template and "dw_out" not in template, sorted(template)
+        assert peak < V * H * 2, (peak, V * H * 2)
+        _, second = step()
+        assert runners == [], runners  # the remembered binding
+        _assert_same_bits(first, second)
+
+
 @pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
 def test_device_scatter_fold_form_serves_every_valid_row_count(monkeypatch, module):
     """The compact dX scatter cast with a label residual fold binds one eager form for an output of ``num_rows`` rows,
@@ -17328,9 +17392,10 @@ _ONE_SLICE = {"dx": {"k_slices": 1}}
 
 def test_small_call_switches_validate_and_restore():
     """The small-call switches return their previous values, reject bad values, and default to the shipped values
-    (256 rows, the small-call kept logits on, padding to 16 rows -- 256 rows for the log-probability entries on
-    sm_107a); a padding row count set with :func:`set_small_pad_rows` applies to every entry until ``None`` restores
-    the defaults."""
+    (256 rows, the small-call kept logits on, padding to 16 rows -- 256 rows for the log-probability entries and the
+    loss entry's calls of at most 128 rows on sm_107a; a device-free call reads the 16-row default); a padding row
+    count set with
+    :func:`set_small_pad_rows` applies to every entry until ``None`` restores the defaults."""
     meta = torch.device("meta")
     assert (
         cake_backend.uncompacted_max_rows()
@@ -17338,9 +17403,15 @@ def test_small_call_switches_validate_and_restore():
         == 256
     )
     assert cake_backend.small_t_keep() is True
-    assert cake_backend.small_pad_rows() == cake_backend.SMALL_PAD_ROWS_DEFAULT == 16
+    assert (
+        cake_backend.small_pad_rows("loss", meta)
+        == cake_backend.SMALL_PAD_ROWS_DEFAULT
+        == 16
+    )
     assert cake_backend.small_pad_rows("logprob", meta) == 16
     assert cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH == {"sm_107a": 256}
+    assert cake_backend.SMALL_PAD_ROWS_LOSS_BY_ARCH == {"sm_107a": 256}
+    assert cake_backend.SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH == {"sm_107a": 128}
     for bad in (-1, 1.5, True):
         with pytest.raises(ValueError):
             cake_backend.set_uncompacted_max_rows(bad)
@@ -17361,14 +17432,15 @@ def test_small_call_switches_validate_and_restore():
     assert cake_backend.set_small_pad_rows(32) == 0
     assert cake_backend.small_pad_rows("logprob", meta) == 32
     assert cake_backend.set_small_pad_rows(None) == 32
-    assert cake_backend.small_pad_rows() == 16
+    assert cake_backend.small_pad_rows("loss", meta) == 16
 
 
 def test_small_call_rule_is_host_only(monkeypatch):
     """The small-call rule reads host values alone (meta tensors and attribute stand-ins here): a 2-D BF16 CUDA ``X``
     with int64 ``[T]`` labels on its device, ``backend="cake"``, compacted, ``0 < T <= min(uncompacted_max_rows(),
     chunk_size)`` stages ``T`` rows, or the entry's ``small_pad_rows(...)`` when ``T`` is below it and the padded count
-    fits (the log-probability entries on sm_107a: 256 rows, the loss entry 16); a policy call at the zero-weight floor,
+    fits (on sm_107a 256 rows for the log-probability and the loss entries, elsewhere 16); a policy call at the
+    zero-weight floor,
     a per-row operand that is not an FP32 ``[T]`` tensor on that device or requires a gradient, and every other call
     stage nothing."""
     meta = torch.device("meta")
@@ -17467,7 +17539,9 @@ def test_small_call_rule_is_host_only(monkeypatch):
         assert rule(X(1), lab(1), "cake", 4096, None) == 16
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 16
         monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_107a")
-        assert rule(X(1), lab(1), "cake", 4096, None) == 16
+        assert rule(X(1), lab(1), "cake", 4096, None) == 256
+        assert rule(X(128), lab(128), "cake", 4096, None) == 256
+        assert rule(X(129), lab(129), "cake", 4096, None) == 129
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 256
         assert rule(X(255), lab(255), "cake", 4096, None, logprob=True) == 256
         assert rule(X(16), lab(16), "cake", 4096, None, logprob=True) == 256
@@ -17478,6 +17552,77 @@ def test_small_call_rule_is_host_only(monkeypatch):
         assert rule(X(1), lab(1), "cake", 4096, None, per_row=tau, logprob=True) == 256
         monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_100a")
         assert rule(X(1), lab(1), "cake", 4096, None, logprob=True) == 16
+        assert rule(X(1), lab(1), "cake", 4096, None) == 16
+
+
+def test_small_call_loss_pad_rows_by_arch(monkeypatch):
+    """The loss entry's small-call padding follows the device architecture (:data:`SMALL_PAD_ROWS_LOSS_BY_ARCH`,
+    :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH`): 256 rows on sm_107a for a call of at most 128 rows, 16 above it and on
+    sm_100a and sm_103a, the log-probability entries' rows unchanged and a forced count winning everywhere; on sm_107a
+    a loss call of ``T <= 128`` rows stages 256 rows, one of 129 to 256 rows its own, a call whose chunk or
+    ``uncompacted_max_rows`` is below 256 its own rows, and a policy call 256 rows below the zero-weight floor and its
+    own rows when the floor is at most 256 (meta tensors and attribute stand-ins; the architecture is mocked)."""
+    meta = torch.device("meta")
+
+    def X(T):
+        return SimpleNamespace(
+            ndim=2, dtype=torch.bfloat16, is_cuda=True, device=meta, shape=(T, 8)
+        )
+
+    def lab(T):
+        return SimpleNamespace(ndim=1, dtype=torch.int64, device=meta, shape=(T,))
+
+    def row(T):
+        return torch.empty((T,), dtype=torch.float32, device=meta)
+
+    rule = cake_backend._small_call_rows
+    loss_rows = cake_backend.SMALL_PAD_ROWS_LOSS_BY_ARCH
+    logprob_rows = cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH
+    default = cake_backend.SMALL_PAD_ROWS_DEFAULT
+    with _small_pad_rows(None):
+        for arch, loss, logprob in (
+            ("sm_107a", 256, 256),
+            ("sm_100a", 16, 16),
+            ("sm_103a", 16, 16),
+        ):
+            monkeypatch.setattr(cake_backend, "arch_for", lambda device=None, a=arch: a)
+            assert cake_backend.small_pad_rows("loss", meta) == loss, arch
+            assert cake_backend.small_pad_rows("loss", meta, 128) == loss, arch
+            assert cake_backend.small_pad_rows("loss", meta, 129) == default, arch
+            assert cake_backend.small_pad_rows("logprob", meta) == logprob, arch
+            assert cake_backend.small_pad_rows("logprob", meta, 255) == logprob, arch
+            assert loss_rows.get(arch, default) == loss
+            assert logprob_rows.get(arch, default) == logprob
+            with _small_pad_rows(32):
+                assert cake_backend.small_pad_rows("loss", meta) == 32, arch
+                assert cake_backend.small_pad_rows("loss", meta, 129) == 32, arch
+                assert cake_backend.small_pad_rows("logprob", meta) == 32, arch
+        monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: "sm_107a")
+        for T in (1, 2, 16, 31, 32, 127, 128):
+            assert rule(X(T), lab(T), "cake", 4096, None) == 256, T
+            assert rule(X(T), lab(T), "cake", 4096, None, logprob=True) == 256, T
+        for T in (129, 192, 255):
+            assert rule(X(T), lab(T), "cake", 4096, None) == T, T
+            assert rule(X(T), lab(T), "cake", 4096, None, logprob=True) == 256, T
+        assert rule(X(256), lab(256), "cake", 4096, None) == 256
+        assert rule(X(257), lab(257), "cake", 4096, None) == 0
+        assert rule(X(1), lab(1), "cake", 128, None) == 1
+        with _uncompacted_max_rows(128):
+            assert rule(X(1), lab(1), "cake", 4096, None) == 1
+        policy = dict(objective="policy", per_row=(row(1), row(1)))
+        with _shipped_zero_weight_floor():
+            assert rule(X(1), lab(1), "cake", 4096, None, **policy) == 256
+        for floor in (2, 255, 256):
+            previous = cake_backend.set_zero_weight_min_rows(floor)
+            try:
+                assert rule(X(1), lab(1), "cake", 4096, None, **policy) == 1, floor
+            finally:
+                cake_backend.set_zero_weight_min_rows(previous)
+        previous = cake_backend.set_zero_weight_min_rows(257)
+        try:
+            assert rule(X(1), lab(1), "cake", 4096, None, **policy) == 256
+        finally:
+            cake_backend.set_zero_weight_min_rows(previous)
 
 
 @pytest.mark.parametrize("rows", [5, 16])
@@ -17485,7 +17630,9 @@ def test_device_small_call_stage_is_one_block(rows):
     """The staged inputs of a small call are views of one allocation: ``X`` with its ignored rows zero (an infinite
     and a NaN row here) and zero padded rows, labels padded with ``-100``, ``infer_logp`` / ``loss_weights`` zero on the
     ignored and padded rows, a temperature padded with ones; the valid rows keep their bits.  Unpadded (``rows == T``)
-    the labels and the temperature come back as is.  The backward hands back ``dX``'s first ``T`` rows."""
+    the labels and the temperature come back as is.  The backward hands back ``dX``'s first ``T`` rows.  The staging's
+    device work waits for the call's first launch: here the scope runs it (``_small_call_scope``); the block holds no
+    zero word of its own (the device's cached ``stage_zero`` cell is the zero)."""
     _require_program(entry="loss")
     T, H = 5, 64
     gen = torch.Generator(device="cpu").manual_seed(SEED)
@@ -17497,13 +17644,23 @@ def test_device_small_call_stage_is_one_block(rows):
     infer = torch.tensor([1.0, float("nan"), 2.0, float("inf"), 3.0], device=CUDA)
     weights = torch.tensor([0.5, float("inf"), -1.0, float("nan"), 2.0], device=CUDA)
     tau = torch.tensor([0.5, 2.0, 1.5, 0.25, 4.0], device=CUDA)
-    xs, lab, inf, wts, tau_s = cake_backend._SmallCallStage.apply(
-        X, labels, rows, infer, weights, tau
-    )
+    with cake_backend._small_call_scope():
+        xs, lab, inf, wts, tau_s = cake_backend._SmallCallStage.apply(
+            X, labels, rows, infer, weights, tau
+        )
+        assert cake_backend._SMALL_STAGE.ops is not None  # pending until a launch
+    assert cake_backend._SMALL_STAGE.ops is None  # the scope ran it
     valid = labels >= 0
     staged = [xs, inf, wts] + ([lab, tau_s] if rows > T else [])
     base = xs.untyped_storage().data_ptr()
     assert all(t.untyped_storage().data_ptr() == base for t in staged)
+    # the block: X rows, the valid-row mask, then the per-row tensors -- no zero word
+    span = xs.untyped_storage().nbytes()
+    per_row = [4 * rows] * (3 if rows > T else 2)
+    words = [2 * rows * H, T] + [8 * rows] * (rows > T) + per_row
+    assert span == sum(cake_backend._align(n) for n in words), (span, words)
+    zero = cake_backend._device_constants(torch.cuda.current_device())["stage_zero"]
+    assert zero.tolist() == [0.0]
     assert xs.shape == (rows, H) and xs.is_contiguous() and xs.requires_grad
     assert torch.equal(_bits(xs[:T][valid]), _bits(X.detach()[valid]))
     assert not bool(_bits(xs[:T][~valid]).any()) and not bool(_bits(xs[T:]).any())
@@ -17524,8 +17681,196 @@ def test_device_small_call_stage_is_one_block(rows):
     upstream = torch.randn((rows, H), generator=gen).to(CUDA, torch.bfloat16)
     (dx,) = torch.autograd.grad(xs, X, grad_outputs=upstream)
     assert torch.equal(_bits(dx), _bits(upstream[:T]))
-    scalar = cake_backend._SmallCallStage.apply(X, labels, rows, None, None, 0.7)
+    with cake_backend._small_call_scope():
+        scalar = cake_backend._SmallCallStage.apply(X, labels, rows, None, None, 0.7)
     assert scalar[2] is None and scalar[3] is None and scalar[4] == 0.7
+    assert cake_backend._SMALL_STAGE.ops is None
+
+
+def test_small_call_stage_is_deferred():
+    """The small-call stage queues no device work when it is applied: its staging (the comparison, the ``where`` per
+    masked tensor, the padded rows' fills) stays pending for the calling thread until the next launch context
+    (``_ffi_stream_context``) or ``_run_small_stage`` runs it, once; the scope of a small call runs a staging no launch
+    ran and drops one an exception left pending (meta tensors: no device here)."""
+    meta = torch.device("meta")
+    X = torch.empty((5, 8), dtype=torch.bfloat16, device=meta)
+    labels = torch.empty((5,), dtype=torch.int64, device=meta)
+    ran: list = []
+    with cake_backend._small_call_scope():
+        xs, lab, inf, wts, tau = cake_backend._SmallCallStage.apply(
+            X, labels, 16, None, None, None
+        )
+        pending = cake_backend._SMALL_STAGE.ops
+        assert pending is not None and xs.shape == (16, 8) and lab.shape == (16,)
+        cake_backend._SMALL_STAGE.ops = lambda: ran.append(pending)
+    assert ran == [pending] and cake_backend._SMALL_STAGE.ops is None
+    cake_backend._run_small_stage()  # nothing pending: a no-op
+    with pytest.raises(RuntimeError, match="inner call failed"):
+        with cake_backend._small_call_scope():
+            cake_backend._SmallCallStage.apply(X, labels, 16, None, None, None)
+            assert cake_backend._SMALL_STAGE.ops is not None
+            raise RuntimeError("inner call failed")
+    assert cake_backend._SMALL_STAGE.ops is None  # dropped, never run
+
+
+def _poison_small_stage_block(monkeypatch) -> None:
+    """Fill the block every small-call stage allocates (``torch.empty`` called from ``_SmallCallStage.forward``) with
+    0xFF bytes -- a NaN pattern in BF16 and FP32 -- as it is allocated, so a staged buffer read before its staging ran
+    reads NaN."""
+    real_empty = torch.empty
+    stage_code = cake_backend._SmallCallStage.forward.__code__
+
+    def empty(*args, **kwargs):
+        out = real_empty(*args, **kwargs)
+        if sys._getframe(1).f_code is stage_code:
+            out.fill_(0xFF)
+        return out
+
+    monkeypatch.setattr(torch, "empty", empty)
+
+
+def _eager_small_stage(inp, rows: int):
+    """The 0.3.4 staging of a small call by hand, eagerly: ``X`` with its ignored rows zero and ``rows - T`` zero rows,
+    labels padded with ``-100``, ``infer_logp`` / ``loss_weights`` zero on the ignored and the padded rows, a per-row
+    temperature padded with ones (an unpadded call keeps its labels and temperature)."""
+    T, H = int(inp.X.shape[0]), int(inp.X.shape[1])
+    valid = inp.labels >= 0
+    xs = torch.zeros((rows, H), dtype=torch.bfloat16, device=CUDA)
+    xs[:T] = torch.where(valid.unsqueeze(1), inp.X.detach(), xs.new_zeros(()))
+    lab = inp.labels
+    if rows > T:
+        pad = torch.full((rows - T,), -100, dtype=torch.int64, device=CUDA)
+        lab = torch.cat([inp.labels, pad])
+
+    def per_row(t, fill, masked):
+        if not isinstance(t, torch.Tensor) or (not masked and rows == T):
+            return t
+        out = torch.full((rows,), fill, dtype=torch.float32, device=CUDA)
+        out[:T] = torch.where(valid, t, out.new_zeros(())) if masked else t
+        return out
+
+    return (
+        xs,
+        lab,
+        per_row(inp.infer_logp, 0.0, True),
+        per_row(inp.loss_weights, 0.0, True),
+        per_row(inp.temperature, 1.0, False),
+    )
+
+
+def _small_call_reference(inp, entry: str, rows: int, **switches):
+    """The small call's inner entry on eagerly staged inputs (:func:`_eager_small_stage`): ``loss`` / ``logp`` / ``dX``
+    / ``dW`` of the 0.3.4 staging sequence."""
+    T = int(inp.X.shape[0])
+    xs, lab, infer, weights, tau = _eager_small_stage(inp, rows)
+    X = xs.requires_grad_(True)
+    W = inp.W.detach().requires_grad_(True)
+    common = dict(chunk_size=4096, backend="cake", compact_rows=False)
+    if entry == "loss":
+        loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
+            X,
+            W,
+            lab,
+            objective=inp.objective,
+            loss_div=inp.loss_div if inp.objective == "ce" else None,
+            infer_logp=infer,
+            loss_weights=weights,
+            return_logp=True,
+            **common,
+        )
+        loss.backward()
+        logp = logp[:T]
+    else:
+        if tau is not None:
+            fn = cake_backend.cake_lm_head_nondet_train_logprob_temperature
+            common.update(temperature=tau, **switches)
+        else:
+            fn = cake_backend.cake_lm_head_nondet_train_logprob
+        logp = fn(X, W, lab, **common)[:T]
+        loss = (logp.detach() * inp.dlogp)[inp.valid].sum()
+        logp.backward(inp.dlogp)
+    torch.cuda.synchronize()
+    return dict(loss=loss.detach(), logp=logp.detach(), dX=X.grad[:T], dW=W.grad)
+
+
+@pytest.mark.parametrize("T", [5, 16])
+@pytest.mark.parametrize(
+    "entry", ["loss", "policy", "logprob_keep", "logprob", "temperature"]
+)
+def test_device_small_call_stages_after_planning(glm_weight, entry, T, monkeypatch):
+    """A small call (T 5 staged to 16 rows, and T 16 unpadded) stages its inputs right before its first launch: at the
+    inner call's binding lookup the staging is still pending (the temperature entry's temperature check reads the
+    staged temperature first and runs it there), after the call nothing is pending, and with the stage's block filled
+    with 0xFF when it is allocated, ``loss`` / ``logp`` / ``dX`` / ``dW`` are bitwise those of the inner entry on
+    eagerly staged inputs (the 0.3.4 staging sequence, by hand).  The staging's zero is the device's
+    cached ``stage_zero`` cell, which stays zero.  An inner call that raises leaves nothing pending."""
+    if entry == "temperature":
+        _require_tau_program()
+        inp = _tau_inputs(T, W=glm_weight, ignore_frac=0.25)
+    else:
+        _require_program(entry="loss" if entry in ("loss", "policy") else "logprob")
+        objective = "policy" if entry == "policy" else "ce"
+        inp = _device_inputs(T, objective, W=glm_weight, ignore_frac=0.25)
+    assert not bool(inp.valid.all())  # ignored rows: the masking matters
+    kind = "loss" if entry in ("loss", "policy") else "logprob"
+    pending_at_lookup: list = []
+    lookup = cake_backend.BindingCache.lookup
+
+    def spy(self, key):
+        # a backward's lookup runs on the autograd engine's thread: no pending staging there
+        pending = getattr(cake_backend._SMALL_STAGE, "ops", None)
+        pending_at_lookup.append(pending is not None)
+        return lookup(self, key)
+
+    keep = entry != "logprob"
+    if kind == "loss":
+        per_row = (inp.infer_logp, inp.loss_weights)
+    else:
+        per_row = (inp.temperature,)
+    with _small_pad_rows(16), _small_t_keep(keep), _shipped_zero_weight_floor():
+        rows = cake_backend._small_call_rows(
+            inp.X,
+            inp.labels,
+            "cake",
+            4096,
+            None,
+            objective=inp.objective,
+            per_row=per_row,
+            logprob=kind == "logprob",
+        )
+        assert rows == 16, rows
+        checks = (False, True) if entry == "temperature" else (None,)
+        for check in checks:
+            kw = {} if check is None else dict(check_temperature=check)
+            ref = _small_call_reference(inp, kind, rows, **kw)
+            for _ in range(2):  # a binding miss, then a hit
+                pending_at_lookup.clear()
+                _poison_small_stage_block(monkeypatch)
+                monkeypatch.setattr(cake_backend.BindingCache, "lookup", spy)
+                try:
+                    out = _run(inp, 4096, entry=kind, backend="cake", **kw)
+                finally:
+                    monkeypatch.undo()
+                assert cake_backend._SMALL_STAGE.ops is None
+                assert pending_at_lookup, (entry, check)
+                assert pending_at_lookup[0] is (entry != "temperature"), (
+                    entry,
+                    check,
+                    pending_at_lookup,
+                )
+                for key in ("loss", "logp", "dX", "dW"):
+                    assert _same_bits(out[key], ref[key]), (entry, T, check, key)
+    zero = cake_backend._device_constants(torch.cuda.current_device())["stage_zero"]
+    torch.cuda.synchronize()
+    assert zero.tolist() == [0.0]
+    # an inner call that raises (a head of another hidden size) leaves nothing pending
+    W_bad = torch.zeros((8, int(inp.X.shape[1]) + 8), dtype=torch.bfloat16, device=CUDA)
+    with _small_pad_rows(16), pytest.raises(ValueError):
+        if kind == "loss":
+            cake_backend.cake_lm_head_nondet_train_loss(inp.X, W_bad, inp.labels)
+        else:
+            cake_backend.cake_lm_head_nondet_train_logprob(inp.X, W_bad, inp.labels)
+    assert cake_backend._SMALL_STAGE.ops is None
 
 
 @pytest.mark.parametrize("T", [1, 32, 256])
@@ -17826,9 +18171,10 @@ def test_device_small_pad_is_the_unpadded_call(glm_weight, T, entry, objective, 
 
 @pytest.mark.parametrize("entry", ["loss", "logprob", "temperature"])
 def test_device_small_call_pads_to_the_entry_default(glm_weight, entry, monkeypatch):
-    """With the shipped defaults a one-row call stages ``small_pad_rows(entry, device)`` rows: 16 for the loss entry,
-    the device architecture's :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` entry (else 16) for the log-probability entries
-    (plain and with a temperature); the per-row output keeps one row.  The one-pass cross-entropy is off
+    """With the shipped defaults a one-row call stages ``small_pad_rows(entry, device)`` rows: the device
+    architecture's :data:`SMALL_PAD_ROWS_LOSS_BY_ARCH` entry (else 16) for the loss entry and its
+    :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` entry (else 16) for the log-probability entries (plain and with a
+    temperature); the per-row output keeps one row.  The one-pass cross-entropy is off
     (``one_pass_rows`` empty): by default a T = 1 loss call at ``ONE_PASS_HIDDEN`` takes it and stages nothing."""
     if entry == "temperature":
         _require_tau_program()
@@ -17838,12 +18184,13 @@ def test_device_small_call_pads_to_the_entry_default(glm_weight, entry, monkeypa
         inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
     kind = "loss" if entry == "loss" else "logprob"
     expected = cake_backend.small_pad_rows(kind, inp.X.device)
-    if kind == "loss":
-        assert expected == cake_backend.SMALL_PAD_ROWS_DEFAULT
-    else:
-        arch = cake_backend.arch_for(inp.X.device)
-        table = cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH
-        assert expected == table.get(arch, cake_backend.SMALL_PAD_ROWS_DEFAULT)
+    arch = cake_backend.arch_for(inp.X.device)
+    table = (
+        cake_backend.SMALL_PAD_ROWS_LOSS_BY_ARCH
+        if kind == "loss"
+        else cake_backend.SMALL_PAD_ROWS_LOGPROB_BY_ARCH
+    )
+    assert expected == table.get(arch, cake_backend.SMALL_PAD_ROWS_DEFAULT)
     seen = []
     apply = cake_backend._SmallCallStage.apply
 
@@ -18498,6 +18845,62 @@ def test_template_only_loss_runner_never_launches():
     for launch in (runner.forward, runner.backward, runner.step):
         with pytest.raises(RuntimeError, match="never launches"):
             launch()
+
+
+_NO_CAST_CASES = [  # (T, C, objective, fused weight-gradient cast, compacted, dX, dW): 1 / 2 / 3 chunks
+    (10, 16, "ce", True, True, True, True),
+    (10, 16, "ce", False, True, True, True),
+    (20, 16, "ce", True, True, True, True),
+    (37, 16, "ce", True, True, True, True),
+    (37, 16, "ce", False, False, True, True),
+    (37, 16, "policy", True, True, True, True),
+    (20, 16, "policy", False, False, True, True),
+    (37, 16, "ce", True, True, True, False),
+    (37, 16, "ce", True, True, False, True),
+    (10, 16, "ce", True, False, False, True),
+]
+
+
+@pytest.mark.parametrize(
+    "T, C, objective, fuse, compact, need_dx, need_dw", _NO_CAST_CASES
+)
+def test_loss_forward_binds_no_cast_output(
+    T, C, objective, fuse, compact, need_dx, need_dw
+):
+    """No launch of a loss forward binds the casts' outputs: for loss plans of one, two and three chunks, the fused and
+    the unfused weight-gradient cast, compacted and not, cross-entropy and policy, dX and dW, dX only and dW only (the
+    reference runner's own tensors), the host values of every forward key (``forward_keys``; ``stage_values`` and the
+    remembered binding's ``_slot_values``, read-recorded) read neither ``dx_out`` nor ``dw_out``, and a template-only
+    runner of the loss entry binds no backward key (``_runner_backward_keys``).  So the template the eager loss
+    forward prepares on a binding-cache miss allocates neither (``prepare_lm_head_loss``), while a runner that
+    launches keeps both."""
+    inp = _host_inputs(T, objective, ignore_frac=0.25)
+    kw = dict(
+        chunk_size=C,
+        backend="reference",
+        compact_rows=compact,
+        fuse_dw_cast=fuse,
+        need_dx=need_dx,
+        need_dw=need_dw,
+    )
+    if objective == "ce":
+        kw.update(loss_div=inp.loss_div)
+    else:
+        kw.update(
+            objective="policy", infer_logp=inp.infer_logp, loss_weights=inp.loss_weights
+        )
+    runner = cake_backend.prepare_lm_head_loss(inp.X, inp.W, inp.labels, **kw)
+    plan, t = runner.plan, runner.tensors
+    case = (T, C, objective, fuse, compact, need_dx, need_dw)
+    assert ("dx_out" in t) is need_dx and ("dw_out" in t) is need_dw, case
+    assert cake_backend._runner_backward_keys(plan, True) == (), case
+    keys = cake_backend.forward_keys(plan)
+    assert keys, case
+    for key in keys:
+        for form in (cake_backend.stage_values, cake_backend._slot_values):
+            recorder = cake_backend._ReadRecorder(t)
+            form(key[0], recorder, plan, key[1])
+            assert not recorder.read & {"dx_out", "dw_out"}, (case, key, form.__name__)
 
 
 def test_eager_form_slots_the_fold_rows(monkeypatch):

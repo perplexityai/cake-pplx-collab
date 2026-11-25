@@ -110,7 +110,10 @@ from . import cake_build
 # gradient) whose weight has at most ``domain_split_max_weight_elems`` elements
 # per group (``N * K``, the down projection) splits its tile queues by the
 # probed SM pairs of each locality domain instead of evenly (``cake_backend``,
-# stream workspaces).
+# stream workspaces).  On the architectures of ``wide_rows_archs`` a forward
+# or data gradient whose output span passes ``int32_elems`` elements (the
+# programs' 32-bit element addressing of C) launches its stage once per row
+# chunk that fits (``cake_backend``, wide outputs).
 #
 # The lead routes: beside each public route ``ROUTES`` holds its lead twin
 # ``<route>_lead`` (``LEAD_SUFFIX``, ``lead_route``; not a public route) with
@@ -2311,6 +2314,11 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     "dgrad_evict_first_archs": ["sm_100a", "sm_107a"],
     "dgrad_evict_first_min_rows": {"sm_100a": 4096, "sm_103a": 16384, "sm_107a": 16384},
     "dgrad_evict_first_min_k": 4096,
+    # A data gradient whose reduction N (w.shape[1]) is at most the architecture's
+    # value keeps main_wide in place of its evict-first twin.  Timed on 148-SM
+    # sm_100a at N 64 to 1024, dX 4096 to 8192 columns and 4096 to 131072 rows per
+    # group: main_wide was faster or level on every row.
+    "dgrad_evict_first_skip_max_n": {"sm_100a": 1024},
     "fwd_lwh_ef_archs": ["sm_107a"],
     "fwd_lwh_ef_max_k": 2048,
     "fwd_evict_first_archs": ["sm_100a", "sm_103a"],
@@ -2318,9 +2326,24 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     "dgrad_wide_ts33_archs": ["sm_103a"],
     "dgrad_wide_ts33_min_rows": {"sm_103a": 8192},
     "dgrad_wide_ts33_min_k": 4096,
+    # A data gradient whose reduction N is from the architecture's
+    # dgrad_wide_ts33_short_n_min to its dgrad_wide_ts33_short_n takes main_wide_ts33
+    # from dgrad_wide_ts33_short_n_min_rows rows per group in place of
+    # dgrad_wide_ts33_min_rows.  Timed on 152-SM sm_103a: faster or level at N 512 to
+    # 1024 (dX 4096 to 8192 columns, 1024 to 8191 rows per group); slower at N 256,
+    # so the rule starts at N 512.
+    "dgrad_wide_ts33_short_n": {"sm_103a": 1024},
+    "dgrad_wide_ts33_short_n_min": {"sm_103a": 512},
+    "dgrad_wide_ts33_short_n_min_rows": {"sm_103a": 1024},
     "fwd_wide_ts33_archs": ["sm_103a"],
     "fwd_wide_ts33_max_k": 2048,
     "fwd_wide_ts33_max_rows": 4096,
+    # A forward reduction K from the architecture's fwd_wide_ts33_short_k_min to its
+    # fwd_wide_ts33_short_k takes main_wide_ts33 at any rows per group.  Timed on
+    # 152-SM sm_103a: faster or level at K 512 to 1024 (1024 to 8192 output columns,
+    # 4097 to 131071 rows per group); slower at K 256, so the rule starts at K 512.
+    "fwd_wide_ts33_short_k": {"sm_103a": 1024},
+    "fwd_wide_ts33_short_k_min": {"sm_103a": 512},
     "block_k": 64,
     "cta_group": 2,
     "cluster_m": 256,
@@ -2403,6 +2426,10 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     ],
     # The u32 words of the queue walk's tile counters (``queue_sched``).
     "queue_sched_words": 2,
+    # The architectures where a forward or data gradient whose output span passes ``int32_elems``
+    # elements launches its stage once per row chunk that fits (``cake_backend``, wide outputs); on the
+    # others such a call is refused.
+    "wide_rows_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "int32_elems": 2147483647,
 }
 

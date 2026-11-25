@@ -109,35 +109,41 @@ the dies every 4 KB, so about half of the bytes each SM reads come from the othe
 (`cuMemCreate` in a locality domain), chunk `k` in die `k & 1`, and returns a torch tensor over it without a copy.  It
 registers the range, so a call finds a tensor's chunk offset and die from its address alone, with no driver call.
 
-The interleaved-domain program of a route (`cake_jit.DOMAIN_ROUTES`) keeps the main program's tiles of 256 vectors (64
-threads, 4 vectors each).  A chunk holds 512 tiles, and an item is 2 tiles of one chunk.  Each CTA reads its die at each
-claim, takes its next item from its own die's counter, and takes the other die's items once its own are taken.  The
-items a CTA runs depend only on its claims, so any grid gives the same bytes; the host launches one CTA per item, at
-most 16 per SM.  A call with `locality="domain"` runs it when all of these hold (`cake_jit.domain_route`): the device is
-`sm_107a`; the call is out of place with an `out` buffer; `x` and `out` lie in memory from the helper at the same offset
-in their chunks and in chunks of the same die; and `numel / 8` is in the record's `vectors` range (from 8,388,608
-vectors).  Every other call runs the `"off"` program, with the same bytes, and never raises for its placement.
+The interleaved-domain program of a route (`cake_jit.DOMAIN_ROUTES`) has its own tiles of 128 threads: 1,024 vectors
+for FP4 (8 each) and 512 for MXFP4 and MXFP8 (4 each).  A chunk holds 128 or 256 tiles, and an item is one tile.  Each
+CTA reads its die at each claim, takes its next item from its own die's counter, and takes the other die's items once
+its own are taken.  The items a CTA runs depend only on its claims, so any grid gives the same bytes; the host launches
+one CTA per item, at most 7 (FP4) or 8 (MXFP4, MXFP8) per SM.  A call with `locality="domain"` runs it when all of these
+hold (`cake_jit.domain_route`): the device is `sm_107a`; the call is out of place with an `out` buffer; `x` and `out`
+lie in memory from the helper at the same offset in their chunks and in chunks of the same die; and `numel / 8` is in
+the record's `vectors` range (8,388,608 to 2,147,482,624 vectors for FP4, to 2,147,483,136 for MXFP4 and MXFP8).
+Every other call runs the `"off"` program, with the same bytes, and never raises for its placement.
 `cake_act_qdq_det_train_domain_plan` returns the route, the reason (`"placed"`, or the first of `"empty"`, `"arch"`,
 `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"` and `"die_parity"` that holds), the
 program, `first_tile`, `first_die` and the grid, without a launch.  An in-place call runs the `"off"` program: the
 interleaved-domain records define no in-place range (`vectors[arch]["in_place"]` is `None`).  On VR200, the domain
-program ran 1.02-1.10x as fast as the `"off"` program on the package benchmark's out-of-place rows from 8,388,608
-vectors (GPU time, median of 20 runs on 4 GPUs, each run at least 1.01x; MXFP8 `[16384, 8, 4096]`: 163.2 µs off,
-147.9 µs domain), and 1.01-1.11x in back-to-back calls, eager or in a CUDA graph.  A call that falls back runs the
-`"off"` program on the helper's memory: on the benchmark's fallback rows (out of place, 131,072 to 4,194,304
-vectors) it ran 0.95-1.03x as fast as on default memory (GPU time), the slowest for buffers of one chunk, which lie
-wholly in die 0; in-place calls and larger ones on the helper's memory were not measured.
+program ran 1.05-1.13x as fast as the `"off"` program on the package benchmark's out-of-place MXFP4 and MXFP8 rows from
+8,388,608 vectors, and 1.10-1.21x on FP4 `[131072, 512]` and `[1048576, 512]` (GPU time, median of 20 runs on 4 GPUs,
+each run at least 1.05x; MXFP8 `[16384, 8, 4096]`: 162.5 µs off, 144.2 µs domain), and 1.05-1.21x in back-to-back calls,
+eager or in a CUDA graph.  A call that falls back runs the `"off"` program on the helper's memory: on the benchmark's
+fallback rows (out of place, 131,072 to 4,194,304 vectors) it ran 0.95-1.03x as fast as on default memory (GPU time),
+the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls and larger ones on the helper's memory
+were not measured.
 
-The claim counters are one unsigned 32-bit word per die in a 128-byte workspace (`cake_domain`; the record's `counters`
-field).  Every launch leaves its counters zero, so the package zeroes a workspace once, when it makes it.  Eager calls
-use one workspace per (device, stream), and per (device, thread) on the per-thread default stream
-(`cudaStreamPerThread`, one handle that names each thread's own stream).  The calls of one CUDA graph capture on one
-capture stream share one of 1,024 zeroed workspaces that the helper makes per device on its first call; once all 1,024
-are taken, each captured call takes one from the graph's pool, which the graph zeroes at every replay.  The replays of
-one instantiated graph never overlap, but a capture instantiated more than once, or added to other graphs as a child
-graph, shares its workspace between those copies: run them one at a time.  Allocate the buffers before a capture (the
-helper refuses during a CUDA graph capture on any device in this thread), and make one eager call per program the
-capture uses.  After the first call on a stream, a call does not synchronize the host.
+The claim counters are one unsigned 32-bit word per die (`cake_domain`; the record's `counters` field), each in its own
+die's memory.  The helper's first call on a device maps one 2 MB chunk in each die for them (4 MB, kept for the
+process, which `torch.cuda.memory_*` does not count), zeroes them and synchronizes once.  A workspace is 128 bytes in
+each die's chunk and is handed out once; every launch leaves its counters zero, so a call on such a workspace launches
+no fill.  Eager calls use one workspace per (device, stream), and per (device, thread) on the per-thread default stream
+(`cudaStreamPerThread`, one handle that names each thread's own stream): 15,360 per device.  The calls of one CUDA
+graph capture on one capture stream share one of 1,024 others.  Once the 15,360 are taken, a call on a new stream makes
+a workspace in default memory and zeroes its 256 bytes; once the 1,024 are taken, each captured call takes one from the
+graph's pool, which the graph zeroes at every replay (die memory cannot be mapped during a capture).  Either keeps both
+counters in default memory, with the same bytes.  An eager launch that raises drops its workspace for good.  The
+replays of one instantiated graph never overlap, but a capture instantiated more than once, or added to other graphs as
+a child graph, shares its workspace between those copies: run them one at a time.  Allocate the buffers before a
+capture (the helper refuses during a CUDA graph capture on any device in this thread), and make one eager call per
+program the capture uses.  After the first call on a stream, a call does not synchronize the host.
 
 Freeing the last view of a buffer synchronizes the device, then unmaps its chunks; a buffer freed during a CUDA graph
 capture on any device in this thread is unmapped by the next helper call.  The helper reads torch's current stream of
@@ -227,10 +233,11 @@ not.  It also checks five repeated calls, CUDA graph replay, a
 checkpointed recompute, steady-state calls without host synchronization, and no rebuild on a new shape.
 `tests/experimental/test_cake_act_qdq_det_train_locality.py` checks the `locality="domain"` route.  On an R200 it
 checks every interleaved-domain program against the FP64 rule on any grid, the route's bytes against the `"off"` route
-above its first size, each reason of the plan, the claim counters, two streams, CUDA graph replay and steady-state
-calls without host synchronization; with two R200s, a free and an allocation during a capture on the other device.  On
-every architecture it checks that a call outside the helper's memory runs the `"off"` program, and without a GPU the
-helper's unwind of a failed mapping and its error without cuda-python.  On an R200 these tests need the `locality` extra.
+above its first size, each reason of the plan, the claim counters and the die of their memory, two streams, CUDA graph
+replay and steady-state calls without host synchronization; with two R200s, a free and an allocation during a capture
+on the other device.  On every architecture it checks that a call outside the helper's memory runs the `"off"` program,
+and without a GPU the helper's unwind of a failed mapping and its error without cuda-python.  On an R200 these tests
+need the `locality` extra.
 
 ## Limitations
 

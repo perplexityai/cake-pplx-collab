@@ -50,8 +50,10 @@ channel count on the running architecture (``cake_jit.NARROW_ROW_FLOORS["fwd"]``
 removed (:func:`_small_s_rows_removed`): its ``floor:`` rows take the ranks' token counts from that table at run time
 (a rank at the floor and one a token below it), its other rows fixed counts (the comment above ``F_ROWS``);
 ``S_ROWS`` are W = 2 / 4 at C = 576 with the ranks' token counts on both sides of the ends of the ``fwd`` route's
-static, direct and pair direct ranges (the forward's small-S rows, read from ``cake_jit``), so the ranks' single-rank
-main programs are the static, the pair direct, the direct and the dynamic program; ``ROWS_SCALE`` are per-document
+static, direct and pair direct ranges (the forward's small-S rows, read from ``cake_jit``; ``P_lo`` and ``P_lo + 1``
+where the pair range starts at one token), so the ranks' single-rank main programs are the pair direct, the direct
+and the dynamic program and, where a static range covers C = 576 (sm_100a and sm_107a), the static program;
+``ROWS_SCALE`` are per-document
 zigzag at W = 16 / 32 / 64 (at W = 64 a document of 128 fragments, and documents of one- and two-token fragments
 whose history comes from up to three predecessor ranks).
 Two launch forms (as ``tests/experimental/test_cake_kda_det_train_kcp_dist.py``):
@@ -113,14 +115,15 @@ F_ROWS = [
 
 
 def _small_s_rows() -> list:
-    """Rows of C = 576 per architecture whose ``fwd`` route has a static and a direct range there
-    (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``): at W = 2 the ranks hold the static range's last token count
-    ``S_x`` and one more, at W = 4 ``S_x``, ``S_x + 1``, the direct range's last count ``S_hi`` and one more (the
-    static, direct and dynamic programs; the pair direct program where a ``PAIR_ROWS`` range holds the count); and
+    """Rows of C = 576 per architecture whose ``fwd`` route has a direct range there (``cake_jit.DIRECT_ROWS``) from
+    more than one token: at W = 2 the ranks hold the last token count ``S_x`` below that range (the static range's
+    last, ``cake_jit.FALLBACK_ROWS``, where one covers C = 576) and one more, at W = 4 ``S_x``, ``S_x + 1``, the
+    direct range's last count ``S_hi`` and one more (the static, direct and dynamic programs; the pair direct program
+    where a ``PAIR_ROWS`` range holds the count); and
     where it has a pair direct range (``cake_jit.PAIR_ROWS``), at W = 2 the ranks hold one token below the range's
-    first count ``P_lo`` and ``P_lo``, at W = 4 ``P_lo - 1``, ``P_lo``, the range's last count ``P_hi`` and one more
-    (static, pair direct, pair direct, and the static or the direct program); a first document of three quarters of
-    the tokens spans every rank."""
+    first count ``P_lo`` and ``P_lo`` (``P_lo`` and ``P_lo + 1`` where the range starts at one token), at W = 4 those
+    two, the range's last count ``P_hi`` and one more (static or pair direct, pair direct, pair direct, and the static
+    or the direct program); a first document of three quarters of the tokens spans every rank."""
 
     from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit
 
@@ -130,12 +133,14 @@ def _small_s_rows() -> list:
         direct = cake_jit.direct_row_range(arch, "fwd", 576)
         pair = cake_jit.pair_row_range(arch, "fwd", 576)
         sides = []
-        if static is not None and direct is not None:
-            s_x, s_hi = static[1], direct[1]
+        if direct is not None and (static is not None or direct[0] > 1):
+            s_x = static[1] if static is not None else direct[0] - 1
+            s_hi = direct[1]
             sides += [(s_x, s_x + 1), (s_x, s_x + 1, s_hi, s_hi + 1)]
         if pair is not None:
             p_lo, p_hi = pair
-            sides += [(p_lo - 1, p_lo), (p_lo - 1, p_lo, p_hi, p_hi + 1)]
+            low = (p_lo - 1, p_lo) if p_lo > 1 else (p_lo, p_lo + 1)
+            sides += [low, (*low, p_hi, p_hi + 1)]
         for counts in sides:
             total = sum(counts)
             lengths = (total - total // 4, total // 4)

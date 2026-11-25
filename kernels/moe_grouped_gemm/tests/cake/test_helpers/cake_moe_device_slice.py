@@ -583,6 +583,7 @@ def force_row_form(monkeypatch, P: Package, op: str, form: str, arch: str) -> bo
                 return False
             monkeypatch.setitem(c["dgrad_evict_first_min_rows"], arch, 1)
             monkeypatch.setitem(c, "dgrad_evict_first_min_k", 1)
+            monkeypatch.setitem(c, "dgrad_evict_first_skip_max_n", {})
         else:
             monkeypatch.setitem(c, "dgrad_evict_first_archs", [])
     elif ef:
@@ -601,6 +602,7 @@ def force_row_form(monkeypatch, P: Package, op: str, form: str, arch: str) -> bo
         if op == "dgrad":
             monkeypatch.setitem(c["dgrad_wide_ts33_min_rows"], arch, 1)
             monkeypatch.setitem(c, "dgrad_wide_ts33_min_k", 1)
+            monkeypatch.setitem(c, "dgrad_wide_ts33_short_n", {})
         else:
             monkeypatch.setitem(c, "fwd_wide_ts33_max_k", 1 << 30)
             monkeypatch.setitem(c, "fwd_wide_ts33_max_rows", 1 << 30)

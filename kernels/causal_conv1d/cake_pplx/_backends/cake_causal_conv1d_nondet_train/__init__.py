@@ -202,12 +202,19 @@ Host design (the knobs are keywords; no environment variable):
   C the first range starts at S = 1.  Where a key has no ``DIRECT_ROWS``
   range (for example the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and
   632, from S = 1 to 24576), the static program runs over the key's range
-  outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows at C = 720
-  to 768 have no ``DIRECT_ROWS`` range: they run the pair direct program from
-  S = 16 to 1536 and the static program from S = 13824 (C = 736: 14336).
-  Outside a row's range, and where an architecture, route and C have no row,
-  the forward runs the dynamic program, which takes counters, as in 0.2.4.
-  ``y`` is the same bits on every forward program and plan.
+  outside the ``PAIR_ROWS`` range.  From release 0.2.17, the sm_103a
+  ``fwd_bias`` rows at C = 720 to 768 run the pair direct program from S = 1
+  to 3072, the static program from S = 3073 to 12800 and from S = 13824 to
+  16383 (C = 736: from 14336; C = 768: to 16384) and the direct program from
+  S = 12801 to 13823 (C = 736: to 14335): there a ``DIRECT_ROWS`` range lies
+  inside the ``FALLBACK_ROWS`` range of its key and runs ahead of it.  Every
+  ``PAIR_ROWS`` range starts at S = 1 but sm_107a ``fwd`` at C = 520 to 736
+  (S = 4).  From release 0.2.17, the sm_107a ``fwd`` range at C = 512 runs
+  the pair direct program up to S = 4096, in place of the static program at
+  S = 2561 to 4096.  Outside a row's range, and where an architecture, route
+  and C have no row, the forward runs the dynamic program, which takes
+  counters, as in 0.2.4.  ``y`` is the same bits on every forward program
+  and plan.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``

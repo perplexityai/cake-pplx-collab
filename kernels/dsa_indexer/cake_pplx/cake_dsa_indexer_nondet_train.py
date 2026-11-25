@@ -310,8 +310,13 @@ def cake_dsa_indexer_nondet_train_topk_with_candidates(
     max_seqlen_k : Optional[int]
         As :func:`cake_dsa_indexer_nondet_train_topk`; here it also sizes the
         workspace's block entries, so it must bound every key segment of the
-        call (a row with more blocks than the workspace holds stops the kernel
-        with a device-side trap).  ``Tkv`` when omitted.
+        call: a row with more blocks than the workspace holds stops the kernel
+        with a device-side trap.  Where ``ceil(max_seqlen_k / 8) <= 2048``
+        (every row keeps all its blocks) the call writes the rows on the device
+        before its programs run, and a row past 2048 blocks stops that write
+        with a device-side assert instead, before any program runs; either way
+        the call or the next synchronizing CUDA call raises and the CUDA
+        context is unusable afterwards.  ``Tkv`` when omitted.
     workspace_buffer : Optional[torch.Tensor]
         Scratch of at least
         :func:`cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size`
@@ -390,9 +395,12 @@ def cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size(
     The scan's candidate buffers and work-unit tickets (the bound of the
     dispatched candidate-block program, which runs the key ranges unsplit) plus
     ``grid x queries_per_unit x blk_cap x 8`` bytes of block entries, where
-    ``blk_cap = ceil(W / 8) - 1`` when ``ceil(W / 8) > 2048`` and 0 otherwise,
-    ``W`` being ``max_seqlen_k`` when given, else ``num_keys``.  The ``[T,
-    2048]`` int32 ``candidate_blocks`` output is not part of the bound.  Pass
+    ``blk_cap = ceil(W / 8) - 1`` when ``ceil(W / 8) > 2048``, ``W`` being
+    ``max_seqlen_k`` when given, else ``num_keys``.  When ``ceil(W / 8) <=
+    2048`` every row keeps all its blocks: the call runs the plain top-k
+    call's programs and writes the rows before them, and the bound is the
+    plain call's workspace for the geometry.  The ``[T, 2048]`` int32
+    ``candidate_blocks`` output is not part of the bound.  Pass
     the call's ``max_seqlen_k``.  On SM107 the candidate-block programs draw
     their work units from a 16-byte ticket block passed as an argument, like
     the plain call's ticket-argument programs there: a prepared runner whose

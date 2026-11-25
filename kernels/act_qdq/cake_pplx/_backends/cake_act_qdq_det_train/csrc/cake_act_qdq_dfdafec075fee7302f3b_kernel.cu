@@ -47,7 +47,7 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
     return result;
 }
 
-#define LAUNCH_MIN_BLOCKS 16
+#define LAUNCH_MIN_BLOCKS 7
 
 __device__ __forceinline__ uint32_t cvt_bf16x2_e2m1x2(uint32_t src) {
     uint16_t _fp4_u16 = (uint16_t)(src & 0xFFu);
@@ -85,7 +85,7 @@ __device__ __forceinline__ float2 mul_f32x2_rz_noftz(float2 a, float2 b) {
 
 extern "C" {
 
-__global__ __launch_bounds__(64, LAUNCH_MIN_BLOCKS) void
+__global__ __launch_bounds__(128, LAUNCH_MIN_BLOCKS) void
 kernel_cake_act_qdq_dfdafec075fee7302f3b(const __nv_bfloat16* x, __nv_bfloat16* y, unsigned int* __restrict__ counters0, unsigned int* __restrict__ counters1, int n_vecs, int first_tile, int first_die, int chunk_tile_shift, int batch_shift)
 {
     const int tid = threadIdx.x;
@@ -111,7 +111,7 @@ kernel_cake_act_qdq_dfdafec075fee7302f3b(const __nv_bfloat16* x, __nv_bfloat16* 
     const int sword_addr = smem + 0;
 
     // === Task calls (declaration order) ===
-    int tiles = n_vecs + 255 >> 8;
+    int tiles = n_vecs + 1023 >> 10;
     int last = n_vecs - 1;
     int last_chunk = first_tile + tiles - 1 >> chunk_tile_shift;
     int items_shift = chunk_tile_shift - batch_shift;
@@ -189,10 +189,10 @@ kernel_cake_act_qdq_dfdafec075fee7302f3b(const __nv_bfloat16* x, __nv_bfloat16* 
         int hi = ((end < tiles) ? end : tiles);
         #pragma unroll 1
         for (int c = lo; c < hi; c++) {
-            unsigned int w[16];
+            unsigned int w[32];
             #pragma unroll
-            for (int r = 0; r < 4; r++) {
-                int i = c * 256 + r * 64 + tid;
+            for (int r = 0; r < 8; r++) {
+                int i = c * 1024 + r * 128 + tid;
                 int ci = ((i < n_vecs) ? i : last);
                 {
                     const uint4* _vptr_5 = reinterpret_cast<const uint4*>(x + (long long)ci * 8ll + 0);
@@ -205,8 +205,8 @@ kernel_cake_act_qdq_dfdafec075fee7302f3b(const __nv_bfloat16* x, __nv_bfloat16* 
                 }
             }
             #pragma unroll
-            for (int r_1 = 0; r_1 < 4; r_1++) {
-                int i_1 = c * 256 + r_1 * 64 + tid;
+            for (int r_1 = 0; r_1 < 8; r_1++) {
+                int i_1 = c * 1024 + r_1 * 128 + tid;
                 float v_1[8];
                 #pragma unroll
                 for (int _pair = 0; _pair < 4; _pair++) {

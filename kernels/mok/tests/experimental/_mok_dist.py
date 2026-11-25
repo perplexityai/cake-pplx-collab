@@ -40,6 +40,9 @@ Workers of the multi-GPU MoK tests (``test_mok_distributed.py``): each runs in e
 * :func:`before_down_overflow`: the full skew on a workspace at the package's default multiplier, whose schedule
   traps on the target rank (run by :func:`tests.experimental._mok_spawn.run_ranks_isolated`);
   :func:`before_down_small_step` then checks the GPUs serve a new group.
+* :func:`scaled_group_training`: the 512-expert top-10 group of the explicit modes (``router_weight_gradient=
+  "direct"``, ``shared_expert="scaled"``) through the adapter at EP8 ``(8, 64)`` over changing source counts, on inputs
+  drawn on the CPU: contract, repeatability, graph replay, the checkpointed step and the whole group judged.
 * :func:`before_down_digests`: SHA-256 of every output of a placement step and a full skew, compared across group
   launches.
 
@@ -1737,4 +1740,290 @@ def before_down_source_split(local_experts):
     del graph
     torch.cuda.synchronize()
     dist.barrier()
+    return records
+
+
+#: The 512-expert top-10 group of the explicit modes (``router_weight_gradient="direct"``, ``shared_expert="scaled"``)
+#: and the names of its step's values: the package's nine and ``d_shared_scale``.
+SCALED_GROUP = kernels.MODE_GROUPS["scaled_top10"]
+SCALED_RESULT_NAMES = (*RESULT_NAMES, "d_shared_scale")
+#: Hidden and intermediate widths of the scaled group's worker.
+SCALED_HIDDEN, SCALED_INTERMEDIATE = 512, 256
+
+
+def _cpu_group_weights(ep, local_experts, hidden, intermediate, device, seed=32483):
+    """BF16 shared weights and the group's routed weights drawn on the CPU (identical on every rank) and copied to
+    ``device``; this rank's slice."""
+    torch.manual_seed(seed)
+    total = ep * local_experts
+    shapes = (
+        ((intermediate, hidden), hidden), ((intermediate, hidden), hidden), ((hidden, intermediate), intermediate),
+        ((total, intermediate, hidden), hidden), ((total, intermediate, hidden), hidden),
+        ((total, hidden, intermediate), intermediate),
+    )  # fmt: skip
+    drawn = [
+        (randn(*shape) / fan_in**0.5).bfloat16().to(device) for shape, fan_in in shapes
+    ]
+    shared, global_routed = drawn[:3], drawn[3:]
+    rank = dist.get_rank()
+    routed = [
+        w[rank * local_experts : (rank + 1) * local_experts].contiguous()
+        for w in global_routed
+    ]
+    return shared, global_routed, routed
+
+
+def _cpu_group_data(counts, hidden, topk, experts, device):
+    """Global inputs of one step drawn on the CPU from the current random state (identical on every rank), copied to
+    ``device``: BF16 ``x`` and ``dY``, int64 expert ids (``topk`` distinct experts per token), FP32 router weights in
+    [0, 1.5) with every 5th token's first one exactly 0, and FP32 shared scales in [0, 2) with every 4th token's
+    exactly 0 and the next one's exactly 1."""
+    total = sum(counts)
+    x = (randn(total, hidden) * 0.125).bfloat16()
+    dy = (randn(total, hidden) * 0.125).bfloat16()
+    ids = rand(total, experts).argsort(-1)[:, :topk].contiguous()
+    scores = rand(total, topk) * 1.5
+    scores[::5, 0] = 0.0
+    scale = rand(total) * 2.0
+    scale[::4] = 0.0
+    scale[1::4] = 1.0
+    data = dict(x=x, d_output=dy, expert_ids=ids, scores=scores, shared_scale=scale)
+    return {key: value.to(device) for key, value in data.items()}
+
+
+class _ScaledIteration:
+    """One step of the scaled group's adapter on fixed input tensors (this rank's section of ``x``, ``ids``,
+    ``scores``, ``dy`` and ``shared_scale``): ``build_schedule``, the context forward (with ``recompute`` the
+    context-free forward and ``recompute_forward_context``), ``backward`` into the zeroed FP32 accumulators.  ``run()``
+    returns the values of :data:`SCALED_RESULT_NAMES`; after ``capture()`` it replays the step's CUDA Graph."""
+
+    def __init__(self, functional, config, workspace, weights, accumulators, x, ids, scores, dy, shared_scale, *,
+                 recompute=False):  # fmt: skip
+        self.functional, self.config, self.workspace = functional, config, workspace
+        self.weights, self.accumulators, self.recompute = (
+            weights,
+            accumulators,
+            recompute,
+        )
+        self.x, self.ids, self.scores, self.dy, self.shared_scale = (
+            x,
+            ids,
+            scores,
+            dy,
+            shared_scale,
+        )
+        self.graph = self.outputs = self.schedule = None
+
+    def _execute(self):
+        f, w = self.functional, self.weights
+        self.schedule = f.build_schedule(
+            self.workspace, self.config, self.ids, num_local_experts=w[3].shape[0]
+        )
+        y, context = f.forward(
+            self.config, self.workspace, self.schedule, self.x, self.scores, *w, save_context=not self.recompute,
+            shared_scale=self.shared_scale,
+        )  # fmt: skip
+        if self.recompute:
+            context = f.recompute_forward_context(
+                self.config, self.workspace, self.schedule, self.x, w[0], w[1], w[3], w[4]
+            )  # fmt: skip
+        for accumulator in self.accumulators:
+            accumulator.zero_()
+        gradients = f.backward(
+            self.config, self.workspace, self.schedule, context, self.dy, self.x, self.scores, *w,
+            weight_grad_accumulators=self.accumulators, shared_scale=self.shared_scale,
+        )  # fmt: skip
+        self.outputs = (y, *gradients)
+        expected = (torch.bfloat16, torch.bfloat16) + (torch.float32,) * 8
+        if any(v.dtype != d for v, d in zip(self.outputs, expected, strict=True)):
+            raise RuntimeError("Output/gradient formats changed")
+        return self.outputs
+
+    def capture(self):
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):
+                self._execute()
+        torch.cuda.current_stream().wait_stream(stream)
+        torch.cuda.synchronize()
+        dist.barrier()
+        torch.cuda.synchronize()
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph, stream=stream):
+            self._execute()
+
+    def run(self):
+        if self.graph is None:
+            return self._execute()
+        self.graph.replay()
+        return self.outputs
+
+    def load(self, data, counts):
+        """Copy this rank's section of the global ``data`` into the step's input tensors."""
+        rank = dist.get_rank()
+        start = sum(counts[:rank])
+        section = slice(start, start + counts[rank])
+        for destination, key in zip(
+            (self.x, self.ids, self.scores, self.dy, self.shared_scale),
+            ("x", "expert_ids", "scores", "d_output", "shared_scale"),
+            strict=True,
+        ):
+            destination.copy_(data[key][section])
+        torch.cuda.synchronize()
+        dist.barrier()
+
+
+def _scaled_contract(values, n, hidden, topk):
+    """Shapes of the scaled group's step values for ``n`` local tokens, every value finite."""
+    _contract(values[:9], n, hidden, topk)
+    assert values[9].shape == (n,) and torch.isfinite(values[9]).all().item(), (
+        "d_shared_scale"
+    )
+
+
+def _scaled_judge(
+    iteration, counts, shared, global_routed, *, local_experts, hidden, seed
+):
+    """Judge the scaled group's whole-group outputs over the draws of :func:`tests.cake_naive.judge_case` (inputs of
+    :func:`_cpu_group_data`) against the float64 oracle beside the naive layer with ``shared_scale`` and
+    ``direct=True``: ``y``, ``dx``, the router-weight gradients, ``d_shared_scale`` and the weight gradients (routed
+    over every expert, shared per rank).  Returns the verdicts, the alternatives' verdicts (none) and the failures."""
+    topk = SCALED_GROUP.topk
+    experts = len(counts) * local_experts
+    device = iteration.x.device
+    naive_values = {}
+
+    def run(j, _seed):
+        data = _cpu_group_data(counts, hidden, topk, experts, device)
+        iteration.load(data, counts)
+        values = _snapshot(iteration.run())
+        outputs = {
+            name: _gather_rows(values[i], counts)
+            for i, name in ((0, "y"), (1, "dx"), (2, "d_scores"))
+        }
+        outputs["d_shared_scale"] = _gather_rows(values[9], counts)
+        for name, value in zip(RESULT_NAMES[3:6], values[3:6], strict=True):
+            outputs[name] = torch.cat(_gather(value))
+        for name, value in zip(RESULT_NAMES[6:], values[6:9], strict=True):
+            outputs[name] = torch.stack(_gather(value))
+        segs = segments(iteration.schedule, counts, local_experts, topk)
+        refs = {}
+        for dtype in (naive.ORACLE, naive.NAIVE):
+            r = naive.layer(
+                data["x"], data["d_output"], data["scores"], shared, global_routed, segs, None, dtype,
+                sections=counts, shared_scale=data["shared_scale"], direct=True,
+            )  # fmt: skip
+            refs[dtype] = dict(
+                y=r["y"],
+                dx=r["dx"],
+                d_scores=r["d_scores"],
+                d_shared_scale=r["d_shared_scale"],
+            )
+            refs[dtype].update(zip(RESULT_NAMES[3:], r["dw"]))
+        naive_values[j] = refs[naive.NAIVE]
+        return outputs, refs[naive.ORACLE]
+
+    verdict, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed)
+    return list(verdict.verdicts().values()), [], failures
+
+
+def scaled_group_training():
+    """The 512-expert top-10 group (``router_weight_gradient="direct"``, ``shared_expert="scaled"``, plain SwiGLU, FP32
+    weight gradients) through the adapter at EP8 ``(8, 64)`` on one workspace over the source counts of
+    :func:`before_down_steps` (padded and unpadded staging, several macrobatches, a new schedule per count, two empty
+    source ranks in the last step), on inputs drawn on the CPU: per count the contract (ten values, ``d_shared_scale``
+    FP32 per source row), repeatability eager and under CUDA Graph replay, the checkpointed step (context-free forward,
+    recompute, backward) with the context step's bytes, no kernel load after the first count, and the whole group's
+    outputs judged.  The workspace has the no-overflow multiplier at its physical source rows."""
+    _exact_matmul()
+    device = torch.device("cuda", torch.cuda.current_device())
+    rank, ep = dist.get_rank(), dist.get_world_size()
+    (group_ep, local_experts), topk = SCALED_GROUP.layouts[0], SCALED_GROUP.topk
+    assert ep == group_ep, (ep, group_ep)
+    hidden, intermediate = SCALED_HIDDEN, SCALED_INTERMEDIATE
+    steps = before_down_steps(ep)
+    shared, global_routed, routed = _cpu_group_weights(
+        ep, local_experts, hidden, intermediate, device
+    )
+    weights = (*shared, *routed)
+    source_capacity = max(max(counts) for counts in steps)
+    multiplier = bound_multiplier(
+        _source_rows(source_capacity, topk), topk, ep, local_experts
+    )
+    functional = prepare_mok_bf16(
+        ep_size=ep, local_experts=local_experts, topk=topk, fp32_wgrad=True, router_weight_gradient="direct",
+        shared_expert="scaled",
+    )  # fmt: skip
+    functional.prepare(save_context=False)
+    functional.prepare_recompute()
+    config, workspace = create_mok_bf16_workspace(
+        group=dist.group.WORLD,
+        device=device,
+        num_local_tokens=steps[0][rank],
+        source_capacity=source_capacity,
+        hidden_size=hidden,
+        topk=topk,
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=256,
+        macrobatch_size=768,
+        schedule_capacity_multiplier=multiplier,
+    )
+    accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+    records, loads = [], None
+    for index, counts in enumerate(steps):
+        torch.manual_seed(8317 + index)
+        data = _cpu_group_data(counts, hidden, topk, ep * local_experts, device)
+        start = sum(counts[:rank])
+        section = slice(start, start + counts[rank])
+        inputs = [
+            data[k][section].clone()
+            for k in ("x", "expert_ids", "scores", "d_output", "shared_scale")
+        ]
+        case = "counts-" + "-".join(map(str, counts))
+
+        def iteration(recompute, inputs=inputs):
+            return _ScaledIteration(
+                functional, config, workspace, weights, accumulators, *inputs, recompute=recompute
+            )  # fmt: skip
+
+        saved_context = iteration(False)
+        outputs = _snapshot(saved_context.run())
+        _scaled_contract(outputs, counts[rank], hidden, topk)
+        again = [_snapshot(saved_context.run()) for _ in range(REPEATS - 1)]
+        assert all(_same(outputs, other) for other in again), (
+            rank,
+            case,
+            "eager repeat",
+        )
+        dist.barrier()
+        checkpointed = _snapshot(iteration(True).run())
+        differs = [
+            n
+            for n, a, b in zip(SCALED_RESULT_NAMES, outputs, checkpointed, strict=True)
+            if not torch.equal(a, b)
+        ]
+        assert not differs, (rank, case, "checkpointed", differs)
+        dist.barrier()
+        saved_context.capture()
+        replays = [_snapshot(saved_context.run()) for _ in range(REPEATS)]
+        assert all(_same(outputs, other) for other in replays), (
+            rank,
+            case,
+            "graph replay",
+        )
+        dist.barrier()
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (rank, case, "kernel loads", loads, misses)
+        record = dict(case=f"bf16-scaled-direct-top10-{case}", counts=counts)
+        record["judged"] = _scaled_judge(
+            saved_context, counts, shared, global_routed, local_experts=local_experts, hidden=hidden, seed=4500 + index
+        )  # fmt: skip
+        records.append(record)
+        del saved_context
+        torch.cuda.synchronize()
+        dist.barrier()
     return records

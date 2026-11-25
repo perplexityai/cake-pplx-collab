@@ -5326,6 +5326,595 @@ def test_hidden_count_eligibility_rules(monkeypatch, toolchain_check_uncached):
     assert elig(short, X, full, name, stats=True)  # sm_100a is not affected
 
 
+def test_hidden_count_loss_rule(monkeypatch, toolchain_check_uncached):
+    """On the architectures of ``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH`` (sm_100a and sm_103a: 32 to 1024 rows) the loss
+    entry's one-chunk calls in the architecture's row window take the hidden valid-row count
+    (``hidden_count_chunks_admit(..., loss_call=True, arch=)``, the loss entry without the zero-weight split): not
+    below 32 rows, not above ``min(chunk, 1024)`` rows, not in two chunks; sm_107a (and an unlisted architecture)
+    admits no one-chunk loss call; ``arch=None`` (the check ahead of the record lookup) takes any architecture's
+    window; three chunks and more on either rule; ``loss_call=False`` (the log-probability entries, a split call)
+    keeps the previous rule.  ``hidden_count_eligible`` (the record's architecture) and the opt-in module's
+    ``_hidden_count_program`` follow it, and the call's other rules still apply: a registered program, an ``X`` read
+    in place and the toolchain (sm_103a on CUDA 13.0: the host count)."""
+    monkeypatch.setattr(cake_build, "record_cuda_version", lambda arch: (13, 4))
+    assert cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH == {
+        "sm_100a": (32, 1024),
+        "sm_103a": (32, 1024),
+    }
+    for lo, hi in cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH.values():
+        assert hi <= cake_backend.HOST_COUNT_MAX_ROWS
+    assert cake_backend.HIDDEN_COUNT_MIN_CHUNKS == 3
+    admit = cake_backend.hidden_count_chunks_admit
+    # (rows, chunk, admitted for an sm_103a loss call, admitted otherwise)
+    for rows, chunk, loss, other in (
+        (0, 4096, False, False),
+        (1, 4096, False, False),
+        (16, 4096, False, False),
+        (31, 4096, False, False),
+        (32, 4096, True, False),
+        (64, 4096, True, False),
+        (256, 4096, True, False),
+        (1024, 4096, True, False),
+        (1025, 4096, False, False),
+        (4096, 4096, False, False),
+        (8192, 4096, False, False),
+        (8193, 4096, True, True),
+        (512, 512, True, False),
+        (513, 512, False, False),
+        (1024, 512, False, False),
+        (1025, 512, True, True),
+        (32, 16, False, False),
+        (33, 16, True, True),
+    ):
+        case = (rows, chunk)
+        for arch in ("sm_100a", "sm_103a"):
+            assert admit(rows, chunk, loss_call=True, arch=arch) is loss, (case, arch)
+        assert admit(rows, chunk, loss_call=True) is loss, case  # any window
+        for arch in ("sm_107a", "sm_120a"):
+            assert admit(rows, chunk, loss_call=True, arch=arch) is other, (case, arch)
+        assert admit(rows, chunk) is other, case
+        assert admit(rows, chunk, arch="sm_103a") is other, case
+    name = "cake_lm_head_det_loss_fake"
+    full = _fake_record(_ROW_GRAD_PLAN)
+    full["stages"] = [
+        "row_grad",
+        "gather_rows_bf16",
+        "gemm_logits_mcnt",
+        "gemm_logits_nostats_mcnt",
+    ]
+    for stage in full["stages"][1:]:
+        full[stage] = full["row_grad"]
+    sm_103a = dict(full, arch="sm_103a")
+    monkeypatch.setitem(cake_jit.MODULES, name, sm_103a)
+    elig = cake_backend.hidden_count_eligible
+    # a host tensor: the rule reads the pointer only
+    X = torch.empty(16, 6144, dtype=torch.bfloat16)
+    for T in (32, 64, 256, 1024):
+        p = _problem(T, 6144, 154880, 4096)
+        assert elig(p, X, sm_103a, name, stats=True, loss_call=True), T
+        assert not elig(p, X, sm_103a, name, stats=True), T  # the previous rule
+        for arch in ("sm_100a", "sm_107a"):
+            other = dict(full, arch=arch)
+            monkeypatch.setitem(cake_jit.MODULES, name, other)
+            windowed = arch == "sm_100a"
+            got = elig(p, X, other, name, stats=True, loss_call=True)
+            assert got is windowed, (T, arch)
+            assert not elig(p, X, other, name, stats=True), (T, arch)
+            assert elig(  # three chunks: the previous rule
+                _problem(3 * 4096, 6144, 154880, 4096),
+                X,
+                other,
+                name,
+                stats=True,
+                loss_call=True,
+            ), arch
+        monkeypatch.setitem(cake_jit.MODULES, name, sm_103a)
+    for T in (1, 16, 31, 1025, 4096):
+        p = _problem(T, 6144, 154880, 4096)
+        assert not elig(p, X, sm_103a, name, stats=True, loss_call=True), T
+    assert not elig(
+        _problem(1024, 6144, 154880, 512), X, sm_103a, name, stats=True, loss_call=True
+    )  # two chunks
+    p = _problem(256, 6144, 154880, 4096)
+    assert not elig(p, X, None, None, stats=True, loss_call=True)
+    assert not elig(
+        replace(p, x_copy=True), X, sm_103a, name, stats=True, loss_call=True
+    )
+    n = 16 * 6144
+    misaligned = torch.empty(n + 8, dtype=torch.bfloat16)[4 : 4 + n].view(16, 6144)
+    assert not elig(p, misaligned, sm_103a, name, stats=True, loss_call=True)
+    # the opt-in module's host check of its loss forward
+    monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, sm_103a))
+    program = opt_in._hidden_count_program
+    kw = dict(backend="cake", compact=True, stats=True, hidden_count=True)
+    assert program(p, X, loss_call=True, **kw) == (name, sm_103a)
+    assert program(p, X, **kw) is None
+    assert program(p, X, loss_call=True, **dict(kw, compact=False)) is None
+    assert program(p, X, loss_call=True, **dict(kw, hidden_count=False)) is None
+    assert program(_problem(16, 6144, 154880, 4096), X, loss_call=True, **kw) is None
+    sm_100a = dict(full, arch="sm_100a")
+    monkeypatch.setitem(cake_jit.MODULES, name, sm_100a)
+    monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, sm_100a))
+    assert program(p, X, loss_call=True, **kw) == (name, sm_100a)
+    assert program(p, X, **kw) is None
+    sm_107a = dict(full, arch="sm_107a")
+    monkeypatch.setitem(cake_jit.MODULES, name, sm_107a)
+    monkeypatch.setattr(opt_in, "record_for", lambda device=None: (name, sm_107a))
+    assert program(p, X, loss_call=True, **kw) is None
+    # the toolchain gate: sm_103a on CUDA 13.0 keeps the host count
+    monkeypatch.setitem(cake_jit.MODULES, name, sm_103a)
+    monkeypatch.setattr(cake_build, "record_cuda_version", lambda arch: (13, 0))
+    cake_jit.toolchain_runs_hidden_count.cache_clear()
+    assert not elig(p, X, sm_103a, name, stats=True, loss_call=True)
+
+
+def test_a_extent_rule():
+    """The padded A extents of a small compacted one-chunk call (:func:`a_extent_rows`), in each architecture's window
+    (``A_EXTENT_WINDOW_BY_ARCH``): on sm_107a the logits GEMMs' and the dX GEMM's A extent is 256 rows for a chunk of 1
+    to 182 valid rows; on sm_100a / sm_103a the logits GEMMs' A extent is 16 rows for 1 to 10 valid rows (no dX
+    extent); more rows, a chunk smaller than the extent and the other architectures keep their rows
+    (:func:`a_extent_pad`: the buffer extent alone).  ``make_plan`` records them (:attr:`Plan.a_rows` /
+    :attr:`Plan.dx_a_rows`) with ``a_extent`` (the eager log-prob forms) for a compacted one-chunk plan only -- a kept
+    plan, a forward with the label-column arm, a backward with the ``dz`` arm; not for an uncompacted one, two chunks,
+    the hidden valid-row count, a loss plan or the previous path's plain arms; the dX extent needs ``need_dx`` and no
+    kept logits; without ``a_extent`` (the loss entry, the temperature forms, a prepared runner) every plan keeps its
+    rows.  ``workspace_layout`` widens only the ``x_c`` / ``logits`` regions for them."""
+    rule = cake_backend.a_extent_rows
+    assert cake_backend.A_EXTENT_ROWS_BY_ARCH == {"sm_100a": 16, "sm_103a": 16, "sm_107a": 256}
+    assert cake_backend.DX_A_EXTENT_ROWS_BY_ARCH == {"sm_107a": 256}
+    assert cake_backend.A_EXTENT_WINDOW_BY_ARCH == {
+        "sm_100a": (1, 10),
+        "sm_103a": (1, 10),
+        "sm_107a": (1, 182),
+    }
+    pad_of = cake_backend.a_extent_pad
+    assert pad_of(4096, "sm_107a") == pad_of(4096, "sm_107a", dx=True) == 256
+    assert pad_of(256, "sm_107a") == 256 and pad_of(255, "sm_107a") == 0
+    for arch in ("sm_100a", "sm_103a"):
+        assert pad_of(4096, arch) == 16 and pad_of(4096, arch, dx=True) == 0, arch
+    for arch in ("sm_120a", None):
+        assert pad_of(4096, arch) == pad_of(4096, arch, dx=True) == 0, arch
+    rows = (0, 1, 13, 14, 15, 100, 182, 183, 255, 256)
+    want = [0, 256, 256, 256, 256, 256, 256, 0, 0, 0]
+    assert [rule(r, 4096, "sm_107a") for r in rows] == want
+    assert [rule(r, 4096, "sm_107a", dx=True) for r in rows] == want
+    assert rule(14, 255, "sm_107a") == 0 and rule(14, 256, "sm_107a") == 256
+    for arch in ("sm_100a", "sm_103a"):
+        assert [rule(r, 4096, arch) for r in rows] == [0, 16, 0, 0, 0, 0, 0, 0, 0, 0], arch
+        assert rule(10, 4096, arch) == 16 and rule(11, 4096, arch) == 0, arch
+        assert [rule(r, 4096, arch, dx=True) for r in rows] == [0] * len(rows), arch
+    for arch in ("sm_120a", None):
+        assert [rule(r, 4096, arch) for r in rows] == [0] * len(rows), arch
+        assert [rule(r, 4096, arch, dx=True) for r in rows] == [0] * len(rows), arch
+    H, V = 6144, 154880
+    g = Geometry.from_record({"geometry": {"hidden": H, "vocab": V}})
+
+    def plan(T, valid, *, arch="sm_107a", C=4096, entry="logprob", **kw):
+        kw = dict(dict(need_dx=True, need_dw=True, a_extent=True), **kw)
+        if entry == "logprob" and not kw.get("logprob_keep"):
+            # the default arms: the label column in a forward, the dz recompute in a backward
+            kw = dict(dict(logprob_dz=True, logprob_lbl=True), **kw)
+        return cake_backend.make_plan(
+            _problem(T, H, V, C, entry=entry),
+            geometry=g,
+            dx_max_slices=4,
+            num_sms=212,
+            dx_resident=106,
+            valid_rows=valid,
+            arch=arch,
+            **kw,
+        )
+
+    def pads(p):
+        return p.a_rows, p.dx_a_rows
+
+    assert pads(plan(20, 15)) == (256, 256)
+    assert pads(plan(20, 14)) == (256, 256)
+    assert pads(plan(20, 13)) == (256, 256)  # the window starts at 1 row
+    assert pads(plan(20, 1)) == (256, 256)
+    assert pads(plan(300, 182)) == (256, 256)
+    assert pads(plan(300, 183)) == (0, 0)  # above the window
+    assert pads(plan(300, 255)) == (0, 0)
+    assert pads(plan(300, 256)) == (0, 0)
+    for arch in ("sm_100a", "sm_103a"):
+        assert pads(plan(20, 10, arch=arch)) == (16, 0), arch
+        assert pads(plan(20, 11, arch=arch)) == (0, 0), arch
+    assert pads(plan(20, 15, arch=None)) == (0, 0)
+    assert pads(plan(20, None)) == (0, 0)  # uncompacted: A is the caller's X
+    assert pads(plan(300, 150, C=128)) == (0, 0)  # two chunks
+    assert pads(plan(20, 15, C=128)) == (0, 0)  # 256 rows exceed the chunk
+    assert pads(plan(20, 15, hidden_count=True)) == (0, 0)
+    # a forward (no gradient): the label-column arm's logits GEMM only
+    assert pads(plan(20, 15, need_dx=False, need_dw=False)) == (256, 0)
+    assert pads(plan(20, 15, need_dx=False, need_dw=False, logprob_lbl=False)) == (0, 0)
+    # a backward: the dz arm's recompute (and its dX GEMM); the plain recompute keeps its rows
+    assert pads(plan(20, 15, need_dx=False)) == (256, 0)
+    assert pads(plan(20, 15, logprob_dz=False)) == (0, 0)
+    kept = plan(20, 15, logprob_keep=True)
+    assert pads(kept) == (256, 0) and kept.logprob_keep
+    # without ``a_extent`` (the loss entry, the temperature forms, a prepared runner) and for a loss plan: no padding
+    assert pads(plan(20, 15, a_extent=False)) == (0, 0)
+    assert pads(plan(20, 15, logprob_keep=True, a_extent=False)) == (0, 0)
+    assert pads(plan(20, 15, entry="loss")) == (0, 0)
+    assert pads(plan(300, 182, entry="loss", need_dx=False)) == (0, 0)
+    tau = cake_backend.make_plan_temperature(
+        cake_backend._with_temperature(_problem(20, H, V, 4096, entry="logprob")),
+        need_dx=True,
+        need_dw=True,
+        geometry=g,
+        dx_max_slices=4,
+        num_sms=212,
+        dx_resident=106,
+        valid_rows=15,
+        arch="sm_107a",
+        logprob_dz=True,
+        logprob_lbl=True,
+    )
+    # the temperature forms keep their rows
+    assert tau.temperature and pads(tau) == (0, 0)
+    base = workspace_layout(15, 512, 4096, hidden=256, compact=True)
+    wide = workspace_layout(
+        15, 512, 4096, hidden=256, compact=True, x_c_rows=256, logits_rows=256
+    )
+    assert wide["x_c"][1] == 256 * 256 * 2 and wide["logits"][1] == 256 * 512 * 2
+    for name in ("stats", "d", "term", "loss_acc", "grad_scale"):
+        assert wide[name][1] == base[name][1], name
+    narrow = workspace_layout(
+        15, 512, 4096, hidden=256, compact=True, x_c_rows=8, logits_rows=8
+    )
+    assert narrow == base  # fewer rows than the chunk's: unchanged
+
+
+def test_a_extent_forms(monkeypatch):
+    """Which calls plan with the padded A extents (``make_plan``'s ``a_extent``, the reference backend; the extent itself
+    is the record architecture's, none here): the log-probability entry's eager forward and backward (the default arms
+    and the previous path's plain arms; the plan decides by its arms) pass it; the loss entry, the temperature forms and
+    a prepared runner (log-prob or loss) never do (nor the loss entry's zero-weight rows' pass:
+    ``test_a_extent_zero_weight_pass``).  A forward plan passes it with ``need_dx`` / ``need_dw`` off, a backward plan
+    with them on."""
+    real = cake_backend.make_plan
+    seen: list = []
+
+    def spy(problem, **kw):
+        seen.append(
+            (
+                problem.entry,
+                bool(problem.temperature),
+                bool(kw.get("need_dx") or kw.get("need_dw")),
+                bool(kw.get("a_extent", False)),
+            )
+        )
+        return real(problem, **kw)
+
+    monkeypatch.setattr(cake_backend, "make_plan", spy)
+    inp = _host_inputs(40, ignore_frac=0.25)
+    for entry in ("loss", "logprob"):
+        for switches in ({}, dict(logprob_dz=False, logprob_lbl=False)):
+            if entry == "loss" and switches:
+                continue
+            seen.clear()
+            _run(inp, 4096, entry=entry, **switches)
+            assert seen, (entry, switches)
+            want = entry == "logprob"
+            assert {e for e, *_ in seen} == {entry}, seen
+            assert all(a is want for *_, a in seen), (entry, switches, seen)
+            if want:  # a forward plan and a backward plan, both with the flag
+                assert {g for _, _, g, _ in seen} == {False, True}, seen
+    tau = _host_inputs(40, ignore_frac=0.25, temperature="hetero")
+    seen.clear()
+    _run(tau, 4096, entry="logprob")
+    assert seen and all(t and not a for _, t, _, a in seen), seen
+    for entry in ("loss", "logprob"):
+        kw = dict(chunk_size=4096, backend="reference", compact_rows=True, entry=entry)
+        if entry == "loss":
+            kw.update(objective="ce", loss_div=inp.loss_div)
+        else:
+            kw.update(dlogp=inp.dlogp)
+        seen.clear()
+        prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
+        assert seen and not any(a for *_, a in seen), (entry, seen)
+
+
+
+@pytest.mark.parametrize("zero_rows", [14, 100, 182])
+@pytest.mark.parametrize("module_name", ["cake_backend", "opt_in"])
+def test_a_extent_zero_weight_pass(monkeypatch, module_name, zero_rows):
+    """The loss entry's zero-weight rows' log-probability pass (``_zero_weight_logp``) keeps the chunk's rows: a policy
+    call of ``zero_weight_min_rows() + 1`` rows with ``return_logp`` and 14 / 100 / 182 zero-weight rows (the sm_107a
+    window) runs the pass -- the log-probability plans formed inside the loss call, compacted to the zero-weight rows,
+    one chunk, no gradient -- with ``a_extent=False``; the same plan formed for sm_107a with the label-column arm (the
+    registered programs' default arm) keeps (0, 0), where the eager forms' flag would give it (256, 0).  Through the
+    main module's loss entry and the opt-in module's default call (the reference backend; the extent itself is the
+    record architecture's)."""
+    real = cake_backend.make_plan
+    seen: list = []
+
+    def pads(plan):
+        return plan.a_rows, plan.dx_a_rows
+
+    def spy(problem, **kw):
+        if problem.entry == "logprob":
+            arm = dict(kw, arch="sm_107a", logprob_lbl=True)
+            seen.append(
+                (
+                    bool(kw.get("a_extent", False)),
+                    kw.get("valid_rows"),
+                    bool(kw.get("need_dx") or kw.get("need_dw")),
+                    pads(real(problem, **arm)),
+                    pads(real(problem, **dict(arm, a_extent=True))),
+                )
+            )
+        return real(problem, **kw)
+
+    T = cake_backend.zero_weight_min_rows() + 1
+    inp = _host_inputs(T, objective="policy", ignore_frac=0.05)
+    weights = inp.loss_weights.clone()
+    weights[weights == 0] = 1.0
+    weights[inp.valid.nonzero().squeeze(1)[:zero_rows]] = 0.0
+    inp = replace(inp, loss_weights=weights.contiguous())
+    assert int((inp.valid & (inp.loss_weights == 0)).sum()) == zero_rows
+    monkeypatch.setattr(cake_backend, "make_plan", spy)
+    switches = dict(memory_mode=None) if module_name == "opt_in" else {}
+    _run(inp, 4096, entry="loss", **switches)
+    case = (module_name, zero_rows)
+    assert seen, case  # the call split: its pass formed its plans
+    for a_extent, valid, grad, shipped, eager in seen:
+        assert valid == zero_rows and not grad, (case, seen)
+        assert a_extent is False, (case, seen)
+        assert shipped == (0, 0), (case, seen)
+        assert eager == (256, 0), (case, seen)
+
+
+def test_zero_weight_pass_binding_key(monkeypatch):
+    """The zero-weight rows' pass remembers its binding apart from an eager log-probability forward of the same inputs
+    and rows (``_forward_logprob_rows``, whose eager form may take the padded A extents): on the cake path with the
+    runner and the binding stubbed, the pass prepares with ``_a_extent=False`` under a key that ends with
+    ``"chunk_rows"`` and the eager form with ``_a_extent=True`` under the plain key; neither finds the other's binding,
+    and a second call of each finds its own."""
+    inp = _host_inputs(40, ignore_frac=0.25)
+    row_index = cake_backend.valid_row_index(inp.labels)
+    n = int(row_index.numel())
+    problem = validate_lm_head_det_inputs(
+        inp.X, inp.W, inp.labels, chunk_size=4096, entry="logprob"
+    )
+    prepared: list = []
+
+    def prepare(*args, **kw):
+        prepared.append(kw["_a_extent"])
+        out = (torch.zeros(n), torch.zeros(n))
+        return SimpleNamespace(forward=lambda: out, memory={"form": kw["_a_extent"]})
+
+    def from_runner(cls, runner, hidden=None):
+        out = runner.forward()
+        return SimpleNamespace(
+            owned_bytes=0, memory=runner.memory, forward=lambda *a, **k: out
+        )
+
+    def call(a_extent):
+        return cake_backend._forward_logprob_rows(
+            problem,
+            inp.X,
+            inp.W,
+            inp.labels,
+            row_index,
+            None,
+            backend="cake",
+            tuning={},
+            lbl=True,
+            a_extent=a_extent,
+        )[2]
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_det_loss", prepare)
+    monkeypatch.setattr(cake_backend._Binding, "from_runner", classmethod(from_runner))
+    with _cache(True) as cache:
+        cache.clear()
+        try:
+            assert call(True) == {"form": True} and prepared == [True]
+            assert call(False) == {"form": False} and prepared == [True, False]
+            assert call(True) == {"form": True} and call(False) == {"form": False}
+            assert prepared == [True, False]  # each found its own binding
+            keys = list(cache._bindings)
+            assert len(keys) == 2, keys
+            plain = [k for k in keys if k[-1] != "chunk_rows"]
+            assert len(plain) == 1 and plain[0] + ("chunk_rows",) in keys, keys
+        finally:
+            cache.clear()
+
+def test_a_extent_runner_operands(monkeypatch):
+    """A runner of a plan with padded A extents (the reference backend's runner given sm_107a's extents by a wrapped
+    ``make_plan``; the cake backend's runner and binding share this code): the workspace carves ``x_a [256, H]`` and
+    ``logits_a [256, V]``, zero past the chunk, whose first rows are ``x_c`` / ``logits`` as before; every logits GEMM
+    launch reads ``A = x_a`` and the dX GEMM ``A = logits_a``, while each launch's other operands and scalars -- ``C``,
+    ``WS``, ``STATS_OUT``, ``M`` / ``m_tiles`` / ``rows_c``, the dW GEMMs' ``A`` / ``B`` and the row kernels' operands
+    -- are those of the runner without the padding; the per-call slots (:func:`_slot_values`) agree.  A given workspace
+    sized without the padding, and a template on the hidden valid-row count's buffers, take the plan without it;
+    ``_bind_a_extents(zero=False)`` (a template) leaves the tail as it is."""
+    real = cake_backend.make_plan
+
+    def padded(problem, **kw):
+        p = real(problem, **kw)
+        if p.compact and p.num_chunks == 1 and not p.hidden_count:
+            rows = p.rows
+            a = cake_backend.a_extent_rows(rows, problem.chunk, "sm_107a")
+            dx = cake_backend.a_extent_rows(rows, problem.chunk, "sm_107a", dx=True)
+            if not p.need_dx or p.logprob_keep:
+                dx = 0
+            p = replace(p, a_rows=a, dx_a_rows=dx)
+        return p
+
+    def meta(x):
+        return x.shape, x.stride(), x.dtype
+
+    gemm = ("A", "B", "C", "STATS_OUT", "WS")
+    for entry in ("loss", "logprob"):
+        inp = _host_inputs(40, ignore_frac=0.25)
+        rows = int((inp.labels >= 0).sum())
+        assert rows == 30
+        kw = dict(chunk_size=4096, backend="reference", compact_rows=True, entry=entry)
+        if entry == "loss":
+            kw.update(objective="ce", loss_div=inp.loss_div)
+        else:
+            kw.update(dlogp=inp.dlogp)
+        plain = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
+        monkeypatch.setattr(cake_backend, "make_plan", padded)
+        r = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
+        monkeypatch.setattr(cake_backend, "make_plan", real)
+        plan, t = r.plan, r.tensors
+        assert (plan.a_rows, plan.dx_a_rows) == (256, 256), entry
+        assert plain.plan == replace(plan, a_rows=0, dx_a_rows=0), entry
+        H, V = int(inp.X.shape[1]), int(inp.W.shape[0])
+        assert r.layout["x_c"][1] == 256 * H * 2, entry
+        assert r.layout["logits"][1] == 256 * V * 2, entry
+        for name in ("stats", "d", "term"):
+            assert r.layout[name][1] == plain.layout[name][1], (entry, name)
+        for name, padded_name, width in (("x_c", "x_a", H), ("logits", "logits_a", V)):
+            buf, view = t[padded_name], t[name]
+            assert buf.shape == (256, width) and view.shape == (rows, width), name
+            assert view.data_ptr() == buf.data_ptr(), name
+            assert not bool(_bits(buf[rows:]).any()), name  # zero past the chunk
+            assert padded_name not in plain.tensors, name
+        assert r.values.keys() == plain.values.keys(), entry
+        seen = set()
+        for key, values in r.values.items():
+            stage = key[0]
+            base = (
+                cake_backend.base_stage(stage)
+                if stage in cake_backend.GEMM_STAGES
+                else stage
+            )
+            want = plain.values[key]
+            assert values.keys() == want.keys(), key
+            for name, value in values.items():
+                other = want[name]
+                if name == "A" and base in cake_backend.LOGITS_BASES:
+                    assert value is t["x_a"], key
+                    seen.add("logits")
+                elif name == "A" and base == "gemm_dx":
+                    assert value is t["logits_a"], key
+                    seen.add("dx")
+                elif isinstance(value, torch.Tensor):
+                    assert meta(value) == meta(other), (key, name)
+                else:
+                    assert value == other, (key, name)
+            if stage in cake_backend.GEMM_STAGES:
+                cake_backend._check_slot_values(key, t, plan, list(gemm), values)
+        assert seen == {"logits", "dx"}, entry
+        # a given workspace sized without the padding: the plan without it
+        small = torch.empty(
+            plain.layout["total"], dtype=torch.uint8, device=inp.X.device
+        )
+        monkeypatch.setattr(cake_backend, "make_plan", padded)
+        fit = prepare_lm_head_det_loss(
+            inp.X, inp.W, inp.labels, workspace_buffer=small, **kw
+        )
+        monkeypatch.setattr(cake_backend, "make_plan", real)
+        assert (fit.plan.a_rows, fit.plan.dx_a_rows) == (0, 0), entry
+        assert "x_a" not in fit.tensors and "logits_a" not in fit.tensors, entry
+        # a template on the hidden valid-row count's chunk-0 buffers keeps the chunk's rows
+        layout = dict(
+            num_rows=rows, vocab=V, chunk=4096, entry=entry, hidden=H, compact=True
+        )
+        kept, _ = cake_backend._runner_layout(plan, None, object(), **layout)
+        assert (kept.a_rows, kept.dx_a_rows) == (0, 0)
+        same, wide = cake_backend._runner_layout(plan, None, None, **layout)
+        assert same is plan and wide["x_c"][1] == r.layout["x_c"][1]
+    # a template's buffers (zero=False) keep their tail
+    p = SimpleNamespace(a_rows=16, dx_a_rows=0)
+    buf = torch.full((16, 8), 7.0, dtype=torch.bfloat16)
+    t = {"x_c": buf}
+    cake_backend._bind_a_extents(p, t, 5, zero=False)
+    assert t["x_a"] is buf and t["x_c"].shape == (5, 8)
+    assert bool((buf[5:] == 7).all())
+    t = {"x_c": buf}
+    cake_backend._bind_a_extents(p, t, 5)
+    assert not bool(_bits(buf[5:]).any()) and bool((buf[:5] == 7).all())
+    # allocated at the chunk's rows: no padded view
+    t = {"x_c": torch.zeros((5, 8), dtype=torch.bfloat16)}
+    cake_backend._bind_a_extents(p, t, 5)
+    assert "x_a" not in t
+
+
+def test_a_extent_padded_index(monkeypatch):
+    """A host count with ``extent`` (:func:`valid_rows`; the eager log-probability forms pass ``(chunk, arch)``,
+    :func:`_a_extent_of`) whose valid rows take the padded A extent (:func:`a_extent_rows`) gives the same index as
+    without it, a view of an index of the extent's rows -- the valid rows, then the last one repeated -- carried as
+    ``_PAD_INDEX_ATTR``; valid rows outside the architecture's window, no valid row, every row valid and a count on the
+    device (more than ``HOST_COUNT_MAX_ROWS`` rows, or off CUDA) pad nothing.  A plan with the padded A extent binds that index (:func:`_bind_row_index`; only
+    when its length is the extent), its gather fills every row of the padded gather buffer from it
+    (:func:`_gather_values`) and :func:`_bind_a_extents` launches no fill for that buffer; without it the gather writes
+    the chunk's rows and the tail is zeroed."""
+    attr = cake_backend._PAD_INDEX_ATTR
+    monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {"sm_100a": 16})
+    monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", {"sm_100a": (2, 5)})
+    ext = (4096, "sm_100a")
+    labels = torch.full((12,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    labels[[1, 4, 6]] = 3
+    plain = cake_backend.valid_row_index(labels)
+    idx, mask = cake_backend.valid_rows(labels, mask=True, extent=ext)
+    assert idx.tolist() == plain.tolist() == [1, 4, 6] and mask.tolist() == (labels >= 0).tolist()
+    assert getattr(plain, attr, None) is None
+    padded = getattr(idx, attr, None)
+    if DEV.type == "cuda":
+        assert padded.tolist() == [1, 4, 6] + [6] * 13 and padded.device == labels.device
+        assert idx.data_ptr() == padded.data_ptr()
+        assert getattr(cake_backend.valid_row_index(labels, extent=ext), attr).tolist() == padded.tolist()
+    else:
+        assert padded is None  # a count off CUDA runs on the device path
+    one = torch.full((12,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    one[5] = 2  # 1 valid row: below the window (2, 5)
+    six = torch.full((12,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    six[:6] = 2  # 6 valid rows: above it
+    for other, want in (
+        (cake_backend.valid_row_index(one, extent=ext), [5]),
+        (cake_backend.valid_row_index(six, extent=ext), list(range(6))),
+        (cake_backend.valid_row_index(labels, extent=(8, "sm_100a")), [1, 4, 6]),  # extent > chunk
+        (cake_backend.valid_row_index(labels, extent=(4096, "sm_120a")), [1, 4, 6]),  # no extent there
+        (cake_backend.valid_row_index(labels), [1, 4, 6]),
+    ):
+        assert other.tolist() == want and getattr(other, attr, None) is None
+    none = cake_backend.valid_row_index(torch.full((4,), IGNORE_INDEX, device=DEV), extent=ext)
+    assert none.numel() == 0 and getattr(none, attr, None) is None
+    assert cake_backend.valid_row_index(torch.ones(4, dtype=torch.int64, device=DEV), extent=ext) is None
+    long = torch.full((cake_backend.HOST_COUNT_MAX_ROWS + 1,), IGNORE_INDEX, dtype=torch.int64, device=DEV)
+    long[[2, 9]] = 1
+    on_device = cake_backend.valid_row_index(long, extent=ext)
+    assert on_device.tolist() == [2, 9] and getattr(on_device, attr, None) is None
+    assert cake_backend._a_extent_of(torch.device("cpu"), 4096, "cake") is None
+    if DEV.type == "cuda":
+        assert cake_backend._a_extent_of(DEV, 4096, "reference") is None
+        arch = cake_backend.arch_for(DEV)
+        want = (4096, arch) if arch == "sm_100a" else None  # the patched tables: an extent on sm_100a only
+        assert cake_backend._a_extent_of(DEV, 4096, "cake") == want
+    # binding and gather (host tensors stand in for the device's; the rule is the same)
+    host = torch.tensor([1, 4, 6] + [6] * 13, dtype=torch.int64)
+    index = host[:3]
+    setattr(index, attr, host)
+    X = torch.arange(12 * 8, dtype=torch.float32).view(12, 8).to(torch.bfloat16)
+    p = SimpleNamespace(a_rows=16, dx_a_rows=0)
+    for a_rows, bound in ((16, True), (8, False), (0, False)):
+        t = {}
+        cake_backend._bind_row_index(SimpleNamespace(a_rows=a_rows), t, index)
+        assert t["row_index"] is index and (t.get("row_index_a") is host) == bound, a_rows
+    t = {"X": X, "x_c": torch.full((16, 8), 7.0, dtype=torch.bfloat16)}
+    cake_backend._bind_row_index(p, t, index)
+    buf = t["x_c"]
+    cake_backend._bind_a_extents(p, t, 3)
+    assert t["x_a"] is buf and t["x_c"].shape == (3, 8) and bool((buf == 7).all())  # no fill
+    idx_g, out = cake_backend._gather_values(t, p, 0, 3)
+    assert idx_g is host and out is buf
+    cake_backend._gather_rows(dict(src=X, idx=idx_g, out=out))
+    assert torch.equal(_bits(buf[:3]), _bits(X[[1, 4, 6]]))
+    assert torch.equal(_bits(buf[3:]), _bits(X[6].expand(13, 8)))  # the last valid row repeated
+    # without the padded index: the chunk's rows, the tail zeroed
+    t = {"X": X, "x_c": torch.full((16, 8), 7.0, dtype=torch.bfloat16)}
+    cake_backend._bind_row_index(p, t, host[:3].clone())
+    buf = t["x_c"]
+    cake_backend._bind_a_extents(p, t, 3)
+    assert "row_index_a" not in t and not bool(_bits(buf[3:]).any())
+    idx_g, out = cake_backend._gather_values(t, p, 0, 3)
+    assert idx_g.tolist() == [1, 4, 6] and out.shape == (3, 8) and out.data_ptr() == buf.data_ptr()
+
+
 _HIDDEN_COUNT_HOST_CASES = [  # (T, C, objective, entry, ignored fraction): three chunks + tail, T < C, T = C + 1, T = C
     (37, 16, "ce", "loss", "five_percent"),
     (37, 16, "policy", "loss", "half"),
@@ -10386,6 +10975,299 @@ def test_device_hidden_count_kernels_match_torch(glm_weight):
         )
 
 
+def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
+    """The loss entry's one-chunk calls in the running architecture's row window (``HIDDEN_COUNT_LOSS_ROWS_BY_ARCH``)
+    without the zero-weight split take the hidden valid-row count where the toolchain runs it, with the shipped table
+    (no window on R200: no one-chunk loss call begins the count) and with the running architecture given the
+    sm_103a window (32, 1024): through the backend's entry and the opt-in module's default call (the public default
+    with a trainable ``W``), a call begins the count exactly when it is such a call -- not at ``T`` 16, 31 or 1025
+    (chunk 4096), not at ``T`` 1024 in two chunks of 512, not a policy call the split serves
+    (``set_zero_weight_min_rows(0)``), not a log-probability call of 256 rows -- and gives the bits (integer views) of
+    the same call with ``hidden_count=False``, which begins no count: ``loss``, ``logp``, ``dX`` and ``dW``.  With the
+    window, a windowed call's dX finalize -- in the step's backward and in a retained graph's second backward -- reads
+    the scan its compaction formed (``_DEVICE_SCAN_ATTR``: no scan of its own, the bits of ``cumsum(mask)``), and a
+    checkpointed call (non-reentrant ``torch.utils.checkpoint``, both entries) begins no count in either pass and gives
+    the bits of the checkpointed call with ``hidden_count=False``."""
+    _require_program(entry="loss")
+    _require_program(entry="logprob")
+    arch = cake_backend.arch_for(CUDA)
+    runs = bool(
+        cake_backend.hidden_count_default()
+        and cake_jit.toolchain_runs_hidden_count(arch)
+    )
+    shipped = dict(cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH)
+    begun = _record_every_hidden_count(monkeypatch)
+    # (T, chunk, objective, entry, zero-weight floor; None: the shipped floor)
+    cases = [(T, 4096, "ce", "loss", None) for T in (16, 31, 32, 64, 256, 1024, 1025)]
+    cases += [
+        (1024, 512, "ce", "loss", None),
+        (256, 4096, "policy", "loss", None),
+        (256, 4096, "policy", "loss", 0),
+        (256, 4096, "ce", "logprob", None),
+    ]
+    for table in (shipped, dict(shipped, **{arch: (32, 1024)})):
+        monkeypatch.setattr(cake_backend, "HIDDEN_COUNT_LOSS_ROWS_BY_ARCH", table)
+        window = table.get(arch)
+        for T, chunk, objective, entry, floor in cases:
+            inp = make_inputs(
+                T,
+                objective=objective,
+                seed=SEED + 7731 + T,
+                device=CUDA,
+                W=glm_weight,
+                ignore_frac=0.05,
+            )
+            expected = (
+                runs
+                and entry == "loss"
+                and floor is None
+                and window is not None
+                and window[0] <= T <= min(chunk, window[1])
+            )
+            previous = cake_backend.set_zero_weight_min_rows(
+                cake_backend.ZERO_WEIGHT_MIN_ROWS_DEFAULT if floor is None else floor
+            )
+            try:
+                for switches in ({}, dict(memory_mode=None)):
+                    case = (window, T, chunk, objective, entry, floor, tuple(switches))
+                    begun.clear()
+                    off = _run(
+                        inp,
+                        chunk,
+                        entry=entry,
+                        backend="cake",
+                        hidden_count=False,
+                        **switches,
+                    )
+                    assert begun == [], (case, begun)
+                    on = _run(inp, chunk, entry=entry, backend="cake", **switches)
+                    assert bool(begun) == expected, (case, begun)
+                    _assert_same_bits(off, on)
+                    del off, on
+            finally:
+                cake_backend.set_zero_weight_min_rows(previous)
+    if not runs:
+        return
+    monkeypatch.setattr(
+        cake_backend, "HIDDEN_COUNT_LOSS_ROWS_BY_ARCH", {arch: (32, 1024)}
+    )
+    scans: list = []
+    row_scan = cake_backend._row_scan
+
+    def scan_spy(row_valid):
+        out = row_scan(row_valid)
+        formed = getattr(row_valid, cake_backend._DEVICE_SCAN_ATTR, None)
+        want = torch.cumsum(row_valid, 0, dtype=torch.int32)
+        scans.append((formed is not None and out is formed, torch.equal(out, want)))
+        return out
+
+    monkeypatch.setattr(cake_backend, "_row_scan", scan_spy)
+    inp = make_inputs(
+        256,
+        objective="ce",
+        seed=SEED + 7743,
+        device=CUDA,
+        W=glm_weight,
+        ignore_frac=0.05,
+    )
+    entries = (
+        ("cake_backend", cake_backend.cake_lm_head_det_train_loss, {}),
+        ("opt_in", opt_in.cake_lm_head_det_train_loss, dict(memory_mode=None)),
+    )
+    for name, fn, extra in entries:
+
+        def call(X, W, **kw):
+            return fn(
+                X,
+                W,
+                inp.labels,
+                objective="ce",
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                return_logp=True,
+                backend="cake",
+                **dict(extra, **kw),
+            )
+
+        # the step's backward and a retained graph's second backward read the forward's scan
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        begun.clear()
+        scans.clear()
+        loss, _ = call(X, W)
+        assert begun, name
+        loss.backward(retain_graph=True)
+        first = (X.grad.clone(), W.grad.clone())
+        X.grad = W.grad = None
+        loss.backward()
+        torch.cuda.synchronize()
+        assert len(scans) == 2 and all(a and b for a, b in scans), (name, scans)
+        assert torch.equal(_bits(X.grad), _bits(first[0])), name
+        assert torch.equal(_bits(W.grad), _bits(first[1])), name
+        del loss, X, W, first
+        # a checkpointed call keeps the host count in both passes
+        got = {}
+        for count in (True, False):
+            X = inp.X.detach().requires_grad_(True)
+            W = inp.W.detach().requires_grad_(True)
+            begun.clear()
+            scans.clear()
+            loss = torch.utils.checkpoint.checkpoint(
+                lambda x, w, _c=count: call(x, w, hidden_count=_c)[0],
+                X,
+                W,
+                use_reentrant=False,
+            )
+            loss.backward()
+            torch.cuda.synchronize()
+            assert begun == [], (name, count, begun)
+            assert not any(a for a, _ in scans), (name, count, scans)
+            got[count] = dict(loss=loss.detach(), dX=X.grad, dW=W.grad)
+            del loss, X, W
+        _assert_same_bits(got[True], got[False], keys=("loss", "dX", "dW"))
+
+
+def test_device_a_extent_is_bitwise(glm_weight, monkeypatch):
+    """The padded A extents (:func:`a_extent_rows`) on the running device -- the shipped tables, and 256-row A and dX
+    extents for its architecture over the window 1..255 (the sm_107a extents, on this device's programs) -- against
+    empty tables (the 0.3.4
+    operands): the det loss (``ce``, policy) and log-prob calls (default, plain recompute ``logprob_dz=False,
+    logprob_lbl=False``, kept ``memory_mode="keep_logits"``, a non-reentrant checkpoint, a temperature where the
+    program has its forms) at ``T`` 12 (2 ignored rows), 32 (2 ignored: 30 valid rows, inside the shipped window) and
+    200 (10 ignored; the loss without the hidden valid-row count) give the bits (integer views) of ``loss`` / ``logp`` /
+    ``dX`` / ``dW``, and bind the padded operands exactly where the rule pads (:func:`_bind_a_extents`): only the
+    log-prob entry's default, kept and checkpointed calls (the kept backward without the dX extent), never the loss
+    entry, the plain recompute or the temperature forms.  A prepared runner (loss and log-prob, compacted) keeps the
+    chunk's rows under the 256-row tables and gives the bits of the runner under empty tables."""
+    _require_program(entry="loss")
+    _require_program(entry="logprob")
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    name, _ = cake_backend.record_for(CUDA)
+    stages = cake_jit.registered_stages_with_temperature(name)
+    has_tau = all(s in stages for s in TAU_STAGES)
+    tables = {
+        "off": ({}, {}, {}),
+        "shipped": (
+            dict(cake_backend.A_EXTENT_ROWS_BY_ARCH),
+            dict(cake_backend.DX_A_EXTENT_ROWS_BY_ARCH),
+            dict(cake_backend.A_EXTENT_WINDOW_BY_ARCH),
+        ),
+        # the whole window below the extent, so the calls of 10 and 190 valid rows pad too
+        "256": ({arch: 256}, {arch: 256}, {arch: (1, 255)}),
+    }
+    bound: list = []
+    bind = cake_backend._bind_a_extents
+
+    def binding(plan, t, rows, **kw):
+        bind(plan, t, rows, **kw)
+        bound.append(("x_a" in t, "logits_a" in t))
+
+    monkeypatch.setattr(cake_backend, "_bind_a_extents", binding)
+
+    def use(table):
+        a, dx, window = tables[table]
+        monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", a)
+        monkeypatch.setattr(cake_backend, "DX_A_EXTENT_ROWS_BY_ARCH", dx)
+        monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", window)
+        cake_backend.BINDING_CACHE.clear()
+        opt_in.BINDING_CACHE.clear()
+        bound.clear()
+
+    def checkpointed(inp):
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        lp = torch.utils.checkpoint.checkpoint(
+            lambda x, w: cake_backend.cake_lm_head_det_train_logprob(
+                x, w, inp.labels, chunk_size=4096
+            ),
+            X,
+            W,
+            use_reentrant=False,
+        )
+        lp.backward(inp.dlogp)
+        torch.cuda.synchronize()
+        return dict(logp=lp.detach(), dX=X.grad, dW=W.grad)
+
+    plain = dict(logprob_dz=False, logprob_lbl=False)
+    lp_keys = ("logp", "dX", "dW")
+    cases = [
+        ("loss ce", "ce", "loss", {}),
+        ("loss policy", "policy", "loss", {}),
+        ("logprob", "ce", "logprob", {}),
+        ("logprob plain", "ce", "logprob", plain),
+        ("logprob kept", "ce", "logprob", dict(memory_mode="keep_logits")),
+        ("logprob ckpt", "ce", "logprob", None),
+    ]
+    if has_tau:
+        cases.append(("temperature", "ce", "logprob", {}))
+    padded_tags = ("logprob", "logprob kept", "logprob ckpt")
+    for T, ignore in ((12, 2 / 12), (32, 2 / 32), (200, 0.05)):
+        for tag, objective, entry, kw in cases:
+            inp = make_inputs(
+                T,
+                objective=objective,
+                seed=SEED + 8311 + T,
+                device=CUDA,
+                W=glm_weight,
+                ignore_frac=ignore,
+                temperature="hetero" if tag == "temperature" else None,
+            )
+            rows = int((inp.labels >= 0).sum())
+            if entry == "loss" and cake_backend.hidden_count_chunks_admit(
+                T, 4096, loss_call=True, arch=arch
+            ):
+                kw = dict(kw, hidden_count=False)  # the host count: a padded plan
+            out = {}
+            for table in ("off", "shipped", "256"):
+                use(table)
+                if kw is None:
+                    out[table] = checkpointed(inp)
+                else:
+                    out[table] = _run(inp, 4096, entry=entry, backend="cake", **kw)
+                torch.cuda.synchronize()
+                case = (T, rows, tag, table)
+                padded = tag in padded_tags
+                a = padded and cake_backend.a_extent_rows(rows, 4096, arch)
+                dx = padded and cake_backend.a_extent_rows(rows, 4096, arch, dx=True)
+                assert any(x for x, _ in bound) == bool(a), (case, bound)
+                # the kept dX reads the kept view
+                want_dx = bool(dx) and tag != "logprob kept"
+                assert any(d for _, d in bound) == want_dx, (case, bound)
+            keys = ("loss",) + lp_keys if entry == "loss" else lp_keys
+            for table in ("shipped", "256"):
+                _assert_same_bits(out["off"], out[table], keys=keys)
+            del inp, out
+    # a prepared runner, compacted: no padded extent under the 256-row tables, the bits of the empty tables
+    inp = make_inputs(
+        200, seed=SEED + 8313, device=CUDA, W=glm_weight, ignore_frac=0.05
+    )
+    index = cake_backend.valid_row_index(inp.labels)
+    for entry in ("loss", "logprob"):
+        kw = dict(chunk_size=4096, backend="cake", compact_rows=index, entry=entry)
+        if entry == "loss":
+            kw.update(objective="ce", loss_div=inp.loss_div)
+            names = ("loss", "logp", "dx_out", "dw_out")
+        else:
+            kw.update(dlogp=inp.dlogp)
+            names = ("logp", "lse", "dx_out", "dw_out")
+        got = {}
+        for table in ("off", "256"):
+            use(table)
+            r = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
+            assert (r.plan.a_rows, r.plan.dx_a_rows) == (0, 0), (entry, table)
+            assert "x_a" not in r.tensors and "logits_a" not in r.tensors, (
+                entry,
+                table,
+            )
+            r.forward()
+            r.backward()
+            torch.cuda.synchronize()
+            got[table] = [_bits(r.tensors[n]).clone() for n in names]
+            del r
+        for n, a, b in zip(names, got["256"], got["off"], strict=True):
+            assert torch.equal(a, b), (entry, n)
+
+
 def test_device_hidden_count_switch_is_bitwise(glm_weight, monkeypatch):
     """The hidden valid-row count on the generated program: ``hidden_count=False`` (the count and the index on the host
     before the first launch) and ``True`` (device compaction, chunk 0's gather kernel and device-count logits GEMM queued before
@@ -11169,7 +12051,8 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch):
         X, W = leaves()
         lp = call(X, W)
         node = lp.grad_fn
-        assert len(node.saved_tensors) == 5 + len(plan_chunks(T_v, C))
+        # X, W, labels, lse, row_index, the forward's valid-row mask and bound labels, the kept views
+        assert len(node.saved_tensors) == 7 + len(plan_chunks(T_v, C))
         assert node.kept is True  # kept, not yet spent
         lp.backward(inp.dlogp, retain_graph=True)
         assert node.kept is False  # spent
@@ -11289,6 +12172,157 @@ def test_device_logprob_keep_lifetimes(glm_weight, monkeypatch):
     assert runner.plan.logprob_keep
     with pytest.raises(NotImplementedError, match="eager entry points"):
         runner.forward()
+
+
+def test_device_logprob_kept_backward_reuses_forward_labels(glm_weight, monkeypatch):
+    """The kept log-probability backward binds the forward's labels and valid-row mask
+    (:attr:`KeptForwardResult.labels_c` / ``row_valid``, saved by the autograd entries) instead of forming them
+    again: on the default call's one-chunk kept logits (``T`` 256 with 5 % of the rows ignored, every row valid, a
+    frozen ``W``) and the opt-in ``memory_mode="keep_logits"`` (``T`` 256, a frozen ``X``, ``T`` 1500 at chunk 512 --
+    the hidden valid-row count's kept form where it runs -- and the caller's count ``num_valid_rows``), the kept
+    backward calls ``_prepare_labels`` (outside the template a binding miss builds, which binds labels of its own) and
+    the host valid-row count zero times and receives the saved mask and labels;
+    the saved mask is ``labels >= 0`` of a compacted call that counted its rows (``None`` without compaction and with
+    the caller's count) and the saved labels are the valid rows' labels in index order (every label without
+    compaction); ``logp`` / ``dX`` / ``dW`` are the bits (integer views) of ``memory_mode="fast"``, and a second
+    backward through the retained graph (a recomputation) gives the first one's bits."""
+    _require_program(entry="logprob")
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    runs_hidden = bool(cake_jit.toolchain_runs_hidden_count(arch))
+    armed = [False]
+    prepared: list = []
+    building = [0]
+    build = cake_backend.prepare_lm_head_det_loss
+
+    def templating(*args, **kw):
+        # a binding miss builds the binding's template, which binds labels of its own (as before)
+        building[0] += 1
+        try:
+            return build(*args, **kw)
+        finally:
+            building[0] -= 1
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_det_loss", templating)
+    for module in (cake_backend, opt_in):
+        prepare = module._prepare_labels
+
+        def preparing(*args, _real=prepare, **kw):
+            if armed[0] and not building[0]:
+                prepared.append(args[2] if len(args) > 2 else kw.get("row_index"))
+            return _real(*args, **kw)
+
+        monkeypatch.setattr(module, "_prepare_labels", preparing)
+    counts = _record_host_counts(monkeypatch)
+    hidden: list = []
+    count = cake_backend._hidden_count
+
+    def counting(*args, **kw):
+        hc = count(*args, **kw)
+        hidden.append(hc is not None)
+        return hc
+
+    monkeypatch.setattr(cake_backend, "_hidden_count", counting)
+    given: list = []
+    keep_backward = cake_backend.backward_logprob_keep
+
+    def keep_spy(*args, **kw):
+        given.append((kw.get("_row_valid"), kw.get("_labels_c")))
+        return keep_backward(*args, **kw)
+
+    monkeypatch.setattr(cake_backend, "backward_logprob_keep", keep_spy)
+
+    def kept_node(lp):
+        pending, seen = [lp.grad_fn], set()
+        while pending:
+            node = pending.pop()
+            if node is None or id(node) in seen:
+                continue
+            seen.add(id(node))
+            if hasattr(node, "kept"):
+                return node
+            pending.extend(n for n, _ in node.next_functions)
+        raise AssertionError("no kept log-probability node")
+
+    def same(a, b):
+        if a is None or b is None:
+            return a is None and b is None
+        return a.data_ptr() == b.data_ptr() and torch.equal(a, b)
+
+    C = 4096
+    keep = dict(memory_mode="keep_logits")
+    # (case, T, chunk, ignored fraction, keywords, train X, train W)
+    for tag, T, chunk, ignore, kw, x, w in (
+        ("default", 256, C, 0.05, {}, True, True),
+        ("default, every row valid", 256, C, 0.0, {}, True, True),
+        ("default, frozen W", 256, C, 0.05, {}, True, False),
+        ("keep_logits", 256, C, 0.05, keep, True, True),
+        ("keep_logits, frozen X", 256, C, 0.05, keep, False, True),
+        ("keep_logits, chunk 512", 1500, 512, 0.05, keep, True, True),
+        ("keep_logits, the caller's count", 256, C, 0.05, keep, True, True),
+    ):
+        inp = make_inputs(
+            T, seed=SEED + 7717 + T, device=CUDA, W=glm_weight, ignore_frac=ignore
+        )
+        kw = dict(kw)
+        if "count" in tag:
+            kw["num_valid_rows"] = int(inp.valid.sum())
+        fast = _run(
+            inp,
+            chunk,
+            entry="logprob",
+            backend="cake",
+            memory_mode="fast",
+            train_x=x,
+            train_w=w,
+        )
+        X = inp.X.detach().requires_grad_(x)
+        W = inp.W.detach().requires_grad_(w)
+        hidden.clear()
+        lp = opt_in.cake_lm_head_det_train_logprob(
+            X, W, inp.labels, chunk_size=chunk, **kw
+        )
+        assert any(hidden) == (T > chunk and runs_hidden), (tag, hidden)
+        node = kept_node(lp)
+        assert node.kept is True, tag
+        saved = node.saved_tensors
+        row_index, row_valid, labels_c = saved[4], saved[5], saved[6]
+        del saved
+        valid = inp.labels >= 0
+        if row_index is None:
+            assert bool(valid.all()) and row_valid is None, tag
+            assert torch.equal(labels_c.long(), inp.labels), tag
+        else:
+            assert torch.equal(row_index, valid.nonzero().squeeze(1)), tag
+            if "num_valid_rows" in kw:
+                assert row_valid is None, tag  # the caller's count: no mask formed
+            else:
+                assert row_valid.dtype == torch.bool, tag
+                assert torch.equal(row_valid, valid), tag
+            assert torch.equal(labels_c.long(), inp.labels[row_index]), tag
+        grads = []
+        for retain in (True, False):
+            X.grad = W.grad = None
+            prepared.clear()
+            counts.clear()
+            given.clear()
+            armed[0] = True
+            try:
+                lp.backward(inp.dlogp, retain_graph=retain)
+                torch.cuda.synchronize()
+            finally:
+                armed[0] = False
+            if retain:  # the first backward: the kept logits
+                assert not prepared and not counts, (tag, prepared, counts)
+                assert len(given) == 1, (tag, len(given))
+                assert same(given[0][0], row_valid), tag
+                assert same(given[0][1], labels_c), tag
+            else:  # through the retained graph: the recomputation
+                assert not given, tag
+            grads.append(dict(logp=lp.detach(), dX=X.grad, dW=W.grad))
+        keys = ("logp",) + (("dX",) if x else ()) + (("dW",) if w else ())
+        _assert_same_bits(fast, grads[0], keys=keys)
+        _assert_same_bits(grads[0], grads[1], keys=keys)
+        del lp, node, fast, grads, row_index, row_valid, labels_c
 
 
 def test_device_host_count_early_launch_is_bitwise(glm_weight, monkeypatch):

@@ -315,7 +315,7 @@ def cake_moe_grouped_gemm_nondet_train_prepare_dgrad(
     row tables); ``K % 256 == 0``, ``N % 64 == 0`` (the
     512-column tile when ``K % 512 == 0`` on the architectures of
     ``wide_dgrad_archs``, its L2 evict-first twin where ``dgrad_evict_first``
-    holds for ``K``, ``sum_m`` and ``E``, its 3 / 3 head / tail twin where
+    holds for ``N``, ``K``, ``sum_m`` and ``E``, its 3 / 3 head / tail twin where
     ``dgrad_wide_ts33`` holds).  The programs are copies of the deterministic
     package's and give its bits.
     """

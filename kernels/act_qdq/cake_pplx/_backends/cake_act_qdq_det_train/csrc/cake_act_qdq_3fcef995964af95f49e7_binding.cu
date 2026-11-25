@@ -92,8 +92,8 @@ void Run(TensorView a_x, TensorView a_y, TensorView a_counters0, TensorView a_co
   check_same_device(a_counters1, a_x, "counters1", "x");
   TVM_FFI_CHECK((a_n_vecs >= 1LL), ValueError)
       << KERNEL_NAME << ": requires (n_vecs >= 1)";
-  TVM_FFI_CHECK((a_n_vecs <= 2147483392LL), ValueError)
-      << KERNEL_NAME << ": requires (n_vecs <= 2147483392)";
+  TVM_FFI_CHECK((a_n_vecs <= 2147483136LL), ValueError)
+      << KERNEL_NAME << ": requires (n_vecs <= 2147483136)";
   TVM_FFI_CHECK((a_first_tile >= 0LL), ValueError)
       << KERNEL_NAME << ": requires (first_tile >= 0)";
   TVM_FFI_CHECK((a_first_tile < CheckedShl(1LL, a_chunk_tile_shift)), ValueError)
@@ -127,7 +127,7 @@ void Run(TensorView a_x, TensorView a_y, TensorView a_counters0, TensorView a_co
   void* kernel_args[] = {&v_x, &v_y, &v_counters0, &v_counters1, &v_n_vecs, &v_first_tile, &v_first_die, &v_chunk_tile_shift, &v_batch_shift};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
-  config.blockDim = dim3(64, 1, 1);
+  config.blockDim = dim3(128, 1, 1);
   config.dynamicSmemBytes = 128;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_act_qdq_3fcef995964af95f49e7), kernel_args),

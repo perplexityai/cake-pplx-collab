@@ -27,7 +27,11 @@ distribution at hidden 5120 / intermediate 2304 over 6 and 48 local experts
 (:func:`tests.experimental._mok_reference.production_inputs`, its gate and up exactly at the limit on one route), and
 the adapter's top-6 step at each 384-expert layout as rank 0 of its EP group emulated on one GPU
 (:mod:`tests.experimental._mok_one_gpu`; ``y``, ``dx`` and the router-weight gradients), and at the EP64 and EP8 layouts
-over changing source counts on one workspace (padded and unpadded staging; also the shared weight gradients).
+over changing source counts on one workspace (padded and unpadded staging; also the shared weight gradients).  The
+512-expert top-10 group (``router_weight_gradient="direct"``, ``shared_expert="scaled"``) on SM100a and SM103a, on
+inputs drawn on the CPU: the shared scale's dot helper, the scaled forward epilogue (``s`` in {0, 1, U}) and the
+adapter's step at EP8 ``(8, 64)`` emulated on one GPU (``y``, ``dx``, the router-weight gradients and those at zero
+weights alone, ``d_shared_scale`` and the shared weight gradients).
 
 An FP32 weight-gradient accumulator is judged by its increment, ``accumulator - start`` in float64 (exact for these
 values), against the oracle's weight gradient: the same error as the accumulator's against ``start`` plus the exact
@@ -57,6 +61,8 @@ from tests.experimental._mok_one_gpu import (
     bound_multiplier,
     one_gpu_source_workspace,
     one_gpu_workspace,
+    one_rank_ids,
+    one_rank_multiplier,
 )
 from tests.experimental._mok_reference import (
     mxfp8_quantize,
@@ -70,6 +76,7 @@ from tests.experimental._mok_reference import (
 
 kernels = cake_package("cake_mok_bf16", "_kernels")
 backend = cake_package("cake_mok_bf16", "backend")
+jit = cake_package("cake_mok_bf16", "jit")
 workspace_module = cake_package("cake_mok_bf16", "workspace")
 
 GEOMETRIES = ((256, 256, 768), (512, 512, 768), (512, 256, 1536))
@@ -833,4 +840,400 @@ def test_before_down_adapter_top6_changed_counts_accuracy(record_property, ep, e
             ("before_down_adapter_counts", ep, experts),
             lambda: _before_down_adapter_counts_case(ep=ep, experts=experts),
         ),
+    )
+
+
+#: The 512-expert top-10 group of the explicit modes and the kernels its cases launch.
+GROUP = kernels.MODE_GROUPS["scaled_top10"]
+GROUP_ROLES = (
+    "backward_fp32_direct",
+    "epilogue_forward_scaled_10",
+    "shared_scale_rows",
+    "shared_scale_dot",
+)
+
+
+def _require_group():
+    """Skip on a target without the 512-expert top-10 group's kernels (``MODE_GROUPS["scaled_top10"].targets``: SM100a
+    and SM103a) or while they are not in this package's registry (``test_mok_bf16.py`` fails for that)."""
+    require_gpu()
+    arch = gaps.TARGETS[torch.cuda.get_device_capability()]
+    if arch not in GROUP.targets:
+        pytest.skip(f"The 512-expert top-10 group has no {arch} build")
+    registry = jit._registry()
+    if any(role not in registry for role in GROUP_ROLES):
+        pytest.skip(
+            "The 512-expert top-10 group's kernels are not in this package's registry"
+        )
+
+
+def _cpu_scales(tokens):
+    """FP32 shared-expert scales drawn on the CPU: ``U[0, 2)``, every 4th token's exactly 0 and the next one's exactly
+    1."""
+    scale = rand(tokens) * 2.0
+    scale[::4] = 0.0
+    scale[1::4] = 1.0
+    return scale
+
+
+@pytest.mark.parametrize(
+    "tokens,width", [(512, 1024), (37, 4096)], ids=["t512-w1024", "t37-w4096"]
+)
+def test_shared_scale_dot_accuracy(record_property, tokens, width):
+    """The shared scale's gradient helper ``dot(a, b)`` (FP32 row dots in one fixed order; ``dot(dh_shared,
+    hidden_shared)`` at width I) against the float64 dot beside the naive BF16 ``(a * b).sum(-1)``; inputs drawn on
+    the CPU."""
+    _require_group()
+    helpers = kernels.MoKSharedScale()
+    naive_values = {}
+
+    def run(j, _seed):
+        a = (randn(tokens, width) * 0.125).bfloat16().cuda()
+        b = (randn(tokens, width) * 0.125).bfloat16().cuda()
+        with kernels._ffi_stream():
+            dots = helpers.dot(a, b)
+        naive_values[j] = dict(d_shared_scale=(a * b).sum(-1))
+        return dict(d_shared_scale=dots), dict(
+            d_shared_scale=(a.double() * b.double()).sum(-1)
+        )
+
+    judge, failures = judge_case(
+        run, lambda j, tier: naive_values.pop(j), seed=6300 + tokens + width
+    )
+    judge.record(record_property)
+    assert not failures, "\n".join(failures)
+
+
+@pytest.mark.parametrize("tokens,hidden", [(512, 256), (37, 4096), (1, 1032)])
+def test_epilogue_forward_scaled_accuracy(record_property, tokens, hidden):
+    """``y = s * shared + sum_k w_k routed_k`` at top-10 (the scaled forward epilogue: FP32 accumulation from
+    ``s * shared``, then ascending slots), ``s`` in {0, 1, U[0, 2)} per token and every 5th token's first weight 0;
+    inputs drawn on the CPU."""
+    _require_group()
+    topk = GROUP.topk
+    epilogues = kernels.MoKEpilogues(topk, shared_row="scaled")
+    naive_values = {}
+
+    def run(j, _seed):
+        shared = (randn(tokens, hidden) * 0.125).bfloat16().cuda()
+        routed = (randn(tokens * topk, hidden) * 0.125).bfloat16().cuda()
+        scores = rand(tokens, topk) * 1.5
+        scores[::5, 0] = 0.0
+        scores, scale = scores.cuda(), _cpu_scales(tokens).cuda()
+        y = epilogues.forward(shared, routed, scores, scale)
+        naive_values[j] = dict(
+            y=naive.epilogue_forward(
+                shared, routed, scores, naive.NAIVE, shared_scale=scale
+            )
+        )
+        return dict(y=y), dict(
+            y=naive.epilogue_forward(
+                shared, routed, scores, naive.ORACLE, shared_scale=scale
+            )
+        )
+
+    judge, failures = judge_case(
+        run, lambda j, tier: naive_values.pop(j), seed=6200 + tokens + hidden
+    )
+    judge.record(record_property)
+    assert not failures, "\n".join(failures)
+
+
+def _scaled_group_adapter_case(
+    *, tokens=512, hidden=512, intermediate=256, macro=1536, mini=256, seed=8431
+):
+    """The group's adapter step (``build_schedule``, ``forward``, ``backward``; ``router_weight_gradient="direct"``,
+    ``shared_expert="scaled"``, plain SwiGLU, FP32 accumulators, several macrobatches) at EP8 ``(8, 64)``, top-10, as
+    rank 0 of its EP group emulated on one GPU (:mod:`tests.experimental._mok_one_gpu`; every route on this rank), on
+    inputs drawn on the CPU: ``s`` in {0, 1, U[0, 2)} per token, every 5th token's first router weight and every weight
+    of token 3 exactly 0.  Judged per draw against the oracle beside the naive implementation of the single-rank layer
+    (:func:`tests.experimental._mok_naive.layer` with ``shared_scale`` and ``direct=True``): ``y``, ``dx``, the
+    router-weight gradients (also alone at the zero weights, ``d_scores_zero_weight``), ``d_shared_scale`` and the
+    shared weight gradients (this rank's own).  The routed weight gradients sum EP copies of every route and are checked
+    exactly in ``test_mok_bf16.py``."""
+    ep, experts = GROUP.layouts[0]
+    topk = GROUP.topk
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep,
+        experts,
+        topk,
+        fp32_wgrad=True,
+        router_weight_gradient="direct",
+        shared_expert="scaled",
+    )
+    functional.communication = OneGpuGroup()
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+    workspace = one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
+    config = workspace_module.MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    naive_values = {}
+
+    def run(j, _draw):
+        x = (randn(tokens, hidden) * 0.125).bfloat16()
+        dy = (randn(tokens, hidden) * 0.125).bfloat16()
+        shared = [
+            (randn(intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(hidden, intermediate) / intermediate**0.5).bfloat16(),
+        ]
+        routed = [
+            (randn(experts, intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(experts, intermediate, hidden) / hidden**0.5).bfloat16(),
+            (randn(experts, hidden, intermediate) / intermediate**0.5).bfloat16(),
+        ]
+        scores = rand(tokens, topk) * 1.5
+        scores[::5, 0] = 0.0
+        scores[3] = 0.0
+        scale = _cpu_scales(tokens)
+        ids = rand(tokens, experts).argsort(-1)[:, :topk].contiguous()
+        x, dy, scores, scale, ids = (
+            value.to(device) for value in (x, dy, scores, scale, ids)
+        )
+        shared, routed = [w.to(device) for w in shared], [w.to(device) for w in routed]
+        weights = (*shared, *routed)
+        accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+        schedule = functional.build_schedule(
+            workspace, config, ids, num_local_experts=experts
+        )
+        assert (
+            int(schedule.num_tokens.item()) > macro
+        )  # several macrobatches: backward replays the later ones
+        y, context = functional.forward(
+            config, workspace, schedule, x, scores, *weights, shared_scale=scale
+        )
+        gradients = functional.backward(
+            config, workspace, schedule, context, dy, x, scores, *weights, weight_grad_accumulators=accumulators,
+            shared_scale=scale,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        zero = scores == 0
+        outputs = dict(
+            y=y.clone(), dx=gradients[0].clone(), d_scores=gradients[1].clone()
+        )
+        outputs["d_scores_zero_weight"] = gradients[1][zero].clone()
+        outputs["d_shared_scale"] = gradients[8].clone()
+        outputs.update((name, gradients[index].clone()) for name, _, index in SHARED_DW)
+        segments = _segments(single_rank_schedule(ids, experts))
+        values = {}
+        for dtype in (naive.ORACLE, naive.NAIVE):
+            r = naive.layer(
+                x,
+                dy,
+                scores,
+                shared,
+                routed,
+                segments,
+                None,
+                dtype,
+                shared_scale=scale,
+                direct=True,
+            )
+            reference = dict(
+                y=r["y"],
+                dx=r["dx"],
+                d_scores=r["d_scores"],
+                d_shared_scale=r["d_shared_scale"],
+            )
+            reference["d_scores_zero_weight"] = r["d_scores"][zero]
+            reference.update((name, r["dw"][index][0]) for name, index, _ in SHARED_DW)
+            values[dtype] = reference
+        naive_values[j] = values[naive.NAIVE]
+        return outputs, values[naive.ORACLE]
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed)
+    return judge, TierJudge(), failures
+
+
+def test_scaled_group_adapter_accuracy(record_property):
+    """The adapter's step of the 512-expert top-10 group (``router_weight_gradient="direct"``,
+    ``shared_expert="scaled"``) at EP8 ``(8, 64)``, emulated on one GPU as rank 0 of the group with every route on this
+    rank: ``y``, ``dx``, the router-weight gradients (and those at zero weights alone), ``d_shared_scale`` and the
+    shared weight gradients."""
+    _require_group()
+    _check(
+        record_property,
+        gaps.OUTPUTS,
+        gaps.judged(("scaled_group_adapter",), _scaled_group_adapter_case),
+    )
+
+
+#: The 896-expert top-16 group (SiTU-GLU routed experts, no shared expert) and the kernels its cases launch.
+SITU_GROUP = kernels.MODE_GROUPS["situ_top16"]
+SITU_ROLES = (
+    "forward_situ_noshared",
+    "backward_fp32_direct_situ_noshared",
+    "epilogue_forward_none_16",
+    "epilogue_backward_none_16",
+)
+#: The SiTU-GLU scalars of the cases.
+SITU_BETA, SITU_LB = 4.0, 25.0
+#: The SiTU-GLU data kinds: per kind the routed gate and up weights' ``(spread, offset range)``.  ``x`` is ``randn *
+#: 0.125`` with each token's first feature 1, the weights ``randn * spread / 0.125 / sqrt(hidden)`` with their first
+#: column (the one that feature multiplies) 0 or uniform over the offset range: gate and up values of spread about
+#: ``spread`` around the offset.  ``saturated`` reaches ``|gate|`` about 190 and ``|up|`` about 950;
+#: ``deep_negative`` puts every gate in about [-88.5, -80.5], where ``sigmoid(gate)`` is a normal FP32 value or just
+#: below the normal range: gates further below (the FP32 subnormal range of ``sigmoid``, ``gate < ln(FLT_MIN) =
+#: -87.3``) are outside the accuracy requirements of these kernels.  ``zero_gate`` and ``zero_up`` set a random half
+#: of the gate or up weight rows exactly 0, so those gate or up values are exactly 0 (and so are their hidden values).
+SITU_DATA = {
+    "normal": ((2.0, None), (2.0, None)),
+    "wide": ((6.0, None), (40.0, None)),
+    "saturated": ((1.0, (-190.0, 190.0)), (5.0, (-950.0, 950.0))),
+    "deep_negative": ((0.5, (-87.0, -82.0)), (2.0, None)),
+    "small": ((0.1, None), (0.1, None)),
+    "zero_gate": ((2.0, None), (2.0, None)),
+    "zero_up": ((2.0, None), (2.0, None)),
+}
+
+
+def _require_situ_group():
+    """Skip on a target without the 896-expert top-16 group's kernels (``MODE_GROUPS["situ_top16"].targets``: SM100a
+    and SM103a) or while they are not in this package's registry (``test_mok_bf16.py`` fails for that)."""
+    require_gpu()
+    arch = gaps.TARGETS[torch.cuda.get_device_capability()]
+    if arch not in SITU_GROUP.targets:
+        pytest.skip(f"The 896-expert top-16 group has no {arch} build")
+    registry = jit._registry()
+    if any(role not in registry for role in SITU_ROLES):
+        pytest.skip("The 896-expert top-16 group's kernels are not in this package's registry")
+
+
+def _situ_weights(kind, experts, hidden, intermediate):
+    """BF16 routed ``(gate, up, down)`` weights of the SiTU-GLU data kind ``kind`` (:data:`SITU_DATA`), drawn on the
+    CPU."""
+
+    def projection(spec):
+        spread, offset = spec
+        w = randn(experts, intermediate, hidden) * (spread / 0.125 / hidden**0.5)
+        w[:, :, 0] = 0.0
+        if offset is not None:
+            w[:, :, 0] = offset[0] + (offset[1] - offset[0]) * rand(experts, intermediate)
+        return w
+
+    gate_spec, up_spec = SITU_DATA[kind]
+    gate, up = projection(gate_spec), projection(up_spec)
+    if kind in ("zero_gate", "zero_up"):
+        (gate if kind == "zero_gate" else up)[rand(experts, intermediate) < 0.5] = 0.0
+    down = randn(experts, hidden, intermediate) / intermediate**0.5
+    return [w.bfloat16() for w in (gate, up, down)]
+
+
+@pytest.mark.parametrize("tokens,hidden", [(512, 256), (37, 4096), (1, 1032)])
+def test_epilogue_forward_none_accuracy(record_property, tokens, hidden):
+    """``y = sum_k w_k routed_k`` at top-16 (the forward epilogue without a shared row: FP32 accumulation from zero in
+    ascending slots, one BF16 rounding), every 5th token's first weight 0; inputs drawn on the CPU."""
+    _require_situ_group()
+    topk = SITU_GROUP.topk
+    epilogues = kernels.MoKEpilogues(topk, shared_row="none")
+    naive_values = {}
+
+    def run(j, _seed):
+        routed = (randn(tokens * topk, hidden) * 0.125).bfloat16().cuda()
+        scores = rand(tokens, topk) * 1.5
+        scores[::5, 0] = 0.0
+        scores = scores.cuda()
+        zeros = torch.zeros(tokens, hidden, dtype=torch.bfloat16, device="cuda")
+        y = epilogues.forward(None, routed, scores)
+        naive_values[j] = dict(y=naive.epilogue_forward(zeros, routed, scores, naive.NAIVE))
+        return dict(y=y), dict(y=naive.epilogue_forward(zeros, routed, scores, naive.ORACLE))
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=6400 + tokens + hidden)
+    judge.record(record_property)
+    assert not failures, "\n".join(failures)
+
+
+def _situ_group_adapter_case(kind, *, tokens=256, hidden=512, intermediate=256, macro=8192, mini=256, seed=8531):
+    """The 896-expert top-16 group's adapter step (``build_schedule``, ``forward``, ``backward``;
+    ``activation="situ_glu"`` with ``situ_beta`` 4 and ``situ_lb`` 25, ``shared_expert="none"``,
+    ``router_weight_gradient="direct"``, FP32 accumulators, several macrobatches) at EP64 ``(64, 14)`` as rank 0 of its
+    EP group emulated on one GPU (:mod:`tests.experimental._mok_one_gpu`; every route on this rank, two of each token's
+    16 routes repeating an expert, :func:`one_rank_ids`), on the SiTU-GLU data kind ``kind`` (:data:`SITU_DATA`) drawn
+    on the CPU, every 5th token's first router weight and every weight of token 3 exactly 0.  Judged per draw against
+    the oracle beside the naive implementation of the single-rank layer without a shared expert
+    (:func:`tests.experimental._mok_naive.layer` with ``shared_w=None``, ``activation=("situ_glu", 4, 25)`` and
+    ``direct=True``): ``y``, ``dx``, the router-weight gradients (also alone at the zero weights,
+    ``d_scores_zero_weight``) and the three routed weight gradients (each the sum of EP equal copies of every route in
+    the emulation, judged divided by EP, a power of two)."""
+    (ep, experts), topk = SITU_GROUP.layouts[0], SITU_GROUP.topk
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, fp32_wgrad=True, router_weight_gradient="direct", shared_expert="none",
+        activation="situ_glu",
+    )  # fmt: skip
+    functional.communication = OneGpuGroup()
+    multiplier = one_rank_multiplier(tokens, topk, ep, experts)
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+    workspace = one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
+    config = workspace_module.MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    situ = dict(situ_beta=SITU_BETA, situ_lb=SITU_LB)
+    names = ("dw_routed_gate", "dw_routed_up", "dw_routed_down")
+    naive_values = {}
+
+    def run(j, _draw):
+        x = randn(tokens, hidden) * 0.125
+        x[:, 0] = 1.0
+        x = x.bfloat16()
+        dy = (randn(tokens, hidden) * 0.125).bfloat16()
+        routed = _situ_weights(kind, experts, hidden, intermediate)
+        scores = rand(tokens, topk) + 0.1
+        scores[::5, 0] = 0.0
+        scores[3] = 0.0
+        ids = one_rank_ids(tokens, experts, topk)
+        x, dy, scores, ids = (value.to(device) for value in (x, dy, scores, ids))
+        routed = [w.to(device) for w in routed]
+        accumulators = [torch.zeros(w.shape, device=device) for w in routed]
+        schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+        assert int(schedule.num_tokens.item()) > macro  # several macrobatches: backward replays the later ones
+        y, context = functional.forward(config, workspace, schedule, x, scores, None, None, None, *routed, **situ)
+        gradients = functional.backward(
+            config, workspace, schedule, context, dy, x, scores, None, None, None, *routed,
+            weight_grad_accumulators=accumulators, **situ,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        zero = scores == 0
+        outputs = dict(y=y.clone(), dx=gradients[0].clone(), d_scores=gradients[1].clone())
+        outputs["d_scores_zero_weight"] = gradients[1][zero].clone()
+        outputs.update((name, gradients[2 + i].double() / ep) for i, name in enumerate(names))
+        segments = _segments(single_rank_schedule(ids, experts))
+        values = {}
+        for dtype in (naive.ORACLE, naive.NAIVE):
+            r = naive.layer(
+                x, dy, scores, None, routed, segments, None, dtype, activation=("situ_glu", SITU_BETA, SITU_LB),
+                direct=True,
+            )  # fmt: skip
+            reference = dict(y=r["y"], dx=r["dx"], d_scores=r["d_scores"])
+            reference["d_scores_zero_weight"] = r["d_scores"][zero]
+            reference.update((name, r["dw"][i]) for i, name in enumerate(names))
+            values[dtype] = reference
+        naive_values[j] = values[naive.NAIVE]
+        return outputs, values[naive.ORACLE]
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed)
+    return judge, TierJudge(), failures
+
+
+@pytest.mark.parametrize("kind", list(SITU_DATA))
+def test_situ_group_adapter_accuracy(record_property, kind):
+    """The adapter's step of the 896-expert top-16 group (SiTU-GLU, ``shared_expert="none"``,
+    ``router_weight_gradient="direct"``) at EP64 ``(64, 14)``, emulated on one GPU as rank 0 of the group with every
+    route on this rank, on each SiTU-GLU data kind: ``y``, ``dx``, the router-weight gradients (and those at zero
+    weights alone) and the three routed weight gradients."""
+    _require_situ_group()
+    _check(
+        record_property,
+        gaps.OUTPUTS,
+        gaps.judged(("situ_group_adapter", kind), lambda: _situ_group_adapter_case(kind)),
     )

@@ -30,8 +30,11 @@ busy on another stream can delay it.  On sm_100a and sm_103a, at the backward
 rows of ``cake_jit.FALLBACK_ROWS`` (the default backward route at C = 520 to
 1016; from release 0.2.7 also the ``bwd_bias`` route and the calls of the
 ``bwd_dt`` route with BF16 taps, from release 0.2.9 every call of the
-``bwd_dt`` route, at C = 520 to 1016 and small S, ``bwd_dt`` at C = 768 on
-sm_103a from release 0.2.11; each row up to its own token bound), that launch
+``bwd_dt`` route, at C = 520 to 1016, ``bwd_dt`` at C = 768 on sm_103a from
+release 0.2.11; each row up to its own token bound: from release 0.2.18
+S = 32768 on ``bwd_dt`` but at C = 768 to 1016 on sm_103a (S = 16384), and
+S = 24576 on ``bwd_bias`` at C = 520 to 640 (S = 16384 at C = 648 to 1016);
+release 0.2.17: S = 24576 at C = 576 to 640, 16384 at the other C), that launch
 runs the route's fallback program, the one the route runs at its smallest
 channel counts, in place of the program its channel thresholds pick.  At the
 backward rows of ``cake_jit.DIRECT_ROWS`` (the ``bwd``, ``bwd_dt`` and
@@ -42,6 +45,13 @@ TMA and no staged pipeline, each CTA the next token blocks of its channel tile,
 ``dx`` bit for bit the route's staged programs', and the same accumulators and
 counters.  From release 0.2.15 the sm_107a ``bwd`` and ``bwd_bias`` direct
 rows run to S = 4096 at C = 512 and 1024 and to S = 2561 at C = 640.  From
+release 0.2.19 direct rows also run between the earlier keys: on sm_100a
+``bwd`` at C = 840 to 888 from S = 1 to 2048, and ``bwd_dt`` at C = 624 to
+632, 744 to 760, 840 to 856 and 872 to 888 from S = 128 to 2048 and at
+C = 776 to 792, 808 to 824 and 904 to 952 from S = 128 to 1000; on sm_103a
+``bwd`` at C = 904 to 952 from S = 128 to 1000, and ``bwd_dt`` at C = 648 to
+664 and 680 to 696 from S = 512 to 2048, at C = 776 to 792 from S = 128 to
+1000 and at C = 840 to 856 and 904 to 952 from S = 128 to 2048.  From
 release 0.2.14, at the small-S rows of ``cake_jit.GRID_CAP_ROWS`` (sm_107a:
 the ``bwd`` route at C = 584 to 760 but 640, from S = 512 to 1000, to 999 at
 C = 600 to 616 and 704, and at C = 768 at S = 512) a launch at
@@ -108,13 +118,22 @@ range runs ahead of the other two tables where it holds the call.  From release
 ``fwd`` at C = 768).  For most ``C`` the first range starts at S = 1.  Where a
 key has no ``DIRECT_ROWS`` range (for example the sm_107a ``fwd_bias`` rows at
 C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over
-the key's range outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows
-at C = 720 to 768 have no ``DIRECT_ROWS`` range: they run the pair direct
-program from S = 16 to 1536 and the static program from S = 13824 (C = 736:
-14336).  Every other call (outside a row's range, or where an architecture,
-route and ``C`` have no row) runs the dynamic program, as in 0.2.4, which takes
-its token chunks from zeroed int32 counters.  The forward workspace size is the
-same in every case.
+the key's range outside the ``PAIR_ROWS`` range.  From release 0.2.17, the
+sm_103a ``fwd_bias`` rows at C = 720 to 768 run the pair direct program from
+S = 1 to 3072, the static program from S = 3073 to 12800 and from S = 13824 to
+16383 (C = 736: from 14336; C = 768: to 16384) and the direct program from
+S = 12801 to 13823 (C = 736: to 14335): there a ``DIRECT_ROWS`` range lies
+inside the ``FALLBACK_ROWS`` range of its key and runs ahead of it (0.2.16: no
+``DIRECT_ROWS`` range, the pair direct program from S = 16 to 1536 and the
+static program from S = 13824, C = 736: 14336).  From release 0.2.16, the
+``PAIR_ROWS`` ranges start at S = 1 (sm_107a ``fwd`` at C = 520 to 736: S = 4;
+sm_103a ``fwd_bias`` at C = 720 to 768: from release 0.2.17).  From release
+0.2.17, the sm_107a ``fwd`` range at C = 512 runs the pair direct program up
+to S = 4096 (0.2.16: 2560), in place of the static program at S = 2561 to 4096.
+Every other call (outside a row's range, or where an architecture, route and
+``C`` have no row) runs the dynamic program, as in 0.2.4, which takes its token
+chunks from zeroed int32 counters.  The forward workspace size is the same in
+every case.
 
 The backward workspace holds zeroed accumulators and counters that every
 launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`

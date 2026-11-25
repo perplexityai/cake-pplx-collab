@@ -52,8 +52,9 @@ Usage::
     cake_act_qdq_det_train_forward(x, format="mxfp4_e8m0_g32", out=x)  # in place
 
 On an R200 (SM107), ``locality="domain"`` runs a program whose CTAs work on
-their own die's memory, for an out-of-place call of at least 8,388,608
-vectors (``numel / 8``) whose input and output lie in memory from
+their own die's memory, for an out-of-place call of 8,388,608 to
+2,147,482,624 vectors for FP4 (``numel / 8``), to 2,147,483,136 for MXFP4
+and MXFP8, whose input and output lie in memory from
 :func:`cake_act_qdq_det_train_domain_empty` (2 MB chunks that alternate
 between the two dies), at the same offset in their chunks and in chunks of
 the same die.  Every other call runs the default program;
@@ -193,14 +194,16 @@ def cake_act_qdq_det_train_domain_empty(
     contiguous and starts on a chunk; views of it (slices, reshapes) keep it
     alive.  Freeing the last view synchronizes the device; during a CUDA
     graph capture on any device in this thread, the range is freed after the
-    capture, by a later free or a later call of this function.  Allocate the
-    buffers once, before any CUDA graph capture, and reuse them.  A capture
-    begun with ``cudaStreamBeginCapture`` on a stream that is not torch's
-    current stream is not detected.  The ``"off"`` programs run on this
-    memory at 0.95-1.03x of their speed on default memory for out-of-place
-    calls of 131,072 to 4,194,304 vectors (GPU time, VR200 package
-    benchmark); in-place calls and larger ones were not measured.  Needs
-    cuda-python (the ``locality`` extra).
+    capture, by a later free or a later call of this function.  A device's
+    first call also maps the claim counters of the domain program (2 MB in
+    each die, kept for the process), zeroes them and synchronizes once.
+    Allocate the buffers once, before any CUDA graph capture, and reuse
+    them.  A capture begun with ``cudaStreamBeginCapture`` on a stream that is
+    not torch's current stream is not detected.  The ``"off"`` programs run on
+    this memory at 0.95-1.03x of their speed on default memory for
+    out-of-place calls of 131,072 to 4,194,304 vectors (GPU time, VR200
+    package benchmark); in-place calls and larger ones were not measured.
+    Needs cuda-python (the ``locality`` extra).
 
     Parameters
     ----------
@@ -218,12 +221,13 @@ def cake_act_qdq_det_train_domain_empty(
         ``TypeError`` for a ``dtype`` that is not a ``torch.dtype``,
         ``ValueError`` for a negative dimension or a device that is not
         CUDA, ``torch.cuda.OutOfMemoryError`` when the device has no room
-        (after torch's cached free memory is returned to the driver once),
-        and ``RuntimeError`` during a CUDA graph capture on any device in
+        for the tensor or, on its first call, for the claim counters (after
+        torch's cached free memory is returned to the driver once), and
+        ``RuntimeError`` during a CUDA graph capture on any device in
         this thread, on a device other than SM107, when the driver reports
         fewer than two locality domains, or without a cuda-python that names
         them.  torch's ``torch.cuda.memory_*`` counters do not count this
-        memory.
+        memory or the claim counters.
     """
 
     return _backend().cake_act_qdq_det_train_domain_empty(shape, dtype=dtype, device=device)
@@ -288,8 +292,11 @@ def cake_act_qdq_det_train_forward_workspace_bytes(
     """The workspace of one forward call of an input of ``shape``.
 
     Always 0: a call takes no caller workspace.  A ``locality="domain"`` call
-    keeps its claim counters in the package's own 128-byte workspace per
-    stream.
+    keeps its claim counters in the package's own workspace per stream: 128
+    bytes in each die's memory, from the device's 15,360 eager workspaces
+    (for eager calls) or 1,024 graph workspaces (for CUDA graph captures); a
+    stream or capture that finds its kind all taken keeps both counters in
+    default memory.
 
     Parameters
     ----------

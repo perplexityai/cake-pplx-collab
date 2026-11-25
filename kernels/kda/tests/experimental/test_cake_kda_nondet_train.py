@@ -172,6 +172,23 @@ SEG_P_SMALL_BY_ARCH = {
     "sm_100a": 37
 }  # the few-chain count of the architectures with one of their own
 SEG_P_SMALL_MAX_NH = 4
+# The token-aware segment rule (the plans' default, given the pack's token count S): on its envelope (an SM count of
+# SEG_TOKEN_SM_COUNTS_BY_ARCH on its architecture, a head count of SEG_TOKEN_HEADS, the segmented route) a document
+# takes P_u = max(S // (SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG * N) + 1, SEG_TOKEN_MIN_UNIFORM_SEGMENTS,
+# ceil(S / SEG_TOKEN_MAX_SEGMENT_TOKENS)) segments where that is below the occupancy count above, except the packs of a
+# band of SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH ((heads, more than, fewer than tokens) on the architecture: GB300's and
+# VR200's 4-head packs of at most 4096 tokens, for accuracy, and VR200's 16-head packs of 8193 to 16383 tokens, for
+# memory); elsewhere, and without a token count (the registry's selection without num_tokens), the occupancy count
+# stays.
+SEG_TOKEN_SM_COUNTS_BY_ARCH = {"sm_100a": (148,), "sm_103a": (152,), "sm_107a": (212,)}
+SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH = {
+    "sm_103a": ((4, -1, 4097),),
+    "sm_107a": ((16, 8192, 16384), (4, -1, 4097)),
+}
+SEG_TOKEN_HEADS = (4, 8, 16)
+SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG = 384
+SEG_TOKEN_MIN_UNIFORM_SEGMENTS = 12
+SEG_TOKEN_MAX_SEGMENT_TOKENS = 1408
 # The two-level segment carry (seg_carry_v8): the segments of each document's chain in groups of g, the groups'
 # products formed in parallel and chained, the CTAs handing over through CARRY_FLAG_WORDS_PER_CTA release-flag
 # words each under a fresh epoch.  Dispatched on every architecture (CARRY_V8_ARCHES) at most CARRY_V8_MAX_H heads,
@@ -1156,14 +1173,26 @@ def test_registry_records_are_well_formed() -> None:
 
 
 def _expected_segments(
-    n: int, h: int, sm: int, arch: str | None = None
+    n: int, h: int, sm: int, arch: str | None = None, *, S: int | None = None
 ) -> tuple[str, int, int]:
+    """``(route, P, NSEG)`` of the problem: the occupancy rule, and given the pack's token count ``S`` (a plan's
+    default) the token-aware rule on its envelope (``arch=None`` has no entry)."""
     plan_heads = SEG_PLAN_HEADS_BY_ARCH.get(arch, ()) if arch is not None else ()
     if h <= SEG_MAX_H or h in plan_heads:
         p = min(SEG_P_MAX, max(1, -(-SEG_SLOT_FACTOR * sm // (n * h))))
         p = max(1, min(p, sm // h))  # one walk CTA per SM per document at most
         if n * h <= SEG_P_SMALL_MAX_NH:
             p = min(p, SEG_P_SMALL_BY_ARCH.get(arch, SEG_P_SMALL))
+        envelope = SEG_TOKEN_SM_COUNTS_BY_ARCH.get(arch, ()) if arch is not None else ()
+        bands = SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH.get(arch, ())
+        banded = S is not None and any(h == bh and lo < S < hi for bh, lo, hi in bands)
+        if S is not None and h in SEG_TOKEN_HEADS and sm in envelope and not banded:
+            p_u = max(
+                S // (SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG * n) + 1,
+                SEG_TOKEN_MIN_UNIFORM_SEGMENTS,
+                -(-S // SEG_TOKEN_MAX_SEGMENT_TOKENS),
+            )
+            p = min(p, p_u)
         return "seg", p, n * p
     return "serial", 1, 0
 
@@ -1178,11 +1207,13 @@ def _query_arch() -> str | None:
 
 
 def _expected_records(
-    nc_pad: int, n: int, h: int, sm: int, arch: str, path: str
+    nc_pad: int, n: int, h: int, sm: int, arch: str, path: str, *, S: int | None = None
 ) -> dict[str, str | None]:
     """The record of every stage of ``path`` on (``nc_pad``, ``n``, ``h``, ``sm``, ``arch``): the dispatch of the
-    kernels' composition, spelled independently of the registry's rules."""
-    route, _p, nseg = _expected_segments(n, h, sm, arch)
+    kernels' composition, spelled independently of the registry's rules.  ``S``: the pack's token count of a plan's
+    token-aware segment count (:func:`_expected_segments`); ``None`` for the occupancy count (the registry's
+    selection without ``num_tokens``)."""
+    route, _p, nseg = _expected_segments(n, h, sm, arch, S=S)
     seg = route == "seg"
     v2 = n * h * RECUR_SLICES["v2"] <= sm * RECUR_CTAS_PER_SM
     few = n * h <= FEW_CHAINS
@@ -1911,17 +1942,22 @@ def test_the_saving_forward_reads_the_token_rows_where_a_program_ships() -> None
     # The intra program writes the internal Aqk / Akk copies (write_int) iff a later program of the path reads them:
     # never on the saving forward's fused serial rows, overlap rows and paired serial rows (the 32-column form below
     # the fused threshold: their token-row records), always on the forward without a saved set and on the replay.
+    # The plans take the token-aware segment count of the pack on the rule's envelope (here 148 SMs of sm_100a and
+    # 212 of sm_107a), where a row the occupancy count puts on the overlap pair may run the plain pass 2 instead.
+    S = 4096
     for n in (1, 3, 4, 7, 300):
         for h in (1, 2, 4, 8, 16, 32, 64):
             for sm in (132, 148, 160, 212):
                 for arch in ARCHES:
-                    p = cake_backend.plan(4096, n, h, sm, arch)
-                    records = _expected_records(p.NC_pad, n, h, sm, arch, "fwd")
+                    p = cake_backend.plan(S, n, h, sm, arch)
+                    route, _p, nseg = _expected_segments(n, h, sm, arch, S=S)
+                    assert (p.recur, p.NSEG) == (route, nseg), (n, h, sm, arch)
+                    records = _expected_records(p.NC_pad, n, h, sm, arch, "fwd", S=S)
                     token = {
                         name for name in records.values() if name in TOKEN_ROW_RECORDS
                     }
-                    seg = _expected_segments(n, h, sm, arch)[0] == "seg"
-                    walk = p.NSEG * h
+                    seg = route == "seg"
+                    walk = nseg * h
                     fused = (
                         not seg
                         and h >= FUSED_FWD_MIN_H
@@ -3047,6 +3083,8 @@ def test_plan_without_arch_takes_the_current_device(monkeypatch) -> None:
 
 
 def test_plan_follows_the_chunk_bound_formulas() -> None:
+    # The plans take the token-aware segment count of the pack (S tokens) on the rule's envelope (here 148 SMs of
+    # sm_100a); the occupancy rule's plans of the same problems keep the occupancy count and its records.
     for lengths, heads in SHAPES:
         S, N = sum(lengths), len(lengths)
         for sm in (132, 148):
@@ -3058,7 +3096,17 @@ def test_plan_follows_the_chunk_bound_formulas() -> None:
                     nc_max + nc_max % 2,
                     64 * (nc_max + nc_max % 2),
                 )
-                assert (p.recur, p.P, p.NSEG) == _expected_segments(N, heads, sm, arch)
+                assert (p.recur, p.P, p.NSEG) == _expected_segments(
+                    N, heads, sm, arch, S=S
+                )
+                po = cake_backend.plan(S, N, heads, sm, arch, segment_rule="occupancy")
+                assert (po.recur, po.P, po.NSEG) == _expected_segments(
+                    N, heads, sm, arch
+                )
+                for path in po.records:
+                    assert po.records[path] == _expected_records(
+                        po.NC_pad, N, heads, sm, arch, path
+                    ), (path, lengths, heads, sm, arch)
                 seg = p.recur == "seg"
                 assert set(p.records) == {
                     path for path in PATHS if seg or path != "light_states"
@@ -3079,7 +3127,9 @@ def test_plan_follows_the_chunk_bound_formulas() -> None:
                     arch,
                 )
                 for path in p.records:
-                    expected = _expected_records(p.NC_pad, N, heads, sm, arch, path)
+                    expected = _expected_records(
+                        p.NC_pad, N, heads, sm, arch, path, S=S
+                    )
                     assert p.records[path] == expected, (path, lengths, heads, sm, arch)
                     for stage in cake_jit.STAGES:
                         if stage not in expected:
@@ -3447,15 +3497,22 @@ def test_seg_state_rule_is_a_pure_function_of_the_scalars() -> None:
     for nseg in (1, 64, 153, 256):
         assert rule(k * nseg, nseg) is True and rule(k * nseg - 1, nseg) is False
     assert rule(10**9, 0) is False  # the serial route has no segment states
-    # the sm_100a rule (a plan without an arch takes the current device's)
+    # the sm_100a rule (a plan without an arch takes the current device's): nseg is the occupancy count, which a
+    # plan takes independently of S off the token-aware rule's envelope; on it (three documents at 8 heads on 148
+    # SMs) a shorter pack takes fewer segments, while the size rule's boundary packs (k * nseg - 1 and k * nseg
+    # tokens) keep the occupancy count
     a0 = cake_jit.ARCHES[0]
     for n, h, sm in ((1, 1, 148), (4, 4, 152), (3, 8, 148), (4, 1, 152)):
-        nseg = cake_backend.plan(1, n, h, sm, a0).NSEG  # independent of S
-        assert (
-            nseg
-            == cake_backend.plan(k * nseg, n, h, sm, a0).NSEG
-            == _expected_segments(n, h, sm, a0)[2]
-        )
+        nseg = _expected_segments(n, h, sm, a0)[2]
+        short = cake_backend.plan(1, n, h, sm, a0)
+        assert short.NSEG == _expected_segments(n, h, sm, a0, S=1)[2]
+        for S in (k * nseg - 1, k * nseg):
+            assert (
+                nseg
+                == cake_backend.plan(S, n, h, sm, a0).NSEG
+                == cake_backend.plan(S, n, h, sm, a0, segment_rule="occupancy").NSEG
+                == _expected_segments(n, h, sm, a0, S=S)[2]
+            )
         assert cake_backend.plan(k * nseg, n, h, sm, a0).seg_save is True
         assert cake_backend.plan(k * nseg - 1, n, h, sm, a0).seg_save is False
     # the serial route
@@ -4136,9 +4193,9 @@ def test_lean_layouts_follow_the_byte_formulas() -> None:
 def test_lean_arena_serves_the_l2n_rows_with_their_dav_program() -> None:
     """In an in-kernel Q/K L2 norm mode every backward path launches a ``dav`` record of
     that mode (``dav_l2n*``: ``dAqk`` alone, which every lean layout holds whole), so a
-    lean arena serves every head count there, H 9-15 included (the rows the flag-off
-    test above refuses), in both gate modes, and ``arena_for_budget`` takes its lean
-    steps on those rows."""
+    lean arena serves every head count there (this test: 1 to 64), H 9-15 included (the
+    rows the flag-off test above refuses), in both gate modes, and ``arena_for_budget``
+    takes its lean steps on those rows."""
     modes = itertools.product(ARCHES, ("g", "raw"), ("fused", "fallback"))
     for arch, gate, l2n in modes:
         q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
@@ -9248,6 +9305,9 @@ PATH_ROWS = [
     ((65, 200), 32),
     ((63, 1, 65), 64),
     ((2048, 100, 513), 4),
+    # above 64 heads (issue #264): the serial walk on the records of 64 heads
+    ((63, 1, 65), 96),
+    ((63, 1, 65), 128),
 ]
 JUDGED_PATHS = (("light", None, False), ("tape", "tape", False), ("replay", None, True))
 
@@ -10406,7 +10466,9 @@ def test_raw_gate_saved_states_are_judged(
         _finite_arms(run(make_raw_inputs(lengths, heads, device), True), (S, heads))
 
 
-@pytest.mark.parametrize("shape", [((63, 1, 65), 2), ((129, 63), 16)], ids=_shape_id)
+@pytest.mark.parametrize(
+    "shape", [((63, 1, 65), 2), ((129, 63), 16), ((63, 1, 65), 96)], ids=_shape_id
+)
 def test_raw_gate_autograd_and_checkpoint_are_judged(
     device, manifest, monkeypatch, shape, record_property
 ) -> None:
@@ -10825,6 +10887,7 @@ RAW_BATCHED_ROWS = [
     ((20, 20, 20, 20, 20, 20, 20), 8),
     ((63, 1, 65), 64),
     ((129, 300), 16),
+    ((63, 1, 65), 96),
 ]
 
 

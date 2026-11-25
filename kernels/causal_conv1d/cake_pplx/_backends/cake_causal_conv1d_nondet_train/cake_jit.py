@@ -51,11 +51,14 @@ architecture and route has a row at each C = 512 to 1024.  For most C the first
 range starts at S = 1.  Where a key has no ``DIRECT_ROWS`` range (for example
 the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to
 24576), the static program runs over the key's range outside the ``PAIR_ROWS``
-range.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 have no ``DIRECT_ROWS``
-range: they run the pair direct program from S = 16 to 1536 and the static
-program from S = 13824 (C = 736: 14336).  Outside a row's range, and where an
-architecture, route and C have no row, a forward call runs the dynamic program,
-which takes ``work``, as in 0.2.4.  Inside the token range of a backward row of
+range.  From release 0.2.17, the sm_103a ``fwd_bias`` rows at C = 720 to 768
+run the pair direct program from S = 1 to 3072, the static program from
+S = 3073 to 12800 and from S = 13824 to 16383 (C = 736: from 14336; C = 768:
+to 16384) and the direct program from S = 12801 to 13823 (C = 736: to 14335):
+there a ``DIRECT_ROWS`` range lies inside the ``FALLBACK_ROWS`` range of its
+key and runs ahead of it.  Outside a row's range, and where an architecture,
+route and C have no row, a forward call runs the dynamic program, which takes
+``work``, as in 0.2.4.  Inside the token range of a backward row of
 ``DIRECT_ROWS`` (routes ``bwd``, ``bwd_dt`` and ``bwd_bias``; per architecture
 and route, channel ranges within C = 512 to 1024, each with its own token range
 within S = 1 to 4096) a backward call runs the route's direct backward program
@@ -5540,26 +5543,27 @@ def _admits(rule: dict[str, Any], *, arch: str, C: int, S: int | None = None) ->
 # S <= S_max`` tokens launches the fallback (:func:`selected_modules`).  A
 # backward key's fallback keeps the route's tiles (:func:`plan`); a forward
 # key's fallback is the route's static program on the route's plan.  The keys
-# of one ``(arch, route)`` are disjoint, and a forward key shares no ``(C, S)``
-# with a :data:`DIRECT_ROWS` range; a :data:`PAIR_ROWS` range runs ahead of a
-# forward key where it covers its ``(C, S)``.  Inside the range of a backward
-# key of :data:`DIRECT_ROWS` the route's direct program runs instead, so a
-# backward key's fallback runs outside that range.  Rendered from the kernel
-# generators' tables; every other channel count, route, ``S`` and architecture
-# selects by :data:`SM_WIDE_ROWS`, :data:`PAIR_ROWS`, :data:`DIRECT_ROWS` and
-# the rules.
+# of one ``(arch, route)`` are disjoint.  A forward key shares ``(C, S)``
+# with a :data:`DIRECT_ROWS` range only inside the range of its own key
+# (sm_103a ``fwd_bias`` at C = 720 to 768), and with a :data:`PAIR_ROWS` range
+# wherever that range covers it; both run ahead of it there.  Inside the range
+# of a backward key of :data:`DIRECT_ROWS` the route's direct program runs
+# instead, so a backward key's fallback runs outside that range.  Rendered
+# from the kernel generators' tables; every other channel count, route, ``S``
+# and architecture selects by :data:`SM_WIDE_ROWS`, :data:`PAIR_ROWS`,
+# :data:`DIRECT_ROWS` and the rules.
 FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
         ("bwd", 520, 608): (1, 24575),
         ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
-        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 520, 568): (1, 24576),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt", 520, 568): (1, 16384),
-        ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 1016): (1, 16384),
+        ("bwd_dt", 520, 568): (1, 32768),
+        ("bwd_dt", 576, 640): (1, 32768),
+        ("bwd_dt", 648, 1016): (1, 32768),
         ("fwd", 512, 512): (1, 24576),
         ("fwd", 520, 544): (1, 12288),
         ("fwd", 552, 568): (1, 8192),
@@ -5598,16 +5602,15 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd", 616, 760): (1, 31292),
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
-        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 520, 568): (1, 24576),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt", 520, 568): (1, 16384),
-        ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 1016): (1, 16384),
-        ("fwd", 512, 512): (1, 2048),
+        ("bwd_dt", 520, 568): (1, 32768),
+        ("bwd_dt", 576, 640): (1, 32768),
+        ("bwd_dt", 648, 760): (1, 32768),
+        ("bwd_dt", 768, 1016): (1, 16384),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
-        ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
@@ -5616,7 +5619,6 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd", 776, 824): (1, 4096),
         ("fwd", 832, 832): (1, 8192),
         ("fwd", 840, 896): (1, 4096),
-        ("fwd", 904, 952): (1, 2048),
         ("fwd", 960, 1024): (1, 24576),
         ("fwd_dt", 512, 512): (1, 20480),
         ("fwd_dt", 520, 568): (1, 8192),
@@ -5640,10 +5642,10 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
         ("fwd_bias", 712, 712): (1, 12800),
-        ("fwd_bias", 720, 728): (13824, 16383),
-        ("fwd_bias", 736, 736): (14336, 16383),
-        ("fwd_bias", 744, 760): (13824, 16383),
-        ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 720, 728): (1, 16383),
+        ("fwd_bias", 736, 736): (1, 16383),
+        ("fwd_bias", 744, 760): (1, 16383),
+        ("fwd_bias", 768, 768): (1, 16384),
         ("fwd_bias", 776, 896): (1, 8192),
         ("fwd_bias", 904, 952): (1, 12288),
         ("fwd_bias", 960, 1024): (1, 20480),
@@ -5656,7 +5658,6 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
-        ("fwd", 768, 768): (1, 2048),
         ("fwd", 776, 824): (1, 32768),
         ("fwd", 832, 832): (1, 4096),
         ("fwd", 840, 888): (1, 8192),
@@ -5699,7 +5700,9 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
     route ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of
     8), ``None`` without one: inside that token range (both bounds included)
     the call launches the route's fallback program, but where a
-    :data:`PAIR_ROWS` range holds a forward call."""
+    :data:`PAIR_ROWS` range holds a forward call or a :data:`DIRECT_ROWS` range
+    holds the call (a backward direct range, or a forward one inside the static
+    range of its key on sm_103a ``fwd_bias`` at C = 720 to 768)."""
 
     C = int(C)
     if C % CHANNEL_MULTIPLE:
@@ -5717,18 +5720,18 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
 # direct record (its ``select_rule`` of kind :data:`ROWS_KIND`, its geometry's
 # ``vec`` 8), on the architecture's direct tiles of the route
 # (:func:`direct_split`, :func:`plan`).  The keys of one ``(arch, route)`` are
-# disjoint.  The forward keys come first: they share no ``(C, S)`` with a
-# :data:`FALLBACK_ROWS` range (where a key has both, the static range of
-# :data:`FALLBACK_ROWS` ends where the direct range starts), and a
-# :data:`PAIR_ROWS` range runs ahead of a forward key where it covers its
-# ``(C, S)``.  Then, per architecture, the backward keys of the ``bwd``,
-# ``bwd_dt`` and ``bwd_bias`` routes (channel ranges within C = 512 to 1024,
-# each with its own token range within S = 1 to 4096): they share no ``(C,
-# S)`` with an :data:`SM_WIDE_ROWS` segment, and inside their range the direct
-# program runs ahead of :data:`FALLBACK_ROWS`, :data:`TILE_OVERRIDES`,
-# :data:`NARROW_TILES` and the rules.  Rendered from the forward and the direct
-# backward kernel generators' tables; outside a key's range the other tables
-# and the rules select.
+# disjoint.  The forward keys come first: a forward key meets the channel counts
+# of a :data:`FALLBACK_ROWS` key only where both are one key, and there its
+# range starts one token above the static range, or lies inside it (sm_103a
+# ``fwd_bias`` at C = 720 to 768) and runs ahead of it; a :data:`PAIR_ROWS`
+# range runs ahead of a forward key where it covers its ``(C, S)``.  Then, per
+# architecture, the backward keys of the ``bwd``, ``bwd_dt`` and ``bwd_bias``
+# routes (channel ranges within C = 512 to 1024, each with its own token range
+# within S = 1 to 4096): they share no ``(C, S)`` with an :data:`SM_WIDE_ROWS`
+# segment, and inside their range the direct program runs ahead of
+# :data:`FALLBACK_ROWS`, :data:`TILE_OVERRIDES`, :data:`NARROW_TILES` and the
+# rules.  Rendered from the forward and the direct backward kernel generators'
+# tables; outside a key's range the other tables and the rules select.
 DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
     "sm_100a": {
         ("fwd", 520, 544): (
@@ -5862,6 +5865,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("bwd", 512, 832): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 840, 888): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 896, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 616): (
@@ -5869,8 +5873,18 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 624, 632): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 640, 736): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 744, 760): (
+            128,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
@@ -5879,9 +5893,19 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 776, 792): (
+            128,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 800, 800): (
             1,
             2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 808, 824): (
+            128,
+            1000,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 832, 832): (
@@ -5889,14 +5913,29 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 840, 856): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 864, 864): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 872, 888): (
+            128,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 896, 896): (
             1,
             4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 904, 952): (
+            128,
+            1000,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 960, 1016): (
@@ -6076,12 +6115,33 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             14592,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
+        ("fwd_bias", 720, 728): (
+            12801,
+            13823,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 736, 736): (
+            12801,
+            14335,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 744, 760): (
+            12801,
+            13823,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 768, 768): (
+            12801,
+            13823,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 776, 896): (
             8193,
             16384,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("bwd", 512, 896): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 904, 952): (128, 1000, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 960, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 640): (
@@ -6089,8 +6149,18 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 648, 664): (
+            512,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 672, 672): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 680, 696): (
+            512,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
@@ -6099,14 +6169,29 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 776, 792): (
+            128,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 800, 832): (
             128,
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 840, 856): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 864, 896): (
             1,
             4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 904, 952): (
+            128,
+            2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 960, 1016): (
@@ -6443,51 +6528,65 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
 # on the architecture's pair tiles of the route (:data:`PAIR_PLANS`,
 # :func:`plan`).  The keys of one ``(arch, route)`` are disjoint in C: one key,
 # but two on sm_100a ``fwd_dt``, whose range ends at S 1024 from C 648 (at most
-# 512 CTAs of the pair grid).  A range may cover the ``(C, S)`` of
-# :data:`FALLBACK_ROWS` and :data:`DIRECT_ROWS` ranges and takes them: those
+# 512 CTAs of the pair grid), and three on sm_103a ``fwd_bias`` (C 720-768 up to
+# S 3072, the others up to S 1536) and sm_107a ``fwd`` (C 512 up to S 4096, C
+# 520-736 from S 4, the others up to S 2560).  A range may cover the ``(C, S)``
+# of :data:`FALLBACK_ROWS` and :data:`DIRECT_ROWS` ranges and takes them: those
 # tables decide only outside it.  The det package's table, under this package's
 # prefix.  Rendered from the forward kernel generator's table.
 PAIR_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
     "sm_100a": {
-        ("fwd", 512, 1024): (64, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 512, 1024): (1, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
         ("fwd_dt", 512, 640): (
-            64,
+            1,
             1536,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_dt", 648, 1024): (
-            64,
+            1,
             1024,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_bias", 512, 1024): (
-            128,
+            1,
             1536,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
     },
     "sm_103a": {
-        ("fwd", 512, 1024): (64, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 512, 1024): (1, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
         ("fwd_dt", 512, 1024): (
-            32,
+            1,
             1792,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
-        ("fwd_bias", 512, 1024): (
-            16,
+        ("fwd_bias", 512, 712): (
+            1,
+            1536,
+            "cake_causal_conv1d_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 720, 768): (
+            1,
+            3072,
+            "cake_causal_conv1d_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 776, 1024): (
+            1,
             1536,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
     },
     "sm_107a": {
-        ("fwd", 512, 1024): (64, 2560, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 512, 512): (1, 4096, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 520, 736): (4, 2560, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 744, 1024): (1, 2560, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
         ("fwd_dt", 512, 1024): (
-            16,
+            1,
             1792,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_bias", 512, 1024): (
-            16,
+            1,
             1792,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
@@ -6740,9 +6839,10 @@ def row_sides(arch: str, kind: str, C: int) -> tuple[tuple[int, int], ...]:
     the :data:`DIRECT_ROWS` range, one :data:`SM_WIDE_ROWS` segment, the :data:`FALLBACK_ROWS` range or the rules: the
     bounds of every segment of the key covering ``C`` and of the pair, direct and fallback ranges covering ``C`` cut
     the token axis (a pair range may lie across a direct or fallback range: its bounds cut that range; a backward
-    direct range cuts the fallback range of the same ``C``).  One range ``((0, sys.maxsize),)`` without a key.  Inside
-    a range :func:`selected_modules` picks one program and :func:`plan` one pair, direct or rule plan, but where a
-    token floor of the rules decides the program outside the tables (:func:`tokens_select`)."""
+    direct range, and a forward one inside the static range of its key, cut the fallback range of the same ``C``).
+    One range ``((0, sys.maxsize),)`` without a key.  Inside a range :func:`selected_modules` picks one program and
+    :func:`plan` one pair, direct or rule plan, but where a token floor of the rules decides the program outside the
+    tables (:func:`tokens_select`)."""
 
     ranges = [] if (bounds := fallback_row_range(arch, kind, C)) is None else [bounds]
     ranges += [] if (direct := direct_row_range(arch, kind, C)) is None else [direct]

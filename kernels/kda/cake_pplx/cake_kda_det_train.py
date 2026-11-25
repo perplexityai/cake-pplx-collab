@@ -30,7 +30,10 @@ natural-log decay gate, preactivated), ``beta`` BF16 ``[1, S, H]`` (through
 the sigmoid), ``cu_seqlens`` int32 ``[num_docs + 1]`` on the device.  The
 batch axis of 1 is optional; outputs take the rank of the inputs.  Gradients:
 ``dq, dk, dv, dbeta`` BF16, ``dg`` FP32.  Per-document zero initial state, no
-final state, ``scale = 128 ** -0.5`` by default, ``H`` in ``1..64``.
+final state, ``scale = 128 ** -0.5`` by default, ``H`` in ``1..128``
+(``R * H * 64 < 2**31`` over the padded rows ``R = 64 * NC_pad``, ``NC_pad``
+the even round-up of ``ceil(S / 64) + num_docs``: at ``H = 128`` one
+document of up to 261,952 tokens, at ``H = 96`` up to 349,376).
 
 Usage::
 

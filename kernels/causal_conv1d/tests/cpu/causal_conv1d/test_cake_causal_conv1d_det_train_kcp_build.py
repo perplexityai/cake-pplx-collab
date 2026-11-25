@@ -407,8 +407,8 @@ def test_two_launch_forward_programs() -> None:
     the direct and the pair direct program of the small-S rows) and the plan scalars (``kcp._fwd_main``), and launches
     the co-resident grid (no reserved SM; the direct and the pair direct program's capped at their token blocks), so
     the host can launch whichever record ``cake_jit.selected_modules`` picks for the call's ``C`` and token count: at
-    C = 576 the static program at 32 tokens, the pair direct program (two channels per thread) at 2000 tokens and the
-    direct program at 6003 tokens on every architecture."""
+    C = 640 the static program at 3103 tokens, at C = 576 the pair direct program (two channels per thread) at 2000
+    tokens and the direct program at 6003 tokens on every architecture."""
 
     kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
     assert kcp.KCP_FWD_HALO == "kcp_fwd_halo" and kcp.FWD_MAIN_ROUTE == "fwd"
@@ -440,15 +440,15 @@ def test_two_launch_forward_programs() -> None:
             (2048, 1),
             (8192, 32768),
             (10240, 32768),
-            (576, 32),
+            (640, 3103),
             (576, 2000),
             (576, 6003),
         ):
             (name,) = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)
             assert name in names, (arch, C, S)
-        # The small-S rows of C = 576: the static program (no rule) at 32 tokens, the
-        # pair direct program (two channels per thread) at 2000, the direct program at 6003.
-        static = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=576, S=32)[0]
+        # The small-S rows: the static program (no rule) at C = 640 and 3103 tokens; at
+        # C = 576 the pair direct program (two channels per thread) at 2000, the direct program at 6003.
+        static = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=640, S=3103)[0]
         assert cake_jit.select_rule(cake_jit.MODULES[static]) is None, (arch, static)
         rows = {"kind": cake_jit.ROWS_KIND}
         for S, vec in ((2000, 2), (6003, 8)):

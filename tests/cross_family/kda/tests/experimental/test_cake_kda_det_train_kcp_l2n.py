@@ -447,7 +447,9 @@ def _snapshot(kw: dict, H: int = 4) -> dict:
 # CUDA device: the byte queries plan for the first exported architecture) on the tree of the commit named under
 # ``"captured"`` with the rest of the capture's provenance (first taken on the base of the in-kernel L2 norm change,
 # retaken after the workspace byte queries began passing the context device's architecture, ``arch``, to the existing
-# backend's plan calls).
+# backend's plan calls, and again after the local plans began passing the occupancy segment rule,
+# ``segment_rule="occupancy"``, at the SM and head counts of the backend's token-aware rule, 148 SMs and 4 heads among
+# them: that capture is the base's with the keyword added to the 4-head calls and no other change).
 GOLDEN_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "test_cake_kda_det_train_kcp_l2n_golden.json",
@@ -2179,9 +2181,11 @@ def test_l2n_local_stage_values_cover_the_records(
     ctx = _cpu_ctx(sm=sm)
     T = int(ctx.T_r)
     assert T > 0
+    # the local problem's plans: the KCP's segment rule (occupancy)
     plans = {
         mode: cake_backend.plan(
-            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, **cake_kcp_plan.qk_l2norm_plan_kwargs(mode)
+            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
+            **cake_kcp_plan.qk_l2norm_plan_kwargs(mode),
         )
         for mode in ("off", form)
     }  # fmt: skip
@@ -2534,8 +2538,10 @@ def test_l2n_backward_rows_ride_in_the_arena(H, arch, sm, gate, form, kind) -> N
 
     def drive(ctx, mode: str, backward: bool = True):
         T = int(ctx.T_r)
+        # the local problem's plan: the KCP's segment rule (occupancy)
         plan = cake_backend.plan(
-            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, **cake_kcp_plan.qk_l2norm_plan_kwargs(mode)
+            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
+            **cake_kcp_plan.qk_l2norm_plan_kwargs(mode),
         )  # fmt: skip
         zeros = torch.zeros(T, H, D, dtype=torch.bfloat16)
         q_raw, k_raw, _ = _packed_qk(zeros, zeros)
@@ -2649,7 +2655,13 @@ def test_l2n_backward_rows_ride_in_the_arena(H, arch, sm, gate, form, kind) -> N
     )
     assert sum(allocs) - sum(allocs_off) == extra
     assert p.workspace_bytes("replay") == cake_backend.plan(
-        ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate
+        ctx.T_r,
+        ctx.n_frag,
+        H,
+        sm,
+        arch,
+        gate=gate,
+        segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
     ).workspace_bytes("replay")
     # nothing moves on a forward or where the rows exceed twice the tokens (one-token documents)
     fwd, _, _ = drive(ctx, form, backward=False)
@@ -2714,11 +2726,18 @@ def _skip_unless_runnable(W: int, *, gate: str | None = "g") -> None:
 
 
 def _l2n_inputs(
-    lengths, H: int, device, *, raw_gate: bool = False, seed: int | None = None
+    lengths,
+    H: int,
+    device,
+    *,
+    raw_gate: bool = False,
+    seed: int | None = None,
+    dt_bias_2d: bool = False,
 ) -> dict:
     """``make_inputs``' operands with raw q / k: its L2-normalized rows times ``2^e`` per (token, head), ``e`` uniform
     in ``[-6, 6]``, about 1/64 of the rows zero (rstd ``1 / sqrt(1e-6)``) or subnormal (the normalized row times
-    ``2^-126``).  ``raw_gate``: ``g`` is a raw BF16 gate with ``A_log`` FP32 ``[H]`` and ``dt_bias`` FP32 ``[H * 128]``."""
+    ``2^-126``).  ``raw_gate``: ``g`` is a raw BF16 gate with ``A_log`` FP32 ``[H]`` and ``dt_bias`` FP32 ``[H * 128]``
+    (``dt_bias_2d``: the same values as ``[H, 128]``)."""
     glob = make_inputs(lengths, H, device, seed=seed)
     S = int(glob["q"].shape[0])
     gen = torch.Generator(device="cpu")
@@ -2735,6 +2754,8 @@ def _l2n_inputs(
         glob["g"] = torch.randn(S, H, D, generator=gen).to(torch.bfloat16).to(device)
         glob["A_log"] = torch.log(torch.rand(H, generator=gen) + 1.0).to(device)
         glob["dt_bias"] = (torch.randn(H * D, generator=gen) * 0.5).to(device)
+        if dt_bias_2d:
+            glob["dt_bias"] = glob["dt_bias"].view(H, D)
     return glob
 
 
@@ -2829,6 +2850,31 @@ RAW_GATE_ROWS = [
     ((3000,), 4, 4, "ragged:1200,0,900,900"),
     ((4000, 1003), 4, 8, "ragged:1,0,999,1000,1000,1000,1,1002"),
 ]
+# Issue #264, the issue's mode above 64 heads: the raw gate (lower bound -5, ``A_log`` ``[H]``, ``dt_bias`` ``[H, 128]``)
+# with the in-kernel Q / K L2 norm, contiguous fragments: one document over every rank (boundaries inside chunks), and
+# documents that start and end inside a rank, a one-token document among them; at 96 heads over 4 and 8 ranks and at
+# 128 heads (the top of the range) over 4.  The rows of 64 ranks run only in a Slurm step of 64 tasks (one process per
+# task, ``WIDE_HEAD_SLURM``; a run of another size has no such rows, so they never show up as skips there).  The head
+# ownership of 96 heads over 64 ranks (two heads per owner, ranks that own no head) on one node, and a padded owner:
+# 6 heads over 4 ranks and 12 over 8 (two heads per owner, 3 / 6 owners, 1 / 2 ranks without heads), 5 over 4 and 9
+# over 8 (two heads per owner, the last owner holds one head padded to two tiles per slot, 1 / 3 ranks without heads).
+WIDE_HEAD_SLURM = {
+    64: [
+        ((4160,), 96, 64, "contiguous"),
+        ((1000, 1, 1500, 1659), 96, 64, "contiguous"),
+    ],
+}
+WIDE_HEAD_ROWS = [
+    ((3001,), 96, 4, "contiguous"),
+    ((700, 1, 1300, 999), 96, 4, "contiguous"),
+    ((4001,), 96, 8, "contiguous"),
+    ((700, 1, 1300, 999, 1000), 96, 8, "contiguous"),
+    ((3001,), 128, 4, "contiguous"),
+    ((3001,), 6, 4, "contiguous"),
+    ((700, 1, 1300, 999), 5, 4, "contiguous"),
+    ((4001,), 12, 8, "contiguous"),
+    ((700, 1, 1300, 999, 1000), 9, 8, "contiguous"),
+] + WIDE_HEAD_SLURM.get(int(os.environ.get("SLURM_NTASKS", "0") or 0), [])
 
 
 def _row_id(row) -> str:
@@ -2928,6 +2974,7 @@ def _run_rank(
     rdzv: str | None,
     result_dir: str | None,
     raw_gate: bool = False,
+    dt_bias_2d: bool = False,
 ) -> dict:
     """One rank: on the first draw the flag-on KCP passes (both forms) and their bitwise flags (run-to-run and the
     package's path equalities), the saved rstd, the flag-off comparison of the collectives and stages and the retained
@@ -2972,7 +3019,12 @@ def _run_rank(
         """Draw ``j``: the judged passes; on the first draw also the exact checks (``flags``, ``reported``,
         ``retained``, ``events``)."""
         glob = _l2n_inputs(
-            lengths, H, device, raw_gate=raw_gate, seed=draw_seed(L2N_SEED, j)
+            lengths,
+            H,
+            device,
+            raw_gate=raw_gate,
+            seed=draw_seed(L2N_SEED, j),
+            dt_bias_2d=dt_bias_2d,
         )
         judge.draw(j, glob)
         names = ("q", "k", "v", "g", "beta", "dout")
@@ -3260,18 +3312,31 @@ def _run_rank(
         report["naive"] = judge.result()
     if rank == 0 and result_dir:
         os.makedirs(result_dir, exist_ok=True)
-        prefix = "l2n-raw-" if raw_gate else "l2n-"
+        prefix = _result_prefix(raw_gate, dt_bias_2d)
         with open(os.path.join(result_dir, prefix + _row_id(row) + ".json"), "w") as fh:
             json.dump(report, fh, indent=1, default=str)
     gc.collect()
     return report
 
 
+def _result_prefix(raw_gate: bool, dt_bias_2d: bool = False) -> str:
+    """The prefix of a row's report file (rank 0's) in the result directory."""
+    if dt_bias_2d:
+        return "l2n-raw-2d-"
+    return "l2n-raw-" if raw_gate else "l2n-"
+
+
 def _spawn_entry(
-    rank: int, W: int, row, rdzv: str | None, result_dir: str, raw_gate: bool
+    rank: int,
+    W: int,
+    row,
+    rdzv: str | None,
+    result_dir: str,
+    raw_gate: bool,
+    dt_bias_2d: bool = False,
 ) -> None:
     try:
-        report = _run_rank(rank, W, row, rdzv, result_dir, raw_gate)
+        report = _run_rank(rank, W, row, rdzv, result_dir, raw_gate, dt_bias_2d)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
     finally:
@@ -3280,25 +3345,25 @@ def _spawn_entry(
             dist.destroy_process_group()
 
 
-def _drive(row, raw_gate: bool, record_property) -> None:
+def _drive(row, raw_gate: bool, record_property, dt_bias_2d: bool = False) -> None:
     """Run the row (one Slurm task, the pytest process at ``W = 1``, or spawned ranks), assert the gathered flags,
     then record and settle rank 0's verdicts (``report["naive"]``)."""
     lengths, H, W, layout = row
     gate = "raw" if raw_gate else "g"
-    prefix = "l2n-raw-" if raw_gate else "l2n-"
+    prefix = _result_prefix(raw_gate, dt_bias_2d)
     slurm = os.environ.get("SLURM_PROCID") is not None
     if slurm and int(os.environ.get("SLURM_NTASKS", "1")) == W and W > 1:
         _skip_unless_runnable(1, gate=gate)
         report = _run_rank(
             int(os.environ["SLURM_PROCID"]), W, row, None,
-            os.environ.get("KCP_TEST_RESULT_DIR"), raw_gate,
+            os.environ.get("KCP_TEST_RESULT_DIR"), raw_gate, dt_bias_2d,
         )  # fmt: skip
         _settle_row(record_property, report, lengths)
         return
     _skip_unless_runnable(W, gate=gate)
     if W == 1:
         report = _run_rank(
-            0, 1, row, None, os.environ.get("KCP_TEST_RESULT_DIR"), raw_gate
+            0, 1, row, None, os.environ.get("KCP_TEST_RESULT_DIR"), raw_gate, dt_bias_2d
         )
         _settle_row(record_property, report, lengths)
         return
@@ -3306,7 +3371,7 @@ def _drive(row, raw_gate: bool, record_property) -> None:
         result_dir = os.environ.get("KCP_TEST_RESULT_DIR") or tmp
         mp.start_processes(
             _spawn_entry,
-            args=(W, row, _rendezvous(tmp), result_dir, raw_gate),
+            args=(W, row, _rendezvous(tmp), result_dir, raw_gate, dt_bias_2d),
             nprocs=W,
             join=True,
             start_method="spawn",
@@ -3344,3 +3409,11 @@ def test_l2n_raw_gate_rows_match_single_rank_and_fp64(row, record_property) -> N
     cross-rank sums of ``dA_log`` / ``ddt_bias`` (reduced in rank order by
     ``cake_kda_det_train_kcp_reduce_gate_param_grads``, bitwise the same under every mode) judged."""
     _drive(row, raw_gate=True, record_property=record_property)
+
+
+@pytest.mark.parametrize("row", WIDE_HEAD_ROWS, ids=_row_id)
+def test_l2n_wide_head_rows_match_single_rank_and_fp64(row, record_property) -> None:
+    """Issue #264: the checks of :func:`test_l2n_raw_gate_rows_match_single_rank_and_fp64` at 96 and 128 heads with
+    ``dt_bias`` ``[H, 128]`` (its gradient judged in that shape), and on the head ownership rows (two heads per owner
+    with ranks that own no head, and a padded owner) over 4 and 8 ranks."""
+    _drive(row, raw_gate=True, record_property=record_property, dt_bias_2d=True)

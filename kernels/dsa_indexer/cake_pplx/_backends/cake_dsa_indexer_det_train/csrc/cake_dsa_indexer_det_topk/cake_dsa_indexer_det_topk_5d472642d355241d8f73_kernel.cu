@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -714,6 +714,8 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
             int half = warp_in_wg % 2;
             int pair_bar = 5 + wg * 2 + pair;
             int bid_i = (int)bid;
+            int blk_over[1];
+            blk_over[0] = 0;
             unsigned int one_u = 1;
             unsigned int lower_lanes = (one_u << (unsigned int)lane) - 1;
             int hist_base = (wg * 2 + pair) * 256;
@@ -848,18 +850,27 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
                             visible_pair = visible[0];
                         }
                         int blk_lim[2];
+                        long long blk_row[2];
                         int nb_q_0 = visible[0] + 7 >> 3;
                         blk_lim[0] = 0;
                         if (row_valid[0] != 0 && nb_q_0 > 2048) {
                             int _min_2 = ((nb_q_0 - 1) < (blk_cap) ? (nb_q_0 - 1) : (blk_cap));
                             blk_lim[0] = _min_2;
+                            if (nb_q_0 - 1 > blk_cap) {
+                                blk_over[0] = 1;
+                            }
                         }
+                        blk_row[0] = (long long)(bid_i * 6 + wg * 2) * (long long)blk_cap;
                         int nb_q_1 = visible[1] + 7 >> 3;
                         blk_lim[1] = 0;
                         if (row_valid[1] != 0 && nb_q_1 > 2048) {
                             int _min_3 = ((nb_q_1 - 1) < (blk_cap) ? (nb_q_1 - 1) : (blk_cap));
                             blk_lim[1] = _min_3;
+                            if (nb_q_1 - 1 > blk_cap) {
+                                blk_over[0] = 1;
+                            }
                         }
+                        blk_row[1] = (long long)(bid_i * 6 + wg * 2 + 1) * (long long)blk_cap;
                         #pragma unroll 1
                         for (int attempt_3 = 0; attempt_3 < 2; attempt_3++) {
                             int n_s = n_sample_1;
@@ -959,25 +970,8 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
                                 int above = ((key >= tau[0]) ? 1 : 0);
                                 int emit = row_valid[0] & in_prefix & above;
                                 emit2[0] = emit;
-                                if (blk_lim[0] > 0) {
-                                    unsigned int bk = (unsigned int)(key >> 32ull);
-                                    unsigned int _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, bk, 1);
-                                    unsigned int _max_5 = ((bk) > (_shfl_xor_sync_6) ? (bk) : (_shfl_xor_sync_6));
-                                    bk = _max_5;
-                                    unsigned int _shfl_xor_sync_8 = __shfl_xor_sync(0xFFFFFFFF, bk, 2);
-                                    unsigned int _max_7 = ((bk) > (_shfl_xor_sync_8) ? (bk) : (_shfl_xor_sync_8));
-                                    bk = _max_7;
-                                    unsigned int _shfl_xor_sync_10 = __shfl_xor_sync(0xFFFFFFFF, bk, 4);
-                                    unsigned int _max_9 = ((bk) > (_shfl_xor_sync_10) ? (bk) : (_shfl_xor_sync_10));
-                                    bk = _max_9;
-                                    int b_m = kid >> 3;
-                                    if ((lane_0 & 7) == 0 && b_m < blk_lim[0]) {
-                                        unsigned int bits_m = (((bk & sign_mask) != 0) ? bk ^ sign_mask : ~bk);
-                                        CandBlk[(long long)(bid_i * 6 + wg * 2) * (long long)blk_cap + (long long)b_m] = (long long)((unsigned long long)bits_m << 32ull | (unsigned long long)(unsigned int)b_m);
-                                    }
-                                }
-                                unsigned int _warp_vote_11 = __ballot_sync(0xFFFFFFFF, emit != 0);
-                                ballot2[0] = _warp_vote_11;
+                                unsigned int _warp_vote_5 = __ballot_sync(0xFFFFFFFF, emit != 0);
+                                ballot2[0] = _warp_vote_5;
                                 float2 sum0_0 = make_float2(0.0f, 0.0f);
                                 float2 sum1_0 = make_float2(0.0f, 0.0f);
                                 #pragma unroll
@@ -1005,21 +999,39 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
                                 int above_12 = ((key_10 >= tau[1]) ? 1 : 0);
                                 int emit_13 = row_valid[1] & in_prefix_11 & above_12;
                                 emit2[1] = emit_13;
-                                if (blk_lim[1] > 0) {
-                                    unsigned int bk_1 = (unsigned int)(key_10 >> 32ull);
-                                    unsigned int _shfl_xor_sync_13 = __shfl_xor_sync(0xFFFFFFFF, bk_1, 1);
-                                    unsigned int _max_12 = ((bk_1) > (_shfl_xor_sync_13) ? (bk_1) : (_shfl_xor_sync_13));
-                                    bk_1 = _max_12;
-                                    unsigned int _shfl_xor_sync_15 = __shfl_xor_sync(0xFFFFFFFF, bk_1, 2);
-                                    unsigned int _max_14 = ((bk_1) > (_shfl_xor_sync_15) ? (bk_1) : (_shfl_xor_sync_15));
-                                    bk_1 = _max_14;
-                                    unsigned int _shfl_xor_sync_17 = __shfl_xor_sync(0xFFFFFFFF, bk_1, 4);
-                                    unsigned int _max_16 = ((bk_1) > (_shfl_xor_sync_17) ? (bk_1) : (_shfl_xor_sync_17));
-                                    bk_1 = _max_16;
-                                    int b_m_1 = kid >> 3;
-                                    if ((lane_0 & 7) == 0 && b_m_1 < blk_lim[1]) {
-                                        unsigned int bits_m_1 = (((bk_1 & sign_mask) != 0) ? bk_1 ^ sign_mask : ~bk_1);
-                                        CandBlk[(long long)(bid_i * 6 + wg * 2 + 1) * (long long)blk_cap + (long long)b_m_1] = (long long)((unsigned long long)bits_m_1 << 32ull | (unsigned long long)(unsigned int)b_m_1);
+                                if (blk_lim[0] + blk_lim[1] > 0) {
+                                    unsigned int bk_a = (unsigned int)(key >> 32ull);
+                                    unsigned int bk_b = (unsigned int)(key_10 >> 32ull);
+                                    unsigned int _shfl_xor_sync_7 = __shfl_xor_sync(0xFFFFFFFF, bk_a, 1);
+                                    unsigned int _max_6 = ((bk_a) > (_shfl_xor_sync_7) ? (bk_a) : (_shfl_xor_sync_7));
+                                    bk_a = _max_6;
+                                    unsigned int _shfl_xor_sync_9 = __shfl_xor_sync(0xFFFFFFFF, bk_b, 1);
+                                    unsigned int _max_8 = ((bk_b) > (_shfl_xor_sync_9) ? (bk_b) : (_shfl_xor_sync_9));
+                                    bk_b = _max_8;
+                                    unsigned int _shfl_xor_sync_11 = __shfl_xor_sync(0xFFFFFFFF, bk_a, 2);
+                                    unsigned int _max_10 = ((bk_a) > (_shfl_xor_sync_11) ? (bk_a) : (_shfl_xor_sync_11));
+                                    bk_a = _max_10;
+                                    unsigned int _shfl_xor_sync_13 = __shfl_xor_sync(0xFFFFFFFF, bk_b, 2);
+                                    unsigned int _max_12 = ((bk_b) > (_shfl_xor_sync_13) ? (bk_b) : (_shfl_xor_sync_13));
+                                    bk_b = _max_12;
+                                    unsigned int _shfl_xor_sync_15 = __shfl_xor_sync(0xFFFFFFFF, bk_a, 4);
+                                    unsigned int _max_14 = ((bk_a) > (_shfl_xor_sync_15) ? (bk_a) : (_shfl_xor_sync_15));
+                                    bk_a = _max_14;
+                                    unsigned int _shfl_xor_sync_17 = __shfl_xor_sync(0xFFFFFFFF, bk_b, 4);
+                                    unsigned int _max_16 = ((bk_b) > (_shfl_xor_sync_17) ? (bk_b) : (_shfl_xor_sync_17));
+                                    bk_b = _max_16;
+                                    int b_m = kid >> 3;
+                                    if ((lane_0 & 7) == 0) {
+                                        if (b_m < blk_lim[0]) {
+                                            unsigned int bits_m = (((bk_a & sign_mask) != 0) ? bk_a ^ sign_mask : ~bk_a);
+                                            long long ent_m = (long long)((unsigned long long)bits_m << 32ull | (unsigned long long)(unsigned int)b_m);
+                                            CandBlk[blk_row[0] + (long long)b_m] = ent_m;
+                                        }
+                                        if (b_m < blk_lim[1]) {
+                                            unsigned int bits_m_1 = (((bk_b & sign_mask) != 0) ? bk_b ^ sign_mask : ~bk_b);
+                                            long long ent_m_1 = (long long)((unsigned long long)bits_m_1 << 32ull | (unsigned long long)(unsigned int)b_m);
+                                            CandBlk[blk_row[1] + (long long)b_m] = ent_m_1;
+                                        }
                                     }
                                 }
                                 unsigned int _warp_vote_18 = __ballot_sync(0xFFFFFFFF, emit_13 != 0);
@@ -1835,10 +1847,7 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
                                     }
                                     int nb_p = visible_pair + 7 >> 3;
                                     long long cb_row = (long long)row * 2048ll;
-                                    if (nb_p > 2048) {
-                                        if (nb_p - 1 > blk_cap) {
-                                            asm volatile("trap;" ::: "memory");
-                                        }
+                                    if (nb_p > 2048 && nb_p - 1 <= blk_cap) {
                                         int n_old = nb_p - 1;
                                         int slot_b = bid_i * 6 + slot_pair;
                                         long long blk_pair = (long long)slot_b * (long long)blk_cap;
@@ -2041,62 +2050,44 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
                                             }
                                         }
                                         int mid_c_1 = (n_old + 63) / 64 * 32;
-                                        int lo_c_1 = 0;
-                                        int hi_c = mid_c_1;
+                                        int n_c = mid_c_1;
+                                        int org_c = 0;
+                                        int dir_c = 1;
                                         int pos_c = 0;
                                         if (half != 0) {
-                                            lo_c_1 = mid_c_1;
-                                            hi_c = n_old;
-                                            #pragma unroll 1
-                                            for (int e0_5 = lo_c_1; e0_5 < hi_c; e0_5 += 256) {
-                                                #pragma unroll
-                                                for (int u_16 = 0; u_16 < 8; u_16++) {
-                                                    int keep_c_1 = 0;
-                                                    if (e0_5 + 32 * u_16 + lane_0 < hi_c) {
-                                                        unsigned long long ent_c_1 = (unsigned long long)(CandBlk + blk_pair)[e0_5 + 32 * u_16 + lane_0];
-                                                        unsigned int bits_c = (unsigned int)(ent_c_1 >> 32ull);
-                                                        unsigned int magnitude_8 = bits_c & 2147483647;
-                                                        unsigned int m_8 = ((magnitude_8 != 0) ? bits_c : zero_u);
-                                                        unsigned int key32_8 = (((m_8 & sign_mask) != 0) ? ~m_8 : m_8 | sign_mask);
-                                                        if (magnitude_8 > nan_floor) {
-                                                            key32_8 = zero_u;
-                                                        }
-                                                        unsigned long long key64_8 = (unsigned long long)key32_8 << 32ull | (unsigned long long)(unsigned int)(e0_5 + 32 * u_16 + lane_0);
-                                                        if (key64_8 >= edge_1) {
-                                                            keep_c_1 = 1;
-                                                        }
-                                                    }
-                                                    unsigned int _warp_vote_27 = __ballot_sync(0xFFFFFFFF, keep_c_1 != 0);
-                                                    pos_c += (int)(unsigned int)__popc(_warp_vote_27);
-                                                }
-                                            }
-                                            pos_c = 2047 - pos_c;
+                                            n_c = n_old - mid_c_1;
+                                            org_c = n_old - 1;
+                                            dir_c = -1;
+                                            pos_c = 2046;
                                         }
                                         #pragma unroll 1
-                                        for (int e0_6 = lo_c_1; e0_6 < hi_c; e0_6 += 256) {
+                                        for (int o0 = 0; o0 < n_c; o0 += 256) {
+                                            unsigned long long ent_c_1[8];
+                                            #pragma unroll
+                                            for (int u_16 = 0; u_16 < 8; u_16++) {
+                                                int _min_27 = ((o0 + 32 * u_16 + lane_0) < (n_c - 1) ? (o0 + 32 * u_16 + lane_0) : (n_c - 1));
+                                                ent_c_1[u_16] = (unsigned long long)(CandBlk + blk_pair)[org_c + dir_c * _min_27];
+                                            }
                                             #pragma unroll
                                             for (int u_17 = 0; u_17 < 8; u_17++) {
-                                                int e_w = e0_6 + 32 * u_17 + lane_0;
-                                                int keep_c_2 = 0;
-                                                if (e_w < hi_c) {
-                                                    unsigned long long ent_c_2 = (unsigned long long)(CandBlk + blk_pair)[e_w];
-                                                    unsigned int bits_c_1 = (unsigned int)(ent_c_2 >> 32ull);
-                                                    unsigned int magnitude_9 = bits_c_1 & 2147483647;
-                                                    unsigned int m_9 = ((magnitude_9 != 0) ? bits_c_1 : zero_u);
-                                                    unsigned int key32_9 = (((m_9 & sign_mask) != 0) ? ~m_9 : m_9 | sign_mask);
-                                                    if (magnitude_9 > nan_floor) {
-                                                        key32_9 = zero_u;
-                                                    }
-                                                    unsigned long long key64_9 = (unsigned long long)key32_9 << 32ull | (unsigned long long)(unsigned int)e_w;
-                                                    if (key64_9 >= edge_1) {
-                                                        keep_c_2 = 1;
-                                                    }
+                                                int e_w = org_c + dir_c * (o0 + 32 * u_17 + lane_0);
+                                                unsigned int bits_w = (unsigned int)(ent_c_1[u_17] >> 32ull);
+                                                unsigned int magnitude_8 = bits_w & 2147483647;
+                                                unsigned int m_8 = ((magnitude_8 != 0) ? bits_w : zero_u);
+                                                unsigned int key32_8 = (((m_8 & sign_mask) != 0) ? ~m_8 : m_8 | sign_mask);
+                                                if (magnitude_8 > nan_floor) {
+                                                    key32_8 = zero_u;
                                                 }
-                                                unsigned int vote_w = __ballot_sync(0xFFFFFFFF, keep_c_2 != 0);
-                                                if (keep_c_2 != 0) {
-                                                    CandBlocks[cb_row + (long long)(pos_c + (int)(unsigned int)__popc(vote_w & lower_lanes))] = e_w;
+                                                unsigned long long key64_8 = (unsigned long long)key32_8 << 32ull | (unsigned long long)(unsigned int)e_w;
+                                                int keep_w = 0;
+                                                if (o0 + 32 * u_17 + lane_0 < n_c && key64_8 >= edge_1) {
+                                                    keep_w = 1;
                                                 }
-                                                pos_c += (int)(unsigned int)__popc(vote_w);
+                                                unsigned int vote_w = __ballot_sync(0xFFFFFFFF, keep_w != 0);
+                                                if (keep_w != 0) {
+                                                    CandBlocks[cb_row + (long long)(pos_c + dir_c * (int)(unsigned int)__popc(vote_w & lower_lanes))] = e_w;
+                                                }
+                                                pos_c += dir_c * (int)(unsigned int)__popc(vote_w);
                                             }
                                         }
                                         if (half != 0) {
@@ -2104,7 +2095,7 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
                                                 CandBlocks[cb_row + 2047ll] = n_old;
                                             }
                                         }
-                                    } else {
+                                    } else if (nb_p <= 2048) {
                                         #pragma unroll 1
                                         for (int i_cb = half * 32 + lane_0; i_cb < 2048; i_cb += 64) {
                                             CandBlocks[cb_row + (long long)i_cb] = ((i_cb < nb_p) ? i_cb : -1);
@@ -2119,6 +2110,9 @@ kernel_cake_dsa_indexer_det_topk_5d472642d355241d8f73(const __grid_constant__ CU
                     }
                 }
                 unit_base += nb_3;
+            }
+            if (blk_over[0] != 0) {
+                asm volatile("trap;" ::: "memory");
             }
             asm volatile("barrier.sync 4, 384;" ::: "memory");
             if (warp == 0) {

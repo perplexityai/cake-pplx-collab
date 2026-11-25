@@ -443,15 +443,17 @@ def judge_single_rank(
     lower_bound: float,
     *,
     det: bool,
+    dt_bias_2d: bool = False,
 ):
     """Judge one single-rank case ``(lengths, H, gate, l2n, ckpt)`` of the autograd entry ``entry`` with
     :func:`judge_arms`: every output of :func:`cake_step`, and with ``ckpt`` the same step under
     ``torch.utils.checkpoint`` (arm ``ckpt``: outputs ``ckpt.<name>``).  ``det``: on the first draw the step runs twice
-    and every output must repeat bit for bit (the deterministic package's run-to-run contract).  Returns the judge."""
+    and every output must repeat bit for bit (the deterministic package's run-to-run contract).  ``dt_bias_2d``: the
+    raw gate's ``dt_bias`` is drawn ``[H, 128]`` (:func:`draw_case`).  Returns the judge."""
     lengths, H, gate, l2n, ckpt = case
 
     def draw(j, s):
-        inputs = draw_case(lengths, H, gate, l2n, s, device)
+        inputs = draw_case(lengths, H, gate, l2n, s, device, dt_bias_2d=dt_bias_2d)
         got = cake_step(entry, inputs, lower_bound, l2n)
         if det and j == 0:
             assert_bitwise(
