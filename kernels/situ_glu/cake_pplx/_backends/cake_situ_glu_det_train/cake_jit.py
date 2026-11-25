@@ -62,13 +62,13 @@ MANIFEST = "build.json"
 STAGES = ("fwd", "bwd")
 
 MODULES: dict[str, dict[str, Any]] = {
-    # The forward: h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb)), one row a CTA, four warps a row, three
-    # segments of 256 columns a warp per pass.
-    "cake_situ_glu_det_train_0d8b30c1317b470593ea": {
+    # The forward: h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb)), one row a CTA, four warps a row, one
+    # segment of 256 columns a warp per pass.
+    "cake_situ_glu_det_train_9b922273e948685fab2d": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "width"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "beta"], ["parameter", "lb"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_situ_glu_det_train_0d8b30c1317b470593ea",
+        "kernel_symbol": "kernel_cake_situ_glu_det_train_9b922273e948685fab2d",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -76,7 +76,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_situ_glu_det_train_0d8b30c1317b470593ea",
+        "library": "cake_situ_glu_det_train_9b922273e948685fab2d",
         "stage": "fwd",
     },
     # The backward: d_gate and d_up (BF16) from gate, up and dh, the activation recomputed, one row a CTA, four warps
