@@ -15,20 +15,22 @@ limitations under the License.
 
 Backend suite of the Cake deterministic SiTU-GLU training package (``cake_pplx._backends.cake_situ_glu_det_train``,
 the backend of ``cake_pplx.cake_situ_glu_det_train``): ``h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb))`` and
-its gradients ``d_gate`` and ``d_up``, at any width that is a multiple of 256, on SM100 and SM103.
+its gradients ``d_gate`` and ``d_up``, at any width that is a multiple of 256, on SM100, SM103 and SM107.
 
-Without a device: the registry (one program per stage, every record delivered for the two architectures and for no
+Without a device: the registry (one program per stage, every record delivered for the three architectures and for no
 other, the launch facts, the argument plans), the launch grid, the build manifest (every record's library, the
 recorded source digests), the capability map, the ``beta`` and ``lb`` keywords and their defaults, the refusal of CPU
 tensors and no environment read outside the JIT shim.
 
-On SM100 / SM103, every training output (``h``, ``d_gate`` and ``d_up``) judged against the naive BF16 tier
+On SM100 / SM103 / SM107, every training output (``h``, ``d_gate`` and ``d_up``) judged against the naive BF16 tier
 (``tests/cake/test_helpers/cake_naive.py``: the error against an FP64 oracle of the same inputs over 32 independent
 draws, in the L2 and the max norm, median and largest, beside the error of the same operation in BF16,
 :mod:`tests.cake.test_helpers.situ_glu_reference`) over row counts 1 to 4097, widths 256 to 33,792 (one segment,
 partial passes of the CTA's warps, both sides of a full pass, and the issue's widths), the merged, two-tensor, sliced
 and copied layouts, saturated, deep negative, small and wide values, zero gates and ups, every BF16 gate and scalars
-other than the model's.  The kernels have no row-count boundary: one program per stage, one CTA per block of rows.
+other than the model's; and ``d_gate`` and ``d_up`` over tiny gates or ups, one magnitude band a case, down to
+``2^-60 beta`` and ``2^-60 lb``.  The kernels have no row-count boundary: one program per stage, one CTA per block of
+rows.
 Beside the judge, exact facts of the contract (no tolerance): ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly (and
 ``d_up = 0`` at ``g = 0``, ``d_gate = 0`` at ``u = 0``); saturated inputs give finite outputs with the oracle's signs
 outside the flushed range; ``R = 0`` returns empty outputs and launches nothing; one library per stage serves every row
@@ -81,8 +83,8 @@ situ_glu = pkg.cake_situ_glu_det
 
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 STAGES = ("fwd", "bwd")
 # The kernel parameters of each stage, in launch order (the kernels' signatures).
 PARAMETERS = {
@@ -110,14 +112,16 @@ THREADS = 128
 # The smallest number that FP32 and BF16 hold as a normal number.
 MIN_NORMAL = 2.0**-126
 
+# The backward's outputs, the only ones the tiny-input cases judge.
+GRADS = ("d_gate", "d_up")
 # The judged cases: row counts 1 to 4097, widths 256 to 33792, every layout, the data kinds and other scalars.  A pass
-# of the forward's CTA covers 12 segments of 256 columns (3072 columns), one of the backward's 8 (2048 columns).
+# of the forward's CTA covers 12 segments of 256 columns (3072 columns), one of the backward's 4 (1024 columns).
 CASES = [
     Case(1),
     Case(2, 256),  # one segment: three warps of the CTA idle
     Case(5, 1280, "merged"),  # five segments: one pass of the CTA, partial
-    Case(33, 1792),  # just below one pass of the backward's CTA
-    Case(33, 2048, "merged"),  # one pass of the backward's CTA
+    Case(33, 1792),  # just below two passes of the backward's CTA
+    Case(33, 2048, "merged"),  # two passes of the backward's CTA
     Case(33, 2304),  # just above it
     Case(33, 2816, "merged"),  # just below one pass of the forward's CTA
     Case(33, 3328),  # just above it
@@ -138,6 +142,15 @@ CASES = [
     Case(257, 6144, data="saturated"),
     Case(257, data="deep_negative"),
     Case(257, data="small"),
+    # Tiny gates or ups, one band a case, for the backward: near where its two forms of beta (1 - E) meet (8), where
+    # 1 - E from E alone is off by percents (20), and deep in the FP32 range, where E rounds to 1 (60).  The forward
+    # takes 1 - E from E (its bound is in the package's README), so these cases judge d_gate and d_up only.
+    Case(65, data="tiny_gate", band=8, judged=GRADS),
+    Case(65, data="tiny_gate", band=20, judged=GRADS),
+    Case(65, layout="merged", data="tiny_gate", band=60, judged=GRADS),
+    Case(65, data="tiny_up", band=20, judged=GRADS),
+    Case(65, 6144, data="tiny_up", band=60, judged=GRADS),
+    Case(65, data="tiny_gate", band=20, beta=2.5, lb=10.0, judged=GRADS),
     Case(257, data="zero_gate"),
     Case(257, layout="merged", data="zero_up"),
     Case(22, data="all_gates"),  # 22 x 3072 >= 65536 gate patterns
@@ -302,7 +315,7 @@ def test_argument_plans_are_the_kernel_parameters() -> None:
 def test_grid_is_one_cta_per_block() -> None:
     """One CTA per block of rows on the x axis; at the largest row count a CTA's step over the rows stays in 32
     bits."""
-    assert cake_jit.ROWS_PER_CTA == {"fwd": 1, "bwd": 2}
+    assert cake_jit.ROWS_PER_CTA == {"fwd": 1, "bwd": 1}
     for stage in STAGES:
         per = cake_jit.ROWS_PER_CTA[stage]
         for rows in (1, 2, 3, 129, 4097, 16380, 262144, 1048576, cake_jit.MAX_ROWS):
@@ -319,27 +332,27 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
     for name, record in cake_jit.MODULES.items():
         for arch in ARCHES:
             assert pkg.library_name(name, arch) == f"{record['library']}_{arch}"
-        for arch in ("sm_90a", "sm_107a", "sm_110a", "sm_120a"):
+        for arch in ("sm_90a", "sm_110a", "sm_120a"):
             with pytest.raises(RuntimeError):
                 pkg.library_name(name, arch)
 
 
-def test_capabilities_map_to_the_two_architectures(monkeypatch) -> None:
-    """(10, 0) and (10, 3) map to ``sm_100a`` and ``sm_103a``; any other capability (SM107 included) is no target, and
-    a device of one is a ``RuntimeError`` naming the delivered architectures."""
+def test_capabilities_map_to_the_three_architectures(monkeypatch) -> None:
+    """(10, 0), (10, 3) and (10, 7) map to ``sm_100a``, ``sm_103a`` and ``sm_107a``; any other capability is no target,
+    and a device of one is a ``RuntimeError`` naming the delivered architectures."""
     assert tuple(pkg.ARCHES) == ARCHES
-    assert tuple(pkg.SUPPORTED_COMPUTE_CAPABILITIES) == ((10, 0), (10, 3))
+    assert tuple(pkg.SUPPORTED_COMPUTE_CAPABILITIES) == ((10, 0), (10, 3), (10, 7))
     assert pkg.WIDTH_MULTIPLE == 256
     for capability, arch in ARCH_BY_CAPABILITY.items():
         assert pkg.arch_for_capability(capability) == arch
-    for capability in ((9, 0), (10, 1), (10, 7), (11, 0), (12, 0), (12, 1)):
+    for capability in ((9, 0), (10, 1), (11, 0), (12, 0), (12, 1)):
         assert pkg.arch_for_capability(capability) is None, capability
-    for capability, want in (((10, 3), "sm_103a"), ((10, 7), None)):
+    for capability, want in (((10, 7), "sm_107a"), ((9, 0), None)):
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None, c=capability: c)
         pkg._arch_of_index.cache_clear()
         try:
             if want is None:
-                with pytest.raises(RuntimeError, match="sm_100a.*sm_103a"):
+                with pytest.raises(RuntimeError, match="sm_100a.*sm_103a.*sm_107a"):
                     pkg.device_arch(0)
             else:
                 assert pkg.device_arch(0) == want
@@ -493,7 +506,7 @@ def test_the_package_reads_no_environment_variable() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On SM100 / SM103: accuracy, judged against the naive BF16 tier
+# On SM100 / SM103 / SM107: accuracy, judged against the naive BF16 tier
 
 
 def test_the_records_load(device) -> None:
