@@ -1702,6 +1702,70 @@ def test_slab_sum_slots_form_only_the_tensors(monkeypatch):
     assert tuple(values["CNT"].shape) == (1,)
 
 
+def test_slot_values_bind_whole_tensors_of_a_one_chunk_plan():
+    """The per-call slots (``_slot_values``) of a chunk whose rows are all of a tensor bind that tensor itself, not a
+    view of all its rows (``_chunk_rows``): the row index and the gathered rows of the host gather, the logits GEMM's
+    ``A`` / ``C``, the dX GEMM's ``A`` / ``C`` and the weight-gradient GEMM's ``A`` of a one-chunk plan (compacted:
+    ``x_c``; uncompacted: ``X``); a plan of three chunks binds views of each chunk's rows.  Every slot binds what
+    ``stage_values`` binds (``_check_slot_values`` passes for every key of the forward and backward sequences)."""
+    inp = _host_inputs(37)
+    seen = set()
+    for compact in (True, False):
+        for chunk in (64, 16):
+            runner = cake_backend.prepare_lm_head_loss(
+                inp.X,
+                inp.W,
+                inp.labels,
+                entry="logprob",
+                dlogp=inp.dlogp,
+                chunk_size=chunk,
+                backend="reference",
+                compact_rows=compact,
+            )
+            plan, t = runner.plan, runner.tensors
+            want_chunks = 1 if chunk == 64 else 3
+            assert plan.compact == compact and plan.num_chunks == want_chunks
+            for key in runner.forward_order + runner.backward_order:
+                stage, index = key
+                if isinstance(index, str):  # the casts ("dx" / "dw") bind no chunk rows
+                    continue
+                row0, rows_c = plan.chunks[index]
+                gemm = stage in cake_backend.GEMM_STAGES
+                base = cake_backend.base_stage(stage) if gemm else stage
+                rows_of = {}  # slot -> (the tensor whose rows it binds, the first row)
+                if stage == "gather_rows":
+                    rows_of = dict(idx=("row_index", row0), out=("x_c", 0))
+                elif base in cake_backend.LOGITS_BASES:
+                    x_rows = ("x_c", 0) if compact else ("X", row0)
+                    rows_of = dict(A=x_rows, C=("logits", 0))
+                elif base in cake_backend.DX_BASES:
+                    rows_of = dict(A=("logits", 0), C=("dx_acc", row0))
+                elif base == "gemm_dw_acc" or base in cake_backend.DW_CAST_STAGES:
+                    rows_of = dict(A=("logits", 0))
+                else:
+                    continue
+                v = cake_backend._slot_values(stage, t, plan, index)
+                names = [n for n, a in v.items() if isinstance(a, torch.Tensor)]
+                cake_backend._check_slot_values(key, t, plan, names)
+                for slot, (name, first) in rows_of.items():
+                    whole = first == 0 and rows_c == t[name].shape[0]
+                    assert (v[slot] is t[name]) is whole, (compact, chunk, key, slot)
+                    if whole:
+                        seen.add((compact, base, slot))
+                    else:
+                        assert v[slot].shape[0] == rows_c, (compact, chunk, key, slot)
+    # a one-chunk plan binds the whole tensors on every slot named above
+    assert {
+        (True, "gather_rows", "idx"),
+        (True, "gather_rows", "out"),
+        (True, "gemm_logits", "A"),
+        (True, "gemm_logits", "C"),
+        (False, "gemm_logits", "A"),
+        (False, "gemm_logits", "C"),
+    } <= seen, seen
+    assert {(c, "gemm_dx", s) for c in (True, False) for s in ("A", "C")} <= seen, seen
+
+
 def test_reference_slab_sum_folds_the_label_residual():
     """The reference slab sums' fold (``lr = 1``): after the slabs' sum (or, with ``n_slabs`` 0, the rows as they are),
     each row whose label lies in ``[0, V)`` and whose residual is nonzero gets ``A + r * f32(W[y])``; an ignored row, a

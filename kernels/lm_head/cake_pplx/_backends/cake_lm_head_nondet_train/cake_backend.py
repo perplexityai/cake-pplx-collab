@@ -6705,6 +6705,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     """The tensor host values of :func:`stage_values` for chunk ``index`` -- the views a remembered launch slots in per
     call (:meth:`_Launch.arguments_for`) and the operands of the ``gather_rows`` host step -- without the scalars and
     the plan checks, which the binding fixed when it was prepared.  Any other host stage gets :func:`stage_values`.
+    The rows of a chunk that covers a whole tensor (the row index, the gathered rows, the chunk buffer, ``X`` and
+    ``dX_acc`` of a one-chunk plan) are that tensor itself (:func:`_chunk_rows`), not a view of all its rows.
     :meth:`_Binding.from_runner` checks every remembered launch against :func:`stage_values` once."""
     p = plan.problem
     if stage == RLAB_ZERO_STAGE:
@@ -6716,7 +6718,9 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             return values
         row0, rows_c = plan.chunks[index]
         values.update(
-            src=t["X"], idx=t["row_index"][row0 : row0 + rows_c], out=t["x_c"][:rows_c]
+            src=t["X"],
+            idx=_chunk_rows(t["row_index"], row0, row0 + rows_c),
+            out=_chunk_rows(t["x_c"], 0, rows_c),
         )
         return values
     if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
@@ -6735,14 +6739,18 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     base = base_stage(stage) if stage in GEMM_STAGES else stage
     logits = t["logits"]
     if base in LOGITS_BASES or base == "gemm_dw_acc" or base in DW_CAST_STAGES:
-        x_chunk = t["x_c"][:rows_c] if plan.compact else t["X"][row0:stop]
+        x_chunk = (
+            _chunk_rows(t["x_c"], 0, rows_c)
+            if plan.compact
+            else _chunk_rows(t["X"], row0, stop)
+        )
         if t.get("x_last") is not None and index == plan.num_chunks - 1:
             x_chunk = t["x_last"]
     if base in LOGITS_BASES:
         values.update(
             A=x_chunk,
             B=t["W"],
-            C=logits[:rows_c],
+            C=_chunk_rows(logits, 0, rows_c),
             STATS_OUT=t["stats"],
             WS=t["f32_dummy"],
         )
@@ -6756,12 +6764,14 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
         _dx_slab_sum_slots(stage, t, plan, index, values)
     elif base == "gemm_dw_acc":
         lc = parse_stage(stage)[1]["live_cast"]
-        values.update(A=logits[:rows_c], B=x_chunk, **_dw_acc_operands(t, p, lc))
+        values.update(
+            A=_chunk_rows(logits, 0, rows_c), B=x_chunk, **_dw_acc_operands(t, p, lc)
+        )
         if lc:
             values.update(CNT_NEXT=t["dcnt"][index + 1 : index + 2])
     elif base in DW_CAST_STAGES:
         values.update(
-            A=logits[:rows_c],
+            A=_chunk_rows(logits, 0, rows_c),
             B=x_chunk,
             C=t["dw_out"],
             STATS_OUT=t["grad_scale"] if p.entry == "loss" else t["unit_scale"],
@@ -7204,12 +7214,13 @@ def _dx_slots(
     stage: str, t: dict[str, Any], plan: Plan, index: int, values: dict[str, Any]
 ) -> None:
     """:func:`_slot_values` of the dX GEMM ``stage`` of chunk ``index`` (the per-call tensor views of a remembered
-    launch), added to ``values`` in place."""
+    launch), added to ``values`` in place; the rows of a chunk that covers a whole tensor are that tensor
+    (:func:`_chunk_rows`)."""
     row0, rows_c = plan.chunks[index]
     values.update(
-        A=t["logits"][:rows_c],
+        A=_chunk_rows(t["logits"], 0, rows_c),
         B=t["W"],
-        C=t["dx_acc"][row0 : row0 + rows_c],
+        C=_chunk_rows(t["dx_acc"], row0, row0 + rows_c),
     )
     if base_stage(stage) == DX_RED_STAGE:
         p, k = plan.problem, plan.dx_slices_of(index)
