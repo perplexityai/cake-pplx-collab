@@ -52,7 +52,8 @@ OLD = {"upload": "blocking", "table_cache": "workspace"}
 CU = (0, 300, 1024, 1500)  # one rank, three documents (boundaries inside chunks)
 # the call rows: a row whose plan splits the token axis (P > 1) and one whose plan does not (P = 1).  P depends on the
 # device's SM count, so each class takes the first (documents, H) of its search range whose plan on the device is of
-# that class (_row_of); the kernels take 1..64 heads.  A class no candidate reaches skips, naming the range searched.
+# that class (_row_of); the candidates keep to 64 heads or fewer (the kernels take 1..128).  A class no candidate
+# reaches skips, naming the range searched.
 ROW_CUS = (
     CU,  # three documents, 1500 tokens (the row of the other tests)
     tuple(range(0, 2401, 300)),  # eight documents of 300 tokens (occupancy rule)

@@ -18,27 +18,66 @@ Single-GPU BF16 MoK kernel checks: contracts, determinism and the host tables.
 Covers the fused forward/backward (ring replay, empty experts, variable widths, CUDA Graph replay), clamped SwiGLU,
 FP32 weight-gradient accumulation, 36 and 9 local experts at top-8, context-only recompute, the context-free forward,
 every exported scheduler layout and the epilogues, plus the host-only communication-split tables, resolvers and
-configuration switches.  Every kernel output is checked against its contract (finite; exact integer and table
-outputs; documented bitwise route forms such as recompute == saved context and graph replay == eager launch) and
-for run-to-run repeatability (five launches on the same inputs give the same bytes).  The accuracy of every
-floating output against the float64 oracle is judged in ``test_mok_accuracy.py``.
+configuration switches.  The router weight before the down projection (``router_weight_position="before_down"``):
+its launchers' arguments against the registry, its refusals before device work and its targets (no GPU: every target
+has its builds), and on SM100a, SM103a and SM107a its fused training at top-2 and top-6 (6 to 96 local experts; also
+with another communication-SM split), zero weights, recompute and the context-free forward, the exact limit, the
+384-expert scheduler layouts, and the scheduler and the adapter at the requested worst-case schedule capacity (the
+routed weight gradients from ring rows past 2^31 bytes exactly).
+The explicit modes (``router_weight_gradient``, ``shared_expert``, ``activation``): their refusals before device work
+and their launchers' arguments against the registry (no GPU), and on SM100a and SM103a the 512-expert top-10 group
+(``MODE_GROUPS["scaled_top10"]``) on inputs drawn on the CPU: the shared-scale helpers (``BF16(s * v)`` bit for bit, the
+row dots repeatable at any grid size), the scaled epilogues (the exact backward sum, ``s = 1`` against the top-8
+epilogues), the direct-gradient backward against the quotient one (every shared output and the routed down-projection
+weight gradient bit for bit, zero weights, the shared-scale operands at ``s = 1`` and ``s = 0``), and the adapter at
+EP8 ``(8, 64)`` emulated on one GPU (nine backward items, checkpointed step, CUDA Graph, where ``s`` enters, changing
+source counts without kernel loads, no host synchronization in a steady-state step, ``torch.utils.checkpoint`` with
+``use_reentrant=False``).
+Every kernel output is checked against its contract (finite; exact integer and table outputs; documented bitwise
+route forms such as recompute == saved context and graph replay == eager launch) and for run-to-run repeatability
+(five launches on the same inputs give the same bytes).  The accuracy of every floating output against the float64
+oracle is judged in ``test_mok_accuracy.py``.
 
 Backend suite: the package is imported only through
 :func:`tests.cake.test_helpers.cake_package.cake_package`; the :mod:`cake_pplx.cake_mok_det_train`
 facade is covered by ``test_cake_mok_det_train_api.py``.
 """
 
+import contextlib
+import dataclasses
+
 import pytest
 import torch
 
-from tests.experimental._mok_reference import require_gpu, single_rank_schedule
+from tests.experimental._mok_one_gpu import (
+    CHANGED_COUNTS,
+    OneGpuGroup,
+    bound_multiplier,
+    one_gpu_source_workspace,
+    one_gpu_workspace,
+    one_rank_ids,
+    one_rank_multiplier,
+    two_rank_skew_ids,
+)
+from tests.experimental._mok_reference import (
+    normal_,
+    production_inputs,
+    rand,
+    randint,
+    randn,
+    randn_like,
+    require_gpu,
+    single_rank_schedule,
+    uniform_,
+)
 from tests.cake.test_helpers.cake_package import cake_package
 
 kernels = cake_package("cake_mok_bf16", "_kernels")
 api = cake_package("cake_mok_bf16", "api")
 backend = cake_package("cake_mok_bf16", "backend")
 jit = cake_package("cake_mok_bf16", "jit")
-MoKConfig = cake_package("cake_mok_bf16", "workspace").MoKConfig
+workspace_module = cake_package("cake_mok_bf16", "workspace")
+MoKConfig = workspace_module.MoKConfig
 SCHEDULER_LAYOUTS = kernels.SCHEDULER_LAYOUTS
 MoKBackward = kernels.MoKBackward
 MoKEpilogues = kernels.MoKEpilogues
@@ -54,6 +93,33 @@ REPEATS = 5
 
 def _same(a, b):
     return all(torch.equal(x, y) for x, y in zip(a, b, strict=True))
+
+
+def _require_role(role):
+    """Skip a role of :data:`BEFORE_DOWN_ROLES` (the router-weight-before-down kernels, top-k 6 and the 384-expert
+    scheduler layouts: builds for the targets of ``BEFORE_DOWN_TARGETS``) or of :data:`MODE_GROUP_ROLES` (SM100a and
+    SM103a) on a device whose target has no build of it; a group role absent from the registry skips too, and
+    :func:`test_mode_group_roles_are_registry_records` fails for it.  Every other role is built for every target
+    (:func:`test_before_down_roles_are_registry_records`), so a missing build fails at load instead of skipping."""
+    require_gpu()
+    arch = jit.target_arch()
+    if role in MODE_GROUP_ROLES and role not in jit._registry():
+        pytest.skip(f"{role} is not in this package's registry")
+    if (
+        role in BEFORE_DOWN_ROLES or role in MODE_GROUP_ROLES
+    ) and arch not in jit._registry()[role]["arches"]:
+        pytest.skip(f"{role} has no {arch} build")
+
+
+def _scheduler_topk(ep, experts):
+    """The top-k a layout's scheduler tests route with: 6 on the 384-expert layouts, the group's top-k on the layouts of
+    a :data:`MODE_GROUPS` group (10 on the 512-expert layouts), else 2 on the diagnostic layouts and 8."""
+    if (ep, experts) in kernels.SCHEDULER_LAYOUTS_384:
+        return 6
+    for group in kernels.MODE_GROUPS.values():
+        if (ep, experts) in group.layouts:
+            return group.topk
+    return 2 if experts * ep <= 16 else 8
 
 
 def _check_fused_training(
@@ -79,20 +145,19 @@ def _check_fused_training(
         for hidden, intermediate, macro in geometries:
             torch.manual_seed(9173 + hidden)
             options = dict(device="cuda", dtype=torch.bfloat16)
-            x = torch.randn(tokens, hidden, **options) * 0.125
-            dy = torch.randn_like(x) * 0.125
+            x = randn(tokens, hidden, **options) * 0.125
+            dy = randn_like(x) * 0.125
             shared = [
-                torch.randn(intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+                randn(intermediate, hidden, **options) / hidden**0.5,
+                randn(intermediate, hidden, **options) / hidden**0.5,
+                randn(hidden, intermediate, **options) / intermediate**0.5,
             ]
             routed = [
-                torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(experts, hidden, intermediate, **options)
-                / intermediate**0.5,
+                randn(experts, intermediate, hidden, **options) / hidden**0.5,
+                randn(experts, intermediate, hidden, **options) / hidden**0.5,
+                randn(experts, hidden, intermediate, **options) / intermediate**0.5,
             ]
-            scores = torch.rand(tokens, topk, device="cuda") + 0.1
+            scores = rand(tokens, topk, device="cuda") + 0.1
             scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
             row = torch.arange(tokens, device="cuda")
             routes = torch.stack(
@@ -107,8 +172,7 @@ def _check_fused_training(
             accumulators = initial = None
             if fp32_wgrad:
                 initial = [
-                    torch.randn(w.shape, device="cuda") * 0.01
-                    for w in (*shared, *routed)
+                    randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)
                 ]
                 accumulators = [value.clone() for value in initial]
 
@@ -164,9 +228,9 @@ def _check_fused_training(
             replay()
             assert torch.count_nonzero(ds_peer).item() == 0
             for _ in range(2):
-                x.normal_(std=0.125)
-                dy.normal_(std=0.125)
-                scores.uniform_(0.1, 1.0)
+                normal_(x, std=0.125)
+                normal_(dy, std=0.125)
+                uniform_(scores, 0.1, 1.0)
                 scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
                 assert _same(replay(), outputs(sequence()))
             records.append(dict(empty=empty, hidden=hidden, macro=macro, routed=actual))
@@ -231,19 +295,19 @@ def test_recompute_context(swiglu_limit, macro):
     )
     torch.manual_seed(4111)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options) * 0.125
-    dy = torch.randn_like(x) * 0.125
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
     s = single_rank_schedule(routes, experts)
@@ -301,19 +365,19 @@ def test_context_free_forward(swiglu_limit, macro):
     )
     torch.manual_seed(4127)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options) * 0.125
-    dy = torch.randn_like(x) * 0.125
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
     s = single_rank_schedule(routes, experts)
@@ -405,12 +469,13 @@ def test_context_free_forward_arguments_are_checked_before_device_work(monkeypat
 @pytest.mark.parametrize("ep,experts", SCHEDULER_LAYOUTS)
 def test_scheduler(ep, experts):
     require_gpu()
-    topk = 2 if experts * ep <= 16 else 8
+    _require_role(f"count_{ep}_{experts}")
+    topk = _scheduler_topk(ep, experts)
     scheduler = MoKScheduler(ep, experts)
     tokens = 512
     generator = torch.Generator(device="cuda").manual_seed(1107)
     ids = (
-        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -453,6 +518,164 @@ def test_scheduler(ep, experts):
         scheduler.owner_loads()
 
 
+@pytest.mark.parametrize("ep,experts", SCHEDULER_LAYOUTS)
+def test_planned_scheduler_matches_the_unplanned_launches(ep, experts):
+    """The scheduler's plan (one int32 buffer per schedule whose sentinel and counters one template copy writes) gives
+    the unplanned launches' schedule bit for bit, twice from one plan: peer ranks, the peer token of every real row,
+    the row count, the padded counts, the owner-rank bins and the written layout prefix.  Every view lies in one
+    allocation, the counters keep the zero slab's alignment and the layout starts 512-B aligned."""
+    require_gpu()
+    _require_role(f"count_{ep}_{experts}")
+    topk = _scheduler_topk(ep, experts)
+    scheduler = MoKScheduler(ep, experts)
+    tokens = 512
+    generator = torch.Generator(device="cuda").manual_seed(2211)
+    ids = (
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        .argsort(-1)[:, :topk]
+        .int()
+        .reshape(ep, tokens, topk)
+        .contiguous()
+    )
+    ids[0, tokens - 37 :] = -1
+    capacity = ep * tokens * topk + experts * 256
+    for rank in sorted({0, ep - 1}):
+        peers, slots, total, counts = scheduler(ids, capacity, rank)
+        owner = scheduler.owner_loads().clone()
+        layout = scheduler.layout(counts, capacity, peers)
+        scheduler.release_counts()
+        written = 3 * experts + int(total.item()) // 256
+        real = peers >= 0
+        plan = scheduler.plan(ids, capacity, rank)
+        for _ in range(2):
+            with kernels._ffi_stream():
+                planned = scheduler.launch_planned(plan)
+                planned_owner = scheduler.owner_loads().clone()
+                scheduler.layout_planned(plan, planned[3], planned[0], planned[4])
+            scheduler.release_counts()
+            p_peers, p_slots, p_total, p_counts, p_layout = planned
+            assert torch.equal(p_peers, peers) and torch.equal(p_total, total)
+            assert torch.equal(p_counts, counts) and torch.equal(planned_owner, owner)
+            assert torch.equal(p_slots[real], slots[real])
+            assert torch.equal(p_layout[:written], layout[:written])
+            base = p_peers.untyped_storage().data_ptr()
+            assert all(view.untyped_storage().data_ptr() == base for view in planned)
+            assert p_total.data_ptr() % 128 == 0 and p_counts.data_ptr() == p_total.data_ptr() + 4
+            assert p_layout.data_ptr() % 512 == 0 and p_layout.numel() == 3 * experts + capacity // 256
+
+
+def _schedule_fields(schedule, experts):
+    """The defined fields of a schedule: peer ranks, the peer token of every real row, the row count, the padded
+    counts and the written layout prefix."""
+    written = 3 * experts + int(schedule.num_tokens.item()) // 256
+    real = schedule.peer_rank >= 0
+    return (
+        schedule.peer_rank,
+        schedule.peer_token_idx[real],
+        schedule.num_tokens,
+        schedule.tokens_per_expert,
+        schedule.layout[:written],
+    )
+
+
+@pytest.mark.parametrize("count", [1024, 777], ids=["full", "partial"])
+def test_build_schedule_plan_matches_the_unplanned_launches(count):
+    """``build_schedule`` through the workspace's schedule plan gives the unplanned launches' schedule bit for bit on
+    full and partial source counts (one-GPU emulation of rank 0 of EP 4, :class:`OneGpuGroup`), and builds the plan
+    once per workspace and adapter.  A workspace's first ``build_schedule`` during CUDA Graph capture runs the
+    unplanned launches and builds no plan; its replay gives the same schedule."""
+    require_gpu()
+    ep, experts, topk, hidden = 4, 4, 2, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
+    generator = torch.Generator(device=device).manual_seed(3307 + count)
+    ids = (
+        rand(count, ep * experts, device=device, generator=generator)
+        .argsort(-1)[:, :topk]
+        .contiguous()
+    )
+
+    def fields(schedule):
+        return _schedule_fields(schedule, experts)
+
+    workspace, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    key = ("schedule", functional.scheduler, functional.communication)
+    planned = [
+        fields(functional.build_schedule(workspace, config, ids, num_local_experts=experts))
+        for _ in range(2)
+    ]
+    plan = workspace.storage.launch_plans[key]
+    assert len([k for k in workspace.storage.launch_plans if k[0] == "schedule"]) == 1
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
+        workspace.storage, config, ids, count
+    )
+    unplanned = fields(
+        workspace_module.MoKSchedule(
+            peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=counts, layout=layout
+        )
+    )
+    assert _same(planned[0], unplanned) and _same(planned[1], unplanned)
+    assert workspace.storage.launch_plans[key] is plan
+
+    fresh, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = functional.build_schedule(fresh, config, ids, num_local_experts=experts)
+    assert key not in fresh.storage.launch_plans
+    graph.replay()
+    torch.cuda.synchronize()
+    assert _same(fields(captured), unplanned)
+
+
+def test_build_schedule_plan_built_under_inference_mode():
+    """A workspace's first ``build_schedule`` under ``torch.inference_mode()`` builds the schedule plan with normal
+    tensors, so the next ``build_schedule`` outside inference mode can overwrite the plan's route buffer, and a third
+    one inside inference mode uses the same plan; all three give the unplanned launches' schedule bit for bit
+    (one-GPU emulation of rank 0 of EP 4, :class:`OneGpuGroup`)."""
+    require_gpu()
+    ep, experts, topk, hidden, count = 4, 4, 2, 256, 1024
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
+    generator = torch.Generator(device=device).manual_seed(3391)
+    ids = (
+        rand(count, ep * experts, device=device, generator=generator)
+        .argsort(-1)[:, :topk]
+        .contiguous()
+    )
+    workspace, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    key = ("schedule", functional.scheduler, functional.communication)
+    with torch.inference_mode():
+        first = _schedule_fields(
+            functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
+        )
+    plan = workspace.storage.launch_plans[key]
+    assert not plan.routes.is_inference() and not plan.scheduler.template.is_inference()
+    second = _schedule_fields(
+        functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
+    )
+    with torch.inference_mode():
+        third = _schedule_fields(
+            functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
+        )
+    assert workspace.storage.launch_plans[key] is plan
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
+        workspace.storage, config, ids, count
+    )
+    unplanned = _schedule_fields(
+        workspace_module.MoKSchedule(
+            peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=counts, layout=layout
+        ),
+        experts,
+    )
+    assert _same(first, unplanned) and _same(second, unplanned) and _same(third, unplanned)
+
+
 @pytest.mark.parametrize("ep,experts", [(4, 4), (8, 32)])
 def test_scheduler_owner_loads_match_count_routed_load_with_invalid_ids(ep, experts):
     """The owner-rank bins drop padding (-1), more negative ids and ids at or
@@ -462,7 +685,7 @@ def test_scheduler_owner_loads_match_count_routed_load_with_invalid_ids(ep, expe
     topk = 2 if ep * experts <= 16 else 8
     limit = ep * experts
     generator = torch.Generator(device="cuda").manual_seed(2203)
-    ids = torch.randint(
+    ids = randint(
         -1, limit + 8, (ep, 256, topk), device="cuda", dtype=torch.int32,
         generator=generator,
     )  # fmt: skip
@@ -497,7 +720,7 @@ def test_scheduler_at_training_geometries(ep, experts, tokens, rank, real):
     topk = 8
     generator = torch.Generator(device="cuda").manual_seed(5309 + ep)
     ids = (
-        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -537,26 +760,32 @@ def test_scheduler_at_training_geometries(ep, experts, tokens, rank, real):
         assert owner_loads[0].sum().item() == sum(real) * topk
 
 
-@pytest.mark.parametrize("topk", [2, 8])
+@pytest.mark.parametrize("topk", [2, 6, 8])
 @pytest.mark.parametrize("tokens,hidden", [(512, 256), (37, 6144), (1, 1032)])
 def test_epilogues(topk, tokens, hidden):
+    """The weighted forward epilogue (top-k 2 and 8) is finite and repeatable; the unweighted sum (every top-k, the
+    router-weight-before-down forward's too) is exact and repeatable."""
     require_gpu()
+    _require_role(f"epilogue_backward_{topk}")
     epilogues = MoKEpilogues(topk)
-    shared = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
-    routed = (
-        torch.randn(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
-    )
-    scores = torch.rand(tokens, topk, device="cuda")
+    shared = randn(tokens, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+    routed = randn(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+    scores = rand(tokens, topk, device="cuda")
     # Native order: FP32 accumulation from the shared row, then ascending slots.
     expected_dx = shared.float()
     for k in range(topk):
         expected_dx = expected_dx + routed.float().view(tokens, topk, hidden)[:, k]
     # The weighted sum may contract multiply-adds (its accuracy is judged in test_mok_accuracy.py): finite and
     # repeatable.  The unweighted sum is exact.
-    y = [epilogues.forward(shared, routed, scores) for _ in range(REPEATS)]
-    assert torch.isfinite(y[0]).all().item()
-    assert all(torch.equal(y[0], other) for other in y[1:])
-    assert torch.equal(epilogues.backward(shared, routed), expected_dx.bfloat16())
+    if topk in kernels.WEIGHTED_EPILOGUE_TOPKS:
+        y = [epilogues.forward(shared, routed, scores) for _ in range(REPEATS)]
+        assert torch.isfinite(y[0]).all().item()
+        assert all(torch.equal(y[0], other) for other in y[1:])
+    else:
+        with pytest.raises(ValueError, match="no weighted form"):
+            epilogues.forward(shared, routed, scores)
+    sums = [epilogues.backward(shared, routed) for _ in range(REPEATS)]
+    assert all(torch.equal(value, expected_dx.bfloat16()) for value in sums)
 
 
 def test_count_routed_load_matches_a_reference_count():
@@ -589,7 +818,7 @@ def test_count_routed_load_matches_a_reference_count():
     assert count_routed_load(edges, ep_size, local_experts).tolist() == [1, 0, 0, 0]
     generator = torch.Generator().manual_seed(0)
     ep_size, local_experts = 64, 4
-    random_routes = torch.randint(
+    random_routes = randint(
         -1, ep_size * local_experts + 8, (ep_size, 2048, 8), generator=generator
     ).to(torch.int32)
     reference = torch.zeros(ep_size, dtype=torch.int64)
@@ -736,12 +965,13 @@ def test_expert_layout_matches_torch_reference(ep, experts):
     scheduler's own outputs (masked ranks and empty experts included), through
     the module helper and the scheduler's ``layout`` method alike."""
     require_gpu()
-    topk = 2 if experts * ep <= 16 else 8
+    _require_role(f"count_{ep}_{experts}")
+    topk = _scheduler_topk(ep, experts)
     scheduler = MoKScheduler(ep, experts)
     tokens = 512
     generator = torch.Generator(device="cuda").manual_seed(1107)
     ids = (
-        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -773,19 +1003,19 @@ def test_launchers_accept_a_precomputed_layout(monkeypatch):
     )  # fmt: skip
     torch.manual_seed(4111)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options) * 0.125
-    dy = torch.randn_like(x) * 0.125
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
     s = single_rank_schedule(routes, experts)
@@ -1013,7 +1243,7 @@ def test_launch_counters_are_one_slab_per_launch():
     recorder = _LaunchRecorder()
     scheduler.count = scheduler.pad = scheduler.rows = recorder
     generator = torch.Generator(device="cuda").manual_seed(77)
-    ids = torch.randint(
+    ids = randint(
         0, ep * experts, (ep, tokens, topk), device="cuda", dtype=torch.int32,
         generator=generator,
     )  # fmt: skip
@@ -1038,12 +1268,12 @@ def test_launch_counters_are_one_slab_per_launch():
 
     hidden, intermediate, macro, mini, comm = 256, 256, 768, 256, 4
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options)
-    dy = torch.randn_like(x)
-    shared = [torch.randn(intermediate, hidden, **options) for _ in range(2)] + [
-        torch.randn(hidden, intermediate, **options)
+    x = randn(tokens, hidden, **options)
+    dy = randn_like(x)
+    shared = [randn(intermediate, hidden, **options) for _ in range(2)] + [
+        randn(hidden, intermediate, **options)
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     routes = torch.stack(
         [
             (torch.arange(tokens, device="cuda") + slot) % experts
@@ -1059,9 +1289,9 @@ def test_launch_counters_are_one_slab_per_launch():
     backward.zero_module = backward.module
     for count in (experts, 2 * experts):
         routed = [
-            torch.randn(count, intermediate, hidden, **options),
-            torch.randn(count, intermediate, hidden, **options),
-            torch.randn(count, hidden, intermediate, **options),
+            randn(count, intermediate, hidden, **options),
+            randn(count, intermediate, hidden, **options),
+            randn(count, hidden, intermediate, **options),
         ]
         s = single_rank_schedule(routes % count, count)
         schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
@@ -1286,9 +1516,9 @@ def test_ffi_stream_context_follows_torch_current_stream():
             assert tvm_ffi.get_raw_stream(device) == reference == side.cuda_stream
         assert tvm_ffi.get_raw_stream(device) == before
     epilogues = MoKEpilogues(2)
-    shared = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)
-    routed = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    scores = torch.rand(64, 2, device="cuda")
+    shared = randn(64, 256, device="cuda", dtype=torch.bfloat16)
+    routed = randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    scores = rand(64, 2, device="cuda")
     expected = epilogues.forward(shared, routed, scores)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -1355,6 +1585,8 @@ def test_select_comm_split_decision_table():
         ((10, 0), 148, "mxfp8", (44, 36)),
         ((10, 0), 152, "bf16", None),  # GB200: same capability, no measured row
         ((10, 0), 152, "mxfp8", None),
+        ((10, 3), 148, "bf16", None),  # B300: no imbalance row
+        ((10, 3), 148, "mxfp8", None),
         ((10, 3), 152, "bf16", None),  # GB300
         ((10, 3), 152, "mxfp8", None),
         ((10, 7), 160, "bf16", None),
@@ -1392,6 +1624,10 @@ def test_imbalance_comm_sms_auto_follows_the_device(
         ((10, 7), 216, "mxfp8", 2.7),  # other Rubin SM count: precision default
         ((10, 0), 148, "mxfp8", 2.7),  # B200
         ((10, 0), 148, "bf16", 4.0),
+        ((10, 0), 152, "bf16", 4.0),  # GB200: precision default
+        ((10, 3), 148, "bf16", 4.0),  # B300: precision default, no device threshold
+        ((10, 3), 148, "mxfp8", 2.7),
+        ((10, 3), 152, "bf16", 4.0),  # GB300: precision default
     ],
 )
 def test_imbalance_threshold_follows_the_device(
@@ -1474,6 +1710,17 @@ def test_imbalance_comm_sms_defaults_keep_the_fixed_split():
         ((10, 3), 160, "mxfp8", 8, None),  # other GB300 SM count: factory split
         ((10, 0), 148, "mxfp8", 8, None),  # B200: the imbalance switch instead
         ((10, 0), 152, "mxfp8", 8, None),  # GB200
+        ((10, 0), 148, "bf16", 8, None),  # B200 EP8: slower from 2.0x skew
+        ((10, 0), 148, "bf16", 4, None),
+        ((10, 0), 148, "bf16", 16, None),
+        ((10, 0), 152, "bf16", 4, None),  # GB200 EP4: no measured gain
+        ((10, 0), 152, "bf16", 8, None),
+        ((10, 0), 152, "bf16", 16, None),
+        ((10, 0), 152, "mxfp8", 4, None),  # the MXFP8 key: factory split
+        ((10, 3), 148, "bf16", 8, (24, 40)),  # B300 EP8: fixed, no imbalance row
+        ((10, 3), 148, "bf16", 4, None),
+        ((10, 3), 148, "bf16", 16, None),
+        ((10, 3), 148, "mxfp8", 8, None),  # the MXFP8 key: factory split
         ((10, 7), 160, "mxfp8", 8, None),
         ((10, 7), 212, "mxfp8", 8, (60, 60)),  # Rubin, EP8 across two nodes
         ((10, 7), 212, "mxfp8", 16, None),
@@ -1514,6 +1761,7 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
     assert api._FACTORY_COMM_SMS == (40, 40)
     assert api.COMM_SMS == {
         (10, 3): {
+            148: {"bf16": {8: (24, 40)}},
             152: {
                 "bf16": {
                     4: (20, 24),
@@ -1523,7 +1771,7 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
                     64: (20, 24),
                 },
                 "mxfp8": {8: (44, 36), 32: (44, 36), 64: (44, 36)},
-            }
+            },
         },
         (10, 7): {212: {"mxfp8": {8: (60, 60)}}},
     }
@@ -1541,6 +1789,113 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
             fwd_num_comm_sms="auto",
             bwd_num_comm_sms=40,
         )
+
+
+@pytest.mark.parametrize(
+    "capability,sm_count,ep_size,precision,expected",
+    [
+        # (fwd_num_comm_sms / bwd_num_comm_sms, bf16_comm_sms, mxfp8_comm_sms)
+        ((10, 0), 148, 8, "bf16", ((40, 40), (40, 40), (40, 40))),  # B200 EP8
+        ((10, 3), 148, 8, "mxfp8", ((40, 40), (24, 40), (40, 40))),  # B300 EP8
+        ((10, 0), 148, 4, "bf16", ((40, 40), (40, 40), (40, 40))),
+        ((10, 0), 152, 4, "bf16", ((40, 40), (40, 40), (40, 40))),  # GB200 EP4
+        ((10, 3), 148, 8, "bf16", ((24, 40), (24, 40), (40, 40))),  # B300 EP8
+        ((10, 3), 152, 4, "bf16", ((20, 24), (20, 24), (40, 40))),  # GB300 EP4
+        ((10, 3), 152, 8, "bf16", ((20, 24), (20, 24), (44, 36))),  # GB300 EP8
+        ((10, 3), 152, 8, "mxfp8", ((44, 36), (20, 24), (44, 36))),
+        ((10, 7), 212, 8, "bf16", ((40, 40), (40, 40), (60, 60))),  # Rubin EP8
+        ((10, 7), 212, 4, "mxfp8", ((40, 40), (40, 40), (40, 40))),
+    ],
+)
+def test_comm_sms_auto_gives_each_routed_precision_its_row(
+    monkeypatch, capability, sm_count, ep_size, precision, expected
+):
+    """Host-only: ``"auto"`` resolves the row of each routed precision for the
+    device and group size (the factory split where there is none) into
+    ``bf16_comm_sms`` / ``mxfp8_comm_sms``, whatever the workspace's
+    ``precision``; ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` hold the row of
+    ``precision``. Integer counts leave both per-precision splits unset."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda device=None: capability
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: ep_size)
+    created = []
+
+    def create_source_workspace(config, group, **kwargs):
+        created.append(config)
+        return "workspace"
+
+    monkeypatch.setattr(backend, "create_source_workspace", create_source_workspace)
+    kwargs = dict(
+        group=None, device=None, num_local_tokens=512, hidden_size=512, topk=2
+    )
+    config, workspace = api.create_mok_bf16_workspace(precision=precision, **kwargs)
+    assert workspace == "workspace" and created == [config]
+    assert (config.fwd_num_comm_sms, config.bwd_num_comm_sms) == expected[0]
+    assert (config.bf16_comm_sms, config.mxfp8_comm_sms) == expected[1:]
+    config, _ = api.create_mok_bf16_workspace(
+        precision=precision, fwd_num_comm_sms=24, bwd_num_comm_sms=28, **kwargs
+    )
+    assert (config.fwd_num_comm_sms, config.bwd_num_comm_sms) == (24, 28)
+    assert config.bf16_comm_sms is None and config.mxfp8_comm_sms is None
+
+
+def test_comm_split_follows_the_routed_precision():
+    """Host-only: without an imbalance split, a launch's fixed split is the row of
+    its routed precision (``mxfp8_comm_sms`` for MXFP8 routed weights,
+    ``bf16_comm_sms`` for BF16), else ``fwd_num_comm_sms`` /
+    ``bwd_num_comm_sms``, and the config defaults leave both rows unset."""
+    split = backend.MoKFunctional._comm_split
+    assert MoKConfig().bf16_comm_sms is None and MoKConfig().mxfp8_comm_sms is None
+    rows = MoKConfig(
+        fwd_num_comm_sms=16,
+        bwd_num_comm_sms=40,
+        bf16_comm_sms=(16, 40),
+        mxfp8_comm_sms=(40, 40),
+    )
+    assert split(None, rows, None) == (16, 40)
+    assert split(None, rows, None, False) == (16, 40)
+    assert split(None, rows, None, True) == (40, 40)
+    # A workspace created with precision "mxfp8": its BF16 launches keep the BF16 row.
+    mxfp8 = dataclasses.replace(rows, fwd_num_comm_sms=40, bwd_num_comm_sms=40)
+    assert split(None, mxfp8, None, False) == (16, 40)
+    assert split(None, mxfp8, None, True) == (40, 40)
+    fixed = MoKConfig(fwd_num_comm_sms=20, bwd_num_comm_sms=24)
+    assert split(None, fixed, None, False) == (20, 24)
+    assert split(None, fixed, None, True) == (20, 24)
+
+
+def test_routed_precision_splits_are_validated():
+    """``bf16_comm_sms`` / ``mxfp8_comm_sms`` must each be ``None`` or a
+    (forward, backward) tuple of positive, even counts that leave compute SMs;
+    ``build_schedule`` rejects any other value before it launches anything."""
+    require_gpu()
+    ep, experts, topk, tokens = 4, 4, 2, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    capacity = ep * tokens * topk + experts * 256
+    workspace = one_gpu_workspace(ep, tokens, 256, topk, capacity, device)
+    ids = torch.zeros(tokens, topk, dtype=torch.int32, device=device)
+    for name, bad in (
+        ("bf16_comm_sms", (16,)),
+        ("bf16_comm_sms", [16, 40]),
+        ("mxfp8_comm_sms", (15, 40)),
+        ("mxfp8_comm_sms", (40, sms)),
+        ("mxfp8_comm_sms", (40, 0)),
+    ):
+        config = MoKConfig(fwd_num_comm_sms=8, bwd_num_comm_sms=8, **{name: bad})
+        with pytest.raises(ValueError, match=name):
+            functional.build_schedule(workspace, config, ids, num_local_experts=experts)
 
 
 def test_comm_split_log_prints_each_split_change(capsys):
@@ -1598,3 +1953,3391 @@ def test_comm_split_log_prints_each_split_change(capsys):
             if "communication split" in line
         ]
         assert lines == expected
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The router weight before the down projection: host checks (no GPU), then the kernels on SM100a, SM103a and SM107a
+# ---------------------------------------------------------------------------------------------------------------------
+
+#: The roles only the router-weight-before-down mode, top-k 6 and the 384-expert layouts load.
+BEFORE_DOWN_ROLES = (
+    "forward_clamped_wbd",
+    "forward_clamped_noctx_wbd",
+    "recompute_clamped_wbd",
+    "backward_clamped_fp32_wbd",
+    "epilogue_backward_6",
+    *(
+        f"{kind}_{ep}_{experts}"
+        for ep, experts in kernels.SCHEDULER_LAYOUTS_384
+        for kind in ("count", "rows")
+    ),
+)
+#: The two layouts the requester runs and the worst-case geometry it asked to fit.
+BOUND_LAYOUTS = [(64, 6), (8, 48)]
+BOUND_IDS = ["ep64-local6", "ep8-local48"]
+
+
+def _mode_group_roles(group):
+    """The roles only the :data:`MODE_GROUPS` group ``group`` loads: its fused kernels (the direct-gradient backward;
+    with SiTU-GLU also the forward, the context-free forward and the recompute, all without a shared expert), its
+    epilogues, its shared-scale helpers and its layouts' scheduler kernels."""
+    situ = group.activation == "situ_glu"
+    roles = []
+    if situ:
+        roles += [
+            kernels._role("forward", situ_glu=True),
+            kernels._role("forward", noctx=True, situ_glu=True),
+            kernels._role("recompute", situ_glu=True),
+        ]
+    roles.append(
+        kernels._role(
+            "backward",
+            False,
+            group.fp32_wgrad,
+            direct=group.router_weight_gradient == "direct",
+            situ_glu=situ,
+        )
+    )
+    if group.shared_expert == "scaled":
+        roles += [
+            f"epilogue_forward_scaled_{group.topk}",
+            f"epilogue_backward_scaled_{group.topk}",
+            "shared_scale_rows",
+            "shared_scale_dot",
+        ]
+    elif group.shared_expert == "none":
+        roles += [
+            f"epilogue_forward_none_{group.topk}",
+            f"epilogue_backward_none_{group.topk}",
+        ]
+    for ep, experts in group.layouts:
+        roles += [f"count_{ep}_{experts}", f"rows_{ep}_{experts}"]
+    return tuple(roles)
+
+
+#: The roles only a :data:`MODE_GROUPS` group loads (the 512-expert top-10 group: the direct-gradient backward, the
+#: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64) scheduler kernels; the 896-expert top-16
+#: group: the SiTU-GLU forward, context-free forward, recompute and direct-gradient backward without a shared expert,
+#: the top-16 epilogues without a shared row and the (64, 14) scheduler kernels).
+MODE_GROUP_ROLES = tuple(
+    role for group in kernels.MODE_GROUPS.values() for role in _mode_group_roles(group)
+)
+
+#: The arguments of a sibling launch that a build without a shared expert does not take: every shared map of the
+#: forward, the recompute and the backward, and ``local_tokens``.
+NO_SHARED_ARGUMENTS = frozenset(
+    {
+        *("x_shared", "wg_shared", "wu_shared", "wd_shared", "gate_shared_out", "up_shared_out"),
+        *("hidden_shared_out", "hidden_shared_in", "y_shared", "local_tokens"),
+        *("dy_s", "dg_s", "du_s", "dy_atb_s", "dg_atb_s", "du_atb_s", "x_atb_s", "h_atb_s", "wg_s", "wu_s"),
+        *("wd_s", "dh_s", "dx_s", "dwg_s", "dwu_s", "dwd_s", "dh_sw_s", "gate_sw_s", "up_sw_s", "dg_sw_s"),
+        "du_sw_s",
+    }
+)
+
+#: Per group role with a sibling: ``(sibling role, (argument, added argument after it) or None, arguments dropped,
+#: SiTU-GLU)``; a SiTU-GLU role takes ``situ_beta``, ``situ_lb`` in the place of ``swiglu_limit``.
+GROUP_SIBLINGS = {
+    "backward_fp32_direct": ("backward_fp32", ("dy_routed_ptr", "dy_scaled_ptr"), (), False),
+    "epilogue_forward_scaled_10": ("epilogue_forward_8", ("scores", "shared_scale"), (), False),
+    "epilogue_backward_scaled_10": ("epilogue_backward_8", ("scores", "shared_scale"), (), False),
+    "forward_situ_noshared": ("forward", None, NO_SHARED_ARGUMENTS, True),
+    "forward_noctx_situ_noshared": ("forward_noctx", None, NO_SHARED_ARGUMENTS, True),
+    "recompute_situ_noshared": ("recompute", None, NO_SHARED_ARGUMENTS, True),
+    "backward_fp32_direct_situ_noshared": (
+        "backward_fp32",
+        ("dy_routed_ptr", "dy_scaled_ptr"),
+        NO_SHARED_ARGUMENTS,
+        True,
+    ),
+    "epilogue_forward_none_16": ("epilogue_forward_8", None, ("shared",), False),
+    "epilogue_backward_none_16": ("epilogue_backward_8", None, ("shared",), False),
+}
+
+
+def _group_records(registry):
+    """Stand-in registry records of the :data:`MODE_GROUP_ROLES` a registry does not hold yet, for the host-only
+    tests: the arguments of the sibling role (:data:`GROUP_SIBLINGS`) with the group's additions (``dy_scaled_ptr``
+    after ``dy_routed_ptr``, ``shared_scale`` after ``scores``) and removals (the shared maps and ``local_tokens``,
+    :data:`NO_SHARED_ARGUMENTS`; the epilogues' ``shared`` row), ``situ_beta``, ``situ_lb`` in the place of
+    ``swiglu_limit`` for SiTU-GLU, the scheduler kernels those of the 256-expert ones, the helpers' own lists, each
+    group's targets.  A registry that holds a role keeps its record."""
+    records = dict(registry)
+    own = {
+        "shared_scale_rows": ["rows", "scales", "scaled", "tokens", "width"],
+        "shared_scale_dot": ["left", "right", "dots", "tokens", "width"],
+    }
+    for group in kernels.MODE_GROUPS.values():
+        targets = list(group.targets)
+        for role in _mode_group_roles(group):
+            if role in records:
+                continue
+            if role in own:
+                arguments = [*own[role], "grid_x", "grid_y", "grid_z"]
+            elif role.startswith(("count_", "rows_")):
+                arguments = list(registry[f"{role.split('_')[0]}_8_32"]["arguments"])
+            else:
+                base, added, dropped, situ = GROUP_SIBLINGS[role]
+                arguments = list(registry[base]["arguments"])
+                if added is not None:
+                    arguments.insert(arguments.index(added[0]) + 1, added[1])
+                arguments = [name for name in arguments if name not in dropped]
+                if situ:
+                    at = arguments.index("swiglu_limit")
+                    arguments[at : at + 1] = ["situ_beta", "situ_lb"]
+            records[role] = {
+                "library": f"cake_mok_{role}",
+                "arches": targets,
+                "arguments": arguments,
+            }
+    return records
+
+
+def _stub_loader(monkeypatch, loaded=None):
+    """``jit.load_kernel`` stand-in: a kernel with its registry record's argument names whose ``run`` records the
+    role and the arguments by name; nothing is compiled or launched.  Returns the record list."""
+    registry = jit._registry()
+    calls = []
+
+    class Stub:
+        def __init__(self, role):
+            self.role = role
+
+        def run(self, *args):
+            names = registry[self.role]["arguments"]
+            calls.append((self.role, dict(zip(names, args, strict=True))))
+
+    def load(role):
+        if loaded is not None:
+            loaded.append(role)
+        return jit._Kernel(Stub(role), registry[role]["arguments"])
+
+    monkeypatch.setattr(jit, "load_kernel", load)
+    return calls
+
+
+def test_before_down_roles_are_registry_records():
+    """Every role a launcher of either router-weight position can load is a registry record, with the suffixes in
+    the registry's order; the router-weight-before-down, top-k 6 and 384-expert roles are built for exactly the
+    targets of ``BEFORE_DOWN_TARGETS`` (SM100a, SM103a and SM107a), every other such role for exactly SM100a, SM103a
+    and SM107a, and top-k 6 has no weighted forward epilogue."""
+    registry = jit._registry()
+    role = kernels._role
+    assert role("forward", True, noctx=True) == "forward_clamped_noctx"
+    assert role("forward", True, noctx=True, weight_before_down=True) == "forward_clamped_noctx_wbd"
+    assert role("backward", True, True, weight_before_down=True) == "backward_clamped_fp32_wbd"
+    names = {"expert_layout", "gather", "barrier", "zero"}
+    for clamped in (False, True):
+        names |= {
+            role("forward", clamped),
+            role("forward", clamped, noctx=True),
+            role("recompute", clamped),
+            role("backward", clamped),
+            role("backward", clamped, True),
+        }
+    names |= {
+        role("forward", True, weight_before_down=True),
+        role("forward", True, noctx=True, weight_before_down=True),
+        role("recompute", True, weight_before_down=True),
+        role("backward", True, True, weight_before_down=True),
+    }
+    for ep, experts in SCHEDULER_LAYOUTS:
+        if not any(
+            (ep, experts) in group.layouts for group in kernels.MODE_GROUPS.values()
+        ):
+            names |= {f"count_{ep}_{experts}", f"rows_{ep}_{experts}", f"pad_{ep}"}
+    names |= {f"epilogue_backward_{k}" for k in kernels.EPILOGUE_TOPKS}
+    names |= {f"epilogue_forward_{k}" for k in kernels.WEIGHTED_EPILOGUE_TOPKS}
+    assert names <= set(registry), sorted(names - set(registry))
+    assert set(BEFORE_DOWN_ROLES) <= names
+    for name in BEFORE_DOWN_ROLES:
+        assert registry[name]["arches"] == list(kernels.BEFORE_DOWN_TARGETS), name
+    for name in sorted(names - set(BEFORE_DOWN_ROLES)):
+        assert registry[name]["arches"] == ["sm_100a", "sm_103a", "sm_107a"], name
+    assert "epilogue_forward_6" not in registry
+    assert set(kernels.BEFORE_DOWN_LAYOUTS) <= set(SCHEDULER_LAYOUTS)
+    assert registry["backward_clamped_fp32_wbd"]["arguments"] == registry["backward_clamped_fp32"]["arguments"]
+    assert registry["epilogue_backward_6"]["arguments"] == registry["epilogue_backward_8"]["arguments"]
+
+
+def test_before_down_launchers_pass_exactly_the_registry_arguments(monkeypatch):
+    """Host only (stub kernels, no launch): the router-weight-before-down forward (context and context-free),
+    recompute and backward hand the kernel exactly its registry record's arguments through ``__call__`` and through
+    a plan.  ``weight_peers`` is the uint64 table of the ranks' router-weight buffers and ``row_weights`` an FP32
+    ``[macro_size]`` ring per call; ``weight_ptrs`` is required there and refused by the other launchers."""
+    calls = _stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    tokens, hidden, intermediate, experts, topk, macro, mini, comm, ep, limit = (
+        512, 256, 256, 4, 2, 768, 256, 4, 4, 10.0,
+    )  # fmt: skip
+    capacity = 4096
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(tokens, hidden, **options)
+    combine = torch.zeros(tokens * topk, hidden, **options)
+    ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
+    weight_ptrs = [65536 * (rank + 1) for rank in range(ep)]
+    shared = [
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(hidden, intermediate, **options),
+    ]
+    routed = [
+        torch.zeros(experts, intermediate, hidden, **options),
+        torch.zeros(experts, intermediate, hidden, **options),
+        torch.zeros(experts, hidden, intermediate, **options),
+    ]
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    schedule = (
+        torch.full((capacity,), -1, dtype=torch.int32),
+        torch.zeros(capacity, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(experts, dtype=torch.int32),
+    )
+    layout = torch.zeros(3 * experts + capacity // 256, dtype=torch.int32)
+
+    def check_router_weights(expected_calls):
+        assert len(calls) == expected_calls
+        for role, arguments in calls:
+            assert role.endswith("_wbd"), role
+            peers, ring = arguments["weight_peers"], arguments["row_weights"]
+            assert peers.dtype == torch.uint64, role
+            assert peers.view(torch.int64).tolist() == weight_ptrs, role
+            assert ring.dtype == torch.float32 and tuple(ring.shape) == (macro,), role
+        calls.clear()
+
+    for context in (True, False):
+        forward = MoKForward(True, context=context, weight_before_down=True)
+        with pytest.raises(ValueError, match="need weight_ptrs"):
+            forward(
+                x, ptrs, combine, ptrs, *weights, *schedule, topk, limit, comm, macro, mini, layout=layout,
+            )  # fmt: skip
+        forward(
+            x, ptrs, combine, ptrs, *weights, *schedule, topk, limit, comm, macro, mini, layout=layout,
+            weight_ptrs=weight_ptrs,
+        )  # fmt: skip
+        plan = forward.plan(
+            x, ptrs, ptrs, intermediate, experts, capacity, topk, limit, comm, macro, mini, weight_ptrs=weight_ptrs,
+        )  # fmt: skip
+        MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+        check_router_weights(2)
+    recompute = MoKRecompute(True, weight_before_down=True)
+    recompute(
+        x, ptrs, shared[0], routed[0], shared[1], routed[1], *schedule, topk, limit, comm, macro, mini,
+        layout=layout, weight_ptrs=weight_ptrs,
+    )  # fmt: skip
+    plan = recompute.plan(
+        x, ptrs, intermediate, experts, capacity, topk, limit, comm, macro, mini, weight_ptrs=weight_ptrs,
+    )  # fmt: skip
+    MoKRecompute.launch_planned(plan, shared[0], routed[0], shared[1], routed[1], *schedule[:3], layout)
+    check_router_weights(2)
+    backward = MoKBackward(True, True, weight_before_down=True)
+    accumulators = [torch.zeros(w.shape) for w in (*shared, *routed)]
+    scores = torch.zeros(tokens, topk)
+    ring = torch.zeros(macro, intermediate, **options)
+    saved = (torch.zeros(macro, hidden, **options), x[:, :intermediate].clone(), ring, x[:, :intermediate].clone(),
+             ring, x[:, :intermediate].clone(), ring)  # fmt: skip
+    backward(
+        x, ptrs, combine, ptrs, scores, weight_ptrs, scores, ptrs, *weights, *saved, x, ptrs, *schedule,
+        topk, limit, comm, macro, mini, weight_grad_accumulators=accumulators, layout=layout,
+    )  # fmt: skip
+    plan = backward.plan(
+        x, ptrs, ptrs, weight_ptrs, ptrs, ptrs, intermediate, experts, capacity, topk, limit, comm, macro, mini,
+    )  # fmt: skip
+    backward.launch_planned(
+        plan, *weights, *saved, x, *schedule, layout, weight_grad_accumulators=accumulators,
+    )  # fmt: skip
+    assert [role for role, _ in calls] == ["backward_clamped_fp32_wbd"] * 2
+    for _, arguments in calls:
+        assert arguments["weight_peers"].view(torch.int64).tolist() == weight_ptrs
+    calls.clear()
+    # Every other launcher refuses the router-weight pointers; the mode needs the clamped (and FP32) builds.
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True)(
+            x, ptrs, combine, ptrs, *weights, *schedule, topk, limit, comm, macro, mini, layout=layout,
+            weight_ptrs=weight_ptrs,
+        )  # fmt: skip
+    with pytest.raises(ValueError, match="read only by"):
+        MoKRecompute(True).plan(
+            x, ptrs, intermediate, experts, capacity, topk, limit, comm, macro, mini, weight_ptrs=weight_ptrs,
+        )  # fmt: skip
+    assert calls == []
+    with pytest.raises(ValueError, match="clamped SwiGLU only"):
+        MoKForward(False, weight_before_down=True)
+    with pytest.raises(ValueError, match="clamped SwiGLU only"):
+        MoKRecompute(False, weight_before_down=True)
+    with pytest.raises(ValueError, match="FP32 weight-gradient accumulation only"):
+        MoKBackward(True, False, weight_before_down=True)
+    with pytest.raises(TypeError, match="weight_before_down must be a boolean"):
+        MoKForward(True, weight_before_down=1)
+
+
+def _source_split_launcher_setup(monkeypatch):
+    """Stub kernels (no launch) and the arguments of a router-weight-before-down forward at EP4, 4 forward
+    communication SMs."""
+    calls = _stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    tokens, hidden, intermediate, experts, topk, macro, mini, comm, ep, limit = (
+        512, 256, 256, 4, 2, 768, 256, 4, 4, 10.0,
+    )  # fmt: skip
+    capacity = 4096
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(tokens, hidden, **options)
+    combine = torch.zeros(tokens * topk, hidden, **options)
+    ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
+    weight_ptrs = [65536 * (rank + 1) for rank in range(ep)]
+    shared = [
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(hidden, intermediate, **options),
+    ]
+    routed = [torch.zeros(experts, intermediate, hidden, **options) for _ in range(2)]
+    routed.append(torch.zeros(experts, hidden, intermediate, **options))
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    schedule = (
+        torch.full((capacity,), -1, dtype=torch.int32),
+        torch.zeros(capacity, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(experts, dtype=torch.int32),
+    )
+    layout = torch.zeros(3 * experts + capacity // 256, dtype=torch.int32)
+    call = (x, ptrs, combine, ptrs, *weights, *schedule, topk, limit, comm, macro, mini)
+    plan = (x, ptrs, ptrs, intermediate, experts, capacity, topk, limit, comm, macro, mini)
+    return calls, call, plan, weights, schedule, layout, weight_ptrs
+
+
+@pytest.mark.parametrize("context", [True, False], ids=["context", "context-free"])
+def test_source_split_launcher_arguments(monkeypatch, context):
+    """Host only (stub kernels, no launch): the router-weight-before-down forward hands the kernel ``ep_size``,
+    ``rich_comm_sms``, ``rich_threshold`` (1/256 steps) and ``owner_routes``.  Without a split the count in force
+    goes in as the rich count and ``num_tokens`` stands in for the route totals (never read); an unplanned call
+    with a split but without the totals keeps the count in force; a plan with a split needs the schedule's int32
+    ``[ep_size]`` totals at every launch.  Malformed splits and totals are refused before any launch, and the other
+    launchers refuse the split."""
+    calls, call, plan_args, weights, schedule, layout, weight_ptrs = _source_split_launcher_setup(monkeypatch)
+    forward = MoKForward(True, context=context, weight_before_down=True)
+    routes = torch.tensor([7, 0, 3, 5], dtype=torch.int32)
+
+    def launched(**expected):
+        ((role, arguments),) = calls
+        calls.clear()
+        assert role.endswith("_wbd"), role
+        for name, value in expected.items():
+            if isinstance(value, torch.Tensor):
+                got = arguments[name]
+                assert got.data_ptr() == value.data_ptr() and torch.equal(got, value), name
+            else:
+                assert arguments[name] == value, (name, arguments[name])
+
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs)
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=384, owner_routes=schedule[2])
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 300))
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=300, owner_routes=schedule[2])
+    forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 300), owner_routes=routes)
+    launched(ep_size=4, rich_comm_sms=2, rich_threshold=300, owner_routes=routes)
+    plan = forward.plan(*plan_args, weight_ptrs=weight_ptrs)
+    MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+    launched(ep_size=4, rich_comm_sms=4, rich_threshold=384, owner_routes=schedule[2])
+    plan = forward.plan(*plan_args, weight_ptrs=weight_ptrs, source_split=(2, 257))
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        MoKForward.launch_planned(plan, *weights, *schedule[:3], layout, routes.long())
+    MoKForward.launch_planned(plan, *weights, *schedule[:3], layout, routes)
+    launched(ep_size=4, rich_comm_sms=2, rich_threshold=257, owner_routes=routes)
+    for split in ((3, 384), (6, 384), (0, 384), (2, 256), (2, 2**31), (2.0, 384), (2, 384.0)):
+        with pytest.raises(ValueError, match="source_split must be"):
+            forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=split)
+        with pytest.raises(ValueError, match="source_split must be"):
+            forward.plan(*plan_args, weight_ptrs=weight_ptrs, source_split=split)
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        forward(*call, layout=layout, weight_ptrs=weight_ptrs, source_split=(2, 384), owner_routes=routes[:3])
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context)(*call, layout=layout, source_split=(2, 384))
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context)(*call, layout=layout, owner_routes=routes)
+    with pytest.raises(ValueError, match="read only by"):
+        MoKForward(True, context=context).plan(*plan_args, source_split=(2, 384))
+    assert calls == []
+
+
+def test_source_split_follows_the_config():
+    """Host only: the adapter's source split of a forward launch: off (the forward count in force, the threshold,
+    ``num_tokens`` in place of the totals) for the router weight after the down projection, without a count, with a
+    count not below the forward count in force and for a schedule without totals; on, the count, the threshold in
+    1/256 steps (rounded) and the schedule's totals; totals of another shape, type or device are refused."""
+    from types import SimpleNamespace
+
+    functional = object.__new__(backend.MoKFunctional)
+    device = torch.device("cpu")
+    workspace = SimpleNamespace(ep_size=4, device=SimpleNamespace(index=-1))
+    routes = torch.tensor([7, 0, 3, 5], dtype=torch.int32, device=device)
+    tokens = torch.zeros(1, dtype=torch.int32, device=device)
+    schedule = SimpleNamespace(owner_routes=routes, num_tokens=tokens)
+    on = dataclasses.replace(MoKConfig(), source_split_comm_sms=16, source_split_threshold=1.25)
+    functional.weight_before_down = False
+    assert functional._source_split(on, workspace, schedule, 24) == (24, 320, tokens)
+    functional.weight_before_down = True
+    off = dataclasses.replace(on, source_split_comm_sms=None)
+    assert functional._source_split(off, workspace, schedule, 24) == (24, 320, tokens)
+    assert functional._source_split(on, workspace, schedule, 16) == (16, 320, tokens)
+    no_routes = SimpleNamespace(owner_routes=None, num_tokens=tokens)
+    assert functional._source_split(on, workspace, no_routes, 24) == (24, 320, tokens)
+    rich, threshold, totals = functional._source_split(on, workspace, schedule, 24)
+    assert (rich, threshold) == (16, 320) and totals is routes
+    assert functional._source_split(
+        dataclasses.replace(on, source_split_threshold=1.5009), workspace, schedule, 24
+    )[1] == 384
+    for bad in (routes[:3], routes.long(), routes.float()):
+        with pytest.raises(ValueError, match="owner_routes must be"):
+            functional._source_split(
+                on, workspace, SimpleNamespace(owner_routes=bad, num_tokens=tokens), 24
+            )
+    with pytest.raises(ValueError, match="owner_routes must be"):
+        functional._source_split(on, SimpleNamespace(ep_size=4, device=SimpleNamespace(index=0)), schedule, 24)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("source_split_comm_sms", 0),
+        ("source_split_comm_sms", 3),
+        ("source_split_comm_sms", -2),
+        ("source_split_comm_sms", 148),
+        ("source_split_comm_sms", 16.0),
+        ("source_split_comm_sms", True),
+        ("source_split_threshold", 1.0),
+        ("source_split_threshold", 1.001),
+        ("source_split_threshold", 0.5),
+        ("source_split_threshold", 65536.5),
+        ("source_split_threshold", float("inf")),
+        ("source_split_threshold", float("nan")),
+        ("source_split_threshold", "1.5"),
+    ],
+)
+def test_source_split_config_is_validated(field, value):
+    """Host only: the schedule check refuses a source-split count that is not a positive, even count leaving
+    compute SMs and a threshold that is not finite, above 1.0 in 1/256 steps and at most 65536; the default and
+    in-range values pass."""
+    functional = object.__new__(backend.MoKFunctional)
+    functional._schedule_configs, functional._sm_count = {}, {0: 148}
+    device = torch.device("cuda", 0)
+    with pytest.raises(ValueError, match=field):
+        functional._check_schedule_config(dataclasses.replace(MoKConfig(), **{field: value}), device)
+    for good in (
+        MoKConfig(),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=16, source_split_threshold=1.002),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=2, source_split_threshold=65536),
+        dataclasses.replace(MoKConfig(), source_split_comm_sms=146, source_split_threshold=4),
+    ):
+        functional._check_schedule_config(good, device)
+
+
+@pytest.mark.parametrize(
+    "capability,sm_count,ep_size,expected",
+    [
+        ((10, 0), 148, 8, 16),  # B200, EP8
+        ((10, 0), 148, 4, None),
+        ((10, 0), 152, 4, 16),  # GB200, EP4
+        ((10, 0), 152, 8, None),
+        ((10, 3), 148, 8, None),  # B300, EP8: measured, no gain (README)
+        ((10, 3), 148, 4, None),
+        ((10, 3), 152, 4, 16),  # GB300, EP4
+        ((10, 3), 152, 8, None),
+        ((10, 3), 160, 4, None),  # other SM count
+        ((10, 7), 212, 8, None),  # Rubin: no row
+        ((12, 0), 170, 4, None),
+    ],
+)
+def test_source_split_auto_follows_the_device_and_group(monkeypatch, capability, sm_count, ep_size, expected):
+    """Host-only: ``"auto"`` for the source split resolves through the per-device, per-group-size table; devices and
+    group sizes without a measured row keep the split off (``None``)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: capability)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    assert api.resolve_source_split_comm_sms(ep_size) == expected
+
+
+def test_source_split_defaults_resolve_the_measured_rows():
+    """Host-only: the config default keeps the source split off, the facade default ``"auto"`` resolves the
+    measured row (threshold 1.5), the measured rows are the shipped table (a change here is a shipping change) and
+    malformed arguments are rejected before any collective."""
+    import inspect
+
+    config = MoKConfig()
+    assert config.source_split_comm_sms is None
+    assert config.source_split_threshold == api.SOURCE_SPLIT_THRESHOLD == 1.5
+    facade = inspect.signature(api.create_mok_bf16_workspace).parameters
+    assert facade["source_split_comm_sms"].default == "auto"
+    assert facade["source_split_threshold"].default == 1.5
+    assert kernels.SOURCE_SPLIT_UNIT == 256
+    assert api.SOURCE_SPLIT_COMM_SMS == {
+        (10, 0): {148: {8: 16}, 152: {4: 16}},
+        (10, 3): {152: {4: 16}},
+    }
+    with pytest.raises(ValueError, match="ep_size must be a positive"):
+        api.resolve_source_split_comm_sms(0)
+    kwargs = dict(group=None, device=None, num_local_tokens=512, hidden_size=256, topk=2)
+    with pytest.raises(ValueError, match='"auto"'):
+        api.create_mok_bf16_workspace(source_split_comm_sms="fast", **kwargs)
+
+
+def test_before_down_call_refusals_come_before_device_work(monkeypatch):
+    """Host only: with ``router_weight_position="before_down"`` plain SwiGLU (``swiglu_limit=None``), MXFP8 routed
+    weights and a recompute without the router weights are refused by every operation and ``prepare`` before any
+    copy, barrier or kernel load."""
+    functional = object.__new__(backend.MoKFunctional)
+    functional.local_experts = 4
+    functional._validated = {}
+    functional.router_weight_position = "before_down"
+    functional.weight_before_down = True
+    functional._forward_kernels, functional._backward_kernels = {}, {}
+    functional._recompute_kernels, functional._context_free_forward_kernels = {}, {}
+    events = []
+    _stub_loader(monkeypatch, events)
+    monkeypatch.setattr(
+        backend.MoKFunctional, "_inputs", staticmethod(lambda *args: (None, 256))
+    )
+    monkeypatch.setattr(functional, "_check_device", lambda workspace: None)
+    monkeypatch.setattr(functional, "_barrier", lambda w: events.append("barrier"))
+    monkeypatch.setattr(
+        backend.MoKFunctional,
+        "_copy_source",
+        staticmethod(lambda *args: events.append("copy")),
+    )
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(256, 256, **options)
+    shared = [torch.zeros(256, 256, **options) for _ in range(3)]
+    routed = [torch.zeros(4, 256, 256, **options) for _ in range(3)]
+    data = torch.zeros(4, 256, 256, dtype=torch.uint8)
+    mxfp8 = [(data, torch.zeros(64, dtype=torch.uint8)) for _ in range(3)]
+    scores = torch.zeros(256, 2)
+    schedule = object()
+    context = backend.MoKForwardContext(
+        x_routed=x, gate_shared=x, gate_routed=x, up_shared=x, up_routed=x, hidden_shared=x, hidden_routed=x,
+        schedule=schedule,
+    )  # fmt: skip
+    plain, needs_bf16 = "requires swiglu_limit", "takes BF16 routed weights"
+    with pytest.raises(ValueError, match=plain):
+        functional.forward(None, None, schedule, x, scores, *shared, *routed)
+    with pytest.raises(ValueError, match=needs_bf16):
+        functional.forward(None, None, schedule, x, scores, *shared, *mxfp8, swiglu_limit=10.0)
+    with pytest.raises(ValueError, match=plain):
+        functional.recompute_forward_context(
+            None, None, schedule, x, shared[0], shared[1], routed[0], routed[1], router_weights=scores
+        )
+    with pytest.raises(ValueError, match="needs router_weights"):
+        functional.recompute_forward_context(
+            None, None, schedule, x, shared[0], shared[1], routed[0], routed[1], 10.0
+        )
+    with pytest.raises(ValueError, match=plain):
+        functional.backward(None, None, schedule, context, x, x, scores, *shared, *routed)
+    with pytest.raises(ValueError, match=needs_bf16):
+        functional.backward(
+            None, None, schedule, context, x, x, scores, *shared, *mxfp8, swiglu_limit=10.0
+        )
+    for prepare in (
+        lambda: functional.prepare(None),
+        lambda: functional.prepare(10.0, True),
+        lambda: functional.prepare(None, save_context=False),
+        lambda: functional.prepare_recompute(None),
+        lambda: functional.prepare_recompute(10.0, True),
+    ):
+        with pytest.raises(ValueError, match="router_weight_position='before_down'"):
+            prepare()
+    assert events == []
+
+
+def test_before_down_is_accepted_on_sm107a(monkeypatch):
+    """Host only: ``"before_down"`` has SM100a, SM103a and SM107a builds; ``check_target`` accepts both positions on
+    each of them and refuses ``"before_down"`` on any other target with a message that names the three.  On an SM107a
+    device the adapter prepares the requester's EP64 top-6 layout, an EP8 384-expert layout and a diagnostic top-2
+    layout, and every kernel it loads has an sm_107a build."""
+    assert kernels.BEFORE_DOWN_TARGETS == ("sm_100a", "sm_103a", "sm_107a")
+    for arch in kernels.BEFORE_DOWN_TARGETS:
+        kernels.check_target("before_down", arch)
+        kernels.check_target("after_down", arch)
+    with pytest.raises(ValueError, match="no sm_90a build .* use an sm_100a, sm_103a or sm_107a device"):
+        kernels.check_target("before_down", "sm_90a")
+    registry = jit._registry()
+    loaded = []
+    _stub_loader(monkeypatch, loaded)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
+    for ep, experts, topk in ((64, 6, 6), (8, 48, 6), (1, 4, 2)):
+        loaded.clear()
+        functional = backend.MoKFunctional(
+            ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+        )
+        assert functional.weight_before_down
+        expected = {"forward_clamped_wbd", "backward_clamped_fp32_wbd", f"count_{ep}_{experts}", f"rows_{ep}_{experts}"}
+        assert expected | {f"epilogue_backward_{topk}"} <= set(loaded), sorted(loaded)
+        assert [role for role in loaded if "sm_107a" not in registry[role]["arches"]] == []
+
+
+def test_top6_epilogues_have_the_unweighted_sum_only(monkeypatch):
+    """Host only: top-k 6 loads the unweighted sum alone and refuses a weighted forward; ``weighted=False`` loads the
+    sum alone for every top-k; top-k 2 and 8 still load both."""
+    loaded = []
+    _stub_loader(monkeypatch, loaded)
+    epilogues = MoKEpilogues(6)
+    assert loaded == ["epilogue_backward_6"] and epilogues.forward_module is None
+    shared = torch.zeros(4, 256, dtype=torch.bfloat16)
+    routed = torch.zeros(24, 256, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="no weighted form"):
+        epilogues.forward(shared, routed, torch.zeros(4, 6))
+    with pytest.raises(ValueError, match="no weighted form"):
+        epilogues.plan(routed, torch.zeros(4, 6))
+    with pytest.raises(ValueError, match="only the unweighted epilogue"):
+        MoKEpilogues(6, weighted=True)
+    with pytest.raises(ValueError, match="top_k=2, 6 or 8"):
+        MoKEpilogues(4)
+    for topk in (2, 8):
+        loaded.clear()
+        MoKEpilogues(topk, weighted=False)
+        assert loaded == [f"epilogue_backward_{topk}"]
+        loaded.clear()
+        MoKEpilogues(topk)
+        assert loaded == [f"epilogue_forward_{topk}", f"epilogue_backward_{topk}"]
+
+
+def _group_stub_loader(monkeypatch, loaded=None):
+    """:func:`_stub_loader` over the registry with the :func:`_group_records` stand-ins of the group roles it does not
+    hold yet."""
+    records = _group_records(jit._registry())
+    monkeypatch.setattr(jit, "_registry", lambda: records)
+    return _stub_loader(monkeypatch, loaded)
+
+
+def test_mode_group_roles_are_registry_records():
+    """Every role of a :data:`MODE_GROUPS` group is a registry record built for exactly the group's targets (SM100a and
+    SM103a), with the arguments the launchers pass: the direct-gradient backward takes those of ``backward_fp32`` and
+    ``dy_scaled_ptr``, the scaled epilogues those of the top-8 epilogues and ``shared_scale``, the SiTU-GLU kernels
+    those of their SwiGLU siblings without the shared maps and ``local_tokens`` and with ``situ_beta``, ``situ_lb`` in
+    the place of ``swiglu_limit``, the top-16 epilogues those of the top-8 ones without the ``shared`` row, the 512-
+    and 896-expert scheduler kernels those of the 256-expert ones, and the two shared-scale helpers their own lists."""
+    registry = jit._registry()
+    missing = [role for role in MODE_GROUP_ROLES if role not in registry]
+    assert missing == [], f"group roles not in this package's registry: {missing}"
+    expected = _group_records(
+        {
+            role: record
+            for role, record in registry.items()
+            if role not in MODE_GROUP_ROLES
+        }
+    )
+    for group in kernels.MODE_GROUPS.values():
+        for role in _mode_group_roles(group):
+            assert registry[role]["arches"] == list(group.targets), role
+            assert registry[role]["arguments"] == expected[role]["arguments"], role
+
+
+GROUP_OK = dict(
+    clamped_swiglu=False,
+    fp32_wgrad=True,
+    router_weight_position="after_down",
+    router_weight_gradient="direct",
+    shared_expert="scaled",
+    activation="swiglu",
+)
+
+
+@pytest.mark.parametrize(
+    "layout,topk,change",
+    [
+        ((8, 64), 8, {}),
+        ((8, 32), 10, {}),
+        ((8, 64), 10, dict(router_weight_gradient="quotient")),
+        ((8, 64), 10, dict(shared_expert="unscaled")),
+        ((8, 64), 10, dict(fp32_wgrad=False)),
+        ((8, 64), 10, dict(clamped_swiglu=True)),
+        ((8, 64), 10, dict(activation="clamped_swiglu")),
+        ((8, 64), 10, dict(router_weight_position="before_down")),
+        ((8, 32), 8, {}),
+        ((8, 32), 8, dict(shared_expert="unscaled")),
+        ((8, 32), 8, dict(router_weight_gradient="quotient")),
+        (
+            (64, 6),
+            6,
+            dict(
+                router_weight_position="before_down",
+                clamped_swiglu=True,
+                shared_expert="unscaled",
+            ),
+        ),
+    ],
+    ids=[
+        "512-top8",
+        "256-top10",
+        "512-quotient",
+        "512-unscaled",
+        "512-bf16-wgrad",
+        "512-clamped",
+        "512-clamped-act",
+        "512-before-down",
+        "256-direct-scaled",
+        "256-direct",
+        "256-scaled",
+        "384-before-down-direct",
+    ],
+)
+def test_mode_group_configurations_outside_the_group_are_refused(layout, topk, change):
+    """Host only: a configuration that uses a layout, the top-k or a mode of the 512-expert top-10 group but is not
+    the group's configuration raises ``ValueError`` naming the group's configuration and the one given."""
+    with pytest.raises(
+        ValueError,
+        match=r"512 routed experts at top-k 10 .* runs \(EP, local experts\) \(8, 64\)",
+    ):
+        kernels.check_configuration(*layout, topk, **{**GROUP_OK, **change})
+
+
+def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
+    """Host only: ``check_configuration`` admits the group's configuration and returns its name, and the default
+    modes keep every existing configuration (returning None); ``check_target`` accepts the group on SM100a and SM103a
+    and refuses it elsewhere with a message naming the two.  On an SM107a device the adapter refuses the group before
+    it loads a kernel; on SM100a and SM103a it loads the group's roles (the direct-gradient backward, the scaled top-10
+    epilogues, the shared-scale helpers, the (8, 64) scheduler kernels) and none of the quotient backward or the
+    unscaled epilogues."""
+    group = kernels.MODE_GROUPS["scaled_top10"]
+    assert group.targets == ("sm_100a", "sm_103a")
+    assert kernels.check_configuration(8, 64, 10, **GROUP_OK) == "scaled_top10"
+    defaults = dict(
+        clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down"
+    )
+    assert kernels.check_configuration(8, 32, 8, **defaults) is None
+    assert (
+        kernels.check_configuration(8, 32, 8, **defaults, activation="clamped_swiglu")
+        is None
+    )
+    for arch in group.targets:
+        kernels.check_target("after_down", arch, "scaled_top10")
+    with pytest.raises(
+        ValueError,
+        match="no sm_107a build in this package; use an sm_100a or sm_103a device",
+    ):
+        kernels.check_target("after_down", "sm_107a", "scaled_top10")
+    loaded = []
+    _group_stub_loader(monkeypatch, loaded)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    keywords = dict(
+        fp32_wgrad=True, router_weight_gradient="direct", shared_expert="scaled"
+    )
+    monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
+    with pytest.raises(ValueError, match="no sm_107a build"):
+        backend.MoKFunctional(8, 64, 10, **keywords)
+    assert loaded == []
+    for arch in group.targets:
+        monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
+        loaded.clear()
+        functional = backend.MoKFunctional(8, 64, 10, **keywords)
+        assert (
+            functional.group == "scaled_top10" and functional.shared_expert == "scaled"
+        )
+        assert set(_mode_group_roles(group)) <= set(loaded), sorted(loaded)
+        assert {"forward", "pad_8", "gather", "barrier", "expert_layout"} <= set(loaded)
+        assert not {"backward_fp32", "epilogue_forward_8", "epilogue_backward_8"} & set(
+            loaded
+        )
+
+
+def test_mode_values_and_mode_types_are_refused():
+    """Host only: an unknown mode value raises ``ValueError`` naming the allowed values; a mode that is not a ``str``
+    raises ``TypeError``, before any value check (also of another argument)."""
+    for name, value in (
+        ("router_weight_gradient", "dot"),
+        ("shared_expert", "half"),
+        ("activation", "gelu"),
+    ):
+        with pytest.raises(ValueError, match=f"{name} must be one of"):
+            kernels.check_configuration(8, 32, 8, **{**GROUP_OK, name: value})
+    for name in ("router_weight_gradient", "shared_expert", "activation"):
+        with pytest.raises(TypeError, match=f"{name} must be one of"):
+            kernels.check_configuration(
+                8, 32, 8, **{**GROUP_OK, name: None, "router_weight_position": "middle"}
+            )
+
+
+def test_situ_parameters_are_checked():
+    """Host only: the per-call SiTU-GLU scalars are finite positive Python numbers whose FP32 values are positive and
+    give finite FP32 kernel constants ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``: ``TypeError`` for a
+    ``bool``, a string or a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value, a value past the
+    FP32 range or rounding to 0 there, and a pair whose constants are past the FP32 range.  The check returns the FP32
+    values."""
+    assert kernels.check_situ_parameters(4.0, 25.0) == (4.0, 25.0)
+    assert kernels.check_situ_parameters(4, 25) == (4.0, 25.0)
+    assert kernels.check_situ_parameters(0.1, 3.0) == (
+        float(torch.tensor(0.1, dtype=torch.float32)),
+        3.0,
+    )
+    for bad in (True, "4", torch.tensor(4.0), None):
+        with pytest.raises(
+            TypeError, match="situ_beta must be a finite positive float"
+        ):
+            kernels.check_situ_parameters(bad, 25.0)
+        with pytest.raises(TypeError, match="situ_lb must be a finite positive float"):
+            kernels.check_situ_parameters(4.0, bad)
+    for bad in (0.0, -4.0, float("inf"), float("nan"), 1e39, 1e-50):
+        with pytest.raises(
+            ValueError, match="situ_beta must be a finite positive float"
+        ):
+            kernels.check_situ_parameters(bad, 25.0)
+        with pytest.raises(ValueError, match="situ_lb must be a finite positive float"):
+            kernels.check_situ_parameters(4.0, bad)
+    for beta, lb, constant in (
+        (1e-39, 25.0, "2.88539 / situ_beta"),
+        (4.0, 1e-39, "2.88539 / situ_lb"),
+        (1e20, 1e20, "situ_beta \\* situ_lb"),
+    ):
+        with pytest.raises(ValueError, match=f"{constant} is past the FP32 range"):
+            kernels.check_situ_parameters(beta, lb)
+
+
+#: The 896-expert top-16 group (``MODE_GROUPS["situ_top16"]``): SiTU-GLU routed experts without a shared expert.
+SITU_GROUP = kernels.MODE_GROUPS["situ_top16"]
+SITU_OK = dict(
+    clamped_swiglu=False,
+    fp32_wgrad=True,
+    router_weight_position="after_down",
+    router_weight_gradient="direct",
+    shared_expert="none",
+    activation="situ_glu",
+)
+#: SiTU-GLU scalars of the GPU tests (``situ_beta``, ``situ_lb``).
+SITU = dict(situ_beta=4.0, situ_lb=25.0)
+
+
+@pytest.mark.parametrize(
+    "layout,topk,change",
+    [
+        ((64, 14), 8, {}),
+        ((8, 32), 16, {}),
+        ((64, 14), 16, dict(activation="swiglu")),
+        ((64, 14), 16, dict(activation="clamped_swiglu")),
+        ((64, 14), 16, dict(clamped_swiglu=True)),
+        ((64, 14), 16, dict(shared_expert="unscaled")),
+        ((64, 14), 16, dict(shared_expert="scaled")),
+        ((64, 14), 16, dict(router_weight_gradient="quotient")),
+        ((64, 14), 16, dict(fp32_wgrad=False)),
+        ((64, 14), 16, dict(router_weight_position="before_down")),
+        ((8, 32), 8, dict(activation="situ_glu", shared_expert="unscaled", router_weight_gradient="quotient")),
+        ((8, 32), 8, dict(shared_expert="none", activation="swiglu", router_weight_gradient="quotient")),
+        ((8, 64), 10, dict(activation="situ_glu")),
+    ],
+    ids=[
+        "896-top8",
+        "256-top16",
+        "896-swiglu",
+        "896-clamped-act",
+        "896-clamped",
+        "896-unscaled",
+        "896-scaled",
+        "896-quotient",
+        "896-bf16-wgrad",
+        "896-before-down",
+        "256-situ",
+        "256-none",
+        "512-situ",
+    ],
+)
+def test_situ_group_configurations_outside_the_group_are_refused(layout, topk, change):
+    """Host only: a configuration that uses the layout, the top-k or a mode of the 896-expert top-16 group (SiTU-GLU,
+    ``shared_expert="none"``) but is not the group's configuration raises ``ValueError`` naming the group's
+    configuration and the one given."""
+    with pytest.raises(
+        ValueError,
+        match=r"896 routed experts at top-k 16 .* runs \(EP, local experts\) \(64, 14\) at topk=16",
+    ):
+        kernels.check_configuration(*layout, topk, **{**SITU_OK, **change})
+
+
+def test_situ_group_configuration_is_checked_before_device_work(monkeypatch):
+    """Host only: ``check_configuration`` admits the 896-expert top-16 group's configuration and returns its name;
+    ``check_target`` accepts the group on SM100a and SM103a and refuses it on SM107a.  On an SM107a device the adapter
+    refuses the group before it loads a kernel; on SM100a and SM103a the adapter (prepared for the context-free forward
+    and the recompute) loads the group's roles (the SiTU-GLU forward, context-free forward, recompute and backward
+    without a shared expert, the top-16 epilogues without a shared row, the (64, 14) scheduler kernels) and none of
+    the SwiGLU fused kernels or the top-8 epilogues."""
+    group = SITU_GROUP
+    assert group.targets == ("sm_100a", "sm_103a")
+    assert group.layouts == ((64, 14),) and group.topk == 16
+    assert kernels.check_configuration(64, 14, 16, **SITU_OK) == "situ_top16"
+    for arch in group.targets:
+        kernels.check_target("after_down", arch, "situ_top16")
+    with pytest.raises(
+        ValueError,
+        match="896 routed experts .* has no sm_107a build in this package; use an sm_100a or sm_103a device",
+    ):
+        kernels.check_target("after_down", "sm_107a", "situ_top16")
+    loaded = []
+    _group_stub_loader(monkeypatch, loaded)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    keywords = {key: SITU_OK[key] for key in ("fp32_wgrad", "router_weight_gradient", "shared_expert", "activation")}
+    monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
+    with pytest.raises(ValueError, match="no sm_107a build"):
+        backend.MoKFunctional(64, 14, 16, **keywords)
+    assert loaded == []
+    for arch in group.targets:
+        monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
+        loaded.clear()
+        functional = backend.MoKFunctional(64, 14, 16, **keywords)
+        functional.prepare(None, save_context=False)
+        functional.prepare_recompute(None)
+        assert functional.group == "situ_top16"
+        assert functional.shared_expert == "none" and functional.activation == "situ_glu"
+        assert set(_mode_group_roles(group)) <= set(loaded), sorted(loaded)
+        assert {"pad_64", "gather", "barrier", "expert_layout"} <= set(loaded)
+        swiglu = {"forward", "forward_noctx", "recompute", "backward_fp32", "backward_fp32_direct"}
+        assert not (swiglu | {"epilogue_forward_8", "epilogue_backward_8"}) & set(loaded)
+
+
+def _situ_launcher_problem(topk=16):
+    """:func:`_launcher_problem` without a shared expert: ``None`` in the three shared-weight places and in the shared
+    places of the saved context, the three routed FP32 accumulators."""
+    p = _launcher_problem(topk=topk)
+    shared, routed = p["weights"][0::2], p["weights"][1::2]
+    p["weights"] = (None, routed[0], None, routed[1], None, routed[2])
+    saved = p["saved"]
+    p["saved"] = (saved[0], None, saved[2], None, saved[4], None, saved[6])
+    p["accumulators"] = p["accumulators"][3:]
+    p["shared"] = shared
+    return p
+
+
+def test_situ_launchers_pass_exactly_the_registry_arguments(monkeypatch):
+    """Host only (stub kernels, no launch): the SiTU-GLU forward (context and context-free), recompute and backward
+    without a shared expert hand their kernels exactly the registry arguments through ``__call__`` and through a plan:
+    ``situ_beta`` and ``situ_lb`` as Python floats, no shared map and no ``local_tokens``.  They return ``None`` in
+    every shared place (and the backward the three routed accumulators); the backward's unscaled and scaled rings are
+    two buffers.  Each refuses a ``swiglu_limit``, missing SiTU-GLU scalars, a shared weight, the shared context and an
+    accumulator count other than three before any launch, and the SwiGLU launchers refuse the SiTU-GLU scalars."""
+    calls = _group_stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    p = _situ_launcher_problem()
+    x, dy, combine, scores, weights = p["x"], p["dy"], p["combine"], p["scores"], p["weights"]
+    topk, macro, mini, comm, ep = 16, 768, 256, 4, 4
+    ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
+    schedule, layout, intermediate, experts, capacity = (
+        p["schedule"], p["layout"], p["intermediate"], p["experts"], p["capacity"],
+    )  # fmt: skip
+    situ = dict(situ_beta=4.0, situ_lb=25)
+    routed = weights[1::2]
+
+    def check(role, count):
+        assert [name for name, _ in calls] == [role] * count
+        for _, arguments in calls:
+            assert arguments["situ_beta"] == 4.0 and arguments["situ_lb"] == 25.0
+            assert type(arguments["situ_beta"]) is float and type(arguments["situ_lb"]) is float
+            assert not NO_SHARED_ARGUMENTS & set(arguments) and "swiglu_limit" not in arguments
+        calls.clear()
+
+    for context in (True, False):
+        forward = MoKForward(False, context=context, situ_glu=True)
+        out = forward(x, ptrs, combine, ptrs, *weights, *schedule, topk, None, comm, macro, mini, layout=layout, **situ)
+        assert out[1] is None and out[3] is None and out[5] is None and out[7] is None
+        plan = forward.plan(x, ptrs, ptrs, intermediate, experts, capacity, topk, None, comm, macro, mini, **situ)
+        planned = MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+        assert len(planned) == 9 and all(planned[i] is None for i in (1, 3, 5, 7))
+        check("forward_situ_noshared" if context else "forward_noctx_situ_noshared", 2)
+    recompute = MoKRecompute(False, situ_glu=True)
+    out = recompute(x, ptrs, None, routed[0], None, routed[1], *schedule, topk, None, comm, macro, mini, layout=layout,
+                    **situ)  # fmt: skip
+    assert len(out) == 7 and all(out[i] is None for i in (1, 3, 5))
+    plan = recompute.plan(x, ptrs, intermediate, experts, capacity, topk, None, comm, macro, mini, **situ)
+    planned = MoKRecompute.launch_planned(plan, None, routed[0], None, routed[1], *schedule[:3], layout)
+    assert len(planned) == 7 and all(planned[i] is None for i in (1, 3, 5))
+    check("recompute_situ_noshared", 2)
+    backward = MoKBackward(False, True, router_weight_gradient="direct", situ_glu=True)
+    accumulators = p["accumulators"]
+    args = (dy, ptrs, combine, ptrs, scores, ptrs, scores, ptrs, *weights, *p["saved"], x, ptrs, *schedule, topk, None,
+            comm, macro, mini)  # fmt: skip
+    out = backward(*args, weight_grad_accumulators=accumulators, layout=layout, **situ)
+    assert all(out[i] is None for i in (0, 2, 4, 6, 9, 11, 13))
+    assert all(out[i] is a for i, a in zip((10, 12, 14), accumulators, strict=True))
+    plan = backward.plan(dy, ptrs, ptrs, ptrs, ptrs, ptrs, intermediate, experts, capacity, topk, None, comm, macro,
+                         mini, **situ)  # fmt: skip
+    planned = backward.launch_planned(plan, *weights, *p["saved"], x, *schedule, layout,
+                                      weight_grad_accumulators=accumulators)  # fmt: skip
+    assert all(planned[i] is None for i in (0, 2, 4, 6, 9, 11, 13))
+    for _, arguments in calls:
+        assert arguments["dy_r"] is arguments["dy_routed_ptr"]
+        assert arguments["dy_atb_r"] is arguments["dy_scaled_ptr"]
+        assert arguments["dy_r"].data_ptr() != arguments["dy_atb_r"].data_ptr()
+        for name, accumulator in zip(("dwg_r", "dwu_r", "dwd_r"), accumulators, strict=True):
+            assert arguments[name] is accumulator, name
+    check("backward_fp32_direct_situ_noshared", 2)
+    # Refusals before any launch.
+    shared = p["shared"]
+    with pytest.raises(ValueError, match="take situ_beta and situ_lb, not a swiglu_limit"):
+        forward(x, ptrs, combine, ptrs, *weights, *schedule, topk, 10.0, comm, macro, mini, layout=layout, **situ)
+    with pytest.raises(TypeError, match="situ_beta must be a finite positive float"):
+        forward(x, ptrs, combine, ptrs, *weights, *schedule, topk, None, comm, macro, mini, layout=layout)
+    with pytest.raises(ValueError, match="situ_lb must be a finite positive float"):
+        recompute.plan(x, ptrs, intermediate, experts, capacity, topk, None, comm, macro, mini, situ_beta=4.0,
+                       situ_lb=float("inf"))  # fmt: skip
+    with pytest.raises(ValueError, match="have no shared expert: pass None"):
+        forward(x, ptrs, combine, ptrs, shared[0], routed[0], None, routed[1], None, routed[2], *schedule, topk, None,
+                comm, macro, mini, layout=layout, **situ)  # fmt: skip
+    with pytest.raises(ValueError, match="have no shared expert: pass None"):
+        recompute(x, ptrs, None, routed[0], shared[1], routed[1], *schedule, topk, None, comm, macro, mini,
+                  layout=layout, **situ)  # fmt: skip
+    saved = list(p["saved"])
+    saved[1] = saved[2]
+    with pytest.raises(ValueError, match="have no shared expert: pass None"):
+        backward(dy, ptrs, combine, ptrs, scores, ptrs, scores, ptrs, *weights, *saved, x, ptrs, *schedule, topk, None,
+                 comm, macro, mini, weight_grad_accumulators=accumulators, layout=layout, **situ)  # fmt: skip
+    with pytest.raises(ValueError, match="exactly three FP32 accumulators"):
+        backward(*args, layout=layout, **situ)
+    with pytest.raises(ValueError, match="Accumulators must be contiguous FP32 tensors shaped like the weights"):
+        backward(*args, weight_grad_accumulators=[*accumulators, accumulators[0]], layout=layout, **situ)
+    with pytest.raises(ValueError, match="read only by the SiTU-GLU kernels"):
+        MoKForward(False)(x, ptrs, combine, ptrs, shared[0], routed[0], shared[1], routed[1], shared[2], routed[2],
+                          *schedule, topk, None, comm, macro, mini, layout=layout, **situ)  # fmt: skip
+    assert calls == []
+    with pytest.raises(ValueError, match="SiTU-GLU forward is built without a SwiGLU limit"):
+        MoKForward(True, situ_glu=True)
+    with pytest.raises(ValueError, match="SiTU-GLU recompute is built without a SwiGLU limit"):
+        MoKRecompute(True, situ_glu=True)
+    with pytest.raises(ValueError, match="SiTU-GLU backward is built with the direct router-weight gradient"):
+        MoKBackward(False, True, situ_glu=True)
+    with pytest.raises(ValueError, match="SiTU-GLU backward is built with the direct router-weight gradient"):
+        MoKBackward(False, True, router_weight_gradient="direct", shared_operands=True, situ_glu=True)
+    with pytest.raises(TypeError, match="situ_glu must be a boolean"):
+        MoKForward(False, situ_glu=1)
+
+
+def test_none_epilogues_take_no_shared_row(monkeypatch):
+    """Host only (stub kernels): ``shared_row="none"`` loads the top-16 forward and backward epilogues without a
+    shared row, whose every launch (direct and planned) passes no ``shared`` argument and the token count and width of
+    the ``[tokens * 16, hidden]`` routed rows; a launch with a shared row raises before any launch, and a planned
+    launch takes ``shared=None`` exactly for such a plan."""
+    loaded = []
+    calls = _group_stub_loader(monkeypatch, loaded)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    epilogues = _host_epilogues(monkeypatch, MoKEpilogues(16, shared_row="none"))
+    assert loaded == ["epilogue_forward_none_16", "epilogue_backward_none_16"]
+    tokens, hidden = 4, 256
+    shared = torch.zeros(tokens, hidden, dtype=torch.bfloat16)
+    routed = torch.zeros(tokens * 16, hidden, dtype=torch.bfloat16)
+    scores = torch.zeros(tokens, 16)
+    with pytest.raises(ValueError, match="take shared=None"):
+        epilogues.forward(shared, routed, scores)
+    with pytest.raises(ValueError, match="take shared=None"):
+        epilogues.backward(shared, routed)
+    monkeypatch.setattr(
+        MoKEpilogues, "_rows", lambda self, shared, routed: (routed.shape[0] // self.top_k, routed.shape[1])
+    )
+    with pytest.raises(ValueError, match="shared_scale is required exactly"):
+        epilogues.backward(None, routed, torch.ones(tokens))
+    assert calls == []
+    outputs = [
+        epilogues.forward(None, routed, scores),
+        epilogues.backward(None, routed),
+        MoKEpilogues.launch_planned(epilogues.plan(routed, scores), None, scores),
+        MoKEpilogues.launch_planned(epilogues.plan(routed, False), None),
+    ]
+    for output in outputs:
+        assert tuple(output.shape) == (tokens, hidden) and output.dtype == torch.bfloat16
+    roles = ["epilogue_forward_none_16", "epilogue_backward_none_16"] * 2
+    assert [role for role, _ in calls] == roles
+    for _, arguments in calls:
+        assert "shared" not in arguments and arguments["routed"] is routed
+        assert arguments["tokens"] == tokens and arguments["hidden"] == hidden
+    with pytest.raises(ValueError, match="shared is None exactly for a plan of the shared-row-free epilogues"):
+        MoKEpilogues.launch_planned(epilogues.plan(routed, False), shared)
+    with pytest.raises(ValueError, match="shared is None exactly for a plan of the shared-row-free epilogues"):
+        MoKEpilogues.launch_planned(MoKEpilogues(8).plan(routed[: tokens * 8], False), None)
+
+
+def test_situ_call_refusals_come_before_device_work(monkeypatch):
+    """Host only: an adapter of the 896-expert top-16 group refuses, before any copy, barrier or kernel load, a forward,
+    recompute or backward without ``situ_beta`` and ``situ_lb`` or with values that are not finite positive numbers, a
+    shared weight, a ``swiglu_limit``, a ``shared_scale`` and MXFP8 routed weights; a SwiGLU adapter refuses the
+    SiTU-GLU scalars."""
+    functional = object.__new__(backend.MoKFunctional)
+    functional.local_experts = 4
+    functional._validated = {}
+    functional.group, functional.shared_expert, functional.router_weight_gradient = "situ_top16", "none", "direct"
+    functional.activation, functional.weight_before_down = "situ_glu", False
+    functional._forward_kernels, functional._backward_kernels = {}, {}
+    functional._recompute_kernels, functional._context_free_forward_kernels = {}, {}
+    events = []
+    _group_stub_loader(monkeypatch, events)
+    workspace = dataclasses.make_dataclass("W", ["device"])(torch.device("cuda", 0))
+    monkeypatch.setattr(backend.MoKFunctional, "_inputs", staticmethod(lambda *args: (workspace, 256)))
+    monkeypatch.setattr(functional, "_check_device", lambda workspace: None)
+    monkeypatch.setattr(functional, "_barrier", lambda w: events.append("barrier"))
+    monkeypatch.setattr(backend.MoKFunctional, "_copy_source", staticmethod(lambda *args: events.append("copy")))
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(256, 256, **options)
+    shared = [torch.zeros(256, 256, **options) for _ in range(3)]
+    routed = [torch.zeros(4, 256, 256, **options) for _ in range(3)]
+    data = torch.zeros(4, 256, 256, dtype=torch.uint8)
+    mxfp8 = [(data, torch.zeros(64, dtype=torch.uint8)) for _ in range(3)]
+    scores = torch.zeros(256, 16)
+    schedule = object()
+    context = backend.MoKForwardContext(
+        x_routed=x, gate_shared=None, gate_routed=x, up_shared=None, up_routed=x, hidden_shared=None, hidden_routed=x,
+        schedule=schedule,
+    )  # fmt: skip
+    none = (None, None, None)
+    forward = lambda **kw: functional.forward(  # noqa: E731
+        None, None, schedule, x, scores, *kw.pop("s", none), *kw.pop("r", routed), **kw
+    )
+    recompute = lambda **kw: functional.recompute_forward_context(  # noqa: E731
+        None, None, schedule, x, *kw.pop("s", none)[:2], *kw.pop("r", routed)[:2], **kw
+    )
+    backward = lambda **kw: functional.backward(  # noqa: E731
+        None, None, schedule, context, x, x, scores, *kw.pop("s", none), *kw.pop("r", routed), **kw
+    )
+    for run in (forward, recompute, backward):
+        with pytest.raises(ValueError, match="requires situ_beta and situ_lb"):
+            run()
+        with pytest.raises(ValueError, match="requires situ_beta and situ_lb"):
+            run(situ_beta=4.0)
+        with pytest.raises(TypeError, match="situ_lb must be a finite positive float"):
+            run(situ_beta=4.0, situ_lb=torch.tensor(25.0))
+        with pytest.raises(ValueError, match="situ_beta must be a finite positive float"):
+            run(situ_beta=0.0, situ_lb=25.0)
+        with pytest.raises(ValueError, match="has no shared expert: pass None"):
+            run(s=shared, **SITU)
+        with pytest.raises(ValueError, match=r"runs SiTU-GLU \(situ_beta, situ_lb\): pass swiglu_limit=None"):
+            run(swiglu_limit=10.0, **SITU)
+    for run in (forward, backward):
+        with pytest.raises(ValueError, match="takes BF16 routed weights"):
+            run(r=mxfp8, **SITU)
+        with pytest.raises(ValueError, match="taken only with shared_expert='scaled'"):
+            run(shared_scale=torch.ones(256), **SITU)
+    functional.group, functional.shared_expert, functional.router_weight_gradient = None, "unscaled", "quotient"
+    functional.activation = "swiglu"
+    for run in (forward, backward):
+        with pytest.raises(ValueError, match="taken only with activation='situ_glu'"):
+            run(s=shared, **SITU)
+    assert events == []
+
+
+def _launcher_problem(
+    tokens=512,
+    hidden=256,
+    intermediate=256,
+    experts=4,
+    topk=10,
+    macro=768,
+    capacity=8192,
+):
+    """Host-only launcher arguments (no device memory is read): BF16 zeros for x, a separate dy, the combine rows and
+    the saved context, the weights, FP32 accumulators and scores, a schedule and its layout."""
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(tokens, hidden, **options)
+    dy = torch.zeros(tokens, hidden, **options)
+    combine = torch.zeros(tokens * topk, hidden, **options)
+    shared = [
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(intermediate, hidden, **options),
+        torch.zeros(hidden, intermediate, **options),
+    ]
+    routed = [
+        torch.zeros(experts, intermediate, hidden, **options),
+        torch.zeros(experts, intermediate, hidden, **options),
+        torch.zeros(experts, hidden, intermediate, **options),
+    ]
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    schedule = (
+        torch.full((capacity,), -1, dtype=torch.int32),
+        torch.zeros(capacity, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(experts, dtype=torch.int32),
+    )
+    ring = torch.zeros(macro, intermediate, **options)
+    saved = (torch.zeros(macro, hidden, **options), x[:, :intermediate].clone(), ring, x[:, :intermediate].clone(),
+             ring, x[:, :intermediate].clone(), ring)  # fmt: skip
+    return dict(
+        x=x, dy=dy, combine=combine, weights=weights, schedule=schedule, saved=saved,
+        layout=torch.zeros(3 * experts + capacity // 256, dtype=torch.int32),
+        accumulators=[torch.zeros(w.shape) for w in (*shared, *routed)],
+        scores=torch.zeros(tokens, topk), capacity=capacity, intermediate=intermediate, experts=experts,
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "operands", [False, True], ids=["staged-operands", "shared-operands"]
+)
+def test_direct_backward_binds_the_unscaled_and_the_scaled_ring(monkeypatch, operands):
+    """Host only (stub kernels): the direct-gradient backward hands its kernel exactly the registry arguments through
+    ``__call__`` and through a plan; the down projection's input gradient (``dy_r``) and the dispatch's unscaled store
+    (``dy_routed_ptr``) are one ``[macro, hidden]`` BF16 ring, the down-projection weight gradient (``dy_atb_r``) and the
+    scaled store (``dy_scaled_ptr``) a second one.  With ``shared_operands=True`` the shared weight gradients read the
+    given ``(dy_atb_s, x_atb_s)``; without it the staged ``dy`` and ``x``."""
+    calls = _group_stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    p = _launcher_problem()
+    x, dy, combine, scores = p["x"], p["dy"], p["combine"], p["scores"]
+    topk, macro, mini, comm, ep = 10, 768, 256, 4, 4
+    ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
+    shared_operands = (torch.zeros_like(x), torch.zeros_like(x)) if operands else None
+    backward = MoKBackward(
+        False, True, router_weight_gradient="direct", shared_operands=operands
+    )
+    backward(
+        dy, ptrs, combine, ptrs, scores, ptrs, scores, ptrs, *p["weights"], *p["saved"], x, ptrs, *p["schedule"],
+        topk, None, comm, macro, mini, weight_grad_accumulators=p["accumulators"], layout=p["layout"],
+        shared_operands=shared_operands,
+    )  # fmt: skip
+    plan = backward.plan(
+        dy, ptrs, ptrs, ptrs, ptrs, ptrs, p["intermediate"], p["experts"], p["capacity"], topk, None, comm, macro,
+        mini,
+    )  # fmt: skip
+    backward.launch_planned(
+        plan, *p["weights"], *p["saved"], x, *p["schedule"], p["layout"], weight_grad_accumulators=p["accumulators"],
+        shared_operands=shared_operands,
+    )  # fmt: skip
+    assert [role for role, _ in calls] == ["backward_fp32_direct"] * 2
+    for _, arguments in calls:
+        unscaled, scaled = arguments["dy_r"], arguments["dy_atb_r"]
+        assert (
+            unscaled is arguments["dy_routed_ptr"]
+            and scaled is arguments["dy_scaled_ptr"]
+        )
+        assert unscaled is not scaled and unscaled.data_ptr() != scaled.data_ptr()
+        for ring in (unscaled, scaled):
+            assert (
+                tuple(ring.shape) == (macro, x.shape[1])
+                and ring.dtype == torch.bfloat16
+            )
+        expected = shared_operands if operands else (dy, x)
+        assert (
+            arguments["dy_atb_s"] is expected[0] and arguments["x_atb_s"] is expected[1]
+        )
+        assert arguments["dy_s"] is dy
+    # The launcher's shared_operands must match how it was built, before any launch.
+    calls.clear()
+    with pytest.raises(ValueError, match="shared_operands is required exactly"):
+        backward(
+            dy, ptrs, combine, ptrs, scores, ptrs, scores, ptrs, *p["weights"], *p["saved"], x, ptrs, *p["schedule"],
+            topk, None, comm, macro, mini, weight_grad_accumulators=p["accumulators"], layout=p["layout"],
+            shared_operands=None if operands else (x, x),
+        )  # fmt: skip
+    if operands:
+        with pytest.raises(
+            ValueError, match="shared_operands must be two contiguous BF16"
+        ):
+            backward.launch_planned(
+                plan, *p["weights"], *p["saved"], x, *p["schedule"], p["layout"],
+                weight_grad_accumulators=p["accumulators"], shared_operands=(x, x[:256]),
+            )  # fmt: skip
+    assert calls == []
+
+
+def test_direct_backward_is_refused_outside_its_build(monkeypatch):
+    """Host only: the direct-gradient backward exists for plain SwiGLU with FP32 weight gradients and the router weight
+    after the down projection; any other combination, or an unknown gradient name, raises before a kernel loads."""
+    loaded = []
+    _group_stub_loader(monkeypatch, loaded)
+    for args in ((True, True), (False, False), (True, True, True)):
+        with pytest.raises(
+            ValueError,
+            match="direct router-weight gradient backward is built for plain SwiGLU",
+        ):
+            MoKBackward(*args, router_weight_gradient="direct")
+    with pytest.raises(ValueError, match="router_weight_gradient must be one of"):
+        MoKBackward(False, True, router_weight_gradient="dot")
+    with pytest.raises(TypeError, match="shared_operands must be booleans"):
+        MoKBackward(False, True, shared_operands=1)
+    assert loaded == []
+    MoKBackward(False, True)
+    assert loaded[0] == "backward_fp32"
+
+
+def _host_epilogues(monkeypatch, epilogues):
+    """Let host-only tests launch ``epilogues`` with CPU tensors: no CUDA checks, three CTAs."""
+    monkeypatch.setattr(MoKEpilogues, "_check", lambda self, shared, routed: None)
+
+    def ctas(self, tokens, device):
+        self._no_scores.setdefault(device, torch.zeros(1))
+        return 3
+
+    monkeypatch.setattr(MoKEpilogues, "_ctas", ctas)
+    return epilogues
+
+
+def test_scaled_epilogues_take_the_shared_scale(monkeypatch):
+    """Host only (stub kernels): ``shared_row="scaled"`` loads the scaled top-10 forward and backward epilogues, whose
+    every launch (direct and planned) passes the caller's FP32 ``[tokens]`` ``shared_scale``; a scaled launch without
+    them, or with another shape, raises before any launch, and an unscaled epilogue refuses them.  Top-k 10 has the
+    scaled epilogues only and they have top-k 10 only."""
+    loaded = []
+    calls = _group_stub_loader(monkeypatch, loaded)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    epilogues = _host_epilogues(monkeypatch, MoKEpilogues(10, shared_row="scaled"))
+    assert loaded == ["epilogue_forward_scaled_10", "epilogue_backward_scaled_10"]
+    tokens, hidden = 4, 256
+    shared = torch.zeros(tokens, hidden, dtype=torch.bfloat16)
+    routed = torch.zeros(tokens * 10, hidden, dtype=torch.bfloat16)
+    scores, scales = torch.zeros(tokens, 10), torch.ones(tokens)
+    with pytest.raises(ValueError, match="shared_scale is required exactly"):
+        epilogues.forward(shared, routed, scores)
+    with pytest.raises(ValueError, match="shared_scale is required exactly"):
+        epilogues.backward(shared, routed)
+    with pytest.raises(
+        ValueError, match=r"shared_scale must be contiguous CUDA FP32 \[tokens\]"
+    ):
+        epilogues.forward(shared, routed, scores, torch.ones(tokens + 1))
+    assert calls == []
+    epilogues.forward(shared, routed, scores, scales)
+    epilogues.backward(shared, routed, scales)
+    MoKEpilogues.launch_planned(epilogues.plan(routed, scores), shared, scores, scales)
+    MoKEpilogues.launch_planned(
+        epilogues.plan(routed, False), shared, shared_scale=scales
+    )
+    roles = ["epilogue_forward_scaled_10", "epilogue_backward_scaled_10"] * 2
+    assert [role for role, _ in calls] == roles
+    for _, arguments in calls:
+        assert arguments["shared_scale"] is scales and arguments["shared"] is shared
+        assert arguments["tokens"] == tokens and arguments["hidden"] == hidden
+    with pytest.raises(ValueError, match="top_k=2, 6 or 8"):
+        MoKEpilogues(10)
+    with pytest.raises(ValueError, match="The scaled epilogues support top_k=10"):
+        MoKEpilogues(8, shared_row="scaled")
+    with pytest.raises(ValueError, match="shared_row='unscaled', 'scaled' or 'none'"):
+        MoKEpilogues(8, shared_row="half")
+    with pytest.raises(
+        ValueError, match="The shared-row-free epilogues support top_k=16"
+    ):
+        MoKEpilogues(8, shared_row="none")
+    unscaled = MoKEpilogues(8)
+    with pytest.raises(ValueError, match="shared_scale is required exactly"):
+        unscaled.forward(
+            shared,
+            torch.zeros(tokens * 8, hidden, dtype=torch.bfloat16),
+            torch.zeros(tokens, 8),
+            scales,
+        )
+
+
+def test_shared_scale_helpers_pass_the_registry_arguments(monkeypatch):
+    """Host only (stub kernels): ``rows`` hands its kernel the BF16 input, the FP32 scales, a new BF16 output of the
+    input's shape and the row count and width on one CTA per row, at most eight per SM; ``dot`` the two BF16 operands
+    and a new FP32 ``[tokens]`` output on one CTA per eight rows, at most eight per SM.  A scale tensor of another shape
+    raises before any launch; zero rows launch nothing."""
+    calls = _group_stub_loader(monkeypatch)
+    monkeypatch.setattr(
+        kernels.MoKSharedScale, "_check_rows", staticmethod(lambda *args: None)
+    )
+    monkeypatch.setattr(kernels.MoKSharedScale, "_sm_count", lambda self, device: 2)
+    helpers = kernels.MoKSharedScale()
+    values, scales = torch.zeros(3, 16, dtype=torch.bfloat16), torch.ones(3)
+    with pytest.raises(
+        ValueError, match=r"scales must be contiguous CUDA FP32 \[tokens\]"
+    ):
+        helpers.rows(values, torch.ones(4))
+    assert calls == []
+    out = helpers.rows(values, scales)
+    dots = helpers.dot(values, out)
+    assert out.shape == values.shape and out.dtype == torch.bfloat16
+    assert tuple(dots.shape) == (3,) and dots.dtype == torch.float32
+    assert [role for role, _ in calls] == ["shared_scale_rows", "shared_scale_dot"]
+    rows, dot = calls[0][1], calls[1][1]
+    assert rows["rows"] is values and rows["scales"] is scales and rows["scaled"] is out
+    assert dot["left"] is values and dot["right"] is out and dot["dots"] is dots
+    assert (rows["tokens"], rows["width"], rows["grid_x"]) == (3, 16, 3)
+    assert (dot["tokens"], dot["width"], dot["grid_x"]) == (3, 16, 1)
+    many = torch.zeros(200, 16, dtype=torch.bfloat16)
+    calls.clear()
+    helpers.rows(many, torch.ones(200))
+    helpers.dot(many, many)
+    assert [arguments["grid_x"] for _, arguments in calls] == [16, 16]
+    calls.clear()
+    empty = torch.zeros(0, 16, dtype=torch.bfloat16)
+    assert helpers.rows(empty, torch.ones(0)).shape == (0, 16) and helpers.dot(
+        empty, empty
+    ).shape == (0,)
+    assert calls == []
+
+
+def test_scaled_call_refusals_come_before_device_work(monkeypatch):
+    """Host only: an adapter of the 512-expert top-10 group refuses, before any copy, barrier or kernel load, a forward
+    or backward without ``shared_scale``, a ``shared_scale`` that is not a tensor (``TypeError``) or not FP32
+    ``[tokens]`` on the device, a clamped SwiGLU limit and MXFP8 routed weights; an unscaled adapter refuses a
+    ``shared_scale``."""
+    functional = object.__new__(backend.MoKFunctional)
+    functional.local_experts = 4
+    functional._validated = {}
+    functional.group, functional.shared_expert, functional.router_weight_gradient = (
+        "scaled_top10",
+        "scaled",
+        "direct",
+    )
+    functional._forward_kernels, functional._backward_kernels = {}, {}
+    functional._recompute_kernels, functional._context_free_forward_kernels = {}, {}
+    events = []
+    _group_stub_loader(monkeypatch, events)
+    workspace = dataclasses.make_dataclass("W", ["device"])(torch.device("cuda", 0))
+    monkeypatch.setattr(
+        backend.MoKFunctional, "_inputs", staticmethod(lambda *args: (workspace, 256))
+    )
+    monkeypatch.setattr(functional, "_check_device", lambda workspace: None)
+    monkeypatch.setattr(functional, "_barrier", lambda w: events.append("barrier"))
+    monkeypatch.setattr(
+        backend.MoKFunctional,
+        "_copy_source",
+        staticmethod(lambda *args: events.append("copy")),
+    )
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(256, 256, **options)
+    shared = [torch.zeros(256, 256, **options) for _ in range(3)]
+    routed = [torch.zeros(4, 256, 256, **options) for _ in range(3)]
+    data = torch.zeros(4, 256, 256, dtype=torch.uint8)
+    mxfp8 = [(data, torch.zeros(64, dtype=torch.uint8)) for _ in range(3)]
+    scores = torch.zeros(256, 10)
+    schedule = object()
+    context = backend.MoKForwardContext(
+        x_routed=x, gate_shared=x, gate_routed=x, up_shared=x, up_routed=x, hidden_shared=x, hidden_routed=x,
+        schedule=schedule,
+    )  # fmt: skip
+    forward = lambda **kw: functional.forward(
+        None, None, schedule, x, scores, *shared, *kw.pop("r", routed), **kw
+    )  # noqa: E731
+    backward = lambda **kw: functional.backward(  # noqa: E731
+        None, None, schedule, context, x, x, scores, *shared, *kw.pop("r", routed), **kw
+    )
+    for run in (forward, backward):
+        with pytest.raises(ValueError, match="requires shared_scale"):
+            run()
+        with pytest.raises(TypeError, match="shared_scale must be a torch.Tensor"):
+            run(shared_scale=[1.0] * 256)
+        with pytest.raises(
+            ValueError, match="shared_scale must be contiguous torch.float32"
+        ):
+            run(shared_scale=torch.ones(256))  # a CPU tensor
+        with pytest.raises(ValueError, match="runs plain SwiGLU"):
+            run(swiglu_limit=10.0, shared_scale=torch.ones(256))
+        with pytest.raises(ValueError, match="takes BF16 routed weights"):
+            run(r=mxfp8, shared_scale=torch.ones(256))
+    functional.group, functional.shared_expert, functional.router_weight_gradient = (
+        None,
+        "unscaled",
+        "quotient",
+    )
+    for run in (forward, backward):
+        with pytest.raises(ValueError, match="taken only with shared_expert='scaled'"):
+            run(shared_scale=torch.ones(256))
+    assert events == []
+
+
+def test_memory_report_counts_each_storage_once():
+    """Host only: the memory report helper (``report_mok_scaled.py``) counts each tensor storage once, in the first
+    part that reaches it (views, and a workspace a schedule or a context refers to, included); the retained state is
+    the schedule, with the context added for a layer without checkpointing."""
+    from tests.experimental.report_mok_scaled import memory_report
+
+    @dataclasses.dataclass
+    class Store:
+        rows: torch.Tensor
+        more: tuple
+
+    @dataclasses.dataclass
+    class Plan:
+        rows: torch.Tensor
+        store: Store
+
+    base = torch.zeros(64)
+    store = Store(base, (base[:8], torch.zeros(4, dtype=torch.bfloat16), None))
+    plan = Plan(torch.zeros(10, dtype=torch.int32), store)
+    context = (torch.zeros(3, dtype=torch.float64), plan, {"rows": torch.zeros(2)})
+    assert memory_report(store, plan, context) == dict(
+        workspace=256 + 8,
+        schedule=40,
+        context=24 + 8,
+        retained_checkpointed=40,
+        retained_with_context=40 + 32,
+    )
+
+
+# The 512-expert top-10 group (``MODE_GROUPS["scaled_top10"]``) on SM100a and SM103a: the helpers, the scaled
+# epilogues, the direct-gradient backward and the adapter.  Every input is drawn on the CPU and copied to the device.
+
+#: The group's (EP, local experts) layout and top-k.
+GROUP_LAYOUT, GROUP_TOPK = (
+    kernels.MODE_GROUPS["scaled_top10"].layouts[0],
+    kernels.MODE_GROUPS["scaled_top10"].topk,
+)
+#: The group's roles beside the scheduler layout's.
+GROUP_KERNELS = (
+    "backward_fp32_direct",
+    "epilogue_forward_scaled_10",
+    "shared_scale_rows",
+    "shared_scale_dot",
+)
+
+
+def _bits(value):
+    """``value``'s bytes as integers (BF16 / FP32), so that signed zeros differ."""
+    return value.view({2: torch.int16, 4: torch.int32}[value.element_size()])
+
+
+def _same_bits(a, b):
+    return all(torch.equal(_bits(x), _bits(y)) for x, y in zip(a, b, strict=True))
+
+
+def _cpu_problem(tokens, hidden, intermediate, experts, topk, seed, device):
+    """Inputs drawn on the CPU, then copied to ``device``: BF16 ``x`` and ``dY``, weights scaled to unit-variance
+    outputs (shared gate, up, down, routed gate, up, down), FP32 router weights in [0, 1.5) with every 5th token's
+    first weight and every weight of token 3 exactly 0, FP32 shared scales in [0, 2) with every 4th token's exactly 0
+    and the next token's exactly 1, and int64 expert ids (``topk`` distinct experts per token)."""
+    g = torch.Generator().manual_seed(seed)
+    x = (randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    dy = (randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    weights = (
+        (randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (randn(intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (randn(hidden, intermediate, generator=g) / intermediate**0.5).bfloat16(),
+        (randn(experts, intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (randn(experts, intermediate, hidden, generator=g) / hidden**0.5).bfloat16(),
+        (
+            randn(experts, hidden, intermediate, generator=g) / intermediate**0.5
+        ).bfloat16(),
+    )
+    scores = rand(tokens, topk, generator=g) * 1.5
+    scores[::5, 0] = 0.0
+    scores[3:4] = 0.0
+    scale = rand(tokens, generator=g) * 2.0
+    scale[::4] = 0.0
+    scale[1::4] = 1.0
+    ids = rand(tokens, experts, generator=g).argsort(-1)[:, :topk].contiguous()
+    return dict(
+        x=x.to(device), dy=dy.to(device), weights=tuple(w.to(device) for w in weights), scores=scores.to(device),
+        scale=scale.to(device), ids=ids.to(device),
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "tokens,width", [(0, 4096), (1, 8), (37, 1032), (4099, 4096), (4099, 1024)]
+)
+def test_shared_scale_helpers_on_the_gpu(monkeypatch, tokens, width):
+    """``rows`` gives ``BF16(s * v)`` bit for bit (one FP32 product, one rounding: the CPU's FP32 product rounded to
+    BF16), so ``s = 1`` keeps the input bits and ``s = 0`` gives signed zeros.  ``dot`` gives the same FP32 bytes run
+    to run and at another grid size; a row with one nonzero product gives that product exactly, a zero row zero.  The
+    accuracy of ``dot`` against the float64 oracle is judged in ``test_mok_accuracy.py``."""
+    for role in ("shared_scale_rows", "shared_scale_dot"):
+        _require_role(role)
+    device = torch.device("cuda", torch.cuda.current_device())
+    helpers = kernels.MoKSharedScale()
+    g = torch.Generator().manual_seed(7001 + tokens + width)
+    values = (randn(tokens, width, generator=g) * 0.125).bfloat16()
+    other = (randn(tokens, width, generator=g) * 0.125).bfloat16()
+    scales = rand(tokens, generator=g) * 4.0 - 2.0
+    scales[::4] = 0.0
+    scales[1::4] = 1.0
+    single = torch.zeros_like(values)
+    columns = randint(0, width, (tokens,), generator=g)
+    single[torch.arange(tokens), columns] = values[torch.arange(tokens), columns]
+    expected_rows = (scales[:, None] * values.float()).bfloat16()
+    expected_single = (
+        single.float()[torch.arange(tokens), columns]
+        * other.float()[torch.arange(tokens), columns]
+    )
+    d_values, d_other, d_scales, d_single = (
+        v.to(device) for v in (values, other, scales, single)
+    )
+    with kernels._ffi_stream():
+        scaled = [helpers.rows(d_values, d_scales) for _ in range(REPEATS)]
+        dots = [helpers.dot(d_values, d_other) for _ in range(REPEATS)]
+        single_dot = helpers.dot(d_single, d_other)
+        zero_dot = helpers.dot(torch.zeros_like(d_values), d_other)
+    monkeypatch.setitem(helpers._sms, device, 1)  # one SM's grid: at most 8 CTAs
+    with kernels._ffi_stream():
+        small_grid = (helpers.rows(d_values, d_scales), helpers.dot(d_values, d_other))
+    torch.cuda.synchronize()
+    assert scaled[0].shape == (tokens, width) and dots[0].shape == (tokens,)
+    assert all(
+        torch.equal(_bits(value.cpu()), _bits(expected_rows))
+        for value in (*scaled, small_grid[0])
+    )
+    assert torch.equal(
+        _bits(scaled[0][1::4].cpu()), _bits(values[1::4])
+    )  # s = 1: the input bits
+    assert all(
+        torch.equal(_bits(value), _bits(dots[0]))
+        for value in (*dots[1:], small_grid[1])
+    )
+    assert torch.isfinite(dots[0]).all().item()
+    nonzero = expected_single != 0
+    assert torch.equal(single_dot.cpu()[nonzero], expected_single[nonzero])
+    assert torch.count_nonzero(zero_dot).item() == 0
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 1032), (37, 4096), (512, 256)])
+def test_scaled_epilogues_on_the_gpu(tokens, hidden):
+    """The scaled top-10 epilogues.  The backward sum is exact: ``BF16(s * shared + routed_0 + ... + routed_9)`` in
+    FP32 in that order, bit for bit the CPU's.  The forward with ``s = 1`` and the last two slots zero (zero rows and
+    zero weights) has the bytes of the top-8 epilogue on the first eight slots (both start from ``s * shared``, then
+    add the slots in ascending order, and ``fma(0, 0, acc) = acc``); a token's row with ``s = 1`` has the bytes of an
+    all-ones call (each token reads its own scale).  Five launches and a CUDA Graph replay give the same bytes.  The
+    forward's accuracy against the float64 oracle is judged in ``test_mok_accuracy.py``."""
+    _require_role("epilogue_forward_scaled_10")
+    _require_role("epilogue_backward_8")
+    device = torch.device("cuda", torch.cuda.current_device())
+    scaled, top8 = MoKEpilogues(10, shared_row="scaled"), MoKEpilogues(8)
+    g = torch.Generator().manual_seed(7101 + tokens + hidden)
+    shared = (randn(tokens, hidden, generator=g) * 0.125).bfloat16()
+    routed = (randn(tokens, 10, hidden, generator=g) * 0.125).bfloat16()
+    scores = rand(tokens, 10, generator=g) + 0.01
+    mixed = rand(tokens, generator=g) * 2.0
+    mixed[::3] = 1.0
+    expected_dx = mixed[:, None] * shared.float()
+    for slot in range(10):
+        expected_dx = expected_dx + routed[:, slot].float()
+    padded, padded_scores = routed.clone(), scores.clone()
+    padded[:, 8:], padded_scores[:, 8:] = 0.0, 0.0
+    d = {name: value.to(device) for name, value in dict(
+        shared=shared, routed=routed.view(-1, hidden), scores=scores, mixed=mixed, ones=torch.ones(tokens),
+        padded=padded.view(-1, hidden), padded_scores=padded_scores,
+        routed8=routed[:, :8].reshape(-1, hidden), scores8=scores[:, :8].contiguous(),
+    ).items()}  # fmt: skip
+
+    def launch():
+        return (
+            scaled.forward(d["shared"], d["routed"], d["scores"], d["mixed"]),
+            scaled.backward(d["shared"], d["routed"], d["mixed"]),
+        )
+
+    eager = [tuple(value.clone() for value in launch()) for _ in range(REPEATS)]
+    assert all(_same_bits(eager[0], other) for other in eager[1:])
+    assert eager[0][0].shape == (tokens, hidden)
+    assert torch.equal(_bits(eager[0][1].cpu()), _bits(expected_dx.bfloat16()))
+    ones = scaled.forward(d["shared"], d["routed"], d["scores"], d["ones"])
+    unit = mixed == 1.0
+    assert torch.equal(
+        _bits(eager[0][0][unit.to(device)]), _bits(ones[unit.to(device)])
+    )
+    padded_y = scaled.forward(d["shared"], d["padded"], d["padded_scores"], d["ones"])
+    assert torch.equal(
+        _bits(padded_y), _bits(top8.forward(d["shared"], d["routed8"], d["scores8"]))
+    )
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        launch()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = launch()
+    for _ in range(2):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same_bits(captured, eager[0])
+
+
+#: The direct-gradient launcher check's outputs, by index of ``(*backward result, dx_peer, ds_peer, forward shared
+#: output, combine rows)``.
+DIRECT_OUTPUTS = {
+    "dx_shared": 0, "d_gate_shared": 2, "d_up_shared": 4, "dh_shared": 6, "dw_shared_gate": 9, "dw_routed_gate": 10,
+    "dw_shared_up": 11, "dw_routed_up": 12, "dw_shared_down": 13, "dw_routed_down": 14, "dx_routed": 15,
+    "d_weights": 16, "y_shared": 17, "y_routed": 18,
+}  # fmt: skip
+#: What the direct and the quotient backward write alike (every shared output and the routed down-projection weight
+#: gradient, which reads ``BF16(w * dy)`` in both), and what only the shared scale's operands change.
+DIRECT_EQUAL_TO_QUOTIENT = ("dx_shared", "d_gate_shared", "d_up_shared", "dh_shared", "dw_shared_gate", "dw_shared_up",
+                            "dw_shared_down", "dw_routed_down", "y_shared", "y_routed")  # fmt: skip
+SHARED_OPERAND_OUTPUTS = ("dw_shared_gate", "dw_shared_up", "dw_shared_down")
+
+
+@pytest.mark.parametrize("geometry", GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
+def test_direct_backward_on_the_gpu(geometry):
+    """The direct-gradient backward at top-10 over 16 local experts (plain SwiGLU, FP32 accumulators from nonzero
+    starts), against the quotient backward on the same forward: the same bytes in every shared output and in the
+    routed down-projection weight gradient; a zero router weight has a nonzero gradient and exactly zero routed input
+    gradients.  With ``shared_operands=True`` and the helpers' ``BF16(1 * dy)`` / ``BF16(1 * x)`` every output has the
+    bytes of the staged-operand launch; with ``s = 0`` the shared weight-gradient accumulators keep their starts bit
+    for bit and every other output keeps its bytes.  :data:`REPEATS` launches, a CUDA Graph replay, and a replay after
+    the inputs change give the eager bytes."""
+    for role in GROUP_KERNELS:
+        _require_role(role)
+    hidden, intermediate, macro = geometry
+    experts, topk, tokens, mini, comm = 16, GROUP_TOPK, 512, 256, 4
+    device = torch.device("cuda", torch.cuda.current_device())
+    p = _cpu_problem(
+        tokens, hidden, intermediate, experts, topk, 7201 + hidden + macro, device
+    )
+    x, dy, scores = p["x"], p["dy"], p["scores"]
+    shared_gate, shared_up, shared_down, routed_gate, routed_up, routed_down = p[
+        "weights"
+    ]
+    forward = MoKForward(False)
+    launchers = dict(
+        quotient=MoKBackward(False, True),
+        direct=MoKBackward(False, True, router_weight_gradient="direct"),
+        operands=MoKBackward(
+            False, True, router_weight_gradient="direct", shared_operands=True
+        ),
+    )
+    helpers = kernels.MoKSharedScale()
+    row = torch.arange(tokens, device=device)
+    s = single_rank_schedule(
+        torch.stack([(row + slot) % experts for slot in range(topk)], -1), experts
+    )
+    options = dict(device=device, dtype=torch.bfloat16)
+    combine = torch.empty(tokens * topk, hidden, **options)
+    dx_peer = torch.empty(tokens * topk, hidden, **options)
+    ds_peer = torch.empty_like(scores)
+    g = torch.Generator().manual_seed(7301 + hidden)
+    initial = [(randn(w.shape, generator=g) * 0.01).to(device) for w in p["weights"]]
+    accumulators = [value.clone() for value in initial]
+    ones, zeros = torch.ones(tokens, device=device), torch.zeros(tokens, device=device)
+
+    def sequence(name, scale=None):
+        for accumulator, start in zip(accumulators, initial, strict=True):
+            accumulator.copy_(start)
+        values = forward(
+            x, [x.data_ptr()], combine, [combine.data_ptr()],
+            shared_gate, routed_gate, shared_up, routed_up, shared_down, routed_down,
+            s["peers"], s["schedule"], s["num_tokens"], s["counts"],
+            topk, None, comm, macro, mini,
+        )  # fmt: skip
+        operands = None
+        if scale is not None:
+            with kernels._ffi_stream():
+                operands = (helpers.rows(dy, scale), helpers.rows(x, scale))
+        result = launchers[name](
+            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+            shared_gate, routed_gate, shared_up, routed_up, shared_down, routed_down,
+            *values[:7], x, [x.data_ptr()],
+            s["peers"], s["schedule"], s["num_tokens"], s["counts"],
+            topk, None, comm, macro, mini,
+            weight_grad_accumulators=accumulators, shared_operands=operands,
+        )  # fmt: skip
+        return result, values
+
+    def outputs(launch):
+        result, values = launch
+        every = (*result, dx_peer, ds_peer, values[7], combine)
+        out = {name: every[index].clone() for name, index in DIRECT_OUTPUTS.items()}
+        for name, value in out.items():
+            assert torch.isfinite(value).all().item(), name
+        return out
+
+    def same(a, b, names=DIRECT_OUTPUTS):
+        return [
+            name for name in names if not torch.equal(_bits(a[name]), _bits(b[name]))
+        ]
+
+    eager = [outputs(sequence("direct")) for _ in range(REPEATS)]
+    assert all(same(eager[0], other) == [] for other in eager[1:])
+    quotient = outputs(sequence("quotient"))
+    assert same(eager[0], quotient, DIRECT_EQUAL_TO_QUOTIENT) == []
+    zero = scores == 0
+    assert torch.count_nonzero(eager[0]["dx_routed"][zero.flatten()]).item() == 0
+    assert (
+        torch.count_nonzero(eager[0]["d_weights"][zero]).item() > 0
+    )  # defined at a zero weight
+    assert torch.count_nonzero(quotient["d_weights"][zero]).item() == 0
+    assert same(outputs(sequence("operands", ones)), eager[0]) == []
+    scaled_zero = outputs(sequence("operands", zeros))
+    assert same(scaled_zero, eager[0]) == list(SHARED_OPERAND_OUTPUTS)
+    for name, start in zip(
+        ("dw_shared_gate", "dw_shared_up", "dw_shared_down"), initial[:3], strict=True
+    ):
+        assert torch.equal(_bits(scaled_zero[name]), _bits(start)), name
+    for name, scale in (("direct", None), ("operands", p["scale"])):
+        reference = outputs(sequence(name, scale))
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            sequence(name, scale)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = sequence(name, scale)
+
+        def replay():
+            graph.replay()
+            torch.cuda.synchronize()
+            return outputs(captured)
+
+        assert same(replay(), reference) == [] and same(replay(), reference) == []
+        g = torch.Generator().manual_seed(7401 + hidden)
+        for value in (x, dy):
+            value.copy_((randn(value.shape, generator=g) * 0.125).bfloat16())
+        scores.copy_(rand(scores.shape, generator=g) * 1.5)
+        assert same(replay(), outputs(sequence(name, scale))) == []
+
+
+def _group_adapter(ep, experts, tokens, hidden, macro, mini, device, counts=None):
+    """The group's adapter as rank 0 of its EP group emulated on one GPU (:class:`OneGpuGroup`, every route on this
+    rank), prepared for the context and the context-free forward and the recompute; its workspace (at the worst-case
+    multiplier; with ``counts`` a source workspace for those counts) and its config."""
+    functional = backend.MoKFunctional(ep, experts, GROUP_TOPK, **GROUP_OK)
+    functional.communication = OneGpuGroup()
+    functional.prepare(None, save_context=False)
+    functional.prepare(None)
+    functional.prepare_recompute(None)
+    if counts is None:
+        multiplier = bound_multiplier(tokens, GROUP_TOPK, ep, experts)
+        capacity = workspace_module.schedule_capacity_for(
+            tokens, GROUP_TOPK, ep, multiplier
+        )
+        workspace = one_gpu_workspace(ep, tokens, hidden, GROUP_TOPK, capacity, device)
+    else:
+        workspace, multiplier = one_gpu_source_workspace(
+            ep, experts, counts, hidden, GROUP_TOPK, device
+        )
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    return functional, workspace, config
+
+
+def _group_step(
+    functional,
+    config,
+    workspace,
+    p,
+    accumulators,
+    *,
+    checkpointed,
+    shared_scale,
+    schedule=None,
+):
+    """One training step of the group's adapter on the inputs ``p`` of :func:`_cpu_problem`: ``build_schedule`` (unless
+    ``schedule`` is given), the context forward (or the context-free forward and the recompute), ``backward`` into the
+    zeroed accumulators.  Returns ``(y, dx, d_weights, routed gate, up, down, shared gate, up, down weight gradients,
+    d_shared_scale)`` and the schedule."""
+    experts = p["weights"][3].shape[0]
+    if schedule is None:
+        schedule = functional.build_schedule(
+            workspace, config, p["ids"], num_local_experts=experts
+        )
+    for accumulator in accumulators:
+        accumulator.zero_()
+    weights = p["weights"]
+    y, context = functional.forward(
+        config, workspace, schedule, p["x"], p["scores"], *weights, save_context=not checkpointed,
+        shared_scale=shared_scale,
+    )  # fmt: skip
+    if checkpointed:
+        context = functional.recompute_forward_context(
+            config, workspace, schedule, p["x"], weights[0], weights[1], weights[3], weights[4]
+        )  # fmt: skip
+    grads = functional.backward(
+        config, workspace, schedule, context, p["dy"], p["x"], p["scores"], *weights,
+        weight_grad_accumulators=accumulators, shared_scale=shared_scale,
+    )  # fmt: skip
+    assert len(grads) == 9
+    return (y, *grads), schedule
+
+
+def _snapshot(values):
+    torch.cuda.synchronize()
+    out = tuple(value.clone() for value in values)
+    for index, value in enumerate(out):
+        assert torch.isfinite(value).all().item(), index
+    return out
+
+
+#: Indexes of ``_group_step``'s values.
+Y, DX, D_WEIGHTS, ROUTED_DW, SHARED_DW_INDEX, D_SHARED_SCALE = (
+    0,
+    1,
+    2,
+    (3, 4, 5),
+    (6, 7, 8),
+    9,
+)
+
+
+def test_scaled_group_adapter_step():
+    """The group's adapter step at EP8 ``(8, 64)``, top-10, emulated on one GPU as rank 0 (512 source rows, several
+    macrobatches): nine backward items, ``d_shared_scale`` FP32 ``[tokens]``; the context step and the checkpointed step
+    (context-free forward, recompute, backward) give the same bytes, run to run and in a CUDA Graph replay; a zero
+    router weight has a nonzero gradient.  The scale enters where the contract puts it: ``d_weights``, the routed weight
+    gradients and ``d_shared_scale`` do not depend on ``s``; with ``s = 0`` everywhere the shared weight gradients are
+    zero; a token's ``y`` and ``dx`` rows with ``s = 0`` (``s = 1``) have the bytes of an all-zero (all-one) step's.  A
+    steady-state step (``build_schedule``, context-free forward, recompute, backward) makes no host synchronization
+    (``torch.cuda.set_sync_debug_mode("error")``).  Accuracy: ``test_mok_accuracy.py``."""
+    ep, experts = GROUP_LAYOUT
+    for role in (*GROUP_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+    tokens, hidden, intermediate, macro, mini = 512, 512, 256, 1536, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _group_adapter(
+        ep, experts, tokens, hidden, macro, mini, device
+    )
+    p = _cpu_problem(tokens, hidden, intermediate, experts, GROUP_TOPK, 7501, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"]]
+    scale = p["scale"]
+
+    def step(checkpointed=False, shared_scale=scale, schedule=None):
+        values, schedule = _group_step(
+            functional, config, workspace, p, accumulators, checkpointed=checkpointed, shared_scale=shared_scale,
+            schedule=schedule,
+        )  # fmt: skip
+        return values, schedule
+
+    values, schedule = step()
+    first = _snapshot(values)
+    assert (
+        int(schedule.num_tokens.item()) > macro
+    )  # several macrobatches: backward replays the later ones
+    assert (
+        first[D_SHARED_SCALE].shape == (tokens,)
+        and first[D_SHARED_SCALE].dtype == torch.float32
+    )
+    assert _same_bits(first, _snapshot(step(schedule=schedule)[0]))
+    assert _same_bits(first, _snapshot(step(True, schedule=schedule)[0]))
+    zero_weight = p["scores"] == 0
+    assert torch.count_nonzero(first[D_WEIGHTS][zero_weight]).item() > 0
+    assert (
+        torch.count_nonzero(first[D_SHARED_SCALE][scale == 0]).item() > 0
+    )  # defined at s = 0
+    zero = _snapshot(step(shared_scale=torch.zeros_like(scale), schedule=schedule)[0])
+    one = _snapshot(step(shared_scale=torch.ones_like(scale), schedule=schedule)[0])
+    for index in (D_WEIGHTS, *ROUTED_DW, D_SHARED_SCALE):
+        assert torch.equal(_bits(zero[index]), _bits(first[index])), index
+        assert torch.equal(_bits(one[index]), _bits(first[index])), index
+    for index in SHARED_DW_INDEX:
+        assert torch.count_nonzero(zero[index]).item() == 0, index
+    for index in (Y, DX):
+        for value, rows in ((zero, scale == 0), (one, scale == 1)):
+            assert torch.equal(_bits(first[index][rows]), _bits(value[index][rows])), (
+                index
+            )
+    # Steady state: every kernel loaded, the schedule's load observation in flight.
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        steady, _ = step(True)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert _same_bits(first, _snapshot(steady))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        step(True, schedule=schedule)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured, _ = step(True, schedule=schedule)
+    for _ in range(2):
+        graph.replay()
+        assert _same_bits(first, _snapshot(captured))
+
+
+def test_scaled_group_adapter_changed_counts():
+    """The group's adapter over changing source counts on one source workspace (:data:`CHANGED_COUNTS`: 1031, 768, 257
+    and 513 rows), as rank 0 of EP8 emulated on one GPU: per count a new schedule, nine backward items with the
+    count's rows, and before each step every workspace row past the count holds other values, so the staging alone
+    decides those rows: the context step and the checkpointed step give exactly the bytes of the context step on a
+    fresh zeroed workspace; no count after the first loads a kernel."""
+    ep, experts = GROUP_LAYOUT
+    for role in (*GROUP_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+    hidden, intermediate, macro, mini = 512, 256, 1536, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _group_adapter(
+        ep, experts, None, hidden, macro, mini, device, CHANGED_COUNTS
+    )
+    fresh_workspaces = []  # alive to the end: no later workspace takes a freed one's address
+    loads = None
+    for index, count in enumerate(CHANGED_COUNTS):
+        p = _cpu_problem(
+            count, hidden, intermediate, experts, GROUP_TOPK, 7601 + index, device
+        )
+        accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"]]
+
+        def step(ws, checkpointed):
+            values, schedule = _group_step(
+                functional, config, ws, p, accumulators, checkpointed=checkpointed, shared_scale=p["scale"]
+            )  # fmt: skip
+            assert (
+                schedule.num_source_tokens == count
+                and int(schedule.num_tokens.item()) > macro
+            )
+            return _snapshot(values)
+
+        def poison(ws):
+            storage = ws.storage
+            for buffer, rows, value in (
+                (storage.x_buffer, count, 3.0),
+                (storage.d_y_buffer, count, -5.0),
+                (storage.router_weight_buffer, count, 0.75),
+                (storage.d_router_weight_buffer, count, 9.0),
+                (storage.combine_buffer, count * GROUP_TOPK, 7.0),
+                (storage.d_x_routed_buffer, count * GROUP_TOPK, -7.0),
+            ):
+                buffer[rows:].fill_(value)
+
+        fresh_workspaces.append(
+            one_gpu_source_workspace(
+                ep, experts, CHANGED_COUNTS, hidden, GROUP_TOPK, device
+            )[0]
+        )
+        reference = step(fresh_workspaces[-1], False)
+        shapes = [tuple(reference[i].shape) for i in (Y, DX, D_WEIGHTS, D_SHARED_SCALE)]
+        assert shapes == [
+            (count, hidden),
+            (count, hidden),
+            (count, GROUP_TOPK),
+            (count,),
+        ]
+        for checkpointed in (False, True):
+            poison(workspace)
+            values = step(workspace, checkpointed)
+            differs = [
+                i
+                for i, (a, b) in enumerate(zip(reference, values, strict=True))
+                if not _same_bits((a,), (b,))
+            ]
+            assert not differs, (
+                count,
+                "checkpointed" if checkpointed else "context",
+                differs,
+            )
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (count, "kernel loads", loads, misses)
+
+
+def test_scaled_group_checkpoint_without_reentrant():
+    """A caller's ``torch.autograd.Function`` (the package ships none) around the context-free forward that saves only
+    its inputs and whose backward recomputes the context and runs ``backward``, under
+    ``torch.utils.checkpoint.checkpoint(..., use_reentrant=False)`` (which reruns the forward in the backward pass):
+    ``x.grad``, the router-weight gradient, ``d_shared_scale`` and the FP32 weight-gradient accumulators have the bytes
+    of the adapter's context step, and ``y`` its ``y``."""
+    from torch.utils.checkpoint import checkpoint
+
+    ep, experts = GROUP_LAYOUT
+    for role in (*GROUP_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+    tokens, hidden, intermediate, macro, mini = 512, 512, 256, 1536, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _group_adapter(
+        ep, experts, tokens, hidden, macro, mini, device
+    )
+    p = _cpu_problem(tokens, hidden, intermediate, experts, GROUP_TOPK, 7701, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"]]
+    values, schedule = _group_step(
+        functional, config, workspace, p, accumulators, checkpointed=False, shared_scale=p["scale"]
+    )  # fmt: skip
+    reference = _snapshot(values)
+    weights = p["weights"]
+
+    class Layer(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, scores, shared_scale):
+            y, _ = functional.forward(
+                config, workspace, schedule, x, scores, *weights, save_context=False, shared_scale=shared_scale
+            )  # fmt: skip
+            ctx.save_for_backward(x, scores, shared_scale)
+            return y
+
+        @staticmethod
+        def backward(ctx, dy):
+            x, scores, shared_scale = ctx.saved_tensors
+            context = functional.recompute_forward_context(
+                config, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4]
+            )  # fmt: skip
+            grads = functional.backward(
+                config, workspace, schedule, context, dy.contiguous(), x, scores, *weights,
+                weight_grad_accumulators=accumulators, shared_scale=shared_scale,
+            )  # fmt: skip
+            return grads[0].clone(), grads[1].clone(), grads[8].clone()
+
+    leaves = [
+        p[name].detach().clone().requires_grad_(True)
+        for name in ("x", "scores", "scale")
+    ]
+    for accumulator in accumulators:
+        accumulator.zero_()
+    y = checkpoint(Layer.apply, *leaves, use_reentrant=False)
+    y_bits = y.detach().clone()
+    y.backward(p["dy"])
+    torch.cuda.synchronize()
+    assert torch.equal(_bits(y_bits), _bits(reference[Y]))
+    for leaf, index in zip(leaves, (DX, D_WEIGHTS, D_SHARED_SCALE), strict=True):
+        assert torch.equal(_bits(leaf.grad), _bits(reference[index])), index
+    order = (
+        *SHARED_DW_INDEX,
+        *ROUTED_DW,
+    )  # accumulators: shared gate, up, down, routed gate, up, down
+    for accumulator, index in zip(accumulators, order, strict=True):
+        assert torch.equal(_bits(accumulator), _bits(reference[index])), index
+
+
+#: The kernels the 896-expert top-16 group's GPU tests launch.
+SITU_KERNELS = (
+    "forward_situ_noshared",
+    "forward_noctx_situ_noshared",
+    "recompute_situ_noshared",
+    "backward_fp32_direct_situ_noshared",
+    "epilogue_forward_none_16",
+    "epilogue_backward_none_16",
+)
+
+
+def _require_situ_group():
+    ep, experts = SITU_GROUP.layouts[0]
+    for role in (*SITU_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 1032), (37, 4096), (512, 256)])
+def test_none_epilogues_on_the_gpu(tokens, hidden):
+    """The top-16 epilogues without a shared row.  The backward sum is exact: ``BF16(routed_0 + ... + routed_15)`` in
+    FP32 in that order, bit for bit the CPU's.  The forward with the last eight slots zero (zero rows and zero weights)
+    has the bytes of the top-8 epilogue on the first eight slots and a zero shared row (both start from zero, then add
+    the slots in ascending order, and ``fma(0, 0, acc) = acc``).  Five launches and a CUDA Graph replay of the direct
+    and the planned launches give the same bytes.  The forward's accuracy against the float64 oracle is judged in
+    ``test_mok_accuracy.py``."""
+    _require_role("epilogue_forward_none_16")
+    _require_role("epilogue_backward_8")
+    device = torch.device("cuda", torch.cuda.current_device())
+    none, top8 = MoKEpilogues(16, shared_row="none"), MoKEpilogues(8)
+    g = torch.Generator().manual_seed(7151 + tokens + hidden)
+    routed = (randn(tokens, 16, hidden, generator=g) * 0.125).bfloat16()
+    scores = rand(tokens, 16, generator=g) + 0.01
+    expected_dx = torch.zeros(tokens, hidden)
+    for slot in range(16):
+        expected_dx = expected_dx + routed[:, slot].float()
+    padded, padded_scores = routed.clone(), scores.clone()
+    padded[:, 8:], padded_scores[:, 8:] = 0.0, 0.0
+    d = {name: value.to(device) for name, value in dict(
+        routed=routed.view(-1, hidden), scores=scores, padded=padded.view(-1, hidden), padded_scores=padded_scores,
+        routed8=routed[:, :8].reshape(-1, hidden), scores8=scores[:, :8].contiguous(), zeros=torch.zeros(tokens, hidden),
+    ).items()}  # fmt: skip
+    zeros = d["zeros"].bfloat16()
+    forward_plan, backward_plan = none.plan(d["routed"], d["scores"]), none.plan(d["routed"], False)
+
+    def launch():
+        with kernels._ffi_stream():
+            planned = (
+                MoKEpilogues.launch_planned(forward_plan, None, d["scores"]),
+                MoKEpilogues.launch_planned(backward_plan, None),
+            )
+        return (none.forward(None, d["routed"], d["scores"]), none.backward(None, d["routed"]), *planned)
+
+    eager = [tuple(value.clone() for value in launch()) for _ in range(REPEATS)]
+    assert all(_same_bits(eager[0], other) for other in eager[1:])
+    assert _same_bits(eager[0][:2], eager[0][2:])
+    assert eager[0][0].shape == (tokens, hidden) and eager[0][1].shape == (tokens, hidden)
+    assert torch.equal(_bits(eager[0][1].cpu()), _bits(expected_dx.bfloat16()))
+    padded_y = none.forward(None, d["padded"], d["padded_scores"])
+    assert torch.equal(_bits(padded_y), _bits(top8.forward(zeros, d["routed8"], d["scores8"])))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        launch()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = launch()
+    for _ in range(2):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same_bits(captured, eager[0])
+
+
+def _situ_problem(tokens, hidden, intermediate, experts, topk, seed, device):
+    """:func:`_cpu_problem` without a shared expert: ``None`` for the three shared weights and every route on this
+    rank's ``experts`` (:func:`one_rank_ids`; at top-16 over 14 experts two routes of each token repeat an expert)."""
+    p = _cpu_problem(tokens, hidden, intermediate, experts, topk, seed, device)
+    p["weights"] = (None, None, None, *p["weights"][3:])
+    p["ids"] = one_rank_ids(tokens, experts, topk, torch.Generator().manual_seed(seed + 1)).to(device)
+    return p
+
+
+def _situ_adapter(tokens, hidden, macro, mini, device, counts=None):
+    """The 896-expert top-16 group's adapter as rank 0 of EP64 ``(64, 14)`` emulated on one GPU (:class:`OneGpuGroup`,
+    every route on this rank), prepared for the context and the context-free forward and the recompute; its workspace
+    (at the multiplier of every route on one rank, :func:`one_rank_multiplier`; with ``counts`` a source workspace for
+    those counts) and its config."""
+    ep, experts = SITU_GROUP.layouts[0]
+    topk = SITU_GROUP.topk
+    functional = backend.MoKFunctional(ep, experts, topk, **SITU_OK)
+    functional.communication = OneGpuGroup()
+    functional.prepare(None, save_context=False)
+    functional.prepare(None)
+    functional.prepare_recompute(None)
+    if counts is None:
+        multiplier = one_rank_multiplier(tokens, topk, ep, experts)
+        capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+        workspace = one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
+    else:
+        workspace, multiplier = one_gpu_source_workspace(
+            ep, experts, counts, hidden, topk, device, multiplier_of=one_rank_multiplier
+        )
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    return functional, workspace, config
+
+
+def _situ_step(functional, config, workspace, p, accumulators, *, checkpointed, situ=None, schedule=None):
+    """One training step of the SiTU-GLU group's adapter on the inputs ``p`` of :func:`_situ_problem`:
+    ``build_schedule`` (unless ``schedule`` is given), the context forward (or the context-free forward and the
+    recompute), ``backward`` into the three zeroed routed accumulators, with the SiTU-GLU scalars ``situ`` (default
+    :data:`SITU`).  Returns ``(y, dx, d_weights, routed gate, up, down weight gradients)`` and the schedule; the
+    context's shared fields and the backward's three shared weight gradients are ``None``."""
+    situ = SITU if situ is None else situ
+    routed = p["weights"][3:]
+    if schedule is None:
+        schedule = functional.build_schedule(workspace, config, p["ids"], num_local_experts=routed[0].shape[0])
+    for accumulator in accumulators:
+        accumulator.zero_()
+    y, context = functional.forward(
+        config, workspace, schedule, p["x"], p["scores"], None, None, None, *routed, save_context=not checkpointed,
+        **situ,
+    )  # fmt: skip
+    if checkpointed:
+        assert context is None
+        context = functional.recompute_forward_context(
+            config, workspace, schedule, p["x"], None, None, routed[0], routed[1], **situ
+        )  # fmt: skip
+    assert context.gate_shared is None and context.up_shared is None and context.hidden_shared is None
+    grads = functional.backward(
+        config, workspace, schedule, context, p["dy"], p["x"], p["scores"], None, None, None, *routed,
+        weight_grad_accumulators=accumulators, **situ,
+    )  # fmt: skip
+    assert len(grads) == 8 and all(value is None for value in grads[5:])
+    assert all(grads[2 + i] is accumulator for i, accumulator in enumerate(accumulators))
+    return (y, *grads[:5]), schedule
+
+
+#: Indexes of ``_situ_step``'s values.
+SITU_Y, SITU_DX, SITU_D_WEIGHTS, SITU_ROUTED_DW = 0, 1, 2, (3, 4, 5)
+
+
+def test_situ_group_adapter_step():
+    """The 896-expert top-16 group's adapter step (SiTU-GLU, no shared expert) at EP64 ``(64, 14)``, emulated on one
+    GPU as rank 0 (every route on this rank, two routes of each token repeating an expert; 256 source rows, several
+    macrobatches): ``y``, ``dx``, ``d_weights`` and the three routed FP32 weight gradients, ``None`` in the shared
+    places; the context step and the checkpointed step (context-free forward, recompute, backward) give the same bytes,
+    run to run and in a CUDA Graph replay; a zero router weight has a nonzero gradient.  ``situ_beta`` and ``situ_lb``
+    are run-time values: other values change ``y``, ``dx``, ``d_weights`` and every weight gradient, and a graph
+    captured with :data:`SITU` replays those values after a step with other ones.  A steady-state step
+    (``build_schedule``, context-free forward, recompute, backward) makes no host synchronization
+    (``torch.cuda.set_sync_debug_mode("error")``).  Accuracy: ``test_mok_accuracy.py``."""
+    _require_situ_group()
+    topk = SITU_GROUP.topk
+    tokens, hidden, intermediate, macro, mini = 256, 512, 256, 8192, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _situ_adapter(tokens, hidden, macro, mini, device)
+    experts = SITU_GROUP.layouts[0][1]
+    p = _situ_problem(tokens, hidden, intermediate, experts, topk, 7801, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"][3:]]
+
+    def step(checkpointed=False, situ=None, schedule=None):
+        return _situ_step(
+            functional, config, workspace, p, accumulators, checkpointed=checkpointed, situ=situ, schedule=schedule
+        )  # fmt: skip
+
+    values, schedule = step()
+    first = _snapshot(values)
+    assert int(schedule.num_tokens.item()) > macro  # several macrobatches: backward replays the later ones
+    assert first[SITU_Y].shape == (tokens, hidden) and first[SITU_D_WEIGHTS].shape == (tokens, topk)
+    assert _same_bits(first, _snapshot(step(schedule=schedule)[0]))
+    assert _same_bits(first, _snapshot(step(True, schedule=schedule)[0]))
+    zero_weight = p["scores"] == 0
+    assert torch.count_nonzero(first[SITU_D_WEIGHTS][zero_weight]).item() > 0
+    other = _snapshot(step(situ=dict(situ_beta=3.0, situ_lb=12.0), schedule=schedule)[0])
+    for index in (SITU_Y, SITU_DX, SITU_D_WEIGHTS, *SITU_ROUTED_DW):
+        assert not torch.equal(_bits(other[index]), _bits(first[index])), index
+    # Steady state: every kernel loaded, the schedule's load observation in flight.
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        steady, _ = step(True)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert _same_bits(first, _snapshot(steady))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        step(True, schedule=schedule)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured, _ = step(True, schedule=schedule)
+    step(True, situ=dict(situ_beta=3.0, situ_lb=12.0), schedule=schedule)
+    for _ in range(2):
+        graph.replay()
+        assert _same_bits(first, _snapshot(captured))
+
+
+def test_situ_group_adapter_changed_counts():
+    """The SiTU-GLU group's adapter over changing source counts on one source workspace (:data:`CHANGED_COUNTS`: 1031,
+    768, 257 and 513 rows), as rank 0 of EP64 emulated on one GPU: per count a new schedule, the six step values with
+    the count's rows, and before each step every workspace row past the count holds other values, so the staging alone
+    decides those rows: the context step and the checkpointed step give exactly the bytes of the context step on a
+    fresh zeroed workspace; no count after the first loads a kernel."""
+    _require_situ_group()
+    topk = SITU_GROUP.topk
+    experts = SITU_GROUP.layouts[0][1]
+    hidden, intermediate, macro, mini = 512, 256, 16384, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _situ_adapter(None, hidden, macro, mini, device, CHANGED_COUNTS)
+    fresh_workspaces = []  # alive to the end: no later workspace takes a freed one's address
+    loads = None
+    for index, count in enumerate(CHANGED_COUNTS):
+        p = _situ_problem(count, hidden, intermediate, experts, topk, 7901 + index, device)
+        accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"][3:]]
+
+        def step(ws, checkpointed):
+            values, schedule = _situ_step(functional, config, ws, p, accumulators, checkpointed=checkpointed)
+            assert schedule.num_source_tokens == count and int(schedule.num_tokens.item()) > macro
+            return _snapshot(values)
+
+        def poison(ws):
+            storage = ws.storage
+            for buffer, rows, value in (
+                (storage.x_buffer, count, 3.0),
+                (storage.d_y_buffer, count, -5.0),
+                (storage.router_weight_buffer, count, 0.75),
+                (storage.d_router_weight_buffer, count, 9.0),
+                (storage.combine_buffer, count * topk, 7.0),
+                (storage.d_x_routed_buffer, count * topk, -7.0),
+            ):
+                buffer[rows:].fill_(value)
+
+        fresh_workspaces.append(
+            one_gpu_source_workspace(
+                *SITU_GROUP.layouts[0], CHANGED_COUNTS, hidden, topk, device, multiplier_of=one_rank_multiplier
+            )[0]
+        )
+        reference = step(fresh_workspaces[-1], False)
+        shapes = [tuple(reference[i].shape) for i in (SITU_Y, SITU_DX, SITU_D_WEIGHTS)]
+        assert shapes == [(count, hidden), (count, hidden), (count, topk)]
+        for checkpointed in (False, True):
+            poison(workspace)
+            values = step(workspace, checkpointed)
+            differs = [
+                i for i, (a, b) in enumerate(zip(reference, values, strict=True)) if not _same_bits((a,), (b,))
+            ]
+            assert not differs, (count, "checkpointed" if checkpointed else "context", differs)
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (count, "kernel loads", loads, misses)
+
+
+def test_situ_group_checkpoint_without_reentrant():
+    """A caller's ``torch.autograd.Function`` around the SiTU-GLU group's context-free forward that saves only its
+    inputs and whose backward recomputes the context and runs ``backward``, under
+    ``torch.utils.checkpoint.checkpoint(..., use_reentrant=False)``: ``x.grad``, the router-weight gradient and the
+    three routed FP32 weight-gradient accumulators have the bytes of the adapter's context step, and ``y`` its
+    ``y``."""
+    from torch.utils.checkpoint import checkpoint
+
+    _require_situ_group()
+    topk = SITU_GROUP.topk
+    experts = SITU_GROUP.layouts[0][1]
+    tokens, hidden, intermediate, macro, mini = 256, 512, 256, 8192, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _situ_adapter(tokens, hidden, macro, mini, device)
+    p = _situ_problem(tokens, hidden, intermediate, experts, topk, 8001, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"][3:]]
+    values, schedule = _situ_step(functional, config, workspace, p, accumulators, checkpointed=False)
+    reference = _snapshot(values)
+    routed = p["weights"][3:]
+
+    class Layer(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, scores):
+            y, _ = functional.forward(
+                config, workspace, schedule, x, scores, None, None, None, *routed, save_context=False, **SITU
+            )  # fmt: skip
+            ctx.save_for_backward(x, scores)
+            return y
+
+        @staticmethod
+        def backward(ctx, dy):
+            x, scores = ctx.saved_tensors
+            context = functional.recompute_forward_context(
+                config, workspace, schedule, x, None, None, routed[0], routed[1], **SITU
+            )  # fmt: skip
+            grads = functional.backward(
+                config, workspace, schedule, context, dy.contiguous(), x, scores, None, None, None, *routed,
+                weight_grad_accumulators=accumulators, **SITU,
+            )  # fmt: skip
+            return grads[0].clone(), grads[1].clone()
+
+    leaves = [p[name].detach().clone().requires_grad_(True) for name in ("x", "scores")]
+    for accumulator in accumulators:
+        accumulator.zero_()
+    y = checkpoint(Layer.apply, *leaves, use_reentrant=False)
+    y_bits = y.detach().clone()
+    y.backward(p["dy"])
+    torch.cuda.synchronize()
+    assert torch.equal(_bits(y_bits), _bits(reference[SITU_Y]))
+    for leaf, index in zip(leaves, (SITU_DX, SITU_D_WEIGHTS), strict=True):
+        assert torch.equal(_bits(leaf.grad), _bits(reference[index])), index
+    for accumulator, index in zip(accumulators, SITU_ROUTED_DW, strict=True):
+        assert torch.equal(_bits(accumulator), _bits(reference[index])), index
+
+
+@pytest.mark.parametrize("tokens", [4096, 16384, 32768])
+@pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
+def test_capacity_at_the_requested_bound(ep, experts, tokens):
+    """Host only: at the requester's worst-case multiplier (top-6, macrobatch 262,144, minibatch 4,096) the schedule
+    capacity holds every padded route of any routing and is a multiple of 256, and every fast-divmod divisor and grid
+    of the forward, recompute and backward launches fits its 31-bit field (the geometry helpers refuse a divisor
+    outside it)."""
+    topk, hidden, intermediate, macro, mini, comm = 6, 5120, 2304, 262144, 4096, 40
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
+    assert multiplier * ep == ep + 1  # (EP + 1) / EP at these shapes
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+    assert capacity == tokens * topk * (ep + 1) and capacity % 256 == 0
+    assert capacity >= min(topk, experts) * tokens * ep + experts * 255
+    limit = 2**31 - 1
+    forward = kernels._forward_geometry(tokens, hidden, intermediate, capacity, macro, mini)
+    recompute = kernels._recompute_geometry(tokens, hidden, intermediate, capacity, macro, mini)
+    backward = kernels._backward_geometry(
+        tokens, hidden, intermediate, capacity, macro, mini, experts
+    )
+    assert 2 * (forward.shared_tasks + forward.minis * forward.mini_tasks) + comm <= limit
+    assert 2 * (recompute.shared_tasks + recompute.minis * recompute.mini_tasks) + comm <= limit
+    assert comm + 2 * backward.clusters <= limit
+    assert macro * hidden <= limit  # elements of the routed x ring
+    # The 3/16 test default overflows under full skew at the 384-expert layouts.
+    assert workspace_module.schedule_capacity_for(tokens, topk, ep, 3 / 16) < min(topk, experts) * tokens * ep
+
+
+def _before_down_problem(tokens, hidden, intermediate, experts, topk, seed):
+    """BF16 ``x`` and ``dY``, weights scaled to unit-variance outputs, FP32 router weights in [0, 1.5) with every 5th
+    token's first weight and every weight of token 3 exactly 0."""
+    torch.manual_seed(seed)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
+    shared = [
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
+    ]
+    routed = [
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+    ]
+    scores = rand(tokens, topk, device="cuda") * 1.5
+    scores[::5, 0] = 0.0
+    scores[3] = 0.0
+    return x, dy, shared, routed, scores
+
+
+def _check_before_down_training(
+    *,
+    experts=4,
+    topk=2,
+    tokens=512,
+    geometries=GEOMETRIES,
+    empty_cases=(False, True),
+    limit=0.125,
+    mini=256,
+    comm=4,
+):
+    """Contract and repeatability of the router-weight-before-down forward + backward (clamped SwiGLU, FP32
+    accumulators from nonzero starts): every output finite, :data:`REPEATS` eager launches and graph replays give
+    the same bytes, a launch with another communication-SM split gives the same bytes, a replay gives the eager
+    launch's bytes (also after the weights and the inputs change), a zero
+    router weight gives its route exactly zero combine rows and input gradients, and the router-weight gradient
+    reads no weight: zeroing every weight leaves its bits, zeroes every routed output, input gradient and
+    routed weight-gradient increment, and leaves the shared expert's outputs."""
+    forward = MoKForward(True, weight_before_down=True)
+    backward = MoKBackward(True, True, weight_before_down=True)
+    records = []
+    for empty in empty_cases:
+        for hidden, intermediate, macro in geometries:
+            x, dy, shared, routed, scores = _before_down_problem(
+                tokens, hidden, intermediate, experts, topk, 9173 + hidden
+            )
+            options = dict(device="cuda", dtype=torch.bfloat16)
+            row = torch.arange(tokens, device="cuda")
+            routes = torch.stack(
+                [(row + slot) % (topk if empty else experts) for slot in range(topk)],
+                -1,
+            )
+            s = single_rank_schedule(routes, experts)
+            combine = torch.empty(tokens * topk, hidden, **options)
+            dx_peer = torch.empty(tokens * topk, hidden, **options)
+            ds_peer = torch.empty_like(scores)
+            initial = [randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)]
+            accumulators = [value.clone() for value in initial]
+
+            def sequence(split=comm):
+                for accumulator, start in zip(accumulators, initial, strict=True):
+                    accumulator.copy_(start)
+                values = forward(
+                    x, [x.data_ptr()], combine, [combine.data_ptr()],
+                    shared[0], routed[0], shared[1], routed[1], shared[2], routed[2],
+                    s["peers"], s["schedule"], s["num_tokens"], s["counts"],
+                    topk, limit, split, macro, mini, weight_ptrs=[scores.data_ptr()],
+                )  # fmt: skip
+                result = backward(
+                    dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+                    scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+                    shared[0], routed[0], shared[1], routed[1], shared[2], routed[2],
+                    *values[:7], x, [x.data_ptr()],
+                    s["peers"], s["schedule"], s["num_tokens"], s["counts"],
+                    topk, limit, split, macro, mini,
+                    weight_grad_accumulators=accumulators,
+                )  # fmt: skip
+                return result, values
+
+            # Shared dx / d_gate / d_up / dh, the six FP32 accumulators (shared gate, routed gate, shared up, routed
+            # up, shared down, routed down), the routed dx and the router-weight gradient, the shared and routed
+            # forward outputs.
+            def outputs(launch):
+                result, values = launch
+                every = (*result, dx_peer, ds_peer, values[7], combine)
+                picked = tuple(every[index] for index in (0, 2, 4, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
+                for value in picked:
+                    assert torch.isfinite(value).all().item(), (empty, hidden)
+                return tuple(value.clone() for value in picked)
+
+            zero = scores == 0
+            zero_rows = zero.flatten()
+            eager = [outputs(sequence()) for _ in range(REPEATS)]
+            assert all(_same(eager[0], other) for other in eager[1:])
+            # No bit depends on the communication-SM split; the dispatch's communication CTAs gather the router
+            # weights into the row ring.
+            assert _same(outputs(sequence(comm + 4)), eager[0])
+            assert torch.count_nonzero(eager[0][13][zero_rows]).item() == 0  # combine rows of zero weights
+            assert torch.count_nonzero(eager[0][10][zero_rows]).item() == 0  # their input gradients
+            assert torch.count_nonzero(eager[0][11][zero]).item() > 0  # their weight gradients: no division
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = sequence()
+
+            def replay():
+                graph.replay()
+                return outputs(captured)
+
+            replays = [replay() for _ in range(REPEATS)]
+            assert all(_same(replays[0], other) for other in replays[1:])
+            assert _same(replays[0], eager[0])  # no bit depends on graph replay versus eager launches
+            scores.mul_(0.5)
+            weighted = replay()
+            assert _same(weighted, outputs(sequence()))
+            scores.zero_()
+            unweighted = replay()
+            assert torch.equal(unweighted[11], weighted[11])  # the weight gradient reads no weight
+            for index in (5, 7, 9, 10, 13):  # routed increments, routed dx, combine rows
+                expected = initial[3 + (index - 5) // 2] if index < 10 else None
+                if expected is None:
+                    assert torch.count_nonzero(unweighted[index]).item() == 0, index
+                else:
+                    assert torch.equal(unweighted[index], expected), index
+            for index in (0, 1, 2, 3, 4, 6, 8, 12):  # the shared expert's outputs
+                assert torch.equal(unweighted[index], weighted[index]), index
+            for _ in range(2):
+                normal_(x, std=0.125)
+                normal_(dy, std=0.125)
+                uniform_(scores, 0.0, 1.5)
+                assert _same(replay(), outputs(sequence()))
+            records.append(dict(empty=empty, hidden=hidden, macro=macro, routed=s["actual"]))
+    return records
+
+
+@pytest.mark.parametrize("geometries", [GEOMETRIES[:1], GEOMETRIES], ids=["one", "all"])
+def test_fused_training_before_down(geometries):
+    """The router weight before the down projection at top-2 over 4 local experts (the diagnostic layouts)."""
+    _require_role("forward_clamped_wbd")
+    _check_before_down_training(geometries=geometries)
+
+
+@pytest.mark.parametrize(
+    "experts,geometry,empty",
+    [
+        (6, (512, 256, 1536), False),
+        (6, (2048, 256, 768), False),
+        (12, (512, 256, 1536), False),
+        (12, (512, 256, 1536), True),
+        (24, (512, 256, 1536), False),
+        (48, (512, 256, 1536), False),
+        (96, (512, 256, 1536), False),
+    ],
+    ids=["local6", "local6-h2048", "local12", "local12-empty-experts", "local24", "local48", "local96"],
+)
+def test_fused_training_before_down_top6(experts, geometry, empty):
+    """Top-6 over the local expert counts of the 384-expert layouts (EP 64, 32, 16, 8, 4), several macrobatches;
+    ``empty`` routes every token to the first 6 experts."""
+    _require_role("forward_clamped_wbd")
+    _check_before_down_training(
+        experts=experts, topk=6, geometries=(geometry,), empty_cases=(empty,)
+    )
+
+
+@pytest.mark.parametrize("experts,topk", [(4, 2), (6, 6)], ids=["top2", "top6"])
+@pytest.mark.parametrize("macro", [768, 4096], ids=["replay", "resident"])
+def test_before_down_recompute_and_context_free_forward(macro, experts, topk):
+    """The router-weight-before-down recompute (which gathers the router weights itself) rebuilds the saved context
+    bitwise; the context-free forward writes the context forward's y, combine rows, hidden and routed x bitwise in
+    every launch; backward from the recomputed context gives the saved context's bits."""
+    _require_role("forward_clamped_wbd")
+    forward = MoKForward(True, weight_before_down=True)
+    context_free = MoKForward(True, context=False, weight_before_down=True)
+    recompute = MoKRecompute(True, weight_before_down=True)
+    backward = MoKBackward(True, True, weight_before_down=True)
+    tokens, hidden, intermediate, mini, comm, limit = 512, 512, 256, 256, 4, 0.125
+    x, dy, shared, routed, scores = _before_down_problem(tokens, hidden, intermediate, experts, topk, 4111)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    row = torch.arange(tokens, device="cuda")
+    routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
+    s = single_rank_schedule(routes, experts)
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    pointers = [scores.data_ptr()]
+    rows = min(s["actual"], macro)
+
+    def run(kernel):
+        combine = torch.zeros(tokens * topk, hidden, **options)
+        values = kernel(
+            x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+            *schedule, topk, limit, comm, macro, mini, weight_ptrs=pointers,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        return values, combine
+
+    saved, combine = run(forward)
+    assert torch.count_nonzero(combine).item() > 0
+    for _ in range(3):
+        values, free_combine = run(context_free)
+        assert values[1:5] == (None,) * 4
+        assert torch.equal(free_combine, combine)
+        assert torch.equal(values[7], saved[7])  # y_shared
+        assert torch.equal(values[5], saved[5])  # hidden_shared
+        for index in (0, 6):  # routed x, hidden of the resident macrobatch
+            assert torch.equal(values[index][:rows], saved[index][:rows]), index
+    rebuilt = recompute(
+        x, [x.data_ptr()], shared[0], routed[0], shared[1], routed[1],
+        *schedule, topk, limit, comm, macro, mini, weight_ptrs=pointers,
+    )  # fmt: skip
+    for index in (0, 2, 4, 6):  # routed x, gate, up, hidden of the resident macrobatch
+        assert torch.equal(saved[index][:rows], rebuilt[index][:rows]), index
+    for index in (1, 3, 5):  # shared gate, up, hidden
+        assert torch.equal(saved[index], rebuilt[index]), index
+
+    def gradients(context):
+        dx_peer = torch.zeros(tokens * topk, hidden, **options)
+        ds_peer = torch.zeros_like(scores)
+        accumulators = [torch.zeros(w.shape, device="cuda") for w in (*shared, *routed)]
+        values = backward(
+            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+            *weights, *context[:7], x, [x.data_ptr()], *schedule,
+            topk, limit, comm, macro, mini, weight_grad_accumulators=accumulators,
+        )  # fmt: skip
+        return (dx_peer, ds_peer, values[0], *values[9:])
+
+    expected = gradients(saved)
+    assert all(torch.count_nonzero(value).item() > 0 for value in expected)
+    for a, b in zip(expected, gradients(rebuilt), strict=True):
+        assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize("experts,topk", [(4, 2), (6, 6)], ids=["top2", "top6"])
+@pytest.mark.parametrize("macro", [768, 4096], ids=["replay", "resident"])
+def test_before_down_source_split_is_bitwise(macro, experts, topk):
+    """The router-weight-before-down forward (context and context-free) with the source split taken on one GPU
+    (route totals of one route, so the rank's 1024 source rows count as rich; 2, 4 and 6 of 8 communication SMs) and
+    held (the schedule's real totals): every launch writes the split-off bytes of y, the combine rows, the shared
+    gate, up and hidden and, on the resident macrobatch, the routed x, gate, up and hidden."""
+    _require_role("forward_clamped_wbd")
+    tokens, hidden, intermediate, mini, comm, limit = 1024, 512, 256, 256, 8, 0.125
+    x, _, shared, routed, scores = _before_down_problem(tokens, hidden, intermediate, experts, topk, 4127)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    row = torch.arange(tokens, device="cuda")
+    routes = torch.stack([(row * 5 + slot) % experts for slot in range(topk)], -1)
+    s = single_rank_schedule(routes, experts)
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    pointers = [scores.data_ptr()]
+    rows = min(s["actual"], macro)
+    taken = torch.ones(1, dtype=torch.int32, device="cuda")
+    held = torch.full((1,), tokens * topk, dtype=torch.int32, device="cuda")
+    for context in (True, False):
+        kernel = MoKForward(True, context=context, weight_before_down=True)
+
+        def run(**split):
+            combine = torch.zeros(tokens * topk, hidden, **options)
+            values = kernel(
+                x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+                *schedule, topk, limit, comm, macro, mini, weight_ptrs=pointers, **split,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return values, combine
+
+        base, base_combine = run()
+        assert torch.count_nonzero(base_combine).item() > 0
+        for split in (
+            dict(source_split=(2, 257), owner_routes=taken),
+            dict(source_split=(4, 300), owner_routes=taken),
+            dict(source_split=(6, 384), owner_routes=taken),
+            dict(source_split=(2, 257), owner_routes=held),
+        ):
+            values, combine = run(**split)
+            assert torch.equal(combine, base_combine), split
+            for index in (1, 3, 5, 7):  # shared gate, up, hidden, y
+                if base[index] is not None:
+                    assert torch.equal(values[index], base[index]), (split, index)
+            for index in (0, 2, 4, 6):  # routed x, gate, up, hidden of the resident macrobatch
+                if base[index] is not None:
+                    assert torch.equal(values[index][:rows], base[index][:rows]), (split, index)
+
+
+def test_before_down_clamp_at_the_limit():
+    """The clamped SwiGLU of the router-weight-before-down kernels at exactly the limit 10, on the requester's input
+    distribution (:func:`production_inputs`, hidden 2048, 6 local experts, top-6), with one macrobatch holding every
+    route, so the backward's routed gate and up gradient rows are the saved context's rows.  Token 1's first expert
+    has gate exactly 10 and up exactly +10 and -10, and the forward saves them exactly.  The gradients pass where the
+    saved gate is at most the limit and the saved up within it, both ends included: they are nonzero at the pinned
+    elements and exactly zero wherever the saved gate is above the limit or the saved up beyond it."""
+    _require_role("forward_clamped_wbd")
+    tokens, hidden, intermediate, experts, topk, macro, mini, comm, limit = 512, 2048, 256, 6, 6, 4096, 256, 4, 10.0
+    p = production_inputs(tokens, hidden, intermediate, experts, topk, limit, seed=8377)
+    assert p["pinned"] is not None
+    x, dy, scores, shared, routed = p["x"], p["dy"], p["weights"], p["shared"], p["routed"]
+    s = single_rank_schedule(p["ids"], experts)
+    assert s["peers"].numel() <= macro  # one macrobatch: the backward replays nothing
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    combine = torch.zeros(tokens * topk, hidden, **options)
+    dx_peer, ds_peer = torch.zeros_like(combine), torch.zeros_like(scores)
+    accumulators = [torch.zeros(w.shape, device="cuda") for w in (*shared, *routed)]
+    context = MoKForward(True, weight_before_down=True)(
+        x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+        *schedule, topk, limit, comm, macro, mini, weight_ptrs=[scores.data_ptr()],
+    )  # fmt: skip
+    torch.cuda.synchronize()
+    slots = s["schedule"][: s["actual"]]
+    defined = slots >= 0
+    gate, up = context[2][: s["actual"]][defined].clone(), context[4][: s["actual"]][defined].clone()
+    token, expert = p["pinned"]
+    slot = token * topk + int((p["ids"][token] == expert).nonzero()[0, 0])
+    (position,) = (slots[defined] == slot).nonzero().flatten().tolist()
+    assert gate[position, 0].item() == limit
+    assert up[position, 0].item() == limit and up[position, 1].item() == -limit
+    above, beyond = gate > limit, up.abs() > limit
+    assert above.any().item() and beyond.any().item()
+    result = MoKBackward(True, True, weight_before_down=True)(
+        dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+        scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+        *weights, *context[:7], x, [x.data_ptr()], *schedule,
+        topk, limit, comm, macro, mini, weight_grad_accumulators=accumulators,
+    )  # fmt: skip
+    torch.cuda.synchronize()
+    d_gate, d_up = result[3][: s["actual"]][defined], result[5][: s["actual"]][defined]
+    assert torch.count_nonzero(d_gate[above]).item() == 0
+    assert torch.count_nonzero(d_up[beyond]).item() == 0
+    assert torch.count_nonzero(d_gate[~above]).item() > 0 and torch.count_nonzero(d_up[~beyond]).item() > 0
+    assert d_gate[position, 0].item() != 0
+    assert d_up[position, 0].item() != 0 and d_up[position, 1].item() != 0
+
+
+@pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
+def test_scheduler_at_the_capacity_bound(ep, experts):
+    """At the requester's worst-case multiplier, 16,384 source rows per rank and top-6, full skew (every token of every
+    rank routes to rank 0's experts) fits: the scheduler's per-expert counts and rows are exact, the total is within
+    the capacity, and another rank receives nothing."""
+    _require_role(f"count_{ep}_{experts}")
+    tokens, topk = 16384, 6
+    capacity = workspace_module.schedule_capacity_for(
+        tokens, topk, ep, bound_multiplier(tokens, topk, ep, experts)
+    )
+    generator = torch.Generator(device="cuda").manual_seed(4409 + ep)
+    ids = (
+        rand(ep * tokens, experts, device="cuda", generator=generator)
+        .argsort(-1)[:, :topk]
+        .int()
+        .reshape(ep, tokens, topk)
+        .contiguous()
+    )
+    scheduler = MoKScheduler(ep, experts)
+    for rank in (0, 1):
+        peers, slots, total, counts = scheduler(ids, capacity, rank)
+        expected_counts = torch.bincount(ids.flatten().long(), minlength=ep * experts)
+        expected_counts = expected_counts[rank * experts : (rank + 1) * experts]
+        expected_counts = ((expected_counts + 255) // 256) * 256
+        assert torch.equal(counts, expected_counts.int())
+        assert total.item() == expected_counts.sum().item() <= capacity
+        if rank:
+            assert total.item() == 0
+        offset = 0
+        for expert, count in enumerate(expected_counts.tolist()):
+            p = peers[offset : offset + count].long()
+            t = slots[offset : offset + count].long()
+            valid = p >= 0
+            actual = (p[valid] * tokens * topk + t[valid]).sort().values
+            expected = (ids.flatten() == rank * experts + expert).nonzero().flatten()
+            assert torch.equal(actual, expected), (rank, expert)
+            offset += count
+        assert (peers[offset:] == -1).all()
+        assert torch.equal(
+            scheduler.owner_loads().long(), backend.count_routed_load(ids, ep, experts)
+        )
+    scheduler.release_counts()
+
+
+@pytest.mark.parametrize("tokens", [4096, 16384, 32768])
+def test_situ_capacity_at_the_requested_bound(tokens):
+    """Host only: at the 896-expert layout (64, 14) and top-16 (more routes per token than local experts) the
+    worst-case multiplier counts at most 14 routes of a token on one rank: ``57 / 64`` at 16,384 source rows; the
+    schedule capacity holds every padded route of any routing with distinct experts per token and is a multiple of
+    256, and every fast-divmod divisor and grid of the forward, recompute and backward launches without a shared
+    expert (``local_tokens`` 0, no shared task) fits its 31-bit field at hidden 3584, intermediate 3072, macrobatch
+    262,144 and minibatch 4,096."""
+    (ep, experts), topk = SITU_GROUP.layouts[0], SITU_GROUP.topk
+    hidden, intermediate, macro, mini, comm = 3584, 3072, 262144, 4096, 40
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
+    if tokens == 16384:
+        assert multiplier == 57 / 64
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+    assert capacity % 256 == 0
+    assert capacity >= experts * tokens * ep + experts * 255
+    limit = 2**31 - 1
+    forward = kernels._forward_geometry(0, hidden, intermediate, capacity, macro, mini)
+    recompute = kernels._recompute_geometry(0, hidden, intermediate, capacity, macro, mini)
+    backward = kernels._backward_geometry(0, hidden, intermediate, capacity, macro, mini, experts, False)
+    assert forward.shared_tasks == recompute.shared_tasks == backward.shared_tasks == 0
+    assert 2 * forward.minis * forward.mini_tasks + comm <= limit
+    assert 2 * recompute.minis * recompute.mini_tasks + comm <= limit
+    assert comm + 2 * backward.clusters <= limit
+    assert macro * hidden <= limit  # elements of the routed x ring
+
+
+def test_situ_scheduler_at_the_capacity_bound():
+    """At the 896-expert layout (64, 14), top-16, 16,384 source rows per rank and the worst-case multiplier (14 of a
+    token's 16 routes on one rank), the two-rank full skew (:func:`two_rank_skew_ids`: every token of every rank routes
+    to all 14 experts of rank 0 and to two distinct experts of rank 1) fits: the scheduler's per-expert counts and rows
+    are exact on rank 0 (the bound) and rank 1 (the rest), each total within the capacity, and rank 2 receives
+    nothing."""
+    (ep, experts), topk = SITU_GROUP.layouts[0], SITU_GROUP.topk
+    _require_role(f"count_{ep}_{experts}")
+    tokens = 16384
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, bound_multiplier(tokens, topk, ep, experts))
+    ids = two_rank_skew_ids(ep * tokens, experts, topk, torch.Generator().manual_seed(4421), "cuda")
+    ids = ids.reshape(ep, tokens, topk).contiguous()
+    assert bool((ids.sort(-1).values.diff(dim=-1) != 0).all())  # distinct experts per token
+    scheduler = MoKScheduler(ep, experts)
+    for rank in (0, 1, 2):
+        peers, slots, total, counts = scheduler(ids, capacity, rank)
+        expected_counts = torch.bincount(ids.flatten().long(), minlength=ep * experts)
+        expected_counts = expected_counts[rank * experts : (rank + 1) * experts]
+        expected_counts = ((expected_counts + 255) // 256) * 256
+        assert torch.equal(counts, expected_counts.int())
+        assert total.item() == expected_counts.sum().item() <= capacity
+        if rank == 0:
+            assert total.item() >= experts * tokens * ep
+        if rank == 2:
+            assert total.item() == 0
+        offset = 0
+        for expert, count in enumerate(expected_counts.tolist()):
+            p = peers[offset : offset + count].long()
+            t = slots[offset : offset + count].long()
+            valid = p >= 0
+            actual = (p[valid] * tokens * topk + t[valid]).sort().values
+            expected = (ids.flatten() == rank * experts + expert).nonzero().flatten()
+            assert torch.equal(actual, expected), (rank, expert)
+            offset += count
+        assert (peers[offset:] == -1).all()
+        assert torch.equal(scheduler.owner_loads().long(), backend.count_routed_load(ids, ep, experts))
+    scheduler.release_counts()
+
+
+def _exact_outer(gradient, known, copies, known_on_rows):
+    """``gradient`` (FP32 ``[m, n]``) is exactly ``copies`` times the outer product of a BF16 vector with the BF16
+    vector ``known`` (along its columns, or its rows with ``known_on_rows``), checked in float64 (``copies`` a power
+    of 2)."""
+    value = gradient.double() / copies
+    if known_on_rows:
+        value = value.T
+    known = known.double()
+    column = int(known.abs().argmax())
+    vector = value[:, column] / known[column]
+    assert torch.count_nonzero(vector).item() > 0
+    assert torch.equal(vector, vector.bfloat16().double())
+    assert torch.equal(value, torch.outer(vector, known))
+
+
+def _check_routed_weight_gradients(run, configs, schedule, ids, scores, x, dy, high, macro, copies, experts):
+    """The routed weight gradients of the capacity-bound step, from ring rows past 2^31 bytes, exactly.
+
+    Only tokens that share no expert keep their router weights; every other weight is 0, so its routes have
+    ``h = BF16(0 * a) = 0`` and ``d_gate = d_up = 0`` and add exactly 0 to every routed weight gradient.  The first
+    chosen token has routes in the resident macrobatch's ring rows from byte offset 2^31 on (``high`` .. ``macro``).
+    Every element of a chosen expert's gradient is then ``copies`` (the EP size: every emulated peer sends the same
+    route) times one BF16 x BF16 product, exact in FP32 in any order and macrobatch split.  ``run(config, router)``
+    returns the routed gate, up and down weight gradients of one step: the two ``configs`` (macrobatches of 262,144
+    and 32,768 rows) give equal values, an expert no chosen token routes to has a zero gradient, and a chosen expert's
+    gradient is exactly ``copies`` times the outer product of a BF16 vector with its token's ``x`` (gate, up) or
+    ``dy`` (down)."""
+    rows = slice(high, macro)
+    above = schedule.peer_token_idx[rows][schedule.peer_rank[rows] >= 0].long() // ids.shape[1]
+    routes = ids.tolist()
+    owner = {}
+    for token in [int(above.min().item()), *range(len(routes))]:
+        if len(owner) == experts:
+            break
+        if not owner.keys() & set(routes[token]):
+            owner.update(dict.fromkeys(routes[token], token))
+    chosen = sorted(set(owner.values()))
+    router = torch.zeros_like(scores)
+    router[chosen] = scores[chosen]
+    gradients = run(configs[0], router)
+    for config in configs[1:]:
+        assert _same(gradients, run(config, router))
+    touched = torch.zeros(experts, dtype=torch.bool)
+    touched[list(owner)] = True
+    for gradient in gradients:
+        assert gradient.shape[0] == experts
+        assert torch.equal(gradient.flatten(1).count_nonzero(-1).cpu() > 0, touched)
+    for expert, token in owner.items():
+        _exact_outer(gradients[0][expert], x[token], copies, False)  # gate: d_gate rows x x rows
+        _exact_outer(gradients[1][expert], x[token], copies, False)  # up
+        _exact_outer(gradients[2][expert], dy[token], copies, True)  # down: dy rows x h rows
+
+
+@pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
+def test_before_down_adapter_at_the_capacity_bound(ep, experts):
+    """The adapter's router-weight-before-down training step at the requester's worst-case geometry of one rank:
+    16,384 source rows, H 5120, I 2304, top-6, macrobatch 262,144, minibatch 4,096, the worst-case multiplier and full
+    skew (every route of the group lands on this rank), emulated on one GPU (:class:`OneGpuGroup`).  The context
+    step, the checkpointed step (context-free forward, recompute with the router weights, backward; another router
+    weight in the workspace before the recompute and before the backward) and its CUDA Graph replay complete with
+    finite outputs and the same bytes, run to run.  The routed x ring's rows at byte offsets of 2^31 and beyond hold
+    their tokens' x exactly, and ``y``, ``dx`` and the router-weight gradients are the bytes of the same step with
+    32,768-row macrobatches, whose ring rows all lie below 2^31 bytes (per-row outputs).  The routed weight gradients,
+    which read the x, dy, gate-gradient and up-gradient rings, are checked exactly on a step where only tokens that
+    share no expert keep their router weights (:func:`_check_routed_weight_gradients`).  Accuracy is judged at the
+    smaller shapes (``test_mok_accuracy.py``, the adapter's top-6 layouts included)."""
+    _require_role("forward_clamped_wbd")
+    _require_role(f"count_{ep}_{experts}")
+    tokens, hidden, intermediate, topk, macro, mini, limit = 16384, 5120, 2304, 6, 262144, 4096, 10.0
+    device = torch.device("cuda", torch.cuda.current_device())
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+    )
+    functional.communication = OneGpuGroup()
+    functional.prepare(limit, save_context=False)
+    functional.prepare_recompute(limit)
+    workspace = one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
+    config = MoKConfig(
+        fwd_num_comm_sms=40,
+        bwd_num_comm_sms=40,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    generator = torch.Generator(device=device).manual_seed(7211 + ep)
+    options = dict(device=device, dtype=torch.bfloat16)
+    x = randn(tokens, hidden, device=device, generator=generator)
+    x = (x / x.square().mean(-1, keepdim=True).sqrt()).bfloat16()
+    dy = randn(tokens, hidden, device=device, generator=generator).bfloat16()
+    ids = rand(tokens, experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
+    scores = rand(tokens, topk, device=device, generator=generator)
+    scores = (scores / scores.sum(-1, keepdim=True) * 1.5).contiguous()
+    scale = 4.0 / hidden**0.5
+    weights = (
+        (randn(intermediate, hidden, **options) * scale),
+        (randn(intermediate, hidden, **options) * scale),
+        (randn(hidden, intermediate, **options) / intermediate**0.5),
+        (randn(experts, intermediate, hidden, **options) * scale),
+        (randn(experts, intermediate, hidden, **options) * scale),
+        (randn(experts, hidden, intermediate, **options) / intermediate**0.5),
+    )
+    accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+    schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+    routed_rows = int(schedule.num_tokens.item())
+    assert ep * tokens * topk <= routed_rows <= capacity
+    assert routed_rows > macro  # several macrobatches: backward replays the later ones
+    # The first routed x ring row at a byte offset of 2^31 or more.
+    high = -(-(2**31) // (2 * hidden))
+    assert high < macro
+
+    def check_high_ring_rows(context):
+        """The resident macrobatch's routed x rows from byte offset 2^31 on: each holds its token's x exactly (every
+        peer's x is this rank's)."""
+        torch.cuda.synchronize()
+        rows = slice(high, macro)
+        defined = schedule.peer_rank[rows] >= 0
+        tokens_of = schedule.peer_token_idx[rows][defined].long() // topk
+        assert tokens_of.numel() > 0
+        assert torch.equal(context.x_routed[rows][defined], x[tokens_of])
+
+    def step(checkpointed, cfg=config, check=False, router=scores):
+        for accumulator in accumulators:
+            accumulator.zero_()
+        y, context = functional.forward(
+            cfg, workspace, schedule, x, router, *weights, swiglu_limit=limit,
+            save_context=not checkpointed,
+        )  # fmt: skip
+        if check:
+            check_high_ring_rows(context)
+        if checkpointed:
+            # Another layer's router weights in the workspace: the recompute and the backward stage their own.
+            workspace.router_weight_buffer.fill_(0.75)
+            context = functional.recompute_forward_context(
+                cfg, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4],
+                swiglu_limit=limit, router_weights=router,
+            )  # fmt: skip
+            workspace.router_weight_buffer.fill_(0.75)
+        grads = functional.backward(
+            cfg, workspace, schedule, context, dy, x, router, *weights, swiglu_limit=limit,
+            weight_grad_accumulators=accumulators,
+        )  # fmt: skip
+        return (y, *grads)
+
+    def snapshot(values):
+        torch.cuda.synchronize()
+        out = tuple(value.clone() for value in values)
+        for value in out:
+            assert torch.isfinite(value).all().item()
+        return out
+
+    first = snapshot(step(False, check=True))
+    assert all(torch.count_nonzero(value).item() > 0 for value in first)
+    assert _same(first, snapshot(step(False)))
+    assert _same(first, snapshot(step(True)))
+    small = dataclasses.replace(config, macrobatch_size=32768)
+    assert small.macrobatch_size * hidden * 2 < 2**31
+    assert _same(first[:3], snapshot(step(False, small))[:3])  # y, dx, router-weight gradients
+    _check_routed_weight_gradients(
+        lambda cfg, router: snapshot(step(False, cfg, router=router)[3:6]),
+        (config, small), schedule, ids, scores, x, dy, high, macro, ep, experts,
+    )  # fmt: skip
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        step(True)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = step(True)
+    for _ in range(2):
+        graph.replay()
+        assert _same(first, snapshot(captured))
+
+
+@pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
+def test_before_down_adapter_top6_changed_counts(ep, experts):
+    """The adapter's top-6 router-weight-before-down step over changing source counts on one source workspace, as rank
+    0 of its EP group emulated on one GPU (:class:`OneGpuGroup`, every emulated peer at this rank's count): the counts
+    of :data:`CHANGED_COUNTS` in order (1031, 257 and 513 rows: padded staging of rows ``[count, shared_rows)``; 768:
+    unpadded), a new schedule per count, several macrobatches.  Before each step every workspace row past the count
+    holds other values (as after a larger count or another layer), so the staging alone decides those rows: the
+    context step and the checkpointed step (context-free forward, recompute with the router weights, backward, another
+    router weight in the workspace between them) give exactly the bytes of the context step on a fresh zeroed
+    workspace, the outputs have the count's rows, and no count after the first loads a kernel.  The accuracy of these
+    steps is judged in ``test_mok_accuracy.py`` (``test_before_down_adapter_top6_changed_counts_accuracy``)."""
+    _require_role("forward_clamped_wbd")
+    _require_role(f"count_{ep}_{experts}")
+    topk, hidden, intermediate, macro, mini, limit = 6, 512, 256, 1536, 256, 0.125
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+    )
+    functional.communication = OneGpuGroup()
+    functional.prepare(limit, save_context=False)
+    functional.prepare_recompute(limit)
+    workspace, multiplier = one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    fresh_workspaces = []  # alive to the end: no later workspace takes a freed one's address
+    loads = None
+    for index, count in enumerate(CHANGED_COUNTS):
+        x, dy, shared, routed, scores = _before_down_problem(count, hidden, intermediate, experts, topk, 6151 + index)
+        ids = rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        weights = (*shared, *routed)
+
+        def step(ws, checkpointed):
+            schedule = functional.build_schedule(ws, config, ids, num_local_experts=experts)
+            assert schedule.num_source_tokens == count and int(schedule.num_tokens.item()) > macro
+            accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+            y, context = functional.forward(
+                config, ws, schedule, x, scores, *weights, swiglu_limit=limit, save_context=not checkpointed
+            )  # fmt: skip
+            if checkpointed:
+                # Another layer's router weights in the workspace: the recompute and the backward stage their own.
+                ws.storage.router_weight_buffer.fill_(0.75)
+                context = functional.recompute_forward_context(
+                    config, ws, schedule, x, weights[0], weights[1], weights[3], weights[4], swiglu_limit=limit,
+                    router_weights=scores,
+                )  # fmt: skip
+                ws.storage.router_weight_buffer.fill_(0.75)
+            grads = functional.backward(
+                config, ws, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return tuple(value.clone() for value in (y, *grads))
+
+        def poison(ws):
+            """Every workspace row past the count: values no staging of this count writes."""
+            storage = ws.storage
+            for buffer, rows, value in (
+                (storage.x_buffer, count, 3.0),
+                (storage.d_y_buffer, count, -5.0),
+                (storage.router_weight_buffer, count, 0.75),
+                (storage.d_router_weight_buffer, count, 9.0),
+                (storage.combine_buffer, count * topk, 7.0),
+                (storage.d_x_routed_buffer, count * topk, -7.0),
+            ):
+                buffer[rows:].fill_(value)
+
+        fresh_workspaces.append(one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)[0])
+        reference = step(fresh_workspaces[-1], False)
+        assert [tuple(v.shape) for v in reference[:3]] == [(count, hidden), (count, hidden), (count, topk)]
+        assert all(torch.isfinite(value).all().item() for value in reference)
+        assert all(torch.count_nonzero(value).item() > 0 for value in reference)
+        for checkpointed in (False, True):
+            poison(workspace)
+            values = step(workspace, checkpointed)
+            differs = [i for i, (a, b) in enumerate(zip(reference, values, strict=True)) if not torch.equal(a, b)]
+            assert not differs, (count, "checkpointed" if checkpointed else "context", differs)
+        # A changed source count builds a new schedule and launch plan on the workspace; it loads no kernel.
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (count, "kernel loads", loads, misses)
+
+
+def test_cat_rows_matches_copy_source_and_rejects_what_cat_rejects():
+    """Host only: ``_cat_rows`` writes a destination prefix with the bytes of ``_copy_source`` (the source rows, then
+    the padding rows), leaves the rows past the prefix alone, and returns False when ``torch.cat`` rejects a staging,
+    so the caller stages by ``_copy_source``: a source that autograd records under grad mode, and a source that
+    overlaps its destination."""
+    functional = backend.MoKFunctional
+    source = torch.arange(20.0).reshape(5, 4)
+    for value, padding in ((0.0, torch.zeros(3, 4)), (1.0, torch.ones(3, 4))):
+        expected = torch.full((10, 4), 7.0)
+        functional._copy_source(expected, source, value, 8)
+        destination = torch.full((10, 4), 7.0)
+        assert functional._cat_rows((source, padding, destination[:8]), None)
+        assert torch.equal(destination, expected)
+    destination = torch.full((10, 4), 7.0)
+    with torch.enable_grad():
+        recorded = source.clone().requires_grad_(True)
+        assert not functional._cat_rows((recorded, torch.zeros(3, 4), destination[:8]))
+    buffer = torch.full((10, 4), 7.0)
+    buffer[:5] = source
+    assert not functional._cat_rows((buffer[:5], torch.zeros(3, 4), buffer[:8]))
+
+
+def test_padding_rows_are_constant_normal_tensors_built_outside_capture(monkeypatch):
+    """Host only: a workspace's padding rows are BF16 zeros ``[256, hidden]`` and FP32 ones ``[256, topk]`` with the
+    launch plans, built once (normal tensors also under ``torch.inference_mode()``), and not built during CUDA Graph
+    capture (the caller then stages by ``_copy_source``)."""
+    import types
+
+    workspace = types.SimpleNamespace(launch_plans={}, hidden_size=512, topk=6, device=torch.device("cpu"))
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    assert backend.MoKFunctional._padding_rows(workspace) is None and workspace.launch_plans == {}
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    with torch.inference_mode():
+        rows = backend.MoKFunctional._padding_rows(workspace)
+    assert workspace.launch_plans == {("padding_rows",): rows}
+    assert rows.zeros.dtype == torch.bfloat16 and tuple(rows.zeros.shape) == (256, 512) and not rows.zeros.any()
+    assert rows.ones.dtype == torch.float32 and tuple(rows.ones.shape) == (256, 6) and bool((rows.ones == 1).all())
+    assert not rows.zeros.is_inference() and not rows.ones.is_inference()
+    assert backend.MoKFunctional._padding_rows(workspace) is rows
+
+
+@pytest.mark.parametrize(
+    "position,ep,experts,topk",
+    [("before_down", 8, 48, 6), ("after_down", 4, 4, 2)],
+    ids=["before_down-ep8-local48", "after_down-ep4-local4"],
+)
+def test_padded_staging_matches_the_copy_and_fill_form(position, ep, experts, topk, monkeypatch):
+    """The padded staging of the planned forward, recompute and backward (``_cat_rows``: one ``torch.cat`` per source
+    buffer from the workspace's padding rows) over the changing source counts of :data:`CHANGED_COUNTS` on one source
+    workspace, as rank 0 of its EP group emulated on one GPU (:class:`OneGpuGroup`).  Before each step every
+    workspace buffer holds other values.  After the context step and after the checkpointed step the workspace rows
+    ``[0, shared_rows)`` of ``x``, the router weights and ``dy`` hold the source rows and the padding values, the
+    padding rows of the combine and gradient buffers hold 0, and the rows past ``shared_rows`` keep their values;
+    every output (``y``, ``dx``, ``dscores``, the six FP32 weight-gradient accumulators) equals bit for bit the same
+    step with every padded staging in the copy-and-fill form (``_copy_source``), and so does a step whose ``x`` is a
+    view of the workspace's own ``x`` rows (``cat`` rejects it, the copy-and-fill form stages it)."""
+    before = position == "before_down"
+    if before:
+        _require_role("forward_clamped_wbd")
+        _require_role(f"count_{ep}_{experts}")
+    else:
+        require_gpu()
+    hidden, intermediate, macro, mini = 512, 256, 1536, 256
+    limit = 0.125 if before else None
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=before, fp32_wgrad=True, router_weight_position=position
+    )
+    functional.communication = OneGpuGroup()
+    functional.prepare(limit, save_context=False)
+    functional.prepare_recompute(limit)
+    workspace, multiplier = one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)
+    storage = workspace.storage
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    original = backend.MoKFunctional._cat_rows
+    staged = []
+
+    def spy(*stagings):
+        staged.append(original(*stagings))
+        return staged[-1]
+
+    sources = (
+        (storage.x_buffer, 3.0, 0.0),
+        (storage.d_y_buffer, -5.0, 0.0),
+        (storage.router_weight_buffer, 0.75, 1.0),
+    )
+    targets = (
+        (storage.combine_buffer, topk, 7.0),
+        (storage.d_x_routed_buffer, topk, -7.0),
+        (storage.d_router_weight_buffer, 1, 9.0),
+    )
+    for index, count in enumerate(CHANGED_COUNTS):
+        rows = backend.MoKFunctional._shared_rows(count)
+        x, dy, shared, routed, scores = _before_down_problem(count, hidden, intermediate, experts, topk, 6301 + index)
+        ids = rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        weights = (*shared, *routed)
+
+        def step(checkpointed, x=x):
+            schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+            accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+            y, context = functional.forward(
+                config, workspace, schedule, x, scores, *weights, swiglu_limit=limit, save_context=not checkpointed
+            )  # fmt: skip
+            if checkpointed:
+                context = functional.recompute_forward_context(
+                    config, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4], swiglu_limit=limit,
+                    router_weights=scores,
+                )  # fmt: skip
+            grads = functional.backward(
+                config, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return tuple(value.clone() for value in (y, *grads))
+
+        def poison():
+            for buffer, value, _ in sources:
+                buffer.fill_(value)
+            for buffer, _, value in targets:
+                buffer.fill_(value)
+
+        def check_staged():
+            torch.cuda.synchronize()
+            pad = rows - count
+            for (buffer, rest, value), source in zip(sources, (x, dy, scores), strict=True):
+                filler = source.new_full((pad, source.shape[1]), value)
+                assert torch.equal(buffer[:rows], torch.cat((source, filler))), (count, value)
+                assert bool((buffer[rows:] == rest).all()), (count, rest)
+            for buffer, width, rest in targets:
+                assert not buffer[count * width : rows * width].any(), (count, width)
+                assert bool((buffer[rows * width :] == rest).all()), (count, rest)
+
+        values = {}
+        for form in ("cat", "copy"):
+            if form == "cat":
+                monkeypatch.setattr(backend.MoKFunctional, "_cat_rows", staticmethod(spy))
+            else:
+                monkeypatch.setattr(backend.MoKFunctional, "_cat_rows", staticmethod(lambda *stagings: False))
+            for checkpointed in (False, True):
+                staged.clear()
+                poison()
+                values[form, checkpointed] = step(checkpointed)
+                check_staged()
+                if form == "cat":
+                    padded = rows > count
+                    assert staged == ([True] * (3 if checkpointed else 2) if padded else []), (count, staged)
+            monkeypatch.undo()
+        for checkpointed in (False, True):
+            assert _same(values["cat", checkpointed], values["copy", checkpointed]), (count, checkpointed)
+        poison()
+        storage.x_buffer[:count].copy_(x)
+        assert _same(values["cat", True], step(True, x=storage.x_buffer[:count])), count
+
+
+def test_build_schedule_route_buffer_over_changing_counts():
+    """``build_schedule`` through the schedule plan over changing source counts on one source workspace (one-GPU
+    emulation of rank 0 of EP 4, :class:`OneGpuGroup`): after each eager build the plan's route buffer holds the
+    count's expert IDs and ``-1`` in every other row (repeated, growing and shrinking counts), and the schedule equals
+    the unplanned launches' bit for bit.  Replays of a build captured in a CUDA Graph, which write IDs past a later
+    eager count, leave every later eager schedule exact, and the captured schedule replays exactly."""
+    require_gpu()
+    ep, experts, topk, hidden = 4, 4, 2, 256
+    counts = (777, 777, 900, 1024, 300, 300, 901, 513)
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
+    workspace, _ = one_gpu_source_workspace(ep, experts, counts, hidden, topk, device)
+    storage = workspace.storage
+    rows = storage.num_local_tokens
+    assert rows == max(counts)
+    key = ("schedule", functional.scheduler, functional.communication)
+    generator = torch.Generator(device=device).manual_seed(5501)
+
+    def problem(count):
+        return rand(count, ep * experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
+
+    def unplanned(ids, count):
+        rank, token, total, tokens, layout, _ = functional._schedule_launches(storage, config, ids, count)
+        return _schedule_fields(
+            workspace_module.MoKSchedule(
+                peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=tokens, layout=layout
+            ),
+            experts,
+        )
+
+    def eager(count):
+        ids = problem(count)
+        schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+        torch.cuda.synchronize()
+        expected = torch.full((rows, topk), -1, dtype=torch.int32, device=device)
+        expected[:count] = ids
+        assert torch.equal(storage.launch_plans[key].routes, expected), count
+        assert _same(_schedule_fields(schedule, experts), unplanned(ids, count)), count
+
+    for count in counts:
+        eager(count)
+    plan = storage.launch_plans[key]
+    eager(300)
+    graph_ids = problem(901)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = functional.build_schedule(workspace, config, graph_ids, num_local_experts=experts)
+    assert storage.launch_plans[key] is plan
+    for count in (600, 600, 1024, 450):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same(_schedule_fields(captured, experts), unplanned(graph_ids, 901))
+        graph.replay()
+        eager(count)

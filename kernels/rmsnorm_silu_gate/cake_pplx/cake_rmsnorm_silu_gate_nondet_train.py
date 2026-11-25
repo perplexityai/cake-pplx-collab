@@ -100,6 +100,62 @@ deterministic package's forward runs, on short inputs whose rows are
 packed (contiguous ``x`` and ``z``, or one token of head stride 128) up to a
 cut of rows per SM (on SM107 not from 17 to 32 rows), a program of one row
 block per CTA with no loop, with the same ``y`` bits.
+Version 0.2.12 keeps the ``y`` bits of every call that 0.2.11 ran
+correctly: on SM100 and SM103 the forward of packed rows (contiguous ``x``
+and ``z``, or one token of head stride 128) up to 4 rows per SM on SM100
+and 12 on SM103 runs a forward with 32 threads to a row (two to each group
+of 8 elements, one 4-row block per 128-thread CTA) with the sum of squares
+of the forward with 16 threads to a row, so its ``y`` bits; that forward
+runs from there up to 36 rows per SM (past these cuts, with the rows in L2,
+the forward with 32 threads to a row is the slower), and SM107 runs the
+forward of 0.2.11.
+A forward of ``x`` or ``z`` broadcast over more than one token (token
+stride 0) runs a forward of other layouts where the forward of packed rows
+would be one that reads packed rows at their linear offsets: 0.2.11 refused
+such a call where it ran the forward with 16 threads to a row of packed rows
+(up to 36 rows per SM on SM100 and SM103 and 65 on SM107; that forward
+takes contiguous ``x`` and ``z`` only, so a ``ValueError``), and on SM107
+past 280 rows per SM its pipelined forward of packed rows read rows past the
+broadcast token.  At every other row count such a call runs, as in 0.2.11,
+the forward of packed rows, which reads the token stride.
+Version 0.2.14 changes no program and no bits, only a grid: the
+deterministic forward and the pipelined forwards (builds of its program)
+launch whole waves of CTAs from a cut of rows per SM of each architecture
+instead of from 8192 rows per SM everywhere, one CTA per 16-row block below
+it, with the same ``y`` bits on either grid; every band is unchanged.  On
+rows the kernel reads as packed (``x`` and ``z`` of head stride 128 and token
+stride ``H * 128``, which get its L2 prefetches) the cut is 5600 on SM103
+and, unchanged, 8192 on SM100 (on B200 the whole waves of such rows were up
+to about 1 % slower per call with a cold L2 from 6500 to 8000 rows per SM)
+and SM107; on other rows (strided, broadcast over tokens or one token) of
+the forwards that read any layout, which run without the prefetches and
+gain from whole waves from far fewer rows per SM, it is 500 on SM100 and
+400 on SM103 and SM107.  The backends'
+``cake_jit.launch_grid`` takes the architecture (keyword ``arch``) and
+whether the rows are read as packed (keyword ``packed``) for those
+forwards.
+Version 0.2.15 changes no bits.  The deterministic package's forward warms
+in L2 each CTA's next block and the first block of the CTA a wave later,
+``x`` and ``z`` each by its own layout: packed rows as one byte range, rows
+of head stride 128 and another token stride (a gate sliced from a
+projection, a broadcast over tokens, one token) as one range a token, and
+rows of other layouts (head-major) as one 256-byte range a row on SM103 and
+SM107 and none on SM100; 0.2.14 warmed ``x`` and ``z`` only where both held
+packed rows.  The pipelined forwards keep the programs of 0.2.14, which warm
+``x`` and ``z`` only where both hold packed rows.  Rows of other layouts of
+a BF16 weight gradient run
+the repeatable backward's look-ahead program from 6145 rows per SM on SM100
+and SM103 and from 4097 on SM107, with the same bits; an FP32 weight
+gradient and a call with ``compute_grad_weight=False`` run it on packed rows
+only, as in 0.2.14.
+Version 0.2.16 changes no bits.  On SM100 and SM103 the deterministic
+package runs packed rows (``x`` and ``z`` both contiguous ``[T, H, 128]``,
+fewer than 2^24 rows) outside its tiny forward's rows on a second forward
+program, the forward of 0.2.14, which warms in L2 only rows packed in both
+``x`` and ``z``, up to 3000 rows per SM; its first forward, which
+warms each tensor by its own layout, runs the other rows outside the tiny
+forward's.
+The kernels of this package are those of 0.2.15.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -113,18 +169,27 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   about -88.72, where ``ex2.approx`` overflows); its bits need not be the
   deterministic package's.
   Where ``x`` and ``z`` hold packed rows (row ``n`` at element ``128 n``) a
-  forward with 16 threads to a row runs up to 36 rows per SM on SM100 and
-  SM103 and 65 on SM107, other layouts up to 12 rows per SM on SM100 and
-  SM103 (59 on SM107), and past that, in bands of rows per SM, the pipelined
+  forward with 32 threads to a row runs up to 4 rows per SM on SM100 and 12
+  on SM103, and a forward with 16 threads to a row from there up to 36 rows
+  per SM on SM100 and SM103 and up to 65 on SM107; other layouts run a
+  forward with 16 threads to a row up to 12 rows per SM on SM100 and SM103
+  (59 on SM107); and past that, in bands of rows per SM, the pipelined
   forwards (builds of the deterministic package's forward program with a
   gate that does not flush), forwards whose CTAs each walk several row
   blocks and, for other layouts past 700 rows per SM on SM100 and SM103 (480
   on SM107), a forward with 8 threads to a row and one CTA per 8-row block.
+  An ``x`` or ``z`` broadcast over more than one token (token stride 0)
+  counts as packed rows, but where the band of packed rows runs a forward
+  that reads rows at their linear offsets (the 32- and 16-thread forwards of
+  packed rows, and on SM107 the pipelined forward of packed rows past 280
+  rows per SM) it runs the forward of other layouts.
   Each forward program's arithmetic is fixed, but the programs
   associate a row's sum of squares differently, on FP32 FMA chains (the
   lanes of ``.f32x2`` FMA chains where a program runs two or four: the
   16-thread forwards four 2-term chains of 16 lanes added in pairs, then
-  folded by XOR shuffles 1, 2, 4, 8; the mid forward, the extra-long forward
+  folded by XOR shuffles 1, 2, 4, 8, and the 32-thread forward the same
+  chains on its 16 lane pairs, then folded by XOR shuffles 2, 4, 8, 16, the
+  same additions; the mid forward, the extra-long forward
   but on SM100 and the SM107 pipelined forward four 4-term chains of 8 lanes
   added in pairs, then folded by 1, 2, 4; the plain forward and the
   pipelined forward on SM100 and SM103 two 8-term chains of 8 lanes, the
@@ -200,8 +265,9 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   and ``z`` each with head stride
   128 and token stride ``H * 128``, more than one token) run its copy of
   the deterministic package's look-ahead program, the same build, from
-  2560 rows per SM on SM100 and SM103 and from 1536 on SM107, with the same
-  bits.
+  2560 rows per SM on SM100 and SM103 and from 1536 on SM107, and, in a
+  call that computes the weight gradient, rows of other layouts from 6145
+  rows per SM on SM100 and SM103 and from 4097 on SM107, with the same bits.
 - Past 512 rows an FP32 weight gradient runs, on every architecture but in
   the static band of SM100 and SM103 (above), the repeatable backward of an
   FP32 weight gradient, this package's copy of the
@@ -232,10 +298,11 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   repeatable bands on SM107; the
   claimed program on the workspace past those cuts and in the repeatable
   band on SM100 and SM103; where packed rows run the look-ahead program,
-  that program without the weight gradient.  On SM100 and SM103, on packed
-  rows (and one token of head stride 128, whose token stride is never read:
-  the call passes it as ``H * 128``) up to 128 rows per SM, every band runs
-  instead the repeatable band's build of packed rows only (128-thread CTAs
+  that program without the weight gradient (other layouts run no
+  look-ahead program without the weight gradient).  On SM100 and SM103, on
+  packed rows (and one token of head stride 128, whose token stride is never
+  read: the call passes it as ``H * 128``) up to 128 rows per SM, every band
+  runs instead the repeatable band's build of packed rows only (128-thread CTAs
   of 8-row blocks with no claim, no ticket and no workspace, no stride
   test, every row read at its linear offset, a row's two reductions across
   its lanes overlapped): its ``dx`` and ``dz`` are the repeatable backward's
@@ -417,15 +484,22 @@ def cake_rmsnorm_silu_gate_nondet_train_forward(
     ``y`` repeats bit for bit for the same inputs on the same device (its bits
     need not be the deterministic package's; that one is
     :func:`cake_pplx.cake_rmsnorm_silu_gate_det_train.cake_rmsnorm_silu_gate_det_train_forward`).
-    A forward with 16 threads to a row runs up to 36 rows per SM on SM100
-    and SM103 and 65 on SM107 where ``x`` and ``z`` hold packed rows (row
-    ``n`` at element ``128 n``), up to 12 on SM100 / SM103 (59 on SM107) for
-    other layouts, and past that, in bands of rows per SM, the pipelined
+    Where ``x`` and ``z`` hold packed rows (row ``n`` at element ``128 n``)
+    a forward with 32 threads to a row runs up to 4 rows per SM on SM100 and
+    12 on SM103, and one with 16 threads to a row from there up to 36 rows
+    per SM on SM100 / SM103 and up to 65 on SM107; one with 16 threads to a
+    row runs other layouts up to 12 on SM100 / SM103 (59 on SM107); and past
+    that, in bands of rows per SM, the pipelined
     forwards, forwards whose CTAs each walk several row blocks and (other
     layouts past 700 rows per SM on SM100 / SM103, 480 on SM107) a forward of
     one CTA per 8-row block; the programs associate a row's sum of
     squares differently (the row count, the SM count and the layout pick the
-    program), so ``y``'s bits can differ between bands.  The forward does not alert under
+    program), so ``y``'s bits can differ between bands.  An ``x`` or ``z``
+    broadcast over more than one token counts as packed rows, but where the
+    band of packed rows runs a forward that reads rows at their linear
+    offsets (the 32- and 16-thread forwards of packed rows, and on SM107 the
+    pipelined forward of packed rows past 280 rows per SM) it runs the
+    forward of other layouts.  The forward does not alert under
     ``torch.use_deterministic_algorithms(True)``.
 
     Parameters
@@ -613,7 +687,9 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     digits in the workspace: ``dx``, ``dz`` and
     ``dw`` the deterministic package's bits, the same for the rows and the SM
     count (packed rows from 2560 rows per SM on SM100 and SM103 and from 1536
-    on SM107 run its look-ahead program, with the same bits).  Past 512 rows
+    on SM107, and rows of other layouts from 6145 rows per SM on SM100 and
+    SM103 and from 4097 on SM107, run its look-ahead program, with the same
+    bits).  Past 512 rows
     an FP32 ``dw`` runs, on every architecture but in the static band of
     SM100 and SM103, the repeatable backward of an
     FP32 weight gradient, this package's copy of the deterministic package's

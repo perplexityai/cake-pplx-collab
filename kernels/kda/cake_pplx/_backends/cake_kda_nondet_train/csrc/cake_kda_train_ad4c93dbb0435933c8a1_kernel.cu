@@ -371,7 +371,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
             int qrs = num_qk_heads * 128;
             long long ext0 = (long long)chunk_bos[chunk];
             int clen = chunk_len[chunk];
-            long long gbase_t = (ext0 * (long long)num_heads + (long long)hv) * 128;
+            long long gbase_t = (ext0 * (long long)num_heads + (long long)hv) * 128ll;
             float* dg_base = dg_ext + (gbase_t + (long long)d_lane);
             long long qoff0 = ext0 * (long long)qrs + (long long)(qk_head * 128 + d_lane);
             __nv_bfloat16* dq_base = dq_ext + qoff0;
@@ -3442,7 +3442,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqa[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowa) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqa[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowa) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_260;
@@ -3468,7 +3468,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqb[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowb) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqb[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowb) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_262;
@@ -4141,7 +4141,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqa_0[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowa_0) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqa_0[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowa_0) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_363;
@@ -4167,7 +4167,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqb_0[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowb_0) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqb_0[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowb_0) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_365;
@@ -5043,7 +5043,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqa_1[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowa_1) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqa_1[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowa_1) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_484;
@@ -5069,7 +5069,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqb_1[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowb_1) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqb_1[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowb_1) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_486;
@@ -5848,7 +5848,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqa_2[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowa_2) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqa_2[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowa_2) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_597;
@@ -5874,7 +5874,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 }
             }
             {
-                rqb_2[0] = *reinterpret_cast<const float*>(qk_rstd + ((0 + rowb_2) * (long long)num_qk_heads + (long long)qk_head) + 0);
+                rqb_2[0] = *reinterpret_cast<const float*>(qk_rstd + ((0ll + rowb_2) * (long long)num_qk_heads + (long long)qk_head) + 0);
             }
             {
                 uint2 _vld_599;
@@ -6381,6 +6381,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(100464 + r_1 * 128)), "f"(z[0]), "f"(z[1]), "f"(z[2]), "f"(z[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr);
                 }
@@ -6487,6 +6488,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(104560 + r_2 * 128)), "f"(z_1[0]), "f"(z_1[1]), "f"(z_1[2]), "f"(z_1[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 8);
                 }
@@ -6637,6 +6639,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(100464 + r_3 * 128)), "f"(z_2[0]), "f"(z_2[1]), "f"(z_2[2]), "f"(z_2[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 16);
                 }
@@ -6819,6 +6822,7 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                             asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(pool_f32_addr + (unsigned int)(104560 + r_40 * 128)), "f"(z_3[0]), "f"(z_3[1]), "f"(z_3[2]), "f"(z_3[3]) : "memory");
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     mbarrier_arrive(kq_ready_addr + 24);
                 }
@@ -7018,16 +7022,16 @@ kernel_cake_kda_train_ad4c93dbb0435933c8a1(const __grid_constant__ CUtensorMap d
                 asm volatile("cp.async.bulk.prefetch.tensor.3d.L2.global.tile [%0, {%1, %2, %3}];" :: "l"((uint64_t)((&q_e))), "r"((int)(64)), "r"((int)(qk_head_h)), "r"((int)(kq0_setup + 56)) : "memory");
             }
             int pf_lane = tid & 31;
-            long long pf_base = ((long long)(row0_h + (pf_lane >> 2)) * (long long)num_heads + (long long)hv_h) * 128 + (long long)((pf_lane & 3) * 32);
-            long long pf_off_2_0 = pf_base + (long long)num_heads * 5120;
+            long long pf_base = ((long long)(row0_h + (pf_lane >> 2)) * (long long)num_heads + (long long)hv_h) * 128ll + (long long)((pf_lane & 3) * 32);
+            long long pf_off_2_0 = pf_base + (long long)num_heads * 5120ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_2_0)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_2_0)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_2_0)));
-            long long pf_off_2_1 = pf_base + (long long)num_heads * 6144;
+            long long pf_off_2_1 = pf_base + (long long)num_heads * 6144ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_2_1)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_2_1)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_2_1)));
-            long long pf_off_2_2 = pf_base + (long long)num_heads * 7168;
+            long long pf_off_2_2 = pf_base + (long long)num_heads * 7168ll;
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dq_f + pf_off_2_2)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dk_f + pf_off_2_2)));
             asm volatile("prefetch.global.L2 [%0];" :: "l"((uint64_t)(dg_f + pf_off_2_2)));

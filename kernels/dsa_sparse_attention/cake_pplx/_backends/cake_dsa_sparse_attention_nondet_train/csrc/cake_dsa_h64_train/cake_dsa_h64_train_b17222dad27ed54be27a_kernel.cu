@@ -1744,6 +1744,7 @@ kernel_cake_dsa_h64_train_b17222dad27ed54be27a(const __grid_constant__ CUtensorM
                 query = _clc_ctaid_x_0;
                 _phase_o_written_waited ^= 1;
             }
+            asm volatile("cp.async.bulk.wait_group.read 0;");
             if (warp == 3) {
                 asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" :: "r"(0), "r"(512));
             }

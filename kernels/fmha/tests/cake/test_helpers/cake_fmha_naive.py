@@ -41,6 +41,9 @@ that reads it, :func:`stored`).  ``scale_log2`` is ``softmax_scale * log2(e)`` r
   of the elements, and ``softmax_scale``, which the postprocess applies, would scale every error alike.  With
   ``pair=True`` (the 2-CTA main kernel of the pair route, head dimension 128) ``dQ_accum`` is in the pair-row layout:
   element ``(r, d)`` of a tile at ``(r // 64) * 8192 + (d // 4) * 256 + (r % 64) * 4 + d % 4`` (:func:`accumulator`).
+* :func:`fused_outputs`: the one-launch stage (no mask) on the operands of :func:`make_inputs`: the formula of the
+  public backward with the row statistics the kernel makes itself, float64 in the oracle and FP32 (``LSE_log2 = lse *
+  log2(e)``, ``dPsum = rowsum(out * dout)``) in the naive tier.
 * :func:`pre_outputs`: the preprocess (:func:`pre_inputs`: ``out`` and ``dout`` ``randn x 0.1``, ``lse`` ``log(Sq) +
   randn`` with every seventh value ``-inf``): ``dPsum = rowsum(out * dout)`` and ``LSE_log2 = lse * log2(e)`` (0 where
   ``lse`` is ``-inf``), FP32 ``[B*H, Sq]``, and ``dQ_accum`` cleared to 0.
@@ -249,6 +252,32 @@ def main_outputs(
         "dQ_accum": dq,
         "dK": _bshd((ds.transpose(-1, -2) @ q) * x.softmax_scale, x.B, x.H),
         "dV": _bshd(p.transpose(-1, -2) @ dout, x.B, x.H),
+    }
+
+
+def fused_outputs(x: types.SimpleNamespace, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+    """``dq``, ``dk`` and ``dv`` of the one-launch stage (``bwd_fused``, no mask) on the operands ``x`` in ``dtype``:
+    the formula of :func:`backward_outputs` with ``P`` and ``dS`` in ``dtype`` and the row statistics the kernel makes
+    itself.  In float64 (the oracle) ``LSE_log2 = lse * log2(e)`` and ``dPsum = rowsum(out * dout)`` are float64;
+    below float64 (the naive tier) they are FP32 as the kernel computes them (``LSE_log2`` 0 where ``lse`` is
+    ``-inf``, ``dPsum`` summed in FP32) and read as stored.  ``dq = (dS k) * softmax_scale`` cast to ``dtype``."""
+    q, k, v = _heads(x.q, dtype), _heads(x.k, dtype), _heads(x.v, dtype)
+    out, dout = _heads(x.out, dtype), _heads(x.dout, dtype)
+    lse = x.lse.reshape(x.B * x.H, x.Sq)
+    if dtype == ORACLE_DTYPE:
+        lse_log2 = lse.to(dtype) * LOG2_E
+        dpsum = (out * dout).sum(-1)
+    else:
+        lse_log2 = torch.where(lse.isneginf(), 0.0, lse * LOG2_E)
+        dpsum = (_heads(x.out, torch.float32) * _heads(x.dout, torch.float32)).sum(-1)
+    p = _probabilities(x, q, k, lse_log2)
+    ds = (p * (dout @ v.transpose(-1, -2) - dpsum[..., None])).to(dtype)
+    p = p.to(dtype)
+    scale = x.softmax_scale
+    return {
+        "dq": _bshd(((ds @ k) * scale).to(dtype), x.B, x.H),
+        "dk": _bshd((ds.transpose(-1, -2) @ q) * scale, x.B, x.H),
+        "dv": _bshd(p.transpose(-1, -2) @ dout, x.B, x.H),
     }
 
 

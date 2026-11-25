@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -379,13 +379,30 @@ kernel_cake_moe_grouped_gemm_55833be10c8515562245(const __grid_constant__ CUtens
                 for (unsigned int _item = 0; _item < t0 + t1 + 2; _item++) {
                     mbarrier_wait(work_full_addr + (work_stage) * 8, _phase_work_full);
                     unsigned int ticket = work_ring[work_stage * 4];
-                    asm volatile(
-                        "{\n\t"
-                        ".reg .b32 remAddr32;\n\t"
-                        "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                        "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
-                        "}"
-                        :: "r"(work_empty_addr + (work_stage) * 8), "r"(0) : "memory");
+                    if (cta_rank != 0) {
+#if __CUDA_ARCH__ == 1030
+                        asm volatile("fence.release.sync_restrict::shared::cta.cluster;" ::: "memory");
+#endif
+                        asm volatile(
+                            "{\n\t"
+                            ".reg .b32 remAddr32;\n\t"
+                            "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+#if __CUDA_ARCH__ == 1030
+                            "mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [remAddr32];\n\t"
+#else
+                            "mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remAddr32];\n\t"
+#endif
+                            "}"
+                            :: "r"(work_empty_addr + (work_stage) * 8), "r"(0) : "memory");
+                    } else {
+                        asm volatile(
+                            "{\n\t"
+                            ".reg .b32 remAddr32;\n\t"
+                            "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+                            "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
+                            "}"
+                            :: "r"(work_empty_addr + (work_stage) * 8), "r"(0) : "memory");
+                    }
                     work_stage += 1;
                     if (work_stage == 4) { work_stage = 0; _phase_work_empty ^= 1; _phase_work_full ^= 1; }
                     if (cta_rank == 0) {
@@ -1243,13 +1260,24 @@ kernel_cake_moe_grouped_gemm_55833be10c8515562245(const __grid_constant__ CUtens
                 mbarrier_wait(work_full_addr + (work_stage_e) * 8, _phase_work_full_2);
                 unsigned int ticket_2 = work_ring[work_stage_e * 4];
                 asm volatile("tcgen05.fence::before_thread_sync;");
-                asm volatile(
-                    "{\n\t"
-                    ".reg .b32 remAddr32;\n\t"
-                    "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
-                    "}"
-                    :: "r"(work_empty_addr + (work_stage_e) * 8), "r"(0) : "memory");
+                if (cta_rank != 0) {
+                    asm volatile("fence.release.sync_restrict::shared::cta.cluster;" ::: "memory");
+                    asm volatile(
+                        "{\n\t"
+                        ".reg .b32 remAddr32;\n\t"
+                        "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+                        "mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [remAddr32];\n\t"
+                        "}"
+                        :: "r"(work_empty_addr + (work_stage_e) * 8), "r"(0) : "memory");
+                } else {
+                    asm volatile(
+                        "{\n\t"
+                        ".reg .b32 remAddr32;\n\t"
+                        "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+                        "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
+                        "}"
+                        :: "r"(work_empty_addr + (work_stage_e) * 8), "r"(0) : "memory");
+                }
                 work_stage_e += 1;
                 if (work_stage_e == 4) { work_stage_e = 0; _phase_work_full_2 ^= 1; }
                 unsigned int q_2 = ticket_2 >> 31;

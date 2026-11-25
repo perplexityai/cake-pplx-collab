@@ -159,7 +159,8 @@ class CakeMoEGroupedGemmNondetFunction(torch.autograd.Function):
     """``Y = grouped X @ W[e].T`` with ``dX`` and ``dW`` from the non-deterministic package's Cake programs.
 
     ``x`` ``[sum_m, K]`` bf16, ``w`` ``[E, N, K]`` bf16, ``offs`` int32 device
-    end offsets ``[E]`` (or ``m_indptr`` ``[E + 1]``).  ``forward`` saves ``x``,
+    end offsets ``[E]`` (or ``m_indptr`` ``[E + 1]``, whose first entry may be
+    above 0: rows outside the slice of ``Y`` and ``dX`` are left uninitialized).  ``forward`` saves ``x``,
     ``w`` and ``offs`` only.  ``backward`` returns ``dX`` ``[sum_m, K]`` bf16 (the
     deterministic bits) and ``dW`` ``[E, N, K]`` in the dtype of ``w``, whose
     split tail (512-wide k tile) is summed in slot order in the same launch;
@@ -282,7 +283,13 @@ def cake_moe_grouped_gemm_nondet(
     """Differentiable ragged grouped GEMM ``Y[offs[e-1]:offs[e]] = X[offs[e-1]:offs[e]] @ W[e].T``.
 
     The slice lower bound is ``0`` for ``e == 0`` and ``offs[e-1]`` for ``e > 0``.
-    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]``.
+    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]`` and
+    the lower bound of group 0 is ``m_indptr[0]``, which may be above 0: a device
+    slice of the rows, in absolute row numbers.  Rows outside
+    ``[m_indptr[0], m_indptr[E])`` do not affect the results and are not
+    written.  The package README (device slices) gives the bits of a slice,
+    its cost, and the ``[E]`` form ``m_indptr[1:]`` that a table starting at 0
+    can pass at no extra cost.
 
     Parameters
     ----------
@@ -292,7 +299,14 @@ def cake_moe_grouped_gemm_nondet(
         ``[E, N, K]`` bfloat16 weights (``[N, K]`` per group).
     offs : torch.Tensor
         int32 device tensor: ``[E]`` cumulative end offsets or ``m_indptr``
-        ``[E + 1]``.  Read by the kernels, never on the host.
+        ``[E + 1]``.  Read by the kernels, never on the host.  With an
+        ``m_indptr`` whose first entry is above 0 (a device slice of the rows
+        of ``x``) the forward writes only the slice's rows of ``Y`` and the
+        backward only the slice's rows of ``x``'s gradient; their other rows
+        are left uninitialized (``torch.empty``).  So the gradients of several
+        slices of one shared ``x`` cannot be summed (the rows outside each
+        slice are undefined): a sliced layout calls the op-level functions
+        with caller-owned outputs.
     fuse_wgrad_accumulation : bool
         ``False`` (default): the backward returns ``w``'s gradient as below.
         ``True`` (Megatron's ``gradient_accumulation_fusion``): ``w.main_grad``

@@ -288,7 +288,7 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
             zero8[6] = 0.0f;
             zero8[7] = 0.0f;
             int head_s = blockIdx.y;
-            long long pbase = ((long long)chunk_s * 64 * (long long)num_heads + (long long)head_s) * 64;
+            long long pbase = ((long long)chunk_s * 64ll * (long long)num_heads + (long long)head_s) * 64ll;
             int prs = num_heads * 64;
             #pragma unroll
             for (int r = 0; r < 2; r++) {
@@ -354,7 +354,7 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
             pz8[6] = 0.0f;
             pz8[7] = 0.0f;
             int head_p = blockIdx.y;
-            long long pbase_p = ((long long)chunk_s * 64 * (long long)num_heads + (long long)head_p) * 128;
+            long long pbase_p = ((long long)chunk_s * 64ll * (long long)num_heads + (long long)head_p) * 128ll;
             int prs_p = num_heads * 128;
             #pragma unroll
             for (int r_1 = 0; r_1 < 4; r_1++) {
@@ -535,8 +535,8 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     int ext0_i = ext0_s;
     long long ext0 = (long long)ext0_i;
     int clen = clen_s;
-    long long abase = (ext0 * (long long)num_heads + (long long)head) * 64;
-    long long ibase = ((long long)row0 * (long long)num_heads + (long long)head) * 64;
+    long long abase = (ext0 * (long long)num_heads + (long long)head) * 64ll;
+    long long ibase = ((long long)row0 * (long long)num_heads + (long long)head) * 64ll;
     int ars = num_heads * 64;
     int l2n_lead = 0;
     if (head == qk_head * group) {
@@ -568,21 +568,21 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     float l2n_rin[8];
     if (read_rstd != 0) {
         int _min_0 = ((tid_0 >> 4) < (clen - 1) ? (tid_0 >> 4) : (clen - 1));
-        l2n_rin[0] = qk_rstd[(0 * (long long)num_tokens + (long long)(ext0_i + _min_0)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[0] = qk_rstd[(0ll * (long long)num_tokens + (long long)(ext0_i + _min_0)) * (long long)num_qk_heads + (long long)qk_head];
         int _min_1 = ((tid_0 >> 4) < (clen - 1) ? (tid_0 >> 4) : (clen - 1));
-        l2n_rin[4] = qk_rstd[(1 * (long long)num_tokens + (long long)(ext0_i + _min_1)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[4] = qk_rstd[(1ll * (long long)num_tokens + (long long)(ext0_i + _min_1)) * (long long)num_qk_heads + (long long)qk_head];
         int _min_2 = (((tid_0 >> 4) + 16) < (clen - 1) ? ((tid_0 >> 4) + 16) : (clen - 1));
-        l2n_rin[1] = qk_rstd[(0 * (long long)num_tokens + (long long)(ext0_i + _min_2)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[1] = qk_rstd[(0ll * (long long)num_tokens + (long long)(ext0_i + _min_2)) * (long long)num_qk_heads + (long long)qk_head];
         int _min_3 = (((tid_0 >> 4) + 16) < (clen - 1) ? ((tid_0 >> 4) + 16) : (clen - 1));
-        l2n_rin[5] = qk_rstd[(1 * (long long)num_tokens + (long long)(ext0_i + _min_3)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[5] = qk_rstd[(1ll * (long long)num_tokens + (long long)(ext0_i + _min_3)) * (long long)num_qk_heads + (long long)qk_head];
         int _min_4 = (((tid_0 >> 4) + 32) < (clen - 1) ? ((tid_0 >> 4) + 32) : (clen - 1));
-        l2n_rin[2] = qk_rstd[(0 * (long long)num_tokens + (long long)(ext0_i + _min_4)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[2] = qk_rstd[(0ll * (long long)num_tokens + (long long)(ext0_i + _min_4)) * (long long)num_qk_heads + (long long)qk_head];
         int _min_5 = (((tid_0 >> 4) + 32) < (clen - 1) ? ((tid_0 >> 4) + 32) : (clen - 1));
-        l2n_rin[6] = qk_rstd[(1 * (long long)num_tokens + (long long)(ext0_i + _min_5)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[6] = qk_rstd[(1ll * (long long)num_tokens + (long long)(ext0_i + _min_5)) * (long long)num_qk_heads + (long long)qk_head];
         int _min_6 = (((tid_0 >> 4) + 48) < (clen - 1) ? ((tid_0 >> 4) + 48) : (clen - 1));
-        l2n_rin[3] = qk_rstd[(0 * (long long)num_tokens + (long long)(ext0_i + _min_6)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[3] = qk_rstd[(0ll * (long long)num_tokens + (long long)(ext0_i + _min_6)) * (long long)num_qk_heads + (long long)qk_head];
         int _min_7 = (((tid_0 >> 4) + 48) < (clen - 1) ? ((tid_0 >> 4) + 48) : (clen - 1));
-        l2n_rin[7] = qk_rstd[(1 * (long long)num_tokens + (long long)(ext0_i + _min_7)) * (long long)num_qk_heads + (long long)qk_head];
+        l2n_rin[7] = qk_rstd[(1ll * (long long)num_tokens + (long long)(ext0_i + _min_7)) * (long long)num_qk_heads + (long long)qk_head];
     }
     mbarrier_wait(raw_full_addr, 0);
     float l2n_x4[32];
@@ -754,12 +754,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_0 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_0) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_0)[0];
+                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_0) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_0)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((0 * (long long)num_tokens + (long long)(ext0_i + l2n_t_0)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[0];
+                        *(reinterpret_cast<float*>(qk_rstd + ((0ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_0)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[0];
                     }
                 }
             }
@@ -820,12 +820,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_1 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_1) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_1)[0];
+                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_1) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_1)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((0 * (long long)num_tokens + (long long)(ext0_i + l2n_t_1)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[1];
+                        *(reinterpret_cast<float*>(qk_rstd + ((0ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_1)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[1];
                     }
                 }
             }
@@ -886,12 +886,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_2 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_2) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_2)[0];
+                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_2) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_2)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((0 * (long long)num_tokens + (long long)(ext0_i + l2n_t_2)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[2];
+                        *(reinterpret_cast<float*>(qk_rstd + ((0ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_2)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[2];
                     }
                 }
             }
@@ -952,12 +952,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_3 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_3) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_3)[0];
+                reinterpret_cast<int4*>(qn + (((long long)(ext0_i + l2n_t_3) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_3)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((0 * (long long)num_tokens + (long long)(ext0_i + l2n_t_3)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[3];
+                        *(reinterpret_cast<float*>(qk_rstd + ((0ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_3)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r[3];
                     }
                 }
             }
@@ -1128,12 +1128,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_4 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_4) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_4)[0];
+                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_4) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_4)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((1 * (long long)num_tokens + (long long)(ext0_i + l2n_t_4)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[0];
+                        *(reinterpret_cast<float*>(qk_rstd + ((1ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_4)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[0];
                     }
                 }
             }
@@ -1190,12 +1190,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_5 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_5) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_5)[0];
+                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_5) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_5)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((1 * (long long)num_tokens + (long long)(ext0_i + l2n_t_5)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[1];
+                        *(reinterpret_cast<float*>(qk_rstd + ((1ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_5)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[1];
                     }
                 }
             }
@@ -1252,12 +1252,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_6 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_6) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_6)[0];
+                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_6) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_6)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((1 * (long long)num_tokens + (long long)(ext0_i + l2n_t_6)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[2];
+                        *(reinterpret_cast<float*>(qk_rstd + ((1ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_6)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[2];
                     }
                 }
             }
@@ -1314,12 +1314,12 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
     if (l2n_t_7 < clen) {
         if (l2n_lead != 0) {
             if (write_qkn != 0) {
-                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_7) * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_7)[0];
+                reinterpret_cast<int4*>(kn + (((long long)(ext0_i + l2n_t_7) * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)((tid_0 & 15) * 8)))[0] = reinterpret_cast<int4*>(l2n_yb_7)[0];
             }
             if (read_rstd == 0) {
                 if (write_rstd != 0) {
                     if ((tid_0 & 15) == 0) {
-                        *(reinterpret_cast<float*>(qk_rstd + ((1 * (long long)num_tokens + (long long)(ext0_i + l2n_t_7)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[3];
+                        *(reinterpret_cast<float*>(qk_rstd + ((1ll * (long long)num_tokens + (long long)(ext0_i + l2n_t_7)) * (long long)num_qk_heads + (long long)qk_head)) + (0)) = l2n_r_0[3];
                     }
                 }
             }
@@ -1467,7 +1467,7 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
             asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
                 : "=r"(*reinterpret_cast<uint32_t*>(&g63[0])), "=r"(*reinterpret_cast<uint32_t*>(&g63[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&g63[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&g63[(0) + 3]))
                 : "r"(g63_a));
-            long long g63_o = ibase * 2 + (long long)(ars * 2 * 63 + tid_0 * 4);
+            long long g63_o = ibase * 2ll + (long long)(ars * 2 * 63 + tid_0 * 4);
             {
                 float4 _v4 = make_float4(g63[0 + 0], g63[0 + 1], g63[0 + 2], g63[0 + 3]);
                 *reinterpret_cast<float4*>((gk_out + g63_o) + 0) = _v4;
@@ -1509,7 +1509,7 @@ kernel_cake_kda_det_train_01d883af20a753827af8(const __grid_constant__ CUtensorM
         int k_i = k_addr + rowb + (cq ^ p8f << 4) + h8;
         int k_i1 = k_i ^ 64;
         int q_i = (int)q_p_addr + f_row * 64 + (cq ^ (f_row >> 1 & 3) << 4) + h8;
-        long long o_i = ibase * 2 + (long long)(t_f * (ars * 2) + (fq * 16 + f_c * 4));
+        long long o_i = ibase * 2ll + (long long)(t_f * (ars * 2) + (fq * 16 + f_c * 4));
         __nv_bfloat16* kb_p = kb_out + o_i;
         __nv_bfloat16* kg_p = kg_out + o_i;
         __nv_bfloat16* qg_p = qg_out + o_i;

@@ -46,13 +46,16 @@ fragment that reads its history from three predecessor ranks).  Per row and rank
 - per-document zigzag rows: the longest document is a chain of ``2 W`` fragments over every rank.
 
 ``ROWS`` are W = 2 / 4 / 8; ``F_ROWS`` are W = 2 / 4 at C = 528 and 568 around the forward's token floor of the
-channel count on the running architecture (``cake_jit.NARROW_ROW_FLOORS["fwd"]``): its ``floor:`` rows take the ranks'
-token counts from that table at run time (a rank at the floor and one a token below it), its other rows fixed counts
-(the comment above ``F_ROWS``); ``S_ROWS`` are W = 2 / 4 at C = 576 with the ranks' token counts on both sides of the
-ends of the ``fwd`` route's static and direct ranges (the forward's small-S rows, read from ``cake_jit``), so the ranks'
-single-rank main programs are the static, the direct and the dynamic program; ``ROWS_SCALE`` are per-document zigzag at
-W = 16 / 32 / 64 (at W = 64 a document of 128 fragments, and documents of one- and two-token fragments whose history
-comes from up to three predecessor ranks).
+channel count on the running architecture (``cake_jit.NARROW_ROW_FLOORS["fwd"]``), run with the forward's small-S rows
+removed (:func:`_small_s_rows_removed`): its ``floor:`` rows take the ranks' token counts from that table at run time
+(a rank at the floor and one a token below it), its other rows fixed counts (the comment above ``F_ROWS``);
+``S_ROWS`` are W = 2 / 4 at C = 576 with the ranks' token counts on both sides of the ends of the ``fwd`` route's
+static, direct and pair direct ranges (the forward's small-S rows, read from ``cake_jit``; ``P_lo`` and ``P_lo + 1``
+where the pair range starts at one token), so the ranks' single-rank main programs are the pair direct, the direct
+and the dynamic program and, where a static range covers C = 576 (sm_100a and sm_107a), the static program;
+``ROWS_SCALE`` are per-document
+zigzag at W = 16 / 32 / 64 (at W = 64 a document of 128 fragments, and documents of one- and two-token fragments
+whose history comes from up to three predecessor ranks).
 Two launch forms (as ``tests/experimental/test_cake_kda_det_train_kcp_dist.py``):
 ``torch.multiprocessing`` (``pytest``: skipped when fewer than ``W`` CUDA devices are visible) and one process per Slurm
 task (``SLURM_NTASKS == W``; the rendezvous from ``MASTER_ADDR`` / ``MASTER_PORT``; rows of another ``W`` are skipped
@@ -91,6 +94,10 @@ ROWS = [
 # Rows of C = 528 and 568 around the forward's token floor of the channel count on the running architecture
 # (``cake_jit.NARROW_ROW_FLOORS["fwd"]``; the nondet package's ``FORWARD_NARROW_ROW_FLOORS`` holds the same floors):
 # from its floor the single-rank main program of a rank runs the narrower tiles of the row, below it the single tile.
+# The rows run with ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS`` empty (:func:`_small_s_rows_removed`; in nondet
+# also the backward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS``, which no KCP call reads): the forward's small-S rows
+# cover most of these token counts, where a rank runs the static, the direct or the pair direct program instead
+# (``S_ROWS`` runs those programs).
 # The ``floor:`` rows (C = 528, W = 2 and 4) take their ranks' token counts from that table at run time
 # (:func:`_floor_row`; ``f`` is the floor): a rank at the floor and one a token below it, so on every architecture one
 # rank runs the narrower tiles and another the single tile; the last document takes the tokens the others leave.  A
@@ -108,11 +115,15 @@ F_ROWS = [
 
 
 def _small_s_rows() -> list:
-    """Rows of C = 576 per architecture whose ``fwd`` route has a static and a direct range there
-    (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``): at W = 2 the ranks hold the static range's last token count
-    ``S_x`` and one more (the static and the direct program), at W = 4 ``S_x``, ``S_x + 1``, the direct range's last
-    count ``S_hi`` and one more (static, direct, direct, dynamic); a first document of three quarters of the tokens
-    spans every rank."""
+    """Rows of C = 576 per architecture whose ``fwd`` route has a direct range there (``cake_jit.DIRECT_ROWS``) from
+    more than one token: at W = 2 the ranks hold the last token count ``S_x`` below that range (the static range's
+    last, ``cake_jit.FALLBACK_ROWS``, where one covers C = 576) and one more, at W = 4 ``S_x``, ``S_x + 1``, the
+    direct range's last count ``S_hi`` and one more (the static, direct and dynamic programs; the pair direct program
+    where a ``PAIR_ROWS`` range holds the count); and
+    where it has a pair direct range (``cake_jit.PAIR_ROWS``), at W = 2 the ranks hold one token below the range's
+    first count ``P_lo`` and ``P_lo`` (``P_lo`` and ``P_lo + 1`` where the range starts at one token), at W = 4 those
+    two, the range's last count ``P_hi`` and one more (static or pair direct, pair direct, pair direct, and the static
+    or the direct program); a first document of three quarters of the tokens spans every rank."""
 
     from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit
 
@@ -120,10 +131,17 @@ def _small_s_rows() -> list:
     for arch in cake_jit.ARCHES:
         static = cake_jit.fallback_row_range(arch, "fwd", 576)
         direct = cake_jit.direct_row_range(arch, "fwd", 576)
-        if static is None or direct is None:
-            continue
-        s_x, s_hi = static[1], direct[1]
-        for counts in ((s_x, s_x + 1), (s_x, s_x + 1, s_hi, s_hi + 1)):
+        pair = cake_jit.pair_row_range(arch, "fwd", 576)
+        sides = []
+        if direct is not None and (static is not None or direct[0] > 1):
+            s_x = static[1] if static is not None else direct[0] - 1
+            s_hi = direct[1]
+            sides += [(s_x, s_x + 1), (s_x, s_x + 1, s_hi, s_hi + 1)]
+        if pair is not None:
+            p_lo, p_hi = pair
+            low = (p_lo - 1, p_lo) if p_lo > 1 else (p_lo, p_lo + 1)
+            sides += [low, (*low, p_hi, p_hi + 1)]
+        for counts in sides:
             total = sum(counts)
             lengths = (total - total // 4, total // 4)
             row = (lengths, len(counts), "ragged:" + ",".join(map(str, counts)), 576)
@@ -179,6 +197,29 @@ def _floor_row(row, arch: str):
     # a rank at or above the floor and one below it; the last document holds tokens
     assert rest == "rest" and docs[-1] > 0 and min(t_r) < floor <= max(t_r), row
     return tuple(docs), W, "ragged:" + ",".join(map(str, t_r)), C
+
+
+@contextlib.contextmanager
+def _small_s_rows_removed(row):
+    """While a row of :data:`F_ROWS` runs, ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS`` of both packages'
+    ``cake_jit`` are empty (in nondet also the backward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS``, which no KCP
+    call reads), so each rank's single-rank main program is the one the token floor decides: the narrower tiles from
+    the floor, the single tile below it.  Every other row runs with the rows of record."""
+
+    if row not in F_ROWS:
+        yield
+        return
+    from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit as det_jit
+    from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
+        cake_jit as nondet_jit,
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        for jit in (det_jit, nondet_jit):
+            m.setattr(jit, "FALLBACK_ROWS", {})
+            m.setattr(jit, "DIRECT_ROWS", {})
+            m.setattr(jit, "PAIR_ROWS", {})
+        yield
 
 
 def _partition(partition, lengths, W: int, layout: str):
@@ -694,7 +735,8 @@ def _run_rank(
 
 def _spawn_entry(rank: int, W: int, row, port: int, result_dir: str) -> None:
     try:
-        report = _run_rank(rank, W, row, port, result_dir, rank)
+        with _small_s_rows_removed(row):
+            report = _run_rank(rank, W, row, port, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
     finally:
@@ -737,14 +779,15 @@ def test_recompute_handle_rows(row) -> None:
             pytest.skip(f"a {ntasks}-task Slurm step runs the W={ntasks} rows only")
         if not _supported():
             pytest.skip("the conv package does not support this device")
-        report = _run_rank(
-            int(os.environ["SLURM_PROCID"]),
-            W,
-            row,
-            int(os.environ.get("MASTER_PORT", "29500")),
-            os.environ.get("KCP_TEST_RESULT_DIR"),
-            int(os.environ.get("SLURM_LOCALID", "0")),
-        )
+        with _small_s_rows_removed(row):
+            report = _run_rank(
+                int(os.environ["SLURM_PROCID"]),
+                W,
+                row,
+                int(os.environ.get("MASTER_PORT", "29500")),
+                os.environ.get("KCP_TEST_RESULT_DIR"),
+                int(os.environ.get("SLURM_LOCALID", "0")),
+            )
         assert report["pass"], report
         _skip_without_allocator_counts(report)
         return

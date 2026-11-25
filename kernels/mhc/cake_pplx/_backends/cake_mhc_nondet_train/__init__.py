@@ -15,7 +15,7 @@ limitations under the License.
 
 Fused-reduction backend of the Cake four-stream mHC training forward /
 backward (hidden sizes 4096, 5120 and 7168 per call, from ``X``; 4 streams;
-SM100 / SM103 / SM107; the backward's column-slab pass folds
+SM100 / SM103 / SM107; the backward's column-slab pass sums
 ``dfn``, ``dscale`` and ``dbase`` itself), one self-contained
 package (host API bodies, the ``cake_jit`` registry, the ``cake_build`` loader
 and the generated CUDA sources under ``csrc/``).  It imports nothing from other
@@ -25,7 +25,8 @@ user-facing module and documentation are
 here.
 
 Numerical contract: no bit promise.  Every sum of the current programs is a
-plain FP32 sum in an order fixed by the token count and the device, but the
+plain FP32 sum in an order fixed by the token count and the device, except
+``dfn`` on SM107 (its column slab's reduction form, below); the
 package does not promise that an output repeats bit for bit from run to run,
 and its outputs are not compared bitwise with the deterministic package's.
 The forward, the statistics replay, the residual mixing and
@@ -42,7 +43,15 @@ unit has stored its sums the grid adds each element's ``P <= 32`` partials
 ``x_p`` in ascending chunk order as one FP32 sum from +0.0, the caller's
 ``dfn`` last under ``accumulate=True``: within ``gamma_n (|start| + sum
 |x_p|)`` of the exact sum (``n`` the additions, ``gamma_n = n u / (1 - n u)``,
-``u = 2^-24``), no addition flushing a subnormal.  By default
+``u = 2^-24``), no addition flushing a subnormal.  On SM107 with
+``accumulation="fp32"`` the column slab runs its reduction form instead
+(``cake_jit.BWD_SLAB_DFN``): each unit adds
+its FP32 ``dfn`` sums into ``dfn`` with relaxed reductions when it ends, so
+``dfn`` (the caller's value under ``accumulate=True``, else zero, plus the
+units' sums) is summed in a run-dependent order and may differ in its last
+bits from run to run; while PyTorch's deterministic-algorithms mode is on it
+is summed in the fold's fixed order (Mode, below).  Its accuracy is checked
+against the FP64 reference like every other output.  By default
 (``accumulation="fp32"``) every sum is one plain FP32 word: no FP64
 accumulation or reduction and no compensation word (a few scalar epilogues
 of the RMS scale, a finished FP32 sum times ``1/(4H)`` plus ``rms_eps`` or
@@ -56,8 +65,11 @@ Mode: the names keep the package's own prefix (``cake_mhc_nondet_train_*``,
 ``CakeMHCNondet*Function``); no entry point takes a ``deterministic`` keyword
 and nothing falls back to the deterministic package
 (``cake_pplx.cake_mhc_det_train``).  Every entry point runs under
-``torch.use_deterministic_algorithms(True)`` without an alert: no launch adds
-in a run-dependent order.
+``torch.use_deterministic_algorithms(True)`` (strict or ``warn_only``) without
+an alert, and then no launch adds in a run-dependent order: ``backward_finish``
+and ``handoff_backward_finish`` read the mode once per call and, while it is
+on, run the column slab's fold on SM107 too (its reduction form, whose ``dfn``
+additions follow the schedule, runs only with the mode off).
 
 Pre handoff (hidden 5120 on SM100 / SM103 / SM107; ``cake_jit.HANDOFF_KINDS``): the
 routes ``fwd_prepare_handoff`` (the standard forward with the collapse
@@ -76,7 +88,23 @@ form with its trips in reverse launch order, from 2048 to 6655 tokens and
 ``collapse_bwd__vjpwa`` VJP split over four / two CTAs a token, up to 215 /
 from 216 to 383 tokens, ``collapse_bwd__vjpwa``, the same VJP without the L2
 prefetch, from 384 to 640 tokens and ``collapse_bwd__vjpwa_pfq2`` from 641
-tokens).
+tokens; on SM100 / SM103 ``collapse_backward`` runs
+``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens (but
+``collapse_bwd__vjpwd_sp4_mb4``, the same split VJP without the shared-memory
+stage, from 31 to 37 tokens on SM100 and from 31 to 38 tokens on SM103, each
+band under its own record name), then ``collapse_bwd__vjpwa_sp2_mb4``: on SM100
+from 216 to 1023 tokens under the record name
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``, on SM103 from 216 to 247 and
+from 320 to 1023 tokens under the record names
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, with ``collapse_bwd``
+from 248 to 319 tokens under the record name ``collapse_bwd__h5120__le319``;
+from 1024 tokens ``collapse_bwd__vjpwa_pf0``, the one-CTA VJP that prefetches
+its own token's rows into L2 before its ``cp.async`` stage, up to 6143 tokens
+on SM100 and up to 8191 tokens on SM103 (on SM103 under the record name
+``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``), and
+``collapse_bwd__vjpwd``, the one-CTA VJP without the shared-memory stage,
+above (on SM103 under the record name ``collapse_bwd__vjpwd__h5120__gt8191``)).
 ``handoff_prepare`` is the autograd node; ``dU`` / ``dpre_next`` from autograd
 are made contiguous, of their dtype and 32-byte aligned before the launch.  No
 run-to-run bit promise.
@@ -846,7 +874,9 @@ class _Launch:
         self.run, self.template, self.slots = run, template, slots
 
 
-_PLANS: dict[tuple[str, str, int, int, int, str, bool, str], tuple[_Launch, ...]] = {}
+_PLANS: dict[
+    tuple[str, str, int, int, int, str, bool, str, bool], tuple[_Launch, ...]
+] = {}
 
 
 def _route_plan(
@@ -858,6 +888,7 @@ def _route_plan(
     path: str,
     sinkhorn_iters: int = SINKHORN_ITERS,
     accumulation: str = ACCUMULATION,
+    deterministic_algorithms: bool = False,
 ) -> tuple[_Launch, ...]:
     """The launches of one route for ``rows`` tokens of hidden size ``hidden`` on
     ``device_index`` along ``path`` (one of ``cake_jit.PDL_PATHS``: with the
@@ -868,10 +899,23 @@ def _route_plan(
     exports no run-time-count program raises ``NotImplementedError`` for such a
     count (``cake_jit.selected_modules``).  ``accumulation`` (``"fp32"`` or
     ``"fp32x2"``) is part of the plan's key: the two-word mode selects its own
-    programs (``cake_jit.two_word_modules``)."""
+    programs (``cake_jit.two_word_modules``).  ``deterministic_algorithms`` (the
+    call runs under ``torch.use_deterministic_algorithms(True)``: :func:`_deterministic_mode`)
+    is part of the key too: it selects the column slab's fold where
+    ``cake_jit.BWD_SLAB_DFN`` names its reduction form (sm_107a)."""
 
     run_time = int(sinkhorn_iters) != SINKHORN_ITERS
-    key = (arch, kind, rows, hidden, device_index, path, run_time, accumulation)
+    key = (
+        arch,
+        kind,
+        rows,
+        hidden,
+        device_index,
+        path,
+        run_time,
+        accumulation,
+        deterministic_algorithms,
+    )
     plan = _PLANS.get(key)
     if plan is None:
         launches = []
@@ -884,6 +928,7 @@ def _route_plan(
             sm_count=sm_count,
             sinkhorn_iters=sinkhorn_iters,
             accumulation=accumulation,
+            deterministic_algorithms=deterministic_algorithms,
         ):
             record = _loader.MODULES[name]
             logical = record["logical"]
@@ -1017,9 +1062,10 @@ _CALL_VALUES: dict[str, tuple[str, ...]] = {
 # Logical workspace values -> region names.  The forward fn split writes the
 # forward operand layout only; its transposed-layout pointer is bound to the
 # same region, exactly like the source launcher binds an unused parameter.  The
-# backward's atomic fn split takes the transposed layout only; the column slab
-# stores its per-chunk ``dfn`` sums in ``dfn_slot`` and counts the grid's
-# finished units and CTAs in ``slab_cnt``.
+# backward's atomic fn split takes the transposed layout only; the column slab's
+# fold stores its per-chunk ``dfn`` sums in ``dfn_slot`` and counts the grid's
+# finished units and CTAs in ``slab_cnt``; its reduction form (sm_107a,
+# ``cake_jit.BWD_SLAB_DFN``) binds neither.
 _FWD_WORKSPACE_VALUES = (
     ("fnp", "fnp"),
     ("fnTp", "fnp"),
@@ -1095,16 +1141,24 @@ class _FastRoute:
         self.workspace, self.x_flat = workspace, x_flat
 
 
-_FAST_ROUTES: dict[tuple[str, int, int, int, str], _FastRoute] = {}
+_FAST_ROUTES: dict[tuple[str, int, int, int, str, bool], _FastRoute] = {}
 
 
 def _fast_route(
-    arch: str, kind: str, rows: int, hidden: int, device_index: int, path: str
+    arch: str,
+    kind: str,
+    rows: int,
+    hidden: int,
+    device_index: int,
+    path: str,
+    deterministic_algorithms: bool = False,
 ) -> _FastRoute:
-    key = (kind, hidden, rows, device_index, path)
+    key = (kind, hidden, rows, device_index, path, deterministic_algorithms)
     found = _FAST_ROUTES.get(key)
     if found is None:
-        found = _build_fast_route(arch, kind, rows, hidden, device_index, path)
+        found = _build_fast_route(
+            arch, kind, rows, hidden, device_index, path, deterministic_algorithms
+        )
         if len(_FAST_ROUTES) >= _CACHE_ENTRIES:
             _FAST_ROUTES.clear()
         _FAST_ROUTES[key] = found
@@ -1112,9 +1166,23 @@ def _fast_route(
 
 
 def _build_fast_route(
-    arch: str, kind: str, rows: int, hidden: int, device_index: int, path: str
+    arch: str,
+    kind: str,
+    rows: int,
+    hidden: int,
+    device_index: int,
+    path: str,
+    deterministic_algorithms: bool = False,
 ) -> _FastRoute:
-    plan = _route_plan(arch, kind, rows, hidden, device_index, path)
+    plan = _route_plan(
+        arch,
+        kind,
+        rows,
+        hidden,
+        device_index,
+        path,
+        deterministic_algorithms=deterministic_algorithms,
+    )
     workspace_values = _WORKSPACE_VALUES[kind]
     names = _CALL_VALUES[kind] + tuple(name for name, _ in workspace_values)
     position_of = {name: position for position, name in enumerate(names)}
@@ -1169,6 +1237,17 @@ def _tuple_getter(keys: list[Any]) -> Any:
     return lambda values: (values[key],)
 
 
+def _deterministic_mode() -> bool:
+    """Whether the current call runs under ``torch.use_deterministic_algorithms(True)``
+    (strict or ``warn_only``): the one read of the mode in the package, once per
+    ``backward_finish`` / ``handoff_backward_finish`` call.  The column slab then runs
+    its fold, whose ``dfn`` additions keep one order, on every architecture
+    (``cake_jit.BWD_SLAB_DFN`` names the reduction form on sm_107a): no launch adds
+    in a run-dependent order, and nothing alerts."""
+
+    return torch.are_deterministic_algorithms_enabled()
+
+
 def _launch_route(
     route: _FastRoute, values: tuple[Any, ...], device_index: int
 ) -> None:
@@ -1194,10 +1273,19 @@ def _run_route(
     path: str,
     sinkhorn_iters: int = SINKHORN_ITERS,
     accumulation: str = ACCUMULATION,
+    deterministic_algorithms: bool = False,
 ) -> None:
     device_index = _device_index(device)
     plan = _route_plan(
-        arch, kind, rows, hidden, device_index, path, sinkhorn_iters, accumulation
+        arch,
+        kind,
+        rows,
+        hidden,
+        device_index,
+        path,
+        sinkhorn_iters,
+        accumulation,
+        deterministic_algorithms,
     )
     stream = _current_stream(device_index)
     with _tvm_ffi().use_raw_stream(_tvm_device(device_index), stream):
@@ -1830,7 +1918,10 @@ def cake_mhc_nondet_train_backward_finish(
         ``False`` (default): ``dfn``, ``dscale`` and ``dbase`` are written.
         ``True``: the caller passes all three; each fold adds the current value
         last (``dfn``: after its FP32 sum of the chunk slots; ``dscale`` /
-        ``dbase``: after the fixed-order FP32 sums of the parameter rows).
+        ``dbase``: after the fixed-order FP32 sums of the parameter rows).  The
+        SM107 ``dfn`` reduction form (``accumulation="fp32"`` while PyTorch's
+        deterministic-algorithms mode is off) starts from the current ``dfn``
+        instead and adds the units' sums into it.
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from :func:`cake_mhc_nondet_train_backward_workspace`
         (sized for this ``H``: ``hidden=X.shape[2]``); a per-device default
@@ -1843,18 +1934,26 @@ def cake_mhc_nondet_train_backward_finish(
 
     Returns
     -------
-    ``(dX, dfn, dscale, dbase)``, with no run-to-run bit promise (the sums
-    run in a fixed order today): the BF16 ``dX`` sums the mapping, collapse
+    ``(dX, dfn, dscale, dbase)``, with no run-to-run bit promise (apart from
+    ``dfn`` on SM107, the sums run in a fixed order today): the BF16 ``dX`` sums the mapping, collapse
     and residual-mixing contributions in FP32 and rounds once.  ``dscale`` / ``dbase`` fold the
     token-owner pass's parameter rows in a fixed order (per-CTA rows, or
     8-token group rows where the deterministic package runs them: hidden 4096
     above 14927 tokens on sm_100a and sm_103a; see :mod:`.cake_jit`), each sum
-    one FP32 word.  ``dfn`` adds the per-chunk FP32 partials ``x_p`` of at
-    most ``P <= 32`` token chunks (the deterministic package's chunks per
-    token count and device) per element in ascending chunk order as one FP32
-    sum from +0.0, the caller's ``dfn`` last under ``accumulate=True``: within
-    ``gamma_n (|start| + sum |x_p|)`` of the exact sum (``n`` the additions,
-    ``gamma_n = n u / (1 - n u)``, ``u = 2^-24``).
+    one FP32 word.  Under the one-word fold (SM100 and SM103, and SM107 while
+    PyTorch's deterministic-algorithms mode is on), ``dfn`` adds the
+    per-chunk FP32 partials ``x_p`` of at most ``P <= 32`` token chunks (the
+    deterministic package's chunks per token count and device) per element
+    in ascending chunk order as one FP32 sum from +0.0, the caller's ``dfn``
+    last under ``accumulate=True``: within ``gamma_n (|start| + sum |x_p|)``
+    of the exact sum (``n`` the additions, ``gamma_n = n u / (1 - n u)``,
+    ``u = 2^-24``).  On SM107 with the mode off, each column-slab unit adds
+    its FP32 ``dfn`` sums into ``dfn`` (the caller's value under
+    ``accumulate=True``, else zero) with relaxed reductions when it ends:
+    ``dfn`` is summed in a run-dependent order, and its accuracy is checked
+    against the FP64 reference like every other output.  With
+    ``accumulation="fp32x2"`` the two-word folds run on every architecture
+    (``accumulation`` above).
     With ``T == 0`` nothing is launched: ``dX`` is empty and the parameter
     gradients are zeroed (``accumulate=False``) or left untouched
     (``accumulate=True``).
@@ -1942,7 +2041,9 @@ def _backward_finish(
                 dscale = _empty(_SCALE_SHAPE, _F32, X)
             if dbase is None:
                 dbase = _empty(_BASE_SHAPE, _F32, X)
-            route = _fast_route(arch, "bwd_finish", rows, hidden, index, path)
+            route = _fast_route(
+                arch, "bwd_finish", rows, hidden, index, path, _deterministic_mode()
+            )
             views = _fast_workspace(workspace, "bwd", rows, hidden, index, X)
             _launch_route(
                 route,
@@ -2021,7 +2122,11 @@ def _backward_finish(
     # workspace's self-resetting ticket word, stores each unit's FP32
     # dfn sums in its chunk's slots, folds the slots into dfn across the grid once
     # every unit is done (the self-resetting slab_cnt words count the units and
-    # the CTAs) and folds dscale / dbase from the token owner's rows.
+    # the CTAs) and folds dscale / dbase from the token owner's rows.  Its
+    # reduction form (sm_107a with accumulation="fp32" outside
+    # torch.use_deterministic_algorithms(True): cake_jit.BWD_SLAB_DFN) adds each
+    # unit's FP32 dfn sums into dfn with relaxed reductions instead and binds
+    # neither dfn_slot, slab_cnt nor prow.
     values: dict[str, Any] = {
         "fn": fn,
         "fnTp": ws["fnTp"],
@@ -2070,6 +2175,7 @@ def _backward_finish(
         path=path,
         sinkhorn_iters=sinkhorn_iters,
         accumulation=accumulation,
+        deterministic_algorithms=_deterministic_mode(),
     )
     return dX, dfn, dscale, dbase
 
@@ -2409,7 +2515,15 @@ def _handoff_backward_finish(
                 dscale = _empty(_SCALE_SHAPE, _F32, X)
             if dbase is None:
                 dbase = _empty(_BASE_SHAPE, _F32, X)
-            route = _fast_route(arch, "bwd_finish_handoff", rows, hidden, index, path)
+            route = _fast_route(
+                arch,
+                "bwd_finish_handoff",
+                rows,
+                hidden,
+                index,
+                path,
+                _deterministic_mode(),
+            )
             views = _fast_workspace(workspace, "bwd", rows, hidden, index, X)
             _launch_route(
                 route,
@@ -2536,6 +2650,7 @@ def _handoff_backward_finish(
         path=path,
         sinkhorn_iters=sinkhorn_iters,
         accumulation=accumulation,
+        deterministic_algorithms=_deterministic_mode(),
     )
     return dX, dpre_in, dfn, dscale, dbase
 
@@ -2840,8 +2955,11 @@ class CakeMHCNondetPrepareFunction(torch.autograd.Function):
     the finish node takes as inputs), ``dY`` and the gradient statistics from the
     finish node's backward; it returns the single-cast ``dX`` (mapping, collapse
     and residual-mixing contributions summed in FP32) and the FP32 parameter
-    gradients (``dfn`` folded from its per-chunk slots in a fixed order), with
-    no run-to-run bit promise; the finish node returns no gradient for ``X``.
+    gradients (``dfn`` folded from its per-chunk slots in a fixed order, but on
+    SM107 with ``accumulation="fp32"`` and PyTorch's deterministic-algorithms
+    mode off added with relaxed reductions in a run-dependent order: see
+    :func:`cake_mhc_nondet_train_backward_finish`), with no run-to-run bit
+    promise; the finish node returns no gradient for ``X``.
     ``state`` is the private state :func:`cake_mhc_nondet_train_prepare` builds.
     """
 

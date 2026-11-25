@@ -120,8 +120,10 @@ ROW_PAD = 256
 OPS = ("fwd", "dgrad", "wgrad")
 INT_VIEW = {torch.bfloat16: torch.int16, torch.float32: torch.int32}
 
-# The host plan constants of this package alone: the keys of the one-launch split
-# tail and of the queue walk.  Every other constant is the deterministic package's.
+# The host plan constants this package states for its own programs: the keys of the
+# one-launch split tail, and the queue walk's rules and counters (each package names
+# the calls that bind its own queue-walk builds).  Every other constant is the
+# deterministic package's.
 OWN_CONSTANTS = frozenset(
     {
         "unordered_tail_archs",
@@ -131,7 +133,8 @@ OWN_CONSTANTS = frozenset(
         "queue_sched_words",
     }
 )
-# The queue walk's stages (``cake_backend.wgrad_queue_walk``): this package's alone.
+# The queue walk's stages (``cake_backend.wgrad_queue_walk``): each package's own
+# builds (this package's with the one-launch split tail).
 QUEUE_STAGES = frozenset({cb.QUEUE_STAGE, cb.QUEUE_STAGE + cb.ACC_SUFFIX})
 # Data-gradient cases of the evict-first rule (at least every architecture's
 # ``dgrad_evict_first_min_rows`` rows per group on average,
@@ -460,14 +463,16 @@ def test_routes_mirror_the_deterministic_package():
     take the deterministic argument plans; on the architectures of
     ``ordered_tail_archs`` (every architecture of the k512 routes) the 512-wide k
     tile's take the one-launch split tail's ``tail_sums`` slots and ``tail_tickets`` in
-    place of the partials, and those routes serve no ``tail_reduce`` stage there.  A program may also take the row bases of ``A`` / ``B``
+    place of the partials, and those routes serve no ``tail_reduce`` stage there.  The lead
+    twin routes (``<route>_lead``) mirror the deterministic package's lead twins the
+    same way.  A program may also take the row bases of ``A`` / ``B``
     (``cake_backend.ROW_BASES``: the same tensors again), which a deterministic build
     of an older kernel does not.  A wave-synchronised stage may be missing on an
     architecture whose host plan never selects it (not in ``wave_sync_archs`` for the
     route's k tile).  The accumulate stages (``<stage>_acc``) are left out of the
     mirror on both sides; their twins are mirrored, and ``test_cake_moe_grouped_gemm_nondet_train_acc.py`` checks them against
-    their twins.  The queue walk's stages (``QUEUE_STAGES``) are this package's alone
-    and left out (``test_queue_stages_take_the_half_release_arguments``).  The L2 evict-first twins of the wide tile (``main_wide_ef``) are
+    their twins.  The queue walk's stages (``QUEUE_STAGES``) are each package's own
+    builds and left out on both sides (``test_queue_stages_take_the_half_release_arguments``).  The L2 evict-first twins of the wide tile (``main_wide_ef``) are
     copies like every other fwd / dgrad stage.  (A CPU check; it lives here because
     the backend suite imports no package but its own.)"""
     det_routes, det_programs = det_jit.ROUTES, det_jit.PROGRAMS
@@ -482,7 +487,11 @@ def test_routes_mirror_the_deterministic_package():
         assert route["op"] == det_route["op"]
         assert route["arches"] == det_route["arches"]
         for arch in route["arches"]:
-            tile_k = 512 if name.endswith("_k512") else 256
+            tile_k = (
+                512
+                if name.removesuffix(cake_jit.LEAD_SUFFIX).endswith("_k512")
+                else 256
+            )
             one_launch = cb.wgrad_ordered_tail(
                 tile_k, arch, HOST_PLAN_CONSTANTS
             ) or cb.wgrad_unordered_tail(tile_k, arch, HOST_PLAN_CONSTANTS)
@@ -493,6 +502,7 @@ def test_routes_mirror_the_deterministic_package():
                 for s in det_route["stages"]
                 if arch in det_programs[s["program"]]["arches"]
                 and not s["name"].endswith(cb.ACC_SUFFIX)
+                and s["name"] not in QUEUE_STAGES
             }
             stages = {
                 s["name"]
@@ -503,10 +513,11 @@ def test_routes_mirror_the_deterministic_package():
             }
             expected_stages = det_stages - {"tail_reduce"} if one_launch else det_stages
             unselected = set()
-            if route["op"] == "wgrad":
-                tile_k = 512 if name.endswith("_k512") else 256
-                if arch not in HOST_PLAN_CONSTANTS["wave_sync_archs"][tile_k]:
-                    unselected = {"main_wave", "main_wave_halves"}
+            if (
+                route["op"] == "wgrad"
+                and arch not in HOST_PLAN_CONSTANTS["wave_sync_archs"][tile_k]
+            ):
+                unselected = {"main_wave", "main_wave_halves"}
             assert stages <= expected_stages, (name, arch, stages - expected_stages)
             assert expected_stages - stages <= unselected, (
                 name,

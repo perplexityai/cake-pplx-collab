@@ -723,7 +723,7 @@ kernel_cake_kda_train_fc369dcf6d01dd9a7417(const __grid_constant__ CUtensorMap q
             zero8[6] = 0.0f;
             zero8[7] = 0.0f;
             int head_s = blockIdx.y;
-            long long pbase = ((long long)chunk_s * 64 * (long long)num_heads + (long long)head_s) * 64;
+            long long pbase = ((long long)chunk_s * 64ll * (long long)num_heads + (long long)head_s) * 64ll;
             int prs = num_heads * 64;
             #pragma unroll
             for (int r = 0; r < 2; r++) {
@@ -789,7 +789,7 @@ kernel_cake_kda_train_fc369dcf6d01dd9a7417(const __grid_constant__ CUtensorMap q
             pz8[6] = 0.0f;
             pz8[7] = 0.0f;
             int head_p = blockIdx.y;
-            long long pbase_p = ((long long)chunk_s * 64 * (long long)num_heads + (long long)head_p) * 128;
+            long long pbase_p = ((long long)chunk_s * 64ll * (long long)num_heads + (long long)head_p) * 128ll;
             int prs_p = num_heads * 128;
             #pragma unroll
             for (int r_1 = 0; r_1 < 4; r_1++) {
@@ -891,11 +891,11 @@ kernel_cake_kda_train_fc369dcf6d01dd9a7417(const __grid_constant__ CUtensorMap q
                 }
                 {
                     float4 _v4 = make_float4(pz8[4 + 0], pz8[4 + 1], pz8[4 + 2], pz8[4 + 3]);
-                    *reinterpret_cast<float4*>((gk_out + (pidx_p + 4)) + 0) = _v4;
+                    *reinterpret_cast<float4*>((gk_out + (pidx_p + 4ll)) + 0) = _v4;
                 }
             }
             if (tid_p < 64) {
-                long long brow_p = (long long)chunk_s * 64 + (long long)tid_p;
+                long long brow_p = (long long)chunk_s * 64ll + (long long)tid_p;
                 float bz = 0.0f;
                 beta_int[brow_p * (long long)num_heads + (long long)head_p] = bz;
             }
@@ -969,8 +969,8 @@ kernel_cake_kda_train_fc369dcf6d01dd9a7417(const __grid_constant__ CUtensorMap q
     int ext0_i = ext0_s;
     long long ext0 = (long long)ext0_i;
     int clen = clen_s;
-    long long abase = (ext0 * (long long)num_heads + (long long)head) * 64;
-    long long ibase = ((long long)row0 * (long long)num_heads + (long long)head) * 64;
+    long long abase = (ext0 * (long long)num_heads + (long long)head) * 64ll;
+    long long ibase = ((long long)row0 * (long long)num_heads + (long long)head) * 64ll;
     int ars = num_heads * 64;
     if (warp == 3) {
         if (elect_sync()) {
@@ -1158,7 +1158,7 @@ kernel_cake_kda_train_fc369dcf6d01dd9a7417(const __grid_constant__ CUtensorMap q
         int k_i = k_addr + rowb + (cq ^ p8f << 4) + h8;
         int k_i1 = k_i ^ 64;
         int q_i = (int)q_p_addr + f_row * 64 + (cq ^ (f_row >> 1 & 3) << 4) + h8;
-        long long o_i = ibase * 2 + (long long)(t_f * (ars * 2) + (fq * 16 + f_c * 4));
+        long long o_i = ibase * 2ll + (long long)(t_f * (ars * 2) + (fq * 16 + f_c * 4));
         __nv_bfloat16* kb_p = kb_out + o_i;
         __nv_bfloat16* kg_p = kg_out + o_i;
         __nv_bfloat16* qg_p = qg_out + o_i;

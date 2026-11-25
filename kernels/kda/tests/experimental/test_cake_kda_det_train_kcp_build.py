@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The KCP registry (``cake_kcp_jit``) and manifests of the Cake packed KDA training package: the records against the
-frozen kernel ABIs, the program names against the identity rule, ``build.json`` (the shipped programs, never a
+frozen kernel ABIs, the program each record launches, ``build.json`` (the shipped programs, never a
 test-only one) and ``build.test.json`` (the test-only programs, loadable only after ``cake_kcp_plan.enable_test_knobs()``),
 and the architecture the workspace byte query selects the local arena's records for.
 No device is needed; nothing is built or launched.
@@ -43,7 +43,8 @@ PACKAGE_DIR = Path(cake_build.__file__).parent
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 GRID = [["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]]
 
-# The frozen kernel argument lists (name, kind) of the four KCP kernel packages and the two chunk stages of the route.
+# The frozen kernel argument lists (name, kind) of the four KCP kernel packages and the three chunk stages of the
+# route.
 FWDH_PLAN = [
     ["buffer", "w_tma"], ["buffer", "kg_tma"], ["buffer", "u"], ["buffer", "gk"], ["parameter", "num_heads"],
     ["buffer", "seq_chunk_start"], ["parameter", "num_seqs"], ["buffer", "walk_seg"], ["buffer", "h0"],
@@ -86,10 +87,16 @@ DAV_PLAN = [
     ["buffer", "do_tma"], ["buffer", "vnew_tma"], ["buffer", "aqk_tma"], ["buffer", "dAqk"], ["buffer", "dv1"],
     ["parameter", "num_heads"], ["parameter", "scale"], *GRID,
 ]  # fmt: skip
+# the output backward of the in-kernel Q/K L2 norm modes: dAqk from the FP32 v_new it forms from akk_int, beta,
+# v, w and the h tape (no v_new operand, no dv1)
+DAV_L2N_PLAN = [
+    ["buffer", "do_tma"], ["buffer", "akk_tma"], ["buffer", "v_tma"], ["buffer", "w_tma"], ["buffer", "h_tma"],
+    ["buffer", "beta"], ["buffer", "chunk_bos"], ["buffer", "chunk_len"], ["buffer", "dAqk"], ["parameter", "scale"],
+    ["parameter", "num_heads"], ["parameter", "num_chunks"], *GRID,
+]  # fmt: skip
 # The K4 merge records (the register-blocked v2 builds the rule names): record -> (build keywords, threads per CTA =
 # 128 * cols_per_cta / the thread tile's outputs, architectures).  The pairs builds are scalar on sm_107a (the
 # exporter's per-architecture keywords; the program name hashes the keywords above).
-MERGE_V2_MODULE = "tart.kda_chunk_kcp_affine_merge.sm100_sm103_sm107.kda_chunk_det_affine_merge_fp32_v2_kcp"
 MERGE_RECORDS = {
     "kcp_affine_merge_c8": (
         {"chunk_k": 16, "cols_per_cta": 8, "pairs": True, "ring": 4, "tile": "4x4"},
@@ -144,6 +151,7 @@ PLANS = {
     **dict.fromkeys(MERGE_RECORDS, MERGE_PLAN),
     "kcp_fwd_o": FWD_O_PLAN,
     "kcp_dav": DAV_PLAN,
+    "kcp_dav_l2n": DAV_L2N_PLAN,
     "kcp_fwdh_o": FWDH_O_PLAN,
     "kcp_fwdh_o_vh64": FWDH_O_PLAN,
     "kcp_transfer_walk_three_mma": TRANSFER_PLAN,
@@ -156,86 +164,42 @@ PLANS = {
 # Launch block of the records that are not 192 threads wide (the merge records: MERGE_RECORDS); the full-width fwdh
 # offset walk runs the split-role schedule (four state, four decay, one TMA and one MMA warp), the shipped transfer
 # walk two compute warpgroups (eight compute, one load and one MMA warp), the fused forward walk ten warps in both
-# forms.
+# forms, the l2n output backward fourteen (448 threads).
 BLOCKS = {
     "kcp_fwdh_offset": 320,
     "kcp_transfer_walk": 320,
     "kcp_fwdh_o": 320,
     "kcp_fwdh_o_vh64": 320,
+    "kcp_dav_l2n": 448,
 }
-# The identity rule: ``cake_kda_det_train_<20 hex of sha256("<source module>\\n<sorted JSON of the build keywords>")>``,
-# then ``_kcp`` for a program only the context-parallel route runs (every one but the single-rank ``dav`` stage).
-# The digest hashes the source module path the program shipped under, so the digests are those of the previous names
-# (``kcp_fwd_o``'s KCP module is new: its path is its own).
-_W = "sm100_sm103_sm107"
-IDENTITIES = {
-    "kcp_fwdh_offset": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_det_fwdh_v2_kcp",
-        {"program": "offset", "tile_prefetch": 0},
-    ),
-    "kcp_fwdh_offset_vh64": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_kcp_fwdh_v1",
-        {"program": "offset", "vh": 64, "prefetch": True, "tmem_batch": True},
-    ),
-    "kcp_fwdh_tape": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_kcp_fwdh_v1",
-        {"program": "tape", "vh": 64, "tape_store": "tma"},
-    ),
-    "kcp_dhu_offset": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "offset", "fuse_dv1": 1},
-    ),
-    "kcp_dhu_offset_overlap": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_det_dhu_v2_kcp",
-        {"program": "offset", "tile_prefetch": 0, "fuse_dv1": 1},
-    ),
-    "kcp_dhu_offset_vh64": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "offset", "vh": 64, "fuse_dv1": 1},
-    ),
-    "kcp_dhu_tape": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "tape", "vh": 64, "tape_store": "tma", "fuse_dv1": 1},
-    ),
-    "kcp_transfer_walk": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_det_transfer_walk_bf16x3_v2_kcp",
-        {"vh": 64},
-    ),
-    **{name: (MERGE_V2_MODULE, row[0]) for name, row in MERGE_RECORDS.items()},
-    "kcp_fwd_o": (f"tart.kda_chunk_kcp_fwd_o.{_W}.kda_chunk_det_fwd_o_v1_kcp", {}),
-    "kcp_dav": (f"tart.kda_chunk_bwd_dav.{_W}.kda_chunk_train_bwd_dav_v1", {}),
-    "kcp_fwdh_o": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_det_fwdh_o_v1_kcp",
-        {"vh": 128},
-    ),
-    "kcp_fwdh_o_vh64": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_det_fwdh_o_v1_kcp",
-        {"vh": 64},
-    ),
-    "kcp_transfer_walk_three_mma": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_v1",
-        {"precision_mode": 1},
-    ),
-    "kcp_transfer_walk_plain_tf32": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_v1",
-        {"precision_mode": 2},
-    ),
-    "kcp_transfer_walk_bf16x3": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_bf16x3_v1",
-        {"vh": 128},
-    ),
-    "kcp_transfer_walk_tf32_hilo": (
-        f"tart.kda_chunk_kcp_transfer_walk.{_W}.kda_chunk_kcp_transfer_walk_v1",
-        {"precision_mode": 0},
-    ),
-    "kcp_fwdh_tape_full": (
-        f"tart.kda_chunk_kcp_fwd_h.{_W}.kda_chunk_kcp_fwdh_v1",
-        {"program": "tape"},
-    ),
-    "kcp_dhu_tape_full": (
-        f"tart.kda_chunk_kcp_dhu.{_W}.kda_chunk_kcp_dhu_v1",
-        {"program": "tape", "fuse_dv1": 1},
-    ),
+# The program every record launches.  The exporter names a program after its kernel and build keywords, so a changed
+# kernel build ships under a new name; this table pins each record's program, and a renamed program fails here until the
+# table is reviewed and updated.  Every name carries the package's ``cake_kda_det_train_`` prefix and, but for the
+# single-rank ``dav`` stage, the ``_kcp`` suffix of a program only the context-parallel route runs.
+PROGRAM_NAMES = {
+    "kcp_fwdh_offset": "cake_kda_det_train_7d43005ed0adb9ffadf2_kcp",
+    "kcp_fwdh_offset_vh64": "cake_kda_det_train_5a20cd12bb62bb6f3ac5_kcp",
+    "kcp_fwdh_tape": "cake_kda_det_train_6fac4410ba86c48541c4_kcp",
+    "kcp_dhu_offset": "cake_kda_det_train_c18b6c39ed72603017e6_kcp",
+    "kcp_dhu_offset_overlap": "cake_kda_det_train_7886f9703ccdc5a28f12_kcp",
+    "kcp_dhu_offset_vh64": "cake_kda_det_train_0897f215cbb985961807_kcp",
+    "kcp_dhu_tape": "cake_kda_det_train_daf0600c550c5f707ac4_kcp",
+    "kcp_transfer_walk": "cake_kda_det_train_8ffd931ca0595948b608_kcp",
+    "kcp_affine_merge_c8": "cake_kda_det_train_7b6b22d3423f3138baf7_kcp",
+    "kcp_affine_merge_c16": "cake_kda_det_train_9ab870ac43ee331f2dd3_kcp",
+    "kcp_affine_merge_c32": "cake_kda_det_train_7634c7541a6836a5146a_kcp",
+    "kcp_affine_merge_c64": "cake_kda_det_train_8cda0d1f1291e740f798_kcp",
+    "kcp_fwd_o": "cake_kda_det_train_c811c1b52ed680d0a515_kcp",
+    "kcp_dav": "cake_kda_det_train_f227dd21f1f3cb464b29",
+    "kcp_dav_l2n": "cake_kda_det_train_44f8275bc726f8a46e33_kcp",
+    "kcp_fwdh_o": "cake_kda_det_train_051de8b4660b1587fc85_kcp",
+    "kcp_fwdh_o_vh64": "cake_kda_det_train_5e6f3ba0b9b429241ab2_kcp",
+    "kcp_transfer_walk_three_mma": "cake_kda_det_train_b1477ed31fad32a5c2c9_kcp",
+    "kcp_transfer_walk_plain_tf32": "cake_kda_det_train_64ba2583f28f7d4c0102_kcp",
+    "kcp_transfer_walk_bf16x3": "cake_kda_det_train_b1a95a8ee8110e47558e_kcp",
+    "kcp_transfer_walk_tf32_hilo": "cake_kda_det_train_1ac972f0cb7cc7b13cf7_kcp",
+    "kcp_fwdh_tape_full": "cake_kda_det_train_9cfe05bce78410f1304b_kcp",
+    "kcp_dhu_tape_full": "cake_kda_det_train_e1f82c1cff44a51988f7_kcp",
 }
 
 
@@ -269,6 +233,7 @@ def test_the_tables_are_disjoint_and_complete() -> None:
         "kcp_fwd_o",
         "kcp_dav",
         "kcp_fwdh_o",
+        "kcp_dav_l2n",
     )
     assert (*kcp_jit.PROGRAMS[:5], "kcp_fwdh_o") == kcp_jit.WALK_PROGRAMS
     assert kcp_jit.PRECISION_MODES == (0, 1, 2)
@@ -317,20 +282,22 @@ def test_record_matches_the_frozen_abi(name: str) -> None:
         assert record["logical"][parameter] in vocabulary, (name, parameter)
 
 
-def test_program_names_follow_the_identity_rule() -> None:
-    for name, (module, kwargs) in IDENTITIES.items():
-        digest = hashlib.sha256(
-            f"{module}\n{json.dumps(kwargs, sort_keys=True)}".encode()
-        ).hexdigest()
+def test_every_record_launches_its_pinned_program() -> None:
+    for name, library in PROGRAM_NAMES.items():
+        assert _records()[name]["library"] == library, name
         suffix = "" if name in CHUNK_STAGES else "_kcp"
-        assert (
-            _records()[name]["library"] == f"cake_kda_det_train_{digest[:20]}{suffix}"
-        ), name
+        assert library.startswith("cake_kda_det_train_") and library.endswith(suffix), (
+            name
+        )
     libraries = [record["library"] for record in _records().values()]
     assert len(set(libraries)) == len(libraries), "every record is its own program"
     assert not set(libraries) & {r["library"] for r in cake_jit.MODULES.values()}, (
         "no KCP program shares a name with a single-rank one"
     )
+    # the l2n output backward runs the single-rank replay form of the program (its 20 hex digits) under the
+    # ``_kcp`` suffix
+    replay = cake_jit.MODULES["dav_l2n_replay"]["library"]
+    assert PROGRAM_NAMES["kcp_dav_l2n"] == f"{replay}_kcp"
 
 
 def test_merge_selection_covers_every_launch_once() -> None:
@@ -434,6 +401,9 @@ def test_selection_and_grids() -> None:
     with pytest.raises(ValueError):
         kcp_jit.launch_grid("kcp_fwd_o", num_chunks_pad=0, num_heads=4, sm_count=152)
     assert kcp_jit.launch_grid("kcp_dav", num_chunks_pad=10, num_heads=3) == (5, 3, 1)
+    # the l2n output backward: one CTA item per (padded chunk, head) tile
+    l2n_grid = kcp_jit.launch_grid("kcp_dav_l2n", num_chunks_pad=10, num_heads=3)
+    assert l2n_grid == (30, 1, 1)
     with pytest.raises(ValueError):
         kcp_jit.launch_grid("kcp_dav", num_chunks_pad=9, num_heads=3)
 
@@ -903,3 +873,16 @@ def test_workspace_bytes_without_cuda_pass_no_architecture(
     seen = _spy_byte_query(monkeypatch)
     assert kcp_plan.cake_kda_det_train_kcp_workspace_bytes(ctx, H=64) > 0
     assert seen == [(name, None) for name in BYTE_QUERY_CALLS]
+
+
+def test_the_l2n_twins_are_the_fused_records_that_read_the_raw_rows() -> None:
+    # A fused-mode record is the ``_l2n`` twin of its stage only when it reads the raw rows ``q_raw`` / ``k_raw``.
+    # The kb-once replay prep of the raw gate's segmented route reads the rows the fused intra program normalized
+    # before it, so that route's replay has exactly one normalizing record and the KCP local stages take the fused
+    # mode of either gate on every architecture.
+    assert kcp_plan.qk_l2norm_twin("fwd_intra_v14_raw_l2n")
+    assert kcp_plan.qk_l2norm_twin("bwd_prep_g8_replay_raw_l2n")
+    assert not kcp_plan.qk_l2norm_twin("bwd_prep_g8_replay_kbonce_raw_l2n")
+    for arch in ARCHES:
+        for gate in ("g", "raw"):
+            assert kcp_plan.qk_l2norm_missing("fused", gate, arch) is None, (arch, gate)

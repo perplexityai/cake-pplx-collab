@@ -1225,12 +1225,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res[_lp*2 + 14], res[_lp*2+1 + 14]));
                     packed[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_17 = reinterpret_cast<const unsigned*>(packed);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col))), "r"(_raw_stv8_17[0]), "r"(_raw_stv8_17[1]), "r"(_raw_stv8_17[2]), "r"(_raw_stv8_17[3]), "r"(_raw_stv8_17[4]), "r"(_raw_stv8_17[5]), "r"(_raw_stv8_17[6]), "r"(_raw_stv8_17[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col)), "r"(packed[(0) + 0]), "r"(packed[(0) + 1]), "r"(packed[(0) + 2]), "r"(packed[(0) + 3]), "r"(packed[(0) + 4]), "r"(packed[(0) + 5]), "r"(packed[(0) + 6]), "r"(packed[(0) + 7]) : "memory");
                 float res_0[16];
                 unsigned int ov_bf16_2[4];
                 #pragma unroll
@@ -1319,12 +1314,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_0[_lp*2 + 14], res_0[_lp*2+1 + 14]));
                     packed_0[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_18 = reinterpret_cast<const unsigned*>(packed_0);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col + 16ll))), "r"(_raw_stv8_18[0]), "r"(_raw_stv8_18[1]), "r"(_raw_stv8_18[2]), "r"(_raw_stv8_18[3]), "r"(_raw_stv8_18[4]), "r"(_raw_stv8_18[5]), "r"(_raw_stv8_18[6]), "r"(_raw_stv8_18[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col + 16ll)), "r"(packed_0[(0) + 0]), "r"(packed_0[(0) + 1]), "r"(packed_0[(0) + 2]), "r"(packed_0[(0) + 3]), "r"(packed_0[(0) + 4]), "r"(packed_0[(0) + 5]), "r"(packed_0[(0) + 6]), "r"(packed_0[(0) + 7]) : "memory");
                 float res_1[16];
                 unsigned int ov_bf16_4[4];
                 #pragma unroll
@@ -1413,12 +1403,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_1[_lp*2 + 14], res_1[_lp*2+1 + 14]));
                     packed_1[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_19 = reinterpret_cast<const unsigned*>(packed_1);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col + 32ll))), "r"(_raw_stv8_19[0]), "r"(_raw_stv8_19[1]), "r"(_raw_stv8_19[2]), "r"(_raw_stv8_19[3]), "r"(_raw_stv8_19[4]), "r"(_raw_stv8_19[5]), "r"(_raw_stv8_19[6]), "r"(_raw_stv8_19[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col + 32ll)), "r"(packed_1[(0) + 0]), "r"(packed_1[(0) + 1]), "r"(packed_1[(0) + 2]), "r"(packed_1[(0) + 3]), "r"(packed_1[(0) + 4]), "r"(packed_1[(0) + 5]), "r"(packed_1[(0) + 6]), "r"(packed_1[(0) + 7]) : "memory");
                 float res_2[16];
                 unsigned int ov_bf16_6[4];
                 #pragma unroll
@@ -1507,12 +1492,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_2[_lp*2 + 14], res_2[_lp*2+1 + 14]));
                     packed_2[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_20 = reinterpret_cast<const unsigned*>(packed_2);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col + 48ll))), "r"(_raw_stv8_20[0]), "r"(_raw_stv8_20[1]), "r"(_raw_stv8_20[2]), "r"(_raw_stv8_20[3]), "r"(_raw_stv8_20[4]), "r"(_raw_stv8_20[5]), "r"(_raw_stv8_20[6]), "r"(_raw_stv8_20[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col + 48ll)), "r"(packed_2[(0) + 0]), "r"(packed_2[(0) + 1]), "r"(packed_2[(0) + 2]), "r"(packed_2[(0) + 3]), "r"(packed_2[(0) + 4]), "r"(packed_2[(0) + 5]), "r"(packed_2[(0) + 6]), "r"(packed_2[(0) + 7]) : "memory");
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 asm volatile("barrier.sync 0, 128;" ::: "memory");
@@ -1597,10 +1577,10 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     ov_0[62] = 0.0f;
                     ov_0[63] = 0.0f;
                 }
-                const float2 _scale2_21 = {output_scale, output_scale};
+                const float2 _scale2_17 = {output_scale, output_scale};
                 #pragma unroll
                 for (int _ls = 0; _ls < 32; _ls++)
-                    mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(ov_0)[_ls], _scale2_21);
+                    mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(ov_0)[_ls], _scale2_17);
                 int out_col_0 = row / 64 * 128 + 64;
                 float res_3[16];
                 unsigned int ov_bf16_8[4];
@@ -1690,12 +1670,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_3[_lp*2 + 14], res_3[_lp*2+1 + 14]));
                     packed_3[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_22 = reinterpret_cast<const unsigned*>(packed_3);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_0))), "r"(_raw_stv8_22[0]), "r"(_raw_stv8_22[1]), "r"(_raw_stv8_22[2]), "r"(_raw_stv8_22[3]), "r"(_raw_stv8_22[4]), "r"(_raw_stv8_22[5]), "r"(_raw_stv8_22[6]), "r"(_raw_stv8_22[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_0)), "r"(packed_3[(0) + 0]), "r"(packed_3[(0) + 1]), "r"(packed_3[(0) + 2]), "r"(packed_3[(0) + 3]), "r"(packed_3[(0) + 4]), "r"(packed_3[(0) + 5]), "r"(packed_3[(0) + 6]), "r"(packed_3[(0) + 7]) : "memory");
                 float res_4[16];
                 unsigned int ov_bf16_10[4];
                 #pragma unroll
@@ -1784,12 +1759,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_4[_lp*2 + 14], res_4[_lp*2+1 + 14]));
                     packed_4[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_23 = reinterpret_cast<const unsigned*>(packed_4);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_0 + 16ll))), "r"(_raw_stv8_23[0]), "r"(_raw_stv8_23[1]), "r"(_raw_stv8_23[2]), "r"(_raw_stv8_23[3]), "r"(_raw_stv8_23[4]), "r"(_raw_stv8_23[5]), "r"(_raw_stv8_23[6]), "r"(_raw_stv8_23[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_0 + 16ll)), "r"(packed_4[(0) + 0]), "r"(packed_4[(0) + 1]), "r"(packed_4[(0) + 2]), "r"(packed_4[(0) + 3]), "r"(packed_4[(0) + 4]), "r"(packed_4[(0) + 5]), "r"(packed_4[(0) + 6]), "r"(packed_4[(0) + 7]) : "memory");
                 float res_5[16];
                 unsigned int ov_bf16_12[4];
                 #pragma unroll
@@ -1878,12 +1848,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_5[_lp*2 + 14], res_5[_lp*2+1 + 14]));
                     packed_5[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_24 = reinterpret_cast<const unsigned*>(packed_5);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_0 + 32ll))), "r"(_raw_stv8_24[0]), "r"(_raw_stv8_24[1]), "r"(_raw_stv8_24[2]), "r"(_raw_stv8_24[3]), "r"(_raw_stv8_24[4]), "r"(_raw_stv8_24[5]), "r"(_raw_stv8_24[6]), "r"(_raw_stv8_24[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_0 + 32ll)), "r"(packed_5[(0) + 0]), "r"(packed_5[(0) + 1]), "r"(packed_5[(0) + 2]), "r"(packed_5[(0) + 3]), "r"(packed_5[(0) + 4]), "r"(packed_5[(0) + 5]), "r"(packed_5[(0) + 6]), "r"(packed_5[(0) + 7]) : "memory");
                 float res_6[16];
                 unsigned int ov_bf16_14[4];
                 #pragma unroll
@@ -1972,12 +1937,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_6[_lp*2 + 14], res_6[_lp*2+1 + 14]));
                     packed_6[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_25 = reinterpret_cast<const unsigned*>(packed_6);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_0 + 48ll))), "r"(_raw_stv8_25[0]), "r"(_raw_stv8_25[1]), "r"(_raw_stv8_25[2]), "r"(_raw_stv8_25[3]), "r"(_raw_stv8_25[4]), "r"(_raw_stv8_25[5]), "r"(_raw_stv8_25[6]), "r"(_raw_stv8_25[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_0 + 48ll)), "r"(packed_6[(0) + 0]), "r"(packed_6[(0) + 1]), "r"(packed_6[(0) + 2]), "r"(packed_6[(0) + 3]), "r"(packed_6[(0) + 4]), "r"(packed_6[(0) + 5]), "r"(packed_6[(0) + 6]), "r"(packed_6[(0) + 7]) : "memory");
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 asm volatile("barrier.sync 0, 128;" ::: "memory");
@@ -2062,10 +2022,10 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     ov_1[62] = 0.0f;
                     ov_1[63] = 0.0f;
                 }
-                const float2 _scale2_26 = {output_scale, output_scale};
+                const float2 _scale2_18 = {output_scale, output_scale};
                 #pragma unroll
                 for (int _ls = 0; _ls < 32; _ls++)
-                    mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(ov_1)[_ls], _scale2_26);
+                    mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(ov_1)[_ls], _scale2_18);
                 int out_col_1 = 256 + row / 64 * 128;
                 float res_7[16];
                 unsigned int ov_bf16_16[4];
@@ -2155,12 +2115,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_7[_lp*2 + 14], res_7[_lp*2+1 + 14]));
                     packed_7[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_27 = reinterpret_cast<const unsigned*>(packed_7);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_1))), "r"(_raw_stv8_27[0]), "r"(_raw_stv8_27[1]), "r"(_raw_stv8_27[2]), "r"(_raw_stv8_27[3]), "r"(_raw_stv8_27[4]), "r"(_raw_stv8_27[5]), "r"(_raw_stv8_27[6]), "r"(_raw_stv8_27[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_1)), "r"(packed_7[(0) + 0]), "r"(packed_7[(0) + 1]), "r"(packed_7[(0) + 2]), "r"(packed_7[(0) + 3]), "r"(packed_7[(0) + 4]), "r"(packed_7[(0) + 5]), "r"(packed_7[(0) + 6]), "r"(packed_7[(0) + 7]) : "memory");
                 float res_8[16];
                 unsigned int ov_bf16_18[4];
                 #pragma unroll
@@ -2249,12 +2204,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_8[_lp*2 + 14], res_8[_lp*2+1 + 14]));
                     packed_8[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_28 = reinterpret_cast<const unsigned*>(packed_8);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_1 + 16ll))), "r"(_raw_stv8_28[0]), "r"(_raw_stv8_28[1]), "r"(_raw_stv8_28[2]), "r"(_raw_stv8_28[3]), "r"(_raw_stv8_28[4]), "r"(_raw_stv8_28[5]), "r"(_raw_stv8_28[6]), "r"(_raw_stv8_28[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_1 + 16ll)), "r"(packed_8[(0) + 0]), "r"(packed_8[(0) + 1]), "r"(packed_8[(0) + 2]), "r"(packed_8[(0) + 3]), "r"(packed_8[(0) + 4]), "r"(packed_8[(0) + 5]), "r"(packed_8[(0) + 6]), "r"(packed_8[(0) + 7]) : "memory");
                 float res_9[16];
                 unsigned int ov_bf16_20[4];
                 #pragma unroll
@@ -2343,12 +2293,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_9[_lp*2 + 14], res_9[_lp*2+1 + 14]));
                     packed_9[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_29 = reinterpret_cast<const unsigned*>(packed_9);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_1 + 32ll))), "r"(_raw_stv8_29[0]), "r"(_raw_stv8_29[1]), "r"(_raw_stv8_29[2]), "r"(_raw_stv8_29[3]), "r"(_raw_stv8_29[4]), "r"(_raw_stv8_29[5]), "r"(_raw_stv8_29[6]), "r"(_raw_stv8_29[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_1 + 32ll)), "r"(packed_9[(0) + 0]), "r"(packed_9[(0) + 1]), "r"(packed_9[(0) + 2]), "r"(packed_9[(0) + 3]), "r"(packed_9[(0) + 4]), "r"(packed_9[(0) + 5]), "r"(packed_9[(0) + 6]), "r"(packed_9[(0) + 7]) : "memory");
                 float res_10[16];
                 unsigned int ov_bf16_22[4];
                 #pragma unroll
@@ -2437,12 +2382,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_10[_lp*2 + 14], res_10[_lp*2+1 + 14]));
                     packed_10[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_30 = reinterpret_cast<const unsigned*>(packed_10);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_1 + 48ll))), "r"(_raw_stv8_30[0]), "r"(_raw_stv8_30[1]), "r"(_raw_stv8_30[2]), "r"(_raw_stv8_30[3]), "r"(_raw_stv8_30[4]), "r"(_raw_stv8_30[5]), "r"(_raw_stv8_30[6]), "r"(_raw_stv8_30[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_1 + 48ll)), "r"(packed_10[(0) + 0]), "r"(packed_10[(0) + 1]), "r"(packed_10[(0) + 2]), "r"(packed_10[(0) + 3]), "r"(packed_10[(0) + 4]), "r"(packed_10[(0) + 5]), "r"(packed_10[(0) + 6]), "r"(packed_10[(0) + 7]) : "memory");
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 asm volatile("barrier.sync 0, 128;" ::: "memory");
@@ -2527,10 +2467,10 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     ov_2[62] = 0.0f;
                     ov_2[63] = 0.0f;
                 }
-                const float2 _scale2_31 = {output_scale, output_scale};
+                const float2 _scale2_19 = {output_scale, output_scale};
                 #pragma unroll
                 for (int _ls = 0; _ls < 32; _ls++)
-                    mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(ov_2)[_ls], _scale2_31);
+                    mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(ov_2)[_ls], _scale2_19);
                 int out_col_2 = 256 + row / 64 * 128 + 64;
                 float res_11[16];
                 unsigned int ov_bf16_24[4];
@@ -2620,12 +2560,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_11[_lp*2 + 14], res_11[_lp*2+1 + 14]));
                     packed_11[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_32 = reinterpret_cast<const unsigned*>(packed_11);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_2))), "r"(_raw_stv8_32[0]), "r"(_raw_stv8_32[1]), "r"(_raw_stv8_32[2]), "r"(_raw_stv8_32[3]), "r"(_raw_stv8_32[4]), "r"(_raw_stv8_32[5]), "r"(_raw_stv8_32[6]), "r"(_raw_stv8_32[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_2)), "r"(packed_11[(0) + 0]), "r"(packed_11[(0) + 1]), "r"(packed_11[(0) + 2]), "r"(packed_11[(0) + 3]), "r"(packed_11[(0) + 4]), "r"(packed_11[(0) + 5]), "r"(packed_11[(0) + 6]), "r"(packed_11[(0) + 7]) : "memory");
                 float res_12[16];
                 unsigned int ov_bf16_26[4];
                 #pragma unroll
@@ -2714,12 +2649,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_12[_lp*2 + 14], res_12[_lp*2+1 + 14]));
                     packed_12[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_33 = reinterpret_cast<const unsigned*>(packed_12);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_2 + 16ll))), "r"(_raw_stv8_33[0]), "r"(_raw_stv8_33[1]), "r"(_raw_stv8_33[2]), "r"(_raw_stv8_33[3]), "r"(_raw_stv8_33[4]), "r"(_raw_stv8_33[5]), "r"(_raw_stv8_33[6]), "r"(_raw_stv8_33[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_2 + 16ll)), "r"(packed_12[(0) + 0]), "r"(packed_12[(0) + 1]), "r"(packed_12[(0) + 2]), "r"(packed_12[(0) + 3]), "r"(packed_12[(0) + 4]), "r"(packed_12[(0) + 5]), "r"(packed_12[(0) + 6]), "r"(packed_12[(0) + 7]) : "memory");
                 float res_13[16];
                 unsigned int ov_bf16_28[4];
                 #pragma unroll
@@ -2808,12 +2738,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_13[_lp*2 + 14], res_13[_lp*2+1 + 14]));
                     packed_13[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_34 = reinterpret_cast<const unsigned*>(packed_13);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_2 + 32ll))), "r"(_raw_stv8_34[0]), "r"(_raw_stv8_34[1]), "r"(_raw_stv8_34[2]), "r"(_raw_stv8_34[3]), "r"(_raw_stv8_34[4]), "r"(_raw_stv8_34[5]), "r"(_raw_stv8_34[6]), "r"(_raw_stv8_34[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_2 + 32ll)), "r"(packed_13[(0) + 0]), "r"(packed_13[(0) + 1]), "r"(packed_13[(0) + 2]), "r"(packed_13[(0) + 3]), "r"(packed_13[(0) + 4]), "r"(packed_13[(0) + 5]), "r"(packed_13[(0) + 6]), "r"(packed_13[(0) + 7]) : "memory");
                 float res_14[16];
                 unsigned int ov_bf16_30[4];
                 #pragma unroll
@@ -2902,12 +2827,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                     __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(res_14[_lp*2 + 14], res_14[_lp*2+1 + 14]));
                     packed_14[_lp + 7] = *(uint32_t*)&_bf2;
                 }
-                {
-                    const unsigned* _raw_stv8_35 = reinterpret_cast<const unsigned*>(packed_14);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(o_lo + (o_row_base + (long long)out_col_2 + 48ll))), "r"(_raw_stv8_35[0]), "r"(_raw_stv8_35[1]), "r"(_raw_stv8_35[2]), "r"(_raw_stv8_35[3]), "r"(_raw_stv8_35[4]), "r"(_raw_stv8_35[5]), "r"(_raw_stv8_35[6]), "r"(_raw_stv8_35[7]) : "memory");
-                }
+                asm volatile("st.global.L1::no_allocate.L2::evict_first.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};" :: "l"(o_lo + (o_row_base + (long long)out_col_2 + 48ll)), "r"(packed_14[(0) + 0]), "r"(packed_14[(0) + 1]), "r"(packed_14[(0) + 2]), "r"(packed_14[(0) + 3]), "r"(packed_14[(0) + 4]), "r"(packed_14[(0) + 5]), "r"(packed_14[(0) + 6]), "r"(packed_14[(0) + 7]) : "memory");
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 asm volatile("barrier.sync 0, 128;" ::: "memory");
@@ -2944,6 +2864,7 @@ kernel_cake_dsa_h64_train_c949a885132a772bdb53(const __grid_constant__ CUtensorM
                 query = _clc_ctaid_x_0;
                 _phase_o_written_waited ^= 1;
             }
+            asm volatile("cp.async.bulk.wait_group.read 0;");
             if (warp == 3) {
                 asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;" :: "r"(0), "r"(512));
             }

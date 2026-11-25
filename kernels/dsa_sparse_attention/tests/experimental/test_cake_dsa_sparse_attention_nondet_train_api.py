@@ -3169,3 +3169,121 @@ def test_no_olo_zero_query_rows_return_none_without_binding(monkeypatch):
             g = torch.autograd.grad(out, leaves, dout)
             assert [tuple(t.shape) for t in g] == [tuple(leaf.shape) for leaf in leaves]
             assert torch.all(g[1] == 0)
+
+
+# ---------------------------------------------------------------------------
+# 96 and 128 query heads through the public entries (the rope form's head windows)
+# ---------------------------------------------------------------------------
+
+#: The softmax scale of a 192-wide query-key head (the 96-head model of the issue).
+SCALE_192 = 192**-0.5
+
+
+@pytest.mark.parametrize("heads", (80, 32, 160))
+def test_public_entries_refuse_other_head_counts(heads, monkeypatch):
+    """A query head count other than 64, 96 or 128 is refused by the public autograd entry and the step forward
+    with ``ValueError`` (host validation while planning, before any allocation or launch; on CPU tensors, with the
+    binding's capture query stood in)."""
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    _, kv, idx = _host_inputs(total_q=8, total_k=16, topk=5)
+    q = torch.zeros(8, heads, D_QK, dtype=torch.bfloat16)
+    args = (
+        q[..., :D_LATENT],
+        q[..., D_LATENT:],
+        kv[:, :D_LATENT],
+        kv[:, D_LATENT:],
+        idx,
+    )
+    with pytest.raises(ValueError, match=r"\(64, 96, 128\)"):
+        cake_dsa_sparse_attention_nondet(*args)
+    with pytest.raises(ValueError, match=r"\(64, 96, 128\)"):
+        public_api.cake_dsa_sparse_attention_nondet_train_forward(*args)
+
+
+@pytest.mark.parametrize("heads", (96, 128))
+def test_public_entries_refuse_more_heads_on_sm107a(monkeypatch, heads):
+    """On ``sm_107a`` (host, the architecture stood in) every public entry refuses a ``heads``-head call with the
+    ``NotImplementedError`` of the backend before any kernel of the package launches: the flat and packed (its
+    torch index route) autograd entries and the step forward / backward pair, with query rows and without."""
+    from tests.experimental.test_helpers import (
+        cake_dsa_sparse_attention_host_launches as hl,
+    )
+
+    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
+    monkeypatch.setattr(
+        cake_backend, "nope_index_prep_available", lambda device=None: False
+    )
+    refused = "sm_107a serves 64 query heads only"
+    for T in (8, 0):
+        inp = hl.host_inputs(T, 64, 16, heads)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
+        leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
+        cu_q = torch.tensor([0, T // 2, T], dtype=torch.int32)
+        cu_k = torch.tensor([0, 24, 64], dtype=torch.int32)
+        with pytest.raises(NotImplementedError, match=refused):
+            cake_dsa_sparse_attention_nondet(*leaves, inp.indices)
+        with pytest.raises(NotImplementedError, match=refused):
+            cake_dsa_sparse_attention_nondet_varlen(
+                *leaves, inp.indices % 24, cu_q, cu_k, causal=True
+            )
+        with pytest.raises(NotImplementedError, match=refused):
+            public_api.cake_dsa_sparse_attention_nondet_train_forward(*args)
+        with pytest.raises(NotImplementedError, match=refused):
+            public_api.cake_dsa_sparse_attention_nondet_train_backward(
+                *args, inp.q_latent, -inp.q_latent, inp.lse, inp.dout
+            )
+    assert not h.launches
+
+
+@pytest.mark.parametrize("heads", (96, 128))
+def test_public_entries_at_more_heads(with_o_lo, heads, record_property):
+    """At ``heads`` query heads and scale ``192**-0.5``, on a packed batch of two causal documents: the flat
+    autograd entry on the global rows, the varlen autograd entry on the document-relative rows and the step forward
+    / backward pair -- ``out``, ``lse`` (step), ``o_lo`` (step) and every gradient of each judged on the same
+    draw (96 and 128 heads ship on ``sm_100a`` / ``sm_103a``)."""
+    _require_program(backward=True)
+    if cake_backend.arch_for(torch.device("cuda")) == "sm_107a":
+        pytest.skip("96 and 128 query heads ship on sm_100a / sm_103a; sm_107a follows")
+
+    def case(s, j):
+        inp = make_inputs([200, 312], [700, 1500], seed=s, topk=512, heads=heads)
+        cu_q, cu_k = inp.cu_seqlens_q, inp.cu_seqlens_k
+        rows = offset_gather_kv_indices(inp.idx_local, cu_q, cu_k, causal=True)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        runs = {}
+        leaves = [t.detach().clone().requires_grad_() for t in args]
+        out = cake_dsa_sparse_attention_nondet(
+            *leaves, rows, softmax_scale=SCALE_192, num_segments=2
+        )
+        runs["flat"] = dict(
+            out=out.detach(), **_rope_grads(torch.autograd.grad(out, leaves, inp.dout))
+        )
+        leaves = [t.detach().clone().requires_grad_() for t in args]
+        out = cake_dsa_sparse_attention_nondet_varlen(
+            *leaves, inp.idx_local, cu_q, cu_k, causal=True, softmax_scale=SCALE_192
+        )
+        runs["varlen"] = dict(
+            out=out.detach(), **_rope_grads(torch.autograd.grad(out, leaves, inp.dout))
+        )
+        out, lse, o_lo = public_api.cake_dsa_sparse_attention_nondet_train_forward(
+            *args, rows, softmax_scale=SCALE_192
+        )
+        assert tuple(out.shape) == (inp.total_q, heads, D_LATENT)
+        assert tuple(lse.shape) == (inp.total_q, heads)
+        grads = public_api.cake_dsa_sparse_attention_nondet_train_backward(
+            *args,
+            rows,
+            out,
+            o_lo,
+            lse,
+            inp.dout,
+            softmax_scale=SCALE_192,
+            num_segments=2,
+        )
+        assert tuple(grads[0].shape) == (inp.total_q, heads, D_LATENT)
+        assert tuple(grads[1].shape) == (inp.total_q, heads, D_ROPE)
+        torch.cuda.synchronize()
+        runs["step"] = dict(out=out, lse=lse, o_lo=o_lo, **_rope_grads(grads))
+        return nv.judged(nv.rope_problem(inp, indices=rows, scale=SCALE_192), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 9600 + heads)

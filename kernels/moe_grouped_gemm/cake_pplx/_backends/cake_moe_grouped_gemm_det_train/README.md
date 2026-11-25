@@ -12,15 +12,16 @@ query `is_cake_moe_grouped_gemm_det_train_supported`. The forward also has a
 There is no automatic backend selection.
 
 Three operations over `E` groups of rows, described by an int32 **device**
-tensor `offs[E]` of cumulative end offsets (`offs[-1] == sum_m`; groups may be
-imbalanced, empty, one row long, or any size that is not a tile multiple) or,
-equivalently, an `m_indptr[E + 1]` with a leading 0 (`torch._grouped_mm` /
-`grouped_mm_bf16` form; `cake_moe_grouped_gemm_det_train_wgrad` needs `num_groups=E` to tell the
-two forms apart). The kernels read the offsets on the device; the host never
+tensor `offs[E]` of cumulative end offsets (`offs[-1] <= sum_m`; groups may be
+imbalanced, empty, one row long, or any size that is not a tile multiple) or
+an `m_indptr[E + 1]` (`torch._grouped_mm` / `grouped_mm_bf16` form, whose first
+entry may be above 0: device slices, below; `cake_moe_grouped_gemm_det_train_wgrad` needs
+`num_groups=E` to tell the two forms apart). The kernels read the offsets on the device; the host never
 synchronises on them.
 
 The slice lower bound is `0` for `e == 0` and `offs[e-1]` for `e > 0`.
-For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]`.
+For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]` and the
+lower bound of group 0 is `m_indptr[0]` (device slices, below).
 
 | helper | computation | inputs | output |
 | --- | --- | --- | --- |
@@ -38,6 +39,58 @@ Numerics: fp32 tensor-core accumulation with one bf16 rounding at the store
 (the fp32 weight-gradient variant stores the accumulator); bitwise
 deterministic (no atomics; the split-K tail sums fp32 partials in a fixed
 order); `dW[e] == 0` exactly for empty groups.
+
+## Device slices (`m_indptr[0] > 0`)
+
+An `m_indptr[E + 1]` may start above 0. The call then covers the rows
+`[m_indptr[0], m_indptr[E])` of the whole `x` / `g`, in absolute row numbers:
+for example the experts `e0 .. e1 - 1` of a larger table, one chunk of experts
+at a time, without copying rows or reading the table on the host.
+
+```python
+# m_indptr: [E_all + 1] int32 on the device; x: [R, K], g: [R, N]: all routed rows
+chunk = m_indptr[e0 : e1 + 1]  # a view; chunk[0] may be above 0
+y = torch.empty(R, N, dtype=torch.bfloat16, device=x.device)
+cake_moe_grouped_gemm_det_train_forward(x, w[e0:e1], chunk, out=y)  # writes rows chunk[0] .. chunk[-1] - 1 of y
+dw = cake_moe_grouped_gemm_det_train_wgrad(g, x, chunk, num_groups=e1 - e0)
+```
+
+- Rows outside `[m_indptr[0], m_indptr[E])` do not affect the results and are
+  not written: the forward and the data gradient leave those rows of `out` as
+  they are, so slices of disjoint rows may write one `out`, also from different
+  streams. The entries must be nondecreasing row numbers of the operands, at
+  most `sum_m`.
+- The weight gradient reads the `[E + 1]` form only with `num_groups=E`;
+  without it, `E + 1` entries are `E + 1` end offsets.
+- The kernels read `m_indptr[0]` on the device at every launch: a prepared
+  launch and a CUDA graph that captured it follow new boundaries, the first
+  entry included.
+- Programs: the `m_indptr` form binds the lead twins of the programs (the
+  routes `<route>_lead` of `cake_jit`, programs `<program>_lead` with
+  `twin_of`); the `[E]` form
+  binds the programs themselves (`launch.bound_routes`, `launch.bound_programs`
+  name them). A process JIT-compiles a twin at its first call where the package
+  ships no prebuilt build of it.
+- Cost: the twins read `m_indptr[0]` once per role, and some launches are
+  slightly slower (most a weight gradient with a split tail). When
+  `m_indptr[0]` is 0, pass `m_indptr[1:]` (the `[E]` form): it binds the
+  original programs at no extra cost and gives the same bits.
+- Bits: the plan (k tile, stage, grid, tail split) comes from the shapes, and
+  `sum_m` is `x.shape[0]`, every row, not the rows of the slice. A slice gives
+  the bits of the host-offset call over its rows (`x[m_indptr[0]:m_indptr[E]]`
+  with `offs = m_indptr[1:] - m_indptr[0]`) when the two calls plan the same.
+  When they plan differently (for example the rows per group cross
+  `k512_min_rows_per_group`), it gives the bits of that host-offset call with
+  its rows padded by rows of no group to the same `sum_m`, which plans the
+  same. Both results repeat bit for bit and meet the same accuracy bar.
+- A slice with no row and `accumulate=True` (`m_indptr[0] == m_indptr[E]`)
+  still launches, as the host does not read the table. Its add of exact zeros turns a `-0.0` in `out` into `+0.0`. The values are
+  equal. The host-offset call with no row launches nothing.
+- Autograd: `cake_moe_grouped_gemm_det(x, w, chunk)` writes only the slice's rows of
+  `Y` and of the gradient of `x`; the other rows of these new tensors are
+  uninitialized (`torch.empty`). Summing the `x` gradients of several slices
+  of one shared `x` is therefore not supported: a sliced layout calls the
+  op-level functions with caller-owned outputs.
 
 ## Reproducibility and accuracy
 
@@ -164,8 +217,8 @@ every call.
 The forward projection also has a handoff with the call shape of
 `grouped_mm_bf16(a, b, m_indptr, out=None, out_dtype=torch.bfloat16, tactic=-1)`:
 `cake_backend.grouped_det_mm_bf16_cake` (bfloat16 outputs only, no tactic
-index, `N % 256 == 0`, `K % 64 == 0`; rows of `a` past `m_indptr[-1]` are left
-untouched). It rejects the options the backend does not take and emits no
+index, `N % 256 == 0`, `K % 64 == 0`; rows of `a` before `m_indptr[0]` and
+past `m_indptr[-1]` are left untouched). It rejects the options the backend does not take and emits no
 warning.
 
 `cake_moe_grouped_gemm_det(x, w, offs)` is a `torch.autograd.Function`
@@ -451,6 +504,29 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   `sm_100a` and `sm_103a` the `main_wave_halves` program keeps the A tile in
   the collector and synchronizes the waves every eight waves. None of these
   changes the output bits.
+- Weight-gradient queue walk (`wgrad_queue_walk`): on `sm_100a` and `sm_103a`
+  the 512-wide k tile routes also serve `main_halves_queue` (and
+  `main_halves_queue_acc` on the fp32 route), the A-collector half-release
+  build whose tiles before the split tail are claimed from one global counter
+  in tile order, so the tiles in flight are consecutive and tiles that read
+  the same `g` or `x` strip run at nearly the same time. The host binds it in
+  place of the stage it selects (`main_halves` or `main_wave_halves`) where a
+  rule of `HOST_PLAN_CONSTANTS["queue_walk"]` names the call: the device's
+  architecture and SM count, the selected stage, the output (`"bfloat16"` /
+  `"float32"`, or `"accumulate"` for a fused accumulate) and a range of group
+  counts. The call keeps the selected stage's plan; its split tail is that
+  stage's, summed by the same ordered tail reduce, and every tile keeps its
+  k-step order, so the output bits are the selected stage's. The rules cover
+  the 148-SM `sm_100a` and 152-SM `sm_103a` parts, where the queue walk was
+  timed against the stage it replaces and no row was confirmed slower across
+  several GPUs, except one disclosed row (the 8-group gate/up weight gradient
+  with a composed bfloat16 accumulate, lead route, eager: slower on one of
+  three 148-SM `sm_100a` GPUs, faster on the other two); on the 148-SM
+  `sm_100a` part the `main_halves` stage keeps it for the fused accumulate
+  only (a bfloat16 row there was slower), and the `main_wave_halves` stage
+  keeps it up to 16 groups (a 32-group bfloat16 row there was slower). An
+  `m_indptr` row table binds the queue stage of the lead route (its `_lead`
+  twin, with `m_begin`), as every other stage.
 - Weight-gradient k256 tail (`wgrad_k256_tail`): on the architectures listed
   in `k256_tail_archs`, when `K` (the columns of `dW[e]` and of `x`) is at
   most `k256_tail_max_k` and the groups average at least `k256_tail_min_rows`
@@ -466,18 +542,44 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   sums (`wgrad_reduce_grid` CTAs). Every element accumulates its rows in the
   order of the 256-wide k tile, so where the two plans split the same tiles
   the same way the output bits are that tile's.
+- Wide outputs (`row_chunks`): the `fwd` / `dgrad` programs address `out`
+  with 32-bit element offsets, so on the architectures of `wide_rows_archs`
+  (`sm_100a`, `sm_103a`, `sm_107a`) a call whose output span passes
+  `int32_elems` (`sum_m * out.stride(0) > 2^31 - 1`) launches the stage
+  selected on the whole call once per row chunk: `n = ceil(sum_m / R)` chunks
+  of `ceil(sum_m / n)` consecutive rows, `R = int32_elems // out.stride(0)`
+  (`plan["launches"]` is `n`, `plan["row_chunks"]` the `(start, rows)` pairs
+  and `plan["grids"]` each chunk's grid; `stages` repeats the stage). At
+  655,360 rows of 4096 columns that is 2 launches of 327,680 rows. Each chunk
+  binds its rows of the row operand and of `out`, `sum_m` = its rows, and a
+  row table that `launch()` computes on the device from the caller's `offs` /
+  `m_indptr` at every launch: the table less the chunk's first row, clamped
+  to the chunk's rows (one clamp per chunk and one subtraction from the second
+  chunk on). There is no host read, so the launch stays CUDA-graph capturable
+  and valid for any `offs` written later. Every element is the same ordered
+  k-step sum of its row in any chunk, so the output bits are those of one
+  launch. On an architecture outside `wide_rows_archs` such a call raises
+  `ValueError`. A call within the span takes one launch, bound as before.
 - Workspaces (allocated at preparation, retained by the launch object): the
   per-CTA TMA descriptor slots of the weight gradient (a ring of nine
   descriptor pairs per CTA: a group switch edits the next pair and warms the
   one after it, never a pair an in-flight load may still read) and its fp32
-  tail partials. The operand
+  tail partials, and the row tables of a wide `fwd` / `dgrad` (one int32
+  buffer of the caller's table size per chunk: `n * (E + 1) * 4` bytes or
+  less; the forward and data gradient retain nothing else). One prepared
+  wide launch must not be in flight on two streams at once, must be kept
+  alive while a CUDA graph that captured it may replay and, after a launch on
+  another stream, must be kept alive until that launch completes (the
+  buffers are allocated on the stream current at the preparation). The operand
   descriptors are launch arguments; there is no descriptor workspace and no
   descriptor upload kernel.
 - Stream workspaces (kept per device and CUDA stream, reused by every launch
   on that stream): the `fwd` / `dgrad` scheduler words (`sched`,
-  `sched_words` u32 words whose first three rest at `sched_rest`) and the
+  `sched_words` u32 words whose first three rest at `sched_rest`), the
   wave-sync counters (`wave_sync`, `wave_sync_words` u32 words resting at
-  zero). The first launch on a stream allocates a buffer at its rest state;
+  zero) and the queue walk's tile counters (`queue_sched`, the argument the
+  queue programs name `sched`: `queue_sched_words` u32 words resting at zero;
+  the last cluster of a launch to retire sets them back to zero). The first launch on a stream allocates a buffer at its rest state;
   every kernel leaves it at its rest state, so launches on one stream share it
   and launches on two streams never do. A launch under CUDA graph capture, or
   for a device that is not the current one, takes buffers of its own, set to
@@ -487,7 +589,8 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
 
 `CakeMoEGroupedGemmDetLaunch.plan` exposes `grid`, `tile_k`, `tail_splits`,
 `raster_rows`, `launches` and, for `fwd` / `dgrad`, `tile_n`, `clusters`, `c0`,
-`c1` (the even split) and `queue_split`, for `wgrad` `tail_tile_k` (the k width of the split tail tiles),
+`c1` (the even split) and `queue_split` (and `row_chunks` and `grids` for a wide
+output), for `wgrad` `tail_tile_k` (the k width of the split tail tiles),
 `wave_mode`, `accumulate` (`"off"`, `"fused"` or `"composed"`) and, on the
 composed route, `accumulate_reason`, for inspection and tests;
 `CakeMoEGroupedGemmDetLaunch.stages` names the bound stages in launch order,
@@ -499,16 +602,16 @@ fused one.
 
 | feature | sm_100a | sm_103a | sm_107a |
 | --- | --- | --- | --- |
-| `wgrad` k512 half-release stages | `main_halves` (planned walk), `main_wave_halves` (wave period 8) | `main_halves` (planned walk), `main_wave_halves` (wave period 8) | `main_halves`, `main_halves_k256t` |
+| `wgrad` k512 half-release stages | `main_halves` (planned walk), `main_wave_halves` (wave period 8), `main_halves_queue` (queue walk) | `main_halves` (planned walk), `main_wave_halves` (wave period 8), `main_halves_queue` (queue walk) | `main_halves`, `main_halves_k256t` |
 | `fwd` / `dgrad` L2 evict-first twin launched (`main_wide_ef`) | `fwd` (`K >= 6144`); `dgrad` (`K >= 4096`, `sum_m // E >= 4096`) | `fwd` (`K >= 6144`) | `fwd` (`K <= 2048`); `dgrad` (`K >= 4096`, `sum_m // E >= 16384`) |
-| `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_wave_halves`, `tail_reduce` | `main_halves`, `main_halves_k256t`, `tail_reduce` |
+| `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `main_halves_queue`, `tail_reduce` | `main_halves`, `main_wave_halves`, `main_halves_queue`, `tail_reduce` | `main_halves`, `main_halves_k256t`, `tail_reduce` |
 | `wgrad` accumulate, composed | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main`; misaligned `out`; `_acc` library not loadable |
 | CUDA toolkit floor (`min_cuda`) | 12.8 | 12.9 | 13.5 |
 | CUDA toolkit floor of the fused main stages (`min_cuda`) | 13.4 | 13.4 | 13.5 |
 
 The programs are exact-architecture tcgen05 payloads built for the exact
 targets `sm_100a`, `sm_103a` and `sm_107a` (`build.json` `arch_flags`).
-`cake_jit.PROGRAMS` lists thirty libraries, one per kernel and build,
+`cake_jit.PROGRAMS` lists thirty-two libraries, one per kernel and build,
 each a kernel and a host-binding translation unit under
 `csrc/cake_moe_grouped_det_gemm/` shared by the architectures it is built for (an
 architecture-dependent line is folded under `__CUDA_ARCH__`):
@@ -533,12 +636,15 @@ architecture-dependent line is folded under `__CUDA_ARCH__`):
   `sm_100a` and `sm_103a`, without it for `sm_107a`; for `sm_107a` its twin
   that runs the tiles left after the full waves as 256-column half tiles
   (`main_halves_k256t`); the wave-synchronized A-collector kernel that
-  releases it in two halves (`main_wave_halves`), for `sm_100a` and `sm_103a`.
+  releases it in two halves (`main_wave_halves`), for `sm_100a` and `sm_103a`;
+  the A-collector half-release kernel on the queue walk
+  (`main_halves_queue`), for `sm_100a` and `sm_103a`.
 - the 512-wide k tile's main kernel for `sm_107a`, a second `main` stage
   beside the one built for `sm_100a` and `sm_103a`.
 - the fp32 accumulate builds (`_acc`): the twins of `main_halves` (one for
   `sm_100a` and `sm_103a`, one for `sm_107a`), `main_wave_halves` (`sm_100a`,
-  `sm_103a`) and `main_halves_k256t` (`sm_107a`) on the fp32 512-wide k tile
+  `sm_103a`), `main_halves_queue` (`sm_100a`, `sm_103a`) and
+  `main_halves_k256t` (`sm_107a`) on the fp32 512-wide k tile
   route, which add the weight gradient into `C` with one fp32 add per element
   (their `build.json` entries need CUDA 13.4 on `sm_100a` and `sm_103a`,
   `min_cuda`), and the twin of the tail-reduce that adds the ordered sum of a
@@ -596,7 +702,7 @@ package's functions emits no log and no warning.
 ## Tests and benchmark
 
 ```bash
-pytest tests/experimental/test_cake_moe_grouped_gemm_det_train.py tests/experimental/test_cake_moe_grouped_gemm_det_train_api.py tests/experimental/test_cake_moe_grouped_gemm_det_train_names.py tests/experimental/test_cake_moe_grouped_gemm_det_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_det_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_det_train_acc.py
+pytest tests/experimental/test_cake_moe_grouped_gemm_det_train.py tests/experimental/test_cake_moe_grouped_gemm_det_train_api.py tests/experimental/test_cake_moe_grouped_gemm_det_train_names.py tests/experimental/test_cake_moe_grouped_gemm_det_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_det_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_det_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_det_train_device_slice.py tests/experimental/test_cake_moe_grouped_gemm_det_train_wide_rows.py
 python benchmarks/bench_cake_moe_grouped_gemm_det_train.py --help
 ```
 
@@ -634,6 +740,32 @@ composed one (split tails, the planned walk with empty groups last, the wave
 halves, the k256 tail, `-0.0`, 32 groups), each judged against the naive BF16
 tier, CUDA graph replays, streams, layouts, and the autograd flag with the
 generated programs.
+`test_cake_moe_grouped_gemm_det_train_device_slice.py` covers the device
+slices (above): on the CPU the lead routes against their routes, the lead
+builds' CUDA floor, the row table's views and the lead binding over every
+architecture; on a GPU each slice against the `[E]` call over the same rows
+moved to row 0 (bitwise) and the `[E]` call over the slice's rows alone
+(bitwise where it plans the same), every forced stage, edges with the rows
+outside poisoned, padded rows, graph replay over device-copied routings, two
+streams, accumulation, the autograd entry and the bits of the judged `[E]`
+cases.
+`test_cake_moe_grouped_gemm_det_train_wide_rows.py` covers the wide
+outputs (host plan, above): on the CPU the chunk arithmetic, the chunks' row
+tables against the rows of each group in each chunk, a call within the span
+bound as one launch, a wide call's chunks, rows and row tables and the
+refusals (an architecture outside `wide_rows_archs`, a row pitch past the
+span); on a GPU forced chunks of
+every served `fwd` / `dgrad` stage bitwise against one launch (an empty chunk,
+a first group past the first chunk, both row tables), the issue's 655,360
+rows over 64 and 32 skewed groups and the boundary row counts 524,287,
+524,288, 524,289 and 1,048,576 against the naive BF16 tier with windows of
+rows (each chunk boundary, row 524,288) bitwise against independent calls
+within the span, an `m_indptr` device slice into a slice of a larger `out`,
+changing device routings eager and from one CUDA graph with no host
+synchronization and no new program load, a checkpointed MoE block bitwise
+against the block without checkpoint, a weight gradient whose operands pass
+2^31 elements against the naive BF16 tier, and repeats. These GPU tests skip
+on a device with too little free memory (up to 72 GiB for the block).
 `test_cake_moe_grouped_gemm_det_train_acceptance.py` repeats every output of
 the reproducibility table five times into a zeroed and five times into a
 filled output under concurrent copy streams, over changing offsets, and
@@ -643,15 +775,23 @@ deterministic baselines `det_acc` and `det_mgB` and the non-deterministic arms).
 The benchmark `benchmarks/bench_cake_moe_grouped_gemm_det_train.py` times the prepared
 launches against `torch._grouped_mm` and a per-group cuBLAS loop on the MoE projection rows of the
 design (E = 4 ragged distributions, E = 8 / 16 / 32 balanced, fp32 weight
-gradients).
+gradients); `--wide-rows` runs the wide-output rows instead (the down
+projection's forward and the gate/up projection's data gradient, `[rows, 4096]`
+at 327,680 and 655,360 rows over 64 and 32 balanced or skewed groups).
 
 ## Limitations
 
-- bf16 inputs only; `E`, `sum_m`, `N`, `K` and the output span must fit
-  32-bit element addressing.
+- bf16 inputs only; `E`, `sum_m`, `N` and `K` must fit 32-bit integers. On
+  `sm_100a`, `sm_103a` and `sm_107a`, a forward or data-gradient output whose
+  span passes 2^31 - 1 elements runs the selected program once per row chunk
+  whose span fits 32-bit element addressing (`plan["row_chunks"]`); the chunk
+  row tables are computed on the device. The weight-gradient output span must
+  fit 32-bit addressing.
 - The weight-gradient accumulation is fused for an fp32 `out` on the
   half-release forms of the 512-wide k tile only; every other call composes,
   with a scratch of the weight gradient's size (above).
 - The alignment rules above; no transposed operand layouts other than the
   documented in-place `W` read of `dgrad`.
 - Compute capability 10.0, 10.3 or 10.7 only; other devices raise.
+- The autograd entry does not support summing the `x` gradients of several
+  device slices of one shared `x` (device slices, above).

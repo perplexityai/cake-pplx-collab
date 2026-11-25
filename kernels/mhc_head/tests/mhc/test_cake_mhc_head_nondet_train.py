@@ -71,7 +71,11 @@ HIDDEN_BY_CAPABILITY = {
     (10, 7): (4096, 5120, 7168),
 }
 HIDDEN = (4096, 5120, 7168)
-TOKENS = (1, 2, 3, 7, 65, 129, 257, 1000, 2049, 4096, 7169)
+# Token counts. On sm_107a the forward runs one kernel per band of T; BAND_EDGES holds each band's last T and the
+# next one, for every hidden size (1024 / 1025 and 4096 / 4097 for 7168, 1536 / 1537 for 5120, 2048 / 2049 and
+# 7168 / 7169 for 4096).
+BAND_EDGES = (1024, 1025, 1536, 1537, 2048, 2049, 4096, 4097, 7168, 7169)
+TOKENS = (1, 2, 3, 7, 65, 129, 257, 1000, *BAND_EDGES)
 BF16 = torch.bfloat16
 SPECIAL = (
     -0.0,

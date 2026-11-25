@@ -97,13 +97,13 @@ kernel_cake_kda_det_train_47a9c058e6d6c78c166d(float* __restrict__ dg_in, float*
     int tgrp = tid / 32;
     int quad = tid - tgrp * 32;
     int d0 = quad * 4;
-    long long row0 = (long long)chunk * 64;
+    long long row0 = (long long)chunk * 64ll;
     long long ext0 = (long long)chunk_bos[chunk];
     int clen = chunk_len[chunk];
     int rs = num_heads * 128;
     int t0 = tgrp * 8;
-    long long ibase = ((row0 + (long long)t0) * (long long)num_heads + (long long)head) * 128 + (long long)d0;
-    long long ebase = ((ext0 + (long long)t0) * (long long)num_heads + (long long)head) * 128 + (long long)d0;
+    long long ibase = ((row0 + (long long)t0) * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
+    long long ebase = ((ext0 + (long long)t0) * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
     int sq = d0 * 4;
     float dgs[32];
     #pragma unroll
