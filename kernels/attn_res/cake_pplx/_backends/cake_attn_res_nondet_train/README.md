@@ -53,8 +53,7 @@ must share no byte with an operand or another output (`ValueError`).
 
 `T = 0` launches no Cake kernel: the backward returns a zero `dw` (a `torch.zeros` fill).
 
-`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB200, GB300, VR200 and R200; on another device a fallback under every measured count). `fwd_n4` takes at most 64 groups on B200, GB200 and GB300 (`cake_jit.GROUP_CAPS`): it runs 1 to 6 % faster there than at all 71 or 74 resident groups. The host zeroes
-`dw` before the backward launch. The kernels take nine value pointers; the host passes the first value in the slots
+`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB200, GB300, VR200 and R200; on another device a fallback under every measured count). `fwd_n4` takes at most 64 groups on B200, GB200 and GB300 (`cake_jit.GROUP_CAPS`): it runs up to 7 % faster there than at all 71 or 74 resident groups. The kernels take nine value pointers; the host passes the first value in the slots
 past `n`, which the kernels never read.
 
 The zeroing of `dw` is part of the backward launch: `run` takes `dw` again as its `zero_region` argument and zeroes it

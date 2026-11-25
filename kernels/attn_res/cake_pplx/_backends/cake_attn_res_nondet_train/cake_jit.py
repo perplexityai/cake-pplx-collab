@@ -357,7 +357,7 @@ RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_107a", 212): {2: 92, 3: 138, 4: 184, 5: 184},
 }
 # Launch groups a program takes at most, below the groups the device holds: (architecture, SM count) -> {record:
-# groups}.  ``fwd_n4`` (the whole-token forward of four values, two CTAs per SM) runs 1 to 6 % faster at 64 groups
+# groups}.  ``fwd_n4`` (the whole-token forward of four values, two CTAs per SM) runs up to 7 % faster at 64 groups
 # than at all 74 resident groups on GB200 and GB300 and all 71 on B200 (CUDA graph replays, cold L2, T = 4097, 16380
 # and 32768, two to four GPUs of each, both packages); 62 to 66 groups measure within 2 % of 64.  Every other
 # program, ``fwd_n2`` and ``fwd_n3`` included, shows no consistent gain below its resident groups on these devices
