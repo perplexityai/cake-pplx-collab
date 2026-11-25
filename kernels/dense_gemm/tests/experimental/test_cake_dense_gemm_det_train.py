@@ -22144,9 +22144,11 @@ def _tables_0323(m):
 
 def _tables_0324(m):
     """Put the weight-gradient tables of version 0.3.24 back (``m``: a monkeypatch context; applying it again in a
-    nested context changes nothing): the token tiers ``SM107A_0323_WGRAD_TIERS`` of the five keys of
-    ``SM107A_0322_WGRAD_ROWS``, the 212-SM range of 4096 -> 16 from T 3072 and the 216-SM indexer_hw ranges from
-    T 1024 (``SM107A_0323_RANGES``).  Version 0.3.25 changes nothing else."""
+    nested context changes nothing), on the generic-call swap of version 0.3.25 (``_tables_0325``): the token tiers
+    ``SM107A_0323_WGRAD_TIERS`` of the five keys of ``SM107A_0322_WGRAD_ROWS``, the 212-SM range of 4096 -> 16 from
+    T 3072 and the 216-SM indexer_hw ranges from T 1024 (``SM107A_0323_RANGES``).  Version 0.3.25 changes nothing
+    else."""
+    _tables_0325(m)
     for key in SM107A_0322_WGRAD_ROWS:
         m.setitem(
             cake_backend.ROW_RULE_MIN_T,
@@ -22157,6 +22159,14 @@ def _tables_0324(m):
         part = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", sm_count)]
         for key, ranges in table.items():
             m.setitem(part, key, tuple((lo, hi, dict(rule)) for lo, hi, rule in ranges))
+
+
+def _tables_0325(m):
+    """Put the generic-call swap of version 0.3.25 back (``m``: a monkeypatch context; applying it again in a nested
+    context changes nothing): no follow floor (``_SINGLE_WGRAD_FOLLOW_MIN_K`` empty), so the generic call swaps only
+    where the swapped key's measured rule is not empty.  Version 0.3.26 changes nothing else."""
+    for key in list(cake_backend._SINGLE_WGRAD_FOLLOW_MIN_K):
+        m.delitem(cake_backend._SINGLE_WGRAD_FOLLOW_MIN_K, key)
 
 
 def _sm107a_0323_rule_at(key, sm_count, T):
@@ -23288,7 +23298,11 @@ def test_gpu_0324_generic_call_runs_the_wgrad_entry_plan_and_bits(case, monkeypa
 # at T 4096 before the post-ship A/B on the 212-SM part, where the whole tiles were not faster than the plan of version
 # 0.3.24 in every entry at T 4096 on these rows; at T 3585 - 4096 they plan as in version 0.3.24
 # (test_sm107a_0325_band_ends_at_3584_on_three_rows).  The checks compare with the tables of version 0.3.24
-# (_tables_0324).
+# (_tables_0324).  Version 0.3.26 lets the generic call follow the entry where the rule is empty too: the generic-call
+# checks of this block that reach a token count where the rule is empty run on the generic call of version 0.3.25
+# (_tables_0325).  The band-end check (test_sm107a_0325_band_ends_at_3584_on_three_rows) and the GPU check
+# (test_gpu_0325_wgrad_rows_meet_the_naive_tier_and_repeat_bitwise) reach only token counts where the rule is not
+# empty, where the generic call of both versions swaps; they read the generic call of the package.
 # ---------------------------------------------------------------------------
 
 #: The rule of the version: whole 128 x 128 pair tiles of 64-row CTAs without a K split, ``pro`` 15 and the L2 hint of
@@ -23878,7 +23892,11 @@ def test_sm107a_0325_generic_call_follows_the_wgrad_rule(monkeypatch, out_f32):
     that swaps since this version (flipped: the four rows at T 960 - 1023, 4096 -> 16 also at T 2049 - 3072 off the
     212-SM part and T 2049 - 3071 on it) plans with the registry fallback the weight-gradient entry's plan
     (``_sm107a_0322_plan``), with the transposed store and no swap, rule or knob fallback.  The counts of the cells of
-    each kind are those of the model (``_sm107a_0325_swaps``, ``_sm107a_0324_swaps``, ``_sm107a_0325_changed``)."""
+    each kind are those of the model (``_sm107a_0325_swaps``, ``_sm107a_0324_swaps``, ``_sm107a_0325_changed``).  The
+    check reads the generic call of version 0.3.25 (``_tables_0325``; version 0.3.26:
+    test_sm107a_0326_generic_swap_follows_the_wgrad_entry_on_every_key and
+    test_routing_0326_changes_exactly_the_generic_follow_cells)."""
+    _tables_0325(monkeypatch)  # the generic call of version 0.3.25: version 0.3.26 is checked below
     out_dtype = "f32" if out_f32 else "bf16"
     odt = torch.float32 if out_f32 else torch.bfloat16
     swap = cake_backend._single_wgrad_swap
@@ -23944,7 +23962,9 @@ def test_routing_0325_changes_exactly_the_t1_bands(monkeypatch):
     there runs the weight-gradient entry's plan, newly swapped where it kept the direct plan with the tables of version
     0.3.24 (``_sm107a_0324_swaps`` false) and replanned where it swapped.  Every other plan (sm_100a and sm_103a, the
     FP32 outputs, the other rows and token counts) is the plan of version 0.3.24.  The counts of the changed cells are
-    those of the model at the sweep's token counts."""
+    those of the model at the sweep's token counts.  The check reads the generic call of version 0.3.25
+    (``_tables_0325``; version 0.3.26: test_routing_0326_changes_exactly_the_generic_follow_cells)."""
+    _tables_0325(monkeypatch)  # the generic call of version 0.3.25: version 0.3.26 is checked below
     assert {part for part in ROUTING_038_CLASSES if part[0] == "sm_107a"} == {
         ("sm_107a", sm_count) for sm_count in SM107A_0323_SM_COUNTS
     }
@@ -24291,4 +24311,435 @@ def test_gpu_0325_wgrad_rows_meet_the_naive_tier_and_repeat_bitwise(case, monkey
     differing = int((before_out.view(torch.int16) != first.view(torch.int16)).sum())
     print(f"SM107A_0325 {d_in} -> {d_out} T {T} on {sm_count} SMs: {differing} elements differ from version 0.3.24")
     assert (differing == 0) == same, (where, before.template, differing)
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Version 0.3.26: the tables do not change.  The unbatched generic call G.T @ X of the four sm_107a BF16 weight
+# gradients of version 0.3.22 without a rule before (4096 -> 16 / 96, 6144 -> 48 / 64) swaps at every token count from
+# the row's _SINGLE_WGRAD_FOLLOW_MIN_K entry on, also where the swapped key's measured rule on the part is empty (below
+# T 960 on every sm_107a part, and 4096 -> 16 at T 3073 - 4095 off the 212-SM part), and there runs the weight-gradient
+# entry's plan of the architecture defaults (dense_proj_det_gemm_nn_n128_t_pro7: whole 128-row tiles below T 960, a
+# two-way K split at T 3073 - 4095) and its bits.  The checks compare with the generic call of version 0.3.25
+# (_tables_0325).
+# ---------------------------------------------------------------------------
+
+#: The generic-call keys ``(arch, M = d_out, N = d_in, out_f32)`` of the rows that may follow the weight-gradient entry:
+#: the four BF16 rows of ``SM107A_0322_WGRAD_ROWS`` without a rule before version 0.3.22.
+SM107A_0326_FOLLOW_ROWS = (
+    ("sm_107a", 16, 4096, False),
+    ("sm_107a", 96, 4096, False),
+    ("sm_107a", 48, 6144, False),
+    ("sm_107a", 64, 6144, False),
+)
+#: Their follow floors of the version (``_SINGLE_WGRAD_FOLLOW_MIN_K``): the generic call of a row swaps at every token
+#: count from its entry on; a row without an entry swaps where its measured rule is not empty, as in version 0.3.25.
+SM107A_0326_FOLLOW_MIN_K = {
+    ("sm_107a", 16, 4096, False): 1,
+    ("sm_107a", 96, 4096, False): 1,
+    ("sm_107a", 48, 6144, False): 1,
+    ("sm_107a", 64, 6144, False): 1,
+}
+#: The weight-gradient entry's program of these rows where their measured rule is empty (the architecture defaults).
+SM107A_0326_DEFAULT_PROGRAM = "dense_proj_det_gemm_nn_n128_t_pro7"
+#: The token counts of the version's A/B below T 960 (each of the four rows, on both classes; the boundaries of one and
+#: two 64-token K blocks among them) and of 4096 -> 16 at T 3073 - 4095 (both ends and the quarter points).
+SM107A_0326_GRID = (1, 16, 64, 65, 128, 129, 192, 256, 320, 384, 512, 640, 768, 896, 959)
+SM107A_0326_BAND_216 = (3073, 3328, 3584, 3840, 4095)
+#: The token counts of the routing and plan checks of the version: those of version 0.3.25, the grid and the band.
+SM107A_0326_SWEEP_TOKENS = tuple(sorted({*SM107A_0325_SWEEP_TOKENS, *SM107A_0326_GRID, *SM107A_0326_BAND_216}))
+#: The rows whose generic call keeps the direct plan where the weight-gradient entry swaps, by ``(arch, M = d_out,
+#: N = d_in, out_f32)`` of the generic call -> the token counts (inclusive; ``None``: no upper bound) at which it keeps
+#: it, on every part of the architecture: the sm_107a BF16 6144 -> 576 row below its ``_SINGLE_WGRAD_SWAP_MIN_K`` entry
+#: (T 6144: the swapped plan measured 0.91x at T 2048 and 4096), and at every token count the rows that no key of the
+#: architecture (or of its parent) names in either orientation, where the entry swaps by its padded-tile rule and the
+#: generic call has neither a rule nor the narrow-output swap: on sm_107a the FP32 forms of ten narrow rows, on sm_100a
+#: and sm_103a both forms of the four rows of ``SM107A_0326_FOLLOW_ROWS``.
+_SM107A_0326_FP32_UNKEYED = (
+    (16, 4096), (96, 4096), (48, 6144), (64, 6144), (32, 4096), (32, 5120), (48, 4096), (48, 5120), (64, 4096),
+    (64, 5120),
+)  # fmt: skip
+SM107A_0326_GENERIC_KEEPS_DIRECT = {
+    ("sm_107a", 576, 6144, False): (1, 6143),
+    **{("sm_107a", d_out, d_in, True): (1, None) for d_out, d_in in _SM107A_0326_FP32_UNKEYED},
+    **{
+        (arch, d_out, d_in, out_f32): (1, None)
+        for arch in ("sm_100a", "sm_103a")
+        for _sm107a, d_out, d_in, _f32 in SM107A_0326_FOLLOW_ROWS
+        for out_f32 in (False, True)
+    },
+}
+
+
+def _sm107a_0326_follows(key, sm_count, T):
+    """Whether the BF16 generic call of the row of ``key`` (``SM107A_0322_WGRAD_ROWS``) at ``T`` tokens on an sm_107a
+    part of ``sm_count`` SMs swaps since version 0.3.26 alone: the row's follow floor (``SM107A_0326_FOLLOW_MIN_K``) is
+    at most ``T`` and its measured rule (``_sm107a_0325_rule_at``: the tables do not change) is empty, where the generic
+    call of version 0.3.25 kept the direct plan."""
+    _rule, d_in, d_out, _before = SM107A_0322_WGRAD_ROWS[key]
+    floor = SM107A_0326_FOLLOW_MIN_K.get(("sm_107a", d_out, d_in, False))
+    return floor is not None and floor <= T and not _sm107a_0325_rule_at(key, sm_count, T)
+
+
+def _sm107a_0326_swaps(key, sm_count, T, out_f32=False):
+    """Whether the generic call of the row of ``key`` swaps at ``T`` tokens on an sm_107a part of ``sm_count`` SMs with
+    the tables of version 0.3.26: where it swaps in version 0.3.25 (``_sm107a_0325_swaps``) and, in BF16, where it
+    follows the weight-gradient entry since this version (``_sm107a_0326_follows``)."""
+    return _sm107a_0325_swaps(key, sm_count, T, out_f32) or (not out_f32 and _sm107a_0326_follows(key, sm_count, T))
+
+
+def _sm107a_0326_edge_tokens():
+    """The token counts of the all-keys check: 1, 2, 255, 256, 257 (the narrow-output swap starts at 256) and
+    2**31 - 1; ``b - 1`` and ``b`` of every bound of ``ROW_RULE_MIN_T``; ``lo - 1``, ``lo``, ``hi`` and ``hi + 1`` of
+    every range of ``ROW_RULE_RANGES_BY_SM``; ``v - 1`` and ``v`` of every entry of ``_SINGLE_WGRAD_SWAP_MIN_K`` and
+    ``_SINGLE_WGRAD_FOLLOW_MIN_K``; the grid and band of the version; the positive ones.  Both decisions of the check
+    are constant between two consecutive token counts of this set."""
+    tokens = {1, 2, 255, 256, 257, 2**31 - 1, *SM107A_0326_GRID, *SM107A_0326_BAND_216}
+    for tiers in cake_backend.ROW_RULE_MIN_T.values():
+        for bound, _below in tiers:
+            tokens |= {bound - 1, bound}
+    for rows in cake_backend.ROW_RULE_RANGES_BY_SM.values():
+        for ranges in rows.values():
+            for lo, hi, _rule in ranges:
+                tokens |= {lo - 1, lo, hi, hi + 1}
+    for v in (*cake_backend._SINGLE_WGRAD_SWAP_MIN_K.values(), *cake_backend._SINGLE_WGRAD_FOLLOW_MIN_K.values()):
+        tokens |= {v - 1, v}
+    return tuple(sorted(T for T in tokens if T >= 1))
+
+
+def _sm107a_0326_keyed_rows():
+    """The rows ``(d_out, d_in, out_f32)`` of every shape that an unbatched ragged-K weight-gradient key of
+    ``ROW_RULES`` names on any architecture (both operands MN-major; the swapped key ``(.., True, False, d_out, None,
+    d_in)`` or the direct key ``(.., False, False, d_in, None, d_out)``), each in both output dtypes."""
+    shapes = set()
+    for _arch, a_mn, b_mn, _out_f32, transposed, batched, n, k, m in ROW_RULES:
+        if a_mn and b_mn and not batched and k is None:
+            shapes.add((n, m) if transposed else (m, n))
+    return tuple(sorted((d_out, d_in, out_f32) for d_out, d_in in shapes for out_f32 in (False, True)))
+
+
+def test_sm107a_0326_follow_table(monkeypatch):
+    """``_SINGLE_WGRAD_FOLLOW_MIN_K`` of version 0.3.26 is ``SM107A_0326_FOLLOW_MIN_K``: at most an entry for each row
+    of ``SM107A_0326_FOLLOW_ROWS`` (the four sm_107a BF16 rows of ``SM107A_0322_WGRAD_ROWS`` without a rule before
+    version 0.3.22), each a positive token count; each of those rows is keyed in the swapped orientation alone, so the
+    weight-gradient entry swaps at every token count.  The generic call's swap floors are those of version 0.3.25 (the
+    6144 -> 576 entry alone).  With ``_tables_0325`` the follow table is empty (version 0.3.25) and the swap floors are
+    the same."""
+    four = {
+        ("sm_107a", d_out, d_in, False) for _rule, d_in, d_out, before in SM107A_0322_WGRAD_ROWS.values() if not before
+    }
+    assert set(SM107A_0326_FOLLOW_ROWS) == four and len(SM107A_0326_FOLLOW_ROWS) == 4
+    assert cake_backend._SINGLE_WGRAD_FOLLOW_MIN_K == SM107A_0326_FOLLOW_MIN_K
+    assert set(SM107A_0326_FOLLOW_MIN_K) <= four
+    for arch, d_out, d_in, out_f32 in SM107A_0326_FOLLOW_ROWS:
+        assert cake_backend._orientation_rules(arch, d_out, d_in, out_f32) == (True, False), (d_out, d_in)
+        assert wgrad_swapped(d_out, d_in, arch=arch, out_f32=out_f32), (d_out, d_in)
+    for key, floor in SM107A_0326_FOLLOW_MIN_K.items():
+        assert isinstance(floor, int) and floor >= 1, (key, floor)
+    swap_floors = {("sm_107a", 576, 6144, False): 6144}
+    assert cake_backend._SINGLE_WGRAD_SWAP_MIN_K == swap_floors
+    with monkeypatch.context() as m:
+        _tables_0325(m)
+        assert cake_backend._SINGLE_WGRAD_FOLLOW_MIN_K == {}
+        assert cake_backend._SINGLE_WGRAD_SWAP_MIN_K == swap_floors
+    assert cake_backend._SINGLE_WGRAD_FOLLOW_MIN_K == SM107A_0326_FOLLOW_MIN_K
+
+
+def test_sm107a_0326_generic_swap_follows_the_wgrad_entry_on_every_key(monkeypatch):
+    """The unbatched generic call ``G.T @ X`` (``_single_wgrad_swap`` with the part's SM count) against the
+    weight-gradient entry (``wgrad_swapped``) over every shape that an unbatched ragged-K weight-gradient key names
+    (``_sm107a_0326_keyed_rows``, both output dtypes) on every class of ``ROUTING_038_CLASSES`` at
+    ``_sm107a_0326_edge_tokens()``: the generic call never swaps where the entry keeps the direct orientation, and it
+    keeps the direct plan where the entry swaps exactly at the cells of ``SM107A_0326_GENERIC_KEEPS_DIRECT`` and, on the
+    rows of ``SM107A_0326_FOLLOW_ROWS``, below the row's follow floor (``SM107A_0326_FOLLOW_MIN_K``; without an entry at
+    every token count) where its measured rule is empty (``_sm107a_0325_rule_at``).  With the generic call of version
+    0.3.25 (``_tables_0325``) it keeps the direct plan there and at every token count of those rows where the rule is
+    empty: the version changes the generic call exactly at those cells from the follow floors on, to the entry's
+    orientation, on the rows with an entry."""
+    rows = _sm107a_0326_keyed_rows()
+    tokens = _sm107a_0326_edge_tokens()
+    swap = cake_backend._single_wgrad_swap
+    assert {(d_out, d_in, out_f32) for _arch, d_out, d_in, out_f32 in SM107A_0326_GENERIC_KEEPS_DIRECT} <= set(rows)
+    assert {arch for arch, *_ in SM107A_0326_GENERIC_KEEPS_DIRECT} <= {arch for arch, _sm in ROUTING_038_CLASSES}
+    assert {(d_out, d_in, out_f32) for _arch, d_out, d_in, out_f32 in SM107A_0326_FOLLOW_ROWS} <= set(rows)
+
+    def decisions():
+        kept, opposite, cells = set(), set(), 0
+        for arch, sm_count in ROUTING_038_CLASSES:
+            for d_out, d_in, out_f32 in rows:
+                entry = wgrad_swapped(d_out, d_in, arch=arch, out_f32=out_f32)
+                for T in tokens:
+                    cells += 1
+                    generic = swap(arch, d_out, d_in, T, True, True, out_f32, sm_count=sm_count)
+                    if generic != entry:
+                        (kept if entry else opposite).add((arch, sm_count, d_out, d_in, out_f32, T))
+        return kept, opposite, cells
+
+    def expected(follow_min_k):
+        want = set()
+        for arch, sm_count in ROUTING_038_CLASSES:
+            for d_out, d_in, out_f32 in rows:
+                ident = (arch, d_out, d_in, out_f32)
+                span = SM107A_0326_GENERIC_KEEPS_DIRECT.get(ident)
+                for T in tokens:
+                    cell = (arch, sm_count, d_out, d_in, out_f32, T)
+                    if span is not None and span[0] <= T and (span[1] is None or T <= span[1]):
+                        want.add(cell)
+                    elif (
+                        ident in SM107A_0326_FOLLOW_ROWS
+                        and not (ident in follow_min_k and follow_min_k[ident] <= T)
+                        and not _sm107a_0325_rule_at(_sm107a_0323_key(d_in, d_out), sm_count, T)
+                    ):
+                        want.add(cell)
+        return want
+
+    kept, opposite, cells = decisions()
+    with monkeypatch.context() as m:
+        _tables_0325(m)
+        kept_0325, opposite_0325, _cells = decisions()
+    print(
+        f"SM107A_0326 all keys: {len(rows)} rows x {len(ROUTING_038_CLASSES)} classes x {len(tokens)} T = {cells} "
+        f"cells, generic direct where the entry swaps {len(kept)} (version 0.3.25: {len(kept_0325)}), opposite "
+        f"{len(opposite)}"
+    )
+    assert not opposite and not opposite_0325, (sorted(opposite)[:8], sorted(opposite_0325)[:8])
+    want = expected(SM107A_0326_FOLLOW_MIN_K)
+    assert kept == want, (len(kept), len(want), sorted(kept - want)[:8], sorted(want - kept)[:8])
+    want_0325 = expected({})
+    assert kept_0325 == want_0325, (len(kept_0325), len(want_0325), sorted(kept_0325 ^ want_0325)[:8])
+    followed = kept_0325 - kept
+    assert kept <= kept_0325, sorted(kept - kept_0325)[:8]
+    assert {(arch, d_out, d_in, out_f32) for arch, _sm, d_out, d_in, out_f32, _T in followed} == set(
+        SM107A_0326_FOLLOW_MIN_K
+    ), sorted(followed)[:8]
+    assert {(arch, d_out, d_in, out_f32) for arch, _sm, d_out, d_in, out_f32, _T in kept} >= set(
+        SM107A_0326_GENERIC_KEEPS_DIRECT
+    )  # every listed row is reached
+
+
+def test_routing_0326_changes_exactly_the_generic_follow_cells(monkeypatch):
+    """Byte for byte against the generic call of version 0.3.25 (``_tables_0325``), over ``ROUTING_038_SWEEP`` and the
+    rows of ``SM107A_0322_WGRAD_ROWS`` at ``SM107A_0326_SWEEP_TOKENS`` (the weight-gradient entry and the unbatched
+    generic call ``G.T @ X``, BF16 and FP32 outputs) on every class of ``ROUTING_038_CLASSES``: a plan changes exactly
+    at the BF16 generic call of those rows on the sm_107a parts where ``_sm107a_0326_follows`` holds (from the row's
+    follow floor on, where its measured rule is empty), from the direct plan to the weight-gradient entry's plan
+    (``_rows_plan``) on ``SM107A_0326_DEFAULT_PROGRAM`` with the transposed store.  Every other plan (every
+    weight-gradient plan, sm_100a and sm_103a, the FP32 outputs, the other rows and token counts) is the plan of version
+    0.3.25.  The counts of the changed cells per row and part are those of the model at the sweep's token counts."""
+    assert {part for part in ROUTING_038_CLASSES if part[0] == "sm_107a"} == {
+        ("sm_107a", sm_count) for sm_count in SM107A_0323_SM_COUNTS
+    }
+    rows = {(d_in, d_out): key for key, (_rule, d_in, d_out, _before) in SM107A_0322_WGRAD_ROWS.items()}
+    sweep = _merged_sweep(
+        ROUTING_038_SWEEP,
+        tuple(
+            (op, d_in, d_out, out_dtype, SM107A_0326_SWEEP_TOKENS)
+            for d_in, d_out in sorted(rows)
+            for op in ("wgrad", "generic")
+            for out_dtype in ("bf16", "f32")
+        ),
+    )
+
+    def plan_of(op, arch, sm_count, d_in, d_out, T, out_dtype):
+        if op == "generic":
+            return _generic_wgrad_plan(arch, sm_count, d_in, d_out, T, out_dtype)
+        return _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+
+    changed, want = {}, {}
+    for op, d_in, d_out, out_dtype, token_counts in sweep:
+        key = rows.get((d_in, d_out)) if op == "generic" else None
+        for T in token_counts:
+            for arch, sm_count in ROUTING_038_CLASSES:
+                where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                plan = plan_of(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _tables_0325(m)
+                    before = plan_of(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                moved = (
+                    key is not None
+                    and (arch, out_dtype) == ("sm_107a", "bf16")
+                    and _sm107a_0326_follows(key, sm_count, T)
+                )
+                if not moved:
+                    assert _plan_signature(plan) == _plan_signature(before), (where, plan.template, before.template)
+                    continue
+                assert plan.transposed_out and not before.transposed_out, (where, plan.template, before.template)
+                assert plan == _rows_plan("wgrad", arch, sm_count, d_in, d_out, T), (where, plan.template)
+                assert plan.template == SM107A_0326_DEFAULT_PROGRAM, (where, plan.template)
+                assert _plan_signature(plan) != _plan_signature(before), (where, before.template)
+                changed[(d_in, d_out, sm_count)] = changed.get((d_in, d_out, sm_count), 0) + 1
+    for op, d_in, d_out, out_dtype, token_counts in sweep:
+        key = rows.get((d_in, d_out)) if op == "generic" else None
+        if key is None or out_dtype != "bf16":
+            continue
+        for sm_count in SM107A_0323_SM_COUNTS:
+            n = sum(_sm107a_0326_follows(key, sm_count, T) for T in token_counts)
+            if n:
+                want[(d_in, d_out, sm_count)] = n
+    print(f"SM107A_0326 routing: {sum(changed.values())} changed generic cells, {changed}")
+    assert changed == want, (changed, want)
+    assert {(d_in, d_out) for d_in, d_out, _sm in changed} == {
+        (d_in, d_out) for _arch, d_out, d_in, _f32 in SM107A_0326_FOLLOW_MIN_K
+    }, changed
+
+
+def test_sm107a_0326_follow_cells_plan_the_entry_default_plan():
+    """The premise of the generic call's bits: at every cell where it follows the weight-gradient entry since this
+    version (``_sm107a_0326_follows``) among the rows of ``SM107A_0322_WGRAD_ROWS`` at ``SM107A_0326_SWEEP_TOKENS`` on
+    the 208-, 212-, 216- and 224-SM parts (a 126-MiB L2), the default generic plan (with the registry fallback) is
+    exactly the weight-gradient entry's (``_sm107a_0322_plan``), with the transposed store and no swap, rule or knob
+    fallback, and the planner's own plan (``_rows_plan``, no fallback): the architecture defaults on
+    ``SM107A_0326_DEFAULT_PROGRAM``, 128-row CTAs, ``block_n`` 128, ``d_in / 256`` pair tiles, no promoted chunks.
+    Below ``2 * SK_MIN_ITERS`` K blocks every tile is whole (one K chain per tile, no stream-K unit); from there on
+    (4096 -> 16 at T 3073 - 4095) the tiles form one partial wave and take the two-way K split of ``stream_k_plan``'s
+    ``"auto"`` policy (``ceil(k_blocks / 2)`` K blocks per unit).  The counts of the cells of each kind are those of
+    the model."""
+    seen = {"whole": 0, "split": 0}
+    want = {"whole": 0, "split": 0}
+    for key, (_rule, d_in, d_out, _before) in SM107A_0322_WGRAD_ROWS.items():
+        for sm_count in SM107A_0323_SM_COUNTS:
+            for T in SM107A_0326_SWEEP_TOKENS:
+                if not _sm107a_0326_follows(key, sm_count, T):
+                    continue
+                k_blocks = -(-T // BLOCK_K)
+                tiles = d_in // 256
+                kind = "whole" if k_blocks < 2 * SK_MIN_ITERS else "split"
+                want[kind] += 1
+                G = torch.empty(T, d_out, dtype=torch.bfloat16)
+                X = torch.empty(T, d_in, dtype=torch.bfloat16)
+                plan = cake_dense_gemm_det_train_projection_plan(
+                    G.t(),
+                    X,
+                    torch.empty(d_out, d_in, dtype=torch.bfloat16),
+                    sm_count=sm_count,
+                    l2_bytes=L2_BYTES,
+                    arch="sm_107a",
+                )[0]
+                wgrad = _sm107a_0322_plan(d_in, d_out, T, sm_count)
+                where = (d_in, d_out, sm_count, T, plan.template)
+                assert plan == wgrad and plan.transposed_out, (where, wgrad.template)
+                assert not (plan.swap_fallback or plan.rule_fallback or plan.knob_fallback), where
+                assert plan == _rows_plan("wgrad", "sm_107a", sm_count, d_in, d_out, T), where
+                assert plan.template == SM107A_0326_DEFAULT_PROGRAM, where
+                assert (plan.M, plan.N, plan.K) == (d_in, d_out, T), where
+                assert (plan.cta_rows, plan.block_n, plan.k_blocks, plan.pair_tiles, plan.promote_blocks) == (
+                    128,
+                    128,
+                    k_blocks,
+                    tiles,
+                    0,
+                ), where
+                if kind == "whole":
+                    parts = (tiles, 0, 0, k_blocks)
+                else:
+                    half = -(-k_blocks // 2)
+                    parts = (0, tiles, -(-(tiles * k_blocks) // half), half)
+                assert (plan.num_full, plan.tail_tiles, plan.sk_units, plan.iters_per_unit) == parts, where
+                seen[kind] += 1
+    print(f"SM107A_0326 follow cells: {seen}")
+    assert seen == want and seen["whole"], (seen, want)
+
+
+#: The cases of the GPU check of version 0.3.26, (d_in, d_out, T): the four rows of ``SM107A_0326_FOLLOW_ROWS`` at T 1,
+#: 64 and 959 (one partial K block, one full K block, the last token count below T 960) and 4096 -> 16 at T 3073 and
+#: 4095 (the ends of its band where the rule is empty off the 212-SM part; on that part it swaps in both versions), and
+#: around each follow floor above T 1 the token counts on both sides of it.
+SM107A_0326_GPU_CASES = tuple(
+    sorted(
+        {(d_in, d_out, T) for _arch, d_out, d_in, _f32 in SM107A_0326_FOLLOW_ROWS for T in (1, 64, 959)}
+        | {(4096, 16, 3073), (4096, 16, 4095)}
+        | {
+            (d_in, d_out, T)
+            for (_arch, d_out, d_in, _f32), floor in SM107A_0326_FOLLOW_MIN_K.items()
+            if floor > 1
+            for T in (floor - 1, floor)
+        }
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    SM107A_0326_GPU_CASES,
+    ids=lambda c: f"sm_107a-generic-{c[0]}x{c[1]}-T{c[2]}-bf16",
+)
+def test_gpu_0326_generic_call_follows_the_wgrad_entry(case, monkeypatch, record_property):
+    """Each case of ``SM107A_0326_GPU_CASES`` prepares the unbatched generic call ``G.T @ X`` (both operands MN-major,
+    no transposed store) and the weight-gradient entry on an sm_107a device (on its own SM count), both with the
+    registry fallback.  Where the generic call swaps on the device's SM count (``_sm107a_0326_swaps``) its plan is the
+    weight-gradient entry's, with the transposed store and no swap, rule or knob fallback (where it follows the entry
+    since this version, on ``SM107A_0326_DEFAULT_PROGRAM``), and on the last draw both launches give the same bits;
+    elsewhere its plan is the direct plan of version 0.3.25 (``_tables_0325``).  Its output is judged against the FP64
+    oracle beside the naive BF16 tier over the draws, and it returns the same bits on three more launches into NaN.
+    Another architecture skips."""
+    d_in, d_out, T = case
+    if not _device_supported():
+        pytest.skip(
+            "requires a device with a registered generated instance "
+            f"(compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch, sm_count = arch_for(device), _sm_count()
+    if arch != "sm_107a":
+        pytest.skip(
+            f"a case of sm_107a alone, where version 0.3.26 changed the generic call; this device is {arch} with "
+            f"{sm_count} SMs"
+        )
+    key = _sm107a_0323_key(d_in, d_out)
+    swapped = _sm107a_0326_swaps(key, sm_count, T)
+    follows = _sm107a_0326_follows(key, sm_count, T)
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+    G, X = _d1_wgrad_operands(T, d_out, d_in, SEED, device)
+    out = torch.full((d_out, d_in), float("nan"), dtype=torch.bfloat16, device=device)
+    prepared = cake_dense_gemm_det_train_projection_prepare(G.t(), X, out)
+    plan = prepared.plan
+    where = (sm_count, d_in, d_out, T, swapped, follows, prepared.template)
+    wgrad_out = torch.full_like(out, float("nan"))
+    wgrad = cake_dense_gemm_det_train_projection_wgrad_prepare(G, X, wgrad_out)
+    if swapped:
+        assert plan == wgrad.plan and plan.transposed_out, (where, wgrad.template)
+        assert prepared.template == wgrad.template, (where, wgrad.template)
+        assert not (plan.swap_fallback or plan.rule_fallback or plan.knob_fallback), where
+        if follows:
+            assert prepared.template == SM107A_0326_DEFAULT_PROGRAM, where
+    else:
+        with monkeypatch.context() as m:
+            _tables_0325(m)
+            old = cake_dense_gemm_det_train_projection_plan(
+                G.t(), X, out, sm_count=sm_count, l2_bytes=_l2_bytes(), arch=arch
+            )[0]
+        assert plan == old and not plan.transposed_out, (where, old.template)
+
+    def draw(s):
+        # the draw's operands, written into the tensors both prepared launches are bound to
+        for t, value in zip((G, X), _d1_wgrad_operands(T, d_out, d_in, s, device), strict=True):
+            t.copy_(value)
+        nan_fill([out])
+        return SimpleNamespace(A=G, B=X)
+
+    def launch(_inputs):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {"out": out}
+
+    def product(v, dtype):
+        return {"out": torch.matmul(v.A.to(dtype).t(), v.B.to(dtype))}
+
+    judge_gemm(record_property, seed=SEED, draw=draw, launch=launch, product=product)
+    first = out.clone()
+    for _ in range(3):
+        out.fill_(float("nan"))
+        prepared.launch()
+        torch.cuda.synchronize()
+        assert torch.equal(out.view(torch.int16), first.view(torch.int16)), where
+    if swapped:
+        # the last draw's operands through the weight-gradient entry: the same program, plan and bits
+        wgrad.launch()
+        torch.cuda.synchronize()
+        differing = int((wgrad_out.view(torch.int16) != first.view(torch.int16)).sum())
+        assert differing == 0, (where, wgrad.template, differing)
+    print(
+        f"SM107A_0326 {d_in} -> {d_out} T {T} on {sm_count} SMs: swapped {swapped}, follows {follows}, "
+        f"{prepared.template}"
+    )
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()

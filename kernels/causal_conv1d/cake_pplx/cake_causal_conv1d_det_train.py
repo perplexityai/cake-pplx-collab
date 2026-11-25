@@ -90,9 +90,11 @@ C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over
 the key's range outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows
 at C = 720 to 768 have no ``DIRECT_ROWS`` range: they run the pair direct
 program from S = 16 to 1536 and the static program from S = 13824 (C = 736:
-14336).  Outside a row's range, and where an architecture, route and ``C`` have
-no row, the forward takes its counters from the workspace, as in 0.2.4.  Every
-forward program writes the same ``y`` bits.
+14336).  From release 0.2.16, every other ``PAIR_ROWS`` range starts at S = 1
+(sm_107a ``fwd`` at C = 520 to 736: S = 4).  Outside a row's range, and where
+an architecture, route and ``C`` have no row, the forward takes its counters
+from the workspace, as in 0.2.4.  Every forward program writes the same ``y``
+bits.
 
 Inputs and outputs are contiguous (``C`` a multiple of 8, ``S`` at most
 ``2**31 - 2**16``, ``ValueError`` beyond); ``dweight`` and

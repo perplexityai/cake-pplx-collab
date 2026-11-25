@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 22 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 23 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, except situ_glu, which supports `sm_100a` and `sm_103a` only (its `sm_107a` libraries are not delivered yet). Some families limit shapes per architecture.
 
 ## Naming
 
@@ -39,6 +39,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | lm_head | `dX` is slab-summed and row skips can change bits. No run-to-run promise for any output. | Alerts before a K-sliced `dX` reduction |
 | gated_act_mxfp8 | Has no nondet module | — |
 | clamped_swiglu | Has no nondet module | — |
+| situ_glu | Has no nondet module | — |
 | engram_lookup | Has no nondet module | — |
 | mok | Has no nondet module | — |
 | act_qdq | Has no nondet module | — |
@@ -294,7 +295,7 @@ Other public names: `CakeCausalConv1dNondetKcpRecomputeHandle`. Any object with 
 - `silu_grad_preactivation` (`"bf16"` by default, or `"fp32"`): where SiLU' is evaluated. Under `"bf16"`, a call with a bias (FP32 or BF16 taps, route `bwd_bias`) or with BF16 taps or a BF16 `dweight` (route `bwd_dt`) evaluates it at the unrounded FP32 preactivation, and a call with FP32 taps, an FP32 `dweight` and no bias (route `bwd`) at the BF16-rounded preactivation; before 0.2.9 every call with FP32 taps evaluated it at the BF16-rounded preactivation. Under `"fp32"`, every call evaluates it at the unrounded FP32 preactivation.
 - `bwd_grid_mult` (1 by default, up to 4): an opt-in finer static token partition of the backward, which helps overlap with kernels on other streams. In det, the `dweight` bits change with each value and the workspace grows. In nondet, the workspace size does not change. At the nondet backward rows of `cake_jit.DIRECT_ROWS` it multiplies the direct program's grid of the call (at least one CTA per channel tile, at most one per token block). At the nondet rows of `cake_jit.GRID_CAP_ROWS` a value above 1 multiplies the untrimmed grid, as elsewhere: the cap applies at 1 only. At the nondet rows of `cake_jit.SM_WIDE_ROWS` each CTA holds most of an SM's registers and shared memory, so a kernel resident on another stream can push CTAs of that backward into a later wave. With a kernel that holds one SM's shared memory on another stream, the backward at S = 261393, C = 576 took 1.821 / 1.904 / 1.891 times its time alone on sm_100a / sm_103a / sm_107a (1.459 / 1.509 / 1.501 with the program the rules pick without `SM_WIDE_ROWS`).
 - `dweight_sum` (`"fp32"` by default, or the opt-in `"fp32_pair"`): the sum form of `dweight` / `dbias`. `"fp32_pair"` runs the FP32 (hi, lo) pair programs (single rank: with `silu_grad_preactivation="fp32"` only; nondet KCP: the overlapped backward only, so no `bwd_reserve_sms` and at most 65536 channels). det KCP has no `dweight_sum` keyword and no pair opt-in. Other combinations and other strings raise `ValueError`, and a non-string raises `TypeError` (`None` is the nondet KCP default); no call falls back to another program. The default never selects a pair program.
-- `workspace=`: backend `cake_jit.FALLBACK_ROWS`, `cake_jit.DIRECT_ROWS` and, from 0.2.12, `cake_jit.PAIR_ROWS` hold the forward rows at C = 512 to 1024, by architecture, route and `C`. Each row gives its own token range. A `PAIR_ROWS` range runs ahead of the other two tables where it holds the call: there the forward runs the pair direct program, the direct program with each thread on a pair of channels, on the channel tiles of `cake_jit.PAIR_PLANS`. From 0.2.10, every architecture and route has a row at each `C` = 512 to 1024 (0.2.6 to 0.2.9: at each `C` = 576 to 768; 0.2.5 had none for sm_100a `fwd_bias` at `C` = 640, sm_103a `fwd_bias` at `C` = 576 and 712, and sm_103a `fwd` at `C` = 768). For most `C` the first range starts at S = 1. Where a key has no `DIRECT_ROWS` range (for example the sm_107a `fwd_bias` rows at C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over the key's range outside the `PAIR_ROWS` range. The sm_103a `fwd_bias` rows at C = 720 to 768 have no `DIRECT_ROWS` range: they run the pair direct program from S = 16 to 1536 (`PAIR_ROWS`) and the static program from S = 13824 (C = 736: 14336; `FALLBACK_ROWS`). Outside a row's range, and where an architecture, route and `C` have no row, the forward runs as in 0.2.4: it takes its counters from the workspace. Inside a row's range, the forward of either package runs a program that takes no counter buffer, eagerly or inside a CUDA Graph capture: a passed `workspace` is checked and not read, the call zeroes no buffer, and an eager call there refills none. So after eager forward calls inside these rows' token ranges only, a captured nondet forward call outside a row's range (or where an architecture, route and `C` have no row) finds no ready forward buffer and zeroes one of its own: one fill node per call (see below). Elsewhere, when omitted, the forward of either package keeps one zeroed counter buffer per (device, current stream), and the nondet backward keeps one zeroed accumulator buffer per (device, current stream). The det backward allocates a new partial-row buffer on every call, eager or captured; that buffer needs no zeroing. Inside a CUDA Graph capture, each det forward call zeroes a counter buffer of its own. nondet takes one pre-zeroed buffer per capture and stream for the forward and one for the backward, so the graph has no fill node for them. The package zeroes these buffers in refills on earlier eager calls that omit `workspace=`, separately for the forward and the backward, at the size of the largest call whose refill succeeded, and keeps at most 4 idle ones of each kind. A graph holds its buffer until the graph is destroyed and its launches have completed. The package takes a released buffer back only at its next refill on that device; until then the released buffer stays allocated. An eager call that omits `workspace=` refills its kind (forward or backward) when it needs a larger buffer than the kind's ready size on that device, which the latest of these events sets: a capture that asks for a buffer of that kind sets it to zero, a refill that succeeds sets it to the size of its buffers, and a refill that runs out of memory sets it to that call's need. A refill that runs out of memory keeps no new buffer and keeps the buffer size, but it has already taken back the device's released buffers, dropping each one that is smaller than its kind's buffer size (for the refill's own kind, that call's need if it is larger) or that would exceed 4 idle buffers of its kind. A refill that fails for any other reason turns that kind's pre-zeroed buffers off on that device for the rest of the process: its captured calls then zero buffers of their own. Replays of one graph must not overlap. Without a ready buffer of the needed kind and size, each captured nondet call zeroes a buffer of its own, one fill node per call, forward and backward alike. A buffer is ready once the zero fill that an earlier eager call queued has completed: a capture that begins right after that call without a device synchronize can find none ready (`torch.cuda.graph` synchronizes before it captures). Without `cuda.bindings` (no capture id), each captured nondet call zeroes a buffer of its own. nondet allocates its per-stream and pre-zeroed buffers from its own `torch.cuda.MemPool` per device; that memory stays cached in that pool and is not returned to the caching allocator's other pools.
+- `workspace=`: backend `cake_jit.FALLBACK_ROWS`, `cake_jit.DIRECT_ROWS` and, from 0.2.12, `cake_jit.PAIR_ROWS` hold the forward rows at C = 512 to 1024, by architecture, route and `C`. Each row gives its own token range. A `PAIR_ROWS` range runs ahead of the other two tables where it holds the call: there the forward runs the pair direct program, the direct program with each thread on a pair of channels, on the channel tiles of `cake_jit.PAIR_PLANS`. From 0.2.10, every architecture and route has a row at each `C` = 512 to 1024 (0.2.6 to 0.2.9: at each `C` = 576 to 768; 0.2.5 had none for sm_100a `fwd_bias` at `C` = 640, sm_103a `fwd_bias` at `C` = 576 and 712, and sm_103a `fwd` at `C` = 768). For most `C` the first range starts at S = 1. Where a key has no `DIRECT_ROWS` range (for example the sm_107a `fwd_bias` rows at C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over the key's range outside the `PAIR_ROWS` range. The sm_103a `fwd_bias` rows at C = 720 to 768 have no `DIRECT_ROWS` range: they run the pair direct program from S = 16 to 1536 (`PAIR_ROWS`) and the static program from S = 13824 (C = 736: 14336; `FALLBACK_ROWS`). From 0.2.16, every other `PAIR_ROWS` range starts at S = 1 (sm_107a `fwd` at C = 520 to 736: S = 4). Outside a row's range, and where an architecture, route and `C` have no row, the forward runs as in 0.2.4: it takes its counters from the workspace. Inside a row's range, the forward of either package runs a program that takes no counter buffer, eagerly or inside a CUDA Graph capture: a passed `workspace` is checked and not read, the call zeroes no buffer, and an eager call there refills none. So after eager forward calls inside these rows' token ranges only, a captured nondet forward call outside a row's range (or where an architecture, route and `C` have no row) finds no ready forward buffer and zeroes one of its own: one fill node per call (see below). Elsewhere, when omitted, the forward of either package keeps one zeroed counter buffer per (device, current stream), and the nondet backward keeps one zeroed accumulator buffer per (device, current stream). The det backward allocates a new partial-row buffer on every call, eager or captured; that buffer needs no zeroing. Inside a CUDA Graph capture, each det forward call zeroes a counter buffer of its own. nondet takes one pre-zeroed buffer per capture and stream for the forward and one for the backward, so the graph has no fill node for them. The package zeroes these buffers in refills on earlier eager calls that omit `workspace=`, separately for the forward and the backward, at the size of the largest call whose refill succeeded, and keeps at most 4 idle ones of each kind. A graph holds its buffer until the graph is destroyed and its launches have completed. The package takes a released buffer back only at its next refill on that device; until then the released buffer stays allocated. An eager call that omits `workspace=` refills its kind (forward or backward) when it needs a larger buffer than the kind's ready size on that device, which the latest of these events sets: a capture that asks for a buffer of that kind sets it to zero, a refill that succeeds sets it to the size of its buffers, and a refill that runs out of memory sets it to that call's need. A refill that runs out of memory keeps no new buffer and keeps the buffer size, but it has already taken back the device's released buffers, dropping each one that is smaller than its kind's buffer size (for the refill's own kind, that call's need if it is larger) or that would exceed 4 idle buffers of its kind. A refill that fails for any other reason turns that kind's pre-zeroed buffers off on that device for the rest of the process: its captured calls then zero buffers of their own. Replays of one graph must not overlap. Without a ready buffer of the needed kind and size, each captured nondet call zeroes a buffer of its own, one fill node per call, forward and backward alike. A buffer is ready once the zero fill that an earlier eager call queued has completed: a capture that begins right after that call without a device synchronize can find none ready (`torch.cuda.graph` synchronizes before it captures). Without `cuda.bindings` (no capture id), each captured nondet call zeroes a buffer of its own. nondet allocates its per-stream and pre-zeroed buffers from its own `torch.cuda.MemPool` per device; that memory stays cached in that pool and is not returned to the caching allocator's other pools.
 - Programmatic dependent launch (PDL): nondet's single-rank forward and backward programs, except the `"fp32_pair"` programs, take it per call by architecture and by mode (eager or inside a CUDA Graph capture; backend `cake_jit.PDL_EAGER` / `PDL_GRAPH`). A launch may then begin while the stream's preceding kernel finishes; each program waits for that kernel before it reads or writes global memory. The single-rank backward launches without it, in both modes, at the rows of backend `cake_jit.PDL_OFF_ROWS` (by route, `C` and `S`): the default `bwd` route at C = 1000 to 1008 from S = 187755 and at C = 1016 from S = 155648 on sm_100a, and at C = 1000 to 1008 from S = 131073 and at C = 1016 from S = 125171 on sm_103a. From these token counts on, the measured training step and checkpointed step were not slower with that launch made without PDL. The forward keeps it at those rows. The nondet KCP programs launch without it.
 - KCP: `recompute_handle` must be one per call and micro-step, created outside the outermost checkpoint region, and every rank passes one or none.
 - CUDA Graph: build every library of the architecture first (backend `cake_jit.specs_for_arch`) so that no JIT build runs inside capture.
@@ -1865,6 +1866,85 @@ y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down 
 
 ---
 
+## situ_glu
+
+**Computes.** The SiTU-GLU activation of an MLP for training, at any width `I` that is a positive multiple of 256 (the Kimi-K3.1-Pro widths 3072, 6144 and 33,792 among them). Per row `r < R` and column `c < I`, from the BF16 gate `g` and up `u` and the FP32 scalars `beta` and `lb`:
+
+- **Forward:** `a = beta * tanh(g / beta) * sigmoid(g)` and `u' = lb * tanh(u / lb)` in FP32, and `h = BF16(a * u')`, the only rounding.
+- **Backward:** with `s = sigmoid(g)`, `tg = tanh(g / beta)` and `tu = tanh(u / lb)`, `d_gate = BF16(dh * u' * ((1 - tg^2) * s + a * (1 - s)))` and `d_up = BF16(dh * a * (1 - tu^2))`, each rounded once.
+- There is no clamp: both factors saturate smoothly, so large `|g|` and `|u|` keep finite values. `g = 0` or `u = 0` gives `h = 0` exactly. The activation is unweighted.
+- The backward stores 0 for `d_up` where `|u| > 43.67 lb` and, at `beta >= 2.4`, for `d_gate` where `|g| > 43.67 beta`: there `E` or `W` flushes below `2^-126`, and the exact values are under `2^-124 |dh| beta` and about `2^-124 |dh| lb`.
+- One kernel per call (PyTorch's NaN fills under deterministic algorithms aside; see Caveats). The backward needs only `gate`, `up` and `dh`; it recomputes the activation.
+- Every exponential is the approximate base-2 exponential of a negative argument, so none overflows: `tanh(|g| / beta) = (1 - E) / (1 + E)` with `E = 2^(-2 |g| log2(e) / beta)`, the sigmoid from `P = 2^(-|g| log2(e))` (`P = E * E` at `beta = 4`) and `1 - tanh^2 = 4 E / (1 + E)^2`, the up likewise. The reciprocal of `(1 + E)(1 + P)(1 + W)` is one per element in the forward and one per pair of elements in the backward. Every product rounds to nearest without flushing subnormals; nothing is FP64.
+- `1 - E` and `1 - W` keep an absolute error of a few `2^-24`. So where `|g|` is below about `3e-5 beta` (`|u|` below about `3e-5 lb`), the relative error of the outputs that scale with `1 - E` (`h`, `d_up`) or `1 - W` (`h`, `d_gate`) can pass the BF16 rounding, and below about `2^-26 beta` (`2^-26 lb`) those outputs are 0.
+
+**Architectures.** `sm_100a`, `sm_103a`. Other devices raise `RuntimeError`, also for `R = 0`. The `sm_107a` libraries are not delivered yet. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` and 12.9 for `sm_103a`.
+
+**Inputs.**
+
+- `gate`, `up`: BF16 `[R, I]` each, or one `[R, 2I]` tensor with the gate in columns `[0, I)` and the up in `[I, 2I)` (pass it as the first argument with `up=None`). The kernels read every BF16 tensor through its row stride, so the halves of a merged tensor and row slices of wider tensors are read in place when the row stride is a multiple of 8 elements, the last stride is 1 and the base is 16-byte aligned. Other inputs are copied once.
+- `dh`: BF16 `[R, I]`.
+- `beta`, `lb`: finite positive Python numbers, rounded to FP32, with the defaults 4.0 and 25.0 (Kimi-K3.1-Pro's `activation_situ_beta` and `activation_situ_linear_beta`). `2.88539 / beta`, `2.88539 / lb` and `beta * lb` must be finite in FP32 (`ValueError` otherwise). The tests cover `beta` in `[2.5, 4]` and `lb` in `[10, 40]`. They are launch arguments, as are `R`, `I` and the strides: one library per program and architecture serves every call, with no recompilation. Each stage has one program, with one CTA per block of rows (one row in the forward, two in the backward).
+- `R` is any count from 0 to `2**30`. Every operand is on one CUDA device.
+- Every argument is checked before an input is copied or an output allocated, so a call refused for its arguments copies, allocates and launches nothing.
+
+### `cake_pplx.cake_situ_glu_det_train`
+
+This family has a det module only, with no nondet or KCP module: every output is elementwise, with no reduction to reorder, and rows are independent. Every call gives the same bits for the same inputs on the same architecture, whatever `R`, the layout, the stream or a CUDA graph, and no call alerts under `torch.use_deterministic_algorithms(True)`. Source: [`kernels/situ_glu/cake_pplx/cake_situ_glu_det_train.py`](../kernels/situ_glu/cake_pplx/cake_situ_glu_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_situ_glu_det` | `(gate_up_or_gate, up=None, *, beta=4.0, lb=25.0)` | As above | Autograd. Returns contiguous BF16 `h [R, I]`, the down projection's input. A merged input's gradient is one `[R, 2I]` tensor; `beta` and `lb` get none. Saves only its inputs; the backward recomputes the activation. |
+| `cake_situ_glu_det_train_forward` | `(gate_up_or_gate, up=None, *, beta=4.0, lb=25.0, out=None)` | `out` optional preallocated BF16 `[R, I]` (the layout rules above, rows not overlapping) | Returns `h` (`out` when given). Not autograd. `R == 0` returns an empty `h` without a launch. |
+| `cake_situ_glu_det_train_backward` | `(grad_out, gate_up_or_gate, up=None, *, beta=4.0, lb=25.0, grad_gate_up_or_gate=None, grad_up=None)` | `grad_out` BF16 `[R, I]`; optional preallocated outputs: `grad_gate_up_or_gate` (`d_gate [R, I]`, or the merged `[R, 2I]` gradient), `grad_up` (two-tensor form only) | Returns `(d_gate_up, None)` for a merged input or `(d_gate, d_up)`. Not autograd. Unfit output buffers raise `ValueError` (never copied). |
+
+Other public names:
+
+- `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `WIDTH_MULTIPLE` (256).
+- `CakeSiTUGLUDetFunction`: the autograd class, `apply(gate_up_or_gate, up, beta, lb)`.
+- `is_cake_situ_glu_det_train_supported(device)`.
+
+**Options and environment.** `beta`, `lb` and the optional output buffers are the only keywords. The facade reads no environment variable.
+
+**Cross-family.** None. The merged `[R, 2I]` form takes the output of a gate/up projection as is, and `h` is the down projection's input.
+
+**Example.**
+
+```python
+import torch
+import torch.utils.checkpoint
+from cake_pplx.cake_situ_glu_det_train import cake_situ_glu_det
+
+R, I = 16380, 6144
+gate_up = torch.randn(R, 2 * I, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+h = cake_situ_glu_det(gate_up)  # BF16 [R, 6144]; beta = 4.0, lb = 25.0
+h.backward(torch.randn_like(h))  # gate_up.grad BF16 [R, 12288]
+
+# Activation checkpointing: checkpoint the op together with the down projection.
+w_down = (torch.randn(7168, I, device="cuda") / I**0.5).bfloat16().requires_grad_()  # BF16 [hidden, 6144]
+
+
+def situ_down(gate_up, w_down):
+    return torch.nn.functional.linear(cake_situ_glu_det(gate_up), w_down)
+
+
+y = torch.utils.checkpoint.checkpoint(situ_down, gate_up, w_down, use_reentrant=False)
+y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down projection's weight gradient
+```
+
+**Caveats.**
+
+- `sm_107a` (Rubin) devices raise `RuntimeError` until its libraries are delivered.
+- Checkpointing: the op keeps only its inputs, so checkpointing it alone saves no memory. The down projection keeps `h` for its weight gradient. Checkpoint the op together with the down projection (as in the example) so that `h` is not kept from the forward to the backward. The backward of a non-reentrant checkpoint then runs the forward kernel once more before the backward kernel: two forwards and one backward per step.
+- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy).
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
+- No double backward. With `create_graph=True` the op's gradients are constants of the graph: differentiating them raises `RuntimeError` when the upstream gradient requires grad, and adds no term of this op otherwise. No FP8 or FP4 output. Not tested under `torch.compile`.
+- `beta` and `lb` must be Python numbers: a tensor raises `TypeError`, as reading it would synchronize the host.
+- A program's library builds at its first launch. Before capturing a CUDA graph, run one eager call of each stage, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
+
+---
+
 ## engram_lookup
 
 **Computes.** The Engram row lookup for training: rows of a quantized table, gathered by row id and written as BF16.
@@ -2205,7 +2285,7 @@ if torch.cuda.get_device_capability() == (10, 7):
 - **Forward:** `y = BF16(w * x)`, the FP32 product rounded once. Bit for bit `(w[:, None] * x.float()).bfloat16()`.
 - **Backward:** `dx = BF16(w * dy)`, bit for bit `(w[:, None] * dy.float()).bfloat16()`, and the FP32 `dw = sum_c dy * x`, one word per row. `dw` does not divide by `w`, so a zero-weight row gets signed zeros in `y` and `dx` and keeps its `dw`.
 - One kernel per call. The backward reads `x` and `dy` once and writes `dx` and `dw` once: no `[rows, H]` FP32 product is formed.
-- The products of two BF16 values in `dw` are exact in FP32; the additions form a balanced binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd halves, then five XOR shuffles across the row's 32 lanes). Every product rounds to nearest without flushing subnormals; nothing is FP64.
+- The products of two BF16 values in `dw` are exact in FP32; the additions form a balanced binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd halves, then five XOR shuffles across 32 lanes). Every product rounds to nearest without flushing subnormals; nothing is FP64.
 
 **Architectures.** `sm_100a`, `sm_103a`; `sm_107a` follows once it runs on an SM107 device. Other devices, SM107 included, raise `RuntimeError`, also for `rows = 0`. The `build.json` of the package gives the minimum CUDA toolkit of each library.
 
@@ -2267,4 +2347,4 @@ cake_route_weight_scale_det_train_forward(x.detach(), w.detach(), out=buffer[:ro
 - Workspace: none. A call allocates only the outputs it is not given. Retained state of the autograd function: `x` and `w` (references, no copy).
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills each output a call allocates with NaN before the kernel writes it: one more fill launch per new output. Output buffers passed to every call avoid the fills. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. Not tested under `torch.compile`.
-- A program's library builds at its first launch. Before capturing a CUDA graph, run an eager call of each stage and width the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
+- A program's library builds at its first launch. The forward at `H = 4096` and the backward at both widths pick a program and a grid by the row count, with the same bits. Before capturing a CUDA graph, run an eager call of each stage, width and row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.

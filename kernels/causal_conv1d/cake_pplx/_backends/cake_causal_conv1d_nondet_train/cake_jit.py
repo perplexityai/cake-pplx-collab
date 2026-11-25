@@ -5604,10 +5604,8 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd_dt", 520, 568): (1, 16384),
         ("bwd_dt", 576, 640): (1, 24576),
         ("bwd_dt", 648, 1016): (1, 16384),
-        ("fwd", 512, 512): (1, 2048),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
-        ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
@@ -5616,7 +5614,6 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd", 776, 824): (1, 4096),
         ("fwd", 832, 832): (1, 8192),
         ("fwd", 840, 896): (1, 4096),
-        ("fwd", 904, 952): (1, 2048),
         ("fwd", 960, 1024): (1, 24576),
         ("fwd_dt", 512, 512): (1, 20480),
         ("fwd_dt", 520, 568): (1, 8192),
@@ -5656,7 +5653,6 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
-        ("fwd", 768, 768): (1, 2048),
         ("fwd", 776, 824): (1, 32768),
         ("fwd", 832, 832): (1, 4096),
         ("fwd", 840, 888): (1, 8192),
@@ -6443,51 +6439,64 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
 # on the architecture's pair tiles of the route (:data:`PAIR_PLANS`,
 # :func:`plan`).  The keys of one ``(arch, route)`` are disjoint in C: one key,
 # but two on sm_100a ``fwd_dt``, whose range ends at S 1024 from C 648 (at most
-# 512 CTAs of the pair grid).  A range may cover the ``(C, S)`` of
+# 512 CTAs of the pair grid), and three on sm_103a ``fwd_bias`` (C 720-768 from S
+# 16) and sm_107a ``fwd`` (C 520-736 from S 4).  A range may cover the ``(C, S)`` of
 # :data:`FALLBACK_ROWS` and :data:`DIRECT_ROWS` ranges and takes them: those
 # tables decide only outside it.  The det package's table, under this package's
 # prefix.  Rendered from the forward kernel generator's table.
 PAIR_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
     "sm_100a": {
-        ("fwd", 512, 1024): (64, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 512, 1024): (1, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
         ("fwd_dt", 512, 640): (
-            64,
+            1,
             1536,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_dt", 648, 1024): (
-            64,
+            1,
             1024,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_bias", 512, 1024): (
-            128,
+            1,
             1536,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
     },
     "sm_103a": {
-        ("fwd", 512, 1024): (64, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 512, 1024): (1, 3072, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
         ("fwd_dt", 512, 1024): (
-            32,
+            1,
             1792,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
-        ("fwd_bias", 512, 1024): (
+        ("fwd_bias", 512, 712): (
+            1,
+            1536,
+            "cake_causal_conv1d_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 720, 768): (
             16,
+            1536,
+            "cake_causal_conv1d_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 776, 1024): (
+            1,
             1536,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
     },
     "sm_107a": {
-        ("fwd", 512, 1024): (64, 2560, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 512, 512): (1, 2560, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 520, 736): (4, 2560, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
+        ("fwd", 744, 1024): (1, 2560, "cake_causal_conv1d_train_d0b237e92b28348315d0"),
         ("fwd_dt", 512, 1024): (
-            16,
+            1,
             1792,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_bias", 512, 1024): (
-            16,
+            1,
             1792,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),

@@ -1612,6 +1612,15 @@ version 0.3.24 its bits change where the deterministic
 package's do; those of the generic call may also change where it now swaps (it ran the direct plan there before).
 Every other row, architecture and SM count plans as in version 0.3.24.
 
+Version 0.3.26 keeps every table of 0.3.25.  The unbatched BF16 `G.T @ X` call of the generic entry on `4096 -> 16`,
+`4096 -> 96`, `6144 -> 48` and `6144 -> 64`, which runs the deterministic program, follows the deterministic package's
+version 0.3.26: it runs that package's weight-gradient plan at every token count (from 1 token on), also where that
+package's rule of the row is empty (below 960 tokens, and `4096 -> 16` at 3073 to 4095 tokens off the 212-SM
+part), where it ran the direct plan before.  This package's post-ship A/B of that call against its version 0.3.25
+(medians of 21 paired rounds with L2 flushed, version 0.3.25 over 0.3.26): 212-SM part 1.19 - 2.14 (eager),
+1.20 - 2.14 (CUDA graph); 216-SM part 1.20 - 2.27 (eager), 1.20 - 2.63 (CUDA graph).  Against version 0.3.25 its bits may change where it now swaps.  Every other row, architecture
+and SM count plans as in version 0.3.25.
+
 ## Helpers of this package
 
 | name (`cake_pplx._backends.cake_dense_gemm_nondet_train`) | reaches |
