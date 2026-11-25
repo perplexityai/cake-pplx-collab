@@ -17,9 +17,10 @@ once, with FP32 atomic reductions, so `dw` makes no bit promise. Under `torch.us
 nondet backward of `T > 0` tokens alerts; the forward and the det module never do. Details are in
 [`docs/API.md`](../../docs/API.md#attn_res).
 
-The GPU suites ran on B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`), the benchmark on
-B200, GB300, VR200 and R200. On VR200 and R200 the `sm_107a` kernels also pass compute-sanitizer (memcheck, racecheck,
-synccheck and initcheck).
+The GPU suites and the benchmark ran on B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`).
+At 0.1.1, compute-sanitizer passes on GB300 (memcheck, synccheck and initcheck). On VR200 and R200 it passed at 0.1.0
+(memcheck, racecheck, synccheck and initcheck); the kernels are unchanged since then, and 0.1.1 adds the `dw` memset
+to the nondet backward bindings.
 
 Install this family alone, pinned to a commit:
 

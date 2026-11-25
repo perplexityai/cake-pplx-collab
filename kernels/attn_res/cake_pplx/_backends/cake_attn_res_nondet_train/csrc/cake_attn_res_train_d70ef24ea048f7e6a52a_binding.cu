@@ -37,7 +37,20 @@ void CheckCuda(cudaError_t status, const char* what) {
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
 
-void Run(TensorView a_dout, TensorView a_v0, TensorView a_v1, TensorView a_v2, TensorView a_v3, TensorView a_v4, TensorView a_v5, TensorView a_v6, TensorView a_v7, TensorView a_v8, TensorView a_w, TensorView a_p, TensorView a_r, TensorView a_d, TensorView a_dv0, TensorView a_dv1, TensorView a_dv2, TensorView a_dv3, TensorView a_dv4, TensorView a_dv5, TensorView a_dv6, TensorView a_dv7, TensorView a_dv8, TensorView a_dw, int64_t a_T, int64_t a_n, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
+void ZeroRegion(const TensorView& t, const DLDevice& dev, cudaStream_t stream) {
+  if (t.numel() == 0) return;
+  TVM_FFI_CHECK(t.device().device_type == kDLCUDA && t.device().device_id == dev.device_id, ValueError)
+      << KERNEL_NAME << ": 'zero_region' must be a CUDA tensor on device " << dev.device_id;
+  check_contiguous(t, "zero_region");
+  const DLDataType dtype = t.dtype();
+  const int64_t bits = static_cast<int64_t>(dtype.bits) * dtype.lanes;
+  TVM_FFI_CHECK(bits % 8 == 0, ValueError)
+      << KERNEL_NAME << ": 'zero_region' must hold whole bytes per element, got " << bits << " bits";
+  CheckCuda(cudaMemsetAsync(DataPtr(t), 0, static_cast<size_t>(t.numel() * (bits / 8)), stream),
+            "cudaMemsetAsync of 'zero_region'");
+}
+
+void Run(TensorView a_dout, TensorView a_v0, TensorView a_v1, TensorView a_v2, TensorView a_v3, TensorView a_v4, TensorView a_v5, TensorView a_v6, TensorView a_v7, TensorView a_v8, TensorView a_w, TensorView a_p, TensorView a_r, TensorView a_d, TensorView a_dv0, TensorView a_dv1, TensorView a_dv2, TensorView a_dv3, TensorView a_dv4, TensorView a_dv5, TensorView a_dv6, TensorView a_dv7, TensorView a_dv8, TensorView a_dw, int64_t a_T, int64_t a_n, TensorView a_zero_region, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_dout.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_dout, "dout");
@@ -196,6 +209,7 @@ void Run(TensorView a_dout, TensorView a_v0, TensorView a_v1, TensorView a_v2, T
   attrs[1].val.clusterSchedulingPolicyPreference = cudaClusterSchedulingPolicySpread;
   config.attrs = attrs;
   config.numAttrs = 2;
+  ZeroRegion(a_zero_region, dev, stream);
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_attn_res_train_d70ef24ea048f7e6a52a), kernel_args),
             "cudaLaunchKernelExC");
 }

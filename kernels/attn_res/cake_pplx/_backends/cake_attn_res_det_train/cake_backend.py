@@ -49,9 +49,10 @@ held in registers); a call of ``n`` values runs the program of the smallest boun
 (:func:`.cake_jit.nmax_for`).  Every program serves every token count, so the libraries are a fixed set: no shape
 compiles a new one.
 
-``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once
-(:func:`.cake_jit.groups`, from a table of measured counts per architecture and SM count and, on a device the table
-does not hold, a fallback under every measured count); any grid is correct.  Every launch is a plain
+``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once,
+or fewer where a measured cap is lower (``fwd_n4`` takes at most 64 groups on B200, GB200 and GB300)
+(:func:`.cake_jit.groups`, from tables of measured counts and caps per architecture and SM count and, on a device
+the tables do not hold, a fallback under every measured count); any grid is correct.  Every launch is a plain
 stream-ordered launch on the current torch stream of the operands' device: nothing cooperative.  Nothing here reads an
 environment variable, reads device memory or synchronizes; grids and buffer sizes come from tensor shapes, the
 architecture and the SM count.
@@ -161,14 +162,14 @@ def sm_count(device_index: int) -> int:
 
 @functools.cache
 def _resident(name: str, device_index: int) -> int:
-    """The resident launch groups of record ``name`` on one CUDA device (:func:`.cake_jit.resident_groups`), looked
-    up once per record and device."""
+    """The launch groups of record ``name`` on one CUDA device: the resident groups, at most the record's cap
+    (:func:`.cake_jit.resident_groups`), looked up once per record and device."""
     return cake_jit.resident_groups(name, device_arch(device_index), sm_count(device_index))
 
 
 def _groups(name: str, T: int, device_index: int) -> int:
-    """:func:`.cake_jit.groups` of record ``name`` for ``T`` tokens on one CUDA device: the resident groups, never
-    more than ``T``, at least one."""
+    """:func:`.cake_jit.groups` of record ``name`` for ``T`` tokens on one CUDA device: the resident groups or the
+    record's cap (:data:`.cake_jit.GROUP_CAPS`), never more than ``T``, at least one."""
     return max(1, min(T, _resident(name, device_index)))
 
 
