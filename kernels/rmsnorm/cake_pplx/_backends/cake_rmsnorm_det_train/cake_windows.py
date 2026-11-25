@@ -695,7 +695,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (1, 128, "cake_rmsnorm_det_train_a5f2942d61e591f57a76"),
             (128, 512, "cake_rmsnorm_det_train_809235a3965d337a6877"),
             (512, 6143, "cake_rmsnorm_det_train_12bbedff93fcaafa475d"),
-            (6143, None, "cake_rmsnorm_det_train_cbeec4e61f2d2b614216"),
+            (6143, 32767, "cake_rmsnorm_det_train_3f26352ef0f1d5e47ecd"),
+            (32767, None, "cake_rmsnorm_det_train_7ac3bb6464039170699d"),
         ),
         "bwd_w32_h1280": (
             (0, 1, "cake_rmsnorm_det_train_103805d93149c8668264"),
@@ -703,7 +704,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (128, 512, "cake_rmsnorm_det_train_e476d0b2c0bd4285f16d"),
             (512, 4096, "cake_rmsnorm_det_train_80956d258172dfa76c2a"),
             (4096, 6143, "cake_rmsnorm_det_train_c66b8cbd5626e2c1f2b4"),
-            (6143, None, "cake_rmsnorm_det_train_3a321b74c7b4fee64877"),
+            (6143, 32767, "cake_rmsnorm_det_train_b1a35315ca6fcda95b3c"),
+            (32767, None, "cake_rmsnorm_det_train_7a4606b019405eb9a2ef"),
         ),
         "bwd_h1536": (
             (0, 1, "cake_rmsnorm_det_train_c3b1b46a2c6d1f9b3724"),
@@ -1450,6 +1452,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (128, "unmeasured"),
             (512, "unmeasured"),
             (6143, "unmeasured"),
+            (32767, "unmeasured"),
         ),
         "bwd_w32_h1280": (
             (1, "unmeasured"),
@@ -1457,6 +1460,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (512, "unmeasured"),
             (4096, "unmeasured"),
             (6143, "unmeasured"),
+            (32767, "unmeasured"),
         ),
         "bwd_h1536": (
             (1, "unmeasured"),
@@ -2062,10 +2066,10 @@ its own windows.
 * ``sm_107a`` ``bwd_h128``: (0, 1024] 93466008 ? (1024, 2047] 401a018c ?
   (2047, 65536] d197bcc3 ? (65536, inf) 401a018c
 * ``sm_107a`` ``bwd_h1280``: (0, 1] 8895b022 ? (1, 128] a5f2942d ? (128, 512] 809235a3 ?
-  (512, 6143] 12bbedff ? (6143, inf) cbeec4e6
+  (512, 6143] 12bbedff ? (6143, 32767] 3f26352e ? (32767, inf) 7ac3bb64
 * ``sm_107a`` ``bwd_w32_h1280``: (0, 1] 103805d9 ? (1, 128] 8d8ef930 ?
   (128, 512] e476d0b2 ? (512, 4096] 80956d25 ? (4096, 6143] c66b8cbd ?
-  (6143, inf) 3a321b74
+  (6143, 32767] b1a35315 ? (32767, inf) 7a4606b0
 * ``sm_107a`` ``bwd_h1536``: (0, 1] c3b1b46a ? (1, 576] 1207b056 ? (576, 1024] 7dc29629
   = (1024, 12288] 88510c60 = (12288, 16384] 6a428da2 = (16384, 45056] 56d26996 =
   (45056, inf) 411e270c
