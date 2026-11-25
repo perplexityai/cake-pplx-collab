@@ -134,6 +134,7 @@ class HostLaunches:
         simulate: bool = True,
     ):
         self.backend, self.jit, self.launch = backend, jit, launch
+        self.monkeypatch = monkeypatch
         self.arch = arch
         self.simulate = simulate
         self.launches: list[Launch] = []
@@ -656,7 +657,8 @@ def _case_inputs(case: dict) -> HostInputs:
 #: The 64-head cases of the golden file: the forward and the backward of the eager entries and a prepared runner,
 #: both ``with_o_lo`` modes, caller and derived lengths, packed and head-major operands, forced key passes over
 #: several token chunks, the direct and the cast-accumulate paths of ``dkv_acc`` (with a repeated destination map)
-#: and ``dkv_fp32``; on the three architectures where their plans differ (token order, direct rule).
+#: and ``dkv_fp32``, and a forward + ``autograd.grad`` step of the flat autograd entry and of the packed (varlen)
+#: entry on its torch index route; on the three architectures where their plans differ (token order, direct rule).
 H64_CASES: dict[str, dict] = {
     "fwd_derived": dict(entry="forward", lengths=False),
     "fwd_packed_lengths_no_olo": dict(
@@ -679,6 +681,8 @@ H64_CASES: dict[str, dict] = {
     "runner_step_acc_no_olo": dict(
         entry="runner", acc=True, dst_map=True, with_o_lo=False
     ),
+    "autograd_derived": dict(entry="autograd", lengths=False),
+    "varlen_torch": dict(entry="varlen", lengths=False),
 }
 #: The cases whose plans depend on the architecture (single-pass token order, the direct rule) also run there.
 H64_ARCH_CASES = ("bwd_single", "bwd_acc_direct_map", "runner_step")
@@ -707,7 +711,10 @@ def run_case(
     h: HostLaunches, backend, case: dict, inp: Optional[HostInputs] = None
 ) -> dict:
     """Run one case of :data:`H64_CASES` (or the same keys at another head count) under ``h``; returns the call's
-    tensors by role."""
+    tensors by role.  The autograd entries (``"autograd"``, ``"varlen"``) run on fresh leaf copies of the inputs
+    (their roles) and ``autograd.grad`` with ``dout``; ``"varlen"`` splits the call into two documents of
+    ``T // 2`` / ``S // 2`` rows (``indices % (S // 2)`` as the document-relative rows, ``causal=True``) and takes
+    the torch index route (the index-preparation stage needs a device)."""
     inp = inp or _case_inputs(case)
     h.bind(inp.q_latent, inp.q_rope, inp.dout)
     with_o_lo = case.get("with_o_lo", True)
@@ -768,6 +775,35 @@ def run_case(
         )
         grads = runner.step()
         roles.update(out=runner.out, lse=runner.lse, o_lo=runner.o_lo, runner=runner)
+        roles.update(
+            zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True)
+        )
+    elif entry in ("autograd", "varlen"):
+        leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
+        h.bind(leaves[0], leaves[1], inp.dout)
+        roles.update(zip(("q_latent", "q_rope", "kv_latent", "k_rope"), leaves))
+        kw = dict(
+            topk_length=lengths,
+            key_passes=case.get("key_passes"),
+            dkv_acc=dkv_acc,
+            dkv_dst_map=dst_map,
+            dkv_direct=case.get("dkv_direct"),
+            with_o_lo=with_o_lo,
+        )
+        if entry == "autograd":
+            out = backend.cake_dsa_sparse_attention_nondet(*leaves, inp.indices, **kw)
+        else:
+            h.monkeypatch.setattr(
+                backend, "nope_index_prep_available", lambda device=None: False
+            )
+            T, S = inp.total_q, inp.total_k
+            cu_q = torch.tensor([0, T // 2, T], dtype=torch.int32)
+            cu_k = torch.tensor([0, S // 2, S], dtype=torch.int32)
+            out = backend.cake_dsa_sparse_attention_nondet_varlen(
+                *leaves, inp.indices % (S // 2), cu_q, cu_k, causal=True, **kw
+            )
+        grads = torch.autograd.grad(out, leaves, inp.dout)
+        roles.update(out=out)
         roles.update(
             zip(("dq_latent", "dq_rope", "dkv_latent", "dk_rope"), grads, strict=True)
         )
