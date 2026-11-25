@@ -357,20 +357,17 @@ CTAS_PER_SM = {
 DW_REDUCE_COLUMNS_PER_CTA = 128
 # Launch groups (four-CTA clusters) one device holds at once, by the CTAs per SM of a program: (architecture, SM
 # count) -> {CTAs per SM: clusters}, as ``cudaOccupancyMaxActiveClusters`` reports them (spread cluster scheduling, as
-# the programs launch).  The count follows the CTAs per SM, not the program; every entry of GB300, B200, VR200 and
-# R200 was measured on the shipped programs (all of them on GB300).  Boards of one SM count can differ by a cluster
-# (one R200 board of 208 SMs holds 154 at 3 CTAs per SM, another 153): an entry holds the least count measured on
-# the boards of its SM count.  The four CTAs of a cluster share one GPC, so a device holds at most CTAs per SM * SMs
-# / 4 clusters (R200 exactly that many at 2 and 4 CTAs per SM, the other devices fewer), and on VR200 and R200 no more
-# at 5 CTAs per SM than at 4.
-# The GB200 entries at 3 and 4 CTAs per SM are the counts measured on the four-CTA cluster programs of the
-# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.  GB200 has no entry at 2 CTAs per SM yet:
-# there ``fwd_n2`` .. ``fwd_n4`` and ``bwd_n7`` .. ``bwd_n9`` take the fallback below (64 groups; GB300 holds 74).
+# the programs launch).  The count follows the CTAs per SM, not the program; every entry of GB300, GB200, B200, VR200
+# and R200 was measured on the shipped programs (all of them on GB300 and GB200).  Boards of one SM count can differ by
+# a cluster (one R200 board of 208 SMs holds 154 at 3 CTAs per SM, another 153): an entry holds the least count
+# measured on the boards of its SM count.  The four CTAs of a cluster share one GPC, so a device holds at most CTAs per
+# SM * SMs / 4 clusters (R200 exactly that many at 2 and 4 CTAs per SM, the other devices fewer), and on VR200 and R200
+# no more at 5 CTAs per SM than at 4.  GB200 and GB300 (both 152 SMs) hold the same counts at 2, 3 and 4 CTAs per SM.
 # The GPU tests check that every program's entry, and the grid the host takes, do not exceed the driver's count
 # (``cuOccupancyMaxActiveClusters``) on the device they run on.
 RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_100a", 148): {2: 71, 3: 104, 4: 142, 5: 175},
-    ("sm_100a", 152): {3: 110, 4: 148},
+    ("sm_100a", 152): {2: 74, 3: 110, 4: 148},
     ("sm_103a", 152): {2: 74, 3: 110, 4: 148, 5: 184},
     ("sm_107a", 208): {2: 104, 3: 153, 4: 208, 5: 208},
     ("sm_107a", 212): {2: 92, 3: 138, 4: 184, 5: 184},

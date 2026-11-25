@@ -54,7 +54,7 @@ must share no byte with an operand or another output (`ValueError`).
 
 `T = 0` launches no Cake kernel: the backward returns a zero `dw` (a `torch.zeros` fill).
 
-`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB300, VR200 and R200; GB200's counts at 3 and 4 CTAs per SM come from another family's measurements, and GB200 has no count at 2 yet, so there `fwd_n2` .. `fwd_n4` and `bwd_n7` .. `bwd_n9` take the fallback; on another device a fallback under every measured count). The kernels take nine value pointers; the host passes the first value in the slots
+`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB200, GB300, VR200 and R200; on another device a fallback under every measured count). The kernels take nine value pointers; the host passes the first value in the slots
 past `n`, which the kernels never read.
 
 ## Determinism
