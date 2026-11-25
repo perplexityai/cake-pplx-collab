@@ -1707,7 +1707,9 @@ def test_slot_values_bind_whole_tensors_of_a_one_chunk_plan():
     view of all its rows (``_chunk_rows``): the row index and the gathered rows of the host gather, the logits GEMM's
     ``A`` / ``C``, the dX GEMM's ``A`` / ``C`` and the weight-gradient GEMM's ``A`` of a one-chunk plan (compacted:
     ``x_c``; uncompacted: ``X``); a plan of three chunks binds views of each chunk's rows.  Every slot binds what
-    ``stage_values`` binds (``_check_slot_values`` passes for every key of the forward and backward sequences)."""
+    ``stage_values`` binds (``_check_slot_values`` passes for every key of the forward and backward sequences).  The
+    opt-in module slots its dX GEMM through the same helper (``_dx_slots``): its one-chunk plan binds the whole
+    ``logits`` / ``dx_acc`` as well, each slot what its own ``stage_values`` binds."""
     inp = _host_inputs(37)
     seen = set()
     for compact in (True, False):
@@ -1764,6 +1766,39 @@ def test_slot_values_bind_whole_tensors_of_a_one_chunk_plan():
         (False, "gemm_logits", "C"),
     } <= seen, seen
     assert {(c, "gemm_dx", s) for c in (True, False) for s in ("A", "C")} <= seen, seen
+    assert opt_in._dx_slots is cake_backend._dx_slots
+    seen_opt = set()
+    for compact in (True, False):
+        for chunk in (64, 16):
+            runner = opt_in.prepare_lm_head_loss(
+                inp.X,
+                inp.W,
+                inp.labels,
+                entry="logprob",
+                dlogp=inp.dlogp,
+                chunk_size=chunk,
+                backend="reference",
+                compact_rows=compact,
+            )
+            plan, t = runner.plan, runner.tensors
+            assert chunk == 16 or plan.num_chunks == 1, (compact, plan.num_chunks)
+            for key in runner.forward_order + runner.backward_order:
+                stage, index = key
+                if isinstance(index, str) or stage not in opt_in.GEMM_STAGES:
+                    continue
+                if opt_in.base_stage(stage) not in opt_in.DX_BASES:
+                    continue
+                row0, rows_c = plan.chunks[index]
+                v = opt_in._slot_values(stage, t, plan, index)
+                names = [n for n, a in v.items() if isinstance(a, torch.Tensor)]
+                opt_in._check_slot_values(key, t, plan, names)
+                rows_of = dict(A=("logits", 0), C=("dx_acc", row0))
+                for slot, (name, first) in rows_of.items():
+                    whole = first == 0 and rows_c == t[name].shape[0]
+                    assert (v[slot] is t[name]) is whole, (compact, chunk, key, slot)
+                    if whole:
+                        seen_opt.add((compact, slot))
+    assert {(c, s) for c in (True, False) for s in ("A", "C")} <= seen_opt, seen_opt
 
 
 @pytest.mark.parametrize("tau", [None, "scalar"])
