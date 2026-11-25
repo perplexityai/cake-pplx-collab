@@ -67,8 +67,10 @@ from tests.experimental.test_cake_kda_det_train_kcp_dist import (
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     _bound_rank_threads,
     _init_group,
-    _programs_exported as _nondet_programs_exported,
     _rendezvous,
+)
+from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
+    _programs_exported as _nondet_programs_exported,
 )
 from tests.experimental.test_helpers.cake_host_sync import census, nonblocking, summary
 
@@ -201,7 +203,7 @@ def _run_rank(
     ctx = m.build_context(part, group, rank, device)
     T = int(ctx.T_r)
     ops = _local_operands(T, device, rank)
-    modes = dict(use_gate_in_kernel=True, use_qk_l2norm_in_kernel=True)
+    modes = {"use_gate_in_kernel": True, "use_qk_l2norm_in_kernel": True}
     ws = m.workspace(**modes)
     reserved = ws.reserve(ctx, H)
     flags: dict = {}
@@ -444,7 +446,7 @@ def _layout_rank(rank: int, pkg: str, W: int, rdzv: str, result_dir: str) -> Non
         _init_group(rank, W, device, rdzv)
         spy = _BuildLoadSpy().install()
         ops = _local_operands(T_RANK, device, rank)
-        modes = dict(use_gate_in_kernel=True, use_qk_l2norm_in_kernel=True)
+        modes = {"use_gate_in_kernel": True, "use_qk_l2norm_in_kernel": True}
         leaves = [ops[n].requires_grad_(True) for n in LEAVES]
 
         def call(lengths) -> dict:
