@@ -2250,8 +2250,9 @@ class _Plan:
     entries: dict[Any, _StageEntry] = field(repr=False)
     backward_order: tuple
     # The program's forward stage(s) (``module_name`` is the program) and the FP32 dQ partial bytes per
-    # token of its pass scratch; the NoPE plans set both.
-    forward_stages: tuple[str, ...] = FORWARD_STAGES
+    # token of its pass scratch; the NoPE plans set both.  Above 64 heads the forward's launch keys are
+    # :class:`WindowLaunch` and :class:`HeadStep` objects, as are those of ``backward_order``.
+    forward_stages: tuple = FORWARD_STAGES
     dq_partial_bytes_per_token: int = DQ_PARTIAL_BYTES_PER_TOKEN
     # NoPE: the backward returns a fresh natural FP32 ``dkv`` (no caller ``dkv_acc``).
     fresh_dkv: bool = False
@@ -2887,8 +2888,9 @@ class DSATrainRunner:
     # True when the natural-layout main stage adds into ``dkv_acc`` itself (no accumulators, no zero fill, no cast).
     dkv_direct: bool = False
     # The program's forward launch key(s) (``("fwd",)``; ``("nope_fwd",)`` on the NoPE runner; their
-    # ``with_o_lo=False`` twins on a runner prepared with ``with_o_lo=False``).
-    forward_stages: tuple[str, ...] = FORWARD_STAGES
+    # ``with_o_lo=False`` twins on a runner prepared with ``with_o_lo=False``; above 64 heads the
+    # :class:`WindowLaunch` and :class:`HeadStep` keys of the windows).
+    forward_stages: tuple = FORWARD_STAGES
     # ``False``: the forward writes no ``o_lo`` (``tensors["o_lo"]`` is the kernels' zero-size placeholder) and the
     # backward's delta reads ``out`` alone.
     with_o_lo: bool = True
