@@ -57,18 +57,21 @@ a call.  Every record ships for the three architectures; where no region
 routes a call (``sm_100a`` with the mask) the pair build ships and no call
 takes it.
 
-The one-launch route (head dimension 128 or 64, no mask): one kernel, the
-``bwd_fused`` stage (``bwd_fused`` / ``bwd_fused_hd64``), does the whole
-backward of a call on few CTAs (short sequences, or long ones with few
-heads).  On the grid ``(Sq / 128 + Skv / 128, H, B)`` the first
+The one-launch route (head dimension 128 or 64, without the mask or with it):
+one kernel, the ``bwd_fused`` stage (``bwd_fused`` / ``bwd_fused_hd64``
+without the mask, ``bwd_fused_causal`` / ``bwd_fused_hd64_causal`` with it),
+does the whole backward of a call on few CTAs (short sequences, or long ones
+with few heads).  On the grid ``(Sq / 128 + Skv / 128, H, B)`` the first
 ``Sq / 128`` CTAs of a (head, batch) are Q-owners, each the dq of one
 query block, and the others are KV-owners, each dk and dv of one key block;
 the kernel makes ``LSE * log2(e)`` and ``dPsum`` itself, needs no workspace
 and writes dq, dk and dv once each in one fixed order.  ``FUSED_OF`` names its
 record per (head dimension, causal) and :func:`fused_record` picks the
-one-launch route for a call inside one of the pieces of ``FUSED_REGION``;
-every other call takes the route of :func:`variant`.  No ``RECORD_OF``
-variant and no host sequence names a ``bwd_fused`` record.
+one-launch route for a call without the mask inside one of the pieces of
+``FUSED_REGION``, and for a causal call (``Sq == Skv``) inside one of the
+pieces of ``FUSED_CAUSAL_REGION``; every other call takes the route of
+:func:`variant`.  No ``RECORD_OF`` variant and no host sequence names a
+``bwd_fused`` record.
 """
 
 from __future__ import annotations
@@ -284,6 +287,36 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_fmha_train_535529048441929389ae",
         "stage": "bwd_fused",
     },
+    "bwd_fused_causal": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ"], ["buffer", "LSE"], ["buffer", "O_gmem"], ["buffer", "dO_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_n_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_45471caca3efd9427760",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 199168,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_45471caca3efd9427760",
+        "stage": "bwd_fused",
+    },
+    "bwd_fused_hd64_causal": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ"], ["buffer", "LSE"], ["buffer", "O_gmem"], ["buffer", "dO_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_n_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_38ec1d22736060c57a93",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 117248,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_38ec1d22736060c57a93",
+        "stage": "bwd_fused",
+    },
 }
 
 # (head dim, causal, pair) -> the records of the three stages, in launch order.
@@ -336,8 +369,14 @@ SEQUENCES: dict[tuple[int, bool, bool], dict[str, Any]] = {
 }
 
 # (head dim, causal) -> the record of the one-launch backward (the ``bwd_fused``
-# stage).  Non-causal only: the kernel has no mask.
-FUSED_OF: dict[tuple[int, bool], str] = {(128, False): "bwd_fused", (64, False): "bwd_fused_hd64"}
+# stage): the build without the mask, or the causal build (top-left mask,
+# ``Sq == Skv``).
+FUSED_OF: dict[tuple[int, bool], str] = {
+    (128, False): "bwd_fused",
+    (64, False): "bwd_fused_hd64",
+    (128, True): "bwd_fused_causal",
+    (64, True): "bwd_fused_hd64_causal",
+}
 
 
 def grid(stage: str, batch: int, heads: int, seqlen_q: int, seqlen_kv: int) -> tuple[int, int, int]:
@@ -482,19 +521,59 @@ FUSED_REGION: dict[tuple[str, int], tuple[tuple[int, int, int, int], ...] | None
     ),
 }
 
+# (architecture, head dimension) -> the region of the one-launch route for a
+# causal call there, or None (no causal call takes it): one or more pieces,
+# each (least_ctas, most_ctas, least_s, most_s).  A causal call (top-left
+# mask, ``Sq == Skv == S``) is inside a piece when ``least_ctas <= B * H *
+# (Sq / 128 + Skv / 128) <= most_ctas`` (the CTAs of the one-launch grid) and
+# ``least_s <= S <= most_s`` (a lower bound of 0 bounds nothing), and inside
+# the region when it is inside any of its pieces (:func:`fused_record`).
+# Every bound is a measured call.  Inside the pieces without a lower bound
+# every measured causal call (``B * H`` 1 to 128, S 128 to 4096) was faster
+# on the one-launch route than on the route of :func:`variant` in both
+# replicate runs of the CUDA-graph timing, beyond the identical-kernel
+# controls' noise; inside the pieces with a lower bound every measured call
+# was faster than that route and than cuDNN's fastest measured plan in every
+# counted round of both replicate runs, in CUDA-graph replays and in eager
+# calls.  Every measured call that was not lies outside every piece (a call
+# measured in both runs by the later one; some calls that were lie outside
+# too: a piece holds no measured call that was not).  The pieces may
+# overlap, and their order does not change the route.
+FUSED_CAUSAL_REGION: dict[tuple[str, int], tuple[tuple[int, int, int, int], ...] | None] = {
+    ("sm_100a", 128): ((0, 128, 0, 4096), (0, 512, 0, 256)),
+    ("sm_100a", 64): ((0, 128, 0, 4096),),
+    ("sm_103a", 128): ((0, 128, 0, 4096), (256, 256, 128, 256)),
+    ("sm_103a", 64): ((0, 128, 0, 4096), (0, 256, 0, 256)),
+    ("sm_107a", 128): ((0, 128, 0, 4096), (512, 1024, 256, 512), (256, 256, 4096, 4096)),
+    ("sm_107a", 64): ((0, 128, 0, 4096), (512, 512, 256, 256)),
+}
+
 
 def fused_record(arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: bool) -> str | None:
     """The ``bwd_fused`` record of a call on ``arch`` (one of ``ARCHES``), or
     None: the call then takes the route of :func:`variant`.  The record is
-    ``FUSED_OF[(D, causal)]`` when ``FUSED_OF`` has one (no mask), the
-    region ``FUSED_REGION[(arch, D)]`` is not None and the call is inside any
-    of its pieces: with ``(max_ctas, s_max, skv_any, skv_per_sq)`` the bounds
-    of a piece, ``B * H * (Sq // BLOCK + Skv // BLOCK) <= max_ctas`` (the
-    CTAs of the one-launch grid), ``max(Sq, Skv) <= s_max`` and ``Skv <=
-    skv_any`` or ``Skv <= skv_per_sq * Sq``.  Reads the shapes and the
-    architecture only."""
+    ``FUSED_OF[(D, causal)]`` when the call is inside the region of its mask.
+    Without the mask: the region ``FUSED_REGION[(arch, D)]`` is not None and
+    the call is inside any of its pieces: with ``(max_ctas, s_max, skv_any,
+    skv_per_sq)`` the bounds of a piece, ``B * H * (Sq // BLOCK + Skv //
+    BLOCK) <= max_ctas`` (the CTAs of the one-launch grid), ``max(Sq, Skv) <=
+    s_max`` and ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq``.  With the
+    mask: ``Sq == Skv``, the region ``FUSED_CAUSAL_REGION[(arch, D)]`` is not
+    None and the call is inside any of its pieces: with ``(least_ctas,
+    most_ctas, least_s, most_s)`` the bounds of a piece, ``least_ctas <= B * H
+    * (Sq // BLOCK + Skv // BLOCK) <= most_ctas`` and ``least_s <= Sq <=
+    most_s``.  Reads the shapes and the architecture only."""
     record = FUSED_OF.get((D, bool(causal)))
     if record is None:
+        return None
+    if causal:
+        region = FUSED_CAUSAL_REGION.get((arch, D))
+        if region is None or Sq != Skv:
+            return None
+        ctas = B * H * (Sq // BLOCK + Skv // BLOCK)
+        for least_ctas, most_ctas, least_s, most_s in region:
+            if least_ctas <= ctas <= most_ctas and least_s <= Sq <= most_s:
+                return record
         return None
     region = FUSED_REGION.get((arch, D))
     if region is None:

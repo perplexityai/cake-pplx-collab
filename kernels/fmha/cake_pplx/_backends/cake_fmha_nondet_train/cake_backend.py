@@ -28,11 +28,13 @@ sources and flags of ``build.json``.
 
 A backward call runs one kernel on the one-launch route, else three.  A call
 that :func:`.cake_jit.fused_record` places in the region of its architecture
-and head dimension (``cake_jit.FUSED_REGION``; no mask) takes the one-launch
-route: the ``bwd_fused`` kernel, on the grid ``(Sq / 128 + Skv / 128, H, B)``,
-whose first ``Sq / 128`` CTAs of a (head, batch) each write the dq of one query
-block and whose other CTAs each write dk and dv of one key block.  It makes
-``lse * log2(e)`` and ``rowsum(out * dout)`` itself and needs no workspace.
+and head dimension (``cake_jit.FUSED_REGION`` without the mask,
+``cake_jit.FUSED_CAUSAL_REGION`` with it, ``Sq == Skv``) takes the one-launch
+route: the ``bwd_fused`` kernel of its mask, on the grid
+``(Sq / 128 + Skv / 128, H, B)``, whose first ``Sq / 128`` CTAs of a (head,
+batch) each write the dq of one query block and whose other CTAs each write dk
+and dv of one key block.  It makes ``lse * log2(e)`` and ``rowsum(out * dout)``
+itself and needs no workspace.
 
 Every other call runs three kernels on the current torch stream of the
 operands' device, in this order:
@@ -479,10 +481,10 @@ def launch_bwd_fused(
     dv: torch.Tensor,
     softmax_scale: float,
 ) -> None:
-    """Launch the one-launch record ``name`` (stage ``bwd_fused``, no mask): from ``q``, ``out``, ``dout`` (BF16
-    ``[B, Sq, H, D]``), ``k``, ``v`` (BF16 ``[B, Skv, H, D]``) and ``lse`` (FP32 natural log ``[B, H, Sq]``) it writes
-    ``dq`` (BF16 ``[B, Sq, H, D]``), ``dk`` and ``dv`` (BF16 ``[B, Skv, H, D]``), each once and in one fixed order;
-    no workspace."""
+    """Launch the one-launch record ``name`` (stage ``bwd_fused``, the build without the mask or the causal build):
+    from ``q``, ``out``, ``dout`` (BF16 ``[B, Sq, H, D]``), ``k``, ``v`` (BF16 ``[B, Skv, H, D]``) and ``lse`` (FP32
+    natural log ``[B, H, Sq]``) it writes ``dq`` (BF16 ``[B, Sq, H, D]``), ``dk`` and ``dv`` (BF16 ``[B, Skv, H, D]``),
+    each once and in one fixed order; no workspace."""
     B, Sq, H, _ = q.shape
     Skv = k.shape[1]
     scale = float(softmax_scale)

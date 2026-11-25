@@ -24,10 +24,10 @@ Without a device: the registry (the three stages of the three-kernel routes in l
 stage, one program per record, every record delivered for the three architectures and for no other, the launch facts:
 a cluster of two CTAs for the 2-CTA main kernels), the routing table ``RECORD_OF`` (the preprocess, main-stage and
 postprocess record of each head dimension, causal flag and route, a 2-CTA main stage with the pair-row postprocess and
-no other), the one-launch record of each head dimension without the mask (``FUSED_OF``: every record serves a variant
-or ``FUSED_OF``, and no variant or host sequence names a one-launch record) and the host sequence of each variant
-(``SEQUENCES``: its three records), the route of a call (``variant``: the pair route for head dimension 128, a key
-length that is a multiple of 256, at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
+no other), the one-launch records of each head dimension, without the mask and causal (``FUSED_OF``: every record
+serves a variant or ``FUSED_OF``, and no variant or host sequence names a one-launch record) and the host sequence of
+each variant (``SEQUENCES``: its three records), the route of a call (``variant``: the pair route for head dimension
+128, a key length that is a multiple of 256, at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
 ``PAIR_REGIONS``; every measured crossover call on its decided route, ``DECIDED_LEAST``; the long-sequence causal region
 of ``sm_103a`` on both sides of each bound, ``CAUSAL_PAIR_CALLS``; the pair route without the mask for fewer queries
 than keys within the bounds ``PAIR_FEWER_QUERIES`` of the architecture, the shipped bounds
@@ -37,7 +37,12 @@ any piece of the region of ``FUSED_REGION``, on both sides of each bound of a re
 the shipped region of each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both sides of each bound of
 each of its pieces and, for each piece, a call that no other piece of its region holds, every measured long call on
 its decided route, ``DECIDED_LONG_CALLS``, and the long calls of the benchmark's ``T1`` to ``T4`` rows on the
-three-kernel routes on every architecture), the launch grids, the stage launchers' keywords, their positional launch of
+three-kernel routes on every architecture; for a causal call, the one-launch route inside any piece of the causal
+region of ``FUSED_CAUSAL_REGION`` and only with ``Sq == Skv``, on both sides of each bound of a causal region of one
+piece and of two pieces; the shipped causal region of each architecture and head dimension,
+``SHIPPED_FUSED_CAUSAL_REGION``, on both sides of each bound of each of its pieces and, for each piece, a call that no
+other piece of its region holds, and every measured causal call on its decided route, ``DECIDED_CAUSAL_FUSED`` and
+``DECIDED_CAUSAL_CALLS``), the launch grids, the stage launchers' keywords, their positional launch of
 every routed record (the FFI arguments and grid of the registry-ordered launch), the two layouts of the dQ accumulator
 in the judge's helper, the build manifest (every record's and host sequence's library, the recorded source digests), the
 standalone loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
@@ -61,7 +66,8 @@ operation on the device (a CUPTI that does not support it), the tests that obser
 skip the observation.  The public backward is also judged on the shipped tables on the least call with fewer queries
 than keys within the bounds of the pair route (the pair route on SM103 and SM107, the 1-CTA route on SM100), and on
 the least causal call of the long-sequence causal region of SM103 (``B * H`` 32, 8192 queries and keys: the pair route
-on SM103 and SM107, the 1-CTA route on SM100).
+on SM103 and SM107, the 1-CTA route on SM100), and on a causal call inside the causal one-launch region of every
+architecture at each head dimension (``B * H`` 8, 1024 queries and keys: the causal one-launch record alone).
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -127,8 +133,13 @@ VARIANT_IDS = ["d128", "d128_causal", "d64", "d64_causal", "d128_pair", "d128_pa
 # The 2-CTA main-stage records (a cluster of two CTAs along x) and the postprocess that reads their pair-row order.
 PAIR_MAINS = ("bwd_main_2cta", "bwd_main_2cta_causal")
 PAIR_POST = "bwd_post_pair"
-# The one-launch record of each (head dimension, causal): no mask.
-FUSED_OF = {(128, False): "bwd_fused", (64, False): "bwd_fused_hd64"}
+# The one-launch record of each (head dimension, causal): the build without the mask and the causal build.
+FUSED_OF = {
+    (128, False): "bwd_fused",
+    (64, False): "bwd_fused_hd64",
+    (128, True): "bwd_fused_causal",
+    (64, True): "bwd_fused_hd64_causal",
+}
 # Threads per CTA of each stage's kernel (8, 16, 4 and 16 warps).
 BLOCK_THREADS = {"bwd_pre": 256, "bwd_main": 512, "bwd_post": 128, "bwd_fused": 512}
 ENTRY = "cake_fmha_nondet_train_backward"
@@ -322,8 +333,8 @@ POST_IDS = ["d128", "d64", "d128_pair"]
 # heads and 256 queries and keys for every head dimension and mask, at head dimension 128 both with every call in a pair
 # region (the pair route) and with none (the 1-CTA route); 384 keys (an odd key-block count: the 1-CTA route in any
 # region) at head dimension 128.  Then one call of two heads and 256 queries and keys per head dimension without the
-# mask, unpatched (``fused`` True: the route ``fused_record`` gives), with no pair region (``pin`` False: the 1-CTA
-# route when ``fused_record`` gives None).
+# mask and with it, unpatched (``fused`` True: the route ``fused_record`` gives), with no pair region (``pin`` False:
+# the 1-CTA route when ``fused_record`` gives None).
 ROUTE_PARAMS = [
     pytest.param(128, False, Case(2, 3, 256), True, False, id="d128"),
     pytest.param(128, True, Case(2, 3, 256), True, False, id="d128_causal"),
@@ -335,6 +346,8 @@ ROUTE_PARAMS = [
     pytest.param(128, True, Case(2, 3, 384), True, False, id="d128_causal-S384"),
     pytest.param(128, False, Case(1, 2, 256), False, True, id="d128-fused"),
     pytest.param(64, False, Case(1, 2, 256), False, True, id="d64-fused"),
+    pytest.param(128, True, Case(1, 2, 256), False, True, id="d128_causal-fused"),
+    pytest.param(64, True, Case(1, 2, 256), False, True, id="d64_causal-fused"),
 ]
 # The shipped regions on the device (``pin`` None), with the one-launch route turned off (``fused`` False): 8192
 # queries and keys at four (head, batch) pairs, on the route ``DECIDED_LEAST`` names for the architecture (the pair
@@ -611,36 +624,53 @@ def test_the_one_launch_route_of_a_call(monkeypatch) -> None:
     inside the region ``FUSED_REGION[(arch, D)]``, a tuple of one or more pieces ``(max_ctas, s_max, skv_any,
     skv_per_sq)``: inside a piece when ``B * H * (Sq / 128 + Skv / 128) <= max_ctas``, ``max(Sq, Skv) <= s_max`` and
     ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq``, and inside the region when inside any of its pieces; None
-    otherwise, for every causal call and wherever the region is None.  Checked on region tables with one entry set to
-    one piece of distinct bounds, every call on both sides of each bound, and to two pieces, a call inside only the
-    second piece routed and a call outside both not; and on the shipped table."""
+    otherwise and wherever the region is None.  ``FUSED_REGION`` routes no causal call: with no causal region
+    (``FUSED_CAUSAL_REGION`` None everywhere) every causal call is None, and with the shipped causal regions a causal
+    call takes the route of its causal region whatever ``FUSED_REGION`` holds.  Checked on region tables with one entry
+    set to one piece of distinct bounds, every call on both sides of each bound, and to two pieces, a call inside only
+    the second piece routed and a call outside both not; and on the shipped table."""
     assert dict(cake_jit.FUSED_OF) == FUSED_OF
     shipped = dict(cake_jit.FUSED_REGION)
+    shipped_causal = dict(cake_jit.FUSED_CAUSAL_REGION)
     assert set(shipped) == {(arch, D) for arch in ARCHES for D in HEAD_DIMS}
     calls = [shape for shape, _ in FUSED_REGION_CALLS]
+
+    def causal_routed(arch: str, D: int, B: int, H: int, Sq: int, Skv: int) -> str | None:
+        """The record the shipped causal regions give a causal call."""
+        region = shipped_causal[(arch, D)] or ()
+        inside = Sq == Skv and any(_inside_causal_piece(piece, B, H, Sq, Skv) for piece in region)
+        return FUSED_OF[(D, True)] if inside else None
+
     for (arch, D), region in shipped.items():
         assert region is None or (type(region) is tuple and len(region) >= 1), (arch, D)
         for piece in region or ():
             assert type(piece) is tuple and len(piece) == 4, (arch, D, piece)
             assert all(type(n) is int and n >= 0 for n in piece), (arch, D, piece)
         for B, H, Sq, Skv in calls:
-            assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
+            found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, True)
+            assert found == causal_routed(arch, D, B, H, Sq, Skv), (arch, D, B, H, Sq, Skv, found)
             if region is None:
                 assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, False) is None, (arch, D, B, H, Sq, Skv)
     probes = ((FUSED_REGION_PROBE, FUSED_REGION_CALLS), (FUSED_REGION_PROBE_TWO, FUSED_REGION_TWO_CALLS))
-    for probe, probe_calls in probes:
-        for arch in ARCHES:
-            for D in HEAD_DIMS:
-                table = dict.fromkeys(shipped)
-                table[(arch, D)] = probe
-                monkeypatch.setattr(cake_jit, "FUSED_REGION", table)
-                for (B, H, Sq, Skv), routed in probe_calls:
-                    found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
-                    assert found == (FUSED_OF[(D, False)] if routed else None), (probe, arch, D, B, H, Sq, Skv, found)
-                    assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
-                    for other in table:
-                        if other != (arch, D):
-                            assert cake_jit.fused_record(other[0], B, H, Sq, Skv, other[1], False) is None, other
+    for no_causal in (False, True):
+        causal_table = dict.fromkeys(shipped_causal) if no_causal else shipped_causal
+        monkeypatch.setattr(cake_jit, "FUSED_CAUSAL_REGION", causal_table)
+        for probe, probe_calls in probes:
+            for arch in ARCHES:
+                for D in HEAD_DIMS:
+                    table = dict.fromkeys(shipped)
+                    table[(arch, D)] = probe
+                    monkeypatch.setattr(cake_jit, "FUSED_REGION", table)
+                    for (B, H, Sq, Skv), routed in probe_calls:
+                        found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
+                        want = FUSED_OF[(D, False)] if routed else None
+                        assert found == want, (probe, arch, D, B, H, Sq, Skv, found)
+                        found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, True)
+                        want = None if no_causal else causal_routed(arch, D, B, H, Sq, Skv)
+                        assert found == want, (no_causal, arch, D, B, H, Sq, Skv, found)
+                        for other in table:
+                            if other != (arch, D):
+                                assert cake_jit.fused_record(other[0], B, H, Sq, Skv, other[1], False) is None, other
 
 
 # The shipped regions of the one-launch route, per (architecture, head dimension): the pieces ``(max_ctas, s_max,
@@ -1007,6 +1037,14 @@ def _inside_piece(piece: tuple[int, int, int, int], B: int, H: int, Sq: int, Skv
     return fits and (Skv <= skv_any or Skv <= skv_per_sq * Sq)
 
 
+def _inside_causal_piece(piece: tuple[int, int, int, int], B: int, H: int, Sq: int, Skv: int) -> bool:
+    """A causal call inside one piece ``(least_ctas, most_ctas, least_s, most_s)`` of a causal region: ``Sq == Skv``,
+    the CTAs of the one-launch grid within ``[least_ctas, most_ctas]`` and the length within ``[least_s, most_s]``."""
+    least_ctas, most_ctas, least_s, most_s = piece
+    ctas = B * H * (Sq // 128 + Skv // 128)
+    return Sq == Skv and least_ctas <= ctas <= most_ctas and least_s <= Sq <= most_s
+
+
 # The query and key lengths searched for a call that only one piece of a region holds (up to the longest ``s_max`` of
 # a shipped piece).
 PIECE_ONLY_LENGTHS = (128, 256, 512, 768, 1024, 2048, 4096, 8192)
@@ -1028,21 +1066,25 @@ def _piece_only_call(region: tuple[tuple[int, int, int, int], ...], index: int) 
 def test_the_shipped_one_launch_regions() -> None:
     """``FUSED_REGION`` is the shipped table ``SHIPPED_FUSED_REGION``, and ``fused_record`` keeps each region on both
     sides of each bound of each of its pieces: the one-launch record for a call inside any piece of the region (a call
-    one step past a bound of one piece may lie inside another piece), None for a call inside no piece and for every
-    causal call.  Every piece of a region routes a call that no other piece of the region holds.  The benchmark's long
-    rows take the three-kernel routes on every architecture, and every measured long call its decided route
+    one step past a bound of one piece may lie inside another piece), None for a call inside no piece; the same call
+    with the mask takes the route of the shipped causal region (``SHIPPED_FUSED_CAUSAL_REGION``), not of
+    ``FUSED_REGION``.  Every piece of a region routes a call that no other piece of the region holds.  The benchmark's
+    long rows take the three-kernel routes on every architecture, and every measured long call its decided route
     (``DECIDED_LONG_CALLS``)."""
     assert dict(cake_jit.FUSED_REGION) == SHIPPED_FUSED_REGION
     pieces = {piece for region in SHIPPED_FUSED_REGION.values() for piece in region}
     assert set(SHIPPED_FUSED_CALLS) == pieces, sorted(set(SHIPPED_FUSED_CALLS) ^ pieces)
     for (arch, D), region in SHIPPED_FUSED_REGION.items():
+        causal_region = SHIPPED_FUSED_CAUSAL_REGION[(arch, D)] or ()
         for piece in region:
             for (B, H, Sq, Skv), inside in SHIPPED_FUSED_CALLS[piece]:
                 assert _inside_piece(piece, B, H, Sq, Skv) == inside, (piece, B, H, Sq, Skv)
                 routed = any(_inside_piece(other, B, H, Sq, Skv) for other in region)
                 found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
                 assert found == (FUSED_OF[(D, False)] if routed else None), (arch, D, piece, B, H, Sq, Skv, found)
-                assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
+                causal = Sq == Skv and any(_inside_causal_piece(other, B, H, Sq, Skv) for other in causal_region)
+                found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, True)
+                assert found == (FUSED_OF[(D, True)] if causal else None), (arch, D, B, H, Sq, Skv, found)
         for index, piece in enumerate(region):
             call = _piece_only_call(region, index)
             assert call is not None, (arch, D, piece)
@@ -1055,6 +1097,320 @@ def test_the_shipped_one_launch_regions() -> None:
         for (B, H, Sq, Skv), routed in DECIDED_LONG_CALLS:
             found = cake_jit.fused_record(arch, B, H, Sq, Skv, 128, False)
             assert found == (FUSED_OF[(128, False)] if routed else None), (arch, B, H, Sq, Skv, found)
+
+
+# Causal calls on both sides of each bound of the causal region of one piece (least_ctas, most_ctas, least_s, most_s) =
+# (64, 192, 256, 1024), as ((B, H, Sq, Skv), routed); the CTAs of a causal call, B * H * 2 * S / 128, are a multiple of
+# 2 * S / 128, so a bound is probed at the nearest CTA count reachable at that length: 60 and 64 CTAs at 256 queries
+# and keys (also as 16 batches of one head); 192 and 196 there; the length at 256 and at 128 (64 CTAs); the length at
+# 1024 (64 CTAs) and at 1152 (72 CTAs); then 256 queries with fewer keys (96 CTAs) and with more keys (80 CTAs).
+FUSED_CAUSAL_PROBE = ((64, 192, 256, 1024),)
+FUSED_CAUSAL_CALLS = (
+    ((1, 15, 256, 256), False),
+    ((1, 16, 256, 256), True),
+    ((16, 1, 256, 256), True),
+    ((1, 48, 256, 256), True),
+    ((1, 49, 256, 256), False),
+    ((1, 32, 128, 128), False),
+    ((1, 4, 1024, 1024), True),
+    ((1, 4, 1152, 1152), False),
+    ((1, 32, 256, 128), False),
+    ((1, 16, 256, 384), False),
+)
+# A causal region of two pieces: the piece above and (0, 32, 0, 128).  Calls as ((B, H, Sq, Skv), routed): inside the
+# second piece only (2 and 32 CTAs at 128 queries and keys); one step past its CTA bound (34 CTAs); 64 CTAs at 128
+# queries and keys, outside both pieces (the first one by its length); inside the first piece only; 72 CTAs past the
+# first piece's longest length.
+FUSED_CAUSAL_PROBE_TWO = ((64, 192, 256, 1024), (0, 32, 0, 128))
+FUSED_CAUSAL_TWO_CALLS = (
+    ((1, 1, 128, 128), True),
+    ((1, 16, 128, 128), True),
+    ((1, 17, 128, 128), False),
+    ((1, 32, 128, 128), False),
+    ((1, 16, 256, 256), True),
+    ((1, 4, 1152, 1152), False),
+)
+
+
+def test_the_causal_one_launch_route_of_a_call(monkeypatch) -> None:
+    """``fused_record(arch, B, H, Sq, Skv, D, True)`` is ``FUSED_OF[(D, True)]`` (the causal build) for a causal call
+    with ``Sq == Skv`` inside the causal region ``FUSED_CAUSAL_REGION[(arch, D)]``, a tuple of one or more pieces
+    ``(least_ctas, most_ctas, least_s, most_s)``: inside a piece when ``least_ctas <= B * H * (Sq / 128 + Skv / 128) <=
+    most_ctas`` and ``least_s <= Sq <= most_s``, and inside the region when inside any of its pieces; None otherwise,
+    for every causal call with ``Sq != Skv`` and wherever the causal region is None.  A causal region routes no call
+    without the mask.  Checked on causal tables with one entry set to one piece of distinct bounds, every call on both
+    sides of each bound, and to two pieces, a call inside only the second piece routed and a call outside both not."""
+    shipped = dict(cake_jit.FUSED_CAUSAL_REGION)
+    assert set(shipped) == {(arch, D) for arch in ARCHES for D in HEAD_DIMS}
+    for (arch, D), region in shipped.items():
+        assert region is None or (type(region) is tuple and len(region) >= 1), (arch, D)
+        for piece in region or ():
+            assert type(piece) is tuple and len(piece) == 4, (arch, D, piece)
+            assert all(type(n) is int and n >= 0 for n in piece), (arch, D, piece)
+            assert piece[0] <= piece[1] and piece[2] <= piece[3], (arch, D, piece)
+    probes = ((FUSED_CAUSAL_PROBE, FUSED_CAUSAL_CALLS), (FUSED_CAUSAL_PROBE_TWO, FUSED_CAUSAL_TWO_CALLS))
+    for probe, probe_calls in probes:
+        for arch in ARCHES:
+            for D in HEAD_DIMS:
+                table = dict.fromkeys(shipped)
+                table[(arch, D)] = probe
+                monkeypatch.setattr(cake_jit, "FUSED_CAUSAL_REGION", table)
+                for (B, H, Sq, Skv), routed in probe_calls:
+                    inside = any(_inside_causal_piece(piece, B, H, Sq, Skv) for piece in probe)
+                    assert inside == routed, (probe, B, H, Sq, Skv)
+                    found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, True)
+                    assert found == (FUSED_OF[(D, True)] if routed else None), (probe, arch, D, B, H, Sq, Skv, found)
+                    without = any(_inside_piece(piece, B, H, Sq, Skv) for piece in SHIPPED_FUSED_REGION[(arch, D)])
+                    found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
+                    assert found == (FUSED_OF[(D, False)] if without else None), (arch, D, B, H, Sq, Skv, found)
+                    for other in table:
+                        if other != (arch, D):
+                            assert cake_jit.fused_record(other[0], B, H, Sq, Skv, other[1], True) is None, other
+
+
+# The shipped causal regions of the one-launch route, per (architecture, head dimension): the pieces ``(least_ctas,
+# most_ctas, least_s, most_s)`` of each region.  ``FUSED_CAUSAL_REGION`` must be this table.
+SHIPPED_FUSED_CAUSAL_REGION = {
+    ("sm_100a", 128): ((0, 128, 0, 4096), (0, 512, 0, 256)),
+    ("sm_100a", 64): ((0, 128, 0, 4096),),
+    ("sm_103a", 128): ((0, 128, 0, 4096), (256, 256, 128, 256)),
+    ("sm_103a", 64): ((0, 128, 0, 4096), (0, 256, 0, 256)),
+    ("sm_107a", 128): ((0, 128, 0, 4096), (512, 1024, 256, 512), (256, 256, 4096, 4096)),
+    ("sm_107a", 64): ((0, 128, 0, 4096), (512, 512, 256, 256)),
+}
+# Causal calls on both sides of each bound of each shipped causal piece, as ((B, H, S), inside the piece), every other
+# bound of the piece held where a call can hold it: the CTAs of the one-launch grid (B * H * 2 * S / 128, a multiple of
+# 2 * S / 128) at the bound and at the nearest count past it that the length reaches, at the least length of the piece
+# and at a longer one; the length at its bound and 128 past it; a lower bound of 0 holds every call (two CTAs at 128
+# queries and keys, the least causal call, is inside).  Where no call of the piece's CTA counts has the length one
+# step past a length bound (256 CTAs at 384 queries and keys; 256 CTAs at 3968 or 4224), the calls of the same B * H
+# there stand beside it.  A call outside one piece may lie inside another piece of the same region; the call is routed
+# when it is inside any piece of the region.
+SHIPPED_FUSED_CAUSAL_CALLS = {
+    (0, 128, 0, 4096): (
+        ((1, 1, 128), True),
+        ((1, 64, 128), True),
+        ((1, 65, 128), False),
+        ((64, 1, 128), True),
+        ((65, 1, 128), False),
+        ((1, 32, 256), True),
+        ((1, 33, 256), False),
+        ((1, 2, 4096), True),
+        ((1, 3, 4096), False),
+        ((1, 1, 4096), True),
+        ((1, 1, 4224), False),
+    ),
+    (0, 512, 0, 256): (
+        ((1, 1, 128), True),
+        ((1, 256, 128), True),
+        ((1, 257, 128), False),
+        ((1, 128, 256), True),
+        ((1, 129, 256), False),
+        ((128, 1, 256), True),
+        ((1, 1, 256), True),
+        ((1, 1, 384), False),
+    ),
+    (256, 256, 128, 256): (
+        ((1, 127, 128), False),
+        ((1, 128, 128), True),
+        ((1, 129, 128), False),
+        ((128, 1, 128), True),
+        ((1, 63, 256), False),
+        ((1, 64, 256), True),
+        ((1, 65, 256), False),
+        ((4, 16, 256), True),
+        ((1, 64, 384), False),
+    ),
+    (0, 256, 0, 256): (
+        ((1, 1, 128), True),
+        ((1, 128, 128), True),
+        ((1, 129, 128), False),
+        ((1, 64, 256), True),
+        ((1, 65, 256), False),
+        ((1, 1, 256), True),
+        ((1, 1, 384), False),
+    ),
+    (512, 1024, 256, 512): (
+        ((1, 127, 256), False),
+        ((1, 128, 256), True),
+        ((1, 256, 256), True),
+        ((1, 257, 256), False),
+        ((2, 128, 256), True),
+        ((1, 63, 512), False),
+        ((1, 64, 512), True),
+        ((1, 96, 512), True),
+        ((1, 128, 512), True),
+        ((1, 129, 512), False),
+        ((1, 256, 128), False),
+        ((1, 52, 640), False),
+    ),
+    (256, 256, 4096, 4096): (
+        ((1, 3, 4096), False),
+        ((1, 4, 4096), True),
+        ((4, 1, 4096), True),
+        ((1, 5, 4096), False),
+        ((1, 4, 3968), False),
+        ((1, 4, 4224), False),
+    ),
+    (512, 512, 256, 256): (
+        ((1, 127, 256), False),
+        ((1, 128, 256), True),
+        ((128, 1, 256), True),
+        ((1, 129, 256), False),
+        ((1, 256, 128), False),
+        ((1, 128, 384), False),
+    ),
+}
+# The measured causal calls (``Sq == Skv``): every (B, H) of ``MEASURED_CAUSAL_HEADS`` at every length of
+# ``MEASURED_CAUSAL_LENGTHS`` on each architecture and head dimension, and the calls of ``DECIDED_CAUSAL_CALLS``.
+MEASURED_CAUSAL_LENGTHS = (128, 256, 512, 1024, 2048, 4096)
+MEASURED_CAUSAL_HEADS = ((1, 1), (1, 2), (1, 4), (1, 8), (1, 16), (1, 32), (1, 64), (1, 128), (2, 16), (4, 16))
+# The decided route of every measured causal call, per (architecture, head dimension) and measured (B, H): the measured
+# lengths on the one-launch route (every other measured length is off it).  This is the decision taken from the
+# measurement, not a measurement: the routed calls were faster on the one-launch route than on the route of
+# ``variant`` in both replicate runs (those inside a piece with a lower CTA bound also faster than cuDNN's fastest
+# measured plan in every counted round, eager and in CUDA-graph replays); every call that was not is off it (a call
+# measured in both runs by the later one), and so are some calls that were (no piece holds a call that was not).
+# ``FUSED_CAUSAL_REGION`` must reproduce it.
+DECIDED_CAUSAL_FUSED = {
+    ("sm_100a", 128): {
+        (1, 1): (128, 256, 512, 1024, 2048, 4096),
+        (1, 2): (128, 256, 512, 1024, 2048, 4096),
+        (1, 4): (128, 256, 512, 1024, 2048),
+        (1, 8): (128, 256, 512, 1024),
+        (1, 16): (128, 256, 512),
+        (1, 32): (128, 256),
+        (1, 64): (128, 256),
+        (1, 128): (128, 256),
+        (2, 16): (128, 256),
+        (4, 16): (128, 256),
+    },
+    ("sm_100a", 64): {
+        (1, 1): (128, 256, 512, 1024, 2048, 4096),
+        (1, 2): (128, 256, 512, 1024, 2048, 4096),
+        (1, 4): (128, 256, 512, 1024, 2048),
+        (1, 8): (128, 256, 512, 1024),
+        (1, 16): (128, 256, 512),
+        (1, 32): (128, 256),
+        (1, 64): (128,),
+        (1, 128): (),
+        (2, 16): (128, 256),
+        (4, 16): (128,),
+    },
+    ("sm_103a", 128): {
+        (1, 1): (128, 256, 512, 1024, 2048, 4096),
+        (1, 2): (128, 256, 512, 1024, 2048, 4096),
+        (1, 4): (128, 256, 512, 1024, 2048),
+        (1, 8): (128, 256, 512, 1024),
+        (1, 16): (128, 256, 512),
+        (1, 32): (128, 256),
+        (1, 64): (128, 256),
+        (1, 128): (128,),
+        (2, 16): (128, 256),
+        (4, 16): (128, 256),
+    },
+    ("sm_103a", 64): {
+        (1, 1): (128, 256, 512, 1024, 2048, 4096),
+        (1, 2): (128, 256, 512, 1024, 2048, 4096),
+        (1, 4): (128, 256, 512, 1024, 2048),
+        (1, 8): (128, 256, 512, 1024),
+        (1, 16): (128, 256, 512),
+        (1, 32): (128, 256),
+        (1, 64): (128, 256),
+        (1, 128): (128,),
+        (2, 16): (128, 256),
+        (4, 16): (128, 256),
+    },
+    ("sm_107a", 128): {
+        (1, 1): (128, 256, 512, 1024, 2048, 4096),
+        (1, 2): (128, 256, 512, 1024, 2048, 4096),
+        (1, 4): (128, 256, 512, 1024, 2048, 4096),
+        (1, 8): (128, 256, 512, 1024),
+        (1, 16): (128, 256, 512),
+        (1, 32): (128, 256),
+        (1, 64): (128, 512),
+        (1, 128): (256, 512),
+        (2, 16): (128, 256),
+        (4, 16): (128, 512),
+    },
+    ("sm_107a", 64): {
+        (1, 1): (128, 256, 512, 1024, 2048, 4096),
+        (1, 2): (128, 256, 512, 1024, 2048, 4096),
+        (1, 4): (128, 256, 512, 1024, 2048),
+        (1, 8): (128, 256, 512, 1024),
+        (1, 16): (128, 256, 512),
+        (1, 32): (128, 256),
+        (1, 64): (128,),
+        (1, 128): (256,),
+        (2, 16): (128, 256),
+        (4, 16): (128,),
+    },
+}
+# The decided route of the measured causal calls off that grid, per (architecture, head dimension), as ((B, H, S),
+# routed): on ``sm_107a`` at head dimension 128, 96 heads of 512 queries and keys (768 CTAs) and two batches of 128
+# heads of 256 (1024 CTAs) were faster than the route of ``variant`` and than cuDNN's fastest measured plan in every
+# counted round of both replicate runs, eager and in CUDA-graph replays.  ``FUSED_CAUSAL_REGION`` must reproduce it.
+DECIDED_CAUSAL_CALLS = {("sm_107a", 128): (((1, 96, 512), True), ((2, 128, 256), True))}
+
+
+def _causal_piece_only_call(region: tuple[tuple[int, int, int, int], ...], index: int) -> tuple[int, int, int] | None:
+    """A causal call ``(1, H, S)`` inside the piece ``region[index]`` and inside no other piece of ``region``, with
+    ``S`` in ``PIECE_ONLY_LENGTHS`` (the first such length, the most heads), or None."""
+    piece = region[index]
+    others = [other for at, other in enumerate(region) if at != index]
+    for S in PIECE_ONLY_LENGTHS:
+        for H in range(piece[1] // (2 * S // 128), 0, -1):
+            if _inside_causal_piece(piece, 1, H, S, S) and not any(_inside_causal_piece(o, 1, H, S, S) for o in others):
+                return 1, H, S
+    return None
+
+
+def test_the_shipped_causal_one_launch_regions() -> None:
+    """``FUSED_CAUSAL_REGION`` is the shipped table ``SHIPPED_FUSED_CAUSAL_REGION``, and ``fused_record`` keeps each
+    causal region on both sides of each bound of each of its pieces: the causal one-launch record for a causal call
+    inside any piece of the region (a call one step past a bound of one piece may lie inside another piece), None for a
+    causal call inside no piece and for a causal call with fewer or more keys than queries; the same calls without the
+    mask take the route of ``FUSED_REGION`` alone.  Every piece of a causal region routes a call that no other piece of
+    the region holds.  Every measured causal call is on its decided route (``DECIDED_CAUSAL_FUSED`` and
+    ``DECIDED_CAUSAL_CALLS``), and the benchmark's long causal rows take the three-kernel routes."""
+    assert dict(cake_jit.FUSED_CAUSAL_REGION) == SHIPPED_FUSED_CAUSAL_REGION
+    pieces = {piece for region in SHIPPED_FUSED_CAUSAL_REGION.values() for piece in region}
+    assert set(SHIPPED_FUSED_CAUSAL_CALLS) == pieces, sorted(set(SHIPPED_FUSED_CAUSAL_CALLS) ^ pieces)
+    for (arch, D), region in SHIPPED_FUSED_CAUSAL_REGION.items():
+        record = FUSED_OF[(D, True)]
+        for piece in region:
+            for (B, H, S), inside in SHIPPED_FUSED_CAUSAL_CALLS[piece]:
+                assert _inside_causal_piece(piece, B, H, S, S) == inside, (piece, B, H, S)
+                routed = any(_inside_causal_piece(other, B, H, S, S) for other in region)
+                found = cake_jit.fused_record(arch, B, H, S, S, D, True)
+                assert found == (record if routed else None), (arch, D, piece, B, H, S, found)
+                without = any(_inside_piece(other, B, H, S, S) for other in SHIPPED_FUSED_REGION[(arch, D)])
+                found = cake_jit.fused_record(arch, B, H, S, S, D, False)
+                assert found == (FUSED_OF[(D, False)] if without else None), (arch, D, B, H, S, found)
+                # The mask needs Sq == Skv: one key block fewer or more is never on the causal one-launch route.
+                for Skv in (S - cake_jit.BLOCK, S + cake_jit.BLOCK):
+                    if Skv > 0:
+                        assert cake_jit.fused_record(arch, B, H, S, Skv, D, True) is None, (arch, D, B, H, S, Skv)
+        for index, piece in enumerate(region):
+            call = _causal_piece_only_call(region, index)
+            assert call is not None, (arch, D, piece)
+            B, H, S = call
+            assert cake_jit.fused_record(arch, B, H, S, S, D, True) == record, (arch, D, piece, call)
+        decided = DECIDED_CAUSAL_FUSED[(arch, D)]
+        assert tuple(decided) == MEASURED_CAUSAL_HEADS, (arch, D)
+        for (B, H), lengths in decided.items():
+            assert set(lengths) <= set(MEASURED_CAUSAL_LENGTHS), (arch, D, B, H)
+            for S in MEASURED_CAUSAL_LENGTHS:
+                found = cake_jit.fused_record(arch, B, H, S, S, D, True)
+                assert found == (record if S in lengths else None), (arch, D, B, H, S, found)
+        for (B, H, S), routed in DECIDED_CAUSAL_CALLS.get((arch, D), ()):
+            assert (B, H) not in decided or S not in MEASURED_CAUSAL_LENGTHS, (arch, D, B, H, S)
+            found = cake_jit.fused_record(arch, B, H, S, S, D, True)
+            assert found == (record if routed else None), (arch, D, B, H, S, found)
+    for arch in ARCHES:
+        for B, H, D, causal in LONG_ROWS:
+            if causal:
+                assert cake_jit.fused_record(arch, B, H, 8192, 8192, D, True) is None, (arch, B, H, D)
 
 
 def test_the_accumulator_layouts() -> None:
@@ -1164,8 +1520,7 @@ def test_stage_launchers_pass_the_registry_arguments_positionally(D, causal, pai
 def test_the_fused_launcher_passes_the_registry_arguments_positionally(D, monkeypatch) -> None:
     """Every ``FUSED_OF`` record is launched positionally by ``launch_bwd_fused``, and its FFI entry gets the same
     arguments and grid, of the same types, as through the registry-ordered launch of ``_launch`` (no device: the FFI
-    entry is a recorder)."""
-    name = cake_jit.FUSED_OF[(D, False)]
+    entry is a recorder): the build without the mask and the causal build of the head dimension."""
     calls = []
     monkeypatch.setattr(cake_backend, "device_arch", lambda index: ARCHES[0])
     monkeypatch.setattr(cake_backend, "_entry", lambda name, arch: lambda *args: calls.append((name, args)))
@@ -1177,25 +1532,29 @@ def test_the_fused_launcher_passes_the_registry_arguments_positionally(D, monkey
     q, out, dout, dq = (torch.empty(B, Sq, H, D, **bf16) for _ in range(4))
     k, v, dk, dv = (torch.empty(B, Skv, H, D, **bf16) for _ in range(4))
     lse = torch.empty(B, H, Sq, dtype=torch.float32)
+    positional_of = cake_backend._positional
 
-    def launch() -> list:
+    def launch(name: str) -> list:
         calls.clear()
         cake_backend.launch_bwd_fused(
             name, q=q, k=k, v=v, out=out, lse=lse, dout=dout, dq=dq, dk=dk, dv=dv, softmax_scale=0.0883883
         )
         return list(calls)
 
-    assert cake_backend._positional(name, "bwd_fused"), name
-    positional = launch()
-    monkeypatch.setattr(cake_backend, "_positional", lambda name, stage: False)
-    registry = launch()
-    assert [found for found, _ in positional] == [found for found, _ in registry] == [name]
-    (_, got), (_, want) = positional[0], registry[0]
-    assert len(got) == len(want), name
-    for i, (a, b) in enumerate(zip(got, want, strict=True)):
-        assert type(a) is type(b), (name, i, type(a), type(b))
-        assert a is b if isinstance(a, torch.Tensor) else a == b, (name, i, a, b)
-    assert tuple(got[-3:]) == (tiles[2], H, B), got[-3:]
+    for causal in (False, True):
+        name = cake_jit.FUSED_OF[(D, causal)]
+        monkeypatch.setattr(cake_backend, "_positional", positional_of)
+        assert cake_backend._positional(name, "bwd_fused"), name
+        positional = launch(name)
+        monkeypatch.setattr(cake_backend, "_positional", lambda name, stage: False)
+        registry = launch(name)
+        assert [found for found, _ in positional] == [found for found, _ in registry] == [name]
+        (_, got), (_, want) = positional[0], registry[0]
+        assert len(got) == len(want), name
+        for i, (a, b) in enumerate(zip(got, want, strict=True)):
+            assert type(a) is type(b), (name, i, type(a), type(b))
+            assert a is b if isinstance(a, torch.Tensor) else a == b, (name, i, a, b)
+        assert tuple(got[-3:]) == (tiles[2], H, B), (name, got[-3:])
 
 
 def test_the_package_exports_the_backend_entry() -> None:
@@ -1570,6 +1929,44 @@ def test_the_long_causal_backward_matches_the_reference(case, device, monkeypatc
             x.q, x.k, x.v, x.out, x.lse, x.dout, softmax_scale=x.softmax_scale, causal=True
         )
         assert launches == [], launches
+        return judged_backward(x, {"backward": {"dq": dq, "dk": dk, "dv": dv}})
+
+    judge_draws(record_property, draw)
+
+
+# The backward's causal calls on the causal one-launch route on the shipped tables (no pin): two batches of four heads
+# of 1024 queries and keys (128 CTAs), inside the causal region of every architecture at both head dimensions.
+CAUSAL_FUSED_CASES = (Case(2, 4, 1024),)
+CAUSAL_FUSED_PARAMS = [
+    pytest.param(D, case, id=f"d{D}_causal-fused-{case.id}") for D in HEAD_DIMS for case in CAUSAL_FUSED_CASES
+]
+
+
+@pytest.mark.parametrize(("D", "case"), CAUSAL_FUSED_PARAMS)
+def test_the_causal_one_launch_backward_matches_the_reference(D, case, device, monkeypatch, record_property) -> None:
+    """A call with the mask inside the causal region of the device's architecture, on the shipped tables:
+    ``fused_record`` gives it the causal one-launch record ``FUSED_OF[(D, True)]``, the backward launches that record
+    once and no host sequence, and ``dq``, ``dk`` and ``dv`` of the backward hold the contract and meet the tier of the
+    backward formula on the same inputs."""
+    arch = cake_backend.device_arch(device.index)
+    assert case.S == case.kv, case
+    region = SHIPPED_FUSED_CAUSAL_REGION[(arch, D)]
+    assert any(_inside_causal_piece(piece, case.B, case.H, case.S, case.kv) for piece in region), (arch, D, case)
+    record = cake_jit.fused_record(arch, case.B, case.H, case.S, case.kv, D, True)
+    assert record == FUSED_OF[(D, True)], (arch, D, record)
+    launches = _count_fused_launches(monkeypatch)
+    sequences = []
+    sequence = cake_backend._sequence
+    monkeypatch.setattr(cake_backend, "_sequence", lambda *key: sequences.append(key) or sequence(*key))
+
+    def draw(seed: int):
+        x = make_inputs(case, D, causal=True, seed=seed, device=device)
+        launches.clear()
+        dq, dk, dv = cake_backend.cake_fmha_nondet_train_backward(
+            x.q, x.k, x.v, x.out, x.lse, x.dout, softmax_scale=x.softmax_scale, causal=True
+        )
+        assert launches == [record], launches
+        assert sequences == [], "the one-launch route looked up a host sequence"
         return judged_backward(x, {"backward": {"dq": dq, "dk": dk, "dv": dv}})
 
     judge_draws(record_property, draw)
