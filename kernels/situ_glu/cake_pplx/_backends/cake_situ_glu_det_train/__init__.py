@@ -31,8 +31,11 @@ Host design (every control is an argument; no environment variable):
   that is not 1, a row stride that is not a multiple of 8 elements, a base
   address that is not 16-byte aligned) is copied once to a contiguous tensor.
   ``beta`` and ``lb`` are finite positive Python numbers rounded to FP32
-  (defaults 4.0 and 25.0); they are launch arguments, as are ``R``, ``I`` and
-  the strides, so one build serves every call.
+  (defaults 4.0 and 25.0), with ``2.88539 / beta``, ``2.88539 / lb`` and
+  ``beta lb`` finite in FP32, the constants the kernels form (``ValueError``
+  otherwise); they are launch arguments, as are ``R``, ``I`` and the strides,
+  so one build serves every call.  The tests cover ``beta`` in ``[2.5, 4]``
+  and ``lb`` in ``[10, 40]``.
 - Outputs.  ``h`` is a new contiguous BF16 ``[R, I]`` tensor, or the caller's
   ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout of the
   inputs: two new contiguous ``[R, I]`` tensors, or one new contiguous
@@ -64,21 +67,26 @@ Host design (every control is an argument; no environment variable):
   ``W = 2^(-2 |u| log2(e) / lb)``, all in ``[0, 1]`` so that no exponential
   overflows: ``tanh(|g| / beta) = (1 - E) / (1 + E)``, ``sigmoid(g) =
   1 / (1 + P)`` for ``g >= 0`` and ``P / (1 + P)`` for ``g < 0``, and
-  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  For a small ``|g|``,
-  ``E`` is within a few FP32 ulps of 1, so ``1 - E`` keeps an absolute error
-  of a few ``2^-24``, far below the BF16 rounding of the output it scales;
-  ``g = 0`` gives ``E = 1`` exactly, so ``g = 0`` or ``u = 0`` gives
+  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  ``1 - E`` and
+  ``1 - W`` keep an absolute error of a few ``2^-24``.  ``h`` and ``d_up``
+  scale with ``1 - E``, and ``h`` and ``d_gate`` with ``1 - W``, so their
+  relative error can pass the BF16 rounding where ``|g|`` is below about
+  ``3e-5 beta`` or ``|u|`` below about ``3e-5 lb``; below about
+  ``2^-26 beta`` (``2^-26 lb``), ``E`` (``W``) rounds to 1 and those outputs
+  are 0.  ``g = 0`` gives ``E = 1`` exactly, so ``g = 0`` or ``u = 0`` gives
   ``h = 0`` exactly.  ``beta = 4`` takes ``P = E E``; any other ``beta`` takes
   ``P`` from its own exponential, the same choice for every element of a call.
   The exponentials are the approximate base-2 exponential.  ``E`` and ``W``
-  flush below ``2^-126``, only where ``|g| > 43.7 beta`` or
-  ``|u| > 43.7 lb``.  ``h`` takes them only as ``1 - E``, ``1 + E``,
+  flush below ``2^-126``, only where ``|g| > 43.67 beta`` or
+  ``|u| > 43.67 lb``.  ``h`` takes them only as ``1 - E``, ``1 + E``,
   ``1 - W`` and ``1 + W``, which the flush leaves as they are.  In the
-  backward, a gate past ``43.7 beta`` has ``d_gate`` under
-  ``2^-124 |dh| lb`` and an up past ``43.7 lb`` has ``d_up`` under
-  ``2^-124 |dh| beta``; the kernels store 0 there.  ``P`` keeps its subnormal values,
+  backward, an up past ``43.67 lb`` has ``d_up`` under
+  ``2^-124 |dh| beta``, and at ``beta >= 2.4`` a gate past ``43.67 beta``
+  has ``d_gate`` under about ``2^-124 |dh| lb``; the kernels store 0 there.
+  At a smaller ``beta``, the sigmoid term ``beta P`` of such a ``d_gate``
+  does not flush, and the kernels store it.  ``P`` keeps its subnormal values,
   so a gate below about -87 keeps a nonzero sigmoid where FP32 holds one.
-  The reciprocal ``R`` of ``(1 + E)(1 + P)(1 + W)``, in ``[1, 8]``: the
+  The reciprocal ``R`` of ``(1 + E)(1 + P)(1 + W)`` (a product in ``[1, 8]``): the
   forward takes one per element; the backward one per pair of elements (of
   their product, multiplied back by the other element's factor) and writes
   both gradients with ``R^2``.
@@ -102,7 +110,9 @@ Host design (every control is an argument; no environment variable):
 - Mode: the mode is part of the name (``det``).  Every output is elementwise,
   so every launch gives the same bits for the same inputs on the same
   architecture, whatever the row count, the layout, the stream or a CUDA graph;
-  ``torch.use_deterministic_algorithms`` does not affect any call, and no entry
+  ``torch.use_deterministic_algorithms`` changes no bits and raises no alert
+  (with ``fill_uninitialized_memory``, PyTorch adds its NaN fill of each new
+  output and each copied input), and no entry
   point takes a ``deterministic`` keyword (passing one is a ``TypeError``).
   The family has no non-deterministic module (there is no reduction to
   reorder) and no KCP module (rows are independent).
@@ -270,6 +280,26 @@ def _scalar(value: Any, name: str) -> float:
     return rounded
 
 
+def _fp32_finite(value: float) -> bool:
+    try:
+        struct.pack("<f", value)
+    except OverflowError:
+        return False
+    return True
+
+
+def _scalars(beta: Any, lb: Any) -> tuple[float, float]:
+    """``beta`` and ``lb`` rounded to FP32 (:func:`_scalar`), with the constants the kernels form from them,
+    ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``, finite in FP32: past it they would be infinite in the kernels
+    and give NaN."""
+    beta32, lb32 = _scalar(beta, "beta"), _scalar(lb, "lb")
+    constants = (("2.88539 / beta", 2.88539 / beta32), ("2.88539 / lb", 2.88539 / lb32), ("beta lb", beta32 * lb32))
+    for name, value in constants:
+        if not _fp32_finite(value):
+            raise ValueError(f"{name} is past the FP32 range (beta {beta32!r}, lb {lb32!r}): the kernels give NaN")
+    return beta32, lb32
+
+
 def _check_tensor(tensor: Any, name: str, dtype: torch.dtype, device: Optional[torch.device]) -> torch.Tensor:
     if not isinstance(tensor, torch.Tensor):
         raise TypeError(f"{name} must be a torch.Tensor, got {type(tensor).__name__}")
@@ -393,7 +423,7 @@ def cake_situ_glu_det_train_forward(
     """Forward step: ``h = bf16(beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb))``, one rounding (see the
     module and the facade's documentation)."""
     device, rows, width, _, first, second = _operands(gate_up_or_gate, up)
-    beta32, lb32 = _scalar(beta, "beta"), _scalar(lb, "lb")
+    beta32, lb32 = _scalars(beta, lb)
     if out is not None:
         out = _check_output(out, "out", rows=rows, cols=width, device=device)
     index = int(device.index)
@@ -432,7 +462,7 @@ def cake_situ_glu_det_train_backward(
     and the facade's documentation)."""
     device, rows, width, merged, first, second = _operands(gate_up_or_gate, up)
     dh = _bf16_2d(grad_out, "grad_out", rows=rows, cols=width, device=device)
-    beta32, lb32 = _scalar(beta, "beta"), _scalar(lb, "lb")
+    beta32, lb32 = _scalars(beta, lb)
     if merged:
         if grad_up is not None:
             raise ValueError("grad_up must be None for a merged input: grad_gate_up_or_gate receives both halves")
@@ -498,8 +528,7 @@ class CakeSiTUGLUDetFunction(torch.autograd.Function):
     def forward(ctx, gate_up_or_gate, up, beta, lb):
         h = cake_situ_glu_det_train_forward(gate_up_or_gate, up, beta=beta, lb=lb)
         ctx.save_for_backward(gate_up_or_gate, up)
-        ctx.beta = _scalar(beta, "beta")
-        ctx.lb = _scalar(lb, "lb")
+        ctx.beta, ctx.lb = _scalars(beta, lb)
         return h
 
     @staticmethod

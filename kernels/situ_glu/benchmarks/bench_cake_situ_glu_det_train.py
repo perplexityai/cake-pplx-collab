@@ -127,14 +127,15 @@ class Unavailable(Exception):
 
 @functools.cache
 def peak_gbps(device: torch.device) -> float:
-    """Peak DRAM bandwidth of ``device`` in GB/s from NVML: memory clock (MHz) x bus width (bits) x 2 / 8 / 1000."""
+    """Peak DRAM bandwidth of ``device`` in GB/s from NVML: memory clock (MHz) x bus width (bits) x 2 / 8 / 1000, of the
+    NVML device with the torch device's UUID (so a ``CUDA_VISIBLE_DEVICES`` remap reads the same GPU)."""
     if device.type != "cuda":
         raise ValueError(f"the NVML peak bandwidth needs a CUDA device, got {device}")
     import pynvml  # noqa: PLC0415 - optional, imported on use
 
     pynvml.nvmlInit()
     try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device.index or 0)
+        handle = pynvml.nvmlDeviceGetHandleByUUID(_uuid(torch.cuda.get_device_properties(device).uuid))
         bus_width = pynvml.nvmlDeviceGetMemoryBusWidth(handle)
         mem_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
         return (mem_clock * bus_width * 2) / 8 / 1000
@@ -149,13 +150,12 @@ def _uuid(value: Any) -> str:
 
 def nvml_mapping(device: torch.device) -> dict[str, Any]:
     """``CUDA_VISIBLE_DEVICES``, the torch device's index and UUID, every NVML device's index and UUID, and the NVML
-    device at the torch index (the one :func:`peak_gbps` reads): its UUID, bus width and memory clock, and whether its
-    UUID is the torch device's."""
+    device with the torch device's UUID (the one :func:`peak_gbps` reads): its index, UUID, bus width and memory clock,
+    and whether its UUID is the torch device's."""
     found: dict[str, Any] = {
         "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "torch_index": device.index,
         "torch_uuid": _uuid(torch.cuda.get_device_properties(device).uuid),
-        "nvml_index": device.index or 0,
     }
     try:
         import pynvml  # noqa: PLC0415 - optional, imported on use
@@ -171,7 +171,8 @@ def nvml_mapping(device: torch.device) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001 - a device this process cannot open
                 devices.append([index, f"unavailable: {type(exc).__name__}"])
         found["nvml_devices"] = devices
-        handle = pynvml.nvmlDeviceGetHandleByIndex(found["nvml_index"])
+        handle = pynvml.nvmlDeviceGetHandleByUUID(found["torch_uuid"])
+        found["nvml_index"] = int(pynvml.nvmlDeviceGetIndex(handle))
         found["nvml_uuid"] = _uuid(pynvml.nvmlDeviceGetUUID(handle))
         found["bus_width_bits"] = int(pynvml.nvmlDeviceGetMemoryBusWidth(handle))
         found["mem_clock_mhz"] = int(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM))
@@ -1070,7 +1071,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     print(
         f"# CUDA_VISIBLE_DEVICES={nvml['CUDA_VISIBLE_DEVICES']}; torch cuda:{nvml['torch_index']} = "
-        f"{nvml['torch_uuid']}; NVML index {nvml['nvml_index']} = {nvml.get('nvml_uuid')} "
+        f"{nvml['torch_uuid']}; NVML index {nvml.get('nvml_index')} = {nvml.get('nvml_uuid')} "
         f"(match: {nvml.get('uuid_match')}); NVML devices {nvml.get('nvml_devices')}"
     )
     print(

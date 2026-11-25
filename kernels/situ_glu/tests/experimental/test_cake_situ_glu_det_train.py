@@ -969,8 +969,8 @@ def test_preallocated_outputs(device) -> None:
 
 
 def test_operand_and_scalar_errors(device, launches) -> None:
-    """Wrong types, dtypes, shapes, widths and devices, and scalars that are not finite positive Python numbers, are
-    refused before any launch."""
+    """Wrong types, dtypes, shapes, widths and devices, and scalars that are not finite positive Python numbers or whose
+    kernel constants are past FP32, are refused before any launch."""
     t = make_inputs(Case(8, 3072, "split"), seed=1, device=device)
     gate, up, dh = t.gate, t.up, t.dh
     merged = torch.cat([gate, up], dim=1)
@@ -995,6 +995,9 @@ def test_operand_and_scalar_errors(device, launches) -> None:
         "a negative lb": lambda: forward(gate, up, lb=-1.0),
         "a beta past FP32": lambda: forward(gate, up, beta=1e39),
         "an lb that rounds to 0 in FP32": lambda: forward(gate, up, lb=1e-50),
+        "a beta whose 2.88539 / beta is past FP32": lambda: forward(gate, up, beta=1e-39),
+        "an lb whose 2.88539 / lb is past FP32 in the backward": lambda: backward(dh, gate, up, lb=1e-39),
+        "a beta lb product past FP32 in the autograd entry": lambda: situ_glu(gate, up, beta=1e20, lb=1e20),
         "a negative beta in the backward": lambda: backward(dh, gate, up, beta=-4.0),
         "a negative lb in the autograd entry": lambda: situ_glu(gate, up, lb=-25.0),
     }

@@ -8,7 +8,8 @@ The facade `cake_pplx.cake_situ_glu_det_train` is a stable API.  This backend pa
 internal names may change.  The facade imports the backend on first use.  The supported architectures are SM100
 (B200 / GB200) and SM103 (B300 / GB300).  Another device raises `RuntimeError`.  The package loads its libraries
 prebuilt from `aot/` when a builder compiled them.  Otherwise the package JIT-builds them from the sources and flags
-that `build.json` records.  The package reads no environment variable.
+that `build.json` records.  No environment variable changes a call; every control is an argument.  A JIT build (no
+prebuilt `aot/` library) reads the JIT variables listed in the repository README, section JIT build and cache.
 
 ## Usage
 
@@ -31,7 +32,8 @@ h = torch.utils.checkpoint.checkpoint(cake_situ_glu_det, gate_up, use_reentrant=
 The steps without autograd, `cake_situ_glu_det_train_forward` and `cake_situ_glu_det_train_backward`, take the same
 operands and optional preallocated outputs (`out=`, `grad_gate_up_or_gate=`, `grad_up=`), for a caller that fuses the
 activation into its own `torch.autograd.Function`.  `beta` and `lb` are keywords everywhere, with the defaults 4.0
-and 25.0.
+and 25.0.  They must be positive and finite in FP32, with `2.88539 / beta`, `2.88539 / lb` and `beta lb` finite in FP32
+(`ValueError` otherwise); the tests cover `beta` in `[2.5, 4]` and `lb` in `[10, 40]`.
 
 ## Inputs and outputs
 
@@ -77,17 +79,19 @@ and the strides are launch arguments, so one library per program and architectur
   `W = 2^(-2 |u| log2(e) / lb)`, all in `[0, 1]` so that no exponential overflows: `tanh(|g| / beta) = (1 - E) /
   (1 + E)`, `sigmoid(g) = 1 / (1 + P)` for `g >= 0` and `P / (1 + P)` for `g < 0`, and `1 - tanh^2 = 4 E / (1 + E)^2`
   (no cancellation); the up takes the same forms with `W`.
-- For a small `|g|`, `E` is within a few FP32 ulps of 1, so `1 - E` keeps an absolute error of a few `2^-24`, far below
-  the BF16 rounding of the output it scales.  `g = 0` gives `E = 1` exactly, so `g = 0` or `u = 0` gives `h = 0`
-  exactly.
+- `1 - E` and `1 - W` keep an absolute error of a few `2^-24`.  `h` and `d_up` scale with `1 - E`, and `h` and
+  `d_gate` with `1 - W`, so their relative error can pass the BF16 rounding where `|g|` is below about `3e-5 beta` or
+  `|u|` below about `3e-5 lb`; below about `2^-26 beta` (`2^-26 lb`), `E` (`W`) rounds to 1 and those outputs are 0.
+  `g = 0` gives `E = 1` exactly, so `g = 0` or `u = 0` gives `h = 0` exactly.
 - `beta = 4` takes `P = E E`; any other `beta` takes `P` from its own exponential.  The choice is the same for every
   element of a call.
 - The exponentials are the approximate base-2 exponential.  `E` and `W` flush below `2^-126`, only where
-  `|g| > 43.7 beta` or `|u| > 43.7 lb`.  `h` takes them only as `1 - E`, `1 + E`, `1 - W` and `1 + W`, which the flush
-  leaves as they are.  In the backward, a gate past `43.7 beta` has `d_gate` under `2^-124 |dh| lb` and an up past
-  `43.7 lb` has `d_up` under `2^-124 |dh| beta`; the kernels store 0 there.  `P` keeps its subnormal values, so a gate
+  `|g| > 43.67 beta` or `|u| > 43.67 lb`.  `h` takes them only as `1 - E`, `1 + E`, `1 - W` and `1 + W`, which the
+  flush leaves as they are.  In the backward, an up past `43.67 lb` has `d_up` under `2^-124 |dh| beta`, and at
+  `beta >= 2.4` a gate past `43.67 beta` has `d_gate` under about `2^-124 |dh| lb`; the kernels store 0 there.  At a
+  smaller `beta`, the sigmoid term `beta P` of such a `d_gate` does not flush, and the kernels store it.  `P` keeps its subnormal values, so a gate
   below about -87 keeps a nonzero sigmoid where FP32 holds one.
-- The reciprocal `R` of `(1 + E)(1 + P)(1 + W)`, in `[1, 8]`: the forward takes one per element; the backward takes
+- The reciprocal `R` of `(1 + E)(1 + P)(1 + W)` (a product in `[1, 8]`): the forward takes one per element; the backward takes
   one per pair of elements (of their product, in `[1, 64]`, multiplied back by the other element's factor) and writes
   both gradients with `R^2`, so it needs no other reciprocal.  A negative gate's sigmoid numerator `P` is the last
   factor of each product, so a subnormal result rounds once.
@@ -99,7 +103,9 @@ and the strides are launch arguments, so one library per program and architectur
 
 Every output is elementwise, so every call gives the same bits for the same inputs on the same architecture, whatever
 the row count, the width's place in a wider tensor, the layout (merged, two tensors, row slices), the stream or a CUDA
-graph replay.  No call alerts under `torch.use_deterministic_algorithms(True)`, and no entry point takes a
+graph replay.  No call alerts under `torch.use_deterministic_algorithms(True)`; with
+`torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills each new output and each copied
+input with NaN before the kernel writes it, one more launch each, and the bits do not change.  No entry point takes a
 `deterministic` keyword.  The family has no non-deterministic module: there is no reduction across columns, rows or
 CTAs to reorder.  It has no KCP module: rows are independent, with no sequence dimension.
 

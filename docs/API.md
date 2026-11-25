@@ -1869,9 +1869,11 @@ y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down 
 
 - **Forward:** `a = beta * tanh(g / beta) * sigmoid(g)` and `u' = lb * tanh(u / lb)` in FP32, and `h = BF16(a * u')`, the only rounding.
 - **Backward:** with `s = sigmoid(g)`, `tg = tanh(g / beta)` and `tu = tanh(u / lb)`, `d_gate = BF16(dh * u' * ((1 - tg^2) * s + a * (1 - s)))` and `d_up = BF16(dh * a * (1 - tu^2))`, each rounded once.
-- There is no clamp: both factors saturate smoothly, so large `|g|` and `|u|` keep finite values and nonzero gradients where FP32 holds them. `g = 0` or `u = 0` gives `h = 0` exactly. The activation is unweighted.
+- There is no clamp: both factors saturate smoothly, so large `|g|` and `|u|` keep finite values. `g = 0` or `u = 0` gives `h = 0` exactly. The activation is unweighted.
+- The backward stores 0 for `d_up` where `|u| > 43.67 lb` and, at `beta >= 2.4`, for `d_gate` where `|g| > 43.67 beta`: there `E` or `W` flushes below `2^-126`, and the exact values are under `2^-124 |dh| beta` and about `2^-124 |dh| lb`.
 - One kernel per call (PyTorch's NaN fills under deterministic algorithms aside; see Caveats). The backward needs only `gate`, `up` and `dh`; it recomputes the activation.
 - Every exponential is the approximate base-2 exponential of a negative argument, so none overflows: `tanh(|g| / beta) = (1 - E) / (1 + E)` with `E = 2^(-2 |g| log2(e) / beta)`, the sigmoid from `P = 2^(-|g| log2(e))` (`P = E * E` at `beta = 4`) and `1 - tanh^2 = 4 E / (1 + E)^2`, the up likewise. The reciprocal of `(1 + E)(1 + P)(1 + W)` is one per element in the forward and one per pair of elements in the backward. Every product rounds to nearest without flushing subnormals; nothing is FP64.
+- `1 - E` and `1 - W` keep an absolute error of a few `2^-24`. So where `|g|` is below about `3e-5 beta` (`|u|` below about `3e-5 lb`), the relative error of the outputs that scale with `1 - E` (`h`, `d_up`) or `1 - W` (`h`, `d_gate`) can pass the BF16 rounding, and below about `2^-26 beta` (`2^-26 lb`) those outputs are 0.
 
 **Architectures.** `sm_100a`, `sm_103a`. Other devices raise `RuntimeError`, also for `R = 0`. The `sm_107a` libraries are not delivered yet. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` and 12.9 for `sm_103a`.
 
@@ -1879,7 +1881,7 @@ y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down 
 
 - `gate`, `up`: BF16 `[R, I]` each, or one `[R, 2I]` tensor with the gate in columns `[0, I)` and the up in `[I, 2I)` (pass it as the first argument with `up=None`). The kernels read every BF16 tensor through its row stride, so the halves of a merged tensor and row slices of wider tensors are read in place when the row stride is a multiple of 8 elements, the last stride is 1 and the base is 16-byte aligned. Other inputs are copied once.
 - `dh`: BF16 `[R, I]`.
-- `beta`, `lb`: finite positive Python numbers, rounded to FP32, with the defaults 4.0 and 25.0 (Kimi-K3.1-Pro's `activation_situ_beta` and `activation_situ_linear_beta`). They are launch arguments, as are `R`, `I` and the strides: one library per program and architecture serves every call, with no recompilation. Each stage has one program, with one CTA per block of rows (one row in the forward, two in the backward).
+- `beta`, `lb`: finite positive Python numbers, rounded to FP32, with the defaults 4.0 and 25.0 (Kimi-K3.1-Pro's `activation_situ_beta` and `activation_situ_linear_beta`). `2.88539 / beta`, `2.88539 / lb` and `beta * lb` must be finite in FP32 (`ValueError` otherwise). The tests cover `beta` in `[2.5, 4]` and `lb` in `[10, 40]`. They are launch arguments, as are `R`, `I` and the strides: one library per program and architecture serves every call, with no recompilation. Each stage has one program, with one CTA per block of rows (one row in the forward, two in the backward).
 - `R` is any count from 0 to `2**30`. Every operand is on one CUDA device.
 - Every argument is checked before an input is copied or an output allocated, so a call refused for its arguments copies, allocates and launches nothing.
 

@@ -28,13 +28,19 @@ Per row ``r < R`` and column ``c < I``, from the BF16 gate ``g`` and up ``u``
     d_up   = BF16(dh a (1 - tu^2))
 
 There is no clamp: both factors saturate smoothly, so large ``|g|`` and
-``|u|`` keep finite values and nonzero gradients where FP32 holds them, and
-``g = 0`` or ``u = 0`` gives ``h = 0`` exactly.  The activation is unweighted.
+``|u|`` keep finite values, and ``g = 0`` or ``u = 0`` gives ``h = 0``
+exactly.  The backward stores 0 for ``d_up`` where ``|u| > 43.67 lb`` and,
+at ``beta >= 2.4``, for ``d_gate`` where ``|g| > 43.67 beta``: there the
+exact values are under ``2^-124 |dh| beta`` and about ``2^-124 |dh| lb``
+(the backend's numerics).  The activation is unweighted.
 ``R`` is a run-time value (any ``0 <= R <= 2**30``; ``R = 0`` returns empty
 outputs and launches nothing), and so are ``I`` and the scalars: one build
 serves every call, with no recompilation.  ``beta`` and ``lb`` default to 4.0
 and 25.0, the values of Kimi-K3.1-Pro (``activation_situ_beta`` and
-``activation_situ_linear_beta``).
+``activation_situ_linear_beta``).  They must be positive and finite in FP32,
+with ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb`` finite in FP32
+(``ValueError`` otherwise); the tests cover ``beta`` in ``[2.5, 4]`` and
+``lb`` in ``[10, 40]``.
 
 The kernels take every exponential as a power of two of a negative argument
 (the approximate base-2 exponential), every tanh as ``(1 - E) / (1 + E)`` of
@@ -60,7 +66,10 @@ Mode rules:
    ``TypeError``.
 3. Every call gives the same bits for the same inputs on the same
    architecture, whatever ``R``, the layout, the stream or a CUDA graph, so
-   under ``torch.use_deterministic_algorithms(True)`` no call alerts.
+   under ``torch.use_deterministic_algorithms(True)`` no call alerts.  With
+   ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
+   PyTorch then fills each new output and each copied input with NaN before
+   the kernel writes it: one more launch each, and the bits do not change.
 4. Autograd: ``CakeSiTUGLUDetFunction`` saves only its inputs (the gate and
    up, or the merged tensor; no activation) and recomputes the activation in
    the backward: retained state is the inputs.
@@ -148,7 +157,8 @@ def cake_situ_glu_det_train_forward(
 ) -> torch.Tensor:
     r"""SiTU-GLU forward: ``h = BF16(beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb))``.
 
-    The activation is FP32; ``h`` is rounded once.  One kernel launch, no workspace.  The same inputs give the same
+    The activation is FP32; ``h`` is rounded once.  One kernel launch (plus one copy of an input the kernels cannot
+    read in place), no workspace.  The same inputs give the same
     bits at every call.
 
     Parameters
@@ -209,7 +219,8 @@ def cake_situ_glu_det_train_backward(
         d_gate = BF16(dh u' ((1 - tg^2) s + a (1 - s)))
         d_up   = BF16(dh a (1 - tu^2))
 
-    in FP32, each BF16 output rounded once.  One kernel launch, no workspace.  The same inputs give the same bits at
+    in FP32, each BF16 output rounded once.  One kernel launch (plus one copy of an input the kernels cannot read in
+    place), no workspace.  The same inputs give the same bits at
     every call.
 
     Parameters
