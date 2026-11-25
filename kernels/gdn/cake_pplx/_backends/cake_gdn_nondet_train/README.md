@@ -320,6 +320,23 @@ call that neither of the two takes runs the third, the prep forward (below).
   most 1.10 x the split one and its sequences x `HV` CTAs fill at least 0.65
   of the SMs; this route then runs it.
 
+In 0.2.10 a backward whose final state receives a gradient (a `dht` given to
+the backward; under autograd, a gradient that autograd gives the final state)
+runs the `pv_tf32` builds of `dhu_tc2_dvl32` and of its tail (the package
+tail, `tail_g2_f32x` and `tail_g3_f32x`, each in both `dbeta` forms) on
+`sm_100a`, `sm_103a` and `sm_107a` (`PV_TF32`, on by default).  `P_v` reads one
+TF32-rounded FP32 copy of `dh`, the scan writes the state terms of `dg` in FP32
+beside `dh`, and the tail reads them in place of its BF16 ones, so `dv` and
+`dg` of such a call meet the BF16 naive tier where 0.2.8 missed it; such a
+call costs more time.  A call planned on the one-wave split runs its table's
+split route on the tcgen05 pass 2 instead (the pre-scan, the stitch, then the
+`pv_tf32` walk) where that route serves the table.  Every call without a
+final-state gradient keeps the 0.2.8 programs and launches, and only such calls
+record or replay a backward plan.  A register scan, the unfused tail or a
+pinned tail form keeps the 0.2.8 programs: the fix does not reach those routes.
+A zero gradient that the caller gives counts as a gradient.  `PV_TF32 = False`
+turns the rule off.
+
 In 0.2.5 `wy_a` is built from newer kernel source under the same program
 name: each compute warp owns the ring slots of its parity.  Routes, launch
 records and output bits are those of 0.2.4.

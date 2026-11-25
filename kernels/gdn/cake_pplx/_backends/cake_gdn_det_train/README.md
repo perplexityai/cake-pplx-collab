@@ -225,6 +225,23 @@ keeps `dhu_tc2_dvl32_gm`.  On `sm_107a` (`ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`)
 a call with `2 x entries x HV <= SMs` keeps the fused pre-scan instead of
 either map form, as in 0.2.7.
 
+In 0.2.10 a backward whose final state receives a gradient (a `dht` given to
+the backward; under autograd, a gradient that autograd gives the final state)
+runs the `pv_tf32` builds of its tcgen05 adjoint scan (`dhu_tc2`,
+`dhu_tc2_dvl32`) and of its tail (`dqkwg`, `tail_g2`, `tail_g3_f32x` and the
+package tail, each tail in both `dbeta` forms) on `sm_100a`, `sm_103a` and
+`sm_107a` (`PV_TF32`, on by default).  `P_v` reads one TF32-rounded FP32 copy
+of `dh`, the scan writes the state terms of `dg` in FP32 beside `dh`, and the
+tail reads them in place of its BF16 ones, so `dv` and `dg` of such a call meet
+the BF16 naive tier where 0.2.8 missed it.  Such a call takes other `dk`, `dv`,
+`dg`, `dbeta` and initial-state-gradient bits than in 0.2.8 and costs more
+time; `o`, `dq` and the final state keep their bits, and it runs the plain
+launches where the plan holds the wavefront pair.  Every call without a
+final-state gradient keeps the 0.2.8 programs and bits, as does a call whose
+adjoint runs on a register scan or whose tail is `tail_g3`: the fix does not
+reach those routes.  A zero gradient that the caller gives counts as a
+gradient.  `PV_TF32 = False` turns the rule off.
+
 In 0.2.8 the segment maps of a split pass 2 at `G = 3` on `dhu_tc2_dvl32` come
 from `dhu_tc2_dvl32_gm` or `dhu_tc2_dvl32_gm2` (above), where 0.2.3 to 0.2.7
 ran the fused pre-scan.  Where a map carries state into the segment before it,
