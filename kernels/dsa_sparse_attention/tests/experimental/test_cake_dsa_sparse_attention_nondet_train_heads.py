@@ -300,6 +300,31 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
     _check_dkv(case, roles, total, direct=direct)
 
 
+def _saved_by(call):
+    """The tensors ``call()`` saves for its backward (``saved_tensors_hooks``) and its result."""
+    saved = []
+
+    def pack(t):
+        saved.append(t)
+        return t
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
+        result = call()
+    return saved, result
+
+
+def _retained_bytes(saved, held) -> int:
+    """Bytes of the storages of ``saved`` that no tensor of ``held`` (the call's inputs and its returned ``out``)
+    owns, each storage counted once."""
+    owned = {t.untyped_storage().data_ptr() for t in held if t.numel()}
+    storages = {
+        t.untyped_storage().data_ptr(): t.untyped_storage().nbytes()
+        for t in saved
+        if t.numel() and t.untyped_storage().data_ptr() not in owned
+    }
+    return sum(storages.values())
+
+
 @pytest.mark.parametrize("heads", (64, 96, 128))
 @pytest.mark.parametrize("with_o_lo", (True, False))
 def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(
@@ -309,7 +334,10 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(
     contract, of which the call's own state is ``lse [T, H]`` FP32, ``o_lo [T, H, 512]`` BF16 (with ``with_o_lo``;
     the zero-size placeholder without) and the derived ``topk_length [T]`` int32 -- exactly
     ``T * (H * (4 + 1024 with_o_lo) + 4)`` bytes beside the inputs and ``out``, no window scratch -- and its backward
-    gives every query head its own ``dq`` (the backward launches as :func:`test_head_window_launches`)."""
+    gives every query head its own ``dq`` (the backward launches as :func:`test_head_window_launches`).  The packed
+    entry (its torch index route) saves the nine as well; beside its inputs and ``out`` it keeps exactly
+    ``dsa_train_retained_size(T, num_heads=H, with_o_lo=..., varlen_topk=K_slots)`` bytes: ``lse``, ``o_lo``, the
+    compacted rows ``[T, K_slots]`` and their counts ``[T]``."""
     h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_100a")
     inp = hl.host_inputs(8, 64, 16, heads, seed=heads)
     leaves = [
@@ -317,26 +345,14 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(
         for t in (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
     ]
     h.bind(leaves[0], leaves[1], inp.dout)
-    saved = []
-
-    def pack(t):
-        saved.append(t)
-        return t
-
-    with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
-        out, lse = cake_backend.cake_dsa_sparse_attention_nondet(
+    saved, (out, lse) = _saved_by(
+        lambda: cake_backend.cake_dsa_sparse_attention_nondet(
             *leaves, inp.indices, return_lse=True, with_o_lo=with_o_lo
         )
+    )
     assert len(saved) == 9
     T, H = inp.total_q, heads
-    held = {
-        t.untyped_storage().data_ptr() for t in (*leaves, inp.indices, out) if t.numel()
-    }
-    retained = sum(
-        t.untyped_storage().nbytes()
-        for t in saved
-        if t.numel() and t.untyped_storage().data_ptr() not in held
-    )
+    retained = _retained_bytes(saved, (*leaves, inp.indices, out))
     assert retained == T * (H * (4 + (1024 if with_o_lo else 0)) + 4), retained
     fwd_launches = h.mark()
     hl.check_forward(
@@ -367,6 +383,30 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(
         grads[0],
         grads[1],
     )
+    # the packed entry on its torch index route (the index-preparation stage needs a device)
+    monkeypatch.setattr(
+        cake_backend, "nope_index_prep_available", lambda device=None: False
+    )
+    K = int(inp.indices.shape[1])
+    local = inp.indices % 24
+    cu_q = torch.tensor([0, 3, T], dtype=torch.int32)
+    cu_k = torch.tensor([0, 24, inp.total_k], dtype=torch.int32)
+    leaves = [t.detach().clone().requires_grad_() for t in leaves]
+    h.bind(leaves[0], leaves[1], inp.dout)
+    saved, out = _saved_by(
+        lambda: cake_backend.cake_dsa_sparse_attention_nondet_varlen(
+            *leaves, local, cu_q, cu_k, causal=True, with_o_lo=with_o_lo
+        )
+    )
+    assert len(saved) == 9
+    want = cake_backend.dsa_train_retained_size(
+        T, num_heads=H, with_o_lo=with_o_lo, varlen_topk=K
+    )
+    assert want == T * (H * (4 + (1024 if with_o_lo else 0)) + 4 * K + 4)
+    retained = _retained_bytes(saved, (*leaves, local, cu_q, cu_k, out))
+    assert retained == want, (retained, want)
+    grads = torch.autograd.grad(out, leaves, inp.dout)
+    assert [tuple(g.shape) for g in grads] == [tuple(t.shape) for t in leaves]
 
 
 #: The ``dout`` layouts of :func:`test_every_rope_plan_carries_dout_copy`: dense, the head-major view a trainer hands
