@@ -54,13 +54,16 @@ in a fixed order (`chain` or `tree`), one FP32 word per sum. A row-strided windo
 slot `s` the rows `s`, `s + n`, `s + 2n`, ... with `n` = min(`T`, slots), and each slot
 sums its rows plainly in row order into its partial row; where its kernel runs beside a
 side stream, the window leaves eight SMs out of the slot count (`ctas_per_sm` x (SM
-count - 8)). A column-task window sums each column over every row in one CTA in a fixed
-order (FP32 sums per row lane, the lanes' sums added in FP32), so there `dw` does not
-depend on the SM count. The FP32-weight routes use the same windows and orders, except
-the `_w32` routes the tables list: they keep the programs of windows where the BF16
-route runs a program without an FP32-weight build, or run another program's FP32-weight
-build where that one is faster with an FP32 weight. Program and reduce names are the
-first eight hex digits of the program name.
+count - 8)). The sm_107a grouped windows (H = 1024 and 1280) give slot `s` the tiles
+`s`, `s + n`, ... of five rows (one per row group), with `n` = min(ceil(`T` / 5),
+slots), and leave one SM out (`ctas_per_sm` x (SM count - 1)), so a kernel resident on
+one SM holds back no slot. A column-task window sums each column over every row in one
+CTA in a fixed order (FP32 sums per row lane, the lanes' sums added in FP32), so there
+`dw` does not depend on the SM count. The FP32-weight routes use the same windows and
+orders, except the `_w32` routes the tables list: they keep the programs of windows
+where the BF16 route runs a program without an FP32-weight build, or run another
+program's FP32-weight build where that one is faster with an FP32 weight. Program and
+reduce names are the first eight hex digits of the program name.
 
 ### sm_100a
 
@@ -239,8 +242,8 @@ first eight hex digits of the program name.
 | `bwd_h1024` | (1, 8] | 5ad5f096 | column task | - | - |
 | `bwd_h1024` | (8, 1536] | 89fa3e96 | column task | - | - |
 | `bwd_h1024` | (1536, 2048] | 0c581a13 | plain | row-strided slots | 4830a91c (chain, column-split) |
-| `bwd_h1024` | (2048, 24576] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_h1024` | (24576, inf) | 4294c01f | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_h1024` | (2048, 4095] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (4095, inf) | 4572a519 | plain | row-strided slots, 1 SMs left out | 176f79f9 (chain) |
 | `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
 | `bwd_h128` | (1024, 2047] | 401a018c | column task | - | - |
 | `bwd_h128` | (2047, 65536] | d197bcc3 | plain | row-strided slots | 096e5efb (chain, column-split) |
@@ -248,15 +251,14 @@ first eight hex digits of the program name.
 | `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
 | `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
 | `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
-| `bwd_h1280` | (512, 8192] | 12bbedff | plain | row-strided slots | 849ee5d8 (chain, column-split) |
-| `bwd_h1280` | (8192, 16384] | c646e097 | plain | row-strided slots | 382c8727 (chain, column-split) |
-| `bwd_h1280` | (16384, inf) | c646e097 | plain | row-strided slots | 55c35305 (chain, column-split) |
+| `bwd_h1280` | (512, 6143] | 12bbedff | plain | row-strided slots | 849ee5d8 (chain, column-split) |
+| `bwd_h1280` | (6143, inf) | cbeec4e6 | plain | row-strided slots, 1 SMs left out | 3ce544b3 (chain) |
 | `bwd_w32_h1280` | (0, 1] | 103805d9 | column task | - | - |
 | `bwd_w32_h1280` | (1, 128] | 8d8ef930 | column task | - | - |
 | `bwd_w32_h1280` | (128, 512] | e476d0b2 | column task | - | - |
 | `bwd_w32_h1280` | (512, 4096] | 80956d25 | plain | row-strided slots | 849ee5d8 (chain, column-split) |
-| `bwd_w32_h1280` | (4096, 16384] | c66b8cbd | plain | row-strided slots | 382c8727 (chain, column-split) |
-| `bwd_w32_h1280` | (16384, inf) | c66b8cbd | plain | row-strided slots | 55c35305 (chain, column-split) |
+| `bwd_w32_h1280` | (4096, 6143] | c66b8cbd | plain | row-strided slots | 382c8727 (chain, column-split) |
+| `bwd_w32_h1280` | (6143, inf) | 3a321b74 | plain | row-strided slots, 1 SMs left out | 3ce544b3 (chain) |
 | `bwd_h1536` | (0, 1] | c3b1b46a | column task | - | - |
 | `bwd_h1536` | (1, 576] | 1207b056 | column task | - | - |
 | `bwd_h1536` | (576, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 628248fe (tree) |

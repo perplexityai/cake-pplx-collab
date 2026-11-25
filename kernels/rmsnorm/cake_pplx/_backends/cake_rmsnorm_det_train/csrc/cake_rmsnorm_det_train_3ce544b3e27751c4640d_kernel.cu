@@ -51,8 +51,8 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 
 extern "C" {
 
-__global__ __launch_bounds__(256) void
-kernel_cake_rmsnorm_train_55c3530541ac1903b775(float* __restrict__ partial, float* __restrict__ dw, int n_chunks)
+__global__ __launch_bounds__(128) void
+kernel_cake_rmsnorm_det_train_3ce544b3e27751c4640d(float* __restrict__ partial, float* __restrict__ dw, int n_chunks)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -75,81 +75,88 @@ kernel_cake_rmsnorm_train_55c3530541ac1903b775(float* __restrict__ partial, floa
     asm volatile("griddepcontrol.wait;" ::: "memory");
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     int s = bid;
-    int rsub = tid / 16;
-    int cg = tid - rsub * 16;
-    int col = s * 16 + cg;
-    float a[1];
+    int rsub = tid / 4;
+    int cg = tid - rsub * 4;
+    int col = s * 8 + cg * 2;
+    float a[2];
     #pragma unroll
-    for (int e = 0; e < 1; e++) {
+    for (int e = 0; e < 2; e++) {
         a[e] = 0.0f;
     }
-    int n_trips = (n_chunks + 15) / 16;
-    int n_waves = (n_trips + 23) / 24;
-    float cur[24];
+    int n_trips = (n_chunks + 31) / 32;
+    int n_waves = (n_trips + 31) / 32;
+    float cur[64];
     #pragma unroll
-    for (int i = 0; i < 24; i++) {
+    for (int i = 0; i < 64; i++) {
         cur[i] = 0.0f;
     }
     #pragma unroll
-    for (int d = 0; d < 24; d++) {
-        int cc = rsub + d * 16;
+    for (int d = 0; d < 32; d++) {
+        int cc = rsub + d * 32;
         if (cc < n_chunks) {
             {
-                cur[d] = *reinterpret_cast<const float*>(partial + ((unsigned long long)cc * 1280ull + (unsigned long long)col));
+                float2 _v2_0 = *reinterpret_cast<const float2*>(partial + (unsigned long long)cc * 1280ull + (unsigned long long)col);
+                cur[d * 2] = _v2_0.x;
+                cur[d * 2 + 1] = _v2_0.y;
             }
         }
     }
     for (int w = 0; w < n_waves; w++) {
-        float nxt[24];
+        float nxt[64];
         #pragma unroll
-        for (int i_1 = 0; i_1 < 24; i_1++) {
+        for (int i_1 = 0; i_1 < 64; i_1++) {
             nxt[i_1] = 0.0f;
         }
         #pragma unroll
-        for (int d_1 = 0; d_1 < 24; d_1++) {
-            int cc_1 = rsub + ((w + 1) * 24 + d_1) * 16;
+        for (int d_1 = 0; d_1 < 32; d_1++) {
+            int cc_1 = rsub + ((w + 1) * 32 + d_1) * 32;
             if (cc_1 < n_chunks) {
                 {
-                    nxt[d_1] = *reinterpret_cast<const float*>(partial + ((unsigned long long)cc_1 * 1280ull + (unsigned long long)col));
+                    float2 _v2_1 = *reinterpret_cast<const float2*>(partial + (unsigned long long)cc_1 * 1280ull + (unsigned long long)col);
+                    nxt[d_1 * 2] = _v2_1.x;
+                    nxt[d_1 * 2 + 1] = _v2_1.y;
                 }
             }
         }
         #pragma unroll
-        for (int d_2 = 0; d_2 < 24; d_2++) {
-            int cc_2 = rsub + (w * 24 + d_2) * 16;
+        for (int d_2 = 0; d_2 < 32; d_2++) {
+            int cc_2 = rsub + (w * 32 + d_2) * 32;
             if (cc_2 < n_chunks) {
                 #pragma unroll
-                for (int e_1 = 0; e_1 < 1; e_1++) {
-                    a[e_1] = a[e_1] + cur[d_2 + e_1];
+                for (int e_1 = 0; e_1 < 2; e_1++) {
+                    a[e_1] = a[e_1] + cur[d_2 * 2 + e_1];
                 }
             }
         }
         #pragma unroll
-        for (int i_2 = 0; i_2 < 24; i_2++) {
+        for (int i_2 = 0; i_2 < 64; i_2++) {
             cur[i_2] = nxt[i_2];
         }
     }
     #pragma unroll
-    for (int e_2 = 0; e_2 < 1; e_2++) {
-        red_fold[rsub * 16 + cg + e_2] = a[e_2];
+    for (int e_2 = 0; e_2 < 2; e_2++) {
+        red_fold[rsub * 8 + cg * 2 + e_2] = a[e_2];
     }
     __syncthreads();
-    if (tid < 16) {
-        float o4[1];
+    if (tid < 4) {
+        float o4[2];
         #pragma unroll
-        for (int e_3 = 0; e_3 < 1; e_3++) {
+        for (int e_3 = 0; e_3 < 2; e_3++) {
             o4[e_3] = 0.0f;
         }
         #pragma unroll
-        for (int k = 0; k < 16; k++) {
+        for (int k = 0; k < 32; k++) {
             #pragma unroll
-            for (int e_4 = 0; e_4 < 1; e_4++) {
-                float d_3 = red_fold[k * 16 + tid + e_4];
+            for (int e_4 = 0; e_4 < 2; e_4++) {
+                float d_3 = red_fold[k * 8 + tid * 2 + e_4];
                 o4[e_4] = o4[e_4] + d_3;
             }
         }
-        int ocol = s * 16 + tid;
-        *(reinterpret_cast<float*>(dw) + ((unsigned long long)ocol)) = o4[0];
+        int ocol = s * 8 + tid * 2;
+        {
+            float2 _v2 = make_float2(o4[0 + 0], o4[0 + 1]);
+            *reinterpret_cast<float2*>(dw + (unsigned long long)ocol) = _v2;
+        }
     }
     __syncthreads();
 }
