@@ -3363,7 +3363,7 @@ STRIDED_FORWARD_BANDS = {
 # ``fwd_layout_keep_pipe`` (``x`` and ``z`` loaded with the L2's default
 # policy; on sm_100a and sm_107a), in the place of parts of the extra-long
 # and the plain forward of STRIDED_FORWARD_BANDS on sm_100a and sm_103a, and
-# of parts of its mid and plain forward on sm_107a.
+# of parts of its mid forward and all of its plain forward on sm_107a.
 PROJECTION_FORWARD_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
