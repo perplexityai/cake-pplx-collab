@@ -693,8 +693,9 @@ change:
   launches -- also without query rows, on a CUDA tensor -- and so does
   `prepare_dsa_train`, until the window stages are validated there (a
   prepared runner refuses `T = 0` with `ValueError` at every head count).
-* Cost.  At 96 heads each stage processes 128 heads (the overlap heads
-  twice).  The forward adds the scratch copies of `lse` and `o_lo`; the
+* Cost.  At 96 heads the forward and the main stage each process 128 heads
+  (the overlap heads twice); the delta runs once over the 96 heads and the
+  cast once.  The forward adds the scratch copies of `lse` and `o_lo`; the
   backward gathers the keys and drains the dK / dV reductions once per window.
 
 ## NoPE (zero-rope) program
