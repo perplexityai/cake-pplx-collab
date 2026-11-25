@@ -5,8 +5,10 @@ non-deterministic package of the DeepSeek Sparse Attention training kernels
 (top-k sparse MLA with absorbed queries; GLM-5.2 geometry: 64 heads, 512
 latent + 64 rope query/key dimensions, 512 value dimensions, top-k 2048).
 The kernels are native 64-query-head programs; the rope form also serves 96
-and 128 query heads on `sm_100a` and `sm_103a` by running them on two 64-head
-windows (see "Query heads above 64 (head windows)").
+and 128 query heads on `sm_100a` and `sm_103a`, through head-window builds
+that run both 64-head windows of every token in one launch, or else on two
+64-head windows of the 64-head kernels (see "Query heads above 64 (head
+windows)").
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_nondet_train` are
 stable APIs; this backend package is experimental (no compatibility guarantee
@@ -157,9 +159,9 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   With `with_o_lo=False` no `o_lo` is computed, stored or saved and the
   backward forms `delta = rowsum(dO * O)` from the BF16 output alone (see
   "Without the output residual").
-* Backward: `dq_latent`, `dq_rope` (computed once per row; above 64 heads the
-  overlap heads `[H - 64, 64)` are written by both windows, the second write
-  final),
+* Backward: `dq_latent`, `dq_rope` (computed once per row; above 64 heads on
+  the two-window bridge the overlap heads `[H - 64, 64)` are written by both
+  windows, the second write final),
   `dkv_latent [S, 512]`, `dk_rope [S, 64]` (FP32 `red.global`
   accumulation, then a cast to natural-layout BF16).  BF16 MMA operands, FP32
   accumulation throughout.  `cake_backend.backward(..., dkv_fp32=True)` (and a
@@ -477,8 +479,9 @@ other layouts through their flat alias.  The stage and the forward are both
 launched before the autograd function runs; it receives the forward's outputs
 and launches nothing itself.  The bindings encode the
 tensor maps by value, so a step is its
-kernels -- at 64 heads (above 64, see "Query heads above 64 (head windows)")
-one launch for the forward; three for the single-pass backward
+kernels -- at 64 heads and with the head-window builds above 64 (on the
+two-window bridge, see "Query heads above 64 (head windows)") one launch for
+the forward; three for the single-pass backward
 (`bwd_delta`, `bwd_main`, `bwd_cast`); `2 + 2 x chunks x passes` for the
 key-range-pass backward (`bwd_delta`, then `bwd_compact` + `bwd_main_pass` per
 token chunk and pass, `bwd_cast`)
@@ -582,8 +585,9 @@ per-pass FP32 dQ-partial round trip and pipeline fill outweigh the L2 benefit
 (the `S = 225,280` / `267,520` one-chunk rows run one pass on `sm_100a` and
 `sm_103a`; `sm_107a`'s two passes are under the cap).  A record without
 `rules` (the first release) is the `sm_100a` rule everywhere.  The tokens of a multi-pass backward run in chunks of 4224 (every
-chunk through every pass, `token_base` = the chunk's first token), so the pass
-scratch holds one chunk.  The passes split the whole key row
+chunk through every pass, `token_base` = the chunk's first token; 2,176 with
+the head-window builds above 64 heads, see "Query heads above 64 (head
+windows)"), so the pass scratch holds one chunk.  The passes split the whole key row
 into equal ranges, which matches an index row whose keys spread over the whole
 row (one document); in a packed multi-segment row every token's keys lie
 inside its own segment, so the policy applies to one-segment rows only
@@ -608,12 +612,86 @@ pass stages serves the single pass only.
 ## Query heads above 64 (head windows)
 
 The rope form takes `H = q_latent.shape[1]` query heads, `H` in 64, 96 and 128
-(`cake_backend.SUPPORTED_HEADS`).  Every kernel of the program serves exactly
-64 heads of a token: its tensor maps take 64-head boxes and its `lse`, `o_lo`
-and `delta` addresses use the literal 64.  `H = 64` runs the plan of 0.6.1
-(the 64-head release), launch for launch.  `H = 96` and `128` run the same stages on two
-64-head windows, `W1` first and then `W0`, with no kernel, build or launcher
-change:
+(`cake_backend.SUPPORTED_HEADS`).  Every kernel of the program computes 64
+heads of a token per work item.  `H = 64` runs the plan of 0.6.1 (the 64-head
+release), launch for launch, whatever the registry ships.  `H = 96` and `128`
+run, per phase (forward, backward), one of two plans:
+
+| plan | where | forward | backward main stage |
+|---|---|---|---|
+| head-window builds | the program ships the phase's build for the device's architecture | one `fwd_hw` launch | one launch of its `*_hw` build (per token chunk and pass with key passes) |
+| two-window bridge | otherwise (0.7.0) | two window launches and their copies | statistics copies, then one launch per window (per token chunk and pass) |
+
+`cake_backend.head_window_plan(H, arch, ...)` returns the head-window stages a
+call runs (`None` for a phase on the bridge).  A phase takes its build only
+where the registry carries it for the architecture, among the record's stages
+and the program's stage order, with its generated launcher and grid
+(`cake_backend.head_window_stage`); the builds ship for `sm_100a` and
+`sm_103a`.  A partial registry mixes the plans per phase.
+
+### Head-window builds
+
+The windows are `W0 = [0, 64)` and `W1 = [64, 128)`.  Work item `i` is window
+`i & 1` of token `i >> 1`, so the two windows of a token run side by side and
+the second finds the token's gathered key rows in L2.  The rows of `W1` past
+`H` (heads 96 to 127 at `H = 96`) are zero-filled by the query loads and
+skipped by every store.
+
+| stage | head-window build (`cake_backend.HEAD_WINDOW_STAGES`) |
+|---|---|
+| `fwd` / `fwd_no_olo` | `fwd_hw` / `fwd_hw_no_olo` |
+| `bwd_main` / `bwd_main_natural` | `bwd_main_hw` / `bwd_main_natural_hw` |
+| `bwd_main_pass` / `bwd_main_pass_natural` | `bwd_main_pass_hw` / `bwd_main_pass_natural_hw` |
+
+* Arguments.  A build takes the arguments of its 64-head stage plus
+  `num_heads = H` and `wsel = -1` (both windows of every token), and the grid
+  of its 64-head stage over `num_queries = 2 T` items.  Its query, `out`,
+  `dout` and `dq` operands are the caller's whole `[T, H, *]` tensors (the
+  tensor maps carry the strides, so packed `[T, H, 576]` and pre-absorption
+  `[T, H, 256]` views work as at 64 heads); `lse`, `o_lo` and `delta` are
+  addressed at `t * H + h`.  The host checks this contract where it binds the
+  launch values (`ValueError` otherwise).
+* Forward.  One `fwd_hw` launch (`fwd_hw_no_olo` under `with_o_lo=False`)
+  writes `out`, `lse` and `o_lo` of every head of the call's `[T, H]` outputs:
+  no scratch and no copy.  With length derivation the `W0` item of a token
+  stores its length.
+* Backward, in launch order:
+  1. The `dout` copy, as on the bridge (step 1 below).
+  2. One `bwd_delta` (or `bwd_delta_no_olo`) launch over the `T * H` rows, as
+     on the bridge (step 2 below).
+  3. The main stage's build over the `2 T` items, reading the call's `lse` and
+     the `delta` rows directly and storing every head's `dq` once.  Its
+     `token_base` / `token_step` count items and keep both items of a token
+     adjacent: ascending from item 0, or descending from item `2 T - 1` where
+     the 64-head plan walks its tokens descending (`sm_103a`, single pass).
+     With key-range passes the backward runs per token chunk and pass:
+     `bwd_compact` over the chunk's tokens (token space), then the pass build
+     over the chunk's `2 n` items, ascending from item `2 * token_base`, so the
+     two windows of a token read its one compaction row.
+  4. One `bwd_cast` at the end (none on a direct binding).
+* Key-pass chunks.  Each item has its own FP32 `dq_partial` row (147,456 B),
+  so the token chunk is planned at two items per token: the largest multiple
+  of 128 tokens whose `2 x 147,456 + 4 * topk + 4` B per token fit the
+  640 MiB budget -- 2,176 tokens at top-k 2048 (4,224 at 64 heads).  The pass
+  count follows the record's rule as at 64 heads.
+* Launches.  The forward is one launch; the single-pass backward is the
+  optional `dout` copy, `bwd_delta`, one main launch and `bwd_cast`.  The
+  runner's launch keys are the build names (`("fwd_hw",)` as
+  `forward_stages`; `"bwd_main_hw"`, or `("bwd_main_pass_hw", chunk, pass)`
+  pass keys, in `backward_order`); no `WindowLaunch` and no copy step besides
+  `HeadStep("dout_copy")`.
+* Workspace: no window scratch (`fwd_lse`, `fwd_o_lo`) and no window
+  statistics (`window_lse`, `window_delta`); `delta` and `dout_copy` as on the
+  bridge; with key passes `dq_partial` holds `2 x` the chunk's tokens rows,
+  `key_scratch` and `pass_counts` one row per token.
+* Numerics.  The builds give every head the same 32-row rescale groups as the
+  bridge, so `out`, `lse`, `o_lo` and `dq` equal the bridge's bit for bit;
+  dK / dV add the same terms through FP32 atomics in another order.
+
+### Two-window bridge
+
+The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
+`W0`, with no kernel, build or launcher change:
 
 | `H` | `W1` (first) | `W0` (second) | heads both windows cover | pad heads of `W1` |
 |---|---|---|---|---|
@@ -668,15 +746,25 @@ change:
   `cake_backend.WindowLaunch(phase, head0, key)` for a window launch (`key`
   the 64-head stage name or pass key) and `cake_backend.HeadStep(name,
   head0)` for a copy step (`"fwd_copy"`, `"dout_copy"`, `"window_stats"`).
+* Workspace.  Per token, the forward adds `fwd_lse` (256 B) and, with
+  `with_o_lo`, `fwd_o_lo` (64 KiB); the backward holds `window_lse` and
+  `window_delta` (512 B each).  The dQ partials of a key-pass backward stay 64
+  heads per token.
+* Cost.  At 96 heads the forward and the main stage each process 128 heads
+  (the overlap heads twice); the delta runs once over the 96 heads and the
+  cast once.  The forward adds the scratch copies of `lse` and `o_lo`; the
+  backward gathers the keys and drains the dK / dV reductions once per window.
+
+### Both plans
+
 * Workspace: per-call scratch (`workspace_layout(..., num_heads=H)`,
-  `dsa_train_workspace_size(..., num_heads=H)`).  Per token, the forward adds
-  `fwd_lse` (256 B) and, with `with_o_lo`, `fwd_o_lo` (64 KiB); the backward
-  holds `delta` (`4 * H` B), `window_lse` and `window_delta` (512 B each) and,
-  when the `dout` layout needs it, `dout_copy` (`H` KiB).
-  `dsa_train_workspace_size` sizes `dout_copy` from its keyword: `None` (the
-  default) includes it for every backward over more than 64 heads, the upper
-  bound for any `dout` layout; `True` / `False` give the exact size.  The dQ
-  partials of a key-pass backward stay 64 heads per token.
+  `dsa_train_workspace_size(..., num_heads=H)`, which sizes the plan the
+  device's architecture serves).  The backward holds `delta` (`4 * H` B per
+  token) and, when the `dout` layout needs it, `dout_copy` (`H` KiB per
+  token).  `dsa_train_workspace_size` sizes `dout_copy` from its keyword:
+  `None` (the default) includes it for every backward over more than 64
+  heads, the upper bound for any `dout` layout; `True` / `False` give the
+  exact size.
 * Retained state: what a training step keeps from its forward to its backward
   (`retained_layout`, `dsa_train_retained_size`).  Per token: `lse`
   (`4 * H` B) and, with `with_o_lo`, `o_lo` (`H` KiB); the flat entry without
@@ -686,6 +774,8 @@ change:
   `out` (`H` KiB) is the call's output and is not counted (the autograd node
   saves it too, so it lives until the backward).  Under
   `torch.utils.checkpoint(..., use_reentrant=False)` nothing is retained.
+* A call without query rows (`T = 0`) returns its empty outputs and zero key
+  gradients before any plan: nothing launches.
 * Not served above 64 heads: the deterministic package, the NoPE program and
   its sink form (`ValueError`; the deterministic and NoPE query checks name
   the rope form, the sink check says the sink form serves 64 query heads
@@ -694,10 +784,7 @@ change:
   launches -- also without query rows, on a CUDA tensor -- and so does
   `prepare_dsa_train`, until the window stages are validated there (a
   prepared runner refuses `T = 0` with `ValueError` at every head count).
-* Cost.  At 96 heads the forward and the main stage each process 128 heads
-  (the overlap heads twice); the delta runs once over the 96 heads and the
-  cast once.  The forward adds the scratch copies of `lse` and `o_lo`; the
-  backward gathers the keys and drains the dK / dV reductions once per window.
+  This holds whatever builds the registry declares for `sm_107a`.
 
 ## NoPE (zero-rope) program
 
@@ -1143,9 +1230,11 @@ and its own key-range-pass and
 direct-accumulation policies (see "NoPE (zero-rope) program").  The rope
 record also carries the twins `fwd_no_olo` (`fwd_scan_no_olo` on `sm_107a`)
 and `bwd_delta_no_olo` (see "Without the output residual").  The rope form
-serves 96 and 128 query heads through the head windows on `sm_100a` and
-`sm_103a`; `sm_107a` serves 64 heads until its window stages are validated
-(see "Query heads above 64 (head windows)").
+serves 96 and 128 query heads on `sm_100a` and `sm_103a`, through the
+head-window builds (`fwd_hw`, `fwd_hw_no_olo` and the four `bwd_main*_hw`
+builds, for those two architectures) where the record carries them and else
+through the two-window bridge; `sm_107a` serves 64 heads until its window
+stages are validated (see "Query heads above 64 (head windows)").
 
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
 only this package; skips without a registered program or a compute capability

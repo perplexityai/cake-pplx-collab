@@ -3676,10 +3676,32 @@ def test_nope_stage_names_and_registry_accessors():
         "nope_fwd_no_olo": "nope_fwd_scan_no_olo",
         "nope_fwd_sink_no_olo": "nope_fwd_scan_sink_no_olo",
     }
-    assert cake_jit.STAGES_OF == {
-        cake_jit.PROGRAM: cake_jit.STAGES
+    rope_order = (
+        cake_jit.STAGES
         + ("fwd_scan",)
-        + ("fwd_no_olo", "bwd_delta_no_olo", "fwd_scan_no_olo"),
+        + ("fwd_no_olo", "bwd_delta_no_olo", "fwd_scan_no_olo")
+    )
+    # the RoPE program's head-window builds (64 < H <= 128, ``cake_backend.HEAD_WINDOW_STAGES``) close its order, in
+    # the order of their 64-head stages, where the registry registers them
+    head_window_tail = tuple(
+        cake_backend.HEAD_WINDOW_STAGES[s]
+        for s in rope_order
+        if s in cake_backend.HEAD_WINDOW_STAGES
+    )
+    assert head_window_tail == (
+        "fwd_hw",
+        "bwd_main_hw",
+        "bwd_main_natural_hw",
+        "bwd_main_pass_hw",
+        "bwd_main_pass_natural_hw",
+        "fwd_hw_no_olo",
+    ), head_window_tail
+    assert cake_jit.STAGES_OF[cake_jit.PROGRAM] in (
+        rope_order,
+        rope_order + head_window_tail,
+    ), cake_jit.STAGES_OF[cake_jit.PROGRAM]
+    assert set(cake_jit.STAGES_OF) == {cake_jit.PROGRAM, NOPE_PROGRAM}
+    assert {NOPE_PROGRAM: cake_jit.STAGES_OF[NOPE_PROGRAM]} == {
         NOPE_PROGRAM: cake_jit.NOPE_STAGES
         + ("nope_fwd_scan",)
         + cake_jit.NOPE_SINK_STAGES
@@ -11995,18 +12017,29 @@ def test_no_olo_twins_are_registered(program):
     twin has its default stage's architectures, entry and launch leaves and a library of its own, except that the
     delta twins of both records name one library (as the default deltas do); a forward twin's scanner-warp build is
     the twin of the default's, so the same architecture picks the scanner build in both modes; ``build.json`` names
-    every twin library for every architecture it ships for."""
+    every twin library for every architecture it ships for.  The RoPE program's head-window builds, where the
+    registry carries them, close its order after the twins (:func:`test_head_window_builds_are_registered`)."""
     record = cake_jit.record(program)
     defaults = _STAGES_0_5_0[program]
     twins = tuple(
         cake_jit.NO_OLO_STAGES[s] for s in defaults if s in cake_jit.NO_OLO_STAGES
     )
     assert len(twins) == (3 if program == cake_jit.PROGRAM else 5)
-    assert cake_jit.STAGES_OF[program] == defaults + twins
-    stages = cake_jit.registered_stages(program)
+    head_window = (
+        set(cake_backend.HEAD_WINDOW_STAGES.values())
+        if program == cake_jit.PROGRAM
+        else set()
+    )
+    order = tuple(s for s in cake_jit.STAGES_OF[program] if s not in head_window)
+    assert cake_jit.STAGES_OF[program][: len(order)] == order
+    assert order == defaults + twins
+    stages = tuple(
+        s for s in cake_jit.registered_stages(program) if s not in head_window
+    )
     assert stages[-len(twins) :] == twins
     assert stages[: -len(twins)] == tuple(s for s in defaults if s in stages)
-    assert tuple(record["stages"][-len(twins) :]) == twins
+    listed = tuple(s for s in record["stages"] if s not in head_window)
+    assert listed[-len(twins) :] == twins
     libraries = {e["name"]: e for e in cake_build.manifest()["libraries"]}
     missing = []
     for default in defaults:
@@ -12037,6 +12070,53 @@ def test_no_olo_twins_are_registered(program):
         rope["bwd_delta_no_olo"]["library"] == nope["nope_bwd_delta_no_olo"]["library"]
     )
     assert rope["bwd_delta"]["library"] == nope["nope_bwd_delta"]["library"]
+    assert not missing, f"build.json lacks {missing}"
+
+
+@pytest.mark.cpu_only
+def test_head_window_builds_are_registered():
+    """The RoPE program's head-window builds (``cake_backend.HEAD_WINDOW_STAGES``; skip where the registry carries
+    none): each a record entry among the record's ``stages`` after the ``with_o_lo=False`` twins, closing the
+    program's ``STAGES_OF`` order in the order of their 64-head stages; shipping for ``sm_100a`` / ``sm_103a`` only,
+    with its 64-head stage's FFI entry and a library of its own (``build.json`` names it for both architectures);
+    its generated launcher and grid; and ``STAGE_ARGS`` its 64-head stage's arguments plus ``num_heads`` and
+    ``wsel`` before the grid.  A partial registration (some builds without the others) is refused."""
+    record = cake_jit.record()
+    builds = cake_backend.HEAD_WINDOW_STAGES
+    found = [hw for hw in builds.values() if hw in record]
+    if not found:
+        pytest.skip("the registry carries no head-window builds")
+    assert sorted(found) == sorted(builds.values()), (
+        "a partial head-window registration"
+    )
+    order = cake_jit.STAGES_OF[cake_jit.PROGRAM]
+    tail = tuple(builds[s] for s in order if s in builds)
+    assert order[-len(tail) :] == tail
+    assert tuple(record["stages"][-len(tail) :]) == tail
+    assert set(tail) <= set(cake_jit.registered_stages())
+    libraries = {e["name"]: e for e in cake_build.manifest()["libraries"]}
+    missing = []
+    for base, hw in builds.items():
+        assert cake_jit.stage_arches(hw) == ("sm_100a", "sm_103a"), hw
+        assert record[hw]["ffi_entry"] == record[base]["ffi_entry"], hw
+        assert record[hw]["library"] != record[base]["library"], hw
+        assert set(record[hw]["launch"]) == set(record[base]["launch"]), hw
+        assert hw in cake_launch.LAUNCH and hw in cake_launch.GRID, hw
+        args = tuple(cake_launch.STAGE_ARGS[hw])
+        assert args == tuple(cake_launch.STAGE_ARGS[base])[:-3] + (
+            "num_heads",
+            "wsel",
+            "grid_x",
+            "grid_y",
+            "grid_z",
+        ), hw
+        for arch in cake_jit.stage_arches(hw):
+            name = f"{record[hw]['library']}_{arch}"
+            if name not in libraries:
+                missing.append(name)
+                continue
+            assert libraries[name]["arch"] == arch
+            assert libraries[name]["entry"] == record[hw]["ffi_entry"]
     assert not missing, f"build.json lacks {missing}"
 
 
