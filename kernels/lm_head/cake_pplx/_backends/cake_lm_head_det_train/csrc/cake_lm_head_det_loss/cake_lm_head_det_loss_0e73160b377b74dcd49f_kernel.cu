@@ -280,6 +280,10 @@ kernel_cake_lm_head_det_loss_0e73160b377b74dcd49f(const __grid_constant__ CUtens
             unsigned int load_stage = 0;
             unsigned int ld_cluster_id = bid / 2;
             unsigned int ld_num_clusters = num_bids / 2;
+            int wr_cnt = WS[0];
+            int wr_lim = ((wr_cnt < M) ? wr_cnt : M);
+            int ld_mt = (wr_lim + 256 - 1) / 256 * 2;
+            int ld_items = ld_mt / 2 * (ldc / 256) * k_slices;
             unsigned int load_clc_stage = 0;
             unsigned int load_thr_stage = 0;
             unsigned int ld_tile = ld_cluster_id;
@@ -303,15 +307,16 @@ kernel_cake_lm_head_det_loss_0e73160b377b74dcd49f(const __grid_constant__ CUtens
                     int ld_pair_bid = ld_item_i * 2 + cta_rank;
                     int group = ld_pair_bid / (group_m * (ldc / 256));
                     int first_m = group * group_m;
-                    int remaining = m_tiles - first_m;
+                    int remaining = ld_mt - first_m;
                     int group_size = ((remaining >= group_m) ? group_m : remaining);
                     int local = ld_pair_bid % (group_m * (ldc / 256));
                     int bid_m = first_m + local % group_size;
                     int bid_n = local / group_size;
                     int ld_off_m = bid_m * 128;
+                    int ld_wsteps = ((ld_item_i < ld_mt / 2 * (ldc / 256) * k_slices) ? k_iters : 0);
                     int ld_off_n = bid_n * 256 + cta_rank * 128;
                     #pragma unroll 1
-                    for (int ld_k = 0; ld_k < k_iters; ld_k++) {
+                    for (int ld_k = 0; ld_k < ld_wsteps; ld_k++) {
                         mbarrier_wait_cluster_hint(mma_done_addr + (load_stage) * 8, _phase_mma_done, 10000000);
 #if CAKE_ARRIVE_FIRST
                         asm volatile(
@@ -389,6 +394,10 @@ kernel_cake_lm_head_det_loss_0e73160b377b74dcd49f(const __grid_constant__ CUtens
             unsigned int mma_epi_stage = 0;
             unsigned int mma_cluster_id = bid / 2;
             unsigned int mma_num_clusters = num_bids / 2;
+            int wr_cnt_1 = WS[0];
+            int wr_lim_1 = ((wr_cnt_1 < M) ? wr_cnt_1 : M);
+            int mm_mt = (wr_lim_1 + 256 - 1) / 256 * 2;
+            int mm_items = mm_mt / 2 * (ldc / 256) * k_slices;
             unsigned int mma_clc_stage = 0;
             unsigned int mm_tile = mma_cluster_id;
             unsigned int _phase_epilogue_done = 1;
@@ -403,7 +412,8 @@ kernel_cake_lm_head_det_loss_0e73160b377b74dcd49f(const __grid_constant__ CUtens
                     #pragma unroll 1
                     for (int mm_kc = 0; mm_kc < 1; mm_kc++) {
                         mbarrier_wait_cluster_hint(epilogue_done_addr + (mma_epi_stage) * 8, _phase_epilogue_done, 10000000);
-                        int mm_steps = ((mm_kc < 0) ? 1 : k_iters);
+                        int mm_wsteps = ((mm_item_i < mm_mt / 2 * (ldc / 256) * k_slices) ? k_iters : 0);
+                        int mm_steps = ((mm_kc < 0) ? 1 : mm_wsteps);
                         #pragma unroll 1
                         for (int mm_k = 0; mm_k < mm_steps; mm_k++) {
                             mbarrier_wait_cluster_hint(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full, 10000000);
@@ -553,15 +563,16 @@ kernel_cake_lm_head_det_loss_0e73160b377b74dcd49f(const __grid_constant__ CUtens
                 int ep_slice = ep_item_i / (m_tiles / 2 * (ldc / 256));
                 int ep_pair_item = ep_item_i % (m_tiles / 2 * (ldc / 256));
                 int ep_pair_bid = ep_item_i * 2 + cta_rank;
-                int group_1 = ep_pair_bid / (group_m * (ldc / 256));
-                int first_m_1 = group_1 * group_m;
-                int remaining_1 = m_tiles - first_m_1;
-                int group_size_1 = ((remaining_1 >= group_m) ? group_m : remaining_1);
-                int local_1 = ep_pair_bid % (group_m * (ldc / 256));
-                int bid_m_1 = first_m_1 + local_1 % group_size_1;
-                int bid_n_1 = local_1 / group_size_1;
-                int global_row = bid_m_1 * 128 + local_row;
-                int ep_off_n = bid_n_1 * 256;
+                int wt_group = ep_pair_bid / (group_m * (ldc / 256));
+                int wt_first_m = wt_group * group_m;
+                int wt_rem = (m_lim + 256 - 1) / 256 * 2 - wt_first_m;
+                int wt_size = ((wt_rem >= group_m) ? group_m : ((wt_first_m < (m_lim + 256 - 1) / 256 * 2) ? wt_rem : group_m));
+                int wt_local = ep_pair_bid % (group_m * (ldc / 256));
+                int wt_m = wt_first_m + wt_local % wt_size;
+                int wt_n = wt_local / wt_size;
+                int wt_live = ((wt_first_m < (m_lim + 256 - 1) / 256 * 2) ? 1 : 0) * ((wt_n < ldc / 256) ? 1 : 0);
+                int global_row = (wt_m * 128 + local_row) * wt_live + M * (1 - wt_live);
+                int ep_off_n = wt_n * 256;
                 unsigned long long row_out = (unsigned long long)global_row * (unsigned long long)ldc + (unsigned long long)ep_off_n;
                 int rin_r = ((global_row < M) ? global_row : M - 1);
                 int rin_t = row0 + rin_r;
@@ -575,7 +586,7 @@ kernel_cake_lm_head_det_loss_0e73160b377b74dcd49f(const __grid_constant__ CUtens
                     mbarrier_wait_cluster_hint(mainloop_done_addr + (epi_stage) * 8, _phase_mainloop_done, 10000000);
                     asm volatile("tcgen05.fence::after_thread_sync;");
                     #pragma unroll 1
-                    for (int n_chunk = 0; n_chunk < 16; n_chunk++) {
+                    for (int n_chunk = 0; n_chunk < 16 * wt_live; n_chunk++) {
                         int col = n_chunk * 16;
                         float _tmem_load_0[16];
                         tmem_ld_x16(&_tmem_load_0[0], lane_addr + col);
@@ -654,7 +665,7 @@ kernel_cake_lm_head_det_loss_0e73160b377b74dcd49f(const __grid_constant__ CUtens
                         }
                     }
                     if (global_row < m_lim) {
-                        unsigned long long st_off = ((unsigned long long)global_row * (unsigned long long)(ldc / 256) + (unsigned long long)bid_n_1) * 2ull;
+                        unsigned long long st_off = ((unsigned long long)global_row * (unsigned long long)(ldc / 256) + (unsigned long long)wt_n) * 2ull;
                         STATS_OUT[st_off] = pmax;
                         STATS_OUT[st_off + 1ull] = psum;
                     }
