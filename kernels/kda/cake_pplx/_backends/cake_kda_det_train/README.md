@@ -598,6 +598,37 @@ plans take it.  The records whose rules read the segment count
   documents, one of them 12009 tokens long, with 4 heads (1.0056
   deterministic, 1.0054 non-deterministic).  The forward, the step and the
   checkpointed step of these packs were faster.
+* In the same A/B, 38 time cells of packs whose plan does not change were
+  slower than in 0.2.1 beyond the noise rule (outside the cell's A/A band and
+  slower in every round), although these packs run the same programs with the
+  same bits: 5 on B200 (0.06 to 0.13 %), 19 on GB300 (0.06 to 0.42 %) and 14
+  on VR200 (0.05 to 0.27 %).  They were not re-measured with one timing
+  process per node.  Per pack (`det` the deterministic package, `nondet` the
+  non-deterministic one; % slower):
+
+| GPU | tokens x documents : heads | gate | L2 norm | slower time cells |
+|---|---|---|---|---|
+| B200 | 65536x3:4 | raw | off | fwd det 0.13, bwd det 0.11 |
+| B200 | 65536x3:4 | raw | on | fwd nondet 0.13, step nondet 0.13 |
+| B200 | 239718x3:4 | raw | off | bwd det 0.06 |
+| GB300 | 16384x1:4 | `g` | off | fwd det 0.28, bwd det 0.25 |
+| GB300 | 65536x3:4 | `g` | off | bwd nondet 0.06 |
+| GB300 | 65536x3:4 | `g` | on | bwd det 0.09 |
+| GB300 | 65536x3:4 | raw | off | fwd det 0.15 |
+| GB300 | 65536x3:4 | raw | on | bwd nondet 0.42, step nondet 0.39, ckpt nondet 0.28 |
+| GB300 | 239718x3:4 | `g` | off | fwd det 0.16, ckpt det 0.10 |
+| GB300 | 239718x3:4 | raw | off | fwd nondet 0.14, bwd det 0.10 |
+| GB300 | 239718x3:4 | raw | on | bwd nondet 0.38, step nondet 0.39, ckpt nondet 0.25 |
+| GB300 | 261393x4:4 | `g` | off | bwd nondet 0.11 |
+| GB300 | 16384x3:64 | `g` | off | fwd nondet 0.18 |
+| GB300 | 65536x3:64 | `g` | off | fwd det 0.24 |
+| GB300 | 65536x3:64 | raw | on | bwd nondet 0.34 |
+| VR200 | 16384x1:4 | `g` | off | fwd det 0.21, bwd det 0.16, bwd nondet 0.27, step det 0.12 |
+| VR200 | 65536x3:4 | `g` | off | fwd det 0.05, fwd nondet 0.20, ckpt nondet 0.12 |
+| VR200 | 65536x3:4 | `g` | on | bwd det 0.22 |
+| VR200 | 239718x3:4 | `g` | off | bwd det 0.12 |
+| VR200 | 12288x3:16 | `g` | off | fwd nondet 0.13, step nondet 0.10, ckpt nondet 0.12 |
+| VR200 | 16384x3:64 | `g` | off | bwd det 0.09, step det 0.09 |
 
 Forward (`fwd`): the chunk tables from `cu_seqlens` -- on the segmented route
 up to 256 documents no table launch: the intra program `fwd_intra_v14`, launched
