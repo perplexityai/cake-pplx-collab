@@ -841,10 +841,11 @@ def dw_cast_tma_rule(num_chunks: int, rows_last: int, arch: Optional[str]) -> bo
 # element once.  Bitwise the same ``dX``.
 # The scatter's fold program (:data:`DX_FINALIZE_FOLD_STAGE`) also folds the FP32 label residuals of the compact rows
 # ``[fold_lo, fold_hi)`` before its scale (:func:`cast_fold_rows`): the one-slice chunks of those rows launch no
-# fold-alone slab sum, and the vocabulary-major backward of a compacted call folds every row there instead of in a
-# slab sum after its last block (:func:`_backward_logprob_vm`).  The same ``fma`` and predicate as the slab sum's fold
-# and an exact FP32 store / load between them, so the same ``dX`` bits.  A call that folds no row launches
-# ``scale_cast_scatter_bf16``, which reads no fold operand.
+# fold-alone slab sum, and the vocabulary-major backward of a compacted call under the fused finalize folds every row
+# there instead of in a slab sum after its last block (:func:`_backward_logprob_vm`; with ``dx_finalize=False`` it
+# still runs that slab sum).  The same ``fma`` and predicate as the slab sum's fold and an exact FP32 store / load
+# between them, so the same ``dX`` bits.  A call that folds no row launches ``scale_cast_scatter_bf16``, which reads no
+# fold operand.
 DX_FINALIZE_STAGES = ("scale_cast_scatter_bf16",)
 DX_FINALIZE_FOLD_STAGE = "scale_cast_scatter_fold_bf16"
 # The flat dX cast's fold program: an uncompacted plan's cast (:func:`cast_fold_rows`) folds the rows
