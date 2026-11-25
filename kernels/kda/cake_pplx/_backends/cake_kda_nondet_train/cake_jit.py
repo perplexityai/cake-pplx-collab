@@ -520,14 +520,23 @@ SEGMENTS: dict[str, Any] = {
 # token-aware plan passes it, so ``sm_100a`` has no band.  The band keeps the
 # occupancy plan below a token bound (every 4-head pack of at most 4096
 # tokens, not that one size) in every gate and L2 norm mode: the rule reads
-# neither.
+# neither.  The bound is case E's size, not a measured accuracy edge.  On 160
+# draws of case E's shape on GB300 the token-aware plan's ``dA_log`` error was
+# 0.943 times the occupancy plan's (geometric mean, 95 % interval 0.89 to
+# 1.00), and the occupancy plan's own ratio to the naive tier exceeded the cap
+# in 2 of the other 4 blocks of 32 draws (1.158 and 1.108): the miss is the
+# test's draw, not a systematic loss.  Packs of more than 4096 tokens take the
+# token-aware plan; the raw-gate accuracy test has no slow-decay pack there.
 #
 # In the 16-head band the FP32 ``qk_rstd`` of the in-kernel Q/K L2 norm
 # (``8 * S * H`` bytes, between 1 and 2 MiB) can fill a free end that the
 # token-aware plan's smaller arena leaves in a caching-allocator segment, and
 # the allocator then counts the whole end: measured on 12288 tokens in three
 # documents, 491,520 B more memory above the live tensors than the occupancy
-# plan at the forward, the step and the checkpointed step.  The byte queries
+# plan at the forward, the step and the checkpointed step.  Only that pack was
+# measured in the window: other changed packs whose ``qk_rstd`` lies between 1
+# and 2 MiB (such as 8 heads at 16385 to 32767 tokens) may show the same
+# effect, depending on the arena size modulo 2 MiB.  The byte queries
 # do not all read the L2 norm mode, so the band keeps the occupancy plan in
 # every mode.
 # ``save_min_tokens_per_seg`` is the backend's ``SEG_SAVE_MIN_TOKENS_PER_SEG``

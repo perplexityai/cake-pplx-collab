@@ -377,7 +377,7 @@ Other public names:
 - `cake_kda_det_train_saved_bytes`: saved-set bytes (`Aqk`/`Akk` at `256*S*H`, plus tables, per-version tensors and the L2-norm `rstd`).
 - `is_cake_kda_det_train_supported`.
 
-**Choosing `save_mode`.** The caller chooses; the default is `'light'`. `'light'` saves less, and its backward recomputes the recurrence. `'tape'` also saves the state tape and `v_new` (768 B more per internal token-head), and its backward skips that recompute. A workspace sized with `save_mode='tape'` is 768 B per internal token-head smaller. The gradients are bitwise the same in both modes. Measured on B200, GB300 and VR200, both packages (ranges over the GPUs and configurations; times are tape / light ratios, below 1 means tape is faster):
+**Choosing `save_mode`.** The caller chooses; the default is `'light'`. `'light'` saves less, and its backward recomputes the recurrence. `'tape'` also saves the state tape and `v_new` (768 B more per internal token-head), and its backward skips that recompute. A workspace sized with `save_mode='tape'` is 768 B per internal token-head smaller. The gradients are bitwise the same in both modes. Measured with KDA 0.2.1 on B200, GB300 and VR200, both packages (ranges over the GPUs and configurations; times are tape / light ratios, below 1 means tape is faster):
 
 | row (`D = 128`) | saved set per layer (MiB), light -> tape | peak, step | step time | checkpointed step time |
 |---|---|---|---|---|
@@ -386,7 +386,9 @@ Other public names:
 | 239718 tokens, 3 docs, 4 heads | 551.8-595.1 -> 992.8-1024.1 | -4.6 to -4.3 % | 1.012-1.036 | 1.032-1.058 |
 | 65536 tokens, 3 docs, 64 heads | 2052.0-2084.0 -> 4108.0-4140.0 | -4.1 to -3.9 % | 0.968-1.013 | 0.989-1.026 |
 
-`'tape'` made the step 14-20 % faster only on the short pack, where the light backward recomputes the whole recurrence. On the other rows the step stayed within about ±4 % (no reliable gain), while the saved set grew. Without checkpointing, every layer keeps its saved set until its backward. Setup, forward and backward times, and noise: [Choosing `save_mode`](../kernels/kda/cake_pplx/_backends/cake_kda_det_train/README.md#choosing-save_mode). The nondet package takes the same `save_mode`. The KCP modules accept `'light'` only.
+In 0.2.2 the 16384-token pack takes the token-aware segment plan (15 segments per document instead of 37, 38 or 53), so `'tape'` saves fewer segment states: its saved set per layer is 32.3-32.8 -> 87.3-87.8 MiB on the three GPUs (byte query). Its peak and times were not measured again; the other rows keep their 0.2.1 plan.
+
+In 0.2.1 `'tape'` made the step 14-20 % faster only on the short pack, where the light backward recomputes the whole recurrence. On the other rows the step stayed within about ±4 % (no reliable gain), while the saved set grew. Without checkpointing, every layer keeps its saved set until its backward. Setup, forward and backward times, and noise: [Choosing `save_mode`](../kernels/kda/cake_pplx/_backends/cake_kda_det_train/README.md#choosing-save_mode). The nondet package takes the same `save_mode`. The KCP modules accept `'light'` only.
 
 ### `cake_pplx.cake_kda_nondet_train`
 

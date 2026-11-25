@@ -241,6 +241,11 @@ so it is live for one layer at a time.
 * 16384-token row (the light backward recomputes the whole recurrence):
   tape made the step 14-20 % faster and the checkpointed step 10-14 % faster.
   It cost 88-112 MiB more saved set per layer and an 8-13 % higher peak.
+  In 0.2.2 this pack takes the token-aware segment plan (15 segments per
+  document instead of 37, 38 or 53), so tape saves fewer segment states: the
+  saved set per layer is 32.3-32.8 -> 87.3-87.8 MiB on the three GPUs (byte
+  query). Its peak and times were not measured again. The other rows keep
+  their 0.2.1 plan.
 * The other rows (segment states saved, or 64 heads): tape made the forward
   3-14 % slower and the backward 1-7 % faster. The step stayed within about
   ±4 %, which is no reliable gain. The checkpointed step, which runs the
@@ -554,11 +559,20 @@ document to 12) it moved the explicit gate's `dA_log` gradient in case E of
 naive BF16 tier's median L2 error, beyond its accepted cap of 1.0607
 (`tests/cake_naive_accepted.json`), and to 1.0179 times FLA's, so it missed
 both references; the occupancy plan passes that case.  On B200 the
-token-aware plan passes it, so B200 has no band.  On VR200 the 16-head packs
-of 8193 to 16383 tokens keep the occupancy rule too: there the FP32 `qk_rstd`
-of the in-kernel Q/K L2 norm (1 to 2 MiB) can fill a free end that the
-smaller arena leaves in a caching-allocator segment, which measured 491,520 B
-more memory above the live tensors at 12288 tokens in three documents.  Both
+token-aware plan passes it, so B200 has no band.  The bound 4096 is case E's
+size, not a measured accuracy edge.  On 160 draws of case E's shape on GB300
+the token-aware plan's `dA_log` error was 0.943 times the occupancy plan's
+(geometric mean, 95 % interval 0.89 to 1.00), and the occupancy plan's own
+ratio to the naive tier exceeded the cap in 2 of the other 4 blocks of 32
+draws (1.158 and 1.108).  So the miss is the test's draw, not a systematic
+loss.  4-head packs of more than 4096 tokens take the token-aware plan; the
+raw-gate accuracy test has no slow-decay pack there.  On VR200 the 16-head
+packs of 8193 to 16383 tokens keep the occupancy rule too: there the FP32
+`qk_rstd` of the in-kernel Q/K L2 norm (1 to 2 MiB) can fill a free end that
+the smaller arena leaves in a caching-allocator segment, which measured
+491,520 B more memory above the live tensors at 12288 tokens in three
+documents.  Only that pack was measured in that window; other changed packs
+whose `qk_rstd` lies between 1 and 2 MiB may show the same effect.  Both
 bands hold in every gate and L2 norm mode.  `segment_rule="occupancy"`
 selects the occupancy rule everywhere; the context-parallel package's local
 plans take it.  The records whose rules read the segment count
