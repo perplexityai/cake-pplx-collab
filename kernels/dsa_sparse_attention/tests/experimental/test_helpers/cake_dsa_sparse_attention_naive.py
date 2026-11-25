@@ -13,14 +13,16 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The accuracy judge of the family's DSA sparse-attention training op (64 query heads, top-k index rows): the FP64
+The accuracy judge of the family's DSA sparse-attention training op (``H`` query heads, top-k index rows): the FP64
 oracle, the naive BF16 tier and the contract of one call, for the judge of ``tests/cake_naive.py``.
 
-A :class:`Problem` holds one call's own inputs: BF16 ``q_latent [T, 64, 512]`` and ``kv_latent [S, 512]``, in the
-RoPE form also ``q_rope [T, 64, 64]`` and ``k_rope [S, 64]`` (the NoPE form has none: the latent is key and value),
-the int32 global key rows ``indices [T, K]``, the optional ``topk_length [T]``, ``dout [T, 64, 512]`` (any strided
-view) and the softmax scale.  Slot ``j`` of row ``t`` is valid when ``0 <= indices[t, j] < S`` and, with
-``topk_length``, ``j < topk_length[t]``.
+A :class:`Problem` holds one call's own inputs: BF16 ``q_latent [T, H, 512]`` and ``kv_latent [S, 512]``, in the
+RoPE form also ``q_rope [T, H, 64]`` and ``k_rope [S, 64]`` (the NoPE form has none: the latent is key and value),
+the int32 global key rows ``indices [T, K]``, the optional ``topk_length [T]``, ``dout [T, H, 512]`` (any strided
+view) and the softmax scale.  The head count ``H`` is the problem's own, ``q_latent.shape[1]``
+(:attr:`Problem.heads`): every head is an independent attention over the same key rows, so the oracle, the tier
+and the contract hold for any ``H`` (the package's RoPE form takes 64, 96 or 128 heads, its NoPE form 64).  Slot
+``j`` of row ``t`` is valid when ``0 <= indices[t, j] < S`` and, with ``topk_length``, ``j < topk_length[t]``.
 
 :func:`outputs` evaluates the forward and the backward of the problem with every op in one dtype: float64 is the
 oracle, bfloat16 the naive tier (torch's own ops on BF16 tensors, each rounding its result to BF16 after torch's
@@ -28,18 +30,18 @@ internal accumulation).  Per row, with ``q`` / ``k`` the latent and rope parts s
 NoPE form) and ``v`` the latent: the gathered keys ``k_j = k[indices[t, j]]``, the scores ``s = q k_j^T * scale``
 over the valid slots, ``lse = logsumexp(s)``, ``P = softmax(s)``, ``out = P v``, ``dP = dout v^T``, ``dS = P (dP -
 rowsum(dout * out)) * scale``, ``dq = dS k``, and per slot the key gradient ``dS^T q`` plus the value gradient
-``P^T dout`` (each summed over the 64 heads), added into key row ``indices[t, j]`` with ``index_add_``.  The RoPE
+``P^T dout`` (each summed over the ``H`` heads), added into key row ``indices[t, j]`` with ``index_add_``.  The RoPE
 form returns ``dq_latent`` / ``dq_rope`` and ``dkv_latent`` / ``dk_rope`` (latent and rope columns of the key
 gradient, the value gradient in the latent), the NoPE form ``dq`` and the combined ``dkv``.  A row without a valid
 slot has ``out = 0``, ``lse = -inf`` and ``dq = 0``; a key row no valid slot names has zero key gradients.  The rows
 go in blocks of at most :data:`BLOCK_SLOTS` (row, slot) pairs: each row's quantities stay inside its block and each
 slot's key gradient is its own ``index_add_`` term, so the blocks bound the memory and do not change the values.
 
-A NoPE problem may carry a trainable per-head sink, FP32 ``sink [64]``: the sink column ``sink[h]`` (not scaled) is
+A NoPE problem may carry a trainable per-head sink, FP32 ``sink [H]``: the sink column ``sink[h]`` (not scaled) is
 appended to every row's scores of head ``h`` -- in the dtype of the scores, ``sink.to(dtype)`` -- before
 ``logsumexp`` and ``softmax``, and its probability is dropped before ``P v`` (the sink has no value).  ``lse`` then
 includes the sink, a row without a valid slot has ``out = 0``, ``dq = 0`` and ``lse = sink[h]`` (``-inf`` for a
-``-inf`` sink), and the gradients above use the key part of that softmax.  The sink gradient ``dsink [64]`` is, in
+``-inf`` sink), and the gradients above use the key part of that softmax.  The sink gradient ``dsink [H]`` is, in
 float64 (the oracle), ``-sum_t exp(sink - lse[t]) * delta[t]`` with ``delta = rowsum(dout * out)`` (0 where ``lse``
 is ``-inf``); in the naive tier it is torch's autograd of the same BF16 forward with respect to the sink column, one
 term per row (0 on a row whose scores and sink are all ``-inf``, as its ``P``), summed over all rows by one BF16
@@ -69,6 +71,8 @@ import torch
 
 from tests.cake_naive import DRAWS, TIER_DTYPES, TIERS, judge_case
 
+#: The head count of the package's 64-head problems (the NoPE form, the default inputs); a problem's own count is
+#: :attr:`Problem.heads`.
 NUM_HEADS = 64
 D_LATENT = 512
 D_ROPE = 64
@@ -96,8 +100,13 @@ class Problem:
     topk_length: Optional[torch.Tensor] = None
     dout: Optional[torch.Tensor] = None
     scale: Optional[float] = None
-    #: NoPE only: the FP32 ``[64]`` trainable per-head sink (``None``: no sink).
+    #: NoPE only: the FP32 ``[H]`` trainable per-head sink (``None``: no sink).
     sink: Optional[torch.Tensor] = None
+
+    @property
+    def heads(self) -> int:
+        """The query head count ``H`` of the problem: ``q_latent.shape[1]``."""
+        return int(self.q_latent.shape[1])
 
     @property
     def nope(self) -> bool:
@@ -171,7 +180,7 @@ def outputs(p: Problem, dtype: torch.dtype, *, backward: bool = True) -> dict[st
     """The forward (``out``, ``lse``) and, with ``backward`` and ``p.dout``, the gradients of ``p`` with every op in
     ``dtype`` on the inputs' device (see the module docstring)."""
     device = p.q_latent.device
-    total_q, total_k = p.total_q, p.total_k
+    total_q, total_k, heads = p.total_q, p.total_k, p.heads
     width = int(p.indices.shape[1]) if p.indices.dim() == 2 else 0
     on = dict(device=device, dtype=dtype)
     scale = p.softmax_scale
@@ -180,17 +189,17 @@ def outputs(p: Problem, dtype: torch.dtype, *, backward: bool = True) -> dict[st
     d_k = int(k_all.shape[-1])
     want_grad = backward and p.dout is not None
     sink = None if p.sink is None else p.sink.to(device=device, dtype=dtype)
-    out = torch.zeros(total_q, NUM_HEADS, D_LATENT, **on)
+    out = torch.zeros(total_q, heads, D_LATENT, **on)
     # a row without a valid slot: lse = -inf, or the sink (logsumexp of the sink column alone)
-    lse = torch.full((total_q, NUM_HEADS), -math.inf, **on)
+    lse = torch.full((total_q, heads), -math.inf, **on)
     if sink is not None:
-        lse = lse.copy_(sink.expand(total_q, NUM_HEADS))
+        lse = lse.copy_(sink.expand(total_q, heads))
     if want_grad:
-        dq = torch.zeros(total_q, NUM_HEADS, d_k, **on)
+        dq = torch.zeros(total_q, heads, d_k, **on)
         dk = torch.zeros(total_k, d_k, **on)
         if sink is not None:
             # each row's sink-gradient term
-            dsink_rows = torch.zeros(total_q, NUM_HEADS, **on)
+            dsink_rows = torch.zeros(total_q, heads, **on)
     if total_q and width and total_k:
         valid_all = p.valid()
         rows_per_block = max(1, BLOCK_SLOTS // width)
@@ -200,10 +209,10 @@ def outputs(p: Problem, dtype: torch.dtype, *, backward: bool = True) -> dict[st
             ix = p.indices[r0:r1].long().clamp(0, total_k - 1)
             q = p.q_latent[r0:r1].to(dtype)
             if not p.nope:
-                q = torch.cat([q, p.q_rope[r0:r1].to(dtype)], -1)  # [rows, 64, 576]
+                q = torch.cat([q, p.q_rope[r0:r1].to(dtype)], -1)  # [rows, H, 576]
             kg = k_all[ix]  # [rows, K, d_k]
             vg = kg[..., :D_LATENT]
-            s = _bmm(q, kg.transpose(1, 2)) * scale  # [rows, 64, K]
+            s = _bmm(q, kg.transpose(1, 2)) * scale  # [rows, H, K]
             s = s.masked_fill(~valid[:, None, :], -math.inf)
             g = p.dout[r0:r1].to(dtype) if want_grad else None
             if sink is None:
@@ -248,13 +257,13 @@ def _sink_rows(
     g: Optional[torch.Tensor],
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-    """``(lse, P, out, dsink term)`` of a block of rows with the sink column: the scores ``s [rows, 64, K]`` (``-inf``
+    """``(lse, P, out, dsink term)`` of a block of rows with the sink column: the scores ``s [rows, H, K]`` (``-inf``
     on invalid slots) and ``sink[h]`` side by side, ``lse = logsumexp``, ``P`` the softmax's key part, ``out = P v``.
     The sink term of each row (``None`` without ``g``): in float64 ``-exp(sink - lse) * rowsum(g * out)`` (0 where
     ``lse`` is ``-inf``), otherwise the autograd of this forward in ``dtype`` with respect to the row's own copy of
     the sink column."""
-    rows = int(s.shape[0])
-    column = sink[None, :, None].expand(rows, NUM_HEADS, 1)
+    rows, heads = int(s.shape[0]), int(s.shape[1])
+    column = sink[None, :, None].expand(rows, heads, 1)
     if g is not None and dtype != torch.float64:
         column = column.clone().requires_grad_(True)
     with torch.enable_grad():
@@ -346,18 +355,18 @@ def assert_contract(label: str, p: Problem, got: Mapping) -> None:
     no_slot = ~valid.any(-1)
     referenced = torch.zeros(p.total_k, dtype=torch.bool, device=valid.device)
     referenced[p.indices.long()[valid]] = True
-    t_q, t_k = p.total_q, p.total_k
+    t_q, t_k, heads = p.total_q, p.total_k, p.heads
     shapes = {
-        "out": (t_q, NUM_HEADS, D_LATENT),
-        "lse": (t_q, NUM_HEADS),
-        "o_lo": (t_q, NUM_HEADS, D_LATENT),
-        "dq_latent": (t_q, NUM_HEADS, D_LATENT),
-        "dq_rope": (t_q, NUM_HEADS, D_ROPE),
-        "dq": (t_q, NUM_HEADS, D_LATENT),
+        "out": (t_q, heads, D_LATENT),
+        "lse": (t_q, heads),
+        "o_lo": (t_q, heads, D_LATENT),
+        "dq_latent": (t_q, heads, D_LATENT),
+        "dq_rope": (t_q, heads, D_ROPE),
+        "dq": (t_q, heads, D_LATENT),
         "dkv_latent": (t_k, D_LATENT),
         "dk_rope": (t_k, D_ROPE),
         "dkv": (t_k, D_LATENT),
-        "dsink": (NUM_HEADS,),
+        "dsink": (heads,),
     }
     for name, value in got.items():
         if name == "dkv_acc":

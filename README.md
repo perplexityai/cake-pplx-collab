@@ -21,7 +21,7 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | fmha | `cake-pplx-fmha` | `cake_fmha_nondet_train` | Dense multi-head attention, head dim 64/128 (backward only) | [API](docs/API.md#fmha) |
 | gated_kv_compression | `cake-pplx-gated-kv-compression` | `cake_gated_kv_compression_det_train` | Ratio-2 gated KV compression: per-document token-pair softmax pooling, width 512 | [API](docs/API.md#gated_kv_compression) |
 | dsa_indexer | `cake-pplx-dsa-indexer` | `cake_dsa_indexer_{det,nondet}_train` | DSA indexer scores + exact top-k (forward only) | [API](docs/API.md#dsa_indexer) |
-| dsa_sparse_attention | `cake-pplx-dsa-sparse-attention` | `cake_dsa_sparse_attention_{det,nondet}_train` | Top-k sparse MLA attention, 64 heads | [API](docs/API.md#dsa_sparse_attention) |
+| dsa_sparse_attention | `cake-pplx-dsa-sparse-attention` | `cake_dsa_sparse_attention_{det,nondet}_train` | Top-k sparse MLA attention, 64 heads (nondet rope form: 64, 96 or 128; 96/128 on sm_100a/sm_103a) | [API](docs/API.md#dsa_sparse_attention) |
 | dense_gemm | `cake-pplx-dense-gemm` | `cake_dense_gemm_{det,nondet}_train` | BF16 projection GEMM, FP32 router GEMM | [API](docs/API.md#dense_gemm) |
 | moe_grouped_gemm | `cake-pplx-moe-grouped-gemm` | `cake_moe_grouped_gemm_{det,nondet}_train` | Ragged BF16 MoE grouped GEMM | [API](docs/API.md#moe_grouped_gemm) |
 | gated_act_mxfp8 | `cake-pplx-gated-act-mxfp8` | `cake_gated_act_mxfp8_det_train` | Fused SwiGLU + MXFP8 quantization | [API](docs/API.md#gated_act_mxfp8) |
