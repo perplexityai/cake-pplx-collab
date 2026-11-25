@@ -4796,18 +4796,6 @@ def _a_extent_of(device: torch.device, chunk: int, backend: str) -> Optional[tup
     return (chunk, arch) if arch and _a_extent_bounds(chunk, arch)[2] else None
 
 
-def _count_extent(
-    labels: torch.Tensor, device: torch.device, chunk: int, backend: str
-) -> Optional[tuple[int, str]]:
-    """The ``extent`` an eager log-probability call passes to its count (:func:`valid_rows`): :func:`_a_extent_of`
-    where the count runs on the host -- ``labels`` on CUDA, at most :data:`HOST_COUNT_MAX_ROWS` rows, the test of
-    :func:`valid_rows` -- the only count that pads its index; else None, without the lookup (a count on the device
-    pads nothing)."""
-    if int(labels.numel()) <= HOST_COUNT_MAX_ROWS and labels.is_cuda:
-        return _a_extent_of(device, chunk, backend)
-    return None
-
-
 def make_plan(
     problem: Problem,
     *,
@@ -11557,16 +11545,11 @@ def forward_logprob(
     elif keep is not None and compact:
         # the one-chunk kept logits' count keeps its valid-row mask for the kept backward (the same count)
         row_index, row_valid = valid_rows(
-            labels,
-            mask=True,
-            extent=_count_extent(labels, X.device, problem.chunk, backend),
+            labels, mask=True, extent=_a_extent_of(X.device, problem.chunk, backend)
         )
     else:
         row_index = (
-            valid_row_index(
-                labels,
-                extent=_count_extent(labels, X.device, problem.chunk, backend),
-            )
+            valid_row_index(labels, extent=_a_extent_of(X.device, problem.chunk, backend))
             if compact
             else None
         )
@@ -11801,9 +11784,7 @@ def backward_logprob(
         else:
             row_index, row_valid = (
                 valid_rows(
-                    labels,
-                    mask=fused_dx,
-                    extent=_count_extent(labels, X.device, problem.chunk, backend),
+                    labels, mask=fused_dx, extent=_a_extent_of(X.device, problem.chunk, backend)
                 )
                 if compact
                 else (None, None)
@@ -12524,9 +12505,7 @@ def forward_logprob_keep(
         elif compact:
             # the valid-row mask of the count is kept for the kept backward (the same count)
             row_index, row_valid = valid_rows(
-                labels,
-                mask=True,
-                extent=_count_extent(labels, X.device, problem.chunk, backend),
+                labels, mask=True, extent=_a_extent_of(X.device, problem.chunk, backend)
             )
         else:
             row_index = None
@@ -12695,9 +12674,7 @@ def backward_logprob_keep(
         _labels_c = None
         row_index, row_valid = (
             valid_rows(
-                labels,
-                mask=fused_dx,
-                extent=_count_extent(labels, X.device, problem.chunk, backend),
+                labels, mask=fused_dx, extent=_a_extent_of(X.device, problem.chunk, backend)
             )
             if compact
             else (None, None)
