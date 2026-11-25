@@ -841,9 +841,11 @@ def dw_cast_tma_rule(num_chunks: int, rows_last: int, arch: Optional[str]) -> bo
 # element once.  Bitwise the same ``dX``.
 # The scatter's fold program (:data:`DX_FINALIZE_FOLD_STAGE`) also folds the FP32 label residuals of the compact rows
 # ``[fold_lo, fold_hi)`` before its scale (:func:`cast_fold_rows`): the one-slice chunks of those rows launch no
-# fold-alone slab sum.  The same ``fma`` and predicate as the slab sum's fold and an exact FP32 store / load between
-# them, so the same ``dX`` bits.  A call that folds no row launches ``scale_cast_scatter_bf16``, which reads no fold
-# operand.
+# fold-alone slab sum, and the vocabulary-major backward of a compacted call under the fused finalize folds every row
+# there instead of in a slab sum after its last block (:func:`_backward_logprob_vm`; with ``dx_finalize=False`` it
+# still runs that slab sum).  The same ``fma`` and predicate as the slab sum's fold and an exact FP32 store / load
+# between them, so the same ``dX`` bits.  A call that folds no row launches ``scale_cast_scatter_bf16``, which reads no
+# fold operand.
 DX_FINALIZE_STAGES = ("scale_cast_scatter_bf16",)
 DX_FINALIZE_FOLD_STAGE = "scale_cast_scatter_fold_bf16"
 # The flat dX cast's fold program: an uncompacted plan's cast (:func:`cast_fold_rows`) folds the rows
@@ -3739,12 +3741,21 @@ def _small_call_rows(
 # the per-call buffers of the call run on the host before the staging, and the GPU waits for none of them between the
 # staging and the first GEMM.  The only reader of a staged tensor ahead of that launch, a temperature check, runs the
 # staging first (:func:`_resolve_temperature`).  The small-call entries hold the stage inside :func:`_small_call_scope`.
-_SMALL_STAGE = threading.local()
+# Every other call reads ``ops`` once per launch context and finds ``None``: no call into the staging.
+class _SmallStage(threading.local):
+    """The calling thread's pending small-call staging, ``ops`` (``None``: nothing pending).  The class attribute is
+    every thread's value until the thread stages, so reading ``ops`` finds it with no lookup miss (reading a missing
+    attribute of a bare ``threading.local`` raises and clears an ``AttributeError`` each time)."""
+
+    ops: Optional[Callable[[], None]] = None
+
+
+_SMALL_STAGE = _SmallStage()
 
 
 def _run_small_stage() -> None:
     """Run the calling thread's pending small-call staging (:data:`_SMALL_STAGE`), if any, once."""
-    ops = getattr(_SMALL_STAGE, "ops", None)
+    ops = _SMALL_STAGE.ops
     if ops is not None:
         _SMALL_STAGE.ops = None
         ops()
@@ -4191,7 +4202,8 @@ def _resolve_temperature(
                     f"a per-token temperature must be on X's device {device}, got {temperature.device}"
                 )
             # a small call's staged temperature is read here, ahead of the call's first launch: its staging first
-            _run_small_stage()
+            if _SMALL_STAGE.ops is not None:
+                _run_small_stage()
             tau = temperature.contiguous()
             if int(T) > 0:
                 # NaN fails ``> 0``, +inf fails ``< inf``
@@ -6206,7 +6218,8 @@ def _ffi_stream_context(index: int):
     program's launch: a pending small-call staging (:data:`_SMALL_STAGE`) runs first, on torch's current stream."""
     import tvm_ffi
 
-    _run_small_stage()
+    if _SMALL_STAGE.ops is not None:
+        _run_small_stage()
 
     device = _FFI_DEVICES.get(index)
     if device is None:
@@ -6705,6 +6718,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     """The tensor host values of :func:`stage_values` for chunk ``index`` -- the views a remembered launch slots in per
     call (:meth:`_Launch.arguments_for`) and the operands of the ``gather_rows`` host step -- without the scalars and
     the plan checks, which the binding fixed when it was prepared.  Any other host stage gets :func:`stage_values`.
+    The rows of a chunk that covers a whole tensor (the row index, the gathered rows, the chunk buffer, ``X`` and
+    ``dX_acc`` of a one-chunk plan) are that tensor itself (:func:`_chunk_rows`), not a view of all its rows.
     :meth:`_Binding.from_runner` checks every remembered launch against :func:`stage_values` once."""
     p = plan.problem
     if stage == RLAB_ZERO_STAGE:
@@ -6716,7 +6731,9 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             return values
         row0, rows_c = plan.chunks[index]
         values.update(
-            src=t["X"], idx=t["row_index"][row0 : row0 + rows_c], out=t["x_c"][:rows_c]
+            src=t["X"],
+            idx=_chunk_rows(t["row_index"], row0, row0 + rows_c),
+            out=_chunk_rows(t["x_c"], 0, rows_c),
         )
         return values
     if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
@@ -6735,14 +6752,18 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     base = base_stage(stage) if stage in GEMM_STAGES else stage
     logits = t["logits"]
     if base in LOGITS_BASES or base == "gemm_dw_acc" or base in DW_CAST_STAGES:
-        x_chunk = t["x_c"][:rows_c] if plan.compact else t["X"][row0:stop]
+        x_chunk = (
+            _chunk_rows(t["x_c"], 0, rows_c)
+            if plan.compact
+            else _chunk_rows(t["X"], row0, stop)
+        )
         if t.get("x_last") is not None and index == plan.num_chunks - 1:
             x_chunk = t["x_last"]
     if base in LOGITS_BASES:
         values.update(
             A=x_chunk,
             B=t["W"],
-            C=logits[:rows_c],
+            C=_chunk_rows(logits, 0, rows_c),
             STATS_OUT=t["stats"],
             WS=t["f32_dummy"],
         )
@@ -6756,12 +6777,14 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
         _dx_slab_sum_slots(stage, t, plan, index, values)
     elif base == "gemm_dw_acc":
         lc = parse_stage(stage)[1]["live_cast"]
-        values.update(A=logits[:rows_c], B=x_chunk, **_dw_acc_operands(t, p, lc))
+        values.update(
+            A=_chunk_rows(logits, 0, rows_c), B=x_chunk, **_dw_acc_operands(t, p, lc)
+        )
         if lc:
             values.update(CNT_NEXT=t["dcnt"][index + 1 : index + 2])
     elif base in DW_CAST_STAGES:
         values.update(
-            A=logits[:rows_c],
+            A=_chunk_rows(logits, 0, rows_c),
             B=x_chunk,
             C=t["dw_out"],
             STATS_OUT=t["grad_scale"] if p.entry == "loss" else t["unit_scale"],
@@ -7204,12 +7227,13 @@ def _dx_slots(
     stage: str, t: dict[str, Any], plan: Plan, index: int, values: dict[str, Any]
 ) -> None:
     """:func:`_slot_values` of the dX GEMM ``stage`` of chunk ``index`` (the per-call tensor views of a remembered
-    launch), added to ``values`` in place."""
+    launch), added to ``values`` in place; the rows of a chunk that covers a whole tensor are that tensor
+    (:func:`_chunk_rows`)."""
     row0, rows_c = plan.chunks[index]
     values.update(
-        A=t["logits"][:rows_c],
+        A=_chunk_rows(t["logits"], 0, rows_c),
         B=t["W"],
-        C=t["dx_acc"][row0 : row0 + rows_c],
+        C=_chunk_rows(t["dx_acc"], row0, row0 + rows_c),
     )
     if base_stage(stage) == DX_RED_STAGE:
         p, k = plan.problem, plan.dx_slices_of(index)
@@ -9229,6 +9253,23 @@ def forward_binding_key(
     )
 
 
+# the position of ``valid_rows`` in a :func:`forward_binding_key` (:func:`forward_binding_key_rows`)
+_FORWARD_KEY_ROWS = 13
+
+
+def forward_binding_key_rows(key: tuple, valid_rows: Optional[int]) -> tuple:
+    """The :func:`forward_binding_key` of a call with the valid-row count ``valid_rows`` (``None`` = uncompacted), from
+    ``key``, the key the same call formed with ``valid_rows=None``: the key's count-independent part, which a caller
+    forms ahead of the count's device synchronization (the host builds it while the device still runs queued work)
+    and completes here once the count is known.  The result equals the key formed with the count element for
+    element."""
+    if key[_FORWARD_KEY_ROWS] is not None:
+        raise ValueError("the key already holds a valid-row count")
+    if valid_rows is None:
+        return key
+    return key[:_FORWARD_KEY_ROWS] + (int(valid_rows),) + key[_FORWARD_KEY_ROWS + 1 :]
+
+
 def logprob_backward_binding_key(
     X,
     W,
@@ -9484,9 +9525,10 @@ class _Binding:
     forward_order: tuple = ()
     backward_order: tuple = ()
     # the host-count path's split of ``forward_order`` (:func:`forward_early_keys`): chunk 0's gather and logits GEMM,
-    # launched right behind the count -- ``forward_early`` before the call's labels are bound, ``forward_early_labels``
-    # (the early launches that read them: the label-column arm) right after -- then ``forward_late`` in order (all
-    # empty on the hidden valid-row count path)
+    # launched right behind the count -- ``forward_early``, the early launches that do not read the call's labels, and
+    # ``forward_early_labels``, the ones that do (the label-column arm): with the latter the labels are bound first and
+    # both run in one launch round, else the labels are bound behind ``forward_early`` -- then ``forward_late`` in
+    # order (all empty on the hidden valid-row count path)
     forward_early: tuple = ()
     forward_early_labels: tuple = ()
     forward_late: tuple = ()
@@ -9811,10 +9853,12 @@ class _Binding:
         Host-count path (``hidden`` None, :func:`forward_early_keys`): chunk 0's row gather and logits GEMM are bound
         and launched first, right behind the valid-row count, and the rest of the call -- the policy operands'
         gathers, the row vectors, the accumulators and the remaining launches -- is bound behind the queued GEMM
-        instead of in front of it; the compacted labels are bound in front of the first early launch that reads them
-        (:attr:`forward_early_labels`, the label-column arm) and behind the early launches otherwise.  The same
-        kernels with the same operands on the same stream; the early launches neither read nor write what moved
-        behind them, so every output is bitwise the in-order sequence's."""
+        instead of in front of it.  When an early launch reads the compacted labels (:attr:`forward_early_labels`,
+        the label-column arm) they are bound first -- their gather queued ahead of the row gather -- and the early
+        launches run in one launch round; otherwise they are bound behind the early launches.  The same kernels with
+        the same operands on the same stream, both gathers ahead of the GEMM; the labels' gather reads the caller's
+        labels and the valid-row index only and writes a new tensor no early launch writes, and the early launches
+        neither read nor write what moved behind them, so every output is bitwise the in-order sequence's."""
         p, plan = self.plan.problem, self.plan
         T, H, V = (
             plan.rows,
@@ -9827,11 +9871,14 @@ class _Binding:
         if early:
             self._compact(t, row_index)
             self._chunk_buffers(t)
-            if self.forward_early:
-                self._launch(self.forward_early, t, dw_stream)
-            t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             if self.forward_early_labels:
-                self._launch(self.forward_early_labels, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
+                self._launch(
+                    self.forward_early + self.forward_early_labels, t, dw_stream
+                )
+            else:
+                self._launch(self.forward_early, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             self._scratch(t, chunk_buffers=False)
         else:
             t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
@@ -10322,14 +10369,17 @@ class _KeptBinding(_Binding):
             )
         first = None if kept_rows is None else kept_rows[: plan.chunks[0][1]]
         t: dict[str, Any] = dict(X=_prepare_x(X, p, plan.compact), W=W)
-        if early:
+        if early:  # as in :meth:`_Binding.forward`
             self._compact(t, row_index)
             self._chunk_buffers(t, logits=first)
-            if self.forward_early:
-                self._launch(self.forward_early, t, dw_stream)
-            t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             if self.forward_early_labels:
-                self._launch(self.forward_early_labels, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
+                self._launch(
+                    self.forward_early + self.forward_early_labels, t, dw_stream
+                )
+            else:
+                self._launch(self.forward_early, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             self._scratch(t, chunk_buffers=False)
         else:
             t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
@@ -11436,8 +11486,9 @@ def scale_cast_scatter(
     output element is written exactly once.  ``T_v == 0`` (every row ignored) is one zero fill: the kernel reads a
     candidate compact row for every output row and would have none.
 
-    ``fold`` (:func:`cast_fold_operands`; the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label
-    residuals no slab sum folded (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
+    ``fold`` (:func:`cast_fold_operands`, or every row of a vocabulary-major backward, :func:`_backward_logprob_vm`;
+    the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label residuals no slab sum folded
+    (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
     such a row's ``acc``, folds ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a
     nonzero residual -- the fold-alone slab sum's arithmetic and predicate -- and then scales and rounds it: the bits
     of the slab sum's FP32 store cast as before.  ``None`` or an empty range: no row folds, and the program without a
@@ -11562,8 +11613,9 @@ def finalize_dx(
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
     (zero fill + ``index_copy_``).  All three produce the same bits.  ``scan`` (the zero-gradient row skip,
     :func:`zero_dlogp_partition`): the inclusive int32 scan of the rows ``acc`` holds, already formed (``row_valid``
-    is then not read): the accumulator's rows past the scan's count are never read and those output rows are zeros.  ``fold`` (:func:`cast_fold_operands`): the scatter cast
-    folds the label residuals of the rows no slab sum folded (:func:`scale_cast_scatter`); only the scatter takes it."""
+    is then not read): the accumulator's rows past the scan's count are never read and those output rows are zeros.  ``fold`` (:func:`cast_fold_operands`; every row
+    of a vocabulary-major backward): the scatter cast folds the label residuals of the rows no slab sum folded
+    (:func:`scale_cast_scatter`); only the scatter takes it."""
     if fold is not None and int(fold["hi"]) > int(fold["lo"]):
         if row_index is None or (scan is None and row_valid is None):
             raise ValueError("only the compact scatter cast folds label residuals")
@@ -11861,6 +11913,13 @@ def forward_logprob(
         stats=True,
         hidden_count=_resolve_hidden_count(hidden_count),
     )
+    # the binding key's count-independent part, formed ahead of the count's device synchronization (the host builds it
+    # while the device runs the queued work); the count completes it (:func:`forward_binding_key_rows`)
+    key0 = (
+        _logprob_forward_key(X, W, labels, problem.chunk, tuning, hc is not None, lbl)
+        if backend == "cake" and BINDING_CACHE.enabled
+        else None
+    )
     if hc is not None:
         row_index = hc.row_index()
     else:
@@ -11879,6 +11938,7 @@ def forward_logprob(
         backend=backend,
         tuning=tuning,
         lbl=lbl,
+        key0=key0,
     )
     result = ForwardResult(
         loss=None,
@@ -11893,6 +11953,38 @@ def forward_logprob(
     return result
 
 
+def _logprob_forward_key(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    labels: torch.Tensor,
+    chunk_size: int,
+    tuning: dict[str, dict[str, Any]],
+    hidden: bool,
+    lbl: bool,
+    valid_rows: Optional[int] = None,
+) -> tuple:
+    """:func:`forward_binding_key` of a log-probability forward without a temperature (:func:`_forward_logprob_rows`):
+    ``hidden`` whether it took the hidden valid-row count, ``lbl`` its resolved label-column arm."""
+    return forward_binding_key(
+        X,
+        W,
+        labels,
+        objective="ce",
+        loss_div=None,
+        infer_logp=None,
+        loss_weights=None,
+        chunk_size=chunk_size,
+        need_dx=False,
+        need_dw=False,
+        grad_weight_dtype=torch.bfloat16,
+        entry="logprob",
+        valid_rows=valid_rows,
+        gemm_tuning=tuning,
+        hidden_count=hidden,
+        logprob_lbl=lbl,
+    )
+
+
 def _forward_logprob_rows(
     problem: Problem,
     X: torch.Tensor,
@@ -11904,33 +11996,24 @@ def _forward_logprob_rows(
     backend: str,
     tuning: dict[str, dict[str, Any]],
     lbl: bool,
+    key0: Optional[tuple] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
     """``(logp, lse, memory)`` of the log-probability forward's chunk loop over the rows ``row_index`` (``None`` =
     every row; non-empty otherwise), through the remembered binding or a new one: :func:`forward_logprob`'s body after
     its count, and the zero-weight rows' logp-only pass of a loss call (:func:`_zero_weight_logp`).  ``logp`` / ``lse``
-    are compact when ``row_index`` is given."""
+    are compact when ``row_index`` is given.  ``key0``: the call's binding key without its valid-row count
+    (:func:`forward_binding_key_rows`), formed by the caller ahead of its count; ``None``: formed here."""
     chunk_size = problem.chunk
     valid_rows = None if row_index is None else int(row_index.numel())
     cache = BINDING_CACHE
     key = None
     if backend == "cake" and cache.enabled:
-        key = forward_binding_key(
-            X,
-            W,
-            labels,
-            objective="ce",
-            loss_div=None,
-            infer_logp=None,
-            loss_weights=None,
-            chunk_size=chunk_size,
-            need_dx=False,
-            need_dw=False,
-            grad_weight_dtype=torch.bfloat16,
-            entry="logprob",
-            valid_rows=valid_rows,
-            gemm_tuning=tuning,
-            hidden_count=hc is not None,
-            logprob_lbl=lbl,
+        key = (
+            _logprob_forward_key(
+                X, W, labels, chunk_size, tuning, hc is not None, lbl, valid_rows
+            )
+            if key0 is None
+            else forward_binding_key_rows(key0, valid_rows)
         )
         binding = cache.lookup(key)
         if binding is not None:
@@ -12324,7 +12407,11 @@ def backward_logprob(
 # block's dX GEMM and joins before the next block's recompute.  The dX GEMM takes the chunk rule's knobs for ``T_v``
 # rows (:func:`chunk_variants`), except on an architecture whose long-chunk ring takes no split: there a launch that
 # would run that ring with a short last wave runs the table ring with the split-tail form
-# (:func:`_logprob_vm_dx_tuning`).  The kept logits (:func:`backward_logprob_keep`) keep
+# (:func:`_logprob_vm_dx_tuning`).  After the last block each row's FP32 label residual (stored by the ``dz`` arm of the
+# block holding the row's label) folds into its dX row: a compacted call under the fused finalize folds every row in the
+# scatter cast that writes dX (:func:`finalize_dx` with ``fold``, :data:`DX_FINALIZE_FOLD_STAGE`), any other call runs
+# the fold-alone slab sum (``n_slabs = 0``) over ``dX_acc`` ahead of its cast -- the same FMA under the same predicate,
+# so the same bits.  The kept logits (:func:`backward_logprob_keep`) keep
 # their own chunk loop (no recompute to save there): their ``dX`` / ``dW`` round differently from this form's.
 _LOGPROB_VM_MODES = (
     "0",
@@ -12861,7 +12948,14 @@ def _backward_logprob_vm(
         DX_RED_STAGE, tile_n=v.dx_tile_n, stages=v.dx_stages, split=split, dcnt=skip
     )
     dw_stage = stage_variant("gemm_dw_cast_bf16", dcnt=skip)
-    folds = (DX_SLAB_SUM_STAGE,) if need_dx else ()  # the label residual fold after the last block
+    # the label residual fold after the last block: on a compacted call under the fused finalize the scatter cast's fold
+    # program folds every row (:func:`finalize_dx`, :data:`DX_FINALIZE_FOLD_STAGE`), else the fold-alone slab sum
+    cast_fold = need_dx and fused_dx and row_index is not None
+    folds = (
+        ((DX_FINALIZE_FOLD_STAGE,) if cast_fold else (DX_SLAB_SUM_STAGE,))
+        if need_dx
+        else ()
+    )
     for stage in (dx_store, dx_add, dw_stage, dz_stage) + folds:
         if stage not in registered:
             raise NotImplementedError(
@@ -12882,7 +12976,8 @@ def _backward_logprob_vm(
     if dx_acc is not None and skip:
         dx_acc.fill_(-0.0)  # the exact additive identity: every block adds into it
     # the rows' FP32 label residuals: the block holding a row's label stores it (the shifted label of every other block
-    # lies outside it), a row no block stores keeps 0; read by the fold after the last block
+    # lies outside it), a row no block stores keeps 0; read by the fold after the last block (the slab sum, or the
+    # scatter cast of the dX output phase)
     rlab = torch.zeros((rows,), dtype=torch.float32, device=device)
     dw_out = torch.empty((V, H), dtype=torch.bfloat16, device=device)
     cnt = None if counts is None else counts[0:1]
@@ -13028,9 +13123,10 @@ def _backward_logprob_vm(
         else:
             launch(dw_stage, values)
         del values, dz, Wb
-    if dx_acc is not None:
+    if dx_acc is not None and not cast_fold:
         # the fold of the rows' FP32 label residuals, once over every row after the last block's dX add: the slab sum
-        # with no slab (``n_slabs = 0``) over the unshifted labels and the full head
+        # with no slab (``n_slabs = 0``) over the unshifted labels and the full head (a fused compacted call folds them
+        # in its scatter cast instead, below)
         values = base_values()
         values.update(
             T=rows,
@@ -13054,8 +13150,11 @@ def _backward_logprob_vm(
     if side_on:
         main.wait_stream(side)
     # the block phase's buffers go before the dX output phase (the main stream has waited for the side stream's last
-    # read of dz): that phase holds the dX accumulator, dW and the dX output only (memory_plan's second phase)
-    del dz_buf, stats, lb_all, x_rows, d_c, labels_c, tau_c, rlab
+    # read of dz): that phase holds the dX accumulator, dW and the dX output, plus, on a fused compacted call, the
+    # compact labels and the label residuals its scatter cast folds (memory_plan's second phase)
+    del dz_buf, stats, lb_all, x_rows, d_c, tau_c
+    if not cast_fold:
+        del labels_c, rlab
     if dx_acc is None:
         return None, dw_out
     if row_index is None:
@@ -13067,13 +13166,22 @@ def _backward_logprob_vm(
             ),
             dw_out,
         )
+    # the scatter cast folds each compact row's label residual, ``fma(rlab, f32(W[label]), dX_acc)`` on a row of a label
+    # in ``[0, V)`` and a nonzero residual -- the fold-alone slab sum's arithmetic and predicate on the same rows -- and
+    # then scales and rounds it: the bits of the slab sum's FP32 store cast by the scatter.  It reads ``W`` (no writer)
+    # and ``rlab`` / ``labels_c`` (written on this stream ahead of it), on the main stream behind the side stream's join
+    fold = dict(labels=labels_c, rlab=rlab, W=W, lo=0, hi=rows)
     if scan is None:
         return (
-            finalize_dx(dx_acc, None, row_index, labels >= 0, T, backend=backend),
+            finalize_dx(
+                dx_acc, None, row_index, labels >= 0, T, backend=backend, fold=fold
+            ),
             dw_out,
         )
     return (
-        finalize_dx(dx_acc, None, row_index, None, T, backend=backend, scan=scan),
+        finalize_dx(
+            dx_acc, None, row_index, None, T, backend=backend, scan=scan, fold=fold
+        ),
         dw_out,
     )
 
@@ -16067,46 +16175,20 @@ def cake_lm_head_nondet_train_logprob(
     forward's valid-row index (no count, no host synchronization) and recomputes under the same values."""
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
-    T = int(X.shape[0]) if X.ndim else 0
     rows = _small_call_rows(X, labels, backend, chunk_size, compact_rows, logprob=True)
-    with _small_call_scope() if rows else contextlib.nullcontext():
-        if rows:
-            # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted (the staging runs right
-            # before the call's first launch, _small_call_scope); cut back to T rows below
-            X, labels, _, _, _ = _SmallCallStage.apply(
-                X, labels, rows, None, None, None
-            )
-            compact_rows = False
-        if (
-            _SMALL_T_KEEP["on"]
-            and backend == "cake"
-            and X.ndim == 2
-            and 0 < int(X.shape[0]) <= SMALL_T_KEEP_MAX_ROWS
-            and torch.is_grad_enabled()
-            and (X.requires_grad or W.requires_grad)
-        ):
-            # a small call where a backward can follow: the kept logits (set_small_t_keep)
-            logp = CakeLMHeadNondetLogprobKeepFunction.apply(
-                X,
+    if rows:
+        # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted (the staging runs right before the
+        # call's first launch, _small_call_scope); cut back to T rows.  Any other call enters no scope.
+        T = int(X.shape[0])
+        with _small_call_scope():
+            Xs, lab, _, _, _ = _SmallCallStage.apply(X, labels, rows, None, None, None)
+            logp = _logprob_call(
+                Xs,
                 W,
-                labels,
-                int(chunk_size),
-                compact_rows,
-                fuse_dw_cast,
-                dx_finalize,
-                dw_stream,
-                hidden_count,
-                gemm_tuning,
-                logprob_dz,
-            )
-        else:
-            logp = CakeLMHeadNondetLogprobFunction.apply(
-                X,
-                W,
-                labels,
-                int(chunk_size),
+                lab,
+                chunk_size,
                 backend,
-                compact_rows,
+                False,
                 fuse_dw_cast,
                 dx_finalize,
                 dw_stream,
@@ -16115,7 +16197,79 @@ def cake_lm_head_nondet_train_logprob(
                 logprob_dz,
                 logprob_lbl,
             )
-    return logp[:T] if rows > T else logp
+        return logp[:T] if rows > T else logp
+    return _logprob_call(
+        X,
+        W,
+        labels,
+        chunk_size,
+        backend,
+        compact_rows,
+        fuse_dw_cast,
+        dx_finalize,
+        dw_stream,
+        hidden_count,
+        gemm_tuning,
+        logprob_dz,
+        logprob_lbl,
+    )
+
+
+def _logprob_call(
+    X,
+    W,
+    labels,
+    chunk_size,
+    backend,
+    compact_rows,
+    fuse_dw_cast,
+    dx_finalize,
+    dw_stream,
+    hidden_count,
+    gemm_tuning,
+    logprob_dz,
+    logprob_lbl,
+) -> torch.Tensor:
+    """The autograd Function call of :func:`cake_lm_head_nondet_train_logprob` (its switches resolved by the
+    Function), also on a small call's staged rows: the kept-logits Function where a backward can follow a call of at
+    most :data:`SMALL_T_KEEP_MAX_ROWS` rows (:func:`set_small_t_keep`), else the default log-probability Function."""
+    if (
+        _SMALL_T_KEEP["on"]
+        and backend == "cake"
+        and X.ndim == 2
+        and 0 < int(X.shape[0]) <= SMALL_T_KEEP_MAX_ROWS
+        and torch.is_grad_enabled()
+        and (X.requires_grad or W.requires_grad)
+    ):
+        # a small call where a backward can follow: the kept logits (set_small_t_keep)
+        return CakeLMHeadNondetLogprobKeepFunction.apply(
+            X,
+            W,
+            labels,
+            int(chunk_size),
+            compact_rows,
+            fuse_dw_cast,
+            dx_finalize,
+            dw_stream,
+            hidden_count,
+            gemm_tuning,
+            logprob_dz,
+        )
+    return CakeLMHeadNondetLogprobFunction.apply(
+        X,
+        W,
+        labels,
+        int(chunk_size),
+        backend,
+        compact_rows,
+        fuse_dw_cast,
+        dx_finalize,
+        dw_stream,
+        hidden_count,
+        gemm_tuning,
+        logprob_dz,
+        logprob_lbl,
+    )
 
 
 def cake_lm_head_nondet_train_logprob_temperature(

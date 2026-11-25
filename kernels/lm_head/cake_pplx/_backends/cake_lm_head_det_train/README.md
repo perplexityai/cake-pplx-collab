@@ -1513,7 +1513,7 @@ the default autograd call: the step at `T` = 16
 checkpointed step (the recompute backward and its dX GEMM) 2142.5 -> 1594.8
 us.  A call that counts its valid rows on the host gathers the gather
 buffer's padded rows too: the count copies a padded index (the valid rows,
-then the last one repeated; `cake_backend.valid_rows`' `pad`) to the device
+then the last one repeated; `cake_backend.valid_rows`' `extent`) to the device
 in its one copy, so no launch fills them.  Other padded rows are zeroed where
 the buffer is allocated (per call).  They add up to `2 * 256 * V` bytes of
 logits buffer, which `memory_report` does not count.  The loss entry (its zero-weight rows'

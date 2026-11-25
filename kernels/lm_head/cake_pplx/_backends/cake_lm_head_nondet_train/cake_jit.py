@@ -2918,8 +2918,12 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 #                          each row's FP32 label residual: fma(rlab,
 #                          fp32(W[y]), sum).  After a one-slice ``gemm_dx``
 #                          (and once after the vocabulary-major backward's
-#                          last block) it is the fold alone (``n_slabs = 0``:
-#                          it reads the stored rows).  Launched
+#                          last block on an uncompacted or
+#                          ``dx_finalize=False`` call; a compacted call under
+#                          the fused finalize folds in
+#                          ``scale_cast_scatter_fold_bf16`` instead) it is the
+#                          fold alone (``n_slabs = 0``: it reads the stored
+#                          rows).  Launched
 #                          with programmatic dependent launch: before its
 #                          ``griddepcontrol.wait`` a thread reads only its
 #                          first vector's label and FP32 label residual (their

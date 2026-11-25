@@ -5915,6 +5915,138 @@ def test_a_extent_padded_index(monkeypatch):
     assert idx_g.tolist() == [1, 4, 6] and out.shape == (3, 8) and out.data_ptr() == buf.data_ptr()
 
 
+# The message of torch's synchronization debug mode for a synchronizing call.
+_SYNC_WARNING = "called a synchronizing CUDA operation"
+
+
+@pytest.mark.parametrize("pad", [16, 256])
+def test_a_extent_pad_select(pad, monkeypatch):
+    """The padded index of a host count (:func:`valid_rows` ``extent``) is one host ``index_select`` of the count's
+    valid-row index by the cached selector :func:`_pad_select`: for every count ``n`` below the extent (1 to
+    ``pad - 1``) it equals the valid rows followed by the last one repeated (``torch.cat`` of the index and its last
+    entry expanded, the 0.3.5 build), int64.  The selector is built once per ``(n, pad)``, on the CPU under another
+    default device, and stays as built: the padded index shares no storage with it, and writing that index leaves it
+    unchanged."""
+    monkeypatch.setattr(cake_backend, "_PAD_SELECT", {})
+    gen = torch.Generator().manual_seed(SEED + pad)
+    for n in range(1, pad):
+        with torch.device("meta"):  # a default device other than the CPU
+            sel = cake_backend._pad_select(n, pad)
+        assert sel.device.type == "cpu" and sel.dtype == torch.int64
+        assert sel.shape == (pad,)
+        assert cake_backend._pad_select(n, pad) is sel  # cached
+        index = torch.randperm(2 * pad, generator=gen)[:n].sort().values
+        want = torch.cat((index, index[-1:].expand(pad - n)))
+        got = index.index_select(0, cake_backend._pad_select(n, pad))
+        assert got.dtype == torch.int64 and torch.equal(got, want), n
+        assert got.untyped_storage().data_ptr() != sel.untyped_storage().data_ptr(), n
+        got.fill_(-1)
+        assert torch.equal(sel, torch.arange(pad).clamp(max=n - 1)), n
+    assert sorted(cake_backend._PAD_SELECT) == [(n, pad) for n in range(1, pad)]
+    for (n, _), sel in cake_backend._PAD_SELECT.items():
+        assert torch.equal(sel, torch.arange(pad).clamp(max=n - 1)), n
+
+
+def test_a_extent_bounds(monkeypatch):
+    """The padded-index decision of :func:`valid_rows`, ``lo <= n <= hi and n < pad`` on the memoized bounds of
+    :func:`_a_extent_bounds`, pads exactly the counts :func:`a_extent_rows` pads, with the same extent, for every
+    ``n`` in 0..1024: on the shipped tables, the padded-index test's (16 rows, window 2..5), the device bits test's
+    256-row tables (window 1..255) and empty tables, for chunks above, at and below the extent and every architecture
+    (an unknown one and None included).  The memo follows tables replaced by ``monkeypatch``, and so does
+    :func:`_a_extent_of` (device 0's architecture given by hand: no device query)."""
+    archs = ("sm_100a", "sm_103a", "sm_107a", "sm_120a", None)
+    tables = (
+        ("shipped", None, None),
+        ("padded index", {"sm_100a": 16}, {"sm_100a": (2, 5)}),
+        ("256", {a: 256 for a in archs[:3]}, {a: (1, 255) for a in archs[:3]}),
+        ("off", {}, {}),
+    )
+    for tag, pads, windows in tables:
+        if pads is not None:
+            monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", pads)
+            monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", windows)
+        for chunk in (4096, 256, 255, 16, 15, 1):
+            for arch in archs:
+                lo, hi, pad = cake_backend._a_extent_bounds(chunk, arch)
+                case = (tag, chunk, arch)
+                assert pad == cake_backend.a_extent_pad(chunk, arch), case
+                for n in range(1025):
+                    got = pad if (lo <= n <= hi and n < pad) else 0
+                    assert got == cake_backend.a_extent_rows(n, chunk, arch), (case, n)
+        memo = cake_backend._A_EXTENT_MEMO
+        assert memo[0] is cake_backend.A_EXTENT_ROWS_BY_ARCH, tag
+        assert memo[1] is cake_backend.A_EXTENT_WINDOW_BY_ARCH, tag
+        monkeypatch.undo()
+    monkeypatch.setitem(cake_backend._A_EXTENT_ARCH, 0, "sm_100a")
+    dev = torch.device("cuda", 0)
+    bounds = cake_backend._a_extent_bounds
+    assert bounds(4096, "sm_100a") == (1, 10, 16)
+    assert cake_backend._a_extent_of(dev, 4096, "cake") == (4096, "sm_100a")
+    monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {"sm_100a": 32})
+    assert bounds(4096, "sm_100a") == (1, 10, 32)
+    # 32 rows exceed the chunk
+    assert cake_backend._a_extent_of(dev, 16, "cake") is None
+    monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", {"sm_100a": (2, 5)})
+    assert bounds(4096, "sm_100a") == (2, 5, 32)
+    assert cake_backend._a_extent_of(dev, 4096, "cake") == (4096, "sm_100a")
+    monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {})
+    assert bounds(4096, "sm_100a") == (2, 5, 0)
+    assert cake_backend._a_extent_of(dev, 4096, "cake") is None
+    monkeypatch.undo()
+    assert bounds(4096, "sm_100a") == (1, 10, 16)
+    assert bounds(4096, "sm_107a") == (1, 182, 256)
+
+
+def test_a_extent_slot_values_bind_the_whole_buffers(monkeypatch):
+    """The per-call slots (:func:`_slot_values`) of a compacted one-chunk runner bind the chunk buffers themselves, no
+    view formed: with the padded A extents (sm_107a's, given by a wrapped ``make_plan`` to the reference backend's
+    runner) every logits GEMM's ``A`` is the padded gather buffer ``t["x_a"]`` and the weight-gradient GEMMs' ``B`` is
+    ``t["x_c"]`` (its first rows); without them the logits GEMMs' ``A`` is ``t["x_c"]`` too.  Each agrees with
+    :func:`stage_values` (:func:`_check_slot_values`)."""
+    real = cake_backend.make_plan
+
+    def padded(problem, **kw):
+        p = real(problem, **kw)
+        if p.compact and p.num_chunks == 1 and not p.hidden_count:
+            a = cake_backend.a_extent_rows(p.rows, problem.chunk, "sm_107a")
+            dx = cake_backend.a_extent_rows(p.rows, problem.chunk, "sm_107a", dx=True)
+            p = replace(p, a_rows=a, dx_a_rows=0 if not p.need_dx else dx)
+        return p
+
+    gemm = ["A", "B", "C", "STATS_OUT", "WS"]
+    inp = _host_inputs(40, ignore_frac=0.25)
+    rows = int((inp.labels >= 0).sum())
+    for entry in ("loss", "logprob"):
+        kw = dict(chunk_size=4096, backend="reference", compact_rows=True, entry=entry)
+        if entry == "loss":
+            kw.update(objective="ce", loss_div=inp.loss_div)
+        else:
+            kw.update(dlogp=inp.dlogp)
+        for pad in (False, True):
+            if pad:
+                monkeypatch.setattr(cake_backend, "make_plan", padded)
+            r = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
+            monkeypatch.setattr(cake_backend, "make_plan", real)
+            plan, t = r.plan, r.tensors
+            assert plan.num_chunks == 1 and plan.a_rows == (256 if pad else 0)
+            assert t["x_c"].shape[0] == rows, (entry, pad)
+            seen = set()
+            for key in r.values:
+                stage = key[0]
+                if stage not in cake_backend.GEMM_STAGES:
+                    continue
+                base = cake_backend.base_stage(stage)
+                values = cake_backend._slot_values(stage, t, plan, key[1])
+                if base in cake_backend.LOGITS_BASES:
+                    assert values["A"] is (t["x_a"] if pad else t["x_c"]), key
+                    seen.add("logits")
+                elif base == "gemm_dw_acc" or base in cake_backend.DW_CAST_STAGES:
+                    assert values["B"] is t["x_c"], key
+                    seen.add("dw")
+                cake_backend._check_slot_values(key, t, plan, gemm)
+            assert seen == {"logits", "dw"}, (entry, pad, seen)
+
+
 _HIDDEN_COUNT_HOST_CASES = [  # (T, C, objective, entry, ignored fraction): three chunks + tail, T < C, T = C + 1, T = C
     (37, 16, "ce", "loss", "five_percent"),
     (37, 16, "policy", "loss", "half"),
@@ -6007,6 +6139,92 @@ def test_valid_rows_host_count_matches_the_device_count(monkeypatch):
         for d, h in ((device_idx, host_idx), (device_mask, host_mask)):
             assert torch.equal(d, h) and d.dtype == h.dtype and d.shape == h.shape
             assert h.device == on_device.device and h.is_contiguous()
+    # with ``extent`` (tables that pad every count of 1 to 255 rows): the same index and mask on either path; a host
+    # count in the window also carries the padded index -- the valid rows, then the last one repeated -- whose first
+    # entries are that index, with no added synchronization; the cached selectors stay as built
+    arch = "sm_100a"
+    shipped = (cake_backend.A_EXTENT_ROWS_BY_ARCH, cake_backend.A_EXTENT_WINDOW_BY_ARCH)
+    monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {arch: 256})
+    monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", {arch: (1, 255)})
+    ext, attr = (4096, arch), cake_backend._PAD_INDEX_ATTR
+    padded_counts = 0
+    for labels in cases:
+        on_device = labels.to(CUDA)
+        n = int((labels >= 0).sum())
+        for rows in (0, 1 << 20):
+            monkeypatch.setattr(cake_backend, "HOST_COUNT_MAX_ROWS", rows)
+            want_idx, want_mask = cake_backend.valid_rows(on_device, mask=True)
+            idx, mask = cake_backend.valid_rows(on_device, mask=True, extent=ext)
+            if want_idx is None:
+                assert idx is None and mask is None
+                continue
+            assert torch.equal(idx, want_idx) and idx.dtype == want_idx.dtype
+            assert torch.equal(mask, want_mask)
+            padded = getattr(idx, attr, None)
+            if rows and 1 <= n <= 255:
+                want = torch.cat((want_idx, want_idx[-1:].expand(256 - n)))
+                assert padded is not None and torch.equal(padded, want), (n, rows)
+                assert padded.device == on_device.device and padded.is_contiguous()
+                assert idx.data_ptr() == padded.data_ptr() and idx.shape == (n,)
+                padded_counts += 1
+            else:
+                assert padded is None, (n, rows)
+    assert padded_counts > 0
+    monkeypatch.setattr(cake_backend, "HOST_COUNT_MAX_ROWS", 1 << 20)
+    # the edges of the window and of the extent (``lo - 1``, ``lo``, ``hi``, ``hi + 1``, ``pad - 1``, ``pad``): a host
+    # count pads its index exactly where :func:`a_extent_rows` gives the extent -- on a window inside the extent (16
+    # rows, window 2..5), a window past it (2..20) and the shipped tables of each architecture
+    edge_tables = (
+        ({arch: 16}, {arch: (2, 5)}, [2, 3, 4, 5]),
+        ({arch: 16}, {arch: (2, 20)}, [2, 3, 15]),
+        (shipped[0], shipped[1], None),
+    )
+    for pads, windows, want_padded in edge_tables:
+        monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", pads)
+        monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", windows)
+        for a in sorted(windows):
+            (lo, hi), pad = windows[a], int(pads[a])
+            T = pad + 8
+            edges = (0, lo - 1, lo, lo + 1, hi - 1, hi, hi + 1, pad - 1, pad, pad + 1)
+            got_padded = []
+            for n in sorted({c for c in edges if 0 <= c < T}):
+                labels = torch.full((T,), IGNORE_INDEX, dtype=torch.int64)
+                pos = torch.randperm(T, generator=gen)[:n].sort().values
+                labels[pos] = 7
+                idx = cake_backend.valid_row_index(labels.to(CUDA), extent=(4096, a))
+                assert idx.tolist() == pos.tolist(), (a, n)
+                padded = getattr(idx, attr, None)
+                extent = cake_backend.a_extent_rows(n, 4096, a)
+                if extent:
+                    want = pos.tolist() + pos[-1:].tolist() * (extent - n)
+                    assert padded is not None and padded.tolist() == want, (a, n)
+                    assert idx.data_ptr() == padded.data_ptr()
+                    got_padded.append(n)
+                else:
+                    assert padded is None, (a, n, pad)
+            assert want_padded is None or got_padded == want_padded, (a, got_padded)
+            assert got_padded[:1] == [lo] and got_padded[-1:] == [min(hi, pad - 1)], a
+    monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {arch: 256})
+    monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", {arch: (1, 255)})
+    labels = torch.full((16,), IGNORE_INDEX, dtype=torch.int64, device=CUDA)
+    labels[[2, 5, 11]] = 7
+    syncs = []
+    for kw in ({}, dict(extent=ext)):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            torch.cuda.set_sync_debug_mode("warn")
+            try:
+                idx, _ = cake_backend.valid_rows(labels, mask=True, **kw)
+            finally:
+                torch.cuda.set_sync_debug_mode("default")
+        # the synchronizations the debug mode detects (not its one-time "prototype feature" notice)
+        syncs.append(sum(_SYNC_WARNING in str(w.message) for w in caught))
+        assert idx.tolist() == [2, 5, 11]
+    assert syncs == [1, 1], syncs
+    assert getattr(idx, attr).tolist() == [2, 5, 11] + [11] * 253
+    for (n, pad), sel in cake_backend._PAD_SELECT.items():
+        want = torch.arange(pad).clamp(max=n - 1)
+        assert sel.device.type == "cpu" and torch.equal(sel, want), (n, pad)
 
 
 def test_scale_cast_scatter_reference_matches_scatter_rows():

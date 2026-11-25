@@ -1702,6 +1702,191 @@ def test_slab_sum_slots_form_only_the_tensors(monkeypatch):
     assert tuple(values["CNT"].shape) == (1,)
 
 
+def test_slot_values_bind_whole_tensors_of_a_one_chunk_plan():
+    """The per-call slots (``_slot_values``) of a chunk whose rows are all of a tensor bind that tensor itself, not a
+    view of all its rows (``_chunk_rows``): the row index and the gathered rows of the host gather, the logits GEMM's
+    ``A`` / ``C``, the dX GEMM's ``A`` / ``C`` and the weight-gradient GEMM's ``A`` of a one-chunk plan (compacted:
+    ``x_c``; uncompacted: ``X``); a plan of three chunks binds views of each chunk's rows.  Every slot binds what
+    ``stage_values`` binds (``_check_slot_values`` passes for every key of the forward and backward sequences).  The
+    opt-in module slots its dX GEMM through the same helper (``_dx_slots``): its one-chunk plan binds the whole
+    ``logits`` / ``dx_acc`` as well, each slot what its own ``stage_values`` binds."""
+    inp = _host_inputs(37)
+    seen = set()
+    for compact in (True, False):
+        for chunk in (64, 16):
+            runner = cake_backend.prepare_lm_head_loss(
+                inp.X,
+                inp.W,
+                inp.labels,
+                entry="logprob",
+                dlogp=inp.dlogp,
+                chunk_size=chunk,
+                backend="reference",
+                compact_rows=compact,
+            )
+            plan, t = runner.plan, runner.tensors
+            want_chunks = 1 if chunk == 64 else 3
+            assert plan.compact == compact and plan.num_chunks == want_chunks
+            for key in runner.forward_order + runner.backward_order:
+                stage, index = key
+                if isinstance(index, str):  # the casts ("dx" / "dw") bind no chunk rows
+                    continue
+                row0, rows_c = plan.chunks[index]
+                gemm = stage in cake_backend.GEMM_STAGES
+                base = cake_backend.base_stage(stage) if gemm else stage
+                rows_of = {}  # slot -> (the tensor whose rows it binds, the first row)
+                if stage == "gather_rows":
+                    rows_of = dict(idx=("row_index", row0), out=("x_c", 0))
+                elif base in cake_backend.LOGITS_BASES:
+                    x_rows = ("x_c", 0) if compact else ("X", row0)
+                    rows_of = dict(A=x_rows, C=("logits", 0))
+                elif base in cake_backend.DX_BASES:
+                    rows_of = dict(A=("logits", 0), C=("dx_acc", row0))
+                elif base == "gemm_dw_acc" or base in cake_backend.DW_CAST_STAGES:
+                    rows_of = dict(A=("logits", 0))
+                else:
+                    continue
+                v = cake_backend._slot_values(stage, t, plan, index)
+                names = [n for n, a in v.items() if isinstance(a, torch.Tensor)]
+                cake_backend._check_slot_values(key, t, plan, names)
+                for slot, (name, first) in rows_of.items():
+                    whole = first == 0 and rows_c == t[name].shape[0]
+                    assert (v[slot] is t[name]) is whole, (compact, chunk, key, slot)
+                    if whole:
+                        seen.add((compact, base, slot))
+                    else:
+                        assert v[slot].shape[0] == rows_c, (compact, chunk, key, slot)
+    # a one-chunk plan binds the whole tensors on every slot named above
+    assert {
+        (True, "gather_rows", "idx"),
+        (True, "gather_rows", "out"),
+        (True, "gemm_logits", "A"),
+        (True, "gemm_logits", "C"),
+        (False, "gemm_logits", "A"),
+        (False, "gemm_logits", "C"),
+    } <= seen, seen
+    assert {(c, "gemm_dx", s) for c in (True, False) for s in ("A", "C")} <= seen, seen
+    assert opt_in._dx_slots is cake_backend._dx_slots
+    seen_opt = set()
+    for compact in (True, False):
+        for chunk in (64, 16):
+            runner = opt_in.prepare_lm_head_loss(
+                inp.X,
+                inp.W,
+                inp.labels,
+                entry="logprob",
+                dlogp=inp.dlogp,
+                chunk_size=chunk,
+                backend="reference",
+                compact_rows=compact,
+            )
+            plan, t = runner.plan, runner.tensors
+            assert chunk == 16 or plan.num_chunks == 1, (compact, plan.num_chunks)
+            for key in runner.forward_order + runner.backward_order:
+                stage, index = key
+                if isinstance(index, str) or stage not in opt_in.GEMM_STAGES:
+                    continue
+                if opt_in.base_stage(stage) not in opt_in.DX_BASES:
+                    continue
+                row0, rows_c = plan.chunks[index]
+                v = opt_in._slot_values(stage, t, plan, index)
+                names = [n for n, a in v.items() if isinstance(a, torch.Tensor)]
+                opt_in._check_slot_values(key, t, plan, names)
+                rows_of = dict(A=("logits", 0), C=("dx_acc", row0))
+                for slot, (name, first) in rows_of.items():
+                    whole = first == 0 and rows_c == t[name].shape[0]
+                    assert (v[slot] is t[name]) is whole, (compact, chunk, key, slot)
+                    if whole:
+                        seen_opt.add((compact, slot))
+    assert {(c, s) for c in (True, False) for s in ("A", "C")} <= seen_opt, seen_opt
+
+
+@pytest.mark.parametrize("tau", [None, "scalar"])
+def test_device_binding_forward_gathers_both_rows_before_the_logits_gemm(
+    glm_weight, monkeypatch, tau
+):
+    """A remembered log-probability binding on the host-count path (one compacted chunk, the label-column arm) binds
+    the call's compacted labels first and runs chunk 0's row gather and logits GEMM in one launch round
+    (``forward_early + forward_early_labels``), then the rest (``forward_late``): on the call's one stream the labels'
+    gather and the row gather are both queued ahead of the logits GEMM, which runs them in that order.  ``logp`` /
+    ``lse`` of the remembered binding are the binding-miss call's bitwise -- with no temperature and a scalar one."""
+    _require_program(entry="logprob")
+    be = cake_backend
+    if tau is not None:
+        _require_tau_program()
+    inp = make_inputs(
+        1024,
+        seed=SEED + 8801,
+        device=CUDA,
+        W=glm_weight,
+        ignore_frac=0.05,
+        temperature=tau,
+    )
+    kw = dict(chunk_size=4096, compact_rows=True, hidden_count=False)
+    if tau is None:
+        fwd = be.forward_logprob
+    else:
+        fwd = functools.partial(
+            be.forward_logprob_temperature, temperature=inp.temperature
+        )
+    events, rounds = [], []
+    stream = torch.cuda.current_stream()
+
+    def on_stream():
+        return torch.cuda.current_stream() == stream
+
+    def labels_spy(real):
+        def spy(*args, **kwargs):
+            events.append(("labels", None, on_stream()))
+            return real(*args, **kwargs)
+
+        return spy
+
+    def slots_spy(real):
+        def spy(stage, t, plan, index):
+            events.append((stage, index, on_stream()))
+            return real(stage, t, plan, index)
+
+        return spy
+
+    def launch_spy(real):
+        def spy(self, keys, *args, **kwargs):
+            rounds.append((self, tuple(keys)))
+            return real(self, keys, *args, **kwargs)
+
+        return spy
+
+    monkeypatch.setattr(be, "_prepare_labels", labels_spy(be._prepare_labels))
+    monkeypatch.setattr(be, "_slot_values", slots_spy(be._slot_values))
+    for cls in (be._Binding, be._TemperatureBinding):
+        monkeypatch.setattr(cls, "_launch", launch_spy(cls.__dict__["_launch"]))
+    be.BINDING_CACHE.clear()
+    miss = fwd(inp.X, inp.W, inp.labels, **kw)
+    torch.cuda.synchronize()
+    events.clear()
+    rounds.clear()
+    hit = fwd(inp.X, inp.W, inp.labels, **kw)
+    torch.cuda.synchronize()
+    assert rounds, "the call did not launch through a remembered binding"
+    binding = rounds[0][0]
+    assert binding.plan.compact and binding.plan.num_chunks == 1
+    assert binding.plan.logprob_lbl
+    assert binding.forward_early == (("gather_rows", 0),)
+    assert len(binding.forward_early_labels) == 1
+    assert binding.forward_early_labels[0][1] == 0
+    assert [keys for _, keys in rounds] == [
+        binding.forward_early + binding.forward_early_labels,
+        binding.forward_late,
+    ]
+    names = [stage for stage, _, _ in events]
+    assert names.count("labels") == 1, names
+    gemm = names.index(be.LOGPROB_LBL_STAGE)
+    assert names.index("labels") < gemm and names.index("gather_rows") < gemm, names
+    assert all(same for _, _, same in events), events
+    for name in ("logp", "lse"):
+        assert _same_bits(getattr(hit, name), getattr(miss, name)), (tau, name)
+
+
 def test_reference_slab_sum_folds_the_label_residual():
     """The reference slab sums' fold (``lr = 1``): after the slabs' sum (or, with ``n_slabs`` 0, the rows as they are),
     each row whose label lies in ``[0, V)`` and whose residual is nonzero gets ``A + r * f32(W[y])``; an ignored row, a
@@ -2990,6 +3175,129 @@ def test_entries_read_the_slice_rule_once_and_key_and_plan_with_it(
             dx_rule=("det", 0),
         )[:-1]
     )
+
+
+def test_forward_binding_key_rows_completes_the_count_free_key():
+    """``forward_binding_key_rows`` completes the key a call formed without its valid-row count (``valid_rows=None``:
+    the part :func:`forward_logprob` forms ahead of the count's device synchronization) into the key the call forms
+    with the count, element for element: equal, with the same element types, repr and hash, for the option sets of
+    the log-probability forward and the loss entry below and the counts ``None``, 0, 1, 973, 1024 and 12000.  A key
+    that already holds a count is refused."""
+    inp = _host_inputs(40, "policy")
+    tuning = cake_backend._resolve_gemm_tuning(None)
+    logprob = dict(
+        objective="ce",
+        loss_div=None,
+        infer_logp=None,
+        loss_weights=None,
+        chunk_size=4096,
+        need_dx=False,
+        need_dw=False,
+        grad_weight_dtype=torch.bfloat16,
+        entry="logprob",
+        gemm_tuning=tuning,
+    )
+    loss = dict(
+        objective="policy",
+        loss_div=2.0,
+        infer_logp=inp.infer_logp,
+        loss_weights=inp.loss_weights,
+        chunk_size=16,
+        need_dx=True,
+        need_dw=True,
+        grad_weight_dtype=torch.float32,
+        entry="loss",
+    )
+    options = [
+        dict(logprob),
+        dict(logprob, hidden_count=True),
+        dict(logprob, logprob_lbl=True),
+        dict(logprob, hidden_count=True, logprob_lbl=True),
+        dict(loss),
+        dict(
+            loss,
+            fuse_dw_cast=True,
+            gemm_tuning={"dx": {"k_slices": 2}},
+            dx_finalize=True,
+            hidden_count=True,
+            dx_rule=("measured", 7),
+            cast_fold=True,
+        ),
+    ]
+    for kw in options:
+        free = cake_backend.forward_binding_key(inp.X, inp.W, inp.labels, **kw)
+        assert free[cake_backend._FORWARD_KEY_ROWS] is None, kw
+        for rows in (None, 0, 1, 973, 1024, 12000):
+            want = cake_backend.forward_binding_key(
+                inp.X, inp.W, inp.labels, valid_rows=rows, **kw
+            )
+            got = cake_backend.forward_binding_key_rows(free, rows)
+            assert got == want, (kw, rows)
+            assert [type(a) for a in got] == [type(b) for b in want], (kw, rows)
+            assert repr(got) == repr(want) and hash(got) == hash(want), (kw, rows)
+            if rows is not None:
+                with pytest.raises(ValueError, match="already holds"):
+                    cake_backend.forward_binding_key_rows(got, rows)
+
+
+def test_device_forward_logprob_keys_before_its_count(glm_weight, monkeypatch):
+    """:func:`forward_logprob` forms its binding key's count-independent part before the valid-row count (the host
+    builds it while the device runs the queued work), once per call, and looks the binding up under the key formed
+    with the count, on a binding miss and a hit, compacted and not."""
+    _require_program(entry="logprob")
+    be = cake_backend
+    inp = make_inputs(
+        1024, seed=SEED + 8802, device=CUDA, W=glm_weight, ignore_frac=0.05
+    )
+    events, looked = [], []
+    real_key, real_count = be.forward_binding_key, be.valid_row_index
+    real_lookup = be.BINDING_CACHE.lookup
+
+    def key_spy(*args, **kwargs):
+        events.append(("key", kwargs.get("valid_rows")))
+        return real_key(*args, **kwargs)
+
+    def count_spy(labels):
+        events.append(("count", None))
+        return real_count(labels)
+
+    def lookup_spy(key):
+        looked.append(key)
+        return real_lookup(key)
+
+    monkeypatch.setattr(be, "forward_binding_key", key_spy)
+    monkeypatch.setattr(be, "valid_row_index", count_spy)
+    monkeypatch.setattr(be.BINDING_CACHE, "lookup", lookup_spy)
+    be.BINDING_CACHE.clear()
+    for compact in (True, False):
+        for _ in range(2):  # a binding miss, then a hit
+            del events[:], looked[:]
+            fr = be.forward_logprob(
+                inp.X, inp.W, inp.labels, chunk_size=4096, compact_rows=compact
+            )
+            rows = None if fr.row_index is None else int(fr.row_index.numel())
+            want_events = [("key", None)] + ([("count", None)] if compact else [])
+            assert events == want_events, events
+            want = real_key(
+                inp.X,
+                inp.W,
+                inp.labels,
+                objective="ce",
+                loss_div=None,
+                infer_logp=None,
+                loss_weights=None,
+                chunk_size=4096,
+                need_dx=False,
+                need_dw=False,
+                grad_weight_dtype=torch.bfloat16,
+                entry="logprob",
+                valid_rows=rows,
+                gemm_tuning=be._resolve_gemm_tuning(None),
+                hidden_count=False,
+                logprob_lbl=be._resolve_logprob_lbl(None),
+            )
+            assert looked == [want], (compact, looked, want)
+    torch.cuda.synchronize()
 
 
 def test_binding_keys_cover_the_options_of_the_plan():
@@ -6330,6 +6638,89 @@ def test_memory_plan_vocab_major_form():
         opt_in._set_memory_budget_bytes(previous)
     with pytest.raises(ValueError):
         opt_in._set_memory_budget_bytes(0)
+
+
+def test_memory_plan_vocab_major_dx_phase_holds_the_fold_operands():
+    """The vocabulary-major model's ``dX`` output phase of a compacted call under the fused finalize counts the compact
+    labels and the FP32 label residuals its scatter cast folds (``label_bytes * rows + 4 * rows`` bytes, 12 a row with
+    the int64 labels, each tensor with the allocator's bound), where the call with ``dx_finalize=False`` counts its
+    BF16 ``[rows, H]`` dX cast instead: where that phase is the larger one (many ignored rows) the two predictions
+    differ by exactly that."""
+    geometry = cake_backend.DEFAULT_GEOMETRY
+    live = opt_in._allocated_bytes
+    label_bytes = torch.empty((), dtype=geometry.labels_dtype).element_size()
+    assert label_bytes == 8
+    for T, R, H, V, C in (
+        (60000, 5000, GLM_H, GLM_V, 1024),
+        (65535, 7000, 4096, 32768, 2048),
+    ):
+        kw = dict(
+            num_rows=T,
+            rows=R,
+            hidden=H,
+            vocab=V,
+            chunk=C,
+            geometry=geometry,
+            vocab_major=True,
+            fuse_dw_cast=False,
+            budget_bytes=1 << 45,
+        )
+        fused = opt_in.memory_plan("logprob", dx_finalize=True, **kw)
+        plain = opt_in.memory_plan("logprob", dx_finalize=False, **kw)
+        assert fused.form == plain.form == "vocab_major", (fused, plain)
+        assert plain.predicted_bytes - fused.predicted_bytes == (
+            live(2 * R * H) - live(label_bytes * R) - live(4 * R)
+        ), (T, R, fused, plain)
+
+
+def test_memory_plan_vocab_major_budget_edge_moves_by_the_fold_operands():
+    """Where the vocabulary-major ``dX`` output phase is the form's peak (a compacted call with many ignored rows,
+    under the fused finalize), the fold operands that phase holds (``live(label_bytes * rows) + live(4 * rows)``, 12
+    bytes a row with the int64 labels) raise the smallest budget at which ``memory_plan`` picks ``"vocab_major"`` by
+    exactly that: the edge without them is the ``dx_finalize=False`` prediction less its BF16 ``[rows, H]`` cast.  At
+    the edge it picks ``"vocab_major"``; one byte below it and at the edge without the fold operands (the budgets of
+    that ``12 * rows``-byte window, where the model without them picked ``"vocab_major"``) it picks the chunk loop's
+    fitting form, as the call without the vocabulary-major form does -- another form, whose ``dX`` / ``dW`` round
+    differently -- here ``"recompute"`` for a call of 100 valid rows of 4096."""
+    geometry = cake_backend.DEFAULT_GEOMETRY
+    live = opt_in._allocated_bytes
+    label_bytes = torch.empty((), dtype=geometry.labels_dtype).element_size()
+    for T, R, H, V, C in (
+        (4096, 100, GLM_H, GLM_V, 4096),
+        (60000, 5000, GLM_H, GLM_V, 1024),
+        (65535, 7000, 4096, 32768, 2048),
+    ):
+        kw = dict(
+            num_rows=T,
+            rows=R,
+            hidden=H,
+            vocab=V,
+            chunk=C,
+            geometry=geometry,
+            fuse_dw_cast=False,
+        )
+        top = opt_in.memory_plan(
+            "logprob", vocab_major=True, budget_bytes=1 << 45, **kw
+        )
+        plain = opt_in.memory_plan(
+            "logprob", vocab_major=True, dx_finalize=False, budget_bytes=1 << 45, **kw
+        )
+        assert top.form == plain.form == "vocab_major", (T, R, top, plain)
+        held = live(label_bytes * R) + live(4 * R)
+        edge = top.predicted_bytes
+        assert edge - held == plain.predicted_bytes - live(2 * R * H), (T, R, plain)
+        at = opt_in.memory_plan("logprob", vocab_major=True, budget_bytes=edge, **kw)
+        assert at.form == "vocab_major" and at.fits, (T, R, at)
+        assert at.predicted_bytes == edge, (T, R, at)
+        for budget in (edge - 1, edge - held):
+            got = opt_in.memory_plan(
+                "logprob", vocab_major=True, budget_bytes=budget, **kw
+            )
+            loop = opt_in.memory_plan("logprob", budget_bytes=budget, **kw)
+            assert loop.fits and loop.form != "vocab_major", (T, R, budget, loop)
+            assert got == loop, (T, R, budget, got, loop)
+            if T == 4096:
+                assert got.form == "recompute", (T, R, budget, got)
 
 
 # The forms of the loss entry's explicit byte budget (:func:`opt_in._set_memory_budget_bytes`), in pick order
@@ -17164,16 +17555,36 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
     calls of every draw take the same forms and are judged against the naive tier: the three vocabulary-major runs, the
     checkpointed step and the kept call of each ``T`` (``vm_T<rows>``, ``vm_T<rows>_run2`` / ``_run3``,
     ``ckpt_T<rows>`` / ``kept_T<rows>``), the five-chunk call under ``"auto"`` and the two runs under ``"1"``
-    (``auto_T8700``, ``forced_T8700`` / ``forced_T8700_run2``) and the two-chunk call (``two_T8000``)."""
+    (``auto_T8700``, ``forced_T8700`` / ``forced_T8700_run2``) and the two-chunk call (``two_T8000``).  Every one of
+    these compacted calls (the fused dX finalize) folds the label residuals in its scatter cast: no slab-sum launch,
+    one ``scale_cast_scatter_fold_bf16``; the frozen ``X`` (no dX) launches neither."""
     _require_program(entry="logprob")
-    calls = []
+    calls, stages = [], []
     real = cake_backend._backward_logprob_vm
+    real_eager = cake_backend._eager_launch
 
     def counted(*args, **kwargs):
         calls.append(1)
-        return real(*args, **kwargs)
+        stages.append([])
+        try:
+            return real(*args, **kwargs)
+        finally:
+            stages[-1] = tuple(stages[-1])
+
+    def eager(record, module_name, stage, *args, **kwargs):
+        # inside a vocabulary-major backward
+        if stages and isinstance(stages[-1], list):
+            stages[-1].append(stage)
+        return real_eager(record, module_name, stage, *args, **kwargs)
+
+    def assert_folds(launched, case, need_dx=True):
+        """The eager stages of one vocabulary-major backward: the cast's fold, never the slab sum."""
+        assert cake_backend.DX_SLAB_SUM_STAGE not in launched, (case, launched)
+        folds = launched.count(cake_backend.DX_FINALIZE_FOLD_STAGE)
+        assert folds == int(need_dx), (case, launched)
 
     monkeypatch.setattr(cake_backend, "_backward_logprob_vm", counted)
+    monkeypatch.setattr(cake_backend, "_eager_launch", eager)
     assert cake_backend.VM_AUTO_MAX_CHUNKS == 4
     for T, C in ((6000, 4096), (7000, 2048)):
         inp = make_inputs(
@@ -17198,6 +17609,8 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
         calls.clear()
         runs = [_run(inp, C, entry="logprob", backend="cake") for _ in range(3)]
         assert len(calls) == 3, case
+        for launched in stages[-3:]:
+            assert_folds(launched, case)
         vm = runs[0]
         assert _same_bits(vm["logp"], loop["logp"]), case
         dead_rows = inp.dlogp == 0
@@ -17213,6 +17626,7 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
         if inp.temperature is not None:
             kw["temperature"] = inp.temperature
             fn = cake_backend.cake_lm_head_nondet_train_logprob_temperature
+        before = len(stages)
         L = torch.utils.checkpoint.checkpoint(
             lambda a, b: (fn(a, b, inp.labels, **kw) * inp.dlogp).sum(),
             X,
@@ -17220,9 +17634,14 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
             use_reentrant=False,
         )
         dX, dW = torch.autograd.grad(L, (X, W))
+        assert len(stages) == before + 1, case
+        assert_folds(stages[-1], case)
         contract_lm_head(dict(dX=dX, dW=dW), inp, entry="logprob")
         assert torch.all(dX[dead_rows] == 0), case
+        before = len(stages)
         frozen = _run(inp, C, entry="logprob", backend="cake", train_x=False)
+        assert len(stages) == before + 1, case
+        assert_folds(stages[-1], case, need_dx=False)
         assert frozen["dX"] is None and _same_bits(frozen["dW"], vm["dW"]), case
         if tau is None:
             # the kept logits keep their own chunk loop: the default call's logp bits; dX / dW round differently
@@ -17250,6 +17669,8 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
     with _vocab_major("1"):
         forced = [_run(inp, 2048, entry="logprob", backend="cake") for _ in range(2)]
     assert len(calls) == 2
+    for launched in stages[-2:]:
+        assert_folds(launched, "forced_T8700")
     assert _same_bits(forced[0]["logp"], auto["logp"])
     contract_lm_head(auto, inp, entry="logprob")
     for run in forced:
@@ -17339,6 +17760,136 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
     _judge_problems(
         record_property, launch, tuple(labels), seed=SEED + 4100, entry="logprob", names=names, contract=contract
     )
+
+
+@pytest.mark.parametrize("tau", [None, "scalar"])
+def test_device_vocab_major_label_fold_forms(glm_weight, monkeypatch, tau):
+    """Where the vocabulary-major backward folds the label residuals into dX, at 7000 rows over 2048-row chunks with
+    valid rows whose labels lie at or past ``V`` (and ignored rows), with no temperature and a scalar one: a compacted
+    call under the fused dX finalize folds them in its scatter cast -- with the zero-gradient row skip (the partition's
+    scan) and without it (the valid-row mask) -- and launches no slab sum; an uncompacted call and one with
+    ``dx_finalize=False`` launch the fold-alone slab sum and no fold cast.  The cast's fold gives the slab sum's bits:
+    ``dX`` / ``dW`` / ``logp`` of the masked call equal those of ``dx_finalize=False`` bit for bit (neither runs the
+    skip).  A retained graph's second backward repeats the first's ``dX`` / ``dW`` bits, and (no temperature) a CUDA
+    graph of the low-level masked backward replays the eager call's bits."""
+    _require_program(entry="logprob")
+    if tau is not None:
+        _require_tau_program()
+    be = cake_backend
+    calls, stages = [], []
+    real, real_eager = be._backward_logprob_vm, be._eager_launch
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        stages.append([])
+        try:
+            return real(*args, **kwargs)
+        finally:
+            stages[-1] = tuple(stages[-1])
+
+    def eager(record, module_name, stage, *args, **kwargs):
+        # inside a vocabulary-major backward
+        if stages and isinstance(stages[-1], list):
+            stages[-1].append(stage)
+        return real_eager(record, module_name, stage, *args, **kwargs)
+
+    monkeypatch.setattr(be, "_backward_logprob_vm", counted)
+    monkeypatch.setattr(be, "_eager_launch", eager)
+    T, C = 7000, 2048
+    V = int(glm_weight.shape[0])
+    inp = make_inputs(
+        T,
+        seed=SEED + 4200,
+        device=CUDA,
+        W=glm_weight,
+        ignore_frac=0.05,
+        temperature=tau,
+    )
+    labels = inp.labels.clone()
+    labels[:5] = torch.tensor([V, V + 5, 2 * V, V - 1, 0], device=CUDA)
+    labels[3000:3008] = V + 3
+    inp = dataclasses.replace(inp, labels=labels)
+    rows = int((labels >= 0).sum())
+    assert be._logprob_vm_auto_rows(rows, C), rows
+    slab, fold = be.DX_SLAB_SUM_STAGE, be.DX_FINALIZE_FOLD_STAGE
+
+    def run(case, **switches):
+        del calls[:]
+        result = _run(inp, C, entry="logprob", backend="cake", **switches)
+        assert len(calls) == 1, (case, calls)
+        launched = stages[-1]
+        folds_in_cast = case in ("scan", "mask")
+        assert (slab in launched) != folds_in_cast, (case, launched)
+        assert launched.count(fold) == int(folds_in_cast), (case, launched)
+        assert bool(torch.isfinite(result["dX"].float()).all()), case
+        assert bool(torch.isfinite(result["dW"].float()).all()), case
+        assert bool((result["dX"][labels < 0] == 0).all()), case
+        return result
+
+    scan = run("scan")
+    with _zero_dlogp_floor(None):
+        mask = run("mask")
+        unfused = run("unfused", dx_finalize=False)
+    run("uncompacted", compact_rows=False)
+    for name in ("logp", "dX", "dW"):
+        assert _same_bits(mask[name], unfused[name]), (tau, name)
+    assert _same_bits(scan["logp"], mask["logp"]), tau
+    # a retained graph: the second backward repeats the first's bits
+    X = inp.X.detach().requires_grad_(True)
+    W = inp.W.detach().requires_grad_(True)
+    if tau is None:
+        lp = be.cake_lm_head_nondet_train_logprob(
+            X, W, labels, chunk_size=C, backend="cake"
+        )
+    else:
+        lp = be.cake_lm_head_nondet_train_logprob_temperature(
+            X, W, labels, chunk_size=C, backend="cake", temperature=inp.temperature
+        )
+    grads = []
+    del calls[:]
+    for _ in range(2):
+        X.grad = W.grad = None
+        lp.backward(inp.dlogp, retain_graph=True)
+        torch.cuda.synchronize()
+        grads.append((X.grad.clone(), W.grad.clone()))
+        assert stages[-1].count(fold) == 1 and slab not in stages[-1], stages[-1]
+    assert len(calls) == 2, calls
+    assert _same_bits(grads[0][0], grads[1][0]), tau
+    assert _same_bits(grads[0][1], grads[1][1]), tau
+    assert _same_bits(grads[0][0], scan["dX"]), tau
+    assert _same_bits(grads[0][1], scan["dW"]), tau
+    del lp, X, W, grads
+    if tau is not None:
+        return
+    # a CUDA graph of the low-level backward (valid-row mask, no skip): the replay gives the eager call's bits
+    fr = be.forward_logprob(inp.X, inp.W, labels, chunk_size=C)
+    dlogp = inp.dlogp.clone()
+
+    def backward():
+        return be.backward_logprob(
+            inp.X, inp.W, labels, fr.lse, dlogp, row_index=fr.row_index, chunk_size=C
+        )
+
+    with _zero_dlogp_floor(None):
+        eager_dx, eager_dw = backward()
+        torch.cuda.synchronize()
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            backward()
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        del calls[:]
+        with torch.cuda.graph(graph):
+            dx_g, dw_g = backward()
+        assert len(calls) == 1, calls
+        assert stages[-1].count(fold) == 1 and slab not in stages[-1], stages[-1]
+        for _ in range(2):
+            graph.replay()
+            torch.cuda.synchronize()
+            assert _same_bits(dx_g, eager_dx) and _same_bits(dw_g, eager_dw)
+    assert _same_bits(eager_dx, mask["dX"]) and _same_bits(eager_dw, mask["dW"])
+    del graph, dx_g, dw_g
 
 
 # ---------------------------------------------------------------------------
@@ -17713,6 +18264,37 @@ def test_small_call_stage_is_deferred():
     assert cake_backend._SMALL_STAGE.ops is None  # dropped, never run
 
 
+def test_small_stage_reads_its_class_default_on_every_thread():
+    """A thread that never staged reads its pending small-call staging as the holder's class attribute ``None`` -- no
+    attribute of its own, so no lookup miss (a bare ``threading.local`` raises and clears an ``AttributeError`` on such
+    a read, which every launch context of every call makes) -- and a staging pending on one thread is not another
+    thread's (meta tensors: no device here)."""
+    stage = cake_backend._SMALL_STAGE
+    assert isinstance(stage, threading.local) and type(stage).ops is None
+    seen: list = []
+
+    def other_thread():
+        seen.append((dict(vars(stage)), stage.ops))
+
+    def on_another_thread():
+        thread = threading.Thread(target=other_thread)
+        thread.start()
+        thread.join()
+        return seen.pop()
+
+    assert on_another_thread() == ({}, None)
+    meta = torch.device("meta")
+    X = torch.empty((5, 8), dtype=torch.bfloat16, device=meta)
+    labels = torch.empty((5,), dtype=torch.int64, device=meta)
+    ran: list = []
+    with cake_backend._small_call_scope():
+        cake_backend._SmallCallStage.apply(X, labels, 16, None, None, None)
+        assert stage.ops is not None
+        assert on_another_thread() == ({}, None)
+        stage.ops = lambda: ran.append(True)
+    assert ran == [True] and stage.ops is None
+
+
 def _poison_small_stage_block(monkeypatch) -> None:
     """Fill the block every small-call stage allocates (``torch.empty`` called from ``_SmallCallStage.forward``) with
     0xFF bytes -- a NaN pattern in BF16 and FP32 -- as it is allocated, so a staged buffer read before its staging ran
@@ -17870,6 +18452,79 @@ def test_device_small_call_stages_after_planning(glm_weight, entry, T, monkeypat
             cake_backend.cake_lm_head_nondet_train_loss(inp.X, W_bad, inp.labels)
         else:
             cake_backend.cake_lm_head_nondet_train_logprob(inp.X, W_bad, inp.labels)
+    assert cake_backend._SMALL_STAGE.ops is None
+
+
+@pytest.mark.parametrize("entry", ["loss", "logprob", "temperature"])
+def test_device_unstaged_call_enters_no_staging(glm_weight, entry, monkeypatch):
+    """A call that stages nothing (T 300: above the small-call rows; compacted, ignored rows) enters none of the
+    small-call staging -- no scope, no stage, and no ``_run_small_stage`` from its launch contexts, forward or backward,
+    on a binding miss and a hit: each launch context finds nothing pending and goes on.  A small call (T 5 staged to
+    16 rows) on the same thread enters its scope and its stage once, and its staging runs once, while pending, in its
+    first launch context (the temperature entry: its temperature check, ahead of any launch context) -- not at the
+    scope's end, which then finds nothing pending."""
+    if entry == "temperature":
+        _require_tau_program()
+
+        def inputs(T):
+            return _tau_inputs(T, W=glm_weight, ignore_frac=0.25)
+
+    else:
+        _require_program(entry=entry)
+
+        def inputs(T):
+            return _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.25)
+
+    kind = "loss" if entry == "loss" else "logprob"
+    calls: list = []
+    contexts: list = []
+    run_stage = cake_backend._run_small_stage
+    scope = cake_backend._small_call_scope
+    apply = cake_backend._SmallCallStage.apply
+    stream_context = cake_backend._ffi_stream_context
+
+    def run_spy():
+        # pending or not, the caller (a launch context, the temperature check or the scope's end) and the launch
+        # contexts entered by then
+        pending = cake_backend._SMALL_STAGE.ops is not None
+        calls.append(("run", pending, sys._getframe(1).f_code.co_name, len(contexts)))
+        return run_stage()
+
+    def scope_spy():
+        calls.append(("scope",))
+        return scope()
+
+    def apply_spy(*args):
+        calls.append(("apply", int(args[2])))
+        return apply(*args)
+
+    def context_spy(index):
+        contexts.append(index)
+        return stream_context(index)
+
+    big, small = inputs(300), inputs(5)
+    assert int(big.X.shape[0]) > cake_backend.uncompacted_max_rows()
+    assert not bool(big.valid.all()) and not bool(small.valid.all())
+    monkeypatch.setattr(cake_backend, "_run_small_stage", run_spy)
+    monkeypatch.setattr(cake_backend, "_small_call_scope", scope_spy)
+    monkeypatch.setattr(cake_backend._SmallCallStage, "apply", apply_spy)
+    monkeypatch.setattr(cake_backend, "_ffi_stream_context", context_spy)
+    with _small_pad_rows(16):
+        for _ in range(2):  # a binding miss, then a hit
+            contexts.clear()
+            out = _run(big, 4096, entry=kind, backend="cake")
+            assert contexts, entry  # the launch contexts ran (and checked)
+            assert calls == [], (entry, calls)
+            assert out["dX"] is not None and out["dW"] is not None
+        contexts.clear()
+        _run(small, 4096, entry=kind, backend="cake")
+    assert contexts, entry
+    if entry == "temperature":
+        first = ("run", True, "_resolve_temperature", 0)
+    else:
+        first = ("run", True, "_ffi_stream_context", 1)
+    assert calls[:3] == [("scope",), ("apply", 16), first], calls
+    assert [c[:3] for c in calls[3:]] == [("run", False, "_small_call_scope")], calls
     assert cake_backend._SMALL_STAGE.ops is None
 
 

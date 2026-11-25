@@ -2675,6 +2675,26 @@ def _row_scan(row_valid: torch.Tensor) -> torch.Tensor:
     return torch.cumsum(row_valid, 0, dtype=torch.int32)
 
 
+# ``(n, pad)`` -> the host selector of :func:`_pad_select`.  A padded count has ``1 <= n < pad`` with ``n`` in its
+# architecture's window and ``pad`` an entry of :data:`A_EXTENT_ROWS_BY_ARCH`, so the keys are bounded: at most
+# ``pad - 1`` selectors per extent size, 192 in all on the shipped tables (``n`` 1..10 of 16 entries and 1..182 of
+# 256, about 365 KiB).  ``setdefault`` under the GIL: threads that build the same key at once all return the one
+# tensor the dict keeps.
+_PAD_SELECT: dict[tuple[int, int], torch.Tensor] = {}
+
+
+def _pad_select(n: int, pad: int) -> torch.Tensor:
+    """The host int64 selector ``[min(k, n - 1) for k < pad]``: the ``index_select`` of an ``n``-entry valid-row
+    index by it is that index followed by its last entry repeated up to ``pad`` entries (:func:`valid_rows`
+    ``extent``).  Built once per ``(n, pad)`` on the CPU whatever the default device, and never written afterwards:
+    ``index_select`` reads it into a new tensor, so no caller's tensor aliases it."""
+    sel = _PAD_SELECT.get((n, pad))
+    if sel is None:
+        built = torch.arange(pad, device="cpu", dtype=torch.int64).clamp_(max=n - 1)
+        sel = _PAD_SELECT.setdefault((n, pad), built)
+    return sel
+
+
 def valid_rows(
     labels: torch.Tensor, *, mask: bool = False, extent: Optional[tuple[int, str]] = None
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -2690,10 +2710,11 @@ def valid_rows(
     the host, copied back to the labels' device: no count or select kernels; with ``mask=True`` the returned mask
     keeps that host copy (:data:`_HOST_MASK_ATTR`, ``T`` host bytes), which the dX finalize scans on the host
     (:func:`_row_scan`).  ``extent`` (the eager log-probability forms' ``(chunk, arch)``, :func:`_a_extent_of`): such a
-    host count whose valid rows take the architecture's padded A extent (:func:`a_extent_rows`, the plan's
-    :attr:`Plan.a_rows`) copies an index of the extent's rows instead -- the valid rows, then the last one repeated --
-    and returns its first entries (the same index, a view) carrying the whole (:data:`_PAD_INDEX_ATTR`); other counts,
-    and a count on the device, pad nothing."""
+    host count whose valid rows take the architecture's padded A extent (the rule of :func:`a_extent_rows`, the
+    plan's :attr:`Plan.a_rows`, tested here on the memoized bounds of :func:`_a_extent_bounds`) copies an index of
+    the extent's rows instead -- the valid rows, then the last one repeated, one host ``index_select``
+    (:func:`_pad_select`) -- and returns its first entries (the same index, a view) carrying the whole
+    (:data:`_PAD_INDEX_ATTR`); other counts, and a count on the device, pad nothing."""
     T = int(labels.numel())
     if T == 0:
         return None, None
@@ -2701,20 +2722,21 @@ def valid_rows(
     if T <= HOST_COUNT_MAX_ROWS and labels.is_cuda:
         host = valid.cpu()
         index = host.nonzero().squeeze(1)
-        if int(index.numel()) == T:
+        n = int(index.numel())
+        if n == T:
             return None, None
         if mask:
             setattr(valid, _HOST_MASK_ATTR, host)
-        n = int(index.numel())
-        pad = a_extent_rows(n, *extent) if extent is not None else 0
-        if pad:
-            # the padded index in the same one copy: the gather fills the padded A extent's rows from it
-            padded = torch.cat((index, index[-1:].expand(pad - n))).to(
-                labels.device, non_blocking=True
-            )
-            index = padded[:n]
-            setattr(index, _PAD_INDEX_ATTR, padded)
-            return index, (valid if mask else None)
+        if extent is not None:
+            lo, hi, pad = _a_extent_bounds(extent[0], extent[1])
+            if lo <= n <= hi and n < pad:
+                # the padded index in the same one copy: the gather fills the padded A extent's rows from it
+                padded = index.index_select(0, _pad_select(n, pad)).to(
+                    labels.device, non_blocking=True
+                )
+                index = padded[:n]
+                setattr(index, _PAD_INDEX_ATTR, padded)
+                return index, (valid if mask else None)
         # pageable host memory: the copy is staged before it returns, so the host index may go right away
         return index.to(labels.device, non_blocking=True), (valid if mask else None)
     index = valid.nonzero().squeeze(1)
@@ -4349,7 +4371,9 @@ class Plan:
     cast_fold: bool = False
     # the padded A extents of a small compacted one-chunk call (:func:`a_extent_rows`; 0 = the chunk's rows): the
     # logits GEMMs read the gathered rows through a tensor map of ``a_rows`` rows, the dX GEMM the chunk's ``dz``
-    # through one of ``dx_a_rows`` rows, each a chunk buffer of that many rows whose rows past the chunk are zero
+    # through one of ``dx_a_rows`` rows, each a chunk buffer of that many rows.  Their rows past the chunk form only
+    # accumulator rows that no epilogue stores: the gather buffer's hold copies of the last valid row when a host
+    # count padded the call's index (:func:`valid_rows` ``extent``), else zeros, and the ``dz`` buffer's zeros
     # (:func:`_bind_a_extents`).  ``M``, ``C``, the statistics and every per-row operand keep the chunk's rows
     a_rows: int = 0
     dx_a_rows: int = 0
@@ -4721,6 +4745,37 @@ def a_extent_rows(
     return pad if rows < pad else 0
 
 
+# The memo of :func:`_a_extent_bounds`: the two tables its entries were formed from and the entries
+# ``(chunk, arch) -> (lo, hi, pad)``, one per chunk size and architecture a process calls with.  Replaced whole, in
+# one assignment, when either table is no longer the module's object.
+_A_EXTENT_MEMO: tuple[Optional[dict], Optional[dict], dict] = (None, None, {})
+
+
+def _a_extent_bounds(chunk: int, arch: Optional[str]) -> tuple[int, int, int]:
+    """``(lo, hi, pad)``: a chunk of ``n`` valid rows takes the logits GEMMs' padded A extent of ``pad`` rows
+    (:func:`a_extent_rows` without ``dx``) exactly when ``lo <= n <= hi and n < pad`` -- ``pad`` is
+    :func:`a_extent_pad` (0: no extent), ``lo`` at least 1, ``(lo, hi) = (1, 0)`` without a window.  Formed once per
+    ``(chunk, arch)`` from :data:`A_EXTENT_ROWS_BY_ARCH` and :data:`A_EXTENT_WINDOW_BY_ARCH` and kept while both
+    names still hold the same objects: a table replaced by another object (a test's ``monkeypatch.setattr``) starts a
+    new memo at the next call; the tables are not changed in place.  Under the GIL two threads at most form an entry
+    twice: a memo is swapped in whole, and each entry is formed from its memo's own tables and added with
+    ``setdefault``."""
+    global _A_EXTENT_MEMO
+    pads, windows, memo = _A_EXTENT_MEMO
+    if pads is not A_EXTENT_ROWS_BY_ARCH or windows is not A_EXTENT_WINDOW_BY_ARCH:
+        pads, windows, memo = A_EXTENT_ROWS_BY_ARCH, A_EXTENT_WINDOW_BY_ARCH, {}
+        _A_EXTENT_MEMO = (pads, windows, memo)
+    bounds = memo.get((chunk, arch))
+    if bounds is None:
+        pad = int(pads.get(arch, 0)) if arch is not None else 0
+        if pad > int(chunk):
+            pad = 0
+        window = windows.get(arch) if arch is not None else None
+        lo, hi = (max(1, window[0]), window[1]) if window is not None else (1, 0)
+        bounds = memo.setdefault((chunk, arch), (lo, hi, pad))
+    return bounds
+
+
 # CUDA device index -> its architecture tag ("" when unsupported), for :func:`_a_extent_of`
 _A_EXTENT_ARCH: dict[int, str] = {}
 
@@ -4728,15 +4783,17 @@ _A_EXTENT_ARCH: dict[int, str] = {}
 def _a_extent_of(device: torch.device, chunk: int, backend: str) -> Optional[tuple[int, str]]:
     """The ``extent`` of :func:`valid_rows` for an eager log-probability call on ``device`` with chunks of ``chunk``
     rows: ``(chunk, arch)`` of the device's architecture when it has a padded A extent for that chunk
-    (:func:`a_extent_pad`), else None (no padding; also off the ``cake`` backend or off CUDA).  A count whose rows take
-    the extent (:func:`a_extent_rows`) pads its index; the plan of the same rows finds it (:func:`_bind_row_index`)."""
+    (:func:`a_extent_pad`, read from the memo of :func:`_a_extent_bounds`), else None (no padding; also off the
+    ``cake`` backend or off CUDA).  A count whose rows take the extent (:func:`a_extent_rows`) pads its index; the plan
+    of the same rows finds it (:func:`_bind_row_index`)."""
     if backend != "cake" or device.type != "cuda":
         return None
     index = torch.cuda.current_device() if device.index is None else int(device.index)
     arch = _A_EXTENT_ARCH.get(index)
     if arch is None:
         arch = _A_EXTENT_ARCH.setdefault(index, arch_for(torch.device("cuda", index)) or "")
-    return (int(chunk), arch) if arch and a_extent_pad(chunk, arch) else None
+    chunk = int(chunk)
+    return (chunk, arch) if arch and _a_extent_bounds(chunk, arch)[2] else None
 
 
 def make_plan(
@@ -5602,7 +5659,10 @@ def _bind_a_extents(
     the whole buffer, and ``t["x_c"]`` / ``t["logits"]`` its first ``rows`` rows (the chunk's, as without the
     padding).  ``zero``: the rows from ``rows`` on are zeroed here, once per buffer -- no launch writes them (the
     gather, the logits GEMMs' ``C`` views and the row kernels cover the first ``rows``) -- except the gather buffer's
-    when the call's padded index is bound (``t["row_index_a"]``, :func:`_bind_row_index`): its gather writes them."""
+    when the call's padded index is bound (``t["row_index_a"]``, :func:`_bind_row_index`): its gather writes them.
+    A plan without either extent binds nothing."""
+    if not (plan.a_rows or plan.dx_a_rows):
+        return
     for name, padded, pad in (
         ("x_c", "x_a", plan.a_rows),
         ("logits", "logits_a", plan.dx_a_rows),
@@ -5628,9 +5688,14 @@ def _gather_values(t: dict[str, Any], plan: Plan, row0: int, rows_c: int) -> tup
     """``(idx, out)`` of chunk ``(row0, rows_c)``'s row gather: the chunk's index entries into the gather buffer's first
     ``rows_c`` rows, or with a bound padded index (:func:`_bind_row_index`) and the padded gather buffer
     (``t["x_a"]``, :func:`_bind_a_extents`) that index into the whole buffer (one chunk: ``row0 == 0``)."""
-    idx_a, x_a = t.get("row_index_a"), t.get("x_a")
-    if plan.a_rows and idx_a is not None and x_a is not None and int(x_a.shape[0]) == int(idx_a.numel()):
-        return idx_a, x_a
+    if plan.a_rows:
+        idx_a, x_a = t.get("row_index_a"), t.get("x_a")
+        if (
+            idx_a is not None
+            and x_a is not None
+            and int(x_a.shape[0]) == int(idx_a.numel())
+        ):
+            return idx_a, x_a
     return t["row_index"][row0 : row0 + rows_c], t["x_c"][:rows_c]
 
 
@@ -6341,7 +6406,8 @@ def stage_values(
             )
         # ``C`` is the chunk's [rows_c, V] rows of the logits workspace: the TMA-store epilogue's tensor map takes its
         # row extent from it (rows >= rows_c are clipped, never written); a pointer store sees the same base address.
-        # ``A`` (a padded extent, :attr:`Plan.a_rows`): its rows >= rows_c are zero and form rows >= M only
+        # ``A`` (a padded extent, :attr:`Plan.a_rows`): its rows >= rows_c hold copies of the last valid row (a padded
+        # index, :func:`valid_rows` ``extent``) or zeros, and form rows >= M only
         values.update(
             A=_logits_a(t, plan, x_chunk),
             B=t["W"],
@@ -6629,7 +6695,11 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     base = base_stage(stage) if stage in GEMM_STAGES else stage
     logits = t["logits"]
     if base in LOGITS_BASES or base == "gemm_dw_acc" or base in DW_CAST_STAGES:
-        x_chunk = t["x_c"][:rows_c] if plan.compact else t["X"][row0:stop]
+        # compacted: the gather buffer itself when the chunk's rows are all of it (a one-chunk plan's, the padded
+        # plan's ``x_c`` view included), as :func:`stage_values`' ``x_c[:rows_c]`` binds it (:func:`_same_view`)
+        x_chunk = (
+            _chunk_rows(t["x_c"], 0, rows_c) if plan.compact else t["X"][row0:stop]
+        )
         if t.get("x_last") is not None and index == plan.num_chunks - 1:
             x_chunk = t["x_last"]
     if base in LOGITS_BASES:
@@ -8173,7 +8243,8 @@ def prepare_lm_head_det_loss(
         t["x_c"] = carve(
             "x_c", torch.bfloat16, (max(rows, plan.a_rows), H)
         )  # the chunk's valid X rows, gathered per chunk
-    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches)
+    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches) -- except the
+    # gather buffer's when the padded index is bound (``t["row_index_a"]``): its gather writes them
     _bind_a_extents(plan, t, rows, zero=not template_only)
     # O(T) row vectors and the loss cell are separate allocations: a caller (or the autograd graph) keeping
     # ``loss`` / ``logp`` / ``lse`` alive must not pin the vocabulary workspace.
@@ -8652,7 +8723,8 @@ def prepare_lm_head_det_loss_temperature(
         t["x_c"] = carve(
             "x_c", torch.bfloat16, (max(rows, plan.a_rows), H)
         )  # the chunk's valid X rows, gathered per chunk
-    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches)
+    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches) -- except the
+    # gather buffer's when the padded index is bound (``t["row_index_a"]``): its gather writes them
     _bind_a_extents(plan, t, rows, zero=not template_only)
     # O(T) row vectors and the loss cell are separate allocations: a caller (or the autograd graph) keeping
     # ``loss`` / ``logp`` / ``lse`` alive must not pin the vocabulary workspace.
