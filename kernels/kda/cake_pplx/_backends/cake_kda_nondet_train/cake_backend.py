@@ -156,12 +156,13 @@ host rule accepts, the two-level carry ``seg_carry_v8`` forms the groups of
 segments in parallel), pass 2 walks again
 from the carried states and writes the tapes.  The segment count of a plan
 follows the token-aware rule by default (``cake_jit.segment_route``, the
-plan's ``segment_rule``): on B200 (``sm_100a``, 148 SMs), GB300 (``sm_103a``,
-152 SMs) and VR200 (``sm_107a``, 212 SMs) with 4, 8 or 16 heads, outside the
-occupancy bands of ``cake_jit.TOKEN_SEGMENTS``, a pack too short to save the
-segment states takes fewer segments per document, never more than the
-occupancy rule's, so neither the saved set nor the arena grows; every arena
-option runs the same plan.
+plan's ``segment_rule``): on B200 (``sm_100a``, 148 SMs) with 4 or 8 heads
+(16 heads take the serial route there), and on GB300 (``sm_103a``, 152 SMs)
+and VR200 (``sm_107a``, 212 SMs) with 4, 8 or 16 heads, outside the occupancy
+bands of ``cake_jit.TOKEN_SEGMENTS``, a pack too short to save the segment
+states takes fewer segments per document, never more than the occupancy
+rule's, so neither the saved set nor the arena grows; every arena option runs
+the same plan.
 
 Memory.  A :class:`CakeKDANondetWorkspace` is one arena holding only the internal
 intermediates; buffers with disjoint lifetimes within one call share a slot
@@ -880,7 +881,7 @@ class Plan:
         ):
             raise ValueError(
                 f"CakeKDANondetArena(lean=True) does not serve H={self.H}: the backward of this row launches the separate "
-                "dA / dv program (dav); the lean layouts serve every other head count in 1..128"
+                "dA / dv program (dav); the lean layouts serve every head count in 1..128 except 9 to 15 with the in-kernel L2 norm off"
             )
         if arena.batched and self.proportional:
             raise ValueError(

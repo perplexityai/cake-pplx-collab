@@ -205,7 +205,8 @@ automatically and is not a mode). `"tape"` keeps `Aqk` / `Akk` with the
 forward's state tape `h` and `v_new` (768 B more per internal token-head)
 and the segment transfers. Its backward skips the recurrence recompute.
 Those 768 B leave the arena: a workspace sized with `save_mode="tape"` is
-768 B per internal token-head smaller (12.6-17.1 % on the rows below) and
+768 B per internal token-head smaller (12.6-17.1 % on the rows below in
+0.2.1, 16.1-17.1 % in 0.2.2 by the byte queries) and
 makes `"tape"` the default of the calls on it. The gradients are bitwise the
 same in both modes (measured on every row below, both packages, the three
 GPUs and every lower-memory arena option).
@@ -565,7 +566,7 @@ the token-aware plan's `dA_log` error was 0.943 times the occupancy plan's
 (geometric mean, 95 % interval 0.89 to 1.00), and the occupancy plan's own
 ratio to the naive tier exceeded the cap in 2 of the other 4 blocks of 32
 draws (1.158 and 1.108).  So the miss is the test's draw, not a systematic
-loss.  4-head packs of more than 4096 tokens take the token-aware plan; the
+loss.  4-head packs of more than 4096 tokens fall under the token-aware rule; the
 raw-gate accuracy test has no slow-decay pack there.  On VR200 the 16-head
 packs of 8193 to 16383 tokens keep the occupancy rule too: there the FP32
 `qk_rstd` of the in-kernel Q/K L2 norm (1 to 2 MiB) can fill a free end that
