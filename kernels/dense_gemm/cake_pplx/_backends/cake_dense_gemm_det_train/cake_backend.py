@@ -1517,9 +1517,12 @@ _SINGLE_WGRAD_SWAP_MIN_K = {
 #: part is empty (the weight-gradient entry then plans with the architecture defaults alone), by ``(arch, M, N,
 #: out_f32)`` of the generic call (see :func:`_single_wgrad_swap`; an entry of ``_SINGLE_WGRAD_SWAP_MIN_K`` still
 #: applies).  Since version 0.3.26 the four sm_107a bf16 weight gradients of version 0.3.22 (4096 -> 16 / 96,
-#: 6144 -> 48 / 64) follow the entry from [[TBD0326_FLOORS]] on: below T 960 on every sm_107a part and, off the
-#: 212-SM part, 4096 -> 16 at T 3073 - 4095, where the entry runs ``dense_proj_det_gemm_nn_n128_t_pro7`` (whole
-#: 128-row tiles below T 960, a two-way K split at T 3073 - 4095).  [[TBD0326_FOLLOW_COMMENT]]
+#: 6144 -> 48 / 64) follow the entry from T 1 on: below T 960 on every sm_107a part and, off the 212-SM part,
+#: 4096 -> 16 at T 3073 - 4095, where the entry runs ``dense_proj_det_gemm_nn_n128_t_pro7`` (whole 128-row tiles
+#: below T 960, a two-way K split at T 3073 - 4095).  Timed against version 0.3.25 (the direct plan) on sm_107a,
+#: medians of 21 paired rounds with L2 flushed; speedup of the entry's plan over the direct plan at the shipped
+#: cells: 1.19 - 2.15 (eager), 1.19 - 2.13 (CUDA graph) on the 212-SM part, 1.20 - 2.49 (eager), 1.21 - 2.70 (CUDA
+#: graph) on the 216-SM part.
 _SINGLE_WGRAD_FOLLOW_MIN_K = {
     ("sm_107a", 16, 4096, False): 1,
     ("sm_107a", 96, 4096, False): 1,
@@ -1909,9 +1912,9 @@ ROW_RULES: dict[tuple, dict] = {
     #      4096 -> 16 at T 2049 - 3072 (T 2049 - 3071 on the 212-SM part), where its bits may change against version
     #      0.3.24 (it ran the direct plan there) ----
     # ---- version 0.3.26: these tables do not change.  The unbatched generic call of 4096 -> 16, 4096 -> 96,
-    #      6144 -> 48 and 6144 -> 64 swaps at every token count from [[TBD0326_FLOORS]] on
-    #      (``_SINGLE_WGRAD_FOLLOW_MIN_K``), also where these rules and tiers give the swapped key no rule on the part
-    #      (below T 960 on every sm_107a part, and 4096 -> 16 at T 3073 - 4095 off the 212-SM part), and there runs the
+    #      6144 -> 48 and 6144 -> 64 swaps at every token count (from T 1 on, ``_SINGLE_WGRAD_FOLLOW_MIN_K``), also
+    #      where these rules and tiers give the swapped key no rule on the part (below T 960 on every sm_107a part,
+    #      and 4096 -> 16 at T 3073 - 4095 off the 212-SM part), and there runs the
     #      weight-gradient entry's plan of the architecture defaults alone, ``dense_proj_det_gemm_nn_n128_t_pro7``
     #      (whole 128-row tiles below T 960, a two-way K split at T 3073 - 4095), and its bits ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
@@ -3030,8 +3033,8 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
     #   rule.
     # - The generic call follows both: it swaps at every token count on indexer_hw (no ``_SINGLE_WGRAD_SWAP_MIN_K``
     #   entry) and on 6144 -> 48 where the rule is not empty (from T 960 on since version 0.3.25, from T 1024 on in
-    #   version 0.3.24; from T 8193 on in version 0.3.23), and since version 0.3.26 at every token count from
-    #   [[TBD0326_FLOORS]] on (``_SINGLE_WGRAD_FOLLOW_MIN_K``).
+    #   version 0.3.24; from T 8193 on in version 0.3.23), and since version 0.3.26 at every token count (from T 1
+    #   on, ``_SINGLE_WGRAD_FOLLOW_MIN_K``).
     # - The other three rows of version 0.3.22 plan their tiers on this part.
     # - Deleting this table puts the tiers back on this part; the tests that pin the table change with it.
     ("sm_107a", 216): {
