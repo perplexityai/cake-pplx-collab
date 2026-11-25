@@ -2763,10 +2763,17 @@ def test_mode_values_and_mode_types_are_refused():
 
 
 def test_situ_parameters_are_checked():
-    """Host only: the per-call SiTU-GLU scalars are finite positive Python numbers: ``TypeError`` for a ``bool``, a
-    string or a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value."""
-    kernels.check_situ_parameters(4.0, 25.0)
-    kernels.check_situ_parameters(4, 25)
+    """Host only: the per-call SiTU-GLU scalars are finite positive Python numbers whose FP32 values are positive and
+    give finite FP32 kernel constants ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``: ``TypeError`` for a
+    ``bool``, a string or a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value, a value past the
+    FP32 range or rounding to 0 there, and a pair whose constants are past the FP32 range.  The check returns the FP32
+    values."""
+    assert kernels.check_situ_parameters(4.0, 25.0) == (4.0, 25.0)
+    assert kernels.check_situ_parameters(4, 25) == (4.0, 25.0)
+    assert kernels.check_situ_parameters(0.1, 3.0) == (
+        float(torch.tensor(0.1, dtype=torch.float32)),
+        3.0,
+    )
     for bad in (True, "4", torch.tensor(4.0), None):
         with pytest.raises(
             TypeError, match="situ_beta must be a finite positive float"
@@ -2774,13 +2781,20 @@ def test_situ_parameters_are_checked():
             kernels.check_situ_parameters(bad, 25.0)
         with pytest.raises(TypeError, match="situ_lb must be a finite positive float"):
             kernels.check_situ_parameters(4.0, bad)
-    for bad in (0.0, -4.0, float("inf"), float("nan")):
+    for bad in (0.0, -4.0, float("inf"), float("nan"), 1e39, 1e-50):
         with pytest.raises(
             ValueError, match="situ_beta must be a finite positive float"
         ):
             kernels.check_situ_parameters(bad, 25.0)
         with pytest.raises(ValueError, match="situ_lb must be a finite positive float"):
             kernels.check_situ_parameters(4.0, bad)
+    for beta, lb, constant in (
+        (1e-39, 25.0, "2.88539 / situ_beta"),
+        (4.0, 1e-39, "2.88539 / situ_lb"),
+        (1e20, 1e20, "situ_beta \\* situ_lb"),
+    ):
+        with pytest.raises(ValueError, match=f"{constant} is past the FP32 range"):
+            kernels.check_situ_parameters(beta, lb)
 
 
 #: The 896-expert top-16 group (``MODE_GROUPS["situ_top16"]``): SiTU-GLU routed experts without a shared expert.
@@ -4238,7 +4252,7 @@ def test_situ_group_adapter_step():
     assert _same_bits(first, _snapshot(step(True, schedule=schedule)[0]))
     zero_weight = p["scores"] == 0
     assert torch.count_nonzero(first[SITU_D_WEIGHTS][zero_weight]).item() > 0
-    other = _snapshot(step(situ=dict(situ_beta=2.0, situ_lb=6.0), schedule=schedule)[0])
+    other = _snapshot(step(situ=dict(situ_beta=3.0, situ_lb=12.0), schedule=schedule)[0])
     for index in (SITU_Y, SITU_DX, SITU_D_WEIGHTS, *SITU_ROUTED_DW):
         assert not torch.equal(_bits(other[index]), _bits(first[index])), index
     # Steady state: every kernel loaded, the schedule's load observation in flight.
@@ -4257,7 +4271,7 @@ def test_situ_group_adapter_step():
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
         captured, _ = step(True, schedule=schedule)
-    step(True, situ=dict(situ_beta=2.0, situ_lb=6.0), schedule=schedule)
+    step(True, situ=dict(situ_beta=3.0, situ_lb=12.0), schedule=schedule)
     for _ in range(2):
         graph.replay()
         assert _same_bits(first, _snapshot(captured))

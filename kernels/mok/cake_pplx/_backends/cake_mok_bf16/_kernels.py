@@ -13,6 +13,7 @@ counts, widths and expert counts remain runtime values.
 from dataclasses import dataclass
 import math
 import operator
+import struct
 from typing import Any
 
 # Scheduler layouts (EP size, local experts) with generated count/rows kernels.
@@ -322,19 +323,51 @@ def check_target(router_weight_position, arch, group=None):
         )
 
 
+def _fp32(value):
+    """``value`` rounded to FP32, or None past the FP32 range (the standard
+    ``"<f"`` format raises there; the native one would give infinity)."""
+    try:
+        return struct.unpack("<f", struct.pack("<f", value))[0]
+    except OverflowError:
+        return None
+
+
 def check_situ_parameters(situ_beta, situ_lb):
     """Per-call SiTU-GLU scalars: ``situ_beta`` and ``situ_lb`` are finite
-    positive Python numbers (a ``bool`` is refused); ``TypeError`` for another
-    type, ``ValueError`` for a value that is not finite and positive."""
+    positive Python numbers (a ``bool`` is refused) whose FP32 values (the
+    kernels') are positive, with the constants the kernels form from them,
+    ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``, finite in FP32
+    (past it they would be infinite in the kernels and give NaN). ``TypeError``
+    for another type, ``ValueError`` for another value. Returns the FP32
+    values."""
     for name, value in (("situ_beta", situ_beta), ("situ_lb", situ_lb)):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(
                 f"{name} must be a finite positive float, got "
                 f"{type(value).__name__} {value!r}"
             )
+    rounded = []
     for name, value in (("situ_beta", situ_beta), ("situ_lb", situ_lb)):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be a finite positive float, got {value!r}")
+        value32 = _fp32(float(value))
+        if value32 is None or value32 <= 0:
+            raise ValueError(
+                f"{name} must be a finite positive float in FP32, got {value!r}"
+            )
+        rounded.append(value32)
+    beta32, lb32 = rounded
+    for name, value in (
+        ("2.88539 / situ_beta", 2.88539 / beta32),
+        ("2.88539 / situ_lb", 2.88539 / lb32),
+        ("situ_beta * situ_lb", beta32 * lb32),
+    ):
+        if _fp32(value) is None:
+            raise ValueError(
+                f"{name} is past the FP32 range (situ_beta {beta32!r}, situ_lb "
+                f"{lb32!r}): the kernels would give NaN"
+            )
+    return beta32, lb32
 
 
 def check_swiglu_limit(swiglu_limit, clamped):
@@ -370,8 +403,8 @@ def _activation_arguments(situ_glu, clamped, swiglu_limit, situ_beta, situ_lb):
             raise ValueError(
                 "The SiTU-GLU kernels take situ_beta and situ_lb, not a swiglu_limit"
             )
-        check_situ_parameters(situ_beta, situ_lb)
-        return {"situ_beta": float(situ_beta), "situ_lb": float(situ_lb)}
+        beta32, lb32 = check_situ_parameters(situ_beta, situ_lb)
+        return {"situ_beta": beta32, "situ_lb": lb32}
     check_swiglu_limit(swiglu_limit, clamped)
     if situ_beta is not None or situ_lb is not None:
         raise ValueError("situ_beta and situ_lb are read only by the SiTU-GLU kernels")
