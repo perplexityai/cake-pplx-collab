@@ -362,11 +362,16 @@ release, k256 tail); see that package's README. The L2 evict-first twins
 (`main_wide_ef`) follow the deterministic rules and constants: the data
 gradient's on the architectures of `dgrad_evict_first_archs` (sm_100a, the
 domain-scheduled twin; sm_107a, the A-collector twin) from the architecture's
-`dgrad_evict_first_min_rows` rows per group and `K >= dgrad_evict_first_min_k`
+`dgrad_evict_first_min_rows` rows per group and `K >= dgrad_evict_first_min_k`,
+unless the reduction `N` is at most `dgrad_evict_first_skip_max_n`
 (`dgrad_evict_first`), the forward pass's on those of `fwd_lwh_ef_archs`
 (sm_107a) for `K <= fwd_lwh_ef_max_k` (`fwd_lwh_ef`) and on those of
 `fwd_evict_first_archs` (sm_100a, sm_103a) for `K >= fwd_evict_first_min_k`
-(`fwd_evict_first`). The eviction priority changes no arithmetic. A forward
+(`fwd_evict_first`). The eviction priority changes no arithmetic. The 3 / 3
+head / tail twins (`main_wide_ts33`, sm_103a) follow the deterministic rules too,
+the short-reduction ones included (`dgrad_wide_ts33_short_n_min` to
+`dgrad_wide_ts33_short_n`, `fwd_wide_ts33_short_k_min` to
+`fwd_wide_ts33_short_k`). A forward
 or data gradient whose output span passes 2^31 - 1 elements launches in row
 chunks on the architectures of `wide_rows_archs` (`sm_100a`, `sm_103a`,
 `sm_107a`) as in

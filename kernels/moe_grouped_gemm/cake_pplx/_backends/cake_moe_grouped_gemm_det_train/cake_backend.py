@@ -103,16 +103,22 @@ architectures of ``dgrad_evict_first_archs`` the data gradient launches the
 twin of its wide tile that loads G and stores dX with the L2 evict-first policy
 (``main_wide_ef``) when the groups average at least the architecture's
 ``dgrad_evict_first_min_rows`` rows (``sum_m // E``) and dX has at least
-``dgrad_evict_first_min_k`` columns (``K``).  On the architectures of
+``dgrad_evict_first_min_k`` columns (``K``), unless its reduction ``N`` is at
+most the architecture's ``dgrad_evict_first_skip_max_n`` (it keeps
+``main_wide``).  On the architectures of
 ``dgrad_wide_ts33_archs`` the data gradient launches the twin of its wide tile
 that splits three head and three tail k steps of an item around the release
 of the accumulator's halves instead of four and three (``main_wide_ts33``)
 when the groups average at least the architecture's
-``dgrad_wide_ts33_min_rows`` rows and dX has at least
+``dgrad_wide_ts33_min_rows`` rows (``dgrad_wide_ts33_short_n_min_rows`` when
+its reduction ``N`` is from the architecture's ``dgrad_wide_ts33_short_n_min``
+to its ``dgrad_wide_ts33_short_n``) and dX has at least
 ``dgrad_wide_ts33_min_k`` columns; on those of ``fwd_wide_ts33_archs`` the
 forward pass launches its twin when its reduction ``K`` is at most
 ``fwd_wide_ts33_max_k`` and the groups average at most
-``fwd_wide_ts33_max_rows`` rows.  On the
+``fwd_wide_ts33_max_rows`` rows, or ``K`` is from the architecture's
+``fwd_wide_ts33_short_k_min`` to its ``fwd_wide_ts33_short_k`` (any rows per
+group).  On the
 architectures of
 ``fwd_lwh_ef_archs`` the forward pass launches the twin of its wide tile that
 releases the last wave of tiles in halves and stores Y with the L2 evict-first
@@ -789,6 +795,8 @@ def dgrad_evict_first(
     sum_m: int,
     num_groups: int,
     constants: Optional[dict[str, Any]] = None,
+    *,
+    n: int | None = None,
 ) -> bool:
     """Whether the data gradient's wide tile takes its L2 evict-first twin.
 
@@ -797,12 +805,17 @@ def dgrad_evict_first(
     group spans many 256-row blocks: on the architectures of ``dgrad_evict_first_archs``,
     the groups average at least the architecture's ``dgrad_evict_first_min_rows`` rows
     (``sum_m // num_groups``) and every 256-row block has at least
-    ``dgrad_evict_first_min_k / wide_block_n`` column tiles (the gate/up projection)."""
+    ``dgrad_evict_first_min_k / wide_block_n`` column tiles (the gate/up projection).
+    A short reduction (``n``, the dgrad ``N``, at most the architecture's
+    ``dgrad_evict_first_skip_max_n``) keeps the plain wide tile.  ``n=None`` leaves
+    that bound out."""
     c = constants or host_plan_constants()
+    skip = c["dgrad_evict_first_skip_max_n"].get(arch)
     return (
         arch in c["dgrad_evict_first_archs"]
         and sum_m // max(num_groups, 1) >= int(c["dgrad_evict_first_min_rows"][arch])
         and k >= int(c["dgrad_evict_first_min_k"])
+        and not (n is not None and skip is not None and n <= int(skip))
     )
 
 
@@ -812,6 +825,8 @@ def dgrad_wide_ts33(
     sum_m: int,
     num_groups: int,
     constants: Optional[dict[str, Any]] = None,
+    *,
+    n: int | None = None,
 ) -> bool:
     """Whether the data gradient's wide tile takes its twin with three head and three
     tail k steps around the release of the accumulator's halves (``main_wide_ts33``).
@@ -821,13 +836,20 @@ def dgrad_wide_ts33(
     the architecture's ``dgrad_wide_ts33_min_rows`` rows (``sum_m // num_groups``) and
     ``K >= dgrad_wide_ts33_min_k``, on the architectures of ``dgrad_wide_ts33_archs``.
     Every element accumulates its k steps in the same order, so the twin gives the bits
-    of ``main_wide``."""
+    of ``main_wide``.  A short reduction (``n``, the dgrad ``N``, from the
+    architecture's ``dgrad_wide_ts33_short_n_min`` to its ``dgrad_wide_ts33_short_n``)
+    takes the twin from the architecture's ``dgrad_wide_ts33_short_n_min_rows`` rows
+    per group instead.  ``n=None`` leaves that bound out."""
     c = constants or host_plan_constants()
-    return (
-        arch in c["dgrad_wide_ts33_archs"]
-        and k >= int(c["dgrad_wide_ts33_min_k"])
-        and sum_m // max(num_groups, 1) >= int(c["dgrad_wide_ts33_min_rows"][arch])
-    )
+    if arch not in c["dgrad_wide_ts33_archs"] or k < int(c["dgrad_wide_ts33_min_k"]):
+        return False
+    short = c["dgrad_wide_ts33_short_n"].get(arch)
+    low = c["dgrad_wide_ts33_short_n_min"].get(arch)
+    if n is not None and short is not None and int(low) <= n <= int(short):
+        min_rows = c["dgrad_wide_ts33_short_n_min_rows"][arch]
+    else:
+        min_rows = c["dgrad_wide_ts33_min_rows"][arch]
+    return sum_m // max(num_groups, 1) >= int(min_rows)
 
 
 def fwd_wide_ts33(
@@ -844,14 +866,19 @@ def fwd_wide_ts33(
     architectures of ``fwd_wide_ts33_archs`` the twin serves the short reductions of
     the down projection over many groups (``K <= fwd_wide_ts33_max_k`` and at most
     ``fwd_wide_ts33_max_rows`` rows per group, ``sum_m // num_groups``).  It gives
-    the bits of ``main_wide``."""
+    the bits of ``main_wide``.  A reduction from the architecture's
+    ``fwd_wide_ts33_short_k_min`` to its ``fwd_wide_ts33_short_k`` takes the twin at
+    any rows per group."""
     c = constants or host_plan_constants()
+    if arch not in c["fwd_wide_ts33_archs"]:
+        return False
+    short = c["fwd_wide_ts33_short_k"].get(arch)
+    low = c["fwd_wide_ts33_short_k_min"].get(arch)
+    if short is not None and int(low) <= k <= int(short):
+        return True
     rows = sum_m // max(num_groups, 1)
-    return (
-        arch in c["fwd_wide_ts33_archs"]
-        and k <= int(c["fwd_wide_ts33_max_k"])
-        and rows <= int(c["fwd_wide_ts33_max_rows"])
-    )
+    max_k, max_rows = int(c["fwd_wide_ts33_max_k"]), int(c["fwd_wide_ts33_max_rows"])
+    return k <= max_k and rows <= max_rows
 
 
 def fwd_lwh_ef(
@@ -937,12 +964,12 @@ def select_row_stage(
     tile_n = fwd_dgrad_tile_n(op, n, k, arch, c)
     if tile_n != int(c["block_n"]) and stage_served(name, "main_wide", arch):
         if (
-            (op == "dgrad" and dgrad_evict_first(k, arch, sum_m, num_groups, c))
+            (op == "dgrad" and dgrad_evict_first(k, arch, sum_m, num_groups, c, n=n))
             or (op == "fwd" and (fwd_lwh_ef(k, arch, c) or fwd_evict_first(k, arch, c)))
         ) and stage_served(name, "main_wide_ef", arch):
             return "main_wide_ef", tile_n
         if (
-            (op == "dgrad" and dgrad_wide_ts33(k, arch, sum_m, num_groups, c))
+            (op == "dgrad" and dgrad_wide_ts33(k, arch, sum_m, num_groups, c, n=n))
             or (op == "fwd" and fwd_wide_ts33(k, arch, sum_m, num_groups, c))
         ) and stage_served(name, "main_wide_ts33", arch):
             return "main_wide_ts33", tile_n
@@ -2005,7 +2032,7 @@ def cake_moe_grouped_gemm_det_train_prepare_dgrad(
     row tables); ``K % 256 == 0``, ``N % 64 == 0`` (the
     512-column tile when ``K % 512 == 0`` on the architectures of
     ``wide_dgrad_archs``, its L2 evict-first twin where ``dgrad_evict_first``
-    holds for ``K``, ``sum_m`` and ``E``, its 3 / 3 head / tail twin where
+    holds for ``N``, ``K``, ``sum_m`` and ``E``, its 3 / 3 head / tail twin where
     ``dgrad_wide_ts33`` holds).
     """
     return _prepare_row_op("dgrad", g, w, offs, out)
