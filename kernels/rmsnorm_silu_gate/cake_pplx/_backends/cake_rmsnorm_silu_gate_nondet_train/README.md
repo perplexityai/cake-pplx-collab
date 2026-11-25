@@ -590,8 +590,9 @@ per SM, so its first `sm_107a` band ends at 300 and the mid forward runs from
 301 to 442, as in 0.2.16; it found a gate of one head up to 2.2 % slower with
 these bands (the forward on `sm_100a` at 3000 and 4000 rows per SM, the step
 on `sm_107a` at 300 and 2000), so such a gate runs the bands of other layouts.
-Version 0.2.18 ends the extra-long forward's band of such a gate at 599 rows
-per SM on `sm_100a` (650 in 0.2.17) and at 629 on `sm_103a` (699), and
+Version 0.2.18 ends the extra-long forward's band of a gate of more than one
+head sliced from a projection (`PROJECTION_FORWARD_BANDS`) at 599 rows per SM
+on `sm_100a` (650 in 0.2.17) and at 629 on `sm_103a` (699), and
 `fwd_layout_pipe` runs from there: measured against 0.2.17 (CUDA Graph
 replays, CUPTI, cold L2, two runs; 16, 48 and 64 heads with `z` sliced from
 a projection `2 * H * 128 + 16` elements wide, and 48 heads with `z` sliced
