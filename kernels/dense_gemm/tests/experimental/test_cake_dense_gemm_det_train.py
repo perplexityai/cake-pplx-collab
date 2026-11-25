@@ -25909,13 +25909,6 @@ SM100A_148_0328_KEYS = {
         "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False, "sh": 0, "sk_first": False,
         "sk_slab": 2, "sk_sync": True, "store_ef": True, "store_hint": "none", "stt": False, "sw": 0,
     },
-    ("sm_100a", True, True, True, False, False, 3584, 16380, 7168): {
-        "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256, "epi": "tma",
-        "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False,
-        "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False, "sh": 0,
-        "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False, "store_hint": "none",
-        "stt": False, "sw": 0,
-    },
     ("sm_100a", True, True, True, False, False, 4096, 32736, 2048): {
         "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128, "epi": "reg",
         "f32_v8": True, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False, "ovl": False,
@@ -25936,13 +25929,6 @@ SM100A_148_0328_KEYS = {
         "sw": 0,
     },
     ("sm_100a", True, True, True, False, False, 7168, 16380, 3584): {
-        "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256, "epi": "tma",
-        "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False,
-        "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False, "sh": 0,
-        "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False, "store_hint": "none",
-        "stt": False, "sw": 0,
-    },
-    ("sm_100a", True, True, True, False, False, 8192, 32736, 4096): {
         "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256, "epi": "tma",
         "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False,
         "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False, "sh": 0,
@@ -26010,13 +25996,6 @@ SM103A_152_0328_KEYS = {
         "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none", "stt": False, "sw": 0,
     },
     ("sm_103a", False, False, False, False, False, 4096, 1024, 32736): {
-        "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128, "epi": "reg",
-        "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False,
-        "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": True, "sh": 0,
-        "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none", "stt": False,
-        "sw": 0,
-    },
-    ("sm_103a", False, False, False, False, False, 4096, 1024, 32768): {
         "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128, "epi": "reg",
         "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False,
         "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": True, "sh": 0,
@@ -26290,12 +26269,6 @@ SM103A_152_0328_KEYS = {
         "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False, "store_hint": "none",
         "stt": False, "sw": 0,
     },
-    ("sm_103a", True, True, True, False, False, 4096, 32736, 2048): {
-        "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128, "epi": "reg",
-        "f32_v8": True, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False, "ovl": False,
-        "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False, "sh": 0, "sk_first": False,
-        "sk_slab": 2, "sk_sync": True, "store_ef": True, "store_hint": "none", "stt": False, "sw": 0,
-    },
     ("sm_103a", True, True, True, False, False, 4096, 32736, 8192): {
         "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256, "epi": "tma",
         "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False, "mg": False,
@@ -26411,12 +26384,10 @@ PLANS_0328 = {
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 512, 16380, 24576)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 148, 44, 74, 171, 0, True, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32736, 4096)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 0, 64, 74, 448, 0, True, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32768, 4096)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 0, 64, 74, 448, 0, True, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 3584, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 148, 48, 74, 171, 0, True, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 4096, 32736, 2048)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 74, 54, 74, 384, 0, True, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 896)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 74, 38, 74, 171, 0, True, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 1536)): ("dense_proj_det_gemm_nn_n160_m256_bz64_hne_f32_v8_ef_pro15", 135, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 3584)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 148, 48, 74, 171, 0, True, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 8192, 32736, 4096)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 222, 34, 68, 256, 0, True, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 576, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m64_hen_f32_t_pro15", 168, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 2112, 16380, 7168)): ("dense_proj_det_gemm_nn_n192_hee_f32_t_tma1_pro7", 308, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, True, 128, 16380, 512)): ("dense_proj_det_gemm_nn_n128_hen_f32_t_pro15", 192, 0, 0, 256, 0, False, False, 16, 0),
@@ -26427,7 +26398,6 @@ PLANS_0328 = {
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 1536, 7168, 16380)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 380, 4, 8, 112, 0, False, True, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 2048, 4096, 32736)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 988, 36, 72, 64, 0, False, True, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32736)): ("dense_proj_det_gemm_kk_n256_q_pro7", 2048, 0, 0, 16, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32768)): ("dense_proj_det_gemm_kk_n256_q_pro7", 2048, 0, 0, 16, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32736)): ("dense_proj_det_gemm_kk_n256_m256_ht_cg_or_pro7", 988, 36, 72, 128, 0, False, True, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32768)): ("dense_proj_det_gemm_kk_n256_m256_ht_cg_or_pro7", 988, 36, 72, 128, 0, False, True, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 12288, 128, 16380)): ("dense_proj_det_gemm_kk_n256_q_pro7", 3072, 0, 0, 2, 0, False, False, 16, 0),
@@ -26468,7 +26438,6 @@ PLANS_0328 = {
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32736, 4096)): ("dense_proj_det_gemm_nn_n256_f32_tma1_cg_pro15", 64, 0, 0, 512, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32768, 4096)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 0, 64, 76, 439, 0, True, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 3584, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 152, 44, 76, 171, 0, True, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 2048)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 76, 52, 76, 384, 0, True, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 8192)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 228, 28, 56, 256, 0, True, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32768, 8192)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 228, 28, 56, 256, 0, True, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 896)): ("dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7", 76, 36, 72, 128, 0, True, False, 16, 0),
@@ -26515,12 +26484,10 @@ A0_PLANS_0328 = {
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 512, 16380, 24576)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 96, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32736, 4096)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 0, 32, 64, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32768, 4096)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 0, 32, 64, 256, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 3584, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 196, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 4096, 32736, 2048)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 64, 0, 0, 512, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 896)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 56, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 1536)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 84, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 3584)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 196, 0, 0, 256, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 8192, 32736, 4096)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 256, 0, 0, 512, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 576, 16380, 7168)): ("dense_proj_det_gemm_nn_n128_m64_f32_t_pro7", 280, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 2112, 16380, 7168)): ("dense_proj_det_gemm_nn_n128_m64_f32_t_pro7", 952, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, True, 128, 16380, 512)): ("dense_proj_det_gemm_nn_n128_m64_f32_t_pro7", 384, 0, 0, 256, 0, False, False, 16, 0),
@@ -26531,7 +26498,6 @@ A0_PLANS_0328 = {
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 1536, 7168, 16380)): ("dense_proj_det_gemm_kk_n256_pro7", 384, 0, 0, 112, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 2048, 4096, 32736)): ("dense_proj_det_gemm_kk_n256_pro7", 1024, 0, 0, 64, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32736)): ("dense_proj_det_gemm_kk_n256_pro7", 2048, 0, 0, 16, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32768)): ("dense_proj_det_gemm_kk_n256_pro7", 2048, 0, 0, 16, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32736)): ("dense_proj_det_gemm_kk_n256_pro7", 2048, 0, 0, 128, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32768)): ("dense_proj_det_gemm_kk_n256_pro7", 2048, 0, 0, 128, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 12288, 128, 16380)): ("dense_proj_det_gemm_kk_n256_pro7", 3072, 0, 0, 2, 0, False, False, 16, 0),
@@ -26572,7 +26538,6 @@ A0_PLANS_0328 = {
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32736, 4096)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 0, 32, 64, 256, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32768, 4096)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 0, 32, 64, 256, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 3584, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 196, 0, 0, 256, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 2048)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 64, 0, 0, 512, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 8192)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 256, 0, 0, 512, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32768, 8192)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 256, 0, 0, 512, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 896)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 56, 0, 0, 256, 0, False, False, 16, 0),
@@ -26619,12 +26584,10 @@ ROWS_0328 = {
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 512, 16380, 24576)): (("wgrad", "f32", 16380, ("proj", 512, 24576)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32736, 4096)): (("wgrad", "f32", 32736, ("proj", 1024, 4096)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32768, 4096)): (("wgrad", "f32", 32768, ("proj", 1024, 4096)),),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 3584, 16380, 7168)): (("wgrad", "f32", 16380, ("proj", 3584, 7168)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 4096, 32736, 2048)): (("wgrad", "f32", 32736, ("proj", 4096, 2048)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 896)): (("wgrad", "f32", 16380, ("proj", 7168, 896)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 1536)): (("wgrad", "f32", 16380, ("proj", 7168, 1536)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 3584)): (("wgrad", "f32", 16380, ("proj", 7168, 3584)),),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 8192, 32736, 4096)): (("wgrad", "f32", 32736, ("proj", 8192, 4096)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 576, 16380, 7168)): (("wgrad", "f32", 16380, ("proj", 7168, 576)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 2112, 16380, 7168)): (("wgrad", "f32", 16380, ("proj", 7168, 2112)),),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, True, 128, 16380, 512)): (("wgrad", "f32", 16380, ("mla", 96, 128, 512, 192, "in_out")), ("wgrad", "f32", 16380, ("mla", 96, 512, 128, 512, "out_in"))),
@@ -26635,7 +26598,6 @@ ROWS_0328 = {
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 1536, 7168, 16380)): (("fwd", "bf16", 16380, ("proj", 7168, 1536)),),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 2048, 4096, 32736)): (("fwd", "bf16", 32736, ("proj", 4096, 2048)),),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32736)): (("fwd", "bf16", 32736, ("proj", 1024, 4096)),),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32768)): (("fwd", "bf16", 32768, ("proj", 1024, 4096)),),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32736)): (("fwd", "bf16", 32736, ("proj", 8192, 4096)),),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32768)): (("fwd", "bf16", 32768, ("proj", 8192, 4096)),),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 12288, 128, 16380)): (("fwd", "bf16", 16380, ("proj", 128, 12288)),),
@@ -26676,7 +26638,6 @@ ROWS_0328 = {
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32736, 4096)): (("wgrad", "f32", 32736, ("proj", 1024, 4096)),),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32768, 4096)): (("wgrad", "f32", 32768, ("proj", 1024, 4096)),),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 3584, 16380, 7168)): (("wgrad", "f32", 16380, ("proj", 3584, 7168)),),
-    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 2048)): (("wgrad", "f32", 32736, ("proj", 4096, 2048)),),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 8192)): (("wgrad", "f32", 32736, ("proj", 4096, 8192)),),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32768, 8192)): (("wgrad", "f32", 32768, ("proj", 4096, 8192)),),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 896)): (("wgrad", "f32", 16380, ("proj", 7168, 896)),),
@@ -26720,6 +26681,8 @@ ROWS_0328_KEEP = (
     (("sm_100a", 148), "wgrad", "f32", 32768, ("proj", 4096, 12288)),
     (("sm_100a", 148), "wgrad", "bf16", 32736, ("proj", 4096, 12288)),
     (("sm_100a", 148), "wgrad", "bf16", 32768, ("proj", 4096, 12288)),
+    (("sm_100a", 148), "wgrad", "f32", 16380, ("proj", 3584, 7168)),
+    (("sm_100a", 148), "wgrad", "f32", 32736, ("proj", 8192, 4096)),
     (("sm_103a", 152), "dgrad", "bf16", 16380, ("mla", 96, 128, 512, 192, "in_out")),
     (("sm_103a", 152), "fwd", "bf16", 16380, ("mla", 96, 512, 128, 512, "out_in")),
     (("sm_103a", 152), "dgrad", "bf16", 16380, ("mla", 96, 512, 128, 512, "out_in")),
@@ -26735,6 +26698,8 @@ ROWS_0328_KEEP = (
     (("sm_103a", 152), "wgrad", "bf16", 32768, ("proj", 4096, 12288)),
     (("sm_103a", 152), "wgrad", "f32", 32736, ("proj", 4096, 12288)),
     (("sm_103a", 152), "wgrad", "f32", 32768, ("proj", 4096, 12288)),
+    (("sm_103a", 152), "wgrad", "f32", 32736, ("proj", 4096, 2048)),
+    (("sm_103a", 152), "fwd", "bf16", 32768, ("proj", 1024, 4096)),
 )
 # fmt: on
 
@@ -26865,16 +26830,16 @@ def _fallbacks_0328(plan):
 
 def test_0328_part_tables(monkeypatch):
     """The part rules of the version: the 148-SM sm_100a part holds its 17 keys of version 0.3.27 (the same rules) and
-    the 43 keys of ``SM100A_148_0328_KEYS``, the new 152-SM sm_103a part exactly the 59 keys of
+    the 41 keys of ``SM100A_148_0328_KEYS``, the new 152-SM sm_103a part exactly the 57 keys of
     ``SM103A_152_0328_KEYS`` (not ``SM103A_152_0328_LEFT_OUT``); each rule equals the generated literal with the same
     types at every level, and every rule field is a keyword of the planner.  No other part changes, and
     ``_tables_0327`` (applied twice) gives back the tables of version 0.3.27.  The keys of ``ROWS_0328``,
-    ``PLANS_0328`` and ``A0_PLANS_0328`` are the keys of the version (46 measured rows on the 148-SM sm_100a part, 61 on
+    ``PLANS_0328`` and ``A0_PLANS_0328`` are the keys of the version (44 measured rows on the 148-SM sm_100a part, 59 on
     the 152-SM sm_103a part), and the rows the version keeps are on those parts."""
     rules = cake_backend.ROW_RULES_BY_SM
     b200, gb300 = ("sm_100a", 148), ("sm_103a", 152)
     assert set(PARTS_0328) == set(NEW_KEYS_0328) == {b200, gb300}
-    assert (len(SM100A_148_0328_KEYS), len(SM103A_152_0328_KEYS)) == (43, 59)
+    assert (len(SM100A_148_0328_KEYS), len(SM103A_152_0328_KEYS)) == (41, 57)
     with monkeypatch.context() as m:
         _tables_0327(m)
         before = {part: dict(table) for part, table in rules.items()}
@@ -26901,7 +26866,7 @@ def test_0328_part_tables(monkeypatch):
     new = {(part, key) for part, keys in NEW_KEYS_0328.items() for key in keys}
     assert set(ROWS_0328) == set(PLANS_0328) == set(A0_PLANS_0328) == new
     counts = {part: sum(len(rows) for (p, _key), rows in ROWS_0328.items() if p == part) for part in PARTS_0328}
-    assert counts == {b200: 46, gb300: 61}, counts
+    assert counts == {b200: 44, gb300: 59}, counts
     assert {row[0] for row in ROWS_0328_KEEP} <= set(PARTS_0328)
 
 
@@ -26937,7 +26902,7 @@ def test_0328_keys_plan_the_screened_program(part, monkeypatch):
                 assert _key_0328(other, arch) == key, (where, heads)
                 assert other.template == PLANS_0328[(part, key)][0], (where, heads, other.template)
                 assert not _fallbacks_0328(other), (where, heads, _fallbacks_0328(other))
-    assert planned == {("sm_100a", 148): 46, ("sm_103a", 152): 61}[part], planned
+    assert planned == {("sm_100a", 148): 44, ("sm_103a", 152): 59}[part], planned
 
 
 def test_0328_exact_keys_only(monkeypatch):
@@ -27131,7 +27096,7 @@ def test_routing_0328_changes_exactly_the_new_keys(monkeypatch):
     )
 
 
-#: The cases of the GPU check of the version: every measured row of ``ROWS_0328`` (46 on the 148-SM sm_100a part, 61 on
+#: The cases of the GPU check of the version: every measured row of ``ROWS_0328`` (44 on the 148-SM sm_100a part, 59 on
 #: the 152-SM sm_103a part), each run on its part.
 CASES_0328 = tuple(
     (part, key, op, out_dtype, T, view) for (part, key), rows in ROWS_0328.items() for op, out_dtype, T, view in rows

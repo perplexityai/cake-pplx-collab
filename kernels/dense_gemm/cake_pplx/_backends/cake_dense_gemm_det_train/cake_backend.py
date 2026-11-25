@@ -2664,7 +2664,7 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # in small raster groups over more token ranges of the 152-SM sm_100a part (below): on 8192 -> 128 at T 16172 and
 # 16231 - 32768, on 5120 -> 128 at T 16231 (between its two ranges of version 0.3.8) and on 6144 -> 128 at
 # T 16231 - 16384 (after its range of version 0.3.8 at T 16172).
-# Version 0.3.28 adds 43 exact keys to the 148-SM sm_100a part (B200) and a 152-SM sm_103a part (GB300) of 59 exact
+# Version 0.3.28 adds 41 exact keys to the 148-SM sm_100a part (B200) and a 152-SM sm_103a part (GB300) of 57 exact
 # keys: forwards, input gradients and weight gradients (BF16 and FP32 outputs) at T 16380, 32736 and 32768, each named
 # with its measured program in the comment above it.  Each rule is the full knob set that names that program (the
 # inverse of its symbol, without the promotion flag: the planner promotes the chunk by its own segment rule, so a
@@ -2967,14 +2967,6 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
             "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": True, "store_hint": "none",
             "stt": False, "sw": 0,
         },
-        # 3584 -> 7168 weight gradient, FP32 output, T 16380: nn_n256_m256_f32_tma1_sks_sb3_pro7, paired median 1.067
-        ('sm_100a', True, True, True, False, False, 3584, 16380, 7168): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
-            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
-            "store_hint": "none", "stt": False, "sw": 0,
-        },
         # 4096 -> 2048 weight gradient, FP32 output, T 32736: nn_n256_f32_v8_ef_sks_sb2_pro7, paired median 1.010
         ('sm_100a', True, True, True, False, False, 4096, 32736, 2048): {
             "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
@@ -3001,14 +2993,6 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
         },
         # 7168 -> 3584 weight gradient, FP32 output, T 16380: nn_n256_m256_f32_tma1_sks_sb3_pro7, paired median 1.055
         ('sm_100a', True, True, True, False, False, 7168, 16380, 3584): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
-            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
-            "store_hint": "none", "stt": False, "sw": 0,
-        },
-        # 8192 -> 4096 weight gradient, FP32 output, T 32736: nn_n256_m256_f32_tma1_sks_sb3_pro7, paired median 1.089
-        ('sm_100a', True, True, True, False, False, 8192, 32736, 4096): {
             "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
             "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
             "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
@@ -3091,14 +3075,6 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
         },
         # 1024 -> 4096 forward, BF16 output, T 32736: kk_n256_q_pro7, paired median 1.012
         ('sm_103a', False, False, False, False, False, 4096, 1024, 32736): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": True,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
-        # 1024 -> 4096 forward, BF16 output, T 32768: kk_n256_q_pro7, paired median 1.019
-        ('sm_103a', False, False, False, False, False, 4096, 1024, 32768): {
             "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
             "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
             "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": True,
@@ -3424,14 +3400,6 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
             "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
             "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
             "store_hint": "none", "stt": False, "sw": 0,
-        },
-        # 4096 -> 2048 weight gradient, FP32 output, T 32736: nn_n256_f32_v8_ef_sks_sb2_pro7, paired median 1.004
-        ('sm_103a', True, True, True, False, False, 4096, 32736, 2048): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": True, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": True, "store_hint": "none",
-            "stt": False, "sw": 0,
         },
         # 4096 -> 8192 weight gradient, FP32 output, T 32736: nn_n256_m256_f32_tma1_sks_sb3_pro7, paired median 1.105
         ('sm_103a', True, True, True, False, False, 4096, 32736, 8192): {

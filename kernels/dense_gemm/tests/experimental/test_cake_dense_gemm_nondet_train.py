@@ -14503,7 +14503,7 @@ def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property,
                     or cake_backend.router_simt("nn_t", **kw) is not None
                 ):
                     continue  # this package's program
-                X, W, G = _router_inputs(T, device, SEED + 120, K=hidden)
+                X, W, G = _router_inputs_0328(T, device, SEED + 120, hidden, experts)
                 cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
                 own_n = cake_backend.router_det_splits("nn_t", **kw) or splits
                 out = torch.empty(experts, hidden, device=device)
@@ -14511,7 +14511,7 @@ def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property,
                 judge_gemm(
                     record_property,
                     seed=SEED + 120,
-                    draw=_n3_router_draw(X, W, G, {what: out}),
+                    draw=_router_draw_0328(X, W, G, {what: out}),
                     launch=launch,
                     product=_n3_router_product({what: "wgrad"}),
                     launches=2,
@@ -23105,12 +23105,10 @@ DET_0328_PART_KEYS = {
         ("sm_100a", True, True, True, False, False, 512, 16380, 24576),
         ("sm_100a", True, True, True, False, False, 1024, 32736, 4096),
         ("sm_100a", True, True, True, False, False, 1024, 32768, 4096),
-        ("sm_100a", True, True, True, False, False, 3584, 16380, 7168),
         ("sm_100a", True, True, True, False, False, 4096, 32736, 2048),
         ("sm_100a", True, True, True, False, False, 7168, 16380, 896),
         ("sm_100a", True, True, True, False, False, 7168, 16380, 1536),
         ("sm_100a", True, True, True, False, False, 7168, 16380, 3584),
-        ("sm_100a", True, True, True, False, False, 8192, 32736, 4096),
         ("sm_100a", True, True, True, True, False, 576, 16380, 7168),
         ("sm_100a", True, True, True, True, False, 2112, 16380, 7168),
         ("sm_100a", True, True, True, True, True, 128, 16380, 512),
@@ -23123,7 +23121,6 @@ DET_0328_PART_KEYS = {
         ("sm_103a", False, False, False, False, False, 1536, 7168, 16380),
         ("sm_103a", False, False, False, False, False, 2048, 4096, 32736),
         ("sm_103a", False, False, False, False, False, 4096, 1024, 32736),
-        ("sm_103a", False, False, False, False, False, 4096, 1024, 32768),
         ("sm_103a", False, False, False, False, False, 4096, 8192, 32736),
         ("sm_103a", False, False, False, False, False, 4096, 8192, 32768),
         ("sm_103a", False, False, False, False, False, 12288, 128, 16380),
@@ -23164,7 +23161,6 @@ DET_0328_PART_KEYS = {
         ("sm_103a", True, True, True, False, False, 1024, 32736, 4096),
         ("sm_103a", True, True, True, False, False, 1024, 32768, 4096),
         ("sm_103a", True, True, True, False, False, 3584, 16380, 7168),
-        ("sm_103a", True, True, True, False, False, 4096, 32736, 2048),
         ("sm_103a", True, True, True, False, False, 4096, 32736, 8192),
         ("sm_103a", True, True, True, False, False, 4096, 32768, 8192),
         ("sm_103a", True, True, True, False, False, 7168, 16380, 896),
@@ -23222,12 +23218,10 @@ DET_0328_ROWS = (
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 512, 16380, 24576), "wgrad", "f32", 16380, ("proj", 512, 24576)),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32736, 4096), "wgrad", "f32", 32736, ("proj", 1024, 4096)),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32768, 4096), "wgrad", "f32", 32768, ("proj", 1024, 4096)),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 3584, 16380, 7168), "wgrad", "f32", 16380, ("proj", 3584, 7168)),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 4096, 32736, 2048), "wgrad", "f32", 32736, ("proj", 4096, 2048)),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 896), "wgrad", "f32", 16380, ("proj", 7168, 896)),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 1536), "wgrad", "f32", 16380, ("proj", 7168, 1536)),
     (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 3584), "wgrad", "f32", 16380, ("proj", 7168, 3584)),
-    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 8192, 32736, 4096), "wgrad", "f32", 32736, ("proj", 8192, 4096)),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 576, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 576)),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 2112, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 2112)),
     (("sm_100a", 148), ("sm_100a", True, True, True, True, True, 128, 16380, 512), "wgrad", "f32", 16380, ("mla", 96, 128, 512, 192, "in_out")),
@@ -23239,7 +23233,6 @@ DET_0328_ROWS = (
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 1536, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 1536)),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 2048, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 2048)),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32736), "fwd", "bf16", 32736, ("proj", 1024, 4096)),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32768), "fwd", "bf16", 32768, ("proj", 1024, 4096)),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32736), "fwd", "bf16", 32736, ("proj", 8192, 4096)),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32768), "fwd", "bf16", 32768, ("proj", 8192, 4096)),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 12288, 128, 16380), "fwd", "bf16", 16380, ("proj", 128, 12288)),
@@ -23281,7 +23274,6 @@ DET_0328_ROWS = (
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32736, 4096), "wgrad", "f32", 32736, ("proj", 1024, 4096)),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32768, 4096), "wgrad", "f32", 32768, ("proj", 1024, 4096)),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 3584, 16380, 7168), "wgrad", "f32", 16380, ("proj", 3584, 7168)),
-    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 2048), "wgrad", "f32", 32736, ("proj", 4096, 2048)),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 8192), "wgrad", "f32", 32736, ("proj", 4096, 8192)),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32768, 8192), "wgrad", "f32", 32768, ("proj", 4096, 8192)),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 896), "wgrad", "f32", 16380, ("proj", 7168, 896)),
