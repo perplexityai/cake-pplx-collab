@@ -611,15 +611,23 @@ plans take it.  The records whose rules read the segment count
   0.2.1 (gate `g`, L2 norm off): 16384 tokens in four documents with 16
   heads (non-deterministic package, 1.0022) and 16384 tokens in twelve
   documents, one of them 12009 tokens long, with 4 heads (1.0056
-  deterministic, 1.0054 non-deterministic).  The forward, the step and the
-  checkpointed step of these packs were faster.
+  deterministic, 1.0054 non-deterministic).  With one timing process per
+  node, on another VR200 node, the twelve-document pack's backward was 0.78 %
+  (deterministic) and 0.80 % (non-deterministic) slower.  The forward, the
+  step and the checkpointed step of these packs were faster.
 * In the same A/B, 38 time cells of packs whose plan does not change were
   slower than in 0.2.1 beyond the noise rule (outside the cell's A/A band and
   slower in every round), although these packs run the same programs with the
   same bits: 5 on B200 (0.06 to 0.13 %), 19 on GB300 (0.06 to 0.42 %) and 14
-  on VR200 (0.05 to 0.27 %).  They were not re-measured with one timing
-  process per node.  Per pack (`det` the deterministic package, `nondet` the
-  non-deterministic one; % slower):
+  on VR200 (0.05 to 0.27 %).  21 of them were also measured with one timing
+  process per node (B200 and VR200 on another node of the same GPU).  None of
+  the 4 B200 and 7 VR200 cells was slower there.  Of the 10 GB300 cells only
+  the deterministic forward of 16384 tokens in one document stayed slower
+  (0.18 to 0.21 %); that run also found the deterministic checkpointed step
+  of the same pack and the non-deterministic backward of 239718 tokens (gate
+  `g`, L2 norm off; 0.09 %) slower.  The other 17 cells were not measured
+  with one timing process.  Per pack (`det` the deterministic package,
+  `nondet` the non-deterministic one; % slower):
 
 | GPU | tokens x documents : heads | gate | L2 norm | slower time cells |
 |---|---|---|---|---|
