@@ -227,12 +227,11 @@ CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3, 
 STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_100a", "sm_103a", "sm_107a"})
 STAGE_BWD_MIN_TOKENS = 4096
 # A call with a token mask launches ``bwd_dot2_order`` from these token counts
-# on these architectures: from there it is no slower with any mask measured
-# (every token kept, every second, fourth or tenth token kept, a random half,
-# runs of 576 tokens) and faster with the sparse ones; below them it is slower
-# with every token or nine in ten kept at some counts (measured on B200,
-# GB300 and VR200).
-ORDER_BWD_MIN_TOKENS: dict[str, int] = {"sm_100a": 8192, "sm_103a": 8192, "sm_107a": 4096}
+# on these architectures and ``bwd_dot2`` below them; the two give the same
+# ``dx``, ``dkey`` and ``dvalue`` bits.  Each threshold comes from timing the
+# two programs on the devices of its architecture with token masks from every
+# token kept to none kept.
+ORDER_BWD_MIN_TOKENS: dict[str, int] = {"sm_100a": 4096, "sm_103a": 6144, "sm_107a": 4096}
 # The forward record a call launches (:func:`forward_record`): ``fwd_f32``'s
 # ``cta1`` form gives the same bits; it is the faster one from
 # ``CTA1_FWD_MIN_TOKENS[(arch, sm_count, acc)]`` tokens on a device (its

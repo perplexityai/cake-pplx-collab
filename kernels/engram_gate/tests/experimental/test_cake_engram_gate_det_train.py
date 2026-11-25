@@ -154,7 +154,7 @@ def test_each_dot_sum_has_a_forward_record_and_one_backward_serves_both() -> Non
     # ORDER_BWD_MIN_TOKENS tokens of its architecture; every other call launches bwd_dot2
     assert cake_jit.STAGE_BWD_ARCHES <= set(ARCHES)
     assert set(cake_jit.ORDER_BWD_MIN_TOKENS) <= set(ARCHES)
-    assert cake_jit.ORDER_BWD_MIN_TOKENS == {"sm_100a": 8192, "sm_103a": 8192, "sm_107a": 4096}
+    assert cake_jit.ORDER_BWD_MIN_TOKENS == {"sm_100a": 4096, "sm_103a": 6144, "sm_107a": 4096}
     least = cake_jit.STAGE_BWD_MIN_TOKENS
     for arch in ARCHES:
         order = cake_jit.ORDER_BWD_MIN_TOKENS.get(arch)
