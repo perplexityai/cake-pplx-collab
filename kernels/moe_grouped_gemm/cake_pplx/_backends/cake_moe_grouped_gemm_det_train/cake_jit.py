@@ -110,7 +110,10 @@ from . import cake_build
 # gradient) whose weight has at most ``domain_split_max_weight_elems`` elements
 # per group (``N * K``, the down projection) splits its tile queues by the
 # probed SM pairs of each locality domain instead of evenly (``cake_backend``,
-# stream workspaces).
+# stream workspaces).  On the architectures of ``wide_rows_archs`` a forward
+# or data gradient whose output span passes ``int32_elems`` elements (the
+# programs' 32-bit element addressing of C) launches its stage once per row
+# chunk that fits (``cake_backend``, wide outputs).
 #
 # The lead routes: beside each public route ``ROUTES`` holds its lead twin
 # ``<route>_lead`` (``LEAD_SUFFIX``, ``lead_route``; not a public route) with
@@ -2403,6 +2406,10 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     ],
     # The u32 words of the queue walk's tile counters (``queue_sched``).
     "queue_sched_words": 2,
+    # The architectures where a forward or data gradient whose output span passes ``int32_elems``
+    # elements launches its stage once per row chunk that fits (``cake_backend``, wide outputs); on the
+    # others such a call is refused.
+    "wide_rows_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "int32_elems": 2147483647,
 }
 
