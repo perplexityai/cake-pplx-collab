@@ -27,9 +27,10 @@ Host tests (CPU, no device): the launches of the eager entries and the prepared 
 the windows, their order, the window statistics and the accumulator at 64, 96 and 128 heads -- plus the retained
 state of the autograd entry, validation and the calls without query rows.  Device tests judge every floating output
 against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_100a / sm_103a (96 and 128 heads ship
-there first; sm_107a runs the 64-head cases).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the T = 16380 case
-(:func:`test_large_t_heads`), which a default run skips: the GPU validation of this form sets it and reports that
-case on its own.
+there first; sm_107a runs the 64-head cases); a call with no valid key in any row has no accuracy to judge and
+equals the oracle exactly instead (:func:`test_naive_tier_heads`).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the
+T = 16380 case (:func:`test_large_t_heads`), which a default run skips: the GPU validation of this form sets it and
+reports that case on its own.
 """
 
 import dataclasses
@@ -43,6 +44,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake_naive import DRAWS, contract, draw_seed
 from tests.experimental.test_helpers import (
     cake_dsa_sparse_attention_host_launches as hl,
 )
@@ -923,6 +925,7 @@ def _validity_rows(inp, validity: str) -> torch.Tensor:
         assert validity == "none"
         idx[::2] = -1
         idx[1::2] = S + 1
+        assert not bool(((idx >= 0) & (idx < S)).any())
     return idx
 
 
@@ -942,7 +945,16 @@ def test_naive_tier_heads(with_o_lo, heads, validity, record_property):
     2048, with the rows of ``validity`` (:func:`_validity_rows`), judged against the FP64 oracle at the naive BF16
     tier on every draw: the forward; the backward with fresh key gradients, with the caller's ``dkv_acc`` through
     the natural-layout main stage (``dkv_direct=True``) and through the cast (``dkv_direct=False``), each over 1, 2
-    and 3 forced key passes (1 and 3 at 128 heads)."""
+    and 3 forced key passes (1 and 3 at 128 heads).
+
+    ``none`` has no accuracy to judge.  No row has a valid key, so on every draw the FP64 oracle is the same
+    constant whatever the inputs: ``out``, ``o_sum`` and ``dq`` are 0 and ``lse`` is ``-inf`` on every row (a row
+    without a valid slot), the fresh key gradients and the ``dkv_acc`` increment are 0 on every key row (no slot
+    names one).  The naive tier is exact there too, and the judge refuses draws whose oracle values are the same
+    (``tests/cake_naive.py`` holds such a case to its contract only).  So ``none`` makes the same calls over the
+    same :data:`DRAWS` draws, holds each call to its contract (``nv.judged``) and each output to the oracle
+    exactly (``contract(..., exact=True)``: equal values, no tolerance).  Rows without a valid key beside rows
+    with one are judged at the tier in ``some``."""
     _require_heads(heads, backward=True)
     _require_key_passes_and_direct()
     passes = (1, 3) if heads in REDUCED_HEADS else (1, 2, 3)
@@ -975,9 +987,23 @@ def test_naive_tier_heads(with_o_lo, heads, validity, record_property):
         torch.cuda.synchronize()
         return nv.judged(nv.rope_problem(inp, indices=idx, scale=SCALE), runs)
 
-    nv.judge_draws(
-        record_property, case, seed=SEED + 10 * heads + VALIDITY.index(validity)
-    )
+    seed = SEED + 10 * heads + VALIDITY.index(validity)
+    if validity != "none":
+        nv.judge_draws(record_property, case, seed=seed)
+        return
+    for j in range(DRAWS):
+        found, oracle, _ = case(draw_seed(seed, j), j)
+        for name, want in oracle.items():
+            constant = float("-inf") if name.endswith("lse") else 0.0
+            assert bool((want == constant).all()), (
+                f"draw {j}: the oracle's {name} is not {constant}"
+            )
+        wrong = [
+            message
+            for name, value in found.items()
+            if (message := contract(name, value, oracle[name], exact=True))
+        ]
+        assert not wrong, f"draw {j}: " + "; ".join(wrong)
 
 
 @pytest.mark.parametrize("heads", (96,) + REDUCED_HEADS)
