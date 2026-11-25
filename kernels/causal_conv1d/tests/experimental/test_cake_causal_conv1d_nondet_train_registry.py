@@ -143,10 +143,10 @@ TOKENS = (
 # C 520 to 1016 run the route's fallback (the stage_pair body) up to the last measured token count at which no
 # backward, training-step or checkpointed-step row was slower than the program the thresholds pick; at C 520 to 608
 # up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).  The
-# ``bwd_bias`` and ``bwd_dt`` routes run their fallback at small token counts by the same rule (FP32 and BF16 taps
-# alike: each route's programs evaluate SiLU' at the unrounded FP32 preactivation with either taps dtype).  The
-# forward routes' keys (C 512 to 1024) run the route's static program, the deterministic package's at the same rows,
-# over the measured token counts where it was not slower than the dynamic program; a direct range of
+# ``bwd_bias`` and ``bwd_dt`` routes run their fallback by the same rule up to S 16384, 24576 or 32768 by key (FP32
+# and BF16 taps alike: each route's programs evaluate SiLU' at the unrounded FP32 preactivation with either taps
+# dtype).  The forward routes' keys (C 512 to 1024) run the route's static program, the deterministic package's at
+# the same rows, over the measured token counts where it was not slower than the dynamic program; a direct range of
 # :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends (where the key has one) or, on sm_103a
 # ``fwd_bias`` at C 720 to 768, lies inside it and runs ahead of it there, and a pair direct range of
 # :data:`PAIR_ROWS_OF_RECORD` runs ahead of both where it covers them.
@@ -156,12 +156,12 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
-        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 520, 568): (1, 24576),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt", 520, 568): (1, 16384),
-        ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 1016): (1, 16384),
+        ("bwd_dt", 520, 568): (1, 32768),
+        ("bwd_dt", 576, 640): (1, 32768),
+        ("bwd_dt", 648, 1016): (1, 32768),
         ("fwd", 512, 512): (1, 24576),
         ("fwd", 520, 544): (1, 12288),
         ("fwd", 552, 568): (1, 8192),
@@ -200,12 +200,13 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd", 616, 760): (1, 31292),
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
-        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 520, 568): (1, 24576),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt", 520, 568): (1, 16384),
-        ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 1016): (1, 16384),
+        ("bwd_dt", 520, 568): (1, 32768),
+        ("bwd_dt", 576, 640): (1, 32768),
+        ("bwd_dt", 648, 760): (1, 32768),
+        ("bwd_dt", 768, 1016): (1, 16384),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
         ("fwd", 640, 688): (1, 4096),

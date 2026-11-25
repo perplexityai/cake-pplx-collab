@@ -30,8 +30,11 @@ busy on another stream can delay it.  On sm_100a and sm_103a, at the backward
 rows of ``cake_jit.FALLBACK_ROWS`` (the default backward route at C = 520 to
 1016; from release 0.2.7 also the ``bwd_bias`` route and the calls of the
 ``bwd_dt`` route with BF16 taps, from release 0.2.9 every call of the
-``bwd_dt`` route, at C = 520 to 1016 and small S, ``bwd_dt`` at C = 768 on
-sm_103a from release 0.2.11; each row up to its own token bound), that launch
+``bwd_dt`` route, at C = 520 to 1016, ``bwd_dt`` at C = 768 on sm_103a from
+release 0.2.11; each row up to its own token bound: from release 0.2.18
+S = 32768 on ``bwd_dt`` but at C = 768 to 1016 on sm_103a (S = 16384), and
+S = 24576 on ``bwd_bias`` at C = 520 to 640 (S = 16384 at C = 648 to 1016);
+release 0.2.17: S = 24576 at C = 576 to 640, 16384 at the other C), that launch
 runs the route's fallback program, the one the route runs at its smallest
 channel counts, in place of the program its channel thresholds pick.  At the
 backward rows of ``cake_jit.DIRECT_ROWS`` (the ``bwd``, ``bwd_dt`` and
