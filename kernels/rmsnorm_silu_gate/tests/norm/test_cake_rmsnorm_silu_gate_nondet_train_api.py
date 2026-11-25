@@ -1626,25 +1626,25 @@ def _made_class(tokens: int, heads: int, layout: str) -> tuple[bool, str | None]
 FORWARD_KINDS = {
     "flat": (1, "flat", True, None),
     "token": (None, "contiguous", True, None),
-    "projection": (1, "projection", False, loader.PROJECTION_LAYOUT),
+    "projection": (4, "projection", False, loader.PROJECTION_LAYOUT),
     "headmajor": (4, "head_major", False, loader.HEAD_MAJOR_LAYOUT),
     "other": (1, "both_sliced", False, None),
 }
 
 
 # Forward inputs around and past the ends of the forward's bands: (tokens,
-# heads, layout); ``heads=None`` takes, with ``end`` the last row of band
-# ``i`` of a ``FORWARD_KINDS`` kind (``last * SMs``), ``end // h + tokens``
-# tokens of ``h`` heads: of one head for ``flat<i>`` (the architecture's
-# ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor),
-# ``projection<i>`` (its ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns
-# of a wider projection) and ``other<i>`` (its ``STRIDED_FORWARD_BANDS``; ``x``
-# and ``z`` both sliced from wider projections), of 4 heads for
-# ``headmajor<i>`` (its ``HEAD_MAJOR_FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS``
-# where it has none; 4 divides 148, 152 and 212, so ``end`` is whole tokens
-# there); ``token<i>`` takes one token of ``end + 1`` heads (packed rows whose
-# token stride is passed as 0); skipped where the architecture has no such
-# band with an end.
+# heads, layout); ``heads=None`` takes, with ``end`` the last row of band ``i``
+# of a ``FORWARD_KINDS`` kind (``last * SMs``), ``end // h + tokens`` tokens of
+# ``h`` heads: of one head for ``flat<i>`` (the architecture's
+# ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor) and ``other<i>``
+# (its ``STRIDED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from wider
+# projections), of 4 heads for ``projection<i>`` (its
+# ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns of a wider projection, a
+# class of more than one head) and ``headmajor<i>`` (its
+# ``HEAD_MAJOR_FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` where it has none; 4
+# divides 148, 152 and 212, so ``end`` is whole tokens there); ``token<i>``
+# takes one token of ``end + 1`` heads (packed rows whose token stride is
+# passed as 0); skipped where the architecture has no such band with an end.
 FORWARD_CASES = [
     pytest.param(1, 48, "contiguous", id="1x48"),
     pytest.param(16, 1, "contiguous", id="16x1"),
@@ -1809,11 +1809,11 @@ def test_forward_keeps_the_gate_tail_in_every_band(
 ) -> None:
     """At the first whole tokens of every forward band of each class's table
     (``FORWARD_KINDS``: ``FORWARD_BANDS`` of packed rows,
-    ``PROJECTION_FORWARD_BANDS`` of one head, ``HEAD_MAJOR_FORWARD_BANDS`` of
-    4 heads, ``STRIDED_FORWARD_BANDS`` where the architecture has no such
-    table, and ``STRIDED_FORWARD_BANDS`` of ``x`` and ``z`` both sliced from
-    wider projections), with every ``z`` in :data:`GATE_TAIL`, the inputs are
-    of the kind's class (:func:`_forward_class`), the forward launches the
+    ``PROJECTION_FORWARD_BANDS`` and ``HEAD_MAJOR_FORWARD_BANDS`` of 4 heads,
+    ``STRIDED_FORWARD_BANDS`` where the architecture has no such table, and
+    ``STRIDED_FORWARD_BANDS`` of ``x`` and ``z`` both sliced from wider
+    projections), with every ``z`` in :data:`GATE_TAIL`, the inputs are of the
+    kind's class (:func:`_forward_class`), the forward launches the
     band's module (``module_for_rows``' module for that class) and, on the
     inputs of every draw of ``judge`` (``x`` and ``w`` of the draw), ``y`` is
     judged against the naive implementation: no forward program flushes the
@@ -2005,19 +2005,18 @@ def test_forward_of_inputs_broadcast_over_tokens_elsewhere_runs_the_program_of_p
 
 
 # Broadcast inputs as in ``BROADCAST_CASES`` (``x``, ``z`` or both) of
-# ``BROADCAST_KEEP_PIPE_HEADS`` heads at rows per SM in a band of
+# ``BROADCAST_KEEP_PIPE_HEADS`` heads at rows per SM in the band of
 # ``fwd_keep_pipe`` (``FORWARD_BANDS``: 59 on sm_100a, in its band from 37 to
-# 85, and 2500 on sm_103a, in its band from 2000 to 3000; the tokens
-# ``rows_per_sm * SMs // BROADCAST_KEEP_PIPE_HEADS``, so the rows are exactly
-# that many rows per SM on 148 and 152 SMs).  The pipelined forward with ``x``
-# and ``z`` loaded with the L2's default policy was measured on packed rows
-# only, so such a call runs ``fwd_pipe`` (the program of 0.2.16 there, the
-# same bits) with the token stride 0; a case where packed rows of its count
-# run another program skips.
+# 85; the tokens ``rows_per_sm * SMs // BROADCAST_KEEP_PIPE_HEADS``, so the
+# rows are exactly that many rows per SM on 148 and 152 SMs).  The pipelined
+# forward with ``x`` and ``z`` loaded with the L2's default policy was measured
+# on packed rows only, so such a call runs ``fwd_pipe`` (the program of 0.2.16
+# there, the same bits) with the token stride 0; a case where packed rows of
+# its count run another program skips.
 BROADCAST_KEEP_PIPE_HEADS = 4
 BROADCAST_KEEP_PIPE_CASES = [
     pytest.param(rows_per_sm, broadcast, id=f"{rows_per_sm}-per-SM-{broadcast}")
-    for rows_per_sm in (59, 2500)
+    for rows_per_sm in (59,)
     for broadcast in ("both", "x", "z")
 ]
 

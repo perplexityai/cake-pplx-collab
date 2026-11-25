@@ -177,17 +177,19 @@ of ``fwd_pipe_packed`` on sm_107a): ``fwd_keep_pipe`` and
 ``fwd_keep_pipe_packed`` load ``x`` and ``z`` with the L2's default policy in
 place of ``evict_first``, ``fwd_layout_pipe`` warms rows of any layout in L2
 by their layout (the deterministic package's per-layout prefetch walk), and
-``fwd_layout_keep_pipe`` does both.  Packed rows run ``fwd_keep_pipe`` on
-sm_100a from 37 to 85 rows per SM and on sm_103a from 2000 to 3000 (an ``x``
-or ``z`` broadcast over more than one token keeps ``fwd_pipe``) and
+``fwd_layout_keep_pipe`` does both (``fwd_keep_pipe`` and
+``fwd_layout_keep_pipe`` on sm_100a and sm_107a only).  Packed rows run
+``fwd_keep_pipe`` on sm_100a from 37 to 85 rows per SM (an ``x`` or ``z``
+broadcast over more than one token keeps ``fwd_pipe``) and
 ``fwd_keep_pipe_packed`` on sm_107a past 8192, where 0.2.16 ran ``fwd_pipe``
 and ``fwd_pipe_packed``, the same bits.  Rows that are not packed are classed
-(``cake_jit.forward_layout``): a gate sliced from a wider projection with
-packed ``x`` runs ``cake_jit.PROJECTION_FORWARD_BANDS`` and head-major ``x``
-and ``z`` on sm_107a ``cake_jit.HEAD_MAJOR_FORWARD_BANDS``, whose bands run
-``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` where 0.2.16 ran the forwards
-of ``cake_jit.STRIDED_FORWARD_BANDS``, so ``y`` can differ there in its last
-bits; other layouts keep the programs of 0.2.16.  ``cake_jit.module_for_rows``
+(``cake_jit.forward_layout``): a gate of more than one head sliced from a
+wider projection with packed ``x`` runs ``cake_jit.PROJECTION_FORWARD_BANDS``
+and head-major ``x`` and ``z`` on sm_107a ``cake_jit.HEAD_MAJOR_FORWARD_BANDS``,
+whose bands run ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` where 0.2.16
+ran the forwards of ``cake_jit.STRIDED_FORWARD_BANDS``, so ``y`` can differ
+there in its last bits; other layouts, such a gate of one head among them,
+keep the programs of 0.2.16.  ``cake_jit.module_for_rows``
 takes the class (keyword ``layout``).  The deterministic package is that of
 0.2.16.
 A band runs a
@@ -417,7 +419,8 @@ Host design (the input layout rules are the deterministic package's):
   ``cake_jit.FORWARD_BANDS`` where ``x`` and ``z`` hold packed rows, row ``n``
   at element ``128 n``, else of the table of the rows' class
   (``cake_jit.forward_layout``): ``cake_jit.PROJECTION_FORWARD_BANDS`` where
-  ``x`` holds packed rows and ``z`` the gate columns of a wider projection,
+  ``x`` holds packed rows of more than one head and ``z`` the gate columns of
+  a wider projection,
   ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major
   on an architecture with such a table (sm_107a), else
   ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
@@ -468,21 +471,21 @@ Host design (the input layout rules are the deterministic package's):
   extra-long forward up to 520 and the pipelined forward past it (to version
   0.2.16 up to 6500, and the mid forward past it); on sm_103a the mid forward
   up to 240, the extra-long forward up to 600, the pipelined forward up to
-  1999, ``fwd_keep_pipe`` up to 3000, the pipelined forward up to 6000, the
-  mid forward up to 8192 and the pipelined forward past it; on sm_107a the mid
+  6000, the mid forward up to 8192 and the pipelined forward past it; on sm_107a the mid
   forward up to 175, the extra-long forward up to 280, the pipelined forward
   up to 8192 and ``fwd_keep_pipe_packed`` past it.  Past the short forward's,
-  for a gate sliced from a projection: on sm_100a the mid forward up to 140,
-  the long forward up to 400, the extra-long forward up to 650,
-  ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 4400 and the
-  plain forward past it; on sm_103a the mid forward up to 250, the extra-long
-  forward up to 699, ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe``
-  up to 6445 and the plain forward past it; on sm_107a
+  for a gate of more than one head sliced from a projection: on sm_100a the
+  mid forward up to 140, the long forward up to 400, the extra-long forward up
+  to 650, ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 3000
+  and the plain forward past it; on sm_103a the mid forward up to 250, the
+  extra-long forward up to 699, ``fwd_layout_pipe`` up to 2000 and the plain
+  forward past it; on sm_107a
   ``fwd_layout_keep_pipe`` up to 442, ``fwd_layout_pipe`` up to 2999 and
   ``fwd_layout_keep_pipe`` past it.  For head-major rows on sm_107a:
   ``fwd_layout_keep_pipe`` up to 120, the mid forward up to 442,
   ``fwd_layout_pipe`` up to 1000 and the plain forward past it.  For other
-  layouts (and head-major rows on sm_100a and sm_103a): on sm_100a the mid
+  layouts (such a gate of one head, and head-major rows on sm_100a and
+  sm_103a): on sm_100a the mid
   forward up to 140, the long forward up to 400, the extra-long forward up to
   700 and the plain forward past it; on sm_103a the mid forward up to 250, the
   extra-long forward up to 700 and the plain forward past it; on sm_107a the
@@ -940,7 +943,8 @@ def _forward(
     )
     sms = device_sm_count(index)
     # rows that are not packed run the table of their layout's class: the
-    # gate columns of a wider projection, head-major rows, or another layout
+    # gate columns of a wider projection of more than one head, head-major
+    # rows, or another layout
     layout = (
         None
         if packed

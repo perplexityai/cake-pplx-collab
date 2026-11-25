@@ -21,11 +21,12 @@ The forward runs the program of its architecture's band of rows per SM:
 of ``FORWARD_BANDS`` where ``x`` and ``z`` hold packed rows (row ``n`` at
 element ``128 n``, fewer than ``PACKED_ROWS`` rows), else of the table of
 the rows' class (``forward_layout``): ``PROJECTION_FORWARD_BANDS`` where
-``x`` holds packed rows and ``z`` the gate columns of a wider projection,
-``HEAD_MAJOR_FORWARD_BANDS`` for head-major rows on SM107, and
-``STRIDED_FORWARD_BANDS`` for other rows (``x`` and ``z`` both sliced from
-wider projections, head-major rows on SM100 and SM103, and a broadcast over
-tokens that its band of packed rows does not run, below).  The plain forward
+``x`` holds packed rows of more than one head and ``z`` the gate columns of
+a wider projection, ``HEAD_MAJOR_FORWARD_BANDS`` for head-major rows on
+SM107, and ``STRIDED_FORWARD_BANDS`` for other rows (``x`` and ``z`` both
+sliced from wider projections, such a gate of one head, head-major rows on
+SM100 and SM103, and a broadcast over tokens that its band of packed rows
+does not run, below).  The plain forward
 launches a grid of independent
 CTAs, one 64-thread CTA per block of 8 rows.  Packed rows up to 4 rows per SM
 on SM100 and 12 on SM103 run the 32-lane tiny forward, one 128-thread CTA per
@@ -38,40 +39,41 @@ the SMs less 16; on SM107 with 205 SMs or more, as with 212 or 216, at most 4
 CTAs per SM on all SMs but 16; fewer SMs do not keep these bounds at the end
 of the band).  The pipelined forwards (the deterministic package's forward
 programs with a gate that does not flush: ``fwd_pipe``, ``fwd_pipe_packed``
-of packed rows on SM107, ``fwd_keep_pipe`` and on SM107
-``fwd_keep_pipe_packed`` with ``x`` and ``z`` loaded with the L2's default
-policy, ``fwd_layout_pipe`` with the per-layout L2 prefetch walk and
-``fwd_layout_keep_pipe`` with both) launch one 128-thread CTA per block of
-16 rows below the deterministic package's cut of rows per SM and from there
-whole waves of 6 CTAs per SM that each walk at most 2 blocks (the cut of the
-architecture: on rows the kernel reads as packed 5600 on SM103 and 8192 on
-SM100 and SM107; on other rows of a pipelined forward of rows of any layout,
-``x`` or ``z`` broadcast over tokens, one token, projection or head-major
-rows, 500 on SM100 and 400 on SM103 and SM107); the mid
+of packed rows on SM107, ``fwd_keep_pipe`` on SM100 and
+``fwd_keep_pipe_packed`` on SM107 with ``x`` and ``z`` loaded with the L2's
+default policy, ``fwd_layout_pipe`` with the per-layout L2 prefetch walk and
+``fwd_layout_keep_pipe`` with both, on SM100 and SM107) launch one
+128-thread CTA per block of 16 rows below the deterministic package's cut of
+rows per SM and from there whole waves of 6 CTAs per SM that each walk at
+most 2 blocks (the cut of the architecture: on rows the kernel reads as
+packed 5600 on SM103 and 8192 on SM100 and SM107; on other rows of a
+pipelined forward of rows of any layout, ``x`` or ``z`` broadcast over
+tokens, one token, projection or head-major rows, 500 on SM100 and 400 on
+SM103 and SM107); the mid
 forward launches whole waves of 6 CTAs per SM that each walk at most 2 blocks
 of 16 rows; the long and the
 extra-long forward launch whole waves of 3 CTAs per SM that each walk at most
 6 blocks of 32 rows.  Their bands past the tiny forwards' or the short
 forward's: packed rows on SM100 run ``fwd_keep_pipe`` up to 85 rows per SM,
-the mid forward up to 160, the long forward up to 400, the extra-long forward
-up to 520 and ``fwd_pipe`` past it (until version 0.2.17 up to 6500, and the
-mid forward past it); on SM103 the mid forward up to 240, the extra-long
-forward up to 600, ``fwd_pipe`` up to 1999, ``fwd_keep_pipe`` up to 3000,
-``fwd_pipe`` up to 6000, the mid forward up to 8192 and ``fwd_pipe`` past
-it; on SM107 the mid forward up to 175, the extra-long forward up to 280,
-``fwd_pipe_packed`` up to 8192 and ``fwd_keep_pipe_packed`` past it.  A call
-of ``x`` or ``z`` broadcast over more than one token runs ``fwd_pipe`` where
-its band runs ``fwd_keep_pipe``, and the band of ``STRIDED_FORWARD_BANDS``
-where its band runs a forward of packed rows at their linear offsets (a tiny
-forward, ``fwd_pipe_packed`` or ``fwd_keep_pipe_packed``).  Projection rows
-on SM100 run the mid forward up to 140 rows per SM, the long forward up to
-400, the extra-long forward up to 650, ``fwd_layout_pipe`` up to 2000,
-``fwd_layout_keep_pipe`` up to 4400 and the plain forward past it; on SM103
+the mid forward up to 160, the long forward up to 400, the extra-long
+forward up to 520 and ``fwd_pipe`` past it (until version 0.2.17 up to 6500,
+and the mid forward past it); on SM103 the mid forward up to 240, the
+extra-long forward up to 600, ``fwd_pipe`` up to 6000, the mid forward up to
+8192 and ``fwd_pipe`` past it; on SM107 the mid forward up to 175, the
+extra-long forward up to 280, ``fwd_pipe_packed`` up to 8192 and
+``fwd_keep_pipe_packed`` past it.  A call of ``x`` or ``z`` broadcast over
+more than one token runs ``fwd_pipe`` where its band runs ``fwd_keep_pipe``,
+and the band of ``STRIDED_FORWARD_BANDS`` where its band runs a forward of
+packed rows at their linear offsets (a tiny forward, ``fwd_pipe_packed`` or
+``fwd_keep_pipe_packed``).  Projection rows (of more than one head) on SM100
+run the mid forward up to 140 rows per SM, the long forward up to 400, the
+extra-long forward up to 650, ``fwd_layout_pipe`` up to 2000,
+``fwd_layout_keep_pipe`` up to 3000 and the plain forward past it; on SM103
 the mid forward up to 250, the extra-long forward up to 699,
-``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 6445 and the
-plain forward past it; on SM107 ``fwd_layout_keep_pipe`` up to 442,
-``fwd_layout_pipe`` up to 2999 and ``fwd_layout_keep_pipe`` past it.
-Head-major rows on SM107 run ``fwd_layout_keep_pipe`` up to 120 rows per SM,
+``fwd_layout_pipe`` up to 2000 and the plain forward past it; on SM107
+``fwd_layout_keep_pipe`` up to 442, ``fwd_layout_pipe`` up to 2999 and
+``fwd_layout_keep_pipe`` past it.  Head-major rows on SM107 run
+``fwd_layout_keep_pipe`` up to 120 rows per SM,
 the mid forward up to 442, ``fwd_layout_pipe`` up to 1000 and the plain
 forward past it.  The rows of ``STRIDED_FORWARD_BANDS`` on SM100 run the mid
 forward up to 140 rows per SM, the long forward up to 400, the extra-long
@@ -258,41 +260,40 @@ the deterministic package's probes the band holds (the most whole blocks of
 fewest whole waves from there and four times that: on packed rows 85, 86
 and 344 on SM100 and SM107 and 58, 60 and 240 on SM103; on rows not read as
 packed 5, 6 and 24 on SM100 and 4, 6 and 24 on SM103 and SM107) and at the
-cut itself, tokens of one head (of 4 heads for head-major rows) whose rows
-are exactly the cut times the SMs (the first row count of whole waves).  On
-packed rows the probes around the cut run in the band of ``fwd_pipe`` on
-SM100 (from 521 rows per SM, with no end since version 0.2.17; until then it
-ended at 6500, past which the mid forward ran and no probe around the cut
-ran on SM100), in the second and the third band of ``fwd_pipe`` on SM103
-(3001 to 6000 and from 8193), and on SM107 in the bands of
-``fwd_pipe_packed`` (up to 8192) and ``fwd_keep_pipe_packed`` (past it);
-the bands of ``fwd_keep_pipe`` (37 to 85 rows per SM on SM100, its most
-rows of one CTA a block, and 2000 to 3000 on SM103) and the first band of
-``fwd_pipe`` on SM103 (601 to 1999) are probed at their first and last rows
-only.  The cut of broadcast rows (500 rows per SM on SM100, 400 on SM103)
-lies in the extra-long forward's band, so no pipelined forward runs such
-rows at it: on SM100 ``fwd_pipe`` runs them one CTA a block in its first
-band (37 to 85 rows per SM, where packed rows run ``fwd_keep_pipe``) and
-whole waves in its second (from 521), on SM103 whole waves in each of its
-bands (601 to 6000, where packed rows run ``fwd_keep_pipe`` from 2000 to
-3000, and from 8193).  Of the probes around that cut only the fewest whole
-waves (on SM100) and four times that run; the bands' first and last rows
-hold the pipelined forward's calls nearest the cut (on SM100 its most rows
-of one CTA a block, 85 rows per SM, and its fewest of whole waves, 521; on
-SM103 its fewest of whole waves, 601).  The cut of projection rows lies
-below the bands of the pipelined forwards of SM100 and SM103, where four
-times the fewest whole waves (2304 rows per SM) runs in the band of
-``fwd_layout_keep_pipe``; on SM107 the most whole blocks below the cut and
+cut itself, tokens of one head (of 4 heads for projection and head-major
+rows) whose rows are exactly the cut times the SMs (the first row count of
+whole waves).  On packed rows the probes around the cut run in the band of
+``fwd_pipe`` on SM100 (from 521 rows per SM, with no end since version
+0.2.17; until then it ended at 6500, past which the mid forward ran and no
+probe around the cut ran on SM100), in the first and the second band of
+``fwd_pipe`` on SM103 (601 to 6000 and from 8193), and on SM107 in the bands
+of ``fwd_pipe_packed`` (up to 8192) and ``fwd_keep_pipe_packed`` (past it);
+the band of ``fwd_keep_pipe`` (37 to 85 rows per SM on SM100, its most rows
+of one CTA a block) is probed at its first and last rows only.  The cut of
+broadcast rows (500 rows per SM on SM100, 400 on SM103) lies in the
+extra-long forward's band, so no pipelined forward runs such rows at it: on
+SM100 ``fwd_pipe`` runs them one CTA a block in its first band (37 to 85
+rows per SM, where packed rows run ``fwd_keep_pipe``) and whole waves in its
+second (from 521), on SM103 whole waves in each of its bands (601 to 6000
+and from 8193).  Of the probes around that cut only the fewest whole waves
+(on SM100) and four times that run; the bands' first and last rows hold the
+pipelined forward's calls nearest the cut (on SM100 its most rows of one CTA
+a block, 85 rows per SM, and its fewest of whole waves, 521; on SM103 its
+fewest of whole waves, 601).  The cut of projection rows lies below the
+bands of the pipelined forwards of SM100 and SM103; four times the fewest
+whole waves (2304 rows per SM) runs in the band of ``fwd_layout_keep_pipe``
+on SM100 (on SM103 past the band of ``fwd_layout_pipe``, which holds its
+first and last rows only); on SM107 the most whole blocks below the cut and
 the cut run in the first band of ``fwd_layout_keep_pipe`` (60 to 442 rows
 per SM), the fewest whole waves and four times that in the band of
 ``fwd_layout_pipe`` (443 to 2999), and of head-major rows the fewest whole
-waves in the band of ``fwd_layout_pipe`` (443 to 1000).  On broadcast rows busy and
-alone are each ``_held_mean`` of ``HELD_RUNS`` samples, not a median of
-seven (``HELD_MEAN_FORWARD_LAYOUTS``): such a call reads one token and
-writes only ``y``, a few microseconds near its cut, where beside one held
-SM the bound is less than one step of the event timer (about 1 microsecond
-on SM100 and SM103) above the ratio of the extra round of CTAs.  The
-forwards of the first bands, the 32-lane tiny forward of packed rows (at 1
+waves in the band of ``fwd_layout_pipe`` (443 to 1000).  On broadcast rows
+busy and alone are each ``_held_mean`` of ``HELD_RUNS`` samples, not a
+median of seven (``HELD_MEAN_FORWARD_LAYOUTS``): such a call reads one token
+and writes only ``y``, a few microseconds near its cut, where beside one
+held SM the bound is less than one step of the event timer (about 1
+microsecond on SM100 and SM103) above the ratio of the extra round of CTAs.
+The forwards of the first bands, the 32-lane tiny forward of packed rows (at 1
 and 4 rows per SM on SM100, 1 and 12 on SM103), the tiny forward of packed
 rows (at 5, 12, 24, 25, 31 and 36 rows per SM on SM100, 13, 24, 32, 33 and 36
 on SM103, 1, 10, 30, 43 and 65 on SM107) and
@@ -421,14 +422,14 @@ def nondeterministic_allowed():
 def _inputs(tokens: int, layout: str = "packed", heads: int = H):
     """``(x, z, w, dy)`` of ``tokens`` tokens of ``heads`` heads, packed rows;
     with ``layout="projection"`` ``z`` the gate columns of a wider projection
-    (the class ``PROJECTION_LAYOUT``); with ``layout="both_sliced"`` ``x`` and
-    ``z`` the first and the second ``heads * 128`` columns of one wider
-    projection (a class of no table of its own); with ``layout="head_major"``
-    ``x`` and ``z`` of ``[heads, tokens, 128]`` tensors viewed as ``[tokens,
-    heads, 128]`` (the class ``HEAD_MAJOR_LAYOUT``), whose rows are not packed
-    (with more than one token, and head-major with more than one head); with
-    ``layout="broadcast"`` ``x`` and ``z`` one token broadcast over the
-    others (token stride 0)."""
+    (the class ``PROJECTION_LAYOUT`` with more than one head); with
+    ``layout="both_sliced"`` ``x`` and ``z`` the first and the second
+    ``heads * 128`` columns of one wider projection (a class of no table of its
+    own); with ``layout="head_major"`` ``x`` and ``z`` of
+    ``[heads, tokens, 128]`` tensors viewed as ``[tokens, heads, 128]`` (the
+    class ``HEAD_MAJOR_LAYOUT``), whose rows are not packed (with more than one
+    token, and head-major with more than one head); with ``layout="broadcast"``
+    ``x`` and ``z`` one token broadcast over the others (token stride 0)."""
     generator = torch.Generator(device="cuda").manual_seed(SEED + tokens)
     kwargs = dict(dtype=torch.float32, device="cuda", generator=generator)
     if layout == "broadcast":
@@ -1767,10 +1768,10 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # band of ``layout``: at the band's first and last row per SM ("band_first",
 # "band_last"; the last band has no last), at the probes of the
 # deterministic package's own test, the most whole blocks per slot below the
-# cut ("below"), the fewest whole waves at or above it ("first") and four
-# times that ("last"), and at the cut itself ("cut": tokens of one head, of 4
-# head-major heads, so that the rows are exactly the cut times the SMs, the
-# first row count of whole waves).  The cut is the record's
+# cut ("below"), the fewest whole waves at or above it ("first") and four times
+# that ("last"), and at the cut itself ("cut": tokens of one head, of 4 heads
+# of projection and head-major rows, so that the rows are exactly the cut times
+# the SMs, the first row count of whole waves).  The cut is the record's
 # ``persistent_from_rows_per_sm`` of the architecture on packed rows and, on
 # rows the kernel does not read as packed (``broadcast``: ``x`` and ``z`` one
 # token broadcast over the others, in the bands of packed rows as such a call
@@ -1782,14 +1783,13 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # SM): below, first and last 85, 86 and 344 on sm_100a (8160, 8256 and 33024
 # rows per SM, and "cut", 8192: all in the band of ``fwd_pipe`` from 521,
 # which has no end since version 0.2.17), 58, 60 and 240 on sm_103a (5568,
-# 5760 and 23040: "below", "first" and "cut", 5600, in the second band of
-# ``fwd_pipe``, 3001 to 6000, "last" in its third, from 8193) and 85, 86 and
+# 5760 and 23040: "below", "first" and "cut", 5600, in the first band of
+# ``fwd_pipe``, 601 to 6000, "last" in its second, from 8193) and 85, 86 and
 # 344 on sm_107a ("below" and "cut", 8192, in the band of ``fwd_pipe_packed``,
 # 281 to 8192, "first" and "last" in the band of ``fwd_keep_pipe_packed``,
-# from 8193); the bands of ``fwd_keep_pipe`` (sm_100a 37 to 85 rows per SM,
-# its most rows of one CTA a block; sm_103a 2000 to 3000) and the first band
-# of ``fwd_pipe`` on sm_103a (601 to 1999) hold no probe but their first and
-# last rows.  The probes on rows not read as packed: 5, 6 and 24 on sm_100a
+# from 8193); the band of ``fwd_keep_pipe`` (sm_100a 37 to 85 rows per SM,
+# its most rows of one CTA a block) holds no probe but its first and last
+# rows.  The probes on rows not read as packed: 5, 6 and 24 on sm_100a
 # (480, 576 and 2304 rows per SM; the cut 500) and 4, 6 and 24 on sm_103a and
 # sm_107a (384, 576 and 2304; the cut 400).  On broadcast rows that cut lies
 # in the extra-long forward's band (sm_100a: 401 to 520 rows per SM; sm_103a:
@@ -1798,11 +1798,11 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # and "last" run in the second band of ``fwd_pipe`` (from 521), whose first
 # row is the fewest of whole waves, and its first band (37 to 85, where packed
 # rows run ``fwd_keep_pipe``) runs one CTA a block up to its last row; on
-# sm_103a "last" runs in its first band (601 to 6000, where packed rows run
-# ``fwd_keep_pipe`` from 2000 to 3000), whose rows are all whole waves.  On
-# projection rows "last" runs in the band of ``fwd_layout_keep_pipe`` on
-# sm_100a (2001 to 4400) and sm_103a (2001 to 6445), whose ``fwd_layout_pipe``
-# bands (651 to 2000; 700 to 2000) lie past the cut; on sm_107a "below" and
+# sm_103a "last" runs in its first band (601 to 6000), whose rows are all
+# whole waves.  On projection rows "last" runs in the band of
+# ``fwd_layout_keep_pipe`` on sm_100a (2001 to 3000); the bands of
+# ``fwd_layout_pipe`` (sm_100a 651 to 2000, sm_103a 700 to 2000) lie past the
+# cut and hold their first and last rows only; on sm_107a "below" and
 # "cut" in the first band of ``fwd_layout_keep_pipe`` (60 to 442), "first" and
 # "last" in the band of ``fwd_layout_pipe`` (443 to 2999), and its second band
 # of ``fwd_layout_keep_pipe`` (from 3000) holds its first rows only.  On
@@ -1812,12 +1812,12 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 PIPELINED_FORWARD_EDGES = ("band_first", "band_last", "below", "first", "last", "cut")
 PIPELINED_FORWARD_LAYOUTS = (*FORWARD_LAYOUTS, "broadcast")
 # The pipelined forwards and the role of the deterministic package's program
-# each is built from, whose grid rule it takes: on sm_100a and sm_103a
-# ``fwd_pipe``, ``fwd_keep_pipe``, ``fwd_layout_pipe`` and
-# ``fwd_layout_keep_pipe`` that package's forward of rows of any layout
-# (``fwd``), on sm_107a ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` its
-# sm_107a forward of rows of any layout (``fwd``) and ``fwd_pipe_packed`` and
-# ``fwd_keep_pipe_packed`` its sm_107a forward of packed rows
+# each is built from, whose grid rule it takes: ``fwd_pipe`` and
+# ``fwd_layout_pipe`` on sm_100a and sm_103a and ``fwd_keep_pipe`` and
+# ``fwd_layout_keep_pipe`` on sm_100a that package's forward of rows of any
+# layout (``fwd``), on sm_107a ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe``
+# its sm_107a forward of rows of any layout (``fwd``) and ``fwd_pipe_packed``
+# and ``fwd_keep_pipe_packed`` its sm_107a forward of packed rows
 # (``fwd_packed``).
 _PIPELINED_COUNTERPARTS = {
     "fwd_pipe": "fwd",
@@ -1828,8 +1828,9 @@ _PIPELINED_COUNTERPARTS = {
     "fwd_keep_pipe_packed": "fwd_packed",
 }
 # Heads of the tokens of the "cut" probe: one, but 4 for head-major rows,
-# whose one-head rows are packed (4 divides 148, 152 and 212 SMs).
-_CUT_HEADS = {"head_major": 4}
+# whose one-head rows are packed, and for projection rows, whose one-head rows
+# run STRIDED_FORWARD_BANDS (4 divides 148, 152 and 212 SMs).
+_CUT_HEADS = {"head_major": 4, "projection": 4}
 
 
 def _pipelined_cases() -> list:
@@ -1878,7 +1879,8 @@ def _pipelined_forward_tokens(
     ``_CUT_HEADS``, else ``H``); skips where the architecture routes no such
     module or band, or the probe is outside the band.  The pipelined
     forward's grid rule is that of the deterministic package's program of
-    its ``_PIPELINED_COUNTERPARTS`` role on the architecture."""
+    its ``_PIPELINED_COUNTERPARTS`` role on the architecture, with the cuts
+    of the architectures the record is built for."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     name = loader.ROUTES[arch].get(role)
@@ -1891,6 +1893,17 @@ def _pipelined_forward_tokens(
     rule = loader.MODULES[name]["grid_rule"]
     det_role = _PIPELINED_COUNTERPARTS[role]
     det_rule = det_loader.MODULES[det_loader.route_module(arch, det_role)]["grid_rule"]
+    # that rule's cuts of the architectures the record is built for (a build
+    # routed on fewer architectures than its counterpart keys fewer)
+    arches = loader.MODULES[name]["arches"]
+    det_rule = {
+        key: (
+            {a: cut for a, cut in value.items() if a in arches}
+            if isinstance(value, dict)
+            else value
+        )
+        for key, value in det_rule.items()
+    }
     assert rule == det_rule, (arch, role, rule, det_rule)
     slots = int(rule["ctas_per_sm"]) * sms
     rows_per_block = int(rule["rows_per_block"])

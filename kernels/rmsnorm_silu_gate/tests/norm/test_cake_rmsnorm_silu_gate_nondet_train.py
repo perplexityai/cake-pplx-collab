@@ -472,13 +472,15 @@ def _packed(T: int, H: int, layout: str = "contiguous") -> bool:
 def _layout_class(T: int, H: int, layout: str = "contiguous") -> str | None:
     """The class ``forward_layout`` gives ``make(T, H, layout=layout)``'s ``x``
     and ``z`` where they do not hold packed rows (:func:`_packed`): the gate
-    columns of a wider projection with packed ``x`` (``projection``),
-    head-major ``x`` and ``z`` (``head_major``), else None (``both_sliced``:
-    ``x`` and ``z`` both sliced from wider projections)."""
+    columns of a wider projection with packed ``x`` of more than one head
+    (``projection``; of one head None), head-major ``x`` and ``z``
+    (``head_major``), else None (``both_sliced``: ``x`` and ``z`` both sliced
+    from wider projections)."""
     if _packed(T, H, layout):
         return None
-    classes = {"projection": PROJECTION_LAYOUT, "head_major": HEAD_MAJOR_LAYOUT}
-    return classes.get(layout)
+    if layout == "projection":
+        return PROJECTION_LAYOUT if H > 1 else None
+    return {"head_major": HEAD_MAJOR_LAYOUT}.get(layout)
 
 
 def _backward_packed(T: int, H: int, layout: str = "contiguous") -> bool:
@@ -3290,9 +3292,8 @@ def test_repeatable_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
 # the 32-lane tiny forward up to 4 rows per SM on sm_100a and 12 on sm_103a,
 # past which it is slower than the tiny forward, then the tiny forward up to
 # 36; the pipelined forward with ``x`` and ``z`` loaded with the L2's default
-# policy, ``fwd_keep_pipe``, on sm_100a from 37 to 85 rows per SM and on
-# sm_103a from 2000 to 3000, and ``fwd_keep_pipe_packed`` on sm_107a past
-# 8192).
+# policy, ``fwd_keep_pipe``, on sm_100a from 37 to 85 rows per SM, and
+# ``fwd_keep_pipe_packed`` on sm_107a past 8192).
 # The forward's band roles, the call role ``fwd`` among them (the plain
 # forward, the last band of other layouts); the backward's are
 # ``BACKWARD_BANDS``.
@@ -3311,8 +3312,6 @@ FORWARD_BANDS = {
         (36, "fwd_tiny"),
         (240, "fwd_mid"),
         (600, "fwd_xlong"),
-        (1999, "fwd_pipe"),
-        (3000, "fwd_keep_pipe"),
         (6000, "fwd_pipe"),
         (8192, "fwd_mid"),
         (None, "fwd_pipe"),
@@ -3332,8 +3331,9 @@ FORWARD_BANDS = {
 FORWARD_TINY_GAP = {"sm_107a": (16, 32, "fwd_short")}
 # The forward bands of inputs whose rows are not packed and of no class with a
 # table of its own (``forward_layout`` gives None: ``x`` and ``z`` both sliced,
-# a broadcast over heads, a mixed or padded layout; head-major rows on sm_100a
-# and sm_103a; the tiny forwards read packed rows only), and of packed rows
+# a gate sliced from a projection of one head, a broadcast over heads, a mixed
+# or padded layout; head-major rows on sm_100a and sm_103a; the tiny forwards
+# read packed rows only), and of packed rows
 # from PACKED_ROWS on, as FORWARD_BANDS.
 STRIDED_FORWARD_BANDS = {
     "sm_100a": (
@@ -3355,13 +3355,14 @@ STRIDED_FORWARD_BANDS = {
         (None, "fwd"),
     ),
 }
-# The forward bands of a gate sliced from a wider projection (``x`` of packed
-# rows, ``z`` of head stride 128 and a token stride past ``H * 128``:
-# ``forward_layout`` gives PROJECTION_LAYOUT), as FORWARD_BANDS: the
-# pipelined forwards with the per-layout L2 prefetch walk, ``fwd_layout_pipe``
-# and ``fwd_layout_keep_pipe`` (``x`` and ``z`` loaded with the L2's default
-# policy), in the place of the extra-long and the plain forward of
-# STRIDED_FORWARD_BANDS.
+# The forward bands of a gate sliced from a wider projection (more than one
+# head, ``x`` of packed rows, ``z`` of head stride 128 and a token stride past
+# ``H * 128``: ``forward_layout`` gives PROJECTION_LAYOUT; such rows of one
+# head run STRIDED_FORWARD_BANDS), as FORWARD_BANDS: the pipelined forwards
+# with the per-layout L2 prefetch walk, ``fwd_layout_pipe`` and
+# ``fwd_layout_keep_pipe`` (``x`` and ``z`` loaded with the L2's default
+# policy; on sm_100a and sm_107a), in the place of the extra-long and the
+# plain forward of STRIDED_FORWARD_BANDS.
 PROJECTION_FORWARD_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3369,7 +3370,7 @@ PROJECTION_FORWARD_BANDS = {
         (400, "fwd_long"),
         (650, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
-        (4400, "fwd_layout_keep_pipe"),
+        (3000, "fwd_layout_keep_pipe"),
         (None, "fwd"),
     ),
     "sm_103a": (
@@ -3377,7 +3378,6 @@ PROJECTION_FORWARD_BANDS = {
         (250, "fwd_mid"),
         (699, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
-        (6445, "fwd_layout_keep_pipe"),
         (None, "fwd"),
     ),
     "sm_107a": (
@@ -3407,10 +3407,10 @@ LAYOUT_FORWARD_BANDS = {
     PROJECTION_LAYOUT: PROJECTION_FORWARD_BANDS,
     HEAD_MAJOR_LAYOUT: HEAD_MAJOR_FORWARD_BANDS,
 }
-# The pipelined forwards of 0.2.17: builds of ``fwd_pipe`` (sm_100a, sm_103a)
-# and, on sm_107a, of the deterministic package's forward of rows of any layout
-# with the gate that does not flush (``fwd_layout_pipe``,
-# ``fwd_layout_keep_pipe``) or of ``fwd_pipe_packed``
+# The pipelined forwards of 0.2.17: builds of ``fwd_pipe`` (sm_100a, and
+# sm_103a for ``fwd_layout_pipe``) and, on sm_107a, of the deterministic
+# package's forward of rows of any layout with the gate that does not flush
+# (``fwd_layout_pipe``, ``fwd_layout_keep_pipe``) or of ``fwd_pipe_packed``
 # (``fwd_keep_pipe_packed``), with the y bits of ``fwd_pipe`` (sm_100a,
 # sm_103a) or ``fwd_pipe_packed`` (sm_107a): ``{role: {arch: base role}}``.
 NEW_PIPE_BASES = {
@@ -3421,10 +3421,9 @@ NEW_PIPE_BASES = {
     },
     "fwd_layout_keep_pipe": {
         "sm_100a": "fwd_pipe",
-        "sm_103a": "fwd_pipe",
         "sm_107a": "fwd_pipe_packed",
     },
-    "fwd_keep_pipe": {"sm_100a": "fwd_pipe", "sm_103a": "fwd_pipe"},
+    "fwd_keep_pipe": {"sm_100a": "fwd_pipe"},
     "fwd_keep_pipe_packed": {"sm_107a": "fwd_pipe_packed"},
 }
 NEW_PIPE_ROLES = tuple(NEW_PIPE_BASES)
@@ -3805,12 +3804,11 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         assert got == routes[strided], (rows, strided)
     # the forward on sm_103a: packed rows the 32-lane tiny forward up to 12
     # rows per SM, the tiny forward up to 36, the mid forward up to 240, the
-    # extra-long forward up to 600, the pipelined forward up to 1999, the
-    # pipelined forward with the L2's default policy up to 3000, the
-    # pipelined forward up to 6000, the mid forward up to 8192, the pipelined
-    # forward past it; other layouts the short forward up to 12, the mid
-    # forward up to 250, the extra-long forward up to 700, the plain forward
-    # past it (sm_103a routes no long forward)
+    # extra-long forward up to 600, the pipelined forward up to 6000, the
+    # mid forward up to 8192, the pipelined forward past it; other layouts
+    # the short forward up to 12, the mid forward up to 250, the extra-long
+    # forward up to 700, the plain forward past it (sm_103a routes no long
+    # forward and no forward with the L2's default policy)
     routes = loader.ROUTES["sm_103a"]
     for rows, packed, strided in (
         (1, "fwd_l32_tiny", "fwd_short"),
@@ -3828,9 +3826,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (700 * sm_count, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count + 1, "fwd_pipe", "fwd"),
         (1999 * sm_count, "fwd_pipe", "fwd"),
-        (1999 * sm_count + 1, "fwd_keep_pipe", "fwd"),
-        (2500 * sm_count, "fwd_keep_pipe", "fwd"),
-        (3000 * sm_count, "fwd_keep_pipe", "fwd"),
+        (1999 * sm_count + 1, "fwd_pipe", "fwd"),
+        (2500 * sm_count, "fwd_pipe", "fwd"),
+        (3000 * sm_count, "fwd_pipe", "fwd"),
         (3000 * sm_count + 1, "fwd_pipe", "fwd"),
         (6000 * sm_count, "fwd_pipe", "fwd"),
         (6000 * sm_count + 1, "fwd_mid", "fwd"),
@@ -3844,7 +3842,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         assert got == routes[packed], (rows, packed)
         got = loader.module_for_rows("sm_103a", "fwd", rows, sm_count, packed=False)
         assert got == routes[strided], (rows, strided)
-    assert "fwd_long" not in routes
+    assert "fwd_long" not in routes and "fwd_keep_pipe" not in routes
+    assert "fwd_layout_keep_pipe" not in routes
     # the forward on sm_107a: packed rows the tiny forward up to 65 rows per
     # SM but from 17 to 32 rows (counts of rows, FORWARD_TINY_GAP) the short
     # forward, the mid forward up to 175, the extra-long forward up to 280,
@@ -3902,8 +3901,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (650 * sm_count + 1, "fwd_layout_pipe"),
                 (2000 * sm_count, "fwd_layout_pipe"),
                 (2000 * sm_count + 1, "fwd_layout_keep_pipe"),
-                (4400 * sm_count, "fwd_layout_keep_pipe"),
-                (4400 * sm_count + 1, "fwd"),
+                (3000 * sm_count, "fwd_layout_keep_pipe"),
+                (3000 * sm_count + 1, "fwd"),
+                (4400 * sm_count, "fwd"),
                 (2**31 - 1, "fwd"),
             ),
         ),
@@ -3917,9 +3917,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (699 * sm_count, "fwd_xlong"),
                 (699 * sm_count + 1, "fwd_layout_pipe"),
                 (2000 * sm_count, "fwd_layout_pipe"),
-                (2000 * sm_count + 1, "fwd_layout_keep_pipe"),
-                (6445 * sm_count, "fwd_layout_keep_pipe"),
-                (6445 * sm_count + 1, "fwd"),
+                (2000 * sm_count + 1, "fwd"),
+                (6445 * sm_count, "fwd"),
                 (2**31 - 1, "fwd"),
             ),
         ),
@@ -4625,7 +4624,13 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
             for table in (loader.FORWARD_BANDS, loader.STRIDED_FORWARD_BANDS)
             for _, band in table[arch]
         }
-        assert {"fwd_layout_pipe", "fwd_layout_keep_pipe"} <= classed - plain, arch
+        layout_pipes = {
+            role
+            for role in ("fwd_layout_pipe", "fwd_layout_keep_pipe")
+            if arch in NEW_PIPE_BASES[role]
+        }
+        assert "fwd_layout_pipe" in layout_pipes, arch
+        assert layout_pipes <= classed - plain, arch
         band_roles |= {
             band for bands in loader.BACKWARD_BANDS[arch].values() for _, band in bands
         }
@@ -4847,13 +4852,12 @@ STRIDED_CUT = "persistent_from_rows_per_sm_strided"
 # blocks.  A row less than the cut times the SMs and the cut times the SMs on
 # 148, 152 and 212 SMs on every architecture, and the rows of the bands of
 # the pipelined forwards of the grid (from 0.2.17 ``fwd_keep_pipe`` on sm_100a
-# up to 85 rows per SM and on sm_103a from 2000 to 3000, and
-# ``fwd_keep_pipe_packed`` on sm_107a past 8192, run the bands of packed rows
-# that ``fwd_pipe`` and ``fwd_pipe_packed`` ran before, with the same grid
-# rule).  On sm_100a the pipelined forward's band from 521 rows per SM has no
-# end since version 0.2.17 (it ended at 6500, past which the mid forward ran),
-# so it runs packed rows one CTA a block below the cut and whole waves from it
-# there too.
+# up to 85 rows per SM and ``fwd_keep_pipe_packed`` on sm_107a past 8192 run
+# the bands of packed rows that ``fwd_pipe`` and ``fwd_pipe_packed`` ran
+# before, with the same grid rule).  On sm_100a the pipelined forward's band
+# from 521 rows per SM has no end since version 0.2.17 (it ended at 6500, past
+# which the mid forward ran), so it runs packed rows one CTA a block below the
+# cut and whole waves from it there too.
 PIPE_FORWARD_GRIDS = [
     (1, 148, "sm_100a", 1),
     (36 * 148 + 1, 148, "sm_100a", 334),  # B200 fwd_keep_pipe band's first row
@@ -5113,14 +5117,17 @@ def test_forward_packed_is_the_kernels_packed_rows_test():
 # ``(T, H, x_tok, x_head, z_tok, z_head)`` as the kernels get them (a single
 # token's stride passed as 0, a single head's as 128) and the class
 # ``forward_layout`` gives the rows: a gate sliced from a wider projection with
-# packed ``x`` (also of one head), head-major ``x`` and ``z``; no class for
-# padded head-major rows, ``x`` sliced too, a ``z`` broadcast over tokens,
-# mixed layouts, packed rows (which the host classes before), one token, one
-# packed head, ``x`` broadcast with a ``z`` sliced from a projection, a ``z``
-# interleaved per head and an ``x`` broadcast over heads.
+# packed ``x`` of more than one head, head-major ``x`` and ``z``; no class for
+# such a gate of one head, padded head-major rows, ``x`` sliced too, a ``z``
+# broadcast over tokens, mixed layouts, packed rows (which the host classes
+# before), one token, one packed head, ``x`` broadcast with a ``z`` sliced
+# from a projection, a ``z`` interleaved per head and an ``x`` broadcast over
+# heads.
 FORWARD_LAYOUT_CASES = [
     pytest.param((64, 16, 2048, 128, 4112, 128), PROJECTION_LAYOUT, id="projection"),
-    pytest.param((64, 1, 128, 128, 272, 128), PROJECTION_LAYOUT, id="projection_h1"),
+    pytest.param((64, 2, 256, 128, 528, 128), PROJECTION_LAYOUT, id="projection_h2"),
+    pytest.param((64, 1, 128, 128, 272, 128), None, id="projection_h1"),
+    pytest.param((64, 1, 128, 128, 4112, 128), None, id="projection_h1_wide"),
     pytest.param((64, 16, 128, 8192, 128, 8192), HEAD_MAJOR_LAYOUT, id="head_major"),
     pytest.param((64, 16, 128, 16384, 128, 16384), None, id="padded_head_major"),
     pytest.param((64, 16, 4112, 128, 4112, 128), None, id="x_also_sliced"),
@@ -5139,8 +5146,9 @@ FORWARD_LAYOUT_CASES = [
 def test_forward_layout_classes(strides, want):
     """``forward_layout`` (host only) gives each call of
     ``FORWARD_LAYOUT_CASES`` its class: ``PROJECTION_LAYOUT`` where ``x``
-    holds packed rows (head stride 128, token stride ``H * 128``) and ``z``
-    has head stride 128 and a token stride past ``H * 128``;
+    holds packed rows of more than one head (head stride 128, token stride
+    ``H * 128``) and ``z`` has head stride 128 and a token stride past ``H *
+    128`` (such rows of one head run ``STRIDED_FORWARD_BANDS``);
     ``HEAD_MAJOR_LAYOUT`` where ``x`` and ``z`` have token stride 128 and
     head stride ``T * 128``; else None."""
     assert loader.forward_layout(*strides) == want, strides
@@ -5230,10 +5238,10 @@ def test_forward_runs_the_table_of_the_rows_class(monkeypatch):
 # Calls in the bands of the pipelined forwards with the L2's default policy:
 # ``(arch, rows per SM, layout, role launched)`` on 4 heads (``_host_inputs``)
 # and as one token (``one_token``: 4 x rows-per-SM-times-SMs heads).  In the
-# bands of ``fwd_keep_pipe`` (sm_100a at 59 rows per SM, sm_103a at 2500) a
-# call with ``x``, ``z`` or both broadcast over more than one token runs
-# ``fwd_pipe``, the program of 0.2.16 there (the same bits); packed rows and
-# one token run ``fwd_keep_pipe``.  In the band of ``fwd_keep_pipe_packed``
+# band of ``fwd_keep_pipe`` (sm_100a, at 59 rows per SM) a call with ``x``,
+# ``z`` or both broadcast over more than one token runs ``fwd_pipe``, the
+# program of 0.2.16 there (the same bits); packed rows and one token run
+# ``fwd_keep_pipe``.  In the band of ``fwd_keep_pipe_packed``
 # (sm_107a, past 8192 rows per SM), a program of packed rows only, a broadcast
 # runs the band of ``STRIDED_FORWARD_BANDS`` (the plain forward), and one
 # token runs it, passed the token stride ``H * 128``.
@@ -5241,7 +5249,6 @@ HOST_KEEP_CASES = [
     (arch, per_sm, layout, role)
     for arch, per_sm, keep, broadcast in (
         ("sm_100a", 59, "fwd_keep_pipe", "fwd_pipe"),
-        ("sm_103a", 2500, "fwd_keep_pipe", "fwd_pipe"),
         ("sm_107a", 8193, "fwd_keep_pipe_packed", "fwd"),
     )
     for layout, role in (
@@ -5252,7 +5259,7 @@ HOST_KEEP_CASES = [
         ("broadcast", broadcast),
     )
 ]
-HOST_KEEP_SM_COUNTS = {"sm_100a": (16, 148), "sm_103a": (16, 152), "sm_107a": (4, 16)}
+HOST_KEEP_SM_COUNTS = {"sm_100a": (16, 148), "sm_107a": (4, 16)}
 
 
 @pytest.mark.parametrize(("arch", "per_sm", "layout", "role"), HOST_KEEP_CASES)
@@ -5291,13 +5298,15 @@ def test_forward_of_rows_broadcast_over_tokens_keeps_its_program_in_the_keep_ban
 
 def test_new_pipelined_forward_records_keep_their_base_grid_rule():
     """Each pipelined forward of 0.2.17 (``NEW_PIPE_BASES``) is routed on the
-    architectures of its base and launches as its base (128 threads, the
-    same arguments): on sm_100a and sm_103a ``fwd_pipe``'s grid rule, both
-    cuts; on sm_107a ``fwd_keep_pipe_packed`` ``fwd_pipe_packed``'s (packed
-    rows only, no cut of rows not read as packed) and ``fwd_layout_pipe`` and
-    ``fwd_layout_keep_pipe`` that rule with the cut of rows not read as packed
-    of a program of rows of any layout (400 rows per SM); none takes a
-    workspace, and its grid is its base's at the rows of
+    architectures of its entry there (``fwd_keep_pipe`` and
+    ``fwd_layout_keep_pipe`` not on sm_103a), built for those it is routed on,
+    and launches as its base (128 threads, the same arguments): on sm_100a and
+    sm_103a ``fwd_pipe``'s grid rule, both cuts, keyed by the record's
+    architectures; on sm_107a ``fwd_keep_pipe_packed`` ``fwd_pipe_packed``'s
+    (packed rows only, no cut of rows not read as packed) and
+    ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` that rule with the cut of
+    rows not read as packed of a program of rows of any layout (400 rows per
+    SM); none takes a workspace, and its grid is its base's at the rows of
     ``PIPE_FORWARD_GRIDS`` and ``STRIDED_PIPE_FORWARD_GRIDS`` (rows read as
     packed or not)."""
     for role, bases in NEW_PIPE_BASES.items():
@@ -5309,13 +5318,22 @@ def test_new_pipelined_forward_records_keep_their_base_grid_rule():
             record = loader.MODULES[name]
             base = loader.MODULES[loader.ROUTES[arch][bases[arch]]]
             assert record["role"] == role and arch in record["arches"], (role, arch)
+            routed = [a for a in loader.ARCHES if loader.ROUTES[a].get(role) == name]
+            assert record["arches"] == routed, (role, arch, record["arches"])
             assert record["logical"] == base["logical"], (role, arch)
             assert record["arg_plan"] == base["arg_plan"], (role, arch)
             assert record["launch"] == base["launch"], (role, arch)
             assert record["launch"]["block"] == (128, 1, 1)
             assert loader.workspace_bytes(name) == 0, (role, arch)
             rule = dict(record["grid_rule"])
-            want = dict(base["grid_rule"])
+            want = {
+                key: (
+                    {a: cut for a, cut in value.items() if a in record["arches"]}
+                    if key in (CUT, STRIDED_CUT)
+                    else value
+                )
+                for key, value in base["grid_rule"].items()
+            }
             layout_walk = role in ("fwd_layout_pipe", "fwd_layout_keep_pipe")
             if layout_walk and arch == "sm_107a":
                 assert STRIDED_CUT not in want
@@ -6931,8 +6949,8 @@ def test_no_entry_point_takes_a_mode_keyword(launches):
 def _forward_rows() -> dict[str, tuple[int, int, str]]:
     """One shape of each forward module this device's bands run: the first
     row of the module's first band of ``FORWARD_BANDS`` (contiguous rows),
-    else of ``PROJECTION_FORWARD_BANDS`` (one head, ``z`` sliced from a wider
-    projection), of ``HEAD_MAJOR_FORWARD_BANDS`` where the architecture has
+    else of ``PROJECTION_FORWARD_BANDS`` (two heads, ``z`` sliced from a
+    wider projection), of ``HEAD_MAJOR_FORWARD_BANDS`` where the architecture has
     one (two heads, head-major) or of ``STRIDED_FORWARD_BANDS`` (one head,
     ``x`` and ``z`` both sliced), at least 2 tokens so that the rows of the
     last three are not packed: ``{module: (T, H, make's layout)}``."""
@@ -6942,7 +6960,7 @@ def _forward_rows() -> dict[str, tuple[int, int, str]]:
     found: dict[str, tuple[int, int, str]] = {}
     for layout, heads, bands in (
         ("contiguous", 1, loader.FORWARD_BANDS[arch]),
-        ("projection", 1, loader.PROJECTION_FORWARD_BANDS[arch]),
+        ("projection", 2, loader.PROJECTION_FORWARD_BANDS[arch]),
         ("head_major", 2, loader.HEAD_MAJOR_FORWARD_BANDS.get(arch, ())),
         ("both_sliced", 1, loader.STRIDED_FORWARD_BANDS[arch]),
     ):
