@@ -268,6 +268,7 @@ kernel_cake_rmsnorm_det_train_6554d4eb4362141cb058(__nv_bfloat16* __restrict__ g
                     xw[5] = reinterpret_cast<const uint32_t*>(&_smem_raw_6)[1];
                     xw[6] = reinterpret_cast<const uint32_t*>(&_smem_raw_6)[2];
                     xw[7] = reinterpret_cast<const uint32_t*>(&_smem_raw_6)[3];
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     mbarrier_arrive(empty_addr + ((int)((unsigned int)k % 3)) * 8);
                     int _min_7 = (((tile + n_chunks) * 8 + wr) < (T - 1) ? ((tile + n_chunks) * 8 + wr) : (T - 1));
                     rn[0] = r[_min_7];

@@ -295,6 +295,7 @@ kernel_cake_rmsnorm_train_0d5dc239536f113f4926(__nv_bfloat16* __restrict__ g, __
                 xw[5] = reinterpret_cast<const uint32_t*>(&_smem_raw_5)[1];
                 xw[6] = reinterpret_cast<const uint32_t*>(&_smem_raw_5)[2];
                 xw[7] = reinterpret_cast<const uint32_t*>(&_smem_raw_5)[3];
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(empty_addr + ((int)((unsigned int)k % 3)) * 8);
                 rr[0] = 0.0f;
                 if (nval > rg) {

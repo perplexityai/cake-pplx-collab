@@ -71,15 +71,11 @@ first eight hex digits of the program name.
 | `bwd_h1024` | (64, 128] | 5ad5f096 | column task | - | - |
 | `bwd_h1024` | (128, 1024] | 89fa3e96 | column task | - | - |
 | `bwd_h1024` | (1024, 8192] | 0c581a13 | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_h1024` | (8192, 12288] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_h1024` | (12288, 24576] | 5e32dd88 | plain | row-strided slots | e21352ee (chain, column-split) |
-| `bwd_h1024` | (24576, inf) | 4294c01f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (8192, inf) | acd331db | plain | row-strided slots | 176f79f9 (chain) |
 | `bwd_w32_h1024` | (0, 1] | 153f8119 | column task | - | - |
 | `bwd_w32_h1024` | (1, 1024] | 744d7429 | column task | - | - |
 | `bwd_w32_h1024` | (1024, 8192] | 561bea88 | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_w32_h1024` | (8192, 12288] | ba8feeec | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_w32_h1024` | (12288, 24576] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
-| `bwd_w32_h1024` | (24576, inf) | 58305d0f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (8192, inf) | b201ba67 | plain | row-strided slots | 176f79f9 (chain) |
 | `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
 | `bwd_h128` | (1024, 2048] | 401a018c | column task | - | - |
 | `bwd_h128` | (2048, 11201] | d197bcc3 | plain | row-strided slots, 8 SMs left out | 096e5efb (chain, column-split) |
@@ -88,7 +84,7 @@ first eight hex digits of the program name.
 | `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
 | `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
 | `bwd_h1280` | (512, 4096] | 12bbedff | plain | row-strided slots | 59474336 (chain) |
-| `bwd_h1280` | (4096, inf) | c646e097 | plain | row-strided slots | 59474336 (chain) |
+| `bwd_h1280` | (4096, inf) | 72a918b0 | plain | row-strided slots | 326ac9f3 (chain) |
 | `bwd_h1536` | (0, 1] | f6233ff8 | column task | - | - |
 | `bwd_h1536` | (1, 768] | 4176a24f | column task | - | - |
 | `bwd_h1536` | (768, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 9b727c2c (tree) |
@@ -166,15 +162,13 @@ first eight hex digits of the program name.
 | `bwd_h1024` | (2048, 4096] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
 | `bwd_h1024` | (4096, 8192] | 5e32dd88 | plain | row-strided slots | 4830a91c (chain, column-split) |
 | `bwd_h1024` | (8192, 12288] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_h1024` | (12288, 24576] | 5e32dd88 | plain | row-strided slots | e21352ee (chain, column-split) |
-| `bwd_h1024` | (24576, inf) | 4294c01f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (12288, inf) | acd331db | plain | row-strided slots | 176f79f9 (chain) |
 | `bwd_w32_h1024` | (0, 1] | 153f8119 | column task | - | - |
 | `bwd_w32_h1024` | (1, 1024] | 744d7429 | column task | - | - |
 | `bwd_w32_h1024` | (1024, 1536] | ba8feeec | plain | row-strided slots | 3b5dc80e (chain) |
 | `bwd_w32_h1024` | (1536, 2048] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
-| `bwd_w32_h1024` | (2048, 16384] | ba8feeec | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_w32_h1024` | (16384, 24576] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
-| `bwd_w32_h1024` | (24576, inf) | 58305d0f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (2048, 12288] | ba8feeec | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (12288, inf) | b201ba67 | plain | row-strided slots | 176f79f9 (chain) |
 | `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
 | `bwd_h128` | (1024, 2048] | 401a018c | column task | - | - |
 | `bwd_h128` | (2048, 12288] | d197bcc3 | plain | row-strided slots, 8 SMs left out | 096e5efb (chain, column-split) |

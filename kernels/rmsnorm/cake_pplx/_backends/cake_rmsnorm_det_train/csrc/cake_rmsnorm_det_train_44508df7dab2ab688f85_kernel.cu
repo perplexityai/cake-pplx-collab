@@ -1062,6 +1062,7 @@ kernel_cake_rmsnorm_det_train_44508df7dab2ab688f85(__nv_bfloat16* __restrict__ g
         xw[5] = reinterpret_cast<const uint32_t*>(&_smem_raw_85)[1];
         xw[6] = reinterpret_cast<const uint32_t*>(&_smem_raw_85)[2];
         xw[7] = reinterpret_cast<const uint32_t*>(&_smem_raw_85)[3];
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         float dq = 0.0f;
         dq = __fmaf_rn(__uint_as_float(gw[0] << 16) * __uint_as_float(ww[0] << 16), __uint_as_float(xw[0] << 16), dq);
         dq = __fmaf_rn(__uint_as_float(gw[0] & 4294901760u) * __uint_as_float(ww[0] & 4294901760u), __uint_as_float(xw[0] & 4294901760u), dq);

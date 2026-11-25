@@ -536,6 +536,7 @@ kernel_cake_rmsnorm_det_train_c145ef195d7aeb04f242(__nv_bfloat16* __restrict__ g
                     xw[(v_1 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_19)[2];
                     xw[(v_1 * 4) + 3] = reinterpret_cast<const uint32_t*>(&_smem_raw_19)[3];
                 }
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 float dq = 0.0f;
                 #pragma unroll
                 for (int v_2 = 0; v_2 < 2; v_2++) {
