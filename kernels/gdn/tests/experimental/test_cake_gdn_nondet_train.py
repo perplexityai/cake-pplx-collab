@@ -336,7 +336,8 @@ def _judge(record_property, seed: int, draw) -> TierJudge:
     inputs from ``s``, launches the package and returns :func:`_judged` entries.  Every value is held to its contract
     (shape, finite where the oracle is finite) and the rest judged against the tier; the random state is restored
     afterwards.  Fails the test on any contract break or failure of the judge (an output not judged on every draw,
-    draws with the same oracle values); a missed tier is recorded (a ``FAIL`` ``TIER`` line) and does not fail it."""
+    draws with the same oracle values, a gross deviation); a missed tier is recorded (a ``FAIL`` ``TIER`` line) and
+    does not fail it."""
     judge, failures = TierJudge(), []
     cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     state = (random.getstate(), torch.get_rng_state())

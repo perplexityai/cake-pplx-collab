@@ -38,10 +38,13 @@ norm too.  A tier whose naive value is not finite where the oracle is finite is
 not met.
 
 The verdict is record-only (the owner's ruling for this family): an output that
-misses the tier does not fail its test.  Each test records every output's
-verdict with pytest's ``record_property`` (:meth:`TierJudge.record`), and the
-family's ``conftest.py`` prints one ``TIER`` line per recorded output in the
-terminal summary, for passing tests too::
+misses the tier does not fail its test.  A gross deviation does (the owner's
+ruling): an output whose largest error over the draws, in the L2 or the max
+norm, is more than :data:`GROSS` times the tier's largest error (finite and
+above 0) fails its test (:meth:`TierJudge.failures`).  Each test records every
+output's verdict with pytest's ``record_property`` (:meth:`TierJudge.record`),
+and the family's ``conftest.py`` prints one ``TIER`` line per recorded output in
+the terminal summary, for passing tests too::
 
     from .cake_naive import summarize_tiers
 
@@ -59,7 +62,7 @@ table output equals the oracle exactly.  A case whose inputs do not change
 with the seed (all zeros, a fixed pattern of infs and NaNs) is held to its
 contract only (:func:`contract`), as one input judges no accuracy.  A broken
 contract fails the test, and so does a judge that did not see an output on
-every draw or saw two draws with the same oracle values
+every draw, saw two draws with the same oracle values or saw a gross deviation
 (:meth:`TierJudge.failures`).
 
 The tests never compare a deterministic kernel with a non-deterministic one,
@@ -101,6 +104,9 @@ PAIRED_NORMS = ("max",)
 #: draw by draw in every norm (:func:`effective_elements`): one effective element, whose median and largest error
 #: only say how one rounding fell on each draw (the owner's ruling).
 PAIRED_EFFECTIVE = 1
+#: A gross deviation, which fails the test (the owner's ruling): the output's largest error over the draws, in the L2
+#: or the max norm, more than this times the tier's largest error, where that is finite and above 0.
+GROSS = 10.0
 #: The seed of draw ``j`` of a case of seed ``base`` is ``base + j * DRAW_SEED_STRIDE``.
 DRAW_SEED_STRIDE = 1_000_003
 
@@ -250,10 +256,10 @@ class TierJudge:
     inputs, judged against the naive BF16 tier.
 
     Call :meth:`add` once per output and draw, then :meth:`failures` (empty
-    when every output was judged on every draw and no two draws had the same
-    oracle values), and record the verdicts with :meth:`record` or
-    :meth:`lines`.  A missed tier is recorded, not a failure; :meth:`misses`
-    gives the reason for each output that missed it."""
+    when every output was judged on every draw, no two draws had the same
+    oracle values and no output deviated grossly), and record the verdicts with
+    :meth:`record` or :meth:`lines`.  A missed tier is recorded, not a failure;
+    :meth:`misses` gives the reason for each output that missed it."""
 
     def __init__(self, draws: int = DRAWS) -> None:
         if draws < DRAWS:
@@ -371,13 +377,26 @@ class TierJudge:
 
     def failures(self) -> list[str]:
         """The judge's own failures, which fail the test: one message per output
-        not judged on every draw, and one per pair of draws whose oracle values
-        are the same.  A missed tier is not one of them (:meth:`misses`)."""
+        not judged on every draw, one per output and norm whose largest error
+        over the draws is more than :data:`GROSS` times the tier's largest error
+        (a gross deviation; not judged where the tier's largest error is not
+        finite or is 0), and one per pair of draws whose oracle values are the
+        same.  A missed tier is not one of them (:meth:`misses`)."""
         found = []
         for name in dict.fromkeys(name for name, _ in self.errors):
             recorded = sorted(self.errors[(name, NORMS[0])])
             if recorded != list(range(self.draws)):
                 found.append(f"{name}: judged on {len(recorded)} of {self.draws} draws")
+        (tier,) = TIERS
+        for name, verdict in self.verdicts().items():
+            for norm, errors in verdict["norms"].items():
+                ours, bound = errors["ours"][1], errors[tier]
+                if bound is not None and bound[1] > 0 and not ours <= GROSS * bound[1]:
+                    found.append(
+                        f"{name}: largest {norm} error {ours:.6g} over {verdict['draws']} draws, "
+                        f"x{ours / bound[1]:.4g} the tier's {bound[1]:.6g}: more than {GROSS:g} x "
+                        "(a gross deviation)"
+                    )
         seen: dict[tuple, int] = {}
         for draw, prints in sorted(self.prints.items()):
             key = tuple(sorted(prints.items()))
