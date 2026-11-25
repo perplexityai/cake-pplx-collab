@@ -505,13 +505,15 @@ def test_the_wy_stage_follows_the_architecture() -> None:
 
 def test_the_stages_that_read_v_by_rows_take_its_pitch() -> None:
     # wy_tc2, wy_bwd, the package tail and the fixed-order cluster tails read v in place through its token pitch in
-    # heads (their last parameter); the FP32-partial cluster tails take v's token-row stride in elements
+    # heads (their last parameter); the FP32-partial cluster tails take v's token-row stride in elements; a pv_tf32
+    # stage reads v as the stage it is named after
     in_place = ("wy_tc2", "wy_bwd", "wy_bwd_bf16", "tail", "tail_bf16", "tail_g2", "tail_g2_bf16", "tail_g3",
                 "tail_g3_bf16")  # fmt: skip
     for stage in cake_jit.STAGES:
         args = cake_chain.LAUNCH_ARGS[stage]
-        assert ("v_row_heads" in args) == (stage in in_place), stage
-        if stage in in_place:
+        base = stage.removesuffix("_pv_tf32")
+        assert ("v_row_heads" in args) == (base in in_place), stage
+        if base in in_place:
             assert args[-1] == "v_row_heads" and "v" in args, stage
     for stage in cake_chain.F32X_TAILS:
         assert "v_row_stride" in cake_chain.LAUNCH_ARGS[stage]
