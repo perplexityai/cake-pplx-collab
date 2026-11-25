@@ -4794,6 +4794,18 @@ def _a_extent_of(device: torch.device, chunk: int, backend: str) -> Optional[tup
     return (chunk, arch) if arch and _a_extent_bounds(chunk, arch)[2] else None
 
 
+def _count_extent(
+    labels: torch.Tensor, device: torch.device, chunk: int, backend: str
+) -> Optional[tuple[int, str]]:
+    """The ``extent`` an eager log-probability call passes to its count (:func:`valid_rows`): :func:`_a_extent_of`
+    where the count runs on the host -- ``labels`` on CUDA, at most :data:`HOST_COUNT_MAX_ROWS` rows, the test of
+    :func:`valid_rows` -- the only count that pads its index; else None, without the lookup (a count on the device
+    pads nothing)."""
+    if int(labels.numel()) <= HOST_COUNT_MAX_ROWS and labels.is_cuda:
+        return _a_extent_of(device, chunk, backend)
+    return None
+
+
 def make_plan(
     problem: Problem,
     *,
@@ -5657,7 +5669,10 @@ def _bind_a_extents(
     the whole buffer, and ``t["x_c"]`` / ``t["logits"]`` its first ``rows`` rows (the chunk's, as without the
     padding).  ``zero``: the rows from ``rows`` on are zeroed here, once per buffer -- no launch writes them (the
     gather, the logits GEMMs' ``C`` views and the row kernels cover the first ``rows``) -- except the gather buffer's
-    when the call's padded index is bound (``t["row_index_a"]``, :func:`_bind_row_index`): its gather writes them."""
+    when the call's padded index is bound (``t["row_index_a"]``, :func:`_bind_row_index`): its gather writes them.
+    A plan without either extent binds nothing."""
+    if not (plan.a_rows or plan.dx_a_rows):
+        return
     for name, padded, pad in (
         ("x_c", "x_a", plan.a_rows),
         ("logits", "logits_a", plan.dx_a_rows),
@@ -5683,9 +5698,14 @@ def _gather_values(t: dict[str, Any], plan: Plan, row0: int, rows_c: int) -> tup
     """``(idx, out)`` of chunk ``(row0, rows_c)``'s row gather: the chunk's index entries into the gather buffer's first
     ``rows_c`` rows, or with a bound padded index (:func:`_bind_row_index`) and the padded gather buffer
     (``t["x_a"]``, :func:`_bind_a_extents`) that index into the whole buffer (one chunk: ``row0 == 0``)."""
-    idx_a, x_a = t.get("row_index_a"), t.get("x_a")
-    if plan.a_rows and idx_a is not None and x_a is not None and int(x_a.shape[0]) == int(idx_a.numel()):
-        return idx_a, x_a
+    if plan.a_rows:
+        idx_a, x_a = t.get("row_index_a"), t.get("x_a")
+        if (
+            idx_a is not None
+            and x_a is not None
+            and int(x_a.shape[0]) == int(idx_a.numel())
+        ):
+            return idx_a, x_a
     return t["row_index"][row0 : row0 + rows_c], t["x_c"][:rows_c]
 
 
@@ -6684,7 +6704,11 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     base = base_stage(stage) if stage in GEMM_STAGES else stage
     logits = t["logits"]
     if base in LOGITS_BASES or base == "gemm_dw_acc" or base in DW_CAST_STAGES:
-        x_chunk = t["x_c"][:rows_c] if plan.compact else t["X"][row0:stop]
+        # compacted: the gather buffer itself when the chunk's rows are all of it (a one-chunk plan's, the padded
+        # plan's ``x_c`` view included), as :func:`stage_values`' ``x_c[:rows_c]`` binds it (:func:`_same_view`)
+        x_chunk = (
+            _chunk_rows(t["x_c"], 0, rows_c) if plan.compact else t["X"][row0:stop]
+        )
         if t.get("x_last") is not None and index == plan.num_chunks - 1:
             x_chunk = t["x_last"]
     if base in LOGITS_BASES:
@@ -11528,11 +11552,16 @@ def forward_logprob(
     elif keep is not None and compact:
         # the one-chunk kept logits' count keeps its valid-row mask for the kept backward (the same count)
         row_index, row_valid = valid_rows(
-            labels, mask=True, extent=_a_extent_of(X.device, problem.chunk, backend)
+            labels,
+            mask=True,
+            extent=_count_extent(labels, X.device, problem.chunk, backend),
         )
     else:
         row_index = (
-            valid_row_index(labels, extent=_a_extent_of(X.device, problem.chunk, backend))
+            valid_row_index(
+                labels,
+                extent=_count_extent(labels, X.device, problem.chunk, backend),
+            )
             if compact
             else None
         )
@@ -11767,7 +11796,9 @@ def backward_logprob(
         else:
             row_index, row_valid = (
                 valid_rows(
-                    labels, mask=fused_dx, extent=_a_extent_of(X.device, problem.chunk, backend)
+                    labels,
+                    mask=fused_dx,
+                    extent=_count_extent(labels, X.device, problem.chunk, backend),
                 )
                 if compact
                 else (None, None)
@@ -12488,7 +12519,9 @@ def forward_logprob_keep(
         elif compact:
             # the valid-row mask of the count is kept for the kept backward (the same count)
             row_index, row_valid = valid_rows(
-                labels, mask=True, extent=_a_extent_of(X.device, problem.chunk, backend)
+                labels,
+                mask=True,
+                extent=_count_extent(labels, X.device, problem.chunk, backend),
             )
         else:
             row_index = None
@@ -12657,7 +12690,9 @@ def backward_logprob_keep(
         _labels_c = None
         row_index, row_valid = (
             valid_rows(
-                labels, mask=fused_dx, extent=_a_extent_of(X.device, problem.chunk, backend)
+                labels,
+                mask=fused_dx,
+                extent=_count_extent(labels, X.device, problem.chunk, backend),
             )
             if compact
             else (None, None)

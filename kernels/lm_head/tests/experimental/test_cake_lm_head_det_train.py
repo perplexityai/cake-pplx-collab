@@ -5997,6 +5997,100 @@ def test_a_extent_bounds(monkeypatch):
     assert bounds(4096, "sm_107a") == (1, 182, 256)
 
 
+def test_a_extent_lookup_only_for_a_host_count(monkeypatch):
+    """The eager log-probability forms look the padded A extent up (:func:`_a_extent_of`) only for a count that can
+    pad its index -- a host count: ``labels`` on CUDA and at most ``HOST_COUNT_MAX_ROWS`` rows, the test of
+    :func:`valid_rows` (:func:`_count_extent`) -- never for a longer call, whose count runs on the device and pads
+    nothing.  The rule on stand-in labels (on CUDA or not, at and past the limit); the forward and the recounting
+    backward on the reference backend on the host layer's device at ``T`` 16 and ``HOST_COUNT_MAX_ROWS + 1`` (a
+    lookup each at 16 rows when that device is CUDA); and every eager form counts through the rule."""
+    real = cake_backend._a_extent_of
+    calls: list = []
+
+    def spy(device, chunk, backend):
+        calls.append((device.type, chunk, backend))
+        return real(device, chunk, backend)
+
+    monkeypatch.setattr(cake_backend, "_a_extent_of", spy)
+    limit = cake_backend.HOST_COUNT_MAX_ROWS
+    cpu = torch.device("cpu")
+    rule_cases = ((1, True, 1), (limit, True, 1), (limit + 1, True, 0), (16, False, 0))
+    for T, on_cuda, want in rule_cases:
+        calls.clear()
+        labels = SimpleNamespace(is_cuda=on_cuda, numel=lambda T=T: T)
+        assert cake_backend._count_extent(labels, cpu, 4096, "cake") is None
+        assert len(calls) == want, (T, on_cuda, calls)
+    for T in (16, limit + 1):
+        inp = _host_inputs(T, ignore_frac=0.25)
+        kw = dict(chunk_size=4096, backend="reference", compact_rows=True)
+        calls.clear()
+        fwd = cake_backend.forward_logprob(inp.X, inp.W, inp.labels, **kw)
+        assert fwd.row_index is not None
+        cake_backend.backward_logprob(
+            inp.X, inp.W, inp.labels, fwd.lse, inp.dlogp, **kw
+        )
+        want = 2 if (DEV.type == "cuda" and T <= limit) else 0
+        assert len(calls) == want, (T, calls)
+    for fn in (
+        cake_backend.forward_logprob,
+        cake_backend.backward_logprob,
+        cake_backend.forward_logprob_keep,
+        cake_backend.backward_logprob_keep,
+    ):
+        src = inspect.getsource(fn)
+        assert "_a_extent_of(" not in src and "_count_extent(" in src, fn.__name__
+
+
+def test_a_extent_slot_values_bind_the_whole_buffers(monkeypatch):
+    """The per-call slots (:func:`_slot_values`) of a compacted one-chunk runner bind the chunk buffers themselves, no
+    view formed: with the padded A extents (sm_107a's, given by a wrapped ``make_plan`` to the reference backend's
+    runner) every logits GEMM's ``A`` is the padded gather buffer ``t["x_a"]`` and the weight-gradient GEMMs' ``B`` is
+    ``t["x_c"]`` (its first rows); without them the logits GEMMs' ``A`` is ``t["x_c"]`` too.  Each agrees with
+    :func:`stage_values` (:func:`_check_slot_values`)."""
+    real = cake_backend.make_plan
+
+    def padded(problem, **kw):
+        p = real(problem, **kw)
+        if p.compact and p.num_chunks == 1 and not p.hidden_count:
+            a = cake_backend.a_extent_rows(p.rows, problem.chunk, "sm_107a")
+            dx = cake_backend.a_extent_rows(p.rows, problem.chunk, "sm_107a", dx=True)
+            p = replace(p, a_rows=a, dx_a_rows=0 if not p.need_dx else dx)
+        return p
+
+    gemm = ["A", "B", "C", "STATS_OUT", "WS"]
+    inp = _host_inputs(40, ignore_frac=0.25)
+    rows = int((inp.labels >= 0).sum())
+    for entry in ("loss", "logprob"):
+        kw = dict(chunk_size=4096, backend="reference", compact_rows=True, entry=entry)
+        if entry == "loss":
+            kw.update(objective="ce", loss_div=inp.loss_div)
+        else:
+            kw.update(dlogp=inp.dlogp)
+        for pad in (False, True):
+            if pad:
+                monkeypatch.setattr(cake_backend, "make_plan", padded)
+            r = prepare_lm_head_det_loss(inp.X, inp.W, inp.labels, **kw)
+            monkeypatch.setattr(cake_backend, "make_plan", real)
+            plan, t = r.plan, r.tensors
+            assert plan.num_chunks == 1 and plan.a_rows == (256 if pad else 0)
+            assert t["x_c"].shape[0] == rows, (entry, pad)
+            seen = set()
+            for key in r.values:
+                stage = key[0]
+                if stage not in cake_backend.GEMM_STAGES:
+                    continue
+                base = cake_backend.base_stage(stage)
+                values = cake_backend._slot_values(stage, t, plan, key[1])
+                if base in cake_backend.LOGITS_BASES:
+                    assert values["A"] is (t["x_a"] if pad else t["x_c"]), key
+                    seen.add("logits")
+                elif base == "gemm_dw_acc" or base in cake_backend.DW_CAST_STAGES:
+                    assert values["B"] is t["x_c"], key
+                    seen.add("dw")
+                cake_backend._check_slot_values(key, t, plan, gemm)
+            assert seen == {"logits", "dw"}, (entry, pad, seen)
+
+
 _HIDDEN_COUNT_HOST_CASES = [  # (T, C, objective, entry, ignored fraction): three chunks + tail, T < C, T = C + 1, T = C
     (37, 16, "ce", "loss", "five_percent"),
     (37, 16, "policy", "loss", "half"),
