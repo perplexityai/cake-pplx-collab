@@ -376,7 +376,8 @@ class HostInputs:
     """CPU inputs of one call: BF16 ``q_latent [T, H, 512]``, ``q_rope [T, H, 64]`` (``packed``: views of one
     ``[T, H, 576]`` tensor), ``kv_latent [S, 512]``, ``k_rope [S, 64]``, int32 ``indices [T, K]`` (row 1 without a
     valid slot when ``T > 1``, ``-1`` and ``>= S`` slots elsewhere), ``topk_length [T]``, ``dout [T, H, 512]``
-    (``head_major``: the ``[T, H, 512]`` view of an ``[H, T, 512]`` buffer) and a backward's ``lse [T, H]`` (finite;
+    (``head_major``: the ``[T, H, 512]`` view of an ``[H, T, 512]`` buffer; ``packed_dout``: channels ``0:512`` of
+    a ``[T, H, 576]`` buffer, head stride 576, dense over its rows) and a backward's ``lse [T, H]`` (finite;
     ``-inf`` on the rows without a valid slot)."""
 
     q_latent: torch.Tensor
@@ -410,7 +411,10 @@ def host_inputs(
     seed: int = 0,
     packed: bool = False,
     head_major: bool = False,
+    packed_dout: bool = False,
 ) -> HostInputs:
+    if head_major and packed_dout:
+        raise ValueError("dout is head-major or a packed slice, not both")
     gen = torch.Generator().manual_seed(seed)
 
     def randn(*shape):
@@ -429,11 +433,12 @@ def host_inputs(
     if T > 1:
         indices[1] = -1
     topk_length = torch.full((T,), K, dtype=torch.int32)
-    dout = (
-        randn(heads, T, D_LATENT).permute(1, 0, 2)
-        if head_major
-        else randn(T, heads, D_LATENT)
-    )
+    if head_major:
+        dout = randn(heads, T, D_LATENT).permute(1, 0, 2)
+    elif packed_dout:
+        dout = randn(T, heads, D_QK)[..., :D_LATENT]
+    else:
+        dout = randn(T, heads, D_LATENT)
     lse = torch.randn(T, heads, generator=gen)
     if T > 1:
         lse[1] = -math.inf
@@ -644,6 +649,7 @@ def _case_inputs(case: dict) -> HostInputs:
         seed=case.get("seed", 0),
         packed=case.get("packed", False),
         head_major=case.get("head_major", False),
+        packed_dout=case.get("packed_dout", False),
     )
 
 

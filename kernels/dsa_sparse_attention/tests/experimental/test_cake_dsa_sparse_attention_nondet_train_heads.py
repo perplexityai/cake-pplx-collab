@@ -148,6 +148,14 @@ HOST_CASES = {
     "runner_head_major_passes2_no_olo": dict(
         entry="runner", head_major=True, key_passes=2, with_o_lo=False
     ),
+    # a packed-slice dout (head stride 576, dense over its rows): read in place at every head count
+    "bwd_packed_dout": dict(entry="backward", packed_dout=True),
+    "bwd_packed_dout_passes3_chunks": dict(
+        entry="backward", packed_dout=True, T=40, S=96, key_passes=3, token_chunk=16
+    ),
+    "runner_packed_dout_no_olo": dict(
+        entry="runner", packed_dout=True, with_o_lo=False
+    ),
 }
 
 
@@ -160,6 +168,7 @@ def _host_case_inputs(case, heads):
         seed=heads,
         packed=case.get("packed", False),
         head_major=case.get("head_major", False),
+        packed_dout=case.get("packed_dout", False),
     )
 
 
@@ -1107,9 +1116,10 @@ def test_packed_views_head_major_dout_and_lengths_heads(with_o_lo, record_proper
     """At 96 query heads: ``q_latent`` / ``q_rope`` as views of a packed ``[T, 96, 576]`` query and ``kv`` of a
     packed ``[S, 576]`` row; the head-major ``dout`` an output projection hands back (``[T, 96, 512]`` view of
     ``[96, T, 512]``), which the eager backward and a prepared runner's step (one pass, and two forced key passes
-    where the program registers them) copy into their dense workspace ``dout`` first; caller lengths that cut rows
-    (0 and 3 included) and the forward deriving the lengths into the caller's vector -- every call judged against
-    the problem of the lengths it used."""
+    where the program registers them) copy into their dense workspace ``dout`` first, and a packed-slice ``dout``
+    (channels ``0:512`` of a ``[T, 96, 576]`` buffer, NaN past them), which both read in place; caller lengths that
+    cut rows (0 and 3 included) and the forward deriving the lengths into the caller's vector -- every call judged
+    against the problem of the lengths it used."""
     _require_heads(96, backward=True)
     passes = (
         (1, 2) if set(KEY_PASS_STAGES) <= set(cake_jit.registered_stages()) else (1,)
@@ -1160,6 +1170,35 @@ def test_packed_views_head_major_dout_and_lengths_heads(with_o_lo, record_proper
             runs[f"runner {p} pass"] = _rope_outputs(
                 (runner.out, runner.lse, runner.o_lo), runner.step()
             )
+        # the packed-slice dout: dense over its rows (token stride 96 head strides), read in place at head stride 576
+        wide = torch.full(
+            (inp.total_q, 96, D_QK), float("nan"), dtype=torch.bfloat16, device="cuda"
+        )
+        wide[..., :D_LATENT].copy_(inp.dout)
+        packed_dout = wide[..., :D_LATENT]
+        runs["packed dout eager"] = _rope_outputs(
+            grads=cake_backend.backward(
+                *views,
+                inp.idx_global,
+                out,
+                o_lo,
+                lse,
+                packed_dout,
+                topk_length=lengths,
+                softmax_scale=SCALE,
+            )
+        )
+        runner = prepare_dsa_train(
+            *views,
+            inp.idx_global,
+            dout=packed_dout,
+            topk_length=lengths,
+            softmax_scale=SCALE,
+        )
+        assert "dout_copy" not in runner.layout
+        runs["packed dout runner"] = _rope_outputs(
+            (runner.out, runner.lse, runner.o_lo), runner.step()
+        )
         filled = torch.empty(inp.total_q, dtype=torch.int32, device="cuda")
         derived = cake_backend.forward(
             *views,
