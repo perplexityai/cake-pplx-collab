@@ -3000,7 +3000,7 @@ def test_situ_launchers_pass_exactly_the_registry_arguments(monkeypatch):
     assert calls == []
     with pytest.raises(ValueError, match="SiTU-GLU forward is built without a SwiGLU limit"):
         MoKForward(True, situ_glu=True)
-    with pytest.raises(ValueError, match="SiTU-GLU forward is built without a SwiGLU limit"):
+    with pytest.raises(ValueError, match="SiTU-GLU recompute is built without a SwiGLU limit"):
         MoKRecompute(True, situ_glu=True)
     with pytest.raises(ValueError, match="SiTU-GLU backward is built with the direct router-weight gradient"):
         MoKBackward(False, True, situ_glu=True)
@@ -3089,7 +3089,7 @@ def test_situ_call_refusals_come_before_device_work(monkeypatch):
         None, None, schedule, x, scores, *kw.pop("s", none), *kw.pop("r", routed), **kw
     )
     recompute = lambda **kw: functional.recompute_forward_context(  # noqa: E731
-        None, None, schedule, x, kw.pop("s", none)[0], kw.pop("r", routed)[0], None, routed[1], **kw
+        None, None, schedule, x, *kw.pop("s", none)[:2], *kw.pop("r", routed)[:2], **kw
     )
     backward = lambda **kw: functional.backward(  # noqa: E731
         None, None, schedule, context, x, x, scores, *kw.pop("s", none), *kw.pop("r", routed), **kw
@@ -4204,7 +4204,7 @@ def _situ_step(functional, config, workspace, p, accumulators, *, checkpointed, 
     if checkpointed:
         assert context is None
         context = functional.recompute_forward_context(
-            config, workspace, schedule, p["x"], None, routed[0], None, routed[1], **situ
+            config, workspace, schedule, p["x"], None, None, routed[0], routed[1], **situ
         )  # fmt: skip
     assert context.gate_shared is None and context.up_shared is None and context.hidden_shared is None
     grads = functional.backward(
@@ -4366,7 +4366,7 @@ def test_situ_group_checkpoint_without_reentrant():
         def backward(ctx, dy):
             x, scores = ctx.saved_tensors
             context = functional.recompute_forward_context(
-                config, workspace, schedule, x, None, routed[0], None, routed[1], **SITU
+                config, workspace, schedule, x, None, None, routed[0], routed[1], **SITU
             )  # fmt: skip
             grads = functional.backward(
                 config, workspace, schedule, context, dy.contiguous(), x, scores, None, None, None, *routed,

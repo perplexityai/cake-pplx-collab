@@ -36,6 +36,7 @@ import math
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.experimental._mok_reference import rand
 
 backend = cake_package("cake_mok_bf16", "backend")
 workspace_module = cake_package("cake_mok_bf16", "workspace")
@@ -64,7 +65,7 @@ def one_rank_ids(tokens, experts, topk, generator=None):
     """``[tokens, topk]`` int64 ids of this rank's ``experts`` (local ids, the one-GPU emulation's routes): a random
     permutation of the experts per token, its first ``topk``, or with ``topk > experts`` the whole permutation followed
     by its first ``topk - experts`` entries again (those routes of a token repeat an expert)."""
-    order = torch.rand(tokens, experts, generator=generator).argsort(-1)
+    order = rand(tokens, experts, generator=generator).argsort(-1)
     if topk <= experts:
         return order[:, :topk].contiguous()
     return torch.cat([order, order[:, : topk - experts]], dim=1).contiguous()
@@ -76,10 +77,10 @@ def two_rank_skew_ids(rows, experts, topk, generator=None, device=None):
     row.  Rank 0 receives ``experts * rows`` routes (the bound :func:`bound_multiplier` sizes), rank 1 the rest."""
     if not 0 < topk - experts <= experts:
         raise ValueError("two_rank_skew_ids needs experts < topk <= 2 * experts")
-    first = torch.rand(rows, experts, generator=generator).argsort(-1)
-    second = torch.rand(rows, experts, generator=generator).argsort(-1)[:, : topk - experts] + experts
+    first = rand(rows, experts, generator=generator).argsort(-1)
+    second = rand(rows, experts, generator=generator).argsort(-1)[:, : topk - experts] + experts
     ids = torch.cat([first, second], dim=1)
-    order = torch.rand(rows, topk, generator=generator).argsort(-1)
+    order = rand(rows, topk, generator=generator).argsort(-1)
     return ids.gather(1, order).int().to(device).contiguous()
 
 

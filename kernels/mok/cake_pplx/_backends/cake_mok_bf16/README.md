@@ -176,7 +176,7 @@ schedule = backend.build_schedule(workspace, config, ids, num_local_experts=loca
 y, _ = backend.forward(config, workspace, schedule, x, router_w, None, None, None,
                        *routed, save_context=False, **situ)
 context = backend.recompute_forward_context(
-    config, workspace, schedule, x, None, routed[0], None, routed[1], **situ)
+    config, workspace, schedule, x, None, None, routed[0], routed[1], **situ)
 dx, d_w, *routed_grads, _, _, _ = backend.backward(
     config, workspace, schedule, context, dy, x, router_w, None, None, None, *routed,
     weight_grad_accumulators=accumulators, **situ)
