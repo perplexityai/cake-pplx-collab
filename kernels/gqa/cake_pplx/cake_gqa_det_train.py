@@ -32,9 +32,11 @@ run to run, for one shape, one ``max_seqlen_k``, one workspace budget and the
 same host boundaries (given or not).
 The backward's main kernel sums dK and dV of each key block in tensor
 memory and stores dS^T into a workspace; dQ is a GEMM over that workspace.
-The backward runs in chunks that fit the workspace's ``budget_bytes`` (default
-16 GiB; the smallest chunk, one KV head and two key blocks, runs even past
-it); it raises no PyTorch determinism alert.  The interface matches the
+The backward runs in chunks that fit the workspace's ``budget_bytes`` (the
+smallest chunk, one KV head and two key blocks, runs even past it).  The
+default budget is 16 GiB, raised to ranges of 72 key blocks (at most 40 GiB)
+when one KV head's key range does not fit; a given budget is a hard bound.
+It raises no PyTorch determinism alert.  The interface matches the
 non-deterministic counterpart ``cake_pplx.cake_gqa_nondet_train``.
 
 A stable API (``@cake_api``; no ``ExperimentalWarning``) of thin
@@ -168,7 +170,7 @@ def cake_gqa_det(
     workspace : optional
         A workspace of :func:`cake_gqa_det_train_workspace`, reused across calls and shapes (grown, never
         shrunk; one stream at a time); autograd holds it by weak reference.  ``None``: the device's per-stream
-        default workspace.
+        default workspace (the default budget of :func:`cake_gqa_det_train_workspace`).
     return_lse : bool
         Also return the FP32 natural-log LSE ``[H_q, T_q]`` (no gradient flows through it).
     cu_seqlens_q_host, cu_seqlens_k_host : sequence of int or torch.Tensor, optional
@@ -372,9 +374,12 @@ def cake_gqa_det_train_workspace(
     device : torch.device, str or int, optional
         The CUDA device; ``None`` is the current device.
     budget_bytes : int, optional
-        The bound of one backward call's dS^T workspace; ``None`` is 16 GiB.  A call whose dS^T exceeds it runs in
-        chunks (at least one KV head and two key blocks per chunk, even past the budget).  The chunks set the dQ
-        rounding: one budget gives the same bits on every run.
+        The bound of one backward call's dS^T workspace.  A call whose dS^T exceeds it runs in chunks (at least one
+        KV head and two key blocks per chunk, even past the budget).  ``None`` is the default budget: 16 GiB, raised
+        when one KV head's key range does not fit it so that a key-block chunk holds 72 key blocks (every key block
+        when there are fewer; one wave on the GPUs this package targets has 74-108 clusters), at most 40 GiB.  A given
+        budget, 16 GiB included, is a hard bound.  The chunks set the dQ rounding: one budget gives the same bits on
+        every run.
 
     Returns
     -------

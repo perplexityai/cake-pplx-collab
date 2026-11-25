@@ -21,7 +21,9 @@ Without a device: the registry (one record per stage and architecture, the argum
 build manifest (every record's library, the recorded source digests), the standalone loader and its pinned bytes,
 no environment read, the workspace chunk plan and the launch grids against the exact dS^T tile counts of generated
 layouts (every KV head and key block in exactly one chunk, every chunk's tiles within its stride, every Q-tile pair
-in the dQ grid), the device tile numbering against the same counts, and the scratch layout.
+in the dQ grid), the default budget's one-wave floor (its fixed 72 key blocks, the rows it raises and the rows it
+leaves, its 40 GiB cap, an explicit budget unchanged, the estimate equal to the backward's plan), the device tile
+numbering against the same counts, and the scratch layout.
 
 On SM100 / SM103 / SM107: the output, the LSE and every gradient judged against the naive BF16 tier
 (``tests/cake_naive.py``: the error against an FP64 oracle of the same inputs over 32 independent draws, in the L2
@@ -30,9 +32,10 @@ tails that are no multiple of a tile, keys fewer than queries, empty segments) i
 a caller's ``out`` off a 32-byte boundary; every call held to its contract (shapes, dtypes, finite outputs, rows that
 see no key exactly ``out = 0``, ``lse = -inf``, ``dq = 0``, keys no query sees exactly zero gradients, untouched
 row-map destination rows); small workspace budgets (KV-head and key-block chunks) and host boundaries judged the same
-way; the row-map adds (destination rows repeated in window order and scattered) judged the same way; document
-isolation (the perturbed call judged); dynamic shapes through one reused workspace; launches on the operands' device
-and stream while another device is current; the dS^T chunk and the window gradients allocated per call (nothing but
+way; the default budget's one-wave floor (ranges of ``WAVE_KEY_BLOCKS`` key blocks, the call's allocation equal to
+its estimate) judged the same way; the row-map adds (destination rows repeated in window order and scattered) judged
+the same way; document isolation (the perturbed call judged); dynamic shapes through one reused workspace; launches
+on the operands' device and stream while another device is current; the dS^T chunk and the window gradients allocated per call (nothing but
 the scratch kept between calls); non-reentrant checkpointing (nothing retained); no device synchronization in steady
 state, with one chunk and with the minimum chunks; CUDA graph replay (every output rewritten on each replay); the
 speed of the forward and the backward beside a kernel resident on another stream; under
@@ -656,6 +659,312 @@ def test_the_host_boundary_plan_counts_the_exact_tiles() -> None:
     assert cake_backend._host_lists(torch.tensor([0, 6]), (0, 8)) == ([0, 6], [0, 8])
 
 
+# The one-wave floor of the default budget.  Rows of 32 query and 2 KV heads (8 head pairs) with ``max_seqlen_k``
+# given: ``(name, q_lens, k_lens)``.  One KV head does not fit 16 GiB on any of them; at 16 GiB a key-block range holds
+# 30 (``cp8``), 62 (``cp16``, ``cp4``) or at least 126 key blocks.
+WAVE_ROWS = (
+    ("cp8", (65520, 65520), (65520, 1048320)),
+    ("cp16", (32752, 32752), (32752, 1048064)),
+    ("cp4", (32752, 32752), (32752, 262016)),
+    ("cp8_256k", (16368, 16368), (16368, 261888)),
+    ("cp32", (16368, 16368), (16368, 1047552)),
+    ("cp64", (8176, 8176), (8176, 1046528)),
+)
+WAVE_HEADS = (32, 2)
+# A CP4 rank of the ``cp8`` document (262,080 queries): DEFAULT_WORKSPACE_CAP holds 38 of its key blocks, fewer than
+# WAVE_KEY_BLOCKS.
+CAPPED_ROW = ("cp4_1m", (131040, 131040), (131040, 1048320))
+
+
+def _wave_sizes(q_lens, k_lens, h_q, h_kv) -> dict:
+    return {
+        "total_q": sum(q_lens),
+        "total_k": sum(k_lens),
+        "num_heads_q": h_q,
+        "num_heads_kv": h_kv,
+        "num_segments": len(q_lens),
+        "max_seqlen_k": max(k_lens),
+    }
+
+
+def _cap_blocks(pairs: int, per_block: int) -> int:
+    """The key blocks of one head pair's range that DEFAULT_WORKSPACE_CAP holds beside the zero tile."""
+    return (cake_jit.DEFAULT_WORKSPACE_CAP // cake_jit.DS_TILE_BYTES - 1) // (
+        pairs * per_block
+    )
+
+
+def test_the_default_budget_holds_one_wave_of_key_blocks() -> None:
+    """The default budget (``budget_bytes=None``) is DEFAULT_WORKSPACE_BUDGET unless one KV head does not fit it and
+    a key-block range would hold fewer than ``min(key_blocks, WAVE_KEY_BLOCKS)`` key blocks; then each range holds
+    ``min(key_blocks, WAVE_KEY_BLOCKS, the cap's blocks)`` key blocks, rounded down to even, within
+    DEFAULT_WORKSPACE_CAP.  WAVE_KEY_BLOCKS is 72 on every device.  Every other plan equals the 16 GiB plan, and a
+    given budget (16 GiB included) is a hard bound."""
+    assert cake_jit.DEFAULT_WORKSPACE_BUDGET == 16 << 30
+    assert cake_jit.DEFAULT_WORKSPACE_CAP == 40 << 30
+    assert cake_jit.WAVE_KEY_BLOCKS == 72
+    h_q, h_kv = WAVE_HEADS
+    pairs = h_q // h_kv // 2
+    changed = set()
+    for name, q_lens, k_lens in (*WAVE_ROWS, CAPPED_ROW):
+        sizes = _wave_sizes(q_lens, k_lens, h_q, h_kv)
+        flat = cake_jit.chunk_plan(
+            **sizes, budget_bytes=cake_jit.DEFAULT_WORKSPACE_BUDGET
+        )
+        blocks = flat["key_blocks"]
+        per_block = cake_jit.tiles_per_key_block(sum(q_lens), len(q_lens))
+        assert flat["h_chunk"] == 1 and flat["n_chunk"] < blocks, name
+        plan = cake_jit.chunk_plan(**sizes, budget_bytes=None)
+        if plan != flat:
+            changed.add(name)
+        label = (name, plan["n_chunk"], flat["n_chunk"])
+        n = min(blocks, cake_jit.WAVE_KEY_BLOCKS)
+        if flat["n_chunk"] >= n:
+            assert plan == flat, label
+            continue
+        n_chunk = min(n, _cap_blocks(pairs, per_block)) & ~1
+        assert plan["h_chunk"] == 1 and plan["n_chunk"] == n_chunk, label
+        assert plan["ranges"] == _ranges(blocks, n_chunk), label
+        assert plan["tile_stride"] == n_chunk * per_block, label
+        assert plan["ws_tiles"] == pairs * n_chunk * per_block + 1, label
+        assert plan["ws_tiles"] * cake_jit.DS_TILE_BYTES <= (
+            cake_jit.DEFAULT_WORKSPACE_CAP
+        ), label
+        assert plan["ws_tiles"] > flat["ws_tiles"], label
+    # The rows the floor changes, and their pinned plans: on the CP8 rank 72 key blocks (36.02 GiB) instead of 30, so
+    # 228 chunks (two KV heads of 114 ranges) instead of 546; on the CP4 rank of the same document the 40 GiB cap holds
+    # 38 key blocks (14 at 16 GiB).
+    cp8 = _wave_sizes(*WAVE_ROWS[0][1:], h_q, h_kv)
+    plan = cake_jit.chunk_plan(**cp8, budget_bytes=None)
+    assert (plan["n_chunk"], len(plan["ranges"])) == (72, 114)
+    assert plan["ws_tiles"] * cake_jit.DS_TILE_BYTES == 38_673_612_800
+    flat = cake_jit.chunk_plan(**cp8, budget_bytes=16 << 30)
+    assert (flat["n_chunk"], len(flat["ranges"])) == (30, 273)
+    capped_sizes = _wave_sizes(*CAPPED_ROW[1:], h_q, h_kv)
+    capped = cake_jit.chunk_plan(**capped_sizes, budget_bytes=None)
+    assert (capped["n_chunk"], len(capped["ranges"])) == (38, 216)
+    assert capped["ws_tiles"] * cake_jit.DS_TILE_BYTES == 40_802_222_080
+    flat = cake_jit.chunk_plan(**capped_sizes, budget_bytes=16 << 30)
+    assert (flat["n_chunk"], len(flat["ranges"])) == (14, 585)
+    assert changed == {"cp8", "cp16", "cp4", "cp4_1m"}
+    # A call that fits one KV head (every layout of this suite) plans as with a given 16 GiB.
+    for name, q_lens, k_lens, h_q2, h_kv2 in LAYOUTS:
+        sizes = _wave_sizes(q_lens, k_lens, h_q2, h_kv2)
+        for seqlens in (None, (q_lens, k_lens)):
+            plan = cake_jit.chunk_plan(**sizes, budget_bytes=None, seqlens=seqlens)
+            flat = cake_jit.chunk_plan(**sizes, budget_bytes=16 << 30, seqlens=seqlens)
+            assert plan == flat, (name, seqlens is None)
+
+
+def test_the_one_wave_floor_counts_the_exact_tiles_with_host_boundaries() -> None:
+    """With host boundaries the floor raises the tile limit of a range to the most exact tiles of ``min(key_blocks,
+    WAVE_KEY_BLOCKS)`` key blocks from an even block (at most the cap's): every range but the last holds that many key
+    blocks at least, the workspace stays within the cap, and the exact plan launches no more chunks than the bound's."""
+    h_q, h_kv = WAVE_HEADS
+    pairs = h_q // h_kv // 2
+    cap_tiles = cake_jit.DEFAULT_WORKSPACE_CAP // cake_jit.DS_TILE_BYTES - 1
+    for name, q_lens, k_lens in (*WAVE_ROWS, CAPPED_ROW):
+        sizes = _wave_sizes(q_lens, k_lens, h_q, h_kv)
+        seqlens = (q_lens, k_lens)
+        flat = cake_jit.chunk_plan(**sizes, budget_bytes=16 << 30, seqlens=seqlens)
+        plan = cake_jit.chunk_plan(**sizes, budget_bytes=None, seqlens=seqlens)
+        bound = cake_jit.chunk_plan(**sizes, budget_bytes=None)
+        blocks = plan["key_blocks"]
+        n = min(blocks, cake_jit.WAVE_KEY_BLOCKS)
+        ranges = plan["ranges"]
+        assert ranges[0][0] == 0 and ranges[-1][1] == blocks, name
+        assert all(a[1] == b[0] for a, b in itertools.pairwise(ranges))
+        assert plan["ws_tiles"] * cake_jit.DS_TILE_BYTES <= max(
+            cake_jit.DEFAULT_WORKSPACE_CAP,
+            flat["ws_tiles"] * cake_jit.DS_TILE_BYTES,
+        ), name
+        assert len(ranges) <= len(bound["ranges"]), name
+        assert len(ranges) <= len(flat["ranges"]), name
+        prefix = [
+            0,
+            *itertools.accumulate(cake_jit.exact_tiles(q_lens, k_lens, blocks)),
+        ]
+        most = max(
+            prefix[min(n0 + n, blocks)] - prefix[n0] for n0 in range(0, blocks, 2)
+        )
+        narrowest = min((n1 - n0 for n0, n1 in flat["ranges"][:-1]), default=blocks)
+        if narrowest >= n:
+            assert plan == flat, name
+        elif most * pairs <= cap_tiles:
+            assert all(n1 - n0 >= n for n0, n1 in ranges[:-1]), name
+            assert plan["tile_stride"] <= most, name
+
+
+def test_the_one_wave_floor_on_random_layouts(monkeypatch) -> None:
+    """Random layouts under a small default budget and cap (so that the floor and the cap both bind), with and
+    without host boundaries.  When the given-budget plan (the default budget's size given explicitly) fits one KV
+    head with every key block, or each of its key-block ranges but the last holds ``n = min(key_blocks,
+    WAVE_KEY_BLOCKS)`` key blocks, the default plan is that plan.  Else the bound plan's ranges are ``min(n, the
+    cap's blocks)`` key blocks wide (two at least) and the exact plan's ranges are the widest within the limit raised
+    to the most exact tiles of ``n`` key blocks from an even block (at most the cap's), so every range but the last
+    holds ``n`` key blocks below the cap; the workspace stays within the cap unless a two-block range alone passes it,
+    and the floor launches no more chunks than the given budget."""
+    small, cap = 64 << 20, 256 << 20
+    monkeypatch.setattr(cake_jit, "DEFAULT_WORKSPACE_BUDGET", small)
+    monkeypatch.setattr(cake_jit, "DEFAULT_WORKSPACE_CAP", cap)
+    cap_tiles = cap // cake_jit.DS_TILE_BYTES - 1
+    rng = random.Random(7077)
+    floors = {False: 0, True: 0}
+    capped = 0
+    for trial in range(150):
+        n_seg = rng.randint(1, 16)
+        q_lens = [
+            rng.choice((0, 1, rng.randint(1, 600), rng.randint(1, 5000)))
+            for _ in range(n_seg)
+        ]
+        k_lens = [rng.choice((0, q, q + rng.randint(0, 30000))) for q in q_lens]
+        if not sum(q_lens) or not sum(k_lens):
+            continue
+        h_q, h_kv = rng.choice(((24, 4), (8, 4), (16, 2), (32, 8)))
+        pairs = h_q // h_kv // 2
+        sizes = _wave_sizes(q_lens, k_lens, h_q, h_kv)
+        for host in (False, True):
+            seqlens = (q_lens, k_lens) if host else None
+            given = cake_jit.chunk_plan(**sizes, budget_bytes=small, seqlens=seqlens)
+            label = (trial, host, given["h_chunk"], given["n_chunk"])
+            blocks = given["key_blocks"]
+            if given["ranges"] == [(0, blocks)]:
+                plan = cake_jit.chunk_plan(**sizes, budget_bytes=None, seqlens=seqlens)
+                assert plan == given, label
+                continue
+            plan = cake_jit.chunk_plan(**sizes, budget_bytes=None, seqlens=seqlens)
+            ranges = plan["ranges"]
+            n = min(blocks, cake_jit.WAVE_KEY_BLOCKS)
+            narrowest = min(
+                (n1 - n0 for n0, n1 in given["ranges"][:-1]), default=blocks
+            )
+            assert plan["h_chunk"] == 1 and plan["key_blocks"] == blocks, label
+            if narrowest >= n:
+                assert plan == given, label
+                continue
+            floors[host] += 1
+            assert ranges[0][0] == 0 and ranges[-1][1] == blocks, label
+            assert all(a[1] == b[0] for a, b in itertools.pairwise(ranges))
+            assert all(n0 % 2 == 0 and n1 - n0 >= 2 for n0, n1 in ranges), label
+            assert len(ranges) <= len(given["ranges"]), label
+            nbytes = plan["ws_tiles"] * cake_jit.DS_TILE_BYTES
+            if not host:
+                per_block = cake_jit.tiles_per_key_block(sum(q_lens), n_seg)
+                width = max(2, min(n, cap_tiles // (pairs * per_block)) & ~1)
+                assert plan["n_chunk"] == width, label
+                assert ranges == _ranges(blocks, width), label
+                assert nbytes <= cap or width == 2, label
+                capped += width < n
+                continue
+            prefix = [
+                0,
+                *itertools.accumulate(cake_jit.exact_tiles(q_lens, k_lens, blocks)),
+            ]
+            most = max(
+                prefix[min(n0 + n, blocks)] - prefix[n0] for n0 in range(0, blocks, 2)
+            )
+            limit = min(most, cap_tiles // pairs)
+            assert limit > max(0, small // cake_jit.DS_TILE_BYTES - 1) // pairs, label
+            for n0, n1 in ranges[:-1]:
+                # Greedy within the raised limit: the next two key blocks would pass it.
+                assert prefix[n1 + 2] - prefix[n0] > limit, label
+            over = [prefix[n1] - prefix[n0] > limit for n0, n1 in ranges]
+            assert all(
+                n1 - n0 == 2 for (n0, n1), o in zip(ranges, over, strict=True) if o
+            ), label
+            assert nbytes <= cap or any(over), label
+            if most * pairs <= cap_tiles:
+                assert all(n1 - n0 >= n for n0, n1 in ranges[:-1]), label
+            else:
+                capped += 1
+    assert floors[False] and floors[True] and capped, (floors, capped)
+
+
+def test_the_estimate_and_the_backward_plan_agree_on_the_floor() -> None:
+    """Host arithmetic only: a default workspace keeps ``None`` (the default budget) and a given 16 GiB stays a hard
+    bound; ``cake_gqa_nondet_train_workspace_bytes`` of a call is the scratch plus the dS^T chunk the backward
+    allocates for the workspace's budget (``ws_tiles`` of the plan, tiles of ``DS_TILE_LINES`` BF16 lines of 64)
+    plus the row-map windows, with and without host boundaries; only the floor rows allocate more than a given 16 GiB."""
+    assert cake_backend.CakeGQANondetWorkspace(3).budget_bytes is None
+    assert (
+        cake_backend.CakeGQANondetWorkspace(3, budget_bytes=16 << 30).budget_bytes
+        == 16 << 30
+    )
+    h_q, h_kv = WAVE_HEADS
+    for name, q_lens, k_lens in (*WAVE_ROWS, CAPPED_ROW):
+        dims = {
+            "total_q": sum(q_lens),
+            "total_k": sum(k_lens),
+            "num_heads_q": h_q,
+            "num_heads_kv": h_kv,
+            "num_segments": len(q_lens),
+        }
+        max_k = max(k_lens)
+        scratch = cake_backend.cake_gqa_nondet_train_workspace_bytes(
+            sum(q_lens), h_q, len(q_lens)
+        )
+        windows = 2 * 4 * sum(k_lens) * h_kv * D
+        for host in (False, True):
+            seqlens = (list(q_lens), list(k_lens)) if host else None
+            extra = (
+                {"cu_seqlens_q_host": _cu(q_lens), "cu_seqlens_k_host": _cu(k_lens)}
+                if host
+                else {}
+            )
+            for ws in (
+                cake_backend.CakeGQANondetWorkspace(3),
+                cake_backend.CakeGQANondetWorkspace(3, budget_bytes=16 << 30),
+            ):
+                # The backward's plan: the call's sizes and host boundaries with the workspace's budget.
+                plan = cake_jit.chunk_plan(
+                    **dims,
+                    max_seqlen_k=max_k,
+                    budget_bytes=ws.budget_bytes,
+                    seqlens=seqlens,
+                )
+                allocated = plan["ws_tiles"] * cake_jit.DS_TILE_LINES * 64 * 2
+                assert allocated == plan["ws_tiles"] * cake_jit.DS_TILE_BYTES
+                got = cake_backend.cake_gqa_nondet_train_workspace_bytes(
+                    sum(q_lens),
+                    h_q,
+                    len(q_lens),
+                    total_k=sum(k_lens),
+                    num_heads_kv=h_kv,
+                    max_seqlen_k=max_k,
+                    row_map=True,
+                    budget_bytes=ws.budget_bytes,
+                    **extra,
+                )
+                assert got == scratch + allocated + windows, (name, host)
+    # The floor rows allocate more than 16 GiB, the others what 16 GiB allocates.
+    for name, q_lens, k_lens in (*WAVE_ROWS, CAPPED_ROW):
+        sizes = {
+            "total_k": sum(k_lens),
+            "num_heads_kv": h_kv,
+            "max_seqlen_k": max(k_lens),
+        }
+        floor = cake_backend.cake_gqa_nondet_train_workspace_bytes(
+            sum(q_lens), h_q, len(q_lens), **sizes
+        )
+        flat = cake_backend.cake_gqa_nondet_train_workspace_bytes(
+            sum(q_lens), h_q, len(q_lens), budget_bytes=16 << 30, **sizes
+        )
+        assert (floor > flat) == (name in ("cp8", "cp16", "cp4", "cp4_1m")), name
+        assert floor <= flat or floor - flat < 40 << 30, name
+
+
+def test_the_main_kernel_records_share_one_launch_shape() -> None:
+    """The one-wave floor counts 2-CTA clusters of the main kernel, one per key block: ``bwd_main_fp32`` and
+    ``bwd_main_bf16`` launch the same block, cluster and dynamic shared memory on every architecture, so
+    WAVE_KEY_BLOCKS serves both."""
+    for arch in ARCHES:
+        fp32 = cake_jit.MODULES[cake_jit.stage_record("bwd_main_fp32", arch)]["launch"]
+        bf16 = cake_jit.MODULES[cake_jit.stage_record("bwd_main_bf16", arch)]["launch"]
+        for key in ("block", "cluster", "dynamic_smem_bytes"):
+            assert fp32[key] == bf16[key], (arch, key)
+        assert tuple(fp32["cluster"]) == (2, 1, 1), arch
+
+
 def test_scratch_layout_is_aligned_and_sized() -> None:
     for total_q, heads, segs in ((1, 24, 1), (30193, 24, 12), (77, 8, 3)):
         rows = cake_jit.rows_pad(total_q, segs)
@@ -1031,6 +1340,114 @@ def test_a_small_budget_matches_the_reference(layout, kind, device, record_prope
                 max_seqlen_k=max_k,
             )
             runs[f"{form} budget={kind}"] = (form, got)
+        torch.cuda.synchronize()
+        return judged(x, runs, dst_init, row_map)
+
+    judge_draws(record_property, case)
+
+
+# Layouts whose key blocks the patched default budget of the one-wave tests cuts into ranges of a third.
+ONE_WAVE_LAYOUTS = ("long_keys", "over_64_blocks")
+
+
+def _one_wave_plan(monkeypatch, x, h_q, h_kv) -> dict:
+    """Patch the default budget to about a third of one KV head's key blocks (``_budget_plan('key_blocks')``) and
+    return the default budget's plan: ranges of ``min(key_blocks, WAVE_KEY_BLOCKS)`` key blocks."""
+    budget, (_h_chunk, n_fit), _default = _budget_plan("key_blocks", x, h_q, h_kv)
+    monkeypatch.setattr(cake_jit, "DEFAULT_WORKSPACE_BUDGET", budget)
+    plan = cake_jit.chunk_plan(
+        total_q=x["cq"][-1],
+        total_k=x["ck"][-1],
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        num_segments=len(x["cq"]) - 1,
+        max_seqlen_k=_longest_k(x),
+        budget_bytes=None,
+    )
+    n = min(plan["key_blocks"], cake_jit.WAVE_KEY_BLOCKS)
+    assert n > n_fit and (plan["h_chunk"], plan["n_chunk"]) == (1, n), plan
+    return plan
+
+
+@pytest.mark.parametrize("layout", ONE_WAVE_LAYOUTS)
+def test_the_one_wave_floor_matches_the_reference(
+    layout, device, monkeypatch, record_property
+) -> None:
+    """The default budget's one-wave floor on the device (the default budget patched to about a third of one KV
+    head's key blocks): the default workspace's backward runs ranges of ``min(key_blocks, WAVE_KEY_BLOCKS)`` key
+    blocks, it allocates for the call exactly the bytes ``cake_gqa_nondet_train_workspace_bytes`` adds to the scratch
+    (plus small device plan tables), and every form meets the naive BF16 tier against the FP64 oracle over the
+    judge's draws."""
+    _name, q_lens, k_lens, h_q, h_kv = LAYOUTS_BY_NAME[layout]
+    x = _inputs(q_lens, k_lens, h_q, h_kv, device)
+    plan = _one_wave_plan(monkeypatch, x, h_q, h_kv)
+    ws = cake_backend.CakeGQANondetWorkspace(device)
+    assert ws.budget_bytes is None
+    row_map, n_dst = _window_row_map(x)
+    max_k = _longest_k(x)
+    dst_init = _destinations(n_dst, h_kv, device)
+    _run(
+        x,
+        "rowmap",
+        workspace=ws,
+        dst_init=dst_init,
+        row_map=row_map,
+        max_seqlen_k=max_k,
+    )
+    out, lse = cake_backend.cake_gqa_nondet_train_forward(
+        x["q"], x["k"], x["v"], x["cu_q"], x["cu_k"], softmax_scale=SCALE, workspace=ws
+    )
+    t_q, t_k, segments = sum(q_lens), sum(k_lens), len(q_lens)
+    scratch = cake_backend.cake_gqa_nondet_train_workspace_bytes(t_q, h_q, segments)
+    per_call = (
+        cake_backend.cake_gqa_nondet_train_workspace_bytes(
+            t_q,
+            h_q,
+            segments,
+            total_k=t_k,
+            num_heads_kv=h_kv,
+            max_seqlen_k=max_k,
+            row_map=True,
+        )
+        - scratch
+    )
+    assert (
+        per_call == plan["ws_tiles"] * cake_jit.DS_TILE_BYTES + 2 * 4 * t_k * h_kv * D
+    )
+    kwargs = {
+        "softmax_scale": SCALE,
+        "workspace": ws,
+        "max_seqlen_k": max_k,
+        "dq": torch.empty_like(x["q"]),
+        "dk_acc": dst_init[0].clone(),
+        "dv_acc": dst_init[1].clone(),
+        "row_map": row_map,
+    }
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(device)
+    before = torch.cuda.memory_allocated(device)
+    cake_backend.cake_gqa_nondet_train_backward(
+        x["q"], x["k"], x["v"], out, lse, x["dout"], x["cu_q"], x["cu_k"], **kwargs
+    )
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated(device) - before
+    assert torch.cuda.memory_allocated(device) == before, layout
+    assert per_call <= peak <= per_call + 4 * MIB, (layout, per_call, peak)
+
+    def case(seed):
+        x = _inputs(q_lens, k_lens, h_q, h_kv, device, seed=seed)
+        dst_init = _destinations(n_dst, h_kv, device, seed=seed + 1)
+        runs = {}
+        for form in DKV_FORMS:
+            got = _run(
+                x,
+                form,
+                workspace=ws,
+                dst_init=dst_init,
+                row_map=row_map,
+                max_seqlen_k=max_k,
+            )
+            runs[f"{form} one wave"] = (form, got)
         torch.cuda.synchronize()
         return judged(x, runs, dst_init, row_map)
 

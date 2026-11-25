@@ -255,10 +255,12 @@ def _launch(
 # Workspace
 
 
-def _budget(budget_bytes: Optional[int]) -> int:
-    """The dS^T workspace budget of one backward call (``None``: :data:`.cake_jit.DEFAULT_WORKSPACE_BUDGET`)."""
+def _budget(budget_bytes: int | None) -> int | None:
+    """The dS^T workspace budget of one backward call: ``None`` is the default budget
+    (:data:`.cake_jit.DEFAULT_WORKSPACE_BUDGET` with the one-wave floor of :func:`.cake_jit.chunk_plan`), an int a
+    hard bound."""
     if budget_bytes is None:
-        return cake_jit.DEFAULT_WORKSPACE_BUDGET
+        return None
     if int(budget_bytes) <= 0:
         raise ValueError(f"budget_bytes must be positive, got {budget_bytes}")
     return int(budget_bytes)
@@ -323,10 +325,13 @@ def cake_gqa_nondet_train_workspace_bytes(
     """Bytes of device memory one backward call of these sizes needs beside its operands and outputs: the scratch a
     workspace keeps (FP32 ``dq_accum [H_q / 2, rows_pad, 256]``, ``lse_log2`` and ``dpsum [H_q / 2, rows_pad]``,
     ``rows_pad = round_up(2 T_q + 128 B, 128)``), with ``total_k`` / ``num_heads_kv`` given plus the dS^T chunk of
-    ``budget_bytes`` (:func:`.cake_jit.chunk_plan`; default 16 GiB; exact with the host boundaries
-    ``cu_seqlens_q_host`` / ``cu_seqlens_k_host``, else a bound) and with ``row_map`` plus the two FP32 window
-    gradients ``[T_k, H_kv, 256]``; the call allocates those two from PyTorch's caching allocator and frees them when
-    it returns."""
+    ``budget_bytes`` (:func:`.cake_jit.chunk_plan`; exact with the host boundaries ``cu_seqlens_q_host`` /
+    ``cu_seqlens_k_host``, else a bound) and with ``row_map`` plus the two FP32 window gradients ``[T_k, H_kv,
+    256]``; the call allocates those two from PyTorch's caching allocator and frees them when it returns.
+
+    ``budget_bytes=None`` is the default budget: 16 GiB, raised when one KV head does not fit so that a key-block
+    range holds 72 key blocks (:data:`.cake_jit.WAVE_KEY_BLOCKS`; every key block when there are fewer), at most
+    40 GiB."""
     # The host boundaries come both or neither, at every size.
     host = _host_lists(cu_seqlens_q_host, cu_seqlens_k_host)
     need = cake_jit.scratch_bytes(int(total_q), int(num_heads_q), int(num_segments))
@@ -356,14 +361,17 @@ class CakeGQANondetWorkspace:
 
     It holds the forward's tile counter (one ``uint32``, zeroed once; every launch leaves it zero) and the backward
     scratch (the FP32 dQ accumulator, ``LSE * log2(e)`` and ``dPsum``), grown to the largest shape seen and never
-    shrunk.  ``budget_bytes`` bounds the dS^T workspace of one backward call (default
-    :data:`.cake_jit.DEFAULT_WORKSPACE_BUDGET`, 16 GiB): a call whose dS^T exceeds it runs in chunks (KV heads first,
-    then key-block ranges).  The dS^T workspace and the row-map window gradients are allocated per call from
-    PyTorch's caching allocator on the current stream and freed when the call returns; the workspace does not hold
-    them.  The chunks depend on the shape, ``max_seqlen_k``, the budget and the host boundaries a call passes (given
-    or not) only; the budget can move the rounding of the outputs, not their accuracy.  One workspace serves one
-    stream at a time: two launches running concurrently on different streams need two workspaces.  Autograd keeps
-    only a weak reference to it, so a checkpointed forward retains nothing through it.
+    shrunk.  ``budget_bytes`` bounds the dS^T workspace of one backward call: a call whose dS^T exceeds it runs in
+    chunks (KV heads first, then key-block ranges).  ``None`` (kept as ``None``) is the default budget,
+    :data:`.cake_jit.DEFAULT_WORKSPACE_BUDGET` (16 GiB), raised when one KV head does not fit so that a key-block
+    range holds 72 key blocks (:data:`.cake_jit.WAVE_KEY_BLOCKS`; every key block when there are fewer), at most
+    :data:`.cake_jit.DEFAULT_WORKSPACE_CAP` (40 GiB); a given budget is a hard bound, 16 GiB included.  The dS^T
+    workspace and the row-map window gradients are allocated per call from PyTorch's caching allocator on the current
+    stream and freed when the call returns; the workspace does not hold them.  The chunks depend on the shape,
+    ``max_seqlen_k``, the budget and the host boundaries a call passes (given or not) only; the budget can move the
+    rounding of the outputs, not their accuracy.  One workspace serves one stream at a time: two launches running
+    concurrently on different streams need two workspaces.  Autograd keeps only a weak reference to it, so a
+    checkpointed forward retains nothing through it.
     """
 
     def __init__(

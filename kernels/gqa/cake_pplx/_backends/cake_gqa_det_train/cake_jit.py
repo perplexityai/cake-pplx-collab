@@ -47,7 +47,7 @@ cooperative, no PDL.
 from __future__ import annotations
 
 import bisect
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Optional
 
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
@@ -312,9 +312,9 @@ MODULES: dict[str, dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 # The host plan: grids, workspace chunks and scratch sizes from host-known
 # values only (the tensors' shapes, the segment count ``len(cu_seqlens) - 1``,
-# ``max_seqlen_k``, the workspace budget, the SM count and, when the caller
-# gives them, host copies of the segment boundaries); nothing here reads a
-# tensor.
+# ``max_seqlen_k``, the workspace budget, the fixed wave width of the default
+# budget (``WAVE_KEY_BLOCKS``), the SM count and, when the caller gives them,
+# host copies of the segment boundaries); nothing here reads a tensor.
 
 # Forward: a CTA pair covers 256 query rows of one (segment, query head); the
 # grid is persistent (tickets from a self-resetting counter), one pair per two
@@ -355,6 +355,18 @@ SCRATCH_ALIGN = 256
 # the key-block split re-reads and rewrites the FP32 dQ accumulator once per
 # extra chunk, and moves the dQ rounding (the bits, not the accuracy).
 DEFAULT_WORKSPACE_BUDGET = 16 << 30
+# The one-wave floor of the default budget.  A main-kernel launch runs one CTA
+# pair (one 2-CTA cluster) per key block of its range, so a range of fewer key
+# blocks than the device runs clusters at once (one wave) leaves SMs idle.
+# When one KV head's key range does not fit DEFAULT_WORKSPACE_BUDGET and a
+# range within it would hold fewer than min(key_blocks, WAVE_KEY_BLOCKS) key
+# blocks, the default budget grows to hold that many, up to
+# DEFAULT_WORKSPACE_CAP.  The floor is 72 key blocks (one wave on the GPUs this
+# package targets has 74-108 clusters), the same on every device, so the
+# chunks, and with them the dQ bits, stay host arithmetic.  An explicit budget
+# stays a hard bound and gets no floor.
+WAVE_KEY_BLOCKS = 72
+DEFAULT_WORKSPACE_CAP = 40 << 30
 
 
 def rows_pad(total_q: int, num_segments: int) -> int:
@@ -484,6 +496,25 @@ def _even_ranges(prefix: list[int], blocks: int, limit: int) -> list[tuple[int, 
     return ranges
 
 
+def _tile_cap(budget_bytes: int) -> int:
+    """The dS^T tiles a budget holds beside the all-zero tile."""
+    return max(0, int(budget_bytes) // DS_TILE_BYTES - 1)
+
+
+def _one_wave(
+    limit: int, narrowest: int, blocks: int, pairs: int, most: Callable[[int], int]
+) -> int:
+    """The one-wave floor of the default budget: the tile limit of one head pair's key-block range.  ``limit`` is
+    that of :data:`DEFAULT_WORKSPACE_BUDGET` and ``narrowest`` the fewest key blocks a range within it holds (the
+    last range aside).  When that is fewer than ``n = min(blocks, WAVE_KEY_BLOCKS)`` (``blocks`` is even, so is
+    ``n``), the limit becomes ``most(n)``, the most tiles of ``n`` key blocks from an even block, at most that of
+    :data:`DEFAULT_WORKSPACE_CAP`."""
+    n = min(blocks, WAVE_KEY_BLOCKS)
+    if narrowest >= n:
+        return limit
+    return max(limit, min(most(n), _tile_cap(DEFAULT_WORKSPACE_CAP) // pairs))
+
+
 def chunk_plan(
     *,
     total_q: int,
@@ -492,7 +523,7 @@ def chunk_plan(
     num_heads_kv: int,
     num_segments: int,
     max_seqlen_k: Optional[int],
-    budget_bytes: int,
+    budget_bytes: int | None,
     seqlens: Optional[tuple[Sequence[int], Sequence[int]]] = None,
 ) -> dict[str, Any]:
     """The workspace chunks of one backward call: ``h_chunk`` KV heads times the key-block ranges ``ranges`` (``[n0,
@@ -501,13 +532,20 @@ def chunk_plan(
     block; else one KV head and key-block ranges that fit; at least one KV head and two key blocks, even past the
     budget.
 
+    ``budget_bytes=None`` is the default budget: :data:`DEFAULT_WORKSPACE_BUDGET` with the one-wave floor.  When one
+    KV head does not fit it and a key-block range within it would hold fewer than ``n = min(key_blocks,
+    WAVE_KEY_BLOCKS)`` key blocks (:data:`WAVE_KEY_BLOCKS` is 72 on every device), the range limit grows to hold ``n``
+    key blocks from any even block, with at most :data:`DEFAULT_WORKSPACE_CAP` of dS^T.  A given budget is a hard
+    bound (no floor).
+
     Without ``seqlens`` every key block counts :func:`tiles_per_key_block` tiles and the ranges are ``n_chunk`` wide.
     With ``seqlens`` (the host ``(q_lens, k_lens)`` of :func:`host_seqlens`) the counts are exact
-    (:func:`exact_tiles`), each range is the widest that fits (:func:`_even_ranges`), ``tile_stride`` is the most
-    tiles of one range and ``n_chunk`` the widest range; ``key_blocks`` comes from the longest segment unless
-    ``max_seqlen_k`` is smaller."""
+    (:func:`exact_tiles`), each range is the widest that fits (:func:`_even_ranges`; the floor counts exact tiles too),
+    ``tile_stride`` is the most tiles of one range and ``n_chunk`` the widest range; ``key_blocks`` comes from the
+    longest segment unless ``max_seqlen_k`` is smaller."""
     pairs = num_heads_q // num_heads_kv // 2
-    cap = max(0, int(budget_bytes) // DS_TILE_BYTES - 1)
+    default = budget_bytes is None
+    cap = _tile_cap(DEFAULT_WORKSPACE_BUDGET if default else budget_bytes)
     if seqlens is None:
         blocks = key_blocks(total_k, max_seqlen_k)
         per_block = tiles_per_key_block(total_q, num_segments)
@@ -517,7 +555,13 @@ def chunk_plan(
         elif per_head <= cap:
             h_chunk, n_chunk = cap // per_head, blocks
         else:
-            h_chunk, n_chunk = 1, max(2, (cap // (pairs * per_block)) & ~1)
+            limit = cap // pairs
+            if default:
+                narrowest = max(2, (limit // per_block) & ~1)
+                limit = _one_wave(
+                    limit, narrowest, blocks, pairs, lambda n: n * per_block
+                )
+            h_chunk, n_chunk = 1, max(2, (limit // per_block) & ~1)
         stride = n_chunk * per_block
         ranges = [(n0, min(n0 + n_chunk, blocks)) for n0 in range(0, blocks, n_chunk)]
     else:
@@ -536,7 +580,21 @@ def chunk_plan(
         elif per_head <= cap:
             h_chunk, ranges = cap // per_head, [(0, blocks)]
         else:
-            h_chunk, ranges = 1, _even_ranges(prefix, blocks, cap // pairs)
+            limit = cap // pairs
+            h_chunk, ranges = 1, _even_ranges(prefix, blocks, limit)
+            if default:
+                raised = _one_wave(
+                    limit,
+                    min((n1 - n0 for n0, n1 in ranges[:-1]), default=blocks),
+                    blocks,
+                    pairs,
+                    lambda n: max(
+                        prefix[min(n0 + n, blocks)] - prefix[n0]
+                        for n0 in range(0, blocks, 2)
+                    ),
+                )
+                if raised != limit:
+                    ranges = _even_ranges(prefix, blocks, raised)
         stride = max(1, max(prefix[n1] - prefix[n0] for n0, n1 in ranges))
         n_chunk = max(n1 - n0 for n0, n1 in ranges)
     zero_tile = h_chunk * pairs * stride
@@ -608,6 +666,7 @@ __all__ = [
     "BWD_TILE_KEYS",
     "BWD_TILE_ROWS",
     "DEFAULT_WORKSPACE_BUDGET",
+    "DEFAULT_WORKSPACE_CAP",
     "DS_TILE_BYTES",
     "DS_TILE_LINES",
     "FOLD_ITEMS_PER_CTA",
@@ -624,6 +683,7 @@ __all__ = [
     "SCRATCH_ALIGN",
     "SCRATCH_TILE_ROWS",
     "STAGES",
+    "WAVE_KEY_BLOCKS",
     "chunk_plan",
     "exact_tiles",
     "grid",
