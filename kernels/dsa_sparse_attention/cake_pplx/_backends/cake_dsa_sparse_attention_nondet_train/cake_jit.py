@@ -69,6 +69,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "fwd_no_olo",
             "bwd_delta_no_olo",
             "fwd_scan_no_olo",
+            "fwd_hw",
+            "bwd_main_hw",
+            "bwd_main_natural_hw",
+            "bwd_main_pass_hw",
+            "bwd_main_pass_natural_hw",
+            "fwd_hw_no_olo",
         ],
         "key_pass_policy": {
             "l2_budget_bytes": 104857600,
@@ -248,6 +254,80 @@ MODULES: dict[str, dict[str, Any]] = {
             "arches": ["sm_107a"],
             "launch": {
                 "block": [416, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": True,
+            },
+        },
+        # The head-window builds (64 < H <= 128 query heads on sm_100a / sm_103a; see the comment above
+        # ``HEAD_WINDOW_STAGES``): the arguments of their 64-head stage plus ``num_heads`` and ``wsel``.
+        "fwd_hw": {
+            "library": "cake_dsa_h64_train_1892b0dda0d2e7a8a2f6",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [384, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": True,
+            },
+        },
+        "bwd_main_hw": {
+            "library": "cake_dsa_h64_train_1adec2ab3f4f771062dd",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": False,
+            },
+        },
+        "bwd_main_natural_hw": {
+            "library": "cake_dsa_h64_train_1adec2ab3f4f771062dd_dkv_natural1",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": False,
+            },
+        },
+        "bwd_main_pass_hw": {
+            "library": "cake_dsa_h64_train_f915616be19e792aa7dd",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": False,
+            },
+        },
+        "bwd_main_pass_natural_hw": {
+            "library": "cake_dsa_h64_train_f915616be19e792aa7dd_dkv_natural1",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": False,
+            },
+        },
+        "fwd_hw_no_olo": {
+            "library": "cake_dsa_h64_train_28b175d8e08a34789433",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [384, 1, 1],
                 "cluster": [1, 1, 1],
                 "cooperative": False,
                 "dynamic_smem_bytes": 231680,
@@ -618,6 +698,22 @@ STAGES_OF = {
     program: order + tuple(NO_OLO_STAGES[s] for s in order if s in NO_OLO_STAGES)
     for program, order in _DEFAULT_STAGES_OF.items()
 }
+# The RoPE program's head-window builds: calls over 64 < H <= 128 query heads run them on sm_100a / sm_103a in place
+# of their 64-head stage -- one launch over the 2 T (token, window) items of both 64-head windows, the arguments of the
+# 64-head stage plus the head count ``num_heads`` and the window selector ``wsel`` (``cake_backend.HEAD_WINDOW_STAGES``
+# names the same pairs; the delta, compaction and cast stages serve every head count).  They close the program's
+# order, in the order of their 64-head stages.
+HEAD_WINDOW_STAGES = {
+    "fwd": "fwd_hw",
+    "fwd_no_olo": "fwd_hw_no_olo",
+    "bwd_main": "bwd_main_hw",
+    "bwd_main_natural": "bwd_main_natural_hw",
+    "bwd_main_pass": "bwd_main_pass_hw",
+    "bwd_main_pass_natural": "bwd_main_pass_natural_hw",
+}
+STAGES_OF[PROGRAM] += tuple(
+    HEAD_WINDOW_STAGES[s] for s in STAGES_OF[PROGRAM] if s in HEAD_WINDOW_STAGES
+)
 
 
 def stage_name(stage: str, program: str = PROGRAM) -> str:
