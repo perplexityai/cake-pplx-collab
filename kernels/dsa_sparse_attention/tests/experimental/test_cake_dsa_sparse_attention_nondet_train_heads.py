@@ -1012,31 +1012,39 @@ def test_varlen_causal_heads(with_o_lo, heads, record_property):
     nv.judge_draws(record_property, case, seed=SEED + 2000 + heads)
 
 
+#: ``(top-k, key rows, destination rows)`` of :func:`test_dkv_acc_repeated_dst_heads`: a short row, and the issue's
+#: top-k 2048 over 4096 keys.
+DST_GEOMETRIES = {"topk512": (512, 1024, 300), "topk2048": (TOPK, 4096, 1200)}
+
+
+@pytest.mark.parametrize("geometry", list(DST_GEOMETRIES))
 @pytest.mark.parametrize("heads", (96,) + REDUCED_HEADS)
-def test_dkv_acc_repeated_dst_heads(with_o_lo, heads, record_property):
-    """``dkv_acc`` through a many-to-few destination map (1024 key rows into 300 destination rows, repeated
-    destinations summing as ``index_add_``) at ``heads`` query heads: the natural-layout main stage and the cast's
-    accumulate path, one pass and two forced key passes, through the eager backward and through a prepared runner's
-    step (two forced key passes: the window launches per pass reuse the runner's carved window statistics and dQ
-    partial); each call's ``dq`` and buffer increment judged (unmapped destination rows and the columns past 576
-    keep their bits), the runner's forward outputs too.  The same draw also judges the eager backward's natural FP32
-    key gradients (``dkv_fp32=True``, one and two key passes)."""
+def test_dkv_acc_repeated_dst_heads(with_o_lo, heads, geometry, record_property):
+    """``dkv_acc`` through a many-to-few destination map (``geometry``: top-k 512 with 1024 key rows into 300
+    destination rows, or top-k 2048 with 4096 key rows into 1200; repeated destinations summing as ``index_add_``)
+    at ``heads`` query heads: the natural-layout main stage and the cast's accumulate path, one pass and two forced
+    key passes, through the eager backward and through a prepared runner's step (two forced key passes: the window
+    launches per pass reuse the runner's carved window statistics and dQ partial); each call's ``dq`` and buffer
+    increment judged (unmapped destination rows and the columns past 576 keep their bits), the runner's forward
+    outputs too.  The same draw also judges the eager backward's natural FP32 key gradients (``dkv_fp32=True``, one
+    and two key passes)."""
     _require_heads(heads, backward=True)
     _require_key_passes_and_direct()
+    topk, num_kv, num_dst = DST_GEOMETRIES[geometry]
 
     def case(s, j):
-        inp = make_inputs([256], [1024], seed=s, topk=512, heads=heads)
+        inp = make_inputs([256], [num_kv], seed=s, topk=topk, heads=heads)
         args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
         fwd = cake_backend.forward(*args, softmax_scale=SCALE)
         out, lse, o_lo = fwd
         gen = torch.Generator(device="cuda").manual_seed(s + 3)
         dst_map = torch.randint(
-            0, 300, (inp.total_k,), device="cuda", generator=gen
+            0, num_dst, (inp.total_k,), device="cuda", generator=gen
         ).to(torch.int32)
         runs = {"forward": _rope_outputs(fwd)}
         for direct in (True, False):
             for p in (1, 2):
-                acc = torch.randn(300, 704, device="cuda", generator=gen)
+                acc = torch.randn(num_dst, 704, device="cuda", generator=gen)
                 before = acc.clone()
                 grads = cake_backend.backward(
                     *args,
@@ -1054,7 +1062,7 @@ def test_dkv_acc_repeated_dst_heads(with_o_lo, heads, record_property):
                     grads=grads,
                     dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map),
                 )
-            acc = torch.randn(300, 704, device="cuda", generator=gen)
+            acc = torch.randn(num_dst, 704, device="cuda", generator=gen)
             before = acc.clone()
             runner = prepare_dsa_train(
                 *args,
@@ -1096,7 +1104,11 @@ def test_dkv_acc_repeated_dst_heads(with_o_lo, heads, record_property):
         torch.cuda.synchronize()
         return nv.judged(nv.rope_problem(inp, scale=SCALE), runs)
 
-    nv.judge_draws(record_property, case, seed=SEED + 3000 + heads)
+    nv.judge_draws(
+        record_property,
+        case,
+        seed=SEED + 3000 + heads + 500 * list(DST_GEOMETRIES).index(geometry),
+    )
 
 
 @pytest.mark.parametrize("heads", HEADS + REDUCED_HEADS)
