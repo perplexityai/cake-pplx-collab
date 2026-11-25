@@ -1421,10 +1421,12 @@ def test_k1_det_0327_wgrad_rows_follow_the_det_tables(monkeypatch):
     package's ``wgrad_views`` and as the unbatched generic call ``G.T @ X``, with the K1 programs registered on both
     architectures: :func:`plan_atomic_gemm` routes each call as with the deterministic tables of version 0.3.26
     (:func:`_det_tables_0326`; it reads none of them).  Where it keeps the call on the deterministic program this
-    package's plan is the deterministic package's, field for field; where it runs this package's program the plan is
-    the plan with the deterministic tables of version 0.3.26.  The deterministic plan differs from its plan of version
-    0.3.26 exactly where :func:`_det_0327_changed` holds.  The counts of the cells of each kind are printed; this is a
-    plan check: it asserts no bits."""
+    package's plan is the deterministic package's, field for field, with either version of its tables; where it runs
+    this package's program the plan is the plan of :func:`plan_atomic_gemm` and the plan with the deterministic tables
+    of version 0.3.26.  The deterministic plan differs from its plan of version 0.3.26 exactly where
+    :func:`_det_0327_changed` holds.  The counts of the cells of each kind are printed, and each kind (the
+    deterministic program with an unchanged and with a changed plan, this package's program) occurs for both calls;
+    this is a plan check: it asserts no bits."""
     _register_k1(monkeypatch, "sm_107a")
     _register_k1(monkeypatch, "sm_103a")
     cells = [
@@ -1437,11 +1439,23 @@ def test_k1_det_0327_wgrad_rows_follow_the_det_tables(monkeypatch):
     cells += [("sm_103a", 152, 4096, 12288, "f32", T) for T in (511, 512, 4096, 4097)]
 
     def plans(A, B, out, transposed, arch, sm_count):
+        """``(keeps, det, nd)``: whether :func:`plan_atomic_gemm` keeps the call on the deterministic program, the
+        deterministic planner's plan and this package's.  Both operands of both calls are MN-major, so this package
+        routes the call to its own planner (``k1_nn``), and its plan entry returns the deterministic planner's
+        ``(plan, a_desc, b_desc, out3)`` where :func:`plan_atomic_gemm` keeps the call, else this package's plan,
+        the plan of :func:`plan_atomic_gemm`."""
+        assert cake_backend._k1_layout(A, B) == "k1_nn" and cake_backend.ROUTES["k1_nn"] == "atomic"
         kw = dict(sm_count=sm_count, l2_bytes=126 << 20, transposed_out=transposed, arch=arch)
         own, *_ = cake_backend.plan_atomic_gemm(A, B, out, transposed_out=transposed, arch=arch, sm_count=sm_count)
-        det = det_backend.cake_dense_gemm_det_train_projection_plan(A, B, out, **kw)[0]
-        nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(A, B, out, **kw)[0]
-        return own is None, det, nd
+        det = det_backend.cake_dense_gemm_det_train_projection_plan(A, B, out, **kw)
+        assert isinstance(det, tuple) and len(det) == 4, type(det)
+        nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(A, B, out, **kw)
+        if own is None:
+            assert isinstance(nd, tuple) and len(nd) == 4, type(nd)
+            return True, det[0], nd[0]
+        assert isinstance(nd, cake_backend.CakeDenseGemmNondetProjectionPlan), type(nd)
+        assert nd == own, (nd, own)
+        return False, det[0], nd
 
     seen = {}
     det_changed = {}
@@ -1461,6 +1475,7 @@ def test_k1_det_0327_wgrad_rows_follow_the_det_tables(monkeypatch):
             assert (det != old_det) == changed, (where, det.template, old_det.template)
             if keeps:
                 assert nd == det, (where, nd.template, det.template)
+                assert old_nd == old_det, (where, old_nd.template, old_det.template)
                 kind = "det, changed" if changed else "det"
             else:
                 assert nd == old_nd, (where, nd.template, old_nd.template)
@@ -1469,7 +1484,9 @@ def test_k1_det_0327_wgrad_rows_follow_the_det_tables(monkeypatch):
             det_changed[(call, changed)] = det_changed.get((call, changed), 0) + 1
     print(f"K1_DET_0327 {seen}, changed deterministic plans {det_changed}")
     assert sum(seen.values()) == 2 * len(cells) == 2 * (13 * 2 * 4 * 9 + 4), seen
-    assert seen.get(("entry", "det, changed")) and seen.get(("generic", "det, changed")), seen
+    for call in ("entry", "generic"):
+        for kind in ("det", "det, changed", "own program"):
+            assert seen.get((call, kind)), (call, kind, seen)
 
 
 def test_k1_excluded_token_counts(no_k1_chains):
