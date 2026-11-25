@@ -20,7 +20,17 @@ operation, each when it imports.
 Arms (``--arms``; default: every arm; ``cake`` always runs first, since the other arms' outputs are compared with its
 outputs):
 
-* ``cake``: ``cake_clamped_swiglu_det_train_forward`` / ``_backward`` (one kernel each).
+* ``cake``: ``cake_clamped_swiglu_det_train_forward`` / ``_backward`` (one kernel each), ``locality="off"``.
+* ``cake_domain`` (``--locality domain`` or ``both``; R200 / ``sm_107a`` only, unavailable elsewhere with the
+  helper's error): the same entry points with ``locality="domain"``.  Before timing, the inputs are copied once into
+  memory from ``cake_clamped_swiglu_det_train_domain_empty`` (chunks that alternate between the dies), and the
+  forward writes an ``h`` allocated there once (the ``homed`` class: every BF16 operand in the rows of the first
+  input).  The backward reads those inputs with the other arms' ``dh`` and returns new gradients, as ``cake``'s
+  does: it has no twin, so it runs its ``"off"`` program (reason ``arch``) on the inputs' memory.  ``ckpt`` runs
+  the autograd entry with ``locality="domain"`` on leaves in that memory, which allocates its outputs with
+  ``torch.empty`` (the forward's ``anchor`` class).  The arm records the route, the reason and the class of each
+  stage's call (the ``*_domain_plan`` functions: ``domain_plans``), its outputs' bits against ``cake``'s (``vs_cake``)
+  and, per stage and timer, ``cake``'s time over its own (``speedup_vs_off``, above 1: the domain route is faster).
 * ``te``: Transformer Engine on the merged ``[R, 2I]`` layout (the gate is the first half, the up the second half)
   with ``limit=L``, ``alpha=1`` and ``glu_linear_offset=0``: ``silu(min(g, L)) clamp(u, -L, L)`` with the same
   inclusive masks.  With a route weight it runs ``transformer_engine_torch.scaled_clamped_swiglu`` /
@@ -62,6 +72,9 @@ outputs):
   composite's two graphs are also timed one by one (``parts`` of its ``bwd`` stage).  A stage no graph builds prints
   as unavailable with the error.
 
+``--locality``: ``off`` (the default) runs ``cake``, ``domain`` runs ``cake_domain`` in its place (the other arms are
+then compared with it), ``both`` runs the two, ``cake`` first.
+
 Every arm runs on identical inputs: ``gate`` and ``up`` ``6 x`` unit normals, ``dh`` a unit normal (BF16) and the FP32
 route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--deep-gate`` sets the gates at columns 0, 768 and 1536
 of every row to ``-88`` (BF16): every group of columns that Cake's kernels vote over holds one, so every warp of
@@ -87,7 +100,9 @@ Timers (``--timers``):
   call, not counted), the summed GPU time of the call's kernels, copies and fills; median of 100 calls after 10
   warm-up calls.  The bandwidth column is the operation's DRAM bytes (each input read once, each output written once)
   over this time; for ``ckpt``, the forward's bytes count twice for an arm whose backward replays it, once for
-  ``cake``.
+  ``cake``.  ``hbm_utilization`` is that bandwidth over the device's NVML peak, read once per run:
+  ``nvmlDeviceGetMemoryBusWidth`` x the NVML memory clock (``NVML_CLOCK_MEM``) x 2 / 8, of the GPU of the device's
+  UUID (``identity.nvml``; absent without ``pynvml``).
 * ``eager``: CUDA events around ``--loop`` back-to-back calls with a warm L2, per call; median of ``--rounds`` samples
   after ``--warmup`` samples.  It includes the host's issue time when the call is host-bound.
 * ``graph``: the same ``--loop`` calls captured in one CUDA graph and replayed, timed the same way.
@@ -140,11 +155,16 @@ import torch.utils.checkpoint
 from cake_pplx.cake_clamped_swiglu_det_train import (
     cake_clamped_swiglu_det,
     cake_clamped_swiglu_det_train_backward,
+    cake_clamped_swiglu_det_train_backward_domain_plan,
+    cake_clamped_swiglu_det_train_domain_empty,
     cake_clamped_swiglu_det_train_forward,
+    cake_clamped_swiglu_det_train_forward_domain_plan,
 )
 
 I = 2304
 ARMS = ("cake", "te", "torch_compile", "eager", "cudnn")
+# ``--locality``: the Cake arms that run first, in order (the first is the reference of the others' outputs).
+LOCALITY_ARMS = {"off": ("cake",), "domain": ("cake_domain",), "both": ("cake", "cake_domain")}
 STAGES = ("fwd", "bwd", "fwd+bwd", "ckpt")
 TIMERS = ("cupti", "eager", "graph")
 # ``--deep-gate``: one gate below -87 in each group of columns the Cake kernels vote over (the forward votes over the
@@ -338,6 +358,60 @@ def cake_arm(x: types.SimpleNamespace) -> dict[str, Any]:
         "writes_weight_grad": x.weight is not None,  # the unweighted backward's kernel writes no d_weight
         "ckpt_replays_forward": False,  # the recomputation of the op alone stops before its forward launch
         "version": _version("cake-pplx-clamped-swiglu"),
+    }
+
+
+def _domain_copy(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """A copy of the BF16 ``t`` in memory whose chunks alternate between the dies (None stays None)."""
+    if t is None:
+        return None
+    copy = cake_clamped_swiglu_det_train_domain_empty(tuple(t.shape), device=t.device)
+    copy.copy_(t)
+    return copy
+
+
+def cake_domain_arm(x: types.SimpleNamespace) -> dict[str, Any]:
+    """Cake with ``locality="domain"``: the inputs copied once into the helper's memory, the forward's ``h``
+    allocated there once, the backward with the other arms' ``dh`` and new gradients, the autograd leaves in that
+    memory (see the module docstring)."""
+    d = types.SimpleNamespace(R=x.R, L=x.L, weight=x.weight)
+    d.first, d.second = _domain_copy(x.first), _domain_copy(x.second)
+    d.h = cake_clamped_swiglu_det_train_domain_empty((x.R, I), device=x.dh.device)
+    torch.cuda.synchronize()
+
+    def leaves():
+        made = [_domain_copy(t) for t in (d.first, d.second)] + [None if x.weight is None else x.weight.clone()]
+        return [None if t is None else t.detach().requires_grad_(True) for t in made]
+
+    plans = {
+        "fwd": cake_clamped_swiglu_det_train_forward_domain_plan(d.first, d.second, x.weight, limit=x.L, out=d.h),
+        "bwd": cake_clamped_swiglu_det_train_backward_domain_plan(x.dh, d.first, d.second, x.weight, limit=x.L),
+        # the autograd step: new outputs, and in the backward a dh from torch
+        "autograd fwd": cake_clamped_swiglu_det_train_forward_domain_plan(d.first, d.second, x.weight, limit=x.L),
+        "autograd bwd": cake_clamped_swiglu_det_train_backward_domain_plan(
+            x.dh, d.first, d.second, x.weight, limit=x.L
+        ),
+    }
+    return {
+        "forward": lambda x: cake_clamped_swiglu_det_train_forward(
+            d.first, d.second, x.weight, limit=x.L, out=d.h, locality="domain"
+        ),
+        "backward": lambda x: cake_clamped_swiglu_det_train_backward(
+            x.dh, d.first, d.second, x.weight, limit=x.L, locality="domain"
+        ),
+        "autograd": lambda first, second, weight, L=x.L: cake_clamped_swiglu_det(
+            first, second, weight, limit=L, locality="domain"
+        ),
+        "leaves": leaves,
+        "writes_weight_grad": x.weight is not None,
+        "ckpt_replays_forward": False,
+        "version": _version("cake-pplx-clamped-swiglu"),
+        "notes": {
+            "domain_plans": {
+                stage: {key: plan[key] for key in ("route", "reason", "class", "program", "grid")}
+                for stage, plan in plans.items()
+            }
+        },
     }
 
 
@@ -923,13 +997,15 @@ def cudnn_arm(x: types.SimpleNamespace) -> dict[str, Any]:
 def make_arm(name: str, x: types.SimpleNamespace) -> dict[str, Any]:
     if name == "cake":
         return cake_arm(x)
+    if name == "cake_domain":
+        return cake_domain_arm(x)
     if name == "te":
         return te_arm(x)
     if name in ("torch_compile", "eager"):
         return _formula_arm(x, compiled=name == "torch_compile")
     if name == "cudnn":
         return cudnn_arm(x)
-    raise ValueError(f"unknown arm {name!r} (one of {', '.join(ARMS)})")
+    raise ValueError(f"unknown arm {name!r} (one of {', '.join(ARMS)}, cake_domain)")
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -943,7 +1019,7 @@ def _stage_calls(arm: dict[str, Any], x: types.SimpleNamespace) -> dict[str, Cal
         "fwd+bwd": lambda: (arm["forward"](x), arm["backward"](x)),
     }
     if arm["autograd"] is not None:
-        leaves = [None if t is None else t.detach().clone().requires_grad_(True) for t in (x.first, x.second, x.weight)]
+        leaves = _leaves(arm, x)
         wants = [t for t in leaves if t is not None]
 
         def ckpt():
@@ -956,6 +1032,14 @@ def _stage_calls(arm: dict[str, Any], x: types.SimpleNamespace) -> dict[str, Cal
     return calls
 
 
+def _leaves(arm: dict[str, Any], x: types.SimpleNamespace) -> list[Optional[torch.Tensor]]:
+    """Fresh leaves of the arm's autograd form that require grad: the arm's own (``leaves``), else clones of the
+    inputs."""
+    if arm.get("leaves") is not None:
+        return arm["leaves"]()
+    return [None if t is None else t.detach().clone().requires_grad_(True) for t in (x.first, x.second, x.weight)]
+
+
 def _saved_bytes(arm: dict[str, Any], x: types.SimpleNamespace) -> Optional[int]:
     """The bytes the arm's autograd form saves for its backward (its retained state), or None without one."""
     if arm["autograd"] is None:
@@ -966,7 +1050,7 @@ def _saved_bytes(arm: dict[str, Any], x: types.SimpleNamespace) -> Optional[int]
         seen[t.data_ptr()] = max(seen.get(t.data_ptr(), 0), t.numel() * t.element_size())
         return t
 
-    leaves = [None if t is None else t.detach().clone().requires_grad_(True) for t in (x.first, x.second, x.weight)]
+    leaves = _leaves(arm, x)
     with torch.autograd.graph.saved_tensors_hooks(pack, lambda t: t):
         arm["autograd"](*leaves)
     return sum(seen.values())
@@ -1110,13 +1194,14 @@ def bench_row(rows: int, layout: str, args: argparse.Namespace) -> dict[str, Any
         for stage, call in (("fwd", arm["forward"]), ("bwd", arm["backward"])):
             first[stage] = _first(lambda call=call: call(x), missing, stage)
         outputs = _outputs(x, first.get("fwd"), first.get("bwd"))
-        if name == "cake":
-            reference = outputs
+        if reference is None and name in ("cake", "cake_domain"):
+            # cake's outputs are new tensors; cake_domain's h is its arm's buffer, which its later calls write again
+            reference = outputs if name == "cake" else {key: value.clone() for key, value in outputs.items()}
         elif reference is not None:
             row["vs_cake"] = _compare(outputs, reference)
         del first
         row["saved_bytes"] = _first(lambda: _saved_bytes(arm, x), missing, "autograd") if not missing else None
-        row["workspace_bytes"] = 0 if name == "cake" else None
+        row["workspace_bytes"] = 0 if name in ("cake", "cake_domain") else None
         row["stages"] = {}
         for stage, call in _stage_calls(arm, x).items():
             reasons = [missing[part] for part in NEEDS[stage] if part in missing]
@@ -1124,6 +1209,8 @@ def bench_row(rows: int, layout: str, args: argparse.Namespace) -> dict[str, Any
                 row["stages"][stage] = {"unavailable": "; ".join(reasons)}
                 continue
             entry = row["stages"][stage] = _time_call(call, stage, arm, x, args)
+            if isinstance(entry.get("cupti_gbs"), float) and NVML.get("peak_gbs"):
+                entry["hbm_utilization"] = entry["cupti_gbs"] / NVML["peak_gbs"]
             if stage == "bwd" and "ms" in entry and arm.get("bwd_parts"):
                 entry["parts"] = {
                     part: _time_call(lambda fn=fn: fn(x), f"bwd {part}", arm, x, args)
@@ -1133,8 +1220,22 @@ def bench_row(rows: int, layout: str, args: argparse.Namespace) -> dict[str, Any
             row["stages"]["ckpt"] = {"unavailable": "no autograd form"}
         if arm.get("codes"):
             row["compile"]["cache_entries"] = {name: _cache_entries(code) for name, code in arm["codes"].items()}
-    cake = result["arms"].get("cake", {}).get("stages", {})
-    for row in result["arms"].values():
+    base_arm = "cake" if "cake" in result["arms"] else "cake_domain"
+    cake = result["arms"].get(base_arm, {}).get("stages", {})
+    domain = result["arms"].get("cake_domain", {}).get("stages", {})
+    if base_arm == "cake":
+        for stage, entry in domain.items():
+            off = cake.get(stage, {}).get("ms", {})
+            speedups = {
+                timer: off[timer] / value
+                for timer, value in entry.get("ms", {}).items()
+                if isinstance(value, float) and isinstance(off.get(timer), float)
+            }
+            if speedups:
+                entry["speedup_vs_off"] = speedups
+    for name, row in result["arms"].items():
+        if name == "cake_domain" and base_arm == "cake":
+            continue
         for stage, entry in row.get("stages", {}).items():
             base = cake.get(stage, {}).get("ms", {})
             ratios = {}
@@ -1186,12 +1287,16 @@ def format_row(result: dict[str, Any], timers: tuple[str, ...]) -> list[str]:
                 for timer, value in item["ms"].items():
                     if isinstance(value, str):
                         notes.append(f"- {name} {label} {timer}: {value}")
+                if item.get("speedup_vs_off"):
+                    notes.append(f"- {name} {label}: off / domain {json.dumps(item['speedup_vs_off'])}")
+                if item.get("hbm_utilization") is not None:
+                    notes.append(f"- {name} {label}: HBM utilization (cupti) {item['hbm_utilization']:.3f}")
                 if item.get("retimed_after_dynamo_compiled"):
                     count = item["retimed_after_dynamo_compiled"]
                     notes.append(f"- {name} {label}: Dynamo compiled {count} graph(s) while timing; timed again")
         if "vs_cake" in row:
             notes.append(f"- {name} outputs vs cake: {json.dumps(row['vs_cake'])}")
-        for key in ("ops", "compile", "merged_gradient", "backward", "errors"):
+        for key in ("ops", "compile", "merged_gradient", "backward", "errors", "domain_plans"):
             if row.get(key):
                 notes.append(f"- {name} {key}: {row[key]}")
         for graph, plan in row.get("plans", {}).items():
@@ -1384,6 +1489,25 @@ def identity() -> dict[str, Any]:
     return out
 
 
+# The device's NVML memory peak (``nvml_peak``), read once per run: ``peak_gbs`` is empty without ``pynvml``.
+NVML: dict[str, Any] = {}
+
+
+def nvml_peak(uuid: str) -> dict[str, Any]:
+    """The NVML memory peak of the GPU of UUID ``uuid`` (``identity()["uuid"]``): ``nvmlDeviceGetMemoryBusWidth``
+    (bits) x the current memory clock (``NVML_CLOCK_MEM``, MHz) x 2 / 8 / 1000 in GB/s, with the UUID, the clock and
+    the width; or the reason it is unavailable.  It makes NVML calls only: no CUDA call and no allocation."""
+    try:
+        pynvml = importlib.import_module("pynvml")
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByUUID(uuid)
+        clock = int(pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM))
+        width = int(pynvml.nvmlDeviceGetMemoryBusWidth(handle))
+    except Exception as exc:  # noqa: BLE001 - recorded, not fatal
+        return {"unavailable": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    return {"uuid": uuid, "mem_clock_mhz": clock, "bus_width_bits": width, "peak_gbs": width * clock * 2 / 8 / 1000}
+
+
 def copy_bandwidth() -> dict[str, float]:
     """A 2 GiB device-to-device copy under the ``cupti`` timer: bytes read plus written over the median time."""
     n = 1 << 31
@@ -1400,6 +1524,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--rows", type=int, nargs="+", default=[98304, 196608, 4097])
     parser.add_argument("--layouts", nargs="+", default=["merged", "split"], choices=["merged", "split"])
     parser.add_argument("--arms", nargs="+", default=list(ARMS), choices=list(ARMS))
+    parser.add_argument(
+        "--locality",
+        default="off",
+        choices=sorted(LOCALITY_ARMS),
+        help="off: the cake arm; domain: cake_domain in its place (R200); both: cake, then cake_domain",
+    )
     parser.add_argument("--timers", nargs="+", default=list(TIMERS), choices=list(TIMERS))
     parser.add_argument("--limit", type=float, default=10.0)
     parser.add_argument("--unweighted", action="store_true", help="no route weight (a shared expert)")
@@ -1435,18 +1565,23 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--host-warmup", type=int, default=100, help="untimed calls before the --host rounds")
     parser.add_argument("--json", default=None)
     args = parser.parse_args(argv)
-    args.arms = list(dict.fromkeys(["cake", *args.arms]))  # cake first: the other arms are compared with its outputs
+    # The Cake arms first: the other arms are compared with the first one's outputs.
+    others = [arm for arm in args.arms if arm != "cake"]
+    args.arms = list(dict.fromkeys([*LOCALITY_ARMS[args.locality], *others]))
     CUDNN_OPTIONS["runtime_compiled"] = args.cudnn_runtime_compiled
     if args.deterministic:
         torch.use_deterministic_algorithms(True)
         importlib.import_module("torch.utils.deterministic").fill_uninitialized_memory = True
     ident = identity()
+    NVML.update(nvml_peak(ident["uuid"]))
+    ident["nvml"] = dict(NVML)
     ident["deep_gate"] = {"columns": list(DEEP_GATE_COLUMNS), "value": DEEP_GATE} if args.deep_gate else None
     print(
         f"# {ident['gpu']} (sm_{ident['cc'][0]}{ident['cc'][1]}, {ident['sms']} SMs), torch {ident['torch']} "
         f"(CUDA {ident['torch_cuda']}), driver/power/max clock {ident.get('driver_power_maxclock')}"
     )
     print(f"# versions: {json.dumps(ident['versions'])}")
+    print(f"# NVML memory peak: {json.dumps(ident['nvml'])}")
     print(
         f"# host: {json.dumps(ident['host'])}; torch.Tensor.__dlpack_c_exchange_api__: "
         f"{ident['torch_dlpack_c_exchange_api']}; determinism: {json.dumps(ident['determinism'])}"

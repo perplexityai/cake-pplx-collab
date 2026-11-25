@@ -19,7 +19,10 @@ The family has one mode, ``det``: the facade ``cake_pplx.cake_clamped_swiglu_det
 package ``cake_pplx._backends.cake_clamped_swiglu_det_train``.  Every public name but the module constants
 (``ARCHES``, ``INTERMEDIATE_SIZE``, ``SUPPORTED_COMPUTE_CAPABILITIES``) carries ``det`` right after the op: the
 autograd entry ``cake_clamped_swiglu_det``, the steps ``cake_clamped_swiglu_det_train_forward`` / ``_backward``, the
-support query ``is_cake_clamped_swiglu_det_train_supported`` and the autograd class ``CakeClampedSwiGLUDetFunction``.
+support query ``is_cake_clamped_swiglu_det_train_supported``, the locality-domain helpers
+``cake_clamped_swiglu_det_train_domain_empty`` / ``_domain_release`` and plans
+``cake_clamped_swiglu_det_train_forward_domain_plan`` / ``_backward_domain_plan``, and the autograd class
+``CakeClampedSwiGLUDetFunction``.
 No entry point has a ``deterministic`` parameter.  The family has no non-deterministic module (every output is
 elementwise or a sum within one row) and no former names.  The facade imports its backend package on first use, so
 ``import cake_pplx`` loads no module of it; ``cake_pplx`` is a PEP 420 namespace package (no ``__init__.py``) that
@@ -57,6 +60,10 @@ FACADE_FUNCTIONS = {
     f"{MODULE}_forward",
     f"{MODULE}_backward",
     f"is_{MODULE}_supported",
+    f"{MODULE}_domain_empty",
+    f"{MODULE}_domain_release",
+    f"{MODULE}_forward_domain_plan",
+    f"{MODULE}_backward_domain_plan",
 }
 CONSTANTS = {"ARCHES", "INTERMEDIATE_SIZE", "SUPPORTED_COMPUTE_CAPABILITIES"}
 PUBLIC = FACADE_FUNCTIONS | {AUTOGRAD} | CONSTANTS

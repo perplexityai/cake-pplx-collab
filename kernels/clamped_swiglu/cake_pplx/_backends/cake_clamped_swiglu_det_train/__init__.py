@@ -162,7 +162,8 @@ JIT variables):
   every input where the naive implementation's is 0
   (``tests/cake/test_helpers/cake_naive.py``).  No output has an error budget
   of its own.
-- Workspace: none.  Retained state: the autograd function saves only its
+- Workspace: none with ``locality="off"`` (a ``"domain"`` forward's claim
+  counters are the package's own, ``cake_domain``).  Retained state: the autograd function saves only its
   inputs (``gate`` and ``up`` or the merged tensor, and ``weight``) through
   ``save_for_backward``, references to the caller's tensors with no copy; the
   backward recomputes the activation.
@@ -200,6 +201,49 @@ JIT variables):
   keep the projection's ``[R, 4608]`` output (the op's input) from the forward
   to the backward; one that also holds the down projection does not keep
   ``h``.
+- Locality domains (``locality="domain"``, opt-in; ``"off"`` is the default
+  and runs everything above unchanged).  An R200 (``sm_107a``) has two dies,
+  each with its own SMs and memory; default memory alternates between them every
+  4 KB.  :func:`cake_clamped_swiglu_det_train_domain_empty` allocates
+  ``[R, 2304]`` (2 MB chunks) or merged ``[R, 4608]`` (4 MB chunks) BF16 tensors
+  whose chunks alternate between the dies, row 0 at the start of a die-0 chunk,
+  so a chunk holds 455.1 rows of either width and every such tensor of one row
+  count changes die at the same rows (``cake_domain``).  A ``"domain"`` call of
+  the forward runs the forward's twin (``cake_jit``: ``fwd_domain``) when the
+  merged input or the gate (the anchor) lies in that memory on a slot of its
+  chunk, the device has its SM table, no caller output overlaps an input, and
+  ``R`` is at least the twin's first rows per SM times the SMs for the call's
+  class: ``homed`` when every BF16 operand (the inputs and ``h``) lies in the
+  anchor's row frame, else ``anchor`` (``cake_jit.DOMAIN_FIRST_ROWS_PER_SM``; a
+  class without a value never runs the twin).  Every other call runs the
+  ``"off"`` program with the same arguments, and never raises for its placement.
+  The backward, weighted or unweighted, has no twin: with ``"domain"`` it runs
+  the ``"off"`` program (reason ``"arch"``).  A new ``h`` is ``torch.empty``
+  (ordinary memory), so a forward without ``out`` is of class ``anchor``; the
+  autograd entry with ``locality="domain"`` allocates its outputs so.  A call
+  with fewer rows than the first row count its class can reach before its
+  placement is read (``anchor``'s for a new ``h``, the lower of the two with a
+  caller's ``out``) runs the ``"off"`` program without reading the registry
+  (:data:`_FLOORS`).  The twin
+  stores the bits of the ``"off"`` programs for every input, grid and placement.
+  A twin launch takes per-die claim counters from the package's workspaces
+  (``cake_domain``), which every launch leaves zero, and the SM table probed by
+  the device's first helper call.  The plans
+  (:func:`cake_clamped_swiglu_det_train_forward_domain_plan`,
+  :func:`cake_clamped_swiglu_det_train_backward_domain_plan`) report the route,
+  its reason, the class and the launch without launching; the route reads the
+  package's registry of the helper's ranges, with no driver call.
+  Costs, measured on R200s of 212 SMs (this package's README lists them): where
+  the twin runs, its route, claims and launch add 2.0 to 3.6 us of host time to
+  an autograd step and 9.0 to 11.3 us to a checkpointed one, so an eager step
+  whose host time exceeds its device time took longer than with ``"off"`` (an
+  autograd step up to 4.5 % at 27,136 rows; a checkpointed one up to 6.6 % from
+  27,136 rows until 49,152 with a merged input or 65,536 with two tensors), while
+  its device time was shorter.  A forward between two GEMMs on inputs with a
+  gate of -88 in each third of every row took up to 1.7 % longer near the first
+  row counts, and up to 0.9 % longer at 98,304 rows than with ``"off"`` on
+  default memory.  Below the first row counts a forward call takes up to about
+  0.2 us more host time than with ``"off"``.
 - Mode: the mode is part of the name (``det``).  Every output is elementwise
   or a sum within one row in one fixed order, so every launch gives the same
   bits for the same inputs on the same architecture, whatever the row count
@@ -217,8 +261,8 @@ import math
 import numbers
 import operator
 import struct
-from collections.abc import Callable
-from typing import Any, Optional
+from collections.abc import Callable, Sequence
+from typing import Any, Optional, Union
 
 import torch
 
@@ -1199,6 +1243,808 @@ def _backward_step(
     )
 
 
+# ----------------------------------------------------------------------------------------------------------------
+# Locality domains (``locality="domain"``): the forward's twin (``cake_jit``) on memory whose chunks alternate between
+# the two dies of an R200.  Nothing here runs for ``locality="off"``: the off steps above are not edited, and the entry
+# points compare ``locality`` with ``"off"`` once before them.
+
+# The values of ``locality``.
+_LOCALITIES = ("off", "domain")
+# The slots of a row of every tensor of the helper's memory (``cake_domain.slot_of``'s row frame).
+_ROW_SLOTS = cake_jit.DOMAIN_ROW_SLOTS
+
+
+def _domain_requested(locality: object) -> bool:
+    """Whether ``locality`` asks for the locality-domain route: ``"domain"``; ``"off"`` does not; a non-``str`` is a
+    ``TypeError`` and any other string a ``ValueError``."""
+    if not isinstance(locality, str):
+        raise TypeError(f"locality must be a str, one of {_LOCALITIES}, got {type(locality).__name__}")
+    if locality not in _LOCALITIES:
+        raise ValueError(f"locality must be one of {_LOCALITIES}, got {locality!r}")
+    return locality == "domain"
+
+
+@functools.cache
+def _domain() -> Any:
+    """The module of the memory that alternates dies, the SM tables and the claim workspaces (``cake_domain``),
+    imported on the first ``"domain"`` call that reads a placement and on the first helper call: an ``"off"`` call, and
+    a ``"domain"`` call refused for its architecture or its row count, import nothing of it."""
+    from . import cake_domain  # noqa: PLC0415 - only the locality-domain route needs it
+
+    return cake_domain
+
+
+# The parameters of a stage's twin (only ``fwd`` has one), in launch order: its base program's kernel parameters, the
+# claim counters of both dies, the twin's geometry, the SM table and the column offsets.  ``counters0`` and
+# ``counters1`` come from the launch's claim workspace (``cake_domain.launch``).
+_DOMAIN_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    stage: (
+        *(key for key in _ARGUMENTS[stage] if key not in ("up_col", "d_up_col")),
+        "counters0",
+        "counters1",
+        "first_slot",
+        "first_die",
+        "chunk_shift",
+        "item_rows",
+        "sm_table",
+        *(key for key in _ARGUMENTS[stage] if key in ("up_col", "d_up_col")),
+    )
+    for stage in _ARGUMENTS
+}
+
+
+class _Twin:
+    """The twin of one stage on one device (:func:`_twin`): ``name``, its record's ``chunk_shift`` and ``item_rows``,
+    ``resident`` (its CTAs per SM times the device's SMs, the largest grid), ``saturated`` (``resident * item_rows``:
+    from that many rows on the grid is ``resident``, :func:`_twin_grid`), ``words`` (its claim counter words a die),
+    ``homed`` and ``anchor`` (the first row count of each route class on the device, ``rows_per_sm * SMs``, or None
+    where the class never runs the twin), ``lowest`` (the smaller of the two, or None) and ``entry``, its FFI entry,
+    bound at its first launch.  Its parameters are checked to be in :data:`_DOMAIN_ARGUMENTS` order when it is made."""
+
+    __slots__ = (
+        "anchor",
+        "arch",
+        "chunk_shift",
+        "entry",
+        "homed",
+        "item_rows",
+        "lowest",
+        "name",
+        "resident",
+        "saturated",
+        "words",
+    )
+
+    def __init__(self, stage: str, device_index: int, name: str) -> None:
+        if parameters(name) != _DOMAIN_ARGUMENTS[stage]:
+            raise RuntimeError(
+                f"record {name}: parameters {parameters(name)} are not in the order the host passes them, "
+                f"{_DOMAIN_ARGUMENTS[stage]}"
+            )
+        self.arch = device_arch(device_index)
+        self.name = name
+        self.chunk_shift, self.item_rows, ctas = cake_jit.domain_rule(name, self.arch)
+        sm_count = int(torch.cuda.get_device_properties(device_index).multi_processor_count)
+        firsts = cake_jit.DOMAIN_FIRST_ROWS_PER_SM[stage][self.arch]
+        self.homed = None if firsts["homed"] is None else firsts["homed"] * sm_count
+        self.anchor = None if firsts["anchor"] is None else firsts["anchor"] * sm_count
+        lows = [value for value in (self.homed, self.anchor) if value is not None]
+        self.lowest = min(lows) if lows else None
+        self.resident = ctas * sm_count
+        self.saturated = self.resident * self.item_rows
+        self.words = int(cake_jit.MODULES[name]["counters"]["words"])
+        self.entry: Any = None
+
+    def bound(self) -> Any:
+        """The twin's FFI entry, looked up once (:func:`_entry`)."""
+        entry = self.entry
+        if entry is None:
+            entry = self.entry = _entry(self.name, self.arch)
+        return entry
+
+
+@functools.cache
+def _twin(stage: str, device_index: int) -> Optional[_Twin]:
+    """The twin of ``stage`` on device ``device_index`` (:class:`_Twin`), or None when the device's architecture has
+    none (``cake_jit.domain_program``): made once per stage and device, at the stage's first ``"domain"`` call on the
+    device.  No library loads here."""
+    name = cake_jit.domain_program(stage, device_arch(device_index))
+    return None if name is None else _Twin(stage, device_index, name)
+
+
+# Per device, the row counts from which a ``"domain"`` forward call can take the twin, known before any placement is
+# read (:func:`_floors`): ``(caller, new, twin)``.  ``caller`` is the lower of the twin's two first row counts (a call
+# with the caller's ``out``, of either class); ``new`` is the ``anchor`` class's (a call that allocates ``h``, which is
+# ordinary memory, so the call is of class ``anchor``: the autograd forward and a step without ``out``); each is
+# ``MAX_ROWS`` (more rows than any call has) where no class the call can be of runs the twin; ``twin`` is the forward's
+# :func:`_twin`, None on an architecture without one.  A call with fewer rows runs the ``"off"`` program without a
+# registry read, as :func:`_domain_route` and the plans route it.
+_FLOORS: dict[int, tuple[int, int, Optional[_Twin]]] = {}
+
+
+def _floors(device_index: int) -> tuple[int, int, Optional[_Twin]]:
+    """``_FLOORS[device_index]`` from the forward's twin on the device (its first row counts, ``rows_per_sm * SMs``),
+    made at the device's first ``"domain"`` forward call, after the call's architecture check."""
+    twin = _twin("fwd", device_index)
+    if twin is None:
+        floors: tuple[int, int, Optional[_Twin]] = (MAX_ROWS, MAX_ROWS, None)
+    else:
+        floors = (
+            MAX_ROWS if twin.lowest is None else twin.lowest,
+            MAX_ROWS if twin.anchor is None else twin.anchor,
+            twin,
+        )
+    _FLOORS[device_index] = floors
+    return floors
+
+
+def _span(tensor: torch.Tensor) -> tuple[int, int]:
+    """The byte interval ``[start, end)`` the elements of ``tensor`` (non-negative strides) lie in."""
+    start = tensor.data_ptr()
+    extent = sum((size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride()) if size > 1)
+    return start, start + (extent + 1) * tensor.element_size()
+
+
+def _overlaps(outputs: tuple[Optional[torch.Tensor], ...], inputs: tuple[Optional[torch.Tensor], ...]) -> bool:
+    """Whether the byte span of a caller's output meets the byte span of an input (each output against each input
+    tensor; the two halves of one merged tensor are one tensor and never compared with each other)."""
+    spans = [_span(tensor) for tensor in inputs if tensor is not None]
+    for tensor in outputs:
+        if tensor is not None:
+            start, end = _span(tensor)
+            if any(start < top and low < end for low, top in spans):
+                return True
+    return False
+
+
+# The result of :func:`_domain_route`: ``(twin, reason, klass, place, homed)``.
+_Route = tuple[Optional[_Twin], str, Optional[str], Optional[tuple[int, int]], Optional[dict[str, bool]]]
+
+
+def _domain_route(
+    stage: str,
+    device_index: int,
+    rows: int,
+    anchor: tuple[str, torch.Tensor],
+    others: tuple[tuple[str, torch.Tensor], ...],
+    outputs: tuple[tuple[str, Optional[torch.Tensor]], ...],
+    inputs: tuple[Optional[torch.Tensor], ...],
+    callers: tuple[Optional[torch.Tensor], ...],
+    copied: frozenset[str] = frozenset(),
+) -> _Route:
+    """The route of a ``locality="domain"`` call of ``stage`` with ``rows >= 1`` rows on device ``device_index``:
+    ``(twin, "placed", class, place, homed)`` for the twin, else ``(None, reason, class, place, homed)`` for the
+    program the call runs with ``locality="off"`` (the same bits).  ``anchor`` is the merged input or the gate,
+    ``others`` the other BF16 inputs (the up of two tensors) and ``outputs`` the BF16 outputs (None: a new
+    output the call allocates with ``torch.empty``), each as ``(label, tensor)``; ``inputs`` are every input tensor and
+    ``callers`` the caller's output buffers, for the overlap check.  A label in ``copied`` is an operand the call copies
+    first (the copy is ordinary memory).  The reasons, in this order:
+
+    1. ``"arch"``: the architecture has no twin of the stage;
+    2. ``"size"``: ``rows`` is below the lower of the twin's first row counts, or above ``cake_jit.DOMAIN_MAX_ROWS``;
+    3. ``"sm_table"``: the device has no SM table (no :func:`cake_clamped_swiglu_det_train_domain_empty` call ran on
+       it, or its probe failed);
+    4. ``"input_memory"``: the anchor does not lie in one range of that helper;
+    5. ``"input_layout"``: its first byte is not on a slot of its range, or its row pitch is not 9 slots;
+    6. ``"overlap"``: a caller's output meets an input;
+    7. the call is of class ``anchor`` (some BF16 operand not in the anchor's row frame) and the stage's twin has no
+       first row count for that class: the first such operand names the reason, ``"input_phase"`` for an input,
+       ``"out_memory"`` for a caller's output and ``"no_out"`` for a new output;
+    8. ``"size"``: ``rows`` is below the first row count of the call's class.
+
+    ``place`` is the anchor's ``(first_slot, first_die)`` from reason 6 on; ``homed`` maps each BF16 operand's label to
+    whether it lies in the anchor's row frame (``cake_domain.in_frame``), from reason 6 on.  Nothing here launches,
+    allocates or calls the driver; a fallback never raises."""
+    twin = _twin(stage, device_index)
+    if twin is None:
+        return None, "arch", None, None, None
+    if twin.lowest is None or rows < twin.lowest or rows > cake_jit.DOMAIN_MAX_ROWS:
+        return None, "size", None, None, None
+    memory = _domain()
+    if memory.sm_table(device_index) is None:
+        return None, "sm_table", None, None, None
+    label, tensor = anchor
+    place = memory.MEMORY if label in copied else memory.place(tensor)
+    if place == memory.MEMORY:
+        return None, "input_memory", None, None, None
+    if place == memory.LAYOUT:
+        return None, "input_layout", None, None, None
+    homed = {label: True}
+    reason = None
+    for label, tensor in others:
+        where = memory.MEMORY if label in copied else memory.place(tensor)
+        homed[label] = ok = type(where) is tuple and memory.in_frame(place, where)
+        if not ok and reason is None:
+            reason = "input_phase"
+    for label, tensor in outputs:
+        if tensor is None:
+            homed[label] = False
+            reason = reason or "no_out"
+            continue
+        where = memory.place(tensor)
+        homed[label] = ok = type(where) is tuple and memory.in_frame(place, where)
+        if not ok and reason is None:
+            reason = "out_memory"
+    if _overlaps(callers, inputs):
+        return None, "overlap", None, place, homed
+    klass = "anchor" if reason else "homed"
+    first = twin.anchor if reason else twin.homed
+    if first is None:
+        return None, reason or "size", klass, place, homed
+    if rows < first:
+        return None, "size", klass, place, homed
+    return twin, "placed", klass, place, homed
+
+
+def _twin_grid(twin: _Twin, rows: int, place: tuple[int, int]) -> int:
+    """The grid of ``twin`` for ``rows`` rows from the anchor's ``place``: ``cake_jit.domain_grid``'s, inline (each
+    die's items, at most the twin's resident CTAs, at least one).  Every row lies in exactly one item and an item holds
+    at most ``item_rows`` rows, so ``rows >= twin.saturated`` (``resident * item_rows``) rows make at least ``resident``
+    items: the grid is ``resident`` with no count."""
+    if rows >= twin.saturated:
+        return twin.resident
+    items0, items1 = cake_jit.domain_items(rows, place[0], place[1], twin.chunk_shift, twin.item_rows)
+    return max(1, min(items0 + items1, twin.resident))
+
+
+def _launch_twin(
+    twin: _Twin, device_index: int, head: tuple[Any, ...], place: tuple[int, int], tail: tuple[Any, ...], rows: int
+) -> None:
+    """Launch ``twin`` on the current stream of device ``device_index``: its base program's arguments ``head``, the
+    claim counters of a workspace no launch in flight shares (``cake_domain.launch``), the anchor's ``place``, the
+    twin's ``chunk_shift`` and ``item_rows``, the device's SM table, the column offsets ``tail`` and the grid.  The
+    launch of a call :func:`_forward_domain` checks in full; a common call's twin launch is the step's own (held:
+    :func:`_launch_held_twin`)."""
+    memory = _domain()
+    grid = _twin_grid(twin, rows, place)
+    memory.launch(
+        twin.bound(),
+        twin.words,
+        device_index,
+        head,
+        (
+            place[0],
+            place[1],
+            twin.chunk_shift,
+            twin.item_rows,
+            memory.sm_table(device_index),
+            *tail,
+            grid,
+            1,
+            1,
+        ),
+    )
+
+
+def _launch_held_twin(
+    twin: _Twin,
+    device_index: int,
+    first: torch.Tensor,
+    up: torch.Tensor,
+    weight: torch.Tensor,
+    h: torch.Tensor,
+    rows: int,
+    stride: int,
+    h_stride: int,
+    limit: float,
+    weighted: int,
+    first_slot: int,
+    first_die: int,
+    table: torch.Tensor,
+    up_col: int,
+    grid: int,
+) -> None:
+    """The twin launch of a common forward call that :func:`_forward_step_domain` kept for :func:`_held_domain` (a
+    checkpoint's recomputation), with the arguments the step built: the step's own launch, run after ``apply``
+    returns.  The entry is bound and the claim counters are taken now, at the launch (``cake_domain.claim``); a launch
+    that raises drops its stream's workspace (``cake_domain.drop``)."""
+    entry = twin.entry
+    if entry is None:
+        entry = twin.bound()
+    memory = _domain()
+    counters0, counters1, key = memory.claim(device_index, twin.words)
+    try:
+        entry(
+            first,
+            up,
+            weight,
+            h,
+            rows,
+            stride,
+            stride,
+            h_stride,
+            limit,
+            weighted,
+            counters0,
+            counters1,
+            first_slot,
+            first_die,
+            twin.chunk_shift,
+            twin.item_rows,
+            table,
+            up_col,
+            grid,
+            1,
+            1,
+        )
+    except BaseException:
+        memory.drop(key)
+        raise
+
+
+def _forward_checked(
+    gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, out: Optional[torch.Tensor]
+) -> tuple[int, torch.device, int, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Any, float, Any]:
+    """The checks of :func:`_forward`, in its order: ``(index, device, R, first, up, weight, copies, L, out)``.  No
+    copy, allocation or launch."""
+    fast = _fast_operands(gate_up_or_gate, up, weight) if _FAST_CHECKS else None
+    if fast is None:
+        device, rows, first, second, w, copies = _operands(gate_up_or_gate, up, weight)
+        index = int(device.index)
+    else:
+        index, rows, first, second, w = fast
+        device, copies = _device(index), None
+    L = _limit(limit)
+    h = out if out is None else _output(out, "out", rows=rows, cols=WIDTH, first=first, index=index)
+    if _arch_of_index(index) is None:
+        device_arch(index)  # raises: not an exported architecture
+    return index, device, rows, first, second, w, copies, L, h
+
+
+# The common call of the ``"domain"`` forward step (:func:`_forward_step_domain`): the common call of the
+# ``"off"`` step (see :func:`_forward_step`), checked in the same order, with the same outputs, then routed in
+# the step's own frame.  A call with fewer rows than the first row count its class can reach before its placement is
+# read (:data:`_FLOORS`: ``anchor``'s for a new ``h``, else the lower of the two) launches the ``"off"`` program as
+# :func:`_forward_step` does, with no registry read.  Every operand of the common call is contiguous, so its bytes and
+# its row pitch follow from its shape: the route reads each operand's data pointer once and finds its place with one
+# ``cake_domain.slot_of`` call (the anchor's, then each other BF16 operand's until one lies outside the anchor's row
+# frame), and compares the byte spans of the caller's output buffers with the inputs' (C12) only for a call whose class
+# can take the twin.  The decision is :func:`_domain_route`'s: the twin runs exactly when every reason there holds (the
+# reasons' order decides only the plan's reason).  Any other call runs :func:`_forward_domain`, which checks in full,
+# copies the inputs the kernels cannot read and routes through :func:`_domain_route`; both give the same launch.
+
+
+def _forward_step_domain(
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    out: Optional[torch.Tensor],
+    held: Optional[_HeldLaunch] = None,
+) -> torch.Tensor:
+    """The forward step with ``locality="domain"``: the common call checked, routed and launched here, any other call
+    through :func:`_forward_domain`; the checks, ``h``, the route and the launch of :func:`_forward_domain`.  With
+    ``held``, the launch is appended there for :func:`_held_domain` to run: ``(_launch_held_twin, arguments)`` for the
+    twin (the arguments of the launch here, the grid and the SM table included), ``(entry, arguments)`` for the
+    ``"off"`` program (:func:`_forward_step`'s)."""
+    first = gate_up_or_gate
+    if _FAST_CHECKS and type(first) is torch.Tensor and first.is_cuda and first.dtype is _BF16:
+        shape = first.shape
+        if len(shape) == 2 and shape[1] == (_MERGED_WIDTH if up is None else WIDTH):
+            rows = shape[0]  # two reads: a ``torch.Size`` is a tuple subclass, which unpacks through an iterator
+            cols = shape[1]
+            if 0 < rows < MAX_ROWS and first.is_contiguous() and not (address := first.data_ptr()) % ALIGNMENT_BYTES:
+                index = first.get_device()
+                # :func:`_plain` of the up of two tensors, inline, its data pointer kept for the route
+                if (
+                    up is None
+                    or (
+                        type(up) is torch.Tensor
+                        and up.is_cuda
+                        and up.dtype is _BF16
+                        and up.shape == shape
+                        and up.is_contiguous()
+                        and up.get_device() == index
+                        and not (up_address := up.data_ptr()) % ALIGNMENT_BYTES
+                    )
+                ) and (
+                    weight is None
+                    or (
+                        type(weight) is torch.Tensor
+                        and weight.is_cuda
+                        and weight.dtype is _FP32
+                        and weight.shape == (rows,)
+                        and weight.is_contiguous()
+                        and weight.get_device() == index
+                    )
+                ):
+                    if type(limit) is float or type(limit) is int:  # :func:`_limit`'s cached rounding, inlined
+                        value, L = _last_limit
+                        if limit != value:
+                            L = _limit(limit)
+                    else:
+                        L = _limit(limit)
+                    if out is not None and not (
+                        type(out) is torch.Tensor
+                        and out.is_cuda
+                        and out.dtype is _BF16
+                        and out.shape == (rows, WIDTH)
+                        and out.is_contiguous()
+                        and out.get_device() == index
+                        and not (out_address := out.data_ptr()) % ALIGNMENT_BYTES
+                    ):
+                        # ``out`` after ``limit``, as in :func:`_forward`, which checks this ``out`` in full.
+                        return _forward_domain(gate_up_or_gate, up, weight, limit, out, held)
+                    if _arch_of_index(index) is None:
+                        device_arch(index)  # raises: not an exported architecture
+                    launch = _launcher("fwd", index)
+                    caller = out
+                    if out is None:
+                        out = torch.empty(rows, WIDTH, dtype=_BF16, device=launch.device)
+                    if weight is None:
+                        w, weighted = launch.weight, 0
+                        if w is None:
+                            w = launch.ignored_weight()
+                    else:
+                        w, weighted = weight, 1
+                    stride, out_stride = (cols, WIDTH) if rows > 1 else (0, 0)
+                    if up is None:
+                        up_tensor, up_col = first, WIDTH
+                    else:
+                        up_tensor, up_col = up, 0
+                    # Below the first row count the call's class can reach (a new ``h``: ``anchor``'s), the ``"off"``
+                    # launch below, with no registry read.
+                    floors = _FLOORS.get(index) or _floors(index)
+                    if floors[1 if caller is None else 0] <= rows <= cake_jit.DOMAIN_MAX_ROWS:
+                        twin = floors[2]
+                        memory = _domain()
+                        table = memory.sm_table(index)
+                        if table is not None:
+                            bases, _, frames = memory.ranges(index)
+                            slot_of = memory.slot_of
+                            at = slot_of(bases, frames, address, rows, cols)
+                            if at >= 0:
+                                # The class: ``homed`` when the caller's ``out`` and the up of two tensors lie in the
+                                # anchor's row frame (a new ``h`` is ordinary memory: class ``anchor``).
+                                homed = caller is not None
+                                if homed:
+                                    period = memory.FRAME_PERIOD
+                                    other = slot_of(bases, frames, out_address, rows, WIDTH)
+                                    homed = other >= 0 and (other - at) % period < _ROW_SLOTS
+                                    if homed and up is not None:
+                                        other = slot_of(bases, frames, up_address, rows, WIDTH)
+                                        homed = other >= 0 and (other - at) % period < _ROW_SLOTS
+                                first_rows = twin.homed if homed else twin.anchor
+                                if first_rows is not None and rows >= first_rows:
+                                    # C12: the caller's ``out`` against the bytes of every input (an absent input
+                                    # spans nothing)
+                                    if caller is not None:
+                                        end = out_address + 2 * rows * WIDTH
+                                        if up is None:
+                                            up_address = up_end = 0
+                                        else:
+                                            up_end = up_address + 2 * rows * WIDTH
+                                        if weight is None:
+                                            w_address = w_end = 0
+                                        else:
+                                            w_address = weight.data_ptr()
+                                            w_end = w_address + 4 * rows
+                                        meets = (
+                                            (out_address < address + 2 * rows * cols and address < end)
+                                            or (out_address < up_end and up_address < end)
+                                            or (out_address < w_end and w_address < end)
+                                        )
+                                    else:
+                                        meets = False
+                                    if not meets:
+                                        die, slot = divmod(at, memory.CHUNK_SLOTS)
+                                        place = (slot, die)
+                                        if held is not None:
+                                            # the launch below, its arguments kept (:func:`_launch_held_twin`)
+                                            arguments = (
+                                                twin,
+                                                index,
+                                                first,
+                                                up_tensor,
+                                                w,
+                                                out,
+                                                rows,
+                                                stride,
+                                                out_stride,
+                                                L,
+                                                weighted,
+                                                slot,
+                                                die,
+                                                table,
+                                                up_col,
+                                                _twin_grid(twin, rows, place),
+                                            )
+                                            held.append((_launch_held_twin, arguments))
+                                            return out
+                                        entry = twin.entry
+                                        if entry is None:
+                                            entry = twin.bound()
+                                        grid = _twin_grid(twin, rows, place)
+                                        # ``cake_domain.launch``'s, with the arguments in one tuple
+                                        counters0, counters1, key = memory.claim(index, twin.words)
+                                        try:
+                                            entry(
+                                                first,
+                                                up_tensor,
+                                                w,
+                                                out,
+                                                rows,
+                                                stride,
+                                                stride,
+                                                out_stride,
+                                                L,
+                                                weighted,
+                                                counters0,
+                                                counters1,
+                                                slot,
+                                                die,
+                                                twin.chunk_shift,
+                                                twin.item_rows,
+                                                table,
+                                                up_col,
+                                                grid,
+                                                1,
+                                                1,
+                                            )
+                                        except BaseException:
+                                            memory.drop(key)
+                                            raise
+                                        return out
+                    limit_rows, plans, tail = launch.route
+                    name, _, per_row, per_cta = plans[rows] if rows < limit_rows else tail
+                    entry = launch.entries.get(name)
+                    if entry is None:
+                        entry = launch.entry(name)
+                    if held is not None:  # the same arguments as the launch below, kept for :func:`_held_domain`
+                        held.append(
+                            (
+                                entry,
+                                (
+                                    first,
+                                    up_tensor,
+                                    w,
+                                    out,
+                                    rows,
+                                    stride,
+                                    stride,
+                                    out_stride,
+                                    L,
+                                    weighted,
+                                    up_col,
+                                    -(-rows * per_row // per_cta),
+                                    1,
+                                    1,
+                                ),
+                            )
+                        )
+                        return out
+                    entry(
+                        first,
+                        up_tensor,
+                        w,
+                        out,
+                        rows,
+                        stride,
+                        stride,
+                        out_stride,
+                        L,
+                        weighted,
+                        up_col,
+                        -(-rows * per_row // per_cta),
+                        1,
+                        1,
+                    )
+                    return out
+    return _forward_domain(gate_up_or_gate, up, weight, limit, out, held)
+
+
+def _forward_domain(
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    out: Optional[torch.Tensor],
+    held: Optional[_HeldLaunch] = None,
+) -> torch.Tensor:
+    """The forward step with ``locality="domain"`` for any call: the checks of :func:`_forward`, the copies of the
+    inputs the kernels cannot read, ``h`` (the caller's ``out``, else ``torch.empty``), then the twin where
+    :func:`_domain_route` places the call, else the program of ``"off"``, with the same arguments and bits.  With
+    ``held``, the launch is appended there as ``(launch, arguments)`` for :func:`_held_domain` to run."""
+    index, device, rows, first, second, w, copies, L, h = _forward_checked(gate_up_or_gate, up, weight, limit, out)
+    if copies:
+        first, second, w = _read(first, second, w, copies)
+    caller = h
+    if h is None:
+        h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+    if rows == 0:
+        return h
+    many = rows > 1
+    gate_stride = first.stride(0) if many else 0
+    if second is None:
+        up_tensor, up_stride, up_col = first, gate_stride, WIDTH
+    else:
+        up_tensor, up_stride, up_col = second, second.stride(0) if many else 0, 0
+    launch = _launcher("fwd", index)
+    head = (
+        first,
+        up_tensor,
+        launch.ignored_weight() if w is None else w,
+        h,
+        rows,
+        gate_stride,
+        up_stride,
+        h.stride(0) if many else 0,
+        L,
+        0 if w is None else 1,
+    )
+    # Below the first row count the call's class can reach (:data:`_FLOORS`), the ``"off"`` program with no registry
+    # read: the program :func:`_domain_route` gives such a call.
+    floors = _FLOORS.get(index) or _floors(index)
+    if rows < floors[1 if caller is None else 0]:
+        twin = place = None
+    else:
+        twin, _, _, place, _ = _domain_route(
+            "fwd",
+            index,
+            rows,
+            ("gate_up" if second is None else "gate", first),
+            () if second is None else (("up", second),),
+            (("h", caller),),
+            (first, second, w),
+            (caller,),
+        )
+    if twin is None:
+        arguments: tuple[Any, ...] = (rows, *head, up_col)
+        if held is None:
+            launch(*arguments)
+        else:
+            held.append((launch, arguments))
+        return h
+    arguments = (twin, index, head, place, (up_col,), rows)
+    if held is None:
+        _launch_twin(*arguments)
+    else:
+        held.append((_launch_twin, arguments))
+    return h
+
+
+def _backward_checked(
+    grad_out: Any,
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    grad_gate_up_or_gate: Optional[torch.Tensor],
+    grad_up: Optional[torch.Tensor],
+    grad_weight: Optional[torch.Tensor],
+    rounded: bool,
+) -> tuple[Any, ...]:
+    """The checks of :func:`_backward`, in its order: ``(index, device, R, first, up, weight, copies, dh, copy_dh, L,
+    cols, d_first, d_up, d_weight)``, the output buffers as the caller gave them (None: new).  No copy, allocation or
+    launch."""
+    fast = _fast_operands(gate_up_or_gate, up, weight) if _FAST_CHECKS else None
+    if fast is None:
+        device, rows, first, second, w, copies = _operands(gate_up_or_gate, up, weight)
+        index = int(device.index)
+    else:
+        index, rows, first, second, w = fast
+        device, copies = _device(index), None
+    if _FAST_CHECKS and _plain(grad_out, torch.bfloat16, (rows, WIDTH), index):
+        dh, copy_dh = grad_out, False
+    else:
+        dh, copy_dh = _input(grad_out, "grad_out", rows=rows, cols=WIDTH, device=device)
+    L = limit if rounded else _limit(limit)
+    cols = 2 * WIDTH if second is None else WIDTH
+    if second is None and grad_up is not None:
+        raise ValueError("grad_up must be None for a merged input: grad_gate_up_or_gate receives both halves")
+    d_first = grad_gate_up_or_gate
+    if d_first is not None:
+        d_first = _output(d_first, "grad_gate_up_or_gate", rows=rows, cols=cols, first=first, index=index)
+    d_second = grad_up
+    if d_second is not None:
+        d_second = _output(d_second, "grad_up", rows=rows, cols=WIDTH, first=first, index=index)
+    d_weight = grad_weight
+    if d_weight is not None:
+        if w is None:
+            raise ValueError("grad_weight needs a weight: an unweighted call has no weight gradient")
+        d_weight = _grad_weight(d_weight, rows=rows, first=first, index=index)
+    if _arch_of_index(index) is None:
+        device_arch(index)  # raises: not an exported architecture
+    return index, device, rows, first, second, w, copies, dh, copy_dh, L, cols, d_first, d_second, d_weight
+
+
+def _forward_locality(
+    gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, out: Optional[torch.Tensor], locality: Any
+) -> torch.Tensor:
+    """The forward step for a ``locality`` other than ``"off"``: checked (:func:`_domain_requested`; the ``str``
+    ``"domain"`` itself passes with no call), then :func:`_forward_step_domain` for ``"domain"``."""
+    if (type(locality) is str and locality == "domain") or _domain_requested(locality):
+        return _forward_step_domain(gate_up_or_gate, up, weight, limit, out)
+    return _forward_step(gate_up_or_gate, up, weight, limit, out)
+
+
+def _backward_locality(
+    grad_out: Any,
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    grad_gate_up_or_gate: Optional[torch.Tensor],
+    grad_up: Optional[torch.Tensor],
+    grad_weight: Optional[torch.Tensor],
+    locality: Any,
+) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """The backward step for a ``locality`` other than ``"off"``: checked (:func:`_domain_requested`; the ``str``
+    ``"domain"`` itself passes with no call), then the ``"off"`` step: the backward has no twin, so a ``"domain"``
+    call runs the ``"off"`` program (reason ``"arch"``)."""
+    if not (type(locality) is str and locality == "domain"):
+        _domain_requested(locality)
+    return _backward_step(
+        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
+    )
+
+
+def _plain_plan(stage: str, device_index: int, rows: int) -> tuple[str, tuple[int, int, int]]:
+    """The program and grid of the ``"off"`` route of ``stage`` for ``rows >= 1`` rows on the device (:func:`_route`)."""
+    limit, plans, tail = _route(stage, device_index)
+    name, _, per_row, per_cta = plans[rows] if rows < limit else tail
+    return name, (-(-rows * per_row // per_cta), 1, 1)
+
+
+def _route_plan(
+    stage: str,
+    device_index: int,
+    rows: int,
+    route: Optional[_Route],
+    outputs: dict[str, str],
+) -> dict[str, Any]:
+    """The plan of a ``locality="domain"`` call (see :func:`cake_clamped_swiglu_det_train_forward_domain_plan`)."""
+    if route is None:
+        return {
+            "stage": stage,
+            "route": "plain",
+            "reason": "empty",
+            "class": None,
+            "program": None,
+            "first_slot": None,
+            "first_die": None,
+            "chunk_shift": None,
+            "item_rows": None,
+            "grid": None,
+            "homed": None,
+            "outputs": outputs,
+        }
+    twin, reason, klass, place, homed = route
+    plan = {
+        "stage": stage,
+        "route": "plain" if twin is None else "domain",
+        "reason": reason,
+        "class": klass,
+        "program": None,
+        "first_slot": None,
+        "first_die": None,
+        "chunk_shift": None,
+        "item_rows": None,
+        "grid": None,
+        "homed": None if homed is None else dict(homed),
+        "outputs": outputs,
+    }
+    if twin is None:
+        plan["program"], plan["grid"] = _plain_plan(stage, device_index, rows)
+    else:
+        plan.update(
+            program=twin.name,
+            first_slot=place[0],
+            first_die=place[1],
+            chunk_shift=twin.chunk_shift,
+            item_rows=twin.item_rows,
+            grid=(_twin_grid(twin, rows, place), 1, 1),
+        )
+    return plan
+
+
+def _copied_labels(labels: tuple[str, ...], copies: Any) -> frozenset[str]:
+    """The labels of the operands a call copies first (``copies``: the first operand, the up, the weight)."""
+    if not copies:
+        return frozenset()
+    return frozenset(label for label, copy in zip(labels, copies) if copy)
+
+
 def cake_clamped_swiglu_det_train_forward(
     gate_up_or_gate: torch.Tensor,
     up: Optional[torch.Tensor] = None,
@@ -1206,10 +2052,14 @@ def cake_clamped_swiglu_det_train_forward(
     *,
     limit: float,
     out: Optional[torch.Tensor] = None,
+    locality: str = "off",
 ) -> torch.Tensor:
     """Forward step: ``h = bf16(weight * silu(min(gate, L)) * clamp(up, -L, L))``, one rounding (see the module and
-    the facade's documentation)."""
-    return _forward_step(gate_up_or_gate, up, weight, limit, out)
+    the facade's documentation).  ``locality="domain"`` runs the forward's twin where
+    :func:`cake_clamped_swiglu_det_train_forward_domain_plan` says so, the same bits either way."""
+    if locality == "off":
+        return _forward_step(gate_up_or_gate, up, weight, limit, out)
+    return _forward_locality(gate_up_or_gate, up, weight, limit, out, locality)
 
 
 def cake_clamped_swiglu_det_train_backward(
@@ -1222,12 +2072,120 @@ def cake_clamped_swiglu_det_train_backward(
     grad_gate_up_or_gate: Optional[torch.Tensor] = None,
     grad_up: Optional[torch.Tensor] = None,
     grad_weight: Optional[torch.Tensor] = None,
+    locality: str = "off",
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Backward step: ``(d_gate_up, None, d_weight)`` for a merged input, ``(d_gate, d_up, d_weight)`` for two
-    tensors; ``d_weight`` is None without a weight (see the module and the facade's documentation)."""
-    return _backward_step(
+    tensors; ``d_weight`` is None without a weight (see the module and the facade's documentation).
+    ``locality="domain"`` runs the ``"off"`` program too: the backward has no twin
+    (:func:`cake_clamped_swiglu_det_train_backward_domain_plan`: reason ``"arch"``)."""
+    if locality == "off":
+        return _backward_step(
+            grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
+        )
+    return _backward_locality(
+        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, locality
+    )
+
+
+def cake_clamped_swiglu_det_train_domain_empty(
+    shape: Sequence[int],
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+    device: Optional[Union[torch.device, str, int]] = None,
+) -> torch.Tensor:
+    """An uninitialized contiguous BF16 tensor of ``shape`` ``(R, 2304)`` or ``(R, 4608)`` in memory whose chunks
+    (2 MB, or 4 MB for the merged width) alternate between the two dies of an SM107 (R200) device, row 0 at the
+    start of a die-0 chunk: an operand or output of a ``locality="domain"`` call (``cake_domain.domain_empty``).
+    ``device`` defaults to the current CUDA device.  ``TypeError`` for a ``dtype`` that is not a ``torch.dtype``,
+    ``ValueError`` for another dtype or shape or a device that is not CUDA, ``torch.cuda.OutOfMemoryError`` when the
+    device has no room, ``RuntimeError`` on another architecture, during a CUDA graph capture on any device in this
+    thread, with fewer than two locality domains or without cuda-python.  Freeing the last view synchronizes the
+    device."""
+    return _domain().domain_empty(shape, dtype=dtype, device=device)
+
+
+def cake_clamped_swiglu_det_train_domain_release(device: Optional[Union[torch.device, str, int]] = None) -> None:
+    """Free the ranges of :func:`cake_clamped_swiglu_det_train_domain_empty` memory of ``device`` (the current CUDA
+    device by default) whose last view is gone and that still wait to be freed (their last view died while another
+    call held the module's lock, or during a CUDA graph capture).  ``RuntimeError`` during a CUDA graph capture on the
+    device's current stream; ``ValueError`` for a device that is not CUDA."""
+    index = _domain()._cuda_index(device)
+    with torch.cuda.device(index):
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("cake_clamped_swiglu_det_train_domain_release runs outside a CUDA graph capture only")
+    _domain().release(index)
+
+
+def cake_clamped_swiglu_det_train_forward_domain_plan(
+    gate_up_or_gate: torch.Tensor,
+    up: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
+    *,
+    limit: float,
+    out: Optional[torch.Tensor] = None,
+) -> dict[str, Any]:
+    """What ``cake_clamped_swiglu_det_train_forward(..., locality="domain")`` runs for these arguments, checked as the
+    forward checks them, without a launch, an allocation or a copy: ``stage``; ``route`` (``"domain"`` for the twin,
+    else ``"plain"``); ``reason`` (``"placed"`` for the twin, else a reason of ``cake_jit.DOMAIN_REASONS``, or
+    ``"empty"`` for ``R = 0``); ``class`` (``"homed"`` or ``"anchor"``, once the anchor is placed); ``program`` (the
+    ``cake_jit.MODULES`` record that runs; None for no launch); ``first_slot``, ``first_die``, ``chunk_shift`` and
+    ``item_rows`` (the twin's, None on the plain route); ``grid``; ``homed`` (each BF16 operand: whether it lies in the
+    anchor's row frame; None before the anchor is placed); ``outputs`` (each output: ``"caller"`` for a caller's
+    buffer, ``"empty"`` for a new ``torch.empty`` tensor)."""
+    index, _, rows, first, second, w, copies, _, h = _forward_checked(gate_up_or_gate, up, weight, limit, out)
+    outputs = {"h": "empty" if h is None else "caller"}
+    if rows == 0:
+        return _route_plan("fwd", index, rows, None, outputs)
+    anchor = "gate_up" if second is None else "gate"
+    copied = _copied_labels((anchor, "up", "weight"), copies)
+    route = _domain_route(
+        "fwd",
+        index,
+        rows,
+        (anchor, first),
+        () if second is None else (("up", second),),
+        (("h", h),),
+        tuple(
+            None if label in copied else tensor for label, tensor in ((anchor, first), ("up", second), ("weight", w))
+        ),
+        (h,),
+        copied,
+    )
+    return _route_plan("fwd", index, rows, route, outputs)
+
+
+def cake_clamped_swiglu_det_train_backward_domain_plan(
+    grad_out: torch.Tensor,
+    gate_up_or_gate: torch.Tensor,
+    up: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
+    *,
+    limit: float,
+    grad_gate_up_or_gate: Optional[torch.Tensor] = None,
+    grad_up: Optional[torch.Tensor] = None,
+    grad_weight: Optional[torch.Tensor] = None,
+) -> dict[str, Any]:
+    """What ``cake_clamped_swiglu_det_train_backward(..., locality="domain")`` runs for these arguments, checked as the
+    backward checks them, without a launch, an allocation or a copy: the keys of
+    :func:`cake_clamped_swiglu_det_train_forward_domain_plan`, ``stage`` ``"bwd"`` for a weighted call and
+    ``"bwd_unweighted"`` for an unweighted one, and ``outputs`` naming ``d_gate_up`` (merged) or ``d_gate`` and
+    ``d_up``, and ``d_weight`` for a weighted call.  The backward has no twin: the route is ``"plain"`` with reason
+    ``"arch"`` (``"empty"`` for ``R = 0``), the ``"off"`` program and its grid."""
+    (index, _, rows, _, second, w, _, _, _, _, _, d_first, d_second, d_weight) = _backward_checked(
         grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
     )
+    stage = "bwd_unweighted" if w is None else "bwd"
+    if second is None:
+        labels: tuple[tuple[str, Optional[torch.Tensor]], ...] = (("d_gate_up", d_first),)
+    else:
+        labels = (("d_gate", d_first), ("d_up", d_second))
+    outputs = {label: "empty" if tensor is None else "caller" for label, tensor in labels}
+    if w is not None:
+        outputs["d_weight"] = "empty" if d_weight is None else "caller"
+    if rows == 0:
+        return _route_plan(stage, index, rows, None, outputs)
+    # No backward stage has a twin (:func:`_backward_locality`): the ``"off"`` program, reason ``"arch"``.
+    return _route_plan(stage, index, rows, (None, "arch", None, None, None), outputs)
 
 
 class _Gradients(torch.autograd.Function):
@@ -1347,16 +2305,82 @@ def _held(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any) -> torch.Tenso
     return h
 
 
+# ----------------------------------------------------------------------------------------------------------------
+# Autograd with ``locality="domain"``: the classes above with the domain forward step (the backward has no twin).  The
+# ``"off"`` classes and their steps are not edited.
+
+
+class _DomainFunction(CakeClampedSwiGLUDetFunction):
+    """:class:`CakeClampedSwiGLUDetFunction` with ``locality="domain"``: the forward step runs its twin where the domain
+    route places the call (:func:`_forward_step_domain`); the backward is :class:`CakeClampedSwiGLUDetFunction`'s, since
+    the backward has no twin.  The same saved state (the inputs only), the same checks and the same bits.  ``h`` is a
+    new ``torch.empty`` tensor, so the forward runs its twin as a call of class ``anchor``."""
+
+    @staticmethod
+    def forward(ctx, gate_up_or_gate, up, weight, limit):
+        h = _forward_step_domain(gate_up_or_gate, up, weight, limit, None)
+        ctx.save_for_backward(gate_up_or_gate, up, weight)
+        ctx.limit = _limit(limit)
+        return h
+
+
+class _HeldDomainFunction(_DomainFunction):
+    """:class:`_DomainFunction` whose ``forward`` keeps the launch in its fifth argument, a :class:`_HeldLaunch`, for
+    :func:`_held_domain` to run after ``apply`` returns (:class:`_HeldFunction`'s rule)."""
+
+    @staticmethod
+    def forward(ctx, gate_up_or_gate, up, weight, limit, held):
+        h = _forward_step_domain(gate_up_or_gate, up, weight, limit, None, held)
+        ctx.save_for_backward(gate_up_or_gate, up, weight)
+        ctx.limit = _limit(limit)
+        return h
+
+    @staticmethod
+    def backward(ctx, grad_h):
+        return (*_DomainFunction.backward(ctx, grad_h), None)
+
+
+_domain_apply = _DomainFunction.apply
+_held_domain_apply = _HeldDomainFunction.apply
+
+
+def _held_domain(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any) -> torch.Tensor:
+    """:func:`_held` with ``locality="domain"``."""
+    if _is_compiling() or _is_tracing():
+        return _domain_apply(gate_up_or_gate, up, weight, limit)
+    held = _HeldLaunch()
+    h = _held_domain_apply(gate_up_or_gate, up, weight, limit, held)
+    if held:
+        launch, arguments = held[0]
+        launch(*arguments)
+    return h
+
+
+def _autograd_locality(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, locality: Any) -> torch.Tensor:
+    """:func:`cake_clamped_swiglu_det` for a ``locality`` other than ``"off"``: checked (:func:`_domain_requested`; the
+    ``str`` ``"domain"`` itself passes with no call), then the domain classes, applied as the ``"off"`` ones are."""
+    if not ((type(locality) is str and locality == "domain") or _domain_requested(locality)):
+        return cake_clamped_swiglu_det(gate_up_or_gate, up, weight, limit=limit)
+    if _graph_task() == -1 or _hooks(False) is None:
+        return _domain_apply(gate_up_or_gate, up, weight, limit)
+    return _held_domain(gate_up_or_gate, up, weight, limit)
+
+
 def cake_clamped_swiglu_det(
     gate_up_or_gate: torch.Tensor,
     up: Optional[torch.Tensor] = None,
     weight: Optional[torch.Tensor] = None,
     *,
     limit: float,
+    locality: str = "off",
 ) -> torch.Tensor:
     """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the arguments
     (the forward launched inside ``forward``); in a backward with saved-tensors hooks set (a non-reentrant
-    checkpoint's recomputation), :func:`_held`: the forward kernel launched after autograd saved the inputs."""
+    checkpoint's recomputation), :func:`_held`: the forward kernel launched after autograd saved the inputs.  With
+    ``locality="domain"``, the same with the domain classes (:func:`_autograd_locality`): the forward step runs its
+    twin where the domain route places it and the backward runs the ``"off"`` program, the same bits either way."""
+    if locality != "off":
+        return _autograd_locality(gate_up_or_gate, up, weight, limit, locality)
     if _graph_task() == -1 or _hooks(False) is None:
         return _apply(gate_up_or_gate, up, weight, limit)
     return _held(gate_up_or_gate, up, weight, limit)
@@ -1369,6 +2393,10 @@ __all__ = [
     "CakeClampedSwiGLUDetFunction",
     "cake_clamped_swiglu_det",
     "cake_clamped_swiglu_det_train_backward",
+    "cake_clamped_swiglu_det_train_backward_domain_plan",
+    "cake_clamped_swiglu_det_train_domain_empty",
+    "cake_clamped_swiglu_det_train_domain_release",
     "cake_clamped_swiglu_det_train_forward",
+    "cake_clamped_swiglu_det_train_forward_domain_plan",
     "is_cake_clamped_swiglu_det_train_supported",
 ]

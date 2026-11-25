@@ -21,8 +21,11 @@ backend's step functions, ``apply`` and, in a backward with saved-tensors hooks 
 their first call.  Through the facade, the forward of a checkpoint's recomputation launches after autograd saved its
 inputs (one held launch; merged, two-tensor, strided and copied inputs, weighted and unweighted), a real non-reentrant
 checkpoint of the op alone launches no forward in the backward, and with no rows no call (the steps, autograd, the held
-call, a checkpoint) looks up, loads or launches a kernel.  The mode rules of the deterministic package: no entry point
-takes a ``deterministic`` keyword (``TypeError``, checked without a device), and
+call, a checkpoint) looks up, loads or launches a kernel.  ``locality`` (the last keyword of the steps and the
+autograd entry, ``"off"`` by default) is checked by the backend for every value but ``"off"``, with the same errors
+through the facade, whose ``"domain"`` entries bind the backend's at their first call and give the ``"off"`` bits; the
+locality-domain helpers and plans have their backend functions' signatures.  The mode rules of the deterministic
+package: no entry point takes a ``deterministic`` keyword (``TypeError``, checked without a device), and
 ``torch.use_deterministic_algorithms(True)`` (strict or ``warn_only``) neither raises nor warns in any call.  The
 facade reads no environment variable.  The numerical contract is ``test_cake_clamped_swiglu_det_train.py``'s.
 """
@@ -62,6 +65,10 @@ ENTRY_NAMES = (
     "cake_clamped_swiglu_det_train_backward",
     "cake_clamped_swiglu_det_train_forward",
     "is_cake_clamped_swiglu_det_train_supported",
+    "cake_clamped_swiglu_det_train_domain_empty",
+    "cake_clamped_swiglu_det_train_domain_release",
+    "cake_clamped_swiglu_det_train_forward_domain_plan",
+    "cake_clamped_swiglu_det_train_backward_domain_plan",
 )
 NAMESPACES = {"facade": facade, "backend": backend}
 
@@ -294,6 +301,45 @@ def test_the_facade_binds_the_backend_functions_at_their_first_call(monkeypatch)
     assert facade._held is backend._held
 
 
+@pytest.mark.parametrize("locality", [None, 1, b"domain", "on", "Domain", ""])
+def test_the_facade_checks_locality_as_the_backend_does(locality) -> None:
+    """Without a device: a ``locality`` that is not a ``str`` (``TypeError``) or not ``"off"`` / ``"domain"``
+    (``ValueError``) raises the same exception, type and message, through the facade and the backend, before any other
+    argument is read."""
+    dh = torch.zeros(4, I, dtype=torch.bfloat16)
+    x = torch.zeros(4, 2 * I, dtype=torch.bfloat16)
+    calls = (
+        lambda module: module.cake_clamped_swiglu_det_train_forward(x, limit=L, locality=locality),
+        lambda module: module.cake_clamped_swiglu_det_train_backward(dh, x, limit=L, locality=locality),
+        lambda module: module.cake_clamped_swiglu_det(x, limit=L, locality=locality),
+    )
+    for call in calls:
+        raised = []
+        for module in (facade, backend):
+            with pytest.raises((TypeError, ValueError), match="locality") as info:
+                call(module)
+            raised.append((type(info.value), str(info.value)))
+        assert raised[0] == raised[1], raised
+        assert raised[0][0] is (ValueError if isinstance(locality, str) else TypeError)
+
+
+def test_the_facade_binds_the_locality_entries_at_their_first_call() -> None:
+    """Without a device: after a first ``locality="domain"`` call of each facade entry (each refused for a CPU
+    operand), the facade calls the backend's own locality entries, bound to globals of the facade."""
+    dh = torch.zeros(4, I, dtype=torch.bfloat16)
+    x = torch.zeros(4, 2 * I, dtype=torch.bfloat16)
+    for call in (
+        lambda: facade.cake_clamped_swiglu_det_train_forward(x, limit=L, locality="domain"),
+        lambda: facade.cake_clamped_swiglu_det_train_backward(dh, x, limit=L, locality="domain"),
+        lambda: facade.cake_clamped_swiglu_det(x, limit=L, locality="domain"),
+    ):
+        with pytest.raises(ValueError):
+            call()
+    assert facade._forward_locality is backend._forward_locality
+    assert facade._backward_locality is backend._backward_locality
+    assert facade._autograd_locality is backend._autograd_locality
+
+
 def test_the_facade_reads_no_environment_variable() -> None:
     tree = ast.parse(Path(facade.__file__).read_text())
     uses = [
@@ -323,6 +369,32 @@ def test_facade_matches_backend_bits(merged: bool, weighted: bool) -> None:
     out.backward(dh)
     assert torch.equal(out, h)
     for leaf, grad in zip(leaves, got, strict=True):
+        if leaf is not None:
+            assert torch.equal(leaf.grad, grad)
+
+
+@requires_device
+@pytest.mark.parametrize(("merged", "weighted"), [(True, True), (False, True), (True, False)])
+def test_facade_domain_calls_on_ordinary_memory_give_the_off_bits(merged: bool, weighted: bool) -> None:
+    """Through the facade, ``locality="domain"`` on ordinary memory (the steps and autograd) gives the backend's
+    ``"off"`` bits on every architecture, and the plans name a program of the ``"off"`` route (the backward's for
+    reason ``"arch"``: it has no twin)."""
+    first, second, w, dh = _inputs(257, seed=12, merged=merged, weighted=weighted)
+    h = backend.cake_clamped_swiglu_det_train_forward(first, second, w, limit=L)
+    want = backend.cake_clamped_swiglu_det_train_backward(dh, first, second, w, limit=L)
+    assert torch.equal(cake_clamped_swiglu_det_train_forward(first, second, w, limit=L, locality="domain"), h)
+    got = cake_clamped_swiglu_det_train_backward(dh, first, second, w, limit=L, locality="domain")
+    for a, b in zip(got, want, strict=True):
+        assert (a is None and b is None) or torch.equal(a, b)
+    backward_plan = facade.cake_clamped_swiglu_det_train_backward_domain_plan(dh, first, second, w, limit=L)
+    for plan in (facade.cake_clamped_swiglu_det_train_forward_domain_plan(first, second, w, limit=L), backward_plan):
+        assert plan["route"] == "plain" and plan["program"] in backend.cake_jit.MODULES, plan
+    assert backward_plan["reason"] == "arch", backward_plan
+    leaves = [None if t is None else t.clone().requires_grad_(True) for t in (first, second, w)]
+    out = cake_clamped_swiglu_det(*leaves, limit=L, locality="domain")
+    out.backward(dh)
+    assert torch.equal(out, h)
+    for leaf, grad in zip(leaves, want, strict=True):
         if leaf is not None:
             assert torch.equal(leaf.grad, grad)
 

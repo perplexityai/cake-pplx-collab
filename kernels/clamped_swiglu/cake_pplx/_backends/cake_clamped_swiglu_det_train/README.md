@@ -246,6 +246,64 @@ two-tensor call passes 0.  The binding refuses an offset below 0, one that is no
 `size(1) - 2304` of a 2-D tensor (`ValueError`).  The kernels and their sources do not change with it.  0.1.5 and
 earlier passed a view of the merged tensor's second half as the up (and `d_up`), with no offset.
 
+## Locality domains (SM107)
+
+An R200 has two dies, each with its own SMs and memory; default memory alternates between them every 4 KB.  With
+`locality="domain"` (the steps and the autograd entry; `"off"`, the default, runs only the programs above), the forward
+runs its twin, the program of the `fwd_domain` role (`sm_107a` only), when the call's operands lie in memory from
+`cake_clamped_swiglu_det_train_domain_empty` (`cake_domain.py`).  That helper maps one virtual range of chunks, chunk
+`k` in die `k & 1` (2 MB for `[R, 2304]`, 4 MB for `[R, 4608]`), so a row is 9 of the 4,096 slots of a chunk in either
+width and tensors of one row count change die at the same rows.  The backward, weighted or unweighted, has no twin:
+with `"domain"` it runs its `"off"` program (its plan's reason `arch`).
+
+- Twin.  The forward's twin is the forward's program built with the claim loop and at least 5 resident CTAs per SM.
+  It takes the forward's parameters, then the claim counters of both dies (`counters0`, `counters1`), the anchor's
+  first slot and die, `chunk_shift`, `item_rows` and the SM table (by value: one int32 word per SM id with its die),
+  then the column offset.  Its rows are items of `item_rows` (4) rows within one chunk; each CTA reads its die from
+  the SM table and claims items of its own die's chunks first, then the other die's.  The grid is
+  `min(items, ctas_per_sm * SMs)` CTAs (`cake_jit.domain_grid`); any grid gives the same bits.  The record's
+  `grid_rule`, `counters` and `first_rows_per_sm` hold these facts; the row-count route and the fine window never name
+  the twin.
+- Route (`_domain_route`, in this order): `arch` (no twin of the stage on the device: every architecture but `sm_107a`,
+  and both backward stages everywhere), `size` (fewer rows than the lower first row count of the twin's classes, or more
+  than `2**27`), `sm_table` (no table on the device), `input_memory` and `input_layout` (the anchor, the merged input or
+  the gate, not on a row start of a helper range), `overlap` (a caller's output buffer meets an input), then the class:
+  `homed` when every BF16 operand lies in the anchor's row frame (its row 0 at most 8 slots after the anchor's), else
+  `anchor`.  A class without a first row count names its first operand outside the frame: `input_phase`, `out_memory` or
+  `no_out`.  Then `size` below the class's first row count, else `placed`.  The route reads the registry of helper
+  ranges only: no driver call, no allocation, no launch.  Every fallback runs the `"off"` program with the same
+  arguments.
+- Outputs.  A new `h` is a `torch.empty` tensor (default memory), so a forward without `out` is of class `anchor`; an
+  `out` from the helper keeps the class `homed`.  Autograd passes no buffer, so its forward is of class `anchor`.
+- Bits.  The twin computes each row with the forward's instructions, so it stores the `"off"` bits for every input and
+  every grid: the atomic claims choose only which CTA computes an item.
+- State.  The helper ranges (outside torch's allocator: not in `torch.cuda.memory_*`; the last view's free synchronizes
+  the device, deferred to the next helper call or `cake_clamped_swiglu_det_train_domain_release` during a capture),
+  each device's SM table (probed by its first helper call through the package's JIT build of the locality probe), and
+  the claim workspaces of `cake_domain.py`: one per stream for eager calls, one per capture and capture stream for CUDA
+  graphs (a graph instantiated more than once shares its workspace: replay its copies one at a time), every launch
+  leaving its counters zero.  The `"off"` path imports none of this.
+- Plans.  `cake_clamped_swiglu_det_train_forward_domain_plan` and `..._backward_domain_plan` take their step's
+  arguments without `locality` and return the route, reason, class, program, placement, grid, per-operand frame flags
+  and whether each output is the caller's or new, without a launch.  The backward's plan names its `"off"` program
+  with reason `arch`.
+- Costs, measured on R200s of 212 SMs, where the first row counts are 23,744 rows (`homed`) and 27,136 (`anchor`).  The
+  twin's route, claims and launch add 2.0 to 3.6 us of host time to an autograd step (forward and backward) and 9.0 to
+  11.3 us to a checkpointed one (two forwards and a backward).  So an eager step whose host time exceeds its device time
+  can take longer than with `"off"`: at 27,136 rows an autograd step took 2.1 to 4.5 % longer, and a checkpointed step
+  4.8 to 6.6 % longer at 27,136 and 32,768 rows and up to 3.5 % longer at 49,152 rows with two input tensors (none was
+  slower at 49,152 rows with a merged input, or at 65,536, 98,304 and 196,608 rows), while the device time of every
+  measured step of the op from 27,136 rows on (CUDA graph replays, kernel timers) was 0.5 to 9.5 % shorter.  In a
+  forward between the gate/up and the down projections (model width 2048) on inputs with a gate of -88 in each third of
+  every row, the twin took 4.5 to 8.5 % longer than the `"off"` program on the same memory at 23,744 and 27,136 rows,
+  and the whole chain 0.4 to 1.7 % longer, on the three GPUs measured whose dies have 106 SMs each (on other inputs, a
+  CUDA graph replay of the chain at 27,136 rows took up to 0.5 % longer on one GPU).  At 98,304 rows such a chain took
+  0.3 to 0.9 % longer on those GPUs than with `"off"` on default memory: the helper's memory makes that kernel 3 to 5 %
+  slower there, and the twin wins back at most 1.7 %; on other inputs the chain took up to 1 % less time.  Below the
+  first row counts a `"domain"` call runs the `"off"` program after its `locality` and size checks, with up to about 0.2
+  us more host time per forward call and about 0.5 to 1 us per checkpointed autograd step; in eager timings this stayed
+  within the noise but for one forward measurement, 0.5 % slower than `"off"` on default memory.
+
 ## Numerics
 
 - `g' = min(g, L)` and `u' = clamp(u, -L, L)` from the BF16 values widened to FP32 (exact); the masks compare the raw
@@ -281,18 +339,19 @@ the fills of those outputs.  The kernels write every element of every output, so
 
 ## Workspace and retained state
 
-- Workspace: none.  An unweighted backward allocates no weight gradient: its program takes no weight and writes no
-  `d_weight`.  An unweighted forward passes, as the weight, one cached one-element FP32 buffer of the device, set to 1,
-  which the process's first unweighted forward on that device makes (that call may be a CUDA graph capture).  The
-  forward kernels read it and ignore it.
+- Workspace: none with `locality="off"` (for `"domain"`, the claim workspaces above).  An unweighted backward allocates
+  no weight gradient: its program takes no weight and writes no `d_weight`.  An unweighted forward passes, as the
+  weight, one cached one-element FP32 buffer of the device, set to 1, which the process's first unweighted forward on
+  that device makes (that call may be a CUDA graph capture).  The forward kernels read it and ignore it.
 - Retained state of the autograd function: its inputs only (`gate` and `up` or the merged tensor, and `weight`),
   references with no copy: `R * 4608 * 2 + R * 4` bytes of tensors the caller already holds.  No activation is saved;
   the backward recomputes it.  So a checkpoint around the op alone saves no memory (see Usage).  The backward reuses
   the forward's FP32 `limit` and checks the saved inputs again, since a saved-tensors hook or a `.data` assignment can
   change them after the forward.
-- Host caches, none of which changes an output bit: per device, its architecture, its SM count, its `torch.device`
-  and one launcher per stage (the route, each program's FFI entry bound at its first launch, and in `fwd` the ignored
-  weight above); per process, the loaded libraries and the FP32 rounding of the last accepted `limit`.  The
+- Host caches, none of which changes an output bit: per device, its architecture, its SM count, its `torch.device`,
+  the forward's twin and its first row counts (made at the first `"domain"` forward, its FFI entry bound at its first
+  launch) and one launcher per stage (the route, each program's FFI entry bound at its first launch, and in `fwd` the
+  ignored weight above); per process, the loaded libraries and the FP32 rounding of the last accepted `limit`.  The
   architecture is still checked at every call, before any allocation.
 - Host path: a common call (plain contiguous operands and outputs of the exact dtypes and shapes on one device, the
   BF16 ones 16-byte aligned, `0 < R < 2**31 - 256`) is checked and launched by the step function itself, without the
@@ -307,6 +366,19 @@ the fills of those outputs.  The kernels write every element of every output, so
   not read.  Any other call takes the full checks, which raise every error and copy what the kernels cannot read; both
   give the same launch.  The facade binds the backend's step functions and autograd entries (`apply`; in a backward
   with saved-tensors hooks set, the held-launch entry) at their first call.
+- Host path with `locality="domain"`: a common forward call is checked as above, in the same order, and routed in the
+  step's own frame (a backward call with `"domain"` takes the `"off"` step after the `locality` check).  Its operands
+  are contiguous, so each one's bytes and row pitch follow from its shape: the step reads each data pointer once and
+  finds each placement with one `cake_domain.slot_of` call (the anchor's, then each other BF16 operand's until one lies
+  outside the anchor's row frame), from what the registry keeps of each helper range.  It compares the caller's output
+  buffers with the inputs only for a call whose class can take the twin, takes the claim counters as FFI tensors made
+  once per workspace, and launches the twin or the `"off"` program itself.  The twin runs exactly when `_domain_route`
+  places the call.  In a checkpoint's recomputation the step keeps that launch with the arguments it built (the grid
+  and the SM table included); the held launch, after `apply` returns, claims the counters and calls the entry as the
+  step does.  Any other call takes the full checks and `_domain_route`; both give the same launch.  A forward
+  call with fewer rows than the first row count its class can reach before its placement is read (the `anchor`
+  class's for a new `h`, as in the autograd forward; the lower of the two with a caller's `out`) launches the `"off"`
+  program as the `"off"` step does, with no registry read, in both paths.
 
 ## Limitations
 
