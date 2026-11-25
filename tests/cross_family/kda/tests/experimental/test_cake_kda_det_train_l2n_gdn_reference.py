@@ -85,7 +85,6 @@ def test_kda_reference_is_bitwise_the_shared_gdn_reference() -> None:
     assert torch.equal(_bits(kda_l2n.l2n_dot(Dq)), _bits(gdn.l2n_dot(Dq)))
 
 
-
 def _bits(x: torch.Tensor) -> torch.Tensor:
     return x.contiguous().view(
         torch.int16 if x.dtype == torch.bfloat16 else torch.int32

@@ -8,7 +8,11 @@ causal, on `sm_100a`, `sm_103a` and `sm_107a`. Public module:
 The family has a non-deterministic module only (no `det` module) and a backward step only (no forward, no autograd
 entry). A head-dimension 128 call whose key length is a multiple of 256 runs a main kernel on clusters of two CTAs (the
 pair route) for the long sequences where it is faster on the architecture (without the mask on `sm_100a`, `sm_103a` and
-`sm_107a`, with the causal mask on `sm_103a` and `sm_107a`); `dq` is non-deterministic on both routes.
+`sm_107a`, with the causal mask on `sm_103a` and `sm_107a`, and without the mask with fewer queries than keys on
+`sm_103a` and `sm_107a` at `B * H` 8 or more), and a call on few CTAs (short sequences, or long ones with few heads),
+without the mask or with the causal mask, runs one kernel for the whole backward (the one-launch route) for the shapes
+where it is faster on the architecture (head dimension 64 and 128 on `sm_100a`, `sm_103a` and `sm_107a`); `dq` may
+differ in its last bits run to run on the three-kernel routes, and the module stays non-deterministic on every route.
 
 Install this family alone, pinned to a commit:
 

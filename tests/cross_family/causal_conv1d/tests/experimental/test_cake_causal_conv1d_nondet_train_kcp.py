@@ -59,6 +59,7 @@ from tests.cake.test_helpers.cake_naive import (
 from tests.test_cake_causal_conv1d_det_train_kcp import (
     ROWS,
     WIDTH,
+    _bits,
     _context,
     _ExchangeCounter,
     _problem,
@@ -220,6 +221,132 @@ def test_fp32_dweight_must_be_16_byte_aligned():
         return {"dx": dx, "dweight": dw}
 
     judge_kcp(lens, cuts, C, run, label="16-byte aligned dweight view")
+
+
+def test_tokens_and_taps_must_be_16_byte_aligned():
+    """The KCP programs move the token rows (``x_local``, ``dy``, ``out``, ``dx``) as 16-byte vectors and one
+    channel's four FP32 taps as one 16-byte vector: a tensor off the 16-byte grid is refused (``ValueError``) by the
+    forward, the backward and the autograd entry of a one-rank context before anything launches or exchanges (the
+    buffers stay zero)."""
+
+    device = torch.device("cuda")
+    lens, cuts, C = (5000, 1003), (1, 2, 4997, 1003), 512
+    p = _problem(lens, cuts, C, device)
+    _, hist = _fwd(p.x_local, p.w, p.ctx)
+    shape, n = tuple(p.x_local.shape), p.x_local.numel()
+    flat = torch.zeros(n + 1, dtype=torch.bfloat16, device=device)
+    v = flat[1:].view(shape)
+    taps = torch.zeros(p.C * WIDTH + 1, dtype=torch.float32, device=device)
+    taps = taps[1:].view(p.C, WIDTH)
+    assert v.data_ptr() % 16 != 0 and taps.data_ptr() % 16 != 0
+    for name, call in (
+        ("x_local", lambda: _fwd(v, p.w, p.ctx)),
+        ("x_local", lambda: conv_kcp.cake_causal_conv1d_nondet_kcp(v, p.w, p.ctx)),
+        ("x_local", lambda: _bwd(v, p.w, p.ctx, p.dy_local, hist)),
+        ("out", lambda: _fwd(p.x_local, p.w, p.ctx, out=v)),
+        ("dy", lambda: _bwd(p.x_local, p.w, p.ctx, v, hist)),
+        ("dx", lambda: _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist, dx=v)),
+        ("weight", lambda: _fwd(p.x_local, taps, p.ctx)),
+        ("weight", lambda: _bwd(p.x_local, taps, p.ctx, p.dy_local, hist)),
+    ):
+        with pytest.raises(ValueError, match=f"{name} must be 16-byte aligned"):
+            call()
+    torch.cuda.synchronize()
+    assert int(torch.count_nonzero(flat)) == 0 and int(torch.count_nonzero(taps)) == 0
+    held = _stream_workspace()
+    assert held is None or int(torch.count_nonzero(held)) == 0
+
+
+@pytest.mark.parametrize("host_trim", [0, 1])
+def test_hist_must_be_16_byte_aligned(host_trim) -> None:
+    """Every KCP backward program reads the history pool's rows as 16-byte vectors: a ``hist`` view 1 to 7 BF16
+    elements past a 16-byte boundary is refused (``ValueError``) by the backward and the multi backward, on both host
+    paths, before anything launches or exchanges (the outputs and the stream's accumulator workspace stay zero).  The
+    same rows in a view 8 elements in give ``dx`` bitwise equal to the forward's own pool, and ``dweight`` judged
+    against the naive tier."""
+
+    device = torch.device("cuda")
+    lens, cuts, C = (5000, 1003), (1, 2, 4997, 1003), 512
+    p = _problem(lens, cuts, C, device)
+
+    def aligned_view(q):
+        _, hist = _fwd(q.x_local, q.w, q.ctx)
+        pool = torch.zeros(hist.numel() + 8, dtype=torch.bfloat16, device=device)
+        hv = pool[8:].view(hist.shape)
+        hv.copy_(hist)
+        assert hv.data_ptr() % 16 == 0
+        dx, dw = _bwd(q.x_local, q.w, q.ctx, q.dy_local, hv)
+        dx_ref = _bwd(q.x_local, q.w, q.ctx, q.dy_local, hist)[0]
+        assert torch.equal(_bits(dx), _bits(dx_ref))
+        return {"dx": dx, "dweight": dw}
+
+    try:
+        conv_kcp._set_test_knobs({"host_trim": host_trim})
+        _, hist = _fwd(p.x_local, p.w, p.ctx)
+        n = hist.numel()
+        assert n > 0
+        pool = torch.zeros(n + 8, dtype=torch.bfloat16, device=device)
+        assert pool.data_ptr() % 16 == 0
+        dx = torch.zeros_like(p.x_local)
+        dw = torch.zeros(C, WIDTH, dtype=torch.float32, device=device)
+        for k in range(1, 8):
+            hv = pool[k : k + n].view(hist.shape)
+            assert hv.data_ptr() % 16 != 0
+            with pytest.raises(ValueError, match="hist must be 16-byte aligned"):
+                _bwd(p.x_local, p.w, p.ctx, p.dy_local, hv, dx=dx, dweight=dw)
+            with pytest.raises(ValueError, match="hist must be 16-byte aligned"):
+                conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
+                    [p.x_local],
+                    [p.w],
+                    p.ctx,
+                    [p.dy_local],
+                    [hv],
+                    dxs=[dx],
+                    dweights=[dw],
+                )
+        torch.cuda.synchronize()
+        assert int(torch.count_nonzero(dx)) == 0 and int(torch.count_nonzero(dw)) == 0
+        held = _stream_workspace()
+        assert held is None or int(torch.count_nonzero(held)) == 0
+        judge_kcp(
+            lens, cuts, C, aligned_view, label=f"aligned hist, host_trim={host_trim}"
+        )
+    finally:
+        conv_kcp._set_test_knobs(None)
+
+
+@pytest.mark.parametrize("entry", ["single", "single-pair", "multi", "multi-pair"])
+def test_autograd_copies_a_misaligned_incoming_gradient(entry) -> None:
+    """Autograd can hand the KCP backward a contiguous BF16 gradient off the 16-byte grid: the backward of
+    ``torch.cat([pad, y.reshape(-1)])`` narrows its gradient one element in, 2 bytes past an aligned address.  The
+    autograd entries (single and multi, and both with ``dweight_sum="fp32_pair"``, which run the opt-in Functions)
+    copy it, so the backward runs (no ``ValueError``): ``dx`` bitwise equal to the explicit backward of the same
+    gradient, ``dweight`` judged against the naive tier."""
+
+    _, lens, cuts, C = ROWS[0]
+    kw = {"dweight_sum": "fp32_pair"} if entry.endswith("pair") else {}
+
+    def through_cat(q):
+        x = q.x_local.detach().clone().requires_grad_(True)
+        w = q.w.detach().clone().requires_grad_(True)
+        if entry.startswith("multi"):
+            (y,) = conv_kcp.cake_causal_conv1d_nondet_kcp_multi([x], [w], q.ctx, **kw)
+        else:
+            y = conv_kcp.cake_causal_conv1d_nondet_kcp(x, w, q.ctx, **kw)
+        seen = []
+        y.register_hook(lambda g: seen.append(g.data_ptr() % 16))
+        pad = y.new_zeros(1)
+        g = torch.cat([pad, q.dy_local.reshape(-1)])
+        torch.cat([pad, y.reshape(-1)]).backward(g)
+        assert seen == [2], seen
+        _, hist = _fwd(q.x_local, q.w, q.ctx)
+        dx_ref = _bwd(q.x_local, q.w, q.ctx, q.dy_local, hist, **kw)[0]
+        assert torch.equal(_bits(x.grad), _bits(dx_ref))
+        return {"dx": x.grad, "dweight": w.grad}
+
+    judge_kcp(
+        lens, cuts, C, through_cat, label=f"incoming gradient off the grid, {entry}"
+    )
 
 
 def test_kcp_plans_with_the_legacy_tile_rule(monkeypatch):

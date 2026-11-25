@@ -33,13 +33,33 @@ Host design (every control is a keyword; no environment variable):
 - The forward saves nothing beyond its inputs; the backward recomputes the
   statistics and the gate from ``x`` and ``z``.
 - Forward: 128-thread CTAs of 16-row blocks (``cake_jit.launch_grid``): one
-  CTA per block below 8192 rows per SM, and from there the fewest whole waves
-  of 6 CTAs per SM that give no CTA more than 2 blocks, a CTA loading its next
-  block while it computes the current one.  One module per architecture, and
-  on SM107 a second one for packed rows (``x`` and ``z`` both read as
-  contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a row
-  with the same FP32 operations in the same order, so the layout changes no
-  bits.  Up to ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
+  CTA per block below a cut of rows per SM of the architecture, and from
+  there the fewest whole waves of 6 CTAs per SM that give no CTA more than 2
+  blocks, a CTA loading its next block while it computes the current one;
+  the grid changes no bits.  The cut depends on the architecture and the
+  layout: on rows the kernel reads as packed (``cake_jit.forward_packed``:
+  ``x`` and ``z`` of head stride 128 and token stride ``H * 128``; its
+  record's ``persistent_from_rows_per_sm``) 5600 on SM103 and 8192 on SM100
+  and SM107, and on other rows (a record's
+  ``persistent_from_rows_per_sm_strided``, which gain from whole waves from
+  far fewer rows per SM) 500 on SM100 and 400 on SM103 and SM107.  A CTA
+  warms its next block and the first block of the CTA a wave later in L2,
+  ``x`` and ``z`` each by its own layout: packed rows as one byte range,
+  rows of head stride 128 and another token stride (a gate sliced from a
+  projection, a broadcast, one token) as one range a token, other layouts
+  (head-major rows) as one 256-byte range a row on SM103 and SM107 and not
+  at all on SM100; a prefetch changes no bits.  One module per architecture,
+  and a second one for packed rows (``x`` and ``z`` both read as contiguous
+  ``[T, H, 128]``, fewer than 2^24 rows; ``cake_jit.forward_module``): on
+  SM107 one that reads each row at its linear offset, on SM100 and SM103 a
+  new module with the forward code of version 0.2.14, which warms only rows
+  packed in both ``x`` and ``z`` (next to the per-layout prefetches, packed
+  rows measured slower at small and mid row counts), up to
+  ``cake_jit.FWD_PACKED_ROWS_PER_SM`` rows per SM (past them it measured no
+  faster than the first module, and up to 0.9 % slower).  Each computes a row
+  with the same FP32
+  operations in the same order, so the layout changes no bits.  Up to
+  ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
   rows of ``cake_jit.FWD_TINY_GAP_ROWS`` (17 to 32 on SM107), inputs whose
   rows are packed (``x`` and ``z`` both read as contiguous ``[T, H, 128]``,
   or one token of head stride 128, whose token stride is never read) run the
@@ -70,8 +90,11 @@ Host design (every control is a keyword; no environment variable):
   kernel reads as packed rows (head stride 128, token stride ``H * 128``;
   ``cake_jit.backward_module``) runs the same backward in a loop that loads a
   block's rows while the previous block's row math runs: the same grid, FP32
-  operations in the same order and workspace, so the same bits; other calls run
-  the default module of their weight-gradient dtype (``cake_jit.ROUTES``).
+  operations in the same order and workspace, so the same bits; so does, from
+  6145 rows per SM on SM100 and SM103 and 4097 on SM107 (one row per SM past
+  the default loop's L2 prefetch share of blocks per CTA times 64), a call
+  with a BF16 weight gradient on rows of other layouts; other calls run the
+  default module of their weight-gradient dtype (``cake_jit.ROUTES``).
   A call that computes the weight gradient on up to 256 rows runs, in the
   default module's place (``cake_jit.dw_module``), that backward built for
   one CTA (up to 16 rows) or for one thread-block cluster of 16 CTAs (17 to
@@ -105,9 +128,11 @@ Host design (every control is a keyword; no environment variable):
   256-thread CTAs
   walking their 16-row blocks; past the strided cut the claimed program, the
   BF16 backward's claims and ticket on the workspace (SM107 routes none: its
-  strided program runs every row count); and where the BF16 backward runs
-  its long module, the long program built without the weight gradient (or,
-  where none is routed, that long module with ``weight_grad`` 0).
+  strided program runs every row count); and on packed rows where the BF16
+  backward runs its long module, the long program built without the weight
+  gradient (or, where none is routed, that long module with ``weight_grad``
+  0; the long programs run no rows of other layouts without the weight
+  gradient).
   ``dx`` and ``dz`` are FP32 formulas rounded once each, with ``rstd`` from the
   approximate FP32 reciprocal square root and the sigmoid factor ``s`` from the
   approximate FP32 base-2 exponential of the exact FP32 product of ``-z`` and
@@ -1052,14 +1077,16 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         x_head,
         z_tok,
         z_head,
+        dw is not None,
     )
     if dw is None:
         # The program built without the weight gradient (the same dx and dz
         # bits): strided up to its cut (or at every row count where no claimed
         # one is routed; its 128-thread builds on packed rows and on small row
-        # counts), else claimed, or the long one.  The packed-row test is
-        # cake_jit.backward_packed, spelled out: a call would cost this host
-        # path more than the test.
+        # counts), else claimed, or the long one (backward_module names the
+        # long module for this call on packed rows only).  The packed-row test
+        # is cake_jit.backward_packed, spelled out: a call would cost this
+        # host path more than the test.
         row = heads * HEAD_DIM
         if dy_head == HEAD_DIM and x_head == HEAD_DIM and z_head == HEAD_DIM:
             if tokens == 1 and rows <= (

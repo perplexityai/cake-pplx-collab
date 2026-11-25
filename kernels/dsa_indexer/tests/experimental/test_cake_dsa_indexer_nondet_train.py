@@ -397,7 +397,7 @@ def test_registry_records_are_well_formed():
         assert set(cake_jit.POLICY[arch]) == set(POLICY_FIELDS)
         scan_keys = sorted(k for k in keys if k.startswith("scan:"))
         cb_keys = sorted(k for k in keys if k.startswith("scan_blocks:"))
-        # the candidate-restricted top-k: the one key ``cand`` (sm_100a / sm_103a)
+        # the candidate-restricted top-k: the one key ``cand`` (sm_100a / sm_103a / sm_107a)
         cand_keys = sorted(k for k in keys if k == "cand")
         assert scan_keys and set(keys) == set(scan_keys) | set(cb_keys) | set(
             cand_keys
@@ -442,7 +442,7 @@ def test_registry_records_are_well_formed():
             }
         ), arch
         # the wide-first precedence reaches the unrolled wide program in both fit forms
-        if policy.wide_first_rule is not None:
+        if policy.wide_first_rule is not None or policy.wide_first_k_rule is not None:
             assert {"scan:wide:u2:s0:f0", "scan:wide:u2:s0:f1"} <= set(keys), arch
         # the sampled rank shift rule: a top_k floor a call can reach, a shift the default does not already give
         if policy.sample_shift_rule is not None:
@@ -701,6 +701,64 @@ def test_policy_records_round_trip_and_reject_foreign_fields():
         for kinds in ([["l6"]], ["l6", 6], ["no_such_kind"], []):
             with pytest.raises(ValueError):
                 DispatchPolicy.from_record(dict(record, sample_long_rule=[kinds, 500]))
+
+
+# 0.6.0 registry: the top_k-keyed wide-first floor of each architecture and the scan programs it gives the top_k-512
+# rows of the candidate-block bench (16384 queries at the tail of 16384 / 65536 / 262144 keys; the 8-segment packed row)
+_P1_Q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
+_P1_K = (1777, 56842, 2123, 67923, 2123, 67923, 2123, 67923)
+_K512_ROWS = {
+    "tail16k": ((16384,), (16384,)),
+    "tail64k": ((16384,), (65536,)),
+    "tail256k": ((16384,), (262144,)),
+    "P1": (_P1_Q, _P1_K),
+}
+_SHIPPED_K512 = {
+    "sm_100a": (
+        148,
+        [512, 128.0],
+        {
+            "tail16k": "scan:l6:u1:s0:f1",
+            "tail64k": "scan:wide:u2:s0:f0",
+            "tail256k": "scan:wide:u2:s0:f0",
+            "P1": "scan:wide:u2:s0:f0:lsf",
+        },
+    ),
+    "sm_103a": (
+        152,
+        [512, 64.0],
+        {
+            "tail16k": "scan:wide:u2:s0:f1",
+            "tail64k": "scan:wide:u2:s0:f0",
+            "tail256k": "scan:wide:u2:s0:f0",
+            "P1": "scan:wide:u2:s0:f0:lsf",
+        },
+    ),
+    "sm_107a": (
+        212,
+        None,
+        {
+            "tail16k": "scan:l6:u1:s1:f1",
+            "tail64k": "scan:wide:u2:s0:f0",
+            "tail256k": "scan:wide:u2:s0:f0",
+            "P1": "scan:l6:u1:s0:f0:lsf",
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("arch", sorted(_SHIPPED_K512))
+def test_shipped_top_k_512_rule_and_scan_programs_of_the_bench_rows(arch):
+    """The shipped records' ``wide_first_k_rule`` and the scan programs the host dispatch gives the top_k-512 bench rows
+    on the architecture's SM count, host-only (the deterministic package's records carry the same unit rules)."""
+    sms, wide_first_k, rows = _SHIPPED_K512[arch]
+    assert cake_jit.POLICY[arch]["wide_first_k_rule"] == wide_first_k
+    for name, (seg_q, seg_k) in _K512_ROWS.items():
+        plan = cake_backend.plan_dsa_indexer_nondet_topk(
+            sum(seg_q), sum(seg_k), len(seg_q), top_k=512, arch=arch, num_sms=sms
+        )
+        assert plan.scan_key == rows[name], (arch, name)
+        assert plan.scan_key in cake_jit.PROGRAM_KEYS[arch], (arch, name)
 
 
 def test_split_calls_run_the_plain_merge_and_unsplit_calls_the_scan_alone():
@@ -1129,15 +1187,26 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
     ``:lsf`` copy reads it only as the copy of a program that does (sm_107a's l6 ticket programs, whose copies keep the
     segment order in the workspace's tail), and every other scan program of an architecture that has a reader reads
     it -- so the host, which decides by the record alone (``reads_ticket_word``), never hands a drawing program the
-    placeholder."""
+    placeholder.  A candidate-block program (role ``scan_blocks``) reads it exactly where the scan program of its
+    unit does (on sm_107a all of them)."""
     for name, record in cake_jit.PROGRAMS.items():
         reads = record.get("ticket_arg_arches")
         if reads is not None:
-            assert record["role"] == "scan" and reads, name
+            assert record["role"] in ("scan", "scan_blocks") and reads, name
             assert list(reads) == [a for a in record["arches"] if a in reads], name
     readers = {}
     for arch, keys in cake_jit.PROGRAM_KEYS.items():
         for key, name in keys.items():
+            if key.startswith("scan_blocks:"):
+                twin = keys["scan:" + key.split(":", 1)[1]]
+                reads = cake_backend.reads_ticket_word(name, arch)
+                assert reads == cake_backend.reads_ticket_word(twin, arch), (arch, key)
+                # a BF16 program, counted with the scan programs below: on an architecture with a reader it reads
+                # its TicketWord unless its kind is static
+                kind = key.split(":")[1]
+                static = set(policy_for(arch, cake_policy.BF16).static_scan_kinds)
+                readers.setdefault(arch, []).append((reads, kind in static))
+                continue
             if not key.startswith("scan:"):
                 continue
             # the static kinds of the key's form (on sm_107a every FP8 kind is static)

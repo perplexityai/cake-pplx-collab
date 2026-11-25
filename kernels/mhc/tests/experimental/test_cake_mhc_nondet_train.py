@@ -24,7 +24,10 @@ deterministic token-owner pass (its group-row form inside ``BWD_ROW_BANDS``),
 its atomic fn split and its column-slab pass, which stores the FP32 ``dfn``
 sum of every (column slab, token chunk) unit in its chunk's slots of the
 workspace and adds the slots of each element into ``dfn`` once every unit is
-done; there is no reduction kernel.  The mode is part of the names: no entry
+done (on SM107 with the default ``accumulation="fp32"``, outside
+``torch.use_deterministic_algorithms(True)``, its reduction form adds every
+unit's FP32 ``dfn`` sums into ``dfn`` with relaxed reductions instead:
+``cake_jit.BWD_SLAB_DFN``); there is no reduction kernel.  The mode is part of the names: no entry
 point takes a ``deterministic`` keyword (passing one is a ``TypeError``) and
 nothing falls back to the deterministic package (checked without a device by
 ``test_cake_mhc_nondet_train_rules.py``).
@@ -61,7 +64,10 @@ module checks:
   hidden 5120 and 7168 the 19 benchmark token counts; every launch one of this
   package's records (the deterministic package launches nothing; the backward
   loads exactly the token-owner record, the atomic fn split and the column
-  slab's form of the call, in that order);
+  slab's form of the call, in that order); the column slab's form per call by
+  launch trace: the reduction form on SM107 with PyTorch's deterministic
+  algorithms off, the fold with them on (strict and ``warn_only``; direct
+  calls and the prepare node's backward);
 * PyTorch's deterministic algorithms (strict and ``warn_only``): every entry
   point, ``backward_finish`` and the backward of the
   ``cake_mhc_nondet_train_prepare`` node included (also when the mode is
@@ -184,8 +190,19 @@ LPT = "cake_mhc_train_bwd_slab_fold__lpt"
 # The slab-fastest copies of the column slab's two forms (program keys ``dynr_os`` / ``lpt_os``).
 SLAB_OS = "cake_mhc_train_bwd_slab_fold__dynr_os"
 LPT_OS = "cake_mhc_train_bwd_slab_fold__lpt_os"
+# The reduction forms of dynr / dynr_os (program keys ``dynr_red`` / ``dynr_os_red``; cake_jit.BWD_SLAB_DFN "red":
+# SM107 outside torch.use_deterministic_algorithms(True)).
+RED = "cake_mhc_train_bwd_slab_red__dynr"
+RED_OS = "cake_mhc_train_bwd_slab_red__dynr_os"
 # The column-slab record of each program key (the size suffix appended at 5120 and 7168).
-SLAB_RECORDS = {"dynr": SLAB, "lpt": LPT, "dynr_os": SLAB_OS, "lpt_os": LPT_OS}
+SLAB_RECORDS = {
+    "dynr": SLAB,
+    "lpt": LPT,
+    "dynr_os": SLAB_OS,
+    "lpt_os": LPT_OS,
+    "dynr_red": RED,
+    "dynr_os_red": RED_OS,
+}
 # The lpt record's chunk scalars (cake_jit.slab_plan), in kernel-parameter order (P, rpc, p_big, rpc_small).
 LPT_HOST_KEYS = (
     "lpt_parts",
@@ -719,11 +736,13 @@ def test_backward_in_each_unit_order(
     the chunk-order records (``dynr`` / ``lpt``) and the slab-fastest ones (``dynr_os`` / ``lpt_os``) both run where
     the device's route holds them, whichever order the tables of record pick on this device (skipped where the route
     holds no record of the order), and the backward outputs of REPEATS launches (the workspaces alternating as in
-    :func:`test_nondeterministic_backward_matches_fp64`) are judged against the naive BF16 tier over 32 inputs."""
+    :func:`test_nondeterministic_backward_matches_fp64`) are judged against the naive BF16 tier over 32 inputs (on
+    SM107 the reduction forms ``dynr_red`` / ``dynr_os_red`` of those records)."""
     _require_hidden(hidden)
     forced_order(hidden, order)
     program = loader.bwd_slab_atomic_program(T, _sm_count(), _arch(), hidden)
-    assert program.endswith("_os") == (order == "slab"), program
+    assert program.removesuffix("_red").endswith("_os") == (order == "slab"), program
+    assert program.endswith("_red") == (loader.BWD_SLAB_DFN[_arch()] == "red"), program
     name = SLAB_RECORDS[program] + _suffix(hidden)
     if name not in loader.route_modules(_arch(), hidden, "bwd_finish"):
         pytest.skip(f"hidden {hidden} has no {name} on {_arch()}")
@@ -928,9 +947,9 @@ def test_benchmark_token_counts_at_the_new_hidden_sizes(
     """At hidden 5120 and 7168 on the 19 benchmark token counts (their copies of the deterministic programs are
     renders of their own; H 4096 is the cases above): the forward entry points, the backward prepare and two
     ``backward_finish`` launches (the column slab's form of the call: ``lpt`` where the size's table fires on this
-    device, else ``dynr``; each as its ``_os`` copy where the size's ``BWD_SLAB_ORDER`` band is ``"slab"``), the
-    second on a poisoned caller workspace whose zero prefix is zero after it, judged against the naive BF16 tier over
-    32 inputs."""
+    device, else ``dynr``; each as its ``_os`` copy where the size's ``BWD_SLAB_ORDER`` band is ``"slab"``; on SM107
+    its reduction form ``dynr_red``), the second on a poisoned caller workspace whose zero prefix is zero after it,
+    judged against the naive BF16 tier over 32 inputs."""
     _require_hidden(hidden)
     _judge_nd(
         lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED + 14, launches=2,
@@ -945,7 +964,8 @@ def test_launches_are_this_packages_records(monkeypatch, hidden: int) -> None:
     records for the local architecture and the call's hidden size, and the deterministic package launches nothing
     (its launch paths refuse); ``backward_finish`` loads exactly its ``bwd_finish`` selection, in launch order: one
     token-owner record, the atomic fn split of the architecture and size and the column slab's form of the call
-    (``bwd_slab_atomic_program``: the size's ``dynr``, ``lpt``, ``dynr_os`` or ``lpt_os`` record)."""
+    (``bwd_slab_atomic_program``: the size's ``dynr``, ``lpt``, ``dynr_os`` or ``lpt_os`` record, on SM107 the
+    reduction form ``dynr_red`` / ``dynr_os_red``)."""
     _require_hidden(hidden)
 
     def refuse(*_args, **_kwargs):
@@ -1001,6 +1021,116 @@ def test_launches_are_this_packages_records(monkeypatch, hidden: int) -> None:
         assert record_arch == arch and arch in loader.MODULES[name]["arches"], name
         assert loader.MODULES[name]["hidden"] == hidden, name
     assert selection[-1] in {name for name, _ in loaded}
+
+
+@pytest.mark.parametrize("hidden", HIDDEN_SIZES, ids=lambda h: f"H{h}")
+def test_deterministic_algorithms_launch_the_fold(
+    deterministic_algorithms, monkeypatch, hidden: int
+) -> None:
+    """The column slab's form follows PyTorch's deterministic algorithms call by call, by launch trace (every FFI
+    entry the route plans call is recorded under its record's name; fresh plan caches).  At 2049 and 16263 tokens,
+    ``backward_finish`` with the mode off launches its ``bwd_finish`` selection of record -- the token-owner record,
+    the atomic fn split and the column slab's record (``bwd_slab_atomic_program``; on an architecture whose
+    ``BWD_SLAB_DFN`` form is ``"red"``, SM107, the reduction form ``cake_mhc_train_bwd_slab_red__*``) -- and under
+    the mode (strict with warnings as errors, and ``warn_only``) the same records with the fold in place of the
+    reduction form (``deterministic_algorithms``), on the default workspace and on a caller workspace, the mode
+    switched on and off between calls in one process (the plans are keyed on it, so each call launches its own).
+    The prepare node's backward (``save_stats`` True and False) launches the form of the mode at ``backward()``.
+    Every output is finite; the outputs of both forms are judged by the other cases of this module (the policy
+    cases run the fold on SM107)."""
+    _require_hidden(hidden)
+    arch, sm = _arch(), _sm_count()
+    red = loader.BWD_SLAB_DFN[arch] == "red"
+    monkeypatch.setattr(pkg, "_PLANS", {})
+    monkeypatch.setattr(pkg, "_FAST_ROUTES", {})
+    launched: list[str] = []
+    load = loader.load
+
+    class _Traced:
+        """A loaded module whose FFI entries record their record's name when called."""
+
+        def __init__(self, name: str, module) -> None:
+            self._name, self._module = name, module
+
+        def __getattr__(self, entry: str):
+            run = getattr(self._module, entry)
+
+            def traced(*args):
+                launched.append(self._name)
+                return run(*args)
+
+            return traced
+
+    monkeypatch.setattr(
+        loader, "load", lambda name, record_arch: _Traced(name, load(name, record_arch))
+    )
+    for T in (2049, 16263):
+        i = _make_inputs(T, hidden=hidden, seed=SEED + 90)
+        prep = _forward(i)
+        ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device(), hidden=hidden)
+        want = {
+            flag: list(
+                loader.selected_modules(
+                    arch,
+                    hidden,
+                    "bwd_finish",
+                    rows=T,
+                    sm_count=sm,
+                    deterministic_algorithms=flag,
+                )
+            )
+            for flag in (False, True)
+        }
+        fold = loader.bwd_slab_atomic_program(
+            T, sm, arch, hidden, deterministic_algorithms=True
+        )
+        assert want[True][-1] == SLAB_RECORDS[fold] + _suffix(hidden), want
+        assert want[False][:-1] == want[True][:-1] and len(want[True]) == 3, want
+        assert want[False][-1] == (
+            want[True][-1].replace(SLAB, RED, 1) if red else want[True][-1]
+        ), want
+        for on, warn_only in (
+            (False, False),
+            (True, False),
+            (True, True),
+            (False, False),
+            (True, False),
+        ):
+            for workspace in (None, ws):
+                launched.clear()
+                deterministic_algorithms(on, warn_only=warn_only)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error")
+                        out = _nd_backward(i, prep, workspace=workspace)
+                        torch.cuda.synchronize()
+                finally:
+                    deterministic_algorithms(False)
+                what = (T, on, warn_only, workspace is None)
+                assert launched == want[on], (what, launched)
+                assert all(torch.isfinite(v).all() for v in out.values()), what
+        for save_stats in (True, False):
+            for on in (False, True):
+                leaves = _leaves(i)
+                U, handle = _nd_prepare(*leaves, save_stats=save_stats)
+                Y = _nd_finish(leaves[0], (U.float() + i["B"].float()).to(BF16), handle)
+                loss = (Y.float() * i["dY"].float()).sum()
+                launched.clear()
+                deterministic_algorithms(on)
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error")
+                        loss.backward()
+                        torch.cuda.synchronize()
+                finally:
+                    deterministic_algorithms(False)
+                slabs = [n for n in launched if loader.MODULES[n]["role"] == "bwd_slab"]
+                assert slabs == [want[on][-1]], (T, save_stats, on, launched)
+                assert all(torch.isfinite(t.grad).all() for t in leaves), (
+                    T,
+                    save_stats,
+                    on,
+                )
 
 
 # ----------------------------------------------------------------------------------------------------------------

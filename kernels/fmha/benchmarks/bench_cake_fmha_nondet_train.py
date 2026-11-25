@@ -35,8 +35,8 @@ tensors), so separate processes time the same bits.
 
 Shapes (``--shapes``): ``T1`` B4 H32 S8192 D128, ``T2`` the same causal, ``T3`` B8 H32 S8192 D64, ``T4`` the same
 causal, ``S1`` B1 H1 S128 D128, ``S2`` B1 H1 S256 D128, ``S3`` B1 H1 S128 D64, ``S4`` B1 H1 S256 D64, ``L1`` B1 H1
-S512 D128, ``L2`` B1 H1 S1024 D128, or ``B:H:S:D[:causal]``, where ``S`` is the query and the key length, or
-``SqxSkv`` gives them apart (``1:1:128x8192:128``: 128 queries, 8192 keys).
+S512 D128, ``L2`` B1 H1 S1024 D128, ``L3`` B1 H1 S512 D64, ``L4`` B1 H1 S1024 D64, or ``B:H:S:D[:causal]``, where
+``S`` is the query and the key length, or ``SqxSkv`` gives them apart (``1:1:128x8192:128``: 128 queries, 8192 keys).
 
 Timing: CUDA events, eager, warm L2. One sample is ``--loop`` back-to-back calls (default 1, or 50 for a shape with
 fewer than 65536 query rows over all heads, whose call is bound by the host); the per-call time is reported, with the
@@ -78,6 +78,8 @@ SHAPES = {
     "S4": (1, 1, 256, 64, False),
     "L1": (1, 1, 512, 128, False),
     "L2": (1, 1, 1024, 128, False),
+    "L3": (1, 1, 512, 64, False),
+    "L4": (1, 1, 1024, 64, False),
 }
 ARMS = ("cake", "fa4", "fa4_det", "cudnn", "cudnn_det")
 FROST = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"

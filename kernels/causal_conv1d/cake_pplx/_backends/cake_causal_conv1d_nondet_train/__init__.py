@@ -43,7 +43,23 @@ The order of that cross-CTA sum depends on the CTAs' timing, so ``dweight`` /
 ``dbias`` are not bitwise reproducible run to run; that is the only relaxed
 property (the accumulation dtypes, plain FP32 words, and rounding boundaries
 are the det package's).  No reduce program, no host synchronization, no cooperative
-launch, no grid barrier.
+launch, no grid barrier.  At the backward rows of ``cake_jit.DIRECT_ROWS``
+(routes ``bwd``, ``bwd_dt`` and ``bwd_bias``; per architecture and route,
+channel ranges within C = 512 to 1024, each with its own token range within
+S = 1 to 4096) the backward runs the route's direct program instead, which has
+no det twin: one ordinary launch without TMA or a staged pipeline, whose ``dx``
+is bit for bit the route's staged programs' and whose ``dweight`` / ``dbias``
+take the same unordered FP32 accumulation, ticket counters and last-CTA store.
+At the small-S rows of ``cake_jit.GRID_CAP_ROWS`` (by architecture, route, ``C``
+and ``S``; outside the backward rows of ``cake_jit.DIRECT_ROWS``) a backward at
+``bwd_grid_mult`` 1 launches fewer CTAs of the same program: at most
+``n_ch_tiles x ceil(S / (n_sub x tokens))`` and at least one per channel tile
+(``cake_jit.small_s_grid``); its channel tiles, ``dx`` and workspace stay the
+row's.  Here ``n_ch_tiles`` is the plan's number of channel tiles and ``n_sub``
+is the number of token sub-tiles of one CTA: ``n_ch_tiles`` 3 and ``n_sub`` 4
+at the keys (sm_107a, ``bwd`` only).  ``tokens`` (3) is the length of one token
+stream: the CTAs of a channel tile split ``S`` into ``CTAs x n_sub`` streams,
+the tail streams shorter, so each CTA takes about ``n_sub x tokens`` tokens.
 
 Numerical mode: the package is chosen by its module name and no entry point
 takes a mode keyword.  This package has no deterministic programs (they are the
@@ -97,8 +113,9 @@ Host design (the knobs are keywords; no environment variable):
   to ``_POOL_DEPTH`` buffers of the largest need of such a call so far,
   refilled by the next such call after a capture took one or when a call needs
   more (a forward inside the token range of a row of
-  ``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` takes no counters and
-  zeroes none).  A captured call finds none ready when no such eager call of
+  ``cake_jit.FALLBACK_ROWS``, ``cake_jit.DIRECT_ROWS`` or ``cake_jit.PAIR_ROWS``
+  takes no counters and zeroes none).  A captured call finds none ready when no
+  such eager call of
   its kind ran before the capture, when the captures since the last one took
   them all, when it needs more than that eager need, or when their zero fills
   have not completed yet (a
@@ -135,8 +152,14 @@ Host design (the knobs are keywords; no environment variable):
   same, as every program reads its partition from the launch (``gridDim.x``:
   the CTAs of a channel tile split its tokens evenly, and its ticket counter
   wraps after that many CTAs), so ``dx`` keeps its bits and more CTAs add into
-  the same accumulators.  The workspace does not grow with it (one accumulator
-  set and one counter per channel tile, whatever the grid).
+  the same accumulators.  At a backward row of ``cake_jit.DIRECT_ROWS`` it
+  multiplies the direct program's grid of the call (at least one CTA per
+  channel tile, at most one per token block: ``cake_jit.launch_grid``); that
+  program's CTAs take a tile's token blocks in turn, so any grid of at least
+  one CTA per tile is correct.  Above 1 the rows of ``cake_jit.GRID_CAP_ROWS``
+  launch that many times the untrimmed grid, as every other row.  The workspace
+  does not grow with it (one accumulator set and one counter per channel tile,
+  whatever the grid).
 - Backward grid beside a concurrent kernel: on the
   ``bwd`` and ``bwd_fp32g`` routes at ``bwd_grid_mult`` 1, a launch of exactly
   ``ctas_per_sm x SM count`` CTAs whose last channel-tile rank holds at least
@@ -156,23 +179,42 @@ Host design (the knobs are keywords; no environment variable):
   to 768 run the det forward's narrow tiles from that floor; below it (and
   on an architecture without one) they keep 0.2.0's single tile.  The
   forward workspace (int32 token-chunk counters) follows the det package's
-  rules and size, which cover every plan; at C = 520 to 568 it is larger
-  than 0.2.3's (6 to 12 words instead of 2), so a buffer sized by 0.2.3 for
-  those rows is refused (``ValueError``) from the row's token floor.
-- At C = 576 to 768, inside the token range of a forward row, the forward
-  runs two other det programs of its route: the static program in the
-  forward ranges of ``cake_jit.FALLBACK_ROWS`` (each CTA a fixed token range
-  of its channel tile, on the route's plan above) and the direct program in
-  the ranges of ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of
+  rules and size, which cover every plan; at C = 520 to 568 it is larger than
+  0.2.3's (6 to 12 words instead of 2), so a buffer sized by 0.2.3 for those
+  rows is refused (``ValueError``) at each token count from the row's token
+  floor up that no forward range of ``cake_jit.FALLBACK_ROWS``,
+  ``cake_jit.DIRECT_ROWS`` or ``cake_jit.PAIR_ROWS`` holds: from the floor
+  where no range holds it, and above the ranges where they hold it (0.2.10:
+  most of these floors), as inside a range the forward takes no counters.
+- At C = 512 to 1024, inside the token range of a forward row, the forward
+  runs one of three other det programs of its route: the static program in
+  the forward ranges of ``cake_jit.FALLBACK_ROWS`` (each CTA a fixed token
+  range of its channel tile, on the route's plan above), the direct program
+  in the ranges of ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of
   its channel tile, on the route's tiles of ``cake_jit.DIRECT_PLANS``, at
-  most one CTA per token block).  Neither takes counters: a passed
-  ``workspace`` is checked and not passed to the program, and the workspace
-  size is unchanged.  Each row gives its own token range.  For most C the
-  first range starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to
-  768 start at S = 13824 (C = 736: 14336) and have only a static range.
-  Outside a row's range, and where an architecture, route and C have no
-  row, the forward runs the dynamic program, which takes counters, as in
-  0.2.4.  ``y`` is the same bits on every forward program and plan.
+  most one CTA per token block), and the pair direct program (the direct
+  program with each thread on a pair of channels, on the route's tiles of
+  ``cake_jit.PAIR_PLANS``) in the ranges of ``cake_jit.PAIR_ROWS``, which
+  run ahead of the other two tables where they hold the call.  None takes
+  counters: a passed ``workspace`` is checked and not passed to the program,
+  and the workspace size is unchanged.  Each row gives its own token range.
+  Every architecture and route has a row at each C = 512 to 1024.  For most
+  C the first range starts at S = 1.  Where a key has no ``DIRECT_ROWS``
+  range (for example the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and
+  632, from S = 1 to 24576), the static program runs over the key's range
+  outside the ``PAIR_ROWS`` range.  From release 0.2.17, the sm_103a
+  ``fwd_bias`` rows at C = 720 to 768 run the pair direct program from S = 1
+  to 3072, the static program from S = 3073 to 12800 and from S = 13824 to
+  16383 (C = 736: from 14336; C = 768: to 16384) and the direct program from
+  S = 12801 to 13823 (C = 736: to 14335): there a ``DIRECT_ROWS`` range lies
+  inside the ``FALLBACK_ROWS`` range of its key and runs ahead of it.  Every
+  ``PAIR_ROWS`` range starts at S = 1 but sm_107a ``fwd`` at C = 520 to 736
+  (S = 4).  From release 0.2.17, the sm_107a ``fwd`` range at C = 512 runs
+  the pair direct program up to S = 4096, in place of the static program at
+  S = 2561 to 4096.  Outside a row's range, and where an architecture, route
+  and C have no row, the forward runs the dynamic program, which takes
+  counters, as in 0.2.4.  ``y`` is the same bits on every forward program
+  and plan.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
@@ -189,17 +231,21 @@ Host design (the knobs are keywords; no environment variable):
   KCP forward launches its single-rank program with 0.
 - Host plan: the first call of a row (architecture, route, ``C``, device,
   ``bwd_grid_mult``; the forward: the taps' dtype) selects its program,
-  splits ``C`` into channel tiles, reads the row's ``TILE_OVERRIDES`` or
-  ``NARROW_TILES`` entry (the forward: its ``forward_narrow_min_s`` and
+  splits ``C`` into channel tiles, reads the row's ``TILE_OVERRIDES`` and
+  ``NARROW_TILES`` entries (the forward: its ``forward_narrow_min_s`` and
   ``FORWARD_WIDTH_FLOORS`` token floors and its single-tile range)
   and sizes the grid (``cake_jit.plan_row``); later calls of the row only
   compare ``S`` with the entry's token ranges (and size the grid where
-  ``launch_grid`` trims it by ``S``), so they launch the values a per-call
-  plan gives.  A row a ``cake_jit.SM_WIDE_ROWS`` or ``cake_jit.FALLBACK_ROWS``
-  key covers is planned for every side of its token ranges at its first call
-  (``cake_jit.row_sides``: an SM-wide segment's program, the route's fallback
-  program inside the fallback range, the rules' program outside them); a
-  later call picks its side with a few compares of ``S``.  A row whose
+  ``launch_grid`` trims it by ``S`` or, at the ``C`` of a
+  ``cake_jit.GRID_CAP_ROWS`` key, caps it by ``S``), so they launch the values
+  a per-call plan gives.  A row a ``cake_jit.SM_WIDE_ROWS``, ``cake_jit.PAIR_ROWS``,
+  ``cake_jit.DIRECT_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers is planned
+  for every side of its token ranges at its first call (``cake_jit.row_sides``:
+  an SM-wide segment's program, the pair direct program inside the pair range,
+  the direct program inside the direct range (on a backward route on the
+  route's direct tiles, ahead of the other tables), the route's fallback
+  program inside the fallback range, the rules' program outside them); a later
+  call picks its side with a few compares of ``S``.  A row whose
   program selection reads ``S`` through a token floor of the selection rules
   plans every call (on that side).
   :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` drops the rows.
@@ -334,7 +380,9 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 _POOL_DEPTH = 4
 # torch's out-of-memory error: a refill that meets it keeps no new buffer, frees no
 # idle buffer and keeps the pool's size.
-_OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", MemoryError)
+_OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(
+    torch.cuda, "OutOfMemoryError", MemoryError
+)
 _POOL_DTYPES: dict[str, torch.dtype] = {"fwd": torch.int32, "bwd": torch.uint8}
 _ZEROED_POOL: dict[tuple[int, str], list] = {}
 _POOL_SIZE: dict[tuple[int, str], int] = {}
@@ -361,15 +409,18 @@ _ACCUMULATOR_VIEWS: dict[int, tuple[weakref.ref, dict]] = {}
 # The host plan of each call row, planned by the row's first call: ``(arch, route kind, C, device index,
 # bwd_grid_mult, bf16_taps) -> ((s_lo, s_hi, cake_jit.RowPlan or None, {n_ch_tiles: the forward's counter words or the
 # backward's accumulator layout}), ...)``, one entry per side of ``cake_jit.row_sides`` (ascending token ranges from
-# 0 up; one side unless a ``cake_jit.SM_WIDE_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers the row, whose ranges
-# then cut the token axis).  Selecting the route's program, splitting C into channel tiles, looking
+# 0 up; one side unless a ``cake_jit.SM_WIDE_ROWS``, ``cake_jit.PAIR_ROWS``, ``cake_jit.DIRECT_ROWS`` or
+# ``cake_jit.FALLBACK_ROWS`` key covers the row, whose ranges then cut the token axis).  Selecting the route's program,
+# splitting C into channel tiles, looking
 # up the TILE_OVERRIDES / NARROW_TILES row (the forward: its token floors) and sizing the grid cost several us of host
 # time in front of every launch; with the row's plan a call only compares ``S`` with the sides' ranges and the side's
 # token ranges (``cake_jit.row_launch``).  A side whose program selection reads ``S`` through a token floor
 # (``cake_jit.tokens_select``) holds ``None`` and plans every call.  At most ``_ROW_PLANS_MAX`` rows (then emptied);
 # :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties it (needed after a change of the registry tables,
 # the SM count or the architecture a device reports, which the rows were planned from).
-_ROW_PLANS: dict[tuple, tuple[tuple[int, int, Optional[_loader.RowPlan], dict], ...]] = {}
+_ROW_PLANS: dict[
+    tuple, tuple[tuple[int, int, Optional[_loader.RowPlan], dict], ...]
+] = {}
 _ROW_PLANS_MAX = 1024
 # The torch dtype of each accumulator / counter dtype name of a workspace rule.
 _TORCH_DTYPES = {
@@ -475,6 +526,41 @@ def _check_placement(
         raise ValueError(f"{name} must be contiguous")
 
 
+# The byte alignment of each operand's address.  The programs load and store these operands as vectors of that
+# many bytes, and a misaligned vector access is a "misaligned address" CUDA error.  A fresh tensor, or a
+# ``.clone()``, is always aligned; a view that starts at a whole row (``x[1:]``, ``weight[1:]``) keeps it.
+# The token rows (x, dy, y or out, dx): eight BF16 channels of a row per 16-byte vector.
+TOKEN_ALIGN = 16
+# The taps: one channel's four taps per vector.
+TAPS_ALIGN = {torch.float32: 16, torch.bfloat16: 8}
+# The bias: the forward loads eight channels per vector (32 bytes in FP32, 16 in BF16); the backward loads them as
+# 16-byte vectors (two in FP32, one in BF16).
+BIAS_ALIGN = {torch.float32: 32, torch.bfloat16: 16}
+BACKWARD_BIAS_ALIGN = {torch.float32: 16, torch.bfloat16: 16}
+
+
+def _aligned(tensor: torch.Tensor, name: str, need: int) -> torch.Tensor:
+    """``tensor`` when its address is ``need``-byte aligned (``ValueError`` otherwise; an empty tensor is never
+    read or written)."""
+
+    misaligned = tensor.data_ptr() % need
+    if misaligned and tensor.numel():
+        raise ValueError(
+            f"{name} must be {need}-byte aligned (the kernels access it as {need}-byte vectors), got "
+            f"data_ptr() % {need} == {misaligned}; pass a fresh tensor or .clone()"
+        )
+    return tensor
+
+
+def _grad_tokens(grad: torch.Tensor) -> torch.Tensor:
+    """The incoming gradient of an autograd backward as a contiguous BF16 tensor at a :data:`TOKEN_ALIGN`-byte
+    address.  Autograd can hand over a view at any offset (the backward of ``torch.cat`` narrows its gradient), and
+    the caller cannot replace that tensor, so a misaligned one is copied."""
+
+    g = grad.to(torch.bfloat16).contiguous()
+    return g.clone() if g.data_ptr() % TOKEN_ALIGN else g
+
+
 # The largest token count ``S`` a call takes.  The kernels split a channel
 # tile's tokens over its token streams with the 32-bit ``(S + streams - 1) /
 # streams``.  A tile has at most ``grid_mult x ctas_per_sm`` streams per SM, a
@@ -495,7 +581,8 @@ def _tokens(
 
     ``shape`` pins the exact shape another token tensor of the call has (``dy``
     against ``x``).  Both kernels read the packed rows as 16-byte vectors of eight
-    channels, so ``C`` is a multiple of eight; ``S`` and ``C`` are 32-bit kernel
+    channels, so ``C`` is a multiple of eight and the address is
+    :data:`TOKEN_ALIGN`-byte aligned; ``S`` and ``C`` are 32-bit kernel
     scalars (``S x C`` itself may exceed 2^31: the kernels address with 64-bit
     offsets), and ``S`` is at most :data:`MAX_TOKENS`.
     """
@@ -523,6 +610,7 @@ def _tokens(
             "32-bit kernel scalar (the kernels split S over at most "
             f"{MAX_TOKEN_STREAMS} token streams with the 32-bit S + streams - 1)"
         )
+    _aligned(t, name, TOKEN_ALIGN)
     return S, C, t.view(S, C)
 
 
@@ -535,7 +623,7 @@ def _weight(
     dtypes: tuple[torch.dtype, ...] = (torch.float32,),
 ) -> torch.Tensor:
     """Validate the ``[C, 4]`` taps of one of ``dtypes`` (the training API passes FP32 and BF16; the KCP path
-    keeps the default, FP32 only)."""
+    keeps the default, FP32 only), at a :data:`TAPS_ALIGN`-byte aligned address."""
 
     w = _require_tensor(weight, name)
     if w.ndim != 2 or int(w.shape[1]) != WIDTH:
@@ -548,11 +636,14 @@ def _weight(
             f"{name} must have one row per channel ([{C}, {WIDTH}]), got shape {tuple(w.shape)}"
         )
     _check_placement(w, name, device=device, dtype=dtypes)
-    return w
+    return _aligned(w, name, TAPS_ALIGN[w.dtype])
 
 
-def _bias(bias: object, C: int, *, device: torch.device) -> torch.Tensor:
-    """Validate the per-channel ``[C]`` bias (FP32 or BF16, independently of the taps)."""
+def _bias(
+    bias: object, C: int, *, device: torch.device, backward: bool = False
+) -> torch.Tensor:
+    """Validate the per-channel ``[C]`` bias (FP32 or BF16, independently of the taps), at a :data:`BIAS_ALIGN`-byte
+    aligned address (:data:`BACKWARD_BIAS_ALIGN` for the standalone ``backward`` call)."""
 
     b = _require_tensor(bias, "bias")
     if b.ndim != 1 or int(b.shape[0]) != C:
@@ -560,7 +651,8 @@ def _bias(bias: object, C: int, *, device: torch.device) -> torch.Tensor:
             f"bias must be a [C] tensor with one value per channel ([{C}]), got shape {tuple(b.shape)}"
         )
     _check_placement(b, "bias", device=device, dtype=PARAMETER_DTYPES)
-    return b
+    need = (BACKWARD_BIAS_ALIGN if backward else BIAS_ALIGN)[b.dtype]
+    return _aligned(b, "bias", need)
 
 
 def _cu_seqlens(
@@ -595,9 +687,10 @@ def _output(
     dtype: torch.dtype,
     device: torch.device,
     dtypes: Optional[tuple[torch.dtype, ...]] = None,
+    align: int = 1,
 ) -> torch.Tensor:
-    """A caller-provided output (exact shape, contiguous, of ``dtype`` or of one of ``dtypes`` when given) or a
-    fresh ``dtype`` one."""
+    """A caller-provided output (exact shape, contiguous, of ``dtype`` or of one of ``dtypes`` when given, at an
+    ``align``-byte aligned address) or a fresh ``dtype`` one."""
 
     if tensor is None:
         return torch.empty(shape, dtype=dtype, device=device)
@@ -607,7 +700,7 @@ def _output(
             f"{name} must have shape {tuple(shape)}, got {tuple(out.shape)}"
         )
     _check_placement(out, name, device=device, dtype=dtypes or dtype)
-    return out
+    return _aligned(out, name, align)
 
 
 # The backward programs store one channel's four FP32 ``dweight`` taps with one 16-byte store.
@@ -641,7 +734,9 @@ def _dweight_sum(value: object, policy: str) -> str:
     routes have a pair form)."""
 
     if not isinstance(value, str):
-        raise TypeError(f"dweight_sum must be a str, one of {DWEIGHT_SUMS}, got {type(value).__name__}")
+        raise TypeError(
+            f"dweight_sum must be a str, one of {DWEIGHT_SUMS}, got {type(value).__name__}"
+        )
     if value not in DWEIGHT_SUMS:
         raise ValueError(f"dweight_sum must be one of {DWEIGHT_SUMS}, got {value!r}")
     if value == "fp32_pair" and policy != "fp32":
@@ -723,7 +818,9 @@ def _launch(
     unwritten.  The caller launches this grid, so a call plans it once.  A
     backward ``bwd_grid_mult`` above 1 launches that many times the record's
     untrimmed grid (``launch_grid`` without the row), never trimmed to whole
-    channel-tile ranks; the scalars do not depend on the grid.  A record's
+    channel-tile ranks, or for a record whose grid is capped by the call (a
+    direct backward program at a row of ``cake_jit.DIRECT_ROWS``) that many
+    times its capped grid; the scalars do not depend on the grid.  A record's
     plan takes the device's architecture ``arch`` and the record's route, so a
     backward row of ``cake_jit.TILE_OVERRIDES`` or ``cake_jit.NARROW_TILES``
     and a forward narrow row (``cake_jit.channel_split``, of the call's taps:
@@ -749,6 +846,12 @@ def _launch(
             device_index=device_index,
             arch=arch,
             bwd_grid_mult=1,
+        )
+    elif record["grid_rule"].get("cap") is not None:
+        grid = (
+            launch_grid(record, device_index=device_index, C=C, S=S)[0] * bwd_grid_mult,
+            1,
+            1,
         )
     else:
         grid = (launch_grid(record, device_index=device_index)[0] * bwd_grid_mult, 1, 1)
@@ -828,9 +931,9 @@ def _call_plan(
     of each channel tile count (empty and not kept for a row planned per call).  ``policy`` is the backward's
     ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error; ``bf16_taps`` (the
     forward's taps are BF16; ``False`` for every backward call) is part of the row.  A row a
-    :data:`cake_jit.SM_WIDE_ROWS`, :data:`cake_jit.DIRECT_ROWS` or :data:`cake_jit.FALLBACK_ROWS` key covers is
-    planned for every side of :func:`cake_jit.row_sides` by its first call; the call's side is a few compares of
-    ``S`` with the sides' ranges."""
+    :data:`cake_jit.SM_WIDE_ROWS`, :data:`cake_jit.PAIR_ROWS`, :data:`cake_jit.DIRECT_ROWS` or
+    :data:`cake_jit.FALLBACK_ROWS` key covers is planned for every side of :func:`cake_jit.row_sides` by its first
+    call; the call's side is a few compares of ``S`` with the sides' ranges."""
 
     key = (arch, kind, C, device_index, bwd_grid_mult, bf16_taps)
     sides = _ROW_PLANS.get(key)
@@ -891,8 +994,10 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
-    ``SM_WIDE_ROWS``, ``DIRECT_ROWS``, ``DIRECT_PLANS``, the forward's ``FORWARD_NARROW_MIN_S``,
-    ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``,
+    ``SM_WIDE_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS``, ``GRID_CAP_ROWS``, ``PAIR_PLANS``, ``DIRECT_PLANS``,
+    ``BACKWARD_DIRECT_PLANS``, the
+    forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``,
+    ``FORWARD_SINGLE_TILE_ROWS``,
     ``FORWARD_NARROW_WIDTHS`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or
     ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` / ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is
     read by every call, not planned."""
@@ -1022,7 +1127,9 @@ def _capture_info(stream: int) -> tuple[int, object]:
         return 0, None
     if info[1] != cudart.cudaStreamCaptureStatus.cudaStreamCaptureStatusActive:
         return 0, None
-    graph = info[3] if len(info) > 3 and isinstance(info[3], cudart.cudaGraph_t) else None
+    graph = (
+        info[3] if len(info) > 3 and isinstance(info[3], cudart.cudaGraph_t) else None
+    )
     return int(info[2]), graph
 
 
@@ -1033,7 +1140,15 @@ class _PoolBuffer:
 
     __slots__ = ("tensor", "kind", "device_index", "flag", "sem", "obj")
 
-    def __init__(self, tensor: torch.Tensor, kind: str, device_index: int, flag: int, sem: int, obj: object):
+    def __init__(
+        self,
+        tensor: torch.Tensor,
+        kind: str,
+        device_index: int,
+        flag: int,
+        sem: int,
+        obj: object,
+    ):
         self.tensor, self.kind, self.device_index = tensor, kind, device_index
         self.flag, self.sem, self.obj = flag, sem, obj
 
@@ -1065,22 +1180,34 @@ class _UserObjects:
         self.libc = libc
         self.sem_post = ctypes.cast(libc.sem_post, ctypes.c_void_p).value
         self.success = cudart.cudaError_t.cudaSuccess
-        self.create_flags = int(cudart.cudaUserObjectFlags.cudaUserObjectNoDestructorSync)
+        self.create_flags = int(
+            cudart.cudaUserObjectFlags.cudaUserObjectNoDestructorSync
+        )
         self.move = int(cudart.cudaUserObjectRetainFlags.cudaGraphUserObjectMove)
         self.free_sems: list[int] = []
-        self.retired: list[int] = []  # semaphores of released idle objects, until their post is consumed
+        self.retired: list[
+            int
+        ] = []  # semaphores of released idle objects, until their post is consumed
         self.flags: list[torch.Tensor] = []  # pinned int32 readiness flags, never freed
         self.free_flags: list[tuple[torch.Tensor, int, int]] = []
-        self.pending_flags: list[tuple[torch.Tensor, int, int]] = []  # returned before their copy was seen
-        self.released: list[_PoolBuffer] = []  # held buffers their graphs released, for their device's refill
+        self.pending_flags: list[
+            tuple[torch.Tensor, int, int]
+        ] = []  # returned before their copy was seen
+        self.released: list[
+            _PoolBuffer
+        ] = []  # held buffers their graphs released, for their device's refill
 
     def semaphore(self) -> int:
         if not self.free_sems:
-            chunk = self.libc.malloc(self.SEM_BYTES * (self.SEM_CHUNK + 1))  # never freed
+            chunk = self.libc.malloc(
+                self.SEM_BYTES * (self.SEM_CHUNK + 1)
+            )  # never freed
             if not chunk:
                 raise MemoryError("malloc of the semaphores failed")
             base = (chunk + self.SEM_BYTES - 1) // self.SEM_BYTES * self.SEM_BYTES
-            self.free_sems.extend(base + self.SEM_BYTES * i for i in range(self.SEM_CHUNK))
+            self.free_sems.extend(
+                base + self.SEM_BYTES * i for i in range(self.SEM_CHUNK)
+            )
         sem = self.free_sems.pop()
         if self.libc.sem_init(sem, 0, 0) != 0:
             self.free_sems.append(sem)
@@ -1158,7 +1285,9 @@ def _mem_pool(device_index: int) -> object:
     return pool
 
 
-def _package_zeros(numel: int, dtype: torch.dtype, device: torch.device, device_index: int) -> torch.Tensor:
+def _package_zeros(
+    numel: int, dtype: torch.dtype, device: torch.device, device_index: int
+) -> torch.Tensor:
     """A zeroed tensor of the package's own memory pool on the device (:func:`_mem_pool`), or of the caching
     allocator's current pool where the package has none.  Only a failure to enter the pool (an unusable
     ``torch.cuda.use_mem_pool``) takes the device off it; an allocation error (an out-of-memory error) propagates.
@@ -1171,7 +1300,9 @@ def _package_zeros(numel: int, dtype: torch.dtype, device: torch.device, device_
             with contextlib.ExitStack() as stack:
                 try:
                     stack.enter_context(torch.cuda.use_mem_pool(pool, device=device))
-                except Exception:  # the API is unusable here: the device leaves its pool for good
+                except (
+                    Exception
+                ):  # the API is unusable here: the device leaves its pool for good
                     _MEM_POOLS[device_index] = None
                 else:
                     # an allocation error (an OOM) propagates and the device keeps its pool
@@ -1265,7 +1396,9 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
                     _drop_capture_entries(buf.tensor)
                     bkey = (buf.device_index, buf.kind)
                     pool = _ZEROED_POOL.setdefault(bkey, [])
-                    if len(pool) < _POOL_DEPTH and buf.tensor.numel() >= _POOL_SIZE.get(bkey, 0):
+                    if len(pool) < _POOL_DEPTH and buf.tensor.numel() >= _POOL_SIZE.get(
+                        bkey, 0
+                    ):
                         # its graphs' launches have completed and left it zero: ready at once
                         buf.obj = uo.create(buf.sem)
                         buf.flag = uo.flag()
@@ -1282,7 +1415,9 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
                             # the flags' source, written on this stream before the copies that read it
                             one = torch.ones(1, dtype=torch.int32, device=device)
                             tensors = [
-                                torch.zeros(size, dtype=_POOL_DTYPES[kind], device=device)
+                                torch.zeros(
+                                    size, dtype=_POOL_DTYPES[kind], device=device
+                                )
                                 for _ in range(_POOL_DEPTH - len(keep))
                             ]
                     except _OUT_OF_MEMORY:
@@ -1294,7 +1429,11 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
                         ctypes.c_int32.from_address(flag[2]).value = 0
                         flag[0][flag[1] : flag[1] + 1].copy_(one, non_blocking=True)
                         sem = uo.semaphore()
-                        fresh.append(_PoolBuffer(tensor, kind, device_index, flag, sem, uo.create(sem)))
+                        fresh.append(
+                            _PoolBuffer(
+                                tensor, kind, device_index, flag, sem, uo.create(sem)
+                            )
+                        )
                 for buf in pool:
                     if buf not in keep:
                         uo.release(buf.obj, buf.sem)
@@ -1306,7 +1445,9 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
         _POOL_READY[kind][device_index] = size
 
 
-def _pool_take(device_index: int, kind: str, need: int, graph: object) -> Optional[torch.Tensor]:
+def _pool_take(
+    device_index: int, kind: str, need: int, graph: object
+) -> Optional[torch.Tensor]:
     """Inside a capture of ``graph``: an idle pre-zeroed buffer of ``kind`` with at least ``need`` elements whose
     zero fill has completed (its flag reads 1), its user object's reference moved into ``graph``; ``None`` when the
     device has none (or CUDA refuses the retain).  Either way the next eager call refills the pool.  Makes no CUDA
@@ -1403,7 +1544,9 @@ def _forward_work(
     if capturing is None:
         capturing = torch.cuda.is_current_stream_capturing()
     if capturing:
-        return _capture_buffer(_CAPTURE_FORWARD_WORKSPACES, device_index, "fwd", words, device)
+        return _capture_buffer(
+            _CAPTURE_FORWARD_WORKSPACES, device_index, "fwd", words, device
+        )
     if words > _POOL_READY["fwd"].get(device_index, 0):
         _pool_refill(device_index, "fwd", words, device)
     key = (device_index, _current_stream_handle(device_index))
@@ -1597,23 +1740,31 @@ def cake_causal_conv1d_nondet_train_forward(
     ``cake_causal_conv1d_det_train_forward``'s (the forward does not alert
     under torch's deterministic mode).
 
+    The kernels access ``x``, ``weight``, ``bias`` and ``out`` as vectors, so
+    each address (``data_ptr()``) must be aligned as stated below; a misaligned
+    one raises ``ValueError`` before anything launches.  A fresh tensor or a
+    ``.clone()`` is aligned, and so is a view that starts at a whole row
+    (``x[1:]``, ``weight[1:]``).
+
     Parameters
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations of every
-        document; ``C`` is a multiple of 8.
+        document; ``C`` is a multiple of 8.  16-byte aligned.
     weight : torch.Tensor
         FP32 or BF16 ``[C, 4]`` contiguous taps; ``weight[c, 3]`` multiplies the
-        current token, ``weight[c, 0]`` the token three positions back.
+        current token, ``weight[c, 0]`` the token three positions back.  FP32
+        taps are 16-byte aligned, BF16 taps 8-byte aligned.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` contiguous device prefix sums of the document
         lengths (``cu_seqlens[0] == 0``, ``cu_seqlens[-1] == S``; a repeated
         value is an empty document).  The host reads its metadata only.
     bias : torch.Tensor, optional
         FP32 or BF16 ``[C]`` contiguous per-channel bias (its dtype is
-        independent of ``weight``'s), added after the four taps.
+        independent of ``weight``'s), added after the four taps.  An FP32 bias
+        is 32-byte aligned, a BF16 bias 16-byte aligned.
     out : torch.Tensor, optional
-        Preallocated BF16 output of ``x``'s shape, contiguous.
+        Preallocated BF16 output of ``x``'s shape, contiguous, 16-byte aligned.
     workspace : torch.Tensor, optional
         Caller-owned int32 buffer from
         :func:`cake_causal_conv1d_nondet_train_forward_workspace` (the
@@ -1641,7 +1792,14 @@ def cake_causal_conv1d_nondet_train_forward(
     w = _weight(weight, C, device=device, dtypes=PARAMETER_DTYPES)
     b = None if bias is None else _bias(bias, C, device=device)
     cu, num_docs = _cu_seqlens(cu_seqlens, device=device)
-    y = _output(out, "out", shape=tuple(x.shape), dtype=torch.bfloat16, device=device)
+    y = _output(
+        out,
+        "out",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
+    )
     if S == 0:
         return y
     bf16_taps = w.dtype == torch.bfloat16
@@ -1710,14 +1868,17 @@ def cake_causal_conv1d_nondet_train_backward(
     ----------
     x, weight, cu_seqlens, bias
         The forward's inputs (same contracts as
-        :func:`cake_causal_conv1d_nondet_train_forward`); nothing else is saved.
+        :func:`cake_causal_conv1d_nondet_train_forward`, except that an FP32
+        ``bias`` needs only 16-byte alignment here); nothing else is saved.
     dy : torch.Tensor
-        BF16 gradient of ``y``, ``x``'s shape, contiguous.
+        BF16 gradient of ``y``, ``x``'s shape, contiguous, 16-byte aligned.
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
-        ``"bf16"`` at the BF16-rounded recomputed preactivation with an FP32
-        ``weight`` and at the unrounded FP32 preactivation with a BF16
-        ``weight``, ``"fp32"`` at
+        ``"bf16"`` at the unrounded FP32 preactivation with a ``bias`` (FP32
+        or BF16 ``weight``), a BF16 ``weight`` or a BF16 ``dweight`` out, and
+        at the BF16-rounded recomputed preactivation with an FP32 ``weight``
+        and ``dweight`` and no ``bias``,
+        ``"fp32"`` at
         the unrounded FP32 preactivation; both accumulate in plain FP32 words.
         ``dx`` is within one BF16 ulp of exact either way, and bitwise the det
         package's.
@@ -1740,9 +1901,9 @@ def cake_causal_conv1d_nondet_train_backward(
     dx, dweight, dbias : torch.Tensor, optional
         Preallocated outputs: BF16 of ``x``'s shape, ``[C, 4]`` and ``[C]``
         (FP32 or BF16 each; the parameter's dtype when omitted), contiguous.
-        An FP32 ``dweight`` must be 16-byte aligned (each channel's four taps
-        are stored with one 16-byte store; ``ValueError`` otherwise).
-        ``dbias`` needs ``bias``.  Every element is overwritten.
+        ``dx`` must be 16-byte aligned, and so must an FP32 ``dweight`` (each
+        channel's four taps are stored with one 16-byte store); ``ValueError``
+        otherwise.  ``dbias`` needs ``bias``.  Every element is overwritten.
     bwd_grid_mult : {1, 2, 3, 4}
         Opt-in finer static partition of the token axis (default 1, the
         default grid): the program launches ``bwd_grid_mult`` times its
@@ -1780,11 +1941,16 @@ def cake_causal_conv1d_nondet_train_backward(
     arch = _device_arch(device)
     S, C, x_flat = _tokens(x, "x", device=device)
     w = _weight(weight, C, device=device, dtypes=PARAMETER_DTYPES)
-    b = None if bias is None else _bias(bias, C, device=device)
+    b = None if bias is None else _bias(bias, C, device=device, backward=True)
     cu, num_docs = _cu_seqlens(cu_seqlens, device=device)
     _, _, dy_flat = _tokens(dy, "dy", device=device, shape=tuple(x.shape))
     dx_out = _output(
-        dx, "dx", shape=tuple(x.shape), dtype=torch.bfloat16, device=device
+        dx,
+        "dx",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
     )
     dw_out = _dweight_aligned(
         _output(
@@ -1882,7 +2048,8 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
     the backward runs the one-launch ``dx`` + unordered ``dweight`` (+ ``dbias``) program of
     :func:`cake_causal_conv1d_nondet_train_backward` (with ``bwd_grid_mult``; it alerts under torch's deterministic
     mode) on the incoming gradient (materialized as a contiguous BF16 tensor when autograd hands over another layout
-    or dtype) and returns the gradients of ``weight`` and ``bias`` in the parameters' dtypes.
+    or dtype, and copied when its address is not 16-byte aligned) and returns the gradients of ``weight`` and
+    ``bias`` in the parameters' dtypes.
     """
 
     @staticmethod
@@ -1911,7 +2078,7 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
         x, weight, cu_seqlens, bias = ctx.saved_tensors
         if grad_y is None:
             grad_y = torch.zeros_like(x)
-        dy = grad_y.to(torch.bfloat16).contiguous()
+        dy = _grad_tokens(grad_y)
         grads = cake_causal_conv1d_nondet_train_backward(
             x,
             weight,
@@ -1942,13 +2109,16 @@ def cake_causal_conv1d_nondet(
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations on a
-        supported CUDA device.
+        supported CUDA device, 16-byte aligned.
     weight : torch.Tensor
-        FP32 or BF16 ``[C, 4]`` contiguous taps.
+        FP32 (16-byte aligned) or BF16 (8-byte aligned) ``[C, 4]`` contiguous
+        taps.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` device prefix sums of the document lengths.
     bias : torch.Tensor, optional
-        FP32 or BF16 ``[C]`` contiguous per-channel bias.
+        FP32 (32-byte aligned) or BF16 (16-byte aligned) ``[C]`` contiguous
+        per-channel bias.  A misaligned tensor raises ``ValueError`` (see
+        :func:`cake_causal_conv1d_nondet_train_forward`).
     silu_grad_preactivation : {"bf16", "fp32"}
         The weight gradient's SiLU' policy (see
         :func:`cake_causal_conv1d_nondet_train_backward`).

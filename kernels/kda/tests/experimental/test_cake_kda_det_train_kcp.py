@@ -16,9 +16,14 @@ limitations under the License.
 CPU tests of the KCP metadata layer (``cake_kcp_plan``): partitions against the rows of record, exchange
 splits and chain tables, head ownership, the plan rule, the byte queries, the private test knobs; the GPU parity test
 of the CPU-built chunk tables against the ``table`` program (``-k gpu``); and the FP64
-fake backend against the unpartitioned FP64 reference (``-k fake``).  Rows, reference partitions and operands come
-from the reference harness ``tests/experimental/test_helpers/cake_kda_kcp_shapes.py`` / ``cake_kda_kcp_inputs.py``, the FP64
-reference from ``tests/experimental/test_helpers/cake_kda_kcp_reference.py``.
+fake backend (``-k fake``): on small drawn packs its outputs are judged against the unpartitioned FP64 reference
+beside the naive BF16 tier over 32 draws (``tests/cake_naive.py`` through ``test_helpers/cake_kda_naive.py``),
+with no tolerance, and on the rows of record its collective order and its own saved == replay bits are checked
+exactly.
+Rows, reference partitions and operands come from the reference harness
+``tests/experimental/test_helpers/cake_kda_kcp_shapes.py`` / ``cake_kda_kcp_inputs.py``, the FP64 reference from
+``tests/experimental/test_helpers/cake_kda_kcp_reference.py`` / ``cake_kda_det_train_reference.py``.  The GPU tests
+of this deterministic package compare its outputs run to run and path to path bit for bit.
 """
 
 import ctypes
@@ -35,6 +40,11 @@ import pytest
 import torch
 
 from tests.experimental.test_helpers import cake_kda_kcp_shapes as kcp_shapes
+from tests.experimental.test_helpers.cake_kda_naive import (
+    judge_arms,
+    kcp_row_draw,
+    kcp_row_inputs,
+)
 from tests.experimental.test_helpers.cake_kda_train_kcp_saved import (
     written_carry,
     written_tensors,
@@ -49,8 +59,9 @@ cake_kcp_jit = cake_package("cake.cake_kda_det_train_kcp", "cake_kcp_jit")
 SM_COUNT = 152  # GB300; the plan rule's examples of the design note §7.2
 EVIDENCE_DIR = os.environ.get("KCP_EVIDENCE_DIR")
 LAYOUT_NAMES = {"C": "contiguous", "Z": "zigzag", "D": "zigzag_per_document"}
-OWNERSHIP_H = (1, 3, 4, 6, 12, 64)
-OWNERSHIP_W = (2, 4, 8, 16)
+# 96 heads over 4 / 8 / 64 ranks: 24 / 12 / 2 heads per owner, 48 owners at 64 ranks (issue #264); 128 the top
+OWNERSHIP_H = (1, 3, 4, 6, 12, 64, 96, 128)
+OWNERSHIP_W = (2, 4, 8, 16, 64)
 
 
 def _evidence(name: str, record: dict) -> None:
@@ -4409,6 +4420,9 @@ def test_gpu_backward_refuses_the_other_modes_saved_set_and_workspace(device) ->
 # --------------------------------------------------------------------------- FP64 fake backend (`-k fake`)
 
 
+# The rows of record C1-C5b at CP2 / CP4 in every layout of the row: the emulation's collective order and its own
+# saved == replay bits, exactly (properties of the CPU emulation).  They are too large for the CPU judge's draws; the
+# small drawn packs of FAKE_JUDGED judge the same layouts.
 FAKE_CASES = [
     ("C1", 2, "C"),
     ("C1", 4, "C"),
@@ -4422,10 +4436,26 @@ FAKE_CASES = [
     ("C5b", 4, "R"),
 ]
 FAKE_IDS = [f"{name}-cp{W}-{lay}" for name, W, lay in FAKE_CASES]
-FAKE_REL_RMS = 1e-12  # vs the unpartitioned FP64 reference ("~1e-12", the design note §11.3); declared before the run
-FAKE_MAX_ABS_REL = 1e-11  # max |diff| relative to max |ref| of the tensor
-FAKE_CHAIN_VS_LOCAL = 1e-9  # owner-chain dS_in vs the local adjoint's dS0 (absolute; FP64 states of unit scale)
-_REFS: dict = {}
+# The small packs the fake backend is judged on (at most 600 tokens, one per layout), with the features of the rows of
+# record: small documents with boundaries inside chunks (C1), one document over every rank (C2), empty and one-token
+# fragments (C3), an explicit ragged table with a zero-token rank, a one-token fragment and cut points at 63 and 1
+# (mod 64) (C4b, C5, C5b).  Their operands are drawn per draw (``kcp_row_draw``: the row's name carries the seed).
+# fmt: off
+FAKE_JUDGED_ROWS = {
+    "F1": kcp_shapes.Row("F1", "correct", (100, 160, 77, 200, 29), 4, (4,), ("C",), "small documents, boundaries inside chunks"),
+    "F2": kcp_shapes.Row("F2", "correct", (600,), 4, (4,), ("Z",), "one document crossing every rank"),
+    "F3": kcp_shapes.Row("F3", "correct", (300, 5, 280, 1), 4, (4,), ("D",), "empty and one-token fragments"),
+    "F4": kcp_shapes.Row("F4", "correct", (190, 1, 365), 4, (4,), ("R",), "ragged T_r = [63, 0, 130, 363]: a zero-token rank, cuts at 63 and 193"),
+}
+# fmt: on
+# the per-rank token counts of the contiguous ragged split of the R pack
+FAKE_RAGGED = {"F4": [63, 0, 130, 363]}
+FAKE_JUDGED = [("F1", 4, "C"), ("F2", 4, "Z"), ("F3", 4, "D"), ("F4", 4, "R")]
+FAKE_JUDGED_IDS = [f"{name}-cp{W}-{lay}" for name, W, lay in FAKE_JUDGED]
+FAKE_ALONE = [("F1", 4, "C"), ("F3", 4, "D")]
+FAKE_ALONE_IDS = [f"{name}-cp{W}-{lay}" for name, W, lay in FAKE_ALONE]
+FAKE_SEED = 4463  # the judged cases' base seed (each draw's own seed follows from it)
+FAKE_TENSORS = ("out", "dq", "dk", "dv", "dg", "dbeta")
 
 
 @pytest.fixture(scope="module")
@@ -4439,50 +4469,82 @@ def _progress(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def _reference_of(fake, row):
-    ref = _REFS.get(row.name)
-    if ref is None:
-        ref = fake.compute_reference(row, progress=_progress)
-        _REFS[row.name] = ref
-    return ref
+def _fake_fragments(row, W: int, layout: str):
+    """The explicit fragment table (per rank ``(doc, offset, length)`` in slot order) of a judged pack in layout R,
+    else ``None``.  A drawn pack is partitioned with its original row's table (``kcp_row_draw`` renames the row)."""
+    if layout != "R":
+        return None
+    frags = kcp_shapes.partition_R(row, W, FAKE_RAGGED[row.name])
+    return [
+        [
+            (f.doc, f.off, f.length)
+            for f in sorted((f for f in frags if f.rank == r), key=lambda f: f.slot)
+        ]
+        for r in range(W)
+    ]
 
 
-def _assert_close_to_reference(fake, res, ref, row, docs, tag: str) -> dict:
-    m = fake.compare_to_reference(res, ref, row.cu_seqlens, docs)
-    for tensor, mm in m.items():
-        _progress(
-            f"{tag} {tensor}: rel_rms {mm['rel_rms']:.3e} max_abs {mm['max_abs']:.3e} (ref max {mm['ref_max']:.3e}, rel {mm['max_abs_rel']:.3e})"
-        )
-    for tensor, mm in m.items():
-        assert mm["rel_rms"] <= FAKE_REL_RMS, (tag, tensor, mm)
-        assert mm["max_abs_rel"] <= FAKE_MAX_ABS_REL, (tag, tensor, mm)
-    return m
-
-
-@pytest.mark.parametrize("case", FAKE_CASES, ids=FAKE_IDS)
-def test_fake_backend_matches_fp64_reference(fake, case) -> None:
-    """Gate 6: the FP64 fake backend (W emulated ranks, dict collectives, the reference per-fragment compute) equals the
-    unpartitioned FP64 reference to ~1e-12 on C1-C5 at CP2 / CP4 in every layout of the row; saved == replay bitwise;
-    the collective order is the design's."""
-    name, W, layout = case
-    row = kcp_shapes.ROWS[name]
-    t0 = time.time()
-    res = fake.run_fake(row, W, layout, progress=_progress)
-    ref = _reference_of(fake, row)
-    docs = list(range(len(row.lengths)))
-    m = _assert_close_to_reference(
-        fake, res, ref, row, docs, f"{name} cp{W} {layout} saved"
-    )
+def _assert_emulation_exact(fake, res) -> None:
+    """The CPU emulation's own exact properties (deterministic FP64, not the kernels'): the replay-mode gradients are
+    bitwise the saved-mode ones, and the collectives run in the design's order (forward c1, c2; saved-mode backward
+    b1, b2; replay-mode backward the forward's exchange, then b1, b2)."""
     assert fake.replay_equals_saved(res), (
         "replay-mode gradients differ from saved-mode gradients"
     )
     assert res["logs"]["forward"] == ["c1", "c2"]
     assert res["logs"]["backward_saved"] == ["b1", "b2"]
     assert res["logs"]["backward_replay"] == ["c1", "c2", "b1", "b2"]
-    for mode in ("saved", "replay"):
-        assert res["checks"][mode]["chain_vs_local_dS_in"] <= FAKE_CHAIN_VS_LOCAL, res[
-            "checks"
-        ]
+
+
+@pytest.mark.parametrize("case", FAKE_JUDGED, ids=FAKE_JUDGED_IDS)
+def test_fake_backend_matches_fp64_reference(fake, case, record_property) -> None:
+    """Gate 6: the FP64 fake backend (W emulated ranks, dict collectives, the reference per-fragment compute) on a small
+    drawn pack of each layout (C, Z, D and an explicit ragged table), on the CPU: ``out`` and the five gradients of
+    its saved mode are judged against the unpartitioned FP64 reference beside the naive BF16 tier over 32 draws
+    (``judge_arms``; the draw's operands from ``kcp_row_draw`` / ``kcp_row_inputs``; layout D cuts each drawn pack
+    with its own jitter, layout R takes the pack's table).  The emulation's own properties stay exact on every draw:
+    its replay-mode gradients are bitwise its saved-mode ones and the collectives run in the design's order.  The
+    rows of record keep these exact checks only (:func:`test_fake_backend_rows_of_record_keep_the_collective_order`)."""
+    from tests.experimental.test_helpers.cake_kda_kcp_reference import SCALE
+
+    name, W, layout = case
+    row = FAKE_JUDGED_ROWS[name]
+    fragments = _fake_fragments(row, W, layout)
+
+    def draw(j, s):
+        res = fake.run_fake(kcp_row_draw(row, s), W, layout, fragments=fragments)
+        _assert_emulation_exact(fake, res)
+        return {"": res["saved"]}, kcp_row_inputs(row, s, "cpu")
+
+    t0 = time.time()
+    judge = judge_arms(record_property, draw, seed=FAKE_SEED, scale=SCALE)
+    _evidence(
+        "fake",
+        {
+            "row": name,
+            "lengths": list(row.lengths),
+            "W": W,
+            "layout": layout,
+            "H": row.h,
+            "draws": judge.draws,
+            "tier": {n: v["tier"] for n, v in judge.verdicts().items()},
+            "elapsed_s": round(time.time() - t0, 1),
+            "pass": True,
+        },
+    )
+
+
+@pytest.mark.parametrize("case", FAKE_CASES, ids=FAKE_IDS)
+def test_fake_backend_rows_of_record_keep_the_collective_order(fake, case) -> None:
+    """Gate 6 on the rows of record C1-C5b at CP2 / CP4 in every layout of the row, exact checks only: the emulation's
+    replay-mode gradients are bitwise its saved-mode ones and the collectives run in the design's order.  These rows
+    are too large for the CPU judge's draws; the small packs of :func:`test_fake_backend_matches_fp64_reference` judge
+    the same layouts against the FP64 reference."""
+    name, W, layout = case
+    row = kcp_shapes.ROWS[name]
+    t0 = time.time()
+    res = fake.run_fake(row, W, layout, progress=_progress)
+    _assert_emulation_exact(fake, res)
     ranks = res["ranks"]
     _evidence(
         "fake",
@@ -4494,11 +4556,8 @@ def test_fake_backend_matches_fp64_reference(fake, case) -> None:
             "T_r": [c.T_r for c in ranks.ctxs],
             "n_frag": [c.n_frag for c in ranks.ctxs],
             "N_in": ranks.ctxs[0].N_in,
-            "metrics_saved": m,
             "replay_equals_saved": True,
             "checks": res["checks"],
-            "max_rel_rms": max(mm["rel_rms"] for mm in m.values()),
-            "max_abs_rel": max(mm["max_abs_rel"] for mm in m.values()),
             "elapsed_s": round(time.time() - t0, 1),
             "pass": True,
         },
@@ -4525,52 +4584,47 @@ def test_fake_backend_save_transfer_is_bitwise(fake) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "case", [("C1", 4, "C"), ("C3", 4, "D")], ids=["C1-cp4-C", "C3-cp4-D"]
-)
-def test_fake_backend_document_alone_equals_slice(fake, case) -> None:
-    """Gate 6: every document run alone (its own partition over the same W) equals the slice of the whole-pack run to
-    rounding: no leakage between documents, no dependence of a document's result on the other documents."""
+@pytest.mark.parametrize("case", FAKE_ALONE, ids=FAKE_ALONE_IDS)
+def test_fake_backend_document_alone_and_its_slice_are_judged(
+    fake, case, record_property
+) -> None:
+    """Gate 6, no leakage between documents: on a small drawn pack (layouts C and D, on the CPU) the whole pack's run
+    (arm ``slice``: each document's slice of it) and every document run alone on its own partition over the same W
+    (arm ``alone``: the documents' results in pack order) are judged against the FP64 reference of the drawn pack
+    beside the naive BF16 tier over 32 draws: ``out`` and the five gradients of the saved mode.  Each run's
+    replay-mode gradients stay bitwise its saved-mode ones (the CPU emulation's own property)."""
+    from tests.experimental.test_helpers.cake_kda_kcp_reference import SCALE
+
     name, W, layout = case
-    row = kcp_shapes.ROWS[name]
-    full = fake.run_fake(row, W, layout, progress=_progress)
-    cu = row.cu_seqlens
-    for d in range(len(row.lengths)):
-        alone = fake.run_fake(row, W, layout, docs=[d], progress=_progress)
-        for tensor in ("out", "dq", "dk", "dv", "dg", "dbeta"):
-            mm = fake.metrics(
-                alone["saved"][tensor], full["saved"][tensor][cu[d] : cu[d + 1]]
-            )
-            _progress(
-                f"{name} doc {d} alone vs slice {tensor}: rel_rms {mm['rel_rms']:.3e} max_abs_rel {mm['max_abs_rel']:.3e}"
-            )
-            assert (
-                mm["rel_rms"] <= FAKE_REL_RMS and mm["max_abs_rel"] <= FAKE_MAX_ABS_REL
-            ), (d, tensor, mm)
-        _evidence(
-            "fake",
-            {
-                "row": name,
-                "W": W,
-                "layout": layout,
-                "check": f"document {d} alone == slice",
-                "pass": True,
+    row = FAKE_JUDGED_ROWS[name]
+
+    def draw(j, s):
+        row_s = kcp_row_draw(row, s)
+        full = fake.run_fake(row_s, W, layout)
+        alone = [
+            fake.run_fake(row_s, W, layout, docs=[d]) for d in range(len(row.lengths))
+        ]
+        for res in (full, *alone):
+            assert fake.replay_equals_saved(res)
+        arms = {
+            "slice": full["saved"],
+            "alone": {
+                n: torch.cat([a["saved"][n] for a in alone], 0) for n in FAKE_TENSORS
             },
-        )
+        }
+        return arms, kcp_row_inputs(row, s, "cpu")
 
-
-def test_fake_backend_transfer_matches_basis_transfer(fake) -> None:
-    """The identity / v = 0 transfer map equals the reference basis-vector ``transfer`` helper (FP64) on a 63-token fragment."""
-    row = kcp_shapes.ROWS["C5"]
-    ranks = fake.build_ranks(row, 4, "R", progress=_progress)
-    err = fake._transfer_matches_basis_transfer(ranks.frag_ops(0, 0), row.h)
-    _progress(
-        f"transfer (identity, v = 0) vs the reference transfer(): max |diff| {err:.3e}"
-    )
-    assert err <= 1e-13
+    judge = judge_arms(record_property, draw, seed=FAKE_SEED + 1, scale=SCALE)
     _evidence(
         "fake",
-        {"row": "C5", "check": "transfer vs reference", "max_abs": err, "pass": True},
+        {
+            "row": name,
+            "W": W,
+            "layout": layout,
+            "check": "documents alone and the pack's slices judged",
+            "draws": judge.draws,
+            "pass": True,
+        },
     )
 
 
@@ -5263,14 +5317,19 @@ def test_forward_only_layout_bytes_and_prediction() -> None:
                         assert pred_f == fwd["arena"] and pred_b == full["arena"]
                         continue
                     args = (ctx.T_r, ctx.n_frag, H)
+                    # the local problem's plan: the KCP's segment rule (occupancy)
+                    local_kw = {
+                        "sm_count": SM_COUNT,
+                        "segment_rule": kp.LOCAL_SEGMENT_RULE,
+                    }
                     local_b = cake_backend.workspace_bytes(
-                        *args, backward=True, sm_count=SM_COUNT
+                        *args, backward=True, **local_kw
                     )
                     local_f = cake_backend.workspace_bytes(
-                        *args, backward=False, fwd_layout="fwd_kcp", sm_count=SM_COUNT
+                        *args, backward=False, fwd_layout="fwd_kcp", **local_kw
                     )
                     old_f = cake_backend.workspace_bytes(
-                        *args, backward=False, sm_count=SM_COUNT
+                        *args, backward=False, **local_kw
                     )
                     assert local_f == 2432 * ctx.R * H, (W, layout, r, H)
                     assert old_f - local_f >= 128 * ctx.R * H
@@ -6291,7 +6350,9 @@ def test_local_stage_values_cover_the_records(H, arch, sm) -> None:
     part = _small_partition(2)
     ctx = kp.cake_kda_det_train_kcp_build_context(part, None, 0, "cpu", 4, sm_count=sm)
     assert ctx.T_r > 0
-    plan = cake_backend.plan(ctx.T_r, ctx.n_frag, H, sm, arch)
+    plan = cake_backend.plan(
+        ctx.T_r, ctx.n_frag, H, sm, arch, segment_rule=kp.LOCAL_SEGMENT_RULE
+    )
     tb = cake_kcp._Tables(ctx, H, fused_walks=1)
     launches: list[tuple[str, str, tuple[int, int, int], dict]] = []
 
@@ -6492,13 +6553,21 @@ def test_local_stage_values_cover_the_records(H, arch, sm) -> None:
                 )
     # the workspace prediction counts the scratch set
     scratch_bytes = (
-        cake_backend.tables_bytes(ctx.T_r, ctx.n_frag, H, sm_count=sm)
+        cake_backend.tables_bytes(
+            ctx.T_r, ctx.n_frag, H, sm_count=sm, segment_rule=kp.LOCAL_SEGMENT_RULE
+        )
         if kp.intra_writes_tables(plan)
         else 0
     )
     assert kp.cake_kda_det_train_kcp_workspace_bytes(ctx, H=H) == (
         cake_backend.workspace_bytes(
-            ctx.T_r, ctx.n_frag, H, backward=True, save_mode="light", sm_count=sm
+            ctx.T_r,
+            ctx.n_frag,
+            H,
+            backward=True,
+            save_mode="light",
+            sm_count=sm,
+            segment_rule=kp.LOCAL_SEGMENT_RULE,
         )
         + scratch_bytes
         + kp.kcp_arena_layout(ctx, H=H)["arena"]
@@ -6602,7 +6671,15 @@ def test_forward_tapes_have_no_reader_outside_the_call(
     ctx, H = _tape_ctx(segmented, sm)
     T = int(ctx.T_r)
     D = cake_kcp.D
-    plan = cake_backend.plan(ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate)
+    plan = cake_backend.plan(
+        ctx.T_r,
+        ctx.n_frag,
+        H,
+        sm,
+        arch,
+        gate=gate,
+        segment_rule=kp.LOCAL_SEGMENT_RULE,
+    )
     log: list = []
 
     class Arena:

@@ -42,8 +42,9 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(
     sorted(ARCH_BY_CAPABILITY)
 )
 # The kernels read and write each tensor in vectors of 64 bits (the sm_100a /
-# sm_103a libraries of one hidden size), 128 bits (the other forward) or 256
-# bits (the other backward).  Every operand must be contiguous with a 32-byte
+# sm_103a libraries of one hidden size), 128 bits (the unsuffixed forward and
+# the L2 bulk-reduce backward) or 256 bits (the sm_107a forward of each token
+# band and the other backward).  Every operand must be contiguous with a 32-byte
 # aligned base on every architecture, the alignment of the widest access any
 # library makes; a row of 4096, 5120 or 7168 BF16 values is a whole number of
 # 32-byte vectors.

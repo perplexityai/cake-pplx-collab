@@ -85,7 +85,7 @@ kernel_cake_kda_det_train_0d93d9b4441327d74a72(float* __restrict__ dq_hat, float
             int row = blockIdx.x * 64 + s;
             float g[4];
             {
-                float4 _v4 = *reinterpret_cast<const float4*>(dq_hat + (((long long)row * (long long)num_heads + (long long)h) * 128 + (long long)(lane_1 * 4)) + 0);
+                float4 _v4 = *reinterpret_cast<const float4*>(dq_hat + (((long long)row * (long long)num_heads + (long long)h) * 128ll + (long long)(lane_1 * 4)) + 0);
                 g[0 + 0] = _v4.x;
                 g[0 + 1] = _v4.y;
                 g[0 + 2] = _v4.z;
@@ -218,7 +218,7 @@ kernel_cake_kda_det_train_0d93d9b4441327d74a72(float* __restrict__ dq_hat, float
             reinterpret_cast<int2*>(dq + ((long long)(bos + s) * (long long)dq_tstride + (long long)(h * 128 + lane_1 * 4)))[0] = reinterpret_cast<int2*>(ob)[0];
             float g_0[4];
             {
-                float4 _v4 = *reinterpret_cast<const float4*>(dk_hat + (((long long)row * (long long)num_heads + (long long)h) * 128 + (long long)(lane_1 * 4)) + 0);
+                float4 _v4 = *reinterpret_cast<const float4*>(dk_hat + (((long long)row * (long long)num_heads + (long long)h) * 128ll + (long long)(lane_1 * 4)) + 0);
                 g_0[0 + 0] = _v4.x;
                 g_0[0 + 1] = _v4.y;
                 g_0[0 + 2] = _v4.z;

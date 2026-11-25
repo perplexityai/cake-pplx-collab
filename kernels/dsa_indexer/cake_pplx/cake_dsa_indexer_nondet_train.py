@@ -287,7 +287,7 @@ def cake_dsa_indexer_nondet_train_topk_with_candidates(
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
     r""":func:`cake_dsa_indexer_nondet_train_topk` that also returns each
     query's candidate blocks, computed from the same scores as ``indices``;
-    SM100 / SM103 only (BF16 ``q`` / ``k``, ``ratio == 1``).
+    SM100 / SM103 / SM107 only (BF16 ``q`` / ``k``, ``ratio == 1``).
 
     Block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``.  For a query
     with ``n`` visible keys (the family's visibility rule) let ``nb = ceil(n /
@@ -310,8 +310,13 @@ def cake_dsa_indexer_nondet_train_topk_with_candidates(
     max_seqlen_k : Optional[int]
         As :func:`cake_dsa_indexer_nondet_train_topk`; here it also sizes the
         workspace's block entries, so it must bound every key segment of the
-        call (a row with more blocks than the workspace holds stops the kernel
-        with a device-side trap).  ``Tkv`` when omitted.
+        call: a row with more blocks than the workspace holds stops the kernel
+        with a device-side trap.  Where ``ceil(max_seqlen_k / 8) <= 2048``
+        (every row keeps all its blocks) the call writes the rows on the device
+        before its programs run, and a row past 2048 blocks stops that write
+        with a device-side assert instead, before any program runs; either way
+        the call or the next synchronizing CUDA call raises and the CUDA
+        context is unusable afterwards.  ``Tkv`` when omitted.
     workspace_buffer : Optional[torch.Tensor]
         Scratch of at least
         :func:`cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size`
@@ -342,7 +347,7 @@ def cake_dsa_indexer_nondet_train_topk_with_candidates(
     keys raises ``RuntimeError`` before it allocates or launches anything
     (with ``warn_only=True`` it warns and runs).  The call never materializes a ``[T, Tkv]`` matrix and never
     synchronizes with the host.  Raises ``NotImplementedError`` on an
-    architecture without a registered candidate-block program (SM107).
+    architecture without a registered candidate-block program.
     """
     if cu_seqlens_q is None or cu_seqlens_k is None:
         raise ValueError(
@@ -390,11 +395,19 @@ def cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size(
     The scan's candidate buffers and work-unit tickets (the bound of the
     dispatched candidate-block program, which runs the key ranges unsplit) plus
     ``grid x queries_per_unit x blk_cap x 8`` bytes of block entries, where
-    ``blk_cap = ceil(W / 8) - 1`` when ``ceil(W / 8) > 2048`` and 0 otherwise,
-    ``W`` being ``max_seqlen_k`` when given, else ``num_keys``.  The ``[T,
-    2048]`` int32 ``candidate_blocks`` output is not part of the bound.  Pass
-    the call's ``max_seqlen_k``.  Raises ``NotImplementedError`` on an
-    architecture without a registered candidate-block program.
+    ``blk_cap = ceil(W / 8) - 1`` when ``ceil(W / 8) > 2048``, ``W`` being
+    ``max_seqlen_k`` when given, else ``num_keys``.  When ``ceil(W / 8) <=
+    2048`` every row keeps all its blocks: the call runs the plain top-k
+    call's programs and writes the rows before them, and the bound is the
+    plain call's workspace for the geometry.  The ``[T, 2048]`` int32
+    ``candidate_blocks`` output is not part of the bound.  Pass
+    the call's ``max_seqlen_k``.  On SM107 the candidate-block programs draw
+    their work units from a 16-byte ticket block passed as an argument, like
+    the plain call's ticket-argument programs there: a prepared runner whose
+    scan draws owns that block, outside the bound; the eager call uses the
+    first 16 bytes of the workspace's ticket tail.  Raises
+    ``NotImplementedError`` on an architecture without a registered
+    candidate-block program.
 
     Parameters
     ----------
@@ -447,7 +460,7 @@ def cake_dsa_indexer_nondet_train_topk_in_candidates(
     return_scores: bool = True,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     r""":func:`cake_dsa_indexer_nondet_train_topk` restricted to given candidate
-    blocks; SM100 / SM103 only (BF16 ``q`` / ``k``, ``ratio == 1``).
+    blocks; SM100 / SM103 / SM107 only (BF16 ``q`` / ``k``, ``ratio == 1``).
 
     Block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``.  For query
     row ``t`` with ``n`` visible keys (the family's visibility rule) the pool
@@ -497,7 +510,7 @@ def cake_dsa_indexer_nondet_train_topk_in_candidates(
         (``warn_only=True``: a ``UserWarning``).
     The call never materializes a ``[T, Tkv]`` matrix and never synchronizes
     with the host.  Raises ``NotImplementedError`` on an architecture without
-    a registered candidate-restricted program (SM107).
+    a registered candidate-restricted program.
     """
     if cu_seqlens_q is None or cu_seqlens_k is None:
         raise ValueError(

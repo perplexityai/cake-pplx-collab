@@ -47,11 +47,13 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
     return result;
 }
 
+#define LAUNCH_MIN_BLOCKS 6
+
 #include <math_constants.h>
 
 extern "C" {
 
-__global__ __launch_bounds__(256) void
+__global__ __launch_bounds__(256, LAUNCH_MIN_BLOCKS) void
 kernel_cake_lm_head_loss_5f3b145300c721d746fe(float* __restrict__ dx, float* __restrict__ ws, int ws_slab, int num_vecs, int n_slabs, int row_vecs, long long* __restrict__ labels, float* __restrict__ rlab, __nv_bfloat16* __restrict__ W, int V, int lr)
 {
     const int tid = threadIdx.x;
@@ -65,155 +67,415 @@ kernel_cake_lm_head_loss_5f3b145300c721d746fe(float* __restrict__ dx, float* __r
     const int cta_rank = 0;
 
     // === Task calls (declaration order) ===
-    asm volatile("griddepcontrol.wait;" ::: "memory");
-    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     int stride = gridDim.x * 256;
     unsigned long long slab64 = (unsigned long long)ws_slab;
-    int n_vecs = num_vecs;
-    #pragma unroll 2
-    for (int vi = bid * 256 + tid; vi < n_vecs; vi += stride) {
-        long long rr_y = -1ll;
-        float rr_r = 0.0f;
-        int rr_col = 0;
-        if (lr != 0) {
-            int rr_row = vi / row_vecs;
-            rr_col = vi - rr_row * row_vecs;
+    int vi0 = bid * 256 + tid;
+    long long rr_y = -1ll;
+    float rr_r = 0.0f;
+    int rr_col = 0;
+    if (lr != 0) {
+        if (vi0 < num_vecs) {
+            int rr_row = vi0 / row_vecs;
+            rr_col = vi0 - rr_row * row_vecs;
             rr_y = labels[rr_row];
             rr_r = rlab[rr_row];
         }
-        int rr_live = (((unsigned long long)rr_y < (unsigned long long)V) ? 1 : 0);
-        if (rr_r == 0.0f) {
-            rr_live = 0;
-        }
-        int touch = ((n_slabs > 0) ? 1 : rr_live);
-        if (touch != 0) {
-            unsigned long long off = (unsigned long long)vi * 8ull;
-            float _vec_load_0[4];
-            float _vec_load_1[4];
-            if (n_slabs > 0) {
+    }
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    int n_vecs = num_vecs;
+    if (lr == 0) {
+        if (n_slabs > 0) {
+            for (int vi = vi0; vi < n_vecs; vi += stride) {
+                unsigned long long off = (unsigned long long)vi * 8ull;
+                float o[8];
+                float _vec_load_0[4];
+                float _vec_load_1[4];
+                if (n_slabs > 0) {
+                    {
+                        float4 _v4 = *reinterpret_cast<const float4*>(ws + off + 0);
+                        _vec_load_0[0 + 0] = _v4.x;
+                        _vec_load_0[0 + 1] = _v4.y;
+                        _vec_load_0[0 + 2] = _v4.z;
+                        _vec_load_0[0 + 3] = _v4.w;
+                    }
+                    {
+                        float4 _v4 = *reinterpret_cast<const float4*>(ws + (off + 4ull) + 0);
+                        _vec_load_1[0 + 0] = _v4.x;
+                        _vec_load_1[0 + 1] = _v4.y;
+                        _vec_load_1[0 + 2] = _v4.z;
+                        _vec_load_1[0 + 3] = _v4.w;
+                    }
+                } else {
+                    {
+                        float4 _v4 = *reinterpret_cast<const float4*>(dx + off + 0);
+                        _vec_load_0[0 + 0] = _v4.x;
+                        _vec_load_0[0 + 1] = _v4.y;
+                        _vec_load_0[0 + 2] = _v4.z;
+                        _vec_load_0[0 + 3] = _v4.w;
+                    }
+                    {
+                        float4 _v4 = *reinterpret_cast<const float4*>(dx + (off + 4ull) + 0);
+                        _vec_load_1[0 + 0] = _v4.x;
+                        _vec_load_1[0 + 1] = _v4.y;
+                        _vec_load_1[0 + 2] = _v4.z;
+                        _vec_load_1[0 + 3] = _v4.w;
+                    }
+                }
+                #pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    o[j] = _vec_load_0[j];
+                    o[j + 4] = _vec_load_1[j];
+                }
+                #pragma unroll 4
+                for (int s = 1; s < n_slabs; s++) {
+                    unsigned long long soff = off + (unsigned long long)s * slab64;
+                    float _vec_load_2[4];
+                    {
+                        float4 _v4 = *reinterpret_cast<const float4*>(ws + soff + 0);
+                        _vec_load_2[0 + 0] = _v4.x;
+                        _vec_load_2[0 + 1] = _v4.y;
+                        _vec_load_2[0 + 2] = _v4.z;
+                        _vec_load_2[0 + 3] = _v4.w;
+                    }
+                    float _vec_load_3[4];
+                    {
+                        float4 _v4 = *reinterpret_cast<const float4*>(ws + (soff + 4ull) + 0);
+                        _vec_load_3[0 + 0] = _v4.x;
+                        _vec_load_3[0 + 1] = _v4.y;
+                        _vec_load_3[0 + 2] = _v4.z;
+                        _vec_load_3[0 + 3] = _v4.w;
+                    }
+                    #pragma unroll
+                    for (int j_1 = 0; j_1 < 4; j_1++) {
+                        o[j_1] = o[j_1] + _vec_load_2[j_1];
+                        o[j_1 + 4] = o[j_1 + 4] + _vec_load_3[j_1];
+                    }
+                }
+                float _vec_load_4[4];
                 {
-                    float4 _v4 = *reinterpret_cast<const float4*>(ws + off + 0);
-                    _vec_load_0[0 + 0] = _v4.x;
-                    _vec_load_0[0 + 1] = _v4.y;
-                    _vec_load_0[0 + 2] = _v4.z;
-                    _vec_load_0[0 + 3] = _v4.w;
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + off + 0);
+                    _vec_load_4[0 + 0] = _v4.x;
+                    _vec_load_4[0 + 1] = _v4.y;
+                    _vec_load_4[0 + 2] = _v4.z;
+                    _vec_load_4[0 + 3] = _v4.w;
+                }
+                float _vec_load_5[4];
+                {
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + (off + 4ull) + 0);
+                    _vec_load_5[0 + 0] = _v4.x;
+                    _vec_load_5[0 + 1] = _v4.y;
+                    _vec_load_5[0 + 2] = _v4.z;
+                    _vec_load_5[0 + 3] = _v4.w;
+                }
+                #pragma unroll
+                for (int j_2 = 0; j_2 < 4; j_2++) {
+                    o[j_2] = _vec_load_4[j_2] + o[j_2];
+                    o[j_2 + 4] = _vec_load_5[j_2] + o[j_2 + 4];
                 }
                 {
-                    float4 _v4 = *reinterpret_cast<const float4*>(ws + (off + 4ull) + 0);
-                    _vec_load_1[0 + 0] = _v4.x;
-                    _vec_load_1[0 + 1] = _v4.y;
-                    _vec_load_1[0 + 2] = _v4.z;
-                    _vec_load_1[0 + 3] = _v4.w;
+                    float4 _v4 = make_float4(o[0 + 0], o[0 + 1], o[0 + 2], o[0 + 3]);
+                    *reinterpret_cast<float4*>((dx + off) + 0) = _v4;
+                }
+                {
+                    float4 _v4 = make_float4(o[4 + 0], o[4 + 1], o[4 + 2], o[4 + 3]);
+                    *reinterpret_cast<float4*>((dx + (off + 4ull)) + 0) = _v4;
+                }
+            }
+        }
+    } else if (n_slabs <= 0) {
+        if (vi0 < n_vecs) {
+            int rl_live = (((unsigned long long)rr_y < (unsigned long long)V) ? 1 : 0);
+            if (rr_r == 0.0f) {
+                rl_live = 0;
+            }
+            if (rl_live != 0) {
+                unsigned long long off0 = (unsigned long long)vi0 * 8ull;
+                unsigned int words0[4];
+                {
+                    uint4 _uv4_8 = *reinterpret_cast<const uint4*>(W + ((unsigned long long)rr_y * (unsigned long long)row_vecs + (unsigned long long)rr_col) * 8ull + 0);
+                    words0[0 + 0] = _uv4_8.x;
+                    words0[0 + 1] = _uv4_8.y;
+                    words0[0 + 2] = _uv4_8.z;
+                    words0[0 + 3] = _uv4_8.w;
+                }
+                float rf_o[8];
+                {
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + off0 + 0);
+                    rf_o[0 + 0] = _v4.x;
+                    rf_o[0 + 1] = _v4.y;
+                    rf_o[0 + 2] = _v4.z;
+                    rf_o[0 + 3] = _v4.w;
+                }
+                {
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + (off0 + 4ull) + 0);
+                    rf_o[4 + 0] = _v4.x;
+                    rf_o[4 + 1] = _v4.y;
+                    rf_o[4 + 2] = _v4.z;
+                    rf_o[4 + 3] = _v4.w;
+                }
+                float _fma_11;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_11) : "f"(rr_r), "f"(__uint_as_float(words0[0] << 16)), "f"(rf_o[0]));
+                rf_o[0] = _fma_11;
+                float _fma_12;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_12) : "f"(rr_r), "f"(__uint_as_float(words0[0] & 4294901760u)), "f"(rf_o[1]));
+                rf_o[1] = _fma_12;
+                float _fma_13;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_13) : "f"(rr_r), "f"(__uint_as_float(words0[1] << 16)), "f"(rf_o[2]));
+                rf_o[2] = _fma_13;
+                float _fma_14;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_14) : "f"(rr_r), "f"(__uint_as_float(words0[1] & 4294901760u)), "f"(rf_o[3]));
+                rf_o[3] = _fma_14;
+                float _fma_15;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_15) : "f"(rr_r), "f"(__uint_as_float(words0[2] << 16)), "f"(rf_o[4]));
+                rf_o[4] = _fma_15;
+                float _fma_16;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_16) : "f"(rr_r), "f"(__uint_as_float(words0[2] & 4294901760u)), "f"(rf_o[5]));
+                rf_o[5] = _fma_16;
+                float _fma_17;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_17) : "f"(rr_r), "f"(__uint_as_float(words0[3] << 16)), "f"(rf_o[6]));
+                rf_o[6] = _fma_17;
+                float _fma_18;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_18) : "f"(rr_r), "f"(__uint_as_float(words0[3] & 4294901760u)), "f"(rf_o[7]));
+                rf_o[7] = _fma_18;
+                {
+                    float4 _v4 = make_float4(rf_o[0 + 0], rf_o[0 + 1], rf_o[0 + 2], rf_o[0 + 3]);
+                    *reinterpret_cast<float4*>((dx + off0) + 0) = _v4;
+                }
+                {
+                    float4 _v4 = make_float4(rf_o[4 + 0], rf_o[4 + 1], rf_o[4 + 2], rf_o[4 + 3]);
+                    *reinterpret_cast<float4*>((dx + (off0 + 4ull)) + 0) = _v4;
+                }
+            }
+        }
+        #pragma unroll 2
+        for (int vi_1 = vi0 + stride; vi_1 < n_vecs; vi_1 += stride) {
+            long long rr_y_0 = -1ll;
+            float rr_r_0 = 0.0f;
+            int rr_col_0 = 0;
+            if (lr != 0) {
+                if (vi_1 < n_vecs) {
+                    int rr_row_1 = vi_1 / row_vecs;
+                    rr_col_0 = vi_1 - rr_row_1 * row_vecs;
+                    rr_y_0 = labels[rr_row_1];
+                    rr_r_0 = rlab[rr_row_1];
+                }
+            }
+            int rl_live_1 = (((unsigned long long)rr_y_0 < (unsigned long long)V) ? 1 : 0);
+            if (rr_r_0 == 0.0f) {
+                rl_live_1 = 0;
+            }
+            if (rl_live_1 != 0) {
+                unsigned long long off_1 = (unsigned long long)vi_1 * 8ull;
+                unsigned int words[4];
+                {
+                    uint4 _uv4_19 = *reinterpret_cast<const uint4*>(W + ((unsigned long long)rr_y_0 * (unsigned long long)row_vecs + (unsigned long long)rr_col_0) * 8ull + 0);
+                    words[0 + 0] = _uv4_19.x;
+                    words[0 + 1] = _uv4_19.y;
+                    words[0 + 2] = _uv4_19.z;
+                    words[0 + 3] = _uv4_19.w;
+                }
+                float rf_o_1[8];
+                {
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + off_1 + 0);
+                    rf_o_1[0 + 0] = _v4.x;
+                    rf_o_1[0 + 1] = _v4.y;
+                    rf_o_1[0 + 2] = _v4.z;
+                    rf_o_1[0 + 3] = _v4.w;
+                }
+                {
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + (off_1 + 4ull) + 0);
+                    rf_o_1[4 + 0] = _v4.x;
+                    rf_o_1[4 + 1] = _v4.y;
+                    rf_o_1[4 + 2] = _v4.z;
+                    rf_o_1[4 + 3] = _v4.w;
+                }
+                float _fma_22;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_22) : "f"(rr_r_0), "f"(__uint_as_float(words[0] << 16)), "f"(rf_o_1[0]));
+                rf_o_1[0] = _fma_22;
+                float _fma_23;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_23) : "f"(rr_r_0), "f"(__uint_as_float(words[0] & 4294901760u)), "f"(rf_o_1[1]));
+                rf_o_1[1] = _fma_23;
+                float _fma_24;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_24) : "f"(rr_r_0), "f"(__uint_as_float(words[1] << 16)), "f"(rf_o_1[2]));
+                rf_o_1[2] = _fma_24;
+                float _fma_25;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_25) : "f"(rr_r_0), "f"(__uint_as_float(words[1] & 4294901760u)), "f"(rf_o_1[3]));
+                rf_o_1[3] = _fma_25;
+                float _fma_26;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_26) : "f"(rr_r_0), "f"(__uint_as_float(words[2] << 16)), "f"(rf_o_1[4]));
+                rf_o_1[4] = _fma_26;
+                float _fma_27;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_27) : "f"(rr_r_0), "f"(__uint_as_float(words[2] & 4294901760u)), "f"(rf_o_1[5]));
+                rf_o_1[5] = _fma_27;
+                float _fma_28;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_28) : "f"(rr_r_0), "f"(__uint_as_float(words[3] << 16)), "f"(rf_o_1[6]));
+                rf_o_1[6] = _fma_28;
+                float _fma_29;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_29) : "f"(rr_r_0), "f"(__uint_as_float(words[3] & 4294901760u)), "f"(rf_o_1[7]));
+                rf_o_1[7] = _fma_29;
+                {
+                    float4 _v4 = make_float4(rf_o_1[0 + 0], rf_o_1[0 + 1], rf_o_1[0 + 2], rf_o_1[0 + 3]);
+                    *reinterpret_cast<float4*>((dx + off_1) + 0) = _v4;
+                }
+                {
+                    float4 _v4 = make_float4(rf_o_1[4 + 0], rf_o_1[4 + 1], rf_o_1[4 + 2], rf_o_1[4 + 3]);
+                    *reinterpret_cast<float4*>((dx + (off_1 + 4ull)) + 0) = _v4;
+                }
+            }
+        }
+    } else {
+        long long y = rr_y;
+        float r = rr_r;
+        int col = rr_col;
+        for (int vi_2 = vi0; vi_2 < n_vecs; vi_2 += stride) {
+            int rl_live_2 = (((unsigned long long)y < (unsigned long long)V) ? 1 : 0);
+            if (r == 0.0f) {
+                rl_live_2 = 0;
+            }
+            long long rr_y_1 = -1ll;
+            float rr_r_1 = 0.0f;
+            int rr_col_1 = 0;
+            if (lr != 0) {
+                if (vi_2 + stride < n_vecs) {
+                    int rr_row_2 = (vi_2 + stride) / row_vecs;
+                    rr_col_1 = vi_2 + stride - rr_row_2 * row_vecs;
+                    rr_y_1 = labels[rr_row_2];
+                    rr_r_1 = rlab[rr_row_2];
+                }
+            }
+            unsigned long long off_2 = (unsigned long long)vi_2 * 8ull;
+            unsigned int words_1[4];
+            if (rl_live_2 != 0) {
+                {
+                    uint4 _uv4_30 = *reinterpret_cast<const uint4*>(W + ((unsigned long long)y * (unsigned long long)row_vecs + (unsigned long long)col) * 8ull + 0);
+                    words_1[0 + 0] = _uv4_30.x;
+                    words_1[0 + 1] = _uv4_30.y;
+                    words_1[0 + 2] = _uv4_30.z;
+                    words_1[0 + 3] = _uv4_30.w;
+                }
+            }
+            float o_1[8];
+            float _vec_load_0_1[4];
+            float _vec_load_1_1[4];
+            if (n_slabs > 0) {
+                {
+                    float4 _v4 = *reinterpret_cast<const float4*>(ws + off_2 + 0);
+                    _vec_load_0_1[0 + 0] = _v4.x;
+                    _vec_load_0_1[0 + 1] = _v4.y;
+                    _vec_load_0_1[0 + 2] = _v4.z;
+                    _vec_load_0_1[0 + 3] = _v4.w;
+                }
+                {
+                    float4 _v4 = *reinterpret_cast<const float4*>(ws + (off_2 + 4ull) + 0);
+                    _vec_load_1_1[0 + 0] = _v4.x;
+                    _vec_load_1_1[0 + 1] = _v4.y;
+                    _vec_load_1_1[0 + 2] = _v4.z;
+                    _vec_load_1_1[0 + 3] = _v4.w;
                 }
             } else {
                 {
-                    float4 _v4 = *reinterpret_cast<const float4*>(dx + off + 0);
-                    _vec_load_0[0 + 0] = _v4.x;
-                    _vec_load_0[0 + 1] = _v4.y;
-                    _vec_load_0[0 + 2] = _v4.z;
-                    _vec_load_0[0 + 3] = _v4.w;
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + off_2 + 0);
+                    _vec_load_0_1[0 + 0] = _v4.x;
+                    _vec_load_0_1[0 + 1] = _v4.y;
+                    _vec_load_0_1[0 + 2] = _v4.z;
+                    _vec_load_0_1[0 + 3] = _v4.w;
                 }
                 {
-                    float4 _v4 = *reinterpret_cast<const float4*>(dx + (off + 4ull) + 0);
-                    _vec_load_1[0 + 0] = _v4.x;
-                    _vec_load_1[0 + 1] = _v4.y;
-                    _vec_load_1[0 + 2] = _v4.z;
-                    _vec_load_1[0 + 3] = _v4.w;
+                    float4 _v4 = *reinterpret_cast<const float4*>(dx + (off_2 + 4ull) + 0);
+                    _vec_load_1_1[0 + 0] = _v4.x;
+                    _vec_load_1_1[0 + 1] = _v4.y;
+                    _vec_load_1_1[0 + 2] = _v4.z;
+                    _vec_load_1_1[0 + 3] = _v4.w;
                 }
             }
-            float o[8];
             #pragma unroll
-            for (int j = 0; j < 4; j++) {
-                o[j] = _vec_load_0[j];
-                o[j + 4] = _vec_load_1[j];
+            for (int j_3 = 0; j_3 < 4; j_3++) {
+                o_1[j_3] = _vec_load_0_1[j_3];
+                o_1[j_3 + 4] = _vec_load_1_1[j_3];
             }
-            for (int s = 1; s < n_slabs; s++) {
-                unsigned long long soff = off + (unsigned long long)s * slab64;
-                float _vec_load_2[4];
+            for (int s_1 = 1; s_1 < n_slabs; s_1++) {
+                unsigned long long soff_1 = off_2 + (unsigned long long)s_1 * slab64;
+                float _vec_load_2_1[4];
                 {
-                    float4 _v4 = *reinterpret_cast<const float4*>(ws + soff + 0);
-                    _vec_load_2[0 + 0] = _v4.x;
-                    _vec_load_2[0 + 1] = _v4.y;
-                    _vec_load_2[0 + 2] = _v4.z;
-                    _vec_load_2[0 + 3] = _v4.w;
+                    float4 _v4 = *reinterpret_cast<const float4*>(ws + soff_1 + 0);
+                    _vec_load_2_1[0 + 0] = _v4.x;
+                    _vec_load_2_1[0 + 1] = _v4.y;
+                    _vec_load_2_1[0 + 2] = _v4.z;
+                    _vec_load_2_1[0 + 3] = _v4.w;
                 }
-                float _vec_load_3[4];
+                float _vec_load_3_1[4];
                 {
-                    float4 _v4 = *reinterpret_cast<const float4*>(ws + (soff + 4ull) + 0);
-                    _vec_load_3[0 + 0] = _v4.x;
-                    _vec_load_3[0 + 1] = _v4.y;
-                    _vec_load_3[0 + 2] = _v4.z;
-                    _vec_load_3[0 + 3] = _v4.w;
+                    float4 _v4 = *reinterpret_cast<const float4*>(ws + (soff_1 + 4ull) + 0);
+                    _vec_load_3_1[0 + 0] = _v4.x;
+                    _vec_load_3_1[0 + 1] = _v4.y;
+                    _vec_load_3_1[0 + 2] = _v4.z;
+                    _vec_load_3_1[0 + 3] = _v4.w;
                 }
                 #pragma unroll
-                for (int j_1 = 0; j_1 < 4; j_1++) {
-                    o[j_1] = o[j_1] + _vec_load_2[j_1];
-                    o[j_1 + 4] = o[j_1 + 4] + _vec_load_3[j_1];
+                for (int j_4 = 0; j_4 < 4; j_4++) {
+                    o_1[j_4] = o_1[j_4] + _vec_load_2_1[j_4];
+                    o_1[j_4 + 4] = o_1[j_4 + 4] + _vec_load_3_1[j_4];
                 }
             }
-            float _vec_load_4[4];
+            float _vec_load_4_1[4];
             {
-                float4 _v4 = *reinterpret_cast<const float4*>(dx + off + 0);
-                _vec_load_4[0 + 0] = _v4.x;
-                _vec_load_4[0 + 1] = _v4.y;
-                _vec_load_4[0 + 2] = _v4.z;
-                _vec_load_4[0 + 3] = _v4.w;
+                float4 _v4 = *reinterpret_cast<const float4*>(dx + off_2 + 0);
+                _vec_load_4_1[0 + 0] = _v4.x;
+                _vec_load_4_1[0 + 1] = _v4.y;
+                _vec_load_4_1[0 + 2] = _v4.z;
+                _vec_load_4_1[0 + 3] = _v4.w;
             }
-            float _vec_load_5[4];
+            float _vec_load_5_1[4];
             {
-                float4 _v4 = *reinterpret_cast<const float4*>(dx + (off + 4ull) + 0);
-                _vec_load_5[0 + 0] = _v4.x;
-                _vec_load_5[0 + 1] = _v4.y;
-                _vec_load_5[0 + 2] = _v4.z;
-                _vec_load_5[0 + 3] = _v4.w;
+                float4 _v4 = *reinterpret_cast<const float4*>(dx + (off_2 + 4ull) + 0);
+                _vec_load_5_1[0 + 0] = _v4.x;
+                _vec_load_5_1[0 + 1] = _v4.y;
+                _vec_load_5_1[0 + 2] = _v4.z;
+                _vec_load_5_1[0 + 3] = _v4.w;
             }
             #pragma unroll
-            for (int j_2 = 0; j_2 < 4; j_2++) {
-                o[j_2] = _vec_load_4[j_2] + o[j_2];
-                o[j_2 + 4] = _vec_load_5[j_2] + o[j_2 + 4];
+            for (int j_5 = 0; j_5 < 4; j_5++) {
+                o_1[j_5] = _vec_load_4_1[j_5] + o_1[j_5];
+                o_1[j_5 + 4] = _vec_load_5_1[j_5] + o_1[j_5 + 4];
             }
-            if (rr_live != 0) {
-                unsigned int rf_words[4];
-                {
-                    uint4 _uv4_8 = *reinterpret_cast<const uint4*>(W + ((unsigned long long)rr_y * (unsigned long long)row_vecs + (unsigned long long)rr_col) * 8ull + 0);
-                    rf_words[0 + 0] = _uv4_8.x;
-                    rf_words[0 + 1] = _uv4_8.y;
-                    rf_words[0 + 2] = _uv4_8.z;
-                    rf_words[0 + 3] = _uv4_8.w;
-                }
-                float _fma_9;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_9) : "f"(rr_r), "f"(__uint_as_float(rf_words[0] << 16)), "f"(o[0]));
-                o[0] = _fma_9;
-                float _fma_10;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_10) : "f"(rr_r), "f"(__uint_as_float(rf_words[0] & 4294901760u)), "f"(o[1]));
-                o[1] = _fma_10;
-                float _fma_11;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_11) : "f"(rr_r), "f"(__uint_as_float(rf_words[1] << 16)), "f"(o[2]));
-                o[2] = _fma_11;
-                float _fma_12;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_12) : "f"(rr_r), "f"(__uint_as_float(rf_words[1] & 4294901760u)), "f"(o[3]));
-                o[3] = _fma_12;
-                float _fma_13;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_13) : "f"(rr_r), "f"(__uint_as_float(rf_words[2] << 16)), "f"(o[4]));
-                o[4] = _fma_13;
-                float _fma_14;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_14) : "f"(rr_r), "f"(__uint_as_float(rf_words[2] & 4294901760u)), "f"(o[5]));
-                o[5] = _fma_14;
-                float _fma_15;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_15) : "f"(rr_r), "f"(__uint_as_float(rf_words[3] << 16)), "f"(o[6]));
-                o[6] = _fma_15;
-                float _fma_16;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_16) : "f"(rr_r), "f"(__uint_as_float(rf_words[3] & 4294901760u)), "f"(o[7]));
-                o[7] = _fma_16;
+            if (rl_live_2 != 0) {
+                float _fma_39;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_39) : "f"(r), "f"(__uint_as_float(words_1[0] << 16)), "f"(o_1[0]));
+                o_1[0] = _fma_39;
+                float _fma_40;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_40) : "f"(r), "f"(__uint_as_float(words_1[0] & 4294901760u)), "f"(o_1[1]));
+                o_1[1] = _fma_40;
+                float _fma_41;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_41) : "f"(r), "f"(__uint_as_float(words_1[1] << 16)), "f"(o_1[2]));
+                o_1[2] = _fma_41;
+                float _fma_42;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_42) : "f"(r), "f"(__uint_as_float(words_1[1] & 4294901760u)), "f"(o_1[3]));
+                o_1[3] = _fma_42;
+                float _fma_43;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_43) : "f"(r), "f"(__uint_as_float(words_1[2] << 16)), "f"(o_1[4]));
+                o_1[4] = _fma_43;
+                float _fma_44;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_44) : "f"(r), "f"(__uint_as_float(words_1[2] & 4294901760u)), "f"(o_1[5]));
+                o_1[5] = _fma_44;
+                float _fma_45;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_45) : "f"(r), "f"(__uint_as_float(words_1[3] << 16)), "f"(o_1[6]));
+                o_1[6] = _fma_45;
+                float _fma_46;
+                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_46) : "f"(r), "f"(__uint_as_float(words_1[3] & 4294901760u)), "f"(o_1[7]));
+                o_1[7] = _fma_46;
             }
             {
-                float4 _v4 = make_float4(o[0 + 0], o[0 + 1], o[0 + 2], o[0 + 3]);
-                *reinterpret_cast<float4*>((dx + off) + 0) = _v4;
+                float4 _v4 = make_float4(o_1[0 + 0], o_1[0 + 1], o_1[0 + 2], o_1[0 + 3]);
+                *reinterpret_cast<float4*>((dx + off_2) + 0) = _v4;
             }
             {
-                float4 _v4 = make_float4(o[4 + 0], o[4 + 1], o[4 + 2], o[4 + 3]);
-                *reinterpret_cast<float4*>((dx + (off + 4ull)) + 0) = _v4;
+                float4 _v4 = make_float4(o_1[4 + 0], o_1[4 + 1], o_1[4 + 2], o_1[4 + 3]);
+                *reinterpret_cast<float4*>((dx + (off_2 + 4ull)) + 0) = _v4;
             }
+            y = rr_y_1;
+            r = rr_r_1;
+            col = rr_col_1;
         }
     }
 }

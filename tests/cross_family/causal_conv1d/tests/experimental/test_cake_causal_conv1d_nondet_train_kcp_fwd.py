@@ -50,11 +50,13 @@ deterministic package.  Per row of the single-GPU suites:
   operation and no device allocation;
 - the single-rank main program is the record ``cake_jit.selected_modules`` picks for the call, on both host paths:
   rows of ``C`` = 2048 and of ``C`` = 256 at 65536 tokens and below, which on sm_107a are the dynamic programs of the
-  route, rows of ``C`` = 640 at local token counts inside every architecture's static range and direct range of its
-  forward key (the static and the direct program, which take no counters), and a row of ``C`` = 640 above every
-  architecture's token floor of the narrow forward's whole tiles and above the key;
-- the multi entry with tensors of a static row and of dynamic rows in one call (one counter buffer, sized for the
-  dynamic ones).
+  route, rows of ``C`` = 640 at local token counts inside every architecture's static range, pair direct range and
+  direct range of its forward keys (the static, the pair direct and the direct program, which take no counters), a
+  row of ``C`` = 640 above every architecture's token floor of the narrow forward's whole tiles and above the key,
+  and rows of ``C`` = 768 inside every architecture's direct range and above the direct ranges and narrow-plan floors
+  of sm_100a and sm_103a (the dynamic program on 32-vector tiles there);
+- the multi entry with tensors of a static or a pair direct row and of dynamic rows in one call (one counter buffer,
+  sized for the dynamic ones).
 
 Skipped until the exporter renders the non-deterministic package.
 """
@@ -92,24 +94,41 @@ REPEATS = 3
 FORMS = [(0, 0), (1, 0), (0, 1), (1, 1)]
 # The rows of the zero-history fwd route's programs: on sm_107a C = 2048 (the c_band program), C = 256 from 65536
 # tokens (the two-stage program) and below (the one-stage program); on sm_100a and sm_103a the one-stage program serves
-# all three.  C = 640 at 3003 tokens lies inside the static range of every architecture's ``fwd`` key covering C 640
-# (the static program), at 12003 tokens inside its direct range (the direct program); from 40003 tokens, above every
-# key and every architecture's floor of the whole 40-vector tiles of the narrow forward plan, the dynamic program, so
-# the main program's plan names the architecture as the single-rank forward's does.  C = 768 at 14003 tokens lies
-# above the ``fwd`` route's floor of the narrow plan on sm_103a (12288: 32-vector tiles of the dynamic program there)
-# and inside the direct ranges of sm_100a and sm_107a.
+# all three.  C = 640 at 2003 tokens lies inside the pair direct range of every architecture's ``fwd`` key covering
+# C 640 (the pair direct program, two channels per thread), at 3103 tokens inside its static range above the pair
+# direct range (the static program), at 12003 tokens inside its direct range (the direct program); from 40003 tokens,
+# above every key and every architecture's floor of the whole 40-vector tiles of the narrow forward plan, the dynamic
+# program, so the main program's plan names the architecture as the single-rank forward's does.  C = 768 at 14003
+# tokens lies inside the direct range of every architecture's ``fwd`` key covering C 768 (the direct program); at
+# 21003 tokens, above the direct ranges of sm_100a and sm_103a (20480, 19456) and their floors of the narrow forward
+# plan (20480, 12288), the dynamic program on 32-vector tiles there (inside sm_107a's direct range: the direct program).
 ROUTE_ROWS = [
     ("c2048", (5000, 1003), (1, 2, 4997, 1003), 2048),
     ("c256-s66536", (40000, 25536, 1000), (1, 2, 39997, 26536), 256),
     ("c256-s6003", (5000, 1003), (1, 2, 4997, 1003), 256),
-    ("c640-s3003", (2000, 1003), (1, 2, 1997, 1003), 640),
+    ("c640-s2003", (1500, 503), (1, 2, 1497, 503), 640),
+    ("c640-s3103", (2000, 1103), (1, 2, 1997, 1103), 640),
     ("c640-s12003", (8000, 4003), (1, 2, 7997, 4003), 640),
     ("c640-s40003", (30000, 10003), (1, 2, 29997, 10003), 640),
     ("c768-s14003", (10000, 4003), (1, 2, 9997, 4003), 768),
+    ("c768-s21003", (15000, 6003), (1, 2, 14997, 6003), 768),
 ]
-# A multi-entry row whose first tensor's local token count lies inside every architecture's static range at C = 640
-# (no counters) and whose other tensors run dynamic programs (C = 512, 1024): one counter buffer per call.
-MROWS_KEYS = [("c7-static-mixed", (2000, 1003), (1, 2, 1997, 1003), (640, 512, 1024))]
+# Multi-entry rows whose first tensor's local token count lies inside every architecture's static range (3103 tokens)
+# or pair direct range (2003 tokens) at C = 640 (no counters) and whose other tensors run dynamic programs (C = 384
+# and 1280, below and above the forward keys of C 512 to 1024): one counter buffer per call.
+MROWS_KEYS = [
+    ("c7-static-mixed", (2000, 1103), (1, 2, 1997, 1103), (640, 384, 1280)),
+    ("c7-pair-mixed", (1500, 503), (1, 2, 1497, 503), (640, 384, 1280)),
+]
+# The selection-rule kind and the geometry ``vec`` of the program the first tensor of each ``MROWS_KEYS`` row selects.
+MROWS_KEYS_FORMS = {
+    "c7-static-mixed": (None, 8),
+    "c7-pair-mixed": (cake_jit.ROWS_KIND, 2),
+}
+# The documents and cuts of ``ROWS[0]`` at C = 384, below the forward keys: the single-rank main program is the
+# dynamic one on every architecture and takes token-chunk counters (C = 512 at these 6003 tokens lies in every
+# architecture's ``fwd`` key, whose static and direct programs take none).
+COUNTER_ROW = ("c384-s6003", (5000, 1003), (1, 2, 4997, 1003), 384)
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
@@ -283,6 +302,16 @@ def test_multi_forward_forms_order_and_outputs(
             conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
             two = _TwoRanks(ctx)
             want = _want(ctx, sr=main_in, overlap=overlap_in, n=len(Cs))
+            S = int(xs[0].shape[0])
+            # whether a tensor's single-rank main program takes counters (the static and the direct program take
+            # none)
+            names = [
+                cake_jit.selected_modules(arch, conv_kcp.FWD_MAIN_ROUTE, C=C, S=S)[0]
+                for C in Cs
+            ]
+            counted = any(
+                cake_jit.MODULES[n]["workspace_rule"] is not None for n in names
+            )
             found = [[] for _ in xs]
             for repeat in range(REPEATS):
                 order.clear()
@@ -294,8 +323,12 @@ def test_multi_forward_forms_order_and_outputs(
                 torch.cuda.synchronize()
                 label = f"{name} main={main_in} overlap={overlap_in} #{repeat}"
                 assert order == want, (label, order)
-                # one counter buffer per call, sized for the largest tensor (none for the kcp_fwd program)
-                assert len(words) == 1 and (words[0] > 0) == main_in, (label, words)
+                # one counter buffer per call, sized for the largest tensor (none for the kcp_fwd program, nor
+                # when no tensor's single-rank main program takes counters)
+                assert len(words) == 1 and (words[0] > 0) == (main_in and counted), (
+                    label,
+                    words,
+                )
                 assert conv_kcp.LAST_CALL["fwd_multi"] == _record(
                     ctx, sr=main_in, overlap=overlap_in
                 ), label
@@ -368,7 +401,7 @@ def test_single_rank_main_counters_are_zero_after_every_call(
     inside a graph capture) are zero after every call: eager calls, then ``graph="replay"`` (eager, capture, replay,
     replay; ``LAST_CALL["fwd"]`` keeps the captured form on a replay; the graphs of the previous draw dropped first),
     then the multi entry (one buffer per call).  ``y`` of every call judged against the naive tier."""
-    name, lens, cuts, C = ROWS[0]
+    name, lens, cuts, C = COUNTER_ROW
     buffers: list[torch.Tensor] = []
     forward_work = conv_kcp._forward_work
 
@@ -588,7 +621,9 @@ def test_two_launch_forward_steady_round_does_not_block_or_allocate(
 
     device = torch.device("cuda")
     alloc_ok = allocator_counts(device)
-    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
+    # the dynamic main program, so that a steady round reuses its counter buffer
+    _name, lens, cuts, C = COUNTER_ROW
+    p = _problem(lens, cuts, C, device)
     xs, ws = (p.x_local,) * 3, (p.w,) * 3
     two = _TwoRanks(p.ctx)
     _reset()
@@ -633,9 +668,12 @@ def test_two_launch_forward_steady_round_does_not_block_or_allocate(
 @pytest.mark.parametrize("arch", cake_jit.ARCHES)
 def test_route_rows_select_every_program(arch) -> None:
     """The rows of ``ROUTE_ROWS`` select every program of the architecture's zero-history ``fwd`` route (a route with
-    another program set needs rows of its own here): the static and the direct program at the C = 640 rows inside
-    the key's ranges, which take no counters, and the dynamic programs at the others; the C = 640 row of the
-    multi-entry row of ``MROWS_KEYS`` selects the static program."""
+    another program set needs rows of its own here): the pair direct, the static and the direct program at the
+    C = 640 rows inside the keys' ranges, which take no counters, the direct program at the C = 768 rows inside a
+    direct range, and the dynamic programs at the others; on sm_100a and sm_103a the C = 768 row above the direct
+    ranges plans the 32-vector tiles of the narrow forward plan; the C = 640 tensor of each multi-entry row of
+    ``MROWS_KEYS`` selects the program :data:`MROWS_KEYS_FORMS` names, its other tensors and ``COUNTER_ROW`` a
+    program that takes counters."""
     picked = {
         name: cake_jit.selected_modules(
             arch, conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens)
@@ -645,18 +683,51 @@ def test_route_rows_select_every_program(arch) -> None:
     assert set(picked.values()) == set(
         cake_jit.route_modules(arch, conv_kcp.FWD_MAIN_ROUTE)
     ), (arch, picked)
-    for name, kind in (("c640-s3003", None), ("c640-s12003", cake_jit.ROWS_KIND)):
+    for name, kind, vec in (
+        ("c640-s2003", cake_jit.ROWS_KIND, 2),
+        ("c640-s3103", None, 8),
+        ("c640-s12003", cake_jit.ROWS_KIND, 8),
+    ):
         record = cake_jit.MODULES[picked[name]]
         assert (cake_jit.select_rule(record) or {"kind": None})["kind"] == kind, (
             arch,
             name,
         )
+        assert record["grid_rule"]["geometry"]["vec"] == vec, (arch, name)
         assert record["workspace_rule"] is None, (arch, name)
-    for _name, lens, _cuts, Cs in MROWS_KEYS:
+    if arch in ("sm_100a", "sm_103a"):
+        _name, lens, _cuts, C = next(
+            row for row in ROUTE_ROWS if row[0] == "c768-s21003"
+        )
+        name = picked["c768-s21003"]
+        keyed = ("c640-s2003", "c640-s3103", "c640-s12003")
+        assert name not in {picked[key] for key in keyed}, (arch, name)
+        record = cake_jit.MODULES[name]
+        split = cake_jit.plan(
+            sum(lens),
+            C,
+            len(lens),
+            geometry=record["grid_rule"]["geometry"],
+            role=record["role"],
+            arch=arch,
+            route=conv_kcp.FWD_MAIN_ROUTE,
+        )
+        assert split["ct_vec"] == 32, (arch, name, split)
+    for row, lens, _cuts, Cs in MROWS_KEYS:
         (name,) = cake_jit.selected_modules(
             arch, conv_kcp.FWD_MAIN_ROUTE, C=Cs[0], S=sum(lens)
         )
-        assert cake_jit.select_rule(cake_jit.MODULES[name]) is None, (arch, name)
+        record = cake_jit.MODULES[name]
+        kind = (cake_jit.select_rule(record) or {"kind": None})["kind"]
+        vec = record["grid_rule"]["geometry"]["vec"]
+        assert (kind, vec) == MROWS_KEYS_FORMS[row], (arch, row, name)
+        assert record["workspace_rule"] is None, (arch, row, name)
+    dynamic = [(lens, C) for _name, lens, _cuts, Cs in MROWS_KEYS for C in Cs[1:]]
+    for lens, C in [*dynamic, (COUNTER_ROW[1], COUNTER_ROW[3])]:
+        (name,) = cake_jit.selected_modules(
+            arch, conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens)
+        )
+        assert cake_jit.MODULES[name]["workspace_rule"] is not None, (arch, C, name)
 
 
 @pytest.mark.parametrize("name,lens,cuts,C", ROUTE_ROWS, ids=[r[0] for r in ROUTE_ROWS])

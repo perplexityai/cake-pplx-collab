@@ -21,10 +21,12 @@ unit plus a tvm-ffi binding, compiled once per architecture it is delivered
 for.  A record is keyed by its program name
 ``cake_clamped_swiglu_det_train_<20 hex>`` and carries the host plan: the
 ``role`` it runs in, the ``stage`` it serves (``fwd``, ``bwd`` or
-``bwd_unweighted``, its role without the ``_large`` suffix), the
-architectures it is delivered for, the ``run`` entry and, in a large-R role,
-``rows_per_sm_windows``; ``library`` is its key.  The derived leaves (``kernel_symbol``, ``launch``, ``arg_plan``) are
-written by the exporter from the rendered binding.  ``MODULES`` is a literal
+``bwd_unweighted``, its role without the ``_large``, ``_relay`` or ``_fine``
+suffix), the architectures it is delivered for, the ``run`` entry and, in a
+large-R, a relay or a fine role, ``rows_per_sm_windows``; ``library`` is its
+key.  The derived
+leaves (``kernel_symbol``, ``launch``, ``arg_plan``) are written by the
+exporter from the rendered binding.  ``MODULES`` is a literal
 table (the exporter and the manifest checker read it with
 ``ast.literal_eval``).  Every launch is a plain stream-ordered launch: nothing
 cooperative, no PDL, no dynamic shared memory.
@@ -45,27 +47,40 @@ The stages:
   1), and nothing else: no weight, no weight flag, no ``d_weight``.  It
   stores the bits ``bwd`` stores with ``weighted`` 0 (``dh * 1`` is ``dh``).
 
-Each stage has two roles (``ROLES``).  The stage's own role (``fwd``,
+Each stage has four roles (``ROLES``).  The stage's own role (``fwd``,
 ``bwd``, ``bwd_unweighted``) is its small-R program, one on every
 architecture.  Its large-R role (``fwd_large``, ``bwd_large``,
-``bwd_unweighted_large``) has at most one program on each architecture
-(``bwd_unweighted_large`` has none); the record's ``rows_per_sm_windows``
-gives, per architecture, the windows of rows per SM in which it runs:
-``[lo, hi]`` lists, ascending, each ``hi`` below the next ``lo``, only the
-last ``hi`` None (no upper bound).  A launch of
-``rows`` rows on a device of ``sm_count`` SMs runs the large-R program when
-``lo * sm_count <= rows <= hi * sm_count`` for one of its windows (both bounds
-included) and the small-R program otherwise (:func:`route`); an architecture
-without a large-R program runs the small-R one at every row count.  The
-programs of a stage differ in their schedule only (the threads of a CTA, the
-runs of a lane's loads, when the loads of a run are issued and when its values
-are stored): they store the same bits for every input, so the route changes no
-output bit.
+``bwd_unweighted_large``), its relay role (``fwd_relay``, ``bwd_relay``,
+``bwd_unweighted_relay``) and its fine role (``fwd_fine``, ``bwd_fine``,
+``bwd_unweighted_fine``) have at most one program on each architecture,
+and may have none; the record's ``rows_per_sm_windows`` gives, per
+architecture, the windows of rows per SM in which it runs: ``[lo, hi]``
+lists of integers, ascending, ``lo`` below ``hi``, each ``hi`` below the next
+``lo``, only the last ``hi`` None (no upper bound).  The large-R and the
+relay roles are the stage's windowed roles (``WINDOWED``): on an
+architecture, the windows of both, taken together and ordered by ``lo``,
+are disjoint (each ``hi`` below the next ``lo``, only the last ``hi``
+None).  A fine record has one window ``[0, hi]`` on each of its
+architectures, below every window of its stage's windowed roles: a launch of
+at most ``hi * sm_count`` rows on a device of ``sm_count`` SMs runs the fine
+program (:func:`fine`).  A fine program spreads each row over 9 tasks, one
+load of each input a task (a warp per task in ``fwd_fine`` and
+``bwd_unweighted_fine``, a CTA of 9 warps per row in ``bwd_fine``), so a
+row's serial chain is shorter when few rows share an SM.  A relay program
+runs a row on a CTA of 3 warps, a warp per run of 768 columns (3 tasks a
+row), so a row's loads take one memory trip.  A launch of more rows runs the windowed program of the window that holds
+it, ``lo * sm_count <= rows <= hi * sm_count`` (both bounds included), and
+the small-R program at every other row count (:func:`route`); an
+architecture without a large-R, a relay or a fine program runs the small-R
+one in its place.  The programs of a stage differ in their schedule only
+(the threads of a CTA, the tasks of a row and the loads of a task, when the
+loads of a run are issued and when its values are stored): they store the
+same bits for every input, so the route changes no output bit.
 
 The host finds a program through ``PROGRAM_OF`` (role -> architecture ->
 program name, derived from the records) and never spells a program name:
 retuning a kernel renames its program (the record's key and ``library``) and
-leaves the host code as it is.  The host's own facts of each stage's programs
+leaves the host code as it is.  The host's own facts of each role's programs
 are ``BUILD_OF``: the lanes that own a task, the tasks of a thread and the
 tasks of a row (with the launch block's threads, the share of rows one CTA
 owns) and the load width (the stride and alignment rule of every BF16
@@ -88,10 +103,15 @@ MANIFEST = "build.json"
 
 # The stages of one training step, in launch order.
 STAGES = ("fwd", "bwd", "bwd_unweighted")
-# The suffix of a stage's large-R role.
+# The suffixes of a stage's large-R role, of its fine role and of its relay role.
 LARGE = "_large"
-# The roles of the records: each stage's small-R role (the stage itself) and its large-R role.
-ROLES = tuple(stage + suffix for stage in STAGES for suffix in ("", LARGE))
+FINE = "_fine"
+RELAY = "_relay"
+# The suffixes of a stage's windowed roles: their programs run in their windows of rows per SM above the fine window.
+WINDOWED = (LARGE, RELAY)
+# The roles of the records: each stage's small-R role (the stage itself), its large-R role, its fine role and its relay
+# role.
+ROLES = tuple(stage + suffix for stage in STAGES for suffix in ("", LARGE, FINE, RELAY))
 
 MODULES: dict[str, dict[str, Any]] = {
     # The forward for small R: h = bf16(w * silu(min(g, L)) * clamp(u, -L, L)), 128 threads, 32 lanes a row, one row
@@ -150,6 +170,25 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "fwd_large",
         "stage": "fwd",
     },
+    # The forward for the fewest rows: 128 threads, a warp per (row, load) task (9 tasks a row, 4 tasks a CTA), a
+    # lane's one load of each input of its task.
+    "cake_clamped_swiglu_det_train_afd0b9fcbf881e8b2cf3": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_afd0b9fcbf881e8b2cf3",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_clamped_swiglu_det_train_afd0b9fcbf881e8b2cf3",
+        "rows_per_sm_windows": {"sm_100a": [[0, 8]], "sm_103a": [[0, 4]], "sm_107a": [[0, 4]]},
+        "role": "fwd_fine",
+        "stage": "fwd",
+    },
     # The backward for small R: d_gate, d_up (BF16) and d_weight (FP32, one fixed-order warp sum a row), 128 threads,
     # 32 lanes a row, one row a thread (4 rows a CTA), a lane's 9 loads in 3 runs, each run's loads issued while the
     # run before it computes.
@@ -184,12 +223,53 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
-        "rows_per_sm_windows": {
-            "sm_100a": [[12, 21], [32, 41], [48, None]],
-            "sm_103a": [[12, 21], [32, 41], [48, None]],
-            "sm_107a": [[12, 21], [35, 41], [48, None]],
-        },
+        "rows_per_sm_windows": {"sm_100a": [[13, 21]], "sm_103a": [[12, 21]], "sm_107a": [[16, 21]]},
         "role": "bwd_large",
+        "stage": "bwd",
+    },
+    # The weighted backward for the fewest rows: a CTA of 288 threads per row, warp r owns load r of each lane (9 tasks
+    # a row); warps 1-8 hand their dh and activation words to warp 0 in static shared memory, and warp 0 runs the
+    # d_weight chain of the other programs in load order.
+    "cake_clamped_swiglu_det_train_c30f690752c972d064fa": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["parameter", "d_up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_c30f690752c972d064fa",
+        "launch": {
+            "block": (288, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_clamped_swiglu_det_train_c30f690752c972d064fa",
+        "rows_per_sm_windows": {"sm_100a": [[0, 2]], "sm_103a": [[0, 2]], "sm_107a": [[0, 2]]},
+        "role": "bwd_fine",
+        "stage": "bwd",
+    },
+    # The weighted backward for many rows per SM: a CTA of 96 threads per row, warp r owns run r of each lane's loads
+    # (3 runs of 3 loads, 3 tasks a row), so a row's loads take one memory trip; registers sized for 9 CTAs an SM.
+    # Warps 1 and 2 hand their dh and activation words to warp 0 in a static 9 KB shared pool, and warp 0 runs the
+    # d_weight chain of the other programs in load order.
+    "cake_clamped_swiglu_det_train_b161c9eed1166d9766b9": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["parameter", "d_up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_b161c9eed1166d9766b9",
+        "launch": {
+            "block": (96, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_clamped_swiglu_det_train_b161c9eed1166d9766b9",
+        "rows_per_sm_windows": {
+            "sm_100a": [[3, 5], [25, None]],
+            "sm_103a": [[25, 647]],
+            "sm_107a": [[3, 6], [31, None]],
+        },
+        "role": "bwd_relay",
         "stage": "bwd",
     },
     # The backward of an unweighted call: d_gate and d_up (BF16) only, no weight and no d_weight, 128 threads, 32 lanes
@@ -208,6 +288,25 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb",
         "role": "bwd_unweighted",
+        "stage": "bwd_unweighted",
+    },
+    # The backward of an unweighted call for the fewest rows: 128 threads, a warp per (row, load) task (9 tasks a row,
+    # 4 tasks a CTA), a lane's one load of each input of its task.
+    "cake_clamped_swiglu_det_train_ebff32b92dd1308d1c58": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "d_gate"], ["buffer", "d_up"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "up_col"], ["parameter", "d_up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_ebff32b92dd1308d1c58",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_clamped_swiglu_det_train_ebff32b92dd1308d1c58",
+        "rows_per_sm_windows": {"sm_100a": [[0, 4]], "sm_103a": [[0, 4]], "sm_107a": [[0, 2]]},
+        "role": "bwd_unweighted_fine",
         "stage": "bwd_unweighted",
     },
 }
@@ -231,17 +330,26 @@ PROGRAM_OF: dict[str, dict[str, str]] = _programs()
 # I: the intermediate width of the expert (the gate, up, h and gradient columns).
 WIDTH = 2304
 
-# Stage -> the build facts of its programs that the host relies on, the same for every program of the stage (one
-# lane layout, so the programs store the same bits).  ``lanes`` lanes own a task and a thread owns ``rows_per_thread``
-# tasks, so a CTA of ``threads`` threads (the launch block) owns ``threads / lanes * rows_per_thread`` consecutive
-# tasks.  A row is ``tasks_per_row`` consecutive tasks (1 when absent: a task is a row; ``bwd_unweighted``: 3, a task
-# is one run of 768 columns of a row), so the grid is ``ceil(rows * tasks_per_row / (threads / lanes *
-# rows_per_thread))`` CTAs (:func:`grid`).  ``width_bits`` is the load width.  A program built with other values of
-# these facts is another program (another name): change this table with the ``MODULES`` keys.
+# Role -> the build facts of its programs that the host relies on.  Every program of a stage keeps one lane layout
+# (``lanes`` and ``width_bits``: a lane's columns), so the programs store the same bits.  ``lanes`` lanes own a task
+# and a thread owns ``rows_per_thread`` tasks, so a CTA of ``threads`` threads (the launch block) owns
+# ``threads / lanes * rows_per_thread`` consecutive tasks.  A row is ``tasks_per_row`` consecutive tasks (1 when
+# absent: a task is a row; ``bwd_unweighted`` and ``bwd_relay``: 3, a task is one run of 768 columns of a row; a fine
+# role: 9, a task is one load of 256 columns of a row), so the grid is ``ceil(rows * tasks_per_row / (threads / lanes *
+# rows_per_thread))`` CTAs (:func:`grid`).  A ``bwd_relay`` CTA of 96 threads owns 3 tasks, one row: its grid is
+# ``rows`` CTAs.  ``width_bits`` is the load width.  A program built with other values of these facts is another program
+# (another name): change this table with the ``MODULES`` keys.  A role with no program in ``MODULES`` may have an
+# entry: the facts its programs keep.
 BUILD_OF: dict[str, dict[str, int]] = {
     "fwd": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
+    "fwd_large": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
+    "fwd_fine": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 9},
     "bwd": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
+    "bwd_large": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
+    "bwd_fine": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 9},
+    "bwd_relay": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 3},
     "bwd_unweighted": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 3},
+    "bwd_unweighted_fine": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 9},
 }
 
 # The kernels load ``width_bits`` at a time: every BF16 row stride is a multiple of one load (8 BF16 values for
@@ -255,21 +363,37 @@ ALIGNMENT_BYTES = 2 * VECTOR_ELEMENTS
 # (``rows * 3`` passes ``2**31 - 1`` from 715,827,883 rows), and its grid, ``ceil(rows * 3 / 4)`` CTAs, stays below
 # ``2**31 - 1`` for every row count below this.
 MAX_ROWS = 2**31 - 256
+# The largest grid a launch takes (the bindings refuse a larger one).  Below ``MAX_ROWS`` rows, every small-R and
+# large-R program, ``bwd_relay`` and ``bwd_fine`` (``rows`` CTAs) stay below it.  ``bwd_relay`` counts its row loop
+# (``row += gridDim.x``) in 64 bits, so any grid takes every row count below ``MAX_ROWS``.  A grid of
+# ``ceil(9 rows / 4)`` CTAs (the ``fwd_fine`` and ``bwd_unweighted_fine`` programs) passes it from about 954 M rows.
+# Those two kernels count their tasks and blocks in 64 bits and stride over the blocks by the grid, so :func:`grid`
+# caps a launch of more rows here.
+# ``bwd_fine`` counts its rows in 32 bits: its row loop (``row += gridDim.x``) stays in range only while the row
+# count plus the grid is at most ``2**31``, so on its grid of ``rows`` CTAs it takes at most ``2**30`` rows.  The route
+# sends it at most its window's ``hi * sm_count`` rows: at most ``MAX_FINE_ROWS_PER_SM * sm_count``, and
+# ``2 * sm_count`` with its shipped window ``[0, 2]``.  :func:`fine` refuses a fine window past
+# :data:`MAX_FINE_ROWS_PER_SM` rows per SM and one whose last row count needs a grid past this cap, so a routed launch
+# never reaches the cap.  That bound keeps ``bwd_fine`` within its ``2**30`` rows on a GPU of at most ``2**24`` SMs
+# (about 16.8 M); :func:`fine` checks no SM count.  On the delivered SM counts (148 to 212) a fine program takes at
+# most 13,568 rows, far below these 32-bit limits.
+MAX_GRID = 2**31 - 1
+
+# The most rows per SM a fine window may reach (its ``hi``).  The fine programs are for the fewest rows: the shipped
+# windows end at 2 to 8 rows per SM.  64 is 8 times the largest of them, room for a retune.  The package's route table
+# holds one entry per row count up to the fine window's last row count or the last edge of the windowed programs (the
+# large-R and the relay ones), whichever is larger, so the bound lets the fine window add at most ``64 * sm_count``
+# entries (13,568 on 212 SMs).  On the delivered SM
+# counts (148 to 212) it also keeps a fine grid far below the 32-bit limits above (``bwd_fine``: at most
+# ``64 * sm_count`` CTAs and rows).
+MAX_FINE_ROWS_PER_SM = 64
 
 
-def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], str, str]:
-    """``(edges, small, large)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: a launch of ``rows`` rows runs the
-    program ``large`` (the stage's large-R role) when ``lo * sm_count <= rows <= hi * sm_count`` for a window
-    ``[lo, hi]`` of its record's ``rows_per_sm_windows[arch]`` (``hi`` None: no upper bound), and the program
-    ``small`` (the stage's role) otherwise.  ``edges`` are the last row count of each run of one program, ascending:
-    ``lo * sm_count - 1`` and ``hi * sm_count`` of each window (an open window's ``lo * sm_count - 1`` alone).  A
-    launch runs ``large`` exactly when the count of edges below ``rows``, ``bisect.bisect_left(edges, rows)``, is
-    odd.  Without a large-R program on ``arch``, ``edges`` is empty and ``large`` is ``small``."""
-    small = PROGRAM_OF[stage][arch]
-    large = PROGRAM_OF[stage + LARGE].get(arch)
-    if large is None:
-        return (), small, small
-    windows = MODULES[large]["rows_per_sm_windows"][arch]
+def _windows(name: str, arch: str) -> list[tuple[int, int | None]]:
+    """``(lo, hi)`` of each window of the windowed record ``name`` on ``arch``, in its order.  Its
+    ``rows_per_sm_windows[arch]`` must be ``[lo, hi]`` lists of integers, ``lo >= 0``, only the last ``hi`` None, that
+    ascend without touching (``lo < hi < next lo``): any other row is a ``RuntimeError`` naming the record."""
+    windows = MODULES[name]["rows_per_sm_windows"][arch]
     bounds = [bound for window in windows for bound in window]
     if (
         not windows
@@ -278,20 +402,105 @@ def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], str, s
         or any(type(bound) is not int for bound in bounds if bound is not None)
         or bounds[0] < 0
     ):
-        raise RuntimeError(f"{large}: rows_per_sm_windows[{arch!r}] {windows!r} are not [lo, hi] lists of integers")
+        raise RuntimeError(f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} are not [lo, hi] lists of integers")
     bounds = [bound for bound in bounds if bound is not None]
     if any(below >= above for below, above in zip(bounds, bounds[1:])):
-        raise RuntimeError(f"{large}: rows_per_sm_windows[{arch!r}] {windows!r} do not ascend without touching")
-    edges = tuple(bound * int(sm_count) - (index % 2 == 0) for index, bound in enumerate(bounds))
-    return edges, small, large
+        raise RuntimeError(f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} do not ascend without touching")
+    return [(window[0], window[1]) for window in windows]
+
+
+def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], tuple[str, ...]]:
+    """``(edges, names)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: a launch of ``rows`` rows runs the program
+    ``names[bisect.bisect_left(edges, rows)]``, the index being the count of edges below ``rows``.  That is the
+    stage's windowed program (its large-R or its relay one, ``WINDOWED``) when ``lo * sm_count <= rows <= hi *
+    sm_count`` for a window ``[lo, hi]`` of the program's ``rows_per_sm_windows[arch]`` (``hi`` None: no upper bound),
+    and the program of the stage's role, the small-R one, otherwise.  ``edges`` are the last row count of each run of
+    one program, ascending: ``lo * sm_count - 1`` and ``hi * sm_count`` of each window of the windowed programs, in the
+    order of their ``lo`` (an open window's ``lo * sm_count - 1`` alone).  ``names`` holds one program more: the
+    small-R program, then per window its windowed program and, after a closed window, the small-R program again.  Each
+    windowed program's windows are checked (:func:`_windows`), and the windows of both, in the order of their ``lo``,
+    must be disjoint: each ``hi`` below the next ``lo`` and only the last ``hi`` None (else a ``RuntimeError`` naming
+    both records).  Without a windowed program on ``arch``, ``edges`` is empty and ``names`` is the small-R program
+    alone."""
+    small = PROGRAM_OF[stage][arch]
+    spans = sorted(
+        (
+            (lo, hi, name)
+            for name in (PROGRAM_OF[stage + suffix].get(arch) for suffix in WINDOWED)
+            if name is not None
+            for lo, hi in _windows(name, arch)
+        ),
+        key=lambda span: span[0],
+    )
+    for (lo, hi, name), (after, top, other) in zip(spans, spans[1:]):
+        if hi is None or hi >= after:
+            raise RuntimeError(
+                f"{name}: rows_per_sm_windows[{arch!r}] window {[lo, hi]!r} and {other}: window {[after, top]!r} of "
+                f"{stage!r} overlap or touch"
+            )
+    edges: list[int] = []
+    names = [small]
+    for lo, hi, name in spans:
+        edges.append(lo * int(sm_count) - 1)
+        names.append(name)
+        if hi is not None:
+            edges.append(hi * int(sm_count))
+            names.append(small)
+    return tuple(edges), tuple(names)
+
+
+def fine(stage: str, arch: str, sm_count: int) -> tuple[int, str]:
+    """``(last, name)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: a launch of ``1 <= rows <= last`` rows runs
+    the program ``name``, the stage's fine role, ahead of :func:`route`.  Its record's ``rows_per_sm_windows[arch]``
+    is one window ``[0, hi]`` with an integer ``hi >= 1``, so ``last = hi * sm_count``.  The window must end below
+    the first window of the stage's windowed programs (``hi`` below every ``lo`` of its large-R and its relay program:
+    ``last`` at most the first edge of :func:`route`), so the fine program never takes a row count that :func:`route`
+    gives a windowed one.  ``hi`` must be at most :data:`MAX_FINE_ROWS_PER_SM`, so the fine window adds at most
+    ``MAX_FINE_ROWS_PER_SM * sm_count`` entries to the package's route table.  Its grid at ``last`` rows must not pass
+    :data:`MAX_GRID`, so a routed launch's grid is :func:`grid`'s, never capped.  ``bwd_fine`` counts its rows in 32
+    bits and takes at most ``2**30`` rows (see the :data:`MAX_GRID` comment); the route sends it at most ``last`` rows
+    (``2 * sm_count`` with its shipped window ``[0, 2]`` on every architecture).  Without a fine program on ``arch``,
+    ``last`` is 0 (no launch runs it) and ``name`` is the stage's small-R program."""
+    name = PROGRAM_OF[stage + FINE].get(arch)
+    if name is None:
+        return 0, PROGRAM_OF[stage][arch]
+    windows = MODULES[name]["rows_per_sm_windows"][arch]
+    if (
+        len(windows) != 1
+        or len(windows[0]) != 2
+        or type(windows[0][0]) is not int
+        or windows[0][0] != 0
+        or type(windows[0][1]) is not int
+        or windows[0][1] < 1
+    ):
+        raise RuntimeError(f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} is not one window [0, hi], hi >= 1")
+    last = windows[0][1] * int(sm_count)
+    edges = route(stage, arch, sm_count)[0]
+    if edges and last > edges[0]:
+        raise RuntimeError(
+            f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} reaches the first large-R or relay window of "
+            f"{stage!r}, from {edges[0] + 1} rows on {sm_count} SMs"
+        )
+    if windows[0][1] > MAX_FINE_ROWS_PER_SM:
+        raise RuntimeError(
+            f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} passes {MAX_FINE_ROWS_PER_SM} rows per SM, the most a "
+            "fine window may reach"
+        )
+    per_cta, per_row = cta_tasks(name)
+    if -(-last * per_row // per_cta) > MAX_GRID:
+        raise RuntimeError(
+            f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} needs a grid of more than {MAX_GRID} CTAs at its last "
+            f"row count, {last} rows on {sm_count} SMs"
+        )
+    return last, name
 
 
 def cta_tasks(name: str) -> tuple[int, int]:
     """``(per_cta, per_row)`` of program ``name``: one CTA owns ``per_cta = threads / lanes * rows_per_thread``
-    consecutive tasks and a row is ``per_row`` tasks (``BUILD_OF`` of its stage, ``tasks_per_row`` 1 when absent; the
+    consecutive tasks and a row is ``per_row`` tasks (``BUILD_OF`` of its role, ``tasks_per_row`` 1 when absent; the
     threads of its launch block), so one CTA owns ``per_cta / per_row`` rows."""
     record = MODULES[name]
-    build = BUILD_OF[record["stage"]]
+    build = BUILD_OF[record["role"]]
     threads = int(record["launch"]["block"][0])
     per_cta = threads // build["lanes"] * build["rows_per_thread"]
     per_row = build.get("tasks_per_row", 1)
@@ -305,9 +514,11 @@ def cta_tasks(name: str) -> tuple[int, int]:
 
 def grid(name: str, rows: int) -> tuple[int, int, int]:
     """The launch grid of program ``name`` for ``rows >= 1`` rows: one CTA per block of ``per_cta`` of the
-    ``rows * per_row`` tasks (:func:`cta_tasks`), ``ceil(rows * per_row / per_cta)`` CTAs on the x axis (the kernels
-    stride over the blocks from ``blockIdx.x``, so any row count fits one axis)."""
+    ``rows * per_row`` tasks (:func:`cta_tasks`), ``ceil(rows * per_row / per_cta)`` CTAs on the x axis, at most
+    :data:`MAX_GRID` (the kernels stride over the blocks from ``blockIdx.x``, so any row count fits one axis and a
+    smaller grid runs every task).  Only a fine program launched at more rows than its window holds reaches the cap
+    (:func:`fine`), so the package's launches pass the uncapped count."""
     if rows < 1:
         raise ValueError(f"a launch needs at least one row, got {rows}")
     per_cta, per_row = cta_tasks(name)
-    return (-(-rows * per_row // per_cta), 1, 1)
+    return (min(-(-rows * per_row // per_cta), MAX_GRID), 1, 1)

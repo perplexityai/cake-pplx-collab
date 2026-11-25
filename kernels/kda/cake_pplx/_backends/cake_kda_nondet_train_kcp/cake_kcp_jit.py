@@ -40,7 +40,7 @@ recorded once in ``build.json`` next to this file; :mod:`.cake_build` serves
 the library from a prebuilt ``aot/`` file when a builder compiled it and
 otherwise through the package's JIT shim (``_cake_pplx_jit.py``) from the same sources and flags.
 
-The programs are the nine launches of the KCP composition
+The programs are the ten launches of the KCP composition
 (:data:`PROGRAMS`, the names :mod:`.cake_kcp` passes to :func:`run_program`):
 
 * ``kcp_fwdh_offset`` / ``kcp_fwdh_tape`` -- the forward state recurrence
@@ -95,7 +95,12 @@ The programs are the nine launches of the KCP composition
   launches it in place of those two programs; the forward a replay-mode backward
   runs keeps the tape walk, whose tapes the backward reads.  It ships in two
   records (``select_rule`` ``walk_form``): the full-width form and its ``_vh64``
-  form (two CTAs per segment and head), bitwise equal.
+  form (two CTAs per segment and head), bitwise equal;
+* ``kcp_dav_l2n`` -- the output backward of the Q/K L2 norm modes at the
+  rank's shape: ``dAqk`` from the ``v_new`` it recomputes in FP32 from the
+  ``akk_int`` rows, ``beta``, ``v``, the ``w`` rows and the ``h`` tape, one CTA
+  per (chunk, head) tile of the padded chunk count (``grid_rule``
+  ``kcp_tile_items``); it forms no ``dv1`` (the adjoint walk forms it).
 
 Compact state pools (the walks' ``h0`` / ``dht`` inputs and ``out`` outputs)
 are flat FP32 tensors of ``128 x 128`` tiles addressed by an int32 slot table
@@ -155,7 +160,8 @@ ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 # (``cake_kcp.KCP_PROGRAMS``).  The first five are walks over a segment list;
 # the sixth composes chains; the seventh and eighth are the chunk stages of the
 # forward output and the output backward at the rank's shape; the ninth is the
-# forward state walk with the forward output fused in (a walk too).
+# forward state walk with the forward output fused in (a walk too); the tenth is
+# the chunk stage of the output backward in the Q/K L2 norm modes.
 PROGRAMS = (
     "kcp_fwdh_offset",
     "kcp_fwdh_tape",
@@ -166,6 +172,7 @@ PROGRAMS = (
     "kcp_fwd_o",
     "kcp_dav",
     "kcp_fwdh_o",
+    "kcp_dav_l2n",
 )
 WALK_PROGRAMS = (*PROGRAMS[:5], "kcp_fwdh_o")
 # Elements of one FP32 state tile [128, 128].
@@ -267,6 +274,9 @@ TEST_MANIFEST = "build.test.json"
 # (``[num_seqs + 1]``, the chunk table of the rank's sequences, not the KCP
 # segment table ``seg_chunk_start``).  ``kcp_fwdh_o`` binds ``out`` (the call's
 # BF16 output) too: it writes no state pool, so ``out`` names no pool there.
+# ``kcp_dav_l2n`` binds the chunk stages' BF16 ``akk_int`` rows ``[R, H, 64]``,
+# the user's token rows ``v`` ``[T, H, 128]`` and ``beta`` ``[T, H]`` and the
+# padded chunk count ``num_chunks_pad``.
 LOGICAL_TENSORS = (
     "w",
     "kg",
@@ -281,6 +291,9 @@ LOGICAL_TENSORS = (
     "dv2",
     "h2d",
     "aqk_int",
+    "akk_int",
+    "v",
+    "beta",
     "dAqk",
     "chunk_bos",
     "chunk_len",
@@ -322,6 +335,7 @@ LOGICAL_SCALARS = (
     "transpose_m",
     "write_states",
     "cols_per_cta",
+    "num_chunks_pad",
 )
 
 # The ``kcp_affine_merge`` record of a launch (:func:`merge_record`), by architecture: ``T = n_chains * ncols / 128``
@@ -1187,6 +1201,54 @@ MODULES: dict[str, dict[str, Any]] = {
             "vnew_tma": "v_new",
         },
         "program": "kcp_dav",
+        "select_rule": {"kind": "always"},
+        "variant": None,
+    },
+    "kcp_dav_l2n": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "do_tma"],
+            ["buffer", "akk_tma"],
+            ["buffer", "v_tma"],
+            ["buffer", "w_tma"],
+            ["buffer", "h_tma"],
+            ["buffer", "beta"],
+            ["buffer", "chunk_bos"],
+            ["buffer", "chunk_len"],
+            ["buffer", "dAqk"],
+            ["parameter", "scale"],
+            ["parameter", "num_heads"],
+            ["parameter", "num_chunks"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "kcp_tile_items"},
+        "kernel_symbol": "kernel_cake_kda_train_44f8275bc726f8a46e33_kcp",
+        "launch": {
+            "block": (448, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 214144,
+            "use_pdl": False,
+        },
+        "library": "cake_kda_train_44f8275bc726f8a46e33_kcp",
+        "logical": {
+            "akk_tma": "akk_int",
+            "beta": "beta",
+            "chunk_bos": "chunk_bos",
+            "chunk_len": "chunk_len",
+            "dAqk": "dAqk",
+            "do_tma": "do_int",
+            "h_tma": "h2d",
+            "num_chunks": "num_chunks_pad",
+            "num_heads": "num_heads",
+            "scale": "scale",
+            "v_tma": "v",
+            "w_tma": "w",
+        },
+        "program": "kcp_dav_l2n",
         "select_rule": {"kind": "always"},
         "variant": None,
     },
@@ -2563,8 +2625,8 @@ def _merge(args: Mapping[str, Any], call: Any, device_index: int) -> None:
 
 def run_program(name: str, args: Mapping[str, Any], *, device_index: int) -> None:
     """Launch KCP program ``name`` (a walk or the merge of :data:`PROGRAMS`) with the composition's arguments
-    ``args``.  The chunk stages ``kcp_fwd_o`` / ``kcp_dav`` take no composition arguments: the host launches
-    them through :func:`run_module` with their logical values on the grid of :func:`launch_grid`.
+    ``args``.  The chunk stages ``kcp_fwd_o`` / ``kcp_dav`` / ``kcp_dav_l2n`` take no composition arguments: the
+    host launches them through :func:`run_module` with their logical values on the grid of :func:`launch_grid`.
 
     ``args`` is the vocabulary of ``cake_kcp.Backend.run``: for a walk the segment list ``walk`` (a launch over no
     segment is skipped), the compact pools ``h0`` / ``dht`` / ``out`` as ``Indexed`` (or ``None``; ``kcp_fwdh_o``

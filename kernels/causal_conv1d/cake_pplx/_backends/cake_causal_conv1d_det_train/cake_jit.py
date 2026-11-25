@@ -32,11 +32,11 @@ produce ``y`` from ``x``, ``weight`` and ``cu_seqlens``: ``fwd`` (FP32 taps),
 ``fwd_dt`` (BF16 taps) and ``fwd_bias`` (a per-channel bias, FP32 or BF16 taps
 and bias).  The backward routes produce ``dx`` and the deterministic
 ``dweight`` (and ``dbias``): ``bwd`` (FP32 taps and
-gradient, SiLU' at the BF16-rounded preactivation), ``bwd_dt`` (FP32 taps and
-a BF16 ``dweight``), ``bwd_bias`` (FP32 taps), ``bwd_fp32g`` (SiLU' at the
-unrounded FP32 preactivation for the weight gradient), ``bwd_bias_fp32g``,
-and ``bwd_dt_bf16_taps`` / ``bwd_bias_bf16_taps`` (BF16 taps: the ``bwd_dt`` /
-``bwd_bias`` programs with SiLU' at the unrounded FP32 preactivation);
+gradient, SiLU' at the BF16-rounded preactivation), ``bwd_dt`` (BF16 taps
+and / or a BF16 ``dweight``, no bias, SiLU' at the unrounded FP32
+preactivation), ``bwd_bias`` (a per-channel bias, FP32 or BF16 taps,
+SiLU' at the unrounded FP32 preactivation), ``bwd_fp32g`` (SiLU' at the
+unrounded FP32 preactivation for the weight gradient) and ``bwd_bias_fp32g``;
 :func:`forward_route` / :func:`backward_route` map a call's arguments to its
 route and the ``flags`` bit mask (``FLAG_*``) tells a route's programs which
 of ``w``, ``dw``, ``b``, ``db`` are BF16.  A route, forward or backward, may
@@ -64,28 +64,41 @@ and chunk for every channel count C >= 8 (``channels_at_least`` 8) and, on
 sm_107a, from a per-route channel count (C = 256 on ``fwd``, 512 on
 ``fwd_dt``, 1024 on ``fwd_bias``) the program of two stages per chunk from
 S = 65536, and a copy of it under its own name (``c_band=2048``) from C =
-2048 at every S.  At C = 576 to 768, inside the token range of a row of
-:data:`FALLBACK_ROWS` or :data:`DIRECT_ROWS` (the small-S rows), a call runs
-one of two programs with no counter instead: the static program (each CTA
-one fixed token stream of its channel tile; the route's fallback, the record
-without a ``select_rule``) at the rows of :data:`FALLBACK_ROWS`, and the
-direct program (no shared memory, barrier or atomic; the CTAs of a channel
-tile take its token blocks in turn) at the rows of :data:`DIRECT_ROWS`, which
-plans its own channel tiles (:data:`DIRECT_PLANS`) and launches at most one
-CTA per token block.  Each row gives its own token range.  For most C the
-first range starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to
-768 start at S = 13824 (C = 736: 14336) and have only a static range.
-Outside a row's range, and where an architecture, route and C have no row,
-a call runs the dynamic program its rules select, as in 0.2.4.  Every
-forward program computes each ``y`` element in the same fixed order, so ``y``
-is bitwise the same whichever program and plan a call runs.  The counters
-of the dynamic programs are the forward workspace ``work``
-(``workspace_rule`` ``tile_counters``: :func:`counter_words`, two int32 words
-per channel tile), zero before the first launch; the last CTA of each tile
-resets them, so the buffer is zero after every launch and every CUDA Graph
-replay and serves every later launch of one stream.  Two launches that may run
-at once (two streams, two graphs replayed concurrently) need two buffers.  The
-static and direct programs take no ``work``; a passed buffer is checked and
+2048 at every S.  At C = 512 to 1024, inside the token range of a row of
+:data:`FALLBACK_ROWS`, :data:`DIRECT_ROWS` or :data:`PAIR_ROWS` (the small-S
+rows), a call runs one of three programs with no counter instead: the static
+program (each CTA one fixed token stream of its channel tile; the route's
+fallback, the record without a ``select_rule``) at the rows of
+:data:`FALLBACK_ROWS`, the direct program (no shared memory, barrier or
+atomic; the CTAs of a channel tile take its token blocks in turn) at the rows
+of :data:`DIRECT_ROWS`, which plans its own channel tiles (:data:`DIRECT_PLANS`)
+and launches at most one CTA per token block, and ahead of both the pair direct
+program (the direct program with each thread on a pair of channels, on the
+channel tiles of :data:`PAIR_PLANS`) at the rows of :data:`PAIR_ROWS`, one
+range per architecture and route (two on sm_100a ``fwd_dt``, three on sm_103a
+``fwd_bias`` and sm_107a ``fwd``) over C = 512 to 1024 at short S.  Each row
+gives its own token range.  Every architecture and route has a row at each
+C = 512 to 1024.  For most C the first range starts at S = 1.  Where a key
+has no :data:`DIRECT_ROWS` range (for example the sm_107a ``fwd_bias`` rows
+at C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs
+over the key's range outside the :data:`PAIR_ROWS` range.  From release
+0.2.17, the sm_103a ``fwd_bias`` rows at C = 720 to 768 run the pair direct
+program from S = 1 to 3072, the static program from S = 3073 to 12800 and
+from S = 13824 to 16383 (C = 736: from 14336; C = 768: to 16384) and the
+direct program from S = 12801 to 13823 (C = 736: to 14335): there a
+:data:`DIRECT_ROWS` range lies inside the :data:`FALLBACK_ROWS` range of its
+key and runs ahead of it.  Outside a row's range, and where an architecture,
+route and C have no row, a call runs the dynamic program its rules select,
+as in 0.2.4.
+Every forward program computes each ``y`` element in the same fixed order, so
+``y`` is bitwise the same whichever program and plan a call runs.  The counters
+of the dynamic programs are the forward workspace ``work`` (``workspace_rule``
+``tile_counters``: :func:`counter_words`, two int32 words per channel tile),
+zero before the first launch; the last CTA of each tile resets them, so the
+buffer is zero after every launch and every CUDA Graph replay and serves every
+later launch of one stream.  Two launches that may run at once (two streams,
+two graphs replayed concurrently) need two buffers.  The static and direct
+programs (pair direct included) take no ``work``; a passed buffer is checked and
 not read.
 
 A backward call is two ordinary launches on one stream.  The selected program
@@ -109,8 +122,8 @@ unchanged, so ``dweight`` is deterministic for a given ``(S, C, device)`` and
 route and, at ``grid_mult`` 1, bitwise what the cooperative form produced.
 Each backward route has its reduce program: the default one, and builds of
 it with ``dtype_flags`` (the ``dw`` store form) and ``bias`` (the fifth,
-dbias, slab and ``db``); the ``_fp32g`` and ``_bf16_taps`` routes share the
-``bwd_dt`` and ``bwd_bias`` routes' builds.  Every reduce program of a default
+dbias, slab and ``db``); the ``_fp32g`` routes share
+the ``bwd_dt`` and ``bwd_bias`` routes' builds.  Every reduce program of a default
 route sums the FP32 partial rows in one plain FP32 word per sum, in its fixed
 order.  The opt-in pair routes (``bwd_fp32g_pair``, ``bwd_bias_fp32g_pair``,
 :data:`PAIR_ROUTES`) are the FP32 hi/lo pair forms of the ``_fp32g`` routes:
@@ -121,7 +134,8 @@ pairs in the same fixed order, rounded once; no default call selects them.
 The host plan is the three functions :func:`plan` (the kernel scalars, with
 the channel tile rule :func:`channel_split` of the record's role: the forward
 and the backward rules differ where no multiple of 32 divides the channel
-vectors; at a row of :data:`DIRECT_ROWS` the forward's :func:`direct_split`),
+vectors; at a row of :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` the forward's
+:func:`direct_split`),
 :func:`launch_grid` (the grid:
 ``co_resident`` records launch ``ctas_per_sm x SM count`` CTAs, those with a
 ``cap`` (:data:`GRID_CAPS`) at most one CTA per token block, ``occupancy``
@@ -186,16 +200,16 @@ the single-tile rows from C = 520 on which it folds five sub-tiles per CTA
 floor and the rows from 616 (sm_107a: 688) at every S.  The programs of
 the six other routes are the same bodies built with ``dtype_flags=True`` (the
 ``flags`` scalar; untyped tap / bias pointers) plus ``bias=True`` for the
-bias routes and ``grad_pre="fp32"`` for the ``_fp32g`` routes, their backward
-fallbacks without ``stage_pair`` (``vec=8, copy="tma2d"`` on sm_100a and
-sm_103a, ``vec=8, min_blocks=2`` on sm_107a); each record's comment names its
-build.
+bias routes, ``exact_pre=True`` for ``bwd_dt`` and ``bwd_bias`` and
+``grad_pre="fp32"`` for the ``_fp32g`` routes, their backward fallbacks
+without ``stage_pair`` (``vec=8, copy="tma2d"`` on sm_100a and sm_103a,
+``vec=8, min_blocks=2`` on sm_107a); each record's comment names its build.
 """
 
 from __future__ import annotations
 
 import functools
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import tvm_ffi
 
@@ -221,7 +235,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # slot (the halo rows its copy brings), not from global memory.  It runs
     # from C = 8 (``channels_at_least`` 8, so the static program is the route's
     # fallback): every channel count on sm_100a and sm_103a, and C < 256 on
-    # sm_107a, but at the small-S rows of ``FALLBACK_ROWS`` and ``DIRECT_ROWS``.
+    # sm_107a, but at the small-S rows of ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and
+    # ``PAIR_ROWS``.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
     # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
@@ -845,7 +860,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # sched="dynamic", chunk_stages=1, pair_math=True``; ``work`` as the ``fwd``
     # record's.  From C = 8 (``channels_at_least`` 8): every channel count on
     # sm_100a and sm_103a, and C < 512 on sm_107a, but at the small-S rows of
-    # ``FALLBACK_ROWS`` and ``DIRECT_ROWS``.
+    # ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``PAIR_ROWS``.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
     # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
@@ -928,8 +943,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # dtype_flags=True, fast=True, sched="dynamic", chunk_stages=1,
     # pair_math=True``; ``work`` as the ``fwd`` record's.  From C = 8
     # (``channels_at_least`` 8): every channel count on sm_100a and sm_103a, and
-    # C < 1024 on sm_107a, but at the small-S rows of ``FALLBACK_ROWS`` and
-    # ``DIRECT_ROWS``.
+    # C < 1024 on sm_107a, but at the small-S rows of ``FALLBACK_ROWS``,
+    # ``DIRECT_ROWS`` and ``PAIR_ROWS``.
     # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
     # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
     # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
@@ -1914,106 +1929,26 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # Route ``bwd_dt`` (hand-written fallback, sm_100a / sm_103a): the fallback backward body
-    # ``vec=8, copy="tma2d"`` with ``dtype_flags=True`` (bit 0: BF16 taps; bit 1, the BF16
-    # ``dw`` store, is read by its reduce program); SiLU' at the BF16-rounded preactivation
-    # as the default route.  Like every backward program since the split it is an ordinary
-    # launch that writes ``dx`` and its partial rows; ``reduce`` names the program that sums
-    # them (the ``bwd_dt`` reduce: ``dtype_flags`` for the ``dw`` store form).
-    # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
-    # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
-    # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
-    "cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa": {
+    # Route ``fwd``: the forward's pair direct program, built with
+    # ``sched="direct", pair_math=True, lane_ch=2``: the direct program with each
+    # thread on a pair of channels (4-byte row loads) in place of an eight-channel
+    # vector, so its geometry's ``vec`` is 2 and ``ct_vec`` counts channel pairs.  It
+    # runs at the rows of ``PAIR_ROWS`` only (``select_rule`` of kind ``rows``), on the
+    # channel tiles of ``PAIR_PLANS`` (:func:`direct_split`), and launches at most one
+    # CTA per token block (``cap`` ``token_blocks``, :func:`launch_grid`).
+    # ``ctas_per_sm`` 7: the co-resident CTAs its rows were timed at (128 threads,
+    # launch bound 4).  ``y`` is bitwise the static program's.
+    "cake_causal_conv1d_det_train_d0b237e92b28348315d0": {
         "arches": [
             "sm_100a",
             "sm_103a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "w"],
-            ["buffer", "cu"],
-            ["buffer", "dy"],
-            ["buffer", "dx"],
-            ["buffer", "partial"],
-            ["parameter", "S"],
-            ["parameter", "C"],
-            ["parameter", "num_docs"],
-            ["parameter", "search_steps"],
-            ["parameter", "ct_vec"],
-            ["parameter", "n_sub"],
-            ["parameter", "n_ch_tiles"],
-            ["parameter", "flags"],
-            ["buffer", "x_map"],
-            ["buffer", "dy_map"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "cooperative": False,
-            "ctas_per_sm": 3,
-            "geometry": {
-                "threads": 128,
-                "vec": 8,
-            },
-            "grid_mult": {
-                "sm_100a": 1,
-                "sm_103a": 1,
-            },
-            "kind": "occupancy",
-        },
-        "kernel": "cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa",
-        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa",
-        "launch": {
-            "block": (128, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
-        },
-        "library": "cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa",
-        "logical": {
-            "C": "C",
-            "S": "S",
-            "ct_vec": "ct_vec",
-            "cu": "cu",
-            "dx": "dx",
-            "dy": "dy",
-            "dy_map": "dy",
-            "flags": "flags",
-            "n_ch_tiles": "n_ch_tiles",
-            "n_sub": "n_sub",
-            "num_docs": "num_docs",
-            "partial": "partial",
-            "search_steps": "search_steps",
-            "w": "w",
-            "x": "x",
-            "x_map": "x",
-        },
-        "reduce": "cake_causal_conv1d_det_train_ea8f91038a9dea452ff2",
-        "role": "bwd",
-        "workspace_rule": {
-            "kind": "partial_rows",
-            "taps": 4,
-        },
-    },
-    # Route ``bwd_dt`` (hand-written fallback, sm_107a): the sm_107a fallback body ``vec=8,
-    # min_blocks=2`` with ``dtype_flags=True``.
-    # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
-    # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
-    # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
-    "cake_causal_conv1d_det_train_8b9b8db0833fd64a578f": {
-        "arches": [
             "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
             ["buffer", "w"],
             ["buffer", "cu"],
-            ["buffer", "dy"],
-            ["buffer", "dx"],
-            ["buffer", "partial"],
+            ["buffer", "y"],
             ["parameter", "S"],
             ["parameter", "C"],
             ["parameter", "num_docs"],
@@ -2021,158 +1956,137 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "ct_vec"],
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
-            ["parameter", "flags"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
         "ffi_entry": "run",
         "grid_rule": {
+            "cap": "token_blocks",
             "cooperative": False,
-            "ctas_per_sm": 2,
+            "ctas_per_sm": 7,
             "geometry": {
                 "threads": 128,
-                "vec": 8,
+                "vec": 2,
             },
-            "grid_mult": {
-                "sm_107a": 1,
-            },
-            "kind": "occupancy",
+            "kind": "co_resident",
         },
-        "kernel": "cake_causal_conv1d_det_train_8b9b8db0833fd64a578f",
-        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_8b9b8db0833fd64a578f",
+        "kernel": "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 50176,
+            "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_det_train_8b9b8db0833fd64a578f",
+        "library": "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         "logical": {
             "C": "C",
             "S": "S",
             "ct_vec": "ct_vec",
             "cu": "cu",
-            "dx": "dx",
-            "dy": "dy",
-            "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
-            "partial": "partial",
             "search_steps": "search_steps",
             "w": "w",
             "x": "x",
+            "y": "y",
         },
-        "reduce": "cake_causal_conv1d_det_train_ea8f91038a9dea452ff2",
-        "role": "bwd",
-        "workspace_rule": {
-            "kind": "partial_rows",
-            "taps": 4,
+        "role": "fwd",
+        "select_rule": {
+            "kind": "rows",
         },
+        "workspace_rule": None,
     },
-    # Route ``bwd_bias`` (hand-written fallback, sm_100a / sm_103a): the fallback body with
-    # ``bias=True`` (reads ``b``; the ``partial`` workspace grows a fifth slab, ``taps`` 5,
-    # of dbias partials that its reduce program sums into ``db``) and ``dtype_flags=True``
-    # (input bits 0 and 2; the store bits 1 and 3 are the reduce program's), ``min_blocks=2``
-    # (the bias accumulators do not fit the 168-register cap of three CTAs per SM).
-    # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
-    # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
-    # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
-    "cake_causal_conv1d_det_train_2d91e5f926238453c78c": {
+    # Route ``fwd_dt``: the forward's pair direct program, built with
+    # ``sched="direct", pair_math=True, dtype_flags=True, lane_ch=2``: the ``fwd`` pair
+    # direct program's form with the ``flags`` scalar.  It runs at the rows of
+    # ``PAIR_ROWS`` only, on the channel tiles of ``PAIR_PLANS``, with the grid cap
+    # ``token_blocks``.  ``ctas_per_sm`` 7.  ``y`` is bitwise the static program's.
+    "cake_causal_conv1d_det_train_96bf2b8aa1132598f130": {
         "arches": [
             "sm_100a",
             "sm_103a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "w"],
-            ["buffer", "cu"],
-            ["buffer", "dy"],
-            ["buffer", "dx"],
-            ["buffer", "partial"],
-            ["buffer", "b"],
-            ["parameter", "S"],
-            ["parameter", "C"],
-            ["parameter", "num_docs"],
-            ["parameter", "search_steps"],
-            ["parameter", "ct_vec"],
-            ["parameter", "n_sub"],
-            ["parameter", "n_ch_tiles"],
-            ["parameter", "flags"],
-            ["buffer", "x_map"],
-            ["buffer", "dy_map"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "cooperative": False,
-            "ctas_per_sm": 2,
-            "geometry": {
-                "threads": 128,
-                "vec": 8,
-            },
-            "grid_mult": {
-                "sm_100a": 1,
-                "sm_103a": 1,
-            },
-            "kind": "occupancy",
-        },
-        "kernel": "cake_causal_conv1d_det_train_2d91e5f926238453c78c",
-        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_2d91e5f926238453c78c",
-        "launch": {
-            "block": (128, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 54272,
-            "use_pdl": False,
-        },
-        "library": "cake_causal_conv1d_det_train_2d91e5f926238453c78c",
-        "logical": {
-            "C": "C",
-            "S": "S",
-            "b": "b",
-            "ct_vec": "ct_vec",
-            "cu": "cu",
-            "dx": "dx",
-            "dy": "dy",
-            "dy_map": "dy",
-            "flags": "flags",
-            "n_ch_tiles": "n_ch_tiles",
-            "n_sub": "n_sub",
-            "num_docs": "num_docs",
-            "partial": "partial",
-            "search_steps": "search_steps",
-            "w": "w",
-            "x": "x",
-            "x_map": "x",
-        },
-        "reduce": "cake_causal_conv1d_det_train_1c21c181af94e1635851",
-        "role": "bwd",
-        "workspace_rule": {
-            "kind": "partial_rows",
-            "taps": 5,
-        },
-    },
-    # Route ``bwd_bias`` (hand-written fallback, sm_107a): the sm_107a fallback body with
-    # ``bias=True, dtype_flags=True``.
-    # ``dynamic_smem_bytes`` 0 is the placeholder of a program whose shared memory follows
-    # the kernel (the exporter's ``KERNEL_SMEM_PROGRAMS``): the first render writes the
-    # kernel's figure, the kernel symbol, the argument plan and the logical names it keeps.
-    "cake_causal_conv1d_det_train_cc7a117aee9c7ae829c4": {
-        "arches": [
             "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
             ["buffer", "w"],
             ["buffer", "cu"],
-            ["buffer", "dy"],
-            ["buffer", "dx"],
-            ["buffer", "partial"],
+            ["buffer", "y"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["parameter", "flags"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cap": "token_blocks",
+            "cooperative": False,
+            "ctas_per_sm": 7,
+            "geometry": {
+                "threads": 128,
+                "vec": 2,
+            },
+            "kind": "co_resident",
+        },
+        "kernel": "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "flags": "flags",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "x": "x",
+            "y": "y",
+        },
+        "role": "fwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": None,
+    },
+    # Route ``fwd_bias``: the forward's pair direct program, built with
+    # ``sched="direct", pair_math=True, bias=True, dtype_flags=True, lane_ch=2``: the
+    # ``fwd`` pair direct program's form with the bias and the ``flags`` scalar.  It
+    # runs at the rows of ``PAIR_ROWS`` only, on the channel tiles of ``PAIR_PLANS``,
+    # with the grid cap ``token_blocks``.  ``ctas_per_sm`` 6: sm_100a and sm_107a
+    # hold six such CTAs per SM, sm_103a seven; at its rows the cap launches fewer
+    # than six per SM on every architecture.  ``y`` is bitwise the static program's.
+    "cake_causal_conv1d_det_train_6cc04dd65e493836b918": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "y"],
             ["buffer", "b"],
             ["parameter", "S"],
             ["parameter", "C"],
@@ -2188,50 +2102,45 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {
+            "cap": "token_blocks",
             "cooperative": False,
-            "ctas_per_sm": 2,
+            "ctas_per_sm": 6,
             "geometry": {
                 "threads": 128,
-                "vec": 8,
+                "vec": 2,
             },
-            "grid_mult": {
-                "sm_107a": 1,
-            },
-            "kind": "occupancy",
+            "kind": "co_resident",
         },
-        "kernel": "cake_causal_conv1d_det_train_cc7a117aee9c7ae829c4",
-        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_cc7a117aee9c7ae829c4",
+        "kernel": "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 54272,
+            "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_causal_conv1d_det_train_cc7a117aee9c7ae829c4",
+        "library": "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         "logical": {
             "C": "C",
             "S": "S",
             "b": "b",
             "ct_vec": "ct_vec",
             "cu": "cu",
-            "dx": "dx",
-            "dy": "dy",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
-            "partial": "partial",
             "search_steps": "search_steps",
             "w": "w",
             "x": "x",
+            "y": "y",
         },
-        "reduce": "cake_causal_conv1d_det_train_1c21c181af94e1635851",
-        "role": "bwd",
-        "workspace_rule": {
-            "kind": "partial_rows",
-            "taps": 5,
+        "role": "fwd",
+        "select_rule": {
+            "kind": "rows",
         },
+        "workspace_rule": None,
     },
     # Route ``bwd_fp32g`` (hand-written fallback, sm_100a / sm_103a): the fallback body with
     # ``grad_pre="fp32"`` (SiLU' at the unrounded FP32 preactivation; its reduce program
@@ -2549,10 +2458,13 @@ MODULES: dict[str, dict[str, Any]] = {
             "taps": 5,
         },
     },
-    # Route ``bwd_dt_bf16_taps`` (hand-written fallback, sm_100a / sm_103a): the ``bwd_dt``
-    # fallback body with ``exact_pre=True``: SiLU' at the unrounded FP32 preactivation, the
-    # program of the calls with BF16 taps (``bwd_dt`` keeps the calls with FP32 taps and a
-    # BF16 ``dweight``); the ``bwd_dt`` record's plan, launch and reduce program.
+    # Route ``bwd_dt`` (hand-written fallback, sm_100a / sm_103a): the fallback backward body
+    # ``vec=8, copy="tma2d"`` with ``dtype_flags=True`` (bit 0: BF16 taps; bit 1, the BF16
+    # ``dw`` store, is read by its reduce program) and ``exact_pre=True``: SiLU' at the
+    # unrounded FP32 preactivation, with FP32 and with BF16 taps.  Like every backward
+    # program since the split it is an ordinary launch that writes ``dx`` and its partial
+    # rows; ``reduce`` names the program that sums them (the ``bwd_dt`` reduce:
+    # ``dtype_flags`` for the ``dw`` store form).
     "cake_causal_conv1d_det_train_af4c42c4bc5c9f00be94": {
         "arches": [
             "sm_100a",
@@ -2628,8 +2540,9 @@ MODULES: dict[str, dict[str, Any]] = {
             "taps": 4,
         },
     },
-    # Route ``bwd_dt_bf16_taps`` (hand-written fallback, sm_107a): the sm_107a ``bwd_dt``
-    # fallback body with ``exact_pre=True``.
+    # Route ``bwd_dt`` (hand-written fallback, sm_107a): the sm_107a fallback body ``vec=8,
+    # min_blocks=2`` with ``dtype_flags=True, exact_pre=True`` (SiLU' at the unrounded FP32
+    # preactivation, with FP32 and with BF16 taps).
     "cake_causal_conv1d_det_train_ff7637fef45fa62da9d5": {
         "arches": [
             "sm_107a",
@@ -2699,10 +2612,13 @@ MODULES: dict[str, dict[str, Any]] = {
             "taps": 4,
         },
     },
-    # Route ``bwd_bias_bf16_taps`` (hand-written fallback, sm_100a / sm_103a): the ``bwd_bias``
-    # fallback body with ``exact_pre=True``: SiLU' at the unrounded FP32 preactivation, the
-    # program of the bias calls with BF16 taps (``bwd_bias`` keeps those with FP32 taps); the
-    # ``bwd_bias`` record's plan, launch and reduce program.
+    # Route ``bwd_bias`` (hand-written fallback, sm_100a / sm_103a): the fallback body with
+    # ``bias=True`` (reads ``b``; the ``partial`` workspace grows a fifth slab, ``taps`` 5,
+    # of dbias partials that its reduce program sums into ``db``), ``dtype_flags=True``
+    # (input bits 0 and 2; the store bits 1 and 3 are the reduce program's), ``min_blocks=2``
+    # (the bias accumulators do not fit the 168-register cap of three CTAs per SM) and
+    # ``exact_pre=True``: SiLU' at the unrounded FP32 preactivation, the program of the bias
+    # calls under the ``"bf16"`` policy with FP32 and with BF16 taps.
     "cake_causal_conv1d_det_train_d8ce3d764c386135943a": {
         "arches": [
             "sm_100a",
@@ -2780,8 +2696,9 @@ MODULES: dict[str, dict[str, Any]] = {
             "taps": 5,
         },
     },
-    # Route ``bwd_bias_bf16_taps`` (hand-written fallback, sm_107a): the sm_107a ``bwd_bias``
-    # fallback body with ``exact_pre=True``.
+    # Route ``bwd_bias`` (hand-written fallback, sm_107a): the sm_107a fallback body with
+    # ``bias=True, dtype_flags=True, exact_pre=True`` (SiLU' at the unrounded FP32
+    # preactivation, with FP32 and with BF16 taps).
     "cake_causal_conv1d_det_train_4bf88567b50bfe45e241": {
         "arches": [
             "sm_107a",
@@ -3163,189 +3080,6 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "reduce": "cake_causal_conv1d_det_train_2a80334666f9e19b5c56",
         "role": "bwd",
-        "workspace_rule": {
-            "kind": "partial_rows",
-            "taps": 5,
-        },
-    },
-    # Rendered by the exporter from the family adapter's scaffold: the backward
-    # with vec 8, copy tma2d, stage_tokens 8, min_blocks 2, dtype_flags,
-    # fold_layout thread
-    # (2 CTAs per SM); it runs when C >= select_rule.channels[arch] and no
-    # routed record of a higher threshold admits C; below every threshold the
-    # fallback record (no select_rule) runs.
-    "cake_causal_conv1d_det_train_2675cc1cb4efc0937378": {
-        "arches": [
-            "sm_100a",
-            "sm_103a",
-            "sm_107a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "w"],
-            ["buffer", "cu"],
-            ["buffer", "dy"],
-            ["buffer", "dx"],
-            ["buffer", "partial"],
-            ["parameter", "S"],
-            ["parameter", "C"],
-            ["parameter", "num_docs"],
-            ["parameter", "search_steps"],
-            ["parameter", "ct_vec"],
-            ["parameter", "n_sub"],
-            ["parameter", "n_ch_tiles"],
-            ["parameter", "flags"],
-            ["buffer", "x_map"],
-            ["buffer", "dy_map"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "cooperative": False,
-            "ctas_per_sm": 2,
-            "geometry": {
-                "threads": 128,
-                "vec": 8,
-            },
-            "grid_mult": {
-                "sm_100a": 1,
-                "sm_103a": 1,
-                "sm_107a": 1,
-            },
-            "kind": "occupancy",
-        },
-        "kernel": "cake_causal_conv1d_det_train_2675cc1cb4efc0937378",
-        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_2675cc1cb4efc0937378",
-        "launch": {
-            "block": (128, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
-        },
-        "library": "cake_causal_conv1d_det_train_2675cc1cb4efc0937378",
-        "logical": {
-            "C": "C",
-            "S": "S",
-            "ct_vec": "ct_vec",
-            "cu": "cu",
-            "dx": "dx",
-            "dy": "dy",
-            "dy_map": "dy",
-            "flags": "flags",
-            "n_ch_tiles": "n_ch_tiles",
-            "n_sub": "n_sub",
-            "num_docs": "num_docs",
-            "partial": "partial",
-            "search_steps": "search_steps",
-            "w": "w",
-            "x": "x",
-            "x_map": "x",
-        },
-        "reduce": "cake_causal_conv1d_det_train_ea8f91038a9dea452ff2",
-        "role": "bwd",
-        "select_rule": {
-            "channels": {
-                "sm_100a": 512,
-                "sm_103a": 512,
-                "sm_107a": 1024,
-            },
-            "kind": "channels_at_least",
-        },
-        "workspace_rule": {
-            "kind": "partial_rows",
-            "taps": 4,
-        },
-    },
-    # Rendered by the exporter from the family adapter's scaffold: the backward
-    # with vec 8, copy tma2d, stage_tokens 8, min_blocks 2, bias, dtype_flags
-    # (2 CTAs per SM); it runs when C >= select_rule.channels[arch] and no
-    # routed record of a higher threshold admits C; below every threshold the
-    # fallback record (no select_rule) runs.
-    "cake_causal_conv1d_det_train_517710d1f0988cf570a9": {
-        "arches": [
-            "sm_100a",
-            "sm_103a",
-            "sm_107a",
-        ],
-        "arg_plan": [
-            ["buffer", "x"],
-            ["buffer", "w"],
-            ["buffer", "cu"],
-            ["buffer", "dy"],
-            ["buffer", "dx"],
-            ["buffer", "partial"],
-            ["buffer", "b"],
-            ["parameter", "S"],
-            ["parameter", "C"],
-            ["parameter", "num_docs"],
-            ["parameter", "search_steps"],
-            ["parameter", "ct_vec"],
-            ["parameter", "n_sub"],
-            ["parameter", "n_ch_tiles"],
-            ["parameter", "flags"],
-            ["buffer", "x_map"],
-            ["buffer", "dy_map"],
-            ["grid", "grid_x"],
-            ["grid", "grid_y"],
-            ["grid", "grid_z"],
-        ],
-        "ffi_entry": "run",
-        "grid_rule": {
-            "cooperative": False,
-            "ctas_per_sm": 2,
-            "geometry": {
-                "threads": 128,
-                "vec": 8,
-            },
-            "grid_mult": {
-                "sm_100a": 1,
-                "sm_103a": 1,
-                "sm_107a": 1,
-            },
-            "kind": "occupancy",
-        },
-        "kernel": "cake_causal_conv1d_det_train_517710d1f0988cf570a9",
-        "kernel_symbol": "kernel_cake_causal_conv1d_det_train_517710d1f0988cf570a9",
-        "launch": {
-            "block": (128, 1, 1),
-            "cluster": (1, 1, 1),
-            "cooperative": False,
-            "dynamic_smem_bytes": 87040,
-            "use_pdl": False,
-        },
-        "library": "cake_causal_conv1d_det_train_517710d1f0988cf570a9",
-        "logical": {
-            "C": "C",
-            "S": "S",
-            "b": "b",
-            "ct_vec": "ct_vec",
-            "cu": "cu",
-            "dx": "dx",
-            "dy": "dy",
-            "dy_map": "dy",
-            "flags": "flags",
-            "n_ch_tiles": "n_ch_tiles",
-            "n_sub": "n_sub",
-            "num_docs": "num_docs",
-            "partial": "partial",
-            "search_steps": "search_steps",
-            "w": "w",
-            "x": "x",
-            "x_map": "x",
-        },
-        "reduce": "cake_causal_conv1d_det_train_1c21c181af94e1635851",
-        "role": "bwd",
-        "select_rule": {
-            "channels": {
-                "sm_100a": 512,
-                "sm_103a": 512,
-                "sm_107a": 1024,
-            },
-            "kind": "channels_at_least",
-        },
         "workspace_rule": {
             "kind": "partial_rows",
             "taps": 5,
@@ -4701,8 +4435,8 @@ MODULES: dict[str, dict[str, Any]] = {
 
 # Architecture -> route -> the records a call of the route selects from (the
 # fallback first).  The default routes ``fwd`` / ``bwd`` are the shipped
-# programs; the ten other routes (``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
-# ``bwd_fp32g``, ``bwd_bias_fp32g``, ``bwd_dt_bf16_taps``, ``bwd_bias_bf16_taps`` and the
+# programs; the eight other routes (``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
+# ``bwd_fp32g``, ``bwd_bias_fp32g`` and the
 # opt-in pair routes ``bwd_fp32g_pair``, ``bwd_bias_fp32g_pair``) each hold their
 # hand-written fallback (above) and, once rendered, the routed programs the exporter
 # scaffolds from it; the forward routes' sm_107a two-stage programs are hand-written
@@ -4716,10 +4450,6 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_e057357c655024d4ff1d",
         ],
         "bwd_bias": [
-            "cake_causal_conv1d_det_train_2d91e5f926238453c78c",
-            "cake_causal_conv1d_det_train_517710d1f0988cf570a9",
-        ],
-        "bwd_bias_bf16_taps": [
             "cake_causal_conv1d_det_train_d8ce3d764c386135943a",
             "cake_causal_conv1d_det_train_03799186845e6a7d8296",
         ],
@@ -4732,10 +4462,6 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
         ],
         "bwd_dt": [
-            "cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa",
-            "cake_causal_conv1d_det_train_2675cc1cb4efc0937378",
-        ],
-        "bwd_dt_bf16_taps": [
             "cake_causal_conv1d_det_train_af4c42c4bc5c9f00be94",
             "cake_causal_conv1d_det_train_e5c5595c9beb345803b0",
         ],
@@ -4751,16 +4477,19 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_f193c5247980992f4f81",
             "cake_causal_conv1d_det_train_f5497330bfd286211643",
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         ],
         "fwd_bias": [
             "cake_causal_conv1d_det_train_62cb38eb8aa667d46bc1",
             "cake_causal_conv1d_det_train_08880ca12e4064bc8cdb",
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         ],
         "fwd_dt": [
             "cake_causal_conv1d_det_train_0f3982a5518f5a8696f6",
             "cake_causal_conv1d_det_train_9c1e7ee9f37e3102660e",
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
         ],
     },
     "sm_103a": {
@@ -4772,10 +4501,6 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_baca4c969c783d07d81f",
         ],
         "bwd_bias": [
-            "cake_causal_conv1d_det_train_2d91e5f926238453c78c",
-            "cake_causal_conv1d_det_train_517710d1f0988cf570a9",
-        ],
-        "bwd_bias_bf16_taps": [
             "cake_causal_conv1d_det_train_d8ce3d764c386135943a",
             "cake_causal_conv1d_det_train_03799186845e6a7d8296",
         ],
@@ -4788,10 +4513,6 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
         ],
         "bwd_dt": [
-            "cake_causal_conv1d_det_train_9c8310a1d3fa9b8ccffa",
-            "cake_causal_conv1d_det_train_2675cc1cb4efc0937378",
-        ],
-        "bwd_dt_bf16_taps": [
             "cake_causal_conv1d_det_train_af4c42c4bc5c9f00be94",
             "cake_causal_conv1d_det_train_e5c5595c9beb345803b0",
         ],
@@ -4807,16 +4528,19 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_f193c5247980992f4f81",
             "cake_causal_conv1d_det_train_f5497330bfd286211643",
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         ],
         "fwd_bias": [
             "cake_causal_conv1d_det_train_62cb38eb8aa667d46bc1",
             "cake_causal_conv1d_det_train_08880ca12e4064bc8cdb",
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         ],
         "fwd_dt": [
             "cake_causal_conv1d_det_train_0f3982a5518f5a8696f6",
             "cake_causal_conv1d_det_train_9c1e7ee9f37e3102660e",
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
         ],
     },
     "sm_107a": {
@@ -4831,10 +4555,6 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_0d99ef0e0ed10b11dfd5",
         ],
         "bwd_bias": [
-            "cake_causal_conv1d_det_train_cc7a117aee9c7ae829c4",
-            "cake_causal_conv1d_det_train_517710d1f0988cf570a9",
-        ],
-        "bwd_bias_bf16_taps": [
             "cake_causal_conv1d_det_train_4bf88567b50bfe45e241",
             "cake_causal_conv1d_det_train_03799186845e6a7d8296",
         ],
@@ -4847,10 +4567,6 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_a681165b3e81204c73ff",
         ],
         "bwd_dt": [
-            "cake_causal_conv1d_det_train_8b9b8db0833fd64a578f",
-            "cake_causal_conv1d_det_train_2675cc1cb4efc0937378",
-        ],
-        "bwd_dt_bf16_taps": [
             "cake_causal_conv1d_det_train_ff7637fef45fa62da9d5",
             "cake_causal_conv1d_det_train_e5c5595c9beb345803b0",
         ],
@@ -4868,6 +4584,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_8665d0756b8240ecb4d0",
             "cake_causal_conv1d_det_train_d00a2892aa363564c673",
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
         ],
         "fwd_bias": [
             "cake_causal_conv1d_det_train_62cb38eb8aa667d46bc1",
@@ -4875,6 +4592,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_d829c95e1d610bc14b23",
             "cake_causal_conv1d_det_train_77af6383ff00b1cd047c",
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
         ],
         "fwd_dt": [
             "cake_causal_conv1d_det_train_0f3982a5518f5a8696f6",
@@ -4882,6 +4600,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_det_train_176ebb3e14f7ad9c94dc",
             "cake_causal_conv1d_det_train_6211cda590057b12f1a2",
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
         ],
     },
 }
@@ -4901,12 +4620,11 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 # preactivation); ``_dt`` routes take BF16 taps and / or store a BF16 gradient
 # (the ``flags`` scalar says which), ``_bias`` routes add the per-channel bias
 # and its gradient, ``_fp32g`` routes evaluate SiLU' at the unrounded FP32
-# preactivation for the weight gradient, and the ``_bf16_taps`` routes run the
-# ``bwd_dt`` / ``bwd_bias`` programs with SiLU' at the unrounded FP32
-# preactivation: a backward call with BF16 taps takes them under the
-# ``"bf16"`` policy (with FP32 taps it keeps ``bwd_dt`` / ``bwd_bias``).  The
-# ``_pair`` routes are the opt-in FP32 hi/lo pair forms of the two ``_fp32g``
-# routes (:data:`PAIR_ROUTES`).
+# preactivation for the weight gradient, and ``bwd_dt`` and ``bwd_bias``
+# evaluate SiLU' at the unrounded FP32 preactivation with FP32 and with BF16
+# taps.
+# The ``_pair`` routes are the opt-in FP32 hi/lo pair forms of the two
+# ``_fp32g`` routes (:data:`PAIR_ROUTES`).
 # :func:`forward_route` and :func:`backward_route` are the host's map from a
 # call's arguments to a route.
 KINDS = (
@@ -4918,8 +4636,6 @@ KINDS = (
     "bwd_bias",
     "bwd_fp32g",
     "bwd_bias_fp32g",
-    "bwd_dt_bf16_taps",
-    "bwd_bias_bf16_taps",
     "bwd_fp32g_pair",
     "bwd_bias_fp32g_pair",
 )
@@ -4982,14 +4698,15 @@ GRID_MULT_CHOICES: tuple[int, ...] = (1, 2, 3, 4)
 # never carries one.
 SELECT_KINDS = ("channels_at_least", "channels_tokens_at_least")
 # The selection-rule kind of a record that owns no call by the rules
-# (``{"kind": "rows"}``): it runs only at the rows of :data:`DIRECT_ROWS` that
-# name it, before :data:`FALLBACK_ROWS` and the rules (the direct forward
-# programs); it is neither a candidate of the rules nor the route's fallback.
+# (``{"kind": "rows"}``): it runs only at the rows of :data:`PAIR_ROWS` or
+# :data:`DIRECT_ROWS` that name it, before :data:`FALLBACK_ROWS` and the rules
+# (the pair direct and the direct forward programs); it is neither a candidate of
+# the rules nor the route's fallback.
 ROWS_KIND = "rows"
 # The ``flags`` bit mask of the ``dtype_flags`` programs (every program of the
-# eight other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
-# ``bwd_fp32g``, ``bwd_bias_fp32g``, ``bwd_dt_bf16_taps`` and
-# ``bwd_bias_bf16_taps``): the host derives it from the tap tensor, the ACTUAL
+# six other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
+# ``bwd_fp32g`` and ``bwd_bias_fp32g``): the host
+# derives it from the tap tensor, the ACTUAL
 # ``dweight`` out tensor, the bias tensor and the ACTUAL ``dbias`` out tensor;
 # the kernel reads it once in its prologue (load form) and once in its epilogue
 # (store form).  The default routes' programs take no ``flags``.
@@ -5094,17 +4811,17 @@ def backward_route(
     """The backward route of a call.
 
     ``bias`` selects ``bwd_bias_fp32g`` under ``fp32_grad`` (the
-    ``silu_grad_preactivation="fp32"`` policy), else ``bwd_bias_bf16_taps``
-    with BF16 taps and ``bwd_bias`` with FP32 taps; without a bias
-    ``fp32_grad`` selects ``bwd_fp32g``; else BF16 taps select
-    ``bwd_dt_bf16_taps``, FP32 taps with a BF16 ``dweight`` out tensor
-    ``bwd_dt``, and FP32 taps and ``dweight`` the default ``bwd``.  The
-    ``_bf16_taps`` routes run the ``bwd_dt`` / ``bwd_bias`` programs with
-    SiLU' at the unrounded FP32 preactivation.  Every route but ``bwd`` reads
-    the tap / gradient dtypes from ``flags``.  ``pair`` (the
-    ``dweight_sum="fp32_pair"`` opt-in) selects the ``_fp32g`` route's pair
-    route (:data:`PAIR_ROUTES`); only the ``_fp32g`` routes have one, so
-    ``pair`` without ``fp32_grad`` is a ``ValueError`` (never another route).
+    ``silu_grad_preactivation="fp32"`` policy), else ``bwd_bias`` with FP32
+    and with BF16 taps (its programs evaluate SiLU' at the unrounded FP32
+    preactivation); without a bias ``fp32_grad`` selects ``bwd_fp32g``; else
+    BF16 taps or a BF16 ``dweight`` out tensor select ``bwd_dt`` (its
+    programs evaluate SiLU' at the unrounded FP32 preactivation, with FP32
+    and with BF16 taps), and FP32 taps and ``dweight`` the default ``bwd``.
+    Every route but ``bwd`` reads the tap / gradient dtypes
+    from ``flags``.  ``pair`` (the ``dweight_sum="fp32_pair"`` opt-in)
+    selects the ``_fp32g`` route's pair route (:data:`PAIR_ROUTES`); only the
+    ``_fp32g`` routes have one, so ``pair`` without ``fp32_grad`` is a
+    ``ValueError`` (never another route).
     """
 
     if pair and not fp32_grad:
@@ -5113,16 +4830,11 @@ def backward_route(
             "the FP32-SiLU' routes have an FP32 (hi, lo) pair form"
         )
     if bias:
-        if fp32_grad:
-            route = "bwd_bias_fp32g"
-        else:
-            route = "bwd_bias_bf16_taps" if bf16_taps else "bwd_bias"
+        route = "bwd_bias_fp32g" if fp32_grad else "bwd_bias"
     elif fp32_grad:
         route = "bwd_fp32g"
-    elif bf16_taps:
-        route = "bwd_dt_bf16_taps"
     else:
-        route = "bwd_dt" if bf16_dweight else "bwd"
+        route = "bwd_dt" if bf16_taps or bf16_dweight else "bwd"
     return f"{route}_pair" if pair else route
 
 
@@ -5160,8 +4872,8 @@ def select_rule(record: dict[str, Any]) -> dict[str, Any] | None:
     with the token floor is tried first; at a row of :data:`FALLBACK_ROWS` the
     route's fallback runs whatever the rules.  ``{"kind": "rows"}``
     (:data:`ROWS_KIND`) owns no call by the rules: the record runs only at the
-    rows of :data:`DIRECT_ROWS` that name it, before :data:`FALLBACK_ROWS` and
-    the rules.
+    rows of :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` that name it, before
+    :data:`FALLBACK_ROWS` and the rules.
     """
 
     return record.get("select_rule")
@@ -5236,62 +4948,131 @@ def _admits(rule: dict[str, Any], *, arch: str, C: int, S: int | None = None) ->
 # selection rules pick, ``{arch: {(route, C_lo, C_hi): (S_min, S_max)}}``: a
 # forward call of ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a
 # multiple of 8) and ``S_min <= S <= S_max`` tokens launches the static program
-# (:func:`selected_modules`) on the route's plan (:func:`plan`).  The keys of one
-# ``(arch, route)`` are disjoint and share no ``(C, S)`` with a
-# :data:`DIRECT_ROWS` range.  Rendered from the forward kernel generator's
-# table; every other channel count, route, ``S`` and architecture selects by
-# :data:`DIRECT_ROWS` and the rules.
+# (:func:`selected_modules`) on the route's plan (:func:`plan`).  The keys
+# of one ``(arch, route)`` are disjoint.  A :data:`DIRECT_ROWS` range shares
+# ``(C, S)`` with them only inside the range of its own key (sm_103a
+# ``fwd_bias`` at C = 720 to 768), and a :data:`PAIR_ROWS` range wherever
+# it covers theirs; both run ahead of them there.  Rendered from the forward
+# kernel generator's table; every other channel count, route, ``S`` and
+# architecture selects by :data:`DIRECT_ROWS` and the rules.
 FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
+        ("fwd", 512, 512): (1, 24576),
+        ("fwd", 520, 544): (1, 12288),
+        ("fwd", 552, 568): (1, 8192),
         ("fwd", 576, 576): (1, 4096),
         ("fwd", 584, 640): (1, 8192),
         ("fwd", 648, 704): (1, 12288),
         ("fwd", 712, 712): (1, 12288),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 12288),
+        ("fwd", 904, 952): (1, 8192),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_dt", 512, 512): (1, 24576),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 576): (1, 4096),
         ("fwd_dt", 584, 640): (1, 8192),
         ("fwd_dt", 648, 696): (1, 8192),
         ("fwd_dt", 704, 704): (1, 12288),
         ("fwd_dt", 712, 768): (1, 16384),
+        ("fwd_dt", 776, 896): (1, 12288),
+        ("fwd_dt", 904, 1024): (1, 12288),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 544): (1, 12288),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 4096),
-        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 584, 640): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
         ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_bias", 776, 776): (1, 8192),
+        ("fwd_bias", 784, 896): (1, 8192),
+        ("fwd_bias", 904, 1024): (1, 12288),
     },
     "sm_103a": {
-        ("fwd", 576, 632): (1, 2048),
+        ("fwd", 520, 520): (1, 8192),
+        ("fwd", 528, 568): (1, 4096),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
-        ("fwd", 720, 760): (1, 8192),
+        ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 824): (1, 4096),
+        ("fwd", 832, 832): (1, 8192),
+        ("fwd", 840, 896): (1, 4096),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_dt", 512, 512): (1, 20480),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 640): (1, 8192),
         ("fwd_dt", 648, 704): (1, 8192),
         ("fwd_dt", 712, 752): (1, 12800),
         ("fwd_dt", 760, 760): (1, 12288),
         ("fwd_dt", 768, 768): (1, 12288),
+        ("fwd_dt", 776, 776): (1, 12288),
+        ("fwd_dt", 784, 832): (1, 12288),
+        ("fwd_dt", 840, 888): (1, 8192),
+        ("fwd_dt", 896, 896): (1, 8192),
+        ("fwd_dt", 904, 952): (1, 8192),
+        ("fwd_dt", 960, 1016): (1, 20480),
+        ("fwd_dt", 1024, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 520): (1, 12288),
+        ("fwd_bias", 528, 544): (1, 24576),
+        ("fwd_bias", 552, 568): (1, 8192),
+        ("fwd_bias", 576, 576): (1, 2048),
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
-        ("fwd_bias", 720, 728): (13824, 16383),
-        ("fwd_bias", 736, 736): (14336, 16383),
-        ("fwd_bias", 744, 760): (13824, 16383),
-        ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 712, 712): (1, 12800),
+        ("fwd_bias", 720, 728): (1, 16383),
+        ("fwd_bias", 736, 736): (1, 16383),
+        ("fwd_bias", 744, 760): (1, 16383),
+        ("fwd_bias", 768, 768): (1, 16384),
+        ("fwd_bias", 776, 896): (1, 8192),
+        ("fwd_bias", 904, 952): (1, 12288),
+        ("fwd_bias", 960, 1024): (1, 20480),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (1, 8192),
+        ("fwd", 520, 520): (1, 24575),
+        ("fwd", 528, 528): (1, 16384),
+        ("fwd", 536, 536): (1, 16384),
+        ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
-        ("fwd", 768, 768): (1, 2048),
+        ("fwd", 776, 824): (1, 32768),
+        ("fwd", 832, 832): (1, 4096),
+        ("fwd", 840, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 16384),
+        ("fwd", 904, 1016): (1, 12288),
+        ("fwd", 1024, 1024): (1, 32768),
+        ("fwd_dt", 512, 512): (1, 32768),
+        ("fwd_dt", 520, 528): (1, 16384),
+        ("fwd_dt", 536, 544): (1, 16384),
+        ("fwd_dt", 552, 568): (1, 16384),
         ("fwd_dt", 576, 640): (1, 12288),
         ("fwd_dt", 648, 704): (1, 12288),
         ("fwd_dt", 712, 712): (1, 32768),
         ("fwd_dt", 720, 768): (1, 12288),
+        ("fwd_dt", 776, 824): (1, 24576),
+        ("fwd_dt", 832, 832): (1, 20480),
+        ("fwd_dt", 840, 888): (1, 20480),
+        ("fwd_dt", 896, 896): (1, 20480),
+        ("fwd_dt", 904, 1024): (1, 32768),
+        ("fwd_bias", 512, 512): (1, 32768),
+        ("fwd_bias", 520, 528): (1, 24575),
+        ("fwd_bias", 536, 568): (1, 32768),
         ("fwd_bias", 576, 576): (1, 12296),
-        ("fwd_bias", 584, 584): (1, 16392),
-        ("fwd_bias", 592, 624): (1, 16384),
-        ("fwd_bias", 632, 632): (1, 16392),
+        ("fwd_bias", 584, 584): (1, 24576),
+        ("fwd_bias", 592, 592): (1, 16384),
+        ("fwd_bias", 600, 600): (1, 24576),
+        ("fwd_bias", 608, 608): (1, 16384),
+        ("fwd_bias", 616, 616): (1, 24576),
+        ("fwd_bias", 624, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 24576),
         ("fwd_bias", 640, 696): (1, 24576),
         ("fwd_bias", 704, 768): (1, 32768),
+        ("fwd_bias", 776, 1024): (1, 32768),
     },
 }
 
@@ -5300,7 +5081,10 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
     """The ``(S_min, S_max)`` of the :data:`FALLBACK_ROWS` key of ``arch`` on
     route ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of
     8), ``None`` without one: inside that token range (both bounds included)
-    the call launches the route's fallback program."""
+    the call launches the route's fallback program, but where a
+    :data:`PAIR_ROWS` or a :data:`DIRECT_ROWS` range holds the call (a direct
+    range lies inside the static range of its key on sm_103a ``fwd_bias`` at
+    C = 720 to 768)."""
 
     C = int(C)
     if C % CHANNEL_MULTIPLE:
@@ -5316,14 +5100,27 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
 # (S_lo, S_hi, module)}}``: a forward call of ``route`` on ``arch`` with ``C_lo <=
 # C <= C_hi`` channels (a multiple of 8) and ``S_lo <= S <= S_hi`` tokens launches
 # ``module`` (:func:`direct_module`), a record of the route whose ``select_rule``
-# is of kind :data:`ROWS_KIND`, on the channel tiles of :data:`DIRECT_PLANS`
-# (:func:`direct_split`).  The keys of one ``(arch, route)`` are disjoint and share
-# no ``(C, S)`` with a :data:`FALLBACK_ROWS` range; where a key of both tables
-# covers ``C``, the static range lies below the direct one.  Rendered from the
-# forward kernel generator's table; every other channel count,
-# route, ``S`` and architecture selects by :data:`FALLBACK_ROWS` and the rules.
+# is of kind :data:`ROWS_KIND` and whose geometry's ``vec`` is 8, on the channel
+# tiles of :data:`DIRECT_PLANS` (:func:`direct_split`).  The keys of one
+# ``(arch, route)`` are disjoint.  A key meets the channel counts of a
+# :data:`FALLBACK_ROWS` key only where both are one key; there the direct range
+# starts one token above the static range, or lies inside it (sm_103a ``fwd_bias``
+# at C = 720 to 768) and runs ahead of it.  A :data:`PAIR_ROWS` range runs
+# ahead of a key where it covers its ``(C, S)``.  Rendered from the forward
+# kernel generator's table; every other channel count, route, ``S`` and
+# architecture selects by :data:`FALLBACK_ROWS` and the rules.
 DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
     "sm_100a": {
+        ("fwd", 520, 544): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 552, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 576): (
             4097,
             24576,
@@ -5348,6 +5145,26 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             8193,
             20480,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 776, 888): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 896, 896): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 952): (
+            8193,
+            20480,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd_dt", 520, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 576): (
             4097,
@@ -5374,12 +5191,32 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20480,
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 776, 896): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 904, 1024): (
+            12289,
+            20480,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_bias", 520, 544): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 552, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 576, 576): (
             4097,
             24576,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 584, 632): (
+        ("fwd_bias", 584, 640): (
             4097,
             20480,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
@@ -5394,8 +5231,33 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20480,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
+        ("fwd_bias", 776, 776): (
+            8193,
+            20480,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 784, 896): (
+            8193,
+            14336,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
     },
     "sm_103a": {
+        ("fwd", 512, 512): (
+            2049,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 520, 520): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 528, 568): (
+            4097,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 632): (
             2049,
             24576,
@@ -5421,10 +5283,40 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20479,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
         ),
-        ("fwd", 720, 760): (
+        ("fwd", 720, 768): (
             8193,
             19456,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 776, 824): (
+            4097,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 832, 832): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 840, 896): (
+            4097,
+            24576,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 952): (
+            2049,
+            20480,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd_dt", 512, 512): (
+            20481,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 520, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 640): (
             8193,
@@ -5451,13 +5343,103 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20480,
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 776, 776): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 784, 832): (
+            12289,
+            20480,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 840, 888): (
+            8193,
+            20480,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 896, 896): (
+            8193,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 904, 952): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_bias", 520, 520): (
+            12289,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 552, 568): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 576, 576): (
+            2049,
+            16384,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 584, 640): (
             4105,
             16384,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
+        ("fwd_bias", 712, 712): (
+            12801,
+            14592,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 720, 728): (
+            12801,
+            13823,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 736, 736): (
+            12801,
+            14335,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 744, 760): (
+            12801,
+            13823,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 768, 768): (
+            12801,
+            13823,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 776, 896): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (
+            8193,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 528, 528): (
+            16385,
+            24575,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 536, 536): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 544, 568): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 704): (
             4097,
             32768,
@@ -5472,6 +5454,41 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             2049,
             24576,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 832, 832): (
+            4097,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 840, 888): (
+            8193,
+            16384,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 896, 896): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 1016): (
+            12289,
+            16384,
+            "cake_causal_conv1d_det_train_a81632301ba92a887c46",
+        ),
+        ("fwd_dt", 520, 528): (
+            16385,
+            24575,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 536, 544): (
+            16385,
+            32768,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 552, 568): (
+            16385,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 640): (
             12289,
@@ -5488,24 +5505,34 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             24576,
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 832, 832): (
+            20481,
+            24576,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 896, 896): (
+            20481,
+            32768,
+            "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
+        ),
         ("fwd_bias", 576, 576): (
             12297,
             32768,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 584, 584): (
-            16393,
-            20480,
-            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
-        ),
-        ("fwd_bias", 592, 624): (
+        ("fwd_bias", 592, 592): (
             16385,
             24576,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 632, 632): (
-            16393,
-            20480,
+        ("fwd_bias", 608, 608): (
+            16385,
+            24576,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 624, 624): (
+            16385,
+            24576,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
     },
@@ -5516,15 +5543,10 @@ def direct_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
     """The ``(S_lo, S_hi)`` of the :data:`DIRECT_ROWS` key of ``arch`` on route
     ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of 8),
     ``None`` without one: inside that token range (both bounds included) the
-    call launches the key's direct program."""
+    call launches the key's direct program, but where a :data:`PAIR_ROWS` range
+    holds the call."""
 
-    C = int(C)
-    if C % CHANNEL_MULTIPLE:
-        return None
-    for (route, c_lo, c_hi), (s_lo, s_hi, _name) in DIRECT_ROWS.get(arch, {}).items():
-        if route == kind and int(c_lo) <= C <= int(c_hi):
-            return int(s_lo), int(s_hi)
-    return None
+    return _row_range(DIRECT_ROWS, arch, kind, C)
 
 
 def direct_row(arch: str | None, kind: str | None, C: int, S: int | None) -> bool:
@@ -5532,10 +5554,7 @@ def direct_row(arch: str | None, kind: str | None, C: int, S: int | None) -> boo
     tokens lies in a :data:`DIRECT_ROWS` range (``False`` without an
     architecture, a route or ``S``)."""
 
-    if arch is None or kind is None or S is None:
-        return False
-    bounds = direct_row_range(arch, kind, C)
-    return bounds is not None and bounds[0] <= int(S) <= bounds[1]
+    return _in_rows(direct_row_range, arch, kind, C, S)
 
 
 def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
@@ -5546,15 +5565,187 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
     ``ValueError``; a module the route does not list, or whose rule is not of
     kind :data:`ROWS_KIND`, is a registry error (``RuntimeError``)."""
 
+    return _rows_module(DIRECT_ROWS, "DIRECT_ROWS", "direct", arch, kind, C, S)
+
+
+# The rows where a forward route runs its pair direct program (the direct program
+# with each thread on a pair of channels) in place of the program
+# :data:`DIRECT_ROWS`, :data:`FALLBACK_ROWS` or its selection rules pick,
+# ``{arch: {(route, C_lo, C_hi): (S_lo, S_hi, module)}}``: a forward call of
+# ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8) and
+# ``S_lo <= S <= S_hi`` tokens launches ``module`` (:func:`pair_module`), a record
+# of the route whose ``select_rule`` is of kind :data:`ROWS_KIND` and whose
+# geometry's ``vec`` is 2, on the channel tiles of :data:`PAIR_PLANS`
+# (:func:`direct_split`).  The keys of one ``(arch, route)`` are disjoint in C:
+# one key, but two on sm_100a ``fwd_dt``, whose range ends at S 1024 from C 648 (at
+# most 512 CTAs of the pair grid), and three on sm_103a ``fwd_bias`` (C 720-768 up
+# to S 3072, the others up to S 1536) and sm_107a ``fwd`` (C 512 up to S 4096, C
+# 520-736 from S 4, the others up to S 2560).  A range may cover the ``(C, S)`` of
+# :data:`FALLBACK_ROWS` and :data:`DIRECT_ROWS` ranges and takes them: those tables
+# decide only outside it.  Rendered from the forward kernel
+# generator's table.
+PAIR_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
+    "sm_100a": {
+        ("fwd", 512, 1024): (
+            1,
+            3072,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd_dt", 512, 640): (
+            1,
+            1536,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_dt", 648, 1024): (
+            1,
+            1024,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_bias", 512, 1024): (
+            1,
+            1536,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+    },
+    "sm_103a": {
+        ("fwd", 512, 1024): (
+            1,
+            3072,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd_dt", 512, 1024): (
+            1,
+            1792,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_bias", 512, 712): (
+            1,
+            1536,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 720, 768): (
+            1,
+            3072,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 776, 1024): (
+            1,
+            1536,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+    },
+    "sm_107a": {
+        ("fwd", 512, 512): (
+            1,
+            4096,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd", 520, 736): (
+            4,
+            2560,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd", 744, 1024): (
+            1,
+            2560,
+            "cake_causal_conv1d_det_train_d0b237e92b28348315d0",
+        ),
+        ("fwd_dt", 512, 1024): (
+            1,
+            1792,
+            "cake_causal_conv1d_det_train_96bf2b8aa1132598f130",
+        ),
+        ("fwd_bias", 512, 1024): (
+            1,
+            1792,
+            "cake_causal_conv1d_det_train_6cc04dd65e493836b918",
+        ),
+    },
+}
+
+
+def pair_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
+    """The ``(S_lo, S_hi)`` of the :data:`PAIR_ROWS` key of ``arch`` on route
+    ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of 8),
+    ``None`` without one: inside that token range (both bounds included) the
+    call launches the key's pair direct program."""
+
+    return _row_range(PAIR_ROWS, arch, kind, C)
+
+
+def pair_row(arch: str | None, kind: str | None, C: int, S: int | None) -> bool:
+    """Whether a call of route ``kind`` on ``arch`` with ``C`` channels and ``S``
+    tokens lies in a :data:`PAIR_ROWS` range (``False`` without an
+    architecture, a route or ``S``)."""
+
+    return _in_rows(pair_row_range, arch, kind, C, S)
+
+
+def pair_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
+    """The pair direct program a call of route ``kind`` on ``arch`` with ``C``
+    channels and ``S`` tokens launches: the module of the :data:`PAIR_ROWS` key
+    covering ``C`` when its range holds ``S`` (both bounds included), ``None``
+    outside it or without a key; the errors of :func:`direct_module`."""
+
+    return _rows_module(PAIR_ROWS, "PAIR_ROWS", "pair direct", arch, kind, C, S)
+
+
+def _row_range(
+    table: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]],
+    arch: str,
+    kind: str,
+    C: int,
+) -> tuple[int, int] | None:
+    """The ``(S_lo, S_hi)`` of the key of ``table`` (:data:`DIRECT_ROWS` or
+    :data:`PAIR_ROWS`) of ``arch`` on route ``kind`` covering ``C``."""
+
     C = int(C)
     if C % CHANNEL_MULTIPLE:
         return None
-    for (route, c_lo, c_hi), (s_lo, s_hi, name) in DIRECT_ROWS.get(arch, {}).items():
+    for (route, c_lo, c_hi), (s_lo, s_hi, _name) in table.get(arch, {}).items():
+        if route == kind and int(c_lo) <= C <= int(c_hi):
+            return int(s_lo), int(s_hi)
+    return None
+
+
+def _in_rows(
+    row_range: Callable[[str, str, int], tuple[int, int] | None],
+    arch: str | None,
+    kind: str | None,
+    C: int,
+    S: int | None,
+) -> bool:
+    """Whether ``S`` lies in the range ``row_range`` gives (``False`` without an
+    architecture, a route or ``S``)."""
+
+    if arch is None or kind is None or S is None:
+        return False
+    bounds = row_range(arch, kind, C)
+    return bounds is not None and bounds[0] <= int(S) <= bounds[1]
+
+
+def _rows_module(
+    table: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]],
+    table_name: str,
+    what: str,
+    arch: str,
+    kind: str,
+    C: int,
+    S: int | None,
+) -> str | None:
+    """The module of the key of ``table`` (named ``table_name``, its programs
+    ``what``) covering ``C`` when its range holds ``S``; see
+    :func:`direct_module`."""
+
+    C = int(C)
+    if C % CHANNEL_MULTIPLE:
+        return None
+    for (route, c_lo, c_hi), (s_lo, s_hi, name) in table.get(arch, {}).items():
         if route != kind or not int(c_lo) <= C <= int(c_hi):
             continue
         if S is None:
             raise ValueError(
-                f"the Cake causal conv1d training {kind!r} route on {arch} for C={C} runs its direct program "
+                f"the Cake causal conv1d training {kind!r} route on {arch} for C={C} runs its {what} program "
                 f"at S {s_lo} to {s_hi}; the selection needs S"
             )
         if not int(s_lo) <= int(S) <= int(s_hi):
@@ -5564,7 +5755,7 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
             or (select_rule(MODULES[name]) or {}).get("kind") != ROWS_KIND
         ):
             raise RuntimeError(
-                f"the DIRECT_ROWS key ({route!r}, {c_lo}, {c_hi}) on {arch} names {name}, which is no "
+                f"the {table_name} key ({route!r}, {c_lo}, {c_hi}) on {arch} names {name}, which is no "
                 f"record of the route with a {ROWS_KIND!r} selection rule"
             )
         return name
@@ -5577,28 +5768,30 @@ def selected_modules(
     """Ordered module names one public call launches on ``arch`` for ``C`` channels and ``S`` tokens.
 
     A route may carry several programs of its kernel and launches exactly one:
-    at a row of :data:`DIRECT_ROWS` (its range holds ``S``) the key's direct
-    program (:func:`direct_module`); else at a row of :data:`FALLBACK_ROWS`
-    (:func:`fallback_row_range` holds ``S``) the route's single fallback record
-    (the one without a rule); elsewhere, of the records whose
-    :func:`select_rule` admits the call on ``arch`` the one of the highest
+    at a row of :data:`PAIR_ROWS` (its range holds ``S``) the key's pair direct
+    program (:func:`pair_module`); else at a row of :data:`DIRECT_ROWS` the
+    key's direct program (:func:`direct_module`); else at a row of
+    :data:`FALLBACK_ROWS` (:func:`fallback_row_range` holds ``S``) the route's
+    single fallback record (the one without a rule); elsewhere, of the records
+    whose :func:`select_rule` admits the call on ``arch`` the one of the highest
     channel threshold (at a threshold two records share, the one with the token
     floor first), else the fallback.  The choice is a pure function of the
     architecture, the route, ``C`` and ``S`` -- ``S`` enters only through a
-    rule's token floor or a :data:`DIRECT_ROWS` or :data:`FALLBACK_ROWS` range,
-    and the host never reads the data -- so a given ``(S, C, device)`` always
-    runs the same program of a route and ``dweight`` stays bitwise
-    reproducible.  Two records of one channel threshold that both reach ``C``
-    (but for one with a token floor and one without), zero or several
-    fallbacks, or a :data:`DIRECT_ROWS` key naming no ``rows`` record of the
-    route, are registry errors (``RuntimeError``); an unknown rule kind, or
-    ``S`` of ``None`` where a token floor decides or a :data:`DIRECT_ROWS` or
-    :data:`FALLBACK_ROWS` key covers ``C``, is a ``ValueError``.
+    rule's token floor or a :data:`PAIR_ROWS`, :data:`DIRECT_ROWS` or
+    :data:`FALLBACK_ROWS` range, and the host never reads the data -- so a given
+    ``(S, C, device)`` always runs the same program of a route and ``dweight``
+    stays bitwise reproducible.  Two records of one channel threshold that both
+    reach ``C`` (but for one with a token floor and one without), zero or
+    several fallbacks, or a :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` key naming
+    no ``rows`` record of the route, are registry errors (``RuntimeError``); an
+    unknown rule kind, or ``S`` of ``None`` where a token floor decides or a
+    :data:`PAIR_ROWS`, :data:`DIRECT_ROWS` or :data:`FALLBACK_ROWS` key covers
+    ``C``, is a ``ValueError``.
     """
 
-    direct = direct_module(arch, kind, C, S)
-    if direct is not None:
-        return (direct,)
+    rows = pair_module(arch, kind, C, S) or direct_module(arch, kind, C, S)
+    if rows is not None:
+        return (rows,)
     candidates, fallback = _channel_choice(
         arch, kind, route_modules(arch, kind), int(C)
     )
@@ -5861,8 +6054,6 @@ _NARROW_BWD_ROUTES = (
     "bwd_bias",
     "bwd_fp32g",
     "bwd_bias_fp32g",
-    "bwd_dt_bf16_taps",
-    "bwd_bias_bf16_taps",
 )
 NARROW_TILE_ROUTES: dict[str, tuple[str, ...]] = {
     "fwd": ("fwd", "fwd_dt", "fwd_bias"),
@@ -6275,32 +6466,60 @@ DIRECT_PLANS: dict[str, dict[str, tuple[int, int]]] = {
 }
 
 
+# The channel tiles of the pair direct programs, per architecture and forward route:
+# ``{arch: {route: (ct_vec, n_sub)}}`` as :data:`DIRECT_PLANS`, ``ct_vec`` counted
+# in channel pairs (a pair record's ``vec`` is 2): ``(16, 8)`` gives each CTA 32
+# channels and 64 tokens, ``ceil(C / 32)`` tiles, at every row of
+# :data:`PAIR_ROWS`.  The plan never changes ``y``.  Kept in sync with the forward
+# kernel generator's pair plans.
+PAIR_PLANS: dict[str, dict[str, tuple[int, int]]] = {
+    "sm_100a": {
+        "fwd": (16, 8),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (16, 8),
+    },
+    "sm_103a": {
+        "fwd": (16, 8),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (16, 8),
+    },
+    "sm_107a": {
+        "fwd": (16, 8),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (16, 8),
+    },
+}
+
+
 def direct_split(
     C: int,
     *,
     geometry: dict[str, int],
     route: str,
     arch: str,
+    pair: bool = False,
 ) -> tuple[int, int, int]:
     """``(ct_vec, n_sub, n_ch_tiles)`` of the direct program of ``route`` on
     ``arch`` for ``C`` channels: the :data:`DIRECT_PLANS` form ``(ct_vec,
-    n_sub)`` and ``ceil(C / vec / ct_vec)`` channel tiles (the last tile
-    partial).  ``ValueError`` for an architecture or route without a form, or
-    a form beyond the geometry's threads."""
+    n_sub)`` (with ``pair``, the pair direct program's :data:`PAIR_PLANS`
+    form) and ``ceil(C / vec / ct_vec)`` channel tiles of the geometry's
+    ``vec`` (the last tile partial).  ``ValueError`` for an architecture or
+    route without a form, or a form beyond the geometry's threads."""
 
     if arch not in ARCHES:
         raise ValueError(f"arch must be one of {ARCHES}, got {arch!r}")
-    form = DIRECT_PLANS.get(arch, {}).get(route)
+    what, plans = ("pair", PAIR_PLANS) if pair else ("direct", DIRECT_PLANS)
+    form = plans.get(arch, {}).get(route)
     if form is None:
         raise ValueError(
-            f"the {route!r} route on {arch} has no direct plan (DIRECT_PLANS names "
-            f"{sorted(DIRECT_PLANS.get(arch, {}))})"
+            f"the {route!r} route on {arch} has no {what} plan ({what.upper()}_PLANS names "
+            f"{sorted(plans.get(arch, {}))})"
         )
     ct_vec, n_sub = (int(value) for value in form)
     threads = int(geometry["threads"])
     if ct_vec < 1 or n_sub < 1 or ct_vec * n_sub > threads:
         raise ValueError(
-            f"the direct plan {form!r} of route {route!r} on {arch} does not fit {threads} threads"
+            f"the {what} plan {form!r} of route {route!r} on {arch} does not fit {threads} threads"
         )
     return _channel_split(
         int(C),
@@ -6325,11 +6544,14 @@ def _plan_split(
     arch: str | None = None,
 ) -> tuple[int, int, int]:
     """:func:`plan`'s ``(ct_vec, n_sub, n_ch_tiles)``: :func:`direct_split` for
-    a forward call (not ``legacy``) at a row of :data:`DIRECT_ROWS` of ``arch``
-    and ``route``, else :func:`channel_split`'s."""
+    a forward call (not ``legacy``) at a row of :data:`PAIR_ROWS` (the pair
+    form) or of :data:`DIRECT_ROWS` of ``arch`` and ``route``, else
+    :func:`channel_split`'s."""
 
-    if role == "fwd" and not legacy and direct_row(arch, route, C, S):
-        return direct_split(C, geometry=geometry, route=route, arch=arch)
+    if role == "fwd" and not legacy:
+        pair = pair_row(arch, route, C, S)
+        if pair or direct_row(arch, route, C, S):
+            return direct_split(C, geometry=geometry, route=route, arch=arch, pair=pair)
     return channel_split(
         C, geometry=geometry, role=role, legacy=legacy, route=route, S=S, arch=arch
     )
@@ -6356,8 +6578,9 @@ def plan(
     :data:`NARROW_TILE_WIDTHS` runs its width from its token floor on
     ``arch``, and the 32-vector tiles below it or without ``arch``; a row of
     :data:`NARROW_ROW_FLOORS` runs one tile below its own floor; a forward
-    call at a row of :data:`DIRECT_ROWS` of ``arch`` and ``route``, where the
-    direct program runs, takes :func:`direct_split` instead) and
+    call at a row of :data:`PAIR_ROWS` or :data:`DIRECT_ROWS` of ``arch`` and
+    ``route``, where the pair direct or the direct program runs, takes
+    :func:`direct_split` instead) and
     ``search_steps``, the number of halvings of the device-side binary
     search over ``cu_seqlens`` (``max(1, ceil(log2 num_docs))``).  Every
     value is a pure function of ``(S, C, num_docs)``, the geometry, the role,
@@ -6418,7 +6641,7 @@ TILE_ALIGNED_CLASSES: dict[str, dict[tuple[int, int, int], tuple[int, int]]] = {
     "sm_107a": {},
 }
 TILE_ALIGNED_CLASS_ROUTES: dict[str, tuple[str, ...]] = {
-    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g", "bwd_dt_bf16_taps"),
+    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g"),
     "sm_103a": (),
     "sm_107a": (),
 }
@@ -7006,7 +7229,9 @@ __all__ = [
     "LOGICAL_SCALARS",
     "LOGICAL_TENSORS",
     "MODULES",
+    "PAIR_PLANS",
     "PAIR_ROUTES",
+    "PAIR_ROWS",
     "PLAN_SCALARS",
     "REQUIRED_KINDS",
     "ROLES",
@@ -7043,6 +7268,9 @@ __all__ = [
     "library_name",
     "load",
     "main_grid",
+    "pair_module",
+    "pair_row",
+    "pair_row_range",
     "partial_bytes",
     "partial_rows",
     "plan",

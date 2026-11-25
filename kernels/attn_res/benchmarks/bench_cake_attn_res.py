@@ -1,0 +1,1222 @@
+"""
+Copyright (c) 2026, NVIDIA CORPORATION.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Benchmark of the Cake attention residual (``cake_pplx.cake_attn_res_{det,nondet}_train``, issue #262) against the
+same-contract baselines, with the issue's accuracy bar per arm.
+
+Arms (each called as ``fn(values, w)`` through autograd: ``values`` ``n`` separate BF16 ``[T, 7168]`` leaves, ``w``
+an FP32 ``[7168]`` leaf):
+
+* ``eager``: the issue's math as released (``released``: the values stacked, ``rsqrt`` of the mean square, the
+  softmax over the scores, a batched matmul) in eager PyTorch FP32 on the BF16 values (``v.float()``), one BF16
+  rounding of ``out``; its backward is PyTorch autograd (the value gradients rounded once to BF16 by the casts).
+* ``torch_compile``: ``torch.compile(fullgraph=True, dynamic=False)`` of the same function.
+* ``fla``: flash-linear-attention's fused AttnRes (``fla.ops.attnres.fused_attnres``, Triton, forward and backward)
+  with ``query = w``, an all-ones FP32 key-norm weight, ``scale = 1`` and ``checkpoint_level = 1`` (``O(T n)`` FP32
+  state kept for the backward).  It takes the values as separate tensors, returns BF16 ``out`` and ``dv_j`` and an FP32
+  ``dw`` (its query gradient): the same contract as the Cake arms.
+* ``fla_gluon``: the opt-in Gluon backend of the same operation (``fla.ops.attnres.backends.gluon``), same arguments.
+* ``cake_nondet`` / ``cake_det``: ``cake_pplx.cake_attn_res_<mode>_train.cake_attn_res_<mode>``.
+
+The cuDNN frontend (NVIDIA/cudnn-frontend main) has no operation with these semantics (a softmax over per-value RMS-
+scaled dot products followed by a weighted sum of the separate values).  The flash-linear-attention arms run when the
+package imports (``pip install flash-linear-attention``) and are reported as unsupported otherwise.
+
+Timing boundary (identical for all arms): ``fwd`` = one training forward ``fn(values, w)`` (output and saved-state
+allocation, autograd graph recorded and dropped); ``bwd`` = ``torch.autograd.backward`` of a recorded forward
+(``retain_graph=True``; the leaves' gradients reset to ``None`` first, so gradient allocation is inside); ``ckpt`` =
+``torch.utils.checkpoint`` (non-reentrant) around the forward, then its backward: two forwards and one backward, the
+issue's training step.  The ``eager`` arm's recompute stops after its last saved tensor (PyTorch's default checkpoint
+early stop, as in training), so it skips the final batched matmul and the BF16 cast of ``out``; the other arms save
+their state after their forward kernels, so their recompute is a full forward.  Each phase runs eagerly (``eager``
+mode: CUPTI span from the first kernel start to the last kernel end of the iteration, host launch gaps included) and as
+one CUDA graph replay (``graph`` mode).  Cold L2 (a 2 x L2 buffer zeroed outside the span before every iteration),
+``--dry`` untimed iterations, ``--repeat`` timed iterations per group, ``--groups`` groups with the arm order rotated
+per group and reversed every other group; the latency is the median of the group medians, the spread the min / max of
+all samples and the p10 / p90.
+
+Bytes moved (the issue's yardstick traffic, BF16 ``[T, 7168]`` tensors only): ``fwd`` reads the ``n`` values and
+writes ``out``, ``(n + 1) T H 2``; ``bwd`` reads ``dout`` and the values and writes every ``dv_j``, ``(2 n + 1) T H 2``;
+``ckpt`` two forwards and one backward, ``(4 n + 3) T H 2`` (the ``[T, n]`` state and ``w`` add under 0.1%).  Achieved
+GB/s = bytes / time (decimal), and the HBM utilization divides it by the device's NVML memory bandwidth
+(``get_gpu_memory_bandwidth``: ``nvmlDeviceGetMemoryBusWidth`` times ``nvmlDeviceGetClockInfo(NVML_CLOCK_MEM)`` times
+2 / 8 / 1000 GB/s, cached per device), the NVML handle found by the device's UUID; the run records the
+``CUDA_VISIBLE_DEVICES`` to NVML index map.  The report recomputes the bytes, GB/s and HBM utilization from the median
+latency and the recorded NVML bandwidth.
+
+Accuracy bar (the issue's, as the tests apply it): on ``--draws`` draws per ``n`` (``--acc-n``, by default every timed
+``n``; ``T = 2048``, values ``randn`` times ``linspace(0.5, 4, n)``, ``w = 0.05 randn``), the error of every arm's
+``out``, ``dv_j`` and ``dw`` against an FP64 evaluation in the L2 and the max norm; ``out`` and ``dv_j`` meet the bar
+when the median and the largest over the draws are at most 1.005 times those of the naive BF16 evaluation, ``dw`` when
+they are at most 1.005 times those of the issue's FP32 sum on the CPU.  An arm that raises misses the bar at that ``n``
+(its record keeps the error).  A baseline is a speedup reference at an ``n`` only when an accuracy record of the same
+GPU (name and compute capability) shows that it meets the bar there (every such record, when there are several);
+otherwise its latency is a diagnostic, marked ``(misses bar)`` or ``(unverified)`` when no record exists.  Beside that
+bar, every arm's ``dw`` is set against two more FP32 evaluations on the GPU, reported and not gated: the issue's
+written FP32 backward (``dw`` by matmul) and the formula's FP32 backward (``dw`` by a torch reduction over the tokens).
+
+Memory per arm (a second forward and backward at the timed row, after one untimed call, so compilation, autotuning and
+library loading are left out): the bytes a forward keeps beside ``out`` and its inputs, and the peak bytes the backward
+allocates beside the gradients; for the Cake arms also the package's own counts (``..._retained_bytes`` and
+``..._workspace_bytes``).
+
+Subcommands: ``run`` (all rows on one GPU, JSON) and ``report`` (JSON to markdown, with the speedup of each Cake arm
+over the fastest baseline arm that meets the bar, and the latency of every baseline arm; ``--json`` takes several
+comma-separated files, e.g. an accuracy run and a timing run; the report lists each file's GPU and library versions).
+
+Example (one GPU)::
+
+    python bench_cake_attn_res.py run --json gb300.json
+    python bench_cake_attn_res.py report --json gb300.json --md gb300.md --title "GB300"
+"""
+
+from __future__ import annotations
+
+import argparse
+import bisect
+import collections
+import functools
+import importlib
+import importlib.metadata
+import json
+import os
+import platform
+import socket
+import statistics
+import sys
+import time
+import traceback
+import types
+import warnings
+from pathlib import Path
+
+import torch
+from torch.utils.checkpoint import checkpoint
+
+H = 7168
+EPS = 1e-5
+CAKE_ARMS = ("cake_nondet", "cake_det")
+BASELINE_ARMS = ("fla", "fla_gluon", "torch_compile", "eager")
+DEFAULT_ARMS = CAKE_ARMS + BASELINE_ARMS
+PHASES = ("fwd", "bwd", "ckpt")
+MODES = ("eager", "graph")
+NEAR_TIE = 1.005
+
+
+def log(msg: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S', time.gmtime())}Z] {msg}", flush=True)
+
+
+def _tail(exc: BaseException, n: int = 400) -> str:
+    text = f"{type(exc).__name__}: {exc}"
+    return text if len(text) <= n else text[: n // 2] + " ... " + text[-n // 2 :]
+
+
+def _dist(name: str):
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+class Unsupported(Exception):
+    """The arm cannot run the row / phase; the message is the concrete reason."""
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GPU timer (kernels/engram_gate/benchmarks/bench_cake_engram_gate.py, unchanged)
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def bench_gpu_time(
+    fn,
+    dry_run_iters=3,
+    repeat_iters=20,
+    enable_cupti=True,
+    cold_l2_cache=True,
+    use_cuda_graph=False,
+    capture_stream=None,
+):
+    """Per-iteration GPU times (ms) of ``fn``: the CUPTI span from the first start to the last end of the kernels,
+    memsets and copies the iteration launches (matched by correlation id); cold L2 by zeroing 2 x L2 before every
+    iteration (outside the span); ``use_cuda_graph`` captures ``fn`` once on ``capture_stream`` and times replays.
+    Without CUPTI it warns and falls back to CUDA events."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    flush = None
+    if cold_l2_cache:
+        l2_bytes = torch.cuda.get_device_properties(device).L2_cache_size
+        flush = torch.empty(max(2 * l2_bytes, 1), dtype=torch.int8, device=device)
+    run = fn
+    graph = None
+    if use_cuda_graph:
+        side = capture_stream if capture_stream is not None else torch.cuda.Stream(device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            fn()
+        torch.cuda.current_stream(device).wait_stream(side)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=side):
+            fn()
+        run = graph.replay
+    try:
+        for _ in range(dry_run_iters):
+            if flush is not None:
+                flush.zero_()
+            run()
+        torch.cuda.synchronize(device)
+        if enable_cupti:
+            try:
+                from cupti import cupti
+            except Exception as exc:  # noqa: BLE001
+                warnings.warn(
+                    f"CUPTI is unavailable ({type(exc).__name__}: {exc}). Falling back to CUDA events.", stacklevel=2
+                )
+            else:
+                return _cupti_times(cupti, run, flush, repeat_iters, device)
+        return _event_times(run, flush, repeat_iters, device)
+    finally:
+        del run
+        if graph is not None:
+            graph.reset()
+            del graph
+
+
+def _cupti_times(cupti, run, flush, iters, device):
+    launches = []
+    spans = collections.defaultdict(list)
+    gpu_kinds = (cupti.ActivityKind.CONCURRENT_KERNEL, cupti.ActivityKind.MEMSET, cupti.ActivityKind.MEMCPY)
+    api_kinds = (cupti.ActivityKind.RUNTIME, cupti.ActivityKind.DRIVER)
+
+    def requested():
+        return 8 * 1024 * 1024, 0
+
+    def completed(activities):
+        for activity in activities:
+            if activity.kind in gpu_kinds:
+                spans[activity.correlation_id].append((activity.start, activity.end))
+            elif activity.kind in api_kinds:
+                launches.append((activity.start, activity.correlation_id))
+
+    kinds = api_kinds + gpu_kinds
+    for kind in kinds:
+        cupti.activity_enable(kind)
+    cupti.activity_register_callbacks(requested, completed)
+    stamps = []
+    try:
+        for _ in range(iters):
+            if flush is not None:
+                flush.zero_()
+            torch.cuda.synchronize(device)
+            begin = cupti.get_timestamp()
+            run()
+            end = cupti.get_timestamp()
+            stamps.append((begin, end))
+        torch.cuda.synchronize(device)
+        cupti.activity_flush_all(0)
+    finally:
+        for kind in kinds:
+            cupti.activity_disable(kind)
+        cupti.finalize()
+    launches.sort()
+    starts = [start for start, _ in launches]
+    times = []
+    for begin, end in stamps:
+        lo, hi = bisect.bisect_left(starts, begin), bisect.bisect_right(starts, end)
+        correlation = {corr for _, corr in launches[lo:hi]}
+        found = [span for corr in correlation for span in spans.get(corr, ())]
+        if not found:
+            raise RuntimeError("CUPTI recorded no GPU activity for a timed iteration")
+        times.append((max(e for _, e in found) - min(s for s, _ in found)) / 1e6)
+    return times
+
+
+def _event_times(run, flush, iters, device):
+    pairs = []
+    for _ in range(iters):
+        if flush is not None:
+            flush.zero_()
+        start = torch.cuda.Event(enable_timing=True)
+        stop = torch.cuda.Event(enable_timing=True)
+        start.record()
+        run()
+        stop.record()
+        pairs.append((start, stop))
+    torch.cuda.synchronize(device)
+    return [start.elapsed_time(stop) for start, stop in pairs]
+
+
+def timer_kind() -> str:
+    try:
+        from cupti import cupti  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        return f"cuda_events (cupti unavailable: {type(exc).__name__}: {exc})"
+    return f"cupti (cupti-python {_dist('cupti-python')})"
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# HBM bandwidth (NVML)
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _nvml_handle(pynvml, device: torch.device):
+    """The NVML handle of a CUDA device, found by its UUID (``CUDA_VISIBLE_DEVICES`` reorders the CUDA indices)."""
+    uuid = str(torch.cuda.get_device_properties(device).uuid)
+    return pynvml.nvmlDeviceGetHandleByUUID(uuid if uuid.startswith("GPU-") else f"GPU-{uuid}")
+
+
+@functools.cache
+def get_gpu_memory_bandwidth(device: torch.device) -> float:
+    """The device's HBM bandwidth in decimal GB/s from NVML: memory clock (MHz) times bus width (bits) times 2 (double
+    data rate) / 8 / 1000.  Cached per device; a device that is not a CUDA device is a ``ValueError``."""
+    device = torch.device(device)
+    if device.type != "cuda":
+        raise ValueError(f"the HBM bandwidth needs a CUDA device, got {device}")
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        handle = _nvml_handle(pynvml, torch.device("cuda", device.index or 0))
+        bus_width = pynvml.nvmlDeviceGetMemoryBusWidth(handle)
+        mem_clock = pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM)
+        return (mem_clock * bus_width * 2) / 8 / 1000
+    finally:
+        pynvml.nvmlShutdown()
+
+
+def nvml_map() -> dict:
+    """``CUDA_VISIBLE_DEVICES`` and, per CUDA index, the GPU UUID, the NVML index and PCI bus id, the memory clock,
+    the bus width and the NVML bandwidth."""
+    found = {"CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"), "devices": []}
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            for i in range(torch.cuda.device_count()):
+                handle = _nvml_handle(pynvml, torch.device("cuda", i))
+                found["devices"].append(
+                    {
+                        "cuda_index": i,
+                        "uuid": pynvml.nvmlDeviceGetUUID(handle),
+                        "nvml_index": pynvml.nvmlDeviceGetIndex(handle),
+                        "pci_bus_id": pynvml.nvmlDeviceGetPciInfo(handle).busId,
+                        "mem_clock_mhz": pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM),
+                        "bus_width_bits": pynvml.nvmlDeviceGetMemoryBusWidth(handle),
+                        "nvml_bandwidth_gbs": get_gpu_memory_bandwidth(torch.device("cuda", i)),
+                    }
+                )
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception as exc:  # noqa: BLE001
+        found["error"] = _tail(exc, 600)
+    return found
+
+
+def bytes_moved(phase: str, T: int, n: int) -> int:
+    """The issue's yardstick traffic of a phase (module docstring); ``ckpt`` is two forwards and one backward."""
+    per = T * H * 2
+    fwd, bwd = (n + 1) * per, (2 * n + 1) * per
+    return {"fwd": fwd, "bwd": bwd, "ckpt": 2 * fwd + bwd}[phase]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Arms
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def released(values, norm_w, proj_w, eps: float = EPS):
+    """_apply_attn_res with the blocks and the running sum stacked, as released (the issue's reference)."""
+    v = torch.stack(values, dim=1)
+    k = v * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + eps)
+    p = (k * (norm_w * proj_w)).sum(-1).softmax(-1)
+    return torch.matmul(p.unsqueeze(1), v).squeeze(1)
+
+
+def attn_res_fp32(values, w):
+    """The issue's math in FP32 on the BF16 values, one BF16 rounding of ``out``."""
+    return released([v.float() for v in values], w, torch.ones_like(w)).bfloat16()
+
+
+def _fresh_function(fn, name):
+    """A copy of ``fn`` with its own code object (dynamo keeps its compile cache per code object)."""
+    code = fn.__code__.replace(co_name=name)
+    return types.FunctionType(code, fn.__globals__, name, fn.__defaults__, fn.__closure__)
+
+
+class Arm:
+    name = ""
+
+    def library(self) -> str:
+        return f"torch {torch.__version__}"
+
+    def layer(self):
+        raise NotImplementedError
+
+
+class EagerArm(Arm):
+    name = "eager"
+
+    def layer(self):
+        return attn_res_fp32
+
+
+class CompileArm(Arm):
+    name = "torch_compile"
+
+    def __init__(self):
+        self.compiled = torch.compile(
+            _fresh_function(attn_res_fp32, "attn_res_compiled"), fullgraph=True, dynamic=False
+        )
+
+    def library(self) -> str:
+        import triton
+
+        return f"torch {torch.__version__} (inductor, triton {triton.__version__}), fullgraph=True, dynamic=False"
+
+    def layer(self):
+        return self.compiled
+
+
+@functools.cache
+def _ones(hidden: int, device: torch.device) -> torch.Tensor:
+    return torch.ones(hidden, dtype=torch.float32, device=device)
+
+
+class FlaArm(Arm):
+    """flash-linear-attention's fused AttnRes: ``query = w``, all-ones key-norm weight, so its logit is
+    ``r_j (v_j . w)`` and its query gradient is ``dw``."""
+
+    def __init__(self, gluon):
+        self.name = "fla_gluon" if gluon else "fla"
+        self.gluon = gluon
+        try:
+            if gluon:
+                from fla.ops.attnres.backends.gluon import fused_attnres_gluon as entry
+            else:
+                from fla.ops.attnres import fused_attnres as entry
+        except Exception as exc:  # noqa: BLE001
+            raise Unsupported(f"flash-linear-attention not importable: {type(exc).__name__}: {exc}") from exc
+        self.entry = entry
+
+    def library(self) -> str:
+        backend = "Gluon backend" if self.gluon else "Triton"
+        return (
+            f"flash-linear-attention {_dist('flash-linear-attention')} (fla.ops.attnres, {backend}, checkpoint_level=1)"
+        )
+
+    def layer(self):
+        entry = self.entry
+
+        def fn(values, w):
+            return entry(w, list(values), _ones(w.shape[-1], w.device), rms_eps=EPS, scale=1.0, checkpoint_level=1)
+
+        return fn
+
+
+class CakeArm(Arm):
+    def __init__(self, mode):
+        self.name = f"cake_{mode}"
+        module = f"cake_pplx.cake_attn_res_{mode}_train"
+        try:
+            self.mod = importlib.import_module(module)
+        except Exception as exc:  # noqa: BLE001
+            raise Unsupported(f"{module} not importable: {type(exc).__name__}: {exc}") from exc
+        self.entry = getattr(self.mod, f"cake_attn_res_{mode}")
+        if torch.cuda.is_available() and not getattr(self.mod, f"is_cake_attn_res_{mode}_train_supported")():
+            raise Unsupported(f"{module} does not serve cc {torch.cuda.get_device_capability()}")
+
+    def library(self) -> str:
+        return f"cake-pplx-attn-res {_dist('cake-pplx-attn-res')} ({self.mod.__name__})"
+
+    def sizes(self, T: int, n: int, device: torch.device) -> dict:
+        """The package's own counts: retained state of a forward, workspace of a backward (bytes)."""
+        prefix = f"cake_attn_res_{self.name.split('_', 1)[1]}_train"
+        return {
+            "api_retained_bytes": int(getattr(self.mod, f"{prefix}_retained_bytes")(T, n)),
+            "api_workspace_bytes": int(getattr(self.mod, f"{prefix}_workspace_bytes")(T, n, device)),
+        }
+
+    def layer(self):
+        entry = self.entry
+
+        def fn(values, w):
+            return entry(values, w, eps=EPS)
+
+        return fn
+
+
+def make_arm(name):
+    if name == "eager":
+        return EagerArm()
+    if name == "torch_compile":
+        return CompileArm()
+    if name in ("fla", "fla_gluon"):
+        return FlaArm(gluon=name == "fla_gluon")
+    if name in CAKE_ARMS:
+        return CakeArm(name.split("_", 1)[1])
+    raise ValueError(f"unknown arm {name}")
+
+
+def _bitwise_equal(a, b):
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    return bool(torch.equal(a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8)))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Accuracy bar
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _outputs(fn, values, w, dout):
+    leaves = [v.detach().clone().requires_grad_(True) for v in values]
+    wl = w.detach().clone().requires_grad_(True)
+    out = fn(leaves, wl)
+    out.backward(dout)
+    return {"out": out.detach(), **{f"dv{j}": v.grad for j, v in enumerate(leaves)}, "dw": wl.grad}
+
+
+def _reference(values, w, dout, dtype):
+    """out, dv_j and dw of the issue's math in ``dtype`` (float64: the FP64 evaluation; bfloat16: the naive BF16
+    evaluation, the FP32 ``w`` kept FP32); each returned in ``dtype``."""
+    vs = [v.to(dtype) for v in values]
+    wd = w if dtype == torch.bfloat16 else w.to(dtype)
+    r = torch.stack([torch.rsqrt(v.square().mean(-1) + EPS) for v in vs], 1)
+    d = torch.stack([(v * wd).sum(-1) for v in vs], 1)
+    p = (r * d).softmax(1)
+    g = dout.to(dtype)
+    dp = torch.stack([(g * v).sum(-1) for v in vs], 1)
+    ds = p * (dp - (p * dp).sum(1, keepdim=True))
+    a, b = ds * r, ds * d * r.pow(3) / H
+    found = {"out": sum(p[:, j : j + 1] * v for j, v in enumerate(vs)).to(dtype)}
+    for j, v in enumerate(vs):
+        found[f"dv{j}"] = (p[:, j : j + 1] * g + a[:, j : j + 1] * wd - b[:, j : j + 1] * v).to(dtype)
+    found["dw"] = sum((a[:, j : j + 1] * v).sum(0) for j, v in enumerate(vs)).to(dtype)
+    return found
+
+
+def _issue_fp32_dw(values, w, dout, device=None):
+    """The issue's FP32 ``dw`` (its written backward in FP32; on the CPU unless ``device`` is given)."""
+    device = torch.device("cpu") if device is None else device
+    vs = [v.to(device).float() for v in values]
+    w32, g = w.to(device).float(), dout.to(device).float()
+    r = torch.stack([torch.rsqrt(v.pow(2).mean(-1) + EPS) for v in vs], 1)
+    dot = torch.stack([v @ w32 for v in vs], 1)
+    p = (r * dot).softmax(1)
+    dp = torch.stack([(g * v).sum(-1) for v in vs], 1)
+    ds = p * (dp - (p * dp).sum(1, keepdim=True))
+    return sum(v.t() @ (ds * r)[:, j] for j, v in enumerate(vs))
+
+
+def _errors(actual, expected):
+    diff = (actual.to(expected.device, torch.float64) - expected).abs()
+    return {"l2": diff.norm().item(), "max": diff.max().item(), "ref_l2": expected.norm().item()}
+
+
+# FP32 evaluations ``dw`` is also set against (reported, not gated): the issue's written backward in FP32 on the CPU
+# (the bar), the same on the GPU, and the formula's FP32 backward on the GPU (``dw`` by a reduction over the tokens).
+DW_YARDSTICKS = ("fp32_issue_cpu", "fp32_issue_gpu", "fp32_reduce_gpu")
+
+
+def _stats(xs):
+    return [statistics.median(xs), max(xs)]
+
+
+def accuracy_unit(arm_names, n, draws, device):
+    """Per arm and output: the median and the largest error over the draws in the L2 and the max norm, beside the bar
+    (the naive BF16 evaluation for ``out`` and ``dv_j``, the issue's FP32 sum for ``dw``), and the verdict; ``dw``
+    also beside each of :data:`DW_YARDSTICKS`.  An arm that raises misses the bar: its record keeps the error, and the
+    other arms go on."""
+    T = 2048
+    arms, failed = {}, {}
+    for name in arm_names:
+        try:
+            arms[name] = make_arm(name).layer()
+        except Unsupported as exc:
+            log(f"accuracy {name}: unsupported: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            failed[name] = _tail(exc)
+            log(f"accuracy n={n} {name}: ERROR at setup: {failed[name]}")
+    errs = {name: collections.defaultdict(list) for name in [*arms, "bar", *DW_YARDSTICKS]}
+    for draw in range(draws):
+        g = torch.Generator(device=device).manual_seed(1000 * n + draw)
+        scales = torch.linspace(0.5, 4.0, n).tolist()
+        values = [(torch.randn(T, H, generator=g, device=device) * c).bfloat16() for c in scales]
+        w = 0.05 * torch.randn(H, generator=g, device=device)
+        dout = torch.randn(T, H, generator=g, device=device).bfloat16()
+        exact = _reference(values, w, dout, torch.float64)
+        tier = _reference(values, w, dout, torch.bfloat16)
+        tier["dw"] = _issue_fp32_dw(values, w, dout)
+        for key, t in tier.items():
+            for norm, e in _errors(t.float() if key != "dw" else t, exact[key]).items():
+                errs["bar"][(key, norm)].append(e)
+        yardsticks = {
+            "fp32_issue_cpu": tier["dw"],
+            "fp32_issue_gpu": _issue_fp32_dw(values, w, dout, device),
+            "fp32_reduce_gpu": _reference(values, w, dout, torch.float32)["dw"],
+        }
+        for ys, t in yardsticks.items():
+            for norm, e in _errors(t, exact["dw"]).items():
+                errs[ys][("dw", norm)].append(e)
+        for name, fn in arms.items():
+            if name in failed:
+                continue
+            try:
+                got = _outputs(fn, values, w, dout)
+                for key, t in got.items():
+                    for norm, e in _errors(t, exact[key]).items():
+                        errs[name][(key, norm)].append(e)
+            except Exception as exc:  # noqa: BLE001
+                failed[name] = _tail(exc)
+                log(f"accuracy n={n} {name}: ERROR at draw {draw}: {failed[name]}")
+    records = []
+    keys = ["out", *(f"dv{j}" for j in range(n)), "dw"]
+    for name in arm_names:
+        if name in failed:
+            records.append(
+                {
+                    "kind": "accuracy",
+                    "arm": name,
+                    "n": n,
+                    "T": T,
+                    "draws": draws,
+                    "meets_bar": False,
+                    "error": failed[name],
+                }
+            )
+            continue
+        if name not in arms:
+            continue
+        rows, ok = {}, True
+        for key in keys:
+            row = {}
+            for norm in ("l2", "max"):
+                ours, bar = errs[name][(key, norm)], errs["bar"][(key, norm)]
+                row[norm] = {"ours": _stats(ours), "bar": _stats(bar)}
+                ok &= row[norm]["ours"][0] <= NEAR_TIE * row[norm]["bar"][0]
+                ok &= row[norm]["ours"][1] <= NEAR_TIE * row[norm]["bar"][1]
+            refs = errs[name][(key, "ref_l2")]
+            row["rel_l2_median"] = statistics.median(e / r for e, r in zip(errs[name][(key, "l2")], refs, strict=True))
+            rows[key] = row
+        versus = {}
+        for ys in DW_YARDSTICKS:
+            entry = {}
+            meets = True
+            for norm in ("l2", "max"):
+                ours, theirs = _stats(errs[name][("dw", norm)]), _stats(errs[ys][("dw", norm)])
+                entry[norm] = {"ours": ours, "yardstick": theirs}
+                meets &= ours[0] <= NEAR_TIE * theirs[0] and ours[1] <= NEAR_TIE * theirs[1]
+            entry["meets"] = meets
+            versus[ys] = entry
+        rows["dw"]["yardsticks"] = versus
+        records.append({"kind": "accuracy", "arm": name, "n": n, "T": T, "draws": draws, "meets_bar": ok, "rows": rows})
+        log(f"accuracy n={n} {name}: meets_bar={ok} dw vs " + ", ".join(f"{k} {v['meets']}" for k, v in versus.items()))
+    for ys in DW_YARDSTICKS:
+        refs = errs[ys][("dw", "ref_l2")]
+        records.append(
+            {
+                "kind": "dw_yardstick",
+                "yardstick": ys,
+                "n": n,
+                "T": T,
+                "draws": draws,
+                "l2": _stats(errs[ys][("dw", "l2")]),
+                "max": _stats(errs[ys][("dw", "max")]),
+                "rel_l2_median": statistics.median(e / r for e, r in zip(errs[ys][("dw", "l2")], refs, strict=True)),
+            }
+        )
+    return records
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Timing
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def make_inputs(T, n, device, seed=1234):
+    g = torch.Generator(device=device).manual_seed(seed + T + 100 * n)
+    scales = torch.linspace(0.5, 4.0, n).tolist()
+    values = [(torch.randn(T, H, generator=g, device=device) * c).bfloat16().requires_grad_(True) for c in scales]
+    w = (0.05 * torch.randn(H, generator=g, device=device)).requires_grad_(True)
+    dout = torch.randn(T, H, generator=g, device=device).bfloat16()
+    return values, w, dout
+
+
+def _reset(leaves):
+    for leaf in leaves:
+        leaf.grad = None
+
+
+def phase_fn(lay, values, w, dout, phase, record_stream):
+    """(fn, release) of a timed phase.  ``bwd`` records its forward on ``record_stream`` (the capture stream in graph
+    mode, so the backward runs on it)."""
+    leaves = [*values, w]
+    state = {}
+    if phase == "fwd":
+        return (lambda: lay(values, w)), state.clear
+    if phase == "bwd":
+        if record_stream is not None:
+            record_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(record_stream):
+                state["y"] = lay(values, w)
+            torch.cuda.current_stream().wait_stream(record_stream)
+        else:
+            state["y"] = lay(values, w)
+        torch.cuda.synchronize()
+
+        def bwd():
+            _reset(leaves)
+            torch.autograd.backward([state["y"]], [dout], retain_graph=True)
+
+        return bwd, state.clear
+    if phase == "ckpt":
+
+        def ckpt():
+            _reset(leaves)
+            y = checkpoint(lay, values, w, use_reentrant=False, preserve_rng_state=False)
+            torch.autograd.backward([y], [dout])
+
+        return ckpt, state.clear
+    raise ValueError(phase)
+
+
+def timing_unit(arm_names, T, n, args, device, cap_stream):
+    row = {"T": T, "n": n}
+    log(f"row T={T} n={n}: inputs")
+    values, w, dout = make_inputs(T, n, device)
+    leaves = [*values, w]
+    torch.cuda.synchronize()
+    records, lays, broken, meta = [], {}, {}, {}
+    for name in arm_names:
+        base = {"kind": "timing", "arm": name, **row}
+        try:
+            arm = make_arm(name)
+            base["library"] = arm.library()
+            lay = arm.layer()
+            t0 = time.time()
+            # One untimed forward and backward first (compilation, autotuning, library loading), so the memory below
+            # is that of a warm call.
+            _reset(leaves)
+            y = lay(values, w)
+            torch.autograd.backward([y], [dout])
+            del y
+            _reset(leaves)
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            m0 = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            y = lay(values, w)
+            torch.cuda.synchronize()
+            m1 = torch.cuda.memory_allocated()
+            out_bytes = y.numel() * y.element_size()
+            mem = {"out_bytes": out_bytes, "fwd_retained_bytes": m1 - m0 - out_bytes}
+            mem["fwd_peak_extra_bytes"] = torch.cuda.max_memory_allocated() - m0
+            torch.cuda.reset_peak_memory_stats()
+            torch.autograd.backward([y], [dout])
+            torch.cuda.synchronize()
+            grads = sum(leaf.grad.numel() * leaf.grad.element_size() for leaf in leaves)
+            mem["grads_bytes"] = grads
+            mem["bwd_peak_extra_bytes"] = torch.cuda.max_memory_allocated() - m1 - grads
+            if isinstance(arm, CakeArm):
+                mem.update(arm.sizes(T, n, device))
+            del y
+            if args.r2r:
+                outs = []
+                for _ in range(2):
+                    _reset(leaves)
+                    y = lay(values, w)
+                    torch.autograd.backward([y], [dout])
+                    outs.append([y.detach()] + [leaf.grad for leaf in leaves])
+                    del y
+                torch.cuda.synchronize()
+                base["run_to_run_bitwise"] = all(_bitwise_equal(a, b) for a, b in zip(*outs, strict=True))
+                del outs
+            base["warm_s"] = round(time.time() - t0, 1)
+            base["memory"] = mem
+            _reset(leaves)
+            torch.cuda.empty_cache()
+            lays[name] = lay
+            log(f"  {name}: warm {base['warm_s']}s mem {mem} r2r={base.get('run_to_run_bitwise')}")
+        except Unsupported as exc:
+            broken[name] = ("unsupported", str(exc))
+            log(f"  {name}: unsupported: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            broken[name] = ("error", _tail(exc, 1200))
+            base["traceback"] = traceback.format_exc()[-3000:]
+            log(f"  {name}: ERROR at warm: {_tail(exc)}")
+            _reset(leaves)
+            torch.cuda.empty_cache()
+        meta[name] = base
+    bandwidth = get_gpu_memory_bandwidth(device)
+    for mode in args.modes:
+        for phase in args.phases:
+            samples = {n_: [] for n_ in arm_names}
+            gmeds = {n_: [] for n_ in arm_names}
+            failed = dict(broken)
+            for gi in range(args.groups):
+                order = [a for a in arm_names if a not in failed]
+                if order:
+                    k = gi % len(order)
+                    order = order[k:] + order[:k]
+                    if gi % 2:
+                        order = order[::-1]
+                for name in order:
+                    if name in failed:
+                        continue
+                    fn, release = None, None
+                    try:
+                        record = cap_stream if mode == "graph" else None
+                        fn, release = phase_fn(lays[name], values, w, dout, phase, record)
+                        times = bench_gpu_time(
+                            fn,
+                            dry_run_iters=args.dry,
+                            repeat_iters=args.repeat,
+                            use_cuda_graph=(mode == "graph"),
+                            capture_stream=cap_stream,
+                        )
+                        samples[name].extend(times)
+                        gmeds[name].append(statistics.median(times))
+                    except Exception as exc:  # noqa: BLE001
+                        failed[name] = ("error", _tail(exc, 1200))
+                        log(f"  {name} {mode}/{phase}: ERROR {_tail(exc)}")
+                        try:
+                            torch.cuda.synchronize()
+                        except Exception as exc2:  # noqa: BLE001
+                            log(f"  sync after error failed: {_tail(exc2)}")
+                    finally:
+                        if release is not None:
+                            release()
+                        _reset(leaves)
+                        del fn
+                        torch.cuda.empty_cache()
+            for name in arm_names:
+                rec = {"kind": "timing", "arm": name, **row, "mode": mode, "phase": phase}
+                rec["library"] = meta[name].get("library")
+                if name in failed:
+                    rec[failed[name][0]] = failed[name][1]
+                elif samples[name]:
+                    xs = sorted(samples[name])
+
+                    def q(p, xs=xs):
+                        return xs[min(len(xs) - 1, int(p * (len(xs) - 1) + 0.5))]
+
+                    median_ms = statistics.median(gmeds[name])
+                    moved = bytes_moved(phase, T, n)
+                    rec.update(
+                        median_us=1e3 * median_ms,
+                        min_us=1e3 * xs[0],
+                        max_us=1e3 * xs[-1],
+                        p10_us=1e3 * q(0.10),
+                        p90_us=1e3 * q(0.90),
+                        samples=len(xs),
+                        group_medians_us=[round(1e3 * v, 3) for v in gmeds[name]],
+                        bytes=moved,
+                        gbs=moved / (median_ms * 1e-3) / 1e9,
+                        nvml_bandwidth_gbs=bandwidth,
+                    )
+                    rec["hbm_utilization"] = rec["gbs"] / bandwidth
+                    for key in ("memory", "run_to_run_bitwise", "warm_s"):
+                        if key in meta[name]:
+                            rec[key] = meta[name][key]
+                records.append(rec)
+                if "median_us" in rec:
+                    log(
+                        f"  {mode}/{phase} {name}: {rec['median_us']:.1f} us ({rec['gbs']:.0f} GB/s, "
+                        f"{100 * rec['hbm_utilization']:.1f}% of NVML) p10 {rec['p10_us']:.1f} p90 {rec['p90_us']:.1f}"
+                    )
+    del values, w, dout, lays
+    torch.cuda.empty_cache()
+    return records
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Environment, run, report
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def environment():
+    env = {
+        "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "host": socket.gethostname(),
+        "machine": platform.machine(),
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "torch_cuda": torch.version.cuda,
+        "timer": timer_kind(),
+    }
+    for dist in (
+        "triton",
+        "apache-tvm-ffi",
+        "cupti-python",
+        "nvidia-ml-py",
+        "flash-linear-attention",
+        "cake-pplx-attn-res",
+    ):
+        env[f"dist:{dist}"] = _dist(dist)
+    if torch.cuda.is_available():
+        i = torch.cuda.current_device()
+        p = torch.cuda.get_device_properties(i)
+        env.update(
+            gpu=p.name,
+            capability=f"{p.major}.{p.minor}",
+            sm_count=p.multi_processor_count,
+            l2_bytes=p.L2_cache_size,
+            gpu_mem_gb=round(p.total_memory / 2**30, 1),
+            driver=torch.cuda.driver_version() if hasattr(torch.cuda, "driver_version") else None,
+        )
+        env["nvml"] = nvml_map()
+    return env
+
+
+def cmd_run(args):
+    import torch._dynamo
+    import torch._functorch.config
+
+    # The timed ``bwd`` phase replays the backward of one recorded forward (retain_graph=True); AOTAutograd donated
+    # buffers forbid that, so they are off for the compiled arm.
+    torch._functorch.config.donated_buffer = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    for attr in ("cache_size_limit", "recompile_limit"):
+        if hasattr(torch._dynamo.config, attr):
+            setattr(torch._dynamo.config, attr, 4096)
+    if args.acc_n is None:
+        args.acc_n = list(args.n)
+    device = torch.device("cuda", 0)
+    torch.cuda.set_device(device)
+    cap_stream = torch.cuda.Stream(device)
+    result = {"env_start": environment(), "args": vars(args), "records": []}
+    path = Path(args.json)
+
+    def flush():
+        tmp = path.with_suffix(".json.part")
+        tmp.write_text(json.dumps(result, indent=1))
+        tmp.replace(path)
+
+    flush()
+    units = [("acc", n) for n in args.acc_n] + [("row", T, n) for T in args.T for n in args.n]
+    for u in units:
+        t0 = time.time()
+        try:
+            if u[0] == "acc":
+                result["records"].extend(accuracy_unit(args.arms, u[1], args.draws, device))
+            else:
+                result["records"].extend(timing_unit(args.arms, u[1], u[2], args, device, cap_stream))
+        except Exception as exc:  # noqa: BLE001
+            result["records"].append(
+                {
+                    "kind": "unit_error",
+                    "unit": list(u),
+                    "error": _tail(exc, 1500),
+                    "traceback": traceback.format_exc()[-4000:],
+                }
+            )
+            log(f"UNIT ERROR {u}: {_tail(exc)}")
+        log(f"unit {u} done in {time.time() - t0:.0f}s")
+        result["env_end"] = environment()
+        flush()
+    log("RUN_DONE")
+
+
+def _load_runs(spec: str) -> tuple[dict, list, list]:
+    """From comma-separated JSON paths: the ``env_start`` of the first run that timed a row (else of the first run),
+    every run's records (each tagged with the index of its run in ``_run``), and per run its file name, record kinds
+    and ``env_start``."""
+    runs, recs = [], []
+    for path in (p for p in spec.split(",") if p):
+        data = json.loads(Path(path).read_text())
+        part = data.get("records", [])
+        for r in part:
+            r["_run"] = len(runs)
+        kinds = sorted({str(r.get("kind")) for r in part})
+        runs.append({"file": Path(path).name, "kinds": kinds, "env": data.get("env_start", {})})
+        recs.extend(part)
+    timed = [run["env"] for run in runs if "timing" in run["kinds"]]
+    return (timed or [run["env"] for run in runs] or [{}])[0], recs, runs
+
+
+def _gpu(env: dict) -> tuple:
+    """The GPU of a run: its name and compute capability."""
+    return env.get("gpu"), env.get("capability")
+
+
+def _mb(x) -> str:
+    return "n/a" if x is None else f"{x / 1e6:.1f}"
+
+
+def cmd_report(args):
+    env, recs, runs = _load_runs(args.json)
+    acc = sorted((r for r in recs if r.get("kind") == "accuracy"), key=lambda r: (r["n"], r["arm"], r["_run"]))
+    yard = {(r["yardstick"], r["n"]): r for r in recs if r.get("kind") == "dw_yardstick"}
+    timing = [r for r in recs if r.get("kind") == "timing" and "mode" in r]
+
+    def gpu_of(r):
+        return _gpu(runs[r["_run"]]["env"])
+
+    # Every accuracy verdict per arm, n and GPU (duplicates kept): a timed baseline meets the bar when every verdict
+    # of its own GPU passes, and is unverified (None) when there is none.
+    verdicts = collections.defaultdict(list)
+    for r in acc:
+        verdicts[(r["arm"], r["n"], gpu_of(r))].append(bool(r["meets_bar"]))
+
+    def meets(r):
+        found = verdicts.get((r["arm"], r["n"], gpu_of(r)))
+        return all(found) if found else None
+
+    timed_gpus = {gpu_of(r) for r in timing}
+
+    def other_gpu(r):
+        """The mark of an accuracy record from a GPU that timed no row here (it gates nothing)."""
+        gpu = gpu_of(r)
+        return f" (other GPU: {gpu[0]}, cc {gpu[1]})" if timed_gpus and gpu not in timed_gpus else ""
+
+    lines = [f"## {args.title}", ""]
+    nvml = env.get("nvml", {})
+    dev0 = (nvml.get("devices") or [{}])[0]
+    lines.append(
+        f"GPU {env.get('gpu')} (cc {env.get('capability')}, {env.get('sm_count')} SMs), torch {env.get('torch')} "
+        f"(CUDA {env.get('torch_cuda')}), timer {env.get('timer')}; "
+        f"NVML bandwidth {dev0.get('nvml_bandwidth_gbs')} GB/s "
+        f"(mem clock {dev0.get('mem_clock_mhz')} MHz x bus {dev0.get('bus_width_bits')} bit; CUDA_VISIBLE_DEVICES="
+        f"{nvml.get('CUDA_VISIBLE_DEVICES')}, cuda:0 = NVML {dev0.get('nvml_index')} {dev0.get('uuid')})."
+    )
+    lines.append("")
+    lines += [
+        "| run file | records | GPU | cc | torch (CUDA) | triton | flash-linear-attention | cake-pplx-attn-res |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for run in runs:
+        e = run["env"]
+        lines.append(
+            f"| {run['file']} | {', '.join(run['kinds'])} | {e.get('gpu')} | {e.get('capability')} | "
+            f"{e.get('torch')} (CUDA {e.get('torch_cuda')}) | {e.get('dist:triton')} | "
+            f"{e.get('dist:flash-linear-attention')} | {e.get('dist:cake-pplx-attn-res')} |"
+        )
+    lines.append("")
+    libraries = {}
+    for r in timing:
+        if r.get("library"):
+            libraries.setdefault(r["arm"], r["library"])
+    if libraries:
+        lines += ["| arm | implementation |", "|---|---|"]
+        lines += [f"| {arm} | {lib} |" for arm, lib in libraries.items()]
+        lines.append("")
+    if acc:
+        lines += [
+            "### Accuracy against FP64 (T = 2048, median and largest over the draws)",
+            "",
+            "Bar: `out` and `dv_j` at most 1.005 x the naive BF16 evaluation's error, `dw` at most 1.005 x the "
+            "issue's FP32 evaluation (CPU), in the L2 and the max norm, median and largest.",
+            "",
+            "| arm | n | draws | meets the bar | out L2 (median / largest) | bar | "
+            "out max-norm (median / largest) | bar | "
+            "worst dv_j L2 (median / largest) | bar | dw L2 (median / largest) | bar (issue FP32, CPU) | "
+            "out / dv / dw rel-L2 (median) |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+
+        def pair(xs):
+            return f"{xs[0]:.3e} / {xs[1]:.3e}"
+
+        for r in acc:
+            arm, n = r["arm"], r["n"]
+            verdict = ("yes" if r["meets_bar"] else "no") + other_gpu(r)
+            if "rows" not in r:
+                error = str(r.get("error")).replace("|", "/").replace("\n", " ")
+                lines.append(f"| {arm} | {n} | {r.get('draws')} | {verdict} (error: {error}) |" + " |" * 9)
+                continue
+            rows = r["rows"]
+            dvs = [k for k in rows if k.startswith("dv")]
+            worst = max(dvs, key=lambda k: rows[k]["l2"]["ours"][1] / max(rows[k]["l2"]["bar"][1], 1e-300))
+            dv_rel = max(rows[k]["rel_l2_median"] for k in dvs)
+            lines.append(
+                f"| {arm} | {n} | {r['draws']} | {verdict} | "
+                f"{pair(rows['out']['l2']['ours'])} | {pair(rows['out']['l2']['bar'])} | "
+                f"{pair(rows['out']['max']['ours'])} | {pair(rows['out']['max']['bar'])} | "
+                f"{pair(rows[worst]['l2']['ours'])} ({worst}) | {pair(rows[worst]['l2']['bar'])} | "
+                f"{pair(rows['dw']['l2']['ours'])} | {pair(rows['dw']['l2']['bar'])} | "
+                f"{rows['out']['rel_l2_median']:.2e} / {dv_rel:.2e} / {rows['dw']['rel_l2_median']:.2e} |"
+            )
+        lines.append("")
+        names = [y for y in DW_YARDSTICKS if any(k[0] == y for k in yard)]
+        if names:
+            lines += [
+                "### dw against the FP32 evaluations (error vs FP64; the CPU form gates, the others are reported)",
+                "",
+                "Each cell: L2 error median / largest; max-norm error median / largest. An arm meets a yardstick "
+                "when all four are at most 1.005 x the yardstick's.",
+                "",
+                "| n | evaluation | dw L2 (median / largest) | dw max-norm (median / largest) | meets "
+                + " / ".join(names)
+                + " |",
+                "|---|---|---|---|---|",
+            ]
+            for n in sorted({k[1] for k in yard}):
+                for y in names:
+                    if (y, n) in yard:
+                        lines.append(
+                            f"| {n} | {y} (yardstick) | {pair(yard[(y, n)]['l2'])} | {pair(yard[(y, n)]['max'])} | |"
+                        )
+                for r in acc:
+                    if r["n"] != n or "yardsticks" not in r.get("rows", {}).get("dw", {}):
+                        continue
+                    vs = r["rows"]["dw"]["yardsticks"]
+                    verdict = " / ".join("yes" if vs[y]["meets"] else "no" for y in names if y in vs)
+                    lines.append(
+                        f"| {n} | {r['arm']}{other_gpu(r)} | {pair(r['rows']['dw']['l2']['ours'])} | "
+                        f"{pair(r['rows']['dw']['max']['ours'])} | {verdict} |"
+                    )
+            lines.append("")
+    mem_rows = {}
+    for r in timing:
+        if "memory" in r:
+            mem_rows.setdefault((r["T"], r["n"], r["arm"]), r["memory"])
+    if mem_rows:
+        lines += [
+            "### Memory (MB; a warm forward and backward at the timed row)",
+            "",
+            "Measured on the second call, after one untimed forward and backward. "
+            "Retained: bytes a forward keeps beside `out` and its inputs (allocator delta). Backward peak: bytes the "
+            "backward allocates beside the gradients (allocator peak). Cake API: the package's own retained-state and "
+            "workspace counts.",
+            "",
+            "| T | n | arm | retained (fwd) | backward peak extra | Cake API retained | Cake API workspace |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for (T, n, arm), m in sorted(mem_rows.items()):
+            lines.append(
+                f"| {T} | {n} | {arm} | {_mb(m.get('fwd_retained_bytes'))} | {_mb(m.get('bwd_peak_extra_bytes'))} | "
+                f"{_mb(m.get('api_retained_bytes'))} | {_mb(m.get('api_workspace_bytes'))} |"
+            )
+        lines.append("")
+    summary = []
+    by = collections.defaultdict(dict)
+    for r in timing:
+        by[(r["mode"], r["phase"], r["T"], r["n"])][r["arm"]] = r
+    if by:
+        lines += [
+            "Speedup: over the fastest baseline that meets the accuracy bar on the same GPU; `(misses bar)` and "
+            "`(unverified)` mark baselines that do not qualify. Bytes, GB/s and HBM util follow the issue's traffic "
+            "(`ckpt`: two forwards and one backward).",
+            "",
+        ]
+    for mode in MODES:
+        for phase in PHASES:
+            keys = sorted(k for k in by if k[0] == mode and k[1] == phase)
+            if not keys:
+                continue
+            present = [a for a in BASELINE_ARMS if any(a in by[k] for k in keys)]
+            lines += [f"### {phase}, {mode}", ""]
+            head = ["T", "n", "bytes", *(f"{a} (us)" for a in present), "best baseline (us)"]
+            for arm in CAKE_ARMS:
+                head += [f"{arm} (us)", "speedup", "GB/s", "HBM util"]
+            lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
+            for key in keys:
+                arms = by[key]
+                T, n = key[2], key[3]
+                timed = [a for a in BASELINE_ARMS if "median_us" in arms.get(a, {})]
+                ok = {a: meets(arms[a]) for a in timed}
+                base = [arms[a] for a in timed if ok[a] is True]
+                best = min(base, key=lambda r: r["median_us"]) if base else None
+                moved = bytes_moved(phase, T, n)
+                cells = [str(T), str(n), f"{moved / 1e6:.0f} MB"]
+                for a in present:
+                    r = arms.get(a, {})
+                    if "median_us" in r:
+                        mark = {True: "", False: " (misses bar)", None: " (unverified)"}[ok[a]]
+                        cells.append(f"{r['median_us']:.1f}{mark}")
+                    else:
+                        cells.append("unsupported" if "unsupported" in r else ("error" if "error" in r else "n/a"))
+                if best:
+                    cells.append(f"{best['median_us']:.1f} ({best['arm']})")
+                else:
+                    cells.append("unverified" if None in ok.values() else "n/a")
+                for arm in CAKE_ARMS:
+                    r = arms.get(arm)
+                    if r is None or "median_us" not in r:
+                        cells += ["n/a", "", "", ""]
+                        continue
+                    speed = f"{best['median_us'] / r['median_us']:.2f}x" if best else "n/a"
+                    # Recomputed from the latency, so runs recorded with an older byte count stay consistent.
+                    gbs = moved / (r["median_us"] * 1e-6) / 1e9
+                    bandwidth = r.get("nvml_bandwidth_gbs")
+                    util = gbs / bandwidth if bandwidth else None
+                    util_cell = "n/a" if util is None else f"{100 * util:.1f}%"
+                    cells += [f"{r['median_us']:.1f}", speed, f"{gbs:.0f}", util_cell]
+                    summary.append(
+                        {
+                            "mode": mode,
+                            "phase": phase,
+                            "T": T,
+                            "n": n,
+                            "arm": arm,
+                            "us": round(r["median_us"], 2),
+                            "p10_us": round(r["p10_us"], 2),
+                            "p90_us": round(r["p90_us"], 2),
+                            "bytes": moved,
+                            "gbs": round(gbs, 1),
+                            "hbm_utilization": None if util is None else round(util, 4),
+                            "best_baseline": best["arm"] if best else None,
+                            "best_baseline_us": round(best["median_us"], 2) if best else None,
+                            "speedup": round(best["median_us"] / r["median_us"], 3) if best else None,
+                            "baselines_us": {a: round(arms[a]["median_us"], 2) for a in timed},
+                            "baselines_meets_bar": dict(ok),
+                        }
+                    )
+                lines.append("| " + " | ".join(cells) + " |")
+            lines.append("")
+    text = "\n".join(lines) + "\n"
+    if args.md:
+        Path(args.md).write_text(text)
+    if args.summary:
+        Path(args.summary).write_text(json.dumps({"env": env, "runs": runs, "rows": summary}, indent=1))
+    print(text)
+
+
+def csv_list(conv):
+    return lambda s: [conv(x) for x in s.split(",") if x]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[1])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    run = sub.add_parser("run")
+    run.add_argument("--json", required=True)
+    run.add_argument("--arms", type=csv_list(str), default=list(DEFAULT_ARMS))
+    run.add_argument("--T", type=csv_list(int), default=[16380])
+    run.add_argument("--n", type=csv_list(int), default=list(range(2, 10)))
+    run.add_argument("--acc-n", type=csv_list(int), help="n of the accuracy units (default: the --n list)")
+    run.add_argument("--draws", type=int, default=8)
+    run.add_argument("--modes", type=csv_list(str), default=list(MODES))
+    run.add_argument("--phases", type=csv_list(str), default=list(PHASES))
+    run.add_argument("--dry", type=int, default=5)
+    run.add_argument("--repeat", type=int, default=20)
+    run.add_argument("--groups", type=int, default=3)
+    run.add_argument("--r2r", action="store_true", help="check run-to-run bitwise equality per arm")
+    report = sub.add_parser("report")
+    report.add_argument("--json", required=True, help="one or more comma-separated run JSON files")
+    report.add_argument("--md")
+    report.add_argument("--summary", help="write the speedup rows as a small JSON file")
+    report.add_argument("--title", default="AttnRes")
+    args = parser.parse_args()
+    if args.cmd == "run":
+        cmd_run(args)
+    else:
+        cmd_report(args)
+
+
+if __name__ == "__main__":
+    main()

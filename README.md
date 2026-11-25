@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 21 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 24 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
@@ -16,19 +16,22 @@ All modules live under `cake_pplx.`. `{det,nondet}` means that both a determinis
 | mhc | `cake-pplx-mhc` | `cake_mhc_{det,nondet}_train` | Four-stream mHC hyper-connection layer | [API](docs/API.md#mhc) |
 | mhc_head | `cake-pplx-mhc-head` | `cake_mhc_head_{det,nondet}_train` | Stream mean at the mHC model head | [API](docs/API.md#mhc_head) |
 | engram_gate | `cake-pplx-engram-gate` | `cake_engram_gate_{det,nondet}_train` | Four-stream Engram context gate, width 5120 | [API](docs/API.md#engram_gate) |
+| attn_res | `cake-pplx-attn-res` | `cake_attn_res_{det,nondet}_train` | Attention residuals: softmax-weighted sum of 1 to 9 BF16 values, width 7168 | [API](docs/API.md#attn_res) |
 | gqa | `cake-pplx-gqa` | `cake_gqa_{det,nondet}_train` | Packed-varlen causal GQA attention, head dim 256 | [API](docs/API.md#gqa) |
 | fmha | `cake-pplx-fmha` | `cake_fmha_nondet_train` | Dense multi-head attention, head dim 64/128 (backward only) | [API](docs/API.md#fmha) |
 | gated_kv_compression | `cake-pplx-gated-kv-compression` | `cake_gated_kv_compression_det_train` | Ratio-2 gated KV compression: per-document token-pair softmax pooling, width 512 | [API](docs/API.md#gated_kv_compression) |
 | dsa_indexer | `cake-pplx-dsa-indexer` | `cake_dsa_indexer_{det,nondet}_train` | DSA indexer scores + exact top-k (forward only) | [API](docs/API.md#dsa_indexer) |
-| dsa_sparse_attention | `cake-pplx-dsa-sparse-attention` | `cake_dsa_sparse_attention_{det,nondet}_train` | Top-k sparse MLA attention, 64 heads | [API](docs/API.md#dsa_sparse_attention) |
+| dsa_sparse_attention | `cake-pplx-dsa-sparse-attention` | `cake_dsa_sparse_attention_{det,nondet}_train` | Top-k sparse MLA attention, 64 heads (nondet rope form: 64, 96 or 128; 96/128 on sm_100a/sm_103a) | [API](docs/API.md#dsa_sparse_attention) |
 | dense_gemm | `cake-pplx-dense-gemm` | `cake_dense_gemm_{det,nondet}_train` | BF16 projection GEMM, FP32 router GEMM | [API](docs/API.md#dense_gemm) |
 | moe_grouped_gemm | `cake-pplx-moe-grouped-gemm` | `cake_moe_grouped_gemm_{det,nondet}_train` | Ragged BF16 MoE grouped GEMM | [API](docs/API.md#moe_grouped_gemm) |
 | gated_act_mxfp8 | `cake-pplx-gated-act-mxfp8` | `cake_gated_act_mxfp8_det_train` | Fused SwiGLU + MXFP8 quantization | [API](docs/API.md#gated_act_mxfp8) |
 | clamped_swiglu | `cake-pplx-clamped-swiglu` | `cake_clamped_swiglu_det_train` | Routed-expert clamped SwiGLU, FP32 route weight before the one BF16 rounding (I = 2304) | [API](docs/API.md#clamped_swiglu) |
+| situ_glu | `cake-pplx-situ-glu` | `cake_situ_glu_det_train` | SiTU-GLU of an MLP, FP32 math and one BF16 rounding (I a multiple of 256: 3072, 6144, 33,792) | [API](docs/API.md#situ_glu) |
 | engram_lookup | `cake-pplx-engram-lookup` | `cake_engram_lookup_det_train` | Engram row lookup: FP8 E4M3 rows with E8M0 scales to BF16 (forward only) | [API](docs/API.md#engram_lookup) |
 | mok | `cake-pplx-mok` | `cake_mok_det_train` | Expert-parallel MoE layer training (BF16 or MXFP8 routed experts) | [API](docs/API.md#mok) |
 | lm_head | `cake-pplx-lm-head` | `cake_lm_head_{det,nondet}_train` | Chunked LM-head loss, log-probs and support KL | [API](docs/API.md#lm_head) |
 | act_qdq | `cake-pplx-act-qdq` | `cake_act_qdq_det_train` | FP4 / MXFP4 / MXFP8 quantize-dequantize of BF16 activations (forward only) | [API](docs/API.md#act_qdq) |
+| route_weight_scale | `cake-pplx-route-weight-scale` | `cake_route_weight_scale_det_train` | Routed-expert row scaling by the FP32 route weight, with the FP32 row-dot `dw` (H = 4096, 3584) | [API](docs/API.md#route_weight_scale) |
 
 Each family's source is in `kernels/<family>/`. Distribution names use hyphens, and the subdirectory names use underscores. pip treats `-` and `_` in distribution names as the same character.
 
@@ -74,11 +77,11 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | Item | Requirement |
 |---|---|
 | GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for act_qdq, lm_head and for some dsa_sparse_attention, gated_kv_compression, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for act_qdq, causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_gate, engram_lookup, fmha, gated_kv_compression, gdn, gqa, lm_head, mhc, mhc_head, moe_grouped_gemm, mok, rmsnorm and rmsnorm_silu_gate). Some moe_grouped_gemm libraries (its FP32 accumulate builds) need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built; on those two architectures below 13.4, a moe_grouped_gemm FP32 accumulate call takes its composed route instead. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for act_qdq, lm_head and for some dsa_sparse_attention, gated_kv_compression, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for act_qdq, attn_res, causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_gate, engram_lookup, fmha, gated_kv_compression, gdn, gqa, kda, lm_head, mhc, mhc_head, moe_grouped_gemm, mok, rmsnorm, rmsnorm_silu_gate, route_weight_scale and situ_glu). Some moe_grouped_gemm libraries (its FP32 accumulate builds) need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built; on those two architectures below 13.4, a moe_grouped_gemm FP32 accumulate call takes its composed route instead. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
-| `cuda-python` | causal_conv1d, dense_gemm and rmsnorm_silu_gate only. |
+| `cuda-python` | causal_conv1d, dense_gemm, rmsnorm_silu_gate, and act_qdq's `locality="domain"` path (`cuda-bindings` 13.5 or later: the act_qdq `locality` extra). |
 | `torch.distributed` with symmetric memory | mok only: an initialized process group whose ranks share one NVLink domain with multicast. |
 
 ## JIT build and cache
@@ -116,8 +119,11 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 | engram_lookup | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | act_qdq | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | clamped_swiglu | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| situ_glu | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | dsa_sparse_attention | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| kda | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | gated_kv_compression | GPU suites and benchmark run on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5, against the acceptance criteria of issue #76 |
+| attn_res | GPU suites and the benchmark run on NVIDIA B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`), with CUDA 13.5, against the acceptance criteria of issue #262. compute-sanitizer passes on GB300 at 0.1.1 and passed on VR200 and R200 at 0.1.0 |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
 

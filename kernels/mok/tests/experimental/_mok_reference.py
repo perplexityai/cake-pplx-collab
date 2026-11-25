@@ -20,10 +20,29 @@ consecutive K elements share a UE8M0 byte ``round_up(max(amax * 0.002232142857,
 1e-12))`` saturated to 254, data is E4M3 ``x * 2**(127 - byte)`` (round to
 nearest even, saturating), and 128 x 128 scale tiles store byte
 ``(row % 32) * 16 + (row // 32) * 4 + k_block`` as ``[R/128, K/128, 32, 16]``.
+
+Random inputs are drawn through :func:`randn`, :func:`randn_like`,
+:func:`rand`, :func:`randint`, :func:`normal_` and :func:`uniform_`, so every
+GPU gets the same inputs.  torch's CUDA random kernels launch ``ceil(n / 256)``
+blocks of 256 threads for ``n`` elements, but at most ``threads per SM / 256``
+blocks per SM, and element ``i`` takes the numbers of thread ``i`` modulo the
+threads launched: one call of more elements than that has other values on a GPU
+with another SM count (148 against 152, for example), and the generator's
+offset, so every later draw of it, moves by another step.  The helpers fill a
+CUDA tensor in consecutive torch calls of :data:`DRAW_CHUNK` elements each.  A
+call of at most 2^17 elements runs one thread per element on every GPU with
+2^17 threads or more (64 SMs of 2048 threads or 128 SMs of 1024; the supported
+GPUs have 148 to 216 SMs of 1024 or 2048 threads), so its values and the offset
+step it takes (4) do not depend on the SM count.  Each call is torch's own: the
+generator (``generator``, or the default one that ``torch.manual_seed`` seeds),
+the dtype (a BF16 tensor holds float normals rounded to BF16) and the order of
+the draws are unchanged, and a draw of at most :data:`DRAW_CHUNK` elements is a
+single torch call.  A CPU tensor is drawn in one torch call.
 """
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 SUPPORTED = ((10, 0), (10, 3), (10, 7))
 
@@ -33,6 +52,69 @@ def require_gpu():
         torch.cuda.get_device_capability() not in SUPPORTED
     ):
         pytest.skip("Requires an SM100a, SM103a or SM107a CUDA device")
+
+
+#: Elements of one torch random call of the draw helpers on a CUDA device.
+DRAW_CHUNK = 1 << 17
+#: Threads per block of torch's CUDA random kernels.
+_RANDOM_BLOCK = 256
+
+
+def fill_in_chunks(out, fill):
+    """``fill(part)`` for the consecutive parts of :data:`DRAW_CHUNK` elements of
+    the contiguous ``out`` (the last part the rest), in order.  Returns ``out``."""
+    for part in out.view(-1).split(DRAW_CHUNK):
+        fill(part)
+    return out
+
+
+def _draw(out, fill):
+    """Fills ``out`` with ``fill`` (a torch random call on its argument): a CUDA
+    tensor by :func:`fill_in_chunks`, any other tensor in one call."""
+    if out.device.type != "cuda":
+        fill(out)
+        return out
+    p = torch.cuda.get_device_properties(out.device)
+    per_sm = p.max_threads_per_multi_processor // _RANDOM_BLOCK
+    assert p.multi_processor_count * per_sm * _RANDOM_BLOCK >= DRAW_CHUNK, p.name
+    return fill_in_chunks(out, fill)
+
+
+def randn(*size, generator=None, dtype=None, device=None):
+    """``torch.randn(*size, generator=generator, dtype=dtype, device=device)``,
+    the same values on every GPU (:data:`DRAW_CHUNK`)."""
+    out = torch.empty(*size, dtype=dtype, device=device)
+    return _draw(out, lambda t: t.normal_(generator=generator))
+
+
+def randn_like(x, *, generator=None):
+    """:func:`randn` of ``x``'s shape, dtype and device."""
+    return randn(x.shape, generator=generator, dtype=x.dtype, device=x.device)
+
+
+def rand(*size, generator=None, dtype=None, device=None):
+    """``torch.rand(*size, generator=generator, dtype=dtype, device=device)``,
+    the same values on every GPU."""
+    out = torch.empty(*size, dtype=dtype, device=device)
+    return _draw(out, lambda t: t.uniform_(generator=generator))
+
+
+def randint(low, high, size, *, generator=None, dtype=torch.int64, device=None):
+    """``torch.randint(low, high, size, ...)``, the same values on every GPU."""
+    out = torch.empty(size, dtype=dtype, device=device)
+    return _draw(out, lambda t: t.random_(low, high, generator=generator))
+
+
+def normal_(x, mean=0.0, std=1.0, *, generator=None):
+    """``x.normal_(mean, std)`` in place (a CUDA ``x`` contiguous), the same
+    values on every GPU.  Returns ``x``."""
+    return _draw(x, lambda t: t.normal_(mean, std, generator=generator))
+
+
+def uniform_(x, low=0.0, high=1.0, *, generator=None):
+    """``x.uniform_(low, high)`` in place (a CUDA ``x`` contiguous), the same
+    values on every GPU.  Returns ``x``."""
+    return _draw(x, lambda t: t.uniform_(low, high, generator=generator))
 
 
 def single_rank_schedule(routes, experts, extra=512):
@@ -124,3 +206,60 @@ def swiglu(gate, up, limit=None):
     if limit is not None:
         gate, up = gate.clamp(max=limit), up.clamp(-limit, limit)
     return (gate * torch.sigmoid(gate) * up).bfloat16()
+
+
+def production_inputs(tokens, hidden, intermediate, experts, topk, limit, *, device="cuda", seed=0):
+    """One draw of the requester's input distribution for the router weight before the down projection.
+
+    ``x``: rows of unit RMS (the post-RMSNorm hidden state) in BF16.  Router: ``sqrt(softplus(logits))`` scores of
+    ``randn`` logits over ``experts``, the top ``topk`` distinct experts per token, their scores normalized over the
+    top ``topk`` and scaled by 1.5 (FP32; each row sums to 1.5, each weight in [0, 1.5]).  Every 8th token gets its
+    smallest weight set to exactly 0 (the others rescaled to sum to 1.5) and token 2 the weights ``(1.5, 0, ..., 0)``.
+    Gate and up weights ``randn * 4 / sqrt(hidden)`` (gate and up of standard deviation about 4, so a small fraction
+    passes the limit), down weights ``randn / sqrt(intermediate)``, shared and routed alike; ``dy`` ``randn``.  Token 1
+    is pinned: its ``x`` row is ``+-1`` and its first expert's gate row 0 and up rows 0 and 1 are ``+-x * limit /
+    hidden``, so its gate is exactly ``limit`` and its up exactly ``+limit`` and ``-limit`` there (``limit / hidden``
+    must be a BF16 value).  Returns a dict of ``x``, ``dy``, ``ids`` (int64 ``[T, topk]``), ``weights`` (FP32
+    ``[T, topk]``), ``shared`` and ``routed`` (BF16, the package's shapes) and ``pinned`` (token, expert).  The draws
+    come from a generator of ``device`` seeded with ``seed`` (:func:`randn`)."""
+    generator = torch.Generator(device=device).manual_seed(seed)
+
+    def normal(*shape):
+        return randn(*shape, generator=generator, device=device)
+
+    x = normal(tokens, hidden)
+    x = (x / x.square().mean(-1, keepdim=True).sqrt()).bfloat16()
+    scores = F.softplus(normal(tokens, experts)).sqrt()
+    top, ids = scores.topk(topk, dim=-1)
+    weights = top / top.sum(-1, keepdim=True) * 1.5
+    zero = torch.arange(tokens, device=device) % 8 == 7
+    weights[zero, topk - 1] = 0.0
+    weights[zero] = weights[zero] / weights[zero].sum(-1, keepdim=True) * 1.5
+    if tokens > 2:
+        weights[2] = 0.0
+        weights[2, 0] = 1.5
+    gate_up = 4.0 / hidden**0.5
+    down = 1.0 / intermediate**0.5
+    shared = [
+        (normal(intermediate, hidden) * gate_up).bfloat16(),
+        (normal(intermediate, hidden) * gate_up).bfloat16(),
+        (normal(hidden, intermediate) * down).bfloat16(),
+    ]
+    routed = [
+        (normal(experts, intermediate, hidden) * gate_up).bfloat16(),
+        (normal(experts, intermediate, hidden) * gate_up).bfloat16(),
+        (normal(experts, hidden, intermediate) * down).bfloat16(),
+    ]
+    dy = normal(tokens, hidden).bfloat16()
+    pinned = None
+    step = torch.tensor(limit / hidden).bfloat16().double().item()
+    if tokens > 1 and step * hidden == limit:
+        signs = torch.where(normal(hidden) < 0, -1.0, 1.0)
+        x[1] = signs.bfloat16()
+        expert = int(ids[1, 0])
+        row = (signs * step).bfloat16()
+        routed[0][expert, 0] = row
+        routed[1][expert, 0] = row
+        routed[1][expert, 1] = -row
+        pinned = (1, expert)
+    return dict(x=x, dy=dy, ids=ids, weights=weights.float().contiguous(), shared=shared, routed=routed, pinned=pinned)

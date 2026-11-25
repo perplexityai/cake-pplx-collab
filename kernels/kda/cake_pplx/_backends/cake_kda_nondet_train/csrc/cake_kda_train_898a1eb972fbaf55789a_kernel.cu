@@ -578,7 +578,7 @@ kernel_cake_kda_train_898a1eb972fbaf55789a(const __grid_constant__ CUtensorMap a
             }
             float gk_pre = 0.0f;
             if (nc_1 > 0) {
-                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                 gk_pre = gk[gn_next];
             }
             unsigned int wst_d = 0;
@@ -693,7 +693,7 @@ kernel_cake_kda_train_898a1eb972fbaf55789a(const __grid_constant__ CUtensorMap a
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 mbarrier_arrive(dec_done_addr);
                 if (nc_1 > c_1 + 1) {
-                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                     gk_pre = gk[gn_next_1];
                 }
                 int ext0 = ext_next;
@@ -764,7 +764,7 @@ kernel_cake_kda_train_898a1eb972fbaf55789a(const __grid_constant__ CUtensorMap a
                     wst_d += 1;
                     if (wst_d == 2) { wst_d = 0; _phase_w_full ^= 1; }
                 }
-                long long obase = ((long long)(ext0 + t_row_1) * (long long)num_heads + (long long)head_1) * 128 + (long long)vbase_1;
+                long long obase = ((long long)(ext0 + t_row_1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)vbase_1;
                 mbarrier_wait(o_done_addr, _phase_o_done_0);
                 _phase_o_done_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");

@@ -104,7 +104,7 @@ void Run(TensorView a_dA_part, TensorView a_db_part, TensorView a_seq_chunk_star
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(1024, 1, 1);
-  config.dynamicSmemBytes = 16512;
+  config.dynamicSmemBytes = 24704;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_kda_train_9788763cb8ed232f13b4), kernel_args),
             "cudaLaunchKernelExC");
