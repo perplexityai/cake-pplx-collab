@@ -4371,7 +4371,9 @@ class Plan:
     cast_fold: bool = False
     # the padded A extents of a small compacted one-chunk call (:func:`a_extent_rows`; 0 = the chunk's rows): the
     # logits GEMMs read the gathered rows through a tensor map of ``a_rows`` rows, the dX GEMM the chunk's ``dz``
-    # through one of ``dx_a_rows`` rows, each a chunk buffer of that many rows whose rows past the chunk are zero
+    # through one of ``dx_a_rows`` rows, each a chunk buffer of that many rows.  Their rows past the chunk form only
+    # accumulator rows that no epilogue stores: the gather buffer's hold copies of the last valid row when a host
+    # count padded the call's index (:func:`valid_rows` ``extent``), else zeros, and the ``dz`` buffer's zeros
     # (:func:`_bind_a_extents`).  ``M``, ``C``, the statistics and every per-row operand keep the chunk's rows
     a_rows: int = 0
     dx_a_rows: int = 0
@@ -6416,7 +6418,8 @@ def stage_values(
             )
         # ``C`` is the chunk's [rows_c, V] rows of the logits workspace: the TMA-store epilogue's tensor map takes its
         # row extent from it (rows >= rows_c are clipped, never written); a pointer store sees the same base address.
-        # ``A`` (a padded extent, :attr:`Plan.a_rows`): its rows >= rows_c are zero and form rows >= M only
+        # ``A`` (a padded extent, :attr:`Plan.a_rows`): its rows >= rows_c hold copies of the last valid row (a padded
+        # index, :func:`valid_rows` ``extent``) or zeros, and form rows >= M only
         values.update(
             A=_logits_a(t, plan, x_chunk),
             B=t["W"],
