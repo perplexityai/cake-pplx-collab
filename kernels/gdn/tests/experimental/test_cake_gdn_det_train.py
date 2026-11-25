@@ -696,6 +696,10 @@ FUSED_TAIL_STAGES = {
     "tail_g3_bf16": 3,
     "tail_g3_f32x": 3,
     "tail_g3_f32x_bf16": 3,
+    "tail_g2_pv_tf32": 2,
+    "tail_g2_bf16_pv_tf32": 2,
+    "tail_g3_f32x_pv_tf32": 3,
+    "tail_g3_f32x_bf16_pv_tf32": 3,
 }
 # The switches of the round-once tail, the FP32 dv_local adjoint and the package tail with their off values: the
 # non-deterministic package's tests set them by name (where this package has them) to hold its tail_g3 on dhu_tc2 to
@@ -897,7 +901,7 @@ FWD_A_RECORDS = ("wy_a", "fwd_ho_a", "fwd_fused", "fwd_summary", "fwd_summary_a"
 
 
 def test_registry_records_are_well_formed() -> None:
-    assert len(cake_jit.STAGES) == 49 and len(set(cake_jit.STAGES)) == 49
+    assert len(cake_jit.STAGES) == 58 and len(set(cake_jit.STAGES)) == 58
     assert set(FWD_A_RECORDS) <= set(cake_jit.STAGES)
     assert set(cake_chain.LAUNCH_ARGS) == set(cake_jit.STAGES)
     for arch in ARCHES:
@@ -10920,9 +10924,9 @@ def test_the_record_gate_leaves_an_unready_plan_without_credit(
         _assert_bitwise(got, want, OUTPUT_NAMES)
 
 
-# --------------------------------------------------------------------------- PV_TF32 per call (the pv_tf32 prototype)
+# --------------------------------------------------------------------------- PV_TF32 per call
 # With cake_chain.PV_TF32 on, only a backward whose final state receives a gradient runs the pv_tf32 adjoint scan and
-# tail (cake_chain.pv_tf32_stages); every other call keeps the 0.2.3 programs, launches and bits.  The call kinds:
+# tail (cake_chain.pv_tf32_stages); every other call keeps the 0.2.8 programs, launches and bits.  The call kinds:
 # (initial state, output_final_state, a final-state gradient).  "h0-final" asks for the final state and gives it no
 # gradient: autograd then passes the backward no dht (the forward turns its zero fill off) and the chain reads the
 # zeros that autograd filled in before (cake_chain._grads_of).
@@ -10999,8 +11003,8 @@ def test_pv_tf32_runs_only_for_a_final_state_gradient(
     case, device, monkeypatch
 ) -> None:
     # PV_TF32 on against off, per call kind on one draw: a call without a final-state gradient launches what the
-    # flag off launches and gives its bits (the 0.2.3 programs); a call with one launches the pv_tf32 scan and tail
-    # in place of the 0.2.3 ones and nothing else differs, o / final_state / dq keep their bits; each repeats its bits
+    # flag off launches and gives its bits (the 0.2.8 programs); a call with one launches the pv_tf32 scan and tail
+    # in place of the 0.2.8 ones and nothing else differs, o / final_state / dq keep their bits; each repeats its bits
     _pv_or_skip()
     heads, seq_lens = FWD_A_CASES[case]
     inputs = _inputs(seq_lens, heads, torch.float32, device, seed=41)
@@ -11032,7 +11036,7 @@ def test_pv_tf32_runs_only_for_a_final_state_gradient(
 def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
     # PV_TF32 on: every call kind on one layout, interleaved in two orders from an empty host table cache, gives the
     # launches and bits of the kind's first call; and three backwards over one graph each take their own path: with
-    # the final-state gradient the pv_tf32 programs, without it the 0.2.3 ones (the h0-final call's bits), and with
+    # the final-state gradient the pv_tf32 programs, without it the 0.2.8 ones (the h0-final call's bits), and with
     # no gradient for o (do filled with zeros) the dht call's bits on zeros
     _pv_or_skip()
     heads, seq_lens = FWD_A_CASES["g2"]
@@ -11089,3 +11093,43 @@ def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
         _run(zero_do, seq_lens, initial_state=h0, output_final_state=True, dht=dht),
         names,
     )
+
+
+def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
+    # On by default on every architecture of the package: each pv_tf32 stage is a stage of the registry with
+    # one record per architecture, and its call site is its sibling's with the FP32 dg state operands inserted (the
+    # scan's h, v_new, hdh32_out, e_out after dh_out; the tail's hdh32, e32 after dh)
+    assert cake_chain.PV_TF32 is True and cake_chain.PV_TF32_ARCHS == ARCHES
+    pairs = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
+    assert set(pairs.values()) == {s for s in cake_jit.STAGES if s.endswith("_pv_tf32")}
+    for base, pv in pairs.items():
+        assert pv == base + "_pv_tf32" and base in cake_jit.STAGES, (base, pv)
+        extra = ("h", "v_new", "hdh32_out", "e_out") if base in cake_chain.PV_TF32_SCANS else ("hdh32", "e32")
+        after = "dh_out" if base in cake_chain.PV_TF32_SCANS else "dh"
+        args = cake_chain.LAUNCH_ARGS[base]
+        i = args.index(after) + 1
+        assert cake_chain.LAUNCH_ARGS[pv] == (*args[:i], *extra, *args[i:]), pv
+        for arch in ARCHES:
+            assert cake_chain._available(pv, arch), (pv, arch)
+    assert "tail_g3" not in cake_chain.PV_TF32_TAILS and "tail_g2_bf16_wavefront" not in cake_chain.PV_TF32_TAILS
+
+
+def test_pv_tf32_stages_fall_back_to_the_other_programs(monkeypatch) -> None:
+    # a route without a pv_tf32 pair keeps its programs instead of raising: a register scan (no tcgen05 scan), a tail
+    # without a pv_tf32 build, the flag off, or an architecture outside PV_TF32_ARCHS
+    for arch in ARCHES:
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "tail") == ("dhu_tc2_dvl32_pv_tf32", "tail_pv_tf32")
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2", "tail_g2_bf16") == (
+            "dhu_tc2_pv_tf32",
+            "tail_g2_bf16_pv_tf32",
+        )
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "dqkwg") == (
+            "dhu_tc2_dvl32_pv_tf32",
+            "dqkwg_pv_tf32",
+        )
+        assert cake_chain.pv_tf32_stages(arch, None, "tail_g2") is None
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "tail_g3") is None
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_wavefront", "tail_g2_bf16") is None
+    assert cake_chain.pv_tf32_stages("sm_90a", "dhu_tc2", "tail_g2") is None
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
+    assert cake_chain.pv_tf32_stages(ARCHES[0], "dhu_tc2", "tail_g2") is None
