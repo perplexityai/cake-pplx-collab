@@ -408,10 +408,14 @@ def _check_eps(eps: Any) -> float:
 
 
 def _span(t: torch.Tensor) -> tuple[int, int]:
-    """The bytes ``[data_ptr, data_ptr + numel * element_size)`` of ``t``: all of it when ``t`` is contiguous (every
-    output and every row operand is)."""
+    """The bytes ``t`` can address, from ``data_ptr`` to its last element: all of ``t`` when it is contiguous (every
+    output and every row operand is), and the true extent of a strided ``w`` (an expanded ``w`` covers one element).
+    Empty for an empty ``t``."""
     start = t.data_ptr()
-    return start, start + t.numel() * t.element_size()
+    if t.numel() == 0:
+        return start, start
+    last = sum((size - 1) * stride for size, stride in zip(t.shape, t.stride()))
+    return start, start + (last + 1) * t.element_size()
 
 
 def _no_overlap(name: str, t: torch.Tensor, others: Sequence[tuple[str, torch.Tensor]]) -> None:

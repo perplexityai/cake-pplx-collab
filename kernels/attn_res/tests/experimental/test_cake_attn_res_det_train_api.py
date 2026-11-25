@@ -509,6 +509,38 @@ def test_a_caller_output_that_overlaps_an_operand_is_a_value_error(monkeypatch) 
     assert _same_bits(fwd(ns.values, ns.w, out=rows[T : 2 * T])[0], out)
 
 
+def test_an_expanded_w_next_to_a_caller_owned_output_is_accepted() -> None:
+    """``w`` may have any layout.  An expanded ``w`` (stride 0) covers one FP32 element, so an ``out`` or a ``dv_j``
+    that starts 16 bytes past it shares no byte with it: the call is accepted and gives the bits of a contiguous ``w``.
+    An ``out`` or a ``dv_j`` that starts on that element overlaps ``w``: a ``ValueError``."""
+    device = _device_or_skip()
+    T, n = 4, 3
+    ns = make_inputs(T, n, seed=2, device=device)
+    fwd, bwd = api.cake_attn_res_det_train_forward, api.cake_attn_res_det_train_backward
+    # One FP32 buffer: element 0 is w's single element; the bytes from 16 on hold a caller-owned BF16 [T, 7168].
+    buf = torch.zeros(4 + T * HIDDEN // 2, dtype=torch.float32, device=device)
+    buf[0] = 0.0625
+    w = buf[:1].expand(HIDDEN)
+    beside = buf[4:].view(torch.bfloat16).view(T, HIDDEN)
+    on_w = buf[: T * HIDDEN // 2].view(torch.bfloat16).view(T, HIDDEN)
+    assert w.stride() == (0,) and beside.data_ptr() == w.data_ptr() + 16
+    out, p, r, d = fwd(ns.values, w.contiguous())
+    got = fwd(ns.values, w, out=beside)[0]
+    assert got.data_ptr() == beside.data_ptr()
+    assert _same_bits(got, out)
+    dv, _ = bwd(ns.dout, ns.values, w.contiguous(), p, r, d)
+    fresh = [torch.empty_like(ns.dout) for _ in range(n)]
+    got_dv, _ = bwd(ns.dout, ns.values, w, p, r, d, dv=[beside, fresh[1], fresh[2]])
+    for j in range(n):
+        assert _same_bits(got_dv[j], dv[j]), j
+    with pytest.raises(ValueError, match="overlap"):
+        fwd(ns.values, w, out=on_w)
+        pytest.fail("forward accepted an out on w's element")
+    with pytest.raises(ValueError, match="overlap"):
+        bwd(ns.dout, ns.values, w, p, r, d, dv=[on_w, fresh[1], fresh[2]])
+        pytest.fail("backward accepted a dv on w's element")
+
+
 def test_a_base_off_a_16_byte_boundary_is_a_value_error() -> None:
     device = _device_or_skip()
     ns = make_inputs(4, 2, seed=2, device=device)

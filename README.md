@@ -1,6 +1,6 @@
 # cake-pplx-collab
 
-This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 23 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
+This repository holds Cake training kernels for NVIDIA Blackwell GPUs (SM100, SM103 and SM107). Most families provide a forward, a backward and an autograd entry point. There are 24 kernel families, and each one is a separate pip distribution. You can pin, upgrade or roll back one family without changing the others.
 
 ## Kernel families
 
