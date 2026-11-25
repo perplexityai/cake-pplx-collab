@@ -1817,7 +1817,8 @@ def _small_s_rows(arch: str, kind: str) -> list[tuple[int, int, int, int]]:
     """``(S, C, C_lo, C_hi)`` of the forward keys of route ``kind`` on ``arch`` (:func:`_forward_keys`): at the key's
     lowest channel count S 1000 (inside the key's range), the range's first token count and the one below it; at its
     highest channel count the range's last token count and the one above it (so ``S_x`` and ``S_x + 1`` of a key
-    with both ranges, and ``S_hi`` and ``S_hi + 1``)."""
+    whose direct range starts above its static range, both sides of both ends of a direct range inside a static
+    range, and ``S_hi`` and ``S_hi + 1``)."""
 
     rows = set()
     for route, c_lo, c_hi, s_lo, s_hi, _ in _forward_keys(arch):

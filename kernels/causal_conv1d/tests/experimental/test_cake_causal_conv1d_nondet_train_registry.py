@@ -147,8 +147,9 @@ TOKENS = (
 # alike: each route's programs evaluate SiLU' at the unrounded FP32 preactivation with either taps dtype).  The
 # forward routes' keys (C 512 to 1024) run the route's static program, the deterministic package's at the same rows,
 # over the measured token counts where it was not slower than the dynamic program; a direct range of
-# :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends (where the key has one), and a pair direct
-# range of :data:`PAIR_ROWS_OF_RECORD` runs ahead of both where it covers them.
+# :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends (where the key has one) or, on sm_103a
+# ``fwd_bias`` at C 720 to 768, lies inside it and runs ahead of it there, and a pair direct range of
+# :data:`PAIR_ROWS_OF_RECORD` runs ahead of both where it covers them.
 FALLBACK_ROWS_OF_RECORD = {
     "sm_100a": {
         ("bwd", 520, 608): (1, 24575),
@@ -224,10 +225,10 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
         ("fwd_bias", 712, 712): (1, 12800),
-        ("fwd_bias", 720, 728): (13824, 16383),
-        ("fwd_bias", 736, 736): (14336, 16383),
-        ("fwd_bias", 744, 760): (13824, 16383),
-        ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 720, 728): (1, 16383),
+        ("fwd_bias", 736, 736): (1, 16383),
+        ("fwd_bias", 744, 760): (1, 16383),
+        ("fwd_bias", 768, 768): (1, 16384),
         ("fwd_bias", 776, 896): (1, 8192),
         ("fwd_bias", 904, 952): (1, 12288),
         ("fwd_bias", 960, 1024): (1, 20480),
@@ -311,12 +312,14 @@ FALLBACK_REPLACES_OF_RECORD = {
 }
 # The rows where a forward route runs its direct program (a build of the deterministic direct program; each CTA takes
 # the next token blocks of its channel tile, no ``work``): arch -> (route, C_lo, C_hi) -> (S_lo, S_hi, program), every
-# multiple of 8 from C_lo to C_hi.  Each range but the four below starts above the key's static range of
+# multiple of 8 from C_lo to C_hi.  Each range but the ones named below starts above the key's static range of
 # :data:`FALLBACK_ROWS_OF_RECORD` (or at the token count from which the direct program beat the dynamic one) and ends
 # at the last measured token count where it was not slower than the dynamic program, eager and CUDA Graph replay; the
 # deterministic package keeps the same rows.  A :data:`PAIR_ROWS_OF_RECORD` range runs ahead of the part of a range it
 # covers.  The ranges of sm_103a ``fwd`` C 512, 576-632 and 904-952 and sm_107a ``fwd`` C 768 start at S 2049, where
-# their static range S 1-2048 ended; that static range lies inside the pair direct range, and 0.2.16 removed it.
+# their static range S 1-2048 ended; that static range lies inside the pair direct range, and 0.2.16 removed it.  On
+# sm_103a ``fwd_bias`` at C 720 to 768 the range (S 12801 to 13823, C 736: to 14335) lies inside the key's static range
+# instead and runs ahead of it, where the deterministic package's static program ran slower than its direct program.
 DIRECT_ROWS_OF_RECORD = {
     "sm_100a": {
         ("fwd", 520, 544): (
@@ -539,6 +542,26 @@ DIRECT_ROWS_OF_RECORD = {
         ("fwd_bias", 712, 712): (
             12801,
             14592,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 720, 728): (
+            12801,
+            13823,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 736, 736): (
+            12801,
+            14335,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 744, 760): (
+            12801,
+            13823,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 768, 768): (
+            12801,
+            13823,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("fwd_bias", 776, 896): (
@@ -780,8 +803,8 @@ PAIR_ROWS_OF_RECORD = {
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
         ("fwd_bias", 720, 768): (
-            16,
-            1536,
+            1,
+            3072,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
         ("fwd_bias", 776, 1024): (
@@ -793,7 +816,7 @@ PAIR_ROWS_OF_RECORD = {
     "sm_107a": {
         ("fwd", 512, 512): (
             1,
-            2560,
+            4096,
             "cake_causal_conv1d_train_d0b237e92b28348315d0",
         ),
         ("fwd", 520, 736): (
@@ -2727,6 +2750,55 @@ def test_fallback_rows_are_the_literal_rows() -> None:
                 assert hi < lo, (arch, route, ranges)
 
 
+def _forward_layout_problems(
+    fallback: dict[tuple[str, int, int], tuple],
+    direct: dict[tuple[str, int, int], tuple],
+) -> list[tuple[tuple[str, int, int], tuple[str, int, int]]]:
+    """The ``(FALLBACK_ROWS key, DIRECT_ROWS key)`` pairs of one architecture (each range ``(S_lo, S_hi, ...)``) that
+    break the forward layout: a direct key meets the channel counts of a static key of its route only where both are
+    one key, and there the direct range starts one token above the static range or lies inside it."""
+
+    problems = []
+    for key, (s_lo, s_hi, *_) in fallback.items():
+        for other, (t_lo, t_hi, *_) in direct.items():
+            if key[0] != other[0] or key[2] < other[1] or other[2] < key[1]:
+                continue
+            touches = s_hi + 1 == t_lo
+            nested = s_lo <= t_lo <= t_hi <= s_hi
+            if key != other or not (touches or nested):
+                problems.append((key, other))
+    return problems
+
+
+@pytest.mark.cpu_only
+def test_forward_layout_keeps_a_direct_range_inside_its_static_range() -> None:
+    """A direct range inside the static range of its own key, or one token above it, keeps the layout."""
+
+    key = ("fwd_bias", 720, 728)
+    for static, direct in (
+        ((1, 16383), (12801, 13823)),
+        ((1, 16383), (1, 16383)),
+        ((1, 12800), (12801, 13823)),
+    ):
+        assert not _forward_layout_problems({key: static}, {key: (*direct, "p")})
+
+
+@pytest.mark.cpu_only
+def test_forward_layout_refuses_a_partial_overlap() -> None:
+    """A direct range that leaves the static range of its key where it meets it, starts a gap above it or lies below
+    it, or meets a static range of another key, breaks the layout; another route or disjoint channels do not."""
+
+    key = ("fwd_bias", 720, 728)
+    direct = {key: (12801, 13823, "p")}
+    for static in ((1, 13000), (12900, 16383), (1, 12000), (13824, 16383)):
+        assert _forward_layout_problems({key: static}, direct) == [(key, key)], static
+    other = ("fwd_bias", 720, 736)
+    assert _forward_layout_problems({key: (1, 16383)}, {other: (12801, 13823, "p")})
+    for elsewhere in (("fwd_bias", 736, 736), ("fwd", 720, 728)):
+        direct = {elsewhere: (12801, 13823, "p")}
+        assert not _forward_layout_problems({key: (1, 16383)}, direct)
+
+
 @pytest.mark.cpu_only
 def test_direct_rows_are_the_literal_rows() -> None:
     """``DIRECT_ROWS`` is the literal :data:`DIRECT_ROWS_OF_RECORD` with the backward keys of
@@ -2734,8 +2806,8 @@ def test_direct_rows_are_the_literal_rows() -> None:
     :data:`DIRECT_PLANS_OF_RECORD`.  Every forward key names an exported architecture, one of its forward routes, a
     closed range of channel counts (multiples of 8), a closed range of token counts inside ``S >= 1`` and the route's
     direct program (selection-rule kind ``rows``), which ships for the architecture; the keys of one architecture and
-    route are disjoint; no ``(C, S)`` of a direct range lies in a ``FALLBACK_ROWS`` range, and where a
-    ``FALLBACK_ROWS`` key covers the same channel counts its static range lies below the direct range.
+    route are disjoint; a direct range meets a ``FALLBACK_ROWS`` key of its route only at the same key, where it starts
+    one token above the static range or lies inside it (:func:`_forward_layout_problems`).
     ``DIRECT_PLANS`` names a form
     ``(ct_vec, n_sub)`` for exactly the forward routes the architecture's keys name, within 128 threads (the backward
     keys: :func:`test_backward_direct_rows_are_the_literal_rows`)."""
@@ -2767,7 +2839,9 @@ def test_direct_rows_are_the_literal_rows() -> None:
                     C,
                 )
                 bounds = cake_jit.fallback_row_range(arch, route, C)
-                assert bounds is None or bounds[1] < s_lo, (label, C, bounds)
+                touches = bounds is not None and bounds[1] + 1 == s_lo
+                nested = bounds is not None and bounds[0] <= s_lo <= s_hi <= bounds[1]
+                assert bounds is None or touches or nested, (label, C, bounds)
             for C in (c_lo - 8, c_hi + 8, c_lo + 4):
                 inside = [
                     k
@@ -2783,6 +2857,8 @@ def test_direct_rows_are_the_literal_rows() -> None:
             ranges.sort()
             for (_, hi), (lo, _) in itertools.pairwise(ranges):
                 assert hi < lo, (arch, route, ranges)
+        fallback = FALLBACK_ROWS_OF_RECORD.get(arch, {})
+        assert not _forward_layout_problems(fallback, rows), arch
         plans = cake_jit.DIRECT_PLANS.get(arch, {})
         assert set(plans) == set(spans), arch
         for route, (ct_vec, n_sub) in plans.items():
@@ -2964,7 +3040,8 @@ def test_pair_module_refuses_registry_errors(arch, monkeypatch) -> None:
 def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
     """Inside a key (``C_lo <= C <= C_hi``, ``C`` a multiple of 8, ``S_min <= S <= S_max``) a call of the key's route
     selects the route's fallback program (a forward route's static program), inside a ``DIRECT_ROWS`` range the
-    route's direct program (a backward one also where a ``FALLBACK_ROWS`` range holds the same ``(C, S)``), inside a
+    route's direct program (also where a ``FALLBACK_ROWS`` range holds the same ``(C, S)``: a backward range, or a
+    forward range inside the static range of its key), inside a
     ``PAIR_ROWS`` range (ahead of the other two) the route's pair direct program, inside an ``SM_WIDE_ROWS`` segment
     the segment's program, and the program the selection
     rules pick everywhere else: both sides of every channel and token bound, on every forward and backward route of
@@ -3009,7 +3086,8 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
             bounds = keys[0] if keys else None
             assert cake_jit.fallback_row_range(arch, kind, C) == bounds, (kind, C)
             for S in sorted(S for S in tokens if 0 < S <= cake_jit.INT32_MAX):
-                # A backward direct range runs ahead of the fallback range it shares ``(C, S)`` with.
+                # A direct range (backward, or forward inside its key's static range) runs ahead of the fallback
+                # range it shares ``(C, S)`` with.
                 inside = (
                     bounds is not None
                     and bounds[0] <= S <= bounds[1]
