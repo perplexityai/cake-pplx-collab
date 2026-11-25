@@ -897,8 +897,10 @@ def test_queue_stages_take_the_half_release_arguments():
     ``main_halves`` program on that architecture and its argument plan plus the
     ``sched`` buffer, which the weight-gradient binding binds to the ``queue_sched``
     stream workspace (the row programs' ``sched`` keeps its own kind).  Every rule names
-    a stage the queue walk may stand in for, an output kind and a group range, and the
-    routes serve the stage it binds.  (A CPU check.)"""
+    a stage the queue walk may stand in for, an output kind and a group range, its other
+    keys are optional bounds of ``QUEUE_RULE_BOUNDS`` (each a ``[min, max]`` of
+    non-negative integers, one end may be None), and the routes serve the stage it binds.
+    (A CPU check.)"""
     assert cb.BINDING_WORKSPACE_KINDS == {"wgrad": {"sched": cb.QUEUE_SCHED}}
     assert cb.WORKSPACE_KINDS == cb.STREAM_WORKSPACES + (cb.QUEUE_SCHED,)
     assert cb.QUEUE_SELECTED_STAGES == ("main_halves", "main_wave_halves")
@@ -911,6 +913,14 @@ def test_queue_stages_take_the_half_release_arguments():
         low, high = rule["groups"]
         assert 1 <= low <= high, rule
         assert rule["sm_counts"] and all(int(v) > 0 for v in rule["sm_counts"]), rule
+        bounds = set(rule) - {"arch", "sm_counts", "stage", "outputs", "groups"}
+        assert bounds <= set(cb.QUEUE_RULE_BOUNDS), rule
+        for key in bounds:
+            low, high = rule[key]
+            assert low is not None or high is not None, rule
+            for end in (low, high):
+                assert end is None or (isinstance(end, int) and end >= 0), rule
+            assert low is None or high is None or low <= high, rule
     for out_dtype in ("bfloat16", "float32"):
         name = cake_jit.record_name("wgrad", out_dtype=out_dtype, tile_k=512)
         for arch in ROUTES[name]["arches"]:
@@ -981,10 +991,79 @@ def test_queue_stages_have_lead_twins():
     assert seen, "no queue-walk stage on any 512-wide k tile route"
 
 
+# Shapes of the queue walk's rule checks (``wgrad_queue_walk``'s keywords): none given (every
+# optional bound fails), and weight gradients at the ends of the deterministic package's
+# bounds and one past them: 65536, 262144 and 327680 rows; 4096 rows per group at 4, 16 and
+# 32 groups (16384 to 131072 rows) and 16384 at 4, 8, 16 and 32 groups (65536 to 524288
+# rows); N of 2048, 4095 / 4096 and 6143 / 6144; K of 6143 / 6144.
+QUEUE_WALK_SHAPES = (
+    {},
+    {"total_rows": 16384, "n": 4096, "k": 6144},
+    {"total_rows": 16385, "n": 4096, "k": 6144},
+    {"total_rows": 65536, "n": 4096, "k": 6144},
+    {"total_rows": 65537, "n": 4096, "k": 6144},
+    {"total_rows": 131072, "n": 4096, "k": 6144},
+    {"total_rows": 131073, "n": 4096, "k": 6144},
+    {"total_rows": 131072, "n": 4095, "k": 6144},
+    {"total_rows": 131072, "n": 4097, "k": 6144},
+    {"total_rows": 262144, "n": 4096, "k": 7168},
+    {"total_rows": 262145, "n": 4096, "k": 7168},
+    {"total_rows": 327680, "n": 4096, "k": 7168},
+    {"total_rows": 327681, "n": 4096, "k": 7168},
+    {"total_rows": 327681, "n": 4095, "k": 4096},
+    {"total_rows": 65536, "n": 2048, "k": 4096},
+    {"total_rows": 65537, "n": 2048, "k": 4096},
+    {"total_rows": 131072, "n": 2048, "k": 4096},
+    {"total_rows": 131073, "n": 2048, "k": 4096},
+    {"total_rows": 262144, "n": 2048, "k": 6143},
+    {"total_rows": 262145, "n": 2048, "k": 6143},
+    {"total_rows": 524288, "n": 2048, "k": 4096},
+    {"total_rows": 524289, "n": 2048, "k": 4096},
+    {"total_rows": 524288, "n": 4095, "k": 4096},
+    {"total_rows": 524288, "n": 4096, "k": 4096},
+    {"total_rows": 655360, "n": 2048, "k": 6144},
+    {"total_rows": 655360, "n": 2048, "k": 6143},
+    {"total_rows": 655360, "n": 2047, "k": 7168},
+    {"total_rows": 655360, "n": 2049, "k": 7168},
+    {"total_rows": 655360, "n": 4095, "k": 6144},
+    {"total_rows": 655360, "n": 4096, "k": 6144},
+    {"total_rows": 655360, "n": 6144, "k": 2048},
+    {"total_rows": 655360, "n": 6143, "k": 2048},
+)
+# The group counts of the rule checks: each end of the shipped group ranges and one past it.
+QUEUE_WALK_GROUPS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 32, 33, 64)
+
+
+def _queue_bounds_hold(rule, groups, shape):
+    """Whether ``shape`` (keywords of ``QUEUE_WALK_SHAPES``) meets every optional bound of
+    ``rule`` over ``groups`` groups, by the rule's definition: ``rows`` holds ``total_rows``,
+    ``rows_per_group`` holds ``total_rows / groups`` (exact in integers), ``n`` and ``k``
+    hold ``n`` and ``k``, a None end leaving its side open; a bound whose value is not given
+    fails."""
+    values = {
+        "rows": (shape.get("total_rows"), 1),
+        "rows_per_group": (shape.get("total_rows"), groups),
+        "n": (shape.get("n"), 1),
+        "k": (shape.get("k"), 1),
+    }
+    for key, (value, scale) in values.items():
+        if key not in rule:
+            continue
+        low, high = rule[key]
+        if value is None:
+            return False
+        if low is not None and value < low * scale:
+            return False
+        if high is not None and value > high * scale:
+            return False
+    return True
+
+
 def test_wgrad_queue_walk_follows_its_rules():
     """``wgrad_queue_walk`` holds exactly where one rule of ``queue_walk`` names the
     architecture, the SM count, the selected stage (one of ``QUEUE_SELECTED_STAGES``),
-    the output and a group range holding the group count.  (A CPU check.)"""
+    the output and a group range holding the group count, and the call's shape meets
+    every optional bound of that rule.  (A CPU check.)"""
     c = HOST_PLAN_CONSTANTS
     stages = ("main", "main_wave", "main_halves_k256t", *cb.QUEUE_SELECTED_STAGES)
     outputs = ("bfloat16", "float32", "accumulate")
@@ -992,23 +1071,221 @@ def test_wgrad_queue_walk_follows_its_rules():
         for sms in (148, 152, 160, 212):
             for stage in stages:
                 for output in outputs:
-                    for groups in (1, 2, 4, 8, 16, 17, 32, 33, 64):
-                        want = any(
-                            rule["arch"] == arch
-                            and sms in rule["sm_counts"]
-                            and rule["stage"] == stage
-                            and output in rule["outputs"]
-                            and rule["groups"][0] <= groups <= rule["groups"][1]
-                            for rule in c["queue_walk"]
-                        )
-                        got = cb.wgrad_queue_walk(stage, output, arch, sms, groups, c)
-                        assert got == want, (arch, sms, stage, output, groups)
+                    for groups in QUEUE_WALK_GROUPS:
+                        for shape in QUEUE_WALK_SHAPES:
+                            want = any(
+                                rule["arch"] == arch
+                                and sms in rule["sm_counts"]
+                                and rule["stage"] == stage
+                                and output in rule["outputs"]
+                                and rule["groups"][0] <= groups <= rule["groups"][1]
+                                and _queue_bounds_hold(rule, groups, shape)
+                                for rule in c["queue_walk"]
+                            )
+                            got = cb.wgrad_queue_walk(
+                                stage, output, arch, sms, groups, c, **shape
+                            )
+                            assert got == want, (
+                                arch,
+                                sms,
+                                stage,
+                                output,
+                                groups,
+                                shape,
+                            )
     assert not cb.wgrad_queue_walk(
         "main_halves", "bfloat16", "sm_100a", 148, 8, {"queue_walk": []}
     )
     # A bfloat16 row of the 148-SM sm_100a main_halves stage was slower on the queue walk.
     assert not cb.wgrad_queue_walk("main_halves", "bfloat16", "sm_100a", 148, 16, c)
     assert cb.wgrad_queue_walk("main_halves", "accumulate", "sm_100a", 148, 16, c)
+
+
+# The rule of the optional bounds' unit checks: the bf16 overwrite of the 148-SM sm_100a
+# ``main_halves`` stage at 1 to 64 groups, before any bound.
+QUEUE_BOUND_RULE = {
+    "arch": "sm_100a",
+    "sm_counts": [148],
+    "stage": "main_halves",
+    "outputs": ["bfloat16"],
+    "groups": [1, 64],
+}
+# A call inside every bound of the unit checks: 32 groups of 6144 rows, a 2048 x 4096 dW[e].
+QUEUE_BOUND_SHAPE = {"total_rows": 196608, "n": 2048, "k": 4096}
+
+
+def _bound_walk(bounds, groups=32, **shape):
+    """``wgrad_queue_walk`` of a bf16 overwrite of ``groups`` groups on the 148-SM sm_100a
+    ``main_halves`` stage under the one rule ``QUEUE_BOUND_RULE`` with ``bounds`` added, for
+    ``QUEUE_BOUND_SHAPE`` with ``shape`` replacing its keywords."""
+    rule = dict(QUEUE_BOUND_RULE, **bounds)
+    return cb.wgrad_queue_walk(
+        "main_halves",
+        "bfloat16",
+        "sm_100a",
+        148,
+        groups,
+        {"queue_walk": [rule]},
+        **{**QUEUE_BOUND_SHAPE, **shape},
+    )
+
+
+def _bound_edges(low, high):
+    """``(value, inside)`` at both ends of ``[low, high]`` and one past each."""
+    return [
+        (low - 1, False),
+        (low, True),
+        (low + 1, True),
+        (high - 1, True),
+        (high, True),
+        (high + 1, False),
+    ]
+
+
+# The unit cases of the optional bounds: (bound key, [min, max], groups, shape keywords, binds).
+# Each bound at both ends and one past them; ``rows_per_group`` in rows at 32 groups and at 3
+# (whose mean rows per group are not whole) and in groups at 196608 rows; each key with one
+# end open (None), which holds every value on that side.
+QUEUE_BOUND_CASES = [
+    *(
+        ("rows", [131072, 196608], 32, {"total_rows": v}, ok)
+        for v, ok in _bound_edges(131072, 196608)
+    ),
+    *(
+        ("rows_per_group", [4096, 6144], 32, {"total_rows": v}, ok)
+        for v, ok in _bound_edges(4096 * 32, 6144 * 32)
+    ),
+    *(
+        ("rows_per_group", [4096, 6144], 3, {"total_rows": v}, ok)
+        for v, ok in _bound_edges(4096 * 3, 6144 * 3)
+    ),
+    *(
+        ("rows_per_group", [4096, 6144], e, {"total_rows": 196608}, ok)
+        for e, ok in (
+            (31, False),
+            (32, True),
+            (33, True),
+            (47, True),
+            (48, True),
+            (49, False),
+        )
+    ),
+    *(("n", [2048, 4096], 32, {"n": v}, ok) for v, ok in _bound_edges(2048, 4096)),
+    *(("k", [4096, 6144], 32, {"k": v}, ok) for v, ok in _bound_edges(4096, 6144)),
+    *(
+        ("rows", bound, 32, {"total_rows": v}, ok)
+        for bound, v, ok in (
+            ([None, 131072], 0, True),
+            ([None, 131072], 131072, True),
+            ([None, 131072], 131073, False),
+            ([131072, None], 131071, False),
+            ([131072, None], 131072, True),
+            ([131072, None], 1 << 40, True),
+        )
+    ),
+    *(
+        ("rows_per_group", bound, 32, {"total_rows": v}, ok)
+        for bound, v, ok in (
+            ([None, 4096], 4096 * 32, True),
+            ([None, 4096], 4096 * 32 + 1, False),
+            ([4096, None], 4096 * 32 - 1, False),
+            ([4096, None], 4096 * 32, True),
+        )
+    ),
+    *(
+        (key, bound, 32, {key: v}, ok)
+        for key in ("n", "k")
+        for bound, v, ok in (
+            ([None, 4096], 4096, True),
+            ([None, 4096], 4097, False),
+            ([4096, None], 4095, False),
+            ([4096, None], 1 << 20, True),
+            ([None, None], 1, True),
+        )
+    ),
+]
+
+
+@pytest.mark.parametrize("key,bound,groups,shape,want", QUEUE_BOUND_CASES)
+def test_wgrad_queue_walk_bound_edges(key, bound, groups, shape, want):
+    """An optional bound of a ``queue_walk`` rule holds its value with both ends included
+    and a None end open: ``"rows"`` ``total_rows``, ``"rows_per_group"``
+    ``total_rows / num_groups`` compared exactly (``min * E <= total_rows <= max * E``),
+    ``"n"`` ``n``, ``"k"`` ``k``.  (A CPU check.)"""
+    assert _bound_walk({key: bound}, groups, **shape) == want
+
+
+# The arguments each optional bound reads.
+QUEUE_BOUND_ARGUMENTS = {
+    "rows": ("total_rows",),
+    "rows_per_group": ("total_rows",),
+    "n": ("n",),
+    "k": ("k",),
+}
+
+
+@pytest.mark.parametrize("key", cb.QUEUE_RULE_BOUNDS)
+def test_wgrad_queue_walk_bound_needs_its_arguments(key):
+    """A rule with an optional bound never matches a call that leaves the argument the bound
+    reads as None (the default), even where the bound holds any value; the arguments it does
+    not read may be None.  (A CPU check.)"""
+    assert tuple(QUEUE_BOUND_ARGUMENTS) == cb.QUEUE_RULE_BOUNDS
+    every = {key: [None, None]}
+    assert _bound_walk(every)
+    for name in QUEUE_BOUND_ARGUMENTS[key]:
+        assert not _bound_walk(every, **{name: None}), name
+    others = {
+        name: None
+        for name in QUEUE_BOUND_SHAPE
+        if name not in QUEUE_BOUND_ARGUMENTS[key]
+    }
+    assert _bound_walk(every, **others), others
+
+
+def test_wgrad_queue_walk_bounds_combine():
+    """A rule binds only where every bound it has holds and its other fields name the call;
+    one matching rule of several binds; a rule with no bound matches a call that gives no
+    shape (the keywords' defaults).  (A CPU check.)"""
+    every = {
+        "rows": [131072, 196608],
+        "rows_per_group": [4096, 6144],
+        "n": [2048, 2048],
+        "k": [4096, None],
+    }
+    assert _bound_walk(every)
+    assert not _bound_walk(every, total_rows=196609)
+    assert not _bound_walk(every, groups=31)
+    assert not _bound_walk(every, n=2304)
+    assert not _bound_walk(every, k=3584)
+    rule = dict(QUEUE_BOUND_RULE, rows=[0, None])
+    for stage, output, arch, sms, groups in (
+        ("main_wave_halves", "bfloat16", "sm_100a", 148, 32),
+        ("main_halves", "float32", "sm_100a", 148, 32),
+        ("main_halves", "bfloat16", "sm_103a", 148, 32),
+        ("main_halves", "bfloat16", "sm_100a", 152, 32),
+        ("main_halves", "bfloat16", "sm_100a", 148, 65),
+    ):
+        assert not cb.wgrad_queue_walk(
+            stage,
+            output,
+            arch,
+            sms,
+            groups,
+            {"queue_walk": [rule]},
+            **QUEUE_BOUND_SHAPE,
+        ), (stage, output, arch, sms, groups)
+    two = {"queue_walk": [dict(QUEUE_BOUND_RULE, rows=[0, 1]), dict(QUEUE_BOUND_RULE)]}
+    assert cb.wgrad_queue_walk(
+        "main_halves", "bfloat16", "sm_100a", 148, 32, two, **QUEUE_BOUND_SHAPE
+    )
+    assert cb.wgrad_queue_walk(
+        "main_halves",
+        "bfloat16",
+        "sm_100a",
+        148,
+        32,
+        {"queue_walk": [QUEUE_BOUND_RULE]},
+    )
 
 
 # The keywords the host binds a stage's argument plan from, by the stage it binds: the

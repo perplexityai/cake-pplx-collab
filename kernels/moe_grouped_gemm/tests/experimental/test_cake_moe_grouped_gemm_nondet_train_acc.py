@@ -231,10 +231,17 @@ def _prepare_pair(g, x, offs, out, num_groups=None):
     return ovw, acc
 
 
-def _assert_twin_launch(ovw, acc, arch):
+def _queue_shape(out, rows):
+    """The shape keywords of ``cb.wgrad_queue_walk`` the host passes for a weight gradient of
+    ``rows`` rows (``g.shape[0]``) into ``out`` ``[E, N, K]``."""
+    return {"total_rows": int(rows), "n": int(out.shape[1]), "k": int(out.shape[2])}
+
+
+def _assert_twin_launch(ovw, acc, arch, rows):
     """``acc`` is ``ovw`` in accumulate mode: the same route and plan apart from the
     accumulate keys, and the binding of its route; a fused launch is one launch with no
-    tail-reduce stage, planned with the ordered one-launch tail (shipped constants)."""
+    tail-reduce stage, planned with the ordered one-launch tail (shipped constants).
+    ``rows`` is the rows of the call's ``g`` (the queue walk's ``total_rows``)."""
     assert ovw.plan["accumulate"] == "off" and "accumulate_reason" not in ovw.plan
     assert acc.record_name == ovw.record_name
     assert _plan_without(acc.plan, "accumulate", "accumulate_reason") == _plan_without(
@@ -260,12 +267,13 @@ def _assert_twin_launch(ovw, acc, arch):
         # The fused accumulate binds the twin's accumulate stage, or the queue walk's where a
         # ``queue_walk`` rule names the fused accumulate (``wgrad_queue_walk``).
         queue_acc = cb.QUEUE_STAGE + ACC
+        shape = _queue_shape(acc.out, rows)
         if acc.stages == (queue_acc,) and stage != cb.QUEUE_STAGE:
             e = acc.out.shape[0]
             assert stage in cb.QUEUE_SELECTED_STAGES, (stage, arch)
             assert cb.wgrad_queue_walk(
-                stage, "accumulate", arch, cb.sm_count(acc.out.device), e
-            ), (stage, arch, e)
+                stage, "accumulate", arch, cb.sm_count(acc.out.device), e, **shape
+            ), (stage, arch, e, shape)
             stage = cb.QUEUE_STAGE
         elif stage in cb.QUEUE_SELECTED_STAGES:
             assert not (
@@ -275,6 +283,7 @@ def _assert_twin_launch(ovw, acc, arch):
                     arch,
                     cb.sm_count(acc.out.device),
                     acc.out.shape[0],
+                    **shape,
                 )
                 and cake_jit.stage_served(acc.record_name, queue_acc, arch)
             ), (stage, arch, acc.stages)
@@ -415,7 +424,7 @@ def test_accumulate_plans_equal_the_overwrite_plans(arch, sm_count, monkeypatch)
             for out_dtype in (torch.bfloat16, torch.float32):
                 g, x, offs, out = _meta_operands(sizes, n, k, out_dtype)
                 ovw, acc = _prepare_pair(g, x, offs, out)
-                _assert_twin_launch(ovw, acc, arch)
+                _assert_twin_launch(ovw, acc, arch, g.shape[0])
                 assert ovw.plan["tile_k"] == 512, (label, proj, ovw.plan)
                 assert "halves" in ovw.stages[0], (label, proj, ovw.stages)
                 if _promised(arch, ovw.stages[0], out_dtype):
@@ -441,7 +450,7 @@ def test_k256_tile_and_forced_forms_compose(arch, monkeypatch):
         )
         ovw, acc = _prepare_pair(g, x, offs, out)
         assert ovw.plan["tile_k"] == 256
-        _assert_twin_launch(ovw, acc, arch)
+        _assert_twin_launch(ovw, acc, arch, g.shape[0])
         assert (acc.plan["accumulate"], acc.plan["accumulate_reason"]) == (
             "composed",
             "tile_k",
@@ -455,7 +464,7 @@ def test_k256_tile_and_forced_forms_compose(arch, monkeypatch):
                 g, x, offs, out = _meta_operands(base.K512_E3, 512, k, out_dtype)
                 ovw, acc = _prepare_pair(g, x, offs, out)
                 assert ovw.stages == (form,), (form, ovw.stages)
-                _assert_twin_launch(ovw, acc, arch)
+                _assert_twin_launch(ovw, acc, arch, g.shape[0])
                 assert (acc.plan["accumulate"], acc.plan["accumulate_reason"]) == (
                     "composed",
                     "stage",
@@ -653,7 +662,7 @@ def test_misaligned_out_composes_with_one_warning(monkeypatch):
     e = len(sizes)
     g, x, offs, aligned = _cpu_operands(sizes, n, k, torch.float32)
     ovw, acc = _prepare_pair(g, x, offs, aligned)
-    _assert_twin_launch(ovw, acc, arch)
+    _assert_twin_launch(ovw, acc, arch, g.shape[0])
     assert _promised(arch, ovw.stages[0], torch.float32), ovw.stages
     assert acc.plan["accumulate"] == "fused" and "accumulate_reason" not in acc.plan
     flat = torch.zeros(e * (n + 1) * (k + 8) + 8, dtype=torch.float32)
@@ -667,7 +676,7 @@ def test_misaligned_out_composes_with_one_warning(monkeypatch):
         for what, out in misaligned.items():
             assert not cb._accumulate_aligned(out), what
             ovw, acc = _prepare_pair(g, x, offs, out)
-            _assert_twin_launch(ovw, acc, arch)
+            _assert_twin_launch(ovw, acc, arch, g.shape[0])
             assert (acc.plan["accumulate"], acc.plan["accumulate_reason"]) == (
                 "composed",
                 "alignment",
@@ -710,7 +719,7 @@ def test_unloadable_acc_build_composes_with_one_warning(monkeypatch):
         warnings.simplefilter("always")
         for _ in range(2):
             ovw, acc = _prepare_pair(g, x, offs, out)
-            _assert_twin_launch(ovw, acc, arch)
+            _assert_twin_launch(ovw, acc, arch, g.shape[0])
             assert _promised(arch, ovw.stages[0], torch.float32), ovw.stages
             assert (acc.plan["accumulate"], acc.plan["accumulate_reason"]) == (
                 "composed",

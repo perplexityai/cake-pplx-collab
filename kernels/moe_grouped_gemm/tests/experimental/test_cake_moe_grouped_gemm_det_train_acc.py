@@ -282,12 +282,19 @@ def _prepare_pair(g, x, offs, out, num_groups=None):
     return ovw, acc
 
 
-def _assert_twin_launch(ovw, acc, arch):
+def _queue_shape(out, rows):
+    """The shape keywords of ``cb.wgrad_queue_walk`` the host passes for a weight gradient of
+    ``rows`` rows (``g.shape[0]``) into ``out`` ``[E, N, K]``."""
+    return {"total_rows": int(rows), "n": int(out.shape[1]), "k": int(out.shape[2])}
+
+
+def _assert_twin_launch(ovw, acc, arch, rows):
     """``acc`` is ``ovw`` in accumulate mode: the same route and plan apart from the
     accumulate keys, the route ``wgrad_accumulate_mode`` gives (a reason exactly when
     composed); fused: the overwrite's stages with ``_acc`` each, no scratch, the version
     bump; composed: the overwrite's stages and a contiguous scratch of ``out``'s shape and
-    dtype.  Neither zero-fills."""
+    dtype.  Neither zero-fills.  ``rows`` is the rows of the call's ``g`` (the queue walk's
+    ``total_rows``)."""
     assert ovw.plan["accumulate"] == "off" and "accumulate_reason" not in ovw.plan
     assert acc.record_name == ovw.record_name
     assert _plan_without(acc.plan, "accumulate", "accumulate_reason") == _plan_without(
@@ -317,17 +324,19 @@ def _assert_twin_launch(ovw, acc, arch):
         queue_acc = cb.QUEUE_STAGE + ACC
         selected, e = ovw.stages[0], acc.out.shape[0]
         sms = cb.sm_count(acc.out.device)
+        shape = _queue_shape(acc.out, rows)
         if acc.stages[0] == queue_acc and selected != cb.QUEUE_STAGE:
             assert selected in cb.QUEUE_SELECTED_STAGES, (selected, arch)
-            assert cb.wgrad_queue_walk(selected, "accumulate", arch, sms, e), (
+            assert cb.wgrad_queue_walk(selected, "accumulate", arch, sms, e, **shape), (
                 selected,
                 arch,
                 e,
+                shape,
             )
             stages = (cb.QUEUE_STAGE, *ovw.stages[1:])
         elif selected in cb.QUEUE_SELECTED_STAGES:
             assert not (
-                cb.wgrad_queue_walk(selected, "accumulate", arch, sms, e)
+                cb.wgrad_queue_walk(selected, "accumulate", arch, sms, e, **shape)
                 and cake_jit.stage_served(acc.record_name, queue_acc, arch)
                 and cb.acc_library_loadable(acc.record_name, queue_acc, arch)
             ), (selected, arch, acc.stages)
@@ -457,7 +466,7 @@ def _det_plan(sizes, n, k, arch, sms, out_dtype=torch.float32):
     )
     k256_tail = stage == "main_halves_k256t"
     if cb.wgrad_queue_walk(
-        stage, DTYPE_NAMES[out_dtype], arch, sms, e, c
+        stage, DTYPE_NAMES[out_dtype], arch, sms, e, c, total_rows=sum_m, n=n, k=k
     ) and cake_jit.stage_served(name, cb.QUEUE_STAGE, arch):
         stage = cb.QUEUE_STAGE
     plan = cb.plan_wgrad(
@@ -550,7 +559,7 @@ def test_accumulate_plans_equal_the_overwrite_plans(arch, sm_count, monkeypatch)
                 ovw_bound = list(bound)
                 bound.clear()
                 acc = prepare_wgrad(g, x, offs, out=out, accumulate=True)
-                mode = _assert_twin_launch(ovw, acc, arch)
+                mode = _assert_twin_launch(ovw, acc, arch, g.shape[0])
                 assert ovw.stages and "halves" in ovw.stages[0], what
                 assert not ovw.zero_fill and ovw.add_from is None, what
                 assert acc.out is out, what
@@ -762,7 +771,7 @@ def test_k256_tile_and_forced_forms_compose(arch, sm_count, monkeypatch):
                     g, x, offs, out = _operands(*case, out_dtype, meta)
                     ovw, acc = _prepare_pair(g, x, offs, out)
                     assert ovw.stages[0] == stage, (form, ovw.stages)
-                    mode = _assert_twin_launch(ovw, acc, arch)
+                    mode = _assert_twin_launch(ovw, acc, arch, g.shape[0])
                     if ovw.plan["tile_k"] == 256:
                         want = ("composed", "tile_k")
                     elif _promised(arch, stage, out_dtype):
@@ -795,10 +804,11 @@ def test_queue_walk_binds_where_its_rules_name_the_call(arch, sm_count, monkeypa
     """With the shipped ``queue_walk`` rules, on the owner rows and projections and at 2 and
     64 groups, for an fp32 and a bf16 ``out``: a weight gradient binds the queue walk
     exactly where ``wgrad_queue_walk`` names the stage the call selects with no rule, its
-    output and its group count and the route serves the queue stage -- the overwrite
-    (output its dtype) and a composed accumulate (the overwrite's programs) in place of the
-    selected stage, a fused accumulate (``"accumulate"``) in place of its accumulate
-    stage.  The plan and every later stage are those of the call with no rule."""
+    output, its group count and its shape (rows, N, K) and the route serves the queue
+    stage -- the overwrite (output its dtype) and a composed accumulate (the overwrite's
+    programs) in place of the selected stage, a fused accumulate (``"accumulate"``) in
+    place of its accumulate stage.  The plan and every later stage are those of the call
+    with no rule."""
     _fake_device(monkeypatch, arch, sm_count, checks=False)
     meta = torch.device("meta")
     c = HOST_PLAN_CONSTANTS
@@ -828,7 +838,13 @@ def test_queue_walk_binds_where_its_rules_name_the_call(arch, sm_count, monkeypa
                 ):
                     queue_stage = cb.QUEUE_STAGE + suffix
                     want = cb.wgrad_queue_walk(
-                        selected, output, arch, sm_count, e, c
+                        selected,
+                        output,
+                        arch,
+                        sm_count,
+                        e,
+                        c,
+                        **_queue_shape(out, g.shape[0]),
                     ) and cake_jit.stage_served(name, queue_stage, arch)
                     assert launch.plan == plain.plan, what
                     assert launch.stages[1:] == plain.stages[1:], what
@@ -842,6 +858,165 @@ def test_queue_walk_binds_where_its_rules_name_the_call(arch, sm_count, monkeypa
         assert seen, (arch, sm_count)
     else:
         assert not seen, (arch, sm_count, seen)
+
+
+# The bounds of the 152-SM sm_103a ``queue_walk`` rules at their edges: (label, output, groups,
+# sum_m, N, K, binds).  ``output``: ``"bf16"`` / ``"f32"`` an overwrite, ``"acc"`` the fused
+# fp32 accumulate, ``"bf16c"`` / ``"f32c"`` a composed accumulate (the overwrite's programs).
+# Each bound just inside and one step past it: rows by one, N by one 256-column block, K by one
+# 512-wide k tile, groups by one; an open end well past the bound.  A step past one rule's
+# bound binds where another rule names the call (the K bound of the N < 4096 rules), else the
+# call keeps its stage.  K of at least ``wave_sync_min_k`` selects ``main_wave_halves``, a
+# smaller K ``main_halves``; every call averages at least the ``k512_min_rows_per_group`` rows
+# of the 512-wide k tile.
+SM103_QUEUE_EDGES = (
+    # main_wave_halves, the fused accumulate: N >= 4096 and at most 262144 rows.
+    ("acc_n4096_in", "acc", 8, 262144, 4096, 4096, True),
+    ("acc_n4096_rows_past", "acc", 8, 262145, 4096, 4096, False),
+    ("acc_n4096_n_open", "acc", 8, 131072, 8192, 4096, True),
+    ("acc_n4096_n_below", "acc", 8, 262144, 3840, 4096, False),
+    ("acc_n4096_e3", "acc", 3, 98304, 4096, 6144, False),
+    ("acc_n4096_e4", "acc", 4, 262144, 4096, 6144, True),
+    ("acc_n4096_e32", "acc", 32, 262144, 4096, 6144, True),
+    ("acc_n4096_e33", "acc", 33, 262144, 4096, 6144, False),
+    ("acc_at_bf16_rows", "acc", 8, 327680, 4096, 7168, False),
+    # main_wave_halves, bfloat16: N >= 4096 and at most 327680 rows.
+    ("bf16_n4096_in", "bf16", 8, 327680, 4096, 4096, True),
+    ("bf16_n4096_rows_past", "bf16", 8, 327681, 4096, 4096, False),
+    ("bf16_n4096_n_open", "bf16", 8, 131072, 8192, 4096, True),
+    ("bf16_n4096_n_below", "bf16", 8, 327680, 3840, 4096, False),
+    ("bf16_n4096_e3", "bf16", 3, 98304, 4096, 6144, False),
+    ("bf16_n4096_e4", "bf16", 4, 327680, 4096, 6144, True),
+    ("bf16_n4096_e32", "bf16", 32, 327680, 4096, 6144, True),
+    ("bf16_n4096_e33", "bf16", 33, 327680, 4096, 6144, False),
+    ("bf16_at_acc_rows_past", "bf16", 8, 262145, 4096, 7168, True),
+    ("bf16c_n4096_in", "bf16c", 8, 327680, 4096, 4096, True),
+    ("bf16c_n4096_rows_past", "bf16c", 8, 327681, 4096, 4096, False),
+    ("f32_at_n4096_bounds", "f32", 8, 131072, 4096, 6144, False),
+    # main_wave_halves, bfloat16 and the fused accumulate: N < 4096 and K >= 6144, any rows.
+    ("bf16_k6144_in", "bf16", 8, 655360, 2048, 6144, True),
+    ("bf16_k6144_k_open", "bf16", 8, 655360, 2048, 8192, True),
+    ("bf16_k6144_k_below", "bf16", 8, 655360, 2048, 5632, False),
+    ("bf16_k6144_n_edge", "bf16", 8, 655360, 3840, 6144, True),
+    ("bf16_k6144_n_past", "bf16", 8, 655360, 4096, 6144, False),
+    ("bf16_k6144_e3", "bf16", 3, 655360, 2048, 6144, False),
+    ("bf16_k6144_e4", "bf16", 4, 655360, 2048, 6144, True),
+    ("bf16_k6144_e32", "bf16", 32, 655360, 2048, 6144, True),
+    ("bf16_k6144_e33", "bf16", 33, 655360, 2048, 6144, False),
+    ("bf16c_k6144_in", "bf16c", 8, 655360, 2048, 6144, True),
+    ("acc_k6144_in", "acc", 8, 655360, 2048, 6144, True),
+    ("acc_k6144_k_below", "acc", 8, 655360, 2048, 5632, False),
+    ("acc_k6144_n_edge", "acc", 8, 655360, 3840, 6144, True),
+    ("acc_k6144_n_past", "acc", 8, 655360, 4096, 6144, False),
+    ("f32_at_k6144_bounds", "f32", 8, 655360, 3840, 6144, False),
+    # main_wave_halves, bfloat16 and the fused accumulate: N < 4096, K < 6144 and at most
+    # 16384 rows per group.  One step past the K bound is the rule above, which binds.
+    ("bf16_rpg_in", "bf16", 8, 131072, 2048, 4096, True),
+    ("bf16_rpg_past", "bf16", 8, 131073, 2048, 4096, False),
+    ("bf16_rpg_e4_in", "bf16", 4, 65536, 2048, 4096, True),
+    ("bf16_rpg_e4_past", "bf16", 4, 65537, 2048, 4096, False),
+    ("bf16_rpg_e32_in", "bf16", 32, 524288, 2048, 4096, True),
+    ("bf16_rpg_e32_past", "bf16", 32, 524289, 2048, 4096, False),
+    ("bf16_rpg_k_edge", "bf16", 8, 131072, 2048, 5632, True),
+    ("bf16_rpg_k_past", "bf16", 8, 131073, 2048, 6144, True),
+    ("bf16_rpg_n_edge", "bf16", 32, 524288, 3840, 4096, True),
+    ("bf16_rpg_n_past", "bf16", 32, 524288, 4096, 4096, False),
+    ("bf16_rpg_e3", "bf16", 3, 49152, 2048, 4096, False),
+    ("bf16_rpg_e33", "bf16", 33, 540672, 2048, 4096, False),
+    ("bf16c_rpg_in", "bf16c", 8, 131072, 2048, 4096, True),
+    ("bf16c_rpg_past", "bf16c", 8, 131073, 2048, 4096, False),
+    ("acc_rpg_in", "acc", 8, 131072, 2048, 4096, True),
+    ("acc_rpg_past", "acc", 8, 131073, 2048, 4096, False),
+    ("acc_rpg_n_edge", "acc", 32, 524288, 3840, 4096, True),
+    ("acc_rpg_n_past", "acc", 32, 524288, 4096, 4096, False),
+    ("f32_at_rpg_bounds", "f32", 8, 131072, 2048, 4096, False),
+    # main_wave_halves, float32: N of 2048 and K >= 6144.
+    ("f32_n2048_in", "f32", 8, 655360, 2048, 6144, True),
+    ("f32_n2048_k_open", "f32", 8, 655360, 2048, 8192, True),
+    ("f32_n2048_k_below", "f32", 8, 655360, 2048, 5632, False),
+    ("f32_n2048_n_below", "f32", 8, 655360, 1792, 6144, False),
+    ("f32_n2048_n_above", "f32", 8, 655360, 2304, 6144, False),
+    ("f32_n2048_e3", "f32", 3, 655360, 2048, 6144, False),
+    ("f32_n2048_e4", "f32", 4, 655360, 2048, 6144, True),
+    ("f32_n2048_e32", "f32", 32, 655360, 2048, 6144, True),
+    ("f32_n2048_e33", "f32", 33, 655360, 2048, 6144, False),
+    ("f32c_n2048_in", "f32c", 8, 655360, 2048, 6144, True),
+    # main_wave_halves, float32: N of 4096 and at most 65536 rows ...
+    ("f32_n4096_rows_in", "f32", 8, 65536, 4096, 6144, True),
+    ("f32_n4096_rows_past", "f32", 8, 65537, 4096, 6144, False),
+    ("f32_n4096_rows_n_below", "f32", 8, 65536, 3840, 6144, False),
+    ("f32_n4096_rows_n_above", "f32", 8, 65536, 4352, 6144, False),
+    ("f32_n4096_e3", "f32", 3, 12288, 4096, 6144, False),
+    ("f32_n4096_e4", "f32", 4, 16384, 4096, 6144, True),
+    # ... or at most 4096 rows per group.
+    ("f32_n4096_rpg_in", "f32", 32, 131072, 4096, 6144, True),
+    ("f32_n4096_rpg_past", "f32", 32, 131073, 4096, 6144, False),
+    ("f32_n4096_rpg_e24_in", "f32", 24, 98304, 4096, 7168, True),
+    ("f32_n4096_rpg_e24_past", "f32", 24, 98305, 4096, 7168, False),
+    ("f32_n4096_rpg_n_above", "f32", 32, 131072, 4352, 6144, False),
+    ("f32_n4096_rpg_e33", "f32", 33, 135168, 4096, 6144, False),
+    # main_halves, float32: 6 to 32 groups and N >= 6144.
+    ("f32_halves_in", "f32", 6, 131072, 6144, 2048, True),
+    ("f32_halves_n_open", "f32", 6, 131072, 7168, 2048, True),
+    ("f32_halves_n_below", "f32", 6, 131072, 5888, 2048, False),
+    ("f32_halves_e5", "f32", 5, 131072, 6144, 2048, False),
+    ("f32_halves_e32", "f32", 32, 131072, 6144, 2048, True),
+    ("f32_halves_e33", "f32", 33, 135168, 6144, 2048, False),
+    ("f32c_halves_in", "f32c", 6, 131072, 6144, 2048, True),
+    ("bf16_halves", "bf16", 6, 131072, 6144, 2048, False),
+    # main_halves, the fused accumulate: 8 to 16 groups, no bound.
+    ("acc_halves_e8", "acc", 8, 131072, 6144, 2048, True),
+    ("acc_halves_e6", "acc", 6, 131072, 6144, 2048, False),
+    ("acc_halves_e17", "acc", 17, 131072, 6144, 2048, False),
+)
+
+
+@pytest.mark.parametrize(
+    "label,output,groups,sum_m,n,k,binds",
+    SM103_QUEUE_EDGES,
+    ids=[case[0] for case in SM103_QUEUE_EDGES],
+)
+def test_sm103a_queue_rules_bind_inside_their_bounds(
+    label, output, groups, sum_m, n, k, binds, monkeypatch
+):
+    """With the shipped ``queue_walk`` rules on the 152-SM sm_103a part, a weight gradient
+    just inside each bound of a rule binds the queue walk (``cb.QUEUE_STAGE``, with ``_acc``
+    for the fused accumulate) in place of the stage it selects with no rule, and one step
+    past the bound keeps that stage unless another rule names the call; the plan and every
+    later stage are those of the call with no rule.  The same calls keep their stage on the
+    160-SM sm_103a part, and a float32 output keeps it on the 148-SM sm_100a part.  (A CPU
+    check.)"""
+    c = HOST_PLAN_CONSTANTS
+    accumulate = output in ("acc", "bf16c", "f32c")
+    out_dtype = torch.bfloat16 if output.startswith("bf16") else torch.float32
+    selected = "main_wave_halves" if k >= int(c["wave_sync_min_k"]) else "main_halves"
+    meta = torch.device("meta")
+    g, x, offs, out = _operands(_balanced(sum_m, groups), n, k, out_dtype, meta)
+    parts = [("sm_103a", 152), ("sm_103a", 160)]
+    if output in ("f32", "f32c"):
+        parts.append(("sm_100a", 148))
+    for arch, sms in parts:
+        with monkeypatch.context() as mp:
+            _fake_device(mp, arch, sms, checks=False, loadable=output != "f32c")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with mp.context() as plain_scope:
+                    plain_scope.setitem(c, "queue_walk", [])
+                    plain = prepare_wgrad(g, x, offs, out=out, accumulate=accumulate)
+                launch = prepare_wgrad(g, x, offs, out=out, accumulate=accumulate)
+        what = (label, arch, sms, plain.stages, launch.stages)
+        suffix = ACC if output == "acc" else ""
+        assert plain.plan["accumulate"] == (
+            "fused" if output == "acc" else "composed" if accumulate else "off"
+        ), what
+        assert plain.plan["tile_k"] == 512, what
+        assert plain.stages[0] == selected + suffix, what
+        assert launch.plan == plain.plan, what
+        assert launch.stages[1:] == plain.stages[1:], what
+        want = binds and (arch, sms) == ("sm_103a", 152)
+        assert launch.stages[0] == (
+            cb.QUEUE_STAGE + suffix if want else plain.stages[0]
+        ), what
 
 
 def _record_bound_routes(monkeypatch):
@@ -911,7 +1086,7 @@ def test_split_tail_fuses_with_the_tail_reduce_acc(arch, sm_count, monkeypatch):
                     ),
                 )
                 ovw, hidden = _prepare_pair(g, x, offs, out)
-                _assert_twin_launch(ovw, hidden, arch)
+                _assert_twin_launch(ovw, hidden, arch, g.shape[0])
                 if split:
                     assert (
                         hidden.plan["accumulate"],
@@ -935,7 +1110,7 @@ def test_misaligned_out_composes_with_one_warning(monkeypatch):
     e = len(sizes)
     g, x, offs, aligned = _operands(sizes, n, k, torch.float32, torch.device("cpu"))
     ovw, acc = _prepare_pair(g, x, offs, aligned)
-    _assert_twin_launch(ovw, acc, arch)
+    _assert_twin_launch(ovw, acc, arch, g.shape[0])
     assert _promised(arch, ovw.stages[0], torch.float32), ovw.stages
     assert acc.plan["accumulate"] == "fused" and "accumulate_reason" not in acc.plan
     assert cb.ACC_ALIGN % 4 == 0
@@ -951,7 +1126,7 @@ def test_misaligned_out_composes_with_one_warning(monkeypatch):
         for what, out in misaligned.items():
             assert not cb._accumulate_aligned(out), what
             ovw, acc = _prepare_pair(g, x, offs, out)
-            _assert_twin_launch(ovw, acc, arch)
+            _assert_twin_launch(ovw, acc, arch, g.shape[0])
             assert (acc.plan["accumulate"], acc.plan["accumulate_reason"]) == (
                 "composed",
                 "alignment",
@@ -996,7 +1171,7 @@ def test_unloadable_acc_build_composes_with_one_warning(monkeypatch):
         warnings.simplefilter("always")
         for _ in range(2):
             ovw, acc = _prepare_pair(g, x, offs, out)
-            _assert_twin_launch(ovw, acc, arch)
+            _assert_twin_launch(ovw, acc, arch, g.shape[0])
             assert _promised(arch, ovw.stages[0], torch.float32), ovw.stages
             assert (acc.plan["accumulate"], acc.plan["accumulate_reason"]) == (
                 "composed",

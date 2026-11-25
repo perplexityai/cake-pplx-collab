@@ -2118,8 +2118,15 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     # stage the host selects.  A call takes it when one rule names the device's
     # architecture and SM count, the selected stage, the kind of output
     # (``"bfloat16"`` / ``"float32"`` overwrite, ``"accumulate"`` for the
-    # fused FP32 accumulate) and a range ``[min, max]`` holding the group count;
-    # every other call keeps its stage.
+    # fused FP32 accumulate) and a range ``[min, max]`` holding the group count,
+    # and meets the rule's optional bounds (``cake_backend.QUEUE_RULE_BOUNDS``),
+    # each a ``[min, max]`` with both ends included (a None end leaves that side
+    # open) that applies only where the rule has its key: ``"rows"`` on the
+    # rows ``sum_m`` (every row of ``g`` and ``x``, for an ``m_indptr`` row
+    # table too), ``"rows_per_group"`` on ``sum_m / E`` (exactly:
+    # ``min * E <= sum_m <= max * E``), ``"n"`` on ``N`` and ``"k"`` on ``K``
+    # of ``dW[e]``; every other call keeps its stage.  No rule here has an
+    # optional bound.
     "queue_walk": [
         {
             "arch": "sm_100a",
