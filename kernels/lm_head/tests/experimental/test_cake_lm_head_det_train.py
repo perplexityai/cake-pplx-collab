@@ -6187,6 +6187,7 @@ def test_valid_rows_host_count_matches_the_device_count(monkeypatch):
     # count in the window also carries the padded index -- the valid rows, then the last one repeated -- whose first
     # entries are that index, with no added synchronization; the cached selectors stay as built
     arch = "sm_100a"
+    shipped = (cake_backend.A_EXTENT_ROWS_BY_ARCH, cake_backend.A_EXTENT_WINDOW_BY_ARCH)
     monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {arch: 256})
     monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", {arch: (1, 255)})
     ext, attr = (4096, arch), cake_backend._PAD_INDEX_ATTR
@@ -6214,6 +6215,41 @@ def test_valid_rows_host_count_matches_the_device_count(monkeypatch):
                 assert padded is None, (n, rows)
     assert padded_counts > 0
     monkeypatch.setattr(cake_backend, "HOST_COUNT_MAX_ROWS", 1 << 20)
+    # the edges of the window and of the extent (``lo - 1``, ``lo``, ``hi``, ``hi + 1``, ``pad - 1``, ``pad``): a host
+    # count pads its index exactly where :func:`a_extent_rows` gives the extent -- on a window inside the extent (16
+    # rows, window 2..5), a window past it (2..20) and the shipped tables of each architecture
+    edge_tables = (
+        ({arch: 16}, {arch: (2, 5)}, [2, 3, 4, 5]),
+        ({arch: 16}, {arch: (2, 20)}, [2, 3, 15]),
+        (shipped[0], shipped[1], None),
+    )
+    for pads, windows, want_padded in edge_tables:
+        monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", pads)
+        monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", windows)
+        for a in sorted(windows):
+            (lo, hi), pad = windows[a], int(pads[a])
+            T = pad + 8
+            edges = (0, lo - 1, lo, lo + 1, hi - 1, hi, hi + 1, pad - 1, pad, pad + 1)
+            got_padded = []
+            for n in sorted({c for c in edges if 0 <= c < T}):
+                labels = torch.full((T,), IGNORE_INDEX, dtype=torch.int64)
+                pos = torch.randperm(T, generator=gen)[:n].sort().values
+                labels[pos] = 7
+                idx = cake_backend.valid_row_index(labels.to(CUDA), extent=(4096, a))
+                assert idx.tolist() == pos.tolist(), (a, n)
+                padded = getattr(idx, attr, None)
+                extent = cake_backend.a_extent_rows(n, 4096, a)
+                if extent:
+                    want = pos.tolist() + pos[-1:].tolist() * (extent - n)
+                    assert padded is not None and padded.tolist() == want, (a, n)
+                    assert idx.data_ptr() == padded.data_ptr()
+                    got_padded.append(n)
+                else:
+                    assert padded is None, (a, n, pad)
+            assert want_padded is None or got_padded == want_padded, (a, got_padded)
+            assert got_padded[:1] == [lo] and got_padded[-1:] == [min(hi, pad - 1)], a
+    monkeypatch.setattr(cake_backend, "A_EXTENT_ROWS_BY_ARCH", {arch: 256})
+    monkeypatch.setattr(cake_backend, "A_EXTENT_WINDOW_BY_ARCH", {arch: (1, 255)})
     labels = torch.full((16,), IGNORE_INDEX, dtype=torch.int64, device=CUDA)
     labels[[2, 5, 11]] = 7
     syncs = []
