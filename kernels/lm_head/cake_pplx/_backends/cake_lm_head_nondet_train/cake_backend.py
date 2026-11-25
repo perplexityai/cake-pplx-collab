@@ -9495,9 +9495,10 @@ class _Binding:
     forward_order: tuple = ()
     backward_order: tuple = ()
     # the host-count path's split of ``forward_order`` (:func:`forward_early_keys`): chunk 0's gather and logits GEMM,
-    # launched right behind the count -- ``forward_early`` before the call's labels are bound, ``forward_early_labels``
-    # (the early launches that read them: the label-column arm) right after -- then ``forward_late`` in order (all
-    # empty on the hidden valid-row count path)
+    # launched right behind the count -- ``forward_early``, the early launches that do not read the call's labels, and
+    # ``forward_early_labels``, the ones that do (the label-column arm): with the latter the labels are bound first and
+    # both run in one launch round, else the labels are bound behind ``forward_early`` -- then ``forward_late`` in
+    # order (all empty on the hidden valid-row count path)
     forward_early: tuple = ()
     forward_early_labels: tuple = ()
     forward_late: tuple = ()
@@ -9822,10 +9823,12 @@ class _Binding:
         Host-count path (``hidden`` None, :func:`forward_early_keys`): chunk 0's row gather and logits GEMM are bound
         and launched first, right behind the valid-row count, and the rest of the call -- the policy operands'
         gathers, the row vectors, the accumulators and the remaining launches -- is bound behind the queued GEMM
-        instead of in front of it; the compacted labels are bound in front of the first early launch that reads them
-        (:attr:`forward_early_labels`, the label-column arm) and behind the early launches otherwise.  The same
-        kernels with the same operands on the same stream; the early launches neither read nor write what moved
-        behind them, so every output is bitwise the in-order sequence's."""
+        instead of in front of it.  When an early launch reads the compacted labels (:attr:`forward_early_labels`,
+        the label-column arm) they are bound first -- their gather queued ahead of the row gather -- and the early
+        launches run in one launch round; otherwise they are bound behind the early launches.  The same kernels with
+        the same operands on the same stream, both gathers ahead of the GEMM; the labels' gather reads the caller's
+        labels and the valid-row index only and writes a new tensor no early launch writes, and the early launches
+        neither read nor write what moved behind them, so every output is bitwise the in-order sequence's."""
         p, plan = self.plan.problem, self.plan
         T, H, V = (
             plan.rows,
@@ -9838,11 +9841,14 @@ class _Binding:
         if early:
             self._compact(t, row_index)
             self._chunk_buffers(t)
-            if self.forward_early:
-                self._launch(self.forward_early, t, dw_stream)
-            t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             if self.forward_early_labels:
-                self._launch(self.forward_early_labels, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
+                self._launch(
+                    self.forward_early + self.forward_early_labels, t, dw_stream
+                )
+            else:
+                self._launch(self.forward_early, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             self._scratch(t, chunk_buffers=False)
         else:
             t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
@@ -10333,14 +10339,17 @@ class _KeptBinding(_Binding):
             )
         first = None if kept_rows is None else kept_rows[: plan.chunks[0][1]]
         t: dict[str, Any] = dict(X=_prepare_x(X, p, plan.compact), W=W)
-        if early:
+        if early:  # as in :meth:`_Binding.forward`
             self._compact(t, row_index)
             self._chunk_buffers(t, logits=first)
-            if self.forward_early:
-                self._launch(self.forward_early, t, dw_stream)
-            t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             if self.forward_early_labels:
-                self._launch(self.forward_early_labels, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
+                self._launch(
+                    self.forward_early + self.forward_early_labels, t, dw_stream
+                )
+            else:
+                self._launch(self.forward_early, t, dw_stream)
+                t["labels"] = _prepare_labels(labels, plan.geometry, row_index)
             self._scratch(t, chunk_buffers=False)
         else:
             t["labels"] = _prepare_labels(labels, plan.geometry, row_index)

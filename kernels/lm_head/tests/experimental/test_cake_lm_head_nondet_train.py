@@ -1766,6 +1766,92 @@ def test_slot_values_bind_whole_tensors_of_a_one_chunk_plan():
     assert {(c, "gemm_dx", s) for c in (True, False) for s in ("A", "C")} <= seen, seen
 
 
+@pytest.mark.parametrize("tau", [None, "scalar"])
+def test_device_binding_forward_gathers_both_rows_before_the_logits_gemm(
+    glm_weight, monkeypatch, tau
+):
+    """A remembered log-probability binding on the host-count path (one compacted chunk, the label-column arm) binds
+    the call's compacted labels first and runs chunk 0's row gather and logits GEMM in one launch round
+    (``forward_early + forward_early_labels``), then the rest (``forward_late``): on the call's one stream the labels'
+    gather and the row gather are both queued ahead of the logits GEMM, which runs them in that order.  ``logp`` /
+    ``lse`` of the remembered binding are the binding-miss call's bitwise -- with no temperature and a scalar one."""
+    _require_program(entry="logprob")
+    be = cake_backend
+    if tau is not None:
+        _require_tau_program()
+    inp = make_inputs(
+        1024,
+        seed=SEED + 8801,
+        device=CUDA,
+        W=glm_weight,
+        ignore_frac=0.05,
+        temperature=tau,
+    )
+    kw = dict(chunk_size=4096, compact_rows=True, hidden_count=False)
+    if tau is None:
+        fwd = be.forward_logprob
+    else:
+        fwd = functools.partial(
+            be.forward_logprob_temperature, temperature=inp.temperature
+        )
+    events, rounds = [], []
+    stream = torch.cuda.current_stream()
+
+    def on_stream():
+        return torch.cuda.current_stream() == stream
+
+    def labels_spy(real):
+        def spy(*args, **kwargs):
+            events.append(("labels", None, on_stream()))
+            return real(*args, **kwargs)
+
+        return spy
+
+    def slots_spy(real):
+        def spy(stage, t, plan, index):
+            events.append((stage, index, on_stream()))
+            return real(stage, t, plan, index)
+
+        return spy
+
+    def launch_spy(real):
+        def spy(self, keys, *args, **kwargs):
+            rounds.append((self, tuple(keys)))
+            return real(self, keys, *args, **kwargs)
+
+        return spy
+
+    monkeypatch.setattr(be, "_prepare_labels", labels_spy(be._prepare_labels))
+    monkeypatch.setattr(be, "_slot_values", slots_spy(be._slot_values))
+    for cls in (be._Binding, be._TemperatureBinding):
+        monkeypatch.setattr(cls, "_launch", launch_spy(cls.__dict__["_launch"]))
+    be.BINDING_CACHE.clear()
+    miss = fwd(inp.X, inp.W, inp.labels, **kw)
+    torch.cuda.synchronize()
+    events.clear()
+    rounds.clear()
+    hit = fwd(inp.X, inp.W, inp.labels, **kw)
+    torch.cuda.synchronize()
+    assert rounds, "the call did not launch through a remembered binding"
+    binding = rounds[0][0]
+    assert binding.plan.compact and binding.plan.num_chunks == 1
+    assert binding.plan.logprob_lbl
+    assert binding.forward_early == (("gather_rows", 0),)
+    assert len(binding.forward_early_labels) == 1
+    assert binding.forward_early_labels[0][1] == 0
+    assert [keys for _, keys in rounds] == [
+        binding.forward_early + binding.forward_early_labels,
+        binding.forward_late,
+    ]
+    names = [stage for stage, _, _ in events]
+    assert names.count("labels") == 1, names
+    gemm = names.index(be.LOGPROB_LBL_STAGE)
+    assert names.index("labels") < gemm and names.index("gather_rows") < gemm, names
+    assert all(same for _, _, same in events), events
+    for name in ("logp", "lse"):
+        assert _same_bits(getattr(hit, name), getattr(miss, name)), (tau, name)
+
+
 def test_reference_slab_sum_folds_the_label_residual():
     """The reference slab sums' fold (``lr = 1``): after the slabs' sum (or, with ``n_slabs`` 0, the rows as they are),
     each row whose label lies in ``[0, V)`` and whose residual is nonzero gets ``A + r * f32(W[y])``; an ignored row, a
