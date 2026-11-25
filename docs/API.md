@@ -1390,13 +1390,14 @@ The autograd entries run the forward eagerly and the backward through autograd; 
 - **Numerics:** every head is computed by the 64-head kernels with their FP32 reductions, so its accuracy class is the 64-head one. The tests judge `out`, `lse`, `o_lo`, `dq` and the key gradients at 96 and 64 heads (128 on a reduced set) against an FP64 oracle at the naive BF16 tier.
 - **Not yet:** 96 and 128 heads on `sm_107a`, the det module and the NoPE form.
 
-**Workspace and retained state (rope form).** The workspace is per-call scratch: the eager entries take it from the caching allocator and free it when the call returns; a prepared runner carves it from one buffer of `cake_backend.dsa_train_workspace_size(T, S, topk, ..., num_heads=H, with_o_lo=..., dout_copy=...)` bytes (`cake_backend.workspace_layout` lists the regions). The retained state is what an autograd entry saves from its forward for its backward (`cake_backend.retained_layout` / `dsa_train_retained_size`); under `torch.utils.checkpoint(..., use_reentrant=False)` it is recomputed instead of kept. The returned `out` (`1024 H` B per token) and the gradients (`dq`: `1152 H` B per token) are the caller's tensors and are in neither table.
+**Workspace and retained state (rope form).** The workspace is per-call scratch: the eager entries take it from the caching allocator and free it when the call returns; a prepared runner carves it from one buffer of `cake_backend.dsa_train_workspace_size(T, S, topk, ..., num_heads=H, with_o_lo=..., dout_copy=...)` bytes (`cake_backend.workspace_layout` lists the regions). `dout_copy=None` (the default) includes the `dout_copy` region for every backward over more than 64 heads, the upper bound for any `dout` layout; `True` / `False` give the exact size for a `dout` that needs the copy / does not. The retained state is what an autograd entry saves from its forward for its backward (`cake_backend.retained_layout` / `dsa_train_retained_size`, with `varlen_topk=K_slots`, the slot count `gather_kv_indices.shape[1]`, for the packed entry); under `torch.utils.checkpoint(..., use_reentrant=False)` it is recomputed instead of kept. The returned `out` (`1024 H` B per token) and the gradients (`dq`: `1152 H` B per token) are the caller's tensors and are in neither table.
 
 | Retained state | Bytes | When | T = 16380, H = 64 | T = 16380, H = 96 |
 |---|---|---|---|---|
 | `lse` FP32 `[T, H]` | `4 H` per token | always | 4,193,280 | 6,289,920 |
 | `o_lo` BF16 `[T, H, 512]` | `1024 H` per token | `with_o_lo=True` | 1,073,479,680 | 1,610,219,520 |
-| `topk_length` int32 `[T]` | 4 per token | the forward derives the lengths (no `topk_length` given) | 65,520 | 65,520 |
+| `indices` int32 `[T, K_slots]` (compacted rows) | `4 K_slots` per token | packed (varlen) entry, both routes | 134,184,960 at `K_slots` = 2048 | 134,184,960 at `K_slots` = 2048 |
+| `topk_length` int32 `[T]` | 4 per token | the flat forward derives the lengths (no `topk_length` given); the packed (varlen) entry always (the counts of its compacted rows) | 65,520 | 65,520 |
 
 | Workspace region | Bytes | When | T = 16380, H = 64 | T = 16380, H = 96 |
 |---|---|---|---|---|

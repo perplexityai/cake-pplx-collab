@@ -409,8 +409,11 @@ def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
     ``delta`` ``[T, H]`` FP32, ``window_lse`` / ``window_delta`` ``[2, T, 64]`` FP32 and (a ``dout`` that is not
     dense over its rows) ``dout_copy`` ``[T, H, 512]`` BF16, the dQ partials staying 64 heads per token; every
     region aligned and apart.  A prepared runner (host) carves exactly that layout, of
-    ``dsa_train_workspace_size`` bytes.  Retained: ``lse`` ``[T, H]`` FP32, ``o_lo`` ``[T, H, 512]`` BF16 with
-    ``with_o_lo``, the derived ``topk_length`` ``[T]`` int32 without caller lengths; ``out`` is the caller's."""
+    ``dsa_train_workspace_size`` bytes; that size's default ``dout_copy=None`` is the upper bound (the copy
+    included above 64 heads).  Retained: ``lse`` ``[T, H]`` FP32, ``o_lo`` ``[T, H, 512]`` BF16 with
+    ``with_o_lo``, the derived ``topk_length`` ``[T]`` int32 without caller lengths; the packed entry
+    (``varlen_topk = K_slots``) keeps its compacted rows ``indices`` ``[T, K_slots]`` int32 and their counts
+    ``topk_length`` ``[T]`` int32 on both of its routes; ``out`` is the caller's."""
     T, S, K, chunk = 40, 96, 16, 16
     windows = heads != 64
     for backward, passes, direct, with_o_lo, dout_copy in itertools.product(
@@ -459,6 +462,23 @@ def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
             )
             == want["total"]
         )
+    # the packed entry: its compacted rows and their counts, whatever derive_topk_length says
+    for with_o_lo, derive in itertools.product((True, False), (True, False)):
+        kw = dict(
+            num_heads=heads,
+            with_o_lo=with_o_lo,
+            derive_topk_length=derive,
+            varlen_topk=K,
+        )
+        retained = cake_backend.retained_layout(T, **kw)
+        want = {"lse": T * heads * 4}
+        if with_o_lo:
+            want["o_lo"] = T * heads * D_LATENT * 2
+        want["indices"] = T * K * 4
+        want["topk_length"] = T * 4
+        want["total"] = sum(want.values())
+        assert retained == want and list(retained) == list(want)
+        assert cake_backend.dsa_train_retained_size(T, **kw) == want["total"]
     h = hl.HostLaunches(
         monkeypatch, cake_backend, cake_jit, cake_launch, "sm_100a", token_chunk=chunk
     )
@@ -493,6 +513,20 @@ def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
                 T, S, K, key_passes=2, num_heads=heads, dout_copy=copy
             )
         )
+    upper = cake_backend.workspace_layout(
+        T,
+        S,
+        K,
+        backward=True,
+        key_passes=2,
+        token_chunk=chunk,
+        num_heads=heads,
+        dout_copy=windows,
+    )
+    assert (
+        cake_backend.dsa_train_workspace_size(T, S, K, key_passes=2, num_heads=heads)
+        == upper["total"]
+    )
 
 
 @pytest.mark.parametrize("heads", (96, 128))
