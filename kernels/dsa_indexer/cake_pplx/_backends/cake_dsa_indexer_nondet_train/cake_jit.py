@@ -67,7 +67,8 @@ from . import cake_build
 # Every scan program takes ``K_scale`` (per-key FP32 scales) right before
 # ``TicketWord``; the FP8 programs (keys tagged ``:fp8``) read it, the BF16
 # programs never do.  A ``scan_blocks`` program (keys ``scan_blocks:<kind>:...``,
-# BF16, unsplit and unpaired) takes the scan's arguments in the scan's order and,
+# BF16 and unsplit; unpaired but for the sm_103a CTA-pair l6 programs, keys
+# ``scan_blocks:pair_l6:...``) takes the scan's arguments in the scan's order and,
 # right before ``K_scale``, ``CandBlk`` (its per-CTA block entries, in the
 # workspace behind the ticket tail), ``CandBlocks`` (the ``[T, 2048]`` int32
 # candidate-block rows) and ``blk_cap`` (block entries per query slot).  The
@@ -227,6 +228,11 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "library": "cake_dsa_indexer_nondet_topk_091795a85161d6e55248",
         "arches": ["sm_100a", "sm_103a"],
     },
+    "cake_dsa_indexer_nondet_topk_0b0d64838a09db0fe7fa": {
+        "role": "scan_blocks",
+        "library": "cake_dsa_indexer_nondet_topk_0b0d64838a09db0fe7fa",
+        "arches": ["sm_103a"],
+    },
     "cake_dsa_indexer_nondet_topk_0d38735ee8e81ae6f5e8": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_0d38735ee8e81ae6f5e8",
@@ -353,6 +359,11 @@ PROGRAMS: dict[str, dict[str, Any]] = {
     "cake_dsa_indexer_nondet_topk_526027b3b42a3dc9a141": {
         "role": "scan",
         "library": "cake_dsa_indexer_nondet_topk_526027b3b42a3dc9a141",
+        "arches": ["sm_103a"],
+    },
+    "cake_dsa_indexer_nondet_topk_5632d117c85d637b5d90": {
+        "role": "scan_blocks",
+        "library": "cake_dsa_indexer_nondet_topk_5632d117c85d637b5d90",
         "arches": ["sm_103a"],
     },
     "cake_dsa_indexer_nondet_topk_56d38f01a465c2faa6cf": {
@@ -825,6 +836,8 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan_blocks:l6:u1:s0:f1": "cake_dsa_indexer_nondet_topk_de1bd9be07a9255ff9e5",
         "scan_blocks:narrow:u1:s0:f0": "cake_dsa_indexer_nondet_topk_24d8dd53172a6ec4a840",
         "scan_blocks:narrow:u1:s0:f1": "cake_dsa_indexer_nondet_topk_384e95b7417af2ac7b5e",
+        "scan_blocks:pair_l6:u1:s0:f0": "cake_dsa_indexer_nondet_topk_0b0d64838a09db0fe7fa",
+        "scan_blocks:pair_l6:u1:s0:f0:lsf": "cake_dsa_indexer_nondet_topk_5632d117c85d637b5d90",
     },
     "sm_107a": {
         "cand": "cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a",

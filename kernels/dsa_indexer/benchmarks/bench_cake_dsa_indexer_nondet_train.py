@@ -49,7 +49,17 @@ timed next to ``nondet`` / ``det``, the plain call of the same ``top_k``;
 (counts, newest block, containment).  ``nondet_cb_scan`` runs this package's
 call on its ``scan_blocks`` program where every row keeps all its blocks (the
 dispatch before ``iota``, which runs the plain programs and writes the rows
-before them: ``plan`` records ``cb_iota``).  ``nondet_in`` / ``nondet_in_aa`` (this
+before them: ``plan`` records ``cb_iota``).  ``nondet_cb_nosample`` /
+``det_cb_nosample`` run the candidate-block calls with the sampled first
+threshold off, and ``nondet_cb_open`` / ``nondet_cb_open_nosample`` this
+package's call with ``cake_policy.CB_TWIN_RULE`` opened to every call with
+block entries (the deterministic benchmark's ``TWIN_RULE_OPEN``: on sm_103a
+the CTA-pair twins outside the rule; measurements only) and
+``nondet_cb_closed`` this package's call with the rule closed to every call
+(the deterministic benchmark's ``TWIN_RULE_CLOSED``: the unpaired l6 program
+of the plan before the twins in this package); the
+deterministic benchmark's twin rows (``--rows twins``) take them.
+``nondet_in`` / ``nondet_in_aa`` (this
 package's ``prepare_dsa_indexer_nondet_topk_in_candidates``) and ``det_in``
 (the deterministic package's) time the top-k restricted to the row's own
 candidate blocks (computed once by the package's candidate-block call outside
@@ -194,20 +204,25 @@ class NondetArm(det_bench.Arm):
         with_candidates=False,
         in_candidates=False,
         cb_scan=False,
+        twin_rule=None,
     ):
         super().__init__(inputs)
         self.knobs = dict(knobs or {})
+        # the candidate-block call with CB_TWIN_RULE replaced (None: the package's own rule)
+        self.twin_rule = None if twin_rule is None else tuple(twin_rule)
         if name is not None:
             self.name = name
         self.blocks = None
         self.source_blocks = None
         if with_candidates:
             # cb_scan: the call on its scan_blocks program where every row keeps all its blocks (before iota)
-            with (
-                det_bench.scan_blocks_only(nondet_backend)
-                if cb_scan
-                else contextlib.nullcontext()
-            ):
+            with contextlib.ExitStack() as scope:
+                if cb_scan:
+                    scope.enter_context(det_bench.scan_blocks_only(nondet_backend))
+                if self.twin_rule is not None:
+                    scope.enter_context(
+                        det_bench.forced_twin_rule(nondet_backend, self.twin_rule)
+                    )
                 self._prepare_with_candidates(inputs)
             return
         if in_candidates:
@@ -394,7 +409,12 @@ def _det(name, knobs=None, with_candidates=False, in_candidates=False):
 
 
 def _nondet(
-    name, knobs=None, with_candidates=False, in_candidates=False, cb_scan=False
+    name,
+    knobs=None,
+    with_candidates=False,
+    in_candidates=False,
+    cb_scan=False,
+    twin_rule=None,
 ):
     def make(inputs):
         return NondetArm(
@@ -404,6 +424,7 @@ def _nondet(
             with_candidates=with_candidates,
             in_candidates=in_candidates,
             cb_scan=cb_scan,
+            twin_rule=twin_rule,
         )
 
     return make
@@ -424,6 +445,25 @@ ARMS = {
     "nondet_cb_aa": _nondet("nondet_cb_aa", with_candidates=True),
     # the same call on its scan_blocks program where every row keeps all its blocks (the dispatch before iota)
     "nondet_cb_scan": _nondet("nondet_cb_scan", with_candidates=True, cb_scan=True),
+    # the candidate-block calls with the sampled first threshold off, and this package's with CB_TWIN_RULE opened
+    "det_cb_nosample": _det(
+        "det_cb_nosample", knobs=det_bench.NOSAMPLE, with_candidates=True
+    ),
+    "nondet_cb_nosample": _nondet(
+        "nondet_cb_nosample", knobs=det_bench.NOSAMPLE, with_candidates=True
+    ),
+    "nondet_cb_open": _nondet(
+        "nondet_cb_open", with_candidates=True, twin_rule=det_bench.TWIN_RULE_OPEN
+    ),
+    "nondet_cb_open_nosample": _nondet(
+        "nondet_cb_open_nosample",
+        knobs=det_bench.NOSAMPLE,
+        with_candidates=True,
+        twin_rule=det_bench.TWIN_RULE_OPEN,
+    ),
+    "nondet_cb_closed": _nondet(
+        "nondet_cb_closed", with_candidates=True, twin_rule=det_bench.TWIN_RULE_CLOSED
+    ),
     # the candidate-restricted call over the row's own candidate blocks (``--rows candidates``)
     "det_in": _det("det_in", in_candidates=True),
     "nondet_in": _nondet("nondet_in", in_candidates=True),

@@ -278,9 +278,11 @@ a `-1` tail (all `-1` when `n == 0`), and every id of `indices` lies in a
 block of its row.
 
 Any other call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
-`scan_blocks:<narrow|l6>:u<n>:s0:f<fit>`): the scan program of the same unit
+`scan_blocks:<narrow|l6>:u<n>:s0:f<fit>`, and on `sm_103a` the CTA-pair twins
+`scan_blocks:pair_l6:u1:s0:f0[:lsf]` below): the scan program of the same unit
 that also folds each tile's block maxima into per-query block entries and
-writes the row.  Only the unsplit, unpaired narrow and l6 units carry it, so
+writes the row.  The unsplit, unpaired narrow and l6 units carry it (the
+CTA-pair twins below aside), so
 the host maps the decided kind to one of them (a wide unit or a CTA pair to
 its unpaired unit, a key-range split to narrow) with `n_split = 1`, at the
 decided tile unroll where its program is registered, else the smallest
@@ -292,6 +294,45 @@ per query slot of the grid when `ceil(W / 8) > 2048`, else none, `W` being
 `max_seqlen_k` when given, else `Tkv`.  With candidate blocks `max_seqlen_k`
 therefore bounds every key segment of the call: a row with more older blocks
 than `blk_cap` stops the kernel with a device-side trap.
+
+The CTA-pair twins: where the plain call's own program is the no-sample-fit
+CTA-pair l6 program (either segment order), in the plain unit order, and the
+architecture registers that program's `scan_blocks` copy
+(`scan_blocks:pair_l6:u1:s0:f0`, `scan_blocks:pair_l6:u1:s0:f0:lsf`;
+`sm_103a` only, `cake_policy.CB_TWIN_FORMS`),
+the call runs that twin with the plain call's plan as decided (unit, CTA
+pair, launched grid, segment order, knobs and workspace) instead of mapping
+the kind.  The twin keeps the layout of its plain program: each CTA of a
+pair scores its own queries in its own query slots, so the block entries are
+those of the launched grid (even for the pair).  A wide plan of a `top_k`
+from `pair_rule[2]` up to `wide_first_k_rule[0]` (on `sm_103a` the wide
+plans of `top_k` 512), unsplit, with no sample fit for the CTA-pair l6 unit,
+runs the CTA-pair l6 twin of its segment order where registered, on that
+unit's geometry (`block_q_l6`, the requested grid made even) with that
+unit's sampled first threshold and check period
+(`cake_policy.cb_pair_twin_key`).  The plain dispatch plans the CTA-pair l6
+unit up to `pair_rule[1]` (1024) mean unit tiles only; above it the twin
+runs where the plain dispatch never plans that unit.
+
+Both routes apply only to calls inside `cake_policy.CB_TWIN_RULE`: `top_k`
+512, 254.5 to 1984 mean unit tiles, at least 16231 queries, the sampled
+first threshold on (`cake_policy.cb_twin_rule_holds`; the wide route also
+needs the CTA-pair l6 unit's sampled first threshold on).  The rule is a
+window around the calls the twins were timed on.  Each twin was timed at
+kernel level, forced on the call geometry against the unpaired l6
+`scan_blocks` program, on GB300 at `top_k` 512 with the sampled first
+threshold, with equal bits, on three calls whose plain plan runs the wide
+program: the CTA-pair twin on 16384 queries at the tail of 65536 keys (448
+mean unit tiles) and of 262144 keys (1984) and on the packed eight-segment
+call of 16231 queries over 268757 keys (254.5), its longest-first copy on
+that packed call only; each ran faster there.  The rule extends them,
+untimed, to the mean unit tiles between them, to more queries and to other
+segment layouts.  No twin was timed at another `top_k`, with the sampled
+first threshold off, on a plan of the CTA-pair l6 program itself, or on
+another device.  On `sm_103a` no call of the package tests' dense grid inside
+the rule plans the CTA-pair l6 program itself, so the rule's calls take the
+wide route.  A sample-fit plan, any other program, a call outside the rule
+and a twin the registry lacks keep the mapping above.
 
 A call whose longest key segment holds at most 2048 blocks (`ceil(W / 8) <=
 2048`, `W` as above) keeps every block of every row, so no block score
