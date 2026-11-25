@@ -1154,12 +1154,16 @@ resolves into this package's keyword switches and the behaviour under
 `torch.use_deterministic_algorithms`) and
 `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_heads.py` (96
 and 128 query heads; its host tests record and check every launch of the
-windows through `tests/experimental/test_helpers/cake_dsa_sparse_attention_host_launches.py`);
+windows through `tests/experimental/test_helpers/cake_dsa_sparse_attention_host_launches.py`;
+its `test_large_t_heads` -- T = 16380, top-k 2048, the per-rank row -- runs
+only with `CAKE_PPLX_DSA_LARGE_TESTS=1` and is skipped otherwise);
 the CPU-only
 `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_names.py`
 checks the public names.  Accuracy is judged by `tests/cake_naive.py` through
 `tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py` (the FP64
 reference and the PyTorch BF16 form of the same call; `tests/conftest.py` prints
 one `TIER` line per judged output); index, length and map outputs are checked
-exactly.  Benchmark:
-`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py`.
+exactly.  Benchmarks:
+`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py` and, for 96 and 64
+query heads against the non-Cake baselines,
+`benchmarks/bench_cake_dsa_sparse_attention_nondet_train_heads.py`.
