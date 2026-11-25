@@ -1621,6 +1621,18 @@ part), where it ran the direct plan before.  This package's post-ship A/B of tha
 1.20 - 2.14 (CUDA graph); 216-SM part 1.20 - 2.27 (eager), 1.20 - 2.63 (CUDA graph).  Against version 0.3.25 its bits may change where it now swaps.  Every other row, architecture
 and SM count plans as in version 0.3.25.
 
+Version 0.3.27 keeps every table of 0.3.26.  The weight gradients that run the deterministic program follow the
+deterministic package's version 0.3.27, in the weight-gradient entry and in the unbatched `G.T @ X` call of the generic
+entry where that call swaps or, on the `sm_103a` row below, plans the same direct key: on `sm_107a` the BF16
+`4096 -> 16`, `4096 -> 96`, `6144 -> 48`, `6144 -> 64` and `6144 -> 32` run whole 64-row tiles without a K split from
+128 tokens on (one band with that of version 0.3.25), the BF16 `4096 -> 32`, `4096 -> 48`, `4096 -> 64`, `4096 -> 128`,
+`5120 -> 48`, `5120 -> 64`, `5120 -> 128` and `8192 -> 128` at 128 to 4096 tokens, and on the 212- and 216-SM parts the
+FP32 outputs of these thirteen rows at 128 to 4096 tokens (`4096 -> 16`: 128 to 3072); on the 152-SM `sm_103a` part the
+FP32 `4096 -> 12288` weight gradient runs the 224-column whole tiles at 512 to 4096 tokens.  A row and token count
+where this package runs its own program (`K1_SPLIT_RULES`) keeps it.  This package's post-ship A/B against its version
+0.3.26: [[TBD0327_NDGEN_AB]].  Against version 0.3.26 its bits change where the deterministic package's do.  Every
+other row, architecture and SM count plans as in version 0.3.26.
+
 ## Helpers of this package
 
 | name (`cake_pplx._backends.cake_dense_gemm_nondet_train`) | reaches |
