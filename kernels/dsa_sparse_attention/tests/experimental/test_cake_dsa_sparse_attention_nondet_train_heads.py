@@ -32,6 +32,7 @@ there first; sm_107a runs the 64-head cases).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` o
 case on its own.
 """
 
+import dataclasses
 import itertools
 import json
 import os
@@ -320,6 +321,84 @@ def test_autograd_entry_retains_o_lo_lse_and_lengths_per_head(
         grads[0],
         grads[1],
     )
+
+
+@pytest.mark.parametrize("heads", (64, 96, 128))
+@pytest.mark.parametrize("with_o_lo", (True, False))
+def test_every_rope_plan_carries_dout_copy(monkeypatch, heads, with_o_lo):
+    """Every plan the backend builds for the rope form carries ``dout_copy`` (host): the eager forward and backward,
+    a prepared runner and the flat and packed (varlen) autograd entries at ``heads`` query heads.  The bound values
+    read the field with a ``False`` fallback for duck-typed plans, so a real plan must hold it: a ``_Plan`` field,
+    ``True`` exactly for a backward over more than 64 heads whose ``dout`` is not dense over its rows (the
+    head-major view)."""
+    assert "dout_copy" in {f.name for f in dataclasses.fields(cake_backend._Plan)}
+    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_100a")
+    real_plan = cake_backend._plan
+    found = []
+    call = {}
+
+    def plan(*args, **kwargs):
+        made = real_plan(*args, **kwargs)
+        found.append((call["entry"], call["head_major"], made))
+        return made
+
+    monkeypatch.setattr(cake_backend, "_plan", plan)
+    # the packed entry takes its torch route on the host (the index-preparation stage needs a device)
+    monkeypatch.setattr(
+        cake_backend, "nope_index_prep_available", lambda device=None: False
+    )
+    T, S, K = 8, 64, 16
+
+    def start(entry, head_major=False):
+        cake_backend.BINDING_CACHE._entries.clear()  # every entry plans afresh
+        call.update(entry=entry, head_major=head_major)
+        inp = hl.host_inputs(T, S, K, heads, seed=heads, head_major=head_major)
+        h.bind(inp.q_latent, inp.q_rope, inp.dout)
+        return inp
+
+    for head_major in (False, True):
+        for entry in ("forward", "backward", "runner"):
+            inp = start(entry, head_major)
+            hl.run_case(h, cake_backend, dict(entry=entry, with_o_lo=with_o_lo), inp)
+    for entry in ("autograd", "varlen"):
+        inp = start(entry)
+        leaves = [
+            t.detach().clone().requires_grad_()
+            for t in (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        ]
+        h.bind(leaves[0], leaves[1], inp.dout)
+        if entry == "autograd":
+            out = cake_backend.cake_dsa_sparse_attention_nondet(
+                *leaves, inp.indices, with_o_lo=with_o_lo
+            )
+        else:
+            cu_q = torch.tensor([0, 3, T], dtype=torch.int32)
+            cu_k = torch.tensor([0, 24, S], dtype=torch.int32)
+            local = inp.indices % 24
+            local[:, -1] = -1
+            out = cake_backend.cake_dsa_sparse_attention_nondet_varlen(
+                *leaves, local, cu_q, cu_k, causal=True, with_o_lo=with_o_lo
+            )
+        torch.autograd.grad(out, leaves, inp.dout)
+    assert {entry for entry, _, _ in found} == {
+        "forward",
+        "backward",
+        "runner",
+        "autograd",
+        "varlen",
+    }
+    for entry in ("autograd", "varlen"):
+        assert any(made.backward for name, _, made in found if name == entry), entry
+    for entry, head_major, made in found:
+        assert made.num_heads == heads and made.with_o_lo == with_o_lo
+        want = made.backward and heads != 64 and head_major
+        assert isinstance(made.dout_copy, bool) and made.dout_copy == want, (
+            entry,
+            head_major,
+            made.backward,
+            made.dout_copy,
+        )
+    assert any(made.dout_copy for _, _, made in found) == (heads != 64)
 
 
 @pytest.mark.parametrize("heads", (64, 96, 128))

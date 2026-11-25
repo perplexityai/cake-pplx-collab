@@ -2721,9 +2721,9 @@ def _bound_values(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
                 key_scratch=t["topk_length"],
                 pass_counts=t["topk_length"],
             )
-        if plan.dout_copy:
+        if getattr(plan, "dout_copy", False):
             # a multi-window backward whose dout the delta cannot read in place: every stage reads the dense copy
-            # the ``"dout_copy"`` step fills first (a 64-head plan never copies)
+            # the ``"dout_copy"`` step fills first (a 64-head plan never copies; duck-typed plans may omit the field)
             values["dout"] = t["dout_copy"]
     return values
 
