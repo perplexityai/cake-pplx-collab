@@ -412,9 +412,11 @@ def test_every_record_loads(device) -> None:
 
 def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
     """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters the
-    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and the measured table entry of this
-    device, when it has one, equals that count.  Skipped only when the query cannot run on this host (no
-    ``cuobjdump``, no driver library); a query that fails for one program fails the test."""
+    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and so is the measured table entry of
+    this device, when it has one: the entry holds the least count measured over the boards of its SM count, which can
+    differ by a cluster (two R200 boards of 208 SMs hold 153 and 154 clusters at 3 CTAs per SM).  Skipped only when
+    the query cannot run on this host (no ``cuobjdump``, no driver library); a query that fails for one program fails
+    the test."""
     why = unreachable()
     if why is not None:
         pytest.skip(f"the occupancy query is not reachable: {why}")
@@ -438,8 +440,8 @@ def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
             continue
         if grid > found:
             problems.append(f"{name}: grid {grid} groups > {found} resident")
-        if table is not None and table != found:
-            problems.append(f"{name}: measured table {table} != driver {found}")
+        if table is not None and table > found:
+            problems.append(f"{name}: measured table {table} > driver {found}")
     assert not problems, problems
 
 
