@@ -500,7 +500,8 @@ def test_zero_query_rows_at_more_heads_return_empty_outputs_without_launching(
     monkeypatch, heads
 ):
     """``T == 0`` at ``heads`` query heads: the eager entries return ``[0, H, ...]`` outputs and zero key gradients
-    without planning, loading or launching (host)."""
+    without planning, loading or launching (host tensors; a CUDA call checks the architecture first,
+    :func:`test_zero_query_rows_of_a_cuda_call_check_the_architecture`)."""
 
     def refuse(*args, **kwargs):
         raise AssertionError("a call without query rows must neither plan nor launch")
@@ -538,6 +539,48 @@ def test_zero_query_rows_at_more_heads_return_empty_outputs_without_launching(
         out_pub, leaves, torch.zeros(0, heads, D_LATENT, dtype=torch.bfloat16)
     )
     assert [tuple(t.shape) for t in g] == [tuple(leaf.shape) for leaf in leaves]
+
+
+@pytest.mark.parametrize("heads", (64, 96, 128))
+@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
+def test_zero_query_rows_of_a_cuda_call_check_the_architecture(
+    monkeypatch, arch, heads
+):
+    """``T == 0`` on a CUDA call (host, the architecture and the device stood in): on ``sm_107a`` a call over more
+    than 64 heads is refused with the ``NotImplementedError`` of a call with query rows, by the eager forward and
+    backward alike; 64 heads there and every head count on ``sm_100a`` / ``sm_103a`` return the empty outputs.
+    Either way nothing is planned, loaded or launched."""
+    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, arch)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a call without query rows must neither plan nor launch")
+
+    monkeypatch.setattr(cake_backend, "_plan", refuse)
+    monkeypatch.setattr(cake_jit, "load_cake_dsa_train_module", refuse)
+    monkeypatch.setattr(cake_backend, "record_for", refuse)
+    inp = hl.host_inputs(0, 16, 5, heads)
+    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
+    dout = torch.zeros(0, heads, D_LATENT, dtype=torch.bfloat16)
+    if heads != 64 and arch == "sm_107a":
+        refused = "sm_107a serves 64 query heads only"
+        with pytest.raises(NotImplementedError, match=refused):
+            cake_backend.forward(*args)
+        lse = torch.zeros(0, heads, dtype=torch.float32)
+        with pytest.raises(NotImplementedError, match=refused):
+            cake_backend.backward(*args, dout, dout, lse, dout)
+    else:
+        out, lse, o_lo = cake_backend.forward(*args)
+        assert tuple(out.shape) == tuple(o_lo.shape) == (0, heads, D_LATENT)
+        assert tuple(lse.shape) == (0, heads)
+        grads = cake_backend.backward(*args, out, o_lo, lse, dout)
+        assert [tuple(g.shape) for g in grads] == [
+            (0, heads, D_LATENT),
+            (0, heads, D_ROPE),
+            (16, D_LATENT),
+            (16, D_ROPE),
+        ]
+        assert not grads[2].any() and not grads[3].any()
+    assert not h.launches
 
 
 def _validate(q_heads, *, rope_heads=None, dout_heads=None, packed=False):

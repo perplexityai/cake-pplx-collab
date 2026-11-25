@@ -99,7 +99,9 @@ empty ``out`` / ``lse`` / ``o_lo`` (``None`` for ``o_lo`` with
 ``dq``, a zero FP32 ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a
 sink, a zero ``dsink``; the rope step backward returns empty ``dq_latent`` /
 ``dq_rope`` and zero ``dkv_latent`` / ``dk_rope``, FP32 with ``dkv_fp32=True``
-and BF16 otherwise (``None`` with a tensor ``dkv_acc``).
+and BF16 otherwise (``None`` with a tensor ``dkv_acc``).  On SM107 a rope call
+over 96 or 128 heads on CUDA tensors raises ``NotImplementedError`` instead,
+as a call with query rows does.
 
 Their autograd Functions, ``CakeDSASparseAttentionNondetFunction`` (both rope
 entries), ``CakeDSASparseAttentionNondetNopeFunction`` and
@@ -1003,7 +1005,9 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     unchanged to :func:`cake_dsa_sparse_attention_nondet_train_backward`.
     ``out``, ``lse`` and ``o_lo`` of a head come from one forward kernel launch
     (with 96 or 128 heads, the launch of the window that delivers the head). A
-    call without query rows returns empty outputs without launching.
+    call without query rows returns empty outputs without launching (on SM107
+    a call over 96 or 128 heads on CUDA tensors raises ``NotImplementedError``
+    instead).
 
     ``with_o_lo`` (``bool``, default ``True``): with ``True`` the forward also
     writes ``o_lo`` as above and the step backward forms ``delta =

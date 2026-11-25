@@ -1354,7 +1354,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 
 The autograd entries run the forward eagerly and the backward through autograd; the `*_train*_forward` / `*_train*_backward` step entries run them as two explicit calls without autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only. On `sm_107a` the nondet rope form takes 64 query heads; a 96- or 128-head call with at least one query row raises `NotImplementedError` before any launch (a call with T = 0 returns empty outputs).
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only. On `sm_107a` the nondet rope form takes 64 query heads; a 96- or 128-head call on CUDA tensors raises `NotImplementedError` before any launch, also with T = 0.
 
 **Inputs (rope form).**
 
@@ -1381,7 +1381,7 @@ The autograd entries run the forward eagerly and the backward through autograd; 
 - `dout` may be head-major (strides `[512, T*512, 1]`).
 - `sink`: FP32 `[64]` (one value per head), contiguous, on `q`'s device, or `None` (the default: no sink). Only the metadata is checked, so there is no device sync. `-inf` disables the sink of its head. `+inf` and NaN are not supported. Every NoPE entry of both modules takes it, flat and varlen. With a sink, `lse` includes the sink, a row with no valid slot gives `out = 0` and `lse = sink[h]`, and the backward gives `dsink = -sum_t exp(sink - lse[t]) * delta[t]` (FP32 `[64]`, summed over all rows of the call, packed rows included, in a fixed order that does not depend on the SM count): autograd returns it as the `sink` gradient, and the step backwards return it as a third value. A `-inf` head gets exactly 0.
 - `num_segments`: the packed segment count of the key row, a Python `int` >= 1 (default 1; `len(cu_seqlens_k) - 1` for the global rows of a packed batch). The flat entries and step backwards of both forms take it; the varlen entries pass it themselves. It selects the plan only.
-- A call with no query rows (T = 0) launches nothing. The forwards return empty `out` / `lse` / `o_lo` (`None` for `o_lo` with nondet `with_o_lo=False`). The step backwards return an empty `dq`, a zero FP32 `dkv` (`None` with `dkv_acc`) and, with a sink, a zero `dsink`. With a sink, the call still checks the sink's metadata and device.
+- A call with no query rows (T = 0) launches nothing. The forwards return empty `out` / `lse` / `o_lo` (`None` for `o_lo` with nondet `with_o_lo=False`); on `sm_107a` a nondet rope call over 96 or 128 heads on CUDA tensors raises `NotImplementedError` instead (see Architectures). The step backwards return an empty `dq`, a zero FP32 `dkv` (`None` with `dkv_acc`) and, with a sink, a zero `dsink`. With a sink, the call still checks the sink's metadata and device.
 
 **Query heads (nondet rope form).** The shipped kernels compute 64 query heads per launch. At 64 heads a call launches what it launched in 0.6.1. At 96 and 128 heads the call runs the same kernels on two 64-head windows, `[H-64, H)` first and then `[0, 64)`; at 96 heads the windows overlap on heads 32-63.
 

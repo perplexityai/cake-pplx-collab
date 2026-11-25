@@ -3777,7 +3777,9 @@ def forward(
 
     Allocates the outputs and launches over the remembered plan of the input
     geometry (validated and resolved on the first call of that geometry); a
-    call without query rows returns empty outputs without launching.  Without
+    call without query rows returns empty outputs without launching (a CUDA
+    call over more than 64 heads checks the architecture first,
+    :func:`_check_empty_window_arch`).  Without
     ``topk_length`` the kernel derives the row lengths itself;
     ``derive_topk_length=True`` makes it write them into the given
     ``topk_length`` tensor (see :func:`prepare_dsa_train`).
@@ -3886,7 +3888,8 @@ def backward(
     (:func:`_dout_rows_dense`).  A view the TMA descriptor cannot address (base
     not 16-byte aligned, strides not multiples of 8 elements, channel stride !=
     1) is copied once.  A call without query rows returns empty ``dq`` and zero
-    ``dkv`` gradients without launching.
+    ``dkv`` gradients without launching (a CUDA call over more than 64 heads
+    checks the architecture first, :func:`_check_empty_window_arch`).
 
     ``with_o_lo`` is the forward's (see :func:`forward`): ``o_lo`` is the
     tensor that forward returned with ``True`` (default) and ``None`` with
