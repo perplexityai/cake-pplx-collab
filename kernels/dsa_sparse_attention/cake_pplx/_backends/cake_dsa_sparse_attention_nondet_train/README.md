@@ -688,9 +688,11 @@ change:
 * Not served above 64 heads: the deterministic package, the NoPE program and
   its sink form (`ValueError`; the deterministic and NoPE query checks name
   the rope form, the sink check says the sink form serves 64 query heads
-  only).  On `sm_107a` a call with
-  more than 64 heads raises `NotImplementedError` -- also without query rows,
-  on a CUDA tensor -- until its window stages are validated.
+  only).  On `sm_107a` an eager, autograd or step call with more than 64
+  heads raises `NotImplementedError` before any kernel of the package
+  launches -- also without query rows, on a CUDA tensor -- and so does
+  `prepare_dsa_train`, until the window stages are validated there (a
+  prepared runner refuses `T = 0` with `ValueError` at every head count).
 * Cost.  At 96 heads each stage processes 128 heads (the overlap heads
   twice).  The forward adds the scratch copies of `lse` and `o_lo`; the
   backward gathers the keys and drains the dK / dV reductions once per window.
