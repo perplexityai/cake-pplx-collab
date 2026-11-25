@@ -448,6 +448,10 @@ def _hidden_count_begin(
     else:
         compaction_index(labels, valid=valid, pos=pos, idx_full=idx_full, ar=ar)
         count_host.copy_(count_dev, non_blocking=True)
+        if rows0 == T:
+            # a one-chunk call: its dX finalize reads this scan of ``valid`` (:func:`.cake_backend._row_scan`), as in
+            # :func:`.cake_backend._hidden_count_begin`
+            setattr(valid, _main._DEVICE_SCAN_ATTR, pos)
     event.record()
     with _ffi_stream_context(index):
         for key in keys:
@@ -4862,17 +4866,21 @@ def _hidden_count_program(
     compact: bool,
     stats: bool,
     hidden_count: bool,
+    loss_call: bool = False,
 ) -> Optional[tuple[str, dict[str, Any]]]:
     """``(module_name, record)`` of a call that runs the hidden valid-row count (:func:`_hidden_count`'s rules: a
     compacted ``cake`` call with the switch on that :func:`hidden_count_eligible` admits), else ``None``.  Host checks
-    only: nothing is allocated or queued."""
+    only: nothing is allocated or queued.  ``loss_call``: a call of the loss entry without the zero-weight split
+    (:func:`.cake_backend.hidden_count_chunks_admit`)."""
     if not (compact and backend == "cake" and hidden_count):
         return None
     rows, chunk = int(problem.num_rows), int(problem.chunk)
-    if rows <= 0 or (rows + chunk - 1) // chunk < HIDDEN_COUNT_MIN_CHUNKS:
+    if not _main.hidden_count_chunks_admit(rows, chunk, loss_call=loss_call):
         return None  # the chunk rule of :func:`hidden_count_eligible`, ahead of the record lookup
     module_name, record = record_for(X.device)
-    if not hidden_count_eligible(problem, X, record, module_name, stats=stats):
+    if not hidden_count_eligible(
+        problem, X, record, module_name, stats=stats, loss_call=loss_call
+    ):
         return None
     return module_name, record
 
@@ -4888,10 +4896,12 @@ def _hidden_count(
     stats: bool,
     hidden_count: bool,
     loss_weights: Optional[torch.Tensor] = None,
+    loss_call: bool = False,
 ) -> Optional[_HiddenCount]:
     """The hidden valid-row count prologue of a compacted ``cake`` call when the switch (``hidden_count``, resolved by
     the caller) is on and the call is eligible (:func:`hidden_count_eligible`); ``None`` = the shipped
-    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`.cake_backend.gradient_index`)."""
+    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`.cake_backend.gradient_index`).
+    ``loss_call``: a call of the loss entry without the zero-weight split (:func:`_hidden_count_program`)."""
     program = _hidden_count_program(
         problem,
         X,
@@ -4899,6 +4909,7 @@ def _hidden_count(
         compact=compact,
         stats=stats,
         hidden_count=hidden_count,
+        loss_call=loss_call,
     )
     if program is None:
         return None
@@ -4984,6 +4995,7 @@ def forward_loss(
     check_num_valid_rows: bool = False,
     return_logp: bool = True,
     _cast_fold: bool = False,
+    _one_chunk_count: bool = True,
 ) -> ForwardResult:
     """Forward of the loss entry: ``loss`` (FP32 scalar), ``logp`` (FP32 ``[T]``) and the
     FP32 gradient accumulators ``dx_acc`` / ``dw_acc`` of the trainable inputs.
@@ -5012,6 +5024,10 @@ def forward_loss(
     :func:`hidden_count_default`) runs a compacted call's valid-row count on the
     device.  ``gemm_tuning`` (default :func:`gemm_tuning_default`) pins GEMM
     knobs explicitly; the result carries it for the deferred weight gradient.
+    ``_one_chunk_count=False`` (the autograd entry's calls inside a non-reentrant
+    ``torch.utils.checkpoint``): a one-chunk call keeps the host count
+    (:func:`.cake_backend.hidden_count_chunks_admit` without the loss entry's
+    row window).
 
     ``memory_mode`` (default ``None``: the fast form; the autograd entries resolve theirs, :func:`memory_mode_default`,
     to :data:`MEMORY_AUTO` and pass it): ``"budget"`` (``cake`` backend, BF16 ``dW``) picks the weight-gradient form of
@@ -5149,6 +5165,7 @@ def forward_loss(
             stats=True,
             hidden_count=count,
             loss_weights=loss_weights if split else None,
+            loss_call=_one_chunk_count and not split,
         )
         if hc is not None:
             # the hidden valid-row count: chunk 0's gather and logits GEMM are queued; the count arrives through the
@@ -8452,6 +8469,9 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 check_num_valid_rows=check_num_valid_rows,
                 return_logp=bool(return_logp),
                 _cast_fold=cast_fold,
+                # both passes of a checkpointed one-chunk call keep the host count: measured slower with the loss
+                # entry's one-chunk hidden count (its device prologue runs in both passes)
+                _one_chunk_count=False,
             )
             split, handed = _main._loss_checkpoint_split(
                 ctx,
@@ -8506,6 +8526,7 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             check_num_valid_rows=check_num_valid_rows,
             return_logp=bool(return_logp),
             _cast_fold=cast_fold,
+            _one_chunk_count=ckpt is None,
         )
         CakeLMHeadDetLossFunction._setup(
             ctx, X, grad_weight_dtype, backend, memory_mode
@@ -10281,8 +10302,21 @@ class CakeLMHeadDetLogprobOneChunkFunction(CakeLMHeadDetLogprobAutoFunction):
             keep=keep,
         )
         kept = getattr(result, "logits", None)
-        # the kept logits are saved tensors too (see the backend's kept-logits function)
-        ctx.save_for_backward(X, W, labels, result.lse, result.row_index, *(kept or ()))
+        # the kept logits are saved tensors too (see the backend's kept-logits function), behind the forward's
+        # valid-row mask and bound labels (the kept backward forms neither again); the default form saves its five
+        if kept is not None:
+            ctx.save_for_backward(
+                X,
+                W,
+                labels,
+                result.lse,
+                result.row_index,
+                result.row_valid,
+                result.labels_c,
+                *kept,
+            )
+        else:
+            ctx.save_for_backward(X, W, labels, result.lse, result.row_index)
         ctx.one_chunk = ctx.kept = kept is not None
         ctx.auto = bool(auto)
         ctx.chunk_size, ctx.backend, ctx.compact = chunk_size, backend, compact

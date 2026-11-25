@@ -286,7 +286,9 @@ keyword.
   different chunk boundaries and differ by FP32 rounding (deterministic run to
   run).  All rows valid: the uncompacted path (no gather, no scatter).  Every
   row ignored: zeros without a launch.  On this host-count path (the calls the
-  hidden valid-row count below does not serve: one and two chunks) a
+  hidden valid-row count below does not serve: one and two chunks, except, on
+  `sm_100a` and `sm_103a`, the loss entry's one-chunk calls of 32 to 1024
+  rows) a
   remembered forward launches chunk 0's row gather and logits GEMM right
   behind the count and binds the rest of the call -- the compacted labels, the
   policy operands, the row vectors, the accumulators -- behind them
@@ -384,9 +386,36 @@ keyword.
   two-chunk calls measured 5-16 % slower with it, so, like the dW side
   stream's `auto` rule, it serves calls of three or more chunks) and every
   `sm_103a` call on CUDA 13.0 (the toolchain note below) take the previous
-  path; the prepared runner (`prepare_lm_head_det_loss`) is
-  unchanged.  The chunk buffers and the gather buffer exist at the buffer
-  extent before the count is known (`memory_report(..., hidden_count=True)`;
+  path.  The exception is, on the architectures of
+  `cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH` (`sm_100a` and `sm_103a`: 32
+  to 1024 rows),
+  the loss entry's one-chunk calls in that row window without the zero-weight
+  split (`cake_backend.hidden_count_chunks_admit`): their chunk 0 GEMM runs on
+  `T` rows and the GPU no longer waits for the host count's readback and the
+  host work after it (measured on GB300 against the host count,
+  cross-entropy, chunk 4096, 18 fresh processes per side: behind queued work
+  the forward 228 to 374 us faster and the backward 3.9 to 7.9 us faster at
+  `T` = 32 to 1024, the `T` = 1024 forward + backward step 3482.8 -> 3182.4
+  us; no slower forward, backward, step, cleared-cache step or checkpointed
+  step in CUPTI span or behind queued work; at `T` = 8 a step with a cleared
+  binding cache measured slower, 1980.0 -> 2087.9 us, so smaller calls keep
+  the host count).  Their dX finalize reads
+  the scan the count's compaction formed, so no backward -- a retained
+  graph's second one included -- launches a scan of its own, and a call
+  inside a non-reentrant `torch.utils.checkpoint` keeps the host count in
+  both passes: without these two rules the retained second backward and the
+  checkpointed step measured slower with the hidden count on B200 and R200.
+  With both rules, on B200 (measured the same way against the host count):
+  behind queued work the forward at `T` = 32 / 1024 841.5 -> 679.4 /
+  2797.4 -> 2636.4 us, the backward 431.0 -> 426.5 / 1236.6 -> 1232.0 us, the
+  `T` = 1024 forward + backward step 4069.1 -> 3906.4 us, the checkpointed
+  step at `T` = 128 2307.0 -> 2304.9 us (the host count in both), and no
+  slower call at `T` = 32 to 1024.  On R200 these one-chunk calls keep the
+  host count (the two rules were not timed there).  The
+  log-probability entries keep the previous rule.  The prepared runner
+  (`prepare_lm_head_det_loss`) is unchanged.  The chunk buffers and the gather
+  buffer exist at the buffer extent before the count is known
+  (`memory_report(..., hidden_count=True)`;
   `cake_backend.hidden_count_eligible` / `_hidden_count_begin`).
 * Log-probability logits GEMM arms (`logprob_dz` / `logprob_lbl`, keywords of
   the log-probability entry points, default `True`; `False` restores the
@@ -431,8 +460,13 @@ keyword.
   held after the checkpointed forward).  `row_grad` overwrites them, so a
   second backward through a retained graph recomputes (bitwise the same), and
   `backward_logprob_keep` marks the views it consumed (a second call on them
-  is a `ValueError`).  A forward with a trainable input whose backward never
-  runs pays the full-logits forward instead of the label-column arm
+  is a `ValueError`).  The autograd entries also save the forward's bound
+  labels (the valid rows' labels when compacted) and the valid-row mask of its
+  count (`KeptForwardResult.labels_c` / `row_valid`, `8 * T_v + T` bytes): the
+  kept backward neither compares nor gathers the labels again (the same mask
+  and labels, so the same bits).  A forward with a trainable input whose
+  backward never runs pays the full-logits forward instead of the label-column
+  arm
   (measured per call, both call orders combined: at `T` = 1 +0.4 to +1.6 us on
   B200 and +9.6 to +13.1 us on GB300; at `T` = 32 and 128 -3.3 to +1.2 us on
   B200 and 5.4 to 13.0 us faster on GB300) and holds the kept logits until its
@@ -1451,6 +1485,60 @@ declares its required cluster in the geometry; its grid rule counts the
 wider work items, and the kernel reads the runtime cluster size.  The GEMM operands are
 described by TMA descriptors the host prepares in a per-runner descriptor
 workspace; the logits GEMM's output descriptor covers the chunk's rows only.
+
+On `sm_107a` the log-probability entry's eager calls without a temperature
+(`cake_lm_head_det_train_logprob` and the backend's `forward_logprob` /
+`backward_logprob`, their kept-logits forms included) of one compacted chunk
+of 1 to 182 valid rows (`cake_backend.A_EXTENT_WINDOW_BY_ARCH`, fewer than
+the 256 rows `cake_backend.A_EXTENT_ROWS_BY_ARCH` names;
+`cake_backend.a_extent_rows`)
+give their logits GEMMs -- the kept forward's, the label-column arm's forward
+and the `dz` arm's recompute -- an `A` descriptor of 256 rows: the gather
+buffer holds them (its rows past the chunk: below).  The recompute backward's
+dX GEMM reads its `dz` the same way (`DX_A_EXTENT_ROWS_BY_ARCH`, 256 rows of
+the chunk's logits buffer; not the kept backward, which reads the kept
+logits).  `M`, the output and workspace descriptors, the statistics, every
+per-row operand, the grid and the K slices keep the chunk's rows, so the
+extra rows only form accumulator rows that no epilogue stores: every output
+keeps its bits.  The shipped programs run a chunk of a few rows slower than
+one of 256 rows there (CUPTI, the logits GEMM of a log-probability step at
+14 valid rows 325.6 -> 167.2 us, at 182 valid rows 237.7 -> 175.2 us; at
+242 valid rows the forward measured slower, so the window stops at the
+measured 182).  From 1 to 12 valid rows the GEMM's time without the extent
+follows where the gathered rows land in memory (the log-probability
+forward's logits GEMM at 1 / 2 / 6 / 8 / 12 valid rows over 24 placements:
+324.8 to 474.7 us; with the 256-row extent 165.4 to 167.2 us).  Measured on
+the default autograd call: the step at `T` = 16
+(15 valid rows) 1450.7 -> 1230.7 us (against 0.3.4: 1402.3 -> 1230.7 us), its
+checkpointed step (the recompute backward and its dX GEMM) 2142.5 -> 1594.8
+us.  A call that counts its valid rows on the host gathers the gather
+buffer's padded rows too: the count copies a padded index (the valid rows,
+then the last one repeated; `cake_backend.valid_rows`' `pad`) to the device
+in its one copy, so no launch fills them.  Other padded rows are zeroed where
+the buffer is allocated (per call).  They add up to `2 * 256 * V` bytes of
+logits buffer, which `memory_report` does not count.  The loss entry (its zero-weight rows'
+log-probability pass included), the temperature forms,
+the prepared runners (`prepare_lm_head_det_loss`, CUDA graphs included), the
+previous path's plain logits GEMM
+(`logprob_lbl=False` / `logprob_dz=False`), calls with every row valid
+(uncompacted), longer calls, the hidden valid-row count and the other
+architectures keep the chunk's rows: the extent was measured only on the
+default log-probability call.
+
+On `sm_100a` / `sm_103a` the same calls of 1 to 10 valid rows
+(`cake_backend.A_EXTENT_WINDOW_BY_ARCH`) give their logits GEMMs an `A`
+descriptor of 16 rows the same way (no dX extent).  With fewer rows the
+GEMM's time follows where the gathered rows land in memory (the
+log-probability forward's logits GEMM with its `A` operand moved over many
+placements: B200 at 6 / 1 valid rows over 130 placements 338.8 to 428.0 /
+357.6 to 463.5 us, with the 16-row extent 331.9 to 337.8 us at every
+placement; GB300 at 6 / 1 valid rows over 75 placements 337.3 to 451.4 /
+341.9 to 474.7 us, with the 16-row extent 316.1 to 317.8 / 314.2 to 316.5
+us; at 10 valid rows B200 340.2 to 414.4 us and GB300 334.4 to 442.0 us, with
+the extent 337.0 to 339.0 / 317.3 to 318.5 us).  From 11 valid rows on the
+time does not follow placement (B200 at 11 to 15 valid rows 337.7 to 340.1
+us, GB300 at 11 to 13 valid rows 317.5 to 319.4 us), so the window stops at
+10 rows: larger calls keep their rows and their count pads no index.
 
 ## Layout of this package
 
