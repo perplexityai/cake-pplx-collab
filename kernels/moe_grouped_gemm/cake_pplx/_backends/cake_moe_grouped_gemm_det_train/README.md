@@ -542,11 +542,35 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   sums (`wgrad_reduce_grid` CTAs). Every element accumulates its rows in the
   order of the 256-wide k tile, so where the two plans split the same tiles
   the same way the output bits are that tile's.
+- Wide outputs (`row_chunks`): the `fwd` / `dgrad` programs address `out`
+  with 32-bit element offsets, so on the architectures of `wide_rows_archs`
+  (`sm_100a`, `sm_103a`, `sm_107a`) a call whose output span passes
+  `int32_elems` (`sum_m * out.stride(0) > 2^31 - 1`) launches the stage
+  selected on the whole call once per row chunk: `n = ceil(sum_m / R)` chunks
+  of `ceil(sum_m / n)` consecutive rows, `R = int32_elems // out.stride(0)`
+  (`plan["launches"]` is `n`, `plan["row_chunks"]` the `(start, rows)` pairs
+  and `plan["grids"]` each chunk's grid; `stages` repeats the stage). At
+  655,360 rows of 4096 columns that is 2 launches of 327,680 rows. Each chunk
+  binds its rows of the row operand and of `out`, `sum_m` = its rows, and a
+  row table that `launch()` computes on the device from the caller's `offs` /
+  `m_indptr` at every launch: the table less the chunk's first row, clamped
+  to the chunk's rows (one clamp per chunk and one subtraction from the second
+  chunk on). There is no host read, so the launch stays CUDA-graph capturable
+  and valid for any `offs` written later. Every element is the same ordered
+  k-step sum of its row in any chunk, so the output bits are those of one
+  launch. On an architecture outside `wide_rows_archs` such a call raises
+  `ValueError`. A call within the span takes one launch, bound as before.
 - Workspaces (allocated at preparation, retained by the launch object): the
   per-CTA TMA descriptor slots of the weight gradient (a ring of nine
   descriptor pairs per CTA: a group switch edits the next pair and warms the
   one after it, never a pair an in-flight load may still read) and its fp32
-  tail partials. The operand
+  tail partials, and the row tables of a wide `fwd` / `dgrad` (one int32
+  buffer of the caller's table size per chunk: `n * (E + 1) * 4` bytes or
+  less; the forward and data gradient retain nothing else). One prepared
+  wide launch must not be in flight on two streams at once, must be kept
+  alive while a CUDA graph that captured it may replay and, after a launch on
+  another stream, must be kept alive until that launch completes (the
+  buffers are allocated on the stream current at the preparation). The operand
   descriptors are launch arguments; there is no descriptor workspace and no
   descriptor upload kernel.
 - Stream workspaces (kept per device and CUDA stream, reused by every launch
@@ -565,7 +589,8 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
 
 `CakeMoEGroupedGemmDetLaunch.plan` exposes `grid`, `tile_k`, `tail_splits`,
 `raster_rows`, `launches` and, for `fwd` / `dgrad`, `tile_n`, `clusters`, `c0`,
-`c1` (the even split) and `queue_split`, for `wgrad` `tail_tile_k` (the k width of the split tail tiles),
+`c1` (the even split) and `queue_split` (and `row_chunks` and `grids` for a wide
+output), for `wgrad` `tail_tile_k` (the k width of the split tail tiles),
 `wave_mode`, `accumulate` (`"off"`, `"fused"` or `"composed"`) and, on the
 composed route, `accumulate_reason`, for inspection and tests;
 `CakeMoEGroupedGemmDetLaunch.stages` names the bound stages in launch order,
@@ -677,7 +702,7 @@ package's functions emits no log and no warning.
 ## Tests and benchmark
 
 ```bash
-pytest tests/experimental/test_cake_moe_grouped_gemm_det_train.py tests/experimental/test_cake_moe_grouped_gemm_det_train_api.py tests/experimental/test_cake_moe_grouped_gemm_det_train_names.py tests/experimental/test_cake_moe_grouped_gemm_det_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_det_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_det_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_det_train_device_slice.py
+pytest tests/experimental/test_cake_moe_grouped_gemm_det_train.py tests/experimental/test_cake_moe_grouped_gemm_det_train_api.py tests/experimental/test_cake_moe_grouped_gemm_det_train_names.py tests/experimental/test_cake_moe_grouped_gemm_det_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_det_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_det_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_det_train_device_slice.py tests/experimental/test_cake_moe_grouped_gemm_det_train_wide_rows.py
 python benchmarks/bench_cake_moe_grouped_gemm_det_train.py --help
 ```
 
@@ -724,6 +749,23 @@ moved to row 0 (bitwise) and the `[E]` call over the slice's rows alone
 outside poisoned, padded rows, graph replay over device-copied routings, two
 streams, accumulation, the autograd entry and the bits of the judged `[E]`
 cases.
+`test_cake_moe_grouped_gemm_det_train_wide_rows.py` covers the wide
+outputs (host plan, above): on the CPU the chunk arithmetic, the chunks' row
+tables against the rows of each group in each chunk, a call within the span
+bound as one launch, a wide call's chunks, rows and row tables and the
+refusals (an architecture outside `wide_rows_archs`, a row pitch past the
+span); on a GPU forced chunks of
+every served `fwd` / `dgrad` stage bitwise against one launch (an empty chunk,
+a first group past the first chunk, both row tables), the issue's 655,360
+rows over 64 and 32 skewed groups and the boundary row counts 524,287,
+524,288, 524,289 and 1,048,576 against the naive BF16 tier with windows of
+rows (each chunk boundary, row 524,288) bitwise against independent calls
+within the span, an `m_indptr` device slice into a slice of a larger `out`,
+changing device routings eager and from one CUDA graph with no host
+synchronization and no new program load, a checkpointed MoE block bitwise
+against the block without checkpoint, a weight gradient whose operands pass
+2^31 elements against the naive BF16 tier, and repeats. These GPU tests skip
+on a device with too little free memory (up to 72 GiB for the block).
 `test_cake_moe_grouped_gemm_det_train_acceptance.py` repeats every output of
 the reproducibility table five times into a zeroed and five times into a
 filled output under concurrent copy streams, over changing offsets, and
@@ -733,12 +775,18 @@ deterministic baselines `det_acc` and `det_mgB` and the non-deterministic arms).
 The benchmark `benchmarks/bench_cake_moe_grouped_gemm_det_train.py` times the prepared
 launches against `torch._grouped_mm` and a per-group cuBLAS loop on the MoE projection rows of the
 design (E = 4 ragged distributions, E = 8 / 16 / 32 balanced, fp32 weight
-gradients).
+gradients); `--wide-rows` runs the wide-output rows instead (the down
+projection's forward and the gate/up projection's data gradient, `[rows, 4096]`
+at 327,680 and 655,360 rows over 64 and 32 balanced or skewed groups).
 
 ## Limitations
 
-- bf16 inputs only; `E`, `sum_m`, `N`, `K` and the output span must fit
-  32-bit element addressing.
+- bf16 inputs only; `E`, `sum_m`, `N` and `K` must fit 32-bit integers. On
+  `sm_100a`, `sm_103a` and `sm_107a`, a forward or data-gradient output whose
+  span passes 2^31 - 1 elements runs the selected program once per row chunk
+  whose span fits 32-bit element addressing (`plan["row_chunks"]`); the chunk
+  row tables are computed on the device. The weight-gradient output span must
+  fit 32-bit addressing.
 - The weight-gradient accumulation is fused for an fp32 `out` on the
   half-release forms of the 512-wide k tile only; every other call composes,
   with a scratch of the weight gradient's size (above).

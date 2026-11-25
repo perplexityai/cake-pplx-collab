@@ -2809,5 +2809,337 @@
       "grid_y",
       "grid_z"
     ]
+  },
+  "backward_fp32_direct": {
+    "library": "cake_mok_backward_fp32_direct",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "dy_s",
+      "dy_r",
+      "dg_s",
+      "dg_r",
+      "du_s",
+      "du_r",
+      "x_nt_r",
+      "dy_atb_s",
+      "dy_atb_r",
+      "dg_atb_s",
+      "dg_atb_r",
+      "du_atb_s",
+      "du_atb_r",
+      "x_atb_s",
+      "x_atb_r",
+      "h_atb_s",
+      "h_atb_r",
+      "wg_s",
+      "wu_s",
+      "wd_s",
+      "wg_r",
+      "wu_r",
+      "wd_r",
+      "wg_nt_r",
+      "wu_nt_r",
+      "dh_s",
+      "dh_r",
+      "dx_s",
+      "dx_r",
+      "gate_out_r",
+      "up_out_r",
+      "dwg_s",
+      "dwu_s",
+      "dwd_s",
+      "dwg_r",
+      "dwu_r",
+      "dwd_r",
+      "dh_sw_s",
+      "dh_sw_r",
+      "gate_sw_s",
+      "gate_sw_r",
+      "up_sw_s",
+      "up_sw_r",
+      "dg_sw_s",
+      "dg_sw_r",
+      "du_sw_s",
+      "du_sw_r",
+      "h_sw_r",
+      "x_routed_ptr",
+      "dy_routed_ptr",
+      "dy_scaled_ptr",
+      "dx_routed_ptr",
+      "weights",
+      "partials",
+      "x_peers",
+      "dy_peers",
+      "dx_peers",
+      "weight_peers",
+      "dweight_peers",
+      "schedule_rank",
+      "schedule_token",
+      "num_tokens",
+      "counts",
+      "dh_ready",
+      "dg_ready",
+      "dy_ready",
+      "dx_ready",
+      "replay_x",
+      "replay_gu",
+      "replay_h",
+      "buffers_done",
+      "weight_ready",
+      "local_tokens",
+      "hidden",
+      "intermediate",
+      "experts",
+      "topk",
+      "comm_sms",
+      "macro_size",
+      "mini_size",
+      "swiglu_limit",
+      "mini_size_div",
+      "mini_bwd_div",
+      "mini_replay_div",
+      "replay_macro_tasks_div",
+      "weight_tasks_div",
+      "shared_wgrad_div",
+      "dh_col_blocks_div",
+      "dx_col_blocks_div",
+      "replay_col_blocks_div",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "epilogue_forward_scaled_10": {
+    "library": "cake_mok_epilogue_forward_scaled_10",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "shared",
+      "routed",
+      "scores",
+      "shared_scale",
+      "output",
+      "tokens",
+      "hidden",
+      "ctas",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "epilogue_backward_scaled_10": {
+    "library": "cake_mok_epilogue_backward_scaled_10",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "shared",
+      "routed",
+      "scores",
+      "shared_scale",
+      "output",
+      "tokens",
+      "hidden",
+      "ctas",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "shared_scale_rows": {
+    "library": "cake_mok_shared_scale_rows",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "rows",
+      "scales",
+      "scaled",
+      "tokens",
+      "width",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "shared_scale_dot": {
+    "library": "cake_mok_shared_scale_dot",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "left",
+      "right",
+      "dots",
+      "tokens",
+      "width",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_8_64": {
+    "library": "cake_mok_count_8_64",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "local_tokens",
+      "top_k",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "rows_8_64": {
+    "library": "cake_mok_rows_8_64",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "schedule_peer_token_idx",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_16_32": {
+    "library": "cake_mok_count_16_32",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "local_tokens",
+      "top_k",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "rows_16_32": {
+    "library": "cake_mok_rows_16_32",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "schedule_peer_token_idx",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_32_16": {
+    "library": "cake_mok_count_32_16",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "local_tokens",
+      "top_k",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "rows_32_16": {
+    "library": "cake_mok_rows_32_16",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "schedule_peer_token_idx",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_64_8": {
+    "library": "cake_mok_count_64_8",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "local_tokens",
+      "top_k",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "rows_64_8": {
+    "library": "cake_mok_rows_64_8",
+    "arches": [
+      "sm_100a",
+      "sm_103a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "schedule_peer_token_idx",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
   }
 }
