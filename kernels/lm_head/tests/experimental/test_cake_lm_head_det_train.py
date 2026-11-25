@@ -11120,11 +11120,13 @@ def test_device_hidden_count_kernels_match_torch(glm_weight):
     _require_hidden_count()
     name, record = cake_backend.record_for(CUDA)
     # calls of three chunks and more (the chunk rule): some rows ignored, none, most (a count below the buffer
-    # extent), five chunks at half, all ignored
+    # extent: 310 and 155 of 1024 rows, the GEMM runs no work on the last two and three of its four 256-row pairs),
+    # five chunks at half, all ignored
     cases = (
         (3100, 1024, 0.05),
         (3100, 1024, 0.0),
         (3100, 1024, 0.9),
+        (3100, 1024, 0.95),
         (4097, 1024, 0.5),
         (2200, 1024, 1.0),
     )
@@ -11202,10 +11204,12 @@ def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
     (chunk 4096), not at ``T`` 1024 in two chunks of 512, not a policy call the split serves
     (``set_zero_weight_min_rows(0)``), not a log-probability call of 256 rows -- and gives the bits (integer views) of
     the same call with ``hidden_count=False``, which begins no count: ``loss``, ``logp``, ``dX`` and ``dW``.  With the
-    window, a windowed call's dX finalize -- in the step's backward and in a retained graph's second backward -- reads
-    the scan its compaction formed (``_DEVICE_SCAN_ATTR``: no scan of its own, the bits of ``cumsum(mask)``), and a
-    checkpointed call (non-reentrant ``torch.utils.checkpoint``, both entries) begins no count in either pass and gives
-    the bits of the checkpointed call with ``hidden_count=False``."""
+    window, also the calls at ``T`` 512 and 1024 with half and three quarters of the rows ignored, whose count leaves
+    whole 256-row pairs of the buffer extent past it (the device-count GEMM runs no work there): each begins the count
+    and gives those bits.  With the window, a windowed call's dX finalize -- in the step's backward and in a retained
+    graph's second backward -- reads the scan its compaction formed (``_DEVICE_SCAN_ATTR``: no scan of its own, the
+    bits of ``cumsum(mask)``), and a checkpointed call (non-reentrant ``torch.utils.checkpoint``, both entries) begins
+    no count in either pass and gives the bits of the checkpointed call with ``hidden_count=False``."""
     _require_program(entry="loss")
     _require_program(entry="logprob")
     arch = cake_backend.arch_for(CUDA)
@@ -11215,25 +11219,32 @@ def test_device_loss_small_one_chunk_hidden_count(glm_weight, monkeypatch):
     )
     shipped = dict(cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH)
     begun = _record_every_hidden_count(monkeypatch)
-    # (T, chunk, objective, entry, zero-weight floor; None: the shipped floor)
-    cases = [(T, 4096, "ce", "loss", None) for T in (16, 31, 32, 64, 256, 1024, 1025)]
-    cases += [
-        (1024, 512, "ce", "loss", None),
-        (256, 4096, "policy", "loss", None),
-        (256, 4096, "policy", "loss", 0),
-        (256, 4096, "ce", "logprob", None),
+    # (T, chunk, objective, entry, zero-weight floor (None: the shipped floor), ignored fraction)
+    cases = [
+        (T, 4096, "ce", "loss", None, 0.05) for T in (16, 31, 32, 64, 256, 1024, 1025)
     ]
+    cases += [
+        (1024, 512, "ce", "loss", None, 0.05),
+        (256, 4096, "policy", "loss", None, 0.05),
+        (256, 4096, "policy", "loss", 0, 0.05),
+        (256, 4096, "ce", "logprob", None, 0.05),
+    ]
+    # under the sm_103a window: counts 256 / 128 of 512 rows and 512 / 256 of 1024 rows, whole 256-row pairs of the
+    # buffer extent past the count
+    dead = [(T, 4096, "ce", "loss", None, f) for T in (512, 1024) for f in (0.5, 0.75)]
     for table in (shipped, dict(shipped, **{arch: (32, 1024)})):
         monkeypatch.setattr(cake_backend, "HIDDEN_COUNT_LOSS_ROWS_BY_ARCH", table)
         window = table.get(arch)
-        for T, chunk, objective, entry, floor in cases:
+        for T, chunk, objective, entry, floor, ignore in cases + (
+            [] if table is shipped else dead
+        ):
             inp = make_inputs(
                 T,
                 objective=objective,
                 seed=SEED + 7731 + T,
                 device=CUDA,
                 W=glm_weight,
-                ignore_frac=0.05,
+                ignore_frac=ignore,
             )
             expected = (
                 runs
