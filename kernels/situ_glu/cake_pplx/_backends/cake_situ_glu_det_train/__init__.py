@@ -68,12 +68,12 @@ Host design (every control is an argument; no environment variable):
   overflows: ``tanh(|g| / beta) = (1 - E) / (1 + E)``, ``sigmoid(g) =
   1 / (1 + P)`` for ``g >= 0`` and ``P / (1 + P)`` for ``g < 0``, and
   ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  The forward takes
-  ``1 - E`` and ``1 - W`` from ``E`` and ``W``, with an absolute error of a
-  few ``2^-24``.  ``h`` scales with both, so its relative error can pass the
-  BF16 rounding where ``|g|`` is below about ``3e-5 beta`` or ``|u|`` below
-  about ``3e-5 lb``; below about ``2^-26 beta`` (``2^-26 lb``), ``E``
-  (``W``) rounds to 1 and ``h`` is 0.  ``g = 0`` gives ``E = 1`` exactly, so
-  ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly.  The backward takes
+  ``beta (1 - E)`` as the smaller of ``|g| (1 + E)`` and
+  ``beta (1 + 2^-21) - beta E``, two upper bounds, without a branch: within
+  about ``2^-14.8`` of the exact value, relative to it, for every ``g``, and
+  0 for ``g = 0``.  ``lb (1 - W)`` takes the same form with ``|u|`` and
+  ``lb``.  So ``h`` keeps its accuracy for tiny gates and ups, and ``g = 0``
+  or ``u = 0`` gives ``h = 0`` exactly.  The backward takes
   ``beta (1 - E)`` as the larger of ``|g| (2 - 2 |g| / beta)`` and
   ``beta (1 - 2^-20) - beta E``, two lower bounds, without a branch: within
   ``2^-13`` of the exact value, relative to it, for every ``g``, and 0 for
@@ -83,8 +83,9 @@ Host design (every control is an argument; no environment variable):
   exponential, the same choice for every element of a call.
   The exponentials are the approximate base-2 exponential.  ``E`` and ``W``
   flush below ``2^-126``, only where ``|g| > 43.67 beta`` or
-  ``|u| > 43.67 lb``.  ``h`` takes them only as ``1 - E``, ``1 + E``,
-  ``1 - W`` and ``1 + W``, which the flush leaves as they are.  In the
+  ``|u| > 43.67 lb``.  ``h`` takes them only as ``1 + E``,
+  ``beta (1 + 2^-21) - beta E`` and the same terms of ``W``, which the flush
+  leaves as they are.  In the
   backward, an up past ``43.67 lb`` has ``d_up`` under
   ``2^-124 |dh| beta``, and at ``beta >= 2.4`` a gate past ``43.67 beta``
   has ``d_gate`` under about ``2^-124 |dh| lb``; the kernels store 0 there.

@@ -28,9 +28,8 @@ draws, in the L2 and the max norm, median and largest, beside the error of the s
 :mod:`tests.cake.test_helpers.situ_glu_reference`) over row counts 1 to 4097, widths 256 to 33,792 (one segment,
 partial passes of the CTA's warps, both sides of a full pass, and the issue's widths), the merged, two-tensor, sliced
 and copied layouts, saturated, deep negative, small and wide values, zero gates and ups, every BF16 gate and scalars
-other than the model's; and ``d_gate`` and ``d_up`` over tiny gates or ups, one magnitude band a case, down to
-``2^-60 beta`` and ``2^-60 lb``.  The kernels have no row-count boundary: one program per stage, one CTA per block of
-rows.
+other than the model's, and tiny gates or ups, one magnitude band a case, down to ``2^-60 beta`` and ``2^-60 lb``.
+The kernels have no row-count boundary: one program per stage, one CTA per block of rows.
 Beside the judge, exact facts of the contract (no tolerance): ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly (and
 ``d_up = 0`` at ``g = 0``, ``d_gate = 0`` at ``u = 0``); saturated inputs give finite outputs with the oracle's signs
 outside the flushed range; ``R = 0`` returns empty outputs and launches nothing; one library per stage serves every row
@@ -112,19 +111,17 @@ THREADS = 128
 # The smallest number that FP32 and BF16 hold as a normal number.
 MIN_NORMAL = 2.0**-126
 
-# The backward's outputs, the only ones the tiny-input cases judge.
-GRADS = ("d_gate", "d_up")
 # The judged cases: row counts 1 to 4097, widths 256 to 33792, every layout, the data kinds and other scalars.  A pass
-# of the forward's CTA covers 12 segments of 256 columns (3072 columns), one of the backward's 4 (1024 columns).
+# of either stage's CTA covers 4 segments of 256 columns (1024 columns).
 CASES = [
     Case(1),
     Case(2, 256),  # one segment: three warps of the CTA idle
-    Case(5, 1280, "merged"),  # five segments: one pass of the CTA, partial
-    Case(33, 1792),  # just below two passes of the backward's CTA
-    Case(33, 2048, "merged"),  # two passes of the backward's CTA
+    Case(5, 1280, "merged"),  # five segments: a full pass of the CTA, then a partial one
+    Case(33, 1792),  # just below two passes of the CTA
+    Case(33, 2048, "merged"),  # two passes of the CTA
     Case(33, 2304),  # just above it
-    Case(33, 2816, "merged"),  # just below one pass of the forward's CTA
-    Case(33, 3328),  # just above it
+    Case(33, 2816, "merged"),  # just below three passes of the CTA
+    Case(33, 3328),  # just above three
     Case(3, 33792, "sliced"),
     Case(129),
     Case(129, layout="merged"),
@@ -142,15 +139,17 @@ CASES = [
     Case(257, 6144, data="saturated"),
     Case(257, data="deep_negative"),
     Case(257, data="small"),
-    # Tiny gates or ups, one band a case, for the backward: near where its two forms of beta (1 - E) meet (8), where
-    # 1 - E from E alone is off by percents (20), and deep in the FP32 range, where E rounds to 1 (60).  The forward
-    # takes 1 - E from E (its bound is in the package's README), so these cases judge d_gate and d_up only.
-    Case(65, data="tiny_gate", band=8, judged=GRADS),
-    Case(65, data="tiny_gate", band=20, judged=GRADS),
-    Case(65, layout="merged", data="tiny_gate", band=60, judged=GRADS),
-    Case(65, data="tiny_up", band=20, judged=GRADS),
-    Case(65, 6144, data="tiny_up", band=60, judged=GRADS),
-    Case(65, data="tiny_gate", band=20, beta=2.5, lb=10.0, judged=GRADS),
+    # Tiny gates or ups, one band a case: near where the forward's two forms of beta (1 - E) meet (7) and where the
+    # backward's do (8), where 1 - E from E alone is off by percents (20), and deep in the FP32 range, where E rounds
+    # to 1 (60).
+    Case(65, data="tiny_gate", band=7),
+    Case(65, data="tiny_gate", band=8),
+    Case(65, data="tiny_gate", band=20),
+    Case(65, layout="merged", data="tiny_gate", band=60),
+    Case(65, data="tiny_up", band=7),
+    Case(65, data="tiny_up", band=20),
+    Case(65, 6144, data="tiny_up", band=60),
+    Case(65, data="tiny_gate", band=20, beta=2.5, lb=10.0),
     Case(257, data="zero_gate"),
     Case(257, layout="merged", data="zero_up"),
     Case(22, data="all_gates"),  # 22 x 3072 >= 65536 gate patterns

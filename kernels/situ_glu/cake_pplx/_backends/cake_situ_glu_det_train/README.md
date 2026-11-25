@@ -64,14 +64,13 @@ Two programs, one for `fwd` and one for `bwd` (`cake_jit.MODULES`, keyed by prog
 stage to its program), each delivered for `sm_100a`, `sm_103a` and `sm_107a` and compiled with the exact `-gencode` flag
 of each (`build.json`).  Each is one kernel.  A row is `I / 256` segments of 256 columns, and a warp owns a segment:
 lane `l` loads 8 BF16 values at column `256 s + 8 l`, so each load of a warp is contiguous.  A CTA has 128 threads (four
-warps).  In the forward its four warps own one row and take the row's segments in turn, three segments per warp and
-pass.  In the backward its four warps own one row, one segment per warp and pass.  Each warp issues the loads of
-its segments before it computes and stores them; a segment past the row's last one reloads the last segment and stores
-nothing, and a row past the last one stores nothing.  The grid is one CTA per block of rows (`cake_jit.ROWS_PER_CTA`,
-`cake_jit.grid`), and the CTAs stride over the blocks, so any smaller grid would also be correct.  Row offsets are
-64-bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The row
-count, the width, `beta`, `lb` and the strides are launch arguments, so one library per program and architecture serves
-every call.
+warps).  In both stages its four warps own one row and take the row's segments in turn, one segment per warp and
+pass.  Each warp issues the loads of its segments before it computes and stores them; a segment past the row's last one
+reloads the last segment and stores nothing, and a row past the last one stores nothing.  The grid is one CTA per block
+of rows (`cake_jit.ROWS_PER_CTA`, `cake_jit.grid`), and the CTAs stride over the blocks, so any smaller grid would also
+be correct.  Row offsets are 64-bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic
+dependent launch.  The row count, the width, `beta`, `lb` and the strides are launch arguments, so one library per
+program and architecture serves every call.
 
 ## Numerics
 
@@ -80,24 +79,29 @@ every call.
   (1 + E)`, `sigmoid(g) = 1 / (1 + P)` for `g >= 0` and `P / (1 + P)` for `g < 0`, and `1 - tanh^2 = 4 E / (1 + E)^2`
   (no cancellation); the up takes the same forms with `W`.
 - The approximate exponential is within 2 ulps of the rounded result, so `1 - E` and `1 - W` taken from `E` and `W`
-  keep an absolute error of a few `2^-24`.  The forward takes them that way.  `h` scales with both, so its relative
-  error can pass the BF16 rounding where `|g|` is below about `3e-5 beta` or `|u|` below about `3e-5 lb`; below about
-  `2^-26 beta` (`2^-26 lb`), `E` (`W`) rounds to 1 and `h` is 0.  `g = 0` gives `E = 1` exactly, so `g = 0` or
-  `u = 0` gives `h = 0` exactly.
+  alone keep only an absolute error of a few `2^-24`, and `E` (`W`) rounds to 1 below about `|g| = 2^-26 beta`
+  (`|u| = 2^-26 lb`).  Neither stage takes them that way.
+- The forward takes `beta (1 - E)` as the smaller of two upper bounds, without a branch.  With `y = 2 |g| / beta`,
+  the first is `|g| (1 + E)`, above the exact value by under `y^2 / 12` of it (`tanh(z) <= z`); the second is
+  `beta (1 + 2^-21) - beta E`, above it by more than the error of `E`.  The smaller is within about `2^-14.8` of the
+  exact value, relative to it, for every `g`, and `g = 0` gives 0 exactly.  `lb (1 - W)` takes the same form with
+  `|u|` and `lb`.  So `h` keeps its accuracy for tiny gates and ups, subnormal ones included, and `g = 0` or `u = 0`
+  gives `h = 0` exactly.
 - The backward takes `beta (1 - E)` as the larger of two lower bounds, without a branch.  With `y = 2 |g| / beta`,
   the first is `|g| (2 - 2 |g| / beta) = beta (y - y^2 / 2)`, below the exact value by under `beta y^3 / 6`; the
   second is `beta (1 - 2^-20) - beta E`, below it by more than the error of `E`.  The larger is within `2^-13` of the
   exact value, relative to it, for every `g`, and `g = 0` gives 0 exactly.  `lb (1 - W)` takes the same form with
   `|u|` and `lb`.  So `d_gate` and `d_up` keep their accuracy for tiny gates and ups, subnormal ones included; the
-  tests judge them with `|g|` down to `2^-60 beta` and `|u|` down to `2^-60 lb`.
+  tests judge every output with `|g|` down to `2^-60 beta` and `|u|` down to `2^-60 lb`.
 - `beta = 4` takes `P = E E`; any other `beta` takes `P` from its own exponential.  The choice is the same for every
   element of a call.
 - The exponentials are the approximate base-2 exponential.  `E` and `W` flush below `2^-126`, only where
-  `|g| > 43.67 beta` or `|u| > 43.67 lb`.  `h` takes them only as `1 - E`, `1 + E`, `1 - W` and `1 + W`, which the
-  flush leaves as they are.  In the backward, an up past `43.67 lb` has `d_up` under `2^-124 |dh| beta`, and at
-  `beta >= 2.4` a gate past `43.67 beta` has `d_gate` under about `2^-124 |dh| lb`; the kernels store 0 there.  At a
-  smaller `beta`, the sigmoid term `beta P` of such a `d_gate` does not flush, and the kernels store it.  `P` keeps its subnormal values, so a gate
-  below about -87 keeps a nonzero sigmoid where FP32 holds one.
+  `|g| > 43.67 beta` or `|u| > 43.67 lb`.  `h` takes them only as `1 + E`, `beta (1 + 2^-21) - beta E` and the same
+  terms of `W`, which the flush leaves as they are.  In the backward, an up past `43.67 lb` has `d_up` under
+  `2^-124 |dh| beta`, and at `beta >= 2.4` a gate past `43.67 beta` has `d_gate` under about `2^-124 |dh| lb`; the
+  kernels store 0 there.  At a smaller `beta`, the sigmoid term `beta P` of such a `d_gate` does not flush, and the
+  kernels store it.  `P` keeps its subnormal values, so a gate below about -87 keeps a nonzero sigmoid where FP32 holds
+  one.
 - The reciprocal `R` of `(1 + E)(1 + P)(1 + W)` (a product in `[1, 8]`): the forward takes one per element; the backward takes
   one per pair of elements (of their product, in `[1, 64]`, multiplied back by the other element's factor) and writes
   both gradients with `R^2`, so it needs no other reciprocal.  A negative gate's sigmoid numerator `P` is the last
