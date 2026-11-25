@@ -140,6 +140,14 @@ HOST_CASES = {
     "runner_passes2_chunks": dict(
         entry="runner", T=40, S=96, key_passes=2, token_chunk=16
     ),
+    # the head-major dout a trainer hands back: above 64 heads the runner's "dout_copy" step fills its workspace copy
+    "runner_head_major": dict(entry="runner", head_major=True),
+    "runner_head_major_passes2_chunks": dict(
+        entry="runner", head_major=True, T=40, S=96, key_passes=2, token_chunk=16
+    ),
+    "runner_head_major_passes2_no_olo": dict(
+        entry="runner", head_major=True, key_passes=2, with_o_lo=False
+    ),
 }
 
 
@@ -178,6 +186,33 @@ def _check_dkv(case, roles, total, *, direct):
         assert torch.equal(dkv.view(-1)[:2], torch.tensor(want).to(torch.bfloat16))
 
 
+def _check_dout_operand(launches, inp):
+    """The ``dout`` the delta launch of a host backward reads: at 64 heads the caller's own at its own strides;
+    above 64 heads the caller's own at the virtual strides ``(64 * hs, hs)`` when its token stride is ``H`` head
+    strides (``hs``: its head stride), else -- the head-major view -- the dense ``[T, H, 512]`` copy holding the
+    caller's values at ``(64 * 512, 512)`` (the main launches read the same buffer: :func:`hl.check_backward`)."""
+    H, dout = inp.heads, inp.dout
+    delta = next(rec for rec in launches if hl.family(rec.stage) == "delta")
+    got = delta.values["dout"]
+    strides = (
+        int(delta.values["dout_token_stride"]),
+        int(delta.values["dout_head_stride"]),
+    )
+    own = got.untyped_storage().data_ptr() == dout.untyped_storage().data_ptr()
+    if H == 64:
+        assert own and strides == (dout.stride(0), dout.stride(1)), strides
+        return
+    in_place = dout.stride(0) == H * dout.stride(1)
+    head = dout.stride(1) if in_place else D_LATENT
+    assert own == in_place, (
+        "above 64 heads a dout dense over its rows is read in place and any other is copied"
+    )
+    assert strides == (64 * head, head), strides
+    if not own:
+        assert got.is_contiguous() and tuple(got.shape) == tuple(dout.shape)
+        assert torch.equal(got, dout), "the dout copy does not hold the caller's dout"
+
+
 @pytest.mark.parametrize("heads", (64, 96, 128))
 @pytest.mark.parametrize("arch", ("sm_100a", "sm_103a"))
 @pytest.mark.parametrize("name", list(HOST_CASES))
@@ -187,7 +222,8 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
     its own, the heads both windows cover from the later one; the backward runs one delta launch over the ``T * H``
     rows, the main stage per (token chunk, window, key pass) with the window statistics of the contract, one shared
     accumulator to which every query head adds once per pass, and one cast (none when direct); every query head's
-    ``dq`` is its own."""
+    ``dq`` is its own.  The delta reads ``dout`` in place, or above 64 heads a head-major ``dout`` from the dense copy
+    the eager backward or the runner's ``"dout_copy"`` step makes (:func:`_check_dout_operand`)."""
     case = HOST_CASES[name]
     h = hl.HostLaunches(
         monkeypatch,
@@ -251,6 +287,7 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
         chunks=chunks,
         direct=direct,
     )
+    _check_dout_operand(launches, inp)
     _check_dkv(case, roles, total, direct=direct)
 
 
@@ -1069,9 +1106,14 @@ def test_long_keys_heads(with_o_lo, record_property):
 def test_packed_views_head_major_dout_and_lengths_heads(with_o_lo, record_property):
     """At 96 query heads: ``q_latent`` / ``q_rope`` as views of a packed ``[T, 96, 576]`` query and ``kv`` of a
     packed ``[S, 576]`` row; the head-major ``dout`` an output projection hands back (``[T, 96, 512]`` view of
-    ``[96, T, 512]``); caller lengths that cut rows (0 and 3 included) and the forward deriving the lengths into
-    the caller's vector -- every call judged against the problem of the lengths it used."""
+    ``[96, T, 512]``), which the eager backward and a prepared runner's step (one pass, and two forced key passes
+    where the program registers them) copy into their dense workspace ``dout`` first; caller lengths that cut rows
+    (0 and 3 included) and the forward deriving the lengths into the caller's vector -- every call judged against
+    the problem of the lengths it used."""
     _require_heads(96, backward=True)
+    passes = (
+        (1, 2) if set(KEY_PASS_STAGES) <= set(cake_jit.registered_stages()) else (1,)
+    )
 
     def case(s, j):
         inp = make_inputs(
@@ -1103,6 +1145,21 @@ def test_packed_views_head_major_dout_and_lengths_heads(with_o_lo, record_proper
             topk_length=lengths,
             softmax_scale=SCALE,
         )
+        runs = {"eager": _rope_outputs(fwd, grads)}
+        for p in passes:
+            runner = prepare_dsa_train(
+                *views,
+                inp.idx_global,
+                dout=inp.dout,
+                topk_length=lengths,
+                softmax_scale=SCALE,
+                key_passes=p,
+            )
+            assert "dout_copy" in runner.layout
+            assert cake_backend.HeadStep("dout_copy") in runner.backward_order
+            runs[f"runner {p} pass"] = _rope_outputs(
+                (runner.out, runner.lse, runner.o_lo), runner.step()
+            )
         filled = torch.empty(inp.total_q, dtype=torch.int32, device="cuda")
         derived = cake_backend.forward(
             *views,
@@ -1116,7 +1173,7 @@ def test_packed_views_head_major_dout_and_lengths_heads(with_o_lo, record_proper
         return nv.merge(
             nv.judged(
                 nv.rope_problem(inp, topk_length=lengths, scale=SCALE),
-                {"": _rope_outputs(fwd, grads)},
+                runs,
                 prefix="lengths ",
             ),
             nv.judged(
@@ -1194,9 +1251,10 @@ def test_step_at_96_heads_captures_into_a_cuda_graph_and_does_not_synchronize(
 ):
     """A training step at 96 query heads through the autograd entry (forward, ``autograd.grad`` to the query
     leaves, the key gradients into ``dkv_acc`` through a destination map with repeated rows) captures into a CUDA
-    graph and replays, judged beside the eager step; in steady state the step makes no pageable host-to-device copy
-    and no synchronizing call and returns while queued device work still runs, as do the eager forward / backward
-    pair and the prepared runner's step, which also allocates nothing."""
+    graph and replays, judged beside the eager step, and so does a prepared runner's step over a head-major ``dout``
+    (its ``"dout_copy"`` step included) into the same kind of ``dkv_acc``; in steady state the step makes no pageable
+    host-to-device copy and no synchronizing call and returns while queued device work still runs, as do the eager
+    forward / backward pair and the prepared runner's step, which also allocates nothing."""
     from tests.experimental.test_helpers.cake_host_sync import (
         census,
         nonblocking,
@@ -1230,20 +1288,47 @@ def test_step_at_96_heads_captures_into_a_cuda_graph_and_does_not_synchronize(
 
         return step, dst_map
 
+    def runner_stepper(inp):
+        S = inp.total_k
+        dst_map = (torch.arange(S, device="cuda", dtype=torch.int32) // 2).contiguous()
+        acc = torch.zeros((S + 1) // 2, D_QK, device="cuda")
+        # the same values as the head-major view of a [96, T, 512] buffer: the step copies it first
+        dout = inp.dout.transpose(0, 1).contiguous().transpose(0, 1)
+        runner = prepare_dsa_train(
+            inp.q_latent,
+            inp.q_rope,
+            inp.kv_latent,
+            inp.k_rope,
+            inp.idx_global,
+            dout=dout,
+            softmax_scale=SCALE,
+            dkv_acc=acc,
+            dkv_dst_map=dst_map,
+        )
+        assert cake_backend.HeadStep("dout_copy") in runner.backward_order
+
+        def step():
+            acc.zero_()
+            dq, dr, _, _ = runner.step()
+            return runner.out, runner.lse, dq, dr, acc
+
+        return step, dst_map
+
     def case(s, j):
         inp = make_inputs([512], [1024], seed=s, topk=512, heads=96)
-        step, dst_map = stepper(inp)
-        eager, captured = _graph_capture(step)
-        replayed = [t.detach().clone() for t in captured]
         runs = {}
-        for label, got in (("eager", eager), ("graph", replayed)):
-            run = dict(
-                zip(("out", "lse", "dq_latent", "dq_rope"), got[:4], strict=True)
-            )
-            run["dkv_acc"] = nv.Acc(
-                before=torch.zeros_like(got[4]), after=got[4], dst_map=dst_map
-            )
-            runs[label] = run
+        for name, make in (("autograd", stepper), ("runner", runner_stepper)):
+            step, dst_map = make(inp)
+            eager, captured = _graph_capture(step)
+            replayed = [t.detach().clone() for t in captured]
+            for label, got in (("eager", eager), ("graph", replayed)):
+                run = dict(
+                    zip(("out", "lse", "dq_latent", "dq_rope"), got[:4], strict=True)
+                )
+                run["dkv_acc"] = nv.Acc(
+                    before=torch.zeros_like(got[4]), after=got[4], dst_map=dst_map
+                )
+                runs[f"{name} {label}"] = run
         return nv.judged(nv.rope_problem(inp, scale=SCALE), runs)
 
     nv.judge_draws(record_property, case, seed=SEED + 9000)
