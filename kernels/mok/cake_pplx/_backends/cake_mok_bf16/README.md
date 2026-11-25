@@ -355,6 +355,19 @@ These launches have no shared row, shared task or shared weight-gradient
 task. The adapter refuses the group on any other target before it loads a
 kernel.
 
+Since 0.4.2 these SiTU-GLU kernels take `s (1 - E)`, the numerator of
+`s tanh(x / s)` (`x` a gate or up value, `s` = `beta` or `lb`,
+`E = exp(-2 |x| / s)`), in bounded forms instead of by subtraction: the hidden
+value (forward, recompute and the backward's replay) uses the smaller of
+`|x| (1 + E)` and `s (1 + 2^-21) - s E`, the backward's gradient terms the
+larger of `|x| (2 - 2 |x| / s)` and `s (1 - 2^-20) - s E`. They keep their
+accuracy for gate and up values far below `beta` and `lb`; 0.4.0 lost it
+there and gave zero below about `2^-26 s`. The hidden value takes both bounds
+scaled by `2 log2(e) / s` and puts `beta lb` back in its reciprocal, which
+needs `situ_beta * situ_lb` of at least `2^-119` (about `1.5e-36`): below
+about `2^-119.9` that reciprocal flushes to zero and the hidden value is 0.
+The adapter does not check this lower end.
+
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
 over the two dies of an SM107a GPU, are not shipped: this package has no such
 library, and no entry point selects one.
@@ -1002,12 +1015,24 @@ SM103a or SM107a device):
   and `torch.utils.checkpoint` without reentrancy; in `test_mok_accuracy.py`
   the forward epilogue and that step on each SiTU-GLU data kind (normal, wide,
   saturated `|gate| <= 190` and `|up| <= 950`, deep negative gates, small,
-  exact-zero gates, exact-zero up values) judged against the naive tier
-  (`y`, `dx`, the router-weight gradients, also at zero weights, and the
-  routed weight gradients). The deep-negative kind keeps the gates near the
-  FP32 normal range of `sigmoid(gate)` (about -88.5 to -80.5): accuracy in the
-  FP32 subnormal range of `sigmoid` is not required. Multi-GPU runs at
-  `(64, 14)` are a separate test.
+  exact-zero gates, exact-zero up values, and the tiny kinds: every token's
+  gates tiny, every token's ups tiny, both, and a random quarter of the
+  tokens' gates with an independent quarter's ups, a tiny gate `beta 2^U` and
+  a tiny up `lb 2^U` with `U` uniform on `[-34, -14)` per token) judged
+  against the naive tier (`y`, `dx`, the router-weight gradients, also at
+  zero weights, and the routed weight gradients). The deep-negative kind keeps
+  the gates near the FP32 normal range of `sigmoid(gate)` (about -88.5 to
+  -80.5): accuracy in the FP32 subnormal range of `sigmoid` is not required.
+  Multi-GPU runs at `(64, 14)` are a separate test.
+  Known limit: with both gates and ups tiny, the router-weight gradient at zero
+  weights has the naive tier's error scale, not a smaller one, because the
+  kernel forms it from the BF16 `dh`, as the naive implementation does. The
+  test's draws pass; with 6 other seeds of that kind, 3 miss the tier's bound
+  of 1.005 (median L2 error over the 32 draws up to 1.365 times the naive
+  implementation's, largest up to 1.805 times; 0.4.0 missed it on all 4 seeds
+  tried, up to 2.088 times). At `situ_beta` 1 and `situ_lb` 1, which the tests
+  do not use, `y` and that gradient fall on either side of the bound from seed
+  to seed (`y`: median 0.991 to 1.005 times, largest 0.991 to 1.018 times).
 
 The CUDA schedules derive from Cursor Research's Apache-2.0 Mixture of Kittens
 implementation at revision `caeb2963f855c7ad53bb50c8bbf211086405cb98`. Copyright and modification notices are
