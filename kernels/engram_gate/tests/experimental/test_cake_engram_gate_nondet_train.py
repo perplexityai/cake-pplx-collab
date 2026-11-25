@@ -18,11 +18,11 @@ context gate (four streams of width 5120).
 
 Without a device: the registry's records, stages, architectures and launch facts; the record of each stage and dot
 product summation (two forwards, one backward), and the forward record of each ``dot_sum`` choice; the persistent grid
-sizes and the resident cluster table they come from; the launch plans a call takes its record and grid from give the
-registry's record and grid at every token count; every stage launcher passes every kernel parameter of its records
-in plan order (the FFI entry replaced by a recorder); ``build.json`` covers every record on every architecture and its
-source digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment
-variable but the JIT shim's.
+sizes and the resident cluster table they come from, and the B300 forward grids; the launch plans a call takes its
+record and grid from give the registry's record and grid at every token count and mask choice; every stage launcher
+passes every kernel parameter of its records in plan order (the FFI entry replaced by a recorder); ``build.json``
+covers every record on every architecture and its source digests; the loader imports standalone; a prebuilt library
+is preferred; the package reads no environment variable but the JIT shim's.
 
 On SM100 / SM103 / SM107: every record loads; each forward record writes every element of a NaN-filled ``out`` and
 meets the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws); the backward meets the tier for
@@ -250,45 +250,87 @@ def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
 
 
 @pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))
-@pytest.mark.parametrize("T", (1, 2, 3, 129, 2047, 2048, 4096, 16384, 65536, 2**31 - 1))
+@pytest.mark.parametrize("T", (1, 2, 3, 126, 129, 142, 143, 2047, 2048, 4096, 8192, 16384, 65536, 2**31 - 1))
 def test_grids_are_persistent_clusters(T, sms) -> None:
     """``fwd`` and ``bwd`` run ``min(T, resident clusters)`` clusters (at least one) of four CTAs, but a ``bwd`` call of
-    at least ``LARGE_BWD_MIN_TOKENS`` tokens on a device of ``LARGE_BWD_CLUSTERS`` runs ``min(T, its entry)``;
-    ``dw_reduce`` covers the 20480 weight-gradient columns on any device."""
+    at least ``LARGE_BWD_MIN_TOKENS`` tokens on a device of ``LARGE_BWD_CLUSTERS`` runs ``min(T, its entry)``, and a
+    ``fwd`` call on a device of ``HELD_FWD_CLUSTERS`` of at most its entry tokens, or without a token mask of at least
+    ``HELD_FWD_UNMASKED_MIN_TOKENS`` tokens, runs ``min(T, its entry)``; ``dw_reduce`` covers the 20480
+    weight-gradient columns on any device."""
     for arch in ARCHES:
+        held = cake_jit.HELD_FWD_CLUSTERS.get((arch, sms))
         for name in PERSISTENT_RECORDS:
+            stage = cake_jit.MODULES[name]["stage"]
             resident = cake_jit.resident_clusters(name, arch, sms)
-            large = T >= cake_jit.LARGE_BWD_MIN_TOKENS
-            want = resident
-            if large and cake_jit.MODULES[name]["stage"] == "bwd":
-                want = cake_jit.LARGE_BWD_CLUSTERS.get((arch, sms), resident)
-            assert cake_jit.persistent_clusters(name, arch, sms, large) == want
-            clusters = cake_jit.clusters(name, T, arch, sms)
-            assert 1 <= clusters <= T
-            assert clusters == max(1, min(T, want))
             assert resident <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
-            assert want <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
-            assert cake_jit.grid(name, T, arch, sms) == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
-        assert cake_jit.grid("dw_reduce", T, arch, sms) == cake_jit.dw_reduce_grid()
+            for masked in (False, True):
+                want = resident
+                if stage == "bwd" and T >= cake_jit.LARGE_BWD_MIN_TOKENS:
+                    want = cake_jit.LARGE_BWD_CLUSTERS.get((arch, sms), resident)
+                if stage == "fwd" and held is not None and (
+                    T <= held or (not masked and T >= cake_jit.HELD_FWD_UNMASKED_MIN_TOKENS)
+                ):
+                    want = held
+                assert cake_jit.persistent_clusters(name, arch, sms, T, masked) == want, (arch, name, masked)
+                clusters = cake_jit.clusters(name, T, arch, sms, masked)
+                assert 1 <= clusters <= T
+                assert clusters == max(1, min(T, want))
+                assert want <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
+                assert cake_jit.grid(name, T, arch, sms, masked) == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
+            if stage == "bwd" or held is None:
+                # the grid follows the mask choice only in a forward call on a device of HELD_FWD_CLUSTERS
+                assert cake_jit.grid(name, T, arch, sms, True) == cake_jit.grid(name, T, arch, sms, False)
+        for masked in (False, True):
+            assert cake_jit.grid("dw_reduce", T, arch, sms, masked) == cake_jit.dw_reduce_grid()
     assert cake_jit.dw_reduce_grid() == (STREAMS * HIDDEN // cake_jit.DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
     assert STREAMS * HIDDEN % cake_jit.DW_REDUCE_COLUMNS_PER_CTA == 0
 
 
 def test_b300_backward_of_many_tokens_runs_its_own_grid() -> None:
-    """B300 (``sm_103a``, 148 SMs) has no resident entry: below ``LARGE_BWD_MIN_TOKENS`` tokens the backward and the
-    forward keep the fallback grids (94 and 125 clusters); from it the backward runs 104 clusters (it holds 104) and
-    the forward still 125."""
+    """B300 (``sm_103a``, 148 SMs) has no resident entry: below ``LARGE_BWD_MIN_TOKENS`` tokens the backward keeps the
+    fallback grid (94 clusters), with a token mask or without one; from it the backward runs 104 clusters (it holds
+    104)."""
     assert cake_jit.LARGE_BWD_MIN_TOKENS == 2048
     assert cake_jit.LARGE_BWD_CLUSTERS == {("sm_103a", 148): 104}
     assert ("sm_103a", 148) not in cake_jit.RESIDENT_CLUSTERS
     for name in ("bwd_dot2", "bwd_dot2_stage", "bwd_dot2_order"):
-        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (1, 94, 129, 2047)] == [1, 94, 94, 94]
-        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (2048, 4096, 65536, 2**31 - 1)] == [104] * 4
-    for name in ("fwd_dot2", "fwd_f32"):
-        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (129, 2047, 2048, 65536)] == [125] * 4
+        for masked in (False, True):
+            got = [cake_jit.clusters(name, T, "sm_103a", 148, masked) for T in (1, 94, 129, 2047)]
+            assert got == [1, 94, 94, 94]
+            got = [cake_jit.clusters(name, T, "sm_103a", 148, masked) for T in (2048, 4096, 65536, 2**31 - 1)]
+            assert got == [104] * 4
     for (arch, sms), entry in cake_jit.LARGE_BWD_CLUSTERS.items():
         assert arch in ARCHES
         assert 1 <= entry <= 3 * sms // cake_jit.CLUSTER_CTAS, (arch, sms)
+
+
+def test_b300_forward_runs_one_wave_and_its_held_grid_without_a_mask() -> None:
+    """B300 (``sm_103a``, 148 SMs) holds 142 forward clusters (``HELD_FWD_CLUSTERS``) where the fallback gives 125: a
+    forward call of at most 142 tokens runs one cluster a token, with a token mask or without one; from 143 tokens a
+    call with a token mask runs 125 clusters, and a call without one runs 142 from ``HELD_FWD_UNMASKED_MIN_TOKENS``
+    tokens and 125 below.  No other device has an entry, and an entry is more than the fallback and at most what
+    four CTAs per SM allow."""
+    assert cake_jit.HELD_FWD_CLUSTERS == {("sm_103a", 148): 142}
+    assert cake_jit.HELD_FWD_UNMASKED_MIN_TOKENS == 4096
+    least = cake_jit.HELD_FWD_UNMASKED_MIN_TOKENS
+    few = (1, 2, 125, 126, 129, 141, 142)
+    many = {143, 144, 200, 256, 1024, 2047, 2048, 4095, 4096, 6144, 8191, 8192, 16383, 16384, 65536, 2**31 - 1}
+    many = sorted(T for T in many | {least - 1, least} if T > 142)
+    for name in ("fwd_dot2", "fwd_f32"):
+        for masked in (False, True):
+            assert [cake_jit.clusters(name, T, "sm_103a", 148, masked) for T in few] == list(few)
+            assert [cake_jit.grid(name, T, "sm_103a", 148, masked)[0] for T in few] == [4 * T for T in few]
+        assert [cake_jit.clusters(name, T, "sm_103a", 148, True) for T in many] == [125] * len(many)
+        want = [142 if T >= least else 125 for T in many]
+        assert [cake_jit.clusters(name, T, "sm_103a", 148, False) for T in many] == want
+    assert cake_jit.clusters("fwd_f32_cta1", 142, "sm_103a", 148, True) == 142  # one CTA an SM: no held entry
+    assert cake_jit.clusters("fwd_f32_cta1", 148, "sm_103a", 148, False) == 148
+    fraction = cake_jit.UNMEASURED_CLUSTER_FRACTION
+    for (arch, sms), entry in cake_jit.HELD_FWD_CLUSTERS.items():
+        assert arch in ARCHES and (arch, sms) not in cake_jit.RESIDENT_CLUSTERS
+        assert int(fraction * 4 * sms) // cake_jit.CLUSTER_CTAS < entry <= 4 * sms // cake_jit.CLUSTER_CTAS, (arch, sms)
+    bounds = cake_jit.token_bounds("sm_103a", 148)
+    assert 143 in bounds and least in bounds
 
 
 # Devices (architecture, SM count) the launch plans are checked on: every measured kind, B300 (no resident entry, its
@@ -316,12 +358,18 @@ def _fake_device(monkeypatch, arch: str, sms: int) -> None:
     _clear_plans()
 
 
+# Token counts the plans are checked at besides every count up to twice the largest bound (with their
+# neighbours): the B300 one-wave forward bound, and counts at and between the record and grid thresholds.
+PLAN_TOKENS = (126, 129, 142, 143, 2048, 4096, 6144, 8191, 8192, 16384)
+
+
 def _plan_tokens(bounds: tuple[int, ...]) -> list[int]:
-    """Every token count from 1 to twice the largest bound (at least 16384), each bound and its neighbours, and every
-    power of two up to 2^30 with its neighbours and 2^31 - 1, the largest count."""
+    """Every token count from 1 to twice the largest bound (at least 16384), each bound, each count of
+    ``PLAN_TOKENS`` and their neighbours, and every power of two up to 2^30 with its neighbours and 2^31 - 1, the
+    largest count."""
     top = max((16384, *(2 * least for least in bounds)))
     tokens = set(range(1, top + 1)) | {2**31 - 1}
-    for least in (*bounds, *(2**e for e in range(31))):
+    for least in (*bounds, *PLAN_TOKENS, *(2**e for e in range(31))):
         tokens |= {least - 1, least, least + 1}
     return sorted(t for t in tokens if 1 <= t <= 2**31 - 1)
 
@@ -335,24 +383,31 @@ def _launch(plan, T: int) -> tuple[str, int]:
 
 
 def _check_plans(arch: str, sms: int) -> None:
-    """Every forward plan (each summation) and backward plan (with and without a token mask) of device 0 gives, for
-    every token count of :func:`_plan_tokens`, the record of ``cake_jit.forward_record`` / ``backward_record`` and the
-    grid of ``cake_jit.grid``; the bounds are ``cake_jit.token_bounds`` (ascending, each above one token)."""
+    """Every forward plan (each summation, with and without a token mask) and backward plan (with and without a token
+    mask) of device 0 gives, for every token count of :func:`_plan_tokens`, the record of ``cake_jit.forward_record``
+    / ``backward_record`` and the grid of ``cake_jit.grid``; the bounds are ``cake_jit.token_bounds`` (ascending, each
+    above one token).  On a device without a ``HELD_FWD_CLUSTERS`` entry the two forward plans of a summation are
+    one plan."""
     bounds = cake_jit.token_bounds(arch, sms)
     assert list(bounds) == sorted(set(bounds)) and all(least > 1 for least in bounds), bounds
     tokens = _plan_tokens(bounds)
     for acc in FWD_ACCS:
-        plan = cake_backend._forward_classes(arch, 0, acc)
-        assert plan[0] == bounds and len(plan[1]) == len(bounds) + 1, (arch, sms, acc)
-        for T in tokens:
-            name = cake_jit.forward_record(arch, sms, acc, T)
-            assert _launch(plan, T) == (name, cake_jit.grid(name, T, arch, sms)[0]), (arch, sms, acc, T)
+        for masked in (False, True):
+            plan = cake_backend._forward_classes(arch, 0, acc, masked)
+            assert plan[0] == bounds and len(plan[1]) == len(bounds) + 1, (arch, sms, acc, masked)
+            for T in tokens:
+                name = cake_jit.forward_record(arch, sms, acc, T)
+                grid = cake_jit.grid(name, T, arch, sms, masked)[0]
+                assert _launch(plan, T) == (name, grid), (arch, sms, acc, masked, T)
+        if (arch, sms) not in cake_jit.HELD_FWD_CLUSTERS:
+            masked_plan = cake_backend._forward_classes(arch, 0, acc, True)
+            assert masked_plan == cake_backend._forward_classes(arch, 0, acc, False), (arch, sms, acc)
     for masked in (False, True):
         plan = cake_backend._backward_classes(arch, 0, masked)
         assert plan[0] == bounds and len(plan[1]) == len(bounds) + 1, (arch, sms, masked)
         for T in tokens:
             name = cake_jit.backward_record(arch, masked, T)
-            assert _launch(plan, T) == (name, cake_jit.grid(name, T, arch, sms)[0]), (arch, sms, masked, T)
+            assert _launch(plan, T) == (name, cake_jit.grid(name, T, arch, sms, masked)[0]), (arch, sms, masked, T)
 
 
 def test_the_launch_plan_gives_the_record_and_the_grid_of_cake_jit(monkeypatch) -> None:
@@ -360,30 +415,39 @@ def test_the_launch_plan_gives_the_record_and_the_grid_of_cake_jit(monkeypatch) 
     look their record and grid up in (built once per device, summation or mask choice and token class) give the record
     and the grid the ``cake_jit`` functions give for every token count up to twice the largest bound and around every
     bound and power of two; the workspace query gives ``cake_jit.clusters`` of the backward.  A plan is built from the
-    tables: after a table changes (a ``cta1`` entry, an ordered or staged threshold, a backward grid of many tokens)
-    and the plans are cleared, the plans follow the changed tables, and the shipped ones again after the undo."""
+    tables: after a table changes (a ``cta1`` entry, an ordered or staged threshold, a backward grid of many tokens, a
+    held forward grid and its threshold without a token mask) and the plans are cleared, the plans follow the changed
+    tables, and the shipped ones again after the undo."""
     workspace = cake_backend.cake_engram_gate_nondet_train_workspace_bytes
     try:
         for arch, sms in PLAN_DEVICES:
             _fake_device(monkeypatch, arch, sms)
             _check_plans(arch, sms)
-            for T in (1, 129, 2047, 2048, 4096, 65536):
-                rows = cake_jit.clusters("bwd_dot2", T, arch, sms)
+            for T in (1, 129, 142, 143, 2047, 2048, 4096, 65536):
+                rows = cake_jit.clusters("bwd_dot2", T, arch, sms, True)
+                assert rows == cake_jit.clusters("bwd_dot2", T, arch, sms, False)
                 assert workspace(T, 0) == rows * STREAMS * HIDDEN * 4, (arch, T)
         _fake_device(monkeypatch, "sm_100a", 148)
-        shipped = {acc: cake_backend._forward_classes("sm_100a", 0, acc) for acc in FWD_ACCS}
+        plans = [(acc, masked) for acc in FWD_ACCS for masked in (False, True)]
+        shipped = {key: cake_backend._forward_classes("sm_100a", 0, *key) for key in plans}
         monkeypatch.setitem(cake_jit.CTA1_FWD_MIN_TOKENS, ("sm_100a", 148, "f32"), 3000)
         monkeypatch.setitem(cake_jit.ORDER_BWD_MIN_TOKENS, "sm_100a", 5000)
         monkeypatch.setitem(cake_jit.LARGE_BWD_CLUSTERS, ("sm_100a", 148), 100)
+        monkeypatch.setitem(cake_jit.HELD_FWD_CLUSTERS, ("sm_100a", 148), 140)
         monkeypatch.setattr(cake_jit, "STAGE_BWD_MIN_TOKENS", 6000)
+        monkeypatch.setattr(cake_jit, "HELD_FWD_UNMASKED_MIN_TOKENS", 7000)
         _clear_plans()
-        assert cake_jit.token_bounds("sm_100a", 148) == (2048, 3000, 5000, 6000)
-        assert _launch(cake_backend._forward_classes("sm_100a", 0, "f32"), 3000) == ("fwd_f32_cta1", 148)
+        assert cake_jit.token_bounds("sm_100a", 148) == (141, 2048, 3000, 5000, 6000, 7000)
+        assert _launch(cake_backend._forward_classes("sm_100a", 0, "f32", True), 3000) == ("fwd_f32_cta1", 148)
         assert _launch(cake_backend._backward_classes("sm_100a", 0, True), 5000) == ("bwd_dot2_order", 400)
+        assert _launch(cake_backend._forward_classes("sm_100a", 0, "dot2", True), 140) == ("fwd_dot2", 560)
+        assert _launch(cake_backend._forward_classes("sm_100a", 0, "dot2", True), 7000) == ("fwd_dot2", 568)
+        assert _launch(cake_backend._forward_classes("sm_100a", 0, "dot2", False), 6999) == ("fwd_dot2", 568)
+        assert _launch(cake_backend._forward_classes("sm_100a", 0, "dot2", False), 7000) == ("fwd_dot2", 560)
         _check_plans("sm_100a", 148)
         monkeypatch.undo()
         _fake_device(monkeypatch, "sm_100a", 148)
-        assert {acc: cake_backend._forward_classes("sm_100a", 0, acc) for acc in FWD_ACCS} == shipped
+        assert {key: cake_backend._forward_classes("sm_100a", 0, *key) for key in plans} == shipped
         _check_plans("sm_100a", 148)
     finally:
         monkeypatch.undo()
@@ -398,8 +462,9 @@ def test_cta1_grids_are_one_cta_an_sm(T, sms) -> None:
     for arch in ARCHES:
         for name in sorted(cake_jit.CTA1_RECORDS):
             assert cake_jit.resident_units(name, arch, sms) == sms
-            assert cake_jit.clusters(name, T, arch, sms) == max(1, min(T, sms))
-            assert cake_jit.grid(name, T, arch, sms) == (max(1, min(T, sms)), 1, 1)
+            for masked in (False, True):
+                assert cake_jit.clusters(name, T, arch, sms, masked) == max(1, min(T, sms))
+                assert cake_jit.grid(name, T, arch, sms, masked) == (max(1, min(T, sms)), 1, 1)
         for name in PERSISTENT_RECORDS:
             assert cake_jit.resident_units(name, arch, sms) == cake_jit.resident_clusters(name, arch, sms)
 
@@ -729,7 +794,7 @@ def test_the_forward_record_matches_the_reference(acc, T, weights, mask, layout,
             out=out,
             eps=1e-20,
             clamp_value=1e-6,
-            clusters=cake_jit.clusters(name, T, arch, cake_backend.sm_count(device.index)),
+            clusters=cake_jit.clusters(name, T, arch, cake_backend.sm_count(device.index), mask != "none"),
         )
         torch.cuda.synchronize(device)
         return {"out": out}

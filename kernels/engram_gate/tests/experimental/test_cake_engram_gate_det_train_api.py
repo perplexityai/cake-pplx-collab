@@ -397,7 +397,7 @@ def test_a_call_from_the_cta1_threshold_launches_the_cta1_forward_with_the_same_
                 out=ref,
                 eps=1e-20,
                 clamp_value=1e-6,
-                clusters=backend.cake_jit.clusters(f"fwd_{acc}", least, arch, sms),
+                clusters=backend.cake_jit.clusters(f"fwd_{acc}", least, arch, sms, mask != "none"),
             )
             torch.cuda.synchronize()
             assert _same_bits(out, ref), (dot_sum, mask)
@@ -409,10 +409,11 @@ def test_a_call_from_the_cta1_threshold_launches_the_cta1_forward_with_the_same_
 
 
 def test_every_call_launches_the_record_and_the_grid_of_cake_jit(monkeypatch) -> None:
-    """A forward call (each ``dot_sum``) and a backward call (without a token mask and with one) launch, at 1, 2 and
-    129 tokens and on both sides of every ``cake_jit.token_bounds`` count of the device, the record
-    ``cake_jit.forward_record`` / ``backward_record`` names on the grid ``cake_jit.grid`` gives, and ``dw_reduce`` on
-    its grid (``_entry`` replaced by a recorder: nothing is launched, the outputs are not read)."""
+    """A forward call (each ``dot_sum``) and a backward call, each without a token mask and with one, launch, at 1, 2
+    and 129 tokens and on both sides of every ``cake_jit.token_bounds`` count of the device, the record
+    ``cake_jit.forward_record`` / ``backward_record`` names on the grid ``cake_jit.grid`` gives for the call's mask
+    choice, and ``dw_reduce`` on its grid (``_entry`` replaced by a recorder: nothing is launched, the outputs are not
+    read)."""
     device = _device_or_skip()
     backend = _backend()
     cake_jit = backend.cake_jit
@@ -435,11 +436,13 @@ def test_every_call_launches_the_record_and_the_grid_of_cake_jit(monkeypatch) ->
                 launched.clear()
                 api.cake_engram_gate_det_train_forward(x, key, value, qw, kw, mask, dot_sum=dot_sum)
                 name = cake_jit.forward_record(arch, sms, acc, T)
-                assert launched == [(name, cake_jit.grid(name, T, arch, sms)[0])], (T, dot_sum, mask is None)
+                grid = cake_jit.grid(name, T, arch, sms, mask is not None)[0]
+                assert launched == [(name, grid)], (T, dot_sum, mask is None)
             launched.clear()
             api.cake_engram_gate_det_train_backward(x, x, key, value, qw, kw, mask)
             name = cake_jit.backward_record(arch, mask is not None, T)
-            want = [(name, cake_jit.grid(name, T, arch, sms)[0]), ("dw_reduce", cake_jit.dw_reduce_grid()[0])]
+            grid = cake_jit.grid(name, T, arch, sms, mask is not None)[0]
+            want = [(name, grid), ("dw_reduce", cake_jit.dw_reduce_grid()[0])]
             assert launched == want, (T, mask is None)
 
 
