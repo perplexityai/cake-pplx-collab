@@ -52,9 +52,8 @@ Host design (every control is an argument; no environment variable):
 - Launches.  One kernel per call (``cake_jit.MODULES``, the record of the
   stage through ``cake_jit.PROGRAM_OF``): CTAs of 128 threads (the record's
   launch block), one CTA per block of ``cake_jit.ROWS_PER_CTA`` rows on the
-  grid's x axis (``cake_jit.grid``).  In the forward a CTA's four warps take
-  its row's segments of 256 columns in turn; in the backward two warps take
-  each of its two rows' segments.  ``R == 0``
+  grid's x axis (``cake_jit.grid``).  In each stage a CTA's four warps take
+  its row's segments of 256 columns in turn.  ``R == 0``
   launches nothing and loads no library.  Every launch is a plain
   stream-ordered launch on the current torch stream of the operands' device
   (a tvm-ffi call whose arguments include PyTorch CUDA tensors runs on that

@@ -315,7 +315,7 @@ def test_argument_plans_are_the_kernel_parameters() -> None:
 def test_grid_is_one_cta_per_block() -> None:
     """One CTA per block of rows on the x axis; at the largest row count a CTA's step over the rows stays in 32
     bits."""
-    assert cake_jit.ROWS_PER_CTA == {"fwd": 1, "bwd": 2}
+    assert cake_jit.ROWS_PER_CTA == {"fwd": 1, "bwd": 1}
     for stage in STAGES:
         per = cake_jit.ROWS_PER_CTA[stage]
         for rows in (1, 2, 3, 129, 4097, 16380, 262144, 1048576, cake_jit.MAX_ROWS):

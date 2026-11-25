@@ -65,7 +65,7 @@ stage to its program), each delivered for `sm_100a`, `sm_103a` and `sm_107a` and
 of each (`build.json`).  Each is one kernel.  A row is `I / 256` segments of 256 columns, and a warp owns a segment:
 lane `l` loads 8 BF16 values at column `256 s + 8 l`, so each load of a warp is contiguous.  A CTA has 128 threads (four
 warps).  In the forward its four warps own one row and take the row's segments in turn, three segments per warp and
-pass.  In the backward two warps own each of its two rows, one segment per warp and pass.  Each warp issues the loads of
+pass.  In the backward its four warps own one row, one segment per warp and pass.  Each warp issues the loads of
 its segments before it computes and stores them; a segment past the row's last one reloads the last segment and stores
 nothing, and a row past the last one stores nothing.  The grid is one CTA per block of rows (`cake_jit.ROWS_PER_CTA`,
 `cake_jit.grid`), and the CTAs stride over the blocks, so any smaller grid would also be correct.  Row offsets are
