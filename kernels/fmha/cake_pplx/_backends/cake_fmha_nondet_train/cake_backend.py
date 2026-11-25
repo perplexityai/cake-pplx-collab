@@ -55,16 +55,27 @@ inside the bounds ``cake_jit.PAIR_FEWER_QUERIES`` of its architecture: its main
 stage is the 2-CTA kernel, one CTA pair per 256 keys, which adds the dQ tiles
 in the pair-row order, and its postprocess is the build that reads that order.
 The kernel parameters, grids and workspace are the same on both three-kernel
-routes.
+routes.  A call without the mask inside a piece of ``cake_jit.QSPLIT_REGION``
+for its architecture (head dimension 128, one batch, a key length that is a
+multiple of 256 and between half the query length and the query length;
+:func:`.cake_jit.qsplit_piece`) takes the split route: the pair route split
+along the queries into ``q_split`` S of 2 or 4, its ``RECORD_OF`` variant
+``(128, False, True, S)``.  Its main stage writes S unscaled FP32 dK / dV
+partials (``[B * S, Skv, H, D]`` each, every element) in place of dK and dV,
+and its postprocess also folds them, in their order, into dk and dv.  Its
+records launch only through the variant's host sequence.  A call inside a
+piece read before ``cake_jit.FUSED_REGION`` takes the split route even where
+that region holds it.
 
 The three-kernel backward runs the three launches in one host call: the library
 of the variant's host sequence compiles the three kernel units beside a host
 unit that launches them in order, with the arguments and grids of the stage
-launchers, and takes ``lse_log2``, ``dpsum`` and ``dq_accum`` from the tvm-ffi
-environment allocator (PyTorch's caching allocator, on the current stream).
-Without an environment allocator the backward allocates them and passes them
-in.  The stage launchers ``launch_bwd_pre``, ``launch_bwd_main``,
-``launch_bwd_post`` and ``launch_bwd_fused`` launch one stage each.
+launchers, and takes ``lse_log2``, ``dpsum`` and ``dq_accum`` (on the split
+route also the two partials) from the tvm-ffi environment allocator
+(PyTorch's caching allocator, on the current stream).  Without an environment
+allocator the backward allocates them and passes them in.  The stage
+launchers ``launch_bwd_pre``, ``launch_bwd_main``, ``launch_bwd_post`` and
+``launch_bwd_fused`` launch one stage each.
 
 Every launch is a plain stream-ordered launch: nothing cooperative, no PDL, no
 co-residency requirement beyond the clusters of two CTAs of the pair route's
@@ -76,7 +87,9 @@ This is the non-deterministic package of its family, and the family has no
 deterministic package: on the three-kernel routes the dQ tiles of the key
 blocks of one head reach the FP32 accumulator in scheduling order, so ``dq``
 may differ in its last bits run to run.  ``dk``, ``dv`` and the preprocess
-outputs have one fixed order.  On the one-launch route dq, dk and dv each have
+outputs have one fixed order (on the split route each partial element has one
+fixed order and the fold adds the S partials in their order, with one BF16
+rounding).  On the one-launch route dq, dk and dv each have
 one fixed order; the package stays non-deterministic all the same.  Every
 backward call that launches raises PyTorch's deterministic-algorithms alert
 first (:func:`_alert_nondeterministic`).
@@ -228,10 +241,11 @@ def _entry(name: str, arch: str) -> Any:
 
 
 @functools.cache
-def _sequence(variant: tuple[int, bool, bool], arch: str) -> Optional[tuple[Any, Any, Any]]:
+def _sequence(variant: tuple[Any, ...], arch: str) -> Optional[tuple[Any, Any, Any]]:
     """``(library, run, run_with_workspace)`` of the host sequence of ``variant`` (a ``RECORD_OF`` key ``(D, causal,
-    pair)``, :func:`.cake_jit.variant`) built for ``arch`` (looked up once per process), or ``None`` when
-    ``SEQUENCES`` has none for the variant on ``arch``; the backward then launches through the stage launchers.
+    pair)`` or ``(D, causal, pair, q_split)``, :func:`.cake_jit.variant`) built for ``arch`` (looked up once per
+    process), or ``None`` when ``SEQUENCES`` has none for the variant on ``arch``; the backward then launches through
+    the stage launchers, which have no grid for the records of a ``q_split`` variant (those launch only here).
 
     The library compiles the variant's three kernel units beside one host unit.  ``run(q, k, v, out, lse, dout, dq,
     dk, dv, softmax_scale, softmax_scale_log2)`` launches the records ``RECORD_OF`` names for the variant, in order,
@@ -240,7 +254,10 @@ def _sequence(variant: tuple[int, bool, bool], arch: str) -> Optional[tuple[Any,
     ``False`` without launching when no environment allocator is set, and raises the builtin ``MemoryError``
     before any launch when an allocation fails.  ``run_with_workspace(q, k, v, out, lse, dout,
     dq, dk, dv, lse_log2, dpsum, dq_accum, softmax_scale, softmax_scale_log2)`` takes the three buffers from the
-    caller."""
+    caller.  The sequence of a ``q_split`` variant also allocates the FP32 partials ``dk_part`` and ``dv_part``
+    (``[B * q_split, Skv, H, D]`` each, after ``dq_accum``; the main stage writes every element), and its
+    ``run_with_workspace`` takes them after ``dq_accum``: ``(..., dq_accum, dk_part, dv_part, softmax_scale,
+    softmax_scale_log2)``."""
     found = cake_jit.SEQUENCES.get(variant)
     if found is None or arch not in found["arches"]:
         return None
@@ -761,7 +778,8 @@ def cake_fmha_nondet_train_backward(
 
     A call inside the one-launch region (:func:`.cake_jit.fused_record`) runs one kernel; every other call runs three.
     On the three-kernel routes the dQ tiles of the key blocks of one head are added into an FP32 accumulator in
-    arrival order, so ``dq`` may differ in its last bits run to run; ``dk`` and ``dv`` have one fixed order.  On the
+    arrival order, so ``dq`` may differ in its last bits run to run; ``dk`` and ``dv`` have one fixed order (on the
+    split route, :func:`.cake_jit.qsplit_piece`, the FP32 partials are folded in their order).  On the
     one-launch route ``dq``, ``dk`` and ``dv`` each have one fixed order.  Under
     ``torch.use_deterministic_algorithms(True)`` the call raises PyTorch's ``RuntimeError`` before it launches
     (``warn_only=True``: one ``UserWarning``, then it runs).  An empty batch returns empty gradients without an
@@ -820,6 +838,14 @@ def cake_fmha_nondet_train_backward(
         lse_log2 = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
         dpsum = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
         dq_accum = torch.empty(B * H * Sq * D, dtype=torch.float32, device=device)  # cleared by bwd_pre
+        if len(variant) > 3:
+            # The split route: the q_split FP32 dK and dV partials, every element written by the main stage.
+            dk_part = torch.empty(B * variant[3], Skv, H, D, dtype=torch.float32, device=device)
+            dv_part = torch.empty(B * variant[3], Skv, H, D, dtype=torch.float32, device=device)
+            run_with_workspace(
+                q, k, v, out, lse, dout, dq, dk, dv, lse_log2, dpsum, dq_accum, dk_part, dv_part, scale, scale_log2
+            )
+            return dq, dk, dv
         run_with_workspace(q, k, v, out, lse, dout, dq, dk, dv, lse_log2, dpsum, dq_accum, scale, scale_log2)
         return dq, dk, dv
     lse_log2 = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
