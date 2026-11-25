@@ -18264,6 +18264,37 @@ def test_small_call_stage_is_deferred():
     assert cake_backend._SMALL_STAGE.ops is None  # dropped, never run
 
 
+def test_small_stage_reads_its_class_default_on_every_thread():
+    """A thread that never staged reads its pending small-call staging as the holder's class attribute ``None`` -- no
+    attribute of its own, so no lookup miss (a bare ``threading.local`` raises and clears an ``AttributeError`` on such
+    a read, which every launch context of every call makes) -- and a staging pending on one thread is not another
+    thread's (meta tensors: no device here)."""
+    stage = cake_backend._SMALL_STAGE
+    assert isinstance(stage, threading.local) and type(stage).ops is None
+    seen: list = []
+
+    def other_thread():
+        seen.append((dict(vars(stage)), stage.ops))
+
+    def on_another_thread():
+        thread = threading.Thread(target=other_thread)
+        thread.start()
+        thread.join()
+        return seen.pop()
+
+    assert on_another_thread() == ({}, None)
+    meta = torch.device("meta")
+    X = torch.empty((5, 8), dtype=torch.bfloat16, device=meta)
+    labels = torch.empty((5,), dtype=torch.int64, device=meta)
+    ran: list = []
+    with cake_backend._small_call_scope():
+        cake_backend._SmallCallStage.apply(X, labels, 16, None, None, None)
+        assert stage.ops is not None
+        assert on_another_thread() == ({}, None)
+        stage.ops = lambda: ran.append(True)
+    assert ran == [True] and stage.ops is None
+
+
 def _poison_small_stage_block(monkeypatch) -> None:
     """Fill the block every small-call stage allocates (``torch.empty`` called from ``_SmallCallStage.forward``) with
     0xFF bytes -- a NaN pattern in BF16 and FP32 -- as it is allocated, so a staged buffer read before its staging ran
@@ -18421,6 +18452,68 @@ def test_device_small_call_stages_after_planning(glm_weight, entry, T, monkeypat
             cake_backend.cake_lm_head_nondet_train_loss(inp.X, W_bad, inp.labels)
         else:
             cake_backend.cake_lm_head_nondet_train_logprob(inp.X, W_bad, inp.labels)
+    assert cake_backend._SMALL_STAGE.ops is None
+
+
+@pytest.mark.parametrize("entry", ["loss", "logprob", "temperature"])
+def test_device_unstaged_call_enters_no_staging(glm_weight, entry, monkeypatch):
+    """A call that stages nothing (T 300: above the small-call rows; compacted, ignored rows) enters none of the
+    small-call staging -- no scope, no stage, and no ``_run_small_stage`` from its launch contexts, forward or backward,
+    on a binding miss and a hit: each launch context finds nothing pending and goes on.  A small call (T 5 staged to
+    16 rows) on the same thread enters its scope and its stage once, and its staging runs once, while pending."""
+    if entry == "temperature":
+        _require_tau_program()
+
+        def inputs(T):
+            return _tau_inputs(T, W=glm_weight, ignore_frac=0.25)
+
+    else:
+        _require_program(entry=entry)
+
+        def inputs(T):
+            return _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.25)
+
+    kind = "loss" if entry == "loss" else "logprob"
+    calls: list = []
+    contexts: list = []
+    run_stage = cake_backend._run_small_stage
+    scope = cake_backend._small_call_scope
+    apply = cake_backend._SmallCallStage.apply
+    stream_context = cake_backend._ffi_stream_context
+
+    def run_spy():
+        calls.append(("run", cake_backend._SMALL_STAGE.ops is not None))
+        return run_stage()
+
+    def scope_spy():
+        calls.append(("scope",))
+        return scope()
+
+    def apply_spy(*args):
+        calls.append(("apply", int(args[2])))
+        return apply(*args)
+
+    def context_spy(index):
+        contexts.append(index)
+        return stream_context(index)
+
+    big, small = inputs(300), inputs(5)
+    assert int(big.X.shape[0]) > cake_backend.uncompacted_max_rows()
+    assert not bool(big.valid.all()) and not bool(small.valid.all())
+    monkeypatch.setattr(cake_backend, "_run_small_stage", run_spy)
+    monkeypatch.setattr(cake_backend, "_small_call_scope", scope_spy)
+    monkeypatch.setattr(cake_backend._SmallCallStage, "apply", apply_spy)
+    monkeypatch.setattr(cake_backend, "_ffi_stream_context", context_spy)
+    with _small_pad_rows(16):
+        for _ in range(2):  # a binding miss, then a hit
+            contexts.clear()
+            out = _run(big, 4096, entry=kind, backend="cake")
+            assert contexts, entry  # the launch contexts ran (and checked)
+            assert calls == [], (entry, calls)
+            assert out["dX"] is not None and out["dW"] is not None
+        _run(small, 4096, entry=kind, backend="cake")
+    assert calls[:2] == [("scope",), ("apply", 16)], calls
+    assert [c for c in calls if c[0] != "run" or c[1]][2:] == [("run", True)], calls
     assert cake_backend._SMALL_STAGE.ops is None
 
 
