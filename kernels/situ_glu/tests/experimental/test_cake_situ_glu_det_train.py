@@ -108,8 +108,9 @@ PARAMETERS = {
 BUFFERS = {"gate", "up", "h", "dh", "d_gate", "d_up"}
 # The threads of a CTA of each stage's program.
 THREADS = 128
-# The smallest number that FP32 and BF16 hold as a normal number.
+# The smallest number that FP32 and BF16 hold as a normal number, and the largest finite FP32 number.
 MIN_NORMAL = 2.0**-126
+FP32_MAX = 3.4028234663852886e38
 
 # The judged cases: row counts 1 to 4097, widths 256 to 33792, every layout, the data kinds and other scalars.  A pass
 # of either stage's CTA covers 4 segments of 256 columns (1024 columns).
@@ -139,9 +140,9 @@ CASES = [
     Case(257, 6144, data="saturated"),
     Case(257, data="deep_negative"),
     Case(257, data="small"),
-    # Tiny gates or ups, one band a case: near where the forward's two forms of beta (1 - E) meet (7) and where the
-    # backward's do (8), where 1 - E from E alone is off by percents (20), and deep in the FP32 range, where E rounds
-    # to 1 (60).
+    # Tiny gates or ups, one band a case: where the two forms of beta (1 - E) meet in both stages (7, y = 2 |g| / beta
+    # near 2^-5.8), just below it (8), where 1 - E from E alone is off by percents (20), and deep in the FP32 range,
+    # where E rounds to 1 (60).
     Case(65, data="tiny_gate", band=7),
     Case(65, data="tiny_gate", band=8),
     Case(65, data="tiny_gate", band=20),
@@ -1010,6 +1011,10 @@ def test_operand_and_scalar_errors(device, launches) -> None:
         "a beta whose 2.88539 / beta is past FP32": lambda: forward(gate, up, beta=1e-39),
         "an lb whose 2.88539 / lb is past FP32 in the backward": lambda: backward(dh, gate, up, lb=1e-39),
         "a beta lb product past FP32 in the autograd entry": lambda: situ_glu(gate, up, beta=1e20, lb=1e20),
+        "a beta whose beta (1 + 2^-21) is past FP32": lambda: forward(gate, up, beta=FP32_MAX, lb=0.5),
+        "an lb whose lb (1 + 2^-21) is past FP32 in the backward": lambda: backward(
+            dh, gate, up, beta=0.5, lb=FP32_MAX
+        ),
         "a negative beta in the backward": lambda: backward(dh, gate, up, beta=-4.0),
         "a negative lb in the autograd entry": lambda: situ_glu(gate, up, lb=-25.0),
     }

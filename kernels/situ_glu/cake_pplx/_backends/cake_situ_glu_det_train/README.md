@@ -32,8 +32,9 @@ h = torch.utils.checkpoint.checkpoint(cake_situ_glu_det, gate_up, use_reentrant=
 The steps without autograd, `cake_situ_glu_det_train_forward` and `cake_situ_glu_det_train_backward`, take the same
 operands and optional preallocated outputs (`out=`, `grad_gate_up_or_gate=`, `grad_up=`), for a caller that fuses the
 activation into its own `torch.autograd.Function`.  `beta` and `lb` are keywords everywhere, with the defaults 4.0
-and 25.0.  They must be positive and finite in FP32, with `2.88539 / beta`, `2.88539 / lb` and `beta lb` finite in FP32
-(`ValueError` otherwise); the tests cover `beta` in `[2.5, 4]` and `lb` in `[10, 40]`.
+and 25.0.  They must be positive and finite in FP32, with `2.88539 / beta`, `2.88539 / lb`, `beta lb`,
+`beta (1 + 2^-21)` and `lb (1 + 2^-21)` finite in FP32 (`ValueError` otherwise); the tests cover `beta` in `[2.5, 4]`
+and `lb` in `[10, 40]`.
 
 ## Inputs and outputs
 
@@ -93,6 +94,9 @@ program and architecture serves every call.
   exact value, relative to it, for every `g`, and `g = 0` gives 0 exactly.  `lb (1 - W)` takes the same form with
   `|u|` and `lb`.  So `d_gate` and `d_up` keep their accuracy for tiny gates and ups, subnormal ones included; the
   tests judge every output with `|g|` down to `2^-60 beta` and `|u|` down to `2^-60 lb`.
+- The bounds of both stages hold in exact arithmetic.  The second bound of each stage also holds in FP32: its margin
+  covers the error of `E` and the roundings.  In FP32 the first bound moves by up to a few `2^-24` of the exact value,
+  to either side, and the relative errors above include this.
 - `beta = 4` takes `P = E E`; any other `beta` takes `P` from its own exponential.  The choice is the same for every
   element of a call.
 - The exponentials are the approximate base-2 exponential.  `E` and `W` flush below `2^-126`, only where
