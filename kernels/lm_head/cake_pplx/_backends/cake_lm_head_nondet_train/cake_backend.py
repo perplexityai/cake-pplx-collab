@@ -16182,22 +16182,57 @@ def cake_lm_head_nondet_train_logprob(
         T = int(X.shape[0])
         with _small_call_scope():
             Xs, lab, _, _, _ = _SmallCallStage.apply(X, labels, rows, None, None, None)
-            logp = cake_lm_head_nondet_train_logprob(
+            logp = _logprob_call(
                 Xs,
                 W,
                 lab,
-                chunk_size=chunk_size,
-                backend=backend,
-                compact_rows=False,
-                fuse_dw_cast=fuse_dw_cast,
-                dx_finalize=dx_finalize,
-                dw_stream=dw_stream,
-                hidden_count=hidden_count,
-                gemm_tuning=gemm_tuning,
-                logprob_dz=logprob_dz,
-                logprob_lbl=logprob_lbl,
+                chunk_size,
+                backend,
+                False,
+                fuse_dw_cast,
+                dx_finalize,
+                dw_stream,
+                hidden_count,
+                gemm_tuning,
+                logprob_dz,
+                logprob_lbl,
             )
         return logp[:T] if rows > T else logp
+    return _logprob_call(
+        X,
+        W,
+        labels,
+        chunk_size,
+        backend,
+        compact_rows,
+        fuse_dw_cast,
+        dx_finalize,
+        dw_stream,
+        hidden_count,
+        gemm_tuning,
+        logprob_dz,
+        logprob_lbl,
+    )
+
+
+def _logprob_call(
+    X,
+    W,
+    labels,
+    chunk_size,
+    backend,
+    compact_rows,
+    fuse_dw_cast,
+    dx_finalize,
+    dw_stream,
+    hidden_count,
+    gemm_tuning,
+    logprob_dz,
+    logprob_lbl,
+) -> torch.Tensor:
+    """The autograd Function call of :func:`cake_lm_head_nondet_train_logprob` (its switches resolved by the
+    Function), also on a small call's staged rows: the kept-logits Function where a backward can follow a call of at
+    most :data:`SMALL_T_KEEP_MAX_ROWS` rows (:func:`set_small_t_keep`), else the default log-probability Function."""
     if (
         _SMALL_T_KEEP["on"]
         and backend == "cake"
