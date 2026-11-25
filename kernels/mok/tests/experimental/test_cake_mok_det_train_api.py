@@ -41,13 +41,17 @@ ENTRY_POINTS = (
     "quantize_mok_mxfp8_weights",
 )
 RE_EXPORTS = (
+    "ACTIVATIONS",
     "COMM_SMS",
     "IMBALANCE_COMM_SMS",
     "IMBALANCE_DEVICE_THRESHOLDS",
     "IMBALANCE_THRESHOLD",
     "IMBALANCE_THRESHOLDS",
+    "MODE_GROUPS",
     "MOK_PRECISIONS",
+    "ROUTER_WEIGHT_GRADIENTS",
     "ROUTER_WEIGHT_POSITIONS",
+    "SHARED_EXPERT_MODES",
     "SOURCE_SPLIT_COMM_SMS",
     "SOURCE_SPLIT_THRESHOLD",
     "resolve_comm_sms",
@@ -160,4 +164,82 @@ def test_prepare_refuses_unsupported_router_weight_combinations(
             clamped_swiglu=clamped,
             fp32_wgrad=fp32,
             router_weight_position=position,
+        )
+
+
+#: The keyword defaults of ``prepare_mok_bf16`` before the explicit modes, and the modes' defaults (today's behavior).
+PREPARE_DEFAULTS = dict(
+    ep_size=16,
+    local_experts=16,
+    topk=8,
+    clamped_swiglu=False,
+    fp32_wgrad=False,
+    router_weight_position="after_down",
+    router_weight_gradient="quotient",
+    shared_expert="unscaled",
+    activation="swiglu",
+)
+
+
+def test_prepare_defaults_keep_the_existing_behavior():
+    """``prepare_mok_bf16`` keeps every earlier keyword and default, and each explicit mode defaults to the earlier
+    behavior: the quotient router-weight gradient, the unscaled shared expert and SwiGLU (the first value of each
+    mode table)."""
+    parameters = inspect.signature(mok.prepare_mok_bf16).parameters
+    assert {name: p.default for name, p in parameters.items()} == PREPARE_DEFAULTS
+    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters.values())
+    assert mok.ROUTER_WEIGHT_GRADIENTS == ("quotient", "direct")
+    assert mok.SHARED_EXPERT_MODES == ("unscaled", "scaled", "none")
+    assert mok.ACTIVATIONS == ("swiglu", "clamped_swiglu", "situ_glu")
+    assert mok.ROUTER_WEIGHT_POSITIONS == ("after_down", "before_down")
+
+
+GROUP = dict(router_weight_gradient="direct", shared_expert="scaled", activation="swiglu")
+
+
+@pytest.mark.parametrize(
+    "ep,experts,topk,clamped,fp32,modes,error,match",
+    [
+        (8, 64, 10, False, True, dict(GROUP, router_weight_gradient=1), TypeError, "router_weight_gradient must be one of"),
+        (8, 64, 10, False, True, dict(GROUP, shared_expert=None), TypeError, "shared_expert must be one of"),
+        (8, 64, 10, False, True, dict(GROUP, activation=b"swiglu"), TypeError, "activation must be one of"),
+        (8.0, 64, 10, False, True, GROUP, TypeError, "ep_size must be an int, got float 8.0"),
+        (8, 64, 10, False, 1, GROUP, TypeError, "clamped_swiglu and fp32_wgrad must be booleans"),
+        (8, 64, 10.0, False, True, dict(GROUP, shared_expert="half"), TypeError, "topk must be an int"),
+        (8, 64, 10, False, True, dict(GROUP, router_weight_gradient="dot"), ValueError, "router_weight_gradient must be one of"),
+        (8, 64, 10, False, True, dict(GROUP, shared_expert="half"), ValueError, "shared_expert must be one of"),
+        (8, 64, 10, False, True, dict(GROUP, activation="gelu"), ValueError, "activation must be one of"),
+        (64, 14, 16, False, True, dict(GROUP, activation="situ_glu"), ValueError, "activation='situ_glu' has no build"),
+        (64, 14, 16, False, True, dict(GROUP, shared_expert="none"), ValueError, "shared_expert='none' has no build"),
+        (8, 64, 8, False, False, {}, ValueError, r"512 routed experts at top-k 10 .* got \(EP, local experts\) \(8, 64\)"),
+        (8, 32, 10, False, True, GROUP, ValueError, r"512 routed experts at top-k 10 .* got \(EP, local experts\) \(8, 32\)"),
+        (8, 64, 10, False, True, dict(GROUP, router_weight_gradient="quotient"), ValueError, "router_weight_gradient='direct'"),
+        (8, 64, 10, False, True, dict(GROUP, shared_expert="unscaled"), ValueError, "shared_expert='scaled'"),
+        (8, 64, 10, False, False, GROUP, ValueError, "fp32_wgrad=True"),
+        (8, 64, 10, True, True, GROUP, ValueError, "activation='swiglu'"),
+        (8, 32, 8, False, True, dict(router_weight_gradient="direct"), ValueError, "512 routed experts at top-k 10"),
+        (16, 16, 8, False, False, dict(shared_expert="scaled"), ValueError, "512 routed experts at top-k 10"),
+    ],
+    ids=[
+        "gradient-type", "shared-type", "activation-type", "ep-type-with-modes", "flag-type-with-modes",
+        "topk-type-before-mode-value", "gradient-value", "shared-value", "activation-value", "situ-unbuilt",
+        "none-unbuilt", "512-top8", "256-top10", "512-quotient", "512-unscaled", "512-bf16-wgrad", "512-clamped",
+        "256-direct", "256-scaled",
+    ],
+)
+def test_prepare_refuses_unsupported_modes(ep, experts, topk, clamped, fp32, modes, error, match):
+    """``prepare_mok_bf16`` refuses every unsupported use of the explicit modes, the 512-expert layouts and top-k 10
+    before any device work (no GPU needed), with the types first: a mode that is not a ``str`` raises ``TypeError``,
+    as does an ``int`` or ``bool`` argument of another type, also when a mode value is unknown; then an unknown mode,
+    the modes without a build in this package (``"situ_glu"``, ``"none"``) and every configuration that uses the
+    512-expert top-10 group's layout, top-k or modes other than exactly as the group runs them raise ``ValueError``
+    naming the group's configuration."""
+    with pytest.raises(error, match=match):
+        mok.prepare_mok_bf16(
+            ep_size=ep,
+            local_experts=experts,
+            topk=topk,
+            clamped_swiglu=clamped,
+            fp32_wgrad=fp32,
+            **modes,
         )

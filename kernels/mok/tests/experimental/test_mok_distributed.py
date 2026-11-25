@@ -25,7 +25,9 @@ scratch lifetime, and the router weight before the down projection through the a
 SM107a: at EP1 and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and
 (8, 48) with top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow
 multiplier, the trap of a schedule past its capacity, the bytes of separate group launches and the bytes of the
-forward source split.
+forward source split; and the 512-expert top-10 group of the explicit modes (``router_weight_gradient="direct"``,
+``shared_expert="scaled"``) at EP8 ``(8, 64)`` over changing source counts on SM100a and SM103a (inputs drawn on the
+CPU).
 Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case (the whole
 group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
@@ -285,3 +287,44 @@ def test_before_down_source_split_bitwise(record_property, world, local_experts)
         for name in ("random", "placement-mixed", "full-skew-last")
     ]
     record_property("rich_ranks", results[0][0]["rich"])
+
+
+def _require_scaled_group(world):
+    """Skip before any process starts unless every rank's device has the 512-expert top-10 group's builds
+    (``MODE_GROUPS["scaled_top10"].targets``: SM100a and SM103a) and they are in this package's registry
+    (``test_mok_bf16.py`` fails while they are not)."""
+    group = kernels.MODE_GROUPS["scaled_top10"]
+    registry = cake_package("cake_mok_bf16", "jit")._registry()
+    if any(
+        role not in registry
+        for role in (
+            "backward_fp32_direct",
+            "epilogue_forward_scaled_10",
+            "shared_scale_dot",
+        )
+    ):
+        pytest.skip(
+            "The 512-expert top-10 group's kernels are not in this package's registry"
+        )
+    if torch.cuda.is_available() and torch.cuda.device_count() >= world:
+        for index in range(world):
+            capability = torch.cuda.get_device_capability(index)
+            arch = gaps.TARGETS.get(capability, f"sm_{capability[0]}{capability[1]}")
+            if arch not in group.targets:
+                pytest.skip(f"The 512-expert top-10 group has no {arch} build")
+
+
+def test_scaled_group_training(record_property):
+    """The 512-expert top-10 group (``router_weight_gradient="direct"``, ``shared_expert="scaled"``) through the
+    adapter at EP8 ``(8, 64)`` over changing source counts on one workspace (two empty source ranks in the last step),
+    on inputs drawn on the CPU: contract, repeatability, graph replay, the checkpointed step with the context step's
+    bytes, no kernel load after the first count; every count's whole-group ``y``, ``dx``, router-weight gradients,
+    ``d_shared_scale`` and weight gradients judged."""
+    world = kernels.MODE_GROUPS["scaled_top10"].layouts[0][0]
+    _require_scaled_group(world)
+    results = _run(world, workers.scaled_group_training)
+    assert [r["case"] for r in results[0]] == [
+        "bf16-scaled-direct-top10-counts-" + "-".join(map(str, counts))
+        for counts in workers.before_down_steps(world)
+    ]
+    _record(results, record_property)

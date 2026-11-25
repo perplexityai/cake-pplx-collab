@@ -11,6 +11,15 @@ from . import _kernels
 MOK_PRECISIONS = ("bf16", "mxfp8")
 # The router-weight positions of ``prepare_mok_bf16`` (a facade name).
 ROUTER_WEIGHT_POSITIONS = _kernels.ROUTER_WEIGHT_POSITIONS
+# The explicit modes of ``prepare_mok_bf16`` (facade names): the
+# ``"after_down"`` router-weight gradient, the shared expert's row and the
+# activation; the first value of each is the default.
+ROUTER_WEIGHT_GRADIENTS = _kernels.ROUTER_WEIGHT_GRADIENTS
+SHARED_EXPERT_MODES = _kernels.SHARED_EXPERT_MODES
+ACTIVATIONS = _kernels.ACTIVATIONS
+# The kernel groups with their own configuration (layouts, top-k, modes and
+# targets), by name (a facade name).
+MODE_GROUPS = _kernels.MODE_GROUPS
 
 # Imbalance-aware communication split, keyed by device compute capability, SM
 # count and the workspace's precision. Only devices with a measured gain have a row;
@@ -244,6 +253,9 @@ def prepare_mok_bf16(
     clamped_swiglu=False,
     fp32_wgrad=False,
     router_weight_position="after_down",
+    router_weight_gradient="quotient",
+    shared_expert="unscaled",
+    activation="swiglu",
 ):
     """Prepare the explicit Cake MoK training backend.
 
@@ -277,17 +289,40 @@ def prepare_mok_bf16(
     sm_103a and sm_107a; ``recompute_forward_context`` then takes the
     forward's ``router_weights``.
 
+    ``router_weight_gradient`` (one of :data:`ROUTER_WEIGHT_GRADIENTS`),
+    ``shared_expert`` (one of :data:`SHARED_EXPERT_MODES`) and ``activation``
+    (one of :data:`ACTIVATIONS`) are explicit modes; the defaults
+    (``"quotient"``, ``"unscaled"``, ``"swiglu"``) keep the behavior and every
+    bit above. ``"quotient"`` computes the ``"after_down"`` router-weight
+    gradient as ``dot(dh, h) / w`` with ``dh`` from ``BF16(w * dy)`` (zero at
+    a zero weight); ``"direct"`` as ``dot(dh, h)`` with ``dh`` from the
+    unscaled ``dy`` and the activation gradient ``w * dh`` (defined at a zero
+    weight; the down-projection weight gradient keeps ``BF16(w * dy)``).
+    ``shared_expert="scaled"`` multiplies the shared expert's output by a
+    per-token FP32 scale ``s``: ``forward`` and ``backward`` take it as
+    ``shared_scale`` (FP32 ``[tokens]``), ``y = s * S(x) + sum_k w_k E_k(x)``,
+    and ``backward`` returns ``d_shared_scale = dot(dy, S(x))`` as a ninth
+    item (defined at ``s = 0``). ``activation="clamped_swiglu"`` is
+    ``clamped_swiglu=True``. ``"situ_glu"`` and ``shared_expert="none"`` are
+    recognized and have no build in this package yet.
+
     Prepare and warm up outside graph capture. Supported scheduler layouts
     (EP, local experts) are (1, 4) and (4, 4) for diagnostics (top-k 2 in
     both positions, top-k 8 with ``"after_down"``), 256 routed experts at EP
     4/8/16/32/64 and 288 routed experts at EP 8/32 with top-k 2 or 8
-    (``"after_down"``), and 384 routed experts at EP 4/8/16/32/64 ((4, 96),
-    (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``).
+    (``"after_down"``), 384 routed experts at EP 4/8/16/32/64 ((4, 96),
+    (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``),
+    and 512 routed experts at EP8 ((8, 64)) with top-k 10, which runs only
+    with ``"after_down"``, plain SwiGLU, ``fp32_wgrad=True``,
+    ``router_weight_gradient="direct"``, ``shared_expert="scaled"`` and BF16
+    routed weights, on sm_100a and sm_103a (:data:`MODE_GROUPS`); the
+    ``"direct"`` and ``"scaled"`` modes run with that configuration only.
     Any other combination raises before any kernel is loaded or launched:
-    ``TypeError`` for a position that is not a ``str``, an ``ep_size``,
-    ``local_experts`` or ``topk`` that is not an ``int`` (a ``bool``
-    included) and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
-    ``bool``, in both positions; ``ValueError`` for every other value.
+    ``TypeError`` for a position, router-weight gradient, shared-expert mode
+    or activation that is not a ``str``, an ``ep_size``, ``local_experts`` or
+    ``topk`` that is not an ``int`` (a ``bool`` included) and a
+    ``clamped_swiglu`` or ``fp32_wgrad`` that is not a ``bool``, in both
+    positions; ``ValueError`` for every other value.
     Tokens, hidden/intermediate widths and per-rank source counts
     remain runtime values subject to the documented alignment constraints.
     This is a synthetic training experiment, with no full-model or optimizer
@@ -302,6 +337,9 @@ def prepare_mok_bf16(
         clamped_swiglu=clamped_swiglu,
         fp32_wgrad=fp32_wgrad,
         router_weight_position=router_weight_position,
+        router_weight_gradient=router_weight_gradient,
+        shared_expert=shared_expert,
+        activation=activation,
     )
 
 
