@@ -150,8 +150,8 @@ timing (per call and per kernel), beyond the identical-kernel controls' noise, a
 calls.  On `sm_100a` and `sm_103a` the one-launch calls of 4096 queries were slower with the split in eager calls and
 keep the one-launch route.  On `sm_107a` a later timing measured the call of 384 key blocks (three heads, 16384
 queries and keys) slower with the split, in eager calls and in CUDA-graph replays: the last piece holds only the 512
-key blocks of its measured calls, and calls of 16384 queries with 257 to 511 key blocks keep the pair route.  No piece
-routes a measured call that was not faster.
+key blocks of its measured calls, and split candidates of 16384 queries with 257 to 511 key blocks keep their 0.1.11
+route.  No piece routes a measured call that was not faster.
 
 ## Kernels
 
