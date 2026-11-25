@@ -63,7 +63,8 @@ ENTRIES = (
     "cake_attn_res_nondet_train_workspace_bytes",
     "is_cake_attn_res_nondet_train_supported",
 )
-# GPU activities of one call: the forward launches ``fwd``; the backward zeroes ``dw`` and launches ``bwd``.
+# GPU activities of one call: the forward launches ``fwd``; the backward's binding zeroes ``dw`` (a memset) and
+# launches ``bwd``.
 LAUNCHES = {"forward": 1, "backward": 2}
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
 SLEEP_CYCLES = 200_000_000

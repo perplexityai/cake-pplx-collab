@@ -57,6 +57,9 @@ must share no byte with an operand or another output (`ValueError`).
 `dw` before the backward launch. The kernels take nine value pointers; the host passes the first value in the slots
 past `n`, which the kernels never read.
 
+The zeroing of `dw` is part of the backward launch: `run` takes `dw` again as its `zero_region` argument and zeroes it
+with a memset on the launch stream right before the kernel, so no host work sits between the zeroing and the kernel.
+
 ## Determinism
 
 `out`, `p`, `r`, `d` and every `dv_j` have one fixed order. The CTAs add their `dw` sums in the order they finish, so
