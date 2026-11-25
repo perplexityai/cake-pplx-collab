@@ -51,9 +51,10 @@ a cluster: group ``g`` serves the tokens ``g, g + G, ...``.  The ``fwd``
 programs of 2 to 4 values (``fwd_n2``, ``fwd_n3``, ``fwd_n4``) serve whole
 tokens per CTA and exchange nothing: CTA ``r`` of group ``g`` serves the
 tokens ``4 g + r, 4 g + r + 4 G, ...``.  The grid is ``(cluster_ctas * G, 1,
-1)`` with ``G = min(T, resident groups)``, the groups one device holds at once
-(:func:`resident_groups`); any grid is correct (the groups never wait on each
-other).  Nothing launches cooperatively.
+1)`` with ``G = min(T, resident groups)``, the groups one device holds at once,
+or a measured cap below them for a program that runs faster with fewer groups
+(:func:`resident_groups`, :data:`GROUP_CAPS`); any grid is correct (the groups
+never wait on each other).  Nothing launches cooperatively.
 """
 
 from __future__ import annotations
@@ -357,20 +358,33 @@ CTAS_PER_SM = {
 DW_REDUCE_COLUMNS_PER_CTA = 128
 # Launch groups (four-CTA clusters) one device holds at once, by the CTAs per SM of a program: (architecture, SM
 # count) -> {CTAs per SM: clusters}, as ``cudaOccupancyMaxActiveClusters`` reports them (spread cluster scheduling, as
-# the programs launch).  The count follows the CTAs per SM, not the program; every entry of GB300, B200, VR200 and
-# R200 was measured on the shipped programs (all of them on GB300).  The four CTAs of a cluster share one GPC, so a
-# device holds fewer clusters than CTAs per SM * SMs / 4, and on VR200 and R200 no more at 5 CTAs per SM than at 4.
-# The GB200 entries at 3 and 4 CTAs per SM are the counts measured on the four-CTA cluster programs of the
-# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.  GB200 has no entry at 2 CTAs per SM yet:
-# there ``fwd_n2`` .. ``fwd_n4`` and ``bwd_n7`` .. ``bwd_n9`` take the fallback below (64 groups; GB300 holds 74).
-# The GPU tests check every program's entry, and the grid the host takes, against the driver's count
+# the programs launch).  The count follows the CTAs per SM, not the program; every entry of GB300, GB200, B200, VR200
+# and R200 was measured on the shipped programs (all of them on GB300 and GB200).  Boards of one SM count can differ by
+# a cluster (one R200 board of 208 SMs holds 154 at 3 CTAs per SM, another 153): an entry holds the least count
+# measured on the boards of its SM count.  The four CTAs of a cluster share one GPC, so a device holds at most CTAs per
+# SM * SMs / 4 clusters (R200 exactly that many at 2 and 4 CTAs per SM, the other devices fewer), and on VR200 and R200
+# no more at 5 CTAs per SM than at 4.  GB200 and GB300 (both 152 SMs) hold the same counts at 2, 3 and 4 CTAs per SM.
+# The GPU tests check that every program's entry, and the grid the host takes, do not exceed the driver's count
 # (``cuOccupancyMaxActiveClusters``) on the device they run on.
 RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_100a", 148): {2: 71, 3: 104, 4: 142, 5: 175},
-    ("sm_100a", 152): {3: 110, 4: 148},
+    ("sm_100a", 152): {2: 74, 3: 110, 4: 148},
     ("sm_103a", 152): {2: 74, 3: 110, 4: 148, 5: 184},
     ("sm_107a", 208): {2: 104, 3: 153, 4: 208, 5: 208},
     ("sm_107a", 212): {2: 92, 3: 138, 4: 184, 5: 184},
+}
+# Launch groups a program takes at most, below the groups the device holds: (architecture, SM count) -> {record:
+# groups}.  ``fwd_n4`` (the whole-token forward of four values, two CTAs per SM) runs up to 7 % faster at 64 groups
+# than at all 74 resident groups on GB200 and GB300 and all 71 on B200 (CUDA graph replays, cold L2, T = 4097, 16380
+# and 32768, two to four GPUs of each, both packages); 62 to 66 groups measure within 3 % of 64.  ``fwd_n2``,
+# ``fwd_n3`` and ``bwd_n7`` .. ``bwd_n9`` (the other two-CTA programs) and the spot-checked ``fwd_n5``, ``bwd_n5``
+# and ``fwd_n9`` show no consistent gain below their resident groups on these devices; ``fwd_n6`` .. ``fwd_n8``,
+# ``bwd_n2`` .. ``bwd_n4`` and ``bwd_n6`` were not measured below them.  No program but ``fwd_n4`` has a cap.  A
+# device without an entry here takes the resident groups.
+GROUP_CAPS: dict[tuple[str, int], dict[str, int]] = {
+    ("sm_100a", 148): {"fwd_n4": 64},
+    ("sm_100a", 152): {"fwd_n4": 64},
+    ("sm_103a", 152): {"fwd_n4": 64},
 }
 # On a device or a count of CTAs per SM the table does not hold, the grid takes this fraction of min(CTAs per SM,
 # UNMEASURED_MAX_CTAS_PER_SM) * SMs / cluster CTAs groups: less than every measured device holds (the least, VR200,
@@ -404,20 +418,22 @@ def cluster_ctas(record_name: str) -> int:
 
 
 def resident_groups(record_name: str, arch: str, sm_count: int) -> int:
-    """The launch groups of the ``fwd`` or ``bwd`` record ``record_name`` one device of ``arch`` with ``sm_count`` SMs
-    holds at once: the :data:`RESIDENT_GROUPS` entry of its ``CTAS_PER_SM``, else :data:`UNMEASURED_FRACTION` of
-    ``min(CTAS_PER_SM, UNMEASURED_MAX_CTAS_PER_SM) * sm_count / cluster_ctas``; at least one."""
+    """The launch groups the persistent grid of the ``fwd`` or ``bwd`` record ``record_name`` fills on one device of
+    ``arch`` with ``sm_count`` SMs: the groups the device holds at once (the :data:`RESIDENT_GROUPS` entry of its
+    ``CTAS_PER_SM``), at most the record's :data:`GROUP_CAPS` entry of the device; else :data:`UNMEASURED_FRACTION`
+    of ``min(CTAS_PER_SM, UNMEASURED_MAX_CTAS_PER_SM) * sm_count / cluster_ctas``; at least one."""
     per_sm = CTAS_PER_SM[record_name]
     measured = RESIDENT_GROUPS.get((arch, sm_count), {}).get(per_sm)
     if measured is not None:
-        return measured
+        return min(measured, GROUP_CAPS.get((arch, sm_count), {}).get(record_name, measured))
     per_sm = min(per_sm, UNMEASURED_MAX_CTAS_PER_SM)
     return max(1, int(UNMEASURED_FRACTION * per_sm * sm_count) // cluster_ctas(record_name))
 
 
 def groups(record_name: str, tokens: int, arch: str, sm_count: int) -> int:
     """The launch groups of the persistent grid of the ``fwd`` or ``bwd`` record ``record_name``: the groups the
-    device holds at once (:func:`resident_groups`), never more groups than tokens, at least one."""
+    device holds at once, or the record's cap (:func:`resident_groups`), never more groups than tokens, at least
+    one."""
     return max(1, min(tokens, resident_groups(record_name, arch, sm_count)))
 
 

@@ -1761,6 +1761,8 @@ kernel_cake_dsa_indexer_det_topk_5dadc938dbfb7d792c92(const __grid_constant__ CU
                                         int kept_above_2 = 0;
                                         unsigned long long prefix_2 = 0;
                                         unsigned long long edge_2 = 0;
+                                        long long* src = CandBlk + blk_pair;
+                                        int n_src = n_old;
                                         #pragma unroll 1
                                         for (int p_2 = 0; p_2 < 8; p_2++) {
                                             int shift_2 = 56 - 8 * p_2;
@@ -1783,19 +1785,19 @@ kernel_cake_dsa_indexer_det_topk_5dadc938dbfb7d792c92(const __grid_constant__ CU
                                                 for (int u_12 = 0; u_12 < 8; u_12++) {
                                                     int idx_l_4 = s_pro_2 * 512 + half * 32 + lane_0 + 64 * u_12;
                                                     ring_2[s_pro_2 * 8 + u_12] = 0;
-                                                    if (idx_l_4 < n_old) {
-                                                        ring_2[s_pro_2 * 8 + u_12] = (unsigned long long)(CandBlk + blk_pair)[idx_l_4];
+                                                    if (idx_l_4 < n_src) {
+                                                        ring_2[s_pro_2 * 8 + u_12] = (unsigned long long)src[idx_l_4];
                                                     }
                                                 }
                                             }
-                                            int nbat_2 = (n_old + 512 - 1) / 512;
+                                            int nbat_2 = (n_src + 512 - 1) / 512;
                                             #pragma unroll 1
                                             for (int g_2 = 0; g_2 < nbat_2; g_2 += 3) {
                                                 #pragma unroll
                                                 for (int s_st_2 = 0; s_st_2 < 3; s_st_2++) {
                                                     #pragma unroll
                                                     for (int u_13 = 0; u_13 < 8; u_13++) {
-                                                        int valid_p_2 = ((n_old > (g_2 + s_st_2) * 512 + half * 32 + lane_0 + 64 * u_13) ? 1 : 0);
+                                                        int valid_p_2 = ((n_src > (g_2 + s_st_2) * 512 + half * 32 + lane_0 + 64 * u_13) ? 1 : 0);
                                                         unsigned int bits_9 = (unsigned int)(ring_2[s_st_2 * 8 + u_13] >> 32ull);
                                                         int kid_8 = (int)(unsigned int)(ring_2[s_st_2 * 8 + u_13] & 4294967295ull);
                                                         unsigned int magnitude_6 = bits_9 & 2147483647;
@@ -1817,8 +1819,8 @@ kernel_cake_dsa_indexer_det_topk_5dadc938dbfb7d792c92(const __grid_constant__ CU
                                                     for (int u_14 = 0; u_14 < 8; u_14++) {
                                                         int idx_l_5 = (g_2 + s_st_2 + 2) * 512 + half * 32 + lane_0 + 64 * u_14;
                                                         ring_2[(s_st_2 + 2) % 3 * 8 + u_14] = 0;
-                                                        if (idx_l_5 < n_old) {
-                                                            ring_2[(s_st_2 + 2) % 3 * 8 + u_14] = (unsigned long long)(CandBlk + blk_pair)[idx_l_5];
+                                                        if (idx_l_5 < n_src) {
+                                                            ring_2[(s_st_2 + 2) % 3 * 8 + u_14] = (unsigned long long)src[idx_l_5];
                                                         }
                                                     }
                                                 }
@@ -1954,46 +1956,136 @@ kernel_cake_dsa_indexer_det_topk_5dadc938dbfb7d792c92(const __grid_constant__ CU
                                             if (kept_above_2 + bucket_cnt_2 <= 2047) {
                                                 break;
                                             }
-                                        }
-                                        int mid_c = (n_old + 63) / 64 * 32;
-                                        int n_c = mid_c;
-                                        int org_c = 0;
-                                        int dir_c = 1;
-                                        int pos_c = 0;
-                                        if (half != 0) {
-                                            n_c = n_old - mid_c;
-                                            org_c = n_old - 1;
-                                            dir_c = -1;
-                                            pos_c = 2046;
-                                        }
-                                        #pragma unroll 1
-                                        for (int o0 = 0; o0 < n_c; o0 += 256) {
-                                            unsigned long long ent_c[8];
-                                            #pragma unroll
-                                            for (int u_15 = 0; u_15 < 8; u_15++) {
-                                                int _min_27 = ((o0 + 32 * u_15 + lane_0) < (n_c - 1) ? (o0 + 32 * u_15 + lane_0) : (n_c - 1));
-                                                ent_c[u_15] = (unsigned long long)(CandBlk + blk_pair)[org_c + dir_c * _min_27];
+                                            int _min_27 = ((cand_cap) < (n_old >> 2) ? (cand_cap) : (n_old >> 2));
+                                            if (n_src == n_old && kept_above_2 + bucket_cnt_2 <= _min_27) {
+                                                n_src = kept_above_2 + bucket_cnt_2;
+                                                int mid_g = (n_old + 63) / 64 * 32;
+                                                int n_h = mid_g;
+                                                int org_g = 0;
+                                                int dir_g = 1;
+                                                int pos_g = 0;
+                                                if (half != 0) {
+                                                    n_h = n_old - mid_g;
+                                                    org_g = n_old - 1;
+                                                    dir_g = -1;
+                                                    pos_g = n_src - 1;
+                                                }
+                                                #pragma unroll 1
+                                                for (int o0 = 0; o0 < n_h; o0 += 256) {
+                                                    unsigned long long ent_g[8];
+                                                    #pragma unroll
+                                                    for (int u_15 = 0; u_15 < 8; u_15++) {
+                                                        int _min_28 = ((o0 + 32 * u_15 + lane_0) < (n_h - 1) ? (o0 + 32 * u_15 + lane_0) : (n_h - 1));
+                                                        ent_g[u_15] = (unsigned long long)(CandBlk + blk_pair)[org_g + dir_g * _min_28];
+                                                    }
+                                                    #pragma unroll
+                                                    for (int u_16 = 0; u_16 < 8; u_16++) {
+                                                        int e_g = org_g + dir_g * (o0 + 32 * u_16 + lane_0);
+                                                        unsigned int bits_g = (unsigned int)(ent_g[u_16] >> 32ull);
+                                                        unsigned int magnitude_7 = bits_g & 2147483647;
+                                                        unsigned int m_7 = ((magnitude_7 != 0) ? bits_g : zero_u);
+                                                        unsigned int key32_7 = (((m_7 & sign_mask) != 0) ? ~m_7 : m_7 | sign_mask);
+                                                        if (magnitude_7 > nan_floor) {
+                                                            key32_7 = zero_u;
+                                                        }
+                                                        unsigned long long key64_7 = (unsigned long long)key32_7 << 32ull | (unsigned long long)(unsigned int)e_g;
+                                                        int keep_g = 0;
+                                                        if (o0 + 32 * u_16 + lane_0 < n_h && key64_7 >= edge_2) {
+                                                            keep_g = 1;
+                                                        }
+                                                        unsigned int vote_g = __ballot_sync(0xFFFFFFFF, keep_g != 0);
+                                                        if (keep_g != 0) {
+                                                            Cand[buf_pair + pos_g + dir_g * (int)(unsigned int)__popc(vote_g & lower_lanes)] = (long long)ent_g[u_16];
+                                                        }
+                                                        pos_g += dir_g * (int)(unsigned int)__popc(vote_g);
+                                                    }
+                                                }
+                                                src = Cand + buf_pair;
                                             }
-                                            #pragma unroll
-                                            for (int u_16 = 0; u_16 < 8; u_16++) {
-                                                int e_w = org_c + dir_c * (o0 + 32 * u_16 + lane_0);
-                                                unsigned int bits_w = (unsigned int)(ent_c[u_16] >> 32ull);
-                                                unsigned int magnitude_7 = bits_w & 2147483647;
-                                                unsigned int m_7 = ((magnitude_7 != 0) ? bits_w : zero_u);
-                                                unsigned int key32_7 = (((m_7 & sign_mask) != 0) ? ~m_7 : m_7 | sign_mask);
-                                                if (magnitude_7 > nan_floor) {
-                                                    key32_7 = zero_u;
+                                        }
+                                        if (n_src < n_old) {
+                                            int mid_v = (n_src + 63) / 64 * 32;
+                                            int n_v = mid_v;
+                                            int org_v = 0;
+                                            int dir_v = 1;
+                                            int pos_v = 0;
+                                            if (half != 0) {
+                                                n_v = n_src - mid_v;
+                                                org_v = n_src - 1;
+                                                dir_v = -1;
+                                                pos_v = 2046;
+                                            }
+                                            #pragma unroll 1
+                                            for (int o0_1 = 0; o0_1 < n_v; o0_1 += 256) {
+                                                unsigned long long ent_v[8];
+                                                #pragma unroll
+                                                for (int u_17 = 0; u_17 < 8; u_17++) {
+                                                    int _min_29 = ((o0_1 + 32 * u_17 + lane_0) < (n_v - 1) ? (o0_1 + 32 * u_17 + lane_0) : (n_v - 1));
+                                                    ent_v[u_17] = (unsigned long long)Cand[buf_pair + org_v + dir_v * _min_29];
                                                 }
-                                                unsigned long long key64_7 = (unsigned long long)key32_7 << 32ull | (unsigned long long)(unsigned int)e_w;
-                                                int keep_w = 0;
-                                                if (o0 + 32 * u_16 + lane_0 < n_c && key64_7 >= edge_2) {
-                                                    keep_w = 1;
+                                                #pragma unroll
+                                                for (int u_18 = 0; u_18 < 8; u_18++) {
+                                                    int e_v = (int)(unsigned int)(ent_v[u_18] & 4294967295ull);
+                                                    unsigned int bits_v = (unsigned int)(ent_v[u_18] >> 32ull);
+                                                    unsigned int magnitude_8 = bits_v & 2147483647;
+                                                    unsigned int m_8 = ((magnitude_8 != 0) ? bits_v : zero_u);
+                                                    unsigned int key32_8 = (((m_8 & sign_mask) != 0) ? ~m_8 : m_8 | sign_mask);
+                                                    if (magnitude_8 > nan_floor) {
+                                                        key32_8 = zero_u;
+                                                    }
+                                                    unsigned long long key64_8 = (unsigned long long)key32_8 << 32ull | (unsigned long long)(unsigned int)e_v;
+                                                    int keep_v = 0;
+                                                    if (o0_1 + 32 * u_18 + lane_0 < n_v && key64_8 >= edge_2) {
+                                                        keep_v = 1;
+                                                    }
+                                                    unsigned int vote_v = __ballot_sync(0xFFFFFFFF, keep_v != 0);
+                                                    if (keep_v != 0) {
+                                                        CandBlocks[cb_row + (long long)(pos_v + dir_v * (int)(unsigned int)__popc(vote_v & lower_lanes))] = e_v;
+                                                    }
+                                                    pos_v += dir_v * (int)(unsigned int)__popc(vote_v);
                                                 }
-                                                unsigned int vote_w = __ballot_sync(0xFFFFFFFF, keep_w != 0);
-                                                if (keep_w != 0) {
-                                                    CandBlocks[cb_row + (long long)(pos_c + dir_c * (int)(unsigned int)__popc(vote_w & lower_lanes))] = e_w;
+                                            }
+                                        } else {
+                                            int mid_c = (n_old + 63) / 64 * 32;
+                                            int n_c = mid_c;
+                                            int org_c = 0;
+                                            int dir_c = 1;
+                                            int pos_c = 0;
+                                            if (half != 0) {
+                                                n_c = n_old - mid_c;
+                                                org_c = n_old - 1;
+                                                dir_c = -1;
+                                                pos_c = 2046;
+                                            }
+                                            #pragma unroll 1
+                                            for (int o0_2 = 0; o0_2 < n_c; o0_2 += 256) {
+                                                unsigned long long ent_c[8];
+                                                #pragma unroll
+                                                for (int u_19 = 0; u_19 < 8; u_19++) {
+                                                    int _min_30 = ((o0_2 + 32 * u_19 + lane_0) < (n_c - 1) ? (o0_2 + 32 * u_19 + lane_0) : (n_c - 1));
+                                                    ent_c[u_19] = (unsigned long long)(CandBlk + blk_pair)[org_c + dir_c * _min_30];
                                                 }
-                                                pos_c += dir_c * (int)(unsigned int)__popc(vote_w);
+                                                #pragma unroll
+                                                for (int u_20 = 0; u_20 < 8; u_20++) {
+                                                    int e_w = org_c + dir_c * (o0_2 + 32 * u_20 + lane_0);
+                                                    unsigned int bits_w = (unsigned int)(ent_c[u_20] >> 32ull);
+                                                    unsigned int magnitude_9 = bits_w & 2147483647;
+                                                    unsigned int m_9 = ((magnitude_9 != 0) ? bits_w : zero_u);
+                                                    unsigned int key32_9 = (((m_9 & sign_mask) != 0) ? ~m_9 : m_9 | sign_mask);
+                                                    if (magnitude_9 > nan_floor) {
+                                                        key32_9 = zero_u;
+                                                    }
+                                                    unsigned long long key64_9 = (unsigned long long)key32_9 << 32ull | (unsigned long long)(unsigned int)e_w;
+                                                    int keep_w = 0;
+                                                    if (o0_2 + 32 * u_20 + lane_0 < n_c && key64_9 >= edge_2) {
+                                                        keep_w = 1;
+                                                    }
+                                                    unsigned int vote_w = __ballot_sync(0xFFFFFFFF, keep_w != 0);
+                                                    if (keep_w != 0) {
+                                                        CandBlocks[cb_row + (long long)(pos_c + dir_c * (int)(unsigned int)__popc(vote_w & lower_lanes))] = e_w;
+                                                    }
+                                                    pos_c += dir_c * (int)(unsigned int)__popc(vote_w);
+                                                }
                                             }
                                         }
                                         if (half != 0) {

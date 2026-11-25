@@ -116,7 +116,16 @@ Candidate blocks (``cake_dsa_indexer_nondet_train_topk_with_candidates``)
   past 2048 blocks (a ``max_seqlen_k`` below one of its key segments) stops
   that fill with a device-side assert, before the call's programs run.
 * The scan of any other such call is the unsplit, unpaired narrow or l6 program of
-  the decided unit (``cake_policy.select_cb_program``).  Its workspace is
+  the decided unit (``cake_policy.select_cb_program``), or, where the plan's own
+  program has a registered twin (``cake_policy.CB_TWIN_FORMS``: on sm_103a the
+  no-sample-fit CTA-pair l6 program in both segment orders), that twin with the
+  plan as decided (``grid`` is the launched grid, even for the CTA pair), and a
+  wide plan the CTA-pair l6 twin on that unit's geometry
+  (``cake_policy.cb_pair_twin_key``), both on calls inside
+  ``cake_policy.CB_TWIN_RULE`` only (``top_k`` 512, 254.5 to 1984 mean unit
+  tiles, at least 16231 queries, sampled: a window around the timed calls,
+  which are wide plans; no plan of the CTA-pair l6 program itself was timed).
+  Its workspace is
   :func:`cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` bytes:
   the scan's candidate buffers and ticket tail, then ``grid x block_q x
   blk_cap x 8`` bytes of block entries (``blk_cap = ceil(W / 8) - 1`` for the

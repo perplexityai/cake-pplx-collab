@@ -85,8 +85,12 @@ on the current torch stream: nothing cooperative.
 B300 (`sm_103a`, 148 SMs) has no entry, so it takes the fallback: 125 forward and 94 backward clusters (it holds 142 /
 104). A backward call of at least `cake_jit.LARGE_BWD_MIN_TOKENS` (2048) tokens on a device of
 `cake_jit.LARGE_BWD_CLUSTERS` runs that table's count instead (`cake_jit.persistent_clusters`): 104 on B300, all it
-holds. Below 2048 tokens the B300 backward keeps 94 clusters: at 129 tokens with a token mask, 104 were slower. The B300
-forward keeps 125: at 142 clusters it ran slower with every second token masked.
+holds. Below 2048 tokens the B300 backward keeps 94 clusters: at 129 tokens with a token mask, 104 were slower. A
+forward call on a device of `cake_jit.HELD_FWD_CLUSTERS` runs that table's count (142 on B300, all it holds) when it has
+at most that many tokens, one cluster a token (with 125 clusters a call of 126 to 142 tokens takes two waves), or when
+it has no `token_mask` and at least `cake_jit.HELD_FWD_UNMASKED_MIN_TOKENS` (4096) tokens. A B300 forward with a
+`token_mask` of more than 142 tokens keeps 125: at 142 clusters it ran slower with every second token masked. Below 4096
+tokens a B300 forward without one keeps 125 too.
 
 The two forward records differ only in the sum of `P`, which the autograd entries and the explicit forward select
 with `dot_sum`:
@@ -101,8 +105,8 @@ the forward's `dot_sum`. The backward has two programs with the same bits and th
 `bwd_dot2_stage`, which also copies the next token's `dout`, `x` and `key` slices into a per-thread shared-memory stage
 with `cp.async`. A call without a `token_mask` of at least `cake_jit.STAGE_BWD_MIN_TOKENS` (4096) tokens on an
 architecture of `cake_jit.STAGE_BWD_ARCHES` (`sm_100a`, `sm_103a` and `sm_107a`) launches `bwd_dot2_stage`. A call with
-a `token_mask` of at least the tokens `cake_jit.ORDER_BWD_MIN_TOKENS` names for its architecture (8192 on `sm_100a` and
-`sm_103a`, 4096 on `sm_107a`) launches `bwd_dot2_order`, a third program on the same grid. It reads the mask itself:
+a `token_mask` of at least the tokens `cake_jit.ORDER_BWD_MIN_TOKENS` names for its architecture (4096 on `sm_100a` and
+`sm_107a`, 6144 on `sm_103a`) launches `bwd_dot2_order`, a third program on the same grid. It reads the mask itself:
 each cluster serves its kept tokens in ascending order on the stage program's path, then its masked tokens with only
 `dout` read. Its `dx`, `dkey` and `dvalue` are the bits of `bwd_dot2`. Its weight-gradient row of a cluster adds that
 cluster's kept tokens in their order, so `dq_weight` and `dk_weight` can differ from those of `bwd_dot2` in the last

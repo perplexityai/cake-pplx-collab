@@ -66,8 +66,9 @@ cake_kcp_jit = cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_jit")
 SM_COUNT = 152  # GB300; the plan rule's examples of the design note §7.2
 EVIDENCE_DIR = os.environ.get("KCP_EVIDENCE_DIR")
 LAYOUT_NAMES = {"C": "contiguous", "Z": "zigzag", "D": "zigzag_per_document"}
-OWNERSHIP_H = (1, 3, 4, 6, 12, 64)
-OWNERSHIP_W = (2, 4, 8, 16)
+# 96 heads over 4 / 8 / 64 ranks: 24 / 12 / 2 heads per owner, 48 owners at 64 ranks (issue #264); 128 the top
+OWNERSHIP_H = (1, 3, 4, 6, 12, 64, 96, 128)
+OWNERSHIP_W = (2, 4, 8, 16, 64)
 
 
 def _evidence(name: str, record: dict) -> None:
@@ -5423,14 +5424,19 @@ def test_forward_only_layout_bytes_and_prediction() -> None:
                         assert pred_f == fwd["arena"] and pred_b == full["arena"]
                         continue
                     args = (ctx.T_r, ctx.n_frag, H)
+                    # the local problem's plan: the KCP's segment rule (occupancy)
+                    local_kw = {
+                        "sm_count": SM_COUNT,
+                        "segment_rule": kp.LOCAL_SEGMENT_RULE,
+                    }
                     local_b = cake_backend.workspace_bytes(
-                        *args, backward=True, sm_count=SM_COUNT
+                        *args, backward=True, **local_kw
                     )
                     local_f = cake_backend.workspace_bytes(
-                        *args, backward=False, fwd_layout="fwd_kcp", sm_count=SM_COUNT
+                        *args, backward=False, fwd_layout="fwd_kcp", **local_kw
                     )
                     old_f = cake_backend.workspace_bytes(
-                        *args, backward=False, sm_count=SM_COUNT
+                        *args, backward=False, **local_kw
                     )
                     assert local_f == 2432 * ctx.R * H, (W, layout, r, H)
                     assert old_f - local_f >= 128 * ctx.R * H
@@ -6360,7 +6366,9 @@ def test_local_stage_values_cover_the_records(H, arch, sm) -> None:
         part, None, 0, "cpu", 4, sm_count=sm
     )
     assert ctx.T_r > 0
-    plan = cake_backend.plan(ctx.T_r, ctx.n_frag, H, sm, arch)
+    plan = cake_backend.plan(
+        ctx.T_r, ctx.n_frag, H, sm, arch, segment_rule=kp.LOCAL_SEGMENT_RULE
+    )
     tb = cake_kcp._Tables(ctx, H, fused_walks=1)
     launches: list[tuple[str, str, tuple[int, int, int], dict]] = []
 
@@ -6565,13 +6573,21 @@ def test_local_stage_values_cover_the_records(H, arch, sm) -> None:
                 )
     # the workspace prediction counts the scratch set
     scratch_bytes = (
-        cake_backend.tables_bytes(ctx.T_r, ctx.n_frag, H, sm_count=sm)
+        cake_backend.tables_bytes(
+            ctx.T_r, ctx.n_frag, H, sm_count=sm, segment_rule=kp.LOCAL_SEGMENT_RULE
+        )
         if kp.intra_writes_tables(plan)
         else 0
     )
     assert kp.cake_kda_nondet_train_kcp_workspace_bytes(ctx, H=H) == (
         cake_backend.workspace_bytes(
-            ctx.T_r, ctx.n_frag, H, backward=True, save_mode="light", sm_count=sm
+            ctx.T_r,
+            ctx.n_frag,
+            H,
+            backward=True,
+            save_mode="light",
+            sm_count=sm,
+            segment_rule=kp.LOCAL_SEGMENT_RULE,
         )
         + scratch_bytes
         + kp.kcp_arena_layout(ctx, H=H)["arena"]
@@ -6687,7 +6703,15 @@ def test_forward_tapes_have_no_reader_outside_the_call(
     ctx, H = _tape_ctx(segmented, sm)
     T = int(ctx.T_r)
     D = cake_kcp.D
-    plan = cake_backend.plan(ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate)
+    plan = cake_backend.plan(
+        ctx.T_r,
+        ctx.n_frag,
+        H,
+        sm,
+        arch,
+        gate=gate,
+        segment_rule=kp.LOCAL_SEGMENT_RULE,
+    )
     log: list = []
 
     class Arena:

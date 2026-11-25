@@ -30,8 +30,11 @@ busy on another stream can delay it.  On sm_100a and sm_103a, at the backward
 rows of ``cake_jit.FALLBACK_ROWS`` (the default backward route at C = 520 to
 1016; from release 0.2.7 also the ``bwd_bias`` route and the calls of the
 ``bwd_dt`` route with BF16 taps, from release 0.2.9 every call of the
-``bwd_dt`` route, at C = 520 to 1016 and small S, ``bwd_dt`` at C = 768 on
-sm_103a from release 0.2.11; each row up to its own token bound), that launch
+``bwd_dt`` route, at C = 520 to 1016, ``bwd_dt`` at C = 768 on sm_103a from
+release 0.2.11; each row up to its own token bound: from release 0.2.18
+S = 32768 on ``bwd_dt`` but at C = 768 to 1016 on sm_103a (S = 16384), and
+S = 24576 on ``bwd_bias`` at C = 520 to 640 (S = 16384 at C = 648 to 1016);
+release 0.2.17: S = 24576 at C = 576 to 640, 16384 at the other C), that launch
 runs the route's fallback program, the one the route runs at its smallest
 channel counts, in place of the program its channel thresholds pick.  At the
 backward rows of ``cake_jit.DIRECT_ROWS`` (the ``bwd``, ``bwd_dt`` and
@@ -42,6 +45,13 @@ TMA and no staged pipeline, each CTA the next token blocks of its channel tile,
 ``dx`` bit for bit the route's staged programs', and the same accumulators and
 counters.  From release 0.2.15 the sm_107a ``bwd`` and ``bwd_bias`` direct
 rows run to S = 4096 at C = 512 and 1024 and to S = 2561 at C = 640.  From
+release 0.2.19 direct rows also run between the earlier keys: on sm_100a
+``bwd`` at C = 840 to 888 from S = 1 to 2048, and ``bwd_dt`` at C = 624 to
+632, 744 to 760, 840 to 856 and 872 to 888 from S = 128 to 2048 and at
+C = 776 to 792, 808 to 824 and 904 to 952 from S = 128 to 1000; on sm_103a
+``bwd`` at C = 904 to 952 from S = 128 to 1000, and ``bwd_dt`` at C = 648 to
+664 and 680 to 696 from S = 512 to 2048, at C = 776 to 792 from S = 128 to
+1000 and at C = 840 to 856 and 904 to 952 from S = 128 to 2048.  From
 release 0.2.14, at the small-S rows of ``cake_jit.GRID_CAP_ROWS`` (sm_107a:
 the ``bwd`` route at C = 584 to 760 but 640, from S = 512 to 1000, to 999 at
 C = 600 to 616 and 704, and at C = 768 at S = 512) a launch at

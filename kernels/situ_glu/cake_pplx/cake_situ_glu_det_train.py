@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake SiTU-GLU training forward / backward of an MLP, at any width ``I`` that
-is a multiple of 256 (SM100 / SM103), deterministic.
+is a multiple of 256 (SM100 / SM103 / SM107), deterministic.
 
 Per row ``r < R`` and column ``c < I``, from the BF16 gate ``g`` and up ``u``
 (two ``[R, I]`` tensors, or one ``[R, 2I]`` tensor with the gate in columns
@@ -38,9 +38,9 @@ outputs and launches nothing), and so are ``I`` and the scalars: one build
 serves every call, with no recompilation.  ``beta`` and ``lb`` default to 4.0
 and 25.0, the values of Kimi-K3.1-Pro (``activation_situ_beta`` and
 ``activation_situ_linear_beta``).  They must be positive and finite in FP32,
-with ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb`` finite in FP32
-(``ValueError`` otherwise); the tests cover ``beta`` in ``[2.5, 4]`` and
-``lb`` in ``[10, 40]``.
+with ``2.88539 / beta``, ``2.88539 / lb``, ``beta lb``, ``beta (1 + 2^-21)``
+and ``lb (1 + 2^-21)`` finite in FP32 (``ValueError`` otherwise); the tests
+cover ``beta`` in ``[2.5, 4]`` and ``lb`` in ``[10, 40]``.
 
 The kernels take every exponential as a power of two of a negative argument
 (the approximate base-2 exponential), every tanh as ``(1 - E) / (1 + E)`` of
@@ -140,7 +140,7 @@ def is_cake_situ_glu_det_train_supported(device: torch.device) -> bool:
     Returns
     -------
     bool
-        ``True`` for a CUDA device of compute capability (10, 0) or (10, 3).
+        ``True`` for a CUDA device of compute capability (10, 0), (10, 3) or (10, 7).
     """
 
     return _backend().is_cake_situ_glu_det_train_supported(device)
@@ -189,7 +189,7 @@ def cake_situ_glu_det_train_forward(
         An operand off CUDA, off the gate's device, of another dtype or shape; a width that is not a positive multiple
         of 256; a non-finite or non-positive ``beta`` or ``lb``; ``R > 2**30``; an ``out`` of another layout.
     RuntimeError
-        A device other than SM100 (``sm_100a``) or SM103 (``sm_103a``), also with ``R = 0``.
+        A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``), also with ``R = 0``.
 
     Notes
     -----

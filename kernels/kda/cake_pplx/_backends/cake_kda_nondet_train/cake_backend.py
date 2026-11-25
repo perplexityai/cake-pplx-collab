@@ -154,7 +154,15 @@ reverse walk from zero), ``seg_carry`` chains the segments' states within
 each document (TF32 on the tensor cores; with at most two heads, where its
 host rule accepts, the two-level carry ``seg_carry_v8`` forms the groups of
 segments in parallel), pass 2 walks again
-from the carried states and writes the tapes.
+from the carried states and writes the tapes.  The segment count of a plan
+follows the token-aware rule by default (``cake_jit.segment_route``, the
+plan's ``segment_rule``): on B200 (``sm_100a``, 148 SMs) with 4 or 8 heads
+(16 heads take the serial route there), and on GB300 (``sm_103a``, 152 SMs)
+and VR200 (``sm_107a``, 212 SMs) with 4, 8 or 16 heads, outside the occupancy
+bands of ``cake_jit.TOKEN_SEGMENTS``, a pack too short to save the segment
+states takes fewer segments per document, never more than the occupancy
+rule's, so neither the saved set nor the arena grows; every arena option runs
+the same plan.
 
 Memory.  A :class:`CakeKDANondetWorkspace` is one arena holding only the internal
 intermediates; buffers with disjoint lifetimes within one call share a slot
@@ -291,6 +299,16 @@ SAVED_VERSION_TAPE = (
 # light saves the segment states iff S >= 384 * NSEG: the three FP32 state blocks (3 * NSEG * H * 64 KiB) are then
 # no larger than the Aqk / Akk set (2 * S * H * 256 B); shorter packs recompute them in the backward
 SEG_SAVE_MIN_TOKENS_PER_SEG = 384
+# The segment rules of a plan (:func:`plan`'s ``segment_rule``).  ``"tokens"`` (the default) is the token-aware rule of
+# ``cake_jit.TOKEN_SEGMENTS``: on its measured envelope (``sm_100a`` with 148 SMs, ``sm_103a`` with 152 SMs and
+# ``sm_107a`` with 212 SMs; 4 / 8 / 16 heads; not the packs of its ``occupancy_bands_by_arch``: on ``sm_103a`` and
+# ``sm_107a`` the 4-head packs of at most 4096 tokens, for the accuracy of case E of the raw-gate accuracy test, and on
+# ``sm_107a`` the 16-head packs of 8193 to 16383 tokens, for memory) a pack too short to save the segment states takes
+# fewer segments per document, never more than the occupancy rule's, so the saved set and the arena never grow.
+# ``"occupancy"`` is the rule of ``cake_jit.SEGMENTS`` alone, the plans of releases before the token-aware rule, which
+# the context-parallel package's local plans keep.  A saved set has the tables and segment states of its forward's
+# plan, so its backward takes a plan of the same rule.
+SEGMENT_RULES = ("tokens", "occupancy")
 SAVE_MODES = ("light", "tape")
 # The in-kernel Q/K L2 norm modes of a plan (:attr:`Plan.l2n`): ``"off"`` (the caller's normalized q / k),
 # ``"fused"`` (``use_qk_l2norm_in_kernel=True``: the first q / k reader of every path normalizes from the raw rows,
@@ -363,7 +381,7 @@ class CakeKDANondetArena:
     ``lean`` sizes a backward workspace for the saved-set paths only (layouts ``bwd_lean`` / ``bwd_tape_lean``: no
     replay layout, no internal ``dout`` copy), so the workspace serves no checkpoint replay (``cake_kda_nondet_train_backward`` with
     ``saved=None``; ``torch.utils.checkpoint`` never replays: the node's backward reads the recomputed saved set)
-    and no flag-off row that dispatches the separate ``dav`` program (H 9-15, outside the contract's head counts).
+    and no flag-off row that dispatches the separate ``dav`` program (9 to 15 heads; every other head count in 1..128 is served).
     In an in-kernel Q/K L2 norm mode every backward launches ``dav`` (the ``dav_l2n*`` records, ``dAqk`` alone),
     and the lean layouts of two or more tail passes hold that whole-sequence ``dAqk`` (256 B more per internal
     token-head) instead of a per-pass one.
@@ -863,7 +881,7 @@ class Plan:
         ):
             raise ValueError(
                 f"CakeKDANondetArena(lean=True) does not serve H={self.H}: the backward of this row launches the separate "
-                "dA / dv program (dav); the lean layouts serve the contract's head counts 1, 2, 4, 8, 16, 32, 64"
+                "dA / dv program (dav); the lean layouts serve every head count in 1..128 except 9 to 15 with the in-kernel L2 norm off"
             )
         if arena.batched and self.proportional:
             raise ValueError(
@@ -1094,6 +1112,7 @@ def plan(
     *,
     gate: str = "g",
     l2n: str = "off",
+    segment_rule: str = "tokens",
 ) -> Plan:
     """The :class:`Plan` of a packed problem; reads no tensor.
 
@@ -1113,9 +1132,15 @@ def plan(
     for ``use_qk_l2norm_in_kernel=True``, ``"fallback"`` for the token-local test route; ``ValueError`` when the
     architecture's records have no class of that mode.
 
-    The plan is a pure function of ``(S, num_docs, H, sm_count, arch, gate, l2n)`` and is cached on them: a repeated
-    problem returns the same :class:`Plan` object (its record and grid tables are shared, never modified), so the
-    calls of the default entry plan a repeated shape once.
+    ``segment_rule`` (keyword-only, ``"tokens"`` by default; :data:`SEGMENT_RULES`) is the segment rule of the
+    segmented route: ``"tokens"`` the token-aware rule (``cake_jit.segment_route`` with ``num_tokens=S``: on its
+    measured envelope the segment count also reads ``S``, never above the occupancy rule's), ``"occupancy"`` the
+    occupancy rule alone.  The records of the stages whose rules read the segment count are selected at the plan's
+    count (``cake_jit.select_record`` with the same ``num_tokens``).
+
+    The plan is a pure function of ``(S, num_docs, H, sm_count, arch, gate, l2n, segment_rule)`` and is cached on
+    them: a repeated problem returns the same :class:`Plan` object (its record and grid tables are shared, never
+    modified), so the calls of the default entry plan a repeated shape once.
     """
     arch = _plan_arch(arch)
     if arch not in cake_jit.ARCHES:
@@ -1128,6 +1153,25 @@ def plan(
         arch,
         _check_gate(gate),
         _check_l2n(l2n),
+        _check_segment_rule(segment_rule),
+    )
+
+
+def _check_segment_rule(segment_rule: str) -> str:
+    """``segment_rule`` when it is one of :data:`SEGMENT_RULES`, else ``ValueError``."""
+    if segment_rule not in SEGMENT_RULES:
+        raise ValueError(
+            f"segment_rule must be one of {SEGMENT_RULES}, got {segment_rule!r}"
+        )
+    return segment_rule
+
+
+def _tokens_kw(S: int, segment_rule: str) -> dict[str, int]:
+    """The ``num_tokens`` keyword of ``cake_jit.segment_plan`` / ``segment_args`` / ``select_record`` under
+    ``segment_rule``: the pack's token count for ``"tokens"``, none for ``"occupancy"`` (whose calls are the calls
+    they always were)."""
+    return (
+        {"num_tokens": int(S)} if _check_segment_rule(segment_rule) == "tokens" else {}
     )
 
 
@@ -1215,11 +1259,15 @@ def _plan(
     arch: str,
     gate: str = "g",
     l2n: str = "off",
+    segment_rule: str = "tokens",
 ) -> Plan:
     """:func:`plan` of the normalized scalars (the cache; a refused problem raises every time)."""
     nc_max, nc_pad, rows = _check_problem(S, num_docs, H, sm_count)
-    recur, segments, num_segments = cake_jit.segment_plan(num_docs, H, sm_count, arch)
-    proportional, seg_arg = cake_jit.segment_args(num_docs, H, sm_count, arch)
+    tokens = _tokens_kw(S, segment_rule)
+    recur, segments, num_segments = cake_jit.segment_plan(
+        num_docs, H, sm_count, arch, **tokens
+    )
+    proportional, seg_arg = cake_jit.segment_args(num_docs, H, sm_count, arch, **tokens)
     scalars = {
         "num_chunks_pad": nc_pad,
         "num_seqs": num_docs,
@@ -1236,7 +1284,13 @@ def _plan(
             stage: None
             if l2n != "off" and stage == "gate_epilogue"
             else select(
-                stage, **scalars, arch=arch, path=path, gate=gate, **_l2n_kw(l2n)
+                stage,
+                **scalars,
+                arch=arch,
+                path=path,
+                gate=gate,
+                **tokens,
+                **_l2n_kw(l2n),
             )
             for stage in _PATH_STAGES[path]
             if l2n == "fallback" or stage not in _L2N_FALLBACK_STAGES
@@ -2017,9 +2071,18 @@ def _arch_sms(sm_count: int | None, arch: str | None) -> tuple[str | None, int]:
     return arch, cake_jit.sm_count(torch.cuda.current_device())
 
 
-def _num_segments(num_docs: int, H: int, sm_count: int, arch: str | None) -> int:
-    """``NSEG`` of the problem (zero on the serial route)."""
-    return cake_jit.segment_plan(num_docs, H, sm_count, arch)[2]
+def _num_segments(
+    S: int,
+    num_docs: int,
+    H: int,
+    sm_count: int,
+    arch: str | None,
+    segment_rule: str = "tokens",
+) -> int:
+    """``NSEG`` of the problem under ``segment_rule`` (zero on the serial route)."""
+    return cake_jit.segment_plan(
+        num_docs, H, sm_count, arch, **_tokens_kw(S, segment_rule)
+    )[2]
 
 
 def _mode_bytes(
@@ -2106,6 +2169,7 @@ def workspace_bytes(
     fwd_layout: str = "fwd",
     gate: str = "g",
     l2n: str = "off",
+    segment_rule: str = "tokens",
 ) -> int:
     """Arena bytes a :class:`CakeKDANondetWorkspace` of the problem allocates (``backward=False``: the forward's layout only,
     ``fwd_layout`` of :data:`FWD_LAYOUTS`; a backward workspace takes the larger of the saved-set paths' layout and
@@ -2119,17 +2183,21 @@ def workspace_bytes(
     same in both modes).  The outputs, the saved set and the raw mode's per-call parameter partials are allocated
     per call: :func:`saved_bytes`, :func:`output_bytes`, :func:`memory_report`.  ``l2n`` is the in-kernel Q/K L2
     norm mode (:attr:`Plan.l2n`): any mode but ``"off"`` drops ``dg_int`` / ``db_int`` on every architecture and
-    puts the transient ``qn`` / ``kn`` on the forward layout's ``u`` / ``w`` slots (the same bytes)."""
+    puts the transient ``qn`` / ``kn`` on the forward layout's ``u`` / ``w`` slots (the same bytes).
+    ``segment_rule`` is the plan's segment rule (:data:`SEGMENT_RULES`)."""
     if save_mode not in SAVE_MODES:
         raise ValueError(
             f"workspace_bytes: save_mode must be one of {SAVE_MODES}, got {save_mode!r}"
         )
     _check_gate(gate)
     _check_l2n(l2n)
+    _check_segment_rule(segment_rule)
     arch, sms = _arch_sms(sm_count, arch)
     S, num_docs, H = int(S), int(num_docs), int(H)
     if arena is not None and (arena.lean or arena.batched):
-        return plan(S, num_docs, H, sms, arch, gate=gate, l2n=l2n).arena_bytes(
+        return plan(
+            S, num_docs, H, sms, arch, gate=gate, l2n=l2n, segment_rule=segment_rule
+        ).arena_bytes(
             backward=backward,
             save_mode=save_mode,
             arena=arena,
@@ -2137,7 +2205,7 @@ def workspace_bytes(
             fwd_layout=fwd_layout,
         )
     _nc_max, nc_pad, rows = _check_problem(S, num_docs, H, sms)
-    nseg = _num_segments(num_docs, H, sms, arch)
+    nseg = _num_segments(S, num_docs, H, sms, arch, segment_rule)
     return _arena_bytes(
         rows,
         H,
@@ -2159,15 +2227,18 @@ def tables_bytes(
     *,
     sm_count: int | None = None,
     arch: str | None = None,
+    segment_rule: str = "tokens",
 ) -> int:
     """Bytes of the int32 table buffer the forward hands over in the saved set (rebuilt by the backward when
     absent); given ``H``, the segmented route's block table is included when that route is dispatched (its length
-    reads ``sm_count`` and ``arch``, :func:`_arch_sms`)."""
+    reads ``sm_count`` and ``arch``, :func:`_arch_sms`, and the plan's ``segment_rule``)."""
     _nc_max, nc_pad, _rows = _geometry(int(S), int(num_docs))
     num_segments = 0
     if H is not None:
         arch, sms = _arch_sms(sm_count, arch)
-        num_segments = _num_segments(int(num_docs), int(H), sms, arch)
+        num_segments = _num_segments(
+            int(S), int(num_docs), int(H), sms, arch, segment_rule
+        )
     _name, off, words = _table_layout(nc_pad, int(num_docs), num_segments)[-1]
     return _round_up(off + words, ALIGN // 4) * 4
 
@@ -2181,6 +2252,7 @@ def saved_bytes(
     sm_count: int | None = None,
     arch: str | None = None,
     l2n: str = "off",
+    segment_rule: str = "tokens",
 ) -> int:
     """Bytes of the saved set: ``Aqk`` + ``Akk`` BF16 ``[S, H, 64]`` (``256 * S * H``), plus, when ``num_docs``
     is given, the tables and, for ``save_mode="light"`` (version 4), the fold's ``qg`` BF16 ``[R, H, 128]`` (the
@@ -2195,11 +2267,12 @@ def saved_bytes(
     segment states FP32 ``[2, NSEG, H, 128, 128]`` whose transfer half is the saved ``seg_m`` (``num_docs``
     required) instead.  With an in-kernel Q/K L2 norm mode (``l2n != "off"``) every version adds ``qk_rstd`` FP32
     ``[2, S, H]`` (``8 * S * H``); the raw q / k the backward reads again are the caller's inputs, not saved
-    tensors."""
+    tensors.  ``segment_rule`` is the plan's segment rule (:data:`SEGMENT_RULES`)."""
     if save_mode not in SAVE_MODES:
         raise ValueError(
             f"saved_bytes: save_mode must be one of {SAVE_MODES}, got {save_mode!r}"
         )
+    _check_segment_rule(segment_rule)
     S, H = int(S), int(H)
     total = 2 * S * H * BT * 2
     if _check_l2n(l2n) != "off":
@@ -2210,8 +2283,10 @@ def saved_bytes(
         return total
     num_docs = int(num_docs)
     arch, sms = _arch_sms(sm_count, arch)
-    num_segments = _num_segments(num_docs, H, sms, arch)
-    total += tables_bytes(S, num_docs, H, sm_count=sms, arch=arch)
+    num_segments = _num_segments(S, num_docs, H, sms, arch, segment_rule)
+    total += tables_bytes(
+        S, num_docs, H, sm_count=sms, arch=arch, segment_rule=segment_rule
+    )
     _nc_max, nc_pad, rows = _geometry(S, num_docs)
     if save_mode == "tape":
         total += nc_pad * H * D * D * 2 + rows * H * D * 2
@@ -2342,6 +2417,31 @@ def _raw_finalize_scratch(NC_pad: int, H: int, device: torch.device) -> dict[str
     }
 
 
+# PyTorch's CUDA caching allocator (default configuration) serves a request of more than 1 MiB from its large pool and
+# hands out a free large block whole when at most 1 MiB of it would remain; it rounds the segment of a request of
+# 10 MiB or more up to 2 MiB, so the free end of such a segment (the arena's, a saved tensor's) is under 2 MiB.
+_ALLOC_SMALL_MAX = 1 << 20
+_ALLOC_SEGMENT_ROUND = 2 << 20
+
+
+def _raw_partials(
+    NC_pad: int, H: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The raw backward's per-call parameter partials ``dA_part`` / ``db_part`` (:func:`_raw_partials_bytes`): FP32
+    ``[NC_pad, H, 128, 2]`` each, contiguous.  Two allocations, except when the bytes of each lie between 1 MiB and
+    2 MiB: then the two halves of one ``[2, NC_pad, H, 128, 2]`` allocation.  A partial in that band could take a free
+    segment end whole (:data:`_ALLOC_SEGMENT_ROUND`) and count up to 1 MiB of it as allocated; the pair is over 2 MiB
+    and fits none.  From 2 MiB on, a partial fits no such end, while one allocation of both could round to a segment
+    whose end (at most 1 MiB) counts as allocated, so the two stay separate.  The bytes, each partial's layout and their
+    lifetime (both are dropped with the call) are the same either way."""
+    shape = (int(NC_pad), int(H), D, 2)
+    half = int(NC_pad) * int(H) * D * 2 * 4
+    if _ALLOC_SMALL_MAX < half < _ALLOC_SEGMENT_ROUND:
+        dA_part, db_part = _alloc((2, *shape), torch.float32, device).unbind(0)
+        return dA_part, db_part
+    return _alloc(shape, torch.float32, device), _alloc(shape, torch.float32, device)
+
+
 def _raw_partials_bytes(NC_pad: int, H: int) -> int:
     """The raw backward's per-call parameter partials ``dA_part`` / ``db_part``: FP32 ``[NC_pad, H, 128, 2]`` each
     (the per-chunk ``(hi, lo)`` pairs of the GLM intra program), plus ``param_finalize``'s FP32 per-segment scratch
@@ -2459,10 +2559,12 @@ def memory_report(
     doc_lengths: Sequence[int] | None = None,
     gate: str = "g",
     l2n: str = "off",
+    segment_rule: str = "tokens",
 ) -> dict[str, Any]:
     """Bytes one problem needs beyond its inputs: the arena (forward-only and full, with the saved-set paths' and
     the replay's backward layouts apart), the saved set, the outputs and the totals of the three boundaries (arena
-    + the per-call tensors live at the peak).  ``sm_count`` and ``arch`` (:func:`_arch_sms`: the current device's
+    + the per-call tensors live at the peak).  ``segment_rule`` is the plan's segment rule (:data:`SEGMENT_RULES`).
+    ``sm_count`` and ``arch`` (:func:`_arch_sms`: the current device's
     when ``None``) select the segmented route's segment count.  ``arena`` (:class:`CakeKDANondetArena`) adds the configured
     arenas (``arena_bwd_configured`` / ``arena_fwd_configured``; the default's stays ``arena_bwd``), the floor of
     the lean layouts (``arena_floor``: 2820 B per internal token-head, 3076 in an in-kernel Q/K L2 norm mode, plus
@@ -2504,19 +2606,22 @@ def memory_report(
         )
     _check_gate(gate)
     _check_l2n(l2n)
+    _check_segment_rule(segment_rule)
     tape = save_mode == "tape"
     arch, sms = _arch_sms(sm_count, arch)
     S, num_docs, H = int(S), int(num_docs), int(H)
     arena = CakeKDANondetArena() if arena is None else arena
     p = (
-        plan(S, num_docs, H, sms, arch, gate=gate, l2n=l2n)
+        plan(S, num_docs, H, sms, arch, gate=gate, l2n=l2n, segment_rule=segment_rule)
         if (arena.lean or arena.batched or doc_lengths is not None)
         else None
     )
     if p is not None:
         p.check_arena(arena)
     _nc_max, nc_pad, rows = _check_problem(S, num_docs, H, sms)
-    recur, segments, num_segments = cake_jit.segment_plan(num_docs, H, sms, arch)
+    recur, segments, num_segments = cake_jit.segment_plan(
+        num_docs, H, sms, arch, **_tokens_kw(S, segment_rule)
+    )
     gf = _gate_fused(arch, gate, l2n)
     arena_fwd = _arena_bytes(
         rows,
@@ -2592,7 +2697,14 @@ def memory_report(
             segments * H * D * D * 4 if recur == "seg" else 0
         )
     saved = saved_bytes(
-        S, H, num_docs, save_mode=save_mode, sm_count=sms, arch=arch, l2n=l2n
+        S,
+        H,
+        num_docs,
+        save_mode=save_mode,
+        sm_count=sms,
+        arch=arch,
+        l2n=l2n,
+        segment_rule=segment_rule,
     )
     out_f = output_bytes(S, H, backward=False, l2n=l2n)
     out_b = output_bytes(S, H, backward=True, gate=gate, l2n=l2n)
@@ -2608,7 +2720,16 @@ def memory_report(
         p_l2n = p
         if p_l2n is None:
             try:
-                p_l2n = plan(S, num_docs, H, sms, arch, gate=gate, l2n=l2n)
+                p_l2n = plan(
+                    S,
+                    num_docs,
+                    H,
+                    sms,
+                    arch,
+                    gate=gate,
+                    l2n=l2n,
+                    segment_rule=segment_rule,
+                )
             except ValueError:  # no record serves the mode here (the call would raise)
                 p_l2n = None
         if p_l2n is not None:
@@ -2642,6 +2763,7 @@ def memory_report(
         "sm_count": sms,
         "arch": plan_arch,
         "path": "fwd",
+        **_tokens_kw(S, segment_rule),
     }
     fwd_wy = cake_jit.select_record("wy_fwd", **scalars) is not None
     wu_saved = _light_prep_saves(nc_pad, num_docs, H, sms, arch)[1]
@@ -3306,13 +3428,16 @@ class CakeKDANondetWorkspace:
         fwd_layout: str = "fwd",
         gate: str = "g",
         l2n: str = "off",
+        segment_rule: str = "tokens",
     ) -> CakeKDANondetWorkspace:
         """A workspace for ``S`` tokens in ``num_docs`` documents with ``H`` heads on ``device`` in gate mode
         ``gate`` (``"raw"``: the calls with ``use_gate_in_kernel=True``) and in-kernel Q/K L2 norm mode ``l2n``
-        (``"fused"``: the calls with ``use_qk_l2norm_in_kernel=True``); ``gate`` and ``l2n`` are checked before the
-        device is read."""
+        (``"fused"``: the calls with ``use_qk_l2norm_in_kernel=True``), on the plan of ``segment_rule``
+        (:data:`SEGMENT_RULES`); ``gate`` and ``l2n`` are checked
+        before the device is read."""
         _check_gate(gate)
         _check_l2n(l2n)
+        _check_segment_rule(segment_rule)
         index = _device_index(torch.device(device))
         return cls(
             plan(
@@ -3323,6 +3448,7 @@ class CakeKDANondetWorkspace:
                 cake_jit.device_arch(index),
                 gate=gate,
                 l2n=l2n,
+                segment_rule=segment_rule,
             ),
             device,
             backward=backward,
@@ -3348,13 +3474,16 @@ class CakeKDANondetWorkspace:
         launcher: Launcher | None = None,
         gate: str = "g",
         l2n: str = "off",
+        segment_rule: str = "tokens",
     ) -> CakeKDANondetWorkspace:
         """A workspace of the first arena option whose arena fits ``arena_budget_bytes`` (:func:`arena_for_budget`:
         the default, lean, two tail passes, four, then four passes over document groups halving from half the pack
-        down to one document per group, which needs ``doc_lengths``); ``ValueError`` when none fits.  ``gate`` /
+        down to one document per group, which needs ``doc_lengths``); ``ValueError`` when none fits.
+        ``segment_rule``: the plan's segment rule (:data:`SEGMENT_RULES`).  ``gate`` /
         ``l2n``: the modes, as :meth:`for_problem` (checked before the device is read)."""
         _check_gate(gate)
         _check_l2n(l2n)
+        _check_segment_rule(segment_rule)
         index = _device_index(torch.device(device))
         p = plan(
             S,
@@ -3364,6 +3493,7 @@ class CakeKDANondetWorkspace:
             cake_jit.device_arch(index),
             gate=gate,
             l2n=l2n,
+            segment_rule=segment_rule,
         )
         option = arena_for_budget(
             p,
@@ -5909,12 +6039,15 @@ def _backward(
         dbeta = _alloc((S, H), torch.bfloat16, ws.device)
         if gp is None:
             return {"dv": dv, "dg": dg, "dbeta": dbeta}
+        dA_log = _alloc((H,), torch.float32, ws.device)
+        ddt_bias = _alloc((H * D,), torch.float32, ws.device)
+        dA_part, db_part = _raw_partials(p.NC_pad, H, ws.device)
         raw_out.update(
             dg_raw=dg,
-            dA_log=_alloc((H,), torch.float32, ws.device),
-            ddt_bias=_alloc((H * D,), torch.float32, ws.device),
-            dA_part=_alloc((p.NC_pad, H, D, 2), torch.float32, ws.device),
-            db_part=_alloc((p.NC_pad, H, D, 2), torch.float32, ws.device),
+            dA_log=dA_log,
+            ddt_bias=ddt_bias,
+            dA_part=dA_part,
+            db_part=db_part,
         )
         return {"dv": dv, "dg": None, "dbeta": dbeta, **gate_values()}
 
@@ -7406,6 +7539,7 @@ __all__ = [
     "SAVED_VERSION_TAPE",
     "SAVE_MODES",
     "SCALE",
+    "SEGMENT_RULES",
     "SEG_SAVE_MIN_TOKENS_PER_SEG",
     "SLOTS",
     "TABLE_NAMES",

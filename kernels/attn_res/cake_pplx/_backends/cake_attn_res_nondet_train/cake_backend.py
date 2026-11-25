@@ -39,18 +39,21 @@ The kernels evaluate ``ds_j`` as ``p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))
 to 1 in FP32 (a peaked softmax), which would drop the dominant value's term of ``dw``.
 
 One forward call launches ``fwd`` alone: it writes ``out`` and the state the backward reads, ``p``, ``r`` and ``d``
-(FP32 ``[T, n]`` each, row-major).  One backward call zeroes ``dw`` and launches ``bwd``: every ``dv_j`` from ``dout``,
-the values, ``w`` and that state (no forward sum is recomputed).  Each CTA keeps its tokens' ``dw`` sums in registers
-and adds them into the zeroed FP32 ``dw`` once, after its token loop, with vector FP32 atomic reductions
+(FP32 ``[T, n]`` each, row-major).  One backward call launches ``bwd`` alone: every ``dv_j`` from ``dout``, the
+values, ``w`` and that state (no forward sum is recomputed).  Its binding zeroes ``dw`` first: ``dw`` is also its
+``zero_region`` argument, which ``run`` zeroes with a memset on the launch stream right before the launch, in the same
+host call, so no host work sits between the zeroing and the kernel.  Each CTA keeps its tokens' ``dw`` sums in
+registers and adds them into the zeroed FP32 ``dw`` once, after its token loop, with vector FP32 atomic reductions
 (``red.global.add.v4.f32``, four columns each).  The kernels take the values as nine pointers (this module passes the
 first value in the slots past ``n``, which the kernels never read) and ``n``, the token count and ``eps`` as run-time
 scalars.  ``fwd`` and ``bwd`` ship one program per value bound ``nmax`` from 2 to 9 (``nmax`` values held in
 registers); a call of ``n`` values runs the program of the smallest bound at least ``n`` (:func:`.cake_jit.nmax_for`).
 Every program serves every token count, so the libraries are a fixed set: no shape compiles a new one.
 
-``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once
-(:func:`.cake_jit.groups`, from a table of measured counts per architecture and SM count and, on a device the table
-does not hold, a fallback under every measured count); any grid is correct.  Every launch is a plain
+``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once,
+or fewer where a measured cap is lower (``fwd_n4`` takes at most 64 groups on B200, GB200 and GB300)
+(:func:`.cake_jit.groups`, from tables of measured counts and caps per architecture and SM count and, on a device
+the tables do not hold, a fallback under every measured count); any grid is correct.  Every launch is a plain
 stream-ordered launch on the current torch stream of the operands' device: nothing cooperative.  Nothing here reads an
 environment variable, reads device memory or synchronizes; grids and buffer sizes come from tensor shapes, the
 architecture and the SM count.
@@ -160,14 +163,14 @@ def sm_count(device_index: int) -> int:
 
 @functools.cache
 def _resident(name: str, device_index: int) -> int:
-    """The resident launch groups of record ``name`` on one CUDA device (:func:`.cake_jit.resident_groups`), looked
-    up once per record and device."""
+    """The launch groups of record ``name`` on one CUDA device: the resident groups, at most the record's cap
+    (:func:`.cake_jit.resident_groups`), looked up once per record and device."""
     return cake_jit.resident_groups(name, device_arch(device_index), sm_count(device_index))
 
 
 def _groups(name: str, T: int, device_index: int) -> int:
-    """:func:`.cake_jit.groups` of record ``name`` for ``T`` tokens on one CUDA device: the resident groups, never
-    more than ``T``, at least one."""
+    """:func:`.cake_jit.groups` of record ``name`` for ``T`` tokens on one CUDA device: the resident groups or the
+    record's cap (:data:`.cake_jit.GROUP_CAPS`), never more than ``T``, at least one."""
     return max(1, min(T, _resident(name, device_index)))
 
 
@@ -236,7 +239,8 @@ def specs_for_arch(arch: str) -> list[Any]:
 
 @functools.cache
 def parameters(name: str) -> tuple[str, ...]:
-    """The kernel parameter names of record ``name`` in ``run`` order (the argument plan without the grid)."""
+    """The ``run`` arguments of record ``name`` before the grid, in order (the argument plan without the grid): the
+    kernel parameters and, for a ``bwd`` record, the region its binding zeroes (``zero_region``)."""
     names: list[str] = []
     axes: list[str] = []
     for kind, key in record(name)["arg_plan"]:
@@ -259,16 +263,18 @@ def _entry(name: str, arch: str) -> Any:
 
 _VALUE_SLOTS = tuple(f"v{j}" for j in range(MAX_VALUES))
 _GRAD_SLOTS = tuple(f"dv{j}" for j in range(MAX_VALUES))
-# The kernel parameters each stage's launcher passes, in order (then the grid): every record of a stage takes these.
+# The arguments each stage's launcher passes, in order (then the grid): every record of a stage takes these.  The
+# last ``bwd`` argument, ``zero_region``, binds no kernel parameter: the binding zeroes it (the host passes ``dw``) on
+# the launch stream right before the launch.
 _STAGE_PARAMETERS: dict[str, tuple[str, ...]] = {
     "fwd": (*_VALUE_SLOTS, "w", "out", "p", "r", "d", "T", "n", "eps"),
-    "bwd": ("dout", *_VALUE_SLOTS, "w", "p", "r", "d", *_GRAD_SLOTS, "dw", "T", "n"),
+    "bwd": ("dout", *_VALUE_SLOTS, "w", "p", "r", "d", *_GRAD_SLOTS, "dw", "T", "n", "zero_region"),
 }
 
 
 @functools.cache
 def _plan(name: str, stage: str) -> None:
-    """Check, once per record, that record ``name`` serves ``stage`` and that its argument plan takes the parameters
+    """Check, once per record, that record ``name`` serves ``stage`` and that its argument plan takes the arguments
     :data:`_STAGE_PARAMETERS` lists for the stage, in that order: the launchers pass their arguments by position."""
     found = record(name)
     if found["stage"] != stage:
@@ -279,7 +285,7 @@ def _plan(name: str, stage: str) -> None:
 
 
 def _run(name: str, stage: str, device_index: int, args: tuple[Any, ...]) -> None:
-    """Launch record ``name`` of ``stage`` with its kernel parameters ``args`` in plan order, then the grid.  tvm-ffi
+    """Launch record ``name`` of ``stage`` with its ``run`` arguments ``args`` in plan order, then the grid.  tvm-ffi
     runs the call on the current torch stream of the device of its first CUDA tensor argument (every buffer is on
     CUDA device ``device_index``), and the binding makes that device current for the launch."""
     _plan(name, stage)
@@ -330,9 +336,11 @@ def launch_bwd(
 ) -> None:
     """Launch the backward record ``name`` over ``T = dout.shape[0] >= 1`` tokens on ``groups`` launch groups: every
     ``dv_j`` (BF16 ``[T, 7168]``, contiguous) written in full, and each CTA's sum of its tokens' ``dw`` terms added
-    once into ``dw`` (FP32 ``[7168]``, zeroed by the caller) with ``red.global.add.v4.f32``."""
+    once into ``dw`` (FP32 ``[7168]``) with ``red.global.add.v4.f32``.  ``dw`` is passed again as the binding's
+    ``zero_region``: the binding zeroes it on the launch stream right before the launch, so its contents on entry do
+    not matter."""
     grid = cake_jit.cluster_ctas(name) * int(groups)
-    args = (dout, *_slots(values), w, p, r, d, *_slots(dv), dw, int(dout.shape[0]), len(values))
+    args = (dout, *_slots(values), w, p, r, d, *_slots(dv), dw, int(dout.shape[0]), len(values), dw)
     _run(name, "bwd", dout.get_device(), (*args, grid, 1, 1))
 
 
@@ -510,9 +518,10 @@ def cake_attn_res_nondet_train_workspace_bytes(
     T: int, n: int, device: Union[torch.device, int, str, None] = None
 ) -> int:
     """Bytes of device memory one backward call over ``T`` tokens and ``n`` values allocates beside its operands and
-    outputs: 0 (``dw`` is an output, zeroed in place before the kernel adds into it).  A forward call allocates its
-    outputs alone: ``out`` and the retained state (:func:`cake_attn_res_nondet_train_retained_bytes`).  ``device`` is
-    accepted for the signature of the deterministic package's query and checked to be a CUDA device for ``T > 0``."""
+    outputs: 0 (``dw`` is an output, zeroed in place by the launch before the kernel adds into it).  A forward call
+    allocates its outputs alone: ``out`` and the retained state (:func:`cake_attn_res_nondet_train_retained_bytes`).
+    ``device`` is accepted for the signature of the deterministic package's query and checked to be a CUDA device for
+    ``T > 0``."""
     T, n = int(T), int(n)
     if T < 0:
         raise ValueError(f"T must be non-negative, got {T}")
@@ -618,9 +627,10 @@ def _launch_backward(
     dv: Optional[list[torch.Tensor]],
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
     """The backward of checked operands over ``T`` tokens: ``(dv, dw)``.  For ``T > 0`` torch's deterministic mode
-    is checked first (:func:`_alert_dw_atomics`).  Every buffer is allocated, the argument tuple built and the entry
-    looked up before ``dw`` is zeroed: the zeroing and the kernel launch back to back, so the device does not wait on
-    host work between them."""
+    is checked first (:func:`_alert_dw_atomics`).  ``dw`` is passed twice, as the kernel's ``dw`` and as the binding's
+    ``zero_region``: the binding zeroes it on the launch stream right before the launch, inside the one host call
+    (after it has read every argument), so the device does not wait on host work between the zeroing and the
+    kernel."""
     device = dout.device
     n = len(values)
     if dv is None:
@@ -629,16 +639,14 @@ def _launch_backward(
         # No token: no Cake kernel and no alert; the weight gradient is a zero fill (torch.zeros).
         return dv, torch.zeros(HIDDEN, dtype=_FP32, device=device)
     index = device.index
-    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    device_arch(index)  # RuntimeError on a device outside ARCHES
     _alert_dw_atomics()
     dw = torch.empty(HIDDEN, dtype=_FP32, device=device)
     name = cake_jit.record("bwd", n)
     groups = _groups(name, T, index)
-    args = (dout, *_slots(values), _weight(w), p, r, d, *_slots(dv), dw, T, n)
-    _plan(name, "bwd")
-    run = _entry(name, arch)
-    dw.zero_()
-    run(*args, cake_jit.cluster_ctas(name) * groups, 1, 1)
+    # dw twice: the kernel's dw, then the region the binding zeroes right before the launch
+    args = (dout, *_slots(values), _weight(w), p, r, d, *_slots(dv), dw, T, n, dw)
+    _run(name, "bwd", index, (*args, cake_jit.cluster_ctas(name) * groups, 1, 1))
     return dv, dw
 
 

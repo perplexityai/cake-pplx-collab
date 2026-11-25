@@ -17,15 +17,16 @@ Backend suite of ``cake_pplx._backends.cake_attn_res_nondet_train``, the non-det
 residual (values of width 7168).
 
 Without a device: the registry's records, stages, architectures and launch facts; the persistent grid sizes; every
-stage launcher passes every kernel parameter of its records in plan order, the first value in the slots past ``n``
-(the FFI entry replaced by a recorder); the workspace and retained-state sizes; ``build.json`` covers every record on
+stage launcher passes every argument of its records in plan order, the first value in the slots past ``n`` and ``dw``
+again as the backward binding's zeroed region (the FFI entry replaced by a recorder); the workspace and retained-state sizes; ``build.json`` covers every record on
 every architecture and its source digests; the loader imports standalone; a prebuilt library is preferred; the package
 reads no environment variable but the JIT shim's.
 
 On SM100 / SM103 / SM107: every record loads; the forward record writes every element of NaN-filled ``out``, ``p``,
 ``r`` and ``d`` and meets the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws); the backward
 from the kernel's own forward state writes every element of NaN-filled ``dv_j`` and meets the tier for every ``dv_j``
-and ``dw``; ``n`` from 1 to 9, scaled, peaked and all-zero-row values.
+and ``dw``, also launched directly into a NaN-filled ``dw`` (its binding zeroes it); ``n`` from 1 to 9, scaled, peaked
+and all-zero-row values.
 """
 
 from __future__ import annotations
@@ -121,6 +122,11 @@ def test_registry_records_are_well_formed() -> None:
         assert launch["cooperative"] is False, name
         kinds = [kind for kind, _ in rec["arg_plan"]]
         assert kinds[-3:] == ["grid", "grid", "grid"], name
+        # a backward's binding zeroes a region (the host passes dw) right before the launch; a forward's zeroes none
+        zeroed = [["zero", "zero_region"]] if rec["stage"] == "bwd" else []
+        assert [slot for slot in rec["arg_plan"] if slot[0] == "zero"] == zeroed, name
+        if zeroed:
+            assert rec["arg_plan"][-4] == zeroed[0], name  # the last argument before the grid
         assert cake_backend.parameters(name), name
         cake_backend._plan(name, rec["stage"])
     with pytest.raises(ValueError):
@@ -169,6 +175,16 @@ def test_the_resident_group_table_is_bounded() -> None:
             assert int(fraction * capped * sms) // 4 <= held, (arch, sms, per_sm)
             for name in PERSISTENT_RECORDS:
                 assert 1 <= held <= per_sm * sms // cake_jit.cluster_ctas(name), (arch, sms, per_sm)
+    # A cap only lowers a measured device's resident groups of one program; the other programs keep theirs.
+    for (arch, sms), caps in cake_jit.GROUP_CAPS.items():
+        assert (arch, sms) in cake_jit.RESIDENT_GROUPS, (arch, sms)
+        table = cake_jit.RESIDENT_GROUPS[(arch, sms)]
+        for name, cap in caps.items():
+            assert name in PERSISTENT_RECORDS, name
+            assert 1 <= cap < table[cake_jit.CTAS_PER_SM[name]], (arch, sms, name, cap)
+            assert cake_jit.resident_groups(name, arch, sms) == cap, (arch, sms, name)
+        for name in set(PERSISTENT_RECORDS) - set(caps):
+            assert cake_jit.resident_groups(name, arch, sms) == table[cake_jit.CTAS_PER_SM[name]], (arch, sms, name)
     for name in PERSISTENT_RECORDS:
         ctas = cake_jit.cluster_ctas(name)
         per_sm = cake_jit.CTAS_PER_SM[name]
@@ -232,7 +248,7 @@ def test_stage_launchers_pass_every_kernel_parameter(n, monkeypatch) -> None:
         if name.startswith("fwd_"):
             assert named["out"] is out and named["eps"] == 1e-5
         else:
-            assert named["dout"] is dout and named["dw"] is dw
+            assert named["dout"] is dout and named["dw"] is dw and named["zero_region"] is dw
             for j in range(MAX_VALUES):
                 assert named[f"dv{j}"] is dv[j if j < n else 0], (name, j)
 
@@ -412,9 +428,11 @@ def test_every_record_loads(device) -> None:
 
 def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
     """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters the
-    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and the measured table entry of this
-    device, when it has one, equals that count.  Skipped only when the query cannot run on this host (no
-    ``cuobjdump``, no driver library); a query that fails for one program fails the test."""
+    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and so is the measured table entry of
+    this device, when it has one: the entry holds the least count measured over the boards of its SM count, which can
+    differ by a cluster (two R200 boards of 208 SMs hold 153 and 154 clusters at 3 CTAs per SM).  The grid is that
+    entry, or the program's cap (``cake_jit.GROUP_CAPS``) when the device has one for it.  Skipped only when the query
+    cannot run on this host (no ``cuobjdump``, no driver library); a query that fails for one program fails the test."""
     why = unreachable()
     if why is not None:
         pytest.skip(f"the occupancy query is not reachable: {why}")
@@ -429,8 +447,9 @@ def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
         found, why = max_active_clusters(library, cake_jit.MODULES[name], index)
         grid = cake_backend._groups(name, 2**31 - 1, index)
         table = cake_jit.RESIDENT_GROUPS.get((arch, sms), {}).get(cake_jit.CTAS_PER_SM[name])
+        cap = cake_jit.GROUP_CAPS.get((arch, sms), {}).get(name)
         print(
-            f"OCCUPANCY nondet {arch} sms={sms} {name} driver={found} grid_groups={grid} table={table} "
+            f"OCCUPANCY nondet {arch} sms={sms} {name} driver={found} grid_groups={grid} table={table} cap={cap} "
             f"ctas_per_sm={cake_jit.CTAS_PER_SM[name]} ({why})"
         )
         if found is None:
@@ -438,8 +457,10 @@ def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
             continue
         if grid > found:
             problems.append(f"{name}: grid {grid} groups > {found} resident")
-        if table is not None and table != found:
-            problems.append(f"{name}: measured table {table} != driver {found}")
+        if table is not None and table > found:
+            problems.append(f"{name}: measured table {table} > driver {found}")
+        if table is not None and grid != min(table, cap or table):
+            problems.append(f"{name}: grid {grid} groups != table {table} capped at {cap}")
     assert not problems, problems
 
 
@@ -496,8 +517,8 @@ def test_the_forward_record_matches_the_reference(n, T, data, weights, device, r
 
 @pytest.mark.parametrize(("n", "T", "data", "weights"), CASES, ids=CASE_IDS)
 def test_the_backward_matches_the_reference(n, T, data, weights, device, record_property) -> None:
-    """The backward (``bwd`` after the host zeroes ``dw``) from the kernel's own forward state, with NaN-filled
-    ``dv_j``, meets the tier for every ``dv_j`` and ``dw``."""
+    """The explicit backward (``bwd``, whose binding zeroes ``dw``) from the kernel's own forward state, with
+    NaN-filled ``dv_j``, meets the tier for every ``dv_j`` and ``dw``."""
 
     def run(ns):
         _, p, r, d = _forward_state(ns, device)
@@ -511,3 +532,28 @@ def test_the_backward_matches_the_reference(n, T, data, weights, device, record_
         return make_inputs(T, n, seed=seed, device=device, data=data, weights=weights)
 
     _record_failures(*judge_draws(run, make, seed=23 + T + 100 * n), record_property)
+
+
+@pytest.mark.parametrize(("n", "T", "data", "weights"), CASES, ids=CASE_IDS)
+def test_the_backward_record_zeroes_dw(n, T, data, weights, device, record_property) -> None:
+    """The backward record launched directly into NaN-filled ``dv_j`` and a NaN-filled ``dw`` (the binding zeroes
+    ``dw``, its ``zero_region``, right before the launch) from the kernel's own forward state meets the tier for every
+    ``dv_j`` and ``dw``."""
+    arch = cake_backend.device_arch(device.index)
+    name = cake_jit.record("bwd", n)
+    groups = cake_jit.groups(name, T, arch, cake_backend.sm_count(device.index))
+
+    def run(ns):
+        _, p, r, d = _forward_state(ns, device)
+        dv = [torch.full((T, HIDDEN), math.nan, dtype=torch.bfloat16, device=device) for _ in range(n)]
+        dw = torch.full((HIDDEN,), math.nan, device=device)
+        cake_backend.launch_bwd(
+            name, dout=ns.dout, values=ns.values, w=ns.w, p=p, r=r, d=d, dv=dv, dw=dw, groups=groups
+        )
+        torch.cuda.synchronize(device)
+        return {**{f"dv{j}": g for j, g in enumerate(dv)}, "dw": dw}
+
+    def make(seed):
+        return make_inputs(T, n, seed=seed, device=device, data=data, weights=weights)
+
+    _record_failures(*judge_draws(run, make, seed=29 + T + 100 * n), record_property)

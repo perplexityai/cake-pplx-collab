@@ -5558,12 +5558,12 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
-        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 520, 568): (1, 24576),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt", 520, 568): (1, 16384),
-        ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 1016): (1, 16384),
+        ("bwd_dt", 520, 568): (1, 32768),
+        ("bwd_dt", 576, 640): (1, 32768),
+        ("bwd_dt", 648, 1016): (1, 32768),
         ("fwd", 512, 512): (1, 24576),
         ("fwd", 520, 544): (1, 12288),
         ("fwd", 552, 568): (1, 8192),
@@ -5602,12 +5602,13 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd", 616, 760): (1, 31292),
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
-        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 520, 568): (1, 24576),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt", 520, 568): (1, 16384),
-        ("bwd_dt", 576, 640): (1, 24576),
-        ("bwd_dt", 648, 1016): (1, 16384),
+        ("bwd_dt", 520, 568): (1, 32768),
+        ("bwd_dt", 576, 640): (1, 32768),
+        ("bwd_dt", 648, 760): (1, 32768),
+        ("bwd_dt", 768, 1016): (1, 16384),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
         ("fwd", 640, 688): (1, 4096),
@@ -5864,6 +5865,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("bwd", 512, 832): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 840, 888): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 896, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 616): (
@@ -5871,8 +5873,18 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 624, 632): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 640, 736): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 744, 760): (
+            128,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
@@ -5881,9 +5893,19 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 776, 792): (
+            128,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 800, 800): (
             1,
             2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 808, 824): (
+            128,
+            1000,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 832, 832): (
@@ -5891,14 +5913,29 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 840, 856): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 864, 864): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 872, 888): (
+            128,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 896, 896): (
             1,
             4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 904, 952): (
+            128,
+            1000,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 960, 1016): (
@@ -6104,6 +6141,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("bwd", 512, 896): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 904, 952): (128, 1000, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 960, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 640): (
@@ -6111,8 +6149,18 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 648, 664): (
+            512,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 672, 672): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 680, 696): (
+            512,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
@@ -6121,14 +6169,29 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 776, 792): (
+            128,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 800, 832): (
             128,
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 840, 856): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 864, 896): (
             1,
             4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 904, 952): (
+            128,
+            2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 960, 1016): (

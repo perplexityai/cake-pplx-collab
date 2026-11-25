@@ -38,18 +38,22 @@ and one FP32 row of the weight-gradient partial sums per cluster,
 partial rows in one fixed order and writes ``dq_weight = dw * k_weight`` and
 ``dk_weight = dw * q_weight`` in FP32).  Every sum has one fixed order, so every
 output is bitwise reproducible run to run on one device: the cluster count
-follows the token count, the record and the device only.
+follows the token count, the record, the device and whether the call has a
+token mask, nothing else.
 
 The ``fwd`` and ``bwd`` kernels give each token to one cluster of four CTAs
 (each CTA owns 1280 of the 5120 columns of every stream) and walk the tokens
 persistently: cluster ``c`` of ``n`` serves the tokens ``c, c + n, ...``.
 The grid is ``(4 * n, 1, 1)`` with ``n = min(T, resident clusters)``, the
 clusters one device holds at once (:func:`resident_clusters`: measured per
-architecture, SM count and CTAs per SM), or for a backward call of at least
-:data:`LARGE_BWD_MIN_TOKENS` tokens on a device of :data:`LARGE_BWD_CLUSTERS`
-``n = min(T, its entry)`` (:func:`clusters`); any grid is correct (the clusters
-never wait on each other).  The dot product ``P = sum_d w_d h_d k_d`` is
-summed in one of two ways: ``dot2`` as a compensated FP32 dot product (each
+architecture, SM count and CTAs per SM), or ``n = min(T, entry)`` with the
+device's entry of :data:`LARGE_BWD_CLUSTERS` for a backward call of at least
+:data:`LARGE_BWD_MIN_TOKENS` tokens, or of :data:`HELD_FWD_CLUSTERS` for a
+forward call of at most that many tokens or without a token mask of at least
+:data:`HELD_FWD_UNMASKED_MIN_TOKENS` tokens (:func:`clusters`); any grid is
+correct (the clusters never wait on each other).  The dot product
+``P = sum_d w_d h_d k_d`` is summed in one of two ways: ``dot2`` as a
+compensated FP32 dot product (each
 product split with an FMA, each running sum with an error-free two-sum, the
 error words summed in FP32 and added once at the end) or ``f32`` in one FP32
 word.  ``fwd`` ships both (``fwd_f32`` the default, ``fwd_dot2`` opt-in);
@@ -223,12 +227,11 @@ CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3, 
 STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_100a", "sm_103a", "sm_107a"})
 STAGE_BWD_MIN_TOKENS = 4096
 # A call with a token mask launches ``bwd_dot2_order`` from these token counts
-# on these architectures: from there it is no slower with any mask measured
-# (every token kept, every second, fourth or tenth token kept, a random half,
-# runs of 576 tokens) and faster with the sparse ones; below them it is slower
-# with every token or nine in ten kept at some counts (measured on B200,
-# GB300 and VR200).
-ORDER_BWD_MIN_TOKENS: dict[str, int] = {"sm_100a": 8192, "sm_103a": 8192, "sm_107a": 4096}
+# on these architectures and ``bwd_dot2`` below them; the two give the same
+# ``dx``, ``dkey`` and ``dvalue`` bits.  Each threshold comes from timing the
+# two programs on the devices of its architecture with token masks from every
+# token kept to none kept.
+ORDER_BWD_MIN_TOKENS: dict[str, int] = {"sm_100a": 4096, "sm_103a": 6144, "sm_107a": 4096}
 # The forward record a call launches (:func:`forward_record`): ``fwd_f32``'s
 # ``cta1`` form gives the same bits; it is the faster one from
 # ``CTA1_FWD_MIN_TOKENS[(arch, sm_count, acc)]`` tokens on a device (its
@@ -267,16 +270,28 @@ RESIDENT_CLUSTERS: dict[tuple[str, int], dict[int, int]] = {
 UNMEASURED_CLUSTER_FRACTION = 0.85
 # The backward grid of a call of many tokens where it is not the resident
 # count: (architecture, SM count) -> the clusters of the ``bwd`` records (all
-# three backward programs) for a call of at least
-# :data:`LARGE_BWD_MIN_TOKENS` tokens.  Every smaller call and
-# every ``fwd`` call keeps :func:`resident_clusters`.  B300 (148 SMs) has no
+# three backward programs) for a call of at least :data:`LARGE_BWD_MIN_TOKENS`
+# tokens.  Every smaller backward call keeps :func:`resident_clusters` (the
+# forward: :data:`HELD_FWD_CLUSTERS`).  B300 (148 SMs) has no
 # ``RESIDENT_CLUSTERS`` entry (the fallback gives 125 forward and 94 backward
 # clusters) and holds 142 / 104 clusters.  From 2048 tokens its backward runs
 # 104, all it holds.  Below 2048 tokens it keeps 94: at 129 tokens with a token
-# mask, 104 clusters were slower.  Its forward keeps 125: at 142 clusters it
-# ran slower with every second token masked.
+# mask, 104 clusters were slower.
 LARGE_BWD_CLUSTERS: dict[tuple[str, int], int] = {("sm_103a", 148): 104}
 LARGE_BWD_MIN_TOKENS = 2048
+# The forward grid of a device whose forward clusters were measured but which
+# the resident table does not hold: (architecture, SM count) -> the clusters of
+# the four-CTA ``fwd`` records it holds.  A forward call of at most that many
+# tokens runs one cluster a token (one wave), with a token mask or without one;
+# a forward call without a token mask of at least
+# :data:`HELD_FWD_UNMASKED_MIN_TOKENS` tokens runs that many clusters; every
+# other forward call keeps :func:`resident_clusters`.  B300 (148 SMs) holds 142
+# forward clusters, where the fallback gives 125, so a call of 126 to 142
+# tokens took two waves.  A call with a token mask of more than 142 tokens
+# keeps 125: at 142 clusters the forward ran slower with every second token
+# masked.  Below 4096 tokens a call without one keeps 125 too.
+HELD_FWD_CLUSTERS: dict[tuple[str, int], int] = {("sm_103a", 148): 142}
+HELD_FWD_UNMASKED_MIN_TOKENS = 4096
 # Columns of the flattened [4 * 5120] weight gradient one CTA of ``dw_reduce``
 # sums (32 lanes of four columns; its eight warps split the partial rows).
 DW_REDUCE_COLUMNS_PER_CTA = 128
@@ -325,18 +340,23 @@ def token_bounds(arch: str, sm_count: int) -> tuple[int, ...]:
     """The token counts, in ascending order, from which a call on a device of
     ``arch`` with ``sm_count`` SMs may launch another record or another grid:
     :data:`LARGE_BWD_MIN_TOKENS`, :data:`STAGE_BWD_MIN_TOKENS`, the
-    :data:`ORDER_BWD_MIN_TOKENS` of ``arch`` and the
-    :data:`CTA1_FWD_MIN_TOKENS` of the device (those above one token).  Below
-    the first, between two neighbours and from the last,
+    :data:`ORDER_BWD_MIN_TOKENS` of ``arch``, the :data:`CTA1_FWD_MIN_TOKENS`
+    of the device and, on a device of :data:`HELD_FWD_CLUSTERS`, one token
+    more than its entry and :data:`HELD_FWD_UNMASKED_MIN_TOKENS` (those above
+    one token).  Below the first, between two neighbours and from the last,
     :func:`forward_record`, :func:`backward_record` and
-    :func:`persistent_clusters` give one answer for every token count, so the
-    host looks a call's record and grid up once per device and token class
-    (:mod:`.cake_backend`).  A rule on another token count adds it here."""
+    :func:`persistent_clusters` give one answer for every token count of a
+    mask choice, so the host looks a call's record and grid up once per
+    device, mask choice and token class (:mod:`.cake_backend`).  A rule on
+    another token count adds it here."""
     found = {LARGE_BWD_MIN_TOKENS, STAGE_BWD_MIN_TOKENS}
     order = ORDER_BWD_MIN_TOKENS.get(arch)
     if order is not None:
         found.add(order)
     found.update(least for (at, sms, _), least in CTA1_FWD_MIN_TOKENS.items() if (at, sms) == (arch, sm_count))
+    held = HELD_FWD_CLUSTERS.get((arch, sm_count))
+    if held is not None:
+        found.update((held + 1, HELD_FWD_UNMASKED_MIN_TOKENS))
     return tuple(sorted(least for least in found if least > 1))
 
 
@@ -370,28 +390,37 @@ def resident_clusters(record_name: str, arch: str, sm_count: int) -> int:
     return max(1, int(UNMEASURED_CLUSTER_FRACTION * per_sm * sm_count) // CLUSTER_CTAS)
 
 
-def persistent_clusters(record_name: str, arch: str, sm_count: int, large: bool) -> int:
+def persistent_clusters(record_name: str, arch: str, sm_count: int, tokens: int, masked: bool) -> int:
     """The units (four-CTA clusters, or the CTAs of a ``cta1`` forward) of the
-    persistent grid of the ``fwd`` or ``bwd`` record ``record_name`` on a
+    persistent grid of the ``fwd`` or ``bwd`` record ``record_name`` in a call
+    of ``tokens`` tokens with a token mask (``masked``) or without one on a
     device of ``arch`` with ``sm_count`` SMs before the token count caps them:
     for a ``bwd`` record in a call of at least :data:`LARGE_BWD_MIN_TOKENS`
-    tokens (``large``) the :data:`LARGE_BWD_CLUSTERS` entry of the device if
-    it has one, else :func:`resident_units`."""
-    if large and MODULES[record_name]["stage"] == "bwd":
+    tokens the :data:`LARGE_BWD_CLUSTERS` entry of the device if it has one;
+    for a four-CTA ``fwd`` record in a call of at most the
+    :data:`HELD_FWD_CLUSTERS` entry of the device tokens, or without a token
+    mask of at least :data:`HELD_FWD_UNMASKED_MIN_TOKENS` tokens, that entry;
+    else :func:`resident_units`."""
+    stage = MODULES[record_name]["stage"]
+    if stage == "bwd" and tokens >= LARGE_BWD_MIN_TOKENS:
         entry = LARGE_BWD_CLUSTERS.get((arch, sm_count))
         if entry is not None:
+            return entry
+    if stage == "fwd" and record_name not in CTA1_RECORDS:
+        entry = HELD_FWD_CLUSTERS.get((arch, sm_count))
+        if entry is not None and (tokens <= entry or (not masked and tokens >= HELD_FWD_UNMASKED_MIN_TOKENS)):
             return entry
     return resident_units(record_name, arch, sm_count)
 
 
-def clusters(record_name: str, tokens: int, arch: str, sm_count: int) -> int:
+def clusters(record_name: str, tokens: int, arch: str, sm_count: int, masked: bool) -> int:
     """The unit count of the persistent grid of the ``fwd`` or ``bwd`` record
-    ``record_name`` (four-CTA clusters, or the CTAs of a ``cta1`` forward):
+    ``record_name`` (four-CTA clusters, or the CTAs of a ``cta1`` forward) in a
+    call of ``tokens`` tokens with a token mask (``masked``) or without one:
     :func:`persistent_clusters` of the call (the units the device holds at
-    once, or the backward grid of a call of many tokens), never more units
-    than tokens, at least one."""
-    large = tokens >= LARGE_BWD_MIN_TOKENS
-    return max(1, min(tokens, persistent_clusters(record_name, arch, sm_count, large)))
+    once, or the grid of the call's table), never more units than tokens, at
+    least one."""
+    return max(1, min(tokens, persistent_clusters(record_name, arch, sm_count, tokens, masked)))
 
 
 def dw_reduce_grid() -> tuple[int, int, int]:
@@ -401,11 +430,12 @@ def dw_reduce_grid() -> tuple[int, int, int]:
     return (STREAMS * HIDDEN // DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
 
 
-def grid(record_name: str, tokens: int, arch: str, sm_count: int) -> tuple[int, int, int]:
-    """The launch grid of ``record_name`` for ``tokens >= 1`` tokens on a
-    device of ``arch`` with ``sm_count`` SMs: ``(4 * clusters, 1, 1)`` for
-    ``fwd`` and ``bwd`` (``(clusters, 1, 1)`` CTAs for a ``cta1`` forward),
-    :func:`dw_reduce_grid` for ``dw_reduce``."""
+def grid(record_name: str, tokens: int, arch: str, sm_count: int, masked: bool) -> tuple[int, int, int]:
+    """The launch grid of ``record_name`` for a call of ``tokens >= 1`` tokens
+    with a token mask (``masked``) or without one on a device of ``arch`` with
+    ``sm_count`` SMs: ``(4 * clusters, 1, 1)`` for ``fwd`` and ``bwd``
+    (``(clusters, 1, 1)`` CTAs for a ``cta1`` forward), :func:`dw_reduce_grid`
+    for ``dw_reduce``."""
     if MODULES[record_name]["stage"] == "dw_reduce":
         return dw_reduce_grid()
-    return (unit_ctas(record_name) * clusters(record_name, tokens, arch, sm_count), 1, 1)
+    return (unit_ctas(record_name) * clusters(record_name, tokens, arch, sm_count, masked), 1, 1)

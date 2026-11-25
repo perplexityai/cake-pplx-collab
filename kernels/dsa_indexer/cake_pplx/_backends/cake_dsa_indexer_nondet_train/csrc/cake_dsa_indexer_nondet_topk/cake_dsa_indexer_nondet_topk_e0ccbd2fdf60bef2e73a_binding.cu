@@ -299,7 +299,7 @@ void Run(TensorView a_Q, TensorView a_Kraw, TensorView a_W, TensorView a_cu_seql
   void* kernel_args[] = {&v_Q, &v_Kraw, &v_W, &v_cu_seqlens_q, &v_cu_seqlens_k, &v_q_offsets, &v_CandBlocks, &v_Indices, &v_Scores, &v_Lists, &v_Cand, &v_TicketWord, &v_num_segments, &v_top_k, &v_has_offsets, &v_cand_width, &v_cand_cap, &v_check_period, &v_grid_ctas, &v_softmax_scale, &v_K8, &v_Kraw_stride_m2};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
-  config.blockDim = dim3(512, 1, 1);
+  config.blockDim = dim3(640, 1, 1);
   config.dynamicSmemBytes = 203008;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a), kernel_args),

@@ -583,6 +583,7 @@ def force_row_form(monkeypatch, P: Package, op: str, form: str, arch: str) -> bo
                 return False
             monkeypatch.setitem(c["dgrad_evict_first_min_rows"], arch, 1)
             monkeypatch.setitem(c, "dgrad_evict_first_min_k", 1)
+            monkeypatch.setitem(c, "dgrad_evict_first_skip_max_n", {})
         else:
             monkeypatch.setitem(c, "dgrad_evict_first_archs", [])
     elif ef:
@@ -601,6 +602,7 @@ def force_row_form(monkeypatch, P: Package, op: str, form: str, arch: str) -> bo
         if op == "dgrad":
             monkeypatch.setitem(c["dgrad_wide_ts33_min_rows"], arch, 1)
             monkeypatch.setitem(c, "dgrad_wide_ts33_min_k", 1)
+            monkeypatch.setitem(c, "dgrad_wide_ts33_short_n", {})
         else:
             monkeypatch.setitem(c, "fwd_wide_ts33_max_k", 1 << 30)
             monkeypatch.setitem(c, "fwd_wide_ts33_max_rows", 1 << 30)
@@ -681,6 +683,134 @@ def form_ks(P: Package, form: str) -> tuple[int, ...]:
 def form_k(P: Package, form: str) -> int:
     """The smallest ``K`` of ``form`` (:func:`form_ks`)."""
     return form_ks(P, form)[0]
+
+
+def queue_bounds_hold(
+    rule: dict[str, Any], groups: int, rows: int, n: int, k: int
+) -> bool:
+    """Whether a weight gradient of ``rows`` rows (``x.shape[0]``) over ``groups`` groups with an
+    ``N x K`` ``dW[e]`` meets every optional bound of the ``queue_walk`` rule ``rule``
+    (``cake_backend.QUEUE_RULE_BOUNDS``), by the rule's definition: ``"rows"`` holds ``rows``,
+    ``"rows_per_group"`` ``rows / groups`` (exactly: ``min * groups <= rows <= max * groups``),
+    ``"n"`` ``N`` and ``"k"`` ``K``, both ends included and a None end leaving its side open."""
+    values = {
+        "rows": (rows, 1),
+        "rows_per_group": (rows, groups),
+        "n": (n, 1),
+        "k": (k, 1),
+    }
+    for key, (value, scale) in values.items():
+        if key not in rule:
+            continue
+        low, high = rule[key]
+        if (low is not None and value < low * scale) or (
+            high is not None and value > high * scale
+        ):
+            return False
+    return True
+
+
+# The slice of :func:`check_queue_bounds`: groups ``[1, 5)`` of six (an empty and a one-row group
+# in it), with rows after the last group, so the operands' rows, the slice's rows and their means
+# per group all differ.
+QUEUE_BOUND_LAYOUT_SIZES = (3000, 0, 4100, 1, 2600, 513)
+QUEUE_BOUND_SLICE = (1, 5)
+
+
+def _queue_bound_ranges(value: int, scale: int) -> list[tuple[int | None, int | None]]:
+    """Ranges ``[min, max]`` of a bound that holds ``value`` when ``min * scale <= value <= max *
+    scale`` (a None end open): the tightest that holds it and its two halves open on one side,
+    then the ranges just past it (above and below, closed and open on the far side), which do
+    not."""
+    low, rem = divmod(value, scale)
+    high = low + (rem > 0)
+    return [
+        (low, high),
+        (None, high),
+        (low, None),
+        (low + 1, low + 1),
+        (low + 1, None),
+        (high - 1, high - 1),
+        (None, high - 1),
+    ]
+
+
+def check_queue_bounds(monkeypatch, P: Package) -> None:
+    """CPU check of the values the host gives the queue walk's optional rule bounds
+    (``cake_backend.QUEUE_RULE_BOUNDS``): under constants that select ``main_halves`` on the
+    148-SM sm_100a part and one rule that names it for every output, SM count and group count
+    plus one bound, a weight gradient binds the queue walk exactly where that bound holds the
+    call's own value: ``"rows"`` the rows of ``g`` and ``x`` (the device slice and reference 1:
+    every row of the operands, not the slice's rows; reference 2: the slice's rows),
+    ``"rows_per_group"`` those rows over ``E`` (compared exactly in integers), ``"n"`` ``N``
+    and ``"k"`` ``K``.  Each bound is set to the tightest range holding the value of the slice
+    or of reference 2, to its halves open on one side and to the ranges just past it, for a
+    bf16 overwrite and an fp32 accumulate; the plan is the call's with no bound, and the slice
+    binds the lead twins of what reference 1 binds (:func:`assert_lead`)."""
+    cb, c = P.cb, P.constants
+    if "queue_walk" not in c:
+        pytest.skip(f"{P.key} has no queue walk")
+    arch, sms, form = "sm_100a", 148, "k512_queue"
+    layout = Layout(QUEUE_BOUND_LAYOUT_SIZES, n=512, k=form_k(P, form), tail=7)
+    e0, e1 = QUEUE_BOUND_SLICE
+    groups = e1 - e0
+    r0, r1 = layout.bounds(e0, e1)
+    # The slice (and reference 1) and reference 2: their rows differ, and neither mean is whole.
+    rows = (layout.rows, layout.rows, r1 - r0)
+    assert rows[2] < rows[0] and rows[0] % groups and rows[2] % groups, rows
+    names = ("slice", "ref1", "ref2")
+    seen = set()
+    with monkeypatch.context() as scope:
+        fake_device(scope, P, arch, sms)
+        assert force_wgrad_form(scope, P, form, arch) == (512, cb.QUEUE_STAGE)
+        (rule,) = c["queue_walk"]
+
+        def calls(bounds: dict[str, Any], out_dtype: torch.dtype, accumulate: bool):
+            scope.setitem(c, "queue_walk", [dict(rule, **bounds)])
+            return meta_calls(
+                P,
+                "wgrad",
+                layout,
+                e0,
+                e1,
+                out_dtype=out_dtype,
+                accumulate=accumulate,
+            )[:3]
+
+        for out_dtype, accumulate in ((torch.bfloat16, False), (torch.float32, True)):
+            free = calls({}, out_dtype, accumulate)
+            values = {
+                "rows": rows,
+                "rows_per_group": rows,
+                "n": (layout.n,) * 3,
+                "k": (layout.k,) * 3,
+            }
+            assert tuple(values) == tuple(cb.QUEUE_RULE_BOUNDS)
+            for key, of in values.items():
+                scale = groups if key == "rows_per_group" else 1
+                for probe in sorted({of[0], of[2]}):
+                    for low, high in _queue_bound_ranges(probe, scale):
+                        what = str(
+                            (key, P.dtype_name(out_dtype), accumulate, low, high)
+                        )
+                        bound = {key: [low, high]}
+                        got = calls(bound, out_dtype, accumulate)
+                        assert_lead(P, got[0], got[1], what)
+                        for name, call, plain, n_rows in zip(
+                            names, got, free, rows, strict=True
+                        ):
+                            holds = queue_bounds_hold(
+                                bound, groups, n_rows, layout.n, layout.k
+                            )
+                            fused = call.plan["accumulate"] == "fused"
+                            stage = cb.QUEUE_STAGE if holds else "main_halves"
+                            stage += cb.ACC_SUFFIX if fused else ""
+                            assert call.plan == plain.plan, (what, name)
+                            assert call.stages[0] == stage, (what, name, call.stages)
+                            seen.add((key, name, holds))
+    for key in cb.QUEUE_RULE_BOUNDS:
+        for name in names:
+            assert {(key, name, True), (key, name, False)} <= seen, (key, name)
 
 
 def wgrad_plan(

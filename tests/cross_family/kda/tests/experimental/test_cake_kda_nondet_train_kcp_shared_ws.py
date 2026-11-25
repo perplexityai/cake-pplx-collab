@@ -564,6 +564,7 @@ def test_byte_query_of_a_list_is_the_per_pool_max() -> None:
                                 backward=backward,
                                 sm_count=SM_COUNT,
                                 fwd_layout=kp.local_fwd_layout(backward),
+                                segment_rule=kp.LOCAL_SEGMENT_RULE,
                             )
                             if c.T_r
                             else 0

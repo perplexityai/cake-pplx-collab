@@ -544,6 +544,7 @@ kernel_cake_rmsnorm_det_train_04ebec87cbee3f0ce093(__nv_bfloat16* __restrict__ g
                 ghw[(vh * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[2];
                 ghw[(vh * 4) + 3] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[3];
             }
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
             float dq = 0.0f;
             #pragma unroll
             for (int v_2 = 0; v_2 < 2; v_2++) {
@@ -566,7 +567,6 @@ kernel_cake_rmsnorm_det_train_04ebec87cbee3f0ce093(__nv_bfloat16* __restrict__ g
             if (lane == 0) {
                 dot_slots[par + warp] = dot;
             }
-            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
             __syncthreads();
             ps[2] = 0;
             if (ps[0] < ps[1]) {

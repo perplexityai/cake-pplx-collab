@@ -22,7 +22,8 @@ CUDA floor, the row table is read on the shape alone and passed as views, an ``m
 never falls back to a route without its lead twin, ``_bind`` refuses a wrong pairing of
 route and row table, the availability query needs the lead twins, no BF16 weight
 gradient has an accumulate build, and a sweep of architectures and SM counts binds
-the lead twins with reference 1's plan.  On a GPU (the device's SM count and the bound
+the lead twins with reference 1's plan, and the queue walk's optional rule bounds read
+the call's shape (every row of the operands for a slice).  On a GPU (the device's SM count and the bound
 programs recorded as test properties):
 reference 1's bits always and reference 2's where it plans the same, every
 forced stage from an odd row and from row 0 (the queue walk, the ordered one-launch
@@ -117,6 +118,10 @@ def test_two_reference_chunks_plan_as_reference_2(monkeypatch):
 @pytest.mark.parametrize("op", ds.OPS)
 def test_judged_cases_are_the_suite_cases(op):
     assert JUDGED[op] == ds.judged_cases(JUDGED_TESTS[op])
+
+
+def test_host_gives_the_queue_walk_bounds_the_call_shape(monkeypatch):
+    ds.check_queue_bounds(monkeypatch, P)
 
 
 # ---------------------------------------------------------------------------

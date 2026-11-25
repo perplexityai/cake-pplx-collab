@@ -172,6 +172,16 @@ def test_the_resident_group_table_is_bounded() -> None:
             assert int(fraction * capped * sms) // 4 <= held, (arch, sms, per_sm)
             for name in PERSISTENT_RECORDS:
                 assert 1 <= held <= per_sm * sms // cake_jit.cluster_ctas(name), (arch, sms, per_sm)
+    # A cap only lowers a measured device's resident groups of one program; the other programs keep theirs.
+    for (arch, sms), caps in cake_jit.GROUP_CAPS.items():
+        assert (arch, sms) in cake_jit.RESIDENT_GROUPS, (arch, sms)
+        table = cake_jit.RESIDENT_GROUPS[(arch, sms)]
+        for name, cap in caps.items():
+            assert name in PERSISTENT_RECORDS, name
+            assert 1 <= cap < table[cake_jit.CTAS_PER_SM[name]], (arch, sms, name, cap)
+            assert cake_jit.resident_groups(name, arch, sms) == cap, (arch, sms, name)
+        for name in set(PERSISTENT_RECORDS) - set(caps):
+            assert cake_jit.resident_groups(name, arch, sms) == table[cake_jit.CTAS_PER_SM[name]], (arch, sms, name)
     for name in PERSISTENT_RECORDS:
         ctas = cake_jit.cluster_ctas(name)
         per_sm = cake_jit.CTAS_PER_SM[name]
@@ -438,9 +448,11 @@ def test_every_record_loads(device) -> None:
 
 def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
     """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters the
-    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and the measured table entry of this
-    device, when it has one, equals that count.  Skipped only when the query cannot run on this host (no
-    ``cuobjdump``, no driver library); a query that fails for one program fails the test."""
+    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and so is the measured table entry of
+    this device, when it has one: the entry holds the least count measured over the boards of its SM count, which can
+    differ by a cluster (two R200 boards of 208 SMs hold 153 and 154 clusters at 3 CTAs per SM).  The grid is that
+    entry, or the program's cap (``cake_jit.GROUP_CAPS``) when the device has one for it.  Skipped only when the query
+    cannot run on this host (no ``cuobjdump``, no driver library); a query that fails for one program fails the test."""
     why = unreachable()
     if why is not None:
         pytest.skip(f"the occupancy query is not reachable: {why}")
@@ -455,8 +467,9 @@ def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
         found, why = max_active_clusters(library, cake_jit.MODULES[name], index)
         grid = cake_backend._groups(name, 2**31 - 1, index)
         table = cake_jit.RESIDENT_GROUPS.get((arch, sms), {}).get(cake_jit.CTAS_PER_SM[name])
+        cap = cake_jit.GROUP_CAPS.get((arch, sms), {}).get(name)
         print(
-            f"OCCUPANCY det {arch} sms={sms} {name} driver={found} grid_groups={grid} table={table} "
+            f"OCCUPANCY det {arch} sms={sms} {name} driver={found} grid_groups={grid} table={table} cap={cap} "
             f"ctas_per_sm={cake_jit.CTAS_PER_SM[name]} ({why})"
         )
         if found is None:
@@ -464,8 +477,10 @@ def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
             continue
         if grid > found:
             problems.append(f"{name}: grid {grid} groups > {found} resident")
-        if table is not None and table != found:
-            problems.append(f"{name}: measured table {table} != driver {found}")
+        if table is not None and table > found:
+            problems.append(f"{name}: measured table {table} > driver {found}")
+        if table is not None and grid != min(table, cap or table):
+            problems.append(f"{name}: grid {grid} groups != table {table} capped at {cap}")
     assert not problems, problems
 
 

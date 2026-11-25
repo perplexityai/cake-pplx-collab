@@ -23,7 +23,8 @@ never falls back to a route without its lead twin, ``_bind`` refuses a wrong pai
 route and row table, the availability query needs the lead twins, no BF16 weight
 gradient has an accumulate build, a sweep of architectures and SM counts binds
 the lead twins with reference 1's plan, and a sweep of the queue walk's rules binds the
-lead twin of the queue stage where a rule names the call.  On a GPU (the device's SM
+lead twin of the queue stage where a rule names the call, its optional bounds reading the
+call's shape (every row of the operands for a slice).  On a GPU (the device's SM
 count and the bound programs recorded as test properties):
 reference 1's bits always and reference 2's where it plans the same, every
 forced stage from an odd row and from row 0 (the queue walk, the split tail with group 0
@@ -113,23 +114,27 @@ def test_host_binds_the_lead_twins(op, monkeypatch):
 def test_host_binds_the_queue_walk_lead_twins(monkeypatch):
     """CPU sweep of the ``queue_walk`` rules: on each rule's architecture and SM counts, under
     constants that select the rule's stage, a slice of the rule's output whose group count is
-    an end of the rule's range binds the lead twin of reference 1's queue stage (its
-    accumulate stage for ``"accumulate"``) with reference 1's plan (``ds.assert_lead``);
-    one group below the range keeps the selected stage."""
+    an end of the rule's range, with the least ``N`` and ``K`` the rule's ``"n"`` / ``"k"``
+    bounds and the stage take, binds the lead twin of reference 1's queue stage (its
+    accumulate stage for ``"accumulate"``) with reference 1's plan (``ds.assert_lead``)
+    where the rule's optional bounds hold the slice's shape (``ds.queue_bounds_hold``: the
+    rows of the operands, ``N``, ``K``); one group below the range keeps the selected stage.
+    Every rule binds the queue walk at least once."""
     cb, c = P.cb, P.constants
     rules = list(c["queue_walk"])
     assert rules, "no queue_walk rule"
-    seen = 0
-    for rule in rules:
+    seen = set()
+    for index, rule in enumerate(rules):
         arch, stage = rule["arch"], rule["stage"]
         form = "k512_" + stage
         low, high = (int(v) for v in rule["groups"])
+        n = max(512, rule.get("n", [None])[0] or 0)
+        k = max(ds.form_k(P, form), rule.get("k", [None])[0] or 0)
         for sms in rule["sm_counts"]:
             with monkeypatch.context() as scope:
                 ds.fake_device(scope, P, arch, int(sms))
                 assert ds.force_wgrad_form(scope, P, form, arch) == (512, stage), rule
                 scope.setitem(c, "queue_walk", rules)
-                k = ds.form_k(P, form)
                 for output in rule["outputs"]:
                     accumulate = output == "accumulate"
                     out_dtype = (
@@ -138,7 +143,7 @@ def test_host_binds_the_queue_walk_lead_twins(monkeypatch):
                     suffix = cb.ACC_SUFFIX if accumulate else ""
                     for groups in sorted({low - 1, low, high} - {0}):
                         what = (rule, sms, output, groups)
-                        layout = ds.Layout((600,) * (groups + 1), n=512, k=k)
+                        layout = ds.Layout((600,) * (groups + 1), n=n, k=k)
                         lead, ref1, _ref2, _chunk = ds.meta_calls(
                             P,
                             "wgrad",
@@ -149,11 +154,32 @@ def test_host_binds_the_queue_walk_lead_twins(monkeypatch):
                             accumulate=accumulate,
                         )
                         ds.assert_lead(P, lead, ref1, str(what))
-                        inside = low <= groups <= high
+                        inside = any(
+                            other["arch"] == arch
+                            and int(sms) in other["sm_counts"]
+                            and other["stage"] == stage
+                            and output in other["outputs"]
+                            and other["groups"][0] <= groups <= other["groups"][1]
+                            and ds.queue_bounds_hold(
+                                other, groups, layout.rows, layout.n, layout.k
+                            )
+                            for other in rules
+                        )
                         want = (cb.QUEUE_STAGE if inside else stage) + suffix
                         assert lead.stages[0] == want, (what, lead.stages)
-                        seen += inside
-    assert seen, "no rule bound the queue walk"
+                        if (
+                            inside
+                            and low <= groups <= high
+                            and ds.queue_bounds_hold(
+                                rule, groups, layout.rows, layout.n, layout.k
+                            )
+                        ):
+                            seen.add(index)
+    assert seen == set(range(len(rules))), sorted(set(range(len(rules))) - seen)
+
+
+def test_host_gives_the_queue_walk_bounds_the_call_shape(monkeypatch):
+    ds.check_queue_bounds(monkeypatch, P)
 
 
 def test_two_reference_chunks_plan_as_reference_2(monkeypatch):

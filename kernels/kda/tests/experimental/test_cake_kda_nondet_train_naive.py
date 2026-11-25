@@ -27,7 +27,9 @@ Cases: four documents with odd lengths (a one-token document, partial last chunk
 with 2 heads, which take the segmented state recurrence, in the four forms of the gate and the Q/K norm (the
 activated FP32 gate, the raw gate activated in the kernels, the in-kernel Q/K L2 norm, both), the activated-gate
 form also under ``torch.utils.checkpoint`` (outputs ``ckpt.*``: the default checkpoint hand-off); and two documents with 12 heads, which take the
-serial walk.
+serial walk.  Above 64 heads (issue #264): the raw gate with the in-kernel Q/K L2 norm and ``dt_bias`` ``[H, 128]`` at
+96 heads on the 4,096-token pack the raw gate is judged on at 64 heads, also under ``torch.utils.checkpoint``; the
+activated gate at 96 heads; the raw gate with the L2 norm at 128 heads, the top of the range.
 """
 
 from __future__ import annotations
@@ -50,7 +52,12 @@ CASES = {
     "seg_l2n": (SEG, 2, "g", True, False),
     "seg_raw_l2n": (SEG, 2, "raw", True, False),
     "serial": ((200, 77), 12, "g", False, False),
+    "h96_raw_l2n": ((1000, 1100, 900, 1096), 96, "raw", True, True),
+    "h96": ((63, 1, 65), 96, "g", False, False),
+    "h128_raw_l2n": ((63, 1, 65), 128, "raw", True, False),
 }
+# the cases that draw ``dt_bias`` as ``[H, 128]`` (the issue's form)
+DT_BIAS_2D = {"h96_raw_l2n", "h128_raw_l2n"}
 SEEDS = {name: 4200 + 10 * i for i, name in enumerate(CASES)}
 
 
@@ -78,4 +85,5 @@ def test_cake_kda_nondet_meets_the_naive_tier(name, device, record_property) -> 
         DEFAULT_SCALE,
         LOWER_BOUND,
         det=False,
+        dt_bias_2d=name in DT_BIAS_2D,
     )

@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the public surface of the Cake route-weight row scaling training kernels (SM100 / SM103): the
+Tests of the public surface of the Cake route-weight row scaling training kernels (SM100 / SM103 / SM107): the
 ``cake_pplx.cake_route_weight_scale_det_train`` facade.  Its entry points are pass-throughs to
 ``cake_pplx._backends.cake_route_weight_scale_det_train``: the same signatures (``out``, ``dx`` and ``dw`` keyword-only),
 the same errors and the same bits; its autograd class and constants are the backend's objects, resolved on first
@@ -49,7 +49,7 @@ requires_device = pytest.mark.skipif(
     not torch.cuda.is_available()
     or not is_cake_route_weight_scale_det_train_supported(torch.device("cuda"))
     or not (Path(backend.__file__).resolve().parent / "build.json").is_file(),
-    reason="Cake route-weight row scaling needs an SM100 / SM103 GPU and an exported package",
+    reason="Cake route-weight row scaling needs an SM100 / SM103 / SM107 GPU and an exported package",
 )
 ENTRY_NAMES = (
     "cake_route_weight_scale_det",
@@ -93,7 +93,7 @@ def test_lazy_objects_are_the_backends() -> None:
     for name in ("ARCHES", "SUPPORTED_COMPUTE_CAPABILITIES", "WIDTHS", "CakeRouteWeightScaleDetFunction"):
         assert getattr(facade, name) is getattr(backend, name), name
     assert tuple(facade.WIDTHS) == (4096, 3584)
-    assert tuple(facade.ARCHES) == ("sm_100a", "sm_103a")
+    assert tuple(facade.ARCHES) == ("sm_100a", "sm_103a", "sm_107a")
     with pytest.raises(AttributeError):
         facade.not_a_name  # noqa: B018
 

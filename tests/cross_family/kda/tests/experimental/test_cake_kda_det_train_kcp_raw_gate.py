@@ -519,7 +519,15 @@ def test_raw_local_stage_values_cover_the_records(H, arch, sm) -> None:
     ctx = _cpu_ctx(sm=sm)
     assert ctx.T_r > 0
     plans = {
-        gate: cake_backend.plan(ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate)
+        gate: cake_backend.plan(
+            ctx.T_r,
+            ctx.n_frag,
+            H,
+            sm,
+            arch,
+            gate=gate,
+            segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
+        )
         for gate in ("g", "raw")
     }
     tb = cake_kcp._Tables(ctx, H, fused_walks=1)

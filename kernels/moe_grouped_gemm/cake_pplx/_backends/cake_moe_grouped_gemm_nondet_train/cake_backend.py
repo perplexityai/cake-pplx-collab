@@ -152,16 +152,22 @@ gradient launches the twin of its wide tile that loads G and stores dX with the
 L2 evict-first policy (``main_wide_ef``: on sm_100a the domain-scheduled wide
 tile's, on sm_107a the A-collector one's) when the groups average at least the
 architecture's ``dgrad_evict_first_min_rows`` rows (``sum_m // E``) and dX has at least
-``dgrad_evict_first_min_k`` columns (``K``).  On the architectures of
+``dgrad_evict_first_min_k`` columns (``K``), unless its reduction ``N`` is at
+most the architecture's ``dgrad_evict_first_skip_max_n`` (it keeps
+``main_wide``).  On the architectures of
 ``dgrad_wide_ts33_archs`` the data gradient launches the twin of its wide tile
 that splits three head and three tail k steps of an item around the release
 of the accumulator's halves instead of four and three (``main_wide_ts33``)
 when the groups average at least the architecture's
-``dgrad_wide_ts33_min_rows`` rows and dX has at least
+``dgrad_wide_ts33_min_rows`` rows (``dgrad_wide_ts33_short_n_min_rows`` when
+its reduction ``N`` is from the architecture's ``dgrad_wide_ts33_short_n_min``
+to its ``dgrad_wide_ts33_short_n``) and dX has at least
 ``dgrad_wide_ts33_min_k`` columns; on those of ``fwd_wide_ts33_archs`` the
 forward pass launches its twin when its reduction ``K`` is at most
 ``fwd_wide_ts33_max_k`` and the groups average at most
-``fwd_wide_ts33_max_rows`` rows.  On the
+``fwd_wide_ts33_max_rows`` rows, or ``K`` is from the architecture's
+``fwd_wide_ts33_short_k_min`` to its ``fwd_wide_ts33_short_k`` (any rows per
+group).  On the
 architectures of
 ``fwd_lwh_ef_archs`` the forward pass launches the twin of its wide tile that
 releases the last wave of tiles in halves and stores Y with the L2 evict-first
@@ -210,16 +216,26 @@ so it gives the bits of the same build on the strided walk.  Where a rule of
 ``queue_walk`` names the call (``wgrad_queue_walk``: the device's
 architecture and SM count, the selected ``main_halves`` /
 ``main_wave_halves`` stage, the output -- ``"bfloat16"`` / ``"float32"``,
-or ``"accumulate"`` for a fused accumulate -- and a range of group counts)
-and the route serves that stage (for a fused accumulate: its accumulate
-build, loadable), the host binds the queue stage in place of the selected
-one, with the selected stage's plan (grid, tail split, raster; the queue
-program takes no wave arguments, so ``plan["wave_mode"]`` goes unused);
+or ``"accumulate"`` for a fused accumulate -- and a range of group counts;
+where the rule has them, also optional ``[min, max]`` bounds, both ends
+included and a None end leaving that side open, on the rows ``sum_m``
+(``"rows"``), the mean rows per group (``"rows_per_group"``, compared
+exactly as ``min * E <= sum_m <= max * E``) and the ``N`` and ``K`` of
+``dW[e]`` (``"n"``, ``"k"``); a rule without such a key does not constrain
+that value) and the route serves that stage (for a fused accumulate: its
+accumulate build, loadable), the host binds the queue stage in place of the
+selected one, with the selected stage's plan (grid, tail split, raster; the
+queue program takes no wave arguments, so ``plan["wave_mode"]`` goes unused);
 ``stages`` names the bound stage.  The queue build places its tail as the
 host plans it: unlike the slack tail placement of ``main_halves``, a planned
 split tail is always split, so on skewed groups its split tail tiles can
 differ in bits from ``main_halves``'s (both are ordered and repeat bit for
-bit).  Every other call keeps its stage.
+bit).  Every other call keeps its stage.  The bounds read host-known values
+only: ``sum_m`` is every row of ``g`` and ``x``, and ``N`` and ``K`` are
+the columns of ``g`` and of ``x``.  For an ``m_indptr`` row table ``sum_m``
+is the rows of the operands, not the rows of the slice, which the host does
+not read (row tables above), so a device-slice call binds the queue walk
+exactly where the ``[E]`` call over the same operands does.
 
 Stream workspaces.  The forward and data-gradient programs take a scheduler
 workspace (``sched``: ``sched_words`` u32 words whose first three rest at
@@ -970,6 +986,8 @@ def dgrad_evict_first(
     sum_m: int,
     num_groups: int,
     constants: Optional[dict[str, Any]] = None,
+    *,
+    n: int | None = None,
 ) -> bool:
     """Whether the data gradient's wide tile takes its L2 evict-first twin.
 
@@ -978,12 +996,17 @@ def dgrad_evict_first(
     group spans many 256-row blocks: on the architectures of ``dgrad_evict_first_archs``,
     the groups average at least the architecture's ``dgrad_evict_first_min_rows`` rows
     (``sum_m // num_groups``) and every 256-row block has at least
-    ``dgrad_evict_first_min_k / wide_block_n`` column tiles (the gate/up projection)."""
+    ``dgrad_evict_first_min_k / wide_block_n`` column tiles (the gate/up projection).
+    A short reduction (``n``, the dgrad ``N``, at most the architecture's
+    ``dgrad_evict_first_skip_max_n``) keeps the plain wide tile.  ``n=None`` leaves
+    that bound out."""
     c = constants or host_plan_constants()
+    skip = c["dgrad_evict_first_skip_max_n"].get(arch)
     return (
         arch in c["dgrad_evict_first_archs"]
         and sum_m // max(num_groups, 1) >= int(c["dgrad_evict_first_min_rows"][arch])
         and k >= int(c["dgrad_evict_first_min_k"])
+        and not (n is not None and skip is not None and n <= int(skip))
     )
 
 
@@ -993,6 +1016,8 @@ def dgrad_wide_ts33(
     sum_m: int,
     num_groups: int,
     constants: Optional[dict[str, Any]] = None,
+    *,
+    n: int | None = None,
 ) -> bool:
     """Whether the data gradient's wide tile takes its twin with three head and three
     tail k steps around the release of the accumulator's halves (``main_wide_ts33``).
@@ -1002,13 +1027,20 @@ def dgrad_wide_ts33(
     the architecture's ``dgrad_wide_ts33_min_rows`` rows (``sum_m // num_groups``) and
     ``K >= dgrad_wide_ts33_min_k``, on the architectures of ``dgrad_wide_ts33_archs``.
     Every element accumulates its k steps in the same order, so the twin gives the bits
-    of ``main_wide``."""
+    of ``main_wide``.  A short reduction (``n``, the dgrad ``N``, from the
+    architecture's ``dgrad_wide_ts33_short_n_min`` to its ``dgrad_wide_ts33_short_n``)
+    takes the twin from the architecture's ``dgrad_wide_ts33_short_n_min_rows`` rows
+    per group instead.  ``n=None`` leaves that bound out."""
     c = constants or host_plan_constants()
-    return (
-        arch in c["dgrad_wide_ts33_archs"]
-        and k >= int(c["dgrad_wide_ts33_min_k"])
-        and sum_m // max(num_groups, 1) >= int(c["dgrad_wide_ts33_min_rows"][arch])
-    )
+    if arch not in c["dgrad_wide_ts33_archs"] or k < int(c["dgrad_wide_ts33_min_k"]):
+        return False
+    short = c["dgrad_wide_ts33_short_n"].get(arch)
+    low = c["dgrad_wide_ts33_short_n_min"].get(arch)
+    if n is not None and short is not None and int(low) <= n <= int(short):
+        min_rows = c["dgrad_wide_ts33_short_n_min_rows"][arch]
+    else:
+        min_rows = c["dgrad_wide_ts33_min_rows"][arch]
+    return sum_m // max(num_groups, 1) >= int(min_rows)
 
 
 def fwd_wide_ts33(
@@ -1025,14 +1057,19 @@ def fwd_wide_ts33(
     architectures of ``fwd_wide_ts33_archs`` the twin serves the short reductions of
     the down projection over many groups (``K <= fwd_wide_ts33_max_k`` and at most
     ``fwd_wide_ts33_max_rows`` rows per group, ``sum_m // num_groups``).  It gives
-    the bits of ``main_wide``."""
+    the bits of ``main_wide``.  A reduction from the architecture's
+    ``fwd_wide_ts33_short_k_min`` to its ``fwd_wide_ts33_short_k`` takes the twin at
+    any rows per group."""
     c = constants or host_plan_constants()
+    if arch not in c["fwd_wide_ts33_archs"]:
+        return False
+    short = c["fwd_wide_ts33_short_k"].get(arch)
+    low = c["fwd_wide_ts33_short_k_min"].get(arch)
+    if short is not None and int(low) <= k <= int(short):
+        return True
     rows = sum_m // max(num_groups, 1)
-    return (
-        arch in c["fwd_wide_ts33_archs"]
-        and k <= int(c["fwd_wide_ts33_max_k"])
-        and rows <= int(c["fwd_wide_ts33_max_rows"])
-    )
+    max_k, max_rows = int(c["fwd_wide_ts33_max_k"]), int(c["fwd_wide_ts33_max_rows"])
+    return k <= max_k and rows <= max_rows
 
 
 def fwd_lwh_ef(
@@ -1118,12 +1155,12 @@ def select_row_stage(
     tile_n = fwd_dgrad_tile_n(op, n, k, arch, c)
     if tile_n != int(c["block_n"]) and stage_served(name, "main_wide", arch):
         if (
-            (op == "dgrad" and dgrad_evict_first(k, arch, sum_m, num_groups, c))
+            (op == "dgrad" and dgrad_evict_first(k, arch, sum_m, num_groups, c, n=n))
             or (op == "fwd" and (fwd_lwh_ef(k, arch, c) or fwd_evict_first(k, arch, c)))
         ) and stage_served(name, "main_wide_ef", arch):
             return "main_wide_ef", tile_n
         if (
-            (op == "dgrad" and dgrad_wide_ts33(k, arch, sum_m, num_groups, c))
+            (op == "dgrad" and dgrad_wide_ts33(k, arch, sum_m, num_groups, c, n=n))
             or (op == "fwd" and fwd_wide_ts33(k, arch, sum_m, num_groups, c))
         ) and stage_served(name, "main_wide_ts33", arch):
             return "main_wide_ts33", tile_n
@@ -1201,13 +1238,28 @@ def wgrad_queue_walk(
     sm_count: int,
     num_groups: int,
     constants: Optional[dict[str, Any]] = None,
+    *,
+    total_rows: int | None = None,
+    n: int | None = None,
+    k: int | None = None,
 ) -> bool:
     """Whether a 512-wide k tile weight gradient binds the queue walk (``QUEUE_STAGE``, or its accumulate
     stage for a fused accumulate) in place of the main stage ``stage`` the host selected
     (:func:`select_wgrad_stage`, one of ``QUEUE_SELECTED_STAGES``): some rule of ``queue_walk`` names ``arch``,
     the device's ``sm_count``, ``stage``, the ``output`` (``"bfloat16"`` / ``"float32"`` for the overwrite of
     that dtype, the bound programs of a composed accumulate included; ``"accumulate"`` for a fused FP32
-    accumulate) and a group range ``[min, max]`` that holds ``num_groups`` (module docstring, program choice).
+    accumulate) and a group range ``[min, max]`` that holds ``num_groups``, and the call meets every
+    optional bound of that rule (``QUEUE_RULE_BOUNDS``; module docstring, the queue walk).
+
+    Each optional bound is a ``[min, max]`` pair, both ends included and a None end leaving that side
+    open, that constrains the call only where the rule has its key: ``"rows"`` holds ``total_rows``;
+    ``"rows_per_group"`` holds the mean rows per group, compared exactly in integers
+    (``min * num_groups <= total_rows <= max * num_groups``); ``"n"`` and ``"k"`` hold ``n`` and ``k``.
+    A rule with such a key never matches a call that leaves the argument it reads as None
+    (``total_rows`` for ``"rows"`` and ``"rows_per_group"``, ``n`` for ``"n"``, ``k`` for ``"k"``).
+    The host passes ``total_rows = sum_m``, the rows of ``g`` and ``x`` (for an ``m_indptr`` row table
+    every row of the operands, not the rows of the slice: module docstring, row tables), and ``n`` and
+    ``k``, the columns of ``g`` and of ``x`` (``dW[e]`` is ``N x K``).
     The caller also needs the route to serve the queue stage on ``arch``."""
     c = constants or host_plan_constants()
     if stage not in QUEUE_SELECTED_STAGES:
@@ -1220,9 +1272,40 @@ def wgrad_queue_walk(
             and rule["stage"] == stage
             and output in rule["outputs"]
             and low <= int(num_groups) <= high
+            and _queue_bounds_hold(rule, int(num_groups), total_rows, n, k)
         ):
             return True
     return False
+
+
+def _queue_bounds_hold(
+    rule: dict[str, Any],
+    num_groups: int,
+    total_rows: int | None,
+    n: int | None,
+    k: int | None,
+) -> bool:
+    """Whether a call meets every optional bound ``rule`` has (:func:`wgrad_queue_walk`): the value each
+    bound reads lies in its ``[min, max]``, each end scaled by ``num_groups`` for ``"rows_per_group"``
+    and a None end not checked; a bound whose value is None fails."""
+    values = {
+        "rows": (total_rows, 1),
+        "rows_per_group": (total_rows, num_groups),
+        "n": (n, 1),
+        "k": (k, 1),
+    }
+    for key in QUEUE_RULE_BOUNDS:
+        if key not in rule:
+            continue
+        value, scale = values[key]
+        if value is None:
+            return False
+        low, high = rule[key]
+        if low is not None and int(value) < int(low) * scale:
+            return False
+        if high is not None and int(value) > int(high) * scale:
+            return False
+    return True
 
 
 def wgrad_accumulate_mode(
@@ -1307,6 +1390,9 @@ WORKSPACE_KINDS = STREAM_WORKSPACES + (QUEUE_SCHED,)
 QUEUE_STAGE = "main_halves_queue"
 # The stages the queue walk may stand in for.
 QUEUE_SELECTED_STAGES = ("main_halves", "main_wave_halves")
+# The optional bounds a ``queue_walk`` rule may add, each a ``[min, max]`` of the call (``wgrad_queue_walk``):
+# the rows ``sum_m``, the mean rows per group, and ``N`` and ``K`` of ``dW[e]``.
+QUEUE_RULE_BOUNDS = ("rows", "rows_per_group", "n", "k")
 # The kinds whose size is the launch's (the split tail's slots and tickets); the others have a fixed size.
 SIZED_STREAM_WORKSPACES = ("tail_sums", "tail_tickets")
 # The kinds with no rest state (each launch overwrites what it reads); the others rest at fixed values.
@@ -2292,7 +2378,7 @@ def cake_moe_grouped_gemm_nondet_train_prepare_dgrad(
     row tables); ``K % 256 == 0``, ``N % 64 == 0`` (the
     512-column tile when ``K % 512 == 0`` on the architectures of
     ``wide_dgrad_archs``, its L2 evict-first twin where ``dgrad_evict_first``
-    holds for ``K``, ``sum_m`` and ``E``, its 3 / 3 head / tail twin where
+    holds for ``N``, ``K``, ``sum_m`` and ``E``, its 3 / 3 head / tail twin where
     ``dgrad_wide_ts33`` holds).  The programs are copies of the deterministic
     package's and give its bits.
     """
@@ -2576,8 +2662,10 @@ def _prepare_wgrad(
     plan["accumulate"] = mode
     if reason is not None:
         plan["accumulate_reason"] = reason
-    # The queue walk (module docstring, program choice): the route's queue stage in place of the selected one,
-    # with the same plan (the queue programs take no wave arguments).
+    # The queue walk (module docstring, the queue walk): the route's queue stage in place of the selected
+    # one, with the same plan (the queue programs take no wave arguments).  A rule's optional bounds read
+    # the host-known shape: sum_m (every row of g and x, for an m_indptr row table too) and N and K of
+    # dW[e].
     fused = mode == "fused"
     queue_stage = QUEUE_STAGE + (ACC_SUFFIX if fused else "")
     queue = (
@@ -2588,6 +2676,9 @@ def _prepare_wgrad(
             sms,
             num_groups,
             c,
+            total_rows=sum_m,
+            n=n,
+            k=k,
         )
         and stage_served(name, queue_stage, arch)
         and (not fused or acc_library_loadable(bound_route, queue_stage, arch))

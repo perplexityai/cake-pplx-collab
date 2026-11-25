@@ -2031,6 +2031,11 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     "dgrad_evict_first_archs": ["sm_100a", "sm_107a"],
     "dgrad_evict_first_min_rows": {"sm_100a": 4096, "sm_103a": 16384, "sm_107a": 16384},
     "dgrad_evict_first_min_k": 4096,
+    # A data gradient whose reduction N (w.shape[1]) is at most the architecture's
+    # value keeps main_wide in place of its evict-first twin.  Timed on 148-SM
+    # sm_100a at N 64 to 1024, dX 4096 to 8192 columns and 4096 to 131072 rows per
+    # group: main_wide was faster or level on every row.
+    "dgrad_evict_first_skip_max_n": {"sm_100a": 1024},
     "fwd_lwh_ef_archs": ["sm_107a"],
     "fwd_lwh_ef_max_k": 2048,
     "fwd_evict_first_archs": ["sm_100a", "sm_103a"],
@@ -2038,9 +2043,24 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     "dgrad_wide_ts33_archs": ["sm_103a"],
     "dgrad_wide_ts33_min_rows": {"sm_103a": 8192},
     "dgrad_wide_ts33_min_k": 4096,
+    # A data gradient whose reduction N is from the architecture's
+    # dgrad_wide_ts33_short_n_min to its dgrad_wide_ts33_short_n takes main_wide_ts33
+    # from dgrad_wide_ts33_short_n_min_rows rows per group in place of
+    # dgrad_wide_ts33_min_rows.  Timed on 152-SM sm_103a: faster or level at N 512 to
+    # 1024 (dX 4096 to 8192 columns, 1024 to 8191 rows per group); slower at N 256,
+    # so the rule starts at N 512.
+    "dgrad_wide_ts33_short_n": {"sm_103a": 1024},
+    "dgrad_wide_ts33_short_n_min": {"sm_103a": 512},
+    "dgrad_wide_ts33_short_n_min_rows": {"sm_103a": 1024},
     "fwd_wide_ts33_archs": ["sm_103a"],
     "fwd_wide_ts33_max_k": 2048,
     "fwd_wide_ts33_max_rows": 4096,
+    # A forward reduction K from the architecture's fwd_wide_ts33_short_k_min to its
+    # fwd_wide_ts33_short_k takes main_wide_ts33 at any rows per group.  Timed on
+    # 152-SM sm_103a: faster or level at K 512 to 1024 (1024 to 8192 output columns,
+    # 4097 to 131071 rows per group); slower at K 256, so the rule starts at K 512.
+    "fwd_wide_ts33_short_k": {"sm_103a": 1024},
+    "fwd_wide_ts33_short_k_min": {"sm_103a": 512},
     "block_k": 64,
     "cta_group": 2,
     "cluster_m": 256,
@@ -2098,8 +2118,15 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     # stage the host selects.  A call takes it when one rule names the device's
     # architecture and SM count, the selected stage, the kind of output
     # (``"bfloat16"`` / ``"float32"`` overwrite, ``"accumulate"`` for the
-    # fused FP32 accumulate) and a range ``[min, max]`` holding the group count;
-    # every other call keeps its stage.
+    # fused FP32 accumulate) and a range ``[min, max]`` holding the group count,
+    # and meets the rule's optional bounds (``cake_backend.QUEUE_RULE_BOUNDS``),
+    # each a ``[min, max]`` with both ends included (a None end leaves that side
+    # open) that applies only where the rule has its key: ``"rows"`` on the
+    # rows ``sum_m`` (every row of ``g`` and ``x``, for an ``m_indptr`` row
+    # table too), ``"rows_per_group"`` on ``sum_m / E`` (exactly:
+    # ``min * E <= sum_m <= max * E``), ``"n"`` on ``N`` and ``"k"`` on ``K``
+    # of ``dW[e]``; every other call keeps its stage.  No rule here has an
+    # optional bound.
     "queue_walk": [
         {
             "arch": "sm_100a",

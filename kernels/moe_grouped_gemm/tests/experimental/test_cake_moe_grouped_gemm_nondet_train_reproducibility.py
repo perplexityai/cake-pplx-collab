@@ -138,11 +138,12 @@ OWN_CONSTANTS = frozenset(
 QUEUE_STAGES = frozenset({cb.QUEUE_STAGE, cb.QUEUE_STAGE + cb.ACC_SUFFIX})
 # Data-gradient cases of the evict-first rule (at least every architecture's
 # ``dgrad_evict_first_min_rows`` rows per group on average,
-# ``K >= dgrad_evict_first_min_k``): (label, sizes, N, K),
+# ``K >= dgrad_evict_first_min_k``, ``N`` over every architecture's
+# ``dgrad_evict_first_skip_max_n``): (label, sizes, N, K),
 # over group sizes off every tile multiple, with a one-row group (the second and
 # third) and an empty group (the third).
 EF_CASES = (
-    ("e2_long", (16390, 16500), 64, 4096),
+    ("e2_long", (16390, 16500), 1088, 4096),
     ("one_row_off_tile", (1, 16383, 16385, 32767), 1088, 4608),
     ("empty_one_row", (0, 49151, 1, 16384), 4096, 6144),
 )
@@ -559,7 +560,9 @@ def test_queue_stages_take_the_half_release_arguments():
     ``main_halves`` program on that architecture and its argument plan plus the
     ``sched`` buffer, which the weight-gradient binding binds to the ``queue_sched``
     stream workspace.  Every rule names a stage the queue walk may stand in for, an
-    output kind and a group range that the routes serve.  (A CPU check.)"""
+    output kind and a group range that the routes serve, and its other keys are optional
+    bounds of ``QUEUE_RULE_BOUNDS``, each a ``[min, max]`` of non-negative integers, one end
+    may be None.  (A CPU check.)"""
     assert cb.BINDING_WORKSPACE_KINDS["wgrad"]["sched"] == cb.QUEUE_SCHED
     assert cb.QUEUE_SCHED in cb.WORKSPACE_KINDS
     assert cb.QUEUE_SCHED not in cb.SIZED_STREAM_WORKSPACES
@@ -571,6 +574,14 @@ def test_queue_stages_take_the_half_release_arguments():
         low, high = rule["groups"]
         assert 1 <= low <= high, rule
         assert rule["sm_counts"] and all(int(v) > 0 for v in rule["sm_counts"]), rule
+        bounds = set(rule) - {"arch", "sm_counts", "stage", "outputs", "groups"}
+        assert bounds <= set(cb.QUEUE_RULE_BOUNDS), rule
+        for key in bounds:
+            low, high = rule[key]
+            assert low is not None or high is not None, rule
+            for end in (low, high):
+                assert end is None or (isinstance(end, int) and end >= 0), rule
+            assert low is None or high is None or low <= high, rule
     for out_dtype in ("bfloat16", "float32"):
         name = cake_jit.record_name("wgrad", out_dtype=out_dtype, tile_k=512)
         for arch in cake_jit.ROUTES[name]["arches"]:
@@ -718,6 +729,7 @@ def test_dgrad_evict_first_gives_the_bits_of_the_plain_tiles(
         int(v) for v in c["dgrad_evict_first_min_rows"].values()
     ), label
     assert k >= int(c["dgrad_evict_first_min_k"]), label
+    assert n > max(c["dgrad_evict_first_skip_max_n"].values(), default=0), label
     assert k % int(c["wide_block_n"]) == 0, label
     assert any(size % 128 for size in sizes), label
     a, b, offs = _inputs(case, device)
@@ -729,13 +741,13 @@ def test_dgrad_evict_first_gives_the_bits_of_the_plain_tiles(
     )
     ef = (
         wide
-        and cb.dgrad_evict_first(k, arch, sum_m, groups, c)
+        and cb.dgrad_evict_first(k, arch, sum_m, groups, c, n=n)
         and cake_jit.stage_served(name, "main_wide_ef", arch)
     )
     ts33 = (
         wide
         and not ef
-        and cb.dgrad_wide_ts33(k, arch, sum_m, groups, c)
+        and cb.dgrad_wide_ts33(k, arch, sum_m, groups, c, n=n)
         and cake_jit.stage_served(name, "main_wide_ts33", arch)
     )
     assert ef == (arch in c["dgrad_evict_first_archs"]), arch
@@ -945,7 +957,14 @@ def test_queue_rows_meet_the_naive_tier(label, output, record_property):
         kind = "accumulate" if fused else ("float32" if accumulate else output)
         stage = cb.QUEUE_STAGE + (cb.ACC_SUFFIX if fused else "")
         want = cb.wgrad_queue_walk(
-            selected, kind, arch, sms, len(sizes)
+            selected,
+            kind,
+            arch,
+            sms,
+            len(sizes),
+            total_rows=int(a.shape[0]),
+            n=n,
+            k=k,
         ) and cake_jit.stage_served(launch.record_name, stage, arch)
         assert queue == want, record
     start_of = None

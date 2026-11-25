@@ -27,6 +27,7 @@ segment boundaries, and no allocation or host synchronization in a run.
 """
 
 import contextlib
+import dataclasses
 import functools
 import gc
 import json
@@ -77,13 +78,110 @@ CB_SLOTS_PLAN = [
 _CB_KEYS_U1 = [
     f"{CB_ROLE}:{kind}:u1:s0:f{fit}" for kind in ("l6", "narrow") for fit in (0, 1)
 ]
+# sm_103a's twins (``cake_policy.CB_TWIN_FORMS``): the ``scan_blocks`` copies of its no-sample-fit CTA-pair l6 program
+# in both segment orders
+CB_TWIN_ARCH = "sm_103a"
+CB_TWIN_KEYS = [
+    f"{CB_ROLE}:pair_l6:u1:s0:f0",
+    f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+]
+# the program a twin's call ran before the twins: the no-sample-fit unpaired l6 ``scan_blocks`` program
+CB_TWIN_REPLACES = f"{CB_ROLE}:l6:u1:s0:f0"
 # the ``scan_blocks`` keys of each architecture: the unpaired, unsplit narrow and l6 units of both fit forms at tile
-# unroll 1; sm_107a also registers the narrow unit at tile unroll 2 (unsampled fit)
+# unroll 1; sm_103a also registers its twins, sm_107a the narrow unit at tile unroll 2 (unsampled fit)
 CB_KEYS = {
     "sm_100a": sorted(_CB_KEYS_U1),
-    "sm_103a": sorted(_CB_KEYS_U1),
+    "sm_103a": sorted(_CB_KEYS_U1 + CB_TWIN_KEYS),
     "sm_107a": sorted(_CB_KEYS_U1 + [f"{CB_ROLE}:narrow:u2:s0:f0"]),
 }
+# a call inside ``cake_policy.CB_TWIN_RULE`` (``top_k`` 512, sampled, at least 16231 queries) whose wide plan runs each
+# twin on sm_103a at every grid of ``GRIDS`` (query segments, key segments, top_k and ``sample_tiles_max``;
+# ``max_seqlen_k`` the longest key segment): 16384 queries at the tail of 131072 keys (960 mean unit tiles) and two
+# segments of 8192 queries over 131072 / 65536 keys (736, longest first)
+TWIN_SHAPES = {
+    f"{CB_ROLE}:pair_l6:u1:s0:f0": ([16384], [131072], 512, None),
+    f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf": ([8192, 8192], [131072, 65536], 512, None),
+}
+# calls outside ``cake_policy.CB_TWIN_RULE`` whose plain plan runs a twin's CTA-pair l6 program on sm_103a at every grid
+# of ``GRIDS`` (twin, then as ``TWIN_SHAPES``): below its query floor at ``top_k`` 512 (4096, 2 x 1024 and 8 x 147
+# queries; 496, 316 and 279 mean unit tiles), above its ``top_k`` (1024 and 2047) and below its mean unit tiles (134
+# and 159 at ``top_k`` 512).  They run the unpaired l6 program of the plan before the twins; with the rule opened
+# (``OPEN_TWIN_RULE``) the twin.
+OUTSIDE_TWIN_SHAPES = {
+    "pair_few_queries": (f"{CB_ROLE}:pair_l6:u1:s0:f0", [4096], [65536], 512, None),
+    "pair_lsf_few_queries": (
+        f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+        [1024, 1024],
+        [65536, 16384],
+        512,
+        None,
+    ),
+    "pair_lsf_8seg_few_queries": (
+        f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+        [147] * 8,
+        [35786, 35785] * 4,
+        512,
+        None,
+    ),
+    "pair_k1024": (f"{CB_ROLE}:pair_l6:u1:s0:f0", [4096], [65536], 1024, None),
+    "pair_k2047": (f"{CB_ROLE}:pair_l6:u1:s0:f0", [512], [49152], 2047, None),
+    "pair_few_tiles": (f"{CB_ROLE}:pair_l6:u1:s0:f0", [512], [17408], 512, None),
+    "pair_lsf_k1024": (
+        f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+        [256, 256],
+        [65536, 16384],
+        1024,
+        None,
+    ),
+    "pair_lsf_k2047": (
+        f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+        [256, 256],
+        [65536, 16384],
+        2047,
+        None,
+    ),
+    "pair_lsf_few_tiles": (
+        f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+        [256, 256],
+        [32768, 8192],
+        512,
+        None,
+    ),
+}
+# ``cake_policy.CB_TWIN_RULE`` opened to every call with block entries (the twins measured outside the rule)
+OPEN_TWIN_RULE = (1, CB_MAX_TOP_K, 0.0, math.inf, 0, False)
+# the twin each request shape takes on sm_103a at 152 SMs, with and without ``max_seqlen_k``: every request shape with
+# block entries plans the wide program at ``top_k`` 512 inside ``cake_policy.CB_TWIN_RULE`` (tail64k 448, tail256k 1984,
+# packed8 254.5 mean unit tiles; 16384 / 16231 queries; sampled), which runs the CTA-pair twin of its segment order;
+# tail16k keeps every block
+CB_TWINS_AT_THE_REQUEST_SHAPES = {
+    "tail64k": f"{CB_ROLE}:pair_l6:u1:s0:f0",
+    "tail256k": f"{CB_ROLE}:pair_l6:u1:s0:f0",
+    "packed8": f"{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+}
+# the fields the CTA-pair twin of a wide plan sets (``cake_policy.cb_pair_twin_key``); the others are the plain plan's
+WIDE_TWIN_FIELDS = (
+    "grid_ctas",
+    "block_q",
+    "unit",
+    "n_split",
+    "split",
+    "pair",
+    "kind",
+    "physical_kind",
+    "snake",
+    "tile_unroll",
+    "sample_fit",
+    "sample_tiles_max",
+    "sample_shift_permille",
+    "check_period",
+    "scan_key",
+    "merge_key",
+    "merge_rank",
+    "scan_entries",
+    "staging_entries",
+    "workspace_bytes",
+)
 # the request's shapes: T = 16,384 queries at the tail of one document of 16,384 / 65,536 / 262,144 keys, and the
 # packed layout of eight segments (T = 16,231, Tkv = 268,757)
 P1_SEG_Q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
@@ -274,9 +372,9 @@ def ref_scores64(q, k, w, cq, ck, offsets, rows, ids) -> torch.Tensor:
 def test_registry_ships_the_candidate_block_programs():
     """``scan_blocks`` is a role of its own after the family's roles; its argument plan is the scan's with ``CandBlk``,
     ``CandBlocks`` and ``blk_cap`` right before ``K_scale``; every architecture registers the unpaired, unsplit BF16
-    narrow and l6 programs of both fit forms at tile unroll 1 under ``scan_blocks:`` keys, and sm_107a also the
-    narrow program at tile unroll 2 of the unsampled fit (``CB_KEYS``), each a program of its own beside the scan
-    program of the same unit."""
+    narrow and l6 programs of both fit forms at tile unroll 1 under ``scan_blocks:`` keys, sm_103a also its twins
+    (``CB_TWIN_KEYS``) and sm_107a the narrow program at tile unroll 2 of the unsampled fit (``CB_KEYS``), each a
+    program of its own beside the scan program of the same key."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     assert cake_jit.STAGES.count(CB_ROLE) == 1
@@ -310,8 +408,9 @@ def test_registry_ships_the_candidate_block_programs():
 @pytest.mark.parametrize("bound", ["max_seqlen_k", "num_keys"])
 def test_plan_at_the_request_shapes(arch, shape, bound):
     """Per grid of the architecture, where ``ceil(W / 8) > 2048`` (``W``: ``max_seqlen_k`` when given, else ``Tkv``):
-    the plan runs a registered ``scan_blocks`` program unsplit and unpaired (on sm_107a the program of
-    ``CB_KEYS_AT_THE_REQUEST_SHAPES``), the block entries are ``ceil(W / 8) - 1`` per query slot and the call's
+    the plan runs a registered ``scan_blocks`` program unsplit, unpaired unless it is a CTA-pair twin (on an even grid),
+    on sm_107a the program of ``CB_KEYS_AT_THE_REQUEST_SHAPES``, the block entries are ``ceil(W / 8) - 1`` per query
+    slot of the launched grid and the call's
     workspace is the scan's (candidate buffers and ticket tail) plus the block entries.  Elsewhere (tail16k) every row
     keeps all its blocks: the plan is the plain call's (``iota``) with its workspace and no block entries.  The bound
     is the larger plan of the two sampling modes."""
@@ -339,9 +438,10 @@ def test_plan_at_the_request_shapes(arch, shape, bound):
                 and c.scan_key in cake_jit.PROGRAM_KEYS[arch]
             ), (grid, c.scan_key)
             assert expected is None or c.scan_key == expected, (grid, c.scan_key)
-            assert (
-                c.n_split == 1 and not c.split and not c.pair and c.merge_key is None
-            ), grid
+            assert c.n_split == 1 and not c.split and c.merge_key is None, grid
+            # only a CTA-pair twin runs a pair, on an even grid
+            assert c.pair == (c.scan_key in CB_TWIN_KEYS and ":pair_" in c.scan_key)
+            assert not c.pair or c.grid_ctas % 2 == 0, grid
             assert (
                 c.workspace_bytes
                 == c.grid_ctas * c.block_q * c.cand_cap * 8 + TICKET_TAIL_BYTES
@@ -441,6 +541,395 @@ def test_architecture_without_candidate_block_programs_is_refused(arch, monkeypa
         16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid
     )
     assert not plain.scan_key.startswith(f"{CB_ROLE}:")
+
+
+def _twin_registries(arch):
+    """The registry of ``arch`` with sm_103a's twins (``CB_TWIN_KEYS``; a checkout whose registry does not carry them
+    gets placeholder names, which the host plan reads as keys only) and without them."""
+    keys = dict(cake_backend.PROGRAM_KEYS[arch])
+    with_twins = {**keys, **{t: keys.get(t, f"placeholder:{t}") for t in CB_TWIN_KEYS}}
+    without = {k: v for k, v in keys.items() if k not in CB_TWIN_KEYS}
+    return with_twins, without
+
+
+def _twin_plans(monkeypatch, arch, seg_q, seg_k, **kw):
+    """The plain plan, the candidate-block plan with the twins registered and the one without them, of one call."""
+    T, Tkv, S = sum(seg_q), sum(seg_k), len(seg_q)
+    with_twins, without = _twin_registries(arch)
+    monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, with_twins)
+    plain = cake_backend.plan_dsa_indexer_det_topk(T, Tkv, S, arch=arch, **kw)
+    plan = plan_with_candidates(T, Tkv, S, arch=arch, **kw)
+    monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, without)
+    before = plan_with_candidates(T, Tkv, S, arch=arch, **kw)
+    monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, with_twins)
+    return plain, plan, before
+
+
+def _check_twin_plan(plain, plan, before, twin, where, call):
+    """``plan`` runs ``twin``: the plain plan as decided with the twin's key, or for a wide plan the CTA-pair l6 unit
+    (``_check_wide_twin``; ``call``: the call's keywords), with the block entries of the launched grid behind its
+    workspace; ``before`` (without the twins) runs the unpaired l6 program."""
+    c = plan.choice
+    assert c.scan_key == twin, (*where, c.scan_key)
+    if plain.physical_kind == "wide":
+        _check_wide_twin(plain, c, twin, where, call)
+    else:
+        assert c == dataclasses.replace(plain, scan_key=twin), where
+        assert plain.scan_key == "scan:" + twin.split(":", 1)[1], where
+        assert c.pair == plain.pair and (not plain.pair or plain.grid_ctas % 2 == 0), (
+            where
+        )
+    assert not plan.iota and plan.blk_cap == before.blk_cap > 0, where
+    assert plan.blk_bytes == c.grid_ctas * c.block_q * plan.blk_cap * 8, where
+    assert plan.workspace_bytes == c.workspace_bytes + plan.blk_bytes, where
+    assert plan.blocks_at == c.workspace_bytes, where
+    assert before.choice.scan_key == CB_TWIN_REPLACES and not before.choice.pair, where
+
+
+def _check_wide_twin(plain, c, twin, where, call):
+    """``c`` runs the CTA-pair l6 twin of the wide plan ``plain`` (``cake_policy.cb_pair_twin_key``, inside
+    ``cake_policy.CB_TWIN_RULE``): the CTA-pair l6 unit unsplit on the requested grid made even, in the plan's segment
+    order, with that unit's sampled first threshold and check period (``cake_policy.fallback_knobs``) and candidate
+    buffers; every other field is the plain plan's."""
+    policy = cake_backend.policy_for(CB_TWIN_ARCH)
+    assert twin == cake_policy.cb_pair_twin_key(policy, plain), where
+    assert plain.top_k == TOP_K and not plain.split and not plain.sample_fit, where
+    assert cake_policy.cb_twin_rule_holds(policy, plain), where
+    assert (c.unit, c.kind, c.physical_kind) == ("l6", "pair_l6", "pair_l6"), where
+    assert c.block_q == policy.block_q_l6 and c.pair and c.grid == plain.grid, where
+    assert c.grid_ctas == plain.grid - plain.grid % 2, where
+    assert c.n_split == 1 and not c.split and c.merge_key is None, where
+    assert not c.snake and not c.sample_fit, where
+    assert c.lsf == plain.lsf == twin.endswith(":lsf"), where
+    assert c.tile_unroll == int(twin.split(":")[2][1:]), where
+    knobs = cake_policy.fallback_knobs(policy, plain, "pair_l6", call)
+    assert c.sample_tiles_max == knobs.sample_tiles_max, where
+    assert c.sample_shift_permille == knobs.sample_shift_permille, where
+    assert c.check_period == knobs.check_period, where
+    assert c.scan_entries == c.grid_ctas * c.block_q * c.cand_cap, where
+    assert c.staging_entries == 0, where
+    assert c.workspace_bytes == c.scan_entries * 8 + TICKET_TAIL_BYTES, where
+    fields = {f: getattr(plain, f) for f in WIDE_TWIN_FIELDS if hasattr(plain, f)}
+    assert dataclasses.replace(c, **fields) == plain, where
+
+
+@pytest.mark.cpu_only
+def test_twin_rule_is_the_measured_region():
+    """``cake_policy.CB_TWIN_RULE`` is the window of the calls the twins were timed on, the request's shapes of
+    ``CB_TWINS_AT_THE_REQUEST_SHAPES`` (wide plans): ``top_k`` 512 only, their smallest (to a half tile) and largest
+    mean unit tiles (254.5 and 1984), their smallest query count (16231), sampled calls only."""
+    assert cake_policy.CB_TWIN_RULE == (512, 512, 254.5, 1984.0, 16231, True)
+    assert sorted(cake_policy.CB_TWIN_FORMS) == [("pair_l6", False), ("pair_l6", True)]
+    policy = cake_backend.policy_for(CB_TWIN_ARCH)
+    timed = [SHAPES[shape] for shape in sorted(CB_TWINS_AT_THE_REQUEST_SHAPES)]
+    tiles = [policy.mean_unit_tiles(sum(q), sum(k), len(q), 1) for q, k in timed]
+    assert cake_policy.CB_TWIN_RULE[2] == math.floor(2 * min(tiles)) / 2
+    assert cake_policy.CB_TWIN_RULE[3] == max(tiles)
+    assert cake_policy.CB_TWIN_RULE[4] == min(sum(q) for q, _ in timed)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("twin", CB_TWIN_KEYS)
+def test_twins_run_the_plan_of_their_program(twin, monkeypatch):
+    """sm_103a, every grid of ``GRIDS``: a call inside ``cake_policy.CB_TWIN_RULE`` with block entries whose plain plan
+    runs the wide program (``TWIN_SHAPES``) runs the CTA-pair twin of its segment order where the registry has it
+    (``_check_twin_plan``: the CTA-pair l6 unit on the requested grid made even, the block entries of the launched grid
+    behind its workspace) and, on the registry without the twins, the unpaired l6 program of the plan before them."""
+    seg_q, seg_k, top_k, sample_tiles_max = TWIN_SHAPES[twin]
+    policy = cake_backend.policy_for(CB_TWIN_ARCH)
+    for grid in GRIDS[CB_TWIN_ARCH]:
+        kw = {
+            "top_k": top_k,
+            "num_sms": grid,
+            "max_seqlen_k": max(seg_k),
+            "sample_tiles_max": sample_tiles_max,
+        }
+        plain, plan, before = _twin_plans(monkeypatch, CB_TWIN_ARCH, seg_q, seg_k, **kw)
+        assert cake_policy.cb_twin_rule_holds(policy, plain), (twin, grid)
+        assert plain.physical_kind == "wide", (twin, grid, plain.scan_key)
+        _check_twin_plan(plain, plan, before, twin, (twin, grid), kw)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("name", sorted(OUTSIDE_TWIN_SHAPES))
+def test_twins_outside_the_rule_run_the_plan_before_them(name, monkeypatch):
+    """sm_103a, every grid of ``GRIDS``: a call outside ``cake_policy.CB_TWIN_RULE`` whose plain plan runs a twin's
+    program with block entries (``OUTSIDE_TWIN_SHAPES``: fewer queries than the rule's floor, ``top_k`` 1024 / 2047, few
+    mean unit tiles) keeps the plan before the twins (the unpaired l6 program) with the twins registered; with the rule
+    opened it runs the twin."""
+    twin, seg_q, seg_k, top_k, sample_tiles_max = OUTSIDE_TWIN_SHAPES[name]
+    policy = cake_backend.policy_for(CB_TWIN_ARCH)
+    for grid in GRIDS[CB_TWIN_ARCH]:
+        kw = {
+            "top_k": top_k,
+            "num_sms": grid,
+            "max_seqlen_k": max(seg_k),
+            "sample_tiles_max": sample_tiles_max,
+        }
+        where = (name, grid)
+        plain, plan, before = _twin_plans(monkeypatch, CB_TWIN_ARCH, seg_q, seg_k, **kw)
+        assert cake_policy.cb_twin_key(plain) == twin, (*where, plain.scan_key)
+        assert not cake_policy.cb_twin_rule_holds(policy, plain), where
+        assert plan == before and before.choice.scan_key == CB_TWIN_REPLACES, where
+        with monkeypatch.context() as m:
+            m.setattr(cake_policy, "CB_TWIN_RULE", OPEN_TWIN_RULE)
+            plain, plan, before = _twin_plans(m, CB_TWIN_ARCH, seg_q, seg_k, **kw)
+            _check_twin_plan(plain, plan, before, twin, where, kw)
+
+
+@pytest.mark.cpu_only
+def test_cta_pair_plans_run_their_twin_inside_the_rule_only(monkeypatch):
+    """sm_103a, every grid of ``GRIDS``, 512 queries at the tail of one segment whose plain plan runs the CTA-pair l6
+    program: fewer queries than the floor of ``cake_policy.CB_TWIN_RULE`` (16231), so the plan before the twins at the
+    rule's tile floor, one key short of it and at ``top_k`` 513; with the query floor lowered to the call's 512
+    queries, the twin from the tile floor of 254.5 mean unit tiles on (``W = 254.5 * 128 + 256``), the plan before the
+    twins one key short of it and at ``top_k`` 513 (above the rule).  (With sampling off a call of this size runs the
+    l6 unit without a pair, ``l6_solo_unsampled_max_queries``; the wide test covers the sampled-only bound.)"""
+    arch = CB_TWIN_ARCH
+    policy = cake_backend.policy_for(arch)
+    twin = f"{CB_ROLE}:pair_l6:u1:s0:f0"
+    T = 512
+    rule = cake_policy.CB_TWIN_RULE
+    assert T < rule[4]
+    lowered = (*rule[:4], T, rule[5])
+    at = math.ceil(rule[2] * policy.tile_keys + T / 2)
+    assert policy.mean_unit_tiles(T, at, 1, 1) >= rule[2]
+    assert policy.mean_unit_tiles(T, at - 1, 1, 1) < rule[2]
+    cases = [
+        (at, TOP_K, True),
+        (at - 1, TOP_K, False),
+        (at, TOP_K + 1, False),
+    ]
+    for grid in GRIDS[arch]:
+        for Tkv, top_k, takes in cases:
+            kw = {
+                "top_k": top_k,
+                "num_sms": grid,
+                "max_seqlen_k": Tkv,
+                "sample_tiles_max": None,
+            }
+            where = (grid, Tkv, top_k)
+            plain, plan, before = _twin_plans(monkeypatch, arch, [T], [Tkv], **kw)
+            assert cake_policy.cb_twin_key(plain) == twin, (*where, plain.scan_key)
+            assert plan == before, (*where, plan.choice.scan_key)
+            assert before.choice.scan_key == CB_TWIN_REPLACES, where
+            with monkeypatch.context() as m:
+                m.setattr(cake_policy, "CB_TWIN_RULE", lowered)
+                plain, plan, before = _twin_plans(m, arch, [T], [Tkv], **kw)
+                if takes:
+                    _check_twin_plan(plain, plan, before, twin, where, kw)
+                else:
+                    assert plan == before, (*where, plan.choice.scan_key)
+                    assert before.choice.scan_key == CB_TWIN_REPLACES, where
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+@pytest.mark.parametrize("bound", ["max_seqlen_k", "num_keys"])
+def test_twins_at_the_request_shapes(shape, bound, monkeypatch):
+    """sm_103a at 152 SMs (GB300), the request's shapes with the twins registered: a shape of
+    ``CB_TWINS_AT_THE_REQUEST_SHAPES`` runs its twin (``_check_twin_plan``: its wide plan on the CTA-pair l6 unit);
+    every other shape keeps the plan without the twins (tail16k keeps every block: the plain plan, ``iota``)."""
+    seg_q, seg_k = SHAPES[shape]
+    msk = max(seg_k) if bound == "max_seqlen_k" else None
+    kw = {"top_k": TOP_K, "num_sms": 152, "max_seqlen_k": msk}
+    plain, plan, before = _twin_plans(monkeypatch, CB_TWIN_ARCH, seg_q, seg_k, **kw)
+    twin = CB_TWINS_AT_THE_REQUEST_SHAPES.get(shape)
+    if twin is None:
+        assert plan == before, (shape, plan.choice.scan_key)
+    else:
+        _check_twin_plan(plain, plan, before, twin, (shape, bound), kw)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("missing", CB_TWIN_KEYS)
+def test_a_twin_the_registry_lacks_is_not_run(missing, monkeypatch):
+    """A registry with every twin but ``missing``: the call of ``missing``'s shape runs the unpaired l6 program of the
+    plan before the twins -- never another twin, the CTA-pair twin of the other segment order included -- and the
+    calls of the other twins keep theirs; a registry without any ``scan_blocks`` program refuses them all."""
+    with_twins, _ = _twin_registries(CB_TWIN_ARCH)
+    for twin, (seg_q, seg_k, top_k, sample_tiles_max) in sorted(TWIN_SHAPES.items()):
+        T, Tkv, S = sum(seg_q), sum(seg_k), len(seg_q)
+        kw = {
+            "top_k": top_k,
+            "arch": CB_TWIN_ARCH,
+            "num_sms": 152,
+            "max_seqlen_k": max(seg_k),
+            "sample_tiles_max": sample_tiles_max,
+        }
+        lacking = {k: v for k, v in with_twins.items() if k != missing}
+        monkeypatch.setitem(cake_backend.PROGRAM_KEYS, CB_TWIN_ARCH, lacking)
+        c = plan_with_candidates(T, Tkv, S, **kw).choice
+        if twin == missing:
+            assert c.scan_key == CB_TWIN_REPLACES and not c.pair, (twin, c.scan_key)
+        else:
+            assert c.scan_key == twin, (missing, twin, c.scan_key)
+        bare = {k: v for k, v in with_twins.items() if not k.startswith(f"{CB_ROLE}:")}
+        monkeypatch.setitem(cake_backend.PROGRAM_KEYS, CB_TWIN_ARCH, bare)
+        with pytest.raises(NotImplementedError, match=CB_REFUSAL):
+            plan_with_candidates(T, Tkv, S, **kw)
+
+
+@pytest.mark.cpu_only
+def test_twins_replace_only_the_no_sample_fit_l6_program_on_a_dense_grid(monkeypatch):
+    """sm_103a, the dense grid of ``test_candidate_block_plans_run_registered_programs_on_a_dense_grid``, with the
+    twins registered and without them (16384 queries added to its query counts): a plan changes only on a call inside
+    ``cake_policy.CB_TWIN_RULE`` where the plain plan runs the program of a twin (``cake_policy.cb_twin_key``) or a wide
+    program the CTA-pair twin serves (``cake_policy.cb_pair_twin_key``) with block entries, there it runs that twin
+    (``_check_twin_plan``) with the sampled first threshold on, at no fewer queries than the rule's floor, and the plan
+    without the twins ran the unpaired l6 program of the unsampled fit (sample-fit plans, ``iota`` plans, calls outside
+    the rule and every other program keep their plan); each twin is taken somewhere on the grid from wide plans, and no
+    plan of a twin's own CTA-pair l6 program lies inside the rule."""
+    arch = CB_TWIN_ARCH
+    with_twins, without = _twin_registries(arch)
+    policy = cake_backend.policy_for(arch)
+    tile = policy.tile_keys
+    queries = sorted(
+        {1, 3, 6018, 16384} | {round(2 ** (17 * i / 10)) for i in range(11)}
+    )
+    tiles = sorted({0, 1} | {round(2 ** (13 * i / 8)) for i in range(9)})
+    routes = [(t, wide) for t in CB_TWIN_KEYS for wide in (False, True)]
+    taken = dict.fromkeys(routes, 0)
+    for grid in GRIDS[arch]:
+        for S in (1, 8, 64):
+            for T in queries:
+                for m in tiles:
+                    Tkv = max(1, round(m * tile * S + T / 2))
+                    for top_k in (1, 512, 1024, 1025, CB_MAX_TOP_K):
+                        for bound in [None, *sorted({-(-Tkv // S), Tkv})]:
+                            for sample_tiles_max in (None, 0):
+                                kw = {
+                                    "top_k": top_k,
+                                    "arch": arch,
+                                    "num_sms": grid,
+                                    "max_seqlen_k": bound,
+                                    "sample_tiles_max": sample_tiles_max,
+                                }
+                                where = (
+                                    grid,
+                                    S,
+                                    T,
+                                    Tkv,
+                                    top_k,
+                                    bound,
+                                    sample_tiles_max,
+                                )
+                                monkeypatch.setitem(
+                                    cake_backend.PROGRAM_KEYS, arch, with_twins
+                                )
+                                plain = cake_backend.plan_dsa_indexer_det_topk(
+                                    T, Tkv, S, **kw
+                                )
+                                plan = plan_with_candidates(T, Tkv, S, **kw)
+                                monkeypatch.setitem(
+                                    cake_backend.PROGRAM_KEYS, arch, without
+                                )
+                                before = plan_with_candidates(T, Tkv, S, **kw)
+                                twin = cake_policy.cb_twin_key(plain)
+                                if twin not in CB_TWIN_KEYS:
+                                    twin = cake_policy.cb_pair_twin_key(policy, plain)
+                                if (
+                                    plan.iota
+                                    or twin not in CB_TWIN_KEYS
+                                    or not cake_policy.cb_twin_rule_holds(policy, plain)
+                                ):
+                                    assert plan == before, where
+                                    continue
+                                _check_twin_plan(plain, plan, before, twin, where, kw)
+                                assert plan.choice.sample_tiles_max > 0, where
+                                assert T >= cake_policy.CB_TWIN_RULE[4], where
+                                taken[(twin, plain.physical_kind == "wide")] += 1
+    assert all(taken[(twin, True)] for twin in CB_TWIN_KEYS), taken
+    assert not any(taken[(twin, False)] for twin in CB_TWIN_KEYS), taken
+
+
+@pytest.mark.cpu_only
+def test_wide_plans_inside_the_rule_run_the_cta_pair_twin(monkeypatch):
+    """sm_103a, every grid of ``GRIDS``, one segment of 16384 queries at the tail of its keys whose plain plan runs the
+    wide program at ``top_k`` 512: the CTA-pair l6 twin (``_check_twin_plan``) at the tile floor and at the tile cap of
+    ``cake_policy.CB_TWIN_RULE`` (254.5 and 1984 mean unit tiles) and, at 448 mean unit tiles, at its query floor
+    (16231 queries); the unpaired l6 program of the plan before the twins one key short of the floor, one key past the
+    cap, one query below the query floor, below the CTA pair's ``top_k`` floor (``pair_rule[2]``), above
+    ``wide_first_k_rule[0]`` (tail256k at ``top_k`` 1024), with sampling off (more queries than
+    ``l6_solo_unsampled_max_queries`` included) and on a registry without the CTA-pair twin."""
+    arch = CB_TWIN_ARCH
+    policy = cake_backend.policy_for(arch)
+    _, _, floor, cap, min_queries, _ = cake_policy.CB_TWIN_RULE
+    twin = f"{CB_ROLE}:pair_l6:u1:s0:f0"
+    solo = int(policy.l6_solo_unsampled_max_queries)
+    T = 16384
+    at = math.ceil(floor * policy.tile_keys + T / 2)
+    top = math.floor(cap * policy.tile_keys + T / 2)
+    assert policy.mean_unit_tiles(T, at, 1, 1) >= floor
+    assert policy.mean_unit_tiles(T, at - 1, 1, 1) < floor
+    assert policy.mean_unit_tiles(T, top, 1, 1) <= cap
+    assert policy.mean_unit_tiles(T, top + 1, 1, 1) > cap
+    at_solo = math.ceil(floor * policy.tile_keys + (solo + 8) / 2)
+    q_at = math.ceil(448 * policy.tile_keys + min_queries / 2)
+    q_below = math.ceil(448 * policy.tile_keys + (min_queries - 1) / 2)
+    assert floor <= policy.mean_unit_tiles(min_queries, q_at, 1, 1) <= cap
+    assert floor <= policy.mean_unit_tiles(min_queries - 1, q_below, 1, 1) <= cap
+    cases = [
+        (T, at, TOP_K, None, True),
+        (T, top, TOP_K, None, True),
+        (T, at - 1, TOP_K, None, False),
+        (T, top + 1, TOP_K, None, False),
+        (T, at, TOP_K - 1, None, False),
+        (T, at, TOP_K, 0, False),
+        (min_queries, q_at, TOP_K, None, True),
+        (min_queries - 1, q_below, TOP_K, None, False),
+        (solo + 8, at_solo, TOP_K, 0, False),
+    ]
+    (T256,), (Tkv256,) = SHAPES["tail256k"]
+    cases.append((T256, Tkv256, 1024, None, False))
+    with_twins, _ = _twin_registries(arch)
+    lacking = {k: v for k, v in with_twins.items() if k != twin}
+    for grid in GRIDS[arch]:
+        for T, Tkv, top_k, sample_tiles_max, takes in cases:
+            kw = {
+                "top_k": top_k,
+                "num_sms": grid,
+                "max_seqlen_k": Tkv,
+                "sample_tiles_max": sample_tiles_max,
+            }
+            where = (grid, T, Tkv, top_k, sample_tiles_max)
+            plain, plan, before = _twin_plans(monkeypatch, arch, [T], [Tkv], **kw)
+            if top_k != TOP_K - 1:
+                assert plain.physical_kind == "wide", (*where, plain.scan_key)
+                assert not plain.split, where
+                assert before.choice.scan_key == CB_TWIN_REPLACES, where
+            if not takes:
+                assert plan == before, (*where, plan.choice.scan_key)
+                continue
+            _check_twin_plan(plain, plan, before, twin, where, kw)
+            monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, lacking)
+            assert plan_with_candidates(T, Tkv, 1, arch=arch, **kw) == before, where
+            monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, with_twins)
+
+
+@pytest.mark.cpu_only
+def test_wide_twin_needs_the_sampled_first_threshold_of_its_unit(monkeypatch):
+    """sm_103a at 152 SMs, tail64k (a wide plan inside ``cake_policy.CB_TWIN_RULE`` that runs the CTA-pair twin): where
+    the CTA-pair l6 unit's sampled first threshold and check period (``cake_policy.fallback_knobs``) turn the threshold
+    off, the call keeps the plan before the twins, since the rule admits sampled calls only."""
+    seg_q, seg_k = SHAPES["tail64k"]
+    kw = {"top_k": TOP_K, "num_sms": 152, "max_seqlen_k": max(seg_k)}
+    _, plan, _ = _twin_plans(monkeypatch, CB_TWIN_ARCH, seg_q, seg_k, **kw)
+    assert plan.choice.scan_key == CB_TWINS_AT_THE_REQUEST_SHAPES["tail64k"]
+    assert plan.choice.sample_tiles_max > 0 and cake_policy.CB_TWIN_RULE[5]
+    original = cake_policy.fallback_knobs
+
+    def unsampled(policy, choice, physical, call):
+        knobs = original(policy, choice, physical, call)
+        if physical == "pair_l6":
+            return dataclasses.replace(knobs, sample_tiles_max=0)
+        return knobs
+
+    monkeypatch.setattr(cake_policy, "fallback_knobs", unsampled)
+    _, plan, before = _twin_plans(monkeypatch, CB_TWIN_ARCH, seg_q, seg_k, **kw)
+    assert plan == before and before.choice.scan_key == CB_TWIN_REPLACES, (
+        plan.choice.scan_key
+    )
 
 
 @pytest.mark.cpu_only
@@ -718,6 +1207,112 @@ def test_indices_and_scores_are_the_plain_calls_at_the_largest_top_k(top_k):
     assert not _structure_failures(*eager, ref.visible_rows(inputs).tolist())
     assert _same_as_plain(eager, plain), key
     assert _same_result(prepared, eager), key
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        *CB_TWIN_KEYS,
+        "wide:tail64k",
+        "wide:tail256k",
+        "wide:packed8",
+        "unbound:packed8",
+        f"unbound:{CB_ROLE}:pair_l6:u1:s0:f0:lsf",
+        "exact:signed zeros",
+        "exact:duplicated keys",
+        *(f"open:{name}" for name in sorted(OUTSIDE_TWIN_SHAPES)),
+    ],
+)
+def test_twins_return_the_result_of_the_plan_before_them(route, monkeypatch):
+    """On a device whose registry carries a twin (``CB_TWIN_KEYS``, sm_103a), a call whose plan takes it
+    (``TWIN_SHAPES``; ``wide:<shape>``: the wide plan of a request shape that runs the CTA-pair twin,
+    ``CB_TWINS_AT_THE_REQUEST_SHAPES``; ``unbound:<shape or twin>``: that call or the ``TWIN_SHAPES`` call without
+    ``max_seqlen_k``, whose block entries follow ``Tkv``; ``exact:<case>``: the ``TWIN_SHAPES`` call of the CTA-pair
+    twin on the exact inputs of that case, ties and signed zeros; ``open:<name>``: a call of ``OUTSIDE_TWIN_SHAPES`` --
+    fewer queries than the floor, ``top_k`` 1024 / 2047, few mean unit tiles -- with ``cake_policy.CB_TWIN_RULE``
+    opened) returns the result of the same call on the registry without the twins, which runs the unpaired l6 program
+    of the plan before them: the same bits, with the structure every row keeps, from a backend-owned runner and from a
+    runner on a 0xFF-filled caller-owned workspace of the bound.  On a device of a grid of ``GRIDS``, where the CPU tests
+    pin each call's plan, the call takes its twin; another grid may plan another program (skipped)."""
+    _require_cb_program()
+    device = torch.device("cuda")
+    arch = arch_for(device)
+    keys = cake_backend.PROGRAM_KEYS[arch]
+    kind, _, name = route.partition(":")
+    bound, case = True, None
+    if kind == "open":
+        twin, seg_q, seg_k, top_k, sample_tiles_max = OUTSIDE_TWIN_SHAPES[name]
+        monkeypatch.setattr(cake_policy, "CB_TWIN_RULE", OPEN_TWIN_RULE)
+    elif kind in ("wide", "unbound") and name in SHAPES:
+        twin, (seg_q, seg_k) = CB_TWINS_AT_THE_REQUEST_SHAPES[name], SHAPES[name]
+        top_k, sample_tiles_max, bound = TOP_K, None, kind == "wide"
+    elif kind == "unbound":
+        twin, (seg_q, seg_k, top_k, sample_tiles_max) = name, TWIN_SHAPES[name]
+        bound = False
+    elif kind == "exact":
+        twin, case = f"{CB_ROLE}:pair_l6:u1:s0:f0", name
+        seg_q, seg_k, top_k, sample_tiles_max = TWIN_SHAPES[twin]
+    else:
+        twin, (seg_q, seg_k, top_k, sample_tiles_max) = route, TWIN_SHAPES[route]
+    if twin not in keys:
+        pytest.skip(f"{arch} registers no {twin}")
+    if case is None:
+        inputs = ref.make_random_inputs(
+            seg_q, seg_k, top_k=top_k, seed=7812, device="cuda"
+        )
+        args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
+        call = inputs.kwargs()
+        ns = ref.visible_rows(inputs).tolist()
+    else:
+        args = cb.exact_inputs(case, seg_q, seg_k, seed=7813, device="cuda")
+        call = {"top_k": top_k, "softmax_scale": cb.EXACT_SCALE}
+        ns = _visible_counts(args[3], args[4], None)
+    T, Tkv, S = sum(seg_q), sum(seg_k), len(seg_q)
+    msk = max(seg_k) if bound else None
+    kw = dict(call, max_seqlen_k=msk, sample_tiles_max=sample_tiles_max)
+    plan = plan_with_candidates(
+        T,
+        Tkv,
+        S,
+        top_k=top_k,
+        device=device,
+        max_seqlen_k=msk,
+        sample_tiles_max=sample_tiles_max,
+    )
+    if plan.choice.scan_key != twin:
+        sms = torch.cuda.get_device_properties(device).multi_processor_count
+        assert sms not in GRIDS[arch], (route, sms, plan.choice.scan_key)
+        pytest.skip(f"{route} plans {plan.choice.scan_key} on this device's grid")
+    got = tuple(t.clone() for t in prepare_with_candidates(*args, **kw)())
+    nbytes = with_candidates_workspace_size(
+        T, Tkv, S, top_k=top_k, device=device, max_seqlen_k=msk
+    )
+    workspace = torch.empty(nbytes, dtype=torch.uint8, device=device)
+    runner = prepare_with_candidates(*args, **kw, workspace_buffer=workspace)
+    assert runner.choice.scan_key == twin, runner.choice.scan_key
+    workspace.fill_(0xFF)
+    prepared = tuple(t.clone() for t in runner())
+    monkeypatch.setitem(
+        cake_backend.PROGRAM_KEYS,
+        arch,
+        {k: v for k, v in keys.items() if k not in CB_TWIN_KEYS},
+    )
+    assert (
+        plan_with_candidates(
+            T,
+            Tkv,
+            S,
+            top_k=top_k,
+            device=device,
+            max_seqlen_k=msk,
+            sample_tiles_max=sample_tiles_max,
+        ).choice.scan_key
+        == CB_TWIN_REPLACES
+    )
+    before = tuple(t.clone() for t in prepare_with_candidates(*args, **kw)())
+    assert not _structure_failures(*got, ns)
+    assert _same_result(got, before), twin
+    assert _same_result(prepared, before), twin
 
 
 def test_caller_owned_workspace_and_outputs():

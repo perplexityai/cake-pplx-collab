@@ -123,7 +123,8 @@ ROW_PAD = 256  # extra columns of the wider tensors row-padded operands are cut 
 # bytes for the multiples of 64 columns the weight gradient takes
 PITCH_OFF_16 = 4
 # Two ragged groups of at least every architecture's ``dgrad_evict_first_min_rows``
-# rows on average: with ``K >= dgrad_evict_first_min_k`` the data gradient takes the
+# rows on average: with ``K >= dgrad_evict_first_min_k`` (and ``N`` over
+# ``dgrad_evict_first_skip_max_n``) the data gradient takes the
 # evict-first twin of its wide tile on the architectures of ``dgrad_evict_first_archs``
 # (sm_100a: the domain-scheduled twin; sm_107a: the A-collector twin).
 EVICT_FIRST_E2 = [16390, 16500]
@@ -190,11 +191,11 @@ def _arch(device):
     return SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
 
 
-def _evict_first(op, k, arch, sum_m, groups, c):
-    """The evict-first rule of ``op``: ``dgrad_evict_first``; ``fwd_lwh_ef`` or
-    ``fwd_evict_first``."""
+def _evict_first(op, k, arch, sum_m, groups, c, n=None):
+    """The evict-first rule of ``op``: ``dgrad_evict_first`` (with the dgrad reduction
+    ``n``); ``fwd_lwh_ef`` or ``fwd_evict_first``."""
     if op == "dgrad":
-        return cb.dgrad_evict_first(k, arch, sum_m, groups, c)
+        return cb.dgrad_evict_first(k, arch, sum_m, groups, c, n=n)
     return cb.fwd_lwh_ef(k, arch, c) or cb.fwd_evict_first(k, arch, c)
 
 
@@ -792,7 +793,7 @@ def test_program_choice_follows_the_host_plan_constants():
                 wide = cols % wide_n == 0 and arch in wide_archs
                 assert tile_n == (wide_n if wide else block_n)
                 assert stage.startswith("main_wide") == wide
-                ef = wide and served_ef and _evict_first(op, k, arch, 4096, 4, c)
+                ef = wide and served_ef and _evict_first(op, k, arch, 4096, 4, c, n=n)
                 assert (stage == "main_wide_ef") == ef, (name, arch, n, k, stage)
     min_k = int(c["wave_sync_min_k"])
     for out_dtype in ("bfloat16", "float32"):
@@ -865,7 +866,8 @@ def test_bench_and_expert_rows_take_the_measured_dgrad_stage(arch):
                 arch == "sm_100a" or (arch == "sm_107a" and groups in (4, 8))
             )
             ts33 = arch == "sm_103a" and gate_up and groups in (4, 8, 16)
-            assert cb.dgrad_evict_first(k, arch, sum_m, groups, c) == ef, (proj, label)
+            rule = cb.dgrad_evict_first(k, arch, sum_m, groups, c, n=n)
+            assert rule == ef, (proj, label)
             stage, tile_n = cb.select_row_stage(
                 name, "dgrad", n, k, arch, c, sum_m=sum_m, num_groups=groups
             )
@@ -912,6 +914,388 @@ def test_bench_and_expert_rows_take_the_measured_fwd_stage(arch):
     # E32 of the benchmark and of the expert rows take the 3 / 3 twin on sm_103a.
     assert taken["main_wide_ef"] == 13
     assert taken["main_wide_ts33"] == {"sm_100a": 0, "sm_103a": 2, "sm_107a": 0}[arch]
+
+
+# The short-reduction rules (``dgrad_evict_first_skip_max_n``,
+# ``dgrad_wide_ts33_short_n_min`` to ``dgrad_wide_ts33_short_n``,
+# ``fwd_wide_ts33_short_k_min`` to ``fwd_wide_ts33_short_k``) at their edges (448 /
+# 512, 1024 / 1025) over 64 groups and 4096 output columns: (op, reduction, rows per
+# group) -> the stage on sm_100a, sm_103a and sm_107a; a pair is (the stage without
+# the three rules, the stage with them).
+_W, _E, _T = "main_wide", "main_wide_ef", "main_wide_ts33"
+SHORT_REDUCTION_EDGES = {
+    ("dgrad", 1024, 5120): ((_E, _W), (_W, _T), _W),
+    ("dgrad", 1025, 5120): (_E, _W, _W),
+    ("dgrad", 512, 5120): ((_E, _W), (_W, _T), _W),
+    ("dgrad", 448, 5120): ((_E, _W), _W, _W),
+    ("dgrad", 1024, 4095): (_W, (_W, _T), _W),
+    ("dgrad", 1024, 1024): (_W, (_W, _T), _W),
+    ("dgrad", 1024, 1023): (_W, _W, _W),
+    ("dgrad", 1025, 1024): (_W, _W, _W),
+    ("dgrad", 512, 1024): (_W, (_W, _T), _W),
+    ("dgrad", 448, 1024): (_W, _W, _W),
+    ("dgrad", 1024, 8192): ((_E, _W), _T, _W),
+    ("dgrad", 1025, 8192): (_E, _T, _W),
+    ("dgrad", 448, 8192): ((_E, _W), _T, _W),
+    ("dgrad", 1024, 16384): ((_E, _W), _T, _E),
+    ("fwd", 1024, 4096): (_W, _T, _E),
+    ("fwd", 1024, 4097): (_W, (_W, _T), _E),
+    ("fwd", 1024, 65536): (_W, (_W, _T), _E),
+    ("fwd", 1025, 4096): (_W, _T, _E),
+    ("fwd", 1025, 4097): (_W, _W, _E),
+    ("fwd", 512, 5120): (_W, (_W, _T), _E),
+    ("fwd", 512, 65536): (_W, (_W, _T), _E),
+    ("fwd", 448, 5120): (_W, _W, _E),
+    ("fwd", 448, 4096): (_W, _T, _E),
+}
+SHORT_REDUCTION_KEYS = (
+    "dgrad_evict_first_skip_max_n",
+    "dgrad_wide_ts33_short_n",
+    "fwd_wide_ts33_short_k",
+)
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_short_reductions_take_the_measured_wide_twins(arch):
+    """A data gradient whose reduction ``N`` is at most the architecture's
+    ``dgrad_evict_first_skip_max_n`` (sm_100a: 1024) keeps the plain wide tile where its
+    evict-first twin served it; one from ``dgrad_wide_ts33_short_n_min`` to
+    ``dgrad_wide_ts33_short_n`` (sm_103a: 512 to 1024) takes ``main_wide_ts33`` from
+    ``dgrad_wide_ts33_short_n_min_rows`` (1024) rows per group; a forward pass whose
+    reduction ``K`` is from ``fwd_wide_ts33_short_k_min`` to ``fwd_wide_ts33_short_k``
+    (sm_103a: 512 to 1024) takes ``main_wide_ts33`` at any rows per group.  The edges
+    (``SHORT_REDUCTION_EDGES``: 448 / 512 and 1024 / 1025, 1023 / 1024 rows per group)
+    take the listed stages, sm_107a has none of the rules, and over a grid of shapes
+    every stage the rules change is one of those three swaps, at a reduction of at
+    most 1024 (sm_100a) or of 512 to 1024 (sm_103a)."""
+    c = HOST_PLAN_CONSTANTS
+    assert set(c["dgrad_evict_first_skip_max_n"]) <= set(c["dgrad_evict_first_archs"])
+    assert set(c["dgrad_wide_ts33_short_n"]) <= set(c["dgrad_wide_ts33_archs"])
+    assert set(c["dgrad_wide_ts33_short_n_min_rows"]) == set(
+        c["dgrad_wide_ts33_short_n"]
+    )
+    assert set(c["dgrad_wide_ts33_short_n_min"]) == set(c["dgrad_wide_ts33_short_n"])
+    assert set(c["fwd_wide_ts33_short_k"]) <= set(c["fwd_wide_ts33_archs"])
+    assert set(c["fwd_wide_ts33_short_k_min"]) == set(c["fwd_wide_ts33_short_k"])
+    plain = dict(c, **{key: {} for key in SHORT_REDUCTION_KEYS})
+    wide_n = int(c["wide_block_n"])
+
+    def stage(op, cols, red, rows, groups, constants):
+        n, k = (cols, red) if op == "fwd" else (red, cols)
+        got, tile_n = cb.select_row_stage(
+            cake_jit.record_name(op),
+            op,
+            n,
+            k,
+            arch,
+            constants,
+            sum_m=rows * groups,
+            num_groups=groups,
+        )
+        assert tile_n == (wide_n if cols % wide_n == 0 else int(c["block_n"]))
+        return got
+
+    column = ("sm_100a", "sm_103a", "sm_107a").index(arch)
+    for (op, red, rows), stages in SHORT_REDUCTION_EDGES.items():
+        want = stages[column]
+        before, after = want if isinstance(want, tuple) else (want, want)
+        assert stage(op, 4096, red, rows, 64, plain) == before, (op, red, rows)
+        assert stage(op, 4096, red, rows, 64, c) == after, (op, red, rows)
+    # Each swap and the reductions it may change.
+    swaps = {
+        "sm_100a": {("dgrad", _E, _W): (1, 1024)},
+        "sm_103a": {("dgrad", _W, _T): (512, 1024), ("fwd", _W, _T): (512, 1024)},
+        "sm_107a": {},
+    }[arch]
+    changed = 0
+    for op in ("fwd", "dgrad"):
+        for cols in (1024, 4096, 7168, 8192):
+            for red in (256, 448, 512, 1024, 1025, 2048, 4096):
+                for rows in (256, 1023, 1024, 4096, 4097, 8192, 65536):
+                    for groups in (4, 64):
+                        before = stage(op, cols, red, rows, groups, plain)
+                        after = stage(op, cols, red, rows, groups, c)
+                        if before != after:
+                            assert (op, before, after) in swaps, (op, cols, red, rows)
+                            low, high = swaps[(op, before, after)]
+                            assert low <= red <= high, (op, cols, red, rows)
+                            changed += 1
+    assert (changed > 0) == bool(swaps), (arch, changed)
+
+
+# Shapes of the queue walk's rule checks (``wgrad_queue_walk``'s keywords): none given (every
+# optional bound fails), and weight gradients on both sides of edges in rows, rows per group
+# (at 4, 16 and 32 groups), N and K.
+QUEUE_WALK_SHAPES = (
+    {},
+    {"total_rows": 16384, "n": 4096, "k": 6144},
+    {"total_rows": 16385, "n": 4096, "k": 6144},
+    {"total_rows": 65536, "n": 4096, "k": 6144},
+    {"total_rows": 65537, "n": 4096, "k": 6144},
+    {"total_rows": 131072, "n": 4096, "k": 6144},
+    {"total_rows": 131073, "n": 4096, "k": 6144},
+    {"total_rows": 131072, "n": 4095, "k": 6144},
+    {"total_rows": 131072, "n": 4097, "k": 6144},
+    {"total_rows": 655360, "n": 2048, "k": 6144},
+    {"total_rows": 655360, "n": 2048, "k": 6143},
+    {"total_rows": 655360, "n": 2047, "k": 7168},
+    {"total_rows": 655360, "n": 2049, "k": 7168},
+    {"total_rows": 655360, "n": 6144, "k": 2048},
+    {"total_rows": 655360, "n": 6143, "k": 2048},
+)
+# The group counts of the rule checks: each end of the shipped group ranges and one past it.
+QUEUE_WALK_GROUPS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 32, 33, 64)
+
+
+def _queue_bounds_hold(rule, groups, shape):
+    """Whether ``shape`` (keywords of ``QUEUE_WALK_SHAPES``) meets every optional bound of
+    ``rule`` over ``groups`` groups, by the rule's definition: ``rows`` holds ``total_rows``,
+    ``rows_per_group`` holds ``total_rows / groups`` (exact in integers), ``n`` and ``k``
+    hold ``n`` and ``k``, a None end leaving its side open; a bound whose value is not given
+    fails."""
+    values = {
+        "rows": (shape.get("total_rows"), 1),
+        "rows_per_group": (shape.get("total_rows"), groups),
+        "n": (shape.get("n"), 1),
+        "k": (shape.get("k"), 1),
+    }
+    for key, (value, scale) in values.items():
+        if key not in rule:
+            continue
+        low, high = rule[key]
+        if value is None:
+            return False
+        if low is not None and value < low * scale:
+            return False
+        if high is not None and value > high * scale:
+            return False
+    return True
+
+
+def test_wgrad_queue_walk_follows_its_rules():
+    """``wgrad_queue_walk`` holds exactly where one rule of ``queue_walk`` names the
+    architecture, the SM count, the selected stage (one of ``QUEUE_SELECTED_STAGES``),
+    the output and a group range holding the group count, and the call's shape meets
+    every optional bound of that rule.  (A CPU check.)"""
+    c = HOST_PLAN_CONSTANTS
+    stages = ("main", "main_wave", "main_halves_k256t", *cb.QUEUE_SELECTED_STAGES)
+    outputs = ("bfloat16", "float32", "accumulate")
+    for arch in cake_jit.ARCHES:
+        for sms in (148, 152, 160, 212):
+            for stage in stages:
+                for output in outputs:
+                    for groups in QUEUE_WALK_GROUPS:
+                        for shape in QUEUE_WALK_SHAPES:
+                            want = any(
+                                rule["arch"] == arch
+                                and sms in rule["sm_counts"]
+                                and rule["stage"] == stage
+                                and output in rule["outputs"]
+                                and rule["groups"][0] <= groups <= rule["groups"][1]
+                                and _queue_bounds_hold(rule, groups, shape)
+                                for rule in c["queue_walk"]
+                            )
+                            got = cb.wgrad_queue_walk(
+                                stage, output, arch, sms, groups, c, **shape
+                            )
+                            assert got == want, (
+                                arch,
+                                sms,
+                                stage,
+                                output,
+                                groups,
+                                shape,
+                            )
+    assert not cb.wgrad_queue_walk(
+        "main_halves", "bfloat16", "sm_100a", 148, 8, {"queue_walk": []}
+    )
+
+
+# The rule of the optional bounds' unit checks: the bf16 overwrite of the 148-SM sm_100a
+# ``main_halves`` stage at 1 to 64 groups, before any bound.
+QUEUE_BOUND_RULE = {
+    "arch": "sm_100a",
+    "sm_counts": [148],
+    "stage": "main_halves",
+    "outputs": ["bfloat16"],
+    "groups": [1, 64],
+}
+# A call inside every bound of the unit checks: 32 groups of 6144 rows, a 2048 x 4096 dW[e].
+QUEUE_BOUND_SHAPE = {"total_rows": 196608, "n": 2048, "k": 4096}
+
+
+def _bound_walk(bounds, groups=32, **shape):
+    """``wgrad_queue_walk`` of a bf16 overwrite of ``groups`` groups on the 148-SM sm_100a
+    ``main_halves`` stage under the one rule ``QUEUE_BOUND_RULE`` with ``bounds`` added, for
+    ``QUEUE_BOUND_SHAPE`` with ``shape`` replacing its keywords."""
+    rule = dict(QUEUE_BOUND_RULE, **bounds)
+    return cb.wgrad_queue_walk(
+        "main_halves",
+        "bfloat16",
+        "sm_100a",
+        148,
+        groups,
+        {"queue_walk": [rule]},
+        **{**QUEUE_BOUND_SHAPE, **shape},
+    )
+
+
+def _bound_edges(low, high):
+    """``(value, inside)`` at both ends of ``[low, high]`` and one past each."""
+    return [
+        (low - 1, False),
+        (low, True),
+        (low + 1, True),
+        (high - 1, True),
+        (high, True),
+        (high + 1, False),
+    ]
+
+
+# The unit cases of the optional bounds: (bound key, [min, max], groups, shape keywords, binds).
+# Each bound at both ends and one past them; ``rows_per_group`` in rows at 32 groups and at 3
+# (whose mean rows per group are not whole) and in groups at 196608 rows; each key with one
+# end open (None), which holds every value on that side.
+QUEUE_BOUND_CASES = [
+    *(
+        ("rows", [131072, 196608], 32, {"total_rows": v}, ok)
+        for v, ok in _bound_edges(131072, 196608)
+    ),
+    *(
+        ("rows_per_group", [4096, 6144], 32, {"total_rows": v}, ok)
+        for v, ok in _bound_edges(4096 * 32, 6144 * 32)
+    ),
+    *(
+        ("rows_per_group", [4096, 6144], 3, {"total_rows": v}, ok)
+        for v, ok in _bound_edges(4096 * 3, 6144 * 3)
+    ),
+    *(
+        ("rows_per_group", [4096, 6144], e, {"total_rows": 196608}, ok)
+        for e, ok in (
+            (31, False),
+            (32, True),
+            (33, True),
+            (47, True),
+            (48, True),
+            (49, False),
+        )
+    ),
+    *(("n", [2048, 4096], 32, {"n": v}, ok) for v, ok in _bound_edges(2048, 4096)),
+    *(("k", [4096, 6144], 32, {"k": v}, ok) for v, ok in _bound_edges(4096, 6144)),
+    *(
+        ("rows", bound, 32, {"total_rows": v}, ok)
+        for bound, v, ok in (
+            ([None, 131072], 0, True),
+            ([None, 131072], 131072, True),
+            ([None, 131072], 131073, False),
+            ([131072, None], 131071, False),
+            ([131072, None], 131072, True),
+            ([131072, None], 1 << 40, True),
+        )
+    ),
+    *(
+        ("rows_per_group", bound, 32, {"total_rows": v}, ok)
+        for bound, v, ok in (
+            ([None, 4096], 4096 * 32, True),
+            ([None, 4096], 4096 * 32 + 1, False),
+            ([4096, None], 4096 * 32 - 1, False),
+            ([4096, None], 4096 * 32, True),
+        )
+    ),
+    *(
+        (key, bound, 32, {key: v}, ok)
+        for key in ("n", "k")
+        for bound, v, ok in (
+            ([None, 4096], 4096, True),
+            ([None, 4096], 4097, False),
+            ([4096, None], 4095, False),
+            ([4096, None], 1 << 20, True),
+            ([None, None], 1, True),
+        )
+    ),
+]
+
+
+@pytest.mark.parametrize("key,bound,groups,shape,want", QUEUE_BOUND_CASES)
+def test_wgrad_queue_walk_bound_edges(key, bound, groups, shape, want):
+    """An optional bound of a ``queue_walk`` rule holds its value with both ends included
+    and a None end open: ``"rows"`` ``total_rows``, ``"rows_per_group"``
+    ``total_rows / num_groups`` compared exactly (``min * E <= total_rows <= max * E``),
+    ``"n"`` ``n``, ``"k"`` ``k``.  (A CPU check.)"""
+    assert _bound_walk({key: bound}, groups, **shape) == want
+
+
+# The arguments each optional bound reads.
+QUEUE_BOUND_ARGUMENTS = {
+    "rows": ("total_rows",),
+    "rows_per_group": ("total_rows",),
+    "n": ("n",),
+    "k": ("k",),
+}
+
+
+@pytest.mark.parametrize("key", cb.QUEUE_RULE_BOUNDS)
+def test_wgrad_queue_walk_bound_needs_its_arguments(key):
+    """A rule with an optional bound never matches a call that leaves the argument the bound
+    reads as None (the default), even where the bound holds any value; the arguments it does
+    not read may be None.  (A CPU check.)"""
+    assert tuple(QUEUE_BOUND_ARGUMENTS) == cb.QUEUE_RULE_BOUNDS
+    every = {key: [None, None]}
+    assert _bound_walk(every)
+    for name in QUEUE_BOUND_ARGUMENTS[key]:
+        assert not _bound_walk(every, **{name: None}), name
+    others = {
+        name: None
+        for name in QUEUE_BOUND_SHAPE
+        if name not in QUEUE_BOUND_ARGUMENTS[key]
+    }
+    assert _bound_walk(every, **others), others
+
+
+def test_wgrad_queue_walk_bounds_combine():
+    """A rule binds only where every bound it has holds and its other fields name the call;
+    one matching rule of several binds; a rule with no bound matches a call that gives no
+    shape (the keywords' defaults).  (A CPU check.)"""
+    every = {
+        "rows": [131072, 196608],
+        "rows_per_group": [4096, 6144],
+        "n": [2048, 2048],
+        "k": [4096, None],
+    }
+    assert _bound_walk(every)
+    assert not _bound_walk(every, total_rows=196609)
+    assert not _bound_walk(every, groups=31)
+    assert not _bound_walk(every, n=2304)
+    assert not _bound_walk(every, k=3584)
+    rule = dict(QUEUE_BOUND_RULE, rows=[0, None])
+    for stage, output, arch, sms, groups in (
+        ("main_wave_halves", "bfloat16", "sm_100a", 148, 32),
+        ("main_halves", "float32", "sm_100a", 148, 32),
+        ("main_halves", "bfloat16", "sm_103a", 148, 32),
+        ("main_halves", "bfloat16", "sm_100a", 152, 32),
+        ("main_halves", "bfloat16", "sm_100a", 148, 65),
+    ):
+        assert not cb.wgrad_queue_walk(
+            stage,
+            output,
+            arch,
+            sms,
+            groups,
+            {"queue_walk": [rule]},
+            **QUEUE_BOUND_SHAPE,
+        ), (stage, output, arch, sms, groups)
+    two = {"queue_walk": [dict(QUEUE_BOUND_RULE, rows=[0, 1]), dict(QUEUE_BOUND_RULE)]}
+    assert cb.wgrad_queue_walk(
+        "main_halves", "bfloat16", "sm_100a", 148, 32, two, **QUEUE_BOUND_SHAPE
+    )
+    assert cb.wgrad_queue_walk(
+        "main_halves",
+        "bfloat16",
+        "sm_100a",
+        148,
+        32,
+        {"queue_walk": [QUEUE_BOUND_RULE]},
+    )
 
 
 def test_workspace_arguments_of_the_argument_plans():
@@ -1177,11 +1561,13 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch, record_property
     device = _require_program("dgrad")
     c = HOST_PLAN_CONSTANTS
     arch = _arch(device)
-    n, k = 64, int(c["dgrad_evict_first_min_k"])
+    # A reduction over every architecture's ``dgrad_evict_first_skip_max_n``.
+    n, k = 1088, int(c["dgrad_evict_first_min_k"])
     sizes = EVICT_FIRST_E2
     assert sum(sizes) // len(sizes) >= max(
         int(v) for v in c["dgrad_evict_first_min_rows"].values()
     )
+    assert n > max(c["dgrad_evict_first_skip_max_n"].values(), default=0)
     case = _Case(sizes, n, k, device)
     w, g, offs = case.w, case.g, case.offs
     launch = prepare_dgrad(g, w, offs)
@@ -1195,7 +1581,7 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch, record_property
     ts33 = (
         wide
         and not ef
-        and cb.dgrad_wide_ts33(k, arch, sum(sizes), len(sizes), c)
+        and cb.dgrad_wide_ts33(k, arch, sum(sizes), len(sizes), c, n=n)
         and cake_jit.stage_served(name, "main_wide_ts33", arch)
     )
     assert ef == (arch in c["dgrad_evict_first_archs"]), arch

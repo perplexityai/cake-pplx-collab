@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Backend of :mod:`cake_pplx.cake_situ_glu_det_train`: the Cake SiTU-GLU
-activation of an MLP in training, forward and backward (SM100 / SM103), as one
-self-contained package (host API bodies, the ``cake_jit`` registry, the pinned
-``cake_build`` loader and the generated CUDA sources under ``csrc/``).  The
+activation of an MLP in training, forward and backward (SM100 / SM103 /
+SM107), as one self-contained package (host API bodies, the ``cake_jit``
+registry, the pinned ``cake_build`` loader and the generated CUDA sources under
+``csrc/``).  The
 ``@cake_api``-decorated entry points and the user-facing documentation live in
 :mod:`cake_pplx.cake_situ_glu_det_train`; import that module.
 
@@ -31,10 +32,11 @@ Host design (every control is an argument; no environment variable):
   that is not 1, a row stride that is not a multiple of 8 elements, a base
   address that is not 16-byte aligned) is copied once to a contiguous tensor.
   ``beta`` and ``lb`` are finite positive Python numbers rounded to FP32
-  (defaults 4.0 and 25.0), with ``2.88539 / beta``, ``2.88539 / lb`` and
-  ``beta lb`` finite in FP32, the constants the kernels form (``ValueError``
-  otherwise); they are launch arguments, as are ``R``, ``I`` and the strides,
-  so one build serves every call.  The tests cover ``beta`` in ``[2.5, 4]``
+  (defaults 4.0 and 25.0), with ``2.88539 / beta``, ``2.88539 / lb``,
+  ``beta lb``, ``beta (1 + 2^-21)`` and ``lb (1 + 2^-21)`` finite in FP32,
+  the constants the kernels form (``ValueError`` otherwise); they are launch
+  arguments, as are ``R``, ``I`` and the strides, so one build serves every
+  call.  The tests cover ``beta`` in ``[2.5, 4]``
   and ``lb`` in ``[10, 40]``.
 - Outputs.  ``h`` is a new contiguous BF16 ``[R, I]`` tensor, or the caller's
   ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout of the
@@ -51,9 +53,8 @@ Host design (every control is an argument; no environment variable):
 - Launches.  One kernel per call (``cake_jit.MODULES``, the record of the
   stage through ``cake_jit.PROGRAM_OF``): CTAs of 128 threads (the record's
   launch block), one CTA per block of ``cake_jit.ROWS_PER_CTA`` rows on the
-  grid's x axis (``cake_jit.grid``).  In the forward a CTA's four warps take
-  its row's segments of 256 columns in turn; in the backward two warps take
-  each of its two rows' segments.  ``R == 0``
+  grid's x axis (``cake_jit.grid``).  In each stage a CTA's four warps take
+  its row's segments of 256 columns in turn.  ``R == 0``
   launches nothing and loads no library.  Every launch is a plain
   stream-ordered launch on the current torch stream of the operands' device
   (a tvm-ffi call whose arguments include PyTorch CUDA tensors runs on that
@@ -67,19 +68,28 @@ Host design (every control is an argument; no environment variable):
   ``W = 2^(-2 |u| log2(e) / lb)``, all in ``[0, 1]`` so that no exponential
   overflows: ``tanh(|g| / beta) = (1 - E) / (1 + E)``, ``sigmoid(g) =
   1 / (1 + P)`` for ``g >= 0`` and ``P / (1 + P)`` for ``g < 0``, and
-  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  ``1 - E`` and
-  ``1 - W`` keep an absolute error of a few ``2^-24``.  ``h`` and ``d_up``
-  scale with ``1 - E``, and ``h`` and ``d_gate`` with ``1 - W``, so their
-  relative error can pass the BF16 rounding where ``|g|`` is below about
-  ``3e-5 beta`` or ``|u|`` below about ``3e-5 lb``; below about
-  ``2^-26 beta`` (``2^-26 lb``), ``E`` (``W``) rounds to 1 and those outputs
-  are 0.  ``g = 0`` gives ``E = 1`` exactly, so ``g = 0`` or ``u = 0`` gives
-  ``h = 0`` exactly.  ``beta = 4`` takes ``P = E E``; any other ``beta`` takes
-  ``P`` from its own exponential, the same choice for every element of a call.
+  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  The forward takes
+  ``beta (1 - E)`` as the smaller of ``|g| (1 + E)`` and
+  ``beta (1 + 2^-21) - beta E``, two upper bounds, without a branch: within
+  about ``2^-14.8`` of the exact value, relative to it, for every ``g``, and
+  0 for ``g = 0``.  ``lb (1 - W)`` takes the same form with ``|u|`` and
+  ``lb``.  So ``h`` keeps its accuracy for tiny gates and ups, and ``g = 0``
+  or ``u = 0`` gives ``h = 0`` exactly.  The bounds of both stages hold in
+  exact arithmetic; in FP32 the first bound of each stage moves by up to a
+  few ``2^-24`` of the exact value, to either side, which the relative
+  errors stated here include.  The backward takes
+  ``beta (1 - E)`` as the larger of ``|g| (2 - 2 |g| / beta)`` and
+  ``beta (1 - 2^-20) - beta E``, two lower bounds, without a branch: within
+  ``2^-13`` of the exact value, relative to it, for every ``g``, and 0 for
+  ``g = 0``.  ``lb (1 - W)`` takes the same form with ``|u|`` and ``lb``.  So
+  ``d_gate`` and ``d_up`` keep their accuracy for tiny gates and ups.
+  ``beta = 4`` takes ``P = E E``; any other ``beta`` takes ``P`` from its own
+  exponential, the same choice for every element of a call.
   The exponentials are the approximate base-2 exponential.  ``E`` and ``W``
   flush below ``2^-126``, only where ``|g| > 43.67 beta`` or
-  ``|u| > 43.67 lb``.  ``h`` takes them only as ``1 - E``, ``1 + E``,
-  ``1 - W`` and ``1 + W``, which the flush leaves as they are.  In the
+  ``|u| > 43.67 lb``.  ``h`` takes them only as ``1 + E``,
+  ``beta (1 + 2^-21) - beta E`` and the same terms of ``W``, which the flush
+  leaves as they are.  In the
   backward, an up past ``43.67 lb`` has ``d_up`` under
   ``2^-124 |dh| beta``, and at ``beta >= 2.4`` a gate past ``43.67 beta``
   has ``d_gate`` under about ``2^-124 |dh| lb``; the kernels store 0 there.
@@ -290,13 +300,20 @@ def _fp32_finite(value: float) -> bool:
 
 def _scalars(beta: Any, lb: Any) -> tuple[float, float]:
     """``beta`` and ``lb`` rounded to FP32 (:func:`_scalar`), with the constants the kernels form from them,
-    ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``, finite in FP32: past it they would be infinite in the kernels
-    and give NaN."""
+    ``2.88539 / beta``, ``2.88539 / lb``, ``beta lb``, ``beta (1 + 2^-21)`` and ``lb (1 + 2^-21)``, finite in FP32:
+    the kernels assume them finite.  Each product of an FP32 value and ``1 + 2^-21`` is exact in float64, so
+    :func:`_fp32_finite` rounds it once, as the kernels do."""
     beta32, lb32 = _scalar(beta, "beta"), _scalar(lb, "lb")
-    constants = (("2.88539 / beta", 2.88539 / beta32), ("2.88539 / lb", 2.88539 / lb32), ("beta lb", beta32 * lb32))
+    constants = (
+        ("2.88539 / beta", 2.88539 / beta32),
+        ("2.88539 / lb", 2.88539 / lb32),
+        ("beta lb", beta32 * lb32),
+        ("beta (1 + 2^-21)", beta32 * (1.0 + 2.0**-21)),
+        ("lb (1 + 2^-21)", lb32 * (1.0 + 2.0**-21)),
+    )
     for name, value in constants:
         if not _fp32_finite(value):
-            raise ValueError(f"{name} is past the FP32 range (beta {beta32!r}, lb {lb32!r}): the kernels give NaN")
+            raise ValueError(f"{name} is past the FP32 range (beta {beta32!r}, lb {lb32!r}): the kernels need it")
     return beta32, lb32
 
 

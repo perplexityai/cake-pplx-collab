@@ -15,7 +15,7 @@ limitations under the License.
 
 Backend of :mod:`cake_pplx.cake_route_weight_scale_det_train`: the Cake
 route-weight row scaling of a routed MoE expert in training, forward and
-backward (SM100 / SM103), as one self-contained package (host code,
+backward (SM100 / SM103 / SM107), as one self-contained package (host code,
 the ``cake_jit`` registry, the pinned ``cake_build`` loader and the generated
 CUDA sources under ``csrc/``).  The ``@cake_api``-decorated entry points and
 the user-facing documentation live in

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Registry of the Cake SiTU-GLU training forward and backward kernels
-(SM100 / SM103), deterministic.
+(SM100 / SM103 / SM107), deterministic.
 
 Every record of ``MODULES`` is one exported program: a CUDA device translation
 unit plus a tvm-ffi binding, compiled once per architecture.  A record is keyed
@@ -43,7 +43,7 @@ program name: retuning a kernel renames its program (the record's key and
 count, the width, ``beta``, ``lb`` and every BF16 row stride (in elements) as
 launch arguments, so one build serves every row count, every width that is a
 multiple of :data:`SEGMENT` and every layout.  A CTA owns a block of
-:data:`ROWS_PER_CTA` rows at a time (one in the forward, two in the backward)
+:data:`ROWS_PER_CTA` rows at a time (one in each stage)
 and the CTAs stride over the blocks, so the grid is one CTA per block
 (:func:`grid`).  The host launches nothing for ``rows == 0``.
 """
@@ -52,8 +52,8 @@ from __future__ import annotations
 
 from typing import Any
 
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 PACKAGE = "cake_pplx._backends.cake_situ_glu_det_train"
 LIBRARY_PREFIX = "cake_situ_glu_det_train"
 MANIFEST = "build.json"
@@ -62,13 +62,13 @@ MANIFEST = "build.json"
 STAGES = ("fwd", "bwd")
 
 MODULES: dict[str, dict[str, Any]] = {
-    # The forward: h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb)), one row a CTA, four warps a row, three
-    # segments of 256 columns a warp per pass.
-    "cake_situ_glu_det_train_0d8b30c1317b470593ea": {
-        "arches": ["sm_100a", "sm_103a"],
+    # The forward: h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb)), one row a CTA, four warps a row, one
+    # segment of 256 columns a warp per pass.
+    "cake_situ_glu_det_train_9b922273e948685fab2d": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "width"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "beta"], ["parameter", "lb"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_situ_glu_det_train_0d8b30c1317b470593ea",
+        "kernel_symbol": "kernel_cake_situ_glu_det_train_9b922273e948685fab2d",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -76,16 +76,16 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_situ_glu_det_train_0d8b30c1317b470593ea",
+        "library": "cake_situ_glu_det_train_9b922273e948685fab2d",
         "stage": "fwd",
     },
-    # The backward: d_gate and d_up (BF16) from gate, up and dh, the activation recomputed, two rows a CTA, two warps
-    # a row, six segments of 256 columns a warp per pass.
-    "cake_situ_glu_det_train_9830620c58096d1142ec": {
-        "arches": ["sm_100a", "sm_103a"],
+    # The backward: d_gate and d_up (BF16) from gate, up and dh, the activation recomputed, one row a CTA, four warps
+    # a row, one segment of 256 columns a warp per pass.
+    "cake_situ_glu_det_train_2ad79222570bbd0c2cef": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "d_gate"], ["buffer", "d_up"], ["parameter", "rows"], ["parameter", "width"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "beta"], ["parameter", "lb"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_situ_glu_det_train_9830620c58096d1142ec",
+        "kernel_symbol": "kernel_cake_situ_glu_det_train_2ad79222570bbd0c2cef",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -93,7 +93,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_situ_glu_det_train_9830620c58096d1142ec",
+        "library": "cake_situ_glu_det_train_2ad79222570bbd0c2cef",
         "stage": "bwd",
     },
 }
@@ -113,9 +113,8 @@ MAX_WIDTH = 2**31 - SEGMENT
 VECTOR_ELEMENTS = 8
 ALIGNMENT_BYTES = 16
 
-# The rows a CTA of 128 threads owns at a time: the forward's four warps own one row, the backward's two warps a row
-# own two rows.
-ROWS_PER_CTA = {"fwd": 1, "bwd": 2}
+# The rows a CTA of 128 threads owns at a time: in each stage its four warps own one row.
+ROWS_PER_CTA = {"fwd": 1, "bwd": 1}
 
 # ``rows`` is a 32-bit kernel parameter, and each CTA steps over the rows by the grid size times its rows in 32 bits:
 # with one CTA per block, up to this many rows no step passes 2**31 - 1.

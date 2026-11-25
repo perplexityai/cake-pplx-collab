@@ -362,11 +362,16 @@ release, k256 tail); see that package's README. The L2 evict-first twins
 (`main_wide_ef`) follow the deterministic rules and constants: the data
 gradient's on the architectures of `dgrad_evict_first_archs` (sm_100a, the
 domain-scheduled twin; sm_107a, the A-collector twin) from the architecture's
-`dgrad_evict_first_min_rows` rows per group and `K >= dgrad_evict_first_min_k`
+`dgrad_evict_first_min_rows` rows per group and `K >= dgrad_evict_first_min_k`,
+unless the reduction `N` is at most `dgrad_evict_first_skip_max_n`
 (`dgrad_evict_first`), the forward pass's on those of `fwd_lwh_ef_archs`
 (sm_107a) for `K <= fwd_lwh_ef_max_k` (`fwd_lwh_ef`) and on those of
 `fwd_evict_first_archs` (sm_100a, sm_103a) for `K >= fwd_evict_first_min_k`
-(`fwd_evict_first`). The eviction priority changes no arithmetic. A forward
+(`fwd_evict_first`). The eviction priority changes no arithmetic. The 3 / 3
+head / tail twins (`main_wide_ts33`, sm_103a) follow the deterministic rules too,
+the short-reduction ones included (`dgrad_wide_ts33_short_n_min` to
+`dgrad_wide_ts33_short_n`, `fwd_wide_ts33_short_k_min` to
+`fwd_wide_ts33_short_k`). A forward
 or data gradient whose output span passes 2^31 - 1 elements launches in row
 chunks on the architectures of `wide_rows_archs` (`sm_100a`, `sm_103a`,
 `sm_107a`) as in
@@ -426,7 +431,16 @@ Differences:
   `main_wave_halves`), the output (`"bfloat16"` / `"float32"` overwrite,
   `"accumulate"` for the fused fp32 accumulate) and a range holding the group
   count (both ends included); `launch.stages` names the bound stage, and the
-  plan is the selected stage's. The rules: sm_100a with 148 SMs (B200): `main_wave_halves`, E4 to
+  plan is the selected stage's. A rule may also bound the call with optional
+  `[min, max]` pairs, both ends included and a `None` end leaving that side
+  open, each applying only where the rule has its key (`QUEUE_RULE_BOUNDS`):
+  `"rows"` on the rows `sum_m`, `"rows_per_group"` on the mean rows per group
+  (compared exactly: `min * E <= sum_m <= max * E`), `"n"` on `N` and `"k"`
+  on `K` of `dW[e]`. All are known on the host; for an `m_indptr` row table
+  `sum_m` is every row of `g` and `x`, not the rows of the slice, so a
+  device-slice call binds the queue walk exactly where the `[E]` call over
+  the same operands does. No rule of this package has such a bound. The
+  rules: sm_100a with 148 SMs (B200): `main_wave_halves`, E4 to
   E32, and `main_halves`, E8 to E32, for bf16 and the fused accumulate;
   sm_100a with 152 SMs (GB200): `main_wave_halves`, E4 to E32, for the fused
   accumulate, and `main_halves`, E16 to E32, for bf16; sm_103a with 152 SMs
