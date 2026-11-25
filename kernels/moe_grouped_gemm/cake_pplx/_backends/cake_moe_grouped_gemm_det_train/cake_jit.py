@@ -2382,18 +2382,61 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     # stage the host selects.  A call takes it when one rule names the device's
     # architecture and SM count, the selected stage, the kind of output
     # (``"bfloat16"`` / ``"float32"`` overwrite, ``"accumulate"`` for the
-    # fused FP32 accumulate) and a range ``[min, max]`` holding the group count;
-    # every other call keeps its stage.  The rules are the parts of the
-    # non-deterministic package's rules where this package's queue walk was
-    # timed against the stage it replaces on that part (148-SM sm_100a, 152-SM
-    # sm_103a) and no row was confirmed slower across several GPUs, except one
-    # disclosed row: the 8-group gate/up weight gradient with a composed
-    # bfloat16 accumulate, lead route, eager, slower on one of three 148-SM
-    # sm_100a GPUs and faster on the other two.  On the 148-SM sm_100a part the
-    # ``main_halves`` stage keeps the queue walk only for the fused accumulate
-    # (a bfloat16 row there was slower than its stage), and the
-    # ``main_wave_halves`` stage keeps it up to 16 groups (a 32-group bfloat16
-    # row there was slower).  A part with no rule here keeps its stage.
+    # fused FP32 accumulate) and a range ``[min, max]`` holding the group count,
+    # and meets the rule's optional bounds (``cake_backend.QUEUE_RULE_BOUNDS``),
+    # each a ``[min, max]`` with both ends included (a None end leaves that side
+    # open) that applies only where the rule has its key: ``"rows"`` on the
+    # rows ``sum_m`` (every row of ``g`` and ``x``, for an ``m_indptr`` row
+    # table too), ``"rows_per_group"`` on ``sum_m / E`` (exactly:
+    # ``min * E <= sum_m <= max * E``), ``"n"`` on ``N`` and ``"k"`` on ``K``
+    # of ``dW[e]``; every other call keeps its stage.  A part with no rule here
+    # keeps its stage.  Each rule was timed against the stage it replaces on
+    # the same GPUs:
+    #
+    # - 148-SM sm_100a: the parts of the non-deterministic package's rules
+    #   where no row was confirmed slower across several GPUs, except one
+    #   disclosed row: the 8-group gate/up weight gradient with a composed
+    #   bfloat16 accumulate, lead route, eager, slower on one of three GPUs and
+    #   faster on the other two.  ``main_halves`` keeps the queue walk only for
+    #   the fused accumulate (a bfloat16 row was slower) and
+    #   ``main_wave_halves`` up to 16 groups (a 32-group bfloat16 row was
+    #   slower).
+    # - 152-SM sm_103a, ``main_halves`` fused accumulate at 8 to 16 groups:
+    #   the part of the non-deterministic package's rule where, timed with the
+    #   sm_100a rules on 152-SM sm_103a GPUs, no row was confirmed slower.
+    # - 152-SM sm_103a, ``main_wave_halves``, bfloat16 and the fused
+    #   accumulate at 4 to 32 groups (four rules): every such call keeps the
+    #   queue walk except where it was timed slower than ``main_wave_halves``,
+    #   which those calls keep: at N >= 4096 above 262144 rows for the fused
+    #   accumulate and above 327680 rows for bfloat16, and at N < 4096 with
+    #   K < 6144 above 16384 rows per group.  Timed on twelve GPUs in each of
+    #   two sweeps at N of 2048 (K of 4096 and 7168) and 4096 (K of 6144 and
+    #   7168), 4, 8 and 32 groups, 131072 to 655360 rows (balanced and
+    #   skewed), eager and graph, ``[E]`` and ``m_indptr`` row tables.  Other
+    #   N and K take the rule of the timed shape on their side of N 4096 and
+    #   K 6144: N < 4096 the N of 2048 (there K >= 6144 the K of 7168, faster
+    #   at every group and row count timed, 131072 to 327680; K < 6144 the K
+    #   of 4096), N >= 4096 the N of 4096.  N between 2048 and 4096 was not
+    #   timed.  Past the bounds the queue walk was level or slower.  Inside
+    #   them it was faster or level, except one bfloat16 call slower on two of
+    #   three GPUs (N of 4096, K of 7168, 8 groups, 327680 rows, eager,
+    #   ``[E]`` row table) and nine other calls slower on one GPU of three.
+    # - 152-SM sm_103a, the float32 rules: timed on twelve GPUs over 4, 6, 8,
+    #   16 and 32 groups, 65536 to 655360 rows (balanced and skewed), N of 1024
+    #   to 7168 and K of 2048 to 7168, eager and graph, ``[E]`` and
+    #   ``m_indptr`` row tables.  No timed call inside a rule's bounds was
+    #   slower than its stage beyond the A/A noise of its GPU.
+    #   - ``main_wave_halves``, float32, N of 2048 and K >= 6144: faster at
+    #     every group and row count timed.
+    #   - ``main_wave_halves``, float32, N of 4096: at most 65536 rows or at
+    #     most 4096 rows per group.  Larger calls with balanced rows were
+    #     level or faster up to 196608 rows and from 262144 rows mostly level,
+    #     slower on some calls; with skewed rows they were faster on most
+    #     calls, but the host does not see how the rows split, so larger calls
+    #     keep their stage.
+    #   - ``main_halves``, float32, 6 to 32 groups and N >= 6144: faster at
+    #     every row count timed (N of 6144 and 7168, K of 2048).  At 4 groups
+    #     skewed rows were slower.
     "queue_walk": [
         {
             "arch": "sm_100a",
@@ -2413,8 +2456,38 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
             "arch": "sm_103a",
             "sm_counts": [152],
             "stage": "main_wave_halves",
+            "outputs": ["accumulate"],
+            "groups": [4, 32],
+            "n": [4096, None],
+            "rows": [None, 262144],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_wave_halves",
+            "outputs": ["bfloat16"],
+            "groups": [4, 32],
+            "n": [4096, None],
+            "rows": [None, 327680],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_wave_halves",
             "outputs": ["bfloat16", "accumulate"],
             "groups": [4, 32],
+            "n": [None, 4095],
+            "k": [6144, None],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_wave_halves",
+            "outputs": ["bfloat16", "accumulate"],
+            "groups": [4, 32],
+            "n": [None, 4095],
+            "k": [None, 6143],
+            "rows_per_group": [None, 16384],
         },
         {
             "arch": "sm_103a",
@@ -2422,6 +2495,41 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
             "stage": "main_halves",
             "outputs": ["accumulate"],
             "groups": [8, 16],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_wave_halves",
+            "outputs": ["float32"],
+            "groups": [4, 32],
+            "n": [2048, 2048],
+            "k": [6144, None],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_wave_halves",
+            "outputs": ["float32"],
+            "groups": [4, 32],
+            "n": [4096, 4096],
+            "rows": [None, 65536],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_wave_halves",
+            "outputs": ["float32"],
+            "groups": [4, 32],
+            "n": [4096, 4096],
+            "rows_per_group": [None, 4096],
+        },
+        {
+            "arch": "sm_103a",
+            "sm_counts": [152],
+            "stage": "main_halves",
+            "outputs": ["float32"],
+            "groups": [6, 32],
+            "n": [6144, None],
         },
     ],
     # The u32 words of the queue walk's tile counters (``queue_sched``).
