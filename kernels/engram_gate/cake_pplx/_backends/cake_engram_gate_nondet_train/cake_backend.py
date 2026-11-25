@@ -66,7 +66,9 @@ forward's choice.
 ``fwd`` and ``bwd`` run a persistent grid of four-CTA clusters: as many as the
 token count and as the device holds at once (:func:`.cake_jit.clusters`, from
 a table per architecture, SM count and record; a backward call of many tokens
-takes its own count on the devices of :data:`.cake_jit.LARGE_BWD_CLUSTERS`);
+takes its own count on the devices of :data:`.cake_jit.LARGE_BWD_CLUSTERS`,
+and a forward call of few tokens, or of many without a token mask, on the
+devices of :data:`.cake_jit.HELD_FWD_CLUSTERS`);
 any grid is correct, so the token count is a run-time value (no
 recompilation, no shape list).  From :data:`.cake_jit.CTA1_FWD_MIN_TOKENS`
 tokens on the devices that table names, a forward call launches the ``cta1``
@@ -76,8 +78,8 @@ stream-ordered launch on the current torch stream of the operands' device:
 nothing cooperative.  Nothing here reads an environment variable, reads
 device memory or synchronizes; grids and buffer sizes come from tensor
 shapes, the architecture and the SM count.  A call takes its record and grid
-from a plan built once per device, forward summation or backward mask choice
-and token class (:func:`.cake_jit.token_bounds`).
+from a plan built once per device, forward summation, mask choice and token
+class (:func:`.cake_jit.token_bounds`).
 
 This is the non-deterministic package of its family: ``out``, ``dx``,
 ``dkey`` and ``dvalue`` have one fixed order, and ``dq_weight`` and
@@ -214,23 +216,26 @@ def sm_count(device_index: int) -> int:
 _Plan = tuple[tuple[int, ...], tuple[tuple[str, int, int], ...]]
 
 
-def _token_class(name: str, arch: str, sms: int, least: int) -> tuple[str, int, int]:
-    """``(name, units, ctas)`` of record ``name`` for the token class from ``least`` tokens on a device of ``arch``
-    with ``sms`` SMs: the units of :func:`.cake_jit.persistent_clusters` (at least one) and the CTAs of a unit
-    (:func:`.cake_jit.unit_ctas`)."""
-    units = cake_jit.persistent_clusters(name, arch, sms, least >= cake_jit.LARGE_BWD_MIN_TOKENS)
+def _token_class(name: str, arch: str, sms: int, least: int, masked: bool) -> tuple[str, int, int]:
+    """``(name, units, ctas)`` of record ``name`` for the token class from ``least`` tokens of a call with a token mask
+    (``masked``) or without one on a device of ``arch`` with ``sms`` SMs: the units of
+    :func:`.cake_jit.persistent_clusters` (at least one) and the CTAs of a unit (:func:`.cake_jit.unit_ctas`)."""
+    units = cake_jit.persistent_clusters(name, arch, sms, least, masked)
     return name, max(1, units), cake_jit.unit_ctas(name)
 
 
 @functools.cache
-def _forward_classes(arch: str, device_index: int, acc: str) -> _Plan:
-    """The launch plan of a forward call summing ``P`` as ``acc`` on CUDA device ``device_index`` of ``arch``, with
-    the record of :func:`.cake_jit.forward_record`; built once per architecture, device and summation from the
-    :mod:`.cake_jit` tables (after a table changes, or a device is faked, ``cache_clear()`` it)."""
+def _forward_classes(arch: str, device_index: int, acc: str, masked: bool) -> _Plan:
+    """The launch plan of a forward call summing ``P`` as ``acc`` with a token mask (``masked``) or without one on
+    CUDA device ``device_index`` of ``arch``, with the record of :func:`.cake_jit.forward_record`; built once per
+    architecture, device, summation and mask choice from the :mod:`.cake_jit` tables (after a table changes, or a
+    device is faked, ``cache_clear()`` it)."""
     sms = sm_count(device_index)
     bounds = cake_jit.token_bounds(arch, sms)
     tokens = (1, *bounds)
-    return bounds, tuple(_token_class(cake_jit.forward_record(arch, sms, acc, t), arch, sms, t) for t in tokens)
+    return bounds, tuple(
+        _token_class(cake_jit.forward_record(arch, sms, acc, t), arch, sms, t, masked) for t in tokens
+    )
 
 
 @functools.cache
@@ -242,7 +247,9 @@ def _backward_classes(arch: str, device_index: int, masked: bool) -> _Plan:
     sms = sm_count(device_index)
     bounds = cake_jit.token_bounds(arch, sms)
     tokens = (1, *bounds)
-    return bounds, tuple(_token_class(cake_jit.backward_record(arch, masked, t), arch, sms, t) for t in tokens)
+    return bounds, tuple(
+        _token_class(cake_jit.backward_record(arch, masked, t), arch, sms, t, masked) for t in tokens
+    )
 
 
 def _device_index(device: Union[torch.device, int, str, None]) -> Optional[int]:
@@ -728,7 +735,8 @@ def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.de
     index = _device_index(device)
     if index is None:
         raise ValueError(f"device must be a CUDA device, got {device}")
-    parts = cake_jit.clusters(cake_jit.record("bwd"), T, device_arch(index), sm_count(index))
+    # (The backward grid is the same with a token mask and without one.)
+    parts = cake_jit.clusters(cake_jit.record("bwd"), T, device_arch(index), sm_count(index), False)
     return _ROW_BYTES * parts
 
 
@@ -759,7 +767,7 @@ def _forward(
         return out, eps_f, clamp_f
     index = x.get_device()
     # The record and the grid of the call (device_arch: RuntimeError on a device outside ARCHES).
-    bounds, classes = _forward_classes(device_arch(index), index, acc)
+    bounds, classes = _forward_classes(device_arch(index), index, acc, token_mask is not None)
     name, units, ctas = classes[bisect_right(bounds, T)]
     # The weights as stored (their 32-bit words), the product formed in the kernel: one launch.
     args = (x, key, value, _words(q_weight), _words(k_weight), _mask(token_mask), out, T, eps_f, clamp_f)
