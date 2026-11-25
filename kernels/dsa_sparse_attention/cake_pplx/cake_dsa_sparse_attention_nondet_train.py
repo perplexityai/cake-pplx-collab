@@ -21,10 +21,13 @@ the stable entry points over the backend package
 Query heads: the rope entries take ``H = q_latent.shape[1]`` heads, ``H`` in
 64, 96 and 128 (96 and 128 on SM100 / SM103; SM107 serves 64); every head
 tensor below written ``[T, 64, ...]`` is ``[T, H, ...]`` for them.  The kernels
-serve 64 heads of a token: 96 and 128 heads run them on two 64-head windows,
-``[H - 64, H)`` and then ``[0, 64)``, with the heads ``[H - 64, 64)`` both
-windows cover taken from the second (see the backend README).  The NoPE
-entries take 64 heads.
+compute 64 heads of a token per work item: 96 and 128 heads run, where the
+program ships them for the device, the head-window builds -- one launch per
+stage over both 64-head windows ``[0, 64)`` and ``[64, 128)`` of every token,
+the heads past ``H`` padding -- and otherwise the two-window bridge: the
+64-head kernels on ``[H - 64, H)`` and then ``[0, 64)``, with the heads
+``[H - 64, 64)`` both windows cover taken from the second (see the backend
+README).  The NoPE entries take 64 heads.
 
 Numerical mode: the module name chooses the package, and no entry point takes a
 determinism keyword; ``with_o_lo`` chooses whether the forward writes ``o_lo``
@@ -84,8 +87,8 @@ FP32, which keeps the gradients accurate on peaked rows (rows whose softmax
 puts almost all weight on one key).  With ``False`` the forward neither
 computes nor stores ``o_lo`` (``H`` KiB less written and saved per query
 token, ``H`` the call's query head count: 64 on the NoPE entries; above 64
-heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of workspace, and
-no ``o_lo`` window copies) and the
+heads on the two-window bridge also no ``fwd_o_lo`` window scratch, 64 KiB per
+token of workspace, and no ``o_lo`` window copies) and the
 backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
 the form cuDNN's DSA backward uses; on peaked rows the gradient error grows to
 that class.  ``out`` and ``lse`` have the same accuracy in both modes.  The
@@ -354,9 +357,10 @@ def cake_dsa_sparse_attention_nondet(
         (``<= S``).  The passes carry dQ through
         an FP32 partial in the workspace (``T * 147,456`` B plus ``T * (4 *
         topk + 4)`` B, ~608 MiB at ``T = 4096``, top-k 2048); dQ is still
-        written once per row at 64 heads (above 64 the overlap heads ``[H -
-        64, 64)`` are written by the first window, zeros, and then by the
-        second) and the dK/dV accumulation is unchanged.
+        written once per row at 64 heads and with the head-window builds
+        (on the two-window bridge the overlap heads ``[H - 64, 64)`` are
+        written by the first window, zeros, and then by the second) and the
+        dK/dV accumulation is unchanged.
     backend : str
         Only ``"cake"``.
     dkv_acc : Optional[torch.Tensor | Callable]
@@ -426,8 +430,9 @@ def cake_dsa_sparse_attention_nondet(
         accurate on peaked rows (rows whose softmax puts almost all weight on
         one key).  With ``False`` the forward neither computes nor stores
         ``o_lo`` (``H`` KiB less written and saved per query token; above 64
-        heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of
-        workspace, and no ``o_lo`` window copies), and the backward forms
+        heads on the two-window bridge also no ``fwd_o_lo`` window scratch,
+        64 KiB per token of workspace, and no ``o_lo`` window copies), and the
+        backward forms
         ``delta = rowsum(dout * out)`` from the BF16 ``out``, the form
         cuDNN's DSA backward uses; on peaked rows the gradient error
         grows to that class.  ``out`` and ``lse`` have the same accuracy in
@@ -441,9 +446,10 @@ def cake_dsa_sparse_attention_nondet(
         Only with ``return_lse=True``.
 
     Gradients flow to ``q_latent``, ``q_rope``, ``kv_latent`` and ``k_rope``
-    (``dq`` stored, not accumulated: written once per row at 64 heads, and above
-    64 the overlap heads ``[H - 64, 64)`` written by the first window, zeros,
-    and then by the second; ``dkv`` accumulated in FP32 with atomics,
+    (``dq`` stored, not accumulated: written once per row at 64 heads and with
+    the head-window builds, and on the two-window bridge the overlap heads
+    ``[H - 64, 64)`` written by the first window, zeros, and then by the
+    second; ``dkv`` accumulated in FP32 with atomics,
     then cast to BF16, or accumulated into ``dkv_acc``).  BF16 operands into the tensor cores, FP32
     accumulation; the backward recomputes the scores from the BF16 inputs and
     forms ``delta`` in FP32 from the BF16 output and its saved BF16 residual
@@ -1008,7 +1014,8 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     (``out + o_lo`` is the output before its BF16 rounding). Pass the three
     unchanged to :func:`cake_dsa_sparse_attention_nondet_train_backward`.
     ``out``, ``lse`` and ``o_lo`` of a head come from one forward kernel launch
-    (with 96 or 128 heads, the launch of the window that delivers the head). A
+    (with 96 or 128 heads, the head-window forward, or on the two-window
+    bridge the launch of the window that delivers the head). A
     call without query rows returns empty outputs without launching (on SM107
     a call over 96 or 128 heads on CUDA tensors raises ``NotImplementedError``
     instead).
@@ -1018,8 +1025,9 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     rowsum(dout * (out + o_lo))`` in FP32, which keeps the gradients accurate
     on peaked rows (rows whose softmax puts almost all weight on one key).
     With ``False`` the forward neither computes nor stores ``o_lo`` (``H`` KiB
-    less written per query token; above 64 heads also no ``fwd_o_lo`` window
-    scratch, 64 KiB per token of workspace, and no ``o_lo`` window copies) and
+    less written per query token; above 64 heads on the two-window bridge also
+    no ``fwd_o_lo`` window scratch, 64 KiB per token of workspace, and no
+    ``o_lo`` window copies) and
     returns ``None`` in its slot; pass
     ``None`` and ``with_o_lo=False`` to the step backward, which forms
     ``delta = rowsum(dout * out)`` from the BF16 ``out``, the form cuDNN's DSA

@@ -21,9 +21,11 @@ limitations under the License.
 # * The RoPE form takes ``H`` query heads, ``H = q_latent.shape[1]`` in
 #   ``SUPPORTED_HEADS`` (64, 96, 128); below, ``64`` in a shape stands for ``H``.
 #   The kernels are 64-head programs: ``H = 64`` runs them as they are, and a
-#   larger ``H`` runs them on two 64-head windows of the heads, ``W1 = [H - 64,
-#   H)`` and then ``W0 = [0, 64)`` (see the comment above ``SUPPORTED_HEADS``).
-#   The NoPE program serves 64 heads.
+#   larger ``H`` runs their head-window builds, both 64-head windows of every
+#   token in one launch per stage (``HEAD_WINDOW_STAGES``), or -- where the
+#   program does not ship those builds -- the 64-head kernels on two windows of
+#   the heads, ``W1 = [H - 64, H)`` and then ``W0 = [0, 64)`` (see the comment
+#   above ``SUPPORTED_HEADS``).  The NoPE program serves 64 heads.
 # * Forward writes ``out [T, 64, 512]`` BF16, ``lse [T, 64]`` FP32 (natural
 #   log over the valid keys; ``-inf`` for a fully masked row, whose ``out`` is
 #   zero) and, with ``with_o_lo=True`` (the default), the BF16 output residual
@@ -35,9 +37,9 @@ limitations under the License.
 #   is then ``None`` and the kernels receive a zero-size placeholder they never
 #   touch.
 # * Backward returns ``dq_latent [T, 64, 512]``, ``dq_rope [T, 64, 64]`` BF16
-#   (stored, not accumulated: written once per row at 64 heads; above 64 the
-#   overlap heads ``[H - 64, 64)`` are written by ``W1`` (zeros) and then by
-#   ``W0``) and ``dkv_latent [S, 512]``,
+#   (stored, not accumulated: written once per row; on the two-window bridge
+#   above 64 heads the overlap heads ``[H - 64, 64)`` are written by ``W1``
+#   (zeros) and then by ``W0``) and ``dkv_latent [S, 512]``,
 #   ``dk_rope [S, 64]`` (FP32 ``red.global`` accumulation in the kernels'
 #   internal permuted layout, un-permuted by the cast stage into natural-layout
 #   BF16 or, with ``dkv_fp32=True``, FP32 outputs) -- or, with a caller-owned
@@ -114,33 +116,78 @@ NUM_HEADS = 64
 D_LATENT = 512
 D_ROPE = 64
 D_QK = D_LATENT + D_ROPE
-# Query heads of the RoPE form.  Every kernel of the program serves exactly ``NUM_HEADS`` (64) heads of a token
-# (``HEAD_WINDOW``): its tensor maps take 64-head boxes, and its ``lse`` / ``o_lo`` / ``delta`` addresses use the
-# literal 64.  A call with ``H = q_latent.shape[1]`` heads in ``SUPPORTED_HEADS`` runs them on head windows
-# (``head_windows``): ``H = 64`` is one window, today's plan unchanged; ``H = 96`` and ``128`` run the window
-# ``W1 = [H - 64, H)`` first and then ``W0 = [0, 64)`` (96: ``[32, 96)`` then ``[0, 64)``; 128: ``[64, 128)`` then
-# ``[0, 64)``).  The window's query, ``out``, ``dout`` and ``dq`` operands are head slices of the caller's tensors
-# (the tensor maps carry the strides); its ``lse`` / ``o_lo`` / stats operands are contiguous ``[T, 64]`` scratch:
+# Query heads of the RoPE form.  Every kernel of the program computes ``NUM_HEADS`` (64) query heads of a token per
+# work item (``HEAD_WINDOW``).  A call with ``H = q_latent.shape[1]`` heads in ``SUPPORTED_HEADS`` covers them with
+# 64-head windows: ``H = 64`` is one window, today's plan unchanged.  ``H = 96`` and ``128`` take one of two plans per
+# phase (forward, backward):
 #
-# * forward: each window writes ``out[:, window]`` in place and its ``lse`` / ``o_lo`` into one scratch, from which
-#   a device copy moves the heads the window owns into the ``[T, H]`` outputs -- ``[64, H)`` for ``W1``, ``[0, 64)``
-#   for ``W0``.  ``W0`` runs last, so every output of the overlapped heads ``[H - 64, 64)`` comes from ``W0``.
-# * backward: one delta launch over the ``T * H`` (token, head) rows (the delta kernel's ``row / 64``, ``row % 64``
-#   read through the virtual ``dout`` strides ``(64 * hs, hs)``, exact when ``dout``'s token stride is ``H`` head
-#   strides ``hs``; another layout is copied once into the workspace), then per-window ``lse`` / ``delta`` stats:
-#   ``W1``'s local heads ``[0, 128 - H)`` (owned by ``W0``) get ``lse = +inf`` and ``delta = 0``, so the kernel's
-#   ``P = exp2(S * scale_log2 - lse)`` and ``dS = P (dP - delta) sm_scale`` are exactly zero there: they add
-#   nothing to dK / dV, and their ``dq`` (zero) is overwritten by ``W0``.  Both windows add into the same FP32
-#   accumulators (or directly into ``dkv_acc``), and one cast runs at the end.  A multi-pass backward runs, per token
-#   chunk, every pass of ``W1`` and then every pass of ``W0`` (the ``dq_partial`` scratch, 64 heads per token, is
-#   reused by the window).
+# * The head-window plan, where the program ships the head-window builds of the phase's stage for the device's
+#   architecture (``HEAD_WINDOW_STAGES``, :func:`head_window_stage`): one launch of the stage over ``2 T`` work items,
+#   item ``2 t + w`` the window ``w`` of token ``t`` -- ``W0 = [0, 64)`` and ``W1 = [64, 128)``, whose rows past
+#   ``H`` (heads ``96..127`` at ``H = 96``) are zero-filled by the query loads and skipped by every store -- so the
+#   two windows of a token run side by side and the second finds the token's gathered key rows in L2.  The kernels
+#   receive the caller's whole ``[T, H, *]`` operands, the head count ``num_heads = H`` and the window selector
+#   ``wsel = -1`` (both windows; ``HEAD_WINDOW_BOTH``), and read and write ``lse`` / ``o_lo`` / ``delta`` at
+#   ``t * H + h`` directly (no window scratch, no device copy):
 #
-# Per head, the numerics are those of the 64-head program.  The deterministic package and the NoPE program serve 64
+#   - forward: ``fwd_hw`` (``fwd_hw_no_olo`` under ``with_o_lo=False``) writes ``out``, ``lse`` and ``o_lo`` of every
+#     head; its loop bound ``num_queries`` is ``2 T``, and with ``derive_length`` the token's ``W0`` item stores the
+#     derived length.
+#   - backward: the delta launch over the ``T * H`` rows (below), then the main stage's head-window build over the
+#     ``2 T`` items (``token_base`` / ``token_step`` in item space: ascending from item 0 or descending from item
+#     ``2 T - 1``, so both items of a token stay adjacent), reading ``lse`` / ``delta`` at ``t * H + h`` with the rows
+#     past ``H`` at ``lse = +inf``, ``delta = 0`` (``P = dS = 0`` exactly) and storing ``dq`` once per head; a
+#     multi-pass backward runs per token chunk ``bwd_compact`` over the chunk's tokens (token space) and the pass
+#     build over its ``2 x`` items (item ``token_base`` = twice the chunk's first token, ascending: the two windows
+#     of a token read its one compaction row), with one ``dq_partial`` row per item.  One cast at the end.
+#   - a call without query rows (``T = 0``) returns its empty outputs before any plan (no launch), as at 64 heads:
+#     the head-window launches always cover at least one token.
+#
+# * The two-window bridge (0.7.0), where the program lacks the phase's head-window build: the 64-head kernels on head
+#   windows (``head_windows``), ``W1 = [H - 64, H)`` first and then ``W0 = [0, 64)`` (96: ``[32, 96)`` then
+#   ``[0, 64)``; 128: ``[64, 128)`` then ``[0, 64)``).  The window's query, ``out``, ``dout`` and ``dq`` operands are
+#   head slices of the caller's tensors (the tensor maps carry the strides); its ``lse`` / ``o_lo`` / stats operands
+#   are contiguous ``[T, 64]`` scratch:
+#
+#   - forward: each window writes ``out[:, window]`` in place and its ``lse`` / ``o_lo`` into one scratch, from which
+#     a device copy moves the heads the window owns into the ``[T, H]`` outputs -- ``[64, H)`` for ``W1``, ``[0, 64)``
+#     for ``W0``.  ``W0`` runs last, so every output of the overlapped heads ``[H - 64, 64)`` comes from ``W0``.
+#   - backward: the delta launch, then per-window ``lse`` / ``delta`` stats: ``W1``'s local heads ``[0, 128 - H)``
+#     (owned by ``W0``) get ``lse = +inf`` and ``delta = 0``, so the kernel's ``P = exp2(S * scale_log2 - lse)`` and
+#     ``dS = P (dP - delta) sm_scale`` are exactly zero there: they add nothing to dK / dV, and their ``dq`` (zero) is
+#     overwritten by ``W0``.  Both windows add into the same FP32 accumulators (or directly into ``dkv_acc``), and one
+#     cast runs at the end.  A multi-pass backward runs, per token chunk, every pass of ``W1`` and then every pass of
+#     ``W0`` (the ``dq_partial`` scratch, 64 heads per token, is reused by the window).
+#
+# Both plans run one delta launch over the ``T * H`` (token, head) rows (the delta kernel's ``row / 64``, ``row % 64``
+# read through the virtual ``dout`` strides ``(64 * hs, hs)``, exact when ``dout``'s token stride is ``H`` head strides
+# ``hs``; another layout is copied once into the workspace and every backward stage reads the copy).  Per head, the
+# numerics are those of the 64-head program on the bridge's windows: the head-window builds give every head the same
+# 32-row rescale groups as the bridge, so ``out``, ``lse``, ``o_lo`` and ``dq`` keep the bridge's bits; ``dK`` / ``dV``
+# add the same terms with FP32 atomics in another order.  The deterministic package and the NoPE program serve 64
 # heads only; on ``sm_107a`` the windows are not yet served (64 heads only).
 SUPPORTED_HEADS = (64, 96, 128)
 HEAD_WINDOW = NUM_HEADS
 # The architectures whose stages serve the head windows of ``H > 64`` (``sm_107a``: 64 heads only for now).
 WINDOW_ARCHES = ("sm_100a", "sm_103a")
+# The head-window builds (see the comment above ``SUPPORTED_HEADS``): stage -> its head-window stage.  The forward
+# builds (and their ``with_o_lo=False`` twins) and the four main backward forms (permuted / natural-layout
+# accumulation, single pass / key-range passes) of the RoPE program; the delta, compaction and cast stages serve both
+# plans unchanged.  Each takes the arguments of its 64-head stage plus ``num_heads`` and ``wsel``, and the grid of
+# its 64-head stage over the ``2 T`` items.  A plan runs a head-window stage only where the registry carries it for
+# the device's architecture with its generated launcher (:func:`head_window_stage`).
+HEAD_WINDOW_STAGES = {
+    "fwd": "fwd_hw",
+    "fwd_no_olo": "fwd_hw_no_olo",
+    "bwd_main": "bwd_main_hw",
+    "bwd_main_natural": "bwd_main_natural_hw",
+    "bwd_main_pass": "bwd_main_pass_hw",
+    "bwd_main_pass_natural": "bwd_main_pass_natural_hw",
+}
+_HEAD_WINDOW_BUILDS = frozenset(HEAD_WINDOW_STAGES.values())
+# The work items per token of a head-window launch (both windows) and its ``wsel`` (-1: both windows of every token).
+HEAD_WINDOW_ITEMS = 2
+HEAD_WINDOW_BOTH = -1
 
 
 def head_windows(num_heads: int) -> tuple[int, ...]:
@@ -156,6 +203,62 @@ def window_owned_heads(num_heads: int, head0: int) -> tuple[int, int]:
     """``[lo, hi)``: the heads whose outputs the window starting at ``head0`` delivers (``W0`` all of ``[0, 64)``,
     ``W1`` the heads above 64); its local heads below ``lo - head0`` are ``W0``'s (the pad heads of ``W1``)."""
     return (0, HEAD_WINDOW) if int(head0) == 0 else (HEAD_WINDOW, int(num_heads))
+
+
+def head_window_stage(stage: str, arch: Optional[str]) -> Optional[str]:
+    """The head-window build of the RoPE program's ``stage`` (``HEAD_WINDOW_STAGES``) that serves ``arch``, or
+    ``None`` when there is none: ``stage`` has no head-window build, ``arch`` is outside ``WINDOW_ARCHES``, or the
+    registry does not register the build (a record entry among the record's stages, shipping for ``arch``) with its
+    generated launcher and grid (``cake_launch``).  ``None`` plans the two-window bridge for that phase (see the
+    comment above ``SUPPORTED_HEADS``)."""
+    hw = HEAD_WINDOW_STAGES.get(stage)
+    if hw is None or arch not in WINDOW_ARCHES:
+        return None
+    if hw not in cake_jit.record() or hw not in cake_jit.registered_stages():
+        return None
+    if arch not in cake_jit.stage_arches(hw):
+        return None
+    if hw not in cake_launch.LAUNCH or hw not in cake_launch.GRID:
+        return None
+    return hw
+
+
+def head_window_plan(
+    num_heads: int,
+    arch: Optional[str],
+    *,
+    with_o_lo: bool = True,
+    backward: bool = False,
+    key_passes: int = 1,
+    dkv_direct: bool = False,
+) -> tuple[Optional[str], Optional[str]]:
+    """``(forward, main)``: the head-window stages a call over ``num_heads`` query heads runs on ``arch`` -- its
+    forward stage (``fwd_hw`` or, without ``o_lo``, ``fwd_hw_no_olo``) and, for a backward, its main stage (the
+    head-window build of ``bwd_main``, ``bwd_main_natural``, ``bwd_main_pass`` or ``bwd_main_pass_natural`` by
+    ``key_passes`` and ``dkv_direct``) -- each ``None`` where that phase runs the two-window bridge (and both ``None``
+    at 64 heads)."""
+    if int(num_heads) == NUM_HEADS:
+        return None, None
+    forward = head_window_stage("fwd" if with_o_lo else "fwd_no_olo", arch)
+    if not backward:
+        return forward, None
+    main = "bwd_main_pass" if int(key_passes) > 1 else "bwd_main"
+    if dkv_direct:
+        main += "_natural"
+    return forward, head_window_stage(main, arch)
+
+
+def head_window_token_order(token_base: int, token_step: int) -> None:
+    """``ValueError`` unless the item-space ``token_base`` / ``token_step`` of a head-window main launch keep both
+    items of every token adjacent and start at a token boundary: ascending from an even item (``2 t``, the token's
+    ``W0``) or descending from an odd one (``2 t + 1``, its ``W1``).  The key-pass builds read the compaction row
+    ``blockIdx.x >> 1``, which is the launch's ``k``-th token only then."""
+    base, step = int(token_base), int(token_step)
+    if not ((step == 1 and base % 2 == 0) or (step == -1 and base % 2 == 1)):
+        raise ValueError(
+            f"a head-window main launch walks its items ascending from an even item or descending from an odd one, "
+            f"got token_base {base}, token_step {step}"
+        )
 
 
 # The NoPE program scores ``q . kv`` over the 512 shared latent dimensions with
@@ -200,9 +303,9 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # ``pass_counts``, and the pass variant of the main stage consumes them,
 # carrying the FP32 dQ / dQ_rope partial of every token in ``dq_partial``
 # between passes (dq_mode 1 store, 2 load-add-store, 3 load-add and BF16
-# output) -- ``dq`` is still written once per row at 64 heads (above 64 the
-# overlap heads ``[H - 64, 64)`` are written by ``W1`` (zeros) and then by
-# ``W0``); the dK/dV reductions are
+# output) -- ``dq`` is still written once per row (on the two-window bridge
+# above 64 heads the overlap heads ``[H - 64, 64)`` are written by ``W1``
+# (zeros) and then by ``W0``); the dK/dV reductions are
 # unchanged (a pass only selects which keys a tile carries).  The pass count
 # follows the policy the record carries (``key_pass_policy``, evaluated by
 # ``KeyPassPolicy``): the L2 formula P = ceil(S * key_bytes / l2_budget_bytes)
@@ -220,7 +323,15 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # chunks of ``chunk`` tokens, every chunk through every pass in order (grid =
 # the chunk's tokens, ``token_base`` = its first token), exactly as the Cake
 # launcher, so the workspace grows by min(T, chunk) * (147,456 + 4 * topk + 4)
-# bytes.  The passes split the whole key row ``[0, S)`` into equal ranges,
+# bytes.  A head-window backward above 64 heads (see the comment above
+# ``SUPPORTED_HEADS``) carries one dQ partial row per (token, window) work
+# item, two per token: its chunk is the largest multiple of
+# ``token_chunk_multiple`` whose 2 x 147,456 + 4 * topk + 4 B per token fit the
+# same budget (2176 tokens at top-k 2048), its workspace grows by min(T, chunk)
+# * (2 x 147,456 + 4 * topk + 4) bytes, and its pass count is planned as at 64
+# heads (the one-chunk test reads the 64-head chunk, so a call plans the
+# passes the two-window bridge planned).  The passes split the whole key row
+# ``[0, S)`` into equal ranges,
 # which matches an index row whose keys spread over the whole row (one
 # document); in a packed multi-segment row every token's keys lie inside its
 # own segment, so whole-row ranges leave most passes empty for most tokens
@@ -321,15 +432,23 @@ class KeyPassPolicy:
     def formula_passes(self, num_kv: int) -> int:
         return max(1, -(-int(num_kv) * self.key_bytes // self.l2_budget_bytes))
 
-    def token_chunk(self, topk: int) -> int:
-        """Tokens whose pass scratch (dQ partial, key scratch, pass count) fits the workspace budget."""
-        per_token = self.dq_partial_bytes_per_token + 4 * int(topk) + 4
+    def token_chunk(self, topk: int, items_per_token: int = 1) -> int:
+        """Tokens whose pass scratch (dQ partial, key scratch, pass count) fits the workspace budget.
+        ``items_per_token`` is the main stage's work items per token, each with its own dQ partial row: 1, or
+        ``HEAD_WINDOW_ITEMS`` (2) on a head-window backward (one row per (token, window) item; the key scratch and
+        the count stay one per token)."""
+        per_token = (
+            int(items_per_token) * self.dq_partial_bytes_per_token + 4 * int(topk) + 4
+        )
         m = self.token_chunk_multiple
         return max(m, (self.workspace_budget_bytes // per_token) // m * m)
 
-    def token_chunks(self, num_queries: int, topk: int) -> tuple[tuple[int, int], ...]:
-        """``(token_base, num_tokens)`` of every token chunk of a multi-pass backward, in launch order."""
-        T, chunk = int(num_queries), self.token_chunk(topk)
+    def token_chunks(
+        self, num_queries: int, topk: int, items_per_token: int = 1
+    ) -> tuple[tuple[int, int], ...]:
+        """``(token_base, num_tokens)`` of every token chunk of a multi-pass backward, in launch order
+        (``items_per_token`` as in :meth:`token_chunk`)."""
+        T, chunk = int(num_queries), self.token_chunk(topk, items_per_token)
         return tuple((base, min(chunk, T - base)) for base in range(0, T, chunk))
 
     def passes(
@@ -427,20 +546,24 @@ def plan_key_passes(
     )
 
 
-def _record_token_chunk(record: dict[str, Any], topk: int) -> Optional[int]:
-    """Tokens per launch chunk of a multi-pass backward under the record's policy (``None``: no policy, the whole row)."""
+def _record_token_chunk(
+    record: dict[str, Any], topk: int, items_per_token: int = 1
+) -> Optional[int]:
+    """Tokens per launch chunk of a multi-pass backward under the record's policy (``None``: no policy, the whole row);
+    ``items_per_token`` as in :meth:`KeyPassPolicy.token_chunk`."""
     policy = KeyPassPolicy.from_record(record)
-    return None if policy is None else policy.token_chunk(topk)
+    return None if policy is None else policy.token_chunk(topk, items_per_token)
 
 
 def _pass_token_chunks(
-    record: dict[str, Any], num_queries: int, topk: int
+    record: dict[str, Any], num_queries: int, topk: int, items_per_token: int = 1
 ) -> tuple[tuple[int, int], ...]:
-    """``(token_base, num_tokens)`` of the token chunks a multi-pass backward runs (one whole-row chunk without a policy)."""
+    """``(token_base, num_tokens)`` of the token chunks a multi-pass backward runs (one whole-row chunk without a
+    policy); ``items_per_token`` as in :meth:`KeyPassPolicy.token_chunk`."""
     policy = KeyPassPolicy.from_record(record)
     if policy is None:
         return ((0, int(num_queries)),)
-    return policy.token_chunks(num_queries, topk)
+    return policy.token_chunks(num_queries, topk, items_per_token)
 
 
 def key_pass_ranges(num_kv: int, passes: int) -> tuple[tuple[int, int], ...]:
@@ -1376,6 +1499,8 @@ def workspace_layout(
     num_heads: int = NUM_HEADS,
     with_o_lo: bool = True,
     dout_copy: bool = False,
+    fused_forward: bool = False,
+    fused_backward: bool = False,
 ) -> dict:
     """Byte ``(offset, size)`` of every workspace region plus ``"total"``.
 
@@ -1389,29 +1514,39 @@ def workspace_layout(
     counts for the tokens of one launch chunk: ``min(num_queries,
     token_chunk)`` rows (the whole row without a ``token_chunk``).
 
-    Above 64 heads (``num_heads`` 96 or 128: two head windows, see the comment
-    above ``SUPPORTED_HEADS``) the forward adds its window scratch,
-    ``fwd_lse`` (``[T, 64]`` FP32) and, with ``with_o_lo``, ``fwd_o_lo``
-    (``[T, 64, 512]`` BF16); the backward adds the per-window stats
-    ``window_lse`` / ``window_delta`` (``[2, T, 64]`` FP32 each) and, with
-    ``dout_copy`` (a ``dout`` whose token stride is not ``H`` head strides,
-    :func:`_dout_rows_dense`), the dense ``dout`` copy ``[T, H, 512]`` BF16.
-    The dQ partials stay 64 heads per token (the windows reuse them).  A
+    Above 64 heads (``num_heads`` 96 or 128, see the comment above
+    ``SUPPORTED_HEADS``) a backward whose ``dout`` token stride is not ``H``
+    head strides (``dout_copy``, :func:`_dout_rows_dense`) adds the dense
+    ``dout`` copy ``[T, H, 512]`` BF16 on both plans.  The two-window bridge
+    adds, for the forward, its window scratch ``fwd_lse`` (``[T, 64]`` FP32)
+    and, with ``with_o_lo``, ``fwd_o_lo`` (``[T, 64, 512]`` BF16), and for the
+    backward the per-window stats ``window_lse`` / ``window_delta`` (``[2, T,
+    64]`` FP32 each); its dQ partials stay one row per token (the windows reuse
+    them).  A head-window forward (``fused_forward``) writes the ``[T, H]``
+    outputs directly and has no window scratch; a head-window backward
+    (``fused_backward``) reads the ``[T, H]`` statistics directly and has no
+    per-window stats, and its key-range passes hold one dQ partial row per
+    (token, window) work item, ``2 x`` the chunk's tokens (the compacted keys
+    and counts stay one row per token; ``token_chunk`` is then the head-window
+    chunk, :meth:`KeyPassPolicy.token_chunk` with two items per token).  A
     64-head layout is the layout of 0.6.1, region for region.
     """
     windows = int(num_heads) != NUM_HEADS
     if windows:
         head_windows(num_heads)  # refuses an unsupported count
+    elif fused_forward or fused_backward:
+        raise ValueError("the head-window plans serve more than 64 query heads")
     sizes = [("topk_length", num_queries * 4)]
-    if windows:
+    if windows and not fused_forward:
         sizes.append(("fwd_lse", num_queries * HEAD_WINDOW * 4))
         if with_o_lo:
             sizes.append(("fwd_o_lo", num_queries * HEAD_WINDOW * D_LATENT * 2))
     if backward:
         sizes.append(("delta", num_queries * int(num_heads) * 4))
         if windows:
-            stats = len(head_windows(num_heads)) * num_queries * HEAD_WINDOW * 4
-            sizes += [("window_lse", stats), ("window_delta", stats)]
+            if not fused_backward:
+                stats = len(head_windows(num_heads)) * num_queries * HEAD_WINDOW * 4
+                sizes += [("window_lse", stats), ("window_delta", stats)]
             if dout_copy:
                 sizes.append(("dout_copy", num_queries * int(num_heads) * D_LATENT * 2))
         if not dkv_direct:
@@ -1425,8 +1560,9 @@ def workspace_layout(
                 if token_chunk is None
                 else min(int(num_queries), int(token_chunk))
             )
+            items = rows * (HEAD_WINDOW_ITEMS if windows and fused_backward else 1)
             sizes += [
-                ("dq_partial", rows * DQ_PARTIAL_BYTES_PER_TOKEN),
+                ("dq_partial", items * DQ_PARTIAL_BYTES_PER_TOKEN),
                 ("key_scratch", rows * int(topk) * 4),
                 ("pass_counts", rows * 4),
             ]
@@ -1530,7 +1666,10 @@ def dsa_train_workspace_size(
     back is one): ``None`` (the default) includes it for every such backward,
     the upper bound that serves any ``dout`` layout; ``True`` / ``False`` give
     the exact size for a ``dout`` that needs it / does not (a dense ``[T, H,
-    512]`` or a packed-slice ``dout``).  A 64-head binding never copies.  The
+    512]`` or a packed-slice ``dout``).  A 64-head binding never copies.  Above
+    64 heads the size is that of the plan the device's architecture serves:
+    the head-window plan of a phase where the program ships its head-window
+    build (:func:`head_window_plan`), else the two-window bridge's.  The
     workspace is scratch: the state a training step retains between its
     forward and its backward is :func:`dsa_train_retained_size`.
     """
@@ -1563,6 +1702,15 @@ def dsa_train_workspace_size(
         if backward
         else 1
     )
+    hw_forward, hw_main = head_window_plan(
+        num_heads,
+        arch,
+        with_o_lo=with_o_lo,
+        backward=bool(backward),
+        key_passes=passes,
+        dkv_direct=direct,
+    )
+    fused_backward = hw_main is not None
     return int(
         workspace_layout(
             num_queries,
@@ -1571,11 +1719,15 @@ def dsa_train_workspace_size(
             backward=backward,
             key_passes=passes,
             dkv_direct=direct,
-            token_chunk=_record_token_chunk(record, topk),
+            token_chunk=_record_token_chunk(
+                record, topk, HEAD_WINDOW_ITEMS if fused_backward else 1
+            ),
             num_heads=num_heads,
             with_o_lo=with_o_lo,
             dout_copy=int(num_heads) != NUM_HEADS
             and (dout_copy is None or bool(dout_copy)),
+            fused_forward=hw_forward is not None,
+            fused_backward=fused_backward,
         )["total"]
     )
 
@@ -2166,13 +2318,39 @@ def _run_keys(
             stage, chunk, index = key
             e = plan.entries[(stage, chunk)]
             e.launcher(
-                e.run,
-                dict(stage_values, **plan.pass_overrides[chunk][index]),
-                e.grid,
+                e.run, _key_values(plan, stage_values, stage, chunk, index), e.grid
             )
         else:
             e = plan.entries[key]
-            e.launcher(e.run, stage_values, e.grid)
+            e.launcher(e.run, _key_values(plan, stage_values, key), e.grid)
+
+
+def _key_values(
+    plan: "_Plan",
+    values: dict[str, Any],
+    stage: str,
+    chunk: Optional[int] = None,
+    index: Optional[int] = None,
+) -> dict[str, Any]:
+    """The launch values of ``stage`` of ``plan`` over the bound ``values`` -- of its pass ``index`` of token chunk
+    ``chunk`` for a pass key: the plan's own values of a head-window stage (``plan.stage_values``: its item count,
+    head count, window selector and item-space token order) over ``values``, then the pass overrides, whose first
+    token and token count a head-window stage counts in work items (``HEAD_WINDOW_ITEMS`` per token).  ``values``
+    itself (the same dict) for a 64-head plan's stage key."""
+    stage_values = getattr(plan, "stage_values", None)
+    own = stage_values.get(stage) if stage_values else None
+    if own:
+        values = dict(values, **own)
+    if chunk is None:
+        return values
+    over = plan.pass_overrides[chunk][index]
+    if stage in _HEAD_WINDOW_BUILDS:
+        over = dict(
+            over,
+            token_base=HEAD_WINDOW_ITEMS * over["token_base"],
+            num_tokens=HEAD_WINDOW_ITEMS * over["num_tokens"],
+        )
+    return dict(values, **over)
 
 
 def _stage_entry(
@@ -2267,16 +2445,32 @@ class _Plan:
     num_heads: int = NUM_HEADS
     head_windows: tuple[int, ...] = ()
     dout_copy: bool = False
+    # Above 64 heads: the forward / the backward runs the head-window builds (``HEAD_WINDOW_STAGES``; one launch per
+    # stage over the ``2 T`` items, the ``[T, H]`` tensors addressed directly) instead of the two-window bridge.
+    fused_forward: bool = False
+    fused_backward: bool = False
+    # Head-window stage -> the launch values that replace the bound values for it: ``num_queries`` (the item count
+    # ``2 T``), ``num_heads``, ``wsel`` and, for a main stage, the item-space ``token_base`` / ``token_step`` (the
+    # pass overrides of a key-pass build count its first token and its tokens in items, :func:`_key_values`).
+    stage_values: dict = field(default_factory=dict, repr=False)
 
     def launch_keys(self) -> tuple:
         return tuple(self.forward_stages) + self.backward_order
 
     @property
     def pass_rows(self) -> int:
-        """Token rows of the pass scratch regions (one launch chunk; 0 without passes)."""
+        """Rows of the dQ partial scratch (the work items of one launch chunk: its tokens, ``2 x`` on a head-window
+        backward; 0 without passes)."""
         if "dq_partial" not in self.layout:
             return 0
         return self.layout["dq_partial"][1] // self.dq_partial_bytes_per_token
+
+    @property
+    def pass_tokens(self) -> int:
+        """Token rows of the compacted-key scratch and the counts (one launch chunk's tokens; 0 without passes)."""
+        if "pass_counts" not in self.layout:
+            return 0
+        return self.layout["pass_counts"][1] // 4
 
 
 def _geometry(t: Optional[torch.Tensor]) -> Optional[tuple]:
@@ -2357,9 +2551,10 @@ def _plan(
 ) -> _Plan:
     """Validate one geometry and resolve its plan (no allocation, no launch).  ``dkv_direct`` / ``check_dst_map``
     as in :func:`prepare_dsa_train`.  ``with_o_lo=False`` plans the ``with_o_lo=False`` twins of the forward and the
-    delta stage (:func:`_require_no_olo_stages`).  A call over ``H > 64`` query heads plans the head windows of the
-    comment above ``SUPPORTED_HEADS`` (:func:`_window_order`); a 64-head plan is 0.6.1's, launch for
-    launch."""
+    delta stage (:func:`_require_no_olo_stages`).  A call over ``H > 64`` query heads plans, per phase, the
+    head-window builds where the program ships them for the device's architecture (:func:`head_window_plan`) and the
+    two-window bridge otherwise (the comment above ``SUPPORTED_HEADS``, :func:`_window_order`); a 64-head plan is
+    0.6.1's, launch for launch."""
     if derive_topk_length and topk_length is None:
         raise ValueError(
             "derive_topk_length=True needs a topk_length [T] int32 tensor for the forward to fill"
@@ -2464,6 +2659,18 @@ def _plan(
     # a multi-window backward reads dout through the delta's virtual 64-head rows: a dout whose token stride is not
     # H head strides is copied once per backward into the workspace (the main windows read the same copy)
     dout_copy = bool(backward) and windows and not _dout_rows_dense(dout)
+    # above 64 heads: the head-window builds of the forward and of the backward's main stage where the program ships
+    # them for this architecture (one launch over the 2 T (token, window) items each), else the two-window bridge
+    hw_forward, hw_main = head_window_plan(
+        H,
+        arch,
+        with_o_lo=with_o_lo,
+        backward=bool(backward),
+        key_passes=passes,
+        dkv_direct=direct,
+    )
+    fused_forward, fused_backward = hw_forward is not None, hw_main is not None
+    items_per_token = HEAD_WINDOW_ITEMS if fused_backward else 1
     layout = workspace_layout(
         num_queries,
         num_kv,
@@ -2471,10 +2678,12 @@ def _plan(
         backward=backward,
         key_passes=passes,
         dkv_direct=direct,
-        token_chunk=_record_token_chunk(record, topk),
+        token_chunk=_record_token_chunk(record, topk, items_per_token),
         num_heads=H,
         with_o_lo=with_o_lo,
         dout_copy=dout_copy,
+        fused_forward=fused_forward,
+        fused_backward=fused_backward,
     )
     has_topk_length = topk_length is not None
     # the forward derives the row lengths into the vector when the caller gives none (or asks for it); the backward
@@ -2532,7 +2741,7 @@ def _plan(
         # production launcher, the whole key range and dq_mode 0.
         constants.update(pass_lo=0, pass_hi=S, dq_mode=0)
     elif backward:
-        token_chunks = _pass_token_chunks(record, num_queries, topk)
+        token_chunks = _pass_token_chunks(record, num_queries, topk, items_per_token)
         ranges = key_pass_ranges(num_kv, passes)
         pass_overrides = tuple(
             tuple(
@@ -2552,7 +2761,17 @@ def _plan(
     fwd, delta = "fwd", "bwd_delta"
     if not with_o_lo:
         fwd, delta = cake_jit.NO_OLO_STAGES[fwd], cake_jit.NO_OLO_STAGES[delta]
-    entries: dict[Any, _StageEntry] = {fwd: _stage_entry(fwd, arch, scalars)}
+    # the head-window stages' own launch values (:func:`_key_values`): the 2 T items, the head count, both windows,
+    # and for the main stage the item-space token order (the pass overrides set a key-pass build's first item)
+    items = HEAD_WINDOW_ITEMS * num_queries
+    stage_values: dict[str, dict[str, int]] = {}
+    item_scalars = dict(scalars, num_queries=items)
+    if fused_forward:
+        fwd = hw_forward
+        stage_values[fwd] = dict(num_queries=items, num_heads=H, wsel=HEAD_WINDOW_BOTH)
+    entries: dict[Any, _StageEntry] = {
+        fwd: _stage_entry(fwd, arch, item_scalars if fused_forward else scalars)
+    }
     backward_order: list = []
     if backward:
         # the natural-layout variants of the main stage replace the permuted ones on a direct binding
@@ -2561,6 +2780,17 @@ def _plan(
             "bwd_compact",
             "bwd_main_pass_natural" if direct else "bwd_main_pass",
         )
+        if fused_backward:
+            # the head-window build of the main stage (single pass or key-range pass); the compaction runs per token
+            order = token_order(items, arch, passes == 1, "rope")
+            head_window_token_order(order["token_base"], order["token_step"])
+            if passes == 1:
+                main_stage = hw_main
+            else:
+                pass_stages = (pass_stages[0], hw_main)
+            stage_values[hw_main] = dict(
+                num_queries=items, num_heads=H, wsel=HEAD_WINDOW_BOTH, **order
+            )
         # above 64 heads the delta runs once over the T * H (token, head) rows: its grid rule reads the 64-row
         # groups ceil(T * H / 64) as its token count (8 warps, one row each, per 8-row block)
         delta_scalars = (
@@ -2571,16 +2801,26 @@ def _plan(
         entries[delta] = _stage_entry(delta, arch, delta_scalars)
         backward_order.append(delta)
         if passes == 1:
-            entries[main_stage] = _stage_entry(main_stage, arch, scalars)
+            entries[main_stage] = _stage_entry(
+                main_stage, arch, item_scalars if fused_backward else scalars
+            )
             backward_order.append(main_stage)
         else:
             # token chunks in order, every chunk through every pass (the Cake launcher's loop);
-            # the grid rules (``num_queries`` / ``num_queries/W``) take the chunk's token count
-            for chunk_index, (_base, num_tokens) in enumerate(token_chunks):
+            # the grid rules (``num_queries`` / ``num_queries/W``) take the chunk's token count -- its work items
+            # for a head-window main stage
+            for chunk_index, (base, num_tokens) in enumerate(token_chunks):
                 chunk_scalars = dict(scalars, num_queries=int(num_tokens))
                 for stage in pass_stages:
+                    if stage in _HEAD_WINDOW_BUILDS:
+                        head_window_token_order(HEAD_WINDOW_ITEMS * int(base), 1)
+                        stage_scalars = dict(
+                            scalars, num_queries=HEAD_WINDOW_ITEMS * int(num_tokens)
+                        )
+                    else:
+                        stage_scalars = chunk_scalars
                     entries[(stage, chunk_index)] = _stage_entry(
-                        stage, arch, chunk_scalars
+                        stage, arch, stage_scalars
                     )
                 for index in range(passes):
                     backward_order += [
@@ -2599,6 +2839,8 @@ def _plan(
             passes=passes,
             num_chunks=len(token_chunks),
             dout_copy=dout_copy,
+            fused_forward=fused_forward,
+            fused_backward=fused_backward,
         )
     return _Plan(
         module_name=module_name,
@@ -2628,6 +2870,9 @@ def _plan(
         num_heads=H,
         head_windows=head_windows(H) if windows else (),
         dout_copy=dout_copy,
+        fused_forward=fused_forward,
+        fused_backward=fused_backward,
+        stage_values=stage_values,
     )
 
 
@@ -2639,20 +2884,27 @@ def _window_order(
     passes: int,
     num_chunks: int,
     dout_copy: bool,
+    fused_forward: bool = False,
+    fused_backward: bool = False,
 ) -> tuple[tuple, tuple]:
-    """``(forward keys, backward keys)`` of a plan over ``num_heads > 64`` heads from the 64-head plan's forward stage
-    ``fwd`` and its ``backward_order`` (see the comment above ``SUPPORTED_HEADS``):
+    """``(forward keys, backward keys)`` of a plan over ``num_heads > 64`` heads from the plan's forward stage ``fwd``
+    and its ``backward_order`` (see the comment above ``SUPPORTED_HEADS``):
 
-    * forward: per window in launch order (``W1`` then ``W0``), the window launch and its ``"fwd_copy"``;
-    * backward: the ``"dout_copy"`` (``dout_copy`` only), the delta stage once over the ``T * H`` rows, the
-      ``"window_stats"``, then the main stage per window -- with key passes, per token chunk every pass of ``W1``
-      (``bwd_compact``, ``bwd_main_pass*``) and then every pass of ``W0`` --, then the cast (absent on a direct
-      binding) once.
+    * forward: a head-window forward (``fused_forward``: ``fwd`` is its head-window stage) runs as it is, one launch;
+      on the bridge, per window in launch order (``W1`` then ``W0``), the window launch and its ``"fwd_copy"``;
+    * backward: the ``"dout_copy"`` (``dout_copy`` only), the delta stage once over the ``T * H`` rows, then on a
+      head-window backward (``fused_backward``: its main stages are the head-window builds) the main launches as
+      they are -- one launch, or per token chunk every pass --, and on the bridge the ``"window_stats"`` and the main
+      stage per window -- with key passes, per token chunk every pass of ``W1`` (``bwd_compact``,
+      ``bwd_main_pass*``) and then every pass of ``W0`` --; then the cast (absent on a direct binding) once.
     """
     windows = head_windows(num_heads)
     forward: list = []
-    for head0 in windows:
-        forward += [WindowLaunch("fwd", head0, fwd), HeadStep("fwd_copy", head0)]
+    if fused_forward:
+        forward.append(fwd)
+    else:
+        for head0 in windows:
+            forward += [WindowLaunch("fwd", head0, fwd), HeadStep("fwd_copy", head0)]
     if not backward_order:
         return tuple(forward), ()
     delta, rest = backward_order[0], backward_order[1:]
@@ -2660,6 +2912,8 @@ def _window_order(
     if rest and rest[-1] == "bwd_cast":
         rest, cast = rest[:-1], (rest[-1],)
     backward: list = [HeadStep("dout_copy")] if dout_copy else []
+    if fused_backward:
+        return tuple(forward), tuple(backward + [delta, *rest]) + cast
     backward += [delta, HeadStep("window_stats")]
     if passes == 1:
         (main,) = rest
@@ -2679,8 +2933,63 @@ def _check_cuda_device(tensors: list, device: torch.device) -> None:
         raise ValueError("Expected all tensors on one CUDA device")
 
 
+def _check_head_window_operands(plan: _Plan, t: dict[str, torch.Tensor]) -> None:
+    """The host contract of the head-window builds (``ValueError`` when broken; host metadata only, no device sync).
+    Their ``num_heads`` and ``num_queries`` are scalars the kernels trust: the query, ``out``, ``dout`` and ``dq``
+    maps carry the head extent of their own tensors, and ``lse`` / ``o_lo`` / ``delta`` are raw pointers addressed
+    at ``t * H + h``.  So every head operand a head-window launch receives holds exactly ``H = num_heads`` heads of
+    the ``T`` tokens -- ``q_latent`` / ``q_rope`` / ``out`` / ``dout`` (or its dense copy) / ``dq_latent`` /
+    ``dq_rope`` ``[T, H, *]``, and ``lse`` / ``delta`` ``[T, H]`` and (with ``o_lo``) ``o_lo [T, H, 512]``
+    contiguous --, and each head-window stage receives ``num_queries = 2 T`` items over both windows (``wsel =
+    -1``) of ``H`` heads.  Validation and the output checks establish all of it on every route; this states it where
+    the launch values are bound."""
+    T, H = int(plan.num_queries), int(plan.num_heads)
+
+    def heads(name: str, last: int) -> None:
+        x = t.get(name)
+        if x is not None and (x.ndim != 3 or tuple(x.shape) != (T, H, last)):
+            raise ValueError(
+                f"a head-window launch of {H} heads over {T} tokens needs {name} [{T}, {H}, {last}], got "
+                f"{tuple(x.shape)}"
+            )
+
+    def rows(name: str, shape: tuple) -> None:
+        x = t.get(name)
+        if x is not None and (tuple(x.shape) != shape or not x.is_contiguous()):
+            raise ValueError(
+                f"a head-window launch addresses {name} at token * {H} + head: it must be a contiguous "
+                f"{list(shape)} tensor, got shape {tuple(x.shape)} strides {tuple(x.stride())}"
+            )
+
+    heads("q_latent", D_LATENT)
+    heads("q_rope", D_ROPE)
+    heads("out", D_LATENT)
+    rows("lse", (T, H))
+    if plan.with_o_lo:
+        rows("o_lo", (T, H, D_LATENT))
+    if plan.fused_backward:
+        heads("dout", D_LATENT)
+        heads("dout_copy", D_LATENT)
+        heads("dq_latent", D_LATENT)
+        heads("dq_rope", D_ROPE)
+        rows("delta", (T, H))
+    for stage, own in plan.stage_values.items():
+        if (own["num_queries"], own["num_heads"], own["wsel"]) != (
+            HEAD_WINDOW_ITEMS * T,
+            H,
+            HEAD_WINDOW_BOTH,
+        ):
+            raise ValueError(
+                f"{stage}: a head-window launch runs {HEAD_WINDOW_ITEMS * T} items of {H} heads with wsel "
+                f"{HEAD_WINDOW_BOTH}, got {own}"
+            )
+
+
 def _bound_values(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
-    """Launch values of ``plan`` over the tensors ``t`` (the kernels' own argument names)."""
+    """Launch values of ``plan`` over the tensors ``t`` (the kernels' own argument names).  A plan with a head-window
+    phase checks the host contract of those builds first (:func:`_check_head_window_operands`)."""
+    if getattr(plan, "fused_forward", False) or getattr(plan, "fused_backward", False):
+        _check_head_window_operands(plan, t)
     indices, _ = _pointer_operand(t["indices"])
     values: dict[str, Any] = dict(plan.constants)
     values.update(t, indices=indices)
@@ -2723,7 +3032,7 @@ def _bound_values(plan: _Plan, t: dict[str, torch.Tensor]) -> dict[str, Any]:
                 pass_counts=t["topk_length"],
             )
         if getattr(plan, "dout_copy", False):
-            # a multi-window backward whose dout the delta cannot read in place: every stage reads the dense copy
+            # a backward above 64 heads whose dout the delta cannot read in place: every stage reads the dense copy
             # the ``"dout_copy"`` step fills first (a 64-head plan never copies; duck-typed plans may omit the field)
             values["dout"] = t["dout_copy"]
     return values
@@ -2754,25 +3063,29 @@ def _launches(
             inner = key.key
         if isinstance(inner, tuple):
             stage, chunk, index = inner
-            stage_values = dict(base, **plan.pass_overrides[chunk][index])
+            stage_values = _key_values(plan, base, stage, chunk, index)
             e = plan.entries[(stage, chunk)]
         else:
-            stage, stage_values = inner, base
+            stage = inner
+            stage_values = _key_values(plan, base, stage)
             e = plan.entries[stage]
         launches[key] = _Launch(stage, e.launcher, e.run, stage_values, e.grid)
     return launches
 
 
 def _scratch(plan: _Plan, flat: torch.Tensor) -> dict[str, torch.Tensor]:
-    """The backward scratch regions of ``plan`` carved from the workspace ``flat`` (above 64 heads also the per-window
-    stats and the dense ``dout`` copy of a ``dout_copy`` plan)."""
+    """The backward scratch regions of ``plan`` carved from the workspace ``flat`` (above 64 heads also the dense
+    ``dout`` copy of a ``dout_copy`` plan and, on the two-window bridge, the per-window stats)."""
     T, S, layout = plan.num_queries, plan.num_kv, plan.layout
     H = plan.num_heads
     t = dict(delta=_carve(flat, layout, "delta", torch.float32, (T, H)))
     if plan.head_windows:
-        stats = (len(plan.head_windows), T, HEAD_WINDOW)
-        t["window_lse"] = _carve(flat, layout, "window_lse", torch.float32, stats)
-        t["window_delta"] = _carve(flat, layout, "window_delta", torch.float32, stats)
+        if not plan.fused_backward:
+            stats = (len(plan.head_windows), T, HEAD_WINDOW)
+            t["window_lse"] = _carve(flat, layout, "window_lse", torch.float32, stats)
+            t["window_delta"] = _carve(
+                flat, layout, "window_delta", torch.float32, stats
+            )
         if plan.dout_copy:
             t["dout_copy"] = _carve(
                 flat, layout, "dout_copy", torch.bfloat16, (T, H, D_LATENT)
@@ -2791,8 +3104,10 @@ def _scratch(plan: _Plan, flat: torch.Tensor) -> dict[str, torch.Tensor]:
 
 
 def _pass_scratch(plan: _Plan, flat: torch.Tensor) -> dict[str, torch.Tensor]:
-    """The key-range-pass scratch of ``plan`` (one launch chunk of tokens) carved from the workspace ``flat``."""
-    rows, layout = plan.pass_rows, plan.layout
+    """The key-range-pass scratch of ``plan`` (one launch chunk of tokens) carved from the workspace ``flat``: the dQ
+    partials of the chunk's work items (:attr:`_Plan.pass_rows`), the compacted keys and counts of its tokens
+    (:attr:`_Plan.pass_tokens`)."""
+    rows, tokens, layout = plan.pass_rows, plan.pass_tokens, plan.layout
     return dict(
         dq_partial=_carve(
             flat,
@@ -2801,8 +3116,10 @@ def _pass_scratch(plan: _Plan, flat: torch.Tensor) -> dict[str, torch.Tensor]:
             torch.float32,
             (rows, plan.dq_partial_bytes_per_token // 4),
         ),
-        key_scratch=_carve(flat, layout, "key_scratch", torch.int32, (rows, plan.topk)),
-        pass_counts=_carve(flat, layout, "pass_counts", torch.int32, (rows,)),
+        key_scratch=_carve(
+            flat, layout, "key_scratch", torch.int32, (tokens, plan.topk)
+        ),
+        pass_counts=_carve(flat, layout, "pass_counts", torch.int32, (tokens,)),
     )
 
 
@@ -2856,13 +3173,20 @@ class DSATrainRunner:
     ``bwd_main`` --, then ``bwd_cast``; a direct binding, ``dkv_direct``,
     launches the natural-layout variants of the main stage and no cast).
 
-    A binding over ``H > 64`` query heads (``num_heads``) keys its window
-    launches :class:`WindowLaunch` and its device copies :class:`HeadStep`
-    (``forward_stages``: per window the launch and its ``"fwd_copy"``;
-    ``backward_order``: ``"dout_copy"`` when the binding's ``dout`` needs it,
-    the delta over the ``T * H`` rows, ``"window_stats"``, the main stage per
-    window -- per token chunk every pass of a window --, the cast); see the
-    comment above ``SUPPORTED_HEADS``.  The window scratch, the stats and the
+    A binding over ``H > 64`` query heads (``num_heads``) runs, per phase,
+    the head-window builds where the program ships them for the device's
+    architecture (``HEAD_WINDOW_STAGES``: ``forward_stages`` is the one
+    head-window forward, e.g. ``("fwd_hw",)``; ``backward_order`` the
+    ``"dout_copy"`` :class:`HeadStep` when the binding's ``dout`` needs it, the
+    delta over the ``T * H`` rows, the head-window main stage -- keyed like the
+    64-head plan's, ``bwd_main_hw`` or per token chunk and pass
+    ``bwd_compact`` / ``bwd_main_pass_hw`` -- and the cast), and otherwise the
+    two-window bridge, whose window launches are keyed :class:`WindowLaunch`
+    and its device copies :class:`HeadStep` (``forward_stages``: per window the
+    launch and its ``"fwd_copy"``; ``backward_order``: ``"dout_copy"`` when
+    needed, the delta, ``"window_stats"``, the main stage per window -- per
+    token chunk every pass of a window --, the cast); see the comment above
+    ``SUPPORTED_HEADS``.  The bridge's window scratch and stats and the
     ``dout`` copy are workspace regions (:func:`workspace_layout`).
     """
 
@@ -2888,14 +3212,14 @@ class DSATrainRunner:
     # True when the natural-layout main stage adds into ``dkv_acc`` itself (no accumulators, no zero fill, no cast).
     dkv_direct: bool = False
     # The program's forward launch key(s) (``("fwd",)``; ``("nope_fwd",)`` on the NoPE runner; their
-    # ``with_o_lo=False`` twins on a runner prepared with ``with_o_lo=False``; above 64 heads the
-    # :class:`WindowLaunch` and :class:`HeadStep` keys of the windows).
+    # ``with_o_lo=False`` twins on a runner prepared with ``with_o_lo=False``; above 64 heads the head-window
+    # forward stage, or on the two-window bridge the :class:`WindowLaunch` and :class:`HeadStep` keys of the windows).
     forward_stages: tuple = FORWARD_STAGES
     # ``False``: the forward writes no ``o_lo`` (``tensors["o_lo"]`` is the kernels' zero-size placeholder) and the
     # backward's delta reads ``out`` alone.
     with_o_lo: bool = True
-    # The binding's query head count H (``SUPPORTED_HEADS``); above 64 heads ``launches`` also holds the window
-    # launches (:class:`WindowLaunch`) and device copies (:class:`HeadStep`) of the plan.
+    # The binding's query head count H (``SUPPORTED_HEADS``); above 64 heads ``launches`` holds the head-window
+    # launches, or the bridge's window launches (:class:`WindowLaunch`), and the device copies (:class:`HeadStep`).
     num_heads: int = NUM_HEADS
 
     @property
@@ -3392,11 +3716,12 @@ def _forward_window_scratch(
     device: torch.device,
     flat: Optional[torch.Tensor] = None,
 ) -> dict[str, torch.Tensor]:
-    """The forward window scratch of a plan over more than 64 heads (nothing on a 64-head plan): ``fwd_lse`` ``[T,
+    """The forward window scratch of a two-window bridge plan over more than 64 heads (nothing on a 64-head plan or a
+    head-window forward, which writes the ``[T, H]`` outputs itself): ``fwd_lse`` ``[T,
     64]`` FP32 and, with ``with_o_lo``, ``fwd_o_lo`` ``[T, 64, 512]`` BF16 -- the contiguous operands each window's
     forward writes before its ``"fwd_copy"`` -- carved from the workspace ``flat`` (a prepared runner) or allocated
     per call (the eager bindings)."""
-    if not plan.head_windows:
+    if not plan.head_windows or plan.fused_forward:
         return {}
     T = plan.num_queries
     shapes = {"fwd_lse": ((T, HEAD_WINDOW), torch.float32)}
@@ -3498,9 +3823,10 @@ class _Binding:
         # from one workspace): the FP32 dK/dV accumulators zero-filled, the rest plain.
         t["delta"] = fresh((T, H), torch.float32)
         if plan.head_windows:
-            stats = (len(plan.head_windows), T, HEAD_WINDOW)
-            t["window_lse"] = fresh(stats, torch.float32)
-            t["window_delta"] = fresh(stats, torch.float32)
+            if not plan.fused_backward:
+                stats = (len(plan.head_windows), T, HEAD_WINDOW)
+                t["window_lse"] = fresh(stats, torch.float32)
+                t["window_delta"] = fresh(stats, torch.float32)
             if plan.dout_copy:
                 t["dout_copy"] = fresh((T, H, D_LATENT), torch.bfloat16)
         # a direct binding adds into the caller's dkv_acc: no accumulators, no fill
@@ -3510,12 +3836,13 @@ class _Binding:
             )
             t["dk_rope_acc"] = _alloc((S, D_ROPE), torch.float32, device, zero=True)
         if plan.key_passes > 1:
-            rows = plan.pass_rows  # the tokens of one launch chunk
+            # the work items (dQ partials) and the tokens (compacted keys, counts) of one launch chunk
+            rows, tokens = plan.pass_rows, plan.pass_tokens
             t["dq_partial"] = fresh(
                 (rows, plan.dq_partial_bytes_per_token // 4), torch.float32
             )
-            t["key_scratch"] = fresh((rows, plan.topk), torch.int32)
-            t["pass_counts"] = fresh((rows,), torch.int32)
+            t["key_scratch"] = fresh((tokens, plan.topk), torch.int32)
+            t["pass_counts"] = fresh((tokens,), torch.int32)
         if plan.accumulate_dkv:
             if dkv_acc is None:
                 raise RuntimeError(
@@ -3789,8 +4116,8 @@ def forward(
     ``with_o_lo`` (``bool``, default ``True``): with ``True`` the forward also writes ``o_lo``, the BF16 rounding
     residual of ``out``, and the backward forms ``delta = rowsum(dout * (out + o_lo))`` in FP32.  With ``False`` the
     forward neither computes nor stores ``o_lo`` (``H`` KiB less written and saved per query token, ``H`` the call's
-    query head count; above 64 heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of workspace, and no
-    ``o_lo`` window copies) and returns ``None`` in its slot, and the backward forms ``delta = rowsum(dout * out)`` from
+    query head count; on the two-window bridge above 64 heads also no ``fwd_o_lo`` window scratch, 64 KiB per token
+    of workspace, and no ``o_lo`` window copies) and returns ``None`` in its slot, and the backward forms ``delta = rowsum(dout * out)`` from
     the BF16 ``out``.  ``out`` and ``lse`` have the same accuracy in both modes.  Any value other than a ``bool``
     raises ``ValueError``.
     """
@@ -4334,7 +4661,8 @@ class _RopeVarlenBinding(_Binding):
             o_lo=_o_lo_operand(plan, o_lo, device),
         )
         t.update(_forward_window_scratch(plan, device))
-        # the forward has no key-range passes (above 64 heads: its windows and their device copies)
+        # the forward has no key-range passes (above 64 heads: the head-window forward, or the bridge's windows and
+        # their device copies)
         self._run(_bound_values(plan, t), plan.forward_stages, t)
         return out, lse, o_lo
 
