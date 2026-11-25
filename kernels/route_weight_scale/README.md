@@ -16,13 +16,13 @@ one sum, `dw` within a row, has one fixed order.
 | Backward | `dx = BF16(w * dy)`, bit for bit `(w[:, None] * dy.float()).bfloat16()`; `dw = sum over c of dy * x`, one FP32 word per row, no division by `w` |
 | `x`, `dy`, `y`, `dx` | BF16 `[rows, H]`, `H` 4096 or 3584. Unit column stride, a row stride that is a multiple of 8 elements, a 16-byte aligned base: row slices of wider or longer buffers are read and written in place. |
 | `w`, `dw` | FP32 `[rows]`, contiguous |
-| `rows` | 0 to 1,048,576 and beyond (fewer than `2**31 - 256`). Row offsets are 64-bit, so one call may span more than 2^31 elements. `rows = 0` launches nothing. |
+| `rows` | 0 to 1,048,576 and beyond (fewer than `2**29`). Row offsets are 64-bit, so one call may span more than 2^31 elements. `rows = 0` launches nothing. |
 | Workspace | 0 bytes. The forward allocates only `y`, the backward only `dx` and `dw` (none when passed in). No `[rows, H]` FP32 buffer. |
 | Retained state | The autograd entry saves `x` and `w` only (references, no copy). |
 | Shapes | `rows` and the strides are run-time values: one library per program and architecture, no recompilation. |
 | Host | No synchronization, no device-to-host read; runs on the current stream of the operands' device |
 | Checkpointing | Works under `torch.utils.checkpoint(..., use_reentrant=False)`; the recomputation launches the forward once. |
-| CUDA graphs | Run one eager call of each stage, width and row count the graph captures first, so that no JIT build happens during capture. The `H = 4096` forward and the backward at both widths pick a program and a grid by the row count, with the same bits. |
+| CUDA graphs | Run one eager call of each stage, width and row count the graph captures first, so that no JIT build happens during capture. The forward and the backward at both widths pick a program and a grid by the row count, with the same bits. |
 | Architectures | `sm_100a`, `sm_103a`; the JIT build needs the CUDA toolkit that `build.json` names for each |
 | Determinism | Bitwise reproducible run to run. No alert under `torch.use_deterministic_algorithms(True)`. |
 | Modes | `det` only: there is no step that sums across rows, so `nondet` and KCP are not applicable. |

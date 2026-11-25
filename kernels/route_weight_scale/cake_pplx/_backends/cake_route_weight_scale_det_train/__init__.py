@@ -43,11 +43,14 @@ Host design:
   ``cake_jit.route`` picks from the band of ``cake_jit.ROUTES`` that holds
   ``rows``, for stage ``fwd`` or ``bwd`` at the width of ``x``
   (``<stage>_h<H>``): the forward at H = 4096 takes ``fwd_h4096_t32`` (one
-  row a CTA of 32 threads) for few rows, the backward at H = 3584 takes
-  ``bwd_h3584_warp`` (one warp a row) in its band, all with the same bits.
-  The grid is the record's (``cake_jit.grid``): one CTA per block of its
-  ``rows_per_cta`` rows (4 for ``fwd_h4096``, ``fwd_h3584`` and
-  ``bwd_h3584_warp``, 1 for the others), capped in a band with a cap at that
+  row a CTA of 32 threads) for few rows, the forward of each width takes its
+  flat program (``fwd_h<H>_flat``) for many rows, the backward at H = 3584
+  takes ``bwd_h3584_warp`` (one warp a row) in its band, all with the same
+  bits.  The grid is the record's (``cake_jit.grid``): one CTA per block of
+  its ``rows_per_cta`` rows (4 for ``fwd_h4096``, ``fwd_h3584`` and
+  ``bwd_h3584_warp``, 1 for ``fwd_h4096_t32``, ``bwd_h4096`` and
+  ``bwd_h3584``), or for a flat record one CTA per chunk of its
+  ``elements_per_cta`` (2048) elements, capped in a band with a cap at that
   many CTAs per SM of the device (a persistent grid).  ``rows`` and the
   strides are launch arguments, so one library per record and architecture
   serves every call; it loads (and, without a prebuilt library, JIT-builds)
@@ -296,7 +299,7 @@ def _device_index(x: torch.Tensor, *others: tuple[str, Optional[torch.Tensor]]) 
 
 def _check_rows(rows: int) -> None:
     if rows >= MAX_ROWS:
-        raise ValueError(f"rows = {rows} exceeds the kernels' 32-bit row count (fewer than {MAX_ROWS})")
+        raise ValueError(f"rows = {rows} exceeds the package's row bound (fewer than {MAX_ROWS})")
 
 
 def _readable(dy: torch.Tensor) -> torch.Tensor:

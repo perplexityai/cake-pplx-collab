@@ -91,7 +91,7 @@ __device__ __forceinline__ float2 cake_bf16x2_to_f32x2(__nv_bfloat162 v) {
 extern "C" {
 
 __global__ __launch_bounds__(32) void
-kernel_cake_route_weight_scale_det_train_81f4f7c0d9059af49cd4(__nv_bfloat16* __restrict__ x, float* __restrict__ w, __nv_bfloat16* __restrict__ y, int rows, long long x_stride, long long y_stride)
+kernel_cake_route_weight_scale_det_train_edfd720e5f7640b79cf4(__nv_bfloat16* __restrict__ x, float* __restrict__ w, __nv_bfloat16* __restrict__ y, int rows, long long x_stride, long long y_stride)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);

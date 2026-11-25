@@ -23,6 +23,12 @@ rank are this rank's), each route reaches this rank once from every emulated pee
 row, an input-gradient row or a router-weight gradient are equal bytes to one address: ``y``, ``dx`` and the
 router-weight gradients are those of a single-rank layer over this rank's experts, and each routed weight gradient sums
 EP copies of every route.  Not a distributed run: no peer barrier and no cross-rank race is exercised.
+
+At a top-k above the local expert count (the 896-expert layout (64, 14) at top-16) a token cannot route every route
+to one rank's experts with distinct experts: :func:`one_rank_ids` repeats experts within a token (each route is its own
+schedule row, so the layer is still well defined) and :func:`one_rank_multiplier` sizes the schedule for every route on
+one rank.  :func:`two_rank_skew_ids` is the full skew with distinct experts at such a layout: each token routes to all
+of one rank's experts and the rest of its routes to the next rank's.
 """
 
 import math
@@ -30,6 +36,7 @@ import math
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.experimental._mok_reference import rand
 
 backend = cake_package("cake_mok_bf16", "backend")
 workspace_module = cake_package("cake_mok_bf16", "workspace")
@@ -45,6 +52,36 @@ def bound_multiplier(tokens, topk, ep, experts):
     ``ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP``."""
     worst = min(topk, experts) * tokens * ep + experts * 255
     return -(-worst // (tokens * topk)) / ep
+
+
+def one_rank_multiplier(tokens, topk, ep, experts):
+    """The no-overflow multiplier with every route of every rank on one rank (:func:`one_rank_ids`):
+    ``ceil((topk * T * EP + E * 255) / (T * topk)) / EP``; :func:`bound_multiplier` when ``topk <= experts``."""
+    worst = topk * tokens * ep + experts * 255
+    return -(-worst // (tokens * topk)) / ep
+
+
+def one_rank_ids(tokens, experts, topk, generator=None):
+    """``[tokens, topk]`` int64 ids of this rank's ``experts`` (local ids, the one-GPU emulation's routes): a random
+    permutation of the experts per token, its first ``topk``, or with ``topk > experts`` the whole permutation followed
+    by its first ``topk - experts`` entries again (those routes of a token repeat an expert)."""
+    order = rand(tokens, experts, generator=generator).argsort(-1)
+    if topk <= experts:
+        return order[:, :topk].contiguous()
+    return torch.cat([order, order[:, : topk - experts]], dim=1).contiguous()
+
+
+def two_rank_skew_ids(rows, experts, topk, generator=None, device=None):
+    """``[rows, topk]`` int32 global ids of the full skew at ``topk > experts`` with distinct experts per token: every
+    row routes to all ``experts`` of rank 0 and to ``topk - experts`` distinct experts of rank 1, in a random order per
+    row.  Rank 0 receives ``experts * rows`` routes (the bound :func:`bound_multiplier` sizes), rank 1 the rest."""
+    if not 0 < topk - experts <= experts:
+        raise ValueError("two_rank_skew_ids needs experts < topk <= 2 * experts")
+    first = rand(rows, experts, generator=generator).argsort(-1)
+    second = rand(rows, experts, generator=generator).argsort(-1)[:, : topk - experts] + experts
+    ids = torch.cat([first, second], dim=1)
+    order = rand(rows, topk, generator=generator).argsort(-1)
+    return ids.gather(1, order).int().to(device).contiguous()
 
 
 class OneGpuGroup:
@@ -101,13 +138,14 @@ def one_gpu_workspace(ep, tokens, hidden, topk, capacity, device):
     )
 
 
-def one_gpu_source_workspace(ep, experts, counts, hidden, topk, device):
+def one_gpu_source_workspace(ep, experts, counts, hidden, topk, device, multiplier_of=bound_multiplier):
     """Rank 0's source workspace (:class:`MoKSourceWorkspace`, as ``create_mok_bf16_workspace`` returns it) on one GPU
     for the source counts ``counts``: the physical rows that factory reserves (the largest count rounded up to its row
-    alignment, at least 512) and the worst-case multiplier at those rows.  Returns the workspace and the multiplier."""
+    alignment, at least 512) and the worst-case multiplier at those rows (``multiplier_of``: :func:`bound_multiplier`,
+    or :func:`one_rank_multiplier` for repeated experts).  Returns the workspace and the multiplier."""
     alignment = math.lcm(256, 512 // math.gcd(topk, 512))
     rows = -(-max(512, *counts) // alignment) * alignment
-    multiplier = bound_multiplier(rows, topk, ep, experts)
+    multiplier = multiplier_of(rows, topk, ep, experts)
     capacity = workspace_module.schedule_capacity_for(rows, topk, ep, multiplier)
     storage = one_gpu_workspace(ep, rows, hidden, topk, capacity, device)
     return backend.MoKSourceWorkspace(storage, (counts[0],) * ep), multiplier

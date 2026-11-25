@@ -55,6 +55,9 @@ from tests.experimental._mok_one_gpu import (
     bound_multiplier,
     one_gpu_source_workspace,
     one_gpu_workspace,
+    one_rank_ids,
+    one_rank_multiplier,
+    two_rank_skew_ids,
 )
 from tests.experimental._mok_reference import (
     normal_,
@@ -1975,16 +1978,26 @@ BOUND_IDS = ["ep64-local6", "ep8-local48"]
 
 
 def _mode_group_roles(group):
-    """The roles only the :data:`MODE_GROUPS` group ``group`` loads: its fused backward, epilogues, shared-scale
-    helpers and its layouts' scheduler kernels."""
-    roles = [
+    """The roles only the :data:`MODE_GROUPS` group ``group`` loads: its fused kernels (the direct-gradient backward;
+    with SiTU-GLU also the forward, the context-free forward and the recompute, all without a shared expert), its
+    epilogues, its shared-scale helpers and its layouts' scheduler kernels."""
+    situ = group.activation == "situ_glu"
+    roles = []
+    if situ:
+        roles += [
+            kernels._role("forward", situ_glu=True),
+            kernels._role("forward", noctx=True, situ_glu=True),
+            kernels._role("recompute", situ_glu=True),
+        ]
+    roles.append(
         kernels._role(
             "backward",
             False,
             group.fp32_wgrad,
             direct=group.router_weight_gradient == "direct",
+            situ_glu=situ,
         )
-    ]
+    )
     if group.shared_expert == "scaled":
         roles += [
             f"epilogue_forward_scaled_{group.topk}",
@@ -1992,55 +2005,91 @@ def _mode_group_roles(group):
             "shared_scale_rows",
             "shared_scale_dot",
         ]
+    elif group.shared_expert == "none":
+        roles += [
+            f"epilogue_forward_none_{group.topk}",
+            f"epilogue_backward_none_{group.topk}",
+        ]
     for ep, experts in group.layouts:
         roles += [f"count_{ep}_{experts}", f"rows_{ep}_{experts}"]
     return tuple(roles)
 
 
 #: The roles only a :data:`MODE_GROUPS` group loads (the 512-expert top-10 group: the direct-gradient backward, the
-#: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64) scheduler kernels).
+#: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64) scheduler kernels; the 896-expert top-16
+#: group: the SiTU-GLU forward, context-free forward, recompute and direct-gradient backward without a shared expert,
+#: the top-16 epilogues without a shared row and the (64, 14) scheduler kernels).
 MODE_GROUP_ROLES = tuple(
     role for group in kernels.MODE_GROUPS.values() for role in _mode_group_roles(group)
 )
 
+#: The arguments of a sibling launch that a build without a shared expert does not take: every shared map of the
+#: forward, the recompute and the backward, and ``local_tokens``.
+NO_SHARED_ARGUMENTS = frozenset(
+    {
+        *("x_shared", "wg_shared", "wu_shared", "wd_shared", "gate_shared_out", "up_shared_out"),
+        *("hidden_shared_out", "hidden_shared_in", "y_shared", "local_tokens"),
+        *("dy_s", "dg_s", "du_s", "dy_atb_s", "dg_atb_s", "du_atb_s", "x_atb_s", "h_atb_s", "wg_s", "wu_s"),
+        *("wd_s", "dh_s", "dx_s", "dwg_s", "dwu_s", "dwd_s", "dh_sw_s", "gate_sw_s", "up_sw_s", "dg_sw_s"),
+        "du_sw_s",
+    }
+)
+
+#: Per group role with a sibling: ``(sibling role, (argument, added argument after it) or None, arguments dropped,
+#: SiTU-GLU)``; a SiTU-GLU role takes ``situ_beta``, ``situ_lb`` in the place of ``swiglu_limit``.
+GROUP_SIBLINGS = {
+    "backward_fp32_direct": ("backward_fp32", ("dy_routed_ptr", "dy_scaled_ptr"), (), False),
+    "epilogue_forward_scaled_10": ("epilogue_forward_8", ("scores", "shared_scale"), (), False),
+    "epilogue_backward_scaled_10": ("epilogue_backward_8", ("scores", "shared_scale"), (), False),
+    "forward_situ_noshared": ("forward", None, NO_SHARED_ARGUMENTS, True),
+    "forward_noctx_situ_noshared": ("forward_noctx", None, NO_SHARED_ARGUMENTS, True),
+    "recompute_situ_noshared": ("recompute", None, NO_SHARED_ARGUMENTS, True),
+    "backward_fp32_direct_situ_noshared": (
+        "backward_fp32",
+        ("dy_routed_ptr", "dy_scaled_ptr"),
+        NO_SHARED_ARGUMENTS,
+        True,
+    ),
+    "epilogue_forward_none_16": ("epilogue_forward_8", None, ("shared",), False),
+    "epilogue_backward_none_16": ("epilogue_backward_8", None, ("shared",), False),
+}
+
 
 def _group_records(registry):
     """Stand-in registry records of the :data:`MODE_GROUP_ROLES` a registry does not hold yet, for the host-only
-    tests: the arguments of the sibling role plus the group's additions (``dy_scaled_ptr`` after ``dy_routed_ptr``,
-    ``shared_scale`` after ``scores``), the helpers' own lists, the group's targets.  A registry that holds a role
-    keeps its record."""
+    tests: the arguments of the sibling role (:data:`GROUP_SIBLINGS`) with the group's additions (``dy_scaled_ptr``
+    after ``dy_routed_ptr``, ``shared_scale`` after ``scores``) and removals (the shared maps and ``local_tokens``,
+    :data:`NO_SHARED_ARGUMENTS`; the epilogues' ``shared`` row), ``situ_beta``, ``situ_lb`` in the place of
+    ``swiglu_limit`` for SiTU-GLU, the scheduler kernels those of the 256-expert ones, the helpers' own lists, each
+    group's targets.  A registry that holds a role keeps its record."""
     records = dict(registry)
-    sibling = {
-        "backward_fp32_direct": ("backward_fp32", "dy_routed_ptr", "dy_scaled_ptr"),
-        "epilogue_forward_scaled_10": ("epilogue_forward_8", "scores", "shared_scale"),
-        "epilogue_backward_scaled_10": (
-            "epilogue_backward_8",
-            "scores",
-            "shared_scale",
-        ),
-        "count_8_64": ("count_8_32", None, None),
-        "rows_8_64": ("rows_8_32", None, None),
-    }
     own = {
         "shared_scale_rows": ["rows", "scales", "scaled", "tokens", "width"],
         "shared_scale_dot": ["left", "right", "dots", "tokens", "width"],
     }
-    targets = list(kernels.MODE_GROUPS["scaled_top10"].targets)
-    for role in MODE_GROUP_ROLES:
-        if role in records:
-            continue
-        if role in own:
-            arguments = [*own[role], "grid_x", "grid_y", "grid_z"]
-        else:
-            base, after, added = sibling[role]
-            arguments = list(registry[base]["arguments"])
-            if after is not None:
-                arguments.insert(arguments.index(after) + 1, added)
-        records[role] = {
-            "library": f"cake_mok_{role}",
-            "arches": targets,
-            "arguments": arguments,
-        }
+    for group in kernels.MODE_GROUPS.values():
+        targets = list(group.targets)
+        for role in _mode_group_roles(group):
+            if role in records:
+                continue
+            if role in own:
+                arguments = [*own[role], "grid_x", "grid_y", "grid_z"]
+            elif role.startswith(("count_", "rows_")):
+                arguments = list(registry[f"{role.split('_')[0]}_8_32"]["arguments"])
+            else:
+                base, added, dropped, situ = GROUP_SIBLINGS[role]
+                arguments = list(registry[base]["arguments"])
+                if added is not None:
+                    arguments.insert(arguments.index(added[0]) + 1, added[1])
+                arguments = [name for name in arguments if name not in dropped]
+                if situ:
+                    at = arguments.index("swiglu_limit")
+                    arguments[at : at + 1] = ["situ_beta", "situ_lb"]
+            records[role] = {
+                "library": f"cake_mok_{role}",
+                "arches": targets,
+                "arguments": arguments,
+            }
     return records
 
 
@@ -2568,8 +2617,10 @@ def _group_stub_loader(monkeypatch, loaded=None):
 def test_mode_group_roles_are_registry_records():
     """Every role of a :data:`MODE_GROUPS` group is a registry record built for exactly the group's targets (SM100a and
     SM103a), with the arguments the launchers pass: the direct-gradient backward takes those of ``backward_fp32`` and
-    ``dy_scaled_ptr``, the scaled epilogues those of the top-8 epilogues and ``shared_scale``, the 512-expert scheduler
-    kernels those of the 256-expert ones, and the two shared-scale helpers their own lists."""
+    ``dy_scaled_ptr``, the scaled epilogues those of the top-8 epilogues and ``shared_scale``, the SiTU-GLU kernels
+    those of their SwiGLU siblings without the shared maps and ``local_tokens`` and with ``situ_beta``, ``situ_lb`` in
+    the place of ``swiglu_limit``, the top-16 epilogues those of the top-8 ones without the ``shared`` row, the 512-
+    and 896-expert scheduler kernels those of the 256-expert ones, and the two shared-scale helpers their own lists."""
     registry = jit._registry()
     missing = [role for role in MODE_GROUP_ROLES if role not in registry]
     assert missing == [], f"group roles not in this package's registry: {missing}"
@@ -2694,18 +2745,9 @@ def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
         )
 
 
-def test_unbuilt_modes_and_mode_types_are_refused():
-    """Host only: ``activation="situ_glu"`` and ``shared_expert="none"`` are recognized and raise ``ValueError`` (no
-    build in this package yet); an unknown mode value raises ``ValueError`` naming the allowed values; a mode that is
-    not a ``str`` raises ``TypeError``, before any value check (also of another argument)."""
-    with pytest.raises(
-        ValueError, match="activation='situ_glu' has no build in this package yet"
-    ):
-        kernels.check_configuration(8, 32, 8, **{**GROUP_OK, "activation": "situ_glu"})
-    with pytest.raises(
-        ValueError, match="shared_expert='none' has no build in this package yet"
-    ):
-        kernels.check_configuration(8, 32, 8, **{**GROUP_OK, "shared_expert": "none"})
+def test_mode_values_and_mode_types_are_refused():
+    """Host only: an unknown mode value raises ``ValueError`` naming the allowed values; a mode that is not a ``str``
+    raises ``TypeError``, before any value check (also of another argument)."""
     for name, value in (
         ("router_weight_gradient", "dot"),
         ("shared_expert", "half"),
@@ -2721,10 +2763,17 @@ def test_unbuilt_modes_and_mode_types_are_refused():
 
 
 def test_situ_parameters_are_checked():
-    """Host only: the per-call SiTU-GLU scalars are finite positive Python numbers: ``TypeError`` for a ``bool``, a
-    string or a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value."""
-    kernels.check_situ_parameters(4.0, 25.0)
-    kernels.check_situ_parameters(4, 25)
+    """Host only: the per-call SiTU-GLU scalars are finite positive Python numbers whose FP32 values are positive and
+    give finite FP32 kernel constants ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``: ``TypeError`` for a
+    ``bool``, a string or a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value, a value past the
+    FP32 range or rounding to 0 there, and a pair whose constants are past the FP32 range.  The check returns the FP32
+    values."""
+    assert kernels.check_situ_parameters(4.0, 25.0) == (4.0, 25.0)
+    assert kernels.check_situ_parameters(4, 25) == (4.0, 25.0)
+    assert kernels.check_situ_parameters(0.1, 3.0) == (
+        float(torch.tensor(0.1, dtype=torch.float32)),
+        3.0,
+    )
     for bad in (True, "4", torch.tensor(4.0), None):
         with pytest.raises(
             TypeError, match="situ_beta must be a finite positive float"
@@ -2732,13 +2781,343 @@ def test_situ_parameters_are_checked():
             kernels.check_situ_parameters(bad, 25.0)
         with pytest.raises(TypeError, match="situ_lb must be a finite positive float"):
             kernels.check_situ_parameters(4.0, bad)
-    for bad in (0.0, -4.0, float("inf"), float("nan")):
+    for bad in (0.0, -4.0, float("inf"), float("nan"), 1e39, 1e-50):
         with pytest.raises(
             ValueError, match="situ_beta must be a finite positive float"
         ):
             kernels.check_situ_parameters(bad, 25.0)
         with pytest.raises(ValueError, match="situ_lb must be a finite positive float"):
             kernels.check_situ_parameters(4.0, bad)
+    for beta, lb, constant in (
+        (1e-39, 25.0, "2.88539 / situ_beta"),
+        (4.0, 1e-39, "2.88539 / situ_lb"),
+        (1e20, 1e20, "situ_beta \\* situ_lb"),
+    ):
+        with pytest.raises(ValueError, match=f"{constant} is past the FP32 range"):
+            kernels.check_situ_parameters(beta, lb)
+
+
+#: The 896-expert top-16 group (``MODE_GROUPS["situ_top16"]``): SiTU-GLU routed experts without a shared expert.
+SITU_GROUP = kernels.MODE_GROUPS["situ_top16"]
+SITU_OK = dict(
+    clamped_swiglu=False,
+    fp32_wgrad=True,
+    router_weight_position="after_down",
+    router_weight_gradient="direct",
+    shared_expert="none",
+    activation="situ_glu",
+)
+#: SiTU-GLU scalars of the GPU tests (``situ_beta``, ``situ_lb``).
+SITU = dict(situ_beta=4.0, situ_lb=25.0)
+
+
+@pytest.mark.parametrize(
+    "layout,topk,change",
+    [
+        ((64, 14), 8, {}),
+        ((8, 32), 16, {}),
+        ((64, 14), 16, dict(activation="swiglu")),
+        ((64, 14), 16, dict(activation="clamped_swiglu")),
+        ((64, 14), 16, dict(clamped_swiglu=True)),
+        ((64, 14), 16, dict(shared_expert="unscaled")),
+        ((64, 14), 16, dict(shared_expert="scaled")),
+        ((64, 14), 16, dict(router_weight_gradient="quotient")),
+        ((64, 14), 16, dict(fp32_wgrad=False)),
+        ((64, 14), 16, dict(router_weight_position="before_down")),
+        ((8, 32), 8, dict(activation="situ_glu", shared_expert="unscaled", router_weight_gradient="quotient")),
+        ((8, 32), 8, dict(shared_expert="none", activation="swiglu", router_weight_gradient="quotient")),
+        ((8, 64), 10, dict(activation="situ_glu")),
+    ],
+    ids=[
+        "896-top8",
+        "256-top16",
+        "896-swiglu",
+        "896-clamped-act",
+        "896-clamped",
+        "896-unscaled",
+        "896-scaled",
+        "896-quotient",
+        "896-bf16-wgrad",
+        "896-before-down",
+        "256-situ",
+        "256-none",
+        "512-situ",
+    ],
+)
+def test_situ_group_configurations_outside_the_group_are_refused(layout, topk, change):
+    """Host only: a configuration that uses the layout, the top-k or a mode of the 896-expert top-16 group (SiTU-GLU,
+    ``shared_expert="none"``) but is not the group's configuration raises ``ValueError`` naming the group's
+    configuration and the one given."""
+    with pytest.raises(
+        ValueError,
+        match=r"896 routed experts at top-k 16 .* runs \(EP, local experts\) \(64, 14\) at topk=16",
+    ):
+        kernels.check_configuration(*layout, topk, **{**SITU_OK, **change})
+
+
+def test_situ_group_configuration_is_checked_before_device_work(monkeypatch):
+    """Host only: ``check_configuration`` admits the 896-expert top-16 group's configuration and returns its name;
+    ``check_target`` accepts the group on SM100a and SM103a and refuses it on SM107a.  On an SM107a device the adapter
+    refuses the group before it loads a kernel; on SM100a and SM103a the adapter (prepared for the context-free forward
+    and the recompute) loads the group's roles (the SiTU-GLU forward, context-free forward, recompute and backward
+    without a shared expert, the top-16 epilogues without a shared row, the (64, 14) scheduler kernels) and none of
+    the SwiGLU fused kernels or the top-8 epilogues."""
+    group = SITU_GROUP
+    assert group.targets == ("sm_100a", "sm_103a")
+    assert group.layouts == ((64, 14),) and group.topk == 16
+    assert kernels.check_configuration(64, 14, 16, **SITU_OK) == "situ_top16"
+    for arch in group.targets:
+        kernels.check_target("after_down", arch, "situ_top16")
+    with pytest.raises(
+        ValueError,
+        match="896 routed experts .* has no sm_107a build in this package; use an sm_100a or sm_103a device",
+    ):
+        kernels.check_target("after_down", "sm_107a", "situ_top16")
+    loaded = []
+    _group_stub_loader(monkeypatch, loaded)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    keywords = {key: SITU_OK[key] for key in ("fp32_wgrad", "router_weight_gradient", "shared_expert", "activation")}
+    monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
+    with pytest.raises(ValueError, match="no sm_107a build"):
+        backend.MoKFunctional(64, 14, 16, **keywords)
+    assert loaded == []
+    for arch in group.targets:
+        monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
+        loaded.clear()
+        functional = backend.MoKFunctional(64, 14, 16, **keywords)
+        functional.prepare(None, save_context=False)
+        functional.prepare_recompute(None)
+        assert functional.group == "situ_top16"
+        assert functional.shared_expert == "none" and functional.activation == "situ_glu"
+        assert set(_mode_group_roles(group)) <= set(loaded), sorted(loaded)
+        assert {"pad_64", "gather", "barrier", "expert_layout"} <= set(loaded)
+        swiglu = {"forward", "forward_noctx", "recompute", "backward_fp32", "backward_fp32_direct"}
+        assert not (swiglu | {"epilogue_forward_8", "epilogue_backward_8"}) & set(loaded)
+
+
+def _situ_launcher_problem(topk=16):
+    """:func:`_launcher_problem` without a shared expert: ``None`` in the three shared-weight places and in the shared
+    places of the saved context, the three routed FP32 accumulators."""
+    p = _launcher_problem(topk=topk)
+    shared, routed = p["weights"][0::2], p["weights"][1::2]
+    p["weights"] = (None, routed[0], None, routed[1], None, routed[2])
+    saved = p["saved"]
+    p["saved"] = (saved[0], None, saved[2], None, saved[4], None, saved[6])
+    p["accumulators"] = p["accumulators"][3:]
+    p["shared"] = shared
+    return p
+
+
+def test_situ_launchers_pass_exactly_the_registry_arguments(monkeypatch):
+    """Host only (stub kernels, no launch): the SiTU-GLU forward (context and context-free), recompute and backward
+    without a shared expert hand their kernels exactly the registry arguments through ``__call__`` and through a plan:
+    ``situ_beta`` and ``situ_lb`` as Python floats, no shared map and no ``local_tokens``.  They return ``None`` in
+    every shared place (and the backward the three routed accumulators); the backward's unscaled and scaled rings are
+    two buffers.  Each refuses a ``swiglu_limit``, missing SiTU-GLU scalars, a shared weight, the shared context and an
+    accumulator count other than three before any launch, and the SwiGLU launchers refuse the SiTU-GLU scalars."""
+    calls = _group_stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    p = _situ_launcher_problem()
+    x, dy, combine, scores, weights = p["x"], p["dy"], p["combine"], p["scores"], p["weights"]
+    topk, macro, mini, comm, ep = 16, 768, 256, 4, 4
+    ptrs = [4096 * (rank + 1) for rank in range(ep)]  # never dereferenced
+    schedule, layout, intermediate, experts, capacity = (
+        p["schedule"], p["layout"], p["intermediate"], p["experts"], p["capacity"],
+    )  # fmt: skip
+    situ = dict(situ_beta=4.0, situ_lb=25)
+    routed = weights[1::2]
+
+    def check(role, count):
+        assert [name for name, _ in calls] == [role] * count
+        for _, arguments in calls:
+            assert arguments["situ_beta"] == 4.0 and arguments["situ_lb"] == 25.0
+            assert type(arguments["situ_beta"]) is float and type(arguments["situ_lb"]) is float
+            assert not NO_SHARED_ARGUMENTS & set(arguments) and "swiglu_limit" not in arguments
+        calls.clear()
+
+    for context in (True, False):
+        forward = MoKForward(False, context=context, situ_glu=True)
+        out = forward(x, ptrs, combine, ptrs, *weights, *schedule, topk, None, comm, macro, mini, layout=layout, **situ)
+        assert out[1] is None and out[3] is None and out[5] is None and out[7] is None
+        plan = forward.plan(x, ptrs, ptrs, intermediate, experts, capacity, topk, None, comm, macro, mini, **situ)
+        planned = MoKForward.launch_planned(plan, *weights, *schedule[:3], layout)
+        assert len(planned) == 9 and all(planned[i] is None for i in (1, 3, 5, 7))
+        check("forward_situ_noshared" if context else "forward_noctx_situ_noshared", 2)
+    recompute = MoKRecompute(False, situ_glu=True)
+    out = recompute(x, ptrs, None, routed[0], None, routed[1], *schedule, topk, None, comm, macro, mini, layout=layout,
+                    **situ)  # fmt: skip
+    assert len(out) == 7 and all(out[i] is None for i in (1, 3, 5))
+    plan = recompute.plan(x, ptrs, intermediate, experts, capacity, topk, None, comm, macro, mini, **situ)
+    planned = MoKRecompute.launch_planned(plan, None, routed[0], None, routed[1], *schedule[:3], layout)
+    assert len(planned) == 7 and all(planned[i] is None for i in (1, 3, 5))
+    check("recompute_situ_noshared", 2)
+    backward = MoKBackward(False, True, router_weight_gradient="direct", situ_glu=True)
+    accumulators = p["accumulators"]
+    args = (dy, ptrs, combine, ptrs, scores, ptrs, scores, ptrs, *weights, *p["saved"], x, ptrs, *schedule, topk, None,
+            comm, macro, mini)  # fmt: skip
+    out = backward(*args, weight_grad_accumulators=accumulators, layout=layout, **situ)
+    assert all(out[i] is None for i in (0, 2, 4, 6, 9, 11, 13))
+    assert all(out[i] is a for i, a in zip((10, 12, 14), accumulators, strict=True))
+    plan = backward.plan(dy, ptrs, ptrs, ptrs, ptrs, ptrs, intermediate, experts, capacity, topk, None, comm, macro,
+                         mini, **situ)  # fmt: skip
+    planned = backward.launch_planned(plan, *weights, *p["saved"], x, *schedule, layout,
+                                      weight_grad_accumulators=accumulators)  # fmt: skip
+    assert all(planned[i] is None for i in (0, 2, 4, 6, 9, 11, 13))
+    for _, arguments in calls:
+        assert arguments["dy_r"] is arguments["dy_routed_ptr"]
+        assert arguments["dy_atb_r"] is arguments["dy_scaled_ptr"]
+        assert arguments["dy_r"].data_ptr() != arguments["dy_atb_r"].data_ptr()
+        for name, accumulator in zip(("dwg_r", "dwu_r", "dwd_r"), accumulators, strict=True):
+            assert arguments[name] is accumulator, name
+    check("backward_fp32_direct_situ_noshared", 2)
+    # Refusals before any launch.
+    shared = p["shared"]
+    with pytest.raises(ValueError, match="take situ_beta and situ_lb, not a swiglu_limit"):
+        forward(x, ptrs, combine, ptrs, *weights, *schedule, topk, 10.0, comm, macro, mini, layout=layout, **situ)
+    with pytest.raises(TypeError, match="situ_beta must be a finite positive float"):
+        forward(x, ptrs, combine, ptrs, *weights, *schedule, topk, None, comm, macro, mini, layout=layout)
+    with pytest.raises(ValueError, match="situ_lb must be a finite positive float"):
+        recompute.plan(x, ptrs, intermediate, experts, capacity, topk, None, comm, macro, mini, situ_beta=4.0,
+                       situ_lb=float("inf"))  # fmt: skip
+    with pytest.raises(ValueError, match="have no shared expert: pass None"):
+        forward(x, ptrs, combine, ptrs, shared[0], routed[0], None, routed[1], None, routed[2], *schedule, topk, None,
+                comm, macro, mini, layout=layout, **situ)  # fmt: skip
+    with pytest.raises(ValueError, match="have no shared expert: pass None"):
+        recompute(x, ptrs, None, routed[0], shared[1], routed[1], *schedule, topk, None, comm, macro, mini,
+                  layout=layout, **situ)  # fmt: skip
+    saved = list(p["saved"])
+    saved[1] = saved[2]
+    with pytest.raises(ValueError, match="have no shared expert: pass None"):
+        backward(dy, ptrs, combine, ptrs, scores, ptrs, scores, ptrs, *weights, *saved, x, ptrs, *schedule, topk, None,
+                 comm, macro, mini, weight_grad_accumulators=accumulators, layout=layout, **situ)  # fmt: skip
+    with pytest.raises(ValueError, match="exactly three FP32 accumulators"):
+        backward(*args, layout=layout, **situ)
+    with pytest.raises(ValueError, match="Accumulators must be contiguous FP32 tensors shaped like the weights"):
+        backward(*args, weight_grad_accumulators=[*accumulators, accumulators[0]], layout=layout, **situ)
+    with pytest.raises(ValueError, match="read only by the SiTU-GLU kernels"):
+        MoKForward(False)(x, ptrs, combine, ptrs, shared[0], routed[0], shared[1], routed[1], shared[2], routed[2],
+                          *schedule, topk, None, comm, macro, mini, layout=layout, **situ)  # fmt: skip
+    assert calls == []
+    with pytest.raises(ValueError, match="SiTU-GLU forward is built without a SwiGLU limit"):
+        MoKForward(True, situ_glu=True)
+    with pytest.raises(ValueError, match="SiTU-GLU recompute is built without a SwiGLU limit"):
+        MoKRecompute(True, situ_glu=True)
+    with pytest.raises(ValueError, match="SiTU-GLU backward is built with the direct router-weight gradient"):
+        MoKBackward(False, True, situ_glu=True)
+    with pytest.raises(ValueError, match="SiTU-GLU backward is built with the direct router-weight gradient"):
+        MoKBackward(False, True, router_weight_gradient="direct", shared_operands=True, situ_glu=True)
+    with pytest.raises(TypeError, match="situ_glu must be a boolean"):
+        MoKForward(False, situ_glu=1)
+
+
+def test_none_epilogues_take_no_shared_row(monkeypatch):
+    """Host only (stub kernels): ``shared_row="none"`` loads the top-16 forward and backward epilogues without a
+    shared row, whose every launch (direct and planned) passes no ``shared`` argument and the token count and width of
+    the ``[tokens * 16, hidden]`` routed rows; a launch with a shared row raises before any launch, and a planned
+    launch takes ``shared=None`` exactly for such a plan."""
+    loaded = []
+    calls = _group_stub_loader(monkeypatch, loaded)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    epilogues = _host_epilogues(monkeypatch, MoKEpilogues(16, shared_row="none"))
+    assert loaded == ["epilogue_forward_none_16", "epilogue_backward_none_16"]
+    tokens, hidden = 4, 256
+    shared = torch.zeros(tokens, hidden, dtype=torch.bfloat16)
+    routed = torch.zeros(tokens * 16, hidden, dtype=torch.bfloat16)
+    scores = torch.zeros(tokens, 16)
+    with pytest.raises(ValueError, match="take shared=None"):
+        epilogues.forward(shared, routed, scores)
+    with pytest.raises(ValueError, match="take shared=None"):
+        epilogues.backward(shared, routed)
+    monkeypatch.setattr(
+        MoKEpilogues, "_rows", lambda self, shared, routed: (routed.shape[0] // self.top_k, routed.shape[1])
+    )
+    with pytest.raises(ValueError, match="shared_scale is required exactly"):
+        epilogues.backward(None, routed, torch.ones(tokens))
+    assert calls == []
+    outputs = [
+        epilogues.forward(None, routed, scores),
+        epilogues.backward(None, routed),
+        MoKEpilogues.launch_planned(epilogues.plan(routed, scores), None, scores),
+        MoKEpilogues.launch_planned(epilogues.plan(routed, False), None),
+    ]
+    for output in outputs:
+        assert tuple(output.shape) == (tokens, hidden) and output.dtype == torch.bfloat16
+    roles = ["epilogue_forward_none_16", "epilogue_backward_none_16"] * 2
+    assert [role for role, _ in calls] == roles
+    for _, arguments in calls:
+        assert "shared" not in arguments and arguments["routed"] is routed
+        assert arguments["tokens"] == tokens and arguments["hidden"] == hidden
+    with pytest.raises(ValueError, match="shared is None exactly for a plan of the shared-row-free epilogues"):
+        MoKEpilogues.launch_planned(epilogues.plan(routed, False), shared)
+    with pytest.raises(ValueError, match="shared is None exactly for a plan of the shared-row-free epilogues"):
+        MoKEpilogues.launch_planned(MoKEpilogues(8).plan(routed[: tokens * 8], False), None)
+
+
+def test_situ_call_refusals_come_before_device_work(monkeypatch):
+    """Host only: an adapter of the 896-expert top-16 group refuses, before any copy, barrier or kernel load, a forward,
+    recompute or backward without ``situ_beta`` and ``situ_lb`` or with values that are not finite positive numbers, a
+    shared weight, a ``swiglu_limit``, a ``shared_scale`` and MXFP8 routed weights; a SwiGLU adapter refuses the
+    SiTU-GLU scalars."""
+    functional = object.__new__(backend.MoKFunctional)
+    functional.local_experts = 4
+    functional._validated = {}
+    functional.group, functional.shared_expert, functional.router_weight_gradient = "situ_top16", "none", "direct"
+    functional.activation, functional.weight_before_down = "situ_glu", False
+    functional._forward_kernels, functional._backward_kernels = {}, {}
+    functional._recompute_kernels, functional._context_free_forward_kernels = {}, {}
+    events = []
+    _group_stub_loader(monkeypatch, events)
+    workspace = dataclasses.make_dataclass("W", ["device"])(torch.device("cuda", 0))
+    monkeypatch.setattr(backend.MoKFunctional, "_inputs", staticmethod(lambda *args: (workspace, 256)))
+    monkeypatch.setattr(functional, "_check_device", lambda workspace: None)
+    monkeypatch.setattr(functional, "_barrier", lambda w: events.append("barrier"))
+    monkeypatch.setattr(backend.MoKFunctional, "_copy_source", staticmethod(lambda *args: events.append("copy")))
+    options = dict(dtype=torch.bfloat16)
+    x = torch.zeros(256, 256, **options)
+    shared = [torch.zeros(256, 256, **options) for _ in range(3)]
+    routed = [torch.zeros(4, 256, 256, **options) for _ in range(3)]
+    data = torch.zeros(4, 256, 256, dtype=torch.uint8)
+    mxfp8 = [(data, torch.zeros(64, dtype=torch.uint8)) for _ in range(3)]
+    scores = torch.zeros(256, 16)
+    schedule = object()
+    context = backend.MoKForwardContext(
+        x_routed=x, gate_shared=None, gate_routed=x, up_shared=None, up_routed=x, hidden_shared=None, hidden_routed=x,
+        schedule=schedule,
+    )  # fmt: skip
+    none = (None, None, None)
+    forward = lambda **kw: functional.forward(  # noqa: E731
+        None, None, schedule, x, scores, *kw.pop("s", none), *kw.pop("r", routed), **kw
+    )
+    recompute = lambda **kw: functional.recompute_forward_context(  # noqa: E731
+        None, None, schedule, x, *kw.pop("s", none)[:2], *kw.pop("r", routed)[:2], **kw
+    )
+    backward = lambda **kw: functional.backward(  # noqa: E731
+        None, None, schedule, context, x, x, scores, *kw.pop("s", none), *kw.pop("r", routed), **kw
+    )
+    for run in (forward, recompute, backward):
+        with pytest.raises(ValueError, match="requires situ_beta and situ_lb"):
+            run()
+        with pytest.raises(ValueError, match="requires situ_beta and situ_lb"):
+            run(situ_beta=4.0)
+        with pytest.raises(TypeError, match="situ_lb must be a finite positive float"):
+            run(situ_beta=4.0, situ_lb=torch.tensor(25.0))
+        with pytest.raises(ValueError, match="situ_beta must be a finite positive float"):
+            run(situ_beta=0.0, situ_lb=25.0)
+        with pytest.raises(ValueError, match="has no shared expert: pass None"):
+            run(s=shared, **SITU)
+        with pytest.raises(ValueError, match=r"runs SiTU-GLU \(situ_beta, situ_lb\): pass swiglu_limit=None"):
+            run(swiglu_limit=10.0, **SITU)
+    for run in (forward, backward):
+        with pytest.raises(ValueError, match="takes BF16 routed weights"):
+            run(r=mxfp8, **SITU)
+        with pytest.raises(ValueError, match="taken only with shared_expert='scaled'"):
+            run(shared_scale=torch.ones(256), **SITU)
+    functional.group, functional.shared_expert, functional.router_weight_gradient = None, "unscaled", "quotient"
+    functional.activation = "swiglu"
+    for run in (forward, backward):
+        with pytest.raises(ValueError, match="taken only with activation='situ_glu'"):
+            run(s=shared, **SITU)
+    assert events == []
 
 
 def _launcher_problem(
@@ -2923,7 +3302,11 @@ def test_scaled_epilogues_take_the_shared_scale(monkeypatch):
         MoKEpilogues(10)
     with pytest.raises(ValueError, match="The scaled epilogues support top_k=10"):
         MoKEpilogues(8, shared_row="scaled")
-    with pytest.raises(ValueError, match="shared_row='unscaled' or 'scaled'"):
+    with pytest.raises(ValueError, match="shared_row='unscaled', 'scaled' or 'none'"):
+        MoKEpilogues(8, shared_row="half")
+    with pytest.raises(
+        ValueError, match="The shared-row-free epilogues support top_k=16"
+    ):
         MoKEpilogues(8, shared_row="none")
     unscaled = MoKEpilogues(8)
     with pytest.raises(ValueError, match="shared_scale is required exactly"):
@@ -3690,6 +4073,321 @@ def test_scaled_group_checkpoint_without_reentrant():
         assert torch.equal(_bits(accumulator), _bits(reference[index])), index
 
 
+#: The kernels the 896-expert top-16 group's GPU tests launch.
+SITU_KERNELS = (
+    "forward_situ_noshared",
+    "forward_noctx_situ_noshared",
+    "recompute_situ_noshared",
+    "backward_fp32_direct_situ_noshared",
+    "epilogue_forward_none_16",
+    "epilogue_backward_none_16",
+)
+
+
+def _require_situ_group():
+    ep, experts = SITU_GROUP.layouts[0]
+    for role in (*SITU_KERNELS, f"count_{ep}_{experts}"):
+        _require_role(role)
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 1032), (37, 4096), (512, 256)])
+def test_none_epilogues_on_the_gpu(tokens, hidden):
+    """The top-16 epilogues without a shared row.  The backward sum is exact: ``BF16(routed_0 + ... + routed_15)`` in
+    FP32 in that order, bit for bit the CPU's.  The forward with the last eight slots zero (zero rows and zero weights)
+    has the bytes of the top-8 epilogue on the first eight slots and a zero shared row (both start from zero, then add
+    the slots in ascending order, and ``fma(0, 0, acc) = acc``).  Five launches and a CUDA Graph replay of the direct
+    and the planned launches give the same bytes.  The forward's accuracy against the float64 oracle is judged in
+    ``test_mok_accuracy.py``."""
+    _require_role("epilogue_forward_none_16")
+    _require_role("epilogue_backward_8")
+    device = torch.device("cuda", torch.cuda.current_device())
+    none, top8 = MoKEpilogues(16, shared_row="none"), MoKEpilogues(8)
+    g = torch.Generator().manual_seed(7151 + tokens + hidden)
+    routed = (randn(tokens, 16, hidden, generator=g) * 0.125).bfloat16()
+    scores = rand(tokens, 16, generator=g) + 0.01
+    expected_dx = torch.zeros(tokens, hidden)
+    for slot in range(16):
+        expected_dx = expected_dx + routed[:, slot].float()
+    padded, padded_scores = routed.clone(), scores.clone()
+    padded[:, 8:], padded_scores[:, 8:] = 0.0, 0.0
+    d = {name: value.to(device) for name, value in dict(
+        routed=routed.view(-1, hidden), scores=scores, padded=padded.view(-1, hidden), padded_scores=padded_scores,
+        routed8=routed[:, :8].reshape(-1, hidden), scores8=scores[:, :8].contiguous(), zeros=torch.zeros(tokens, hidden),
+    ).items()}  # fmt: skip
+    zeros = d["zeros"].bfloat16()
+    forward_plan, backward_plan = none.plan(d["routed"], d["scores"]), none.plan(d["routed"], False)
+
+    def launch():
+        with kernels._ffi_stream():
+            planned = (
+                MoKEpilogues.launch_planned(forward_plan, None, d["scores"]),
+                MoKEpilogues.launch_planned(backward_plan, None),
+            )
+        return (none.forward(None, d["routed"], d["scores"]), none.backward(None, d["routed"]), *planned)
+
+    eager = [tuple(value.clone() for value in launch()) for _ in range(REPEATS)]
+    assert all(_same_bits(eager[0], other) for other in eager[1:])
+    assert _same_bits(eager[0][:2], eager[0][2:])
+    assert eager[0][0].shape == (tokens, hidden) and eager[0][1].shape == (tokens, hidden)
+    assert torch.equal(_bits(eager[0][1].cpu()), _bits(expected_dx.bfloat16()))
+    padded_y = none.forward(None, d["padded"], d["padded_scores"])
+    assert torch.equal(_bits(padded_y), _bits(top8.forward(zeros, d["routed8"], d["scores8"])))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        launch()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = launch()
+    for _ in range(2):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same_bits(captured, eager[0])
+
+
+def _situ_problem(tokens, hidden, intermediate, experts, topk, seed, device):
+    """:func:`_cpu_problem` without a shared expert: ``None`` for the three shared weights and every route on this
+    rank's ``experts`` (:func:`one_rank_ids`; at top-16 over 14 experts two routes of each token repeat an expert)."""
+    p = _cpu_problem(tokens, hidden, intermediate, experts, topk, seed, device)
+    p["weights"] = (None, None, None, *p["weights"][3:])
+    p["ids"] = one_rank_ids(tokens, experts, topk, torch.Generator().manual_seed(seed + 1)).to(device)
+    return p
+
+
+def _situ_adapter(tokens, hidden, macro, mini, device, counts=None):
+    """The 896-expert top-16 group's adapter as rank 0 of EP64 ``(64, 14)`` emulated on one GPU (:class:`OneGpuGroup`,
+    every route on this rank), prepared for the context and the context-free forward and the recompute; its workspace
+    (at the multiplier of every route on one rank, :func:`one_rank_multiplier`; with ``counts`` a source workspace for
+    those counts) and its config."""
+    ep, experts = SITU_GROUP.layouts[0]
+    topk = SITU_GROUP.topk
+    functional = backend.MoKFunctional(ep, experts, topk, **SITU_OK)
+    functional.communication = OneGpuGroup()
+    functional.prepare(None, save_context=False)
+    functional.prepare(None)
+    functional.prepare_recompute(None)
+    if counts is None:
+        multiplier = one_rank_multiplier(tokens, topk, ep, experts)
+        capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+        workspace = one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
+    else:
+        workspace, multiplier = one_gpu_source_workspace(
+            ep, experts, counts, hidden, topk, device, multiplier_of=one_rank_multiplier
+        )
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    return functional, workspace, config
+
+
+def _situ_step(functional, config, workspace, p, accumulators, *, checkpointed, situ=None, schedule=None):
+    """One training step of the SiTU-GLU group's adapter on the inputs ``p`` of :func:`_situ_problem`:
+    ``build_schedule`` (unless ``schedule`` is given), the context forward (or the context-free forward and the
+    recompute), ``backward`` into the three zeroed routed accumulators, with the SiTU-GLU scalars ``situ`` (default
+    :data:`SITU`).  Returns ``(y, dx, d_weights, routed gate, up, down weight gradients)`` and the schedule; the
+    context's shared fields and the backward's three shared weight gradients are ``None``."""
+    situ = SITU if situ is None else situ
+    routed = p["weights"][3:]
+    if schedule is None:
+        schedule = functional.build_schedule(workspace, config, p["ids"], num_local_experts=routed[0].shape[0])
+    for accumulator in accumulators:
+        accumulator.zero_()
+    y, context = functional.forward(
+        config, workspace, schedule, p["x"], p["scores"], None, None, None, *routed, save_context=not checkpointed,
+        **situ,
+    )  # fmt: skip
+    if checkpointed:
+        assert context is None
+        context = functional.recompute_forward_context(
+            config, workspace, schedule, p["x"], None, None, routed[0], routed[1], **situ
+        )  # fmt: skip
+    assert context.gate_shared is None and context.up_shared is None and context.hidden_shared is None
+    grads = functional.backward(
+        config, workspace, schedule, context, p["dy"], p["x"], p["scores"], None, None, None, *routed,
+        weight_grad_accumulators=accumulators, **situ,
+    )  # fmt: skip
+    assert len(grads) == 8 and all(value is None for value in grads[5:])
+    assert all(grads[2 + i] is accumulator for i, accumulator in enumerate(accumulators))
+    return (y, *grads[:5]), schedule
+
+
+#: Indexes of ``_situ_step``'s values.
+SITU_Y, SITU_DX, SITU_D_WEIGHTS, SITU_ROUTED_DW = 0, 1, 2, (3, 4, 5)
+
+
+def test_situ_group_adapter_step():
+    """The 896-expert top-16 group's adapter step (SiTU-GLU, no shared expert) at EP64 ``(64, 14)``, emulated on one
+    GPU as rank 0 (every route on this rank, two routes of each token repeating an expert; 256 source rows, several
+    macrobatches): ``y``, ``dx``, ``d_weights`` and the three routed FP32 weight gradients, ``None`` in the shared
+    places; the context step and the checkpointed step (context-free forward, recompute, backward) give the same bytes,
+    run to run and in a CUDA Graph replay; a zero router weight has a nonzero gradient.  ``situ_beta`` and ``situ_lb``
+    are run-time values: other values change ``y``, ``dx``, ``d_weights`` and every weight gradient, and a graph
+    captured with :data:`SITU` replays those values after a step with other ones.  A steady-state step
+    (``build_schedule``, context-free forward, recompute, backward) makes no host synchronization
+    (``torch.cuda.set_sync_debug_mode("error")``).  Accuracy: ``test_mok_accuracy.py``."""
+    _require_situ_group()
+    topk = SITU_GROUP.topk
+    tokens, hidden, intermediate, macro, mini = 256, 512, 256, 8192, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _situ_adapter(tokens, hidden, macro, mini, device)
+    experts = SITU_GROUP.layouts[0][1]
+    p = _situ_problem(tokens, hidden, intermediate, experts, topk, 7801, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"][3:]]
+
+    def step(checkpointed=False, situ=None, schedule=None):
+        return _situ_step(
+            functional, config, workspace, p, accumulators, checkpointed=checkpointed, situ=situ, schedule=schedule
+        )  # fmt: skip
+
+    values, schedule = step()
+    first = _snapshot(values)
+    assert int(schedule.num_tokens.item()) > macro  # several macrobatches: backward replays the later ones
+    assert first[SITU_Y].shape == (tokens, hidden) and first[SITU_D_WEIGHTS].shape == (tokens, topk)
+    assert _same_bits(first, _snapshot(step(schedule=schedule)[0]))
+    assert _same_bits(first, _snapshot(step(True, schedule=schedule)[0]))
+    zero_weight = p["scores"] == 0
+    assert torch.count_nonzero(first[SITU_D_WEIGHTS][zero_weight]).item() > 0
+    other = _snapshot(step(situ=dict(situ_beta=3.0, situ_lb=12.0), schedule=schedule)[0])
+    for index in (SITU_Y, SITU_DX, SITU_D_WEIGHTS, *SITU_ROUTED_DW):
+        assert not torch.equal(_bits(other[index]), _bits(first[index])), index
+    # Steady state: every kernel loaded, the schedule's load observation in flight.
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        steady, _ = step(True)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert _same_bits(first, _snapshot(steady))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        step(True, schedule=schedule)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured, _ = step(True, schedule=schedule)
+    step(True, situ=dict(situ_beta=3.0, situ_lb=12.0), schedule=schedule)
+    for _ in range(2):
+        graph.replay()
+        assert _same_bits(first, _snapshot(captured))
+
+
+def test_situ_group_adapter_changed_counts():
+    """The SiTU-GLU group's adapter over changing source counts on one source workspace (:data:`CHANGED_COUNTS`: 1031,
+    768, 257 and 513 rows), as rank 0 of EP64 emulated on one GPU: per count a new schedule, the six step values with
+    the count's rows, and before each step every workspace row past the count holds other values, so the staging alone
+    decides those rows: the context step and the checkpointed step give exactly the bytes of the context step on a
+    fresh zeroed workspace; no count after the first loads a kernel."""
+    _require_situ_group()
+    topk = SITU_GROUP.topk
+    experts = SITU_GROUP.layouts[0][1]
+    hidden, intermediate, macro, mini = 512, 256, 16384, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _situ_adapter(None, hidden, macro, mini, device, CHANGED_COUNTS)
+    fresh_workspaces = []  # alive to the end: no later workspace takes a freed one's address
+    loads = None
+    for index, count in enumerate(CHANGED_COUNTS):
+        p = _situ_problem(count, hidden, intermediate, experts, topk, 7901 + index, device)
+        accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"][3:]]
+
+        def step(ws, checkpointed):
+            values, schedule = _situ_step(functional, config, ws, p, accumulators, checkpointed=checkpointed)
+            assert schedule.num_source_tokens == count and int(schedule.num_tokens.item()) > macro
+            return _snapshot(values)
+
+        def poison(ws):
+            storage = ws.storage
+            for buffer, rows, value in (
+                (storage.x_buffer, count, 3.0),
+                (storage.d_y_buffer, count, -5.0),
+                (storage.router_weight_buffer, count, 0.75),
+                (storage.d_router_weight_buffer, count, 9.0),
+                (storage.combine_buffer, count * topk, 7.0),
+                (storage.d_x_routed_buffer, count * topk, -7.0),
+            ):
+                buffer[rows:].fill_(value)
+
+        fresh_workspaces.append(
+            one_gpu_source_workspace(
+                *SITU_GROUP.layouts[0], CHANGED_COUNTS, hidden, topk, device, multiplier_of=one_rank_multiplier
+            )[0]
+        )
+        reference = step(fresh_workspaces[-1], False)
+        shapes = [tuple(reference[i].shape) for i in (SITU_Y, SITU_DX, SITU_D_WEIGHTS)]
+        assert shapes == [(count, hidden), (count, hidden), (count, topk)]
+        for checkpointed in (False, True):
+            poison(workspace)
+            values = step(workspace, checkpointed)
+            differs = [
+                i for i, (a, b) in enumerate(zip(reference, values, strict=True)) if not _same_bits((a,), (b,))
+            ]
+            assert not differs, (count, "checkpointed" if checkpointed else "context", differs)
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (count, "kernel loads", loads, misses)
+
+
+def test_situ_group_checkpoint_without_reentrant():
+    """A caller's ``torch.autograd.Function`` around the SiTU-GLU group's context-free forward that saves only its
+    inputs and whose backward recomputes the context and runs ``backward``, under
+    ``torch.utils.checkpoint.checkpoint(..., use_reentrant=False)``: ``x.grad``, the router-weight gradient and the
+    three routed FP32 weight-gradient accumulators have the bytes of the adapter's context step, and ``y`` its
+    ``y``."""
+    from torch.utils.checkpoint import checkpoint
+
+    _require_situ_group()
+    topk = SITU_GROUP.topk
+    experts = SITU_GROUP.layouts[0][1]
+    tokens, hidden, intermediate, macro, mini = 256, 512, 256, 8192, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional, workspace, config = _situ_adapter(tokens, hidden, macro, mini, device)
+    p = _situ_problem(tokens, hidden, intermediate, experts, topk, 8001, device)
+    accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"][3:]]
+    values, schedule = _situ_step(functional, config, workspace, p, accumulators, checkpointed=False)
+    reference = _snapshot(values)
+    routed = p["weights"][3:]
+
+    class Layer(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, scores):
+            y, _ = functional.forward(
+                config, workspace, schedule, x, scores, None, None, None, *routed, save_context=False, **SITU
+            )  # fmt: skip
+            ctx.save_for_backward(x, scores)
+            return y
+
+        @staticmethod
+        def backward(ctx, dy):
+            x, scores = ctx.saved_tensors
+            context = functional.recompute_forward_context(
+                config, workspace, schedule, x, None, None, routed[0], routed[1], **SITU
+            )  # fmt: skip
+            grads = functional.backward(
+                config, workspace, schedule, context, dy.contiguous(), x, scores, None, None, None, *routed,
+                weight_grad_accumulators=accumulators, **SITU,
+            )  # fmt: skip
+            return grads[0].clone(), grads[1].clone()
+
+    leaves = [p[name].detach().clone().requires_grad_(True) for name in ("x", "scores")]
+    for accumulator in accumulators:
+        accumulator.zero_()
+    y = checkpoint(Layer.apply, *leaves, use_reentrant=False)
+    y_bits = y.detach().clone()
+    y.backward(p["dy"])
+    torch.cuda.synchronize()
+    assert torch.equal(_bits(y_bits), _bits(reference[SITU_Y]))
+    for leaf, index in zip(leaves, (SITU_DX, SITU_D_WEIGHTS), strict=True):
+        assert torch.equal(_bits(leaf.grad), _bits(reference[index])), index
+    for accumulator, index in zip(accumulators, SITU_ROUTED_DW, strict=True):
+        assert torch.equal(_bits(accumulator), _bits(reference[index])), index
+
+
 @pytest.mark.parametrize("tokens", [4096, 16384, 32768])
 @pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
 def test_capacity_at_the_requested_bound(ep, experts, tokens):
@@ -4092,6 +4790,72 @@ def test_scheduler_at_the_capacity_bound(ep, experts):
         assert torch.equal(
             scheduler.owner_loads().long(), backend.count_routed_load(ids, ep, experts)
         )
+    scheduler.release_counts()
+
+
+@pytest.mark.parametrize("tokens", [4096, 16384, 32768])
+def test_situ_capacity_at_the_requested_bound(tokens):
+    """Host only: at the 896-expert layout (64, 14) and top-16 (more routes per token than local experts) the
+    worst-case multiplier counts at most 14 routes of a token on one rank: ``57 / 64`` at 16,384 source rows; the
+    schedule capacity holds every padded route of any routing with distinct experts per token and is a multiple of
+    256, and every fast-divmod divisor and grid of the forward, recompute and backward launches without a shared
+    expert (``local_tokens`` 0, no shared task) fits its 31-bit field at hidden 3584, intermediate 3072, macrobatch
+    262,144 and minibatch 4,096."""
+    (ep, experts), topk = SITU_GROUP.layouts[0], SITU_GROUP.topk
+    hidden, intermediate, macro, mini, comm = 3584, 3072, 262144, 4096, 40
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
+    if tokens == 16384:
+        assert multiplier == 57 / 64
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+    assert capacity % 256 == 0
+    assert capacity >= experts * tokens * ep + experts * 255
+    limit = 2**31 - 1
+    forward = kernels._forward_geometry(0, hidden, intermediate, capacity, macro, mini)
+    recompute = kernels._recompute_geometry(0, hidden, intermediate, capacity, macro, mini)
+    backward = kernels._backward_geometry(0, hidden, intermediate, capacity, macro, mini, experts, False)
+    assert forward.shared_tasks == recompute.shared_tasks == backward.shared_tasks == 0
+    assert 2 * forward.minis * forward.mini_tasks + comm <= limit
+    assert 2 * recompute.minis * recompute.mini_tasks + comm <= limit
+    assert comm + 2 * backward.clusters <= limit
+    assert macro * hidden <= limit  # elements of the routed x ring
+
+
+def test_situ_scheduler_at_the_capacity_bound():
+    """At the 896-expert layout (64, 14), top-16, 16,384 source rows per rank and the worst-case multiplier (14 of a
+    token's 16 routes on one rank), the two-rank full skew (:func:`two_rank_skew_ids`: every token of every rank routes
+    to all 14 experts of rank 0 and to two distinct experts of rank 1) fits: the scheduler's per-expert counts and rows
+    are exact on rank 0 (the bound) and rank 1 (the rest), each total within the capacity, and rank 2 receives
+    nothing."""
+    (ep, experts), topk = SITU_GROUP.layouts[0], SITU_GROUP.topk
+    _require_role(f"count_{ep}_{experts}")
+    tokens = 16384
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, bound_multiplier(tokens, topk, ep, experts))
+    ids = two_rank_skew_ids(ep * tokens, experts, topk, torch.Generator().manual_seed(4421), "cuda")
+    ids = ids.reshape(ep, tokens, topk).contiguous()
+    assert bool((ids.sort(-1).values.diff(dim=-1) != 0).all())  # distinct experts per token
+    scheduler = MoKScheduler(ep, experts)
+    for rank in (0, 1, 2):
+        peers, slots, total, counts = scheduler(ids, capacity, rank)
+        expected_counts = torch.bincount(ids.flatten().long(), minlength=ep * experts)
+        expected_counts = expected_counts[rank * experts : (rank + 1) * experts]
+        expected_counts = ((expected_counts + 255) // 256) * 256
+        assert torch.equal(counts, expected_counts.int())
+        assert total.item() == expected_counts.sum().item() <= capacity
+        if rank == 0:
+            assert total.item() >= experts * tokens * ep
+        if rank == 2:
+            assert total.item() == 0
+        offset = 0
+        for expert, count in enumerate(expected_counts.tolist()):
+            p = peers[offset : offset + count].long()
+            t = slots[offset : offset + count].long()
+            valid = p >= 0
+            actual = (p[valid] * tokens * topk + t[valid]).sort().values
+            expected = (ids.flatten() == rank * experts + expert).nonzero().flatten()
+            assert torch.equal(actual, expected), (rank, expert)
+            offset += count
+        assert (peers[offset:] == -1).all()
+        assert torch.equal(scheduler.owner_loads().long(), backend.count_routed_load(ids, ep, experts))
     scheduler.release_counts()
 
 

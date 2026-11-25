@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 23 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, except situ_glu, which supports `sm_100a` and `sm_103a` only (its `sm_107a` libraries are not delivered yet). Some families limit shapes per architecture.
+This page covers the public modules of all 24 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`. Some families limit shapes per architecture.
 
 ## Naming
 
@@ -30,6 +30,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | mhc | Plain FP32 sums. On `sm_107a` with the default `accumulation="fp32"` the backward adds `dfn` with FP32 atomic reductions in arrival order; every other sum has a fixed order today. No bit promise; not compared bitwise with det. | No alert. The `sm_107a` backward then runs the fixed-order `dfn` fold in place of the arrival-order reductions |
 | mhc_head | Same kernels as det | No alert |
 | engram_gate | Same kernels as det. `out`, `dX`, `dK`, `dV` have one fixed order; no bit promise for `dq_weight` / `dk_weight`. | No alert |
+| attn_res | The same forward. The backward adds each CTA's `dw` sums with FP32 atomics: no bit promise for `dw`. `out` and every `dv_j` have one fixed order. | Backward alerts for `T > 0` (raises; warns with `warn_only=True`). The forward never alerts |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
 | fmha | Has no det module. On the three-kernel routes `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. On the one-launch route all three have one fixed order. | Raises before launch |
 | dsa_indexer | Each row holds its selected set in no specified slot order | Raises before launch |
@@ -1026,6 +1027,83 @@ out.backward(torch.randn_like(out))      # x.grad, kv.grad [T, 25600], q_weight.
 
 ---
 
+## attn_res
+
+**Computes.** The attention residual (AttnRes) of Kimi-K3: the layer input as a softmax-weighted sum of `n` values (the closed block states, then the running sum of the current block), `1 <= n <= 9`, width 7168, with its backward. Per token `t`, every quantity in FP32 and each BF16 output rounded once, at its store:
+
+```text
+r_j = 1 / sqrt(mean_c v_j[c]^2 + eps)   d_j = sum_c v_j[c] w[c]
+p   = softmax over j of (r_j d_j)       (the largest term subtracted first)
+out = BF16(sum_j p_j v_j)
+dp_j = sum_c dout[c] v_j[c]   ds_j = p_j (dp_j - sum_i p_i dp_i)
+dv_j = BF16(p_j dout + ds_j r_j w - (ds_j d_j r_j^3 / 7168) v_j)
+dw   = sum over t and j of ds_j r_j v_j   (FP32)
+```
+
+The kernels evaluate `ds_j` as `p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `c` the value of the largest `p_j` (the first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1 (a peaked softmax). The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward, which recomputes no forward sum. No sum uses FP64. `eps` is greater than 0, so an all-zero value row gives `r_j = 1 / sqrt(eps)` and `d_j = 0`: a finite result.
+
+**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward and the backward ship one program per value bound from 2 to 9 (the bound is the number of values the program keeps in registers); a call of `n` values runs the program of the smallest bound at least `n`. The forward programs serve both modules. The det backward adds a fixed-order sum of the weight-gradient rows. Every program serves every token count, so the libraries are a fixed set. The GPU suites and the benchmark ran on B200 (`sm_100a`) and GB300 (`sm_103a`) with CUDA 13.5, against the acceptance criteria of issue #262. The `sm_107a` libraries ship, and `is_*_supported` reports SM107 (Rubin) devices as supported. Those libraries pass the package tests on VR200; the R200 runs and the `sm_107a` sanitizer runs are pending.
+
+**Inputs.** `values`: a list or tuple of `n` BF16 `[T, 7168]` tensors, each contiguous and 16-byte aligned, all on one CUDA device. They stay separate: nothing is stacked or copied. `w`: FP32 `[7168]` (the product of the norm and projection weights; its gradient is `dw`). `eps`: a Python `float` or `int`, 1e-5 by default. It must be finite and at least 2**-84 (about 5.2e-26), so that an all-zero value row stays finite in the backward; otherwise `ValueError`. A `bool`, a tensor or another type raises `TypeError`: no call reads device memory to the host. `T >= 0` and `n` are run-time values: no shape compiles a new library.
+
+**Caller-owned outputs.** `out` (forward) and every `dv[j]` (backward) are BF16 `[T, 7168]`, contiguous and 16-byte aligned. `out` must not overlap any value or `w`. Each `dv[j]` must not overlap any value, `dout`, `w`, `p`, `r`, `d` or another `dv` entry. The checks compare byte ranges (metadata only, no synchronization) and raise `ValueError`.
+
+### `cake_pplx.cake_attn_res_det_train`
+
+Every sum has one fixed order. Each cluster of the backward writes its own FP32 row of weight-gradient partial sums, and a second kernel adds the rows in one order. Every output repeats bit for bit on one device. No alert under deterministic algorithms. Source: [`kernels/attn_res/cake_pplx/cake_attn_res_det_train.py`](../kernels/attn_res/cake_pplx/cake_attn_res_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_attn_res_det` | `(values, w, *, eps=1e-5)` | As above; any may require grad | Autograd. Returns BF16 `out [T, 7168]`. The node saves references to the inputs and `p`, `r`, `d`. Gradients: BF16 `dv_j`, FP32 `dw`. |
+| `cake_attn_res_det_train_forward` | `(values, w, *, eps=1e-5, out=None)` | `out` BF16 `[T, 7168]`, contiguous, 16-byte aligned; it must not overlap a value or `w` | Returns `(out, p, r, d)`, the state FP32 `[T, n]` each. `T == 0` launches nothing. |
+| `cake_attn_res_det_train_backward` | `(dout, values, w, p, r, d, *, dv=None)` | `dout` BF16 `[T, 7168]`, contiguous, 16-byte aligned; `p`, `r`, `d` the forward's; `dv` a list of `n` BF16 `[T, 7168]`, contiguous, 16-byte aligned; no `dv[j]` may overlap an operand or another `dv` entry | Returns `(dv, dw)`: a list of `n` BF16 value gradients and FP32 `dw [7168]`. `T == 0` launches no Cake kernel and returns a zero-filled `dw` (a `torch.zeros` fill). |
+| `cake_attn_res_det_train_workspace_bytes` | `(T, n, device=None)` | | Device bytes one backward allocates beside its operands and outputs: one FP32 `[7168]` row, 28 KiB, per cluster of the backward grid; 0 for `T == 0`. It depends on `n` through the backward program's resident clusters: on B200, 142 rows for `n <= 5`, 104 for `n = 6` and 71 for `n >= 7` (fewer when `T` is smaller). |
+| `cake_attn_res_det_train_retained_bytes` | `(T, n)` | | Bytes of the state a forward keeps for the backward beside its inputs: `12 * T * n`. |
+
+Other public names: `is_cake_attn_res_det_train_supported(device=None)`, `CakeAttnResDetFunction`, `ARCHES`, `HIDDEN` (7168), `MAX_VALUES` (9), `SUPPORTED_COMPUTE_CAPABILITIES`.
+
+### `cake_pplx.cake_attn_res_nondet_train`
+
+The forward is det's. In the backward, each CTA keeps its tokens' weight-gradient sums in registers. After its token loop it adds them once into one zeroed FP32 `dw` with vector FP32 atomic reductions (`red.global.add.v4.f32`). The order of those adds varies, so `dw` makes no bit promise; `out` and every `dv_j` have one fixed order. It allocates no workspace. Under `torch.use_deterministic_algorithms(True)`, a backward of `T > 0` tokens (explicit or autograd) raises `RuntimeError` before the `dw` launch; with `warn_only=True` it emits a `UserWarning` and runs. The forward and a `T == 0` backward never alert. A launch captured into a CUDA graph alerts at capture, not at replay. Source: [`kernels/attn_res/cake_pplx/cake_attn_res_nondet_train.py`](../kernels/attn_res/cake_pplx/cake_attn_res_nondet_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_attn_res_nondet` | As det | As det | Autograd. The backward alerts for `T > 0` (see above). |
+| `cake_attn_res_nondet_train_forward` | As det | As det | Returns `(out, p, r, d)`. Never alerts. |
+| `cake_attn_res_nondet_train_backward` | As det | As det | Returns `(dv, dw)`. Alerts for `T > 0` (see above). |
+| `cake_attn_res_nondet_train_workspace_bytes` | `(T, n, device=None)` | | 0. |
+| `cake_attn_res_nondet_train_retained_bytes` | `(T, n)` | | As det. |
+
+Other public names: `is_cake_attn_res_nondet_train_supported(device=None)`, `CakeAttnResNondetFunction`, `ARCHES`, `HIDDEN`, `MAX_VALUES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
+
+**Options and environment.** The keyword options are `eps`, `out` and `dv`. This family has no environment variables of its own: kernel selection and launches read none. The JIT build reads the variables of the [README](../README.md#jit-build-and-cache) (`CUDA_HOME` / `CUDA_PATH`, `CXX` and the `CAKE_PPLX_*` build settings).
+
+**Cross-family.** None.
+
+**Example.**
+
+```python
+import torch
+from cake_pplx.cake_attn_res_nondet_train import cake_attn_res_nondet
+
+T, dev = 16380, torch.device("cuda:0")
+values = [torch.randn(T, 7168, device=dev).bfloat16().requires_grad_() for _ in range(5)]  # closed blocks, running sum
+w = (torch.randn(7168, device=dev) * 0.05).requires_grad_()                                # norm.weight * proj.weight
+
+h = cake_attn_res_nondet(values, w, eps=1e-5)    # BF16 [T, 7168]
+h.backward(torch.randn_like(h))                  # values[j].grad (BF16), w.grad (FP32)
+# det: cake_pplx.cake_attn_res_det_train.cake_attn_res_det
+```
+
+**Caveats.**
+
+- State kept for the backward: references to the inputs and `p`, `r`, `d`, `12 * T * n` bytes. Workspace of a backward call: none in nondet (`dw` is zeroed in place before the kernel adds into it); in det the FP32 `[7168]` weight-gradient rows, 28 KiB each, one per cluster of the backward grid, so it depends on `n`. The det workspace query reads the device's architecture and SM count for `T > 0`.
+- The backward and the forward of 5 to 9 values run one cluster of four CTAs per token; the forward of 1 to 4 values runs one CTA per token (its clusters of four exchange nothing). Both run persistently: `min(T, resident clusters)` clusters. The resident counts were measured per launch bound on B200, GB300, VR200 and R200. On GB200 (152-SM `sm_100a`) the counts at 3 and 4 CTAs per SM come from the four-CTA cluster programs of the engram_gate family, and there is no count at 2 CTAs per SM yet: there the forward of `n <= 4` and the backward of `n >= 7` take the fallback, a count under every measured one, as any other device does (measuring it is a follow-up). The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
+- No double backward.
+- Capture in a CUDA graph only after one eager call has loaded the programs.
+
+---
+
 ## gqa
 
 **Computes.** Packed-varlen causal GQA attention training with head dimension 256.
@@ -2014,16 +2092,16 @@ out = cake_engram_lookup_det_train_forward(w, s, torch.arange(M, device="cuda"))
 
 ## mok
 
-**Computes.** One expert-parallel MoE layer for training (Mixture of Kittens): the routed-token scheduler, the fused forward (dispatch, gate/up GEMMs, SwiGLU, down GEMM, combine), the context-only recompute and the fused backward (`dx`, router-score gradient, six expert-weight gradients).
+**Computes.** One expert-parallel MoE layer for training (Mixture of Kittens): the routed-token scheduler, the fused forward (dispatch, gate/up GEMMs, SwiGLU or SiTU-GLU, down GEMM, combine), the context-only recompute and the fused backward (`dx`, router-score gradient, six expert-weight gradients, or three without a shared expert).
 
 - Routed experts run in BF16, or in MXFP8 with caller-prequantized weights. The shared expert runs in BF16.
 - `swiglu_limit` (a per-call value) selects clamped SwiGLU, `silu(min(gate, L)) * clamp(up, -L, L)`.
 - With `fp32_wgrad=True`, the backward adds every weight gradient into six caller-owned FP32 accumulators.
 - `router_weight_position="before_down"` applies each route's FP32 router weight `w` to the SwiGLU activation `a` before the down projection, `h = BF16(w * a)`, and sums the routed outputs unweighted; the router-weight gradient is `dot(dh, a)` (`dh` the gradient of `h`), defined at a zero weight. It runs top-k 6 over 384 routed experts (and top-k 2 on the diagnostic layouts) with clamped SwiGLU, FP32 weight gradients and BF16 routed weights. The default `"after_down"` weights each routed output in the combine.
-- Explicit modes, defaults unchanged: `router_weight_gradient="direct"` computes the `"after_down"` router-weight gradient as `dot(dh, h)` with `dh` from the unscaled `dy` (defined at a zero weight; the default `"quotient"` divides by the weight and gives zero at a zero weight). `shared_expert="scaled"` scales the shared expert's output by a per-token FP32 `s`, `y = s * S(x) + sum_k w_k E_k(x)`; `forward` and `backward` take `shared_scale`, and `backward` returns `d_shared_scale` as a ninth item. Both run 512 routed experts at EP8 `(8, 64)`, top-k 10, plain SwiGLU, FP32 weight gradients and BF16 routed weights. `activation="situ_glu"` and `shared_expert="none"` are accepted names without a build yet; they raise `ValueError`.
+- Explicit modes, defaults unchanged: `router_weight_gradient="direct"` computes the `"after_down"` router-weight gradient as `dot(dh, h)` with `dh` from the unscaled `dy` (defined at a zero weight; the default `"quotient"` divides by the weight and gives zero at a zero weight). `shared_expert="scaled"` scales the shared expert's output by a per-token FP32 `s`, `y = s * S(x) + sum_k w_k E_k(x)`; `forward` and `backward` take `shared_scale`, and `backward` returns `d_shared_scale` as a ninth item. Both run 512 routed experts at EP8 `(8, 64)`, top-k 10, plain SwiGLU, FP32 weight gradients and BF16 routed weights. `activation="situ_glu"` replaces SwiGLU by SiTU-GLU, `beta * tanh(gate / beta) * sigmoid(gate) * lb * tanh(up / lb)`, with `situ_beta` and `situ_lb` (finite positive floats) on every `forward`, `recompute_forward_context` and `backward` (run-time kernel values, fixed inside a captured CUDA graph). `shared_expert="none"` has no shared expert, `y = sum_k w_k E_k(x)`: the three shared weights are `None` on every call, the forward context's shared fields are `None`, and `backward` takes the three routed FP32 accumulators and returns `None` for the three shared weight gradients. Both run, with `router_weight_gradient="direct"`, 896 routed experts at EP64 `(64, 14)`, top-k 16, FP32 weight gradients and BF16 routed weights.
 - Every output repeats bit for bit from run to run, within the scope in the backend README (same inputs, weights, configuration other than the communication-SM split, precision, router-weight position, EP group, build and GPU model).
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`, both router-weight positions; the 512-expert top-10 group (`"direct"`, `"scaled"`) on `sm_100a` and `sm_103a` only. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`, both router-weight positions; the 512-expert top-10 group (`"direct"`, `"scaled"`) and the 896-expert top-16 group (`"direct"`, `"none"`, `"situ_glu"`) on `sm_100a` and `sm_103a` only. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
 
 **Distributed requirements.** The caller passes an initialized `torch.distributed` process group with its CUDA device current. All ranks share one peer-accessible NVLink domain with multicast (PyTorch symmetric memory). EP sizes: 1, 4, 8, 16, 32 and 64. EP1 uses plain tensors.
 
@@ -2033,13 +2111,13 @@ This family has a det module only. The backend package is `cake_pplx._backends.c
 
 | Name | Signature | Returns / notes |
 |---|---|---|
-| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down", router_weight_gradient="quotient", shared_expert="unscaled", activation="swiglu")` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. With `router_weight_position="before_down"`, `recompute_forward_context` takes `router_weights` (the forward's). With `shared_expert="scaled"`, `forward` and `backward` take `shared_scale` (FP32 `[tokens]`) and `backward` returns `d_shared_scale` after the eight other items. An unsupported combination raises before any kernel is loaded or launched: `TypeError` for a position, router-weight gradient, shared-expert mode or activation that is not a `str`, an `ep_size`, `local_experts` or `topk` that is not an `int` (a `bool` included) and a `clamped_swiglu` or `fp32_wgrad` that is not a `bool`, in both positions; `ValueError` for every other value. |
+| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down", router_weight_gradient="quotient", shared_expert="unscaled", activation="swiglu")` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. With `router_weight_position="before_down"`, `recompute_forward_context` takes `router_weights` (the forward's). With `shared_expert="scaled"`, `forward` and `backward` take `shared_scale` (FP32 `[tokens]`) and `backward` returns `d_shared_scale` after the eight other items. With `activation="situ_glu"`, `forward`, `recompute_forward_context` and `backward` take the keywords `situ_beta` and `situ_lb`; with `shared_expert="none"` they take `None` for the shared weights, and `backward` takes three FP32 accumulators (routed gate, up, down) and returns `(dx, d_weights, dW_gate, dW_up, dW_down, None, None, None)`. An unsupported combination raises before any kernel is loaded or launched: `TypeError` for a position, router-weight gradient, shared-expert mode or activation that is not a `str`, an `ep_size`, `local_experts` or `topk` that is not an `int` (a `bool` included) and a `clamped_swiglu` or `fp32_wgrad` that is not a `bool`, in both positions; `ValueError` for every other value. |
 | `create_mok_bf16_workspace` | `(*, group, device, num_local_tokens, hidden_size, topk, source_capacity=None, fwd_num_comm_sms="auto", bwd_num_comm_sms="auto", minibatch_size=4096, macrobatch_size=32768, schedule_capacity_multiplier=3/16, precision="bf16", imbalance_comm_sms="auto", imbalance_threshold="auto", source_split_comm_sms="auto", source_split_threshold=1.5)` | Collective. Returns `(config, workspace)`. Call it outside CUDA Graph capture. |
 | `quantize_mok_mxfp8_weights` | `(gate, up, down)` | `(forward_weights, backward_weights)` of BF16 routed weights `gate`/`up [E_local, I, H]`, `down [E_local, H, I]` in the MXFP8 recipe. PyTorch operations; requantize after every weight update. |
 
 Other public names: `ACTIVATIONS`, `COMM_SMS`, `IMBALANCE_COMM_SMS`, `IMBALANCE_DEVICE_THRESHOLDS`, `IMBALANCE_THRESHOLD`, `IMBALANCE_THRESHOLDS`, `MODE_GROUPS`, `MOK_PRECISIONS`, `ROUTER_WEIGHT_GRADIENTS`, `ROUTER_WEIGHT_POSITIONS`, `SHARED_EXPERT_MODES`, `SOURCE_SPLIT_COMM_SMS`, `SOURCE_SPLIT_THRESHOLD`, `resolve_comm_sms`, `resolve_imbalance_comm_sms`, `resolve_imbalance_threshold`, `resolve_source_split_comm_sms` (loaded from the backend on first access).
 
-**Contract.** Scheduler layouts `(EP, local experts)`: `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. With `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2; `clamped_swiglu=True` and a `swiglu_limit` on every call, `fp32_wgrad=True`, BF16 routed weights, router weights `>= 0`. With `router_weight_gradient="direct"` and `shared_expert="scaled"` (only together): `(8, 64)` at top-k 10, `"after_down"`, plain SwiGLU (`swiglu_limit=None`), `fp32_wgrad=True`, BF16 routed weights, router weights `>= 0` (a zero weight has its gradient), any finite `shared_scale` (`0` included). A `schedule_capacity_multiplier` of at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` (`E` local experts, `T` the workspace's physical source rows, at least the largest rank's source rows or `source_capacity`) holds every routing; no upper bound is enforced. Every rank passes the same multiplier, so compute it from a row bound all ranks agree on, such as `source_capacity`: the bound decreases as `T` grows. Hidden and intermediate widths are multiples of 256 (MXFP8: hidden a multiple of 512). Source counts may differ across ranks, including zero. Communication-SM counts are positive and even. The locality-domain (`_domain`) builds are not shipped. The backend README (`kernels/mok/cake_pplx/_backends/cake_mok_bf16/README.md`) holds the full contract, the memory and recompute rules and the measured communication-SM tables.
+**Contract.** Scheduler layouts `(EP, local experts)`: `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. With `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2; `clamped_swiglu=True` and a `swiglu_limit` on every call, `fp32_wgrad=True`, BF16 routed weights, router weights `>= 0`. With `router_weight_gradient="direct"` and `shared_expert="scaled"` (only together): `(8, 64)` at top-k 10, `"after_down"`, plain SwiGLU (`swiglu_limit=None`), `fp32_wgrad=True`, BF16 routed weights, router weights `>= 0` (a zero weight has its gradient), any finite `shared_scale` (`0` included). With `activation="situ_glu"` and `shared_expert="none"` (only together, with `router_weight_gradient="direct"`): `(64, 14)` at top-k 16, `"after_down"`, `swiglu_limit=None`, finite positive `situ_beta` and `situ_lb` (rounded to FP32, with `2.88539 / beta`, `2.88539 / lb` and `beta * lb` finite in FP32), `fp32_wgrad=True`, BF16 routed weights, router weights `>= 0`. A `schedule_capacity_multiplier` of at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` (`E` local experts, `T` the workspace's physical source rows, at least the largest rank's source rows or `source_capacity`) holds every routing (at `(64, 14)` and top-k 16 a token routes at most 14 routes to one rank: `57 / 64` at 16,384 rows); no upper bound is enforced. Every rank passes the same multiplier, so compute it from a row bound all ranks agree on, such as `source_capacity`: the bound decreases as `T` grows. Hidden and intermediate widths are multiples of 256 (MXFP8: hidden a multiple of 512). Source counts may differ across ranks, including zero. Communication-SM counts are positive and even. The locality-domain (`_domain`) builds are not shipped. The backend README (`kernels/mok/cake_pplx/_backends/cake_mok_bf16/README.md`) holds the full contract, the memory and recompute rules and the measured communication-SM tables.
 
 **Options and environment.** The options are the keywords of `prepare_mok_bf16` and `create_mok_bf16_workspace` above. The facade reads no family-specific environment variable; the JIT variables in the README apply.
 
@@ -2294,7 +2372,7 @@ if torch.cuda.get_device_capability() == (10, 7):
 
 - `x`, `dy`: BF16 `[rows, H]`, `H` 4096 or 3584. Each BF16 operand, inputs and outputs, has a unit column stride, a row stride that is a multiple of 8 elements and a 16-byte aligned base, so row slices of wider or longer buffers are read and written in place. An output's row stride is at least `H`. A single row's stride is not read.
 - `w`: FP32 `[rows]`, contiguous. Any value; zeros allowed.
-- `rows` is any count from 0 to `2**31 - 257`, read from the tensor shape. Row offsets are 64-bit, so 1,048,576 rows at `H = 4096` (more than 2^31 elements) are one call. `rows` and the strides are launch arguments: one library per program and architecture serves every call, with no recompilation.
+- `rows` is any count from 0 to `2**29 - 1`, read from the tensor shape. Row offsets are 64-bit, so 1,048,576 rows at `H = 4096` (more than 2^31 elements) are one call. `rows` and the strides are launch arguments: one library per program and architecture serves every call, with no recompilation.
 - Every operand is on one CUDA device. An operand of another dtype, shape or layout raises `ValueError` before any allocation or launch; nothing is copied.
 
 ### `cake_pplx.cake_route_weight_scale_det_train`
@@ -2348,4 +2426,4 @@ cake_route_weight_scale_det_train_forward(x.detach(), w.detach(), out=buffer[:ro
 - Workspace: none. A call allocates only the outputs it is not given. Retained state of the autograd function: `x` and `w` (references, no copy).
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills each output a call allocates with NaN before the kernel writes it: one more fill launch per new output. Output buffers passed to every call avoid the fills. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. Not tested under `torch.compile`.
-- A program's library builds at its first launch. The forward at `H = 4096` and the backward at both widths pick a program and a grid by the row count, with the same bits. Before capturing a CUDA graph, run an eager call of each stage, width and row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
+- A program's library builds at its first launch. The forward and the backward at both widths pick a program and a grid by the row count, with the same bits. Before capturing a CUDA graph, run an eager call of each stage, width and row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.

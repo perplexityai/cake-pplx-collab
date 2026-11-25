@@ -209,8 +209,8 @@ GROUP = dict(router_weight_gradient="direct", shared_expert="scaled", activation
         (8, 64, 10, False, True, dict(GROUP, router_weight_gradient="dot"), ValueError, "router_weight_gradient must be one of"),
         (8, 64, 10, False, True, dict(GROUP, shared_expert="half"), ValueError, "shared_expert must be one of"),
         (8, 64, 10, False, True, dict(GROUP, activation="gelu"), ValueError, "activation must be one of"),
-        (64, 14, 16, False, True, dict(GROUP, activation="situ_glu"), ValueError, "activation='situ_glu' has no build"),
-        (64, 14, 16, False, True, dict(GROUP, shared_expert="none"), ValueError, "shared_expert='none' has no build"),
+        (64, 14, 16, False, True, dict(GROUP, activation="situ_glu"), ValueError, r"896 routed experts at top-k 16 .* runs \(EP, local experts\) \(64, 14\)"),
+        (64, 14, 16, False, True, dict(GROUP, shared_expert="none"), ValueError, r"896 routed experts at top-k 16 .* activation='situ_glu'"),
         (8, 64, 8, False, False, {}, ValueError, r"512 routed experts at top-k 10 .* got \(EP, local experts\) \(8, 64\)"),
         (8, 32, 10, False, True, GROUP, ValueError, r"512 routed experts at top-k 10 .* got \(EP, local experts\) \(8, 32\)"),
         (8, 64, 10, False, True, dict(GROUP, router_weight_gradient="quotient"), ValueError, "router_weight_gradient='direct'"),
@@ -219,20 +219,23 @@ GROUP = dict(router_weight_gradient="direct", shared_expert="scaled", activation
         (8, 64, 10, True, True, GROUP, ValueError, "activation='swiglu'"),
         (8, 32, 8, False, True, dict(router_weight_gradient="direct"), ValueError, "512 routed experts at top-k 10"),
         (16, 16, 8, False, False, dict(shared_expert="scaled"), ValueError, "512 routed experts at top-k 10"),
+        (8, 32, 8, False, False, dict(activation="situ_glu"), ValueError, "896 routed experts at top-k 16"),
+        (16, 16, 8, False, False, dict(shared_expert="none"), ValueError, "896 routed experts at top-k 16"),
+        (64, 14, 8, False, True, dict(GROUP, shared_expert="none", activation="situ_glu"), ValueError, r"896 routed experts at top-k 16 .* got \(EP, local experts\) \(64, 14\), topk=8"),
     ],
     ids=[
         "gradient-type", "shared-type", "activation-type", "ep-type-with-modes", "flag-type-with-modes",
-        "topk-type-before-mode-value", "gradient-value", "shared-value", "activation-value", "situ-unbuilt",
-        "none-unbuilt", "512-top8", "256-top10", "512-quotient", "512-unscaled", "512-bf16-wgrad", "512-clamped",
-        "256-direct", "256-scaled",
+        "topk-type-before-mode-value", "gradient-value", "shared-value", "activation-value", "896-scaled",
+        "896-swiglu", "512-top8", "256-top10", "512-quotient", "512-unscaled", "512-bf16-wgrad", "512-clamped",
+        "256-direct", "256-scaled", "256-situ", "256-none", "896-top8",
     ],
 )
 def test_prepare_refuses_unsupported_modes(ep, experts, topk, clamped, fp32, modes, error, match):
     """``prepare_mok_bf16`` refuses every unsupported use of the explicit modes, the 512-expert layouts and top-k 10
     before any device work (no GPU needed), with the types first: a mode that is not a ``str`` raises ``TypeError``,
-    as does an ``int`` or ``bool`` argument of another type, also when a mode value is unknown; then an unknown mode,
-    the modes without a build in this package (``"situ_glu"``, ``"none"``) and every configuration that uses the
-    512-expert top-10 group's layout, top-k or modes other than exactly as the group runs them raise ``ValueError``
+    as does an ``int`` or ``bool`` argument of another type, also when a mode value is unknown; then an unknown mode
+    and every configuration that uses the layout, top-k or modes of the 512-expert top-10 group or of the 896-expert
+    top-16 group (SiTU-GLU, ``shared_expert="none"``) other than exactly as the group runs them raise ``ValueError``
     naming the group's configuration."""
     with pytest.raises(error, match=match):
         mok.prepare_mok_bf16(
