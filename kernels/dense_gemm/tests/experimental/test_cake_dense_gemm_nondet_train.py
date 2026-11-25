@@ -1126,7 +1126,8 @@ def _det_tables_0326(m):
     the rows of :data:`DET_0322_WGRAD_ROWS` from 960 tokens (its version 0.3.27: from 128), no token tiers of the eight
     other BF16 rows of :data:`DET_0327_ROWS`, the 216-SM indexer_hw range from 960 tokens, no 212- / 216-SM ranges of
     the FP32 rows of :data:`DET_0327_ROWS` and no 152-SM ``sm_103a`` range of the FP32 ``4096 -> 12288`` weight
-    gradient.  Its version 0.3.27 changes nothing else."""
+    gradient, on its tables of version 0.3.27 (:func:`_det_tables_0327`).  Its version 0.3.27 changes nothing else."""
+    _det_tables_0327(m)
     t1 = {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ("evict_first", "none")}
     x2 = {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ("evict_first", "none")}
     tier = {"block_n": 128, "sk_exact": 3}
@@ -1154,6 +1155,20 @@ def _det_tables_0326(m):
         for d_in, d_out in DET_0327_ROWS:
             m.delitem(det_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", sm_count)], key(d_in, d_out, True), raising=False)
     m.delitem(det_backend.ROW_RULE_RANGES_BY_SM[("sm_103a", 152)], DET_0327_N224_KEY, raising=False)
+
+
+def _det_tables_0327(m):
+    """Put the deterministic package's tables of version 0.3.27 back (``m``: a monkeypatch context; applying it again
+    in a nested context changes nothing): no key of :data:`DET_0328_PART_KEYS` in its 148-SM ``sm_100a`` part rules, no
+    152-SM ``sm_103a`` part rules and no router split count of :data:`DET_ROUTER_0328_RULES`.  Its version 0.3.28
+    changes nothing else."""
+    part = det_backend.ROW_RULES_BY_SM.get(("sm_100a", 148))
+    if part is not None:
+        for key in DET_0328_PART_KEYS[("sm_100a", 148)]:
+            m.delitem(part, key, raising=False)
+    m.delitem(det_backend.ROW_RULES_BY_SM, ("sm_103a", 152), raising=False)
+    for key in DET_ROUTER_0328_RULES:
+        m.delitem(det_backend.ROUTER_SPLIT_RULES, key, raising=False)
 
 
 def _det_tables_0325(m):
@@ -4587,7 +4602,7 @@ def test_router_waves_partition():
     windows were measured against the default count, which is that package's count at every token count they hold."""
     assert det_backend.ROUTER_SPLITS["nn_t"] == cake_backend.ROUTER_DET_WGRAD_SPLITS
     waves = [
-        (key[0], key[2], lo, hi)
+        (key[0], key[2], key[3], lo, hi)
         for table in (
             cake_backend.ROUTER_RULES,
             *cake_backend.ROUTER_RULES_BY_SM.values(),
@@ -4598,12 +4613,12 @@ def test_router_waves_partition():
         if spec == "waves"
     ]
     assert waves
-    for (arch, _, layout, hidden), windows in det_backend.ROUTER_SPLIT_RULES.items():
+    for (arch, _, layout, hidden, experts), windows in det_backend.ROUTER_SPLIT_RULES.items():
         for lo, hi, _ in windows:
             assert layout != "nn_t" or not any(
-                (a, h) == (arch, hidden) and lo <= w_hi and w_lo <= hi
-                for a, h, w_lo, w_hi in waves
-            ), (arch, hidden, lo, hi)
+                (a, h, e) == (arch, hidden, experts) and lo <= w_hi and w_lo <= hi
+                for a, h, e, w_lo, w_hi in waves
+            ), (arch, hidden, experts, lo, hi)
     # hidden 5120 (20 row-tile pairs x 2 column tiles), T = 16231 (508 K blocks)
     assert cake_backend.router_waves(20, 2, 508, 152) == 5 * 76
     assert cake_backend.router_waves(20, 2, 508, 216) == 4 * 108
@@ -4641,7 +4656,7 @@ def test_router_partition_waves_weighs_the_deterministic_count_of_the_row(monkey
     assert cake_backend.router_waves(20, 2, 6, 153) is not None
     assert cake_backend.router_partition("nn_t", **{**kw, "K": 192}) is None
     monkeypatch.setitem(
-        det_backend.ROUTER_SPLIT_RULES, ("sm_103a", 153, "nn_t", 5120), ((1, 192, 9),)
+        det_backend.ROUTER_SPLIT_RULES, ("sm_103a", 153, "nn_t", 5120, 256), ((1, 192, 9),)
     )
     assert det_backend.router_splits("nn_t", 5120, 256, 64, "sm_103a", 153) == 9
     assert cake_backend.router_partition("nn_t", **kw) is None
@@ -5963,7 +5978,7 @@ def test_router_wgrad_at_the_deterministic_split_rule_rows():
     for arch in ("sm_100a", "sm_103a"):
         for sms in (148, 152):
             for hidden in (5120, 6144):
-                rule = det_backend.ROUTER_SPLIT_RULES.get((arch, sms, "nn_t", hidden))
+                rule = det_backend.ROUTER_SPLIT_RULES.get((arch, sms, "nn_t", hidden, 256))
                 assert rule, (arch, sms, hidden)
                 for lo, hi, splits in rule:
                     for T in range(lo, hi + 1):
@@ -9586,7 +9601,7 @@ class _ReportsCuda(torch.Tensor):
 ROUTER_SPLIT_RULE_PARTS = sorted(
     {
         (a, sms)
-        for a, sms, layout, _ in det_backend.ROUTER_SPLIT_RULES
+        for a, sms, layout, _, _ in det_backend.ROUTER_SPLIT_RULES
         if layout == "nn_t"
     }
 )
@@ -9606,6 +9621,7 @@ def test_router_wgrad_split_rule_rows_take_the_deterministic_count(
     sum where it serves the count, else by ``torch.sum``; every other
     token count runs this package's program.  ``cake_dense_gemm_nondet_train_router_plan`` plans the same: the
     deterministic package's plan (its count) where the call runs the deterministic program."""
+    _det_tables_0327(monkeypatch)  # the router split counts of version 0.3.27: version 0.3.28 is checked below
     _cpu_k2_launches(monkeypatch, arch)
     facts = det_backend.DeviceFacts(
         index=0, arch=arch, sm_count=sm_count, l2_bytes=126 << 20
@@ -9617,10 +9633,10 @@ def test_router_wgrad_split_rule_rows_take_the_deterministic_count(
     table, _ = cake_backend.router_rules(arch, sm_count)
     default = det_backend.ROUTER_SPLITS["nn_t"]
     ran = set()  # (hidden, tokens, splits) run on the deterministic program
-    for (a, sms, layout, hidden), windows in det_backend.ROUTER_SPLIT_RULES.items():
+    for (a, sms, layout, hidden, experts), windows in det_backend.ROUTER_SPLIT_RULES.items():
         if (a, sms, layout) != (arch, sm_count, "nn_t"):
             continue
-        rule = table.get((arch, "nn_t", hidden, 256))
+        rule = table.get((arch, "nn_t", hidden, experts))
         own = rule if isinstance(rule, tuple) else ()
         for lo, hi, splits in windows:
             tokens = {lo - 1, lo, hi, hi + 1} | {
@@ -9632,16 +9648,16 @@ def test_router_wgrad_split_rule_rows_take_the_deterministic_count(
             for T in sorted(tokens):
                 want = splits if lo <= T <= hi else default
                 assert (
-                    det_backend.router_splits("nn_t", hidden, 256, T, arch, sm_count)
+                    det_backend.router_splits("nn_t", hidden, experts, T, arch, sm_count)
                     == want
                 )
-                kw = dict(arch=arch, sm_count=sm_count, M=hidden, N=256, K=T)
+                kw = dict(arch=arch, sm_count=sm_count, M=hidden, N=experts, K=T)
                 runs_own = (
                     cake_backend.router_partition("nn_t", **kw) is not None
                     or cake_backend.router_simt("nn_t", **kw) is not None
                 )
-                X, G = torch.empty(T, hidden), torch.empty(T, 256)
-                out = torch.empty(256, hidden).as_subclass(_ReportsCuda)
+                X, G = torch.empty(T, hidden), torch.empty(T, experts)
+                out = torch.empty(experts, hidden).as_subclass(_ReportsCuda)
                 plan, *_ = det_backend.cake_dense_gemm_det_train_router_plan(
                     G.t(), X, out
                 )
@@ -14452,7 +14468,7 @@ def test_gpu_router_rows_without_a_verdict_run_the_deterministic_program_unplann
         assert not cake_backend._K2_ATOMIC_CACHE
 
 
-def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property):
+def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property, monkeypatch):
     """A weight-gradient row of the deterministic package's ``ROUTER_SPLIT_RULES`` for this device, at the first and
     the last token count of its window where this package has neither a partition nor a SIMT window: the
     deterministic program at that package's count (its ``router_splits``), or at the count of this package's
@@ -14460,6 +14476,7 @@ def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property)
     (``_K2_SPLITK_CACHE``; no plan in ``_K2_ATOMIC_CACHE``) -- the partials reduced by this package's partial sum
     where it serves the count, else by ``torch.sum`` -- and its output meets the naive BF16 tier against FP64
     (:func:`judge_gemm`), on the first draw in each of two calls into a NaN-filled ``out``."""
+    _det_tables_0327(monkeypatch)  # the router split counts of version 0.3.27: version 0.3.28 is checked below
     device, arch = _atomic_device_or_skip()
     sm_count = det_backend.device_facts(device).sm_count
 
@@ -14473,14 +14490,14 @@ def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property)
         return v.outs
 
     ran = 0
-    for (rule_arch, sms, layout, hidden), windows in sorted(
+    for (rule_arch, sms, layout, hidden, experts), windows in sorted(
         det_backend.ROUTER_SPLIT_RULES.items()
     ):
         if (rule_arch, sms, layout) != (arch, sm_count, "nn_t"):
             continue
         for lo, hi, splits in windows:
             for T in (lo, hi):
-                kw = dict(arch=arch, sm_count=sm_count, M=hidden, N=256, K=T)
+                kw = dict(arch=arch, sm_count=sm_count, M=hidden, N=experts, K=T)
                 if (
                     cake_backend.router_partition("nn_t", **kw) is not None
                     or cake_backend.router_simt("nn_t", **kw) is not None
@@ -14489,7 +14506,7 @@ def test_gpu_router_split_rule_rows_run_the_deterministic_count(record_property)
                 X, W, G = _router_inputs(T, device, SEED + 120, K=hidden)
                 cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
                 own_n = cake_backend.router_det_splits("nn_t", **kw) or splits
-                out = torch.empty(256, hidden, device=device)
+                out = torch.empty(experts, hidden, device=device)
                 what = f"wgrad {hidden} {T}"
                 judge_gemm(
                     record_property,
@@ -23039,3 +23056,527 @@ def test_gpu_k1_program_rows_take_offset_and_padded_views(record_property):
         ran += 1
     if not ran:
         pytest.skip(f"no K1 program row of {arch} on {sms} SMs")
+
+
+# ---------------------------------------------------------------------------
+# Version 0.3.28 of the deterministic package: exact part keys of the 148-SM sm_100a and the 152-SM sm_103a rows at
+# T 16380, 32736 and 32768, and router split counts keyed by the experts of the row
+# ---------------------------------------------------------------------------
+
+# The constants of that version, generated from its measurements and its planner (never typed by hand):
+# ``DET_0328_PART_KEYS`` (part -> its keys of the version), ``DET_ROUTER_0328_RULES`` / ``DET_ROUTER_0328_DEFAULTS``
+# (its router split counts of the version and the default count of each row) and ``DET_0328_ROWS`` (the measured rows
+# of the keys: part, key, op, output dtype, T and view; a view is ``("proj", d_in, d_out)`` or ``("mla", heads, d_in,
+# d_out, head stride, weight layout)``).
+# fmt: off
+DET_0328_PART_KEYS = {
+    ("sm_100a", 148): (
+        ("sm_100a", False, False, False, False, False, 512, 4096, 32736),
+        ("sm_100a", False, False, False, False, False, 512, 4096, 32768),
+        ("sm_100a", False, False, False, False, False, 576, 7168, 16380),
+        ("sm_100a", False, False, False, False, False, 896, 7168, 16380),
+        ("sm_100a", False, False, False, False, False, 1536, 7168, 16380),
+        ("sm_100a", False, False, False, False, False, 2048, 4096, 32736),
+        ("sm_100a", False, False, False, False, False, 4096, 1024, 32736),
+        ("sm_100a", False, False, False, False, False, 4096, 1024, 32768),
+        ("sm_100a", False, False, False, False, False, 12288, 128, 16380),
+        ("sm_100a", False, False, False, False, False, 24576, 512, 16380),
+        ("sm_100a", False, True, False, False, False, 128, 12288, 16380),
+        ("sm_100a", False, True, False, False, False, 7168, 96, 16380),
+        ("sm_100a", False, True, False, False, False, 7168, 128, 16380),
+        ("sm_100a", False, True, False, False, False, 7168, 576, 16380),
+        ("sm_100a", False, True, False, False, False, 7168, 896, 16380),
+        ("sm_100a", False, True, False, False, True, 512, 128, 16380),
+        ("sm_100a", True, True, False, False, False, 128, 16380, 12288),
+        ("sm_100a", True, True, False, False, False, 512, 16380, 24576),
+        ("sm_100a", True, True, False, False, False, 1024, 32736, 4096),
+        ("sm_100a", True, True, False, False, False, 1024, 32768, 4096),
+        ("sm_100a", True, True, False, False, False, 3584, 16380, 7168),
+        ("sm_100a", True, True, False, False, False, 4096, 32736, 1024),
+        ("sm_100a", True, True, False, False, False, 4096, 32736, 2048),
+        ("sm_100a", True, True, False, False, False, 4096, 32768, 1024),
+        ("sm_100a", True, True, False, False, False, 7168, 16380, 896),
+        ("sm_100a", True, True, False, False, False, 7168, 16380, 1536),
+        ("sm_100a", True, True, False, False, False, 7168, 16380, 3584),
+        ("sm_100a", True, True, False, True, False, 576, 16380, 7168),
+        ("sm_100a", True, True, False, True, False, 2112, 16380, 7168),
+        ("sm_100a", True, True, False, True, True, 128, 16380, 512),
+        ("sm_100a", True, True, True, False, False, 128, 16380, 12288),
+        ("sm_100a", True, True, True, False, False, 512, 16380, 24576),
+        ("sm_100a", True, True, True, False, False, 1024, 32736, 4096),
+        ("sm_100a", True, True, True, False, False, 1024, 32768, 4096),
+        ("sm_100a", True, True, True, False, False, 3584, 16380, 7168),
+        ("sm_100a", True, True, True, False, False, 4096, 32736, 2048),
+        ("sm_100a", True, True, True, False, False, 7168, 16380, 896),
+        ("sm_100a", True, True, True, False, False, 7168, 16380, 1536),
+        ("sm_100a", True, True, True, False, False, 7168, 16380, 3584),
+        ("sm_100a", True, True, True, False, False, 8192, 32736, 4096),
+        ("sm_100a", True, True, True, True, False, 576, 16380, 7168),
+        ("sm_100a", True, True, True, True, False, 2112, 16380, 7168),
+        ("sm_100a", True, True, True, True, True, 128, 16380, 512),
+    ),
+    ("sm_103a", 152): (
+        ("sm_103a", False, False, False, False, False, 512, 4096, 32736),
+        ("sm_103a", False, False, False, False, False, 512, 4096, 32768),
+        ("sm_103a", False, False, False, False, False, 576, 7168, 16380),
+        ("sm_103a", False, False, False, False, False, 896, 7168, 16380),
+        ("sm_103a", False, False, False, False, False, 1536, 7168, 16380),
+        ("sm_103a", False, False, False, False, False, 2048, 4096, 32736),
+        ("sm_103a", False, False, False, False, False, 4096, 1024, 32736),
+        ("sm_103a", False, False, False, False, False, 4096, 1024, 32768),
+        ("sm_103a", False, False, False, False, False, 4096, 8192, 32736),
+        ("sm_103a", False, False, False, False, False, 4096, 8192, 32768),
+        ("sm_103a", False, False, False, False, False, 12288, 128, 16380),
+        ("sm_103a", False, False, False, False, False, 12288, 7168, 16380),
+        ("sm_103a", False, False, False, False, False, 24576, 512, 16380),
+        ("sm_103a", False, True, False, False, False, 128, 12288, 16380),
+        ("sm_103a", False, True, False, False, False, 4096, 8192, 32736),
+        ("sm_103a", False, True, False, False, False, 4096, 8192, 32768),
+        ("sm_103a", False, True, False, False, False, 4096, 16384, 32736),
+        ("sm_103a", False, True, False, False, False, 4096, 16384, 32768),
+        ("sm_103a", False, True, False, False, False, 4096, 17408, 32736),
+        ("sm_103a", False, True, False, False, False, 4096, 20480, 32736),
+        ("sm_103a", False, True, False, False, False, 4096, 20608, 32736),
+        ("sm_103a", False, True, False, False, False, 7168, 96, 16380),
+        ("sm_103a", False, True, False, False, False, 7168, 128, 16380),
+        ("sm_103a", False, True, False, False, False, 7168, 576, 16380),
+        ("sm_103a", False, True, False, False, False, 7168, 896, 16380),
+        ("sm_103a", True, True, False, False, False, 128, 16380, 12288),
+        ("sm_103a", True, True, False, False, False, 512, 16380, 24576),
+        ("sm_103a", True, True, False, False, False, 1024, 32736, 4096),
+        ("sm_103a", True, True, False, False, False, 1024, 32768, 4096),
+        ("sm_103a", True, True, False, False, False, 3584, 16380, 7168),
+        ("sm_103a", True, True, False, False, False, 4096, 32736, 2048),
+        ("sm_103a", True, True, False, False, False, 4096, 32736, 8192),
+        ("sm_103a", True, True, False, False, False, 4096, 32768, 8192),
+        ("sm_103a", True, True, False, False, False, 6144, 16380, 7168),
+        ("sm_103a", True, True, False, False, False, 7168, 16380, 896),
+        ("sm_103a", True, True, False, False, False, 7168, 16380, 1536),
+        ("sm_103a", True, True, False, False, False, 7168, 16380, 3584),
+        ("sm_103a", True, True, False, False, False, 7168, 16380, 6144),
+        ("sm_103a", True, True, False, False, False, 8192, 32736, 4096),
+        ("sm_103a", True, True, False, False, False, 8192, 32768, 4096),
+        ("sm_103a", True, True, False, True, False, 576, 16380, 7168),
+        ("sm_103a", True, True, False, True, False, 2112, 16380, 7168),
+        ("sm_103a", True, True, False, True, True, 128, 16380, 512),
+        ("sm_103a", True, True, True, False, False, 128, 16380, 12288),
+        ("sm_103a", True, True, True, False, False, 512, 16380, 24576),
+        ("sm_103a", True, True, True, False, False, 1024, 32736, 4096),
+        ("sm_103a", True, True, True, False, False, 1024, 32768, 4096),
+        ("sm_103a", True, True, True, False, False, 3584, 16380, 7168),
+        ("sm_103a", True, True, True, False, False, 4096, 32736, 2048),
+        ("sm_103a", True, True, True, False, False, 4096, 32736, 8192),
+        ("sm_103a", True, True, True, False, False, 4096, 32768, 8192),
+        ("sm_103a", True, True, True, False, False, 7168, 16380, 896),
+        ("sm_103a", True, True, True, False, False, 7168, 16380, 1536),
+        ("sm_103a", True, True, True, False, False, 7168, 16380, 3584),
+        ("sm_103a", True, True, True, False, False, 8192, 32736, 4096),
+        ("sm_103a", True, True, True, False, False, 8192, 32768, 4096),
+        ("sm_103a", True, True, True, True, False, 576, 16380, 7168),
+        ("sm_103a", True, True, True, True, False, 2112, 16380, 7168),
+        ("sm_103a", True, True, True, True, True, 128, 16380, 512),
+    ),
+}
+DET_ROUTER_0328_RULES = {
+    ("sm_100a", 148, "kk", 4096, 512): ((32736, 32736, 1),),
+    ("sm_100a", 148, "nn_t", 4096, 512): ((32736, 32736, 8),),
+    ("sm_103a", 152, "kk", 4096, 512): ((32736, 32736, 1),),
+    ("sm_103a", 152, "nn_t", 4096, 512): ((32736, 32736, 8),),
+    ("sm_103a", 152, "kk", 7168, 896): ((16380, 16380, 1),),
+}
+DET_ROUTER_0328_DEFAULTS = {("sm_100a", 148, "kk", 4096, 512): 4, ("sm_100a", 148, "nn_t", 4096, 512): 6, ("sm_103a", 152, "kk", 4096, 512): 4, ("sm_103a", 152, "nn_t", 4096, 512): 6, ("sm_103a", 152, "kk", 7168, 896): 4}
+DET_0328_ROWS = (
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 512, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 512)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 512, 4096, 32768), "fwd", "bf16", 32768, ("proj", 4096, 512)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 576, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 896, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 1536, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 2048, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 2048)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 4096, 1024, 32736), "fwd", "bf16", 32736, ("proj", 1024, 4096)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 4096, 1024, 32768), "fwd", "bf16", 32768, ("proj", 1024, 4096)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 12288, 128, 16380), "fwd", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 24576, 512, 16380), "fwd", "bf16", 16380, ("proj", 512, 24576)),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 128, 12288, 16380), "dgrad", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 96, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 96)),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 128, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 128)),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 576, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 896, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, True, 512, 128, 16380), "fwd", "bf16", 16380, ("mla", 96, 128, 512, 192, "in_out")),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, True, 512, 128, 16380), "dgrad", "bf16", 16380, ("mla", 96, 512, 128, 512, "out_in")),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 128, 16380, 12288), "wgrad", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 512, 16380, 24576), "wgrad", "bf16", 16380, ("proj", 512, 24576)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 1024, 32736, 4096), "wgrad", "bf16", 32736, ("proj", 1024, 4096)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 1024, 32768, 4096), "wgrad", "bf16", 32768, ("proj", 1024, 4096)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 3584, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 3584, 7168)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 4096, 32736, 1024), "wgrad", "bf16", 32736, ("proj", 4096, 1024)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 4096, 32736, 2048), "wgrad", "bf16", 32736, ("proj", 4096, 2048)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 4096, 32768, 1024), "wgrad", "bf16", 32768, ("proj", 4096, 1024)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 7168, 16380, 896), "wgrad", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 7168, 16380, 1536), "wgrad", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, False, False, 7168, 16380, 3584), "wgrad", "bf16", 16380, ("proj", 7168, 3584)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, True, False, 576, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, True, False, 2112, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 7168, 2112)),
+    (("sm_100a", 148), ("sm_100a", True, True, False, True, True, 128, 16380, 512), "wgrad", "bf16", 16380, ("mla", 96, 128, 512, 192, "in_out")),
+    (("sm_100a", 148), ("sm_100a", True, True, False, True, True, 128, 16380, 512), "wgrad", "bf16", 16380, ("mla", 96, 512, 128, 512, "out_in")),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 128, 16380, 12288), "wgrad", "f32", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 512, 16380, 24576), "wgrad", "f32", 16380, ("proj", 512, 24576)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32736, 4096), "wgrad", "f32", 32736, ("proj", 1024, 4096)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 1024, 32768, 4096), "wgrad", "f32", 32768, ("proj", 1024, 4096)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 3584, 16380, 7168), "wgrad", "f32", 16380, ("proj", 3584, 7168)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 4096, 32736, 2048), "wgrad", "f32", 32736, ("proj", 4096, 2048)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 896), "wgrad", "f32", 16380, ("proj", 7168, 896)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 1536), "wgrad", "f32", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 7168, 16380, 3584), "wgrad", "f32", 16380, ("proj", 7168, 3584)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, False, False, 8192, 32736, 4096), "wgrad", "f32", 32736, ("proj", 8192, 4096)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 576, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 576)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, True, False, 2112, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 2112)),
+    (("sm_100a", 148), ("sm_100a", True, True, True, True, True, 128, 16380, 512), "wgrad", "f32", 16380, ("mla", 96, 128, 512, 192, "in_out")),
+    (("sm_100a", 148), ("sm_100a", True, True, True, True, True, 128, 16380, 512), "wgrad", "f32", 16380, ("mla", 96, 512, 128, 512, "out_in")),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 512, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 512)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 512, 4096, 32768), "fwd", "bf16", 32768, ("proj", 4096, 512)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 576, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 896, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 1536, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 2048, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 2048)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32736), "fwd", "bf16", 32736, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1024, 32768), "fwd", "bf16", 32768, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32736), "fwd", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 8192, 32768), "fwd", "bf16", 32768, ("proj", 8192, 4096)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 12288, 128, 16380), "fwd", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 12288, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 12288)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 24576, 512, 16380), "fwd", "bf16", 16380, ("proj", 512, 24576)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 128, 12288, 16380), "dgrad", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 4096, 8192, 32736), "dgrad", "bf16", 32736, ("proj", 4096, 8192)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 4096, 8192, 32768), "dgrad", "bf16", 32768, ("proj", 4096, 8192)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 4096, 16384, 32736), "dgrad", "bf16", 32736, ("proj", 4096, 16384)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 4096, 16384, 32768), "dgrad", "bf16", 32768, ("proj", 4096, 16384)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 4096, 17408, 32736), "dgrad", "bf16", 32736, ("proj", 4096, 17408)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 4096, 20480, 32736), "dgrad", "bf16", 32736, ("proj", 4096, 20480)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 4096, 20608, 32736), "dgrad", "bf16", 32736, ("proj", 4096, 20608)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 96, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 96)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 128, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 128)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 576, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 896, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 128, 16380, 12288), "wgrad", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 512, 16380, 24576), "wgrad", "bf16", 16380, ("proj", 512, 24576)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 1024, 32736, 4096), "wgrad", "bf16", 32736, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 1024, 32768, 4096), "wgrad", "bf16", 32768, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 3584, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 3584, 7168)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 4096, 32736, 2048), "wgrad", "bf16", 32736, ("proj", 4096, 2048)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 4096, 32736, 8192), "wgrad", "bf16", 32736, ("proj", 4096, 8192)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 4096, 32768, 8192), "wgrad", "bf16", 32768, ("proj", 4096, 8192)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 6144, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 6144, 7168)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 7168, 16380, 896), "wgrad", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 7168, 16380, 1536), "wgrad", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 7168, 16380, 3584), "wgrad", "bf16", 16380, ("proj", 7168, 3584)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 7168, 16380, 6144), "wgrad", "bf16", 16380, ("proj", 7168, 6144)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 8192, 32736, 4096), "wgrad", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, False, False, 8192, 32768, 4096), "wgrad", "bf16", 32768, ("proj", 8192, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, True, False, 576, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, True, False, 2112, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 7168, 2112)),
+    (("sm_103a", 152), ("sm_103a", True, True, False, True, True, 128, 16380, 512), "wgrad", "bf16", 16380, ("mla", 96, 128, 512, 192, "in_out")),
+    (("sm_103a", 152), ("sm_103a", True, True, False, True, True, 128, 16380, 512), "wgrad", "bf16", 16380, ("mla", 96, 512, 128, 512, "out_in")),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 128, 16380, 12288), "wgrad", "f32", 16380, ("proj", 128, 12288)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 512, 16380, 24576), "wgrad", "f32", 16380, ("proj", 512, 24576)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32736, 4096), "wgrad", "f32", 32736, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 1024, 32768, 4096), "wgrad", "f32", 32768, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 3584, 16380, 7168), "wgrad", "f32", 16380, ("proj", 3584, 7168)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 2048), "wgrad", "f32", 32736, ("proj", 4096, 2048)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32736, 8192), "wgrad", "f32", 32736, ("proj", 4096, 8192)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 4096, 32768, 8192), "wgrad", "f32", 32768, ("proj", 4096, 8192)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 896), "wgrad", "f32", 16380, ("proj", 7168, 896)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 1536), "wgrad", "f32", 16380, ("proj", 7168, 1536)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 3584), "wgrad", "f32", 16380, ("proj", 7168, 3584)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 8192, 32736, 4096), "wgrad", "f32", 32736, ("proj", 8192, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 8192, 32768, 4096), "wgrad", "f32", 32768, ("proj", 8192, 4096)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, True, False, 576, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 576)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, True, False, 2112, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 2112)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, True, True, 128, 16380, 512), "wgrad", "f32", 16380, ("mla", 96, 128, 512, 192, "in_out")),
+    (("sm_103a", 152), ("sm_103a", True, True, True, True, True, 128, 16380, 512), "wgrad", "f32", 16380, ("mla", 96, 512, 128, 512, "out_in")),
+)
+# fmt: on
+
+
+def _views_0328(arch, op, out_dtype, T, view):
+    """``((call, A, B, out, transposed_out), ...)`` of a row of :data:`DET_0328_ROWS` at ``T`` tokens on CPU views: a
+    projection's forward ``X[T, d_in] @ W[d_out, d_in].T`` and input gradient ``G[T, d_out] @ W``, its weight gradient
+    in the orientation of the deterministic package's ``wgrad_views`` (``"entry"``) and as the unbatched generic call
+    ``G.T @ X`` (``"generic"``); an MLA row's batched views over the heads (the activation in a ``[T, heads, head
+    stride]`` buffer, its first ``d_in`` columns per head; the weight ``[heads, d_in, d_out]`` for ``in_out``, else
+    ``[heads, d_out, d_in]``)."""
+    bf16 = torch.bfloat16
+    odt = torch.float32 if out_dtype == "f32" else bf16
+    if view[0] == "mla":
+        _, H, d_in, d_out, slot, layout = view
+        in_out = layout == "in_out"
+        x = torch.empty(T, H, slot, dtype=bf16)[..., :d_in]
+        weight = torch.empty((H, d_in, d_out) if in_out else (H, d_out, d_in), dtype=bf16)
+        grad = torch.empty(T, H, d_out, dtype=bf16)
+        w_in_out = weight if in_out else weight.transpose(1, 2)
+        if op == "fwd":
+            out = torch.empty(T, H, d_out, dtype=odt).permute(1, 0, 2)
+            return (("entry", x.permute(1, 0, 2), w_in_out, out, False),)
+        if op == "dgrad":
+            out = torch.empty(T, H, slot, dtype=odt)[..., :d_in].permute(1, 0, 2)
+            return (("entry", grad.permute(1, 0, 2), w_in_out.transpose(1, 2), out, False),)
+        out = torch.empty(tuple(weight.shape), dtype=odt)
+        if in_out:
+            return (("entry", x.permute(1, 2, 0), grad.permute(1, 0, 2), out, False),)
+        return (("entry", grad.permute(1, 2, 0), x.permute(1, 0, 2), out, False),)
+    _, d_in, d_out = view
+    if op == "fwd":
+        X, W = torch.empty(T, d_in, dtype=bf16), torch.empty(d_out, d_in, dtype=bf16)
+        return (("entry", X, W.t(), torch.empty(T, d_out, dtype=odt), False),)
+    if op == "dgrad":
+        G, W = torch.empty(T, d_out, dtype=bf16), torch.empty(d_out, d_in, dtype=bf16)
+        return (("entry", G, W, torch.empty(T, d_in, dtype=odt), False),)
+    G, X = torch.empty(T, d_out, dtype=bf16), torch.empty(T, d_in, dtype=bf16)
+    out = torch.empty(d_out, d_in, dtype=odt)
+    A, B, transposed = det_backend.wgrad_views(G, X, arch=arch, out_f32=out_dtype == "f32")
+    return (("entry", A, B, out, transposed), ("generic", G.t(), X, out, False))
+
+
+def _det_key_0328(plan, arch):
+    """The exact ``ROW_RULES`` key a deterministic plan of ``arch`` reads: ``(arch, a_mn, b_mn, out_f32, out_t,
+    batched, N, K, M)``."""
+    return (
+        arch,
+        bool(plan.a_mn),
+        bool(plan.b_mn),
+        bool(plan.out_f32),
+        bool(plan.transposed_out),
+        int(plan.L) > 1,
+        int(plan.N),
+        int(plan.K),
+        int(plan.M),
+    )
+
+
+def test_router_0328_rows_run_the_deterministic_count(monkeypatch):
+    """The router rows of the deterministic package's version 0.3.28 (:data:`DET_ROUTER_0328_RULES`, 512 and 896
+    experts) at their token count: this package has no partition, no ``"det_s<n>"`` count (:func:`router_det_splits`,
+    :func:`_k2_det_splits`) and no SIMT window there, so its plan (CPU views, an ``out`` that reports a CUDA device, the
+    device facts patched to the part) is the deterministic package's plan at that package's count of the row; with its
+    tables of version 0.3.27 (:func:`_det_tables_0327`) the default count of the row
+    (:data:`DET_ROUTER_0328_DEFAULTS`).  On a forward row of one split an ``out`` 4 bytes past a 16-byte boundary is
+    refused by this package's plan (``splits`` omitted) with the deterministic package's message; with its tables of
+    version 0.3.27 the same ``out`` plans the default count."""
+    refused = 0
+    for key, ((T, _hi, count),) in DET_ROUTER_0328_RULES.items():
+        arch, sm_count, layout, H, N = key
+        default = DET_ROUTER_0328_DEFAULTS[key]
+        assert default == det_backend.ROUTER_SPLITS[layout] != count, key
+        with monkeypatch.context() as m:
+            _cpu_k2_launches(m, arch)
+            facts = det_backend.DeviceFacts(index=0, arch=arch, sm_count=sm_count, l2_bytes=126 << 20)
+            m.setattr(det_backend, "device_facts", lambda device=None, facts=facts: facts)
+            M, K = (T, H) if layout == "kk" else (H, T)
+            kw = dict(arch=arch, sm_count=sm_count, M=M, N=N, K=K)
+            assert cake_backend.router_partition(layout, **kw) is None, key
+            assert cake_backend.router_det_splits(layout, **kw) is None, key
+            assert cake_backend.router_simt(layout, **kw) is None, key
+            assert det_backend.router_splits(layout, M, N, K, arch, sm_count) == count, key
+            X, W, G = torch.empty(T, H), torch.empty(N, H), torch.empty(T, N)
+            if layout == "kk":
+                A, B, rows, cols = X, W.t(), T, N
+            else:
+                A, B, rows, cols = G.t(), X, N, H
+            assert cake_backend._k2_det_splits(A, B, arch, sm_count) is None, key
+            out = torch.empty(rows, cols).as_subclass(_ReportsCuda)
+            plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
+            assert isinstance(plan, tuple) and plan[0].splits == count, key
+            with monkeypatch.context() as old:
+                _det_tables_0327(old)
+                assert det_backend.router_splits(layout, M, N, K, arch, sm_count) == default, key
+                plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
+                assert isinstance(plan, tuple) and plan[0].splits == default, key
+            if count != 1:
+                continue
+            assert layout == "kk", key
+            storage = torch.empty(rows * cols + 4)
+            base = (-storage.data_ptr() % 16) // 4
+            shifted = storage[base + 1 : base + 1 + rows * cols].view(rows, cols).as_subclass(_ReportsCuda)
+            assert shifted.data_ptr() % 16 == 4
+            with pytest.raises(ValueError, match="16-byte aligned") as det_refused:
+                det_backend.cake_dense_gemm_det_train_router_plan(A, B, shifted)
+            with pytest.raises(ValueError, match=re.escape(str(det_refused.value))):
+                cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, shifted)
+            with monkeypatch.context() as old:
+                _det_tables_0327(old)
+                plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, shifted)
+                assert isinstance(plan, tuple) and plan[0].splits == default, key
+            refused += 1
+    assert refused == 3, refused
+
+
+def test_k1_det_0328_rows_follow_the_det_tables(monkeypatch):
+    """The measured rows of the deterministic package's version 0.3.28 (:data:`DET_0328_ROWS`) on their parts, as the
+    call of the row and, for a projection's weight gradient, as the unbatched generic call ``G.T @ X``, with the K1
+    programs registered on both architectures: where this package keeps the call on the deterministic program (a
+    layout routed ``"det"``, or :func:`plan_atomic_gemm` returns no plan) its plan is the deterministic package's,
+    field for field, with either version of its tables (:func:`_det_tables_0327`); where it runs its own program the
+    plan is the plan of :func:`plan_atomic_gemm` and the plan with the tables of version 0.3.27.  The deterministic plan
+    differs from its plan of version 0.3.27 exactly where it reads the row's key (every call of the row; the generic
+    call where it plans that key).  The counts of the cells of each kind are printed; this is a plan check: it asserts
+    no bits."""
+    _register_k1(monkeypatch, "sm_100a")
+    _register_k1(monkeypatch, "sm_103a")
+
+    def plans(A, B, out, transposed, arch, sm_count):
+        """``(keeps, det, nd)``: whether this package keeps the call on the deterministic program, the deterministic
+        planner's plan and this package's."""
+        kw = dict(sm_count=sm_count, l2_bytes=126 << 20, transposed_out=transposed, arch=arch)
+        det = det_backend.cake_dense_gemm_det_train_projection_plan(A, B, out, **kw)
+        assert isinstance(det, tuple) and len(det) == 4, type(det)
+        nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(A, B, out, **kw)
+        own = None
+        if cake_backend.ROUTES[cake_backend._k1_layout(A, B)] != "det":
+            own, *_ = cake_backend.plan_atomic_gemm(
+                A, B, out, transposed_out=transposed, arch=arch, sm_count=sm_count
+            )
+        if own is None:
+            assert isinstance(nd, tuple) and len(nd) == 4, type(nd)
+            return True, det[0], nd[0]
+        assert isinstance(nd, cake_backend.CakeDenseGemmNondetProjectionPlan), type(nd)
+        assert nd == own, (nd, own)
+        return False, det[0], nd
+
+    seen = {}
+    cells = 0
+    for part, key, op, out_dtype, T, view in DET_0328_ROWS:
+        arch, sm_count = part
+        assert key in DET_0328_PART_KEYS[part], (part, key)
+        for call, A, B, out, transposed in _views_0328(arch, op, out_dtype, T, view):
+            where = (call, part, key, op, out_dtype, T, view)
+            keeps, det, nd = plans(A, B, out, transposed, arch, sm_count)
+            with monkeypatch.context() as m:
+                _det_tables_0327(m)
+                old_keeps, old_det, old_nd = plans(A, B, out, transposed, arch, sm_count)
+            assert keeps == old_keeps, where
+            reads = _det_key_0328(old_det, arch) == key
+            assert _det_key_0328(det, arch) == _det_key_0328(old_det, arch), where
+            assert (det != old_det) == reads, (where, det.template, old_det.template)
+            assert reads or call == "generic", where
+            if keeps:
+                assert nd == det, (where, nd.template, det.template)
+                assert old_nd == old_det, (where, old_nd.template, old_det.template)
+                kind = "det, changed" if reads else "det"
+            else:
+                assert nd == old_nd, (where, nd.template, old_nd.template)
+                kind = "own program"
+            seen[(call, kind)] = seen.get((call, kind), 0) + 1
+            cells += 1
+    print(f"K1_DET_0328 {seen}")
+    generic = sum((op, view[0]) == ("wgrad", "proj") for _part, _key, op, _dtype, _T, view in DET_0328_ROWS)
+    assert cells == sum(seen.values()) == len(DET_0328_ROWS) + generic, seen
+    assert seen.get(("entry", "det, changed")), seen
+
+
+def _router_inputs_0328(T, device, seed, K, N):
+    """:func:`_router_inputs` with ``N`` experts: ``X[T, K]``, ``W[N, K]`` and ``G[T, N]``."""
+    g = torch.Generator(device=device).manual_seed(seed)
+    X = torch.randn(T, K, device=device, generator=g)
+    W = torch.randn(N, K, device=device, generator=g) * 0.02
+    G = torch.randn(T, N, device=device, generator=g) * 1e-3
+    return X, W, G
+
+
+def _router_draw_0328(X, W, G, outs):
+    """:func:`_n3_router_draw` for ``W[N, hidden]`` and ``G[T, N]`` of any expert count ``N``
+    (:func:`_router_inputs_0328`)."""
+
+    def draw(s):
+        T, hidden = X.shape
+        for t, value in zip((X, W, G), _router_inputs_0328(T, X.device, s, hidden, W.shape[0]), strict=True):
+            t.copy_(value)
+        nan_fill(outs.values())
+        return SimpleNamespace(X=X, W=W, G=G, outs=outs)
+
+    return draw
+
+
+@pytest.mark.parametrize(
+    "key", sorted(DET_ROUTER_0328_RULES), ids=lambda k: f"{k[0]}-{k[1]}-{k[2]}-H{k[3]}-N{k[4]}"
+)
+def test_gpu_router_0328_rows(key, record_property):
+    """A router row of the deterministic package's version 0.3.28 (:data:`DET_ROUTER_0328_RULES`) on its part (another
+    device skips), at its token count: this package's forward (``kk``) or weight gradient (``nn_t``) without a split
+    count runs the deterministic program at that package's count of the row through this package's binding
+    (``_K2_SPLITK_CACHE``; no plan in ``_K2_ATOMIC_CACHE``); its output meets the naive BF16 tier against FP64
+    (:func:`judge_gemm`, two calls into a NaN-filled ``out`` on the first draw), and three more calls into NaN on the
+    last draw return the same bits.  On a forward row of one split an ``out`` 4 bytes past a 16-byte boundary is
+    refused by this package's plan, prepared launch, router entry and forward entry with the deterministic package's
+    message before anything is launched, and that NaN-filled storage is unchanged."""
+    device, arch = _atomic_device_or_skip()
+    sm_count = det_backend.device_facts(device).sm_count
+    rule_arch, sms, layout, hidden, experts = key
+    if (arch, sm_count) != (rule_arch, sms):
+        pytest.skip(f"a row of the {sms}-SM {rule_arch} part alone; this device is {arch} with {sm_count} SMs")
+    ((T, _hi, count),) = DET_ROUTER_0328_RULES[key]
+    op = "fwd" if layout == "kk" else "wgrad"
+    M, K = (T, hidden) if layout == "kk" else (hidden, T)
+    kw = dict(arch=arch, sm_count=sm_count, M=M, N=experts, K=K)
+    assert cake_backend.router_partition(layout, **kw) is None, key
+    assert cake_backend.router_simt(layout, **kw) is None, key
+    assert cake_backend.router_det_splits(layout, **kw) is None, key
+    X, W, G = _router_inputs_0328(T, device, SEED + 128, hidden, experts)
+    if op == "fwd":
+        A, B, rows, cols = X, W.t(), T, experts
+    else:
+        A, B, rows, cols = G.t(), X, experts, hidden
+    out = torch.empty(rows, cols, device=device)
+    plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
+    assert isinstance(plan, tuple) and plan[0].splits == count, key
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+
+    def call(o):
+        if op == "fwd":
+            return cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, o)
+        return cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, o)
+
+    what = f"{op} {hidden}x{experts} T {T}"
+
+    def launch(v):
+        assert call(out) is out, what
+        torch.cuda.synchronize()
+        return v.outs
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 128,
+        draw=_router_draw_0328(X, W, G, {what: out}),
+        launch=launch,
+        product=_n3_router_product({what: op}),
+        launches=2,
+        poison=_n3_outs,
+    )
+    (entry,) = cake_backend._K2_SPLITK_CACHE.values()
+    assert entry.plan.splits == count, key
+    assert all(e.plan is None for e in cake_backend._K2_ATOMIC_CACHE.values()), key
+    first = out.clone()
+    for _ in range(3):
+        nan_fill([out])
+        call(out)
+        torch.cuda.synchronize()
+        assert torch.equal(out.view(torch.int32), first.view(torch.int32)), key
+    if count == 1:
+        assert op == "fwd", key
+        storage = torch.full((rows * cols + 4,), float("nan"), device=device)
+        base = (-storage.data_ptr() % 16) // 4
+        shifted = storage[base + 1 : base + 1 + rows * cols].view(rows, cols)
+        assert shifted.data_ptr() % 16 == 4
+        with pytest.raises(ValueError, match="16-byte aligned") as refused:
+            det_backend.cake_dense_gemm_det_train_router_plan(A, B, shifted)
+        message = re.escape(str(refused.value))
+        for refuse in (
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, shifted),
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router_prepare(A, B, shifted),
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router(A, B, shifted),
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, shifted),
+        ):
+            with pytest.raises(ValueError, match=message):
+                refuse()
+        torch.cuda.synchronize()  # nothing was launched: the context stays healthy
+        assert bool(storage.isnan().all()), key
+    print(f"ROUTER_0328 nondet {what}: the deterministic program at {count} splits")
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
