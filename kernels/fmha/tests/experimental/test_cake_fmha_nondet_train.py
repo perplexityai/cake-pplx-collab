@@ -48,8 +48,9 @@ call has without the split, ``fused_record`` giving no record inside a piece rea
 what it gives without the split; the shipped split region of each architecture, ``SHIPPED_QSPLIT_REGION``, on both
 sides of each bound of each of its pieces and refused outside the candidates (``B`` 2, head dimension 64, the mask, a
 key length that is not a multiple of 256 or outside ``[Sq / 2, Sq]``), and every measured call on its decided route,
-``DECIDED_QSPLIT``, with the route it has without the split), the launch grids, the stage launchers' keywords, their
-positional launch of
+``DECIDED_QSPLIT``, with the route it has without the split; ``QSPLIT_LEAST_Q``, the least queries of all pieces,
+derived from ``QSPLIT_REGION``, below which ``variant`` and ``fused_record`` do not look for a piece), the launch grids,
+the stage launchers' keywords, their positional launch of
 every routed record (the FFI arguments and grid of the registry-ordered launch), the two layouts of the dQ accumulator
 in the judge's helper, the build manifest (every record's and host sequence's library, the recorded source digests), the
 standalone loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
@@ -1522,15 +1523,17 @@ SHIPPED_QSPLIT_REGION = {
         (4, 1, 32, 4096, 8192, True),
         (2, 33, 64, 4096, 16384, True),
         (4, 65, 256, 16384, 16384, True),
-        (2, 257, 512, 16384, 16384, True),
+        (2, 512, 512, 16384, 16384, True),
     ),
 }
 # Calls of one batch at head dimension 128 without the mask on both sides of each bound of each shipped split piece,
 # as ((B, H, Sq, Skv), the q_split of the piece that holds the call, or 0 for none).  ``kv = H * Skv / 128`` is even
-# (the key length is a multiple of 256), so a bound at an odd ``kv`` is probed at the nearest even one; a candidate
-# with ``Sq >= 4096`` has ``kv >= 16`` (the keys are at least half the queries); a query bound is probed 128 queries
-# past it.  On ``sm_100a`` and ``sm_103a``: the third piece (4096 queries) is read after ``FUSED_REGION``, which holds
-# 36 and 64 key blocks at two heads first.
+# (the key length is a multiple of 256), so a bound at an odd ``kv`` is probed at the nearest even one a candidate
+# reaches (beside the 512 key blocks of the last ``sm_107a`` piece: 510 and 516, as no candidate of 16384 queries has
+# 514); a candidate with ``Sq >= 4096`` has ``kv >= 16`` (the keys are at least half the queries); a query bound is
+# probed 128 queries past it.  On ``sm_100a`` and ``sm_103a``: the third piece (4096 queries) is read after
+# ``FUSED_REGION``, which holds 36 and 64 key blocks at two heads first.  On ``sm_107a`` also the measured call of 384
+# key blocks that the last piece leaves out (three heads, 16384 queries and keys).
 _SM100_QSPLIT_CALLS = (
     ((1, 1, 8192, 4096), 4),
     ((1, 1, 8064, 4096), 0),
@@ -1581,11 +1584,14 @@ SHIPPED_QSPLIT_CALLS = {
         ((1, 4, 16384, 8192), 4),
         ((1, 2, 16256, 16128), 0),
         ((1, 2, 16512, 16384), 0),
-        ((1, 3, 16384, 11008), 2),
+        ((1, 3, 16384, 11008), 0),
+        ((1, 3, 16384, 16384), 0),
+        ((1, 5, 16384, 13056), 0),
         ((1, 4, 16384, 16384), 2),
         ((1, 8, 16384, 8192), 2),
         ((1, 6, 16384, 11008), 0),
         ((1, 4, 16256, 16128), 0),
+        ((1, 8, 16256, 8192), 0),
         ((1, 4, 16512, 16384), 0),
     ),
 }
@@ -1614,7 +1620,9 @@ REFUSED_QSPLIT_CALLS = (
 # the split where the split was faster than its route without it in every counted round of both replicate runs of the
 # CUDA-graph timing, per call and per kernel, beyond the identical-kernel controls' noise, and not slower beyond that
 # noise in eager calls.  On ``sm_100a`` and ``sm_103a`` the one-launch calls of 4096 queries were slower with the split
-# in eager calls and keep the one-launch route.  ``QSPLIT_REGION`` must reproduce it.
+# in eager calls and keep the one-launch route.  On ``sm_107a`` also the call of three heads with 16384 queries and
+# keys, measured by a later timing: slower with the split than without it in every counted round, in eager calls and
+# in CUDA-graph replays; it keeps the pair route.  ``QSPLIT_REGION`` must reproduce it.
 _SM100_GRID = {
     (1, 1, 4096, 4096): ("fused", "fused"),
     (1, 1, 4096, 2048): ("fused", "fused"),
@@ -1681,6 +1689,7 @@ DECIDED_QSPLIT = {
         (1, 8, 8192, 4096): ("pair", "pair"),
         (1, 8, 16384, 16384): ("pair", "pair"),
         (1, 8, 16384, 8192): ("pair", "split2"),
+        (1, 3, 16384, 16384): ("pair", "pair"),
     },
 }
 
@@ -1784,6 +1793,26 @@ def test_the_shipped_split_regions(monkeypatch) -> None:
         for call, (before, now) in DECIDED_QSPLIT[arch].items():
             assert _route_name(arch, *call) == before, (arch, call)
             assert now == before or now in ("split2", "split4"), (arch, call)
+
+
+def test_the_split_least_queries_follow_the_region() -> None:
+    """``QSPLIT_LEAST_Q`` is derived from ``QSPLIT_REGION``: the least ``least_q`` of all its pieces, on the module's
+    table and on the shipped table ``SHIPPED_QSPLIT_REGION``.  ``variant`` and ``fused_record`` do not look for the
+    piece of a call with fewer queries: every candidate of 256 to ``QSPLIT_LEAST_Q - 128`` queries is inside no piece of
+    any architecture.  ``SHIPPED_QSPLIT_CALLS`` holds both sides of this bound (``sm_107a``, 3968 and 4096 queries)."""
+    least_q = cake_jit.QSPLIT_LEAST_Q
+    assert type(least_q) is int
+    for region in (cake_jit.QSPLIT_REGION, SHIPPED_QSPLIT_REGION):
+        assert least_q == min(piece[3] for pieces in region.values() for piece in pieces)
+    checked = 0
+    for arch, region in SHIPPED_QSPLIT_REGION.items():
+        for Sq in range(256, least_q, 128):
+            for Skv in range(-(-Sq // 512) * 256, Sq + 1, 256):
+                for H in (1, 2, 3, 4, 6, 8, 16, 64):
+                    assert _qsplit_piece(region, 1, H, Sq, Skv, 128, False) is None, (arch, H, Sq, Skv)
+                    assert cake_jit.qsplit_piece(arch, 1, H, Sq, Skv, 128, False) is None, (arch, H, Sq, Skv)
+                    checked += 1
+    assert checked > 0
 
 
 def test_the_accumulator_layouts() -> None:

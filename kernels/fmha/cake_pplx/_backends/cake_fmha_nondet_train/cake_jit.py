@@ -73,7 +73,8 @@ their order into dK (times the softmax scale) and dV, each element rounded
 to BF16 once, so dK and dV keep one fixed order.  These records launch only
 through their host sequence: ``grid`` has no grid for them.
 :func:`qsplit_piece` gives the piece of a call; :func:`variant` and
-:func:`fused_record` read it.
+:func:`fused_record` find the same piece (they share ``_qsplit_find`` with
+it).
 
 The one-launch route (head dimension 128 or 64, without the mask or with it):
 one kernel, the ``bwd_fused`` stage (``bwd_fused`` / ``bwd_fused_hd64``
@@ -535,10 +536,13 @@ PAIR_FEWER_QUERIES: dict[str, tuple[int, int, int, int] | None] = {
 # that takes the split (``B * H`` 1 to 8, 4096 to 16384 queries, 2048 to 16384 keys) was faster with it, in one host
 # call, than on its route without it in every counted round of both replicate runs of the CUDA-graph timing (per call
 # and per kernel), beyond the identical-kernel controls' noise, and not slower beyond that noise in eager calls.
-# ``most_kv``, ``least_q`` and ``most_q`` are measured values; each ``least_kv`` is 1 or one past a measured value.
-# Every measured call that was not faster lies outside every piece or, at 4096 queries on ``sm_100a`` and ``sm_103a``,
-# inside ``FUSED_REGION``, which is read before the piece that holds it.  A call outside every piece keeps the route it
-# had without the split.  An architecture without an entry has no split route.
+# ``most_kv``, ``least_q`` and ``most_q`` are measured values; each ``least_kv`` is 1, one past a measured value or, in
+# the last ``sm_107a`` piece, a measured value: that piece holds only the 512 key blocks of its measured calls, because
+# a later timing measured the call of 384 key blocks (three heads, 16384 queries and keys) slower with the split than
+# without it in every counted round, in eager calls and in CUDA-graph replays.  Every measured call that was
+# not faster lies outside every piece or, at 4096 queries on ``sm_100a`` and ``sm_103a``, inside ``FUSED_REGION``,
+# which is read before the piece that holds it.  A call outside every piece keeps the route it had without the split.
+# An architecture without an entry has no split route.
 QSPLIT_REGION: dict[str, tuple[tuple[int, int, int, int, int, bool], ...]] = {
     "sm_100a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
     "sm_103a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
@@ -546,9 +550,31 @@ QSPLIT_REGION: dict[str, tuple[tuple[int, int, int, int, int, bool], ...]] = {
         (4, 1, 32, 4096, 8192, True),
         (2, 33, 64, 4096, 16384, True),
         (4, 65, 256, 16384, 16384, True),
-        (2, 257, 512, 16384, 16384, True),
+        (2, 512, 512, 16384, 16384, True),
     ),
 }
+# The least ``least_q`` of all pieces of ``QSPLIT_REGION`` (0 when it has none): a call with fewer queries is inside
+# no piece, so :func:`variant` and :func:`fused_record` do not look for its piece.
+QSPLIT_LEAST_Q: int = min((piece[3] for pieces in QSPLIT_REGION.values() for piece in pieces), default=0)
+
+
+def _qsplit_find(arch: str, H: int, Sq: int, Skv: int) -> tuple[int, int, int, int, int, bool] | None:
+    """The piece of ``QSPLIT_REGION[arch]`` that holds a call with no mask,
+    ``D == 128`` and ``B == 1`` (the caller checks these), or None: the rest
+    of :func:`qsplit_piece`, which :func:`variant` and :func:`fused_record`
+    call after their own checks."""
+    if Skv % (2 * BLOCK) or Sq > 2 * Skv or Skv > Sq:
+        return None
+    try:
+        pieces = QSPLIT_REGION[arch]
+    except KeyError:
+        return None
+    kv = H * (Skv // BLOCK)
+    for piece in pieces:
+        _, least_kv, most_kv, least_q, most_q, _ = piece
+        if least_kv <= kv <= most_kv and least_q <= Sq <= most_q:
+            return piece
+    return None
 
 
 def qsplit_piece(
@@ -563,14 +589,9 @@ def qsplit_piece(
     most_kv`` and ``least_q <= Sq <= most_q``.  Reads the shapes and the
     architecture only; an architecture outside ``QSPLIT_REGION`` holds no
     call."""
-    if causal or D != 128 or B != 1 or Skv % (2 * BLOCK) or Sq > 2 * Skv or Skv > Sq:
+    if causal or D != 128 or B != 1:
         return None
-    kv = B * H * (Skv // BLOCK)
-    for piece in QSPLIT_REGION.get(arch, ()):
-        _, least_kv, most_kv, least_q, most_q, _ = piece
-        if least_kv <= kv <= most_kv and least_q <= Sq <= most_q:
-            return piece
-    return None
+    return _qsplit_find(arch, H, Sq, Skv)
 
 
 def variant(
@@ -590,9 +611,6 @@ def variant(
     ``RuntimeError`` for a device outside ``ARCHES`` before the call)."""
     causal = bool(causal)
     least = PAIR_LEAST[arch][causal]
-    piece = qsplit_piece(arch, batch, heads, seqlen_q, seqlen_kv, D, causal)
-    if piece is not None:
-        return (D, causal, True, piece[0])
     if seqlen_q < seqlen_kv:
         bounds = PAIR_FEWER_QUERIES[arch]
         if D != 128 or causal or bounds is None or seqlen_kv % (2 * BLOCK):
@@ -600,6 +618,10 @@ def variant(
         least_count, least_q, least_kv, most_per_q = bounds
         pair = batch * heads >= least_count and seqlen_q >= least_q and least_kv <= seqlen_kv <= most_per_q * seqlen_q
         return (D, causal, pair)
+    if not causal and batch == 1 and D == 128 and seqlen_q >= QSPLIT_LEAST_Q:
+        piece = _qsplit_find(arch, heads, seqlen_q, seqlen_kv)
+        if piece is not None:
+            return (D, causal, True, piece[0])
     if D != 128 or least is None or seqlen_kv < least or seqlen_kv % (2 * BLOCK):
         return (D, causal, False)
     count = batch * heads
@@ -726,9 +748,10 @@ def fused_record(arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: b
     region = FUSED_REGION.get((arch, D))
     if region is None:
         return None
-    piece = qsplit_piece(arch, B, H, Sq, Skv, D, False)
-    if piece is not None and piece[5]:
-        return None
+    if B == 1 and D == 128 and Skv <= Sq and Sq >= QSPLIT_LEAST_Q:
+        piece = _qsplit_find(arch, H, Sq, Skv)
+        if piece is not None and piece[5]:
+            return None
     for max_ctas, s_max, skv_any, skv_per_sq in region:
         if B * H * (Sq // BLOCK + Skv // BLOCK) > max_ctas or max(Sq, Skv) > s_max:
             continue
