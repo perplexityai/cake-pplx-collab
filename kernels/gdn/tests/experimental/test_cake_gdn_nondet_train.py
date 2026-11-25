@@ -9964,7 +9964,11 @@ def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
     for base, pv in pairs.items():
         assert pv == base + "_pv_tf32" and base in cake_jit.STAGES, (base, pv)
         assert (pv in PDL_STAGES) is (base in PDL_STAGES), pv
-        extra = ("h", "v_new", "hdh32_out", "e_out") if base in cake_chain.PV_TF32_SCANS else ("hdh32", "e32")
+        extra = (
+            ("h", "v_new", "hdh32_out", "e_out")
+            if base in cake_chain.PV_TF32_SCANS
+            else ("hdh32", "e32")
+        )
         after = "dh_out" if base in cake_chain.PV_TF32_SCANS else "dh"
         args = cake_chain.LAUNCH_ARGS[base]
         i = args.index(after) + 1

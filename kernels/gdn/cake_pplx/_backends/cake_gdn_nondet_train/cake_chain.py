@@ -1818,7 +1818,11 @@ def pv_tf32_stages(arch: str, scan: str | None, tail: str) -> tuple[str, str] | 
     if not PV_TF32 or arch not in PV_TF32_ARCHS or scan is None:
         return None
     pv_scan, pv_tail = PV_TF32_SCANS.get(scan), PV_TF32_TAILS.get(tail)
-    if pv_scan is None or pv_tail is None or not (_available(pv_scan, arch) and _available(pv_tail, arch)):
+    if (
+        pv_scan is None
+        or pv_tail is None
+        or not (_available(pv_scan, arch) and _available(pv_tail, arch))
+    ):
         return None
     return pv_scan, pv_tail
 

@@ -11104,21 +11104,31 @@ def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
     assert set(pairs.values()) == {s for s in cake_jit.STAGES if s.endswith("_pv_tf32")}
     for base, pv in pairs.items():
         assert pv == base + "_pv_tf32" and base in cake_jit.STAGES, (base, pv)
-        extra = ("h", "v_new", "hdh32_out", "e_out") if base in cake_chain.PV_TF32_SCANS else ("hdh32", "e32")
+        extra = (
+            ("h", "v_new", "hdh32_out", "e_out")
+            if base in cake_chain.PV_TF32_SCANS
+            else ("hdh32", "e32")
+        )
         after = "dh_out" if base in cake_chain.PV_TF32_SCANS else "dh"
         args = cake_chain.LAUNCH_ARGS[base]
         i = args.index(after) + 1
         assert cake_chain.LAUNCH_ARGS[pv] == (*args[:i], *extra, *args[i:]), pv
         for arch in ARCHES:
             assert cake_chain._available(pv, arch), (pv, arch)
-    assert "tail_g3" not in cake_chain.PV_TF32_TAILS and "tail_g2_bf16_wavefront" not in cake_chain.PV_TF32_TAILS
+    assert (
+        "tail_g3" not in cake_chain.PV_TF32_TAILS
+        and "tail_g2_bf16_wavefront" not in cake_chain.PV_TF32_TAILS
+    )
 
 
 def test_pv_tf32_stages_fall_back_to_the_other_programs(monkeypatch) -> None:
     # a route without a pv_tf32 pair keeps its programs instead of raising: a register scan (no tcgen05 scan), a tail
     # without a pv_tf32 build, the flag off, or an architecture outside PV_TF32_ARCHS
     for arch in ARCHES:
-        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "tail") == ("dhu_tc2_dvl32_pv_tf32", "tail_pv_tf32")
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "tail") == (
+            "dhu_tc2_dvl32_pv_tf32",
+            "tail_pv_tf32",
+        )
         assert cake_chain.pv_tf32_stages(arch, "dhu_tc2", "tail_g2_bf16") == (
             "dhu_tc2_pv_tf32",
             "tail_g2_bf16_pv_tf32",
@@ -11129,7 +11139,9 @@ def test_pv_tf32_stages_fall_back_to_the_other_programs(monkeypatch) -> None:
         )
         assert cake_chain.pv_tf32_stages(arch, None, "tail_g2") is None
         assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "tail_g3") is None
-        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_wavefront", "tail_g2_bf16") is None
+        assert (
+            cake_chain.pv_tf32_stages(arch, "dhu_tc2_wavefront", "tail_g2_bf16") is None
+        )
     assert cake_chain.pv_tf32_stages("sm_90a", "dhu_tc2", "tail_g2") is None
     monkeypatch.setattr(cake_chain, "PV_TF32", False)
     assert cake_chain.pv_tf32_stages(ARCHES[0], "dhu_tc2", "tail_g2") is None

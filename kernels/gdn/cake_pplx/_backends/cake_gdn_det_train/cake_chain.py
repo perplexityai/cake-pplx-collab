@@ -398,7 +398,13 @@ _DHU_TC2_PV_ARGS = _with_after(
 _DQKWG_PV_ARGS = _with_after(_DQKWG_ARGS, "dh", ("hdh32", "e32"))
 _TAIL_PV_ARGS = _with_after(_TAIL_ARGS, "dh", ("hdh32", "e32"))
 _TAIL_F32X_PV_ARGS = _with_after(_TAIL_F32X_ARGS, "dh", ("hdh32", "e32"))
-_TAIL_WS_PV_ARGS = (*_TAIL_PV_ARGS[:20], "ws", "ws_count", *_TAIL_PV_ARGS[20:], "ws_tiles")
+_TAIL_WS_PV_ARGS = (
+    *_TAIL_PV_ARGS[:20],
+    "ws",
+    "ws_count",
+    *_TAIL_PV_ARGS[20:],
+    "ws_tiles",
+)
 LAUNCH_ARGS.update(
     {
         "dhu_tc2_pv_tf32": _DHU_TC2_PV_ARGS,
@@ -5128,7 +5134,11 @@ def pv_tf32_stages(arch: str, scan: str | None, tail: str) -> tuple[str, str] | 
     if not PV_TF32 or arch not in PV_TF32_ARCHS or scan is None:
         return None
     pv_scan, pv_tail = PV_TF32_SCANS.get(scan), PV_TF32_TAILS.get(tail)
-    if pv_scan is None or pv_tail is None or not (_available(pv_scan, arch) and _available(pv_tail, arch)):
+    if (
+        pv_scan is None
+        or pv_tail is None
+        or not (_available(pv_scan, arch) and _available(pv_tail, arch))
+    ):
         return None
     return pv_scan, pv_tail
 
