@@ -1041,8 +1041,9 @@ def memory_plan(
     one of the ``rows``, not ``buffer_rows``) -- the block's ``dz`` and statistics, the FP32 ``dX`` accumulator, the
     BF16 ``dW`` output, the gathered ``X`` rows (compacted) or ``X``'s copy, the block-shifted labels of every block
     (with the two temporaries of their one-pass build), the zero-gradient partition's row vectors (compacted) and the
-    ``O(T)`` vectors -- then the ``dX`` output phase.  Its ``dW`` / ``dX`` are the vocabulary-major backward's bits
-    (they round differently from the chunk loop's)."""
+    ``O(T)`` vectors -- then the ``dX`` output phase, which on a compacted call under the fused finalize also holds the
+    compact labels and the FP32 label residuals its scatter cast folds (``label_bytes * rows + 4 * rows`` bytes).  Its
+    ``dW`` / ``dX`` are the vocabulary-major backward's bits (they round differently from the chunk loop's)."""
     if entry not in ENTRIES:
         raise ValueError(f"entry must be one of {ENTRIES}")
     T, R, H, V, C = (int(num_rows), int(rows), int(hidden), int(vocab), int(chunk))
@@ -1198,11 +1199,18 @@ def memory_plan(
         """The vocabulary-major backward (log-probability entry): its block phase, then its ``dX`` output phase.  The
         block phase holds the block-shifted labels of every block, built at once in the labels' dtype
         (:attr:`Geometry.labels_dtype`) after the block buffers exist: at the inner ``torch.where`` the shifted labels,
-        the block test's bool mask, the foreign-label fill and the result are live together."""
+        the block test's bool mask, the foreign-label fill and the result are live together.  On a compacted call under
+        the fused finalize the ``dX`` output phase also holds the compact labels and the FP32 label residuals, which
+        its scatter cast folds (no slab sum folds them after the last block)."""
         nb = -(-V // vb)
         x_rows = live(2 * R * H) if compact else xc
         partition = (live(8 * R) + live(4 * R)) if compact else 0
         vm_dx_rows = live(2 * R * H) if need_dx and compact and not dx_finalize else 0
+        folded = (
+            live(label_bytes * R) + live(4 * R)
+            if need_dx and compact and dx_finalize
+            else 0
+        )
         block_labels = live(label_bytes * nb * R, 3) + live(nb * R)
         blocks = (
             dxacc
@@ -1217,7 +1225,7 @@ def memory_plan(
         )
         return max(
             blocks,
-            dxacc + vm_dx_rows + dx_out + dw_out + rowvec + live(4 * T) + xc,
+            dxacc + vm_dx_rows + folded + dx_out + dw_out + rowvec + live(4 * T) + xc,
         )
 
     candidates: list[tuple[str, int, Optional[int]]] = []

@@ -6605,6 +6605,39 @@ def test_memory_plan_vocab_major_form():
         opt_in._set_memory_budget_bytes(0)
 
 
+def test_memory_plan_vocab_major_dx_phase_holds_the_fold_operands():
+    """The vocabulary-major model's ``dX`` output phase of a compacted call under the fused finalize counts the compact
+    labels and the FP32 label residuals its scatter cast folds (``label_bytes * rows + 4 * rows`` bytes, 12 a row with
+    the int64 labels, each tensor with the allocator's bound), where the call with ``dx_finalize=False`` counts its
+    BF16 ``[rows, H]`` dX cast instead: where that phase is the larger one (many ignored rows) the two predictions
+    differ by exactly that."""
+    geometry = cake_backend.DEFAULT_GEOMETRY
+    live = opt_in._allocated_bytes
+    label_bytes = torch.empty((), dtype=geometry.labels_dtype).element_size()
+    assert label_bytes == 8
+    for T, R, H, V, C in (
+        (60000, 5000, GLM_H, GLM_V, 1024),
+        (65535, 7000, 4096, 32768, 2048),
+    ):
+        kw = dict(
+            num_rows=T,
+            rows=R,
+            hidden=H,
+            vocab=V,
+            chunk=C,
+            geometry=geometry,
+            vocab_major=True,
+            fuse_dw_cast=False,
+            budget_bytes=1 << 45,
+        )
+        fused = opt_in.memory_plan("logprob", dx_finalize=True, **kw)
+        plain = opt_in.memory_plan("logprob", dx_finalize=False, **kw)
+        assert fused.form == plain.form == "vocab_major", (fused, plain)
+        assert plain.predicted_bytes - fused.predicted_bytes == (
+            live(2 * R * H) - live(label_bytes * R) - live(4 * R)
+        ), (T, R, fused, plain)
+
+
 # The forms of the loss entry's explicit byte budget (:func:`opt_in._set_memory_budget_bytes`), in pick order
 _LOSS_BUDGET_FORMS = ("fused", "unfused", "partial", "recompute")
 
@@ -17437,16 +17470,36 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
     calls of every draw take the same forms and are judged against the naive tier: the three vocabulary-major runs, the
     checkpointed step and the kept call of each ``T`` (``vm_T<rows>``, ``vm_T<rows>_run2`` / ``_run3``,
     ``ckpt_T<rows>`` / ``kept_T<rows>``), the five-chunk call under ``"auto"`` and the two runs under ``"1"``
-    (``auto_T8700``, ``forced_T8700`` / ``forced_T8700_run2``) and the two-chunk call (``two_T8000``)."""
+    (``auto_T8700``, ``forced_T8700`` / ``forced_T8700_run2``) and the two-chunk call (``two_T8000``).  Every one of
+    these compacted calls (the fused dX finalize) folds the label residuals in its scatter cast: no slab-sum launch,
+    one ``scale_cast_scatter_fold_bf16``; the frozen ``X`` (no dX) launches neither."""
     _require_program(entry="logprob")
-    calls = []
+    calls, stages = [], []
     real = cake_backend._backward_logprob_vm
+    real_eager = cake_backend._eager_launch
 
     def counted(*args, **kwargs):
         calls.append(1)
-        return real(*args, **kwargs)
+        stages.append([])
+        try:
+            return real(*args, **kwargs)
+        finally:
+            stages[-1] = tuple(stages[-1])
+
+    def eager(record, module_name, stage, *args, **kwargs):
+        # inside a vocabulary-major backward
+        if stages and isinstance(stages[-1], list):
+            stages[-1].append(stage)
+        return real_eager(record, module_name, stage, *args, **kwargs)
+
+    def assert_folds(launched, case, need_dx=True):
+        """The eager stages of one vocabulary-major backward: the cast's fold, never the slab sum."""
+        assert cake_backend.DX_SLAB_SUM_STAGE not in launched, (case, launched)
+        folds = launched.count(cake_backend.DX_FINALIZE_FOLD_STAGE)
+        assert folds == int(need_dx), (case, launched)
 
     monkeypatch.setattr(cake_backend, "_backward_logprob_vm", counted)
+    monkeypatch.setattr(cake_backend, "_eager_launch", eager)
     assert cake_backend.VM_AUTO_MAX_CHUNKS == 4
     for T, C in ((6000, 4096), (7000, 2048)):
         inp = make_inputs(
@@ -17471,6 +17524,8 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
         calls.clear()
         runs = [_run(inp, C, entry="logprob", backend="cake") for _ in range(3)]
         assert len(calls) == 3, case
+        for launched in stages[-3:]:
+            assert_folds(launched, case)
         vm = runs[0]
         assert _same_bits(vm["logp"], loop["logp"]), case
         dead_rows = inp.dlogp == 0
@@ -17486,6 +17541,7 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
         if inp.temperature is not None:
             kw["temperature"] = inp.temperature
             fn = cake_backend.cake_lm_head_nondet_train_logprob_temperature
+        before = len(stages)
         L = torch.utils.checkpoint.checkpoint(
             lambda a, b: (fn(a, b, inp.labels, **kw) * inp.dlogp).sum(),
             X,
@@ -17493,9 +17549,14 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
             use_reentrant=False,
         )
         dX, dW = torch.autograd.grad(L, (X, W))
+        assert len(stages) == before + 1, case
+        assert_folds(stages[-1], case)
         contract_lm_head(dict(dX=dX, dW=dW), inp, entry="logprob")
         assert torch.all(dX[dead_rows] == 0), case
+        before = len(stages)
         frozen = _run(inp, C, entry="logprob", backend="cake", train_x=False)
+        assert len(stages) == before + 1, case
+        assert_folds(stages[-1], case, need_dx=False)
         assert frozen["dX"] is None and _same_bits(frozen["dW"], vm["dW"]), case
         if tau is None:
             # the kept logits keep their own chunk loop: the default call's logp bits; dX / dW round differently
@@ -17523,6 +17584,8 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
     with _vocab_major("1"):
         forced = [_run(inp, 2048, entry="logprob", backend="cake") for _ in range(2)]
     assert len(calls) == 2
+    for launched in stages[-2:]:
+        assert_folds(launched, "forced_T8700")
     assert _same_bits(forced[0]["logp"], auto["logp"])
     contract_lm_head(auto, inp, entry="logprob")
     for run in forced:
@@ -17612,6 +17675,136 @@ def test_device_vocab_major_logprob_backward(glm_weight, record_property, monkey
     _judge_problems(
         record_property, launch, tuple(labels), seed=SEED + 4100, entry="logprob", names=names, contract=contract
     )
+
+
+@pytest.mark.parametrize("tau", [None, "scalar"])
+def test_device_vocab_major_label_fold_forms(glm_weight, monkeypatch, tau):
+    """Where the vocabulary-major backward folds the label residuals into dX, at 7000 rows over 2048-row chunks with
+    valid rows whose labels lie at or past ``V`` (and ignored rows), with no temperature and a scalar one: a compacted
+    call under the fused dX finalize folds them in its scatter cast -- with the zero-gradient row skip (the partition's
+    scan) and without it (the valid-row mask) -- and launches no slab sum; an uncompacted call and one with
+    ``dx_finalize=False`` launch the fold-alone slab sum and no fold cast.  The cast's fold gives the slab sum's bits:
+    ``dX`` / ``dW`` / ``logp`` of the masked call equal those of ``dx_finalize=False`` bit for bit (neither runs the
+    skip).  A retained graph's second backward repeats the first's ``dX`` / ``dW`` bits, and (no temperature) a CUDA
+    graph of the low-level masked backward replays the eager call's bits."""
+    _require_program(entry="logprob")
+    if tau is not None:
+        _require_tau_program()
+    be = cake_backend
+    calls, stages = [], []
+    real, real_eager = be._backward_logprob_vm, be._eager_launch
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        stages.append([])
+        try:
+            return real(*args, **kwargs)
+        finally:
+            stages[-1] = tuple(stages[-1])
+
+    def eager(record, module_name, stage, *args, **kwargs):
+        # inside a vocabulary-major backward
+        if stages and isinstance(stages[-1], list):
+            stages[-1].append(stage)
+        return real_eager(record, module_name, stage, *args, **kwargs)
+
+    monkeypatch.setattr(be, "_backward_logprob_vm", counted)
+    monkeypatch.setattr(be, "_eager_launch", eager)
+    T, C = 7000, 2048
+    V = int(glm_weight.shape[0])
+    inp = make_inputs(
+        T,
+        seed=SEED + 4200,
+        device=CUDA,
+        W=glm_weight,
+        ignore_frac=0.05,
+        temperature=tau,
+    )
+    labels = inp.labels.clone()
+    labels[:5] = torch.tensor([V, V + 5, 2 * V, V - 1, 0], device=CUDA)
+    labels[3000:3008] = V + 3
+    inp = dataclasses.replace(inp, labels=labels)
+    rows = int((labels >= 0).sum())
+    assert be._logprob_vm_auto_rows(rows, C), rows
+    slab, fold = be.DX_SLAB_SUM_STAGE, be.DX_FINALIZE_FOLD_STAGE
+
+    def run(case, **switches):
+        del calls[:]
+        result = _run(inp, C, entry="logprob", backend="cake", **switches)
+        assert len(calls) == 1, (case, calls)
+        launched = stages[-1]
+        folds_in_cast = case in ("scan", "mask")
+        assert (slab in launched) != folds_in_cast, (case, launched)
+        assert launched.count(fold) == int(folds_in_cast), (case, launched)
+        assert bool(torch.isfinite(result["dX"].float()).all()), case
+        assert bool(torch.isfinite(result["dW"].float()).all()), case
+        assert bool((result["dX"][labels < 0] == 0).all()), case
+        return result
+
+    scan = run("scan")
+    with _zero_dlogp_floor(None):
+        mask = run("mask")
+        unfused = run("unfused", dx_finalize=False)
+    run("uncompacted", compact_rows=False)
+    for name in ("logp", "dX", "dW"):
+        assert _same_bits(mask[name], unfused[name]), (tau, name)
+    assert _same_bits(scan["logp"], mask["logp"]), tau
+    # a retained graph: the second backward repeats the first's bits
+    X = inp.X.detach().requires_grad_(True)
+    W = inp.W.detach().requires_grad_(True)
+    if tau is None:
+        lp = be.cake_lm_head_nondet_train_logprob(
+            X, W, labels, chunk_size=C, backend="cake"
+        )
+    else:
+        lp = be.cake_lm_head_nondet_train_logprob_temperature(
+            X, W, labels, chunk_size=C, backend="cake", temperature=inp.temperature
+        )
+    grads = []
+    del calls[:]
+    for _ in range(2):
+        X.grad = W.grad = None
+        lp.backward(inp.dlogp, retain_graph=True)
+        torch.cuda.synchronize()
+        grads.append((X.grad.clone(), W.grad.clone()))
+        assert stages[-1].count(fold) == 1 and slab not in stages[-1], stages[-1]
+    assert len(calls) == 2, calls
+    assert _same_bits(grads[0][0], grads[1][0]), tau
+    assert _same_bits(grads[0][1], grads[1][1]), tau
+    assert _same_bits(grads[0][0], scan["dX"]), tau
+    assert _same_bits(grads[0][1], scan["dW"]), tau
+    del lp, X, W, grads
+    if tau is not None:
+        return
+    # a CUDA graph of the low-level backward (valid-row mask, no skip): the replay gives the eager call's bits
+    fr = be.forward_logprob(inp.X, inp.W, labels, chunk_size=C)
+    dlogp = inp.dlogp.clone()
+
+    def backward():
+        return be.backward_logprob(
+            inp.X, inp.W, labels, fr.lse, dlogp, row_index=fr.row_index, chunk_size=C
+        )
+
+    with _zero_dlogp_floor(None):
+        eager_dx, eager_dw = backward()
+        torch.cuda.synchronize()
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            backward()
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        del calls[:]
+        with torch.cuda.graph(graph):
+            dx_g, dw_g = backward()
+        assert len(calls) == 1, calls
+        assert stages[-1].count(fold) == 1 and slab not in stages[-1], stages[-1]
+        for _ in range(2):
+            graph.replay()
+            torch.cuda.synchronize()
+            assert _same_bits(dx_g, eager_dx) and _same_bits(dw_g, eager_dw)
+    assert _same_bits(eager_dx, mask["dX"]) and _same_bits(eager_dw, mask["dW"])
+    del graph, dx_g, dw_g
 
 
 # ---------------------------------------------------------------------------

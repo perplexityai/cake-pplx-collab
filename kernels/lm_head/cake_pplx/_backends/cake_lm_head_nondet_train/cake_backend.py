@@ -12392,7 +12392,11 @@ def backward_logprob(
 # block's dX GEMM and joins before the next block's recompute.  The dX GEMM takes the chunk rule's knobs for ``T_v``
 # rows (:func:`chunk_variants`), except on an architecture whose long-chunk ring takes no split: there a launch that
 # would run that ring with a short last wave runs the table ring with the split-tail form
-# (:func:`_logprob_vm_dx_tuning`).  The kept logits (:func:`backward_logprob_keep`) keep
+# (:func:`_logprob_vm_dx_tuning`).  After the last block each row's FP32 label residual (stored by the ``dz`` arm of the
+# block holding the row's label) folds into its dX row: a compacted call under the fused finalize folds every row in the
+# scatter cast that writes dX (:func:`finalize_dx` with ``fold``, :data:`DX_FINALIZE_FOLD_STAGE`), any other call runs
+# the fold-alone slab sum (``n_slabs = 0``) over ``dX_acc`` ahead of its cast -- the same FMA under the same predicate,
+# so the same bits.  The kept logits (:func:`backward_logprob_keep`) keep
 # their own chunk loop (no recompute to save there): their ``dX`` / ``dW`` round differently from this form's.
 _LOGPROB_VM_MODES = (
     "0",
@@ -12929,7 +12933,14 @@ def _backward_logprob_vm(
         DX_RED_STAGE, tile_n=v.dx_tile_n, stages=v.dx_stages, split=split, dcnt=skip
     )
     dw_stage = stage_variant("gemm_dw_cast_bf16", dcnt=skip)
-    folds = (DX_SLAB_SUM_STAGE,) if need_dx else ()  # the label residual fold after the last block
+    # the label residual fold after the last block: on a compacted call under the fused finalize the scatter cast's fold
+    # program folds every row (:func:`finalize_dx`, :data:`DX_FINALIZE_FOLD_STAGE`), else the fold-alone slab sum
+    cast_fold = need_dx and fused_dx and row_index is not None
+    folds = (
+        ((DX_FINALIZE_FOLD_STAGE,) if cast_fold else (DX_SLAB_SUM_STAGE,))
+        if need_dx
+        else ()
+    )
     for stage in (dx_store, dx_add, dw_stage, dz_stage) + folds:
         if stage not in registered:
             raise NotImplementedError(
@@ -12950,7 +12961,8 @@ def _backward_logprob_vm(
     if dx_acc is not None and skip:
         dx_acc.fill_(-0.0)  # the exact additive identity: every block adds into it
     # the rows' FP32 label residuals: the block holding a row's label stores it (the shifted label of every other block
-    # lies outside it), a row no block stores keeps 0; read by the fold after the last block
+    # lies outside it), a row no block stores keeps 0; read by the fold after the last block (the slab sum, or the
+    # scatter cast of the dX output phase)
     rlab = torch.zeros((rows,), dtype=torch.float32, device=device)
     dw_out = torch.empty((V, H), dtype=torch.bfloat16, device=device)
     cnt = None if counts is None else counts[0:1]
@@ -13096,9 +13108,10 @@ def _backward_logprob_vm(
         else:
             launch(dw_stage, values)
         del values, dz, Wb
-    if dx_acc is not None:
+    if dx_acc is not None and not cast_fold:
         # the fold of the rows' FP32 label residuals, once over every row after the last block's dX add: the slab sum
-        # with no slab (``n_slabs = 0``) over the unshifted labels and the full head
+        # with no slab (``n_slabs = 0``) over the unshifted labels and the full head (a fused compacted call folds them
+        # in its scatter cast instead, below)
         values = base_values()
         values.update(
             T=rows,
@@ -13122,8 +13135,11 @@ def _backward_logprob_vm(
     if side_on:
         main.wait_stream(side)
     # the block phase's buffers go before the dX output phase (the main stream has waited for the side stream's last
-    # read of dz): that phase holds the dX accumulator, dW and the dX output only (memory_plan's second phase)
-    del dz_buf, stats, lb_all, x_rows, d_c, labels_c, tau_c, rlab
+    # read of dz): that phase holds the dX accumulator, dW and the dX output, plus, on a fused compacted call, the
+    # compact labels and the label residuals its scatter cast folds (memory_plan's second phase)
+    del dz_buf, stats, lb_all, x_rows, d_c, tau_c
+    if not cast_fold:
+        del labels_c, rlab
     if dx_acc is None:
         return None, dw_out
     if row_index is None:
@@ -13135,13 +13151,22 @@ def _backward_logprob_vm(
             ),
             dw_out,
         )
+    # the scatter cast folds each compact row's label residual, ``fma(rlab, f32(W[label]), dX_acc)`` on a row of a label
+    # in ``[0, V)`` and a nonzero residual -- the fold-alone slab sum's arithmetic and predicate on the same rows -- and
+    # then scales and rounds it: the bits of the slab sum's FP32 store cast by the scatter.  It reads ``W`` (no writer)
+    # and ``rlab`` / ``labels_c`` (written on this stream ahead of it), on the main stream behind the side stream's join
+    fold = dict(labels=labels_c, rlab=rlab, W=W, lo=0, hi=rows)
     if scan is None:
         return (
-            finalize_dx(dx_acc, None, row_index, labels >= 0, T, backend=backend),
+            finalize_dx(
+                dx_acc, None, row_index, labels >= 0, T, backend=backend, fold=fold
+            ),
             dw_out,
         )
     return (
-        finalize_dx(dx_acc, None, row_index, None, T, backend=backend, scan=scan),
+        finalize_dx(
+            dx_acc, None, row_index, None, T, backend=backend, scan=scan, fold=fold
+        ),
         dw_out,
     )
 

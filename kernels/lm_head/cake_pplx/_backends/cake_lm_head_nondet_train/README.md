@@ -645,10 +645,15 @@ rule, no switch), which keeps no such buffer:
   run that ring with a short last wave runs the table ring with the split.
 * The label residuals start at 0 and each block's dz arm stores those of the
   rows whose label lies in the block (the shifted label of every other block
-  lies outside it).  After the last block, a call that forms `dX` launches
-  the slab sum `dx_slab_sum` once over every row as the fold alone
-  (`n_slabs = 0`), with the unshifted labels and the full head: the same
-  fold as the chunk loop's, after the last block's add.
+  lies outside it).  After the last block's add they fold into `dX`, with
+  the unshifted labels and the full head: the same fold as the chunk
+  loop's.  A compacted call under the fused `dX` finalize (the default) folds
+  every row in the scatter cast that writes `dX`
+  (`scale_cast_scatter_fold_bf16`), so it holds the compact labels and the
+  residuals (`12 * rows` bytes) until that cast; any other call that forms
+  `dX` (uncompacted, or `dx_finalize=False`) first launches the slab sum
+  `dx_slab_sum` once over every row as the fold alone (`n_slabs = 0`).  Both
+  apply the same FMA under the same predicate, so `dX` has the same bits.
 * The forward, `logp` and `lse` do not change.  `dX` and `dW` are summed in
   one fixed order (no unordered reduction; no run-to-run bit promise); they
   round differently from the chunk loop (other summation groupings under the
