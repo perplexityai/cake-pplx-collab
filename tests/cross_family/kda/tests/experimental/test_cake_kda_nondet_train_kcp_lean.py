@@ -636,6 +636,7 @@ def test_lean_byte_prediction_on_the_host() -> None:
                             H,
                             sm_count=c.sm_count,
                             fwd_layout=kp.local_fwd_layout(True),
+                            segment_rule=kp.LOCAL_SEGMENT_RULE,
                         )
                         if c.T_r
                         else 0
@@ -646,7 +647,13 @@ def test_lean_byte_prediction_on_the_host() -> None:
                         if not c.T_r:
                             local.append(0)
                             continue
-                        p = cake_backend.plan(c.T_r, c.n_frag, H, c.sm_count)
+                        p = cake_backend.plan(
+                            c.T_r,
+                            c.n_frag,
+                            H,
+                            c.sm_count,
+                            segment_rule=kp.LOCAL_SEGMENT_RULE,
+                        )
                         a = kp.local_arena_bytes(p, backward=True, local_arena="lean")
                         if kp.local_lean_serves(p):
                             assert a == kp.local_lean_bytes(p, kp.local_lean_passes(p))
@@ -669,6 +676,7 @@ def test_lean_byte_prediction_on_the_host() -> None:
                                     H,
                                     sm_count=c.sm_count,
                                     fwd_layout=kp.local_fwd_layout(True),
+                                    segment_rule=kp.LOCAL_SEGMENT_RULE,
                                 )
                                 if c.T_r
                                 else 0
@@ -714,7 +722,9 @@ def test_lean_passes_knob_bytes_on_the_host() -> None:
     )
     kcp_module = pytest.importorskip("cake_pplx.cake_kda_nondet_train_kcp")
     for H in (4, 64):
-        p = cake_backend.plan(ctx.T_r, ctx.n_frag, H, ctx.sm_count)
+        p = cake_backend.plan(
+            ctx.T_r, ctx.n_frag, H, ctx.sm_count, segment_rule=kp.LOCAL_SEGMENT_RULE
+        )
         replay = kp.cake_kda_nondet_train_kcp_workspace_bytes(
             ctx, H=H, local_arena="replay"
         )

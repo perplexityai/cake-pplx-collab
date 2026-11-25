@@ -3171,6 +3171,12 @@ def _pools_arena(need: dict[str, int], *, backward: bool, save_transfer: bool) -
 # adds it) on the rows its registry lists, the deterministic pair elsewhere, and refuses a mixed pair.
 LOCAL_PATH_FWD = "fwd_nosave"
 LOCAL_PATH_BWD = "replay"
+# The single-rank backend's segment rule of the local plans and of the byte queries that size the local arenas
+# (``cake_backend.plan`` / ``workspace_bytes`` / ``tables_bytes`` / ``for_problem``, ``segment_rule``;
+# :func:`local_segment_rule_kwargs`): the occupancy rule.  The single-rank default (the token-aware rule) was
+# measured on whole packs only and selects the records at its own segment count; the local problems keep the
+# segment counts and records the local stages, arenas and byte predictions were validated with.
+LOCAL_SEGMENT_RULE = "occupancy"
 # The layout of a forward-only local arena: the KCP route's own forward layout (``cake_backend.FWD_KCP_SLOTS``; no
 # state blocks, the internal Akk rows under the h tape), which the existing backend's forward layout contains.
 LOCAL_LAYOUT_FWD_ONLY = "fwd_kcp"
@@ -3576,6 +3582,22 @@ def qk_l2norm_plan_kwargs(mode: str) -> dict[str, Any]:
     return {} if mode == "off" else {"l2n": mode}
 
 
+def local_segment_rule_kwargs(sm_count: int, H: int) -> dict[str, Any]:
+    """The ``segment_rule`` keyword of the existing backend's plan, workspace and byte queries for a local problem
+    of ``H`` heads on ``sm_count`` SMs: :data:`LOCAL_SEGMENT_RULE` where the backend's token-aware rule may decide
+    (an SM count and a head count of its ``cake_jit.TOKEN_SEGMENTS``); none elsewhere, where both rules give the
+    same plan and the calls stay the calls they always were (as :func:`qk_l2norm_plan_kwargs` with the flag off),
+    nor with a backend that has no such rule."""
+    from . import _single_rank
+
+    rule = getattr(_single_rank.module("cake_jit"), "TOKEN_SEGMENTS", None)
+    if rule is None or int(H) not in rule["heads"]:
+        return {}
+    if any(int(sm_count) in sms for sms in rule["sm_counts_by_arch"].values()):
+        return {"segment_rule": LOCAL_SEGMENT_RULE}
+    return {}
+
+
 @functools.cache
 def _takes(fn: Any, name: str) -> bool:
     """Whether callable ``fn`` takes a parameter ``name`` (its ``inspect.signature``, read once per callable)."""
@@ -3970,8 +3992,16 @@ def cake_kda_nondet_train_kcp_workspace_bytes(
         # the architecture of the context's device, the one its forward plans with (never the current CUDA device's,
         # which may be another model); None keeps the existing backend's default
         arch = _device_arch(c.device)
+        rule_kw = local_segment_rule_kwargs(c.sm_count, int(H))
         p = cake_backend.plan(
-            c.T_r, c.n_frag, int(H), c.sm_count, arch=arch, gate=gate, **l2n_kw
+            c.T_r,
+            c.n_frag,
+            int(H),
+            c.sm_count,
+            arch=arch,
+            gate=gate,
+            **rule_kw,
+            **l2n_kw,
         )
         if lean and local_lean_serves(p):
             a = local_lean_bytes(p, local_lean_passes(p, passes=lean_passes))
@@ -3988,6 +4018,7 @@ def cake_kda_nondet_train_kcp_workspace_bytes(
                     arch=arch,
                     fwd_layout=local_fwd_layout(backward, save_mode),
                     gate=gate,
+                    **rule_kw,
                     **l2n_kw,
                 )
             )
@@ -3999,7 +4030,7 @@ def cake_kda_nondet_train_kcp_workspace_bytes(
         if intra_writes_tables(p):
             scratch[(int(c.T_r), int(c.n_frag))] = int(
                 cake_backend.tables_bytes(
-                    c.T_r, c.n_frag, int(H), sm_count=c.sm_count, arch=arch
+                    c.T_r, c.n_frag, int(H), sm_count=c.sm_count, arch=arch, **rule_kw
                 )
             )
     layouts = [

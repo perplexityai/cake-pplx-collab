@@ -35,6 +35,7 @@ checkpoint rows count the checks exactly beside the exchange's collectives.
 
 from __future__ import annotations
 
+import datetime
 import gc
 import hashlib
 import json
@@ -657,16 +658,34 @@ def _rendezvous(tmp: str) -> str:
     )
 
 
+def _group_timeout() -> dict:
+    """``{"timeout": ...}`` of ``KCP_TEST_PG_TIMEOUT_S`` (seconds) when it is set, for a run whose rank 0 holds the
+    others in a collective longer than the process group's default timeout (a first draw that builds its programs
+    and references); ``{}`` (the default timeout) when it is not."""
+    seconds = os.environ.get("KCP_TEST_PG_TIMEOUT_S")
+    if not seconds:
+        return {}
+    return {"timeout": datetime.timedelta(seconds=float(seconds))}
+
+
 def _init_group(rank: int, W: int, device: torch.device, rdzv: str | None) -> None:
     """Join the ``W``-rank NCCL group on ``device``: through the spawning test's ``file://`` store
-    (:func:`_rendezvous`), or for ``rdzv=None`` (one process per Slurm task) from ``MASTER_ADDR`` / ``MASTER_PORT``."""
+    (:func:`_rendezvous`), or for ``rdzv=None`` (one process per Slurm task) from ``MASTER_ADDR`` / ``MASTER_PORT``;
+    the group's timeout is ``KCP_TEST_PG_TIMEOUT_S`` seconds when that is set (:func:`_group_timeout`)."""
     if rdzv is None:
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", "29500")
-        dist.init_process_group("nccl", rank=rank, world_size=W, device_id=device)
+        dist.init_process_group(
+            "nccl", rank=rank, world_size=W, device_id=device, **_group_timeout()
+        )
     else:
         dist.init_process_group(
-            "nccl", init_method=rdzv, rank=rank, world_size=W, device_id=device
+            "nccl",
+            init_method=rdzv,
+            rank=rank,
+            world_size=W,
+            device_id=device,
+            **_group_timeout(),
         )
 
 

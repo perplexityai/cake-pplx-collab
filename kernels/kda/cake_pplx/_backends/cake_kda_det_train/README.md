@@ -3,7 +3,7 @@
 Experimental backend for the packed Kimi Delta Attention (KDA) chunked
 training forward and backward in the GLM-5.3-Flash geometry: head dimension
 128 for `q`, `k`, `v` and the gate, chunk length 64, per-document zero initial
-state, `H` heads per call (1 to 64), one packed batch of documents described by
+state, `H` heads per call (1 to 128), one packed batch of documents described by
 `cu_seqlens`.
 
 Both the API and the backend are experimental: no compatibility guarantee.
@@ -72,9 +72,10 @@ ws = cake_kda_det_train_workspace(S, num_docs, H, device, use_gate_in_kernel=Tru
   set (with or without the saved segment states) and the checkpoint replay
   (`saved=None`) give bitwise the same gradients.
 * Limits: `H * 128 * 64 < 2**31` (`H <= 262143`; the public contract covers
-  `H` in 1..64); `R * H * 64 < 2**31` over the padded rows `R = 64 * NC_pad` of
-  the intra-chunk buffers (at `H = 64` that is `S` up to about 524k tokens; the
-  contract's shapes use at most half of that range); `num_docs <= 65536` (the
+  `H` in 1..128); `R * H * 64 < 2**31` over the padded rows `R = 64 * NC_pad` of
+  the intra-chunk buffers (at `H = 64` that is `S` up to about 524k tokens, at
+  `H = 96` about 349k and at `H = 128` about 262k in one document; at `H = 64`
+  the contract's shapes use at most half of that range); `num_docs <= 65536` (the
   layout table's 16-step document search); `S >= 1`, `num_docs >= 1`.  Any `S`,
   including `S < 64` and document lengths that are not multiples of 64.  The
   host refuses a problem outside these limits before any launch.
@@ -166,7 +167,9 @@ no larger than the `Aqk` / `Akk` set (`3 * NSEG * H * 65536 <= 2 * S * H *
 H <= 4`; 37 on `sm_100a`), `NSEG * H` is at most `4 * sm_count` (that much for `num_docs * H >=
 10` unless the per-SM cap binds, which brings it down to `num_docs *
 sm_count`), so the states cost at most about `12 * sm_count * 64 KiB` (115 MiB
-on a 152-SM device) independent of `S`, and the threshold is about 58k tokens
+on a 152-SM device) independent of `S` (the token-aware rule's counts are at
+most these, and its plan saves the states exactly when the occupancy plan
+does), and the threshold is about 58k tokens
 at `H = 4` (four documents), 29k at `H = 8`,
 `384 * 38 * num_docs` tokens with at most four chains (14592 for one document
 at `H = 1`, 58368 for four; `384 * 37 * num_docs` on `sm_100a`: 14208 and
@@ -202,7 +205,8 @@ automatically and is not a mode). `"tape"` keeps `Aqk` / `Akk` with the
 forward's state tape `h` and `v_new` (768 B more per internal token-head)
 and the segment transfers. Its backward skips the recurrence recompute.
 Those 768 B leave the arena: a workspace sized with `save_mode="tape"` is
-768 B per internal token-head smaller (12.6-17.1 % on the rows below) and
+768 B per internal token-head smaller (12.6-17.1 % on the rows below in
+0.2.1, 16.1-17.1 % in 0.2.2 by the byte queries) and
 makes `"tape"` the default of the calls on it. The gradients are bitwise the
 same in both modes (measured on every row below, both packages, the three
 GPUs and every lower-memory arena option).
@@ -238,6 +242,11 @@ so it is live for one layer at a time.
 * 16384-token row (the light backward recomputes the whole recurrence):
   tape made the step 14-20 % faster and the checkpointed step 10-14 % faster.
   It cost 88-112 MiB more saved set per layer and an 8-13 % higher peak.
+  In 0.2.2 this pack takes the token-aware segment plan (15 segments per
+  document instead of 37, 38 or 53), so tape saves fewer segment states: the
+  saved set per layer is 32.3-32.8 -> 87.3-87.8 MiB on the three GPUs (byte
+  query). Its peak and times were not measured again. The other rows keep
+  their 0.2.1 plan.
 * The other rows (segment states saved, or 64 heads): tape made the forward
   3-14 % slower and the backward 1-7 % faster. The step stayed within about
   ±4 %, which is no reliable gain. The checkpointed step, which runs the
@@ -326,12 +335,12 @@ replay: `cake_kda_det_train_backward` with `saved=None` raises `ValueError` on i
 the recomputed saved set, never the replay path.  A lean arena also refuses
 the flag-off rows whose backward dispatches the separate dA / dv program `dav`
 (9 to 15 heads) with `ValueError` when a backward workspace is built and in
-the byte queries; it serves the contract's head counts 1, 2, 4, 8, 16, 32 and
-64.  In the in-kernel Q/K L2 norm modes every backward launches `dav` (the
-`dav_l2n*` records, which write `dAqk` alone), and a lean arena serves those
-rows too: its layouts of two or more passes hold that whole-sequence `dAqk`
-instead of a per-pass one, 256 B more per internal token-head (3076, tape
-2308, from four passes on).
+the byte queries; it serves every other head count in 1..128.  In the
+in-kernel Q/K L2 norm modes every backward launches `dav` (the `dav_l2n*`
+records, which write `dAqk` alone), and a lean arena serves those rows too:
+its layouts of two or more passes hold that whole-sequence `dAqk` instead of a
+per-pass one, 256 B more per internal token-head (3076, tape 2308, from four
+passes on).
 
 `tail_passes = B` runs the chunk-parallel tail stages of the backward (the
 fused gradient `dqkg`, the GLM intra program and, on `sm_100a` in the default
@@ -490,7 +499,8 @@ that refuse an option skip it).
 
 ## Kernel structure of one training step
 
-The host resolves one plan per `(S, num_docs, H, sm_count, arch, gate)`: which
+The host resolves one plan per `(S, num_docs, H, sm_count, arch, gate, l2n,
+segment_rule)`: which
 record of each stage runs on each path and with which grid.  The paths are
 `fwd` (the forward with `save_for_backward`: its programs read the saved
 `Aqk` / `Akk` token rows where a form for them ships and the intra program
@@ -512,6 +522,136 @@ most `sm_count // H`, and at most 38 (37 on `sm_100a`) when `num_docs * H <= 4`
 (the "few-chain" rows, which also take proportional segment lengths: `seg_arg =
 -num_docs`); `cake_jit.SEGMENTS` holds the constants (`small_segments_by_arch`
 the per-architecture few-chain counts).
+
+That count `P_old` is the occupancy rule.  By default a plan takes the
+token-aware rule (`cake_backend.plan(..., segment_rule="tokens")`,
+`cake_jit.segment_route(..., num_tokens=S)`, constants in
+`cake_jit.TOKEN_SEGMENTS`).  On B200 (`sm_100a` with 148 SMs), GB300
+(`sm_103a` with 152 SMs) and VR200 (`sm_107a` with 212 SMs) with 4, 8 or 16
+heads (16 heads take the serial route on `sm_100a`) it also reads the token
+count `S`: a pack too short for the occupancy
+plan to save the segment states (`S < 384 * num_docs * P_old`) takes `P_u =
+max(P_ns, 12, ceil(S / 1408))` segments per document when `P_u < P_old`, where
+`P_ns = S // (384 * num_docs) + 1` is the fewest that save no state either.
+The block table keeps its form (uniform above four chains, proportional at or
+below), so the saved set and the arena never grow, the route never changes,
+and every arena option, the batched one included, runs the same plan.  The
+bounds come from GB300 measurements of the forward and backward kernel time
+against the occupancy plan, on even and skewed packs (one document holding
+most of the tokens), with 2k to 262k tokens.  Every slower uniform table on a
+skewed pack had 8 or fewer segments per document; on the skewed packs of 16384
+tokens the slower ones had segments of 1501 tokens or more, and 1334 was not
+slower.  So the rule keeps at least 12 segments per document and segments of
+at most 1408 tokens.  On B200 and VR200 the same constants were measured
+against the occupancy plan: on B200 the 53 packs whose plan changes took
+0.424-0.987 of the occupancy plan's forward kernel time and 0.606-0.999 of its
+backward (54 timed rows); on VR200 the 71 packs whose plan changes took
+0.377-0.991 of the occupancy plan's forward kernel time and 0.586-1.006 of its
+backward (72 timed rows), with no higher step or checkpointed-step peak and no
+larger saved set on B200 and VR200 (table below).  Other architectures and SM
+counts (`sm_100a` with 152 SMs, `sm_107a` with 216 SMs), other head counts,
+and the serial route keep the occupancy rule.  So do the packs of the bands of
+`occupancy_bands_by_arch`.  On GB300 and VR200 the 4-head packs of at most
+4096 tokens keep it, for accuracy: there the token-aware plan would take 12
+segments per document where the occupancy plan takes 13 to 38 (GB300) or 13
+to 53 (VR200).  On 4096 tokens in two documents (38 or 53 segments per
+document to 12) it moved the explicit gate's `dA_log` gradient in case E of
+`test_raw_gate_and_the_explicit_gate_meet_the_naive_tier` to 1.1004 times the
+naive BF16 tier's median L2 error, beyond its accepted cap of 1.0607
+(`tests/cake_naive_accepted.json`), and to 1.0179 times FLA's, so it missed
+both references; the occupancy plan passes that case.  On B200 the
+token-aware plan passes it, so B200 has no band.  The bound 4096 is case E's
+size, not a measured accuracy edge.  On 160 draws of case E's shape on GB300
+the token-aware plan's `dA_log` error was 0.943 times the occupancy plan's
+(geometric mean, 95 % interval 0.89 to 1.00), and the occupancy plan's own
+ratio to the naive tier exceeded the cap in 2 of the other 4 blocks of 32
+draws (1.158 and 1.108).  So the miss is the test's draw, not a systematic
+loss.  4-head packs of more than 4096 tokens fall under the token-aware rule; the
+raw-gate accuracy test has no slow-decay pack there.  On VR200 the 16-head
+packs of 8193 to 16383 tokens keep the occupancy rule too: there the FP32
+`qk_rstd` of the in-kernel Q/K L2 norm (1 to 2 MiB) can fill a free end that
+the smaller arena leaves in a caching-allocator segment, which measured
+491,520 B more memory above the live tensors at 12288 tokens in three
+documents.  Only that pack was measured in that window; other changed packs
+whose `qk_rstd` lies between 1 and 2 MiB may show the same effect.  Both
+bands hold in every gate and L2 norm mode.  `segment_rule="occupancy"`
+selects the occupancy rule everywhere; the context-parallel package's local
+plans take it.  The records whose rules read the segment count
+(`walk_ctas_*`, `segments_heads_*`) are selected at the plan's count.
+
+| GPU | packs whose plan changes | fwd time | bwd time | step time | ckpt step time | peak, step | peak, ckpt step | saved set per layer |
+|---|---|---|---|---|---|---|---|---|
+| B200 (`sm_100a`, 148 SMs) | 53 | 0.759 (0.424-0.987) | 0.899 (0.606-0.999) | 0.862 (0.551-0.996) | 0.836 (0.523-0.994) | -1.8 to 0.0 | -1.8 to 0.0 | 0.0 |
+| GB300 (`sm_103a`, 152 SMs) | 46 | 0.862 (0.718-0.987) | 0.928 (0.812-0.995) | 0.905 (0.786-0.992) | 0.894 (0.767-0.989) | -1.6 to 0.0 | -1.7 to 0.0 | 0.0 |
+| VR200 (`sm_107a`, 212 SMs) | 71 | 0.743 (0.377-0.991) | 0.892 (0.586-1.006) | 0.850 (0.502-0.996) | 0.833 (0.468-0.992) | -1.8 to 0.0 | -1.8 to 0.0 | 0.0 |
+
+* Measured with KDA 0.2.2 against 0.2.1 (the occupancy rule) on B200 (CUDA
+  13.5.37, torch 2.14.1+cu130), GB300 (CUDA 13.5.37, torch 2.14.1+cu130) and
+  VR200 (CUDA 13.5.37, torch 2.14.1+cu130): each version in its own process on
+  the same GPU, both packages, gate `g` and raw, and in-kernel Q/K L2 norm off
+  and on.  Times are new / old ratios of summed GPU kernel time (CUPTI; eager,
+  L2 flushed before every call), each version's value the median of its pooled
+  inner-round medians over 10-15 rotated rounds (2 inner rounds per process);
+  a ratio below 1 means faster.  Each time cell gives the median and the range
+  over the timed rows of the changed packs: 54 rows on B200, 15 rows on GB300
+  and 72 rows on VR200.  Timing processes per node at once: 4.  Two identical
+  arms of the new version differed by up to 3.94 % on B200, 3.73 % on GB300
+  and 2.36 % on VR200.  Memory columns: new minus old in MiB (2^20 bytes) of
+  the allocator peak above the live tensors at the step and at the
+  checkpointed step, and of the saved set per layer (the package's
+  `memory_report`), with the default arena: 232 records of 116 packs on B200,
+  192 records of 96 packs on GB300 and 304 records of 152 packs on VR200.
+  B200, GB300 and VR200 were measured on pre-release builds whose plans and
+  programs for the timed packs on that GPU equal this version's.
+* On B200, GB300 and VR200 the packs whose plan does not change run the same
+  programs with the same bits as 0.2.1; on the changed packs the deterministic
+  package is bitwise identical from run to run (3 runs) and its outputs meet
+  the accuracy rule of the family README.
+* On VR200 three backward times of the changed packs were slower than in
+  0.2.1 (gate `g`, L2 norm off): 16384 tokens in four documents with 16
+  heads (non-deterministic package, 1.0022) and 16384 tokens in twelve
+  documents, one of them 12009 tokens long, with 4 heads (1.0056
+  deterministic, 1.0054 non-deterministic).  With one timing process per
+  node, on another VR200 node, the twelve-document pack's backward was 0.78 %
+  (deterministic) and 0.80 % (non-deterministic) slower.  The forward, the
+  step and the checkpointed step of these packs were faster.
+* In the same A/B, 38 time cells of packs whose plan does not change were
+  slower than in 0.2.1 beyond the noise rule (outside the cell's A/A band and
+  slower in every round), although these packs run the same programs with the
+  same bits: 5 on B200 (0.06 to 0.13 %), 19 on GB300 (0.06 to 0.42 %) and 14
+  on VR200 (0.05 to 0.27 %).  21 of them were also measured with one timing
+  process per node (B200 and VR200 on another node of the same GPU).  None of
+  the 4 B200 and 7 VR200 cells was slower there.  Of the 10 GB300 cells only
+  the deterministic forward of 16384 tokens in one document stayed slower
+  (0.18 to 0.21 %); that run also found the deterministic checkpointed step
+  of the same pack and the non-deterministic backward of 239718 tokens (gate
+  `g`, L2 norm off; 0.09 %) slower.  The other 17 cells were not measured
+  with one timing process.  Per pack (`det` the deterministic package,
+  `nondet` the non-deterministic one; % slower):
+
+| GPU | tokens x documents : heads | gate | L2 norm | slower time cells |
+|---|---|---|---|---|
+| B200 | 65536x3:4 | raw | off | fwd det 0.13, bwd det 0.11 |
+| B200 | 65536x3:4 | raw | on | fwd nondet 0.13, step nondet 0.13 |
+| B200 | 239718x3:4 | raw | off | bwd det 0.06 |
+| GB300 | 16384x1:4 | `g` | off | fwd det 0.28, bwd det 0.25 |
+| GB300 | 65536x3:4 | `g` | off | bwd nondet 0.06 |
+| GB300 | 65536x3:4 | `g` | on | bwd det 0.09 |
+| GB300 | 65536x3:4 | raw | off | fwd det 0.15 |
+| GB300 | 65536x3:4 | raw | on | bwd nondet 0.42, step nondet 0.39, ckpt nondet 0.28 |
+| GB300 | 239718x3:4 | `g` | off | fwd det 0.16, ckpt det 0.10 |
+| GB300 | 239718x3:4 | raw | off | fwd nondet 0.14, bwd det 0.10 |
+| GB300 | 239718x3:4 | raw | on | bwd nondet 0.38, step nondet 0.39, ckpt nondet 0.25 |
+| GB300 | 261393x4:4 | `g` | off | bwd nondet 0.11 |
+| GB300 | 16384x3:64 | `g` | off | fwd nondet 0.18 |
+| GB300 | 65536x3:64 | `g` | off | fwd det 0.24 |
+| GB300 | 65536x3:64 | raw | on | bwd nondet 0.34 |
+| VR200 | 16384x1:4 | `g` | off | fwd det 0.21, bwd det 0.16, bwd nondet 0.27, step det 0.12 |
+| VR200 | 65536x3:4 | `g` | off | fwd det 0.05, fwd nondet 0.20, ckpt nondet 0.12 |
+| VR200 | 65536x3:4 | `g` | on | bwd det 0.22 |
+| VR200 | 239718x3:4 | `g` | off | bwd det 0.12 |
+| VR200 | 12288x3:16 | `g` | off | fwd nondet 0.13, step nondet 0.10, ckpt nondet 0.12 |
+| VR200 | 16384x3:64 | `g` | off | bwd det 0.09, step det 0.09 |
 
 Forward (`fwd`): the chunk tables from `cu_seqlens` -- on the segmented route
 up to 256 documents no table launch: the intra program `fwd_intra_v14`, launched
