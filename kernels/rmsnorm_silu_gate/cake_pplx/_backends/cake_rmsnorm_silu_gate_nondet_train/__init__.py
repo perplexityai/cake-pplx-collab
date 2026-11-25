@@ -194,26 +194,34 @@ in its last bits; other layouts, such a gate of one head among them,
 keep the programs of 0.2.16.  ``cake_jit.module_for_rows``
 takes the class (keyword ``layout``).  The deterministic package is that of
 0.2.16.
-Version 0.2.18 changes no program, only cuts of two forward tables on
-sm_100a and sm_103a (the bands of packed rows, every sm_107a table and the
-backward's are those of 0.2.17).  A gate of more than one head sliced from
-a wider projection runs ``fwd_layout_pipe`` from 600 rows per SM on sm_100a
-and from 630 on sm_103a (``cake_jit.PROJECTION_FORWARD_BANDS``; 0.2.17 ran
-the extra-long forward up to 650 and 699), whose ``y`` can differ in its last
-bits there (by at most one BF16 ulp on a few elements where measured: the
-programs associate a row's sum of squares differently); the rows of
-``cake_jit.STRIDED_FORWARD_BANDS`` run ``fwd_layout_pipe`` from 701 to 1500
-rows per SM on sm_100a and sm_103a (0.2.17 ran the plain forward), with the
-same ``y`` bits.  Head-major ``x`` and ``z`` on sm_100a and sm_103a, which
-ran ``cake_jit.STRIDED_FORWARD_BANDS`` until 0.2.17, take
-``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` there too, 0.2.17's bands of other
-layouts, so they keep 0.2.17's programs.  ``dx``, ``dz``
-and the weight gradient do not change.  Measured against 0.2.17 on the same
-GPU (B200, GB300; a gate of 1, 16, 48 or 64 heads sliced from a projection,
-``x`` and ``z`` of 16 and 48 heads both sliced), neither the forward nor the
+Version 0.2.18 changes no program, only forward tables on sm_100a and
+sm_103a (the bands of packed rows, every sm_107a table and the backward's
+are those of 0.2.17).  A gate of more than one head sliced from a wider
+projection runs ``fwd_layout_pipe`` from 600 rows per SM on sm_100a and
+from 630 on sm_103a (``cake_jit.PROJECTION_FORWARD_BANDS``; 0.2.17 ran the
+extra-long forward up to 650 and 699).  Rows that are whole tokens of wider
+tensors are a class of their own (``cake_jit.SLICED_LAYOUT``: head strides
+128 and both token strides at least ``H * 128``, such as ``x`` and ``z``
+both sliced, padded rows, a gate of one head sliced from a projection, or
+``x`` sliced beside packed ``z``), whose table
+(``cake_jit.SLICED_FORWARD_BANDS``) runs ``fwd_layout_pipe`` from 701 to
+1500 rows per SM on sm_100a and sm_103a, where 0.2.17 ran the plain
+forward; on sm_107a they run ``cake_jit.STRIDED_FORWARD_BANDS`` as in
+0.2.17.  Other layouts (``x`` or ``z`` broadcast over tokens or heads, a
+head stride other than 128, padded head-major planes, a mixed layout) and
+head-major rows keep 0.2.17's programs (the pipelined forward was measured
+slower on those other layouts).  Where ``fwd_layout_pipe`` runs in the place
+of 0.2.17's program, ``y`` can differ from 0.2.17's in its last bits on a
+few elements (the programs associate a row's sum of squares differently;
+where measured, by at most one BF16 ulp for a gate sliced from a projection,
+and the same bits on whole-token rows).  ``dx``, ``dz`` and the weight
+gradient do not change.  Measured against 0.2.17 on the same GPU (B200,
+GB300; a gate of 1, 16, 48 or 64 heads sliced from a projection, ``x`` and
+``z`` of 16 and 48 heads both sliced), neither the forward nor the
 checkpointed training step was slower beyond noise in the moved bands, nor
-the forward than the deterministic package's (the comments of the two tables
-in ``cake_jit`` give the measurement).
+the forward than the deterministic package's (the comments of
+``cake_jit.PROJECTION_FORWARD_BANDS`` and ``cake_jit.SLICED_FORWARD_BANDS``
+give the measurement).
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -443,8 +451,11 @@ Host design (the input layout rules are the deterministic package's):
   (``cake_jit.forward_layout``): ``cake_jit.PROJECTION_FORWARD_BANDS`` where
   ``x`` holds packed rows of more than one head and ``z`` the gate columns of
   a wider projection,
-  ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major,
-  else ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
+  ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major
+  on an architecture with such a table (sm_107a),
+  ``cake_jit.SLICED_FORWARD_BANDS`` where the rows are whole tokens of wider
+  tensors on an architecture with such a table (sm_100a, sm_103a), else
+  ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
   than one token counts as packed rows, but runs the band of other layouts
   where its band of packed rows runs a program that reads them at their linear
   offsets, and ``fwd_pipe`` where it runs ``fwd_keep_pipe``): a call runs a
@@ -460,8 +471,8 @@ Host design (the input layout rules are the deterministic package's):
   sm_107a, and packed rows of 17 to 32 rows on sm_107a) launches one
   256-thread CTA per block of 16 rows; the plain
   forward (the call role ``fwd``; other
-  layouts past 1500 rows per SM on sm_100a and sm_103a and past 480 on
-  sm_107a, head-major rows past 700 on sm_100a and sm_103a) one 64-thread
+  layouts past 700 rows per SM on sm_100a and sm_103a and past 480 on
+  sm_107a, whole-token rows past 1500 on sm_100a and sm_103a) one 64-thread
   CTA per block of 8 rows; the other forwards a grid
   whose CTA ``b`` walks the blocks ``b``, ``b + grid``, ...,
   loading each next block while it computes the current one, in the fewest
@@ -503,17 +514,19 @@ Host design (the input layout rules are the deterministic package's):
   extra-long forward up to 629, ``fwd_layout_pipe`` up to 2000 and the plain
   forward past it; on sm_107a ``fwd_layout_keep_pipe`` up to 300, the mid
   forward up to 442, ``fwd_layout_pipe`` up to 2999 and
-  ``fwd_layout_keep_pipe`` past it.  For head-major rows: on sm_100a the mid
+  ``fwd_layout_keep_pipe`` past it.  For head-major rows on sm_107a:
+  ``fwd_layout_keep_pipe`` up to 100, the mid forward up to 480 and the plain
+  forward past it.  For whole-token rows (such as a gate of one head) on
+  sm_100a: the mid forward up to 140, the long forward up to 400, the
+  extra-long forward up to 700, ``fwd_layout_pipe`` up to 1500 and the plain
+  forward past it; on sm_103a the mid forward up to 250, the extra-long
+  forward up to 700, ``fwd_layout_pipe`` up to 1500 and the plain forward
+  past it.  For other
+  layouts (whole-token rows on sm_107a, and head-major rows on sm_100a and
+  sm_103a): on sm_100a the mid
   forward up to 140, the long forward up to 400, the extra-long forward up to
   700 and the plain forward past it; on sm_103a the mid forward up to 250, the
-  extra-long forward up to 700 and the plain forward past it (the bands of
-  other layouts in 0.2.17); on sm_107a ``fwd_layout_keep_pipe`` up to 100, the
-  mid forward up to 480 and the plain forward past it.  For other
-  layouts (such a gate of one head): on sm_100a the mid
-  forward up to 140, the long forward up to 400, the extra-long forward up to
-  700, ``fwd_layout_pipe`` up to 1500 and the plain forward past it; on
-  sm_103a the mid forward up to 250, the extra-long forward up to 700,
-  ``fwd_layout_pipe`` up to 1500 and the plain forward past it; on sm_107a the
+  extra-long forward up to 700 and the plain forward past it; on sm_107a the
   mid forward up to 480 and the plain forward past it.  The forward programs
   associate a row's sum of squares differently, on FP32 FMA chains (the
   lanes of ``.f32x2`` FMA chains where a program runs two or four): the tiny
@@ -971,7 +984,7 @@ def _forward(
     sms = device_sm_count(index)
     # rows that are not packed run the table of their layout's class: the
     # gate columns of a wider projection of more than one head, head-major
-    # rows, or another layout
+    # rows, whole-token rows of wider tensors, or another layout
     layout = (
         None
         if packed

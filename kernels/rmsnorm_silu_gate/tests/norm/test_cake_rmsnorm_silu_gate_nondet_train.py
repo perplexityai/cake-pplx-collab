@@ -79,8 +79,9 @@ the package no longer ships, the claimed backwards of an FP32 weight
 gradient and its static backward of sm_107a among them), bands, chunks and
 grids (the forward's tables: ``FORWARD_BANDS`` of packed rows, and of rows
 that are not packed the table of their class, ``forward_layout``: a gate
-sliced from a wider projection, head-major rows, else
-``STRIDED_FORWARD_BANDS``, the host passing the class of the call's strides;
+sliced from a wider projection, head-major rows on sm_107a, whole-token rows
+on sm_100a and sm_103a, else ``STRIDED_FORWARD_BANDS``, the host passing the
+class of the call's strides;
 in the bands of ``fwd_keep_pipe`` rows broadcast over tokens run
 ``fwd_pipe``; the pipelined forwards of 0.2.17, run by name, give the ``y``
 bits of their base programs on packed, projection, head-major, one-token and
@@ -473,14 +474,14 @@ def _layout_class(T: int, H: int, layout: str = "contiguous") -> str | None:
     """The class ``forward_layout`` gives ``make(T, H, layout=layout)``'s ``x``
     and ``z`` where they do not hold packed rows (:func:`_packed`): the gate
     columns of a wider projection with packed ``x`` of more than one head
-    (``projection``; of one head None), head-major ``x`` and ``z``
-    (``head_major``), else None (``both_sliced``: ``x`` and ``z`` both sliced
-    from wider projections)."""
+    (``projection``), head-major ``x`` and ``z`` (``head_major``) and
+    whole-token rows (``projection`` of one head; ``both_sliced``: ``x`` and
+    ``z`` both sliced from wider projections)."""
     if _packed(T, H, layout):
         return None
     if layout == "projection":
-        return PROJECTION_LAYOUT if H > 1 else None
-    return {"head_major": HEAD_MAJOR_LAYOUT}.get(layout)
+        return PROJECTION_LAYOUT if H > 1 else SLICED_LAYOUT
+    return {"head_major": HEAD_MAJOR_LAYOUT, "both_sliced": SLICED_LAYOUT}.get(layout)
 
 
 def _backward_packed(T: int, H: int, layout: str = "contiguous") -> bool:
@@ -880,7 +881,9 @@ def make(T, H, *, layout="contiguous", data="normal", seed=0, device="cuda"):
         dy = randn(T, H, D)
     elif layout == "both_sliced":
         # x and z (and dy) all sliced from wider projections, read in place:
-        # rows of no class of ``forward_layout`` (STRIDED_FORWARD_BANDS).
+        # whole-token rows (``forward_layout`` gives SLICED_LAYOUT:
+        # SLICED_FORWARD_BANDS where the architecture has it, else
+        # STRIDED_FORWARD_BANDS).
         x = randn(T, 2 * H * D + 16)[:, : H * D].view(T, H, D)
         z = randn(T, 2 * H * D + 16)[:, H * D : 2 * H * D].view(T, H, D)
         dy = randn(T, 2 * H * D + 16)[:, : H * D].view(T, H, D)
@@ -3330,26 +3333,24 @@ FORWARD_BANDS = {
 # sm_107a from 17 to 32 rows.
 FORWARD_TINY_GAP = {"sm_107a": (16, 32, "fwd_short")}
 # The forward bands of inputs whose rows are not packed and of no class with a
-# table of its own (``forward_layout`` gives None: ``x`` and ``z`` both sliced,
-# a gate sliced from a projection of one head, a broadcast over heads, a mixed
-# or padded layout; the tiny forwards read packed rows only), and of packed
-# rows from PACKED_ROWS on, as FORWARD_BANDS: on sm_100a and sm_103a
-# ``fwd_layout_pipe`` from 701 to 1500 rows per SM (version 0.2.18; 0.2.17
-# ran the plain forward there).
+# table of its own on the architecture (``forward_layout`` gives None: ``x`` or
+# ``z`` broadcast over heads, or over tokens beside rows that are not packed, a
+# head stride other than 128, a mixed layout or padded head-major planes; and
+# head-major rows on sm_100a and sm_103a and whole-token rows on sm_107a, whose
+# class has no table there; the tiny forwards read packed rows only), and of
+# packed rows from PACKED_ROWS on, as FORWARD_BANDS.
 STRIDED_FORWARD_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
         (700, "fwd_xlong"),
-        (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
         (700, "fwd_xlong"),
-        (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
     "sm_107a": (
@@ -3361,13 +3362,12 @@ STRIDED_FORWARD_BANDS = {
 # The forward bands of a gate sliced from a wider projection (more than one
 # head, ``x`` of packed rows, ``z`` of head stride 128 and a token stride past
 # ``H * 128``: ``forward_layout`` gives PROJECTION_LAYOUT; such rows of one
-# head run STRIDED_FORWARD_BANDS), as FORWARD_BANDS: the pipelined forwards
-# with the per-layout L2 prefetch walk, ``fwd_layout_pipe`` and
+# head are whole-token rows, SLICED_LAYOUT), as FORWARD_BANDS: the pipelined
+# forwards with the per-layout L2 prefetch walk, ``fwd_layout_pipe`` and
 # ``fwd_layout_keep_pipe`` (``x`` and ``z`` loaded with the L2's default
 # policy; on sm_100a and sm_107a), in the place of parts of the extra-long
-# and the plain forward of STRIDED_FORWARD_BANDS on sm_100a and sm_103a (whose
-# ``fwd_layout_pipe`` band, 701 to 1500 rows per SM, lies inside this table's),
-# and of parts of its mid forward and all of its plain forward on sm_107a.
+# and the plain forward of STRIDED_FORWARD_BANDS on sm_100a and sm_103a, and
+# of parts of its mid forward and all of its plain forward on sm_107a.
 # The extra-long forward ends at 599 rows per SM on sm_100a and 629 on sm_103a
 # (version 0.2.18; 650 and 699 in 0.2.17).
 PROJECTION_FORWARD_BANDS = {
@@ -3397,25 +3397,10 @@ PROJECTION_FORWARD_BANDS = {
 }
 # The forward bands of head-major rows (``x`` and ``z`` of token stride 128
 # and head stride ``T * 128``: ``forward_layout`` gives HEAD_MAJOR_LAYOUT), by
-# architecture.  On sm_100a and sm_103a the table is version 0.2.17's
-# STRIDED_FORWARD_BANDS (V0217_FORWARD_BANDS), which these rows ran until
-# version 0.2.18, so they keep 0.2.17's programs (no ``fwd_layout_pipe`` band
-# from 701 to 1500 rows per SM).  On sm_107a ``fwd_layout_keep_pipe`` runs up
-# to 100 rows per SM; past it the bands of STRIDED_FORWARD_BANDS.
+# architecture; an architecture without an entry (sm_100a, sm_103a) runs
+# STRIDED_FORWARD_BANDS.  On sm_107a ``fwd_layout_keep_pipe`` runs up to 100
+# rows per SM; past it the bands of STRIDED_FORWARD_BANDS.
 HEAD_MAJOR_FORWARD_BANDS = {
-    "sm_100a": (
-        (12, "fwd_short"),
-        (140, "fwd_mid"),
-        (400, "fwd_long"),
-        (700, "fwd_xlong"),
-        (None, "fwd"),
-    ),
-    "sm_103a": (
-        (12, "fwd_short"),
-        (250, "fwd_mid"),
-        (700, "fwd_xlong"),
-        (None, "fwd"),
-    ),
     "sm_107a": (
         (59, "fwd_short"),
         (100, "fwd_layout_keep_pipe"),
@@ -3423,20 +3408,45 @@ HEAD_MAJOR_FORWARD_BANDS = {
         (None, "fwd"),
     ),
 }
+# The forward bands of whole-token rows (``x`` and ``z`` of head stride 128 and
+# token strides of at least ``H * 128``, one of them past it, but not a gate
+# of PROJECTION_LAYOUT: ``forward_layout`` gives SLICED_LAYOUT; ``x`` and ``z``
+# both sliced, padded rows, a gate of one head sliced from a projection, ``x``
+# sliced beside packed ``z``), by architecture (version 0.2.18): on sm_100a and
+# sm_103a STRIDED_FORWARD_BANDS but for ``fwd_layout_pipe`` from 701 to 1500
+# rows per SM; an architecture without an entry (sm_107a) runs
+# STRIDED_FORWARD_BANDS.
+SLICED_FORWARD_BANDS = {
+    "sm_100a": (
+        (12, "fwd_short"),
+        (140, "fwd_mid"),
+        (400, "fwd_long"),
+        (700, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
+        (700, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+}
 PROJECTION_LAYOUT = "projection"
 HEAD_MAJOR_LAYOUT = "head_major"
+SLICED_LAYOUT = "sliced"
 # The table of each class of ``forward_layout``.
 LAYOUT_FORWARD_BANDS = {
     PROJECTION_LAYOUT: PROJECTION_FORWARD_BANDS,
     HEAD_MAJOR_LAYOUT: HEAD_MAJOR_FORWARD_BANDS,
+    SLICED_LAYOUT: SLICED_FORWARD_BANDS,
 }
 # Version 0.2.17's bands of the tables version 0.2.18 changed, by table name
 # and architecture (every other table and architecture is unchanged; None: no
 # entry): the extra-long forward of a gate sliced from a projection up to 650
-# rows per SM on sm_100a and 699 on sm_103a, no ``fwd_layout_pipe`` band of
-# STRIDED_FORWARD_BANDS (the plain forward from 701 rows per SM), and no
-# HEAD_MAJOR_FORWARD_BANDS entry of sm_100a and sm_103a (head-major rows ran
-# STRIDED_FORWARD_BANDS there).
+# rows per SM on sm_100a and 699 on sm_103a, and no SLICED_FORWARD_BANDS entry
+# (0.2.17 gave whole-token rows no class: they ran STRIDED_FORWARD_BANDS).
 V0217_FORWARD_BANDS = {
     "PROJECTION_FORWARD_BANDS": {
         "sm_100a": (
@@ -3456,34 +3466,19 @@ V0217_FORWARD_BANDS = {
             (None, "fwd"),
         ),
     },
-    "STRIDED_FORWARD_BANDS": {
-        "sm_100a": (
-            (12, "fwd_short"),
-            (140, "fwd_mid"),
-            (400, "fwd_long"),
-            (700, "fwd_xlong"),
-            (None, "fwd"),
-        ),
-        "sm_103a": (
-            (12, "fwd_short"),
-            (250, "fwd_mid"),
-            (700, "fwd_xlong"),
-            (None, "fwd"),
-        ),
-    },
-    "HEAD_MAJOR_FORWARD_BANDS": {"sm_100a": None, "sm_103a": None},
+    "SLICED_FORWARD_BANDS": {"sm_100a": None, "sm_103a": None},
 }
 # The rows per SM ``(lo, hi]`` whose forward module version 0.2.18 moved, by
 # architecture, ``forward_layout`` class of rows that are not packed and
 # ``(0.2.17 role, 0.2.18 role)``: a gate of more than one head sliced from a
-# projection (``PROJECTION_LAYOUT``) from the extra-long forward, and the rows
-# of STRIDED_FORWARD_BANDS (no class) from the plain forward, each to
-# ``fwd_layout_pipe``; head-major rows move nowhere.
+# projection (``PROJECTION_LAYOUT``) from the extra-long forward, and
+# whole-token rows (``SLICED_LAYOUT``) from the plain forward, each to
+# ``fwd_layout_pipe``; rows of no class and head-major rows move nowhere.
 V0218_MOVED_BANDS = {
     ("sm_100a", PROJECTION_LAYOUT): (599, 650, "fwd_xlong", "fwd_layout_pipe"),
     ("sm_103a", PROJECTION_LAYOUT): (629, 699, "fwd_xlong", "fwd_layout_pipe"),
-    ("sm_100a", None): (700, 1500, "fwd", "fwd_layout_pipe"),
-    ("sm_103a", None): (700, 1500, "fwd", "fwd_layout_pipe"),
+    ("sm_100a", SLICED_LAYOUT): (700, 1500, "fwd", "fwd_layout_pipe"),
+    ("sm_103a", SLICED_LAYOUT): (700, 1500, "fwd", "fwd_layout_pipe"),
 }
 # The pipelined forwards of 0.2.17: builds of ``fwd_pipe`` (sm_100a, and
 # sm_103a for ``fwd_layout_pipe``) and, on sm_107a, of the deterministic
@@ -3635,7 +3630,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     """``module_for_rows``: the forward's module of the first
     ``FORWARD_BANDS`` band (where the rows are not packed, of the table of
     their class ``layout``: ``PROJECTION_FORWARD_BANDS``,
-    ``HEAD_MAJOR_FORWARD_BANDS``, else ``STRIDED_FORWARD_BANDS``) with
+    ``HEAD_MAJOR_FORWARD_BANDS`` and ``SLICED_FORWARD_BANDS`` where the
+    architecture has one, else ``STRIDED_FORWARD_BANDS``) with
     ``rows <= last * sm_count`` (rows per SM; the tiny forwards of 32 lanes a
     row, sm_100a and sm_103a, and of 16, the
     short, pipelined, mid, long, extra-long and plain forwards, each where the
@@ -3673,8 +3669,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     assert loader.STRIDED_FORWARD_BANDS == STRIDED_FORWARD_BANDS
     assert loader.PROJECTION_FORWARD_BANDS == PROJECTION_FORWARD_BANDS
     assert loader.HEAD_MAJOR_FORWARD_BANDS == HEAD_MAJOR_FORWARD_BANDS
+    assert loader.SLICED_FORWARD_BANDS == SLICED_FORWARD_BANDS
     assert loader.PROJECTION_LAYOUT == PROJECTION_LAYOUT
     assert loader.HEAD_MAJOR_LAYOUT == HEAD_MAJOR_LAYOUT
+    assert loader.SLICED_LAYOUT == SLICED_LAYOUT
     assert loader.LAYOUT_FORWARD_BANDS == LAYOUT_FORWARD_BANDS
     assert loader.LAYOUT_FORWARD_BANDS[PROJECTION_LAYOUT] is (
         loader.PROJECTION_FORWARD_BANDS
@@ -3682,13 +3680,18 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     assert loader.LAYOUT_FORWARD_BANDS[HEAD_MAJOR_LAYOUT] is (
         loader.HEAD_MAJOR_FORWARD_BANDS
     )
+    assert loader.LAYOUT_FORWARD_BANDS[SLICED_LAYOUT] is (
+        loader.SLICED_FORWARD_BANDS
+    )
     assert set(PROJECTION_FORWARD_BANDS) == set(loader.ARCHES)
-    assert set(HEAD_MAJOR_FORWARD_BANDS) == set(loader.ARCHES)
-    for arch in ("sm_100a", "sm_103a"):
-        # head-major rows keep 0.2.17's bands of other layouts
-        old = V0217_FORWARD_BANDS["STRIDED_FORWARD_BANDS"][arch]
-        assert HEAD_MAJOR_FORWARD_BANDS[arch] == old, arch
-        assert STRIDED_FORWARD_BANDS[arch] != old, arch
+    assert set(HEAD_MAJOR_FORWARD_BANDS) == {"sm_107a"}
+    assert set(SLICED_FORWARD_BANDS) == {"sm_100a", "sm_103a"}
+    for arch, bands in SLICED_FORWARD_BANDS.items():
+        # whole-token rows: the bands of other layouts but ``fwd_layout_pipe``
+        # from 701 to 1500 rows per SM
+        pipe = bands.index((1500, "fwd_layout_pipe"))
+        assert bands[pipe - 1] == (700, "fwd_xlong"), arch
+        assert bands[:pipe] + bands[pipe + 1 :] == STRIDED_FORWARD_BANDS[arch], arch
     for arch, (lo, hi, role) in FORWARD_TINY_GAP.items():
         # the gap lies in the tiny forward's first band on any SM count
         assert FORWARD_BANDS[arch][0][1] == "fwd_tiny", arch
@@ -3851,8 +3854,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     # end: past 6500 rows per SM too, where the mid forward ran until version
     # 0.2.17); other layouts the short forward up to 12 rows per SM, the mid
     # forward up to 140, the long forward up to 400, the extra-long forward up
-    # to 700, ``fwd_layout_pipe`` up to 1500 (the plain forward until version
-    # 0.2.18), the plain forward past it
+    # to 700, the plain forward past it
     routes = loader.ROUTES["sm_100a"]
     for rows, packed, strided in (
         (1, "fwd_l32_tiny", "fwd_short"),
@@ -3874,9 +3876,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (520 * sm_count, "fwd_xlong", "fwd_xlong"),
         (520 * sm_count + 1, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count, "fwd_pipe", "fwd_xlong"),
-        (700 * sm_count + 1, "fwd_pipe", "fwd_layout_pipe"),
-        (701 * sm_count, "fwd_pipe", "fwd_layout_pipe"),
-        (1500 * sm_count, "fwd_pipe", "fwd_layout_pipe"),
+        (700 * sm_count + 1, "fwd_pipe", "fwd"),
+        (701 * sm_count, "fwd_pipe", "fwd"),
+        (1500 * sm_count, "fwd_pipe", "fwd"),
         (1500 * sm_count + 1, "fwd_pipe", "fwd"),
         (1501 * sm_count, "fwd_pipe", "fwd"),
         (6500 * sm_count, "fwd_pipe", "fwd"),
@@ -3895,8 +3897,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     # extra-long forward up to 600, the pipelined forward up to 6000, the
     # mid forward up to 8192, the pipelined forward past it; other layouts
     # the short forward up to 12, the mid forward up to 250, the extra-long
-    # forward up to 700, ``fwd_layout_pipe`` up to 1500 (the plain forward
-    # until version 0.2.18), the plain forward past it (sm_103a routes no long
+    # forward up to 700, the plain forward past it (sm_103a routes no long
     # forward and no forward with the L2's default policy)
     routes = loader.ROUTES["sm_103a"]
     for rows, packed, strided in (
@@ -3913,9 +3914,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (600 * sm_count, "fwd_xlong", "fwd_xlong"),
         (600 * sm_count + 1, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count, "fwd_pipe", "fwd_xlong"),
-        (700 * sm_count + 1, "fwd_pipe", "fwd_layout_pipe"),
-        (701 * sm_count, "fwd_pipe", "fwd_layout_pipe"),
-        (1500 * sm_count, "fwd_pipe", "fwd_layout_pipe"),
+        (700 * sm_count + 1, "fwd_pipe", "fwd"),
+        (701 * sm_count, "fwd_pipe", "fwd"),
+        (1500 * sm_count, "fwd_pipe", "fwd"),
         (1500 * sm_count + 1, "fwd_pipe", "fwd"),
         (1501 * sm_count, "fwd_pipe", "fwd"),
         (1999 * sm_count, "fwd_pipe", "fwd"),
@@ -3979,10 +3980,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     assert "fwd_long" not in routes and "fwd_pipe" not in routes
     assert "fwd_keep_pipe" not in routes and "fwd_l32_tiny" not in routes
     # the classes of rows that are not packed: a gate sliced from a projection
-    # (PROJECTION_FORWARD_BANDS) and head-major rows (HEAD_MAJOR_FORWARD_BANDS;
-    # on sm_100a and sm_103a 0.2.17's bands of other layouts, the plain
-    # forward from 701 rows per SM, where other layouts run ``fwd_layout_pipe``
-    # up to 1500 since version 0.2.18), at each cut of their tables
+    # (PROJECTION_FORWARD_BANDS), head-major rows (HEAD_MAJOR_FORWARD_BANDS on
+    # sm_107a, STRIDED_FORWARD_BANDS elsewhere) and whole-token rows
+    # (SLICED_FORWARD_BANDS on sm_100a and sm_103a, STRIDED_FORWARD_BANDS on
+    # sm_107a), at each cut of their tables
     for arch, layout, cases in (
         (
             "sm_100a",
@@ -3997,6 +3998,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (600 * sm_count, "fwd_layout_pipe"),
                 (650 * sm_count, "fwd_layout_pipe"),
                 (650 * sm_count + 1, "fwd_layout_pipe"),
+                (651 * sm_count, "fwd_layout_pipe"),
                 (2000 * sm_count, "fwd_layout_pipe"),
                 (2000 * sm_count + 1, "fwd_layout_keep_pipe"),
                 (3000 * sm_count, "fwd_layout_keep_pipe"),
@@ -4017,6 +4019,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (630 * sm_count, "fwd_layout_pipe"),
                 (699 * sm_count, "fwd_layout_pipe"),
                 (699 * sm_count + 1, "fwd_layout_pipe"),
+                (700 * sm_count, "fwd_layout_pipe"),
                 (2000 * sm_count, "fwd_layout_pipe"),
                 (2000 * sm_count + 1, "fwd"),
                 (6445 * sm_count, "fwd"),
@@ -4043,7 +4046,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         ),
         (
             "sm_100a",
-            HEAD_MAJOR_LAYOUT,
+            SLICED_LAYOUT,
             (
                 (12 * sm_count, "fwd_short"),
                 (12 * sm_count + 1, "fwd_mid"),
@@ -4052,10 +4055,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (400 * sm_count, "fwd_long"),
                 (400 * sm_count + 1, "fwd_xlong"),
                 (700 * sm_count, "fwd_xlong"),
-                (700 * sm_count + 1, "fwd"),
-                (701 * sm_count, "fwd"),
-                (1000 * sm_count, "fwd"),
-                (1500 * sm_count, "fwd"),
+                (700 * sm_count + 1, "fwd_layout_pipe"),
+                (701 * sm_count, "fwd_layout_pipe"),
+                (1000 * sm_count, "fwd_layout_pipe"),
+                (1500 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count + 1, "fwd"),
                 (1501 * sm_count, "fwd"),
                 (2**31 - 1, "fwd"),
@@ -4063,17 +4066,17 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         ),
         (
             "sm_103a",
-            HEAD_MAJOR_LAYOUT,
+            SLICED_LAYOUT,
             (
                 (12 * sm_count, "fwd_short"),
                 (12 * sm_count + 1, "fwd_mid"),
                 (250 * sm_count, "fwd_mid"),
                 (250 * sm_count + 1, "fwd_xlong"),
                 (700 * sm_count, "fwd_xlong"),
-                (700 * sm_count + 1, "fwd"),
-                (701 * sm_count, "fwd"),
-                (1000 * sm_count, "fwd"),
-                (1500 * sm_count, "fwd"),
+                (700 * sm_count + 1, "fwd_layout_pipe"),
+                (701 * sm_count, "fwd_layout_pipe"),
+                (1000 * sm_count, "fwd_layout_pipe"),
+                (1500 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count + 1, "fwd"),
                 (1501 * sm_count, "fwd"),
                 (2**31 - 1, "fwd"),
@@ -4116,28 +4119,33 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         )
         want = loader.module_for_rows("sm_107a", "fwd", rows, sm_count, packed=False)
         assert got == want, rows
+    # whole-token rows on sm_107a run the programs of STRIDED_FORWARD_BANDS
+    for rows in (59, 60, 480, 481, 700, 701, 1500, 1501):
+        rows *= sm_count
+        got = loader.module_for_rows(
+            "sm_107a", "fwd", rows, sm_count, packed=False, layout=SLICED_LAYOUT
+        )
+        want = loader.module_for_rows("sm_107a", "fwd", rows, sm_count, packed=False)
+        assert got == want, rows
     for arch in ("sm_100a", "sm_103a"):
-        # head-major rows run 0.2.17's STRIDED_FORWARD_BANDS, the bands of
-        # other layouts but from 701 to 1500 rows per SM, where those run
-        # ``fwd_layout_pipe`` and head-major rows the plain forward
-        routes = loader.ROUTES[arch]
-        old = V0217_FORWARD_BANDS["STRIDED_FORWARD_BANDS"][arch]
-        for last, _ in STRIDED_FORWARD_BANDS[arch][:-1]:
+        # no table of head-major rows: STRIDED_FORWARD_BANDS
+        for last, _ in STRIDED_FORWARD_BANDS[arch][:-1] + ((1500, None),):
             for rows in (last * sm_count, last * sm_count + 1):
                 got = loader.module_for_rows(
                     arch, "fwd", rows, sm_count, packed=False, layout=HEAD_MAJOR_LAYOUT
                 )
-                want = next(
-                    band for end, band in old if end is None or rows <= end * sm_count
-                )
-                assert got == routes[want], (arch, rows)
-                other = loader.module_for_rows(
-                    arch, "fwd", rows, sm_count, packed=False
+                want = loader.module_for_rows(arch, "fwd", rows, sm_count, packed=False)
+                assert got == want, (arch, rows)
+                # whole-token rows apart from the bands of other layouts only
+                # from 701 to 1500 rows per SM
+                sliced = loader.module_for_rows(
+                    arch, "fwd", rows, sm_count, packed=False, layout=SLICED_LAYOUT
                 )
                 apart = 700 * sm_count < rows <= 1500 * sm_count
-                assert (got != other) == apart, (arch, rows)
+                assert (sliced != want) == apart, (arch, rows)
                 if apart:
-                    assert (got, other) == (routes["fwd"], routes["fwd_layout_pipe"])
+                    routes = loader.ROUTES[arch]
+                    assert (sliced, want) == (routes["fwd_layout_pipe"], routes["fwd"])
         for rows in (PACKED_ROWS, 2**31 - 1):
             # packed rows from PACKED_ROWS on: STRIDED_FORWARD_BANDS
             got = loader.module_for_rows(arch, "fwd", rows, sm_count)
@@ -4763,10 +4771,8 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
     """``routes_every_call``: every exported architecture routes a module for
     every call (the role of every band of its ``FORWARD_BANDS``,
     ``STRIDED_FORWARD_BANDS``, the class tables of ``LAYOUT_FORWARD_BANDS`` (a
-    role only they run, the pipelined forwards with the per-layout walk on
-    sm_107a and ``fwd_layout_keep_pipe`` on sm_100a, among them; since
-    version 0.2.18 ``STRIDED_FORWARD_BANDS`` runs ``fwd_layout_pipe`` on
-    sm_100a and sm_103a too) and ``BACKWARD_BANDS``, and the long role of
+    role only they run, the pipelined forwards with the per-layout walk,
+    among them) and ``BACKWARD_BANDS``, and the long role of
     every band role of its ``LONG_BACKWARD_ROWS_PER_SM`` and
     ``LONG_BACKWARD_STRIDED_ROWS_PER_SM``; a role whose bands
     end without a ``None`` band, its own module), so the support query is
@@ -4777,16 +4783,14 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
     assert pkg.is_cake_rmsnorm_silu_gate_nondet_train_supported(torch.device("cuda"))
     assert not loader.routes_every_call("sm_90a")
     routes = loader.ROUTES
-    only_classed = {}
     for arch in loader.ARCHES:
         assert loader.routes_every_call(arch), arch
         band_roles = {
             band for bands in _loader_forward_tables(arch) for _, band in bands
         }
         # the roles only a table of a class of ``forward_layout`` runs (the
-        # pipelined forwards with the per-layout walk, but ``fwd_layout_pipe``
-        # on sm_100a and sm_103a, which STRIDED_FORWARD_BANDS runs too since
-        # version 0.2.18): removing one's route fails the query too
+        # pipelined forwards with the per-layout walk): removing one's route
+        # fails the query too
         classed = {
             band
             for table in loader.LAYOUT_FORWARD_BANDS.values()
@@ -4803,10 +4807,7 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
             if arch in NEW_PIPE_BASES[role]
         }
         assert "fwd_layout_pipe" in layout_pipes, arch
-        assert layout_pipes <= classed, arch
-        strided_too = {"fwd_layout_pipe"} if arch in ("sm_100a", "sm_103a") else set()
-        assert layout_pipes & plain == strided_too, arch
-        only_classed[arch] = layout_pipes - plain
+        assert layout_pipes <= classed - plain, arch
         band_roles |= {
             band for bands in loader.BACKWARD_BANDS[arch].values() for _, band in bands
         }
@@ -4820,12 +4821,6 @@ def test_support_query_needs_a_route_for_every_call(monkeypatch):
             monkeypatch.setattr(loader, "ROUTES", fewer)
             assert not loader.routes_every_call(arch), (arch, role)
             monkeypatch.setattr(loader, "ROUTES", routes)
-    # a role only a class table runs on sm_100a and sm_107a (none on sm_103a)
-    assert only_classed == {
-        "sm_100a": {"fwd_layout_keep_pipe"},
-        "sm_103a": set(),
-        "sm_107a": {"fwd_layout_pipe", "fwd_layout_keep_pipe"},
-    }, only_classed
     # the bands of a BF16 weight gradient without their last (``None``) band:
     # sm_100a routes no module of the call role past them, sm_107a its static
     # backward
@@ -5299,21 +5294,34 @@ def test_forward_packed_is_the_kernels_packed_rows_test():
 # ``(T, H, x_tok, x_head, z_tok, z_head)`` as the kernels get them (a single
 # token's stride passed as 0, a single head's as 128) and the class
 # ``forward_layout`` gives the rows: a gate sliced from a wider projection with
-# packed ``x`` of more than one head, head-major ``x`` and ``z``; no class for
-# such a gate of one head, padded head-major rows, ``x`` sliced too, a ``z``
-# broadcast over tokens, mixed layouts, packed rows (which the host classes
-# before), one token, one packed head, ``x`` broadcast with a ``z`` sliced
-# from a projection, a ``z`` interleaved per head and an ``x`` broadcast over
-# heads.
+# packed ``x`` of more than one head, head-major ``x`` and ``z``; whole-token
+# rows (head strides 128, both token strides at least ``H * 128`` and one past
+# it: such a gate of one head, ``x`` sliced too, of 16 and 48 heads, padded
+# rows of 16 heads and of one, ``x`` sliced beside packed ``z``); no class for
+# padded head-major rows, a head stride of 144 (padded heads), a ``z``
+# broadcast over tokens (beside packed or sliced ``x``), mixed layouts, packed
+# rows (which the host classes before), one token, one packed head, ``x``
+# broadcast with a ``z`` sliced from a projection, a ``z`` interleaved per
+# head, an ``x`` broadcast over heads and a ``z`` whose token stride is less
+# than a row.
 FORWARD_LAYOUT_CASES = [
     pytest.param((64, 16, 2048, 128, 4112, 128), PROJECTION_LAYOUT, id="projection"),
     pytest.param((64, 2, 256, 128, 528, 128), PROJECTION_LAYOUT, id="projection_h2"),
-    pytest.param((64, 1, 128, 128, 272, 128), None, id="projection_h1"),
-    pytest.param((64, 1, 128, 128, 4112, 128), None, id="projection_h1_wide"),
+    pytest.param((64, 1, 128, 128, 272, 128), SLICED_LAYOUT, id="projection_h1"),
+    pytest.param((64, 1, 128, 128, 4112, 128), SLICED_LAYOUT, id="projection_h1_wide"),
     pytest.param((64, 16, 128, 8192, 128, 8192), HEAD_MAJOR_LAYOUT, id="head_major"),
     pytest.param((64, 16, 128, 16384, 128, 16384), None, id="padded_head_major"),
-    pytest.param((64, 16, 4112, 128, 4112, 128), None, id="x_also_sliced"),
+    pytest.param((64, 16, 4112, 128, 4112, 128), SLICED_LAYOUT, id="x_also_sliced"),
+    pytest.param(
+        (64, 48, 12304, 128, 12304, 128), SLICED_LAYOUT, id="x_also_sliced_h48"
+    ),
+    pytest.param((64, 16, 2064, 128, 2064, 128), SLICED_LAYOUT, id="padded"),
+    pytest.param((64, 1, 144, 128, 144, 128), SLICED_LAYOUT, id="padded_h1"),
+    pytest.param((64, 16, 4112, 128, 2048, 128), SLICED_LAYOUT, id="x_sliced_z_packed"),
+    pytest.param((64, 16, 2304, 144, 2304, 144), None, id="padded_heads"),
     pytest.param((64, 16, 2048, 128, 0, 128), None, id="broadcast_z"),
+    pytest.param((64, 16, 4112, 128, 0, 128), None, id="x_sliced_broadcast_z"),
+    pytest.param((64, 16, 4112, 128, 1024, 128), None, id="z_token_stride_below_row"),
     pytest.param((64, 16, 128, 8192, 4112, 128), None, id="mixed"),
     pytest.param((64, 16, 2048, 128, 2048, 128), None, id="packed"),
     pytest.param((1, 16, 0, 128, 0, 128), None, id="one_token"),
@@ -5330,9 +5338,10 @@ def test_forward_layout_classes(strides, want):
     ``FORWARD_LAYOUT_CASES`` its class: ``PROJECTION_LAYOUT`` where ``x``
     holds packed rows of more than one head (head stride 128, token stride
     ``H * 128``) and ``z`` has head stride 128 and a token stride past ``H *
-    128`` (such rows of one head run ``STRIDED_FORWARD_BANDS``);
-    ``HEAD_MAJOR_LAYOUT`` where ``x`` and ``z`` have token stride 128 and
-    head stride ``T * 128``; else None."""
+    128``; ``HEAD_MAJOR_LAYOUT`` where ``x`` and ``z`` have token stride 128
+    and head stride ``T * 128``; ``SLICED_LAYOUT`` where both head strides
+    are 128 and both token strides at least ``H * 128``, one past it (such a
+    gate of one head among them); else None."""
     assert loader.forward_layout(*strides) == want, strides
 
 
@@ -5355,7 +5364,8 @@ def _host_forward(monkeypatch, arch: str, sm_count: int) -> list:
 def _host_inputs(T: int, H: int, layout: str):
     """Uninitialised CPU ``x`` and ``z`` of ``make``'s ``layout`` (and
     ``broadcast``, ``x_broadcast``, ``z_broadcast``: contiguous, the named
-    tensors broadcast over tokens), and a weight."""
+    tensors broadcast over tokens; the forms of ``HOST_FORM_CLASSES``), and a
+    weight."""
     if layout == "contiguous":
         x, z = torch.empty(T, H, D, dtype=torch.bfloat16), None
     elif layout == "projection":
@@ -5369,6 +5379,32 @@ def _host_inputs(T: int, H: int, layout: str):
         x = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)[:, : H * D]
         z = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)
         x, z = x.view(T, H, D), z[:, H * D : 2 * H * D].view(T, H, D)
+    elif layout == "padded":
+        x = torch.empty(T, H * D + 16, dtype=torch.bfloat16)[:, : H * D]
+        z = torch.empty(T, H * D + 16, dtype=torch.bfloat16)[:, : H * D]
+        x, z = x.view(T, H, D), z.view(T, H, D)
+    elif layout == "x_sliced":
+        x = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)[:, : H * D]
+        x = x.view(T, H, D)
+    elif layout == "padded_heads":
+        x = torch.empty(T, H, D + 16, dtype=torch.bfloat16)[..., :D]
+        z = torch.empty(T, H, D + 16, dtype=torch.bfloat16)[..., :D]
+    elif layout == "padded_head_major":
+        x = torch.empty(H, 2 * T, D, dtype=torch.bfloat16)[:, :T].permute(1, 0, 2)
+        z = torch.empty(H, 2 * T, D, dtype=torch.bfloat16)[:, :T].permute(1, 0, 2)
+    elif layout in ("mixed", "x_broadcast_projection"):
+        if layout == "mixed":
+            x = torch.empty(H, T, D, dtype=torch.bfloat16).permute(1, 0, 2)
+        else:
+            x = torch.empty(1, H, D, dtype=torch.bfloat16).expand(T, H, D)
+        z = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)
+        z = z[:, H * D : 2 * H * D].view(T, H, D)
+    elif layout == "x_broadcast_heads":
+        x = torch.empty(T, 1, D, dtype=torch.bfloat16).expand(T, H, D)
+    elif layout == "z_broadcast_x_sliced":
+        x = torch.empty(T, 2 * H * D + 16, dtype=torch.bfloat16)[:, : H * D]
+        x = x.view(T, H, D)
+        z = torch.empty(1, H, D, dtype=torch.bfloat16).expand(T, H, D)
     elif layout.endswith("broadcast"):
         one = torch.empty(1, H, D, dtype=torch.bfloat16).expand(T, H, D)
         full = torch.empty(T, H, D, dtype=torch.bfloat16)
@@ -5381,42 +5417,77 @@ def _host_inputs(T: int, H: int, layout: str):
     return x, z, torch.ones(D, dtype=torch.bfloat16)
 
 
+# The forward class the host gives each form of ``_host_inputs`` of 4 heads and
+# of one head (more than one token): "packed" (rows the host reads as packed,
+# which take no class), or the class of ``forward_layout``.  A gate of one head
+# sliced from a projection, padded heads of one head (token stride 144) and a
+# head-major ``x`` of one head beside such a gate are whole-token rows; one
+# head of head-major rows, of padded head-major planes or broadcast over heads
+# is packed.
+HOST_FORM_CLASSES = {
+    "contiguous": ("packed", "packed"),
+    "projection": (PROJECTION_LAYOUT, SLICED_LAYOUT),
+    "head_major": (HEAD_MAJOR_LAYOUT, "packed"),
+    "both_sliced": (SLICED_LAYOUT, SLICED_LAYOUT),
+    "padded": (SLICED_LAYOUT, SLICED_LAYOUT),
+    "x_sliced": (SLICED_LAYOUT, SLICED_LAYOUT),
+    "padded_heads": (None, SLICED_LAYOUT),
+    "padded_head_major": (None, "packed"),
+    "mixed": (None, SLICED_LAYOUT),
+    "x_broadcast_heads": (None, "packed"),
+    "x_broadcast_projection": (None, None),
+    "z_broadcast_x_sliced": (None, None),
+}
+
+
 def test_forward_runs_the_table_of_the_rows_class(monkeypatch):
     """Without a device or a kernel (``_host_forward``, 2 SMs): the backend's
-    forward of ``make``'s layouts of 4 heads (packed rows, a gate sliced from a
-    projection, head-major rows, ``x`` and ``z`` both sliced) at each cut of
-    every forward table of the architecture and a row either side launches the
-    module of the table of the rows' class (:func:`_layout_class`,
-    :func:`_tier_module`): ``forward_layout`` of the host's strides reaches
-    ``module_for_rows``.  A gate sliced from a projection runs another module
-    than the same rows of no class at some row count on every architecture,
-    and so do head-major rows (on sm_100a and sm_103a from 701 to 1500 rows
-    per SM, where rows of no class run ``fwd_layout_pipe`` since version
-    0.2.18 and head-major rows the plain forward of 0.2.17)."""
-    sm_count, heads = 2, 4
+    forward of every form of ``HOST_FORM_CLASSES`` of 4 heads and of one head
+    (packed rows, a gate sliced from a projection, head-major rows, ``x`` and
+    ``z`` both sliced, padded rows, ``x`` sliced beside packed ``z``, padded
+    heads, padded head-major planes, a mixed layout, ``x`` broadcast over
+    heads, ``x`` broadcast over tokens beside a gate sliced from a projection
+    and ``z`` broadcast over tokens beside a sliced ``x``) at each cut of every
+    forward table of the architecture and a row either side launches the
+    module of the table of the rows' class (:func:`_tier_module`):
+    ``forward_layout`` of the host's strides reaches ``module_for_rows``.  A
+    gate sliced from a projection runs another module than the same rows of
+    no class at some row count on every architecture, head-major rows on
+    sm_107a only and whole-token rows on sm_100a and sm_103a only (from 701
+    to 1500 rows per SM, version 0.2.18)."""
+    sm_count = 2
     for arch in loader.ARCHES:
         calls = _host_forward(monkeypatch, arch, sm_count)
         edges = {1, 2, 3}
         for bands in _forward_tables(arch):
             for last, _ in bands[:-1]:
                 edges |= {last * sm_count + d for d in (-1, 0, 1)}
-        apart = {PROJECTION_LAYOUT: 0, HEAD_MAJOR_LAYOUT: 0}
+        apart = {PROJECTION_LAYOUT: 0, HEAD_MAJOR_LAYOUT: 0, SLICED_LAYOUT: 0}
         for edge in sorted(edges):
-            T = max(2, -(-edge // heads))
-            rows = T * heads
-            for layout in ("contiguous", "projection", "head_major", "both_sliced"):
-                x, z, w = _host_inputs(T, heads, layout)
-                calls.clear()
-                pkg._forward(x, z, w, EPS, out=None)
-                packed = _packed(T, heads, layout)
-                cls = _layout_class(T, heads, layout)
-                want = _tier_module(arch, "fwd", rows, sm_count, packed, cls)
-                assert [name for name, _ in calls] == [want], (arch, layout, rows)
-                if cls is not None:
-                    other = _tier_module(arch, "fwd", rows, sm_count, False)
-                    apart[cls] += want != other
+            for layout, classes in HOST_FORM_CLASSES.items():
+                for heads, cls in zip((4, 1), classes, strict=True):
+                    T = max(2, -(-edge // heads))
+                    rows = T * heads
+                    x, z, w = _host_inputs(T, heads, layout)
+                    calls.clear()
+                    pkg._forward(x, z, w, EPS, out=None)
+                    packed = cls == "packed"
+                    layout_class = None if packed else cls
+                    want = _tier_module(
+                        arch, "fwd", rows, sm_count, packed, layout_class
+                    )
+                    assert [name for name, _ in calls] == [want], (
+                        arch,
+                        layout,
+                        heads,
+                        rows,
+                    )
+                    if layout_class is not None:
+                        other = _tier_module(arch, "fwd", rows, sm_count, False)
+                        apart[layout_class] += want != other
         assert apart[PROJECTION_LAYOUT], arch
-        assert apart[HEAD_MAJOR_LAYOUT], arch
+        assert bool(apart[HEAD_MAJOR_LAYOUT]) == (arch in HEAD_MAJOR_FORWARD_BANDS)
+        assert bool(apart[SLICED_LAYOUT]) == (arch in SLICED_FORWARD_BANDS)
 
 
 # Calls in the bands of the pipelined forwards with the L2's default policy:
@@ -7136,10 +7207,12 @@ def _forward_rows() -> dict[str, tuple[int, int, str]]:
     """One shape of each forward module this device's bands run: the first
     row of the module's first band of ``FORWARD_BANDS`` (contiguous rows),
     else of ``PROJECTION_FORWARD_BANDS`` (two heads, ``z`` sliced from a
-    wider projection), of ``HEAD_MAJOR_FORWARD_BANDS`` (two heads,
-    head-major) or of ``STRIDED_FORWARD_BANDS`` (one head,
-    ``x`` and ``z`` both sliced), at least 2 tokens so that the rows of the
-    last three are not packed: ``{module: (T, H, make's layout)}``."""
+    wider projection), of ``HEAD_MAJOR_FORWARD_BANDS`` where the
+    architecture has one (two heads, head-major) or of
+    ``SLICED_FORWARD_BANDS`` where it has one, else ``STRIDED_FORWARD_BANDS``
+    (one head, ``x`` and ``z`` both sliced: whole-token rows), at least 2
+    tokens so that the rows of the last three are not packed: ``{module: (T,
+    H, make's layout)}``."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     sm_count = loader.device_sm_count(device_index)
@@ -7148,7 +7221,11 @@ def _forward_rows() -> dict[str, tuple[int, int, str]]:
         ("contiguous", 1, loader.FORWARD_BANDS[arch]),
         ("projection", 2, loader.PROJECTION_FORWARD_BANDS[arch]),
         ("head_major", 2, loader.HEAD_MAJOR_FORWARD_BANDS.get(arch, ())),
-        ("both_sliced", 1, loader.STRIDED_FORWARD_BANDS[arch]),
+        (
+            "both_sliced",
+            1,
+            loader.SLICED_FORWARD_BANDS.get(arch) or loader.STRIDED_FORWARD_BANDS[arch],
+        ),
     ):
         start = 1 if layout == "contiguous" else 2 * heads
         for last, _role in bands:

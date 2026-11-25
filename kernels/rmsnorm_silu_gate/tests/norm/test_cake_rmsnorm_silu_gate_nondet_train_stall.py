@@ -23,10 +23,11 @@ element ``128 n``, fewer than ``PACKED_ROWS`` rows), else of the table of
 the rows' class (``forward_layout``): ``PROJECTION_FORWARD_BANDS`` where
 ``x`` holds packed rows of more than one head and ``z`` the gate columns of
 a wider projection, ``HEAD_MAJOR_FORWARD_BANDS`` for head-major rows on
-SM107, and ``STRIDED_FORWARD_BANDS`` for other rows (``x`` and ``z`` both
-sliced from wider projections, such a gate of one head, head-major rows on
-SM100 and SM103, and a broadcast over tokens that its band of packed rows
-does not run, below).  The plain forward
+SM107, ``SLICED_FORWARD_BANDS`` for whole-token rows on SM100 and SM103
+(``x`` and ``z`` both sliced from wider projections, such a gate of one
+head), and ``STRIDED_FORWARD_BANDS`` for other rows (whole-token rows on
+SM107, head-major rows on SM100 and SM103, and a broadcast over tokens that
+its band of packed rows does not run, below).  The plain forward
 launches a grid of independent
 CTAs, one 64-thread CTA per block of 8 rows.  Packed rows up to 4 rows per SM
 on SM100 and 12 on SM103 run the 32-lane tiny forward, one 128-thread CTA per
@@ -74,17 +75,14 @@ the mid forward up to 250, the extra-long forward up to 629,
 ``fwd_layout_keep_pipe`` up to 300, the mid forward up to 442,
 ``fwd_layout_pipe`` up to 2999 and ``fwd_layout_keep_pipe`` past it.
 Head-major rows on SM107 run ``fwd_layout_keep_pipe`` up to 100 rows per SM,
-the mid forward up to 480 and the plain forward past it; on SM100 and SM103
-they run the bands of ``STRIDED_FORWARD_BANDS`` of version 0.2.17 (the mid
-forward up to 140 rows per SM, the long forward up to 400 and the extra-long
-forward up to 700 on SM100, the mid forward up to 250 and the extra-long
-forward up to 700 on SM103, the plain forward past 700).  The rows of
+the mid forward up to 480 and the plain forward past it.  The rows of
 ``STRIDED_FORWARD_BANDS`` on SM100 run the mid
 forward up to 140 rows per SM, the long forward up to 400, the extra-long
-forward up to 700, ``fwd_layout_pipe`` up to 1500 and the plain forward past
-it; on SM103 the mid forward up to 250, the extra-long forward up to 700,
-``fwd_layout_pipe`` up to 1500 and the plain forward past it; on SM107 the
-mid forward up to 480 and the plain forward past it.
+forward up to 700 and the plain forward past it; on SM103 the mid forward up
+to 250, the extra-long forward up to 700 and the plain forward past it; on
+SM107 the mid forward up to 480 and the plain forward past it.  Whole-token
+rows on SM100 and SM103 (``SLICED_FORWARD_BANDS``, version 0.2.18) run those
+bands but ``fwd_layout_pipe`` from 701 to 1500 rows per SM.
 
 The backward runs the program of its architecture's ``BACKWARD_BANDS`` band
 of the weight gradient's dtype (a call without a weight gradient takes the
@@ -238,10 +236,12 @@ slot the side kernel
 holds walks all of its blocks once it starts), plus ``PROPORTIONAL_SLACK``,
 in each band of the module, of packed rows (``FORWARD_BANDS``), of
 projection rows (``PROJECTION_FORWARD_BANDS``), of head-major rows
-(``HEAD_MAJOR_FORWARD_BANDS``; on SM100 and SM103 the bands of
-``STRIDED_FORWARD_BANDS`` up to 700 rows per SM, so the probes of the rows of
-``STRIDED_FORWARD_BANDS`` below) and of ``x`` and ``z`` both sliced from
-wider projections (``STRIDED_FORWARD_BANDS``), at the band's first and last rows
+(``HEAD_MAJOR_FORWARD_BANDS`` on SM107, ``STRIDED_FORWARD_BANDS`` on SM100
+and SM103) and of ``x`` and ``z`` both sliced from wider projections
+(``SLICED_FORWARD_BANDS`` on SM100 and SM103, whose bands up to 700 rows per
+SM are those of ``STRIDED_FORWARD_BANDS``, so the probes of the rows of
+``STRIDED_FORWARD_BANDS`` below; ``STRIDED_FORWARD_BANDS`` on SM107), at the
+band's first and last rows
 per SM and at the token counts that give the module's CTA slots the fewest
 whole row blocks each past the previous band's end and the most up to its
 band's end, or four times the fewest in the last band, which has no end: the
@@ -260,8 +260,9 @@ forwards (``fwd_pipe``, ``fwd_keep_pipe``, ``fwd_layout_pipe``,
 each with the grid rule of the deterministic package's program it is built
 from) by the same bound, in each of their bands, on packed rows, on
 projection rows, on head-major rows (SM107) and, on SM100 and SM103, on
-``x`` and ``z`` both sliced (``fwd_layout_pipe`` from 701 to 1500 rows per SM, from
-version 0.2.18) and broadcast over tokens, at its first and last rows per
+``x`` and ``z`` both sliced (``fwd_layout_pipe`` from 701 to 1500 rows per
+SM of ``SLICED_FORWARD_BANDS``, from version 0.2.18) and broadcast over
+tokens, at its first and last rows per
 SM, at the deterministic package's probes the band holds (the most whole
 blocks of
 16 rows per slot below the cut of such rows, where a CTA runs one block, the
@@ -433,8 +434,8 @@ def _inputs(tokens: int, layout: str = "packed", heads: int = H):
     with ``layout="projection"`` ``z`` the gate columns of a wider projection
     (the class ``PROJECTION_LAYOUT`` with more than one head); with
     ``layout="both_sliced"`` ``x`` and ``z`` the first and the second
-    ``heads * 128`` columns of one wider projection (a class of no table of its
-    own); with ``layout="head_major"`` ``x`` and ``z`` of
+    ``heads * 128`` columns of one wider projection (whole-token rows, the
+    class ``SLICED_LAYOUT``); with ``layout="head_major"`` ``x`` and ``z`` of
     ``[heads, tokens, 128]`` tensors viewed as ``[tokens, heads, 128]`` (the
     class ``HEAD_MAJOR_LAYOUT``), whose rows are not packed (with more than one
     token, and head-major with more than one head); with ``layout="broadcast"``
@@ -1474,11 +1475,12 @@ def test_repeatable_backward_long_role_slows_in_proportion_to_the_sms_held(
 # forward's (6 per SM) row blocks of 16 rows, in the module's ``nth`` band of
 # the forward bands of ``layout`` (``_forward_bands``: "packed", packed rows,
 # FORWARD_BANDS; "projection", ``z`` the gate columns of a wider projection,
-# PROJECTION_FORWARD_BANDS; "head_major", HEAD_MAJOR_FORWARD_BANDS, on
-# sm_100a and sm_103a the bands of STRIDED_FORWARD_BANDS up to 700 rows per SM
-# and the plain forward past it, so the probes below of the rows of
-# STRIDED_FORWARD_BANDS; "both_sliced", ``x`` and ``z`` both sliced from wider
-# projections, STRIDED_FORWARD_BANDS), at the
+# PROJECTION_FORWARD_BANDS; "head_major", HEAD_MAJOR_FORWARD_BANDS on
+# sm_107a, STRIDED_FORWARD_BANDS on sm_100a and sm_103a; "both_sliced", ``x``
+# and ``z`` both sliced from wider projections, whole-token rows,
+# SLICED_FORWARD_BANDS on sm_100a and sm_103a, whose bands up to 700 rows per
+# SM are those of STRIDED_FORWARD_BANDS, so the probes below of the rows of
+# STRIDED_FORWARD_BANDS, and STRIDED_FORWARD_BANDS on sm_107a), at the
 # band's first and last row per SM ("band_first", "band_last"; the last band
 # has no last), at the fewest whole blocks per slot past the previous band's
 # end ("first") and at the most up to the band's end, or four times "first"
@@ -1502,7 +1504,7 @@ FORWARD_LAYOUTS = ("packed", "both_sliced", "projection", "head_major")
 FORWARD_LAYOUT_CLASSES = {
     "packed": "packed",
     "broadcast": "packed",
-    "both_sliced": None,
+    "both_sliced": loader.SLICED_LAYOUT,
     "projection": loader.PROJECTION_LAYOUT,
     "head_major": loader.HEAD_MAJOR_LAYOUT,
 }
@@ -1788,10 +1790,10 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # token broadcast over the others, in the bands of packed rows as such a call
 # runs them, ``_broadcast_bands``; ``projection`` and ``head_major`` rows),
 # its ``persistent_from_rows_per_sm_strided`` (500 rows per SM on sm_100a, 400
-# on sm_103a and sm_107a); ``both_sliced`` rows (``STRIDED_FORWARD_BANDS``) run
-# ``fwd_layout_pipe`` from 701 to 1500 rows per SM on sm_100a and sm_103a
-# (version 0.2.18) and no pipelined forward on sm_107a, where neither do
-# broadcast rows.  The
+# on sm_103a and sm_107a); ``both_sliced`` rows (whole-token rows,
+# ``SLICED_FORWARD_BANDS``) run ``fwd_layout_pipe`` from 701 to 1500 rows per
+# SM on sm_100a and sm_103a (version 0.2.18) and no pipelined forward on
+# sm_107a (``STRIDED_FORWARD_BANDS``), where neither do broadcast rows.  The
 # probes on packed rows, as blocks per slot (a slot's block is 96 rows per
 # SM): below, first and last 85, 86 and 344 on sm_100a (8160, 8256 and 33024
 # rows per SM, and "cut", 8192: all in the band of ``fwd_pipe`` from 521,
@@ -1845,7 +1847,8 @@ _PIPELINED_COUNTERPARTS = {
 }
 # Heads of the tokens of the "cut" probe: one, but 4 for head-major rows,
 # whose one-head rows are packed, and for projection rows, whose one-head rows
-# run STRIDED_FORWARD_BANDS (4 divides 148, 152 and 212 SMs).
+# are whole-token rows (SLICED_FORWARD_BANDS where the architecture has it,
+# else STRIDED_FORWARD_BANDS; 4 divides 148, 152 and 212 SMs).
 _CUT_HEADS = {"head_major": 4, "projection": 4}
 
 
