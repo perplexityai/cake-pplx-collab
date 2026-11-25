@@ -142,16 +142,20 @@ call inside a piece takes the split of its `q_split`), with `kv = B * H * Skv / 
 |---|---|
 | `sm_100a` | `(4, 1, 32, 8192, 8192, True)`: `kv <= 32`, `Sq == 8192`, `q_split` 4; `(2, 33, 64, 8192, 16384, True)`: `33 <= kv <= 64`, `8192 <= Sq <= 16384`, `q_split` 2; `(2, 33, 64, 4096, 4096, False)`: `33 <= kv <= 64`, `Sq == 4096`, `q_split` 2, read after `FUSED_REGION` |
 | `sm_103a` | the pieces of `sm_100a` |
-| `sm_107a` | `(4, 1, 32, 4096, 8192, True)`: `kv <= 32`, `4096 <= Sq <= 8192`, `q_split` 4; `(2, 33, 64, 4096, 16384, True)`: `33 <= kv <= 64`, `4096 <= Sq <= 16384`, `q_split` 2; `(4, 65, 256, 16384, 16384, True)`: `65 <= kv <= 256`, `Sq == 16384`, `q_split` 4; `(2, 512, 512, 16384, 16384, True)`: `kv == 512`, `Sq == 16384`, `q_split` 2 |
+| `sm_107a` | `(4, 1, 32, 4096, 8192, True)`: `kv <= 32`, `4096 <= Sq <= 8192`, `q_split` 4; `(2, 33, 64, 4096, 4096, False)`: `33 <= kv <= 64`, `Sq == 4096`, `q_split` 2, read after `FUSED_REGION`; `(2, 33, 64, 4097, 16384, True)`: `33 <= kv <= 64`, `4097 <= Sq <= 16384`, `q_split` 2; `(4, 65, 256, 16384, 16384, True)`: `65 <= kv <= 256`, `Sq == 16384`, `q_split` 4; `(2, 512, 512, 16384, 16384, True)`: `kv == 512`, `Sq == 16384`, `q_split` 2 |
 
 Every measured call that takes the split (`B * H` 1 to 8, 4096 to 16384 queries, 2048 to 16384 keys) was faster with
 it, in one host call, than on its route without it in every counted round of both replicate runs of the CUDA-graph
 timing (per call and per kernel), beyond the identical-kernel controls' noise, and not slower beyond that noise in eager
 calls.  On `sm_100a` and `sm_103a` the one-launch calls of 4096 queries were slower with the split in eager calls and
-keep the one-launch route.  On `sm_107a` a later timing measured the call of 384 key blocks (three heads, 16384
-queries and keys) slower with the split, in eager calls and in CUDA-graph replays: the last piece holds only the 512
-key blocks of its measured calls, and split candidates of 16384 queries with 257 to 511 key blocks keep their 0.1.11
-route.  No piece routes a measured call that was not faster.
+keep the one-launch route.  On `sm_107a` a later timing measured the call of two heads with 4096 queries and keys
+slower with the split than on the one-launch route in eager calls on one node in every counted round, while faster in
+CUDA-graph replays: there too the piece of 4096 queries is read after `FUSED_REGION`, and split candidates of two heads
+with 4096 queries and 2304 to 4096 keys keep their 0.1.11 route, the one-launch route; the next piece, read before
+`FUSED_REGION`, begins at 4097 queries, one past them.  On `sm_107a` a later timing also measured the call of 384 key
+blocks (three heads, 16384 queries and keys) slower with the split, in eager calls and in CUDA-graph replays: the last
+piece holds only the 512 key blocks of its measured calls, and split candidates of 16384 queries with 257 to 511 key
+blocks keep their 0.1.11 route.  No piece routes a measured call that was not faster.
 
 ## Kernels
 

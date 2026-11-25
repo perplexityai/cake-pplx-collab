@@ -48,7 +48,9 @@ call has without the split, ``fused_record`` giving no record inside a piece rea
 what it gives without the split; the shipped split region of each architecture, ``SHIPPED_QSPLIT_REGION``, on both
 sides of each bound of each of its pieces and refused outside the candidates (``B`` 2, head dimension 64, the mask, a
 key length that is not a multiple of 256 or outside ``[Sq / 2, Sq]``), and every measured call on its decided route,
-``DECIDED_QSPLIT``, with the route it has without the split; ``QSPLIT_LEAST_Q``, the least queries of all pieces,
+``DECIDED_QSPLIT``, with the route it has without the split; on ``sm_107a`` the calls inside the split piece of 4096
+queries, which is read after ``FUSED_REGION``, on their routes, ``QSPLIT_AFTER_FUSED_CALLS`` (the one-launch route
+where ``FUSED_REGION`` holds them, else the split); ``QSPLIT_LEAST_Q``, the least queries of all pieces,
 derived from ``QSPLIT_REGION``, below which ``variant`` and ``fused_record`` do not look for a piece), the launch grids,
 the stage launchers' keywords, their positional launch of
 every routed record (the FFI arguments and grid of the registry-ordered launch), the two layouts of the dQ accumulator
@@ -1521,7 +1523,8 @@ SHIPPED_QSPLIT_REGION = {
     "sm_103a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
     "sm_107a": (
         (4, 1, 32, 4096, 8192, True),
-        (2, 33, 64, 4096, 16384, True),
+        (2, 33, 64, 4096, 4096, False),
+        (2, 33, 64, 4097, 16384, True),
         (4, 65, 256, 16384, 16384, True),
         (2, 512, 512, 16384, 16384, True),
     ),
@@ -1531,9 +1534,11 @@ SHIPPED_QSPLIT_REGION = {
 # (the key length is a multiple of 256), so a bound at an odd ``kv`` is probed at the nearest even one a candidate
 # reaches (beside the 512 key blocks of the last ``sm_107a`` piece: 510 and 516, as no candidate of 16384 queries has
 # 514); a candidate with ``Sq >= 4096`` has ``kv >= 16`` (the keys are at least half the queries); a query bound is
-# probed 128 queries past it.  On ``sm_100a`` and ``sm_103a``: the third piece (4096 queries) is read after
-# ``FUSED_REGION``, which holds 36 and 64 key blocks at two heads first.  On ``sm_107a`` also the measured call of 384
-# key blocks that the last piece leaves out (three heads, 16384 queries and keys).
+# probed 128 queries past it, and the least queries of the second ``sm_107a`` piece, 4097 (one past the 4096 queries
+# of the piece before it), also at 4097 queries.  On every architecture the piece of 4096 queries is read after
+# ``FUSED_REGION``, which holds 36 and 64 key blocks at two heads first; on ``sm_107a`` the piece after it is read
+# before ``FUSED_REGION``, which holds 36 key blocks at two heads with 4097 and 4224 queries too.  On ``sm_107a`` also
+# the measured call of 384 key blocks that the last piece leaves out (three heads, 16384 queries and keys).
 _SM100_QSPLIT_CALLS = (
     ((1, 1, 8192, 4096), 4),
     ((1, 1, 8064, 4096), 0),
@@ -1567,6 +1572,8 @@ SHIPPED_QSPLIT_CALLS = {
         ((1, 1, 8192, 4096), 4),
         ((1, 1, 8064, 4096), 4),
         ((1, 2, 4096, 2304), 2),
+        ((1, 2, 4097, 2304), 2),
+        ((1, 2, 4224, 2304), 2),
         ((1, 1, 8192, 4352), 2),
         ((1, 1, 8320, 4352), 2),
         ((1, 3, 4096, 2048), 2),
@@ -1620,9 +1627,11 @@ REFUSED_QSPLIT_CALLS = (
 # the split where the split was faster than its route without it in every counted round of both replicate runs of the
 # CUDA-graph timing, per call and per kernel, beyond the identical-kernel controls' noise, and not slower beyond that
 # noise in eager calls.  On ``sm_100a`` and ``sm_103a`` the one-launch calls of 4096 queries were slower with the split
-# in eager calls and keep the one-launch route.  On ``sm_107a`` also the call of three heads with 16384 queries and
-# keys, measured by a later timing: slower with the split than without it in every counted round, in eager calls and
-# in CUDA-graph replays; it keeps the pair route.  ``QSPLIT_REGION`` must reproduce it.
+# in eager calls and keep the one-launch route; so does the ``sm_107a`` call of two heads with 4096 queries and keys,
+# measured by a later timing: slower with the split than on the one-launch route in eager calls on one node in every
+# counted round, while faster in CUDA-graph replays.  On ``sm_107a`` also the call of three heads with 16384 queries
+# and keys, measured by a later timing: slower with the split than without it in every counted round, in eager calls
+# and in CUDA-graph replays; it keeps the pair route.  ``QSPLIT_REGION`` must reproduce it.
 _SM100_GRID = {
     (1, 1, 4096, 4096): ("fused", "fused"),
     (1, 1, 4096, 2048): ("fused", "fused"),
@@ -1671,7 +1680,7 @@ DECIDED_QSPLIT = {
         (1, 1, 8192, 4096): ("fused", "split4"),
         (1, 1, 16384, 16384): ("pair", "split4"),
         (1, 1, 16384, 8192): ("pair", "split2"),
-        (1, 2, 4096, 4096): ("fused", "split2"),
+        (1, 2, 4096, 4096): ("fused", "fused"),
         (1, 2, 4096, 2048): ("fused", "split4"),
         (1, 2, 8192, 8192): ("pair", "pair"),
         (1, 2, 8192, 4096): ("pair", "split2"),
@@ -1692,6 +1701,21 @@ DECIDED_QSPLIT = {
         (1, 3, 16384, 16384): ("pair", "pair"),
     },
 }
+# Calls of one batch at head dimension 128 without the mask inside the ``sm_107a`` split piece of 4096 queries, which
+# is read after ``FUSED_REGION``, as ((B, H, Sq, Skv), route): the calls of two heads with 2304 to 4096 keys, which
+# ``FUSED_REGION`` holds, take the one-launch route (their route of 0.1.11), and the call of four heads with 2048
+# keys, which it does not hold, takes the split.
+QSPLIT_AFTER_FUSED_CALLS = (
+    ((1, 2, 4096, 2304), "fused"),
+    ((1, 2, 4096, 2560), "fused"),
+    ((1, 2, 4096, 2816), "fused"),
+    ((1, 2, 4096, 3072), "fused"),
+    ((1, 2, 4096, 3328), "fused"),
+    ((1, 2, 4096, 3584), "fused"),
+    ((1, 2, 4096, 3840), "fused"),
+    ((1, 2, 4096, 4096), "fused"),
+    ((1, 4, 4096, 2048), "split2"),
+)
 
 
 def test_the_split_route_of_a_call(monkeypatch) -> None:
@@ -1813,6 +1837,25 @@ def test_the_split_least_queries_follow_the_region() -> None:
                     assert cake_jit.qsplit_piece(arch, 1, H, Sq, Skv, 128, False) is None, (arch, H, Sq, Skv)
                     checked += 1
     assert checked > 0
+
+
+def test_the_split_of_4096_queries_follows_the_one_launch_region() -> None:
+    """On ``sm_107a`` the split piece of 4096 queries is read after ``FUSED_REGION``, on the shipped tables: each call
+    of ``QSPLIT_AFTER_FUSED_CALLS`` is inside that piece, ``variant`` gives it the split variant of the piece, and it
+    takes its listed route; a call that ``FUSED_REGION`` holds takes the one-launch record (the route it has without
+    the split, as in 0.1.11), and a call that ``FUSED_REGION`` does not hold takes the split."""
+    piece = (2, 33, 64, 4096, 4096, False)
+    assert piece in SHIPPED_QSPLIT_REGION["sm_107a"]
+    fused_region = SHIPPED_FUSED_REGION[("sm_107a", 128)]
+    for (B, H, Sq, Skv), route in QSPLIT_AFTER_FUSED_CALLS:
+        assert cake_jit.qsplit_piece("sm_107a", B, H, Sq, Skv, 128, False) == piece, (B, H, Sq, Skv)
+        found = cake_jit.variant(128, False, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch="sm_107a")
+        assert found == (128, False, True, piece[0]), (B, H, Sq, Skv, found)
+        inside = any(_inside_piece(other, B, H, Sq, Skv) for other in fused_region)
+        assert inside == (route == "fused"), (B, H, Sq, Skv)
+        found = cake_jit.fused_record("sm_107a", B, H, Sq, Skv, 128, False)
+        assert found == (FUSED_OF[(128, False)] if route == "fused" else None), (B, H, Sq, Skv, found)
+        assert _route_name("sm_107a", B, H, Sq, Skv) == route, (B, H, Sq, Skv)
 
 
 def test_the_accumulator_layouts() -> None:

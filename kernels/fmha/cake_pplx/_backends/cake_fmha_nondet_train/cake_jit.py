@@ -536,19 +536,24 @@ PAIR_FEWER_QUERIES: dict[str, tuple[int, int, int, int] | None] = {
 # that takes the split (``B * H`` 1 to 8, 4096 to 16384 queries, 2048 to 16384 keys) was faster with it, in one host
 # call, than on its route without it in every counted round of both replicate runs of the CUDA-graph timing (per call
 # and per kernel), beyond the identical-kernel controls' noise, and not slower beyond that noise in eager calls.
-# ``most_kv``, ``least_q`` and ``most_q`` are measured values; each ``least_kv`` is 1, one past a measured value or, in
-# the last ``sm_107a`` piece, a measured value: that piece holds only the 512 key blocks of its measured calls, because
-# a later timing measured the call of 384 key blocks (three heads, 16384 queries and keys) slower with the split than
-# without it in every counted round, in eager calls and in CUDA-graph replays.  Every measured call that was
-# not faster lies outside every piece or, at 4096 queries on ``sm_100a`` and ``sm_103a``, inside ``FUSED_REGION``,
-# which is read before the piece that holds it.  A call outside every piece keeps the route it had without the split.
-# An architecture without an entry has no split route.
+# ``most_kv`` and ``most_q`` are measured values; each ``least_q`` is a measured value or one past one (4097 in the
+# second ``sm_107a`` piece, one past the 4096 queries of the piece before it); each ``least_kv`` is 1, one past a
+# measured value or, in the last ``sm_107a`` piece, a measured value: that piece holds only the 512 key blocks of its
+# measured calls, because a later timing measured the call of 384 key blocks (three heads, 16384 queries and keys)
+# slower with the split than without it in every counted round, in eager calls and in CUDA-graph replays.  Every
+# measured call that was not faster lies outside every piece or, at 4096 queries, inside ``FUSED_REGION``, which is
+# read before the piece that holds it.  On ``sm_107a`` a later timing measured the call of two heads with 4096 queries
+# and keys slower with the split than with the one-launch route in eager calls on one node in every counted round,
+# while faster in CUDA-graph replays: so the piece of 4096 queries of ``sm_107a`` is read after ``FUSED_REGION``, as on
+# ``sm_100a`` and ``sm_103a``, and the piece after it, read before ``FUSED_REGION``, begins at 4097 queries.  A call
+# outside every piece keeps the route it had without the split.  An architecture without an entry has no split route.
 QSPLIT_REGION: dict[str, tuple[tuple[int, int, int, int, int, bool], ...]] = {
     "sm_100a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
     "sm_103a": ((4, 1, 32, 8192, 8192, True), (2, 33, 64, 8192, 16384, True), (2, 33, 64, 4096, 4096, False)),
     "sm_107a": (
         (4, 1, 32, 4096, 8192, True),
-        (2, 33, 64, 4096, 16384, True),
+        (2, 33, 64, 4096, 4096, False),
+        (2, 33, 64, 4097, 16384, True),
         (4, 65, 256, 16384, 16384, True),
         (2, 512, 512, 16384, 16384, True),
     ),
