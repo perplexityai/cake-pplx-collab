@@ -115,13 +115,13 @@ MIN_NORMAL = 2.0**-126
 # The backward's outputs, the only ones the tiny-input cases judge.
 GRADS = ("d_gate", "d_up")
 # The judged cases: row counts 1 to 4097, widths 256 to 33792, every layout, the data kinds and other scalars.  A pass
-# of the forward's CTA covers 12 segments of 256 columns (3072 columns), one of the backward's 8 (2048 columns).
+# of the forward's CTA covers 12 segments of 256 columns (3072 columns), one of the backward's 4 (1024 columns).
 CASES = [
     Case(1),
     Case(2, 256),  # one segment: three warps of the CTA idle
     Case(5, 1280, "merged"),  # five segments: one pass of the CTA, partial
-    Case(33, 1792),  # just below one pass of the backward's CTA
-    Case(33, 2048, "merged"),  # one pass of the backward's CTA
+    Case(33, 1792),  # just below two passes of the backward's CTA
+    Case(33, 2048, "merged"),  # two passes of the backward's CTA
     Case(33, 2304),  # just above it
     Case(33, 2816, "merged"),  # just below one pass of the forward's CTA
     Case(33, 3328),  # just above it

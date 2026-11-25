@@ -2047,7 +2047,6 @@ y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down 
 
 **Caveats.**
 
-- `sm_107a` (Rubin) devices raise `RuntimeError` until its libraries are delivered.
 - Checkpointing: the op keeps only its inputs, so checkpointing it alone saves no memory. The down projection keeps `h` for its weight gradient. Checkpoint the op together with the down projection (as in the example) so that `h` is not kept from the forward to the backward. The backward of a non-reentrant checkpoint then runs the forward kernel once more before the backward kernel: two forwards and one backward per step.
 - Workspace: none. Retained state of the autograd function: its inputs only (references, no copy).
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
