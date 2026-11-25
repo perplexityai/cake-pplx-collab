@@ -5,7 +5,7 @@
 """Prepared launchers for the generated MoK training kernels.
 
 Each class owns one generated module (one per schedule identity: precision,
-SwiGLU variant and weight-gradient accumulation) and keeps the native host
+activation variant, shared expert and weight-gradient accumulation) and keeps the native host
 contract: recurring allocations, counter resets and launch geometry. Token
 counts, widths and expert counts remain runtime values.
 """
@@ -32,6 +32,7 @@ SCHEDULER_LAYOUTS = (
     (32, 12),
     (64, 6),
     (8, 64),
+    (64, 14),
 )
 # The 384-routed-expert layouts: top-k 6 with the router weight before the down
 # projection only.
@@ -39,6 +40,9 @@ SCHEDULER_LAYOUTS_384 = ((4, 96), (8, 48), (16, 24), (32, 12), (64, 6))
 # The 512-routed-expert layouts: top-k 10 with the per-token shared-expert scale
 # and the direct router-weight gradient only (``MODE_GROUPS["scaled_top10"]``).
 SCHEDULER_LAYOUTS_512 = ((8, 64),)
+# The 896-routed-expert layouts: top-k 16 with SiTU-GLU, no shared expert and the
+# direct router-weight gradient only (``MODE_GROUPS["situ_top16"]``).
+SCHEDULER_LAYOUTS_896 = ((64, 14),)
 # Top-k values of the epilogues that add the shared-expert row as it is
 # (``shared_expert="unscaled"``).
 EPILOGUE_TOPKS = (2, 6, 8)
@@ -47,6 +51,9 @@ WEIGHTED_EPILOGUE_TOPKS = (2, 8)
 # Top-k values of the epilogues that scale the shared-expert row per token
 # (``shared_expert="scaled"``): a weighted forward and an unweighted backward.
 SCALED_EPILOGUE_TOPKS = (10,)
+# Top-k values of the epilogues without a shared-expert row
+# (``shared_expert="none"``): a weighted forward and an unweighted backward.
+NONE_EPILOGUE_TOPKS = (16,)
 # Where the FP32 router weight multiplies a routed expert: on its output, in the
 # combine (``"after_down"``), or on its SwiGLU activation before the down
 # projection, ``h = BF16(w * a)``, with an unweighted combine (``"before_down"``).
@@ -114,11 +121,16 @@ MODE_GROUPS = {
         targets=("sm_100a", "sm_103a"),
         description="512 routed experts at top-k 10 with the per-token shared-expert scale",
     ),
-}
-# The modes no group of this package runs yet: recognized values that raise.
-UNBUILT_MODES = {
-    "activation": ("situ_glu",),
-    "shared_expert": ("none",),
+    "situ_top16": ModeGroup(
+        layouts=SCHEDULER_LAYOUTS_896,
+        topk=16,
+        activation="situ_glu",
+        shared_expert="none",
+        router_weight_gradient="direct",
+        fp32_wgrad=True,
+        targets=("sm_100a", "sm_103a"),
+        description="896 routed experts at top-k 16 with SiTU-GLU and no shared expert",
+    ),
 }
 SWIGLU_BWD_TILES = 8  # 128 x 128 tiles per backward SwiGLU task half.
 
@@ -131,10 +143,12 @@ def _role(
     noctx=False,
     weight_before_down=False,
     direct=False,
+    situ_glu=False,
 ):
     """Kernel role name: ``base`` plus the ``_clamped``, ``_fp32``, ``_noctx``,
-    ``_wbd`` (router weight before the down projection) and ``_direct`` (the
-    direct router-weight gradient) suffixes, in that order."""
+    ``_wbd`` (router weight before the down projection), ``_direct`` (the
+    direct router-weight gradient) and ``_situ_noshared`` (SiTU-GLU routed
+    experts without a shared expert) suffixes, in that order."""
     return (
         base
         + ("_clamped" if clamped else "")
@@ -142,6 +156,7 @@ def _role(
         + ("_noctx" if noctx else "")
         + ("_wbd" if weight_before_down else "")
         + ("_direct" if direct else "")
+        + ("_situ_noshared" if situ_glu else "")
     )
 
 
@@ -177,8 +192,9 @@ def check_configuration(
     a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a ``bool`` raise
     ``TypeError``. Every other refusal raises ``ValueError``. A configuration
     that uses the layouts, the top-k or a mode of a :data:`MODE_GROUPS` group
-    runs exactly that group's configuration. Otherwise ``"after_down"`` keeps
-    the weighted layouts: top-k 2 or 8 on the layouts of
+    (the direct router-weight gradient, the shared-expert modes ``"scaled"``
+    and ``"none"``, SiTU-GLU) runs exactly that group's configuration.
+    Otherwise ``"after_down"`` keeps the weighted layouts: top-k 2 or 8 on the layouts of
     :data:`SCHEDULER_LAYOUTS` other than the 384-expert ones (the caller's
     check names any other combination), and ``"before_down"`` runs the layouts
     of :data:`BEFORE_DOWN_LAYOUTS` at their top-k, with clamped SwiGLU and FP32
@@ -218,12 +234,6 @@ def check_configuration(
     for name, value, allowed in modes:
         if value not in allowed:
             raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
-    for name, value in (("activation", activation), ("shared_expert", shared_expert)):
-        if value in UNBUILT_MODES[name]:
-            raise ValueError(
-                f"{name}={value!r} has no build in this package yet (it needs the "
-                "896-expert layouts at top-k 16, a separate kernel group)"
-            )
     clamped = clamped_swiglu or activation == "clamped_swiglu"
     layout = (ep, local_experts)
     touched = [
@@ -233,6 +243,7 @@ def check_configuration(
         or topk == group.topk
         or router_weight_gradient == group.router_weight_gradient != "quotient"
         or shared_expert == group.shared_expert != "unscaled"
+        or activation == group.activation != "swiglu"
     ]
     for name, group in touched:
         if (
@@ -345,6 +356,36 @@ def check_swiglu_limit(swiglu_limit, clamped):
     if not clamped:
         raise ValueError(
             "This kernel was built for unclamped SwiGLU; use the clamped kernel"
+        )
+
+
+def _activation_arguments(situ_glu, clamped, swiglu_limit, situ_beta, situ_lb):
+    """The activation scalars of a fused launch, checked: a SwiGLU build's
+    ``swiglu_limit`` (``0.0`` for plain SwiGLU; :func:`check_swiglu_limit`),
+    which takes no ``situ_beta`` / ``situ_lb``, or a SiTU-GLU build's FP32
+    ``situ_beta`` and ``situ_lb`` (:func:`check_situ_parameters`), which takes
+    no ``swiglu_limit``."""
+    if situ_glu:
+        if swiglu_limit is not None:
+            raise ValueError(
+                "The SiTU-GLU kernels take situ_beta and situ_lb, not a swiglu_limit"
+            )
+        check_situ_parameters(situ_beta, situ_lb)
+        return {"situ_beta": float(situ_beta), "situ_lb": float(situ_lb)}
+    check_swiglu_limit(swiglu_limit, clamped)
+    if situ_beta is not None or situ_lb is not None:
+        raise ValueError("situ_beta and situ_lb are read only by the SiTU-GLU kernels")
+    return {"swiglu_limit": 0.0 if swiglu_limit is None else float(swiglu_limit)}
+
+
+def _no_shared_weights(situ_glu, *weights):
+    """The SiTU-GLU builds have no shared expert: their launchers take ``None``
+    in every shared-weight and shared-context position; the other builds take
+    the tensors there."""
+    if situ_glu and any(weight is not None for weight in weights):
+        raise ValueError(
+            "The SiTU-GLU kernels have no shared expert: pass None for the shared "
+            "weights and the shared context"
         )
 
 
@@ -574,8 +615,17 @@ def _recompute_geometry(
 
 
 def _backward_geometry(
-    local_tokens, hidden, intermediate, capacity, macro_size, mini_size, experts
+    local_tokens,
+    hidden,
+    intermediate,
+    capacity,
+    macro_size,
+    mini_size,
+    experts,
+    shared=True,
 ):
+    """``shared=False`` (a build without a shared expert, ``local_tokens`` 0):
+    no shared row, GEMM, SwiGLU or weight-gradient task."""
     g = _Geometry()
     g.minis = (capacity + mini_size - 1) // mini_size
     g.macros = (capacity + macro_size - 1) // macro_size
@@ -587,6 +637,8 @@ def _backward_geometry(
         g.shared_rows * (g.ibw + g.hbw)
         + swiglu_backward_tasks((local_tokens // 128) * (intermediate // 128))
         + 3 * wgrad_tiles(hidden, intermediate)
+        if shared
+        else 0
     )
     g.mini_bwd = (mini_size // 256) * (g.ibw + g.hbw) + swiglu_backward_tasks(
         (mini_size // 128) * (intermediate // 128)
@@ -896,26 +948,45 @@ class MoKForward:
     schedule's owner-rank route totals ``owner_routes``, runs
     ``rich_comm_sms`` communication SMs instead of ``comm_sms``; no output
     bit depends on the count.
+
+    ``situ_glu=True`` loads the SiTU-GLU forward without a shared expert (role
+    ``forward[_noctx]_situ_noshared``): the routed activation is
+    ``beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)`` with the
+    per-call ``situ_beta`` and ``situ_lb`` (FP32 kernel values) in place of
+    ``swiglu_limit``, and there is no shared expert: the shared weights are
+    ``None``, the kernel takes no shared map and no ``local_tokens`` (its
+    shared row count is 0) and the four shared outputs are ``None``. ``x``
+    stays the staged source rows the peers read.
     """
 
-    def __init__(self, clamped=False, context=True, weight_before_down=False):
+    def __init__(
+        self, clamped=False, context=True, weight_before_down=False, *, situ_glu=False
+    ):
         from .jit import load_kernel
 
         if type(context) is not bool:
             raise TypeError("context must be a boolean")
         if type(weight_before_down) is not bool:
             raise TypeError("weight_before_down must be a boolean")
+        if type(situ_glu) is not bool:
+            raise TypeError("situ_glu must be a boolean")
         if weight_before_down and not clamped:
             raise ValueError(
                 "The router-weight-before-down forward is built for clamped SwiGLU only"
             )
+        if situ_glu and (clamped or weight_before_down):
+            raise ValueError(
+                "The SiTU-GLU forward is built without a SwiGLU limit and with the "
+                "router weight after the down projection only"
+            )
         self.clamped, self.context = clamped, context
-        self.weight_before_down = weight_before_down
+        self.weight_before_down, self.situ_glu = weight_before_down, situ_glu
         role = _role(
             "forward",
             clamped,
             noctx=not context,
             weight_before_down=weight_before_down,
+            situ_glu=situ_glu,
         )
         self.module = load_kernel(role)
         self.layout_module = load_kernel("expert_layout")
@@ -948,13 +1019,18 @@ class MoKForward:
         weight_ptrs=None,
         owner_routes=None,
         source_split=None,
+        situ_beta=None,
+        situ_lb=None,
     ):
         import torch
 
-        check_swiglu_limit(swiglu_limit, self.clamped)
+        activation = _activation_arguments(
+            self.situ_glu, self.clamped, swiglu_limit, situ_beta, situ_lb
+        )
+        _no_shared_weights(self.situ_glu, shared_gate, shared_up, shared_down)
         _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
-        intermediate, experts = shared_gate.shape[0], counts.numel()
+        intermediate, experts = routed_gate.shape[1], counts.numel()
         capacity = peer_rank.numel()
         if (
             x.dtype != torch.bfloat16
@@ -991,8 +1067,10 @@ class MoKForward:
             )
         options = dict(device=x.device, dtype=torch.bfloat16)
         x_routed = torch.empty((macro_size, hidden), **options)
+        # No shared expert (SiTU-GLU): no shared storage, map or row.
+        shared_rows = 0 if self.situ_glu else local_tokens
         if self.context:
-            gate_shared = torch.empty((local_tokens, intermediate), **options)
+            gate_shared = torch.empty((shared_rows, intermediate), **options)
             gate_routed = torch.empty((macro_size, intermediate), **options)
             up_shared, up_routed = (
                 torch.empty_like(gate_shared),
@@ -1004,13 +1082,30 @@ class MoKForward:
             )
             maps = (gate_shared, up_shared, gate_routed, up_routed)
         else:
-            hidden_shared = torch.empty((local_tokens, intermediate), **options)
+            hidden_shared = torch.empty((shared_rows, intermediate), **options)
             hidden_routed = torch.empty((macro_size, intermediate), **options)
             gate_shared = gate_routed = up_shared = up_routed = None
             maps = (hidden_shared, hidden_shared, hidden_routed, hidden_routed)
-        y_shared, y_routed = torch.empty_like(x), torch.empty_like(x_routed)
+        y_shared = torch.empty((shared_rows, hidden), **options)
+        y_routed = torch.empty_like(x_routed)
+        shared = {}
+        if self.situ_glu:
+            gate_shared = up_shared = hidden_shared = y_shared = None
+        else:
+            shared = dict(
+                x_shared=x,
+                wg_shared=shared_gate.unsqueeze(0),
+                wu_shared=shared_up.unsqueeze(0),
+                wd_shared=shared_down.unsqueeze(0),
+                gate_shared_out=maps[0],
+                up_shared_out=maps[1],
+                hidden_shared_out=hidden_shared,
+                hidden_shared_in=hidden_shared,
+                y_shared=y_shared,
+                local_tokens=local_tokens,
+            )
         key = (
-            local_tokens,
+            0 if self.situ_glu else local_tokens,
             hidden,
             intermediate,
             capacity,
@@ -1031,23 +1126,15 @@ class MoKForward:
         with _ffi_stream():
             self.module.launch(
                 grid=(2 * (g.shared_tasks + g.minis * g.mini_tasks) + comm_sms, 1, 1),
-                x_shared=x,
+                **shared,
                 x_routed=x_routed,
-                wg_shared=shared_gate.unsqueeze(0),
-                wu_shared=shared_up.unsqueeze(0),
-                wd_shared=shared_down.unsqueeze(0),
                 wg_routed=routed_gate,
                 wu_routed=routed_up,
                 wd_routed=routed_down,
-                gate_shared_out=maps[0],
-                up_shared_out=maps[1],
                 gate_routed_out=maps[2],
                 up_routed_out=maps[3],
-                hidden_shared_out=hidden_shared,
                 hidden_routed_out=hidden_routed,
-                hidden_shared_in=hidden_shared,
                 hidden_routed_in=hidden_routed,
-                y_shared=y_shared,
                 y_routed=y_routed,
                 x_routed_ptr=x_routed,
                 y_routed_ptr=y_routed,
@@ -1061,7 +1148,6 @@ class MoKForward:
                 x_ready=x_ready,
                 y_ready=y_ready,
                 y_done=y_done,
-                local_tokens=local_tokens,
                 hidden=hidden,
                 intermediate=intermediate,
                 experts=experts,
@@ -1069,7 +1155,7 @@ class MoKForward:
                 comm_sms=comm_sms,
                 macro_size=macro_size,
                 mini_size=mini_size,
-                swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
+                **activation,
                 mini_tasks_div=g.mini_tasks_div,
                 minis_per_macro_div=g.minis_per_macro_div,
                 fused_col_blocks_div=g.fused_col_blocks_div,
@@ -1104,8 +1190,10 @@ class MoKForward:
         *,
         weight_ptrs=None,
         source_split=None,
+        situ_beta=None,
+        situ_lb=None,
     ):
-        """Validated launch plan for one geometry, split and SwiGLU variant.
+        """Validated launch plan for one geometry, split and activation variant.
 
         ``x`` is the staged source rows the kernel reads (a fixed view of the
         caller-owned symmetric x buffer); it, the peer tables and a persistent
@@ -1117,11 +1205,14 @@ class MoKForward:
         ``row_weights`` ring is allocated by :meth:`launch_planned`.
         ``source_split``: as in ``__call__``, bound into the plan; the
         schedule's ``owner_routes`` are a per-call argument of
-        :meth:`launch_planned`.
+        :meth:`launch_planned`. ``situ_beta`` / ``situ_lb``: the SiTU-GLU
+        scalars, bound into the plan as ``swiglu_limit`` is.
         """
         import torch
 
-        check_swiglu_limit(swiglu_limit, self.clamped)
+        activation = _activation_arguments(
+            self.situ_glu, self.clamped, swiglu_limit, situ_beta, situ_lb
+        )
         _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
         if (
@@ -1141,7 +1232,7 @@ class MoKForward:
             self._peer_tables, x.device, x_ptrs, combine_ptrs
         )
         key = (
-            local_tokens,
+            0 if self.situ_glu else local_tokens,
             hidden,
             intermediate,
             capacity,
@@ -1170,11 +1261,12 @@ class MoKForward:
             raise ValueError(
                 "source_split is read only by the router-weight-before-down forward"
             )
+        shared = not self.situ_glu
         return _Plan(
             self.module,
             (2 * (g.shared_tasks + g.minis * g.mini_tasks) + comm_sms, 1, 1),
             dict(
-                x_shared=x,
+                **({"x_shared": x, "local_tokens": local_tokens} if shared else {}),
                 x_peers=x_peers,
                 y_peers=y_peers,
                 **router_weight,
@@ -1182,7 +1274,6 @@ class MoKForward:
                 x_ready=x_ready,
                 y_ready=y_ready,
                 y_done=y_done,
-                local_tokens=local_tokens,
                 hidden=hidden,
                 intermediate=intermediate,
                 experts=experts,
@@ -1190,7 +1281,7 @@ class MoKForward:
                 comm_sms=comm_sms,
                 macro_size=macro_size,
                 mini_size=mini_size,
-                swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
+                **activation,
                 mini_tasks_div=g.mini_tasks_div,
                 minis_per_macro_div=g.minis_per_macro_div,
                 fused_col_blocks_div=g.fused_col_blocks_div,
@@ -1198,17 +1289,15 @@ class MoKForward:
             ),
             (
                 ("x_routed", "x_routed_ptr"),
-                "gate_shared_out",
+                *(("gate_shared_out",) if shared else ()),
                 "gate_routed_out",
-                "up_shared_out",
+                *(("up_shared_out",) if shared else ()),
                 "up_routed_out",
-                ("hidden_shared_out", "hidden_shared_in"),
+                *((("hidden_shared_out", "hidden_shared_in"),) if shared else ()),
                 ("hidden_routed_out", "hidden_routed_in"),
-                "y_shared",
+                *(("y_shared",) if shared else ()),
                 ("y_routed", "y_routed_ptr"),
-                "wg_shared",
-                "wu_shared",
-                "wd_shared",
+                *(("wg_shared", "wu_shared", "wd_shared") if shared else ()),
                 "wg_routed",
                 "wu_routed",
                 "wd_routed",
@@ -1222,7 +1311,7 @@ class MoKForward:
             extra=(
                 x,
                 (macro_size, hidden),
-                (local_tokens, intermediate),
+                (local_tokens, intermediate) if shared else None,
                 (macro_size, intermediate),
                 3 * experts + capacity // 256,
                 self.context,
@@ -1248,7 +1337,8 @@ class MoKForward:
     ):
         """Launch a :meth:`plan` on the current stream; returns the nine
         outputs of ``__call__`` (``None`` in the four gate/up places for a
-        context-free launcher). The caller resets ``plan.slab`` on this
+        context-free launcher, in the four shared places and with ``None``
+        shared weights for a SiTU-GLU one). The caller resets ``plan.slab`` on this
         stream before the launch, validated the weights against the plan's
         geometry and runs this inside ``_ffi_stream()``. ``owner_routes``:
         the schedule's owner-rank route totals, required by a before-down plan
@@ -1270,6 +1360,17 @@ class MoKForward:
             raise ValueError("layout does not match the schedule geometry")
         if split_ranks is not None:
             _check_owner_routes(owner_routes, split_ranks)
+        if shared_shape is None:
+            return MoKForward._launch_planned_routed(
+                plan,
+                routed_gate,
+                routed_up,
+                routed_down,
+                peer_rank,
+                peer_token,
+                num_tokens,
+                layout,
+            )
         x_routed = x.new_empty(routed_rows)
         if context:
             gate_shared = x.new_empty(shared_shape)
@@ -1328,6 +1429,60 @@ class MoKForward:
             y_routed,
         )
 
+    @staticmethod
+    def _launch_planned_routed(
+        plan,
+        routed_gate,
+        routed_up,
+        routed_down,
+        peer_rank,
+        peer_token,
+        num_tokens,
+        layout,
+    ):
+        """:meth:`launch_planned` of a SiTU-GLU plan: routed storage only, the
+        nine outputs with ``None`` in the four shared places."""
+        x, routed_rows, _, routed_shape, _, context, _, _ = plan.extra
+        x_routed = x.new_empty(routed_rows)
+        hidden_routed = x.new_empty(routed_shape)
+        if context:
+            gate_routed, up_routed = (
+                x.new_empty(routed_shape),
+                x.new_empty(routed_shape),
+            )
+            maps = (gate_routed, up_routed)
+        else:
+            # The context-free kernel stores no gate/up (as in ``__call__``).
+            gate_routed = up_routed = None
+            maps = (hidden_routed, hidden_routed)
+        y_routed = x.new_empty(routed_rows)
+        plan.launch(
+            (
+                x_routed,
+                *maps,
+                hidden_routed,
+                y_routed,
+                routed_gate,
+                routed_up,
+                routed_down,
+                peer_rank,
+                peer_token,
+                num_tokens,
+                layout,
+            )
+        )
+        return (
+            x_routed,
+            None,
+            gate_routed,
+            None,
+            up_routed,
+            None,
+            hidden_routed,
+            None,
+            y_routed,
+        )
+
 
 class MoKRecompute:
     """Native-signature BF16 context-only recompute; caller owns peer barriers.
@@ -1342,21 +1497,38 @@ class MoKRecompute:
     which gathers the routed rows' router weights as that forward does
     (``weight_ptrs``) and rebuilds its context: the routed hidden is
     ``BF16(w * a)``.
+
+    ``situ_glu=True`` loads the SiTU-GLU recompute without a shared expert
+    (role ``recompute_situ_noshared``; see :class:`MoKForward`): ``None``
+    shared weights, the per-call ``situ_beta`` and ``situ_lb``, ``None`` in the
+    three shared context places.
     """
 
-    def __init__(self, clamped=False, weight_before_down=False):
+    def __init__(self, clamped=False, weight_before_down=False, *, situ_glu=False):
         from .jit import load_kernel
 
         if type(weight_before_down) is not bool:
             raise TypeError("weight_before_down must be a boolean")
+        if type(situ_glu) is not bool:
+            raise TypeError("situ_glu must be a boolean")
         if weight_before_down and not clamped:
             raise ValueError(
                 "The router-weight-before-down recompute is built for clamped SwiGLU only"
             )
+        if situ_glu and (clamped or weight_before_down):
+            raise ValueError(
+                "The SiTU-GLU recompute is built without a SwiGLU limit and with the "
+                "router weight after the down projection only"
+            )
         self.clamped = clamped
-        self.weight_before_down = weight_before_down
+        self.weight_before_down, self.situ_glu = weight_before_down, situ_glu
         self.module = load_kernel(
-            _role("recompute", clamped, weight_before_down=weight_before_down)
+            _role(
+                "recompute",
+                clamped,
+                weight_before_down=weight_before_down,
+                situ_glu=situ_glu,
+            )
         )
         self.layout_module = load_kernel("expert_layout")
         self._peer_tables = {}
@@ -1382,13 +1554,18 @@ class MoKRecompute:
         *,
         layout=None,
         weight_ptrs=None,
+        situ_beta=None,
+        situ_lb=None,
     ):
         import torch
 
-        check_swiglu_limit(swiglu_limit, self.clamped)
+        activation = _activation_arguments(
+            self.situ_glu, self.clamped, swiglu_limit, situ_beta, situ_lb
+        )
+        _no_shared_weights(self.situ_glu, shared_gate, shared_up)
         _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
-        intermediate, experts = shared_gate.shape[0], counts.numel()
+        intermediate, experts = routed_gate.shape[1], counts.numel()
         capacity = peer_rank.numel()
         if (
             x.dtype != torch.bfloat16
@@ -1414,9 +1591,11 @@ class MoKRecompute:
                 ),
             )
         options = dict(device=x.device, dtype=torch.bfloat16)
-        # Identical context storage to the forward ring.
+        # Identical context storage to the forward ring (no shared rows
+        # without a shared expert).
         x_routed = torch.empty((macro_size, hidden), **options)
-        gate_shared = torch.empty((local_tokens, intermediate), **options)
+        shared_rows = 0 if self.situ_glu else local_tokens
+        gate_shared = torch.empty((shared_rows, intermediate), **options)
         gate_routed = torch.empty((macro_size, intermediate), **options)
         up_shared, up_routed = (
             torch.empty_like(gate_shared),
@@ -1426,8 +1605,21 @@ class MoKRecompute:
             torch.empty_like(gate_shared),
             torch.empty_like(gate_routed),
         )
+        shared = {}
+        if self.situ_glu:
+            gate_shared = up_shared = hidden_shared = None
+        else:
+            shared = dict(
+                x_shared=x,
+                wg_shared=shared_gate.unsqueeze(0),
+                wu_shared=shared_up.unsqueeze(0),
+                gate_shared_out=gate_shared,
+                up_shared_out=up_shared,
+                hidden_shared_out=hidden_shared,
+                local_tokens=local_tokens,
+            )
         key = (
-            local_tokens,
+            shared_rows,
             hidden,
             intermediate,
             capacity,
@@ -1448,17 +1640,12 @@ class MoKRecompute:
         with _ffi_stream():
             self.module.launch(
                 grid=(2 * (g.shared_tasks + g.minis * g.mini_tasks) + comm_sms, 1, 1),
-                x_shared=x,
+                **shared,
                 x_routed=x_routed,
-                wg_shared=shared_gate.unsqueeze(0),
-                wu_shared=shared_up.unsqueeze(0),
                 wg_routed=routed_gate,
                 wu_routed=routed_up,
-                gate_shared_out=gate_shared,
-                up_shared_out=up_shared,
                 gate_routed_out=gate_routed,
                 up_routed_out=up_routed,
-                hidden_shared_out=hidden_shared,
                 hidden_routed_out=hidden_routed,
                 x_routed_ptr=x_routed,
                 x_peers=x_peers,
@@ -1468,7 +1655,6 @@ class MoKRecompute:
                 counts=layout,
                 hidden_ready=hidden_ready,
                 x_ready=x_ready,
-                local_tokens=local_tokens,
                 hidden=hidden,
                 intermediate=intermediate,
                 experts=experts,
@@ -1476,7 +1662,7 @@ class MoKRecompute:
                 comm_sms=comm_sms,
                 macro_size=macro_size,
                 mini_size=mini_size,
-                swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
+                **activation,
                 mini_tasks_div=g.mini_tasks_div,
                 fused_col_blocks_div=g.fused_col_blocks_div,
                 **router_weight,
@@ -1505,11 +1691,15 @@ class MoKRecompute:
         mini_size,
         *,
         weight_ptrs=None,
+        situ_beta=None,
+        situ_lb=None,
     ):
         """Validated launch plan; see :meth:`MoKForward.plan`."""
         import torch
 
-        check_swiglu_limit(swiglu_limit, self.clamped)
+        activation = _activation_arguments(
+            self.situ_glu, self.clamped, swiglu_limit, situ_beta, situ_lb
+        )
         _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
         if (
@@ -1527,7 +1717,7 @@ class MoKRecompute:
             )
         (x_peers,) = _peer_table(self._peer_tables, x.device, x_ptrs)
         key = (
-            local_tokens,
+            0 if self.situ_glu else local_tokens,
             hidden,
             intermediate,
             capacity,
@@ -1546,16 +1736,16 @@ class MoKRecompute:
             (router_weight["weight_peers"],) = _peer_table(
                 self._peer_tables, x.device, weight_ptrs
             )
+        shared = not self.situ_glu
         return _Plan(
             self.module,
             (2 * (g.shared_tasks + g.minis * g.mini_tasks) + comm_sms, 1, 1),
             dict(
-                x_shared=x,
+                **({"x_shared": x, "local_tokens": local_tokens} if shared else {}),
                 x_peers=x_peers,
                 **router_weight,
                 hidden_ready=hidden_ready,
                 x_ready=x_ready,
-                local_tokens=local_tokens,
                 hidden=hidden,
                 intermediate=intermediate,
                 experts=experts,
@@ -1563,20 +1753,19 @@ class MoKRecompute:
                 comm_sms=comm_sms,
                 macro_size=macro_size,
                 mini_size=mini_size,
-                swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
+                **activation,
                 mini_tasks_div=g.mini_tasks_div,
                 fused_col_blocks_div=g.fused_col_blocks_div,
             ),
             (
                 ("x_routed", "x_routed_ptr"),
-                "gate_shared_out",
+                *(("gate_shared_out",) if shared else ()),
                 "gate_routed_out",
-                "up_shared_out",
+                *(("up_shared_out",) if shared else ()),
                 "up_routed_out",
-                "hidden_shared_out",
+                *(("hidden_shared_out",) if shared else ()),
                 "hidden_routed_out",
-                "wg_shared",
-                "wu_shared",
+                *(("wg_shared", "wu_shared") if shared else ()),
                 "wg_routed",
                 "wu_routed",
                 "schedule_rank",
@@ -1589,7 +1778,7 @@ class MoKRecompute:
             extra=(
                 x,
                 (macro_size, hidden),
-                (local_tokens, intermediate),
+                (local_tokens, intermediate) if shared else None,
                 (macro_size, intermediate),
                 3 * experts + capacity // 256,
                 macro_size if self.weight_before_down else None,
@@ -1609,7 +1798,9 @@ class MoKRecompute:
         layout,
     ):
         """Launch a :meth:`plan`; returns the seven context tensors of
-        ``__call__``. Same caller contract as :meth:`MoKForward.launch_planned`."""
+        ``__call__`` (``None`` in the three shared places, and ``None`` shared
+        weights, for a SiTU-GLU plan). Same caller contract as
+        :meth:`MoKForward.launch_planned`."""
         import torch
 
         x, routed_rows, shared_shape, routed_shape, layout_numel, weight_ring = (
@@ -1617,6 +1808,29 @@ class MoKRecompute:
         )
         if layout.numel() != layout_numel:
             raise ValueError("layout does not match the schedule geometry")
+        if shared_shape is None:
+            # SiTU-GLU: routed storage only.
+            x_routed = x.new_empty(routed_rows)
+            gate_routed, up_routed = (
+                x.new_empty(routed_shape),
+                x.new_empty(routed_shape),
+            )
+            hidden_routed = x.new_empty(routed_shape)
+            plan.launch(
+                (
+                    x_routed,
+                    gate_routed,
+                    up_routed,
+                    hidden_routed,
+                    routed_gate,
+                    routed_up,
+                    peer_rank,
+                    peer_token,
+                    num_tokens,
+                    layout,
+                )
+            )
+            return (x_routed, None, gate_routed, None, up_routed, None, hidden_routed)
         # Identical context storage to the forward ring.
         x_routed = x.new_empty(routed_rows)
         gate_shared, gate_routed = x.new_empty(shared_shape), x.new_empty(routed_shape)
@@ -1694,6 +1908,16 @@ class MoKBackward:
     adapter's ``BF16(s * dy)`` and ``BF16(s * x)`` of the per-token shared
     scale ``s``) instead of the staged ``dy`` and ``x``; every other task
     reads what it reads without it.
+
+    ``situ_glu=True`` (with ``"direct"`` and ``fp32_wgrad`` only) loads the
+    SiTU-GLU backward without a shared expert (role
+    ``backward_fp32_direct_situ_noshared``): the direct-gradient backward
+    whose routed activation is SiTU-GLU with the per-call ``situ_beta`` and
+    ``situ_lb``; the shared weights and the shared context are ``None``, the
+    kernel takes no shared map and no ``local_tokens``, the
+    ``weight_grad_accumulators`` are the three routed ones (gate, up, down)
+    and the seven shared outputs are ``None``. The staged ``dy`` rows stay
+    the rows the peers read.
     """
 
     def __init__(
@@ -1704,11 +1928,14 @@ class MoKBackward:
         *,
         router_weight_gradient="quotient",
         shared_operands=False,
+        situ_glu=False,
     ):
         from .jit import load_kernel
 
         if type(weight_before_down) is not bool or type(shared_operands) is not bool:
             raise TypeError("weight_before_down and shared_operands must be booleans")
+        if type(situ_glu) is not bool:
+            raise TypeError("situ_glu must be a boolean")
         if router_weight_gradient not in ROUTER_WEIGHT_GRADIENTS:
             raise ValueError(
                 f"router_weight_gradient must be one of {ROUTER_WEIGHT_GRADIENTS}, "
@@ -1726,9 +1953,19 @@ class MoKBackward:
                 "with FP32 weight-gradient accumulation and "
                 "router_weight_position='after_down' only"
             )
+        if situ_glu and (not direct or shared_operands):
+            raise ValueError(
+                "The SiTU-GLU backward is built with the direct router-weight "
+                "gradient and FP32 weight-gradient accumulation, without a shared "
+                "expert, only"
+            )
         self.clamped, self.fp32_wgrad = clamped, fp32_wgrad
         self.weight_before_down = weight_before_down
         self.direct, self.shared_operands = direct, shared_operands
+        self.situ_glu = situ_glu
+        # FP32 accumulators: shared and routed gate, up, down; routed only
+        # without a shared expert.
+        self.accumulators = 3 if situ_glu else 6
         self.module = load_kernel(
             _role(
                 "backward",
@@ -1736,6 +1973,7 @@ class MoKBackward:
                 fp32_wgrad,
                 weight_before_down=weight_before_down,
                 direct=direct,
+                situ_glu=situ_glu,
             )
         )
         self.zero_module = load_kernel("zero")
@@ -1781,24 +2019,40 @@ class MoKBackward:
         *,
         layout=None,
         shared_operands=None,
+        situ_beta=None,
+        situ_lb=None,
     ):
         """``weight_grad_accumulators`` (FP32 kernels only): caller-owned FP32
         (shared gate, up, down, routed gate, up, down) tensors with the weight
-        shapes; this call adds its weight gradients to them and returns them.
-        ``shared_operands`` (required exactly with ``shared_operands=True``):
-        the BF16 ``(dy_atb_s, x_atb_s)`` the shared weight gradients read, each
-        shaped like ``x``."""
+        shapes, the routed three only for a SiTU-GLU launcher; this call adds
+        its weight gradients to them and returns them. ``shared_operands``
+        (required exactly with ``shared_operands=True``): the BF16
+        ``(dy_atb_s, x_atb_s)`` the shared weight gradients read, each shaped
+        like ``x``. ``situ_beta`` / ``situ_lb``: the SiTU-GLU scalars (a
+        SiTU-GLU launcher only), in place of ``swiglu_limit``."""
         import torch
 
-        check_swiglu_limit(swiglu_limit, self.clamped)
+        activation = _activation_arguments(
+            self.situ_glu, self.clamped, swiglu_limit, situ_beta, situ_lb
+        )
+        _no_shared_weights(
+            self.situ_glu,
+            shared_gate,
+            shared_up,
+            shared_down,
+            gate_shared,
+            up_shared,
+            hidden_shared,
+        )
         dy_atb_s, x_atb_s = self._shared_operands(shared_operands, dy_buffer, x)
         if (weight_grad_accumulators is not None) != self.fp32_wgrad:
             raise ValueError(
-                "FP32 weight-gradient kernels require exactly six FP32 accumulators"
+                "FP32 weight-gradient kernels require exactly "
+                f"{'three' if self.situ_glu else 'six'} FP32 accumulators"
             )
         local_tokens, hidden = x.shape
         intermediate, experts, capacity = (
-            shared_gate.shape[0],
+            routed_gate.shape[1],
             counts.numel(),
             peer_rank.numel(),
         )
@@ -1831,21 +2085,27 @@ class MoKBackward:
         )
         dy_routed = torch.empty((macro_size, hidden), **options)
         dy_scaled = torch.empty_like(dy_routed) if self.direct else dy_routed
-        dh_shared = torch.empty((local_tokens, intermediate), **options)
+
+        def shared_empty(*shape):
+            # No shared storage without a shared expert.
+            return None if self.situ_glu else torch.empty(shape, **options)
+
+        dh_shared = shared_empty(local_tokens, intermediate)
         dh_routed = torch.empty((macro_size, intermediate), **options)
-        dg_shared, dg_routed = torch.empty_like(dh_shared), torch.empty_like(dh_routed)
-        du_shared, du_routed = torch.empty_like(dh_shared), torch.empty_like(dh_routed)
-        dx_shared, dx_routed = torch.empty_like(x), torch.empty_like(dy_routed)
+        dg_shared = shared_empty(local_tokens, intermediate)
+        dg_routed = torch.empty_like(dh_routed)
+        du_shared = shared_empty(local_tokens, intermediate)
+        du_routed = torch.empty_like(dh_routed)
+        dx_shared = shared_empty(local_tokens, hidden)
+        dx_routed = torch.empty_like(dy_routed)
         if self.fp32_wgrad:
             weights = (
-                shared_gate,
-                shared_up,
-                shared_down,
+                *(() if self.situ_glu else (shared_gate, shared_up, shared_down)),
                 routed_gate,
                 routed_up,
                 routed_down,
             )
-            if len(weight_grad_accumulators) != 6 or any(
+            if len(weight_grad_accumulators) != self.accumulators or any(
                 a.dtype != torch.float32
                 or a.shape != w.shape
                 or a.device != x.device
@@ -1855,9 +2115,18 @@ class MoKBackward:
                 raise ValueError(
                     "Accumulators must be contiguous FP32 tensors shaped like the weights"
                 )
-            dwg_shared, dwu_shared, dwd_shared, dwg_routed, dwu_routed, dwd_routed = (
-                weight_grad_accumulators
-            )
+            if self.situ_glu:
+                dwg_shared = dwu_shared = dwd_shared = None
+                dwg_routed, dwu_routed, dwd_routed = weight_grad_accumulators
+            else:
+                (
+                    dwg_shared,
+                    dwu_shared,
+                    dwd_shared,
+                    dwg_routed,
+                    dwu_routed,
+                    dwd_routed,
+                ) = weight_grad_accumulators
         else:
             dwg_shared, dwg_routed = (
                 torch.empty_like(shared_gate),
@@ -1872,7 +2141,7 @@ class MoKBackward:
                 torch.empty_like(routed_down),
             )
         key = (
-            local_tokens,
+            0 if self.situ_glu else local_tokens,
             hidden,
             intermediate,
             capacity,
@@ -1882,8 +2151,36 @@ class MoKBackward:
         )
         g = _recall(self._geometry, key)
         if g is None:
-            g = _remember(self._geometry, key, _backward_geometry(*key))
+            g = _remember(
+                self._geometry, key, _backward_geometry(*key, not self.situ_glu)
+            )
         rows = g.shared_rows + g.routed_rows
+        shared = {}
+        if not self.situ_glu:
+            shared = dict(
+                dy_s=dy_buffer,
+                dg_s=dg_shared,
+                du_s=du_shared,
+                dy_atb_s=dy_atb_s,
+                dg_atb_s=dg_shared,
+                du_atb_s=du_shared,
+                x_atb_s=x_atb_s,
+                h_atb_s=hidden_shared,
+                wg_s=shared_gate.unsqueeze(0),
+                wu_s=shared_up.unsqueeze(0),
+                wd_s=shared_down.unsqueeze(0),
+                dh_s=dh_shared,
+                dx_s=dx_shared,
+                dwg_s=dwg_shared.unsqueeze(0),
+                dwu_s=dwu_shared.unsqueeze(0),
+                dwd_s=dwd_shared.unsqueeze(0),
+                dh_sw_s=dh_shared,
+                gate_sw_s=gate_shared,
+                up_sw_s=up_shared,
+                dg_sw_s=dg_shared,
+                du_sw_s=du_shared,
+                local_tokens=local_tokens,
+            )
         (
             dy_ready,
             dh_ready,
@@ -1913,52 +2210,32 @@ class MoKBackward:
         with _ffi_stream():
             self.module.launch(
                 grid=(comm_sms + 2 * g.clusters, 1, 1),
-                dy_s=dy_buffer,
+                **shared,
                 dy_r=dy_routed,
-                dg_s=dg_shared,
                 dg_r=dg_routed,
-                du_s=du_shared,
                 du_r=du_routed,
                 x_nt_r=x_routed,
-                dy_atb_s=dy_atb_s,
                 dy_atb_r=dy_scaled,
-                dg_atb_s=dg_shared,
                 dg_atb_r=dg_routed,
-                du_atb_s=du_shared,
                 du_atb_r=du_routed,
-                x_atb_s=x_atb_s,
                 x_atb_r=x_routed,
-                h_atb_s=hidden_shared,
                 h_atb_r=hidden_routed,
-                wg_s=shared_gate.unsqueeze(0),
-                wu_s=shared_up.unsqueeze(0),
-                wd_s=shared_down.unsqueeze(0),
                 wg_r=routed_gate,
                 wu_r=routed_up,
                 wd_r=routed_down,
                 wg_nt_r=routed_gate,
                 wu_nt_r=routed_up,
-                dh_s=dh_shared,
                 dh_r=dh_routed,
-                dx_s=dx_shared,
                 dx_r=dx_routed,
                 gate_out_r=gate_routed,
                 up_out_r=up_routed,
-                dwg_s=dwg_shared.unsqueeze(0),
-                dwu_s=dwu_shared.unsqueeze(0),
-                dwd_s=dwd_shared.unsqueeze(0),
                 dwg_r=dwg_routed,
                 dwu_r=dwu_routed,
                 dwd_r=dwd_routed,
-                dh_sw_s=dh_shared,
                 dh_sw_r=dh_routed,
-                gate_sw_s=gate_shared,
                 gate_sw_r=gate_routed,
-                up_sw_s=up_shared,
                 up_sw_r=up_routed,
-                dg_sw_s=dg_shared,
                 dg_sw_r=dg_routed,
-                du_sw_s=du_shared,
                 du_sw_r=du_routed,
                 h_sw_r=hidden_routed,
                 x_routed_ptr=x_routed,
@@ -1985,7 +2262,6 @@ class MoKBackward:
                 replay_h=replay_h,
                 buffers_done=buffers_done,
                 weight_ready=weight_ready,
-                local_tokens=local_tokens,
                 hidden=hidden,
                 intermediate=intermediate,
                 experts=experts,
@@ -1993,7 +2269,7 @@ class MoKBackward:
                 comm_sms=comm_sms,
                 macro_size=macro_size,
                 mini_size=mini_size,
-                swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
+                **activation,
                 mini_size_div=g.mini_size_div,
                 mini_bwd_div=g.mini_bwd_div,
                 mini_replay_div=g.mini_replay_div,
@@ -2048,6 +2324,9 @@ class MoKBackward:
         comm_sms,
         macro_size,
         mini_size,
+        *,
+        situ_beta=None,
+        situ_lb=None,
     ):
         """Validated launch plan; see :meth:`MoKForward.plan`. ``dy_buffer``
         is the staged output-gradient rows (a fixed view of the symmetric
@@ -2055,7 +2334,9 @@ class MoKBackward:
         the shared-expert path may read the caller's tensor."""
         import torch
 
-        check_swiglu_limit(swiglu_limit, self.clamped)
+        activation = _activation_arguments(
+            self.situ_glu, self.clamped, swiglu_limit, situ_beta, situ_lb
+        )
         local_tokens, hidden = dy_buffer.shape
         if (
             dy_buffer.dtype != torch.bfloat16
@@ -2080,8 +2361,9 @@ class MoKBackward:
             weight_ptrs,
             dweight_ptrs,
         )
+        shared = not self.situ_glu
         key = (
-            local_tokens,
+            local_tokens if shared else 0,
             hidden,
             intermediate,
             capacity,
@@ -2091,7 +2373,7 @@ class MoKBackward:
         )
         g = _recall(self._geometry, key)
         if g is None:
-            g = _remember(self._geometry, key, _backward_geometry(*key))
+            g = _remember(self._geometry, key, _backward_geometry(*key, shared))
         rows = g.shared_rows + g.routed_rows
         slab, counters = _counter_slab(
             device,
@@ -2124,19 +2406,22 @@ class MoKBackward:
                 dict(elements=hidden * intermediate),
                 ("gate", "up", "down", "counts"),
             )
+        staged = {}
+        if shared:
+            staged = dict(dy_s=dy_buffer, local_tokens=local_tokens)
+            if not self.shared_operands:
+                staged["dy_atb_s"] = dy_buffer
         return _Plan(
             self.module,
             (comm_sms + 2 * g.clusters, 1, 1),
             dict(
-                dy_s=dy_buffer,
-                **({} if self.shared_operands else {"dy_atb_s": dy_buffer}),
+                **staged,
                 x_peers=x_peers,
                 dy_peers=dy_peers,
                 dx_peers=dx_peers,
                 weight_peers=weight_peers,
                 dweight_peers=dweight_peers,
                 **dict(zip(names, counters, strict=True)),
-                local_tokens=local_tokens,
                 hidden=hidden,
                 intermediate=intermediate,
                 experts=experts,
@@ -2144,7 +2429,7 @@ class MoKBackward:
                 comm_sms=comm_sms,
                 macro_size=macro_size,
                 mini_size=mini_size,
-                swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
+                **activation,
                 mini_size_div=g.mini_size_div,
                 mini_bwd_div=g.mini_bwd_div,
                 mini_replay_div=g.mini_replay_div,
@@ -2161,34 +2446,30 @@ class MoKBackward:
                     if self.direct
                     else (("dy_r", "dy_atb_r", "dy_routed_ptr"),)
                 ),
-                ("dg_s", "dg_atb_s", "dg_sw_s"),
+                *((("dg_s", "dg_atb_s", "dg_sw_s"),) if shared else ()),
                 ("dg_r", "dg_atb_r", "dg_sw_r"),
-                ("du_s", "du_atb_s", "du_sw_s"),
+                *((("du_s", "du_atb_s", "du_sw_s"),) if shared else ()),
                 ("du_r", "du_atb_r", "du_sw_r"),
-                ("dh_s", "dh_sw_s"),
+                *((("dh_s", "dh_sw_s"),) if shared else ()),
                 ("dh_r", "dh_sw_r"),
-                "dx_s",
+                *(("dx_s",) if shared else ()),
                 ("dx_r", "dx_routed_ptr"),
                 "weights",
                 "partials",
                 ("x_nt_r", "x_atb_r", "x_routed_ptr"),
-                "gate_sw_s",
+                *(("gate_sw_s",) if shared else ()),
                 ("gate_out_r", "gate_sw_r"),
-                "up_sw_s",
+                *(("up_sw_s",) if shared else ()),
                 ("up_out_r", "up_sw_r"),
-                "h_atb_s",
+                *(("h_atb_s",) if shared else ()),
                 ("h_atb_r", "h_sw_r"),
-                "x_atb_s",
+                *(("x_atb_s",) if shared else ()),
                 *(("dy_atb_s",) if self.shared_operands else ()),
-                "wg_s",
-                "wu_s",
-                "wd_s",
+                *(("wg_s", "wu_s", "wd_s") if shared else ()),
                 ("wg_r", "wg_nt_r"),
                 ("wu_r", "wu_nt_r"),
                 "wd_r",
-                "dwg_s",
-                "dwu_s",
-                "dwd_s",
+                *(("dwg_s", "dwu_s", "dwd_s") if shared else ()),
                 "dwg_r",
                 "dwu_r",
                 "dwd_r",
@@ -2237,15 +2518,17 @@ class MoKBackward:
 
     def check_accumulators(self, weights, weight_grad_accumulators):
         """The FP32 accumulator checks of ``__call__``; ``weights`` in the
-        accumulator order (shared gate, up, down, routed gate, up, down)."""
+        accumulator order (shared gate, up, down, routed gate, up, down; the
+        routed three for a SiTU-GLU launcher)."""
         import torch
 
         if (weight_grad_accumulators is not None) != self.fp32_wgrad:
             raise ValueError(
-                "FP32 weight-gradient kernels require exactly six FP32 accumulators"
+                "FP32 weight-gradient kernels require exactly "
+                f"{'three' if self.situ_glu else 'six'} FP32 accumulators"
             )
         if self.fp32_wgrad and (
-            len(weight_grad_accumulators) != 6
+            len(weight_grad_accumulators) != self.accumulators
             or any(
                 a.dtype != torch.float32
                 or a.shape != w.shape
@@ -2289,12 +2572,33 @@ class MoKBackward:
         zeroing reads it). Same caller contract as
         :meth:`MoKForward.launch_planned`; the caller checked the FP32
         accumulators with :meth:`check_accumulators` before staging.
-        ``shared_operands`` as in ``__call__``."""
+        ``shared_operands`` as in ``__call__``. A SiTU-GLU launcher takes
+        ``None`` shared weights and shared context and three accumulators,
+        and returns ``None`` in the seven shared places; it reads no ``x``
+        (the peers read the staged rows), which may be ``None``."""
         import torch
 
         dy, local_tokens, hidden, intermediate, macro_size, layout_numel, zero = (
             plan.extra
         )
+        if self.situ_glu:
+            if layout.numel() != layout_numel:
+                raise ValueError("layout does not match the schedule geometry")
+            return self._launch_planned_routed(
+                plan,
+                routed_gate,
+                routed_up,
+                routed_down,
+                x_routed,
+                gate_routed,
+                up_routed,
+                hidden_routed,
+                peer_rank,
+                peer_token,
+                num_tokens,
+                layout,
+                weight_grad_accumulators,
+            )
         if x.shape != (local_tokens, hidden) or x.dtype != torch.bfloat16:
             raise ValueError("Source rows do not match the planned geometry")
         dy_atb_s, x_atb_s = self._shared_operands(shared_operands, dy, x)
@@ -2395,6 +2699,83 @@ class MoKBackward:
             dwu_shared,
             dwu_routed,
             dwd_shared,
+            dwd_routed,
+        )
+
+    @staticmethod
+    def _launch_planned_routed(
+        plan,
+        routed_gate,
+        routed_up,
+        routed_down,
+        x_routed,
+        gate_routed,
+        up_routed,
+        hidden_routed,
+        peer_rank,
+        peer_token,
+        num_tokens,
+        layout,
+        weight_grad_accumulators,
+    ):
+        """:meth:`launch_planned` of a SiTU-GLU plan: routed storage only,
+        the three routed FP32 accumulators."""
+        import torch
+
+        dy, _, hidden, intermediate, macro_size, _, _ = plan.extra
+        routed_shape = (macro_size, intermediate)
+        router_weights = torch.empty(macro_size, dtype=torch.float32, device=dy.device)
+        partials = torch.empty(
+            macro_size, intermediate // 128, dtype=torch.float32, device=dy.device
+        )
+        dy_routed = dy.new_empty((macro_size, hidden))
+        dy_scaled = dy.new_empty((macro_size, hidden))
+        dh_routed = dy.new_empty(routed_shape)
+        dg_routed = dy.new_empty(routed_shape)
+        du_routed = dy.new_empty(routed_shape)
+        dx_routed = dy.new_empty(dy_routed.shape)
+        dwg_routed, dwu_routed, dwd_routed = weight_grad_accumulators
+        plan.launch(
+            (
+                dy_routed,
+                dy_scaled,
+                dg_routed,
+                du_routed,
+                dh_routed,
+                dx_routed,
+                router_weights,
+                partials,
+                x_routed,
+                gate_routed,
+                up_routed,
+                hidden_routed,
+                routed_gate,
+                routed_up,
+                routed_down,
+                dwg_routed,
+                dwu_routed,
+                dwd_routed,
+                peer_rank,
+                peer_token,
+                num_tokens,
+                layout,
+            )
+        )
+        return (
+            None,
+            dx_routed,
+            None,
+            dg_routed,
+            None,
+            du_routed,
+            None,
+            dh_routed,
+            dy_routed,
+            None,
+            dwg_routed,
+            None,
+            dwu_routed,
+            None,
             dwd_routed,
         )
 
@@ -3620,35 +4001,46 @@ class MoKEpilogues:
     ``epilogue_{forward,backward}_scaled_{k}``); every method then takes the
     FP32 ``[tokens]`` ``shared_scale``. ``"unscaled"`` (default) starts it
     from the shared row.
+
+    ``shared_row="none"`` (top-k 16, :data:`NONE_EPILOGUE_TOPKS`) loads the
+    epilogues without a shared row (roles
+    ``epilogue_{forward,backward}_none_{k}``): each token's FP32 accumulator
+    starts from zero, then adds the routed rows as above; every method takes
+    ``shared=None`` and reads the token count and width from ``routed``.
     """
 
     def __init__(self, top_k: int, *, weighted=None, shared_row="unscaled"):
         from .jit import load_kernel
 
-        if shared_row not in ("unscaled", "scaled"):
+        if shared_row not in ("unscaled", "scaled", "none"):
             raise ValueError(
-                "The epilogues support shared_row='unscaled' or 'scaled', got "
+                "The epilogues support shared_row='unscaled', 'scaled' or 'none', got "
                 f"{shared_row!r}"
             )
-        scaled = shared_row == "scaled"
-        topks = SCALED_EPILOGUE_TOPKS if scaled else EPILOGUE_TOPKS
+        scaled, none = shared_row == "scaled", shared_row == "none"
+        topks = (
+            SCALED_EPILOGUE_TOPKS
+            if scaled
+            else NONE_EPILOGUE_TOPKS
+            if none
+            else EPILOGUE_TOPKS
+        )
         if type(top_k) is not int or top_k not in topks:
             names = ", ".join(map(str, topks[:-1]))
             names = f"{names} or {topks[-1]}" if names else str(topks[-1])
-            raise ValueError(
-                f"The {'scaled ' if scaled else ''}epilogues support top_k={names}"
-            )
+            kind = "scaled " if scaled else "shared-row-free " if none else ""
+            raise ValueError(f"The {kind}epilogues support top_k={names}")
         if weighted is None:
-            weighted = scaled or top_k in WEIGHTED_EPILOGUE_TOPKS
+            weighted = scaled or none or top_k in WEIGHTED_EPILOGUE_TOPKS
         if type(weighted) is not bool:
             raise TypeError("weighted must be a boolean or None")
-        if weighted and not scaled and top_k not in WEIGHTED_EPILOGUE_TOPKS:
+        if weighted and not (scaled or none) and top_k not in WEIGHTED_EPILOGUE_TOPKS:
             raise ValueError(
                 f"top-k {top_k} has only the unweighted epilogue "
                 "(router_weight_position='before_down')"
             )
-        self.top_k, self.scaled = top_k, scaled
-        kind = "scaled_" if scaled else ""
+        self.top_k, self.scaled, self.none = top_k, scaled, none
+        kind = "scaled_" if scaled else "none_" if none else ""
         self.forward_module = (
             load_kernel(f"epilogue_forward_{kind}{top_k}") if weighted else None
         )
@@ -3662,6 +4054,37 @@ class MoKEpilogues:
                 f"These top-k {self.top_k} epilogues have no weighted form: sum the "
                 "routed rows unweighted with backward() or plan(routed, False)"
             )
+
+    def _rows(self, shared, routed):
+        """The checked ``(tokens, hidden)`` of a launch: from ``shared`` (see
+        :meth:`_check`), or with ``shared_row="none"`` from ``routed``
+        (``[tokens * top_k, hidden]``), which then takes ``shared=None``."""
+        import torch
+
+        if not self.none:
+            self._check(shared, routed)
+            return shared.shape
+        if shared is not None:
+            raise ValueError("The shared-row-free epilogues take shared=None")
+        if (
+            not isinstance(routed, torch.Tensor)
+            or routed.ndim != 2
+            or routed.shape[0] <= 0
+            or routed.shape[0] % self.top_k
+            or routed.shape[1] <= 0
+            or routed.shape[1] % 8
+        ):
+            raise ValueError(
+                "Routed buffer must have positive [tokens * top_k, hidden] shape "
+                "with a 16-byte row stride"
+            )
+        if (
+            not routed.is_cuda
+            or routed.dtype != torch.bfloat16
+            or not routed.is_contiguous()
+        ):
+            raise ValueError("Expected contiguous BF16 buffers on one CUDA device")
+        return routed.shape[0] // self.top_k, routed.shape[1]
 
     def _check(self, shared, routed):
         import torch
@@ -3707,22 +4130,21 @@ class MoKEpilogues:
         import torch
 
         self._require_weighted()
-        self._check(shared, routed)
-        tokens, hidden = shared.shape
+        tokens, hidden = self._rows(shared, routed)
         if (
             tuple(scores.shape) != (tokens, self.top_k)
             or scores.dtype != torch.float32
-            or scores.device != shared.device
+            or scores.device != routed.device
             or not scores.is_contiguous()
         ):
             raise ValueError("Scores must be contiguous CUDA FP32 [tokens, top_k]")
-        scales = self._check_scales(shared_scale, tokens, shared.device)
-        output = torch.empty_like(shared)
-        ctas = self._ctas(tokens, shared.device)
+        scales = self._check_scales(shared_scale, tokens, routed.device)
+        output = routed.new_empty((tokens, hidden))
+        ctas = self._ctas(tokens, routed.device)
         with _ffi_stream():
             self.forward_module.launch(
                 grid=(ctas, 1, 1),
-                shared=shared,
+                **({} if self.none else {"shared": shared}),
                 routed=routed,
                 scores=scores,
                 output=output.view(torch.uint32),
@@ -3749,7 +4171,7 @@ class MoKEpilogues:
         if not backward:
             self._require_weighted()
         tokens, hidden = routed.shape[0] // self.top_k, routed.shape[1]
-        self._check(routed[:tokens], routed)
+        self._rows(None if self.none else routed[:tokens], routed)
         if not backward and (
             tuple(scores.shape) != (tokens, self.top_k)
             or scores.dtype != torch.float32
@@ -3762,46 +4184,52 @@ class MoKEpilogues:
         if backward:
             fixed["scores"] = self._no_scores[routed.device]
         scales = ("shared_scale",) if self.scaled else ()
+        rows = () if self.none else ("shared",)
         return _Plan(
             self.backward_module if backward else self.forward_module,
             (ctas, 1, 1),
             fixed,
-            ("shared", *scales, "output")
+            (*rows, *scales, "output")
             if backward
-            else ("shared", "scores", *scales, "output"),
+            else (*rows, "scores", *scales, "output"),
+            # The output's template without a shared row: [tokens, hidden].
+            extra=routed[:tokens] if self.none else None,
         )
 
     @staticmethod
     def launch_planned(plan, shared, scores=None, shared_scale=None):
         """Launch an epilogue :meth:`plan` inside ``_ffi_stream()``; returns
         the BF16 output, as :meth:`forward` / :meth:`backward` do.
-        ``shared_scale`` exactly for a ``shared_row="scaled"`` plan."""
+        ``shared_scale`` exactly for a ``shared_row="scaled"`` plan;
+        ``shared=None`` exactly for a ``shared_row="none"`` plan."""
         import torch
 
-        output = torch.empty_like(shared)
+        if (shared is None) != (plan.extra is not None):
+            raise ValueError(
+                "shared is None exactly for a plan of the shared-row-free epilogues"
+            )
+        output = torch.empty_like(shared if shared is not None else plan.extra)
         view = output.view(torch.uint32)
+        rows = () if shared is None else (shared,)
         scales = () if shared_scale is None else (shared_scale,)
         plan.launch(
-            (shared, *scales, view)
-            if scores is None
-            else (shared, scores, *scales, view)
+            (*rows, *scales, view) if scores is None else (*rows, scores, *scales, view)
         )
         return output
 
     def backward(self, shared, routed, shared_scale=None):
         import torch
 
-        self._check(shared, routed)
-        tokens, hidden = shared.shape
-        scales = self._check_scales(shared_scale, tokens, shared.device)
-        output = torch.empty_like(shared)
-        ctas = self._ctas(tokens, shared.device)
+        tokens, hidden = self._rows(shared, routed)
+        scales = self._check_scales(shared_scale, tokens, routed.device)
+        output = routed.new_empty((tokens, hidden))
+        ctas = self._ctas(tokens, routed.device)
         with _ffi_stream():
             self.backward_module.launch(
                 grid=(ctas, 1, 1),
-                shared=shared,
+                **({} if self.none else {"shared": shared}),
                 routed=routed,
-                scores=self._no_scores[shared.device],
+                scores=self._no_scores[routed.device],
                 output=output.view(torch.uint32),
                 tokens=tokens,
                 hidden=hidden,

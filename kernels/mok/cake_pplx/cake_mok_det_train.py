@@ -128,8 +128,16 @@ def prepare_mok_bf16(
     ``shared_scale`` (FP32 ``[tokens]``), ``y = s * S(x) + sum_k w_k E_k(x)``,
     and ``backward`` returns ``d_shared_scale = dot(dy, S(x))`` as a ninth
     item (defined at ``s = 0``). ``activation="clamped_swiglu"`` is
-    ``clamped_swiglu=True``. ``"situ_glu"`` and ``shared_expert="none"`` are
-    recognized and have no build in this package yet.
+    ``clamped_swiglu=True``. ``activation="situ_glu"`` runs the routed
+    activation ``beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)``:
+    ``forward``, ``recompute_forward_context`` and ``backward`` take
+    ``situ_beta`` and ``situ_lb`` (finite positive floats, run-time values
+    fixed inside a captured CUDA graph, as ``swiglu_limit``).
+    ``shared_expert="none"`` has no shared expert,
+    ``y = sum_k w_k E_k(x)``: every call takes ``None`` for the shared
+    weights, the forward context's shared fields are ``None``, and
+    ``backward`` takes the three routed FP32 accumulators (gate, up, down) and
+    returns ``None`` for the three shared weight gradients.
 
     Prepare and warm up outside graph capture. Supported scheduler layouts
     (EP, local experts) are (1, 4) and (4, 4) for diagnostics (top-k 2 in
@@ -137,11 +145,15 @@ def prepare_mok_bf16(
     4/8/16/32/64 and 288 routed experts at EP 8/32 with top-k 2 or 8
     (``"after_down"``), 384 routed experts at EP 4/8/16/32/64 ((4, 96),
     (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``),
-    and 512 routed experts at EP8 ((8, 64)) with top-k 10, which runs only
+    512 routed experts at EP8 ((8, 64)) with top-k 10, which runs only
     with ``"after_down"``, plain SwiGLU, ``fp32_wgrad=True``,
     ``router_weight_gradient="direct"``, ``shared_expert="scaled"`` and BF16
-    routed weights, on sm_100a and sm_103a (:data:`MODE_GROUPS`); the
-    ``"direct"`` and ``"scaled"`` modes run with that configuration only.
+    routed weights, and 896 routed experts at EP64 ((64, 14)) with top-k 16,
+    which runs only with ``"after_down"``, ``activation="situ_glu"``,
+    ``fp32_wgrad=True``, ``router_weight_gradient="direct"``,
+    ``shared_expert="none"`` and BF16 routed weights; both on sm_100a and
+    sm_103a (:data:`MODE_GROUPS`). The ``"direct"``, ``"scaled"``,
+    ``"none"`` and ``"situ_glu"`` modes run with those configurations only.
     Any other combination raises before any kernel is loaded or launched:
     ``TypeError`` for a position, router-weight gradient, shared-expert mode
     or activation that is not a ``str``, an ``ep_size``, ``local_experts`` or

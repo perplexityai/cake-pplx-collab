@@ -32,7 +32,11 @@ Shared-expert weight gradients remain source-rank local.
   unscaled `dy`, defined at a zero weight) and the per-token shared-expert
   scale (`"scaled"`: `y = s * S(x) + sum_k w_k E_k(x)` with its gradient
   `d_s`), run by the 512-routed-expert group at EP8 `(8, 64)`, top-k 10, on
-  SM100a and SM103a (see Contract, "Explicit modes").
+  SM100a and SM103a; SiTU-GLU routed experts (`activation="situ_glu"`,
+  `beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)` with per-call
+  `situ_beta`, `situ_lb`) without a shared expert (`shared_expert="none"`), run
+  with the direct router-weight gradient by the 896-routed-expert group at EP64
+  `(64, 14)`, top-k 16, on SM100a and SM103a (see Contract, "Explicit modes").
 
 The implementation uses standalone generated CUDA sources, loaded prebuilt
 from `aot/` when the package ships them and otherwise built by the package's
@@ -148,6 +152,34 @@ context = backend.recompute_forward_context(
 dx, d_w, *weight_grads, d_s = backend.backward(
     config, workspace, schedule, context, dy, x, router_w, *weights,
     weight_grad_accumulators=accumulators, shared_scale=s)
+
+# 896 routed experts at EP64 (14 local experts), top-16, SiTU-GLU without a
+# shared expert: None for the three shared weights, situ_beta / situ_lb on
+# every call, three FP32 accumulators (routed gate, up, down). A token routes
+# at most 14 of its 16 routes to one rank: min(k, local) in the bound.
+ep, local, k = 64, 14, 16
+worst = min(k, local) * max_rows * ep + local * 255
+m = math.ceil(worst / (max_rows * k)) / ep  # 57 / 64 at 16,384 rows
+config, workspace = create_mok_bf16_workspace(
+    group=group, device=device, num_local_tokens=n, hidden_size=3584, topk=k,
+    source_capacity=max_rows, schedule_capacity_multiplier=m,
+)
+routed = (routed_gate, routed_up, routed_down)  # [14, I, H], [14, I, H], [14, H, I]
+accumulators = [torch.zeros(w.shape, device=device) for w in routed]  # FP32
+backend = prepare_mok_bf16(ep_size=ep, local_experts=local, topk=k, fp32_wgrad=True,
+                           router_weight_gradient="direct", shared_expert="none",
+                           activation="situ_glu")
+backend.prepare(save_context=False)
+backend.prepare_recompute()
+situ = dict(situ_beta=beta, situ_lb=lb)  # Python floats
+schedule = backend.build_schedule(workspace, config, ids, num_local_experts=local)
+y, _ = backend.forward(config, workspace, schedule, x, router_w, None, None, None,
+                       *routed, save_context=False, **situ)
+context = backend.recompute_forward_context(
+    config, workspace, schedule, x, None, routed[0], None, routed[1], **situ)
+dx, d_w, *routed_grads, _, _, _ = backend.backward(
+    config, workspace, schedule, context, dy, x, router_w, None, None, None, *routed,
+    weight_grad_accumulators=accumulators, **situ)
 ```
 
 `weights` contains shared gate/up/down followed by routed gate/up/down; gate
@@ -167,8 +199,11 @@ separate kernel builds. `prepare_mok_bf16(clamped_swiglu=..., fp32_wgrad=...)`
 compiles one BF16 variant immediately; call `prepare(swiglu_limit, mxfp8)` and
 `prepare_recompute(swiglu_limit, mxfp8)` for every other variant before CUDA
 Graph capture. With `fp32_wgrad=True`, pass six FP32 tensors (shared gate, up,
-down, routed gate, up, down) as `weight_grad_accumulators`; backward adds into
-them and returns them.
+down, routed gate, up, down) as `weight_grad_accumulators`, or with
+`shared_expert="none"` the three routed ones; backward adds into them and
+returns them. `situ_beta` and `situ_lb` (`activation="situ_glu"`) are per-call
+runtime values like `swiglu_limit`: a captured CUDA graph replays the values of
+its capture.
 
 Prepare and warm up before CUDA Graph capture. All ranks must execute
 matching collective calls. Keep workspace allocations and peer mappings alive
@@ -199,7 +234,8 @@ expert output is saved: with the default
 `router_weight_gradient="quotient"` the router-score gradient is fused into
 SwiGLU backward as `dot(d_hidden, hidden) / score`, as in native MoK. Scores
 must be positive there; a zero score yields a zero score gradient. With
-`router_weight_gradient="direct"` (the 512-expert top-10 group) the
+`router_weight_gradient="direct"` (the 512-expert top-10 and the 896-expert
+top-16 groups) the
 router-weight gradient is `dot(dh, h)` with `dh` from the unscaled `dy`, with
 no division: router weights are `>= 0` and a zero weight has its gradient. With
 `router_weight_position="before_down"` the router-weight gradient is
@@ -303,6 +339,21 @@ arguments of the top-8 ones and `shared_scale`, FP32 `[tokens]`), the two
 shared-scale helpers `shared_scale_rows` and `shared_scale_dot`, and the count /
 rows kernels of `(8, 64)`. The adapter refuses the group on any other target
 before it loads a kernel.
+
+The 896-expert top-16 group's kernels (`MODE_GROUPS["situ_top16"]`) are
+generated for SM100a and SM103a only: the SiTU-GLU forward, context-free
+forward and recompute without a shared expert (`forward_situ_noshared`,
+`forward_noctx_situ_noshared`, `recompute_situ_noshared`: the arguments of
+their SwiGLU roles without the shared maps and `local_tokens`, with the FP32
+`situ_beta` and `situ_lb` in the place of `swiglu_limit`), the direct-gradient
+SiTU-GLU backward `backward_fp32_direct_situ_noshared` (the arguments of
+`backward_fp32_direct` without the shared maps and `local_tokens`, the same
+replacement), the top-16 epilogues without a shared row
+`epilogue_forward_none_16` and `epilogue_backward_none_16` (the arguments of
+the top-8 ones without `shared`), and the count / rows kernels of `(64, 14)`.
+These launches have no shared row, shared task or shared weight-gradient
+task. The adapter refuses the group on any other target before it loads a
+kernel.
 
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
 over the two dies of an SM107a GPU, are not shipped: this package has no such
@@ -441,18 +492,20 @@ across communication-SM splits and under CUDA Graph replay.
   | Keyword | Values | Meaning |
   | --- | --- | --- |
   | `router_weight_gradient` (`ROUTER_WEIGHT_GRADIENTS`) | `"quotient"`, `"direct"` | `"after_down"` router-weight gradient. `"quotient"`: `dh = BF16(BF16(w * dy) Wd)`, `d_w = dot(dh, h) / w`, zero at a zero weight. `"direct"`: `dh = BF16(dy Wd)` from the unscaled `dy`, activation gradient `w * dh` in FP32, `d_w = dot(dh, h)` (FP32, fixed order), defined at a zero weight; the down-projection weight gradient reads `BF16(w * dy)` in both, bit for bit the same |
-  | `shared_expert` (`SHARED_EXPERT_MODES`) | `"unscaled"`, `"scaled"`, `"none"` | `"scaled"`: `forward` and `backward` take `shared_scale` (FP32 `[tokens]`, the forward's on the backward), `y = BF16(s * BF16(S(x)) + sum_k w_k o_k)` in FP32; `dx` adds `s * dx_shared` (`dx_shared` from the unscaled `dy`); the shared down-projection weight gradient reads `BF16(s * dy)`, the shared gate/up weight gradients `BF16(s * x)`; `backward` returns `d_shared_scale = dot(dh_shared, hidden_shared)` (FP32, fixed order; `dh_shared = BF16(dy Wd_shared)`) as a ninth item, defined at `s = 0`. `s = 1` gives the unscaled values bit for bit. `"none"` has no build in this package yet |
-  | `activation` (`ACTIVATIONS`) | `"swiglu"`, `"clamped_swiglu"`, `"situ_glu"` | `"clamped_swiglu"` is `clamped_swiglu=True`; `"situ_glu"` has no build in this package yet |
+  | `shared_expert` (`SHARED_EXPERT_MODES`) | `"unscaled"`, `"scaled"`, `"none"` | `"scaled"`: `forward` and `backward` take `shared_scale` (FP32 `[tokens]`, the forward's on the backward), `y = BF16(s * BF16(S(x)) + sum_k w_k o_k)` in FP32; `dx` adds `s * dx_shared` (`dx_shared` from the unscaled `dy`); the shared down-projection weight gradient reads `BF16(s * dy)`, the shared gate/up weight gradients `BF16(s * x)`; `backward` returns `d_shared_scale = dot(dh_shared, hidden_shared)` (FP32, fixed order; `dh_shared = BF16(dy Wd_shared)`) as a ninth item, defined at `s = 0`. `s = 1` gives the unscaled values bit for bit. `"none"`: no shared expert, `y = BF16(sum_k w_k o_k)` in FP32 from zero; every call takes `None` for the shared weights, the forward context's shared fields are `None`, and `backward` takes and returns the three routed FP32 accumulators and returns `None` for the three shared weight gradients |
+  | `activation` (`ACTIVATIONS`) | `"swiglu"`, `"clamped_swiglu"`, `"situ_glu"` | `"clamped_swiglu"` is `clamped_swiglu=True`; `"situ_glu"`: `beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)`, `situ_beta` and `situ_lb` (finite positive Python floats, FP32 kernel values) on every `forward`, `recompute_forward_context` and `backward`, `swiglu_limit=None` |
 
   A configuration that uses a layout, the top-k or a mode of a kernel group
   (`MODE_GROUPS`) runs exactly that group's configuration:
 
-  | Group | Layouts (EP, local experts) | Top-k | Position | SwiGLU | Weight gradients | `router_weight_gradient` | `shared_expert` | Routed weights | Targets |
+  | Group | Layouts (EP, local experts) | Top-k | Position | Activation | Weight gradients | `router_weight_gradient` | `shared_expert` | Routed weights | Targets |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-  | `"scaled_top10"` | `(8, 64)` (512 routed experts) | 10 | `"after_down"` | plain | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a |
+  | `"scaled_top10"` | `(8, 64)` (512 routed experts) | 10 | `"after_down"` | plain SwiGLU | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a |
+  | `"situ_top16"` | `(64, 14)` (896 routed experts) | 16 | `"after_down"` | SiTU-GLU | FP32 | `"direct"` | `"none"` | BF16 | SM100a, SM103a |
 
-  Recompute (`recompute_forward_context`) is unchanged by the modes. The group's
-  backward holds, beyond the unscaled backward, the scaled `dy` ring
+  Recompute (`recompute_forward_context`) is unchanged by the router-weight
+  gradient and the shared-expert scale; the SiTU-GLU group recomputes its
+  SiTU-GLU context without a shared expert. The scaled group's backward holds, beyond the unscaled backward, the scaled `dy` ring
   (`macro_size x hidden` BF16) and the two shared operands `BF16(s * dy)` and
   `BF16(s * x)` (`source rows x hidden` BF16 each) until its launch ends, and
   `dh_shared` until its row dots are taken.
@@ -744,7 +797,9 @@ across communication-SM splits and under CUDA Graph replay.
   `T` (the largest rank's source rows, or `source_capacity`, rounded up to the
   256-row tile, at least 512); every routing fits when
   `m >= ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` (`E` local
-  experts), about `(EP + 1) / EP`. The bound decreases as `T` grows, so a
+  experts), about `(EP + 1) / EP`. At the 896-expert layout `(64, 14)` and
+  top-k 16 a token routes at most 14 routes to one rank: `m = 57 / 64` from
+  4,096 to 32,768 rows (14,942,208 schedule rows at 16,384). The bound decreases as `T` grows, so a
   multiplier computed from any `T` up to the physical rows also holds; every
   rank must pass the same `m` (the ranks' configurations are compared at
   workspace creation), so compute it from a row bound all ranks agree on, such
@@ -933,6 +988,26 @@ SM103a or SM107a device):
   `tests/test_mok_naive_wbd.py` (CPU) the oracle and naive forms.
   `tests/experimental/report_mok_wbd.py` (a measurement report, not a test)
   prints the issue's stage-rounded reference errors on those inputs.
+- The 896-expert top-16 group (SiTU-GLU, `shared_expert="none"`): in
+  `test_mok_bf16.py` the registry records and the launchers' arguments, the
+  refused configurations and calls before device work, the capacity bound at
+  `(64, 14)` (no GPU), and on SM100a and SM103a the top-16 epilogues without a
+  shared row (the exact backward sum, the top-8 bytes on padded slots, CUDA
+  Graph replay), the scheduler at the bound under the two-rank skew (14 routes
+  of every token on one rank, 2 on the next, distinct experts), and the
+  adapter's step at `(64, 14)` emulated on one GPU with every route on rank 0
+  (two routes of each token repeating an expert): the context and checkpointed
+  steps bit for bit, run to run and under CUDA Graph replay, the SiTU-GLU
+  scalars as run-time values, no host synchronization, changing source counts
+  and `torch.utils.checkpoint` without reentrancy; in `test_mok_accuracy.py`
+  the forward epilogue and that step on each SiTU-GLU data kind (normal, wide,
+  saturated `|gate| <= 190` and `|up| <= 950`, deep negative gates, small,
+  exact-zero gates, exact-zero up values) judged against the naive tier
+  (`y`, `dx`, the router-weight gradients, also at zero weights, and the
+  routed weight gradients). The deep-negative kind keeps the gates near the
+  FP32 normal range of `sigmoid(gate)` (about -88.5 to -80.5): accuracy in the
+  FP32 subnormal range of `sigmoid` is not required. Multi-GPU runs at
+  `(64, 14)` are a separate test.
 
 The CUDA schedules derive from Cursor Research's Apache-2.0 Mixture of Kittens
 implementation at revision `caeb2963f855c7ad53bb50c8bbf211086405cb98`. Copyright and modification notices are
