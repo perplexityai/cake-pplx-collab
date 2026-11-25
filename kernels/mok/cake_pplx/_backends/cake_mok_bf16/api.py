@@ -169,8 +169,8 @@ _FACTORY_COMM_SMS = (40, 40)
 # B200 ((10, 0), 148 SMs) keeps 40 / 40 (48 / 40 measured within the spread of
 # identical arms) and GB200 ((10, 0), 152 SMs) keeps 40 / 40 (no other count
 # measured).
-# Absolute times against the previous version and the baselines: backend
-# README, "Fixed split per launch shape".
+# Absolute times against the previous version: backend README, "Fixed split
+# per launch shape".
 SHAPE_COMM_SMS = {
     (10, 3): {152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}}},
 }

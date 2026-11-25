@@ -790,6 +790,71 @@ across communication-SM splits and under CUDA Graph replay.
   imbalance split); MXFP8 routed weights on a workspace created with
   `precision="bf16"` at EP8: 40 / 40 -> 60 / 60 (two Rubin nodes needed).
 
+- Fixed split per launch shape: `SHAPE_COMM_SMS` (keyed like `COMM_SMS` by
+  compute capability, SM count, routed precision and EP group size, then by the
+  launch's hidden width, routed intermediate width and top-k;
+  `resolve_shape_comm_sms`) holds the split measured for one launch shape. With
+  `fwd_num_comm_sms` / `bwd_num_comm_sms` `"auto"`, `create_mok_bf16_workspace`
+  puts the device's rows into `MoKConfig.shape_comm_sms`. A forward,
+  context-free forward or backward launch whose routed precision, hidden width
+  (the workspace's `hidden_size`), routed intermediate width and top-k (the
+  workspace's `topk`) match a row takes that row's split instead of the
+  `COMM_SMS` row; the imbalance split still replaces it while the load is
+  skewed. A context recompute launch keeps the `COMM_SMS` row: it rebuilds one
+  macro batch, which slows as the forward count grows. Integer counts leave
+  `shape_comm_sms` `None`. The split changes time, never bits (see
+  Repeatability): with the row and with 0.4.0 every rank's output digests (y,
+  d_x, d_router_weights, the weight gradients, d_shared_scale) are the same for
+  the 512-expert layout at 2,048 and 32,768 tokens per rank (uniform) and at
+  32,768 with the hot rank at 1.75x, on GB300.
+
+  Row: GB300 (152 SMs) BF16 EP8, H 4096 / I 1024 / top 10 (the 512-expert
+  layout `(8, 64)`): 56 / 48. The `COMM_SMS` row 20 / 24 was chosen at I 2048
+  and top 8, where a routed row carries twice the expert GEMM work per byte it
+  moves; at I 1024 the forward and the backward wait on communication with that
+  few SMs. Selection: checkpointed step on two GB300 trays of one NVLink
+  domain, EP8, 32,768 tokens per rank, uniform / hot rank 1.75x, two rounds
+  interleaved with 20 / 24, slowest rank's median: 20 / 24 46.24 / 72.74 ms,
+  48 / 48 33.91 / 53.72, 56 / 40 34.23 / 54.31, 56 / 48 33.49 / 53.59, 64 / 48
+  33.81 / 53.54. B300 (148 SMs) keeps 24 / 40: 48 / 48 made the checkpointed
+  step faster (41.97 -> 38.90 ms, uniform, 32,768 tokens per rank) but the
+  backward slower (26.17 -> 27.14 ms; the faster forward leaves the GPU at a
+  lower SM clock under its power limit), and so did every forward count from 40
+  to 56 with a backward count of 40 or 48. B200 and GB200 keep 40 / 40.
+
+  Table: this package against 0.4.0 (main) on GB300, EP8 on two trays of one
+  NVLink domain, the 512-expert layout (H 4096 / I 1024, top 10, direct router
+  weight gradient, scaled shared expert, BF16 routed weights, FP32 weight
+  gradients), macro batch 32,768, three rounds of 0.4.0, this package and a
+  second 0.4.0 process interleaved on the same GPUs, order reversed in every
+  second round, eager, slowest rank's median of 20 timed repetitions, median
+  over the lines; change = this package / main - 1; band = the largest relative
+  spread of the lines of either side; 'faster' = the line ranges do not overlap
+  and the change is beyond the band, 'noise' otherwise. Forward = schedule and
+  forward without context; checkpointed step = schedule, forward without
+  context, context recompute and backward. The two 0.4.0 processes differ by at
+  most 0.4 % on every row except the context recompute (at most 3.3 %, 0.8 ms).
+  On GB200, B200 and B300 this package launches the same splits as 0.4.0.
+
+  | routing | tokens per rank | operation | main (ms) | this package (ms) | change |
+  | --- | --- | --- | --- | --- | --- |
+  | uniform | 32,768 | forward | 15.728 | 9.532 | -39.4 % (band 0.9 %, faster) |
+  | uniform | 32,768 | backward | 29.815 | 23.328 | -21.8 % (band 1.6 %, faster) |
+  | uniform | 32,768 | context recompute | 0.831 | 0.824 | -0.8 % (band 3.0 %, noise) |
+  | uniform | 32,768 | checkpointed step | 46.263 | 33.595 | -27.4 % (band 0.8 %, faster) |
+  | 1.75x hot rank | 32,768 | forward | 24.491 | 14.920 | -39.1 % (band 0.3 %, faster) |
+  | 1.75x hot rank | 32,768 | backward | 47.504 | 37.534 | -21.0 % (band 0.6 %, faster) |
+  | 1.75x hot rank | 32,768 | context recompute | 0.827 | 0.823 | -0.6 % (band 4.0 %, noise) |
+  | 1.75x hot rank | 32,768 | checkpointed step | 72.716 | 53.525 | -26.4 % (band 0.3 %, faster) |
+  | uniform | 16,384 | forward | 7.824 | 4.799 | -38.7 % (band 0.6 %, faster) |
+  | uniform | 16,384 | backward | 14.800 | 11.636 | -21.4 % (band 0.5 %, faster) |
+  | uniform | 16,384 | context recompute | 0.733 | 0.724 | -1.1 % (band 2.7 %, noise) |
+  | uniform | 16,384 | checkpointed step | 23.171 | 17.206 | -25.7 % (band 0.3 %, faster) |
+  | 1.75x hot rank | 16,384 | forward | 11.902 | 7.385 | -37.9 % (band 0.6 %, faster) |
+  | 1.75x hot rank | 16,384 | backward | 23.446 | 18.707 | -20.2 % (band 0.6 %, faster) |
+  | 1.75x hot rank | 16,384 | context recompute | 0.725 | 0.724 | -0.1 % (band 2.8 %, noise) |
+  | 1.75x hot rank | 16,384 | checkpointed step | 35.919 | 26.843 | -25.3 % (band 0.6 %, faster) |
+
 - Mini-batches are multiples of 256; macro-batches are multiples of the
   mini-batch. Schedule capacity must hold every padded route; overflow traps.
   The capacity is `T * topk * max(2, ceil(EP * m))` rows for
