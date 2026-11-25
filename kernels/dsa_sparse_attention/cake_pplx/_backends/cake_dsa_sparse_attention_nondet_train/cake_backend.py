@@ -3789,7 +3789,8 @@ def forward(
     ``with_o_lo`` (``bool``, default ``True``): with ``True`` the forward also writes ``o_lo``, the BF16 rounding
     residual of ``out``, and the backward forms ``delta = rowsum(dout * (out + o_lo))`` in FP32.  With ``False`` the
     forward neither computes nor stores ``o_lo`` (``H`` KiB less written and saved per query token, ``H`` the call's
-    query head count) and returns ``None`` in its slot, and the backward forms ``delta = rowsum(dout * out)`` from
+    query head count; above 64 heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of workspace, and no
+    ``o_lo`` window copies) and returns ``None`` in its slot, and the backward forms ``delta = rowsum(dout * out)`` from
     the BF16 ``out``.  ``out`` and ``lse`` have the same accuracy in both modes.  Any value other than a ``bool``
     raises ``ValueError``.
     """

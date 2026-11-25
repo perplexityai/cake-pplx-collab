@@ -83,7 +83,9 @@ With ``True`` the forward also writes ``o_lo``, the BF16 rounding residual of
 FP32, which keeps the gradients accurate on peaked rows (rows whose softmax
 puts almost all weight on one key).  With ``False`` the forward neither
 computes nor stores ``o_lo`` (``H`` KiB less written and saved per query
-token, ``H`` the call's query head count: 64 on the NoPE entries) and the
+token, ``H`` the call's query head count: 64 on the NoPE entries; above 64
+heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of workspace, and
+no ``o_lo`` window copies) and the
 backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
 the form cuDNN's DSA backward uses; on peaked rows the gradient error grows to
 that class.  ``out`` and ``lse`` have the same accuracy in both modes.  The
@@ -423,9 +425,11 @@ def cake_dsa_sparse_attention_nondet(
         rowsum(dout * (out + o_lo))`` in FP32.  This keeps the gradients
         accurate on peaked rows (rows whose softmax puts almost all weight on
         one key).  With ``False`` the forward neither computes nor stores
-        ``o_lo`` (``H`` KiB less written and saved per query token), and the
-        backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
-        the form cuDNN's DSA backward uses; on peaked rows the gradient error
+        ``o_lo`` (``H`` KiB less written and saved per query token; above 64
+        heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of
+        workspace, and no ``o_lo`` window copies), and the backward forms
+        ``delta = rowsum(dout * out)`` from the BF16 ``out``, the form
+        cuDNN's DSA backward uses; on peaked rows the gradient error
         grows to that class.  ``out`` and ``lse`` have the same accuracy in
         both modes.  Any value other than a ``bool`` raises ``ValueError``.
 
@@ -1014,7 +1018,9 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     rowsum(dout * (out + o_lo))`` in FP32, which keeps the gradients accurate
     on peaked rows (rows whose softmax puts almost all weight on one key).
     With ``False`` the forward neither computes nor stores ``o_lo`` (``H`` KiB
-    less written per query token) and returns ``None`` in its slot; pass
+    less written per query token; above 64 heads also no ``fwd_o_lo`` window
+    scratch, 64 KiB per token of workspace, and no ``o_lo`` window copies) and
+    returns ``None`` in its slot; pass
     ``None`` and ``with_o_lo=False`` to the step backward, which forms
     ``delta = rowsum(dout * out)`` from the BF16 ``out``, the form cuDNN's DSA
     backward uses (on peaked rows the gradient error grows to that class).
