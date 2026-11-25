@@ -9240,6 +9240,23 @@ def forward_binding_key(
     )
 
 
+# the position of ``valid_rows`` in a :func:`forward_binding_key` (:func:`forward_binding_key_rows`)
+_FORWARD_KEY_ROWS = 13
+
+
+def forward_binding_key_rows(key: tuple, valid_rows: Optional[int]) -> tuple:
+    """The :func:`forward_binding_key` of a call with the valid-row count ``valid_rows`` (``None`` = uncompacted), from
+    ``key``, the key the same call formed with ``valid_rows=None``: the key's count-independent part, which a caller
+    forms ahead of the count's device synchronization (the host builds it while the device still runs queued work)
+    and completes here once the count is known.  The result equals the key formed with the count element for
+    element."""
+    if key[_FORWARD_KEY_ROWS] is not None:
+        raise ValueError("the key already holds a valid-row count")
+    if valid_rows is None:
+        return key
+    return key[:_FORWARD_KEY_ROWS] + (int(valid_rows),) + key[_FORWARD_KEY_ROWS + 1 :]
+
+
 def logprob_backward_binding_key(
     X,
     W,
@@ -11881,6 +11898,13 @@ def forward_logprob(
         stats=True,
         hidden_count=_resolve_hidden_count(hidden_count),
     )
+    # the binding key's count-independent part, formed ahead of the count's device synchronization (the host builds it
+    # while the device runs the queued work); the count completes it (:func:`forward_binding_key_rows`)
+    key0 = (
+        _logprob_forward_key(X, W, labels, problem.chunk, tuning, hc is not None, lbl)
+        if backend == "cake" and BINDING_CACHE.enabled
+        else None
+    )
     if hc is not None:
         row_index = hc.row_index()
     else:
@@ -11899,6 +11923,7 @@ def forward_logprob(
         backend=backend,
         tuning=tuning,
         lbl=lbl,
+        key0=key0,
     )
     result = ForwardResult(
         loss=None,
@@ -11913,6 +11938,38 @@ def forward_logprob(
     return result
 
 
+def _logprob_forward_key(
+    X: torch.Tensor,
+    W: torch.Tensor,
+    labels: torch.Tensor,
+    chunk_size: int,
+    tuning: dict[str, dict[str, Any]],
+    hidden: bool,
+    lbl: bool,
+    valid_rows: Optional[int] = None,
+) -> tuple:
+    """:func:`forward_binding_key` of a log-probability forward without a temperature (:func:`_forward_logprob_rows`):
+    ``hidden`` whether it took the hidden valid-row count, ``lbl`` its resolved label-column arm."""
+    return forward_binding_key(
+        X,
+        W,
+        labels,
+        objective="ce",
+        loss_div=None,
+        infer_logp=None,
+        loss_weights=None,
+        chunk_size=chunk_size,
+        need_dx=False,
+        need_dw=False,
+        grad_weight_dtype=torch.bfloat16,
+        entry="logprob",
+        valid_rows=valid_rows,
+        gemm_tuning=tuning,
+        hidden_count=hidden,
+        logprob_lbl=lbl,
+    )
+
+
 def _forward_logprob_rows(
     problem: Problem,
     X: torch.Tensor,
@@ -11924,33 +11981,24 @@ def _forward_logprob_rows(
     backend: str,
     tuning: dict[str, dict[str, Any]],
     lbl: bool,
+    key0: Optional[tuple] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
     """``(logp, lse, memory)`` of the log-probability forward's chunk loop over the rows ``row_index`` (``None`` =
     every row; non-empty otherwise), through the remembered binding or a new one: :func:`forward_logprob`'s body after
     its count, and the zero-weight rows' logp-only pass of a loss call (:func:`_zero_weight_logp`).  ``logp`` / ``lse``
-    are compact when ``row_index`` is given."""
+    are compact when ``row_index`` is given.  ``key0``: the call's binding key without its valid-row count
+    (:func:`forward_binding_key_rows`), formed by the caller ahead of its count; ``None``: formed here."""
     chunk_size = problem.chunk
     valid_rows = None if row_index is None else int(row_index.numel())
     cache = BINDING_CACHE
     key = None
     if backend == "cake" and cache.enabled:
-        key = forward_binding_key(
-            X,
-            W,
-            labels,
-            objective="ce",
-            loss_div=None,
-            infer_logp=None,
-            loss_weights=None,
-            chunk_size=chunk_size,
-            need_dx=False,
-            need_dw=False,
-            grad_weight_dtype=torch.bfloat16,
-            entry="logprob",
-            valid_rows=valid_rows,
-            gemm_tuning=tuning,
-            hidden_count=hc is not None,
-            logprob_lbl=lbl,
+        key = (
+            _logprob_forward_key(
+                X, W, labels, chunk_size, tuning, hc is not None, lbl, valid_rows
+            )
+            if key0 is None
+            else forward_binding_key_rows(key0, valid_rows)
         )
         binding = cache.lookup(key)
         if binding is not None:

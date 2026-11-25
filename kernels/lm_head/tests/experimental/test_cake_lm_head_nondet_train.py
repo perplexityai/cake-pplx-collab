@@ -3142,6 +3142,129 @@ def test_entries_read_the_slice_rule_once_and_key_and_plan_with_it(
     )
 
 
+def test_forward_binding_key_rows_completes_the_count_free_key():
+    """``forward_binding_key_rows`` completes the key a call formed without its valid-row count (``valid_rows=None``:
+    the part :func:`forward_logprob` forms ahead of the count's device synchronization) into the key the call forms
+    with the count, element for element: equal, with the same element types, repr and hash, for the option sets of
+    the log-probability forward and the loss entry below and the counts ``None``, 0, 1, 973, 1024 and 12000.  A key
+    that already holds a count is refused."""
+    inp = _host_inputs(40, "policy")
+    tuning = cake_backend._resolve_gemm_tuning(None)
+    logprob = dict(
+        objective="ce",
+        loss_div=None,
+        infer_logp=None,
+        loss_weights=None,
+        chunk_size=4096,
+        need_dx=False,
+        need_dw=False,
+        grad_weight_dtype=torch.bfloat16,
+        entry="logprob",
+        gemm_tuning=tuning,
+    )
+    loss = dict(
+        objective="policy",
+        loss_div=2.0,
+        infer_logp=inp.infer_logp,
+        loss_weights=inp.loss_weights,
+        chunk_size=16,
+        need_dx=True,
+        need_dw=True,
+        grad_weight_dtype=torch.float32,
+        entry="loss",
+    )
+    options = [
+        dict(logprob),
+        dict(logprob, hidden_count=True),
+        dict(logprob, logprob_lbl=True),
+        dict(logprob, hidden_count=True, logprob_lbl=True),
+        dict(loss),
+        dict(
+            loss,
+            fuse_dw_cast=True,
+            gemm_tuning={"dx": {"k_slices": 2}},
+            dx_finalize=True,
+            hidden_count=True,
+            dx_rule=("measured", 7),
+            cast_fold=True,
+        ),
+    ]
+    for kw in options:
+        free = cake_backend.forward_binding_key(inp.X, inp.W, inp.labels, **kw)
+        assert free[cake_backend._FORWARD_KEY_ROWS] is None, kw
+        for rows in (None, 0, 1, 973, 1024, 12000):
+            want = cake_backend.forward_binding_key(
+                inp.X, inp.W, inp.labels, valid_rows=rows, **kw
+            )
+            got = cake_backend.forward_binding_key_rows(free, rows)
+            assert got == want, (kw, rows)
+            assert [type(a) for a in got] == [type(b) for b in want], (kw, rows)
+            assert repr(got) == repr(want) and hash(got) == hash(want), (kw, rows)
+            if rows is not None:
+                with pytest.raises(ValueError, match="already holds"):
+                    cake_backend.forward_binding_key_rows(got, rows)
+
+
+def test_device_forward_logprob_keys_before_its_count(glm_weight, monkeypatch):
+    """:func:`forward_logprob` forms its binding key's count-independent part before the valid-row count (the host
+    builds it while the device runs the queued work), once per call, and looks the binding up under the key formed
+    with the count, on a binding miss and a hit, compacted and not."""
+    _require_program(entry="logprob")
+    be = cake_backend
+    inp = make_inputs(
+        1024, seed=SEED + 8802, device=CUDA, W=glm_weight, ignore_frac=0.05
+    )
+    events, looked = [], []
+    real_key, real_count = be.forward_binding_key, be.valid_row_index
+    real_lookup = be.BINDING_CACHE.lookup
+
+    def key_spy(*args, **kwargs):
+        events.append(("key", kwargs.get("valid_rows")))
+        return real_key(*args, **kwargs)
+
+    def count_spy(labels):
+        events.append(("count", None))
+        return real_count(labels)
+
+    def lookup_spy(key):
+        looked.append(key)
+        return real_lookup(key)
+
+    monkeypatch.setattr(be, "forward_binding_key", key_spy)
+    monkeypatch.setattr(be, "valid_row_index", count_spy)
+    monkeypatch.setattr(be.BINDING_CACHE, "lookup", lookup_spy)
+    be.BINDING_CACHE.clear()
+    for compact in (True, False):
+        for _ in range(2):  # a binding miss, then a hit
+            del events[:], looked[:]
+            fr = be.forward_logprob(
+                inp.X, inp.W, inp.labels, chunk_size=4096, compact_rows=compact
+            )
+            rows = None if fr.row_index is None else int(fr.row_index.numel())
+            want_events = [("key", None)] + ([("count", None)] if compact else [])
+            assert events == want_events, events
+            want = real_key(
+                inp.X,
+                inp.W,
+                inp.labels,
+                objective="ce",
+                loss_div=None,
+                infer_logp=None,
+                loss_weights=None,
+                chunk_size=4096,
+                need_dx=False,
+                need_dw=False,
+                grad_weight_dtype=torch.bfloat16,
+                entry="logprob",
+                valid_rows=rows,
+                gemm_tuning=be._resolve_gemm_tuning(None),
+                hidden_count=False,
+                logprob_lbl=be._resolve_logprob_lbl(None),
+            )
+            assert looked == [want], (compact, looked, want)
+    torch.cuda.synchronize()
+
+
 def test_binding_keys_cover_the_options_of_the_plan():
     """Every option that shapes a binding's plan or argument plans is in its key (the D:3203 analog): the entry, the
     tensors' addresses / shapes / strides / dtypes, the objective and its scalars, the switches, the explicit GEMM knobs
