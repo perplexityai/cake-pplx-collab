@@ -29,9 +29,31 @@ h.backward(dh)  # gate_up.grad: BF16 [R, 4608]; w.grad: FP32 [R]
 h = cake_clamped_swiglu_det(gate, up, w, limit=10.0)
 h_shared = cake_clamped_swiglu_det(gate_up_shared, limit=10.0)
 
-# under activation checkpointing: only the inputs are kept
-h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, w, limit=10.0, use_reentrant=False)
+# activation checkpointing: checkpoint the op together with the down projection (w_down: BF16 [hidden, 2304])
+def swiglu_down(gate_up, w, w_down):
+    return torch.nn.functional.linear(cake_clamped_swiglu_det(gate_up, weight=w, limit=10.0), w_down)
+
+y = torch.utils.checkpoint.checkpoint(swiglu_down, gate_up, w, w_down, use_reentrant=False)
 ```
+
+The op saves only its inputs, so checkpointing it alone saves no memory: the down projection keeps `h` for its weight
+gradient.  In the backward of a non-reentrant checkpoint, the recomputation runs with saved-tensors hooks set; there
+`cake_clamped_swiglu_det` launches its forward kernel after autograd saved its inputs, as a built-in op does.  So with
+early stop on (the torch default), the recomputation stops before that launch when nothing later in the region saves a
+tensor, and runs the forward when a later operation saves one.  Anywhere else (no hooks, or not in a backward, such as
+the checkpoint's own forward pass) the autograd function's `forward` launches, as up to 0.1.7.  The launch and the bits
+are the same in every case.  Per checkpointed region (down projection: `F.linear(h, w_down)`, which saves `h`):
+
+| Region | Not kept from the forward to the backward | Forward of this op in the backward |
+|---|---|---|
+| The op alone (down projection outside) | Nothing (the op keeps its inputs, the down projection `h`) | None (0.1.7: one) |
+| Gate/up projection, then the op (down projection outside) | The projection's `[R, 4608]` output | None (0.1.7: one); the projection is recomputed |
+| The op, then the down projection (above) | `h` | One, as in 0.1.7 |
+| The whole block (gate/up projection, op, down projection) | The projection's output and `h` | One, as in 0.1.7 |
+| Any region with `use_reentrant=True`, `early_stop=False` (or `set_checkpoint_early_stop(False)`), or a direct `CakeClampedSwiGLUDetFunction.apply` | As above | One, also when its output is dropped |
+
+A call that Dynamo or `torch.jit.trace` records launches inside `forward`; a checkpoint's recomputation runs with Dynamo
+disabled.  Not tested under `torch.compile`.
 
 The steps without autograd, `cake_clamped_swiglu_det_train_forward` and `cake_clamped_swiglu_det_train_backward`,
 take the same operands and optional preallocated outputs (`out=`, `grad_gate_up_or_gate=`, `grad_up=`,
@@ -67,69 +89,120 @@ required keyword everywhere.
 
 ## Programs
 
-Each stage has two programs (`cake_jit.MODULES`, keyed by program name): a small-R program (role `fwd` or `bwd`) and
-a large-R program (role `fwd_large` or `bwd_large`).  `cake_jit.PROGRAM_OF` maps a role and an architecture to its
+The forward runs stage `fwd`, a weighted backward stage `bwd` and an unweighted backward stage `bwd_unweighted`
+(`cake_jit.MODULES`, keyed by program name).  Each stage has a small-R program (role `fwd`, `bwd` or `bwd_unweighted`)
+and, from 0.1.9, a fine program for the fewest rows (role `fwd_fine`, `bwd_fine` or `bwd_unweighted_fine`), on all
+three architectures.  `fwd` and `bwd` also have a large-R program (role `fwd_large` or `bwd_large`), and from 0.1.10
+`bwd` also has a relay program (role `bwd_relay`).  `cake_jit.PROGRAM_OF` maps a role and an architecture to its
 program.  A program is compiled with the exact `-gencode` flag of each architecture it is delivered for (`build.json`).
-A call runs the large-R program when `R` lies in one of the record's windows of rows per SM on the device's
-architecture (`rows_per_sm_windows`): `lo * SMs <= R <= hi * SMs` for a window `[lo, hi]` (both bounds included), where
-`hi` None has no upper bound.  It runs the small-R program at every other `R` (`cake_jit.route`).  The package reads
-the architecture once per device and the SM count once per stage and device.  An architecture without a large-R program
-of a stage runs the small-R one at every `R`.
+A call runs the fine program when `R <= hi * SMs` for the fine record's one window `[0, hi]` of rows per SM on the
+device's architecture (`rows_per_sm_windows`, `cake_jit.fine`).  At more rows it runs a windowed program (the large-R
+or the relay one) when `R` lies in one of its record's windows: `lo * SMs <= R <= hi * SMs` for a window `[lo, hi]`
+(both bounds included), where `hi` None has no upper bound.  The windows of a stage's windowed programs do not overlap
+or touch.  It runs the small-R program at every other `R` (`cake_jit.route`).  The package reads the architecture once
+per device and the SM count once per stage and device.  Per stage and device it makes one table with an entry per row
+count up to the fine window's last row count or the last edge of the windowed programs, whichever is larger.  A call
+compares `R` with that table's length and reads one entry.  A call of more rows runs the windowed program whose last
+window has no upper bound (`fwd`; `bwd` on `sm_100a` and `sm_107a`), and the small-R program otherwise (`bwd` on
+`sm_103a`, and `bwd_unweighted`, which has no large-R or relay program).  An architecture without a fine, a large-R or
+a relay program of a stage runs the small-R one in its place.  A fine window may reach at most 64 rows per SM
+(`cake_jit.MAX_FINE_ROWS_PER_SM`), so the fine window adds at most `64 * SMs` entries to the table.
 
 | stage | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
+| `fwd` fine | up to 8 rows per SM | up to 4 | up to 4 |
 | `fwd` large-R | from 112 rows per SM | from 208 | from 384 |
-| `bwd` large-R | [12, 21], [32, 41], from 48 rows per SM | [12, 21], [32, 41], from 48 | [12, 21], [35, 41], from 48 |
+| `bwd` fine | up to 2 rows per SM | up to 2 | up to 2 |
+| `bwd` relay | [3, 5], from 25 rows per SM | [25, 647] | [3, 6], from 31 |
+| `bwd` large-R | [13, 21] rows per SM | [12, 21] | [16, 21] |
+| `bwd_unweighted` fine | up to 4 rows per SM | up to 4 | up to 2 |
 
-A window changes 0.1.1's route only where forced small/large sweeps showed the other program not slower by more than
-0.5 % on that architecture, with both weighted and unweighted inputs.  In these sweeps the route was forced to each
-program, and both were timed at fixed row counts on B200, GB300 and VR200, with warm L2 (CUDA graph) and cold L2
-(CUPTI).  The inputs were weighted, unweighted and deep-gate (every warp takes the exact sigmoid).  The sweeps timed the
-backward alone and in forward + backward and checkpointed steps.  They timed the forward alone with merged and split
-inputs, and in those steps only on GB300 with a split input.  They have no forward + backward or checkpointed timing for
-the B200 forward change (96 to 112 rows per SM).  There only the release A/B of 0.1.2 against 0.1.1 covers those steps,
+The forward's large-R windows change 0.1.1's route only where forced small/large sweeps showed the other program not
+slower by more than 0.5 % on that architecture, with both weighted and unweighted inputs.  In these sweeps the route was
+forced to each program, and both were timed at fixed row counts on B200, GB300 and VR200, with warm L2 (CUDA graph) and
+cold L2 (CUPTI).  The inputs were weighted, unweighted and deep-gate (every warp takes the deep-gate sigmoid, exact
+before 0.1.4).  The sweeps timed the forward alone with merged and split inputs, and in forward + backward and
+checkpointed steps only on GB300 with a split input.  They have no forward + backward or checkpointed timing for the
+B200 forward change (96 to 112 rows per SM).  There only the release A/B of 0.1.2 against 0.1.1 covers those steps,
 and it marks none of them slower: on the graph and CUPTI timers the highest ratio of 0.1.2's time to 0.1.1's is 1.006,
 with cold L2 at 111.99 rows per SM, within noise.  Below, small/large is the small-R program's time over the large-R
 one's.  The bounds are whole numbers of rows per SM and run the large-R program, as 0.1.1's cut did.  So a window also
-holds rows where the small-R program measures faster in some cases.  For example: the backward alone at the bounds 12,
-32 and 48 rows per SM and at 36; the forward + backward and checkpointed steps at 35 rows per SM on `sm_107a`
-(small/large 0.977-0.996); every measured case from about 20.25 to 21 and from 40.5 to 41 rows per SM; and the forward
-with the deep-gate input (small/large 0.815-0.957 inside the forward windows).  These rows ran the large-R program in
-0.1.1 too, so nothing changes for them.
+holds rows where the small-R program measures faster in some cases: with the deep-gate input the forward reads
+small/large 0.815-0.957 inside the forward windows.  These rows ran the large-R program in 0.1.1 too, so nothing
+changes for them.  In the forward on `sm_100a`, the small-R program alone stays faster up to 112 rows per SM.  With
+merged weighted and unweighted inputs it reads small/large 0.988-0.998 at 112.  For the split layout near 112, the
+release A/B reads the split forward at 111.99 rows per SM at 0.978-0.995 of 0.1.1's time with weighted and unweighted
+inputs on the graph and CUPTI timers.  So that window begins at 112 (0.1.1: 96).  On `sm_103a` (GB300) the small-R
+forward alone is faster with a merged input up to about 384 rows per SM.  With a split input, from 224 rows per SM on,
+it is faster in some cases (down to 0.989) and more than 0.5 % slower in others (weighted and unweighted inputs, warm
+L2: up to 1.008 at 384).  At 192 and 208 the split forward reads 0.988-0.997 alone and 0.997-1.001 in the forward +
+backward and checkpointed steps, so that window begins at 208 (0.1.1: 192).  On `sm_107a` the window stays at 0.1.1's
+384.  From 320 to 384 rows per SM, with weighted and unweighted inputs, the two forward programs are within about
+0.5 % of each other (small/large 0.995-1.005; the small-R forward is up to 0.53 % slower with a merged input and cold
+L2).  With the deep-gate input the small-R forward is 5.6-6.2 % faster at 384.  Below 384 the small-R forward runs, as
+in 0.1.1.
 
-Both backward programs run 4 rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows per SM a wave), the large-R one 5
-(20 rows).  Above 12 and up to 20 rows per SM, and above 36 and up to 40, the small-R program runs twice the waves of
-the large-R one.  There it measured slower in every forward + backward and checkpointed case at 16, 20 and 40 rows per
-SM (small/large 1.005-1.090).  The backward alone is mixed there: the small-R program is faster in some cases (down to
-0.954) and slower in others (up to 1.083).  Just above 20 rows per SM the small-R program measured up to 3.5 % slower in
-the checkpointed step (GB300, in the first A/B of this release; the forced sweeps there read up to 2.2 %).  Just above
-40 it measured up to about 3 % slower in some cases (the backward alone and both steps).  From about 20.25 and 40.5 rows
-per SM on, it measured as fast or faster in every measured case (small/large 0.901-0.983 at 21 * SMs + 1 rows and
-0.934-0.995 at 41 * SMs + 1), so those windows end at 21 and 41.  At 36 rows per SM the large-R program's unweighted
-backward with warm L2 measures as fast or faster (small/large 1.003-1.006 on B200 and 1.011-1.016 on GB300, merged and
-split).  In the other measured cases there the small-R backward is faster.  The sweeps have no point between 32 and 36,
-so on `sm_100a` and `sm_103a` that window begins at 32.  On `sm_107a` the small-R program is faster in both steps at 35
-rows per SM (0.977-0.996), and at 36 * SMs - 1 rows the split unweighted steps read 1.005-1.007 with warm L2, so that
-window begins at 35.  From 48 rows per SM on, the small-R backward alone measures 0.92 to 1.05 times the large-R one's
-time (by GPU, input and timer).  Right after a forward over the same rows it measured up to 1.5 % slower: in the
-checkpointed step with unweighted inputs, on GB300 at 56-64 rows per SM (with both timers) and on B200 at 60 and 112.
-So the large-R program runs there.  Inside the small-R backward ranges between the windows, every swept case reads
-small/large at most 1.000 (raw maximum 1.0004).  In the forward on `sm_100a`, the small-R program alone stays faster up
-to 112 rows per SM.  With merged weighted and unweighted inputs it reads small/large 0.988-0.998 at 112.  For the split
-layout near 112, the release A/B reads the split forward at 111.99 rows per SM at 0.978-0.995 of 0.1.1's time with
-weighted and unweighted inputs on the graph and CUPTI timers.  So that window begins at 112 (0.1.1: 96).  On `sm_103a`
-(GB300) the small-R forward alone is faster with a merged input up to about 384 rows per SM.  With a split input, from
-224 rows per SM on, it is faster in some cases (down to 0.989) and more than 0.5 % slower in others (weighted and
-unweighted inputs, warm L2: up to 1.008 at 384).  At 192 and 208 the split forward reads 0.988-0.997 alone and
-0.997-1.001 in the forward + backward and checkpointed steps, so that window begins at 208 (0.1.1: 192).  On `sm_107a`
-the window stays at 0.1.1's 384.  From 320 to 384 rows per SM, with weighted and unweighted inputs, the two forward
-programs are within about 0.5 % of each other (small/large 0.995-1.005; the small-R forward is up to 0.53 % slower with
-a merged input and cold L2).  With the deep-gate input the small-R forward is 5.6-6.2 % faster at 384.  Below 384 the
-small-R forward runs, as in 0.1.1.
+The `bwd` windows route weighted backward calls only: an unweighted backward runs the `bwd_unweighted` programs at
+every `R`.  From 0.1.10 the `bwd` relay and large-R windows are one route, derived by a fixed rule from one forced sweep
+on B200, GB300 and VR200 (at full memory clock):
 
-Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
-of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a
-warp is contiguous.  The programs differ in their schedule:
+- At every swept row the sweep timed each of the three backward programs (the small-R, the large-R and the relay one)
+  and a second copy of the large-R program, on two GPUs (four on GB300).  A GPU's noise band is the 95th percentile of
+  the two copies' time ratio, less one, over a range of rows (below 12, from 12 to 48 and from 48 rows per SM), by
+  step and timer.
+- The rows are `R = k * SMs` for every k from 3 to 48; `k * SMs - 1` and `k * SMs + 1` for k in 12, 16, 20, 21, 32, 35,
+  36, 40, 41 and 48; `k * SMs` for k in 56, 64, 80, 96, 112 and 128; and R = 4096, 16384, 32768, 65536, 98304 and
+  196608.
+- Each row has 24 cases: the backward alone, a forward + backward step and a checkpointed step; warm L2 (CUDA graph)
+  and cold L2 (CUPTI); merged and split inputs; normal and deep-gate inputs.
+- A program may run at a swept row only if no case there reads it slower than 0.1.9's program.  A case reads slower
+  when two GPUs (two of four on GB300) measure it slower beyond their band, or when a GPU has no reading.
+- At each row the route takes the allowed program with the lowest geometric mean of its 24 median times.  Programs
+  within 0.1 % of it count as tied, and a tie goes to 0.1.9's program, then to the small-R one.
+- A program holds at most two windows on an architecture.  Where that forces a change, the row takes the allowed
+  program that keeps the fewest windows, 0.1.9's program first.
+- The rows between two consecutive swept rows run a program allowed at both of them.
+
+The small-R and the large-R backward programs run 4 rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows per SM a
+wave), the large-R one 5 (20 rows).  The relay program runs one row a CTA and is sized for 9 CTAs on an SM (9 rows per
+SM a wave).  The rule gives these windows, but for one change on `sm_103a`.  There the rule gave the relay program 12 to
+13 rows per SM and the large-R one 14 to 21.  Two windows may not touch, so the rows between them (R = 1977 to 2127 on
+152 SMs) ran the small-R program.  There the release A/B measured the backward alone 1.3 to 2.7 % slower than 0.1.9's
+large-R program (cold L2, merged and split inputs, four GPUs).  So on `sm_103a` the large-R program keeps 0.1.9's window
+from 12 rows per SM, and the relay program has no window below 25.  On `sm_103a` the relay window ends at 647 rows per
+SM, the first whole number at or above 98304 / 152 SMs (646.7).  At 196608 rows there the relay program's geometric mean
+is within 0.1 % of the small-R one's, so the small-R program runs above 647 rows per SM.  Every program of a stage
+stores the same bits for every input, so the route changes no output bit.
+
+At a few rows per SM, a small-R program runs each row (in `bwd_unweighted`, each run of 768 columns) on one warp, alone
+on its SM sub-partition.  Its time is that warp's serial chain of loads.  A fine program splits a row over 9 tasks, one
+load of each input a task, so a row's chain is 9 times shorter and takes one memory trip.  At more rows its extra
+per-task instructions (`fwd`, `bwd_unweighted`) or its per-row barriers and shared-memory hand-off (`bwd`) cost more
+than they save.  Each fine window ends at the largest swept multiple `j * SMs` (j in 1, 2, 4, 8, 12 and 16) at and
+below which no swept row measured the fine program slower than the small-R one beyond the run's noise band.  These
+sweeps forced each program and timed R = 1, 2, 3, 4, 8, 16, 32, 64, 128 and `j * SMs - 1`, `j * SMs` and
+`j * SMs + 1` on B200, GB300 and VR200.  They used warm L2 (CUDA graph) and cold L2 (CUPTI), weighted and unweighted,
+merged and split, and ordinary and deep-gate inputs.  Below, fine/small is the fine program's time over the small-R
+one's, at the first slower swept row; each was rechecked on a second GPU of the same kind:
+
+- `fwd`: `12 * SMs - 1` rows on `sm_100a` (1.056, warm L2); `8 * SMs - 1` on `sm_103a` (1.031) and `sm_107a`
+  (1.098-1.103).  At 8 rows per SM `sm_100a` reads 0.998, so its crossover lies near the bound.
+- `bwd`: `4 * SMs - 1` rows on every architecture (1.029, 1.091 and 1.122-1.165).
+- `bwd_unweighted`: `8 * SMs - 1` rows on `sm_100a` (1.047) and `sm_103a` (1.075); `4 * SMs - 1` and `4 * SMs` on
+  `sm_107a` (1.024-1.025, cold L2).
+
+The sweeps have no point between two swept multiples, so a window may end below its crossover.  Each fine window ends
+below its stage's first large-R or relay window.  At 1 row the fine programs measured, as a share of the small-R
+program's time, 0.64-0.69 (`fwd` on B200 and GB300), 0.69-0.80 (`fwd` on VR200), 0.70-0.79 (`bwd`) and 0.77-0.94
+(`bwd_unweighted`).
+
+Every program is one kernel.  In `fwd` and `bwd`, 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads
+of 8 BF16 values of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so
+every load of a warp is contiguous.  In `bwd_unweighted`, a warp owns one (row, run) task: a run is a third of the row
+(768 columns), and each lane makes that run's 3 loads of the gate, the up and `dh`, at the same columns.  The relay
+program runs the same (row, run) tasks, a CTA of 3 warps per row: warp `r` owns run `r`.  In a fine program a task is
+one load `p` of a row (256 columns), and each lane makes that load of the gate, the up (and `dh`), at the same columns.
+The programs differ in their schedule:
 
 | stage | program | architectures | CTA | a lane's 9 loads |
 |---|---|---|---|---|
@@ -138,15 +211,40 @@ warp is contiguous.  The programs differ in their schedule:
 | `fwd` | large-R | `sm_107a` | 128 threads, 4 rows | one run; the values of each load are stored as soon as they are computed |
 | `bwd` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3; a run's loads are issued while the run before it computes |
 | `bwd` | large-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3, one run at a time |
+| `bwd` | relay | `sm_100a`, `sm_103a`, `sm_107a` | 96 threads (3 warps), 1 row | warp `r`: the 3 loads of run `r`; warp 0 then sums `d_weight` |
+| `fwd` | fine | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, load) tasks | the task's load |
+| `bwd` | fine | `sm_100a`, `sm_103a`, `sm_107a` | 288 threads (9 warps), 1 row | warp `p`: load `p`; warp 0 then sums `d_weight` |
+| `bwd_unweighted` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, run) tasks | the 3 loads of the task's run |
+| `bwd_unweighted` | fine | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, load) tasks | the task's load |
 
-More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`,
-from the launch block and `cake_jit.BUILD_OF`).  A row past `R` loads the last row and stores nothing.  The programs of
-a stage compute each element with the same FP32 operations (the exact sigmoid gives the bits of the fast one wherever
-the fast one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's
-columns in load order with the same lanes.  So both programs store the same bits for every input: the route changes no
-output bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The
-row count, the limit, the weight flag and the strides are launch arguments, so one library per program and
+More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs, `ceil(3 R / 4)`
+CTAs in the small-R `bwd_unweighted` program, `ceil(9 R / 4)` CTAs in `fwd_fine` and `bwd_unweighted_fine`, and `R` CTAs
+in `bwd_fine` and `bwd_relay` (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`; the `bwd_unweighted`,
+`fwd_fine` and `bwd_unweighted_fine` kernels count their tasks in 64 bits and stride over the blocks, and `bwd_relay`
+counts its rows in 64 bits).  No routed launch has more than `2**31 - 1` CTAs (`cake_jit.MAX_GRID`): `cake_jit.fine`
+refuses a fine window whose last row count needs more, and `cake_jit.grid` caps only a fine program launched at more
+rows than its window holds.  `bwd_fine` counts its rows in 32 bits, so it takes at most `2**30` rows.  The route sends
+it at most its window's `hi * SMs` rows: at most `64 * SMs`, and `2 * SMs` as shipped.  A row or a task past `R` loads
+the last row and stores nothing.  The programs of a stage compute each element with the same FP32 operations (the
+deep-gate sigmoid gives the fast one's bits wherever the fast one may be taken, so the loads a warp's vote covers change
+no bit), and the `d_weight` sums take a lane's columns in load order with the same lanes.  In `bwd_fine`, warps 1 to 8
+hand their `dh` words and activations to warp 0 in shared memory, and warp 0 runs each lane's `d_weight` chain over the
+row's loads in load order with the same instructions; in `bwd_relay` warps 1 and 2 do the same for their runs.  So the
+programs of a stage store the same bits for every input: the route changes no output bit.  `bwd_unweighted` votes once
+per (row, run), the run of 768 columns that the `bwd` programs vote over, and computes each element with their
+operations, taking `dh` where they take `dh w` with `w = 1` (the same value).  So it stores the `d_gate` and `d_up` bits
+of the `bwd` programs with the weight flag 0, for every input; so does `bwd_unweighted_fine`, which votes once per (row,
+load).  No program but `bwd_fine` and `bwd_relay` uses shared memory (their pools are static: 16 KB and 9 KB), and none
+uses a workspace, a cooperative launch or programmatic dependent launch.  The row count, the limit, the weight flag
+(`fwd`, `bwd`), the strides and the column offsets below are launch arguments, so one library per program and
 architecture serves every call.
+
+Each program's binding also takes the column offset of `up` (in `bwd` and `bwd_unweighted`, of `d_up` too), in BF16
+elements, last before the grid, and adds it to that pointer.  A merged call passes its `[R, 4608]` tensor as both the
+gate and the up with the offset 2304, and its gradient as both `d_gate` and `d_up`, so the host makes no view; a
+two-tensor call passes 0.  The binding refuses an offset below 0, one that is not a multiple of 8 and one past
+`size(1) - 2304` of a 2-D tensor (`ValueError`).  The kernels and their sources do not change with it.  0.1.5 and
+earlier passed a view of the merged tensor's second half as the up (and `d_up`), with no offset.
 
 ## Numerics
 
@@ -155,10 +253,13 @@ architecture serves every call.
 - `s = 1 / (1 + 2^(-g' log2 e))`: the approximate base-2 exponential (`ex2.approx.ftz`; `1 + 2^t` absorbs a flushed
   subnormal `2^t`) and the approximate reciprocal plus one round-to-nearest Newton step, which is the IEEE `rcp.rn` of
   every `1 <= d < 2^126`.  A warp with a clamped gate at or below -87 in a run of its loads computes that run with a
-  branch-free exact reciprocal: `RN(1 / d)` for every `d`, subnormal results kept, +0 for an infinite `d`.
+  scaled reciprocal: the Newton reciprocal of `d 2^-126`, times `2^-126` with one rounding.  That is `RN(1 / d)` where
+  the sigmoid is normal and within one subnormal ulp of it where it is subnormal (0.1.3 and earlier rounded it exactly,
+  at the cost of more instructions per element), +0 for an infinite `d`.
 - `silu = g' s`, `a = silu u'`, `h = bf16(w a)`: one rounding.
 - `d_gate = bf16(((dh w) u') (silu (1 - s) + s) [g <= L])` (one FMA for `silu (1 - s) + s`) and
-  `d_up = bf16((dh w) silu [-L <= u <= L])`, each mask a factor of 1 or 0, each output rounded once.
+  `d_up = bf16((dh w) silu [-L <= u <= L])`, each mask a factor of 1 or 0, each output rounded once.  The unweighted
+  backward takes `dh` for `dh w` (`w = 1`, the same value).
 - `d_weight = sum over c of dh a` in FP32 from the unweighted `a`: each lane keeps two FMA chains (its even and its
   odd columns) in load order and adds them, then XOR shuffles sum the row's lanes.
 - Every product and FMA rounds to nearest without flushing subnormals.  Nothing is FP64.  A NaN input gives a NaN where
@@ -174,26 +275,46 @@ or CTAs to reorder.
 
 With `torch.use_deterministic_algorithms(True)` and `torch.utils.deterministic.fill_uninitialized_memory` (on by
 default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per
-new output (`h`; `d_gate_up`, or `d_gate` and `d_up`; `d_weight`, also the one an unweighted backward drops) and per
-copied input.  Output buffers allocated once and passed to every call (`out=`, `grad_gate_up_or_gate=`, `grad_up=`,
-`grad_weight=`) avoid the fills of those outputs.  The kernels write every element of every output, so a fill never
-reaches a result.
+new output (`h`; `d_gate_up`, or `d_gate` and `d_up`; a weighted call's `d_weight`) and per copied input.  Output
+buffers allocated once and passed to every call (`out=`, `grad_gate_up_or_gate=`, `grad_up=`, `grad_weight=`) avoid
+the fills of those outputs.  The kernels write every element of every output, so a fill never reaches a result.
 
 ## Workspace and retained state
 
-- Workspace: none.  An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops
-  them.  An unweighted launch passes, as the weight, one cached one-element FP32 buffer of the device, set to 1, which
-  the process's first unweighted call on that device makes (that call may be a CUDA graph capture).  The kernels read
-  it and ignore it.
+- Workspace: none.  An unweighted backward allocates no weight gradient: its program takes no weight and writes no
+  `d_weight`.  An unweighted forward passes, as the weight, one cached one-element FP32 buffer of the device, set to 1,
+  which the process's first unweighted forward on that device makes (that call may be a CUDA graph capture).  The
+  forward kernels read it and ignore it.
 - Retained state of the autograd function: its inputs only (`gate` and `up` or the merged tensor, and `weight`),
   references with no copy: `R * 4608 * 2 + R * 4` bytes of tensors the caller already holds.  No activation is saved;
-  the backward recomputes it.
+  the backward recomputes it.  So a checkpoint around the op alone saves no memory (see Usage).  The backward reuses
+  the forward's FP32 `limit` and checks the saved inputs again, since a saved-tensors hook or a `.data` assignment can
+  change them after the forward.
+- Host caches, none of which changes an output bit: per device, its architecture, its SM count, its `torch.device`
+  and one launcher per stage (the route, each program's FFI entry bound at its first launch, and in `fwd` the ignored
+  weight above); per process, the loaded libraries and the FP32 rounding of the last accepted `limit`.  The
+  architecture is still checked at every call, before any allocation.
+- Host path: a common call (plain contiguous operands and outputs of the exact dtypes and shapes on one device, the
+  BF16 ones 16-byte aligned, `0 < R < 2**31 - 256`) is checked and launched by the step function itself, without the
+  full checks (the autograd forward of a checkpoint's recomputation keeps that launch and runs it after `apply`
+  returns, see Usage).  The step checks the first operand, the weight and `dh` in its own frame, and the `up` of a two-tensor
+  input and each caller-provided output buffer with one helper call each.  So only a merged input with new outputs,
+  whose limit is a Python float, or an int that a float holds exactly, equal to the float value of the last accepted
+  limit, is checked and launched in exactly one Python frame per step once the host caches above are filled (any other
+  limit adds one `_limit` call; a call that fills a host cache, such as the first launch of a program on a device,
+  adds the calls that fill it).  The checks keep the order of the full checks: the operands and `dh`, then `limit`,
+  then the output buffers.  The row strides of its contiguous tensors are constants (`4608` or `2304`; 0 for one row),
+  not read.  Any other call takes the full checks, which raise every error and copy what the kernels cannot read; both
+  give the same launch.  The facade binds the backend's step functions and autograd entries (`apply`; in a backward
+  with saved-tensors hooks set, the held-launch entry) at their first call.
 
 ## Limitations
 
 - The intermediate width is 2304 only (a compile-time width of the kernels).
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`.  Not tested
-  under `torch.compile` or `torch.jit.trace`.  No MXFP8 or FP4 output.
-- A program's library builds at its first launch, and the row count picks the program (see Programs).  Before
-  capturing a CUDA graph, run an eager call at each row count the graph captures, or build every library of the
+  under `torch.compile` or `torch.jit.trace`: a call that Dynamo or the tracer records launches its forward inside the
+  autograd function's `forward`; a checkpoint's recomputation runs with Dynamo disabled.  No MXFP8 or FP4 output.
+- A program's library builds at its first launch, and the row count picks the program (see Programs); in the backward so
+  does the weight, as an unweighted backward runs its own programs.  Before capturing a CUDA graph, run an eager call of
+  each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the
   architecture with `specs_for_arch` (which leaves out a library whose `min_cuda` the local toolkit is below).

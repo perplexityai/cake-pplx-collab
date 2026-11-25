@@ -15,7 +15,7 @@ The rest of this document explains how the repository meets this requirement.
 | Family | One operation, for example `kda` or `rmsnorm`. A family is the unit of release. |
 | Mode | `det` or `nondet`. The mode is part of the name. No `deterministic=` keyword exists. |
 | `det` | Bitwise identical output from run to run. |
-| `nondet` | No bitwise promise. At its non-deterministic step, it raises the PyTorch deterministic-algorithms alert. It never falls back to `det`. |
+| `nondet` | No bitwise promise. At its non-deterministic step, it raises the PyTorch deterministic-algorithms alert, or, while that mode is on, runs the step in a fixed order instead (the mhc backward on `sm_107a`). [docs/API.md](docs/API.md#det-and-nondet) lists the behavior of each family. It never falls back to `det`. |
 | KCP | Context-parallel route. The suffix is `_kcp`. |
 | Facade | Public module `cake_pplx.<module>`. It wraps one backend package. |
 | Backend package | `cake_pplx._backends.<module>/`. Holds kernels, `build.json` and `csrc/`. |
@@ -47,7 +47,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 
 Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks. mok has no `benchmarks/` directory.
 
-The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. act_qdq has no `nondet` and no KCP module: no step of the op has an order to relax, and the op works on each token alone; its tests compare every output bit for bit with an FP64 oracle. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row. gated_kv_compression has a `det` module only, because each of its outputs depends on one token pair and no non-deterministic step exists; its tests also use an FP64 oracle beside the same math in BF16.
+The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. act_qdq has no `nondet` and no KCP module: no step of the op has an order to relax, and the op works on each token alone; its tests compare every output bit for bit with an FP64 oracle. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row. route_weight_scale has a `det` module only for the same reason: nothing sums across rows, so `nondet` and KCP are not applicable. situ_glu has no `nondet` and no KCP module: every output is elementwise. gated_kv_compression has a `det` module only, because each of its outputs depends on one token pair and no non-deterministic step exists; its tests also use an FP64 oracle beside the same math in BF16.
 
 ## Overview
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 21 families and 39 backend packages, about 274 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 24 families and 43 backend packages, about 329 MB in total. About 276 MB of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -85,6 +85,7 @@ The repository has 21 families and 39 backend packages, about 274 MB in total. M
 | `mhc` | det, nondet | `cake-pplx-mhc` |
 | `mhc_head` | det, nondet | `cake-pplx-mhc-head` |
 | `engram_gate` | det, nondet | `cake-pplx-engram-gate` |
+| `attn_res` | det, nondet | `cake-pplx-attn-res` |
 | `gdn` | det, det_kcp, nondet, nondet_kcp | `cake-pplx-gdn` |
 | `kda` | det, det_kcp, nondet, nondet_kcp | `cake-pplx-kda` |
 | `lm_head` | det, nondet | `cake-pplx-lm-head` |
@@ -97,9 +98,11 @@ The repository has 21 families and 39 backend packages, about 274 MB in total. M
 | `fmha` | nondet | `cake-pplx-fmha` |
 | `gated_act_mxfp8` | det | `cake-pplx-gated-act-mxfp8` |
 | `clamped_swiglu` | det | `cake-pplx-clamped-swiglu` |
+| `situ_glu` | det | `cake-pplx-situ-glu` |
 | `engram_lookup` | det | `cake-pplx-engram-lookup` |
 | `mok` | det (backend package `cake_mok_bf16`) | `cake-pplx-mok` |
 | `act_qdq` | det | `cake-pplx-act-qdq` |
+| `route_weight_scale` | det | `cake-pplx-route-weight-scale` |
 
 pip normalizes `_` and `-` in distribution names. Both spellings resolve to the same distribution.
 
@@ -227,6 +230,6 @@ Run the tests of `tests/cross_family/<family>/` the same way, in an environment 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d, mhc, mhc_head, mok and rmsnorm are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`), and act_qdq, clamped_swiglu, engram_lookup and gated_kv_compression on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d, mhc, mhc_head, mok and rmsnorm are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`), and act_qdq, clamped_swiglu, dsa_sparse_attention, engram_lookup, gated_kv_compression, kda and situ_glu on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`); attn_res on B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`).
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.

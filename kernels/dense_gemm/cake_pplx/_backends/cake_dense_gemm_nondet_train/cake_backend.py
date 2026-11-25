@@ -360,23 +360,33 @@ K1_ROW_MAJOR_BLOCK_N: tuple[int, ...] = (192,)
 #: :data:`K1_CHAIN_RANGES_BY_SM`, three-chain programs (templates ``..._c3``); the two- and four-chain programs of
 #: :data:`K1_ORDERED_RANGES_BY_SM` (templates ``..._c2``, ``..._c4``) are the planner's only, not a ``chains`` choice.
 K1_CHAINS_CHOICES: tuple[int, ...] = (1, 3)
-#: The K blocks of one promoted chunk of a K1 program (templates ``..._kc128``): one FP32 accumulator that adds a
+#: The K blocks of one promoted chunk of a K1 program (templates ``..._kc64``): one FP32 accumulator that adds a
 #: split's whole long token range is less accurate than the reference, so the promoted program cuts each item's ``n``
 #: K blocks into ``ceil(n / K1_PROMOTE_BLOCKS)`` balanced contiguous chunks of at most this many blocks, each summed in
 #: an accumulator of its own, and adds the chunk sums in FP32 registers in chunk order.  The split sum, its order, the
-#: workspace and the launch arguments are those of the program without promotion; at one chunk (``n <= 128``) its bits
+#: workspace and the launch arguments are those of the program without promotion; at one chunk (``n <= 64``) its bits
 #: are that program's.  :func:`plan_atomic_gemm` runs it where :func:`k1_promote_blocks` names it (one chain, BF16
 #: out, the transposed store, more than this many K blocks in the largest split), except on the rows of
-#: :data:`K1_PROMOTE_EXEMPT_ROWS`.  Not the TMA L2 promotion of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.
-K1_PROMOTE_BLOCKS = 128
+#: :data:`K1_PROMOTE_EXEMPT_ROWS`.  Not the TMA L2 promotion of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.  From version 0.3.0
+#: to 0.3.20 the chunk and the threshold were 128 K blocks (``..._kc128``).  In the pre-registered screen of version
+#: 0.3.21 (the BF16 weight-gradient rows of ``d_out <= 128``, 21 seeds per row and token count, 32 random inputs per
+#: seed; the median and the largest error against FP64, in the L2 and in the max norm, at most 1.005 times those of
+#: PyTorch BF16) this package's plans of version 0.3.20 missed the naive BF16 tier at the same three cells on each of
+#: the 148-SM B200 and B300 parts: ``5120 -> 32`` at 16172 and 16231 tokens (two splits of at most 127 K blocks, without
+#: promotion; max-norm ratio up to 1.00556) and ``5120 -> 64`` at 65535 tokens (chunks of 128; 1.00509); the rows this
+#: package runs on the deterministic program missed it where that package's plan did (5 cells each on the 212-SM VR200
+#: and the 216-SM R200 board).  At 64 no output of this package or of the deterministic one missed it on the B200,
+#: GB200, GB300, B300 and VR200 parts and the 216-SM R200 board (README: the screen table).
+K1_PROMOTE_BLOCKS = 64
 #: Rows whose plans :func:`plan_atomic_gemm` keeps without promotion where :func:`k1_promote_blocks` names the promoted
 #: program, keys as in :data:`K1_SPLIT_RULES`.  ``sm_107a`` ``5120 -> 1024`` BF16 runs one split of 256-wide tiles on
 #: 216 SMs and more at every token count of its verdict (up to version 0.3.0 also on 212 SMs from 512 to 12288 tokens);
 #: the verdicts were measured without promotion.  Measured on a 212-SM VR200 part: without promotion its output met the
 #: naive BF16 tier at 10240, 12288, 16384, 24576, 32768, 65536 and 131072 tokens (32 random inputs each; in the L2 and
-#: the max norm, its median and largest error equal to those of PyTorch BF16), and the promoted program took 1.012 to
-#: 1.015 times its time at 10240 and 12288 tokens (CUPTI, cold L2, eager launches and CUDA graph replays, 5 rounds of 20
-#: launches).  The row keeps the program of version 0.2.0; ``promote=True`` runs the promoted program.
+#: the max norm, its median and largest error equal to those of PyTorch BF16), and the promoted program of version 0.3.0
+#: (chunks of 128 K blocks) took 1.012 to 1.015 times its time at 10240 and 12288 tokens (CUPTI, cold L2, eager
+#: launches and CUDA graph replays, 5 rounds of 20 launches).  The row keeps the program of version 0.2.0;
+#: ``promote=True`` runs the promoted program.
 K1_PROMOTE_EXEMPT_ROWS: frozenset[tuple[str, int, int, int, str]] = frozenset(
     {("sm_107a", 1, 5120, 1024, "bf16")}
 )
@@ -494,31 +504,34 @@ K1_RULE_MIN_SM_COUNT: dict[tuple[str, int, int, int, str], int] = {
 #: the token count at which a split holds more than :data:`K1_PROMOTE_BLOCKS` K blocks the BF16 split program is the
 #: promoted program, whose output met the naive BF16 tier of the training tests at every measured point, where the
 #: deterministic program's missed it at most of them; where both met it, the row keeps its split verdict, as at any
-#: token count without an entry.  At the token counts of the former open-ended BF16 entries its output met the naive
-#: BF16 tier against FP64 (32 random inputs; the median and the largest error, in the L2 and in the max norm, at most
-#: 1.005 times those of PyTorch BF16) at every measured point (32768, 49153, 65536, 65537, 98304 and 131072 tokens;
-#: largest ratio 1.0005 on a 148-SM B200 part, 1.0025 on a 152-SM GB300 part), and the deterministic program's output
-#: missed it at 18 of 21 points on the B200 and 23 of 31 on the GB300 (largest ratio 1.027 and 1.028).  On the GB300 at
-#: 40961, 43009, 45057, 45058, 47105 and 49152 tokens of ``5120 -> 32``, ``5120 -> 48`` and ``5120 -> 64`` its output
-#: met the tier at all 18 points (largest ratio 1.0020) and the deterministic program's missed it at all 18 (smallest
-#: ratio 1.00502).  Timed against the deterministic program in paired runs (CUPTI, cold L2, eager launches and CUDA
-#: graph replays, 4 interleaved repetitions of 5 groups of 20 launches), the promoted program took 0.934 to 1.008 times
-#: its time on the B200 (49153, 65536, 98304 and 131072 tokens) and 0.929 to 1.022 times on the GB300 (32768, 49153,
-#: 65536, 98304 and 131072 tokens); it was slower on the B200 for ``4096 -> 64`` at 98304 and 131072 tokens (up to
-#: 1.008), and on the GB300 for ``4096 -> 32`` at 65536 and 131072 tokens (up to 1.013), ``4096 -> 48`` at 65536, 98304
-#: and 131072 tokens (up to 1.022) and ``5120 -> 128`` at 32768 tokens (up to 1.002).  Those entries were: sm_100a
-#: ``4096 -> 32`` from 65536 tokens, ``4096 -> 48`` and ``5120 -> 48`` from 49153 and ``5120 -> 32`` from 65537 (148 SMs
-#: up), and ``4096 -> 64`` from 65536 (152 SMs up; its 148-SM entry was in :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM`,
-#: as was that of sm_103a ``4096 -> 32``); sm_103a ``4096 -> 32`` from 65536 tokens, ``4096 -> 48`` and ``5120 -> 128``
-#: from 32768, ``5120 -> 32`` and ``5120 -> 64`` from 45058 and ``5120 -> 48`` from 40961 (152 SMs up; below 65536
-#: tokens the entries of ``4096 -> 48`` and ``5120 -> 128`` held where the two-split program without promotion failed
-#: the timing rule above, and from 40961 to 49152 tokens that of ``5120 -> 48`` held because on a 148-SM B300 part the
-#: split program without promotion missed the BF16 budget for one of 10 seeds at 40961 and 40962 tokens while the
-#: deterministic program's met it; its 148-SM entry in :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` stays).  The 152-SM
-#: sm_100a parts (GB200) and the 148-SM sm_103a parts (B300) were not timed with the promoted program.  The FP32 entries
-#: of sm_103a ``4096 -> 32`` and ``4096 -> 48`` from 32768 tokens have no upper bound: the two-split program's FP32
-#: output is the deterministic program's bits at an even number of 64-token K blocks, and at an odd number it met the
-#: budget at 65537 tokens and missed it on every seed from 98305 tokens, as the deterministic program's did (the
+#: token count without an entry.  At the token counts of the former open-ended BF16 entries its output with chunks of
+#: 128 K blocks (version 0.3.0) met the naive BF16 tier against FP64 (32 random inputs; the median and the largest
+#: error, in the L2 and in the max norm, at most 1.005 times those of PyTorch BF16) at every measured point (32768,
+#: 49153, 65536, 65537, 98304 and 131072 tokens; largest ratio 1.0005 on a 148-SM B200 part, 1.0025 on a 152-SM GB300
+#: part), and the deterministic program's output missed it at 18 of 21 points on the B200 and 23 of 31 on the GB300
+#: (largest ratio 1.027 and 1.028).  On the GB300 at 40961, 43009, 45057, 45058, 47105 and 49152 tokens of
+#: ``5120 -> 32``, ``5120 -> 48`` and ``5120 -> 64`` its output met the tier at all 18 points (largest ratio 1.0020) and
+#: the deterministic program's missed it at all 18 (smallest ratio 1.00502).  With the chunks of 64 of version 0.3.21
+#: these rows met the tier at every cell of the pre-registered screen on the B200, GB200, GB300 and B300 parts
+#: (:data:`K1_PROMOTE_BLOCKS`).  Timed against the deterministic program in paired runs (CUPTI, cold L2, eager launches
+#: and CUDA graph replays, 4 interleaved repetitions of 5 groups of 20 launches), the promoted program of version 0.3.0
+#: took 0.934 to 1.008 times its time on the B200 (49153, 65536, 98304 and 131072 tokens) and 0.929 to 1.022 times on
+#: the GB300 (32768, 49153, 65536, 98304 and 131072 tokens); it was slower on the B200 for ``4096 -> 64`` at 98304 and
+#: 131072 tokens (up to 1.008), and on the GB300 for ``4096 -> 32`` at 65536 and 131072 tokens (up to 1.013),
+#: ``4096 -> 48`` at 65536, 98304 and 131072 tokens (up to 1.022) and ``5120 -> 128`` at 32768 tokens (up to 1.002).
+#: Those entries were: sm_100a ``4096 -> 32`` from 65536 tokens, ``4096 -> 48`` and ``5120 -> 48`` from 49153 and
+#: ``5120 -> 32`` from 65537 (148 SMs up), and ``4096 -> 64`` from 65536 (152 SMs up; its 148-SM entry was in
+#: :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM`, as was that of sm_103a ``4096 -> 32``); sm_103a ``4096 -> 32`` from
+#: 65536 tokens, ``4096 -> 48`` and ``5120 -> 128`` from 32768, ``5120 -> 32`` and ``5120 -> 64`` from 45058 and
+#: ``5120 -> 48`` from 40961 (152 SMs up; below 65536 tokens the entries of ``4096 -> 48`` and ``5120 -> 128`` held
+#: where the two-split program without promotion failed the timing rule above, and from 40961 to 49152 tokens that of
+#: ``5120 -> 48`` held because on a 148-SM B300 part the split program without promotion missed the BF16 budget for one
+#: of 10 seeds at 40961 and 40962 tokens while the deterministic program's met it; its 148-SM entry in
+#: :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS_BY_SM` stays).  The 152-SM sm_100a parts (GB200) and the 148-SM sm_103a parts
+#: (B300) were not timed with the promoted program of version 0.3.0.  The FP32 entries of sm_103a ``4096 -> 32`` and
+#: ``4096 -> 48`` from 32768 tokens have no upper bound: the two-split program's FP32 output is the deterministic
+#: program's bits at an even number of 64-token K blocks, and at an odd number it met the budget at 65537 tokens and
+#: missed it on every seed from 98305 tokens, as the deterministic program's did (the
 #: deterministic plan of these rows is the same on 148 and 152
 #: SMs, and the entries start at the token counts at which the split program failed the timing rule above).  Unmeasured
 #: token counts keep the verdict: below 512, above 65536 (except the rows with open-ended entries), between two measured
@@ -1724,8 +1737,9 @@ def k1_program_knobs(program: str) -> tuple:
     package's inverse of its symbol (``_template_knobs``).  ``ValueError`` for a symbol that names no planner knobs.
     The serpentine K walk ``kser`` of that inverse is not a planner keyword: it is dropped when 0, and a ``_ks<P>``
     program (``kser`` P > 0), which that package plans from its own rules only, names no planner knobs.  A program
-    without the promoted-chunk token ``_kc128`` names ``promote=False``: that planner then plans exactly this program at
-    every token count, never its promoted twin (a ``_kc128`` program names ``promote=True``)."""
+    without the promoted-chunk token ``_kc64`` names ``promote=False``: that planner then plans exactly this program at
+    every token count, never its promoted twin (a ``_kc64`` program names ``promote=True``; the ``_kc128`` chunk of
+    versions up to 0.3.20 names no planner knobs)."""
     det = deterministic_backend()
     knobs = det._template_knobs(det._TEMPLATE_PREFIX + program)
     if knobs is None or knobs.pop("kser", 0):
@@ -1746,11 +1760,29 @@ def k1_program_knobs(program: str) -> tuple:
 #: prefix), planned with the knobs that name it (:func:`k1_program_knobs`); every other part, row, token count, layout
 #: and output dtype runs the deterministic plan.  The table's programs (``kn_n128_f32_tma2_s4_c1``,
 #: ``kn_n256_tma1_w8`` / ``_w8r`` / ``_w8rs``, ``kn_n256_f32_v8_ef_pro7``; on 212-SM ``sm_107a`` parts
-#: ``kn_n128_f32_tma1_pd2_c1`` and ``kn_n256_tma2_pd2_lw_pro15``) were measured at exactly these rows and token counts on
-#: one part of each SM count, against the deterministic plan of the row in the same process: faster in eager launches
-#: and in CUDA graph replays in at least 4 of 5 paired groups of a screen (``sm_107a``: 5 of 5), the output equal to
-#: the deterministic plan's bit for bit, and the same bits on 20 repeats; the rows and token counts of that screen that
-#: missed keep the deterministic plan.
+#: ``kn_n128_f32_tma1_pd2_c1`` and, up to version 0.3.16, ``kn_n256_tma2_pd2_lw_pro15``) were measured at exactly these
+#: rows and token counts on one part of each SM count, against the deterministic plan of the row in the same process:
+#: faster in eager launches and in CUDA graph replays in at least 4 of 5 paired groups of a screen (``sm_107a``: 5 of
+#: 5), the output equal to the deterministic plan's bit for bit, and the same bits on 20 repeats; the rows and token
+#: counts of that screen that missed keep the deterministic plan.  Up to version 0.3.15 the table also held BF16
+#: entries at 16 keys of :data:`_NVJET_DGRAD_DET_PLAN_ROWS` (11 on 152-SM ``sm_103a`` parts, 5 on 148-SM ``sm_100a``
+#: parts) and up to version 0.3.16 at 3 more (``kn_n256_tma2_pd2_lw_pro15`` on the indexer_hw ``6144 -> 32`` at 16172,
+#: 16231 and 16384 tokens on 212-SM ``sm_107a`` parts), each under an entry of :data:`K1_DGRAD_NVJET_RULES_BY_SM`,
+#: which comes first; since version 0.3.16 (on ``sm_107a`` since version 0.3.17) these keys run the deterministic plan.
+#: Up to version 0.3.17 it also held 20 BF16 entries on 152-SM ``sm_100a`` parts (GB200), ``kn_n256_tma1_w8`` /
+#: ``_w8r`` / ``_w8rs``: 7 under keys of :data:`_NVJET_DGRAD_DET_PLAN_ROWS` (``4096 -> 32`` at 16172, 16231 and 16384
+#: tokens, ``4096 -> 64`` at 16384, and ``4096 -> 128``, ``5120 -> 32`` and the indexer_hw ``6144 -> 32`` at 16231),
+#: and 13 of keys no other table held: ``4096 -> 128``, ``5120 -> 32``, ``5120 -> 48``, the indexer_hw ``6144 -> 32``
+#: and the indexer_k ``6144 -> 128`` at 16172 and 16384 tokens, and ``4096 -> 48``, ``5120 -> 128`` and
+#: ``8192 -> 128`` at 16172.  Since version 0.3.18 these keys run the deterministic plan, which was faster there in a
+#: counted comparison on two GB200 nodes (:data:`_NVJET_DGRAD_DET_PLAN_ROWS`; at the 13 keys the lowest and highest
+#: medians of the entry's time over the plan's were 1.019 and 1.086).  Up to version 0.3.19 it also held the GB200
+#: entry ``kn_n256_tma1_w8r`` of ``5120 -> 128`` at 16384 tokens.  Since version 0.3.20 that key runs the deterministic
+#: plan, which since the deterministic package's version 0.3.20 runs ``kn_n256_tma1_w8relf`` there (a range of that
+#: one token count): on two GB200 nodes, 21 paired rounds per node in eager launches and in CUDA graph replays, the
+#: plan was faster than the entry's program in all 21 rounds of each of the four node and mode pairs, medians of the
+#: entry's time over the plan's 1.039 to 1.041, and the plan met the naive BF16 tier on five seeds.  The entry of this
+#: row at 16231 tokens stays (under the entry of :data:`K1_DGRAD_NVJET_RULES_BY_SM`, which comes first).
 # fmt: off
 K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {
@@ -1760,15 +1792,14 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (4096, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8r",
         (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
         (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "bf16"): "kn_n256_tma1_w8rs",
         (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7",
         (4096, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7", (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7",
-        (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1778,7 +1809,7 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (5120, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16384, "bf16"): "kn_n256_tma1_w8r",
         (5120, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
         (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8r", (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8r",
         (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1793,54 +1824,43 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (8192, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (8192, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
     },
     ("sm_100a", 152): {
-        (4096, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16384, "bf16"): "kn_n256_tma1_w8", (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8rs", (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8r", (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
-        (5120, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8rs", (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8rs",
-        (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16172, "bf16"): "kn_n256_tma1_w8r",
         (6144, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16231, "bf16"): "kn_n256_tma1_w8r",
         (6144, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16384, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16384, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (8192, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (8192, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (8192, 128, 16231, "bf16"): "kn_n256_tma1_w8rs",
         (8192, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (8192, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
     },
     ("sm_103a", 152): {
-        (4096, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16384, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16172, "bf16"): "kn_n256_tma1_w8rs",
-        (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16231, "bf16"): "kn_n256_tma1_w8rs",
-        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8r",
+        (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
         (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8rs",
         (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7", (4096, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
-        (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8r",
-        (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8r",
+        (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1849,8 +1869,7 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
         (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
-        (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8rs",
-        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7",
         (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1867,8 +1886,6 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (4096, 128, 16172, "f32"): "kn_n128_f32_tma1_pd2_c1", (4096, 128, 16231, "f32"): "kn_n128_f32_tma1_pd2_c1",
         (4096, 128, 16384, "f32"): "kn_n128_f32_tma1_pd2_c1", (5120, 128, 16172, "f32"): "kn_n128_f32_tma1_pd2_c1",
         (5120, 128, 16231, "f32"): "kn_n128_f32_tma1_pd2_c1", (5120, 128, 16384, "f32"): "kn_n128_f32_tma1_pd2_c1",
-        (6144, 32, 16172, "bf16"): "kn_n256_tma2_pd2_lw_pro15", (6144, 32, 16231, "bf16"): "kn_n256_tma2_pd2_lw_pro15",
-        (6144, 32, 16384, "bf16"): "kn_n256_tma2_pd2_lw_pro15",
     },
 }
 # fmt: on
@@ -2123,6 +2140,55 @@ _NVJET_FREE_ROWS: dict[tuple[str, int], tuple[tuple[int, int, int], ...]] = {
         for t in _GLM3
     ),
 }
+#: The ``(K, N, T)`` rows (BF16 out) per part that :data:`K1_DGRAD_NVJET_RULES_BY_SM` leaves out of both its programs
+#: since version 0.3.16 (on 212-SM ``sm_107a`` parts since version 0.3.17, on 152-SM ``sm_100a`` parts since version
+#: 0.3.18), as :data:`K1_DGRAD_RULES_BY_SM` leaves out the entries it held under 26 of them: there the call runs the
+#: deterministic plan of the row, its program and bits (before, the nvjet program on the plan of
+#: :data:`K1_DGRAD_NVJET_DET_PROGRAM`).  A round on two nodes of each part timed, at the keys a part holds among 11 rows
+#: at 16172, 16231 and 16384 tokens (on 212-SM ``sm_107a`` parts among 5 rows), the deterministic plan as two prepared
+#: copies against this package's launch of the key in the same 21 paired rounds, in eager launches and in CUDA graph
+#: replays.  A key leaves where, in every node and mode pair, each copy was faster in at least 17 of the 21 rounds and
+#: both medians of this package's time over the copy's were at least 1.015, the plan met the naive BF16 tier against
+#: FP64 on five seeds, and its outputs had one bit pattern on every run and GPU.  At every GB300 and B200 key here both
+#: copies were faster in all 21 rounds of every pair, and at every GB200 key but ``4096 -> 64`` at 16231 tokens (there
+#: in 19 to 21); the lowest and highest medians over the nodes, modes and copies:
+#:   * 152-SM ``sm_103a`` (GB300), at 16172, 16231 and 16384 tokens: ``4096 -> 32`` (1.050 to 1.075), ``4096 -> 64``
+#:     (1.015 to 1.068), ``5120 -> 32`` (1.026 to 1.052), ``5120 -> 64`` (1.028 to 1.053) and the indexer_hw input
+#:     gradient ``6144 -> 32`` (1.023 to 1.042);
+#:   * 148-SM ``sm_100a`` (B200): ``5120 -> 32`` at 16172, 16231 and 16384 tokens (1.018 to 1.026), and ``4096 -> 64``
+#:     (1.035 to 1.052), ``5120 -> 64`` (1.023 to 1.038) and the indexer_hw ``6144 -> 32`` (1.019 to 1.024) at 16384;
+#:   * 212-SM ``sm_107a`` (VR200), since version 0.3.17: ``4096 -> 32`` (1.027 to 1.080), ``5120 -> 32`` (1.024 to
+#:     1.082) and the indexer_hw ``6144 -> 32`` (1.017 to 1.058) at 16172, 16231 and 16384 tokens, and ``5120 -> 64``
+#:     (1.022 to 1.033) at 16384; there the plan runs the 128-column start-path programs of the deterministic
+#:     package's version 0.3.17;
+#:   * 152-SM ``sm_100a`` (GB200), since version 0.3.18: ``4096 -> 32`` (1.049 to 1.077) and ``4096 -> 64`` (1.021 to
+#:     1.065) at 16172, 16231 and 16384 tokens, and ``4096 -> 128`` (1.022 to 1.028), ``5120 -> 32`` (1.051 to 1.064),
+#:     ``5120 -> 64`` (1.045 to 1.059) and the indexer_hw ``6144 -> 32`` (1.048 to 1.053) at 16231; with them 13 keys
+#:     that only :data:`K1_DGRAD_RULES_BY_SM` held run the deterministic plan (that table's notes), 23 in all.  The
+#:     medians are against the deterministic package's plan of version 0.3.18; since its version 0.3.19 that plan runs
+#:     ``4096 -> 64`` at 16231 tokens (and 16173 to 16383) on its 128-column start-path program
+#:     ``kn_n128_tma1_w8relf`` in raster groups of 16 instead of ``kn_n256_tma1_w8relf``, with the same bits, measured
+#:     1.011 to 1.039 times faster than its plan of version 0.3.18 there (1.029 to 1.039 in a confirmation round), and
+#:     the call runs that program.
+#: The other measured keys of these parts (18 on GB300, 27 on B200, 5 on VR200, 7 on GB200) missed the bar and keep
+#: their programs.  A key names one token count: the token counts next to it keep their routes.  Up to version 0.3.17
+#: 152-SM ``sm_100a`` parts kept every entry (an empty set); a part's set holds the rows it leaves, with their entries
+#: of :data:`K1_DGRAD_RULES_BY_SM` taken out.
+_NVJET_DGRAD_DET_PLAN_ROWS: dict[tuple[str, int], frozenset[tuple[int, int, int]]] = {
+    ("sm_100a", 148): frozenset(
+        {*((5120, 32, t) for t in _GLM3), (4096, 64, 16384), (5120, 64, 16384), (6144, 32, 16384)}
+    ),
+    ("sm_100a", 152): frozenset(
+        {
+            *((k, n, t) for k, n in ((4096, 32), (4096, 64)) for t in _GLM3),
+            *((k, n, 16231) for k, n in ((4096, 128), (5120, 32), (5120, 64), (6144, 32))),
+        }
+    ),
+    ("sm_103a", 152): frozenset(
+        (k, n, t) for k, n in ((4096, 32), (4096, 64), (5120, 32), (5120, 64), (6144, 32)) for t in _GLM3
+    ),
+    ("sm_107a", 212): frozenset({*((k, 32, t) for k in (4096, 5120, 6144) for t in _GLM3), (5120, 64, 16384)}),
+}
 # fmt: on
 #: The K1 input-gradient rows that run this package's nvjet program on the deterministic package's plan of
 #: :data:`K1_DGRAD_NVJET_DET_PROGRAM`, ``(arch, sm_count) -> {(K, N, T, out_dtype): template}``: on a part of exactly
@@ -2151,20 +2217,48 @@ _NVJET_FREE_ROWS: dict[tuple[str, int], tuple[tuple[int, int, int], ...]] = {
 #: graph replays, faster in 17 of 17 groups in both: on a B200 part that route took 1.006 to 1.043 times its time, on a
 #: GB300 part 1.005 to 1.053 times, on an R200 part 1.036 to 1.108 times (and 1.07 to 1.11 times on two more cards for
 #: 8 rows).  The other rows of those screens (within 0.998 to 1.014 times) keep their routes.
+#:
+#: Since version 0.3.16 a part leaves its rows of :data:`_NVJET_DGRAD_DET_PLAN_ROWS` (GB300 15, B200 6; since version
+#: 0.3.17 VR200 10; since version 0.3.18 GB200 10) out of both programs: the deterministic plan of the row was faster
+#: there.  Since version 0.3.18 GB200 leaves 23 keys to the deterministic plan in all, those 10 and 13 that only
+#: :data:`K1_DGRAD_RULES_BY_SM` held: the deterministic plan was faster there in a counted comparison on two nodes.
+#: Since its version 0.3.20 the deterministic plan of six VR200 rows here (``4096 -> 48``, ``4096 -> 128``,
+#: ``5120 -> 48``, ``5120 -> 128``, ``8192 -> 128`` and the indexer_k ``6144 -> 128``) runs start-path programs at 16172
+#: to 16384 tokens.  The VR200 part keeps its 18 keys of these rows: the plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`
+#: names another form than those ranges, so it is unchanged.  The round of that version timed this package's launch at
+#: the 18 keys beside one copy of the new plan on two VR200 nodes, 21 paired rounds per node in eager launches and in
+#: CUDA graph replays: the ratio of its median time to the plan's was 0.987 to 1.020.  Only at ``4096 -> 128`` at 16231
+#: tokens was the plan faster in at least 17 of the 21 rounds with a median of this package's time over the plan's of at
+#: least 1.0 in every node and mode pair; the lowest of those medians, 1.005, is below the 1.015 above, so the key
+#: stays.  The token counts between the keys, which no table of
+#: this package holds, run the new deterministic plan.  Since its version 0.3.20 the deterministic plan of the GB200 row
+#: ``4096 -> 48`` runs ``kn_n256_tma1_w8relf`` at 16232 to 32767 tokens too (one range at 16172 to 32768 tokens), where
+#: it ran the half-tail program of the row's rule and, at 16384 tokens, ``kn_n256_tma1_w8r``, with the same bits,
+#: measured 1.027 to 1.061 times faster at 16300, 16384 and 24576 tokens.  The GB200 part keeps its key of this row at
+#: 16231 tokens (this package's program on the plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, unchanged); no table of this
+#: package holds the row at 16232 to 32767 tokens, so the call there runs the new deterministic plan.
 # fmt: off
 K1_DGRAD_NVJET_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS if row not in _NVJET_DGRAD_SM100_KEPT},
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_100a", 148)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS
+           if row not in _NVJET_DGRAD_SM100_KEPT | _NVJET_DGRAD_DET_PLAN_ROWS[("sm_100a", 148)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_100a", 148)]
+           if row not in _NVJET_DGRAD_DET_PLAN_ROWS[("sm_100a", 148)]},
     },
     ("sm_100a", 152): {
-        (*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS if row not in _NVJET_DGRAD_SM100_KEPT
+        (*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS
+        if row not in _NVJET_DGRAD_SM100_KEPT | _NVJET_DGRAD_DET_PLAN_ROWS[("sm_100a", 152)]
     },
     ("sm_103a", 152): {
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS if row not in _NVJET_DGRAD_SM103_KEPT},
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_103a", 152)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS
+           if row not in _NVJET_DGRAD_SM103_KEPT | _NVJET_DGRAD_DET_PLAN_ROWS[("sm_103a", 152)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_103a", 152)]
+           if row not in _NVJET_DGRAD_DET_PLAN_ROWS[("sm_103a", 152)]},
     },
-    ("sm_107a", 212): {(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_107a", 212)]},
+    ("sm_107a", 212): {
+        (*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_107a", 212)]
+        if row not in _NVJET_DGRAD_DET_PLAN_ROWS[("sm_107a", 212)]
+    },
 }
 # fmt: on
 
@@ -7161,6 +7255,7 @@ def cake_dense_gemm_nondet_train_projection_plan(
     mg: Optional[bool] = _UNSET,
     sw: Optional[int] = _UNSET,
     form: Optional[str] = _UNSET,
+    block_k: Optional[int] = _UNSET,
     arch: str = _UNSET,
 ) -> Any:
     """Validate the views and plan the K1 launch: a weight-gradient layout (both operands MN-major) is planned for
@@ -7171,8 +7266,8 @@ def cake_dense_gemm_nondet_train_projection_plan(
     ``CakeDenseGemmDetProjectionPlan``).  The other keyword-only knobs are the deterministic planner's public ones
     (``sm_count`` and ``l2_bytes`` included): a knob the caller gives reaches that planner as given, and
     ``transposed_out``, ``arch`` and ``sm_count`` also apply to this package's plan; a knob the caller does not give
-    takes the deterministic planner's default.  ``promote=None`` or ``False`` never reaches the deterministic planner
-    (:func:`_routing_knobs`)."""
+    takes the deterministic planner's default (``block_k``, the K step of its 128-column start-path program, among
+    them).  ``promote=None`` or ``False`` never reaches the deterministic planner (:func:`_routing_knobs`)."""
     # must stay the first statement: ``locals()`` holds only the parameters here
     knobs = _given_knobs(locals())
     if _route(_k1_layout(A, B)) == "det":

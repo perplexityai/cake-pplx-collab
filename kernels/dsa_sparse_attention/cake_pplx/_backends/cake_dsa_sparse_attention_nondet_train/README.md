@@ -1,10 +1,12 @@
 # Cake DSA sparse-attention training backend (SM100 / SM103 / SM107)
 
 Backend package of `cake_pplx.cake_dsa_sparse_attention_nondet_train`, the
-non-deterministic package of the native 64-query-head DeepSeek Sparse Attention
-training kernels (top-k sparse MLA with absorbed queries; GLM-5.2 geometry:
-64 heads, 512 latent + 64 rope query/key dimensions, 512 value dimensions,
-top-k 2048).
+non-deterministic package of the DeepSeek Sparse Attention training kernels
+(top-k sparse MLA with absorbed queries; GLM-5.2 geometry: 64 heads, 512
+latent + 64 rope query/key dimensions, 512 value dimensions, top-k 2048).
+The kernels are native 64-query-head programs; the rope form also serves 96
+and 128 query heads on `sm_100a` and `sm_103a` by running them on two 64-head
+windows (see "Query heads above 64 (head windows)").
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_nondet_train` are
 stable APIs; this backend package is experimental (no compatibility guarantee
@@ -12,14 +14,18 @@ for its own helpers).  SM100 (B200 / GB200) is the acceptance architecture of
 the native kernels and
 SM103 (B300 / GB300) is compiled from the same sources; SM107 (Rubin R200) is
 the acceptance architecture of the packed / strided-layout extension.  On
-`sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan` and
-`nope_fwd_scan` ship for `sm_107a` only, and `fwd` / `nope_fwd` ship for
-`sm_100a` and `sm_103a`, as do the NoPE trainable-sink stages `nope_fwd_sink` /
-`nope_bwd_dsink` (see "Trainable per-head sink"); the other stages compile from
-the same sources for all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
+`sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan`,
+`nope_fwd_scan` and `nope_fwd_scan_sink` ship for `sm_107a` only, and `fwd` /
+`nope_fwd` / `nope_fwd_sink` ship for `sm_100a` and `sm_103a`, and so do
+their `with_o_lo=False` builds (`fwd_scan_no_olo`, `nope_fwd_scan_no_olo` and
+`nope_fwd_scan_sink_no_olo` for `sm_107a` only; `fwd_no_olo` / `nope_fwd_no_olo`
+/ `nope_fwd_sink_no_olo` for `sm_100a` and `sm_103a`); the other stages,
+the NoPE sink-gradient stage `nope_bwd_dsink` included (see "Trainable per-head
+sink"), compile from the same sources for all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
 in their `build.json` entries).  On `sm_100a` every library needs CUDA 12.9
 or newer (`min_cuda` 12.9) except those of the stages `bwd_delta` /
-`nope_bwd_delta`, `nope_bwd_dsink` and `index_prep`, which need 12.8.  The feature does not
+`nope_bwd_delta` and their `with_o_lo=False` build `bwd_delta_no_olo` /
+`nope_bwd_delta_no_olo`, `nope_bwd_dsink` and `index_prep`, which need 12.8.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when the package ships them and
 JIT-built through the package's JIT shim from `build.json` otherwise (see
@@ -28,7 +34,9 @@ JIT-built through the package's JIT shim from `build.json` otherwise (see
 ## Mode and names
 
 The module name states the mode and no entry point takes a `deterministic=`
-keyword.  This is the `nondet` package: the backward adds the dK / dV
+keyword (`with_o_lo`, see "Without the output residual", chooses whether the
+forward writes `o_lo` and how the backward forms `delta`; it is not a
+determinism switch).  This is the `nondet` package: the backward adds the dK / dV
 contributions with unordered FP32 atomics, and the package does not promise that
 any output repeats bit for bit, from run to run or across routes, views,
 layouts, streams or kernels running beside it.
@@ -44,8 +52,8 @@ the binding's row-length vector) and the validation of `dkv_acc` /
 `dkv_dst_map`.  It never falls back to another package.  A
 backward without query rows launches nothing and does not alert.  The
 deterministic package `cake_pplx.cake_dsa_sparse_attention_det_train` has
-the same entry points (`det` in place of `nondet`); its outputs repeat bit for
-bit run to run.
+the same entry points (`det` in place of `nondet`, without `with_o_lo`); its
+outputs repeat bit for bit run to run.
 
 The tests judge the accuracy of every floating output against an FP64
 reference: over 32 random inputs per case, the error of each output, in the L2
@@ -79,7 +87,7 @@ from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
 out = cake_dsa_sparse_attention_nondet(
     q_latent, q_rope, kv_latent, k_rope, indices,
     topk_length=None, softmax_scale=None, return_lse=False,
-    dkv_acc=None, dkv_dst_map=None)
+    dkv_acc=None, dkv_dst_map=None, num_segments=1)
 out = cake_dsa_sparse_attention_nondet_varlen(
     q_latent, q_rope, kv_latent, k_rope, gather_kv_indices,
     cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None,
@@ -87,9 +95,11 @@ out = cake_dsa_sparse_attention_nondet_varlen(
     return_lse=False, dkv_acc=None, dkv_dst_map=None)
 ```
 
-* `q_latent [T, 64, 512]`, `q_rope [T, 64, 64]` BF16; `kv_latent [S, 512]`
-  (K = V) and `k_rope [S, 64]` BF16.  Strided views are consumed in place --
-  see "Packed and strided inputs" below.
+* `q_latent [T, H, 512]`, `q_rope [T, H, 64]` BF16, `H` = 64, 96 or 128 query
+  heads (96 and 128 on `sm_100a` / `sm_103a`, see "Query heads above 64 (head
+  windows)"; another `H` raises `ValueError`); `kv_latent [S, 512]` (K = V)
+  and `k_rope [S, 64]` BF16.  Strided views are consumed in place -- see
+  "Packed and strided inputs" below.
 * `indices [T, topk]` int32 (any row stride) hold **global** key rows; `-1` or `>= S` marks an
   invalid slot anywhere in the row; `topk_length [T]` int32 optionally
   invalidates slots `>= topk_length[t]`; any positive `topk`.  Without
@@ -133,13 +143,23 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   rows; a row whose every slot ends up `-1` gives `out = 0`, `lse = -inf` and
   zero gradients.  The segment count `len(cu_seqlens_k) - 1` is passed on as
   `num_segments`: the backward's whole-row key-range passes apply to
-  one-segment rows only (see "Key-range passes").
-* Forward: `out [T, 64, 512]` BF16 and (with `return_lse=True`) the natural-log
-  `lse [T, 64]` FP32 over the valid keys; fully masked rows give `out = 0` and
+  one-segment rows only (see "Key-range passes"), and on `sm_107a` the
+  direct-accumulation rule reads it (see "Direct accumulation from the main
+  stage").  The flat entries and the step backwards of both forms take the
+  count as the keyword `num_segments` (a Python `int`, default 1): a caller
+  that passes the global rows of a packed batch passes `len(cu_seqlens_k) - 1`
+  and gets the varlen entry's plan for the same rows.
+* Forward: `out [T, H, 512]` BF16 and (with `return_lse=True`) the natural-log
+  `lse [T, H]` FP32 over the valid keys; fully masked rows give `out = 0` and
   `lse = -inf`.  The autograd wrapper also keeps the BF16 output residual
   `o_lo = bf16(fp32(O) - bf16(O))`; the backward forms
   `delta = rowsum(dO * (O + O_lo))` in FP32 from the BF16 output and it.
-* Backward: `dq_latent`, `dq_rope` (computed once per row),
+  With `with_o_lo=False` no `o_lo` is computed, stored or saved and the
+  backward forms `delta = rowsum(dO * O)` from the BF16 output alone (see
+  "Without the output residual").
+* Backward: `dq_latent`, `dq_rope` (computed once per row; above 64 heads the
+  overlap heads `[H - 64, 64)` are written by both windows, the second write
+  final),
   `dkv_latent [S, 512]`, `dk_rope [S, 64]` (FP32 `red.global`
   accumulation, then a cast to natural-layout BF16).  BF16 MMA operands, FP32
   accumulation throughout.  `cake_backend.backward(..., dkv_fp32=True)` (and a
@@ -160,9 +180,9 @@ trainer's packed layouts are consumed in place
 -- no `.contiguous()`, `cat` or copy on the host:
 
 * `q_rope` may be the `192:256` channel slice of the pre-absorption
-  `[T, 64, 256]` query (head stride 256, token stride 16384, storage offset
-  192 elements = 384 B), `q_latent` a view of a packed `[T, 64, 576]` query,
-  or both contiguous.  Rule (`cake_backend._check_head_tensor`): unit channel
+  `[T, H, 256]` query (head stride 256, token stride `H * 256` -- 16384 at 64
+  heads --, storage offset 192 elements = 384 B), `q_latent` a view of a
+  packed `[T, H, 576]` query, or both contiguous.  Rule (`cake_backend._check_head_tensor`): unit channel
   stride; head and token strides positive multiples of 8 elements (16 bytes,
   the granule of `cuTensorMapEncodeTiled`'s global strides); head stride at
   least the slice width; base address 16-byte aligned.
@@ -180,7 +200,11 @@ trainer's packed layouts are consumed in place
   dout_head_stride + channel`).  The eager `backward` copies a `dout` only when
   the descriptor cannot address it (base not 16-byte aligned, strides not
   multiples of 8 elements, channel stride != 1); `prepare_dsa_train` rejects
-  such a view.
+  such a view.  Above 64 heads the delta stage reads `dout` as `T * H` rows of
+  64 virtual heads, which needs its token stride to be `H` head strides (a
+  dense or packed-slice `dout`); any other admissible layout -- the head-major
+  view included -- is copied once into the workspace by the eager `backward`
+  and the prepared runner alike (see "Query heads above 64 (head windows)").
 * For a strided view, only descriptor fields and pointer offsets differ from
   a contiguous tensor.
 
@@ -221,7 +245,8 @@ context-parallel window):
   synchronizes).  The autograd `Function`s save every tensor their forward
   produces for the backward -- `out`, `lse`, `o_lo`, the index rows, the
   lengths -- through `ctx.save_for_backward` (a fixed list with a zero-size
-  placeholder for an absent `topk_length`, so non-reentrant
+  placeholder for an absent `topk_length`, and for `o_lo` under
+  `with_o_lo=False`, so non-reentrant
   `torch.utils.checkpoint` can match the recomputed tensors by position) and
   keep nothing else of size on `ctx`: after a checkpointed forward the entries
   retain ~0 MiB.  Saved-tensor hooks such as
@@ -452,15 +477,18 @@ other layouts through their flat alias.  The stage and the forward are both
 launched before the autograd function runs; it receives the forward's outputs
 and launches nothing itself.  The bindings encode the
 tensor maps by value, so a step is its
-kernels -- one launch for the forward; three for the single-pass backward
+kernels -- at 64 heads (above 64, see "Query heads above 64 (head windows)")
+one launch for the forward; three for the single-pass backward
 (`bwd_delta`, `bwd_main`, `bwd_cast`); `2 + 2 x chunks x passes` for the
 key-range-pass backward (`bwd_delta`, then `bwd_compact` + `bwd_main_pass` per
 token chunk and pass, `bwd_cast`)
 -- plus the two fills of the FP32 dK/dV accumulators; a direct binding (see
 "Direct accumulation from the main stage") launches the natural-layout variant
 of the main stage instead and has neither the fills nor the cast.  A call without query rows
-(`T == 0`) returns empty outputs and zero gradients without launching; `S == 0`
-is rejected.
+(`T == 0`) returns empty outputs and zero gradients without launching (on
+`sm_107a` a call over more than 64 heads on CUDA tensors raises
+`NotImplementedError` instead, see "Query heads above 64 (head windows)");
+`S == 0` is rejected.
 
 Host cost through the autograd wrapper: the `Function.backward` runs on
 PyTorch's autograd device thread, where the two thread handoffs and the Python
@@ -478,8 +506,17 @@ graph (`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --host-us` re
 * `fwd`: one CTA per query token gathers its top-k keys once (TMA gather) and
   produces `out`, the natural-log `lse` and the BF16 output residual `o_lo`.
   On `sm_107a` its scanner-warp build `fwd_scan` (416 threads) runs in its
-  place, with the same arguments, grid and outputs.
-* `bwd_delta`: `delta = rowsum(dO * (O + O_lo))`, one (token, head) row per warp.
+  place, with the same arguments, grid and outputs.  Under `with_o_lo=False`
+  its twin `fwd_no_olo` (`fwd_scan_no_olo` on `sm_107a`) runs instead: same
+  arguments and grid, `out` and `lse` only.  The forward writes `o_lo` with an
+  L1 no-allocate / L2 evict-first cache hint: nothing reads it before the
+  backward's launch.  In every build the softmax role waits for the
+  shared-memory reads of its last `out` TMA stores before it exits.
+* `bwd_delta`: `delta = rowsum(dO * (O + O_lo))`, one (token, head) row per warp
+  (`bwd_delta_no_olo` under `with_o_lo=False`: `delta = rowsum(dO * O)`); the
+  kernel splits a row into token `row / 64` and head `row % 64`, which a launch
+  over more than 64 heads addresses through virtual `dout` strides (see "Query
+  heads above 64 (head windows)").
 * `bwd_main`: one CTA per query token (20 warps: gather, compute, reduce, MMA,
   load and metadata roles) recomputes S and P from the BF16 Q and the gathered
   K, forms dP and dS, accumulates dQ / dQ_rope in tensor memory (written once
@@ -507,7 +544,8 @@ graph (`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --host-us` re
 Launch grids are functions of the problem scalars in `cake_launch.py`
 (`num_queries` CTAs for `fwd` / `fwd_scan`, `bwd_main`, `bwd_main_pass` and their
 natural-layout variants,
-`num_queries * 8` for `bwd_delta`, `ceil(num_queries / 4)` for `bwd_compact`,
+`num_queries * 8` for `bwd_delta` (`ceil(T * H / 64) * 8` above 64 heads),
+`ceil(num_queries / 4)` for `bwd_compact`,
 `ceil(num_kv * 18 / 256)` for `bwd_cast`).
 
 ### Key-range passes for the DRAM regime
@@ -549,11 +587,14 @@ scratch holds one chunk.  The passes split the whole key row
 into equal ranges, which matches an index row whose keys spread over the whole
 row (one document); in a packed multi-segment row every token's keys lie
 inside its own segment, so the policy applies to one-segment rows only
-(`num_segments > 1`, the varlen entry's `len(cu_seqlens_k) - 1`, plans one
-pass unless `key_passes` overrides).  Since the policy reads only whether the
+(`num_segments > 1` -- the varlen entry's `len(cu_seqlens_k) - 1`, or the
+flat rope entry's keyword -- plans one pass unless `key_passes` overrides).
+Since the policy reads only whether the
 row has more than one segment, the backward binding keys hold that class, not
-the count: a training step with a new document count reuses the backward
-binding of the last one.  The passes add
+the count, and on `sm_107a`, whose `dkv_direct` rule reads the count, also the
+rule's decision (see "Direct accumulation from the main stage"): a training
+step with a new document count reuses the backward binding of the last one
+unless that decision changes.  The passes add
 `min(T, 4224) * (147,456 + 4 * topk + 4)` B to the workspace (`dq_partial`,
 `key_scratch`, `pass_counts`; 608 MiB at `T = 4096`, top-k 2048;
 `dsa_train_workspace_size` includes them).  dQ is
@@ -563,6 +604,100 @@ places), and the dK/dV reductions are
 the same reds in another order.  `key_passes=` on the entry points overrides
 the policy (`1` = single pass, `n` = that many passes); a program without the
 pass stages serves the single pass only.
+
+## Query heads above 64 (head windows)
+
+The rope form takes `H = q_latent.shape[1]` query heads, `H` in 64, 96 and 128
+(`cake_backend.SUPPORTED_HEADS`).  Every kernel of the program serves exactly
+64 heads of a token: its tensor maps take 64-head boxes and its `lse`, `o_lo`
+and `delta` addresses use the literal 64.  `H = 64` runs the plan of 0.6.1
+(the 64-head release), launch for launch.  `H = 96` and `128` run the same stages on two
+64-head windows, `W1` first and then `W0`, with no kernel, build or launcher
+change:
+
+| `H` | `W1` (first) | `W0` (second) | heads both windows cover | pad heads of `W1` |
+|---|---|---|---|---|
+| 96 | `[32, 96)` | `[0, 64)` | `[32, 64)` | local `[0, 32)` |
+| 128 | `[64, 128)` | `[0, 64)` | none | none |
+
+* Operands.  A window's `q_latent`, `q_rope`, `out`, `dout`, `dq_latent` and
+  `dq_rope` are the head slices `[:, head0 : head0 + 64]` of the call's
+  tensors; the tensor maps carry the strides, so packed `[T, H, 576]` and
+  pre-absorption `[T, H, 256]` views work as at 64 heads.  Its `lse`, `o_lo`
+  and backward statistics are contiguous `[T, 64]` scratch.
+* Forward.  Per window, in launch order, the `fwd` (or `fwd_no_olo`) launch
+  writes `out[:, window]` in place and its `lse` / `o_lo` into one reused
+  scratch: `fwd_lse` `[T, 64]` FP32 and, with `with_o_lo`, `fwd_o_lo`
+  `[T, 64, 512]` BF16.  A device copy then moves the heads the window owns
+  into the `[T, H]` outputs: `[64, H)` for `W1`, `[0, 64)` for `W0`.  `W0`
+  runs last, so `out`, `lse` and `o_lo` of the overlap heads `[H - 64, 64)`
+  all come from `W0`.  Both windows take the call's `topk_length` and length
+  derivation (the derivation writes the same lengths twice).
+* Backward, in launch order:
+  1. A `dout` whose token stride is not `H` head strides
+     (`dout.stride(0) != H * dout.stride(1)`, such as the head-major
+     `[512, T * 512, 1]` view) is copied once into the workspace (`dout_copy`
+     `[T, H, 512]` BF16).  A dense or packed-slice `dout` is read in place.
+  2. One `bwd_delta` (or `bwd_delta_no_olo`) launch over the `T * H` (token,
+     head) rows.  The kernel splits a row into `row / 64` and `row % 64`, so
+     the launch passes the virtual `dout` strides `(64 * hs, hs)` (`hs` the
+     head stride, 512 on the copy), which address row `t * H + h` exactly, and
+     a grid of `ceil(T * H / 64) * 8` blocks.  It writes the `[T, H]` `delta`.
+  3. Per-window statistics `window_lse` / `window_delta` `[2, T, 64]` FP32, by
+     device copies: `W0` takes heads `[0, 64)`; `W1` takes heads `[H - 64, H)`,
+     and its pad heads (local `[0, 128 - H)`, the heads `W0` owns) get
+     `lse = +inf` and `delta = 0`.  The kernel forms `P = exp2(S * scale_log2 -
+     lse)` and `dS = P (dP - delta) sm_scale`, so a pad head has `P = 0` and
+     `dS = 0`: it adds exactly zero to dK / dV, and its `dq` (zero) is
+     overwritten by `W0`.
+  4. The main stage per window, `W1` then `W0`, both adding into the same FP32
+     accumulators (zeroed once) or, on a direct binding, into `dkv_acc`.  With
+     key-range passes the order is token chunk, then window, then pass: per
+     chunk every pass of `W1`, then every pass of `W0`.  `dq_partial` (64
+     heads per token) holds one window's partial between passes and the next
+     window reuses it.
+  5. One `bwd_cast` at the end (none on a direct binding).
+* Numerics.  Per head they are those of the 64-head program: the windows add no
+  reduction, and dK / dV sum the contributions of both windows through the
+  same FP32 atomics.
+* Launches.  The forward is two window launches, each followed by its copy
+  step.  The single-pass backward is the optional `dout` copy, `bwd_delta`,
+  the statistics copies, two main launches and `bwd_cast`.  The copies are
+  torch operations on the current stream: no host synchronization, and the
+  prepared runner stays CUDA-graph capturable.  The runner's launch keys are
+  `cake_backend.WindowLaunch(phase, head0, key)` for a window launch (`key`
+  the 64-head stage name or pass key) and `cake_backend.HeadStep(name,
+  head0)` for a copy step (`"fwd_copy"`, `"dout_copy"`, `"window_stats"`).
+* Workspace: per-call scratch (`workspace_layout(..., num_heads=H)`,
+  `dsa_train_workspace_size(..., num_heads=H)`).  Per token, the forward adds
+  `fwd_lse` (256 B) and, with `with_o_lo`, `fwd_o_lo` (64 KiB); the backward
+  holds `delta` (`4 * H` B), `window_lse` and `window_delta` (512 B each) and,
+  when the `dout` layout needs it, `dout_copy` (`H` KiB).
+  `dsa_train_workspace_size` sizes `dout_copy` from its keyword: `None` (the
+  default) includes it for every backward over more than 64 heads, the upper
+  bound for any `dout` layout; `True` / `False` give the exact size.  The dQ
+  partials of a key-pass backward stay 64 heads per token.
+* Retained state: what a training step keeps from its forward to its backward
+  (`retained_layout`, `dsa_train_retained_size`).  Per token: `lse`
+  (`4 * H` B) and, with `with_o_lo`, `o_lo` (`H` KiB); the flat entry without
+  caller lengths also keeps the derived `topk_length` (4 B); the packed entry
+  (`varlen_topk = K_slots`) keeps its compacted rows `indices`
+  (`4 * K_slots` B) and their counts (4 B) on both of its routes.  The returned
+  `out` (`H` KiB) is the call's output and is not counted (the autograd node
+  saves it too, so it lives until the backward).  Under
+  `torch.utils.checkpoint(..., use_reentrant=False)` nothing is retained.
+* Not served above 64 heads: the deterministic package, the NoPE program and
+  its sink form (`ValueError`; the deterministic and NoPE query checks name
+  the rope form, the sink check says the sink form serves 64 query heads
+  only).  On `sm_107a` an eager, autograd or step call with more than 64
+  heads raises `NotImplementedError` before any kernel of the package
+  launches -- also without query rows, on a CUDA tensor -- and so does
+  `prepare_dsa_train`, until the window stages are validated there (a
+  prepared runner refuses `T = 0` with `ValueError` at every head count).
+* Cost.  At 96 heads the forward and the main stage each process 128 heads
+  (the overlap heads twice); the delta runs once over the 96 heads and the
+  cast once.  The forward adds the scratch copies of `lse` and `o_lo`; the
+  backward gathers the keys and drains the dK / dV reductions once per window.
 
 ## NoPE (zero-rope) program
 
@@ -588,12 +723,13 @@ from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
 
 out = cake_dsa_sparse_attention_nondet_nope(
     q, kv, indices, topk_length=None, softmax_scale=None,
-    return_lse=False, dkv_acc=None, dkv_dst_map=None)
+    return_lse=False, dkv_acc=None, dkv_dst_map=None, num_segments=1,
+    sink=None)
 out = cake_dsa_sparse_attention_nondet_nope_varlen(
     q, kv, gather_kv_indices, cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q=None, max_seqlen_k=None, causal=False,
     topk_length=None, softmax_scale=None, return_lse=False,
-    dkv_acc=None, dkv_dst_map=None, check_cu_seqlens=True)
+    dkv_acc=None, dkv_dst_map=None, check_cu_seqlens=True, sink=None)
 ```
 
 * `q [T, 64, 512]` BF16 (contiguous or a strided token / head view, consumed in
@@ -635,9 +771,10 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   valid slot + 1 by default, bitwise `offset_gather_kv_indices`; `compact=True`
   the compacted rows and counts, with an optional `topk_length` cut),
   `prepare_dsa_nope_train` / `DSANopeTrainRunner`, `dsa_nope_train_workspace_size`,
-  `validate_dsa_nope_inputs`, `CakeDSASparseAttentionNondetNopeFunction` (12 forward inputs,
-  gradients for `q` and `kv` only).  The binding cache is shared; the NoPE keys are
-  tagged (`"nope_fwd"` / `"nope_bwd"`, and `"nope_bwd_prediction"` for the
+  `validate_dsa_nope_inputs`, `CakeDSASparseAttentionNondetNopeFunction` (14 forward inputs,
+  `sink` and `with_o_lo` last and optional; gradients for `q`, `kv` and a `sink`).  The binding cache is shared; the
+  NoPE keys are tagged (`"nope_fwd"` / `"nope_bwd"`, `"nope_fwd_no_olo"` / `"nope_bwd_no_olo"` under
+  `with_o_lo=False`, and `"nope_bwd_prediction"` for the
   autograd backward's predictions) and never collide with the rope keys.
 * `dkv` semantics.  Fresh (no `dkv_acc`): `backward_nope` returns a new natural
   FP32 `[S, 512]` buffer -- filled by the natural-layout main stage adding into
@@ -659,7 +796,8 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   tensor or a zero-argument callable producing it (or an `(accumulator,
   dkv_dst_map)` pair) at backward time, as for the rope entries.  Both NoPE
   autograd `Function`s save every produced backward operand -- the saved
-  outputs, `o_lo`, the global index rows, the lengths -- through
+  outputs, `o_lo` (a zero-size placeholder under `with_o_lo=False`), the global
+  index rows, the lengths -- through
   `ctx.save_for_backward` (seven tensors in a fixed order) and keep only
   options, geometry keys and the caller-owned accumulator on `ctx`, so a
   checkpointed forward retains nothing.
@@ -723,7 +861,8 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   `dout` of the predicted layout the backward's host work before its first
   launch is the layout checks of the saved rows and `dout`, the operands, the
   `delta` allocation and the delta stage's values -- no key completion and no
-  cache lookup.  The delta stage reads only `dout`, `out` and `o_lo` and launches
+  cache lookup.  The delta stage reads only `dout`, `out` and `o_lo` (`dout`
+  and `out` under `with_o_lo=False`) and launches
   first; the `dq` allocation, the other fresh buffers, the main stage's values
   and the zero fills of the FP32 buffers the call owns follow while it runs,
   then the main (and cast) stages.  Every check precedes the delta launch, and
@@ -787,25 +926,31 @@ whether the record registers the stages a call needs for the device; the NoPE
 GPU tests additionally skip while `build.json` lacks a registered NoPE library
 (the export delivers the libraries).
 
-### Trainable per-head sink (NoPE, `sm_100a` / `sm_103a`)
+### Trainable per-head sink (NoPE)
 
-The flat NoPE entries -- `cake_dsa_sparse_attention_nondet_nope` and the step
-pair `cake_dsa_sparse_attention_nondet_train_nope_forward` / `_backward` (and,
-in this backend, `forward_nope`, `backward_nope` and `prepare_dsa_nope_train`)
--- take an optional `sink`: FP32 `[64]`, contiguous, on the device of `q`.
+The NoPE entries -- the flat `cake_dsa_sparse_attention_nondet_nope` and step
+pair `cake_dsa_sparse_attention_nondet_train_nope_forward` / `_backward`, the
+packed `cake_dsa_sparse_attention_nondet_nope_varlen` and step pair
+`cake_dsa_sparse_attention_nondet_train_nope_varlen_forward` / `_backward`
+(and, in this backend, `forward_nope`, `backward_nope`, `forward_nope_varlen`
+and `prepare_dsa_nope_train`) -- take an optional `sink`: FP32 `[64]`,
+contiguous, on the device of `q`.
 Per row `t` and head `h`, over the valid slots `j`:
 
 ```text
 s_j      = softmax_scale * <q[t,h], kv_j>
 lse[t,h] = log(sum_j exp(s_j) + exp(sink[h]))      # the sink is not scaled
 out      = BF16(sum_j exp(s_j - lse) * kv_j)       # the sink has no value term
-delta    = <dout[t,h], out + o_lo>
+delta    = <dout[t,h], out + o_lo>                  # <dout[t,h], out> under with_o_lo=False
 dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
 ```
 
 * Forward: the stage `nope_fwd_sink` (the forward's sink build: the forward's
   arguments plus `sink`, its grid and launch geometry) runs in place of
-  `nope_fwd`.  It folds the sink into the final normalisation of the FP32
+  `nope_fwd`; on `sm_107a` `stage_for` resolves it to `nope_fwd_scan_sink`,
+  the sink build of the scanner-warp forward.  The packed entries run the
+  same stage over the packed rows on every route (in-kernel index conversion
+  or index preparation); a zero-length query segment adds no row.  It folds the sink into the final normalisation of the FP32
   softmax and rounds `out` and the residual `o_lo` once from that sum (not a
   rescaled sink-free output).  `lse` includes the sink.  A row without a valid
   slot gives `out = o_lo = 0` and `lse = sink[h]` (`-inf` for a `-inf` head);
@@ -822,14 +967,19 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   (64) tokens, writes one FP32 partial per (chunk, head) to the workspace
   (`dsink_partial`, `ceil(T / 64) x 64` FP32); the CTA that completes the
   grid (`dsink_ticket`: a 32-bit completion counter, zero-filled by the host
-  before every backward) sums the partials in chunk order, so `dsink` depends
-  on `T` only, not on the SM count or the grid.  A row without a valid slot (`delta = 0`) and a `-inf`
+  before every backward) sums the partials in one fixed order -- four
+  lane-strided sums over the chunks (chunks `r, r + 4, ...`), folded in lane
+  order -- so `dsink` depends on `T` only, not on the SM count or the grid.  A row without a valid slot (`delta = 0`) and a `-inf`
   head contribute exactly 0.  FP32 throughout.
-* Returns: the step backward returns `(dq, dkv, dsink)` when it is given the
-  `sink` its forward ran with (`(dq, dkv)` without one, as before); the
-  autograd entry returns `dsink` as the gradient of `sink` (its thirteenth
-  input); the prepared runner's `backward()` returns `(dq, dkv, dsink)`.
-  `lse` stays non-differentiable.
+* Returns: the step backwards return `(dq, dkv, dsink)` when they are given
+  the `sink` their forward ran with (`(dq, dkv)` without one, as before), and
+  `(dq, None, dsink)` with a tensor `dkv_acc`; the packed step backward sums
+  `dsink` over all packed rows of the call.  The autograd entries return
+  `dsink` as the gradient of `sink` (the flat entry's thirteenth input, the
+  packed Function's sixteenth; `None` for the `with_o_lo` input after it); the prepared runner's `backward()` returns
+  `(dq, dkv, dsink)`.  `lse` stays non-differentiable.  A call without query
+  rows (`T = 0`) launches nothing on every architecture and gives a zero
+  `dsink`.
 * Checks: metadata only (dtype, shape, contiguity, the device of the other
   tensors), no value check and no device synchronization; `+inf` and NaN
   values are not supported.  The binding keys end with the sink's geometry, so
@@ -839,13 +989,81 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   reference to the caller's `sink` (`ctx.save_for_backward`, so non-reentrant
   checkpointing releases and recomputes it like the others).  The workspace
   grows by the sink-gradient scratch, `ceil(T / 64) * 256 + 4` bytes
+  before alignment and `ceil(T / 64) * 256 + 256` after it
   (`dsa_nope_train_workspace_size(..., sink=True)`, the regions
   `dsink_partial` / `dsink_ticket` of `workspace_layout_nope`); `dsink [64]`
   is an output.
-* Not supported yet (`NotImplementedError`): a sink on `sm_107a` (no
-  scanner-warp sink build ships), a sink on the packed (varlen) NoPE entries
-  (their per-document forward has no sink build), and a sink in the
-  deterministic package.
+* The deterministic package takes the same `sink` on its NoPE entries, with
+  the same stages and the same `dsink` order.
+
+## Without the output residual (`with_o_lo=False`)
+
+Every entry -- the four autograd entries, the three step forwards and the
+three step backwards, and in this backend `forward`, `backward`,
+`forward_nope`, `backward_nope`, `forward_nope_varlen` and both `prepare_*`
+runners -- takes `with_o_lo`, a keyword-only Python `bool` (default `True`;
+anything else raises `ValueError`); the three autograd `Function`s take it as
+their last `apply` input (see below).  No environment variable sets it: it
+chooses the accuracy class of the gradients and stays visible at the call
+site.
+
+```text
+with_o_lo=True   forward writes out, lse, o_lo     delta = rowsum(dout * (out + o_lo))   FP32
+with_o_lo=False  forward writes out, lse           delta = rowsum(dout * out)            FP32
+```
+
+* `True` (default) is the behaviour of every earlier release: the same stages,
+  libraries, binding keys and saved tensors.  `o_lo` keeps the gradients
+  accurate on peaked rows (rows whose softmax puts almost all weight on one
+  key).
+* `False` runs the twins of `cake_jit.NO_OLO_STAGES` in place of the forward
+  and the delta stage: `fwd_no_olo`, `nope_fwd_no_olo` and
+  `nope_fwd_sink_no_olo` on `sm_100a` / `sm_103a` (their scanner-warp builds
+  `fwd_scan_no_olo`, `nope_fwd_scan_no_olo` and `nope_fwd_scan_sink_no_olo` on
+  `sm_107a`), and `bwd_delta_no_olo` / `nope_bwd_delta_no_olo` (one library
+  shared by both programs, every architecture).  The forward twins take the
+  default stage's arguments, grid and launch geometry and leave the `o_lo`
+  operand unwritten; the delta twin reads `dout` and `out` alone, the form
+  cuDNN's DSA backward uses, so on peaked rows the gradient error grows to
+  that class.  The main, compaction, cast and sink-gradient stages are the
+  default ones (`dsink` follows the twin's `delta`).  `out` and `lse` have
+  the same accuracy in both modes.  The sink tests bound each head's `dsink`
+  error by `5e-3 * max |dsink_ref|`; `with_o_lo=False` derives `delta` from
+  the BF16 `out`, so its per-head `dsink` bound is 1.5 times the default
+  (`7.5e-3 * max |dsink_ref|`), and every other bound and the naive BF16 tier
+  are the same in both modes.
+* No `o_lo` is allocated, written or saved: `H` KiB less written and saved per
+  query token (64 KiB at 64 heads, 2 GiB at `T = 32,768`; above 64 heads the
+  forward window scratch `fwd_o_lo` is not allocated either).  The kernels' `o_lo` operand is a
+  cached zero-size BF16 placeholder chosen from the plan's mode alone, and
+  the autograd `Function`s keep their saved-list length and order (the `o_lo`
+  slot holds a zero-size placeholder), so non-reentrant checkpointing still
+  matches by position.  At 64 heads the workspace layouts are the same in
+  both modes; above 64 heads the forward's window `o_lo` scratch
+  (`fwd_o_lo`) exists only with `with_o_lo=True`.
+* Step entries: the step forwards return `None` in the `o_lo` slot (`(out,
+  lse, None)`, the packed form `(out, lse, None, indices, topk_length)`); a
+  step backward takes `o_lo=None` with `with_o_lo=False`.  `o_lo` is `None`
+  exactly when `with_o_lo` is `False`: a tensor with `False`, or `None` with
+  `True` on a call with query rows, raises `ValueError` before anything is
+  planned, allocated or launched.  A default call without query rows
+  accepts `o_lo=None` (it launches nothing).  A runner prepared with
+  `with_o_lo=False` refuses an `o_lo=` tensor; its `o_lo` and the third
+  element of `forward()` are `None`.
+* Binding keys: the first slot gains `_no_olo` (`"fwd_no_olo"`,
+  `"bwd_no_olo"`, `"rope_varlen_fwd_no_olo"`, `"nope_fwd_no_olo"`,
+  `"nope_bwd_no_olo"`); every other slot keeps its position and every default
+  key is unchanged.  The NoPE autograd backward's prediction keys carry the
+  tag through `key[:7]`.
+* Autograd `apply`: `with_o_lo` is the last input of each `Function` (the rope
+  `Function`'s sixteenth after `launched`, the flat NoPE `Function`'s
+  fourteenth after `sink`, the packed NoPE `Function`'s seventeenth after
+  `sink`); the entries pass it only when it is `False`, so a default call
+  applies the same inputs as before.  Each backward returns one gradient per
+  input it received.
+* A checkout whose record lacks a twin for the device's architecture raises
+  `NotImplementedError` naming the twin and the architecture;
+  `generated_program_available(..., with_o_lo=False)` is `False` there.
 
 ## Layout of this package
 
@@ -859,18 +1077,23 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   entry `<library>_<arch>` that `load_cake_dsa_train_module(stage, arch,
   program)` loads through `cake_build`.  Stages of the two programs that
   share a kernel name the same library stem.  A stage entry may narrow the
-  record's architectures with its own `arches` (`fwd_scan` / `nope_fwd_scan`:
-  `sm_107a`; `fwd` / `nope_fwd` and the sink stages `nope_fwd_sink` /
-  `nope_bwd_dsink`: `sm_100a`, `sm_103a`); `SCAN_STAGES` and
+  record's architectures with its own `arches` (`fwd_scan` / `nope_fwd_scan` /
+  `nope_fwd_scan_sink` and their twins `fwd_scan_no_olo` /
+  `nope_fwd_scan_no_olo` / `nope_fwd_scan_sink_no_olo`: `sm_107a`; `fwd` /
+  `nope_fwd` / `nope_fwd_sink` and their twins `fwd_no_olo` /
+  `nope_fwd_no_olo` / `nope_fwd_sink_no_olo`: `sm_100a`, `sm_103a`);
+  `NO_OLO_STAGES` maps each default forward and delta stage to its
+  `with_o_lo=False` twin; `SCAN_STAGES` and
   `stage_for` resolve a forward on `sm_107a` to its scanner-warp stage, and
   `library_name` returns that stage's library.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
   `cake-build/1`, written by the export): one entry per `<library>_<arch>`
-  (eighteen libraries over fourteen kernel sources, four of them compiled a
-  second time with `-DDKV_NATURAL=1`; sixteen on `sm_100a` and `sm_103a` and
-  fourteen on `sm_107a`: the scanner-warp forwards on `sm_107a` only, and `fwd`
-  / `nope_fwd` and the two NoPE sink stages on `sm_100a` and `sm_103a`) with
+  (twenty-six libraries over twenty-two kernel sources, four of them compiled
+  a second time with `-DDKV_NATURAL=1`; twenty on each architecture, sixty
+  entries: the six scanner-warp forwards on `sm_107a` only, and `fwd` /
+  `nope_fwd` / `nope_fwd_sink` and their `_no_olo` twins on `sm_100a` and
+  `sm_103a`) with
   its translation
   units, digests, nvcc flags (`--use_fast_math` per stage, plus the natural
   variants' specialization defines), closure digest and `aot/<name>.so`
@@ -909,22 +1132,39 @@ backward preprocess, backward main (single-pass and key-range-pass form with
 its compaction, each with its natural-layout direct-accumulation variant) and
 cast stages plus the key-range-pass and direct-accumulation policies, exported
 from the kernel snapshot named in the pull request, and the NoPE program's
-record with its twelve stages (the forward and, on `sm_107a`, its scanner-warp
-build `nope_fwd_scan`; the delta, compaction and cast kernels shared with
-the rope program; the trainable-sink stages `nope_fwd_sink` and
-`nope_bwd_dsink` on `sm_100a` / `sm_103a`) and its own key-range-pass and
-direct-accumulation policies (see "NoPE (zero-rope) program").
+record with its eighteen stages (the forward and, on `sm_107a`, its
+scanner-warp build `nope_fwd_scan`; the delta, compaction and cast kernels
+shared with the rope program; the trainable-sink stages `nope_fwd_sink` (on
+`sm_107a` its scanner-warp build `nope_fwd_scan_sink`) and `nope_bwd_dsink`;
+the five `with_o_lo=False` twins `nope_fwd_no_olo`, `nope_bwd_delta_no_olo`,
+`nope_fwd_scan_no_olo`, `nope_fwd_sink_no_olo` and
+`nope_fwd_scan_sink_no_olo`)
+and its own key-range-pass and
+direct-accumulation policies (see "NoPE (zero-rope) program").  The rope
+record also carries the twins `fwd_no_olo` (`fwd_scan_no_olo` on `sm_107a`)
+and `bwd_delta_no_olo` (see "Without the output residual").  The rope form
+serves 96 and 128 query heads through the head windows on `sm_100a` and
+`sm_103a`; `sm_107a` serves 64 heads until its window stages are validated
+(see "Query heads above 64 (head windows)").
 
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
 only this package; skips without a registered program or a compute capability
 10.0 / 10.3 / 10.7 device) and `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_api.py`
 (the public entry points, the environment variables the wrapper
 resolves into this package's keyword switches and the behaviour under
-`torch.use_deterministic_algorithms`); the CPU-only
+`torch.use_deterministic_algorithms`) and
+`tests/experimental/test_cake_dsa_sparse_attention_nondet_train_heads.py` (96
+and 128 query heads; its host tests record and check every launch of the
+windows through `tests/experimental/test_helpers/cake_dsa_sparse_attention_host_launches.py`;
+its `test_large_t_heads` -- T = 16380, top-k 2048, the per-rank row -- runs
+only with `CAKE_PPLX_DSA_LARGE_TESTS=1` and is skipped otherwise);
+the CPU-only
 `tests/experimental/test_cake_dsa_sparse_attention_nondet_train_names.py`
 checks the public names.  Accuracy is judged by `tests/cake_naive.py` through
 `tests/experimental/test_helpers/cake_dsa_sparse_attention_naive.py` (the FP64
 reference and the PyTorch BF16 form of the same call; `tests/conftest.py` prints
 one `TIER` line per judged output); index, length and map outputs are checked
-exactly.  Benchmark:
-`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py`.
+exactly.  Benchmarks:
+`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py` and, for 96 and 64
+query heads against the non-Cake baselines,
+`benchmarks/bench_cake_dsa_sparse_attention_nondet_train_heads.py`.

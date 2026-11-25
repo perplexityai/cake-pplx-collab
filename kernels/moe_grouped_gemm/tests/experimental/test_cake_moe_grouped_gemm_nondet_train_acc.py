@@ -124,9 +124,12 @@ def _plan_without(plan, *keys):
 
 
 def _acc_bindings():
-    """``(route, stage, arch)`` of every accumulate stage the registry serves."""
+    """``(route, stage, arch)`` of every accumulate stage the registry's public routes serve
+    (the lead twin routes mirror them: ``test_lead_routes_mirror_their_routes``)."""
     found = []
     for name, route in ROUTES.items():
+        if cake_jit.is_lead_route(name):
+            continue
         for item in route["stages"]:
             if not item["name"].endswith(ACC):
                 continue
@@ -378,10 +381,11 @@ def test_acc_stages_are_builds_of_their_twins():
 
 
 def test_overwrite_routes_never_bind_an_acc_stage():
-    """With ``accumulate=False`` the stage rules never select an accumulate stage."""
+    """With ``accumulate=False`` the stage rules never select an accumulate stage (on the
+    public routes, where the host selects; a lead twin binds the stage selected there)."""
     c = HOST_PLAN_CONSTANTS
     for name, route in ROUTES.items():
-        if route["op"] != "wgrad":
+        if route["op"] != "wgrad" or cake_jit.is_lead_route(name):
             continue
         tile_k = 512 if name.endswith("_k512") else 256
         for arch in route["arches"]:

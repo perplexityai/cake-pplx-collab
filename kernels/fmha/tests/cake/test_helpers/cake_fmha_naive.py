@@ -38,13 +38,18 @@ that reads it, :func:`stored`).  ``scale_log2`` is ``softmax_scale * log2(e)`` r
   as the preprocess does); it adds the unscaled ``dS k`` into ``dQ_accum``, FP32 ``[B*H*Sq*D]`` in the reduction layout
   the postprocess reads (per 128-row tile of a head, element ``(r, d)`` at ``(d // 4) * 512 + r * 4 + d % 4``), and
   writes ``dK`` and ``dV``.  ``dQ_accum`` is compared in that layout: the L2 and max norms do not depend on the order
-  of the elements, and ``softmax_scale``, which the postprocess applies, would scale every error alike.
+  of the elements, and ``softmax_scale``, which the postprocess applies, would scale every error alike.  With
+  ``pair=True`` (the 2-CTA main kernel of the pair route, head dimension 128) ``dQ_accum`` is in the pair-row layout:
+  element ``(r, d)`` of a tile at ``(r // 64) * 8192 + (d // 4) * 256 + (r % 64) * 4 + d % 4`` (:func:`accumulator`).
+* :func:`fused_outputs`: the one-launch stage (no mask) on the operands of :func:`make_inputs`: the formula of the
+  public backward with the row statistics the kernel makes itself, float64 in the oracle and FP32 (``LSE_log2 = lse *
+  log2(e)``, ``dPsum = rowsum(out * dout)``) in the naive tier.
 * :func:`pre_outputs`: the preprocess (:func:`pre_inputs`: ``out`` and ``dout`` ``randn x 0.1``, ``lse`` ``log(Sq) +
   randn`` with every seventh value ``-inf``): ``dPsum = rowsum(out * dout)`` and ``LSE_log2 = lse * log2(e)`` (0 where
   ``lse`` is ``-inf``), FP32 ``[B*H, Sq]``, and ``dQ_accum`` cleared to 0.
-* :func:`post_outputs`: the postprocess (:func:`post_inputs`: ``dQ_accum`` ``randn x 0.1`` in the reduction layout):
-  ``dq = bf16(dQ_accum * softmax_scale)`` in the input layout ``[B, Sq, H, D]``, the FP32 accumulation and scale as
-  stored.
+* :func:`post_outputs`: the postprocess (:func:`post_inputs`: ``dQ_accum`` ``randn x 0.1`` in the reduction layout,
+  or with ``pair=True`` in the pair-row layout the pair route's postprocess reads): ``dq = bf16(dQ_accum *
+  softmax_scale)`` in the input layout ``[B, Sq, H, D]``, the FP32 accumulation and scale as stored.
 
 :func:`judge_draws` runs the template's :func:`judge_case` over the draws of a case and records every verdict.
 """
@@ -208,19 +213,71 @@ def main_buffers(x: types.SimpleNamespace) -> types.SimpleNamespace:
     )
 
 
-def main_outputs(x: types.SimpleNamespace, m: types.SimpleNamespace, dtype: torch.dtype) -> dict[str, torch.Tensor]:
-    """``dQ_accum`` (reduction layout, unscaled), ``dK`` and ``dV`` of the main stage on ``x`` and its buffers ``m`` in
-    ``dtype``: the FP32 ``lse_log2`` and ``dpsum`` as stored, ``P`` and ``dS`` in ``dtype``."""
-    bh = x.B * x.H
+def accumulator(dq: torch.Tensor, *, pair: bool = False) -> torch.Tensor:
+    """``dq`` ``[B*H, Sq, D]`` flattened in the layout of the FP32 dQ accumulator: per 128-row tile of a head, element
+    ``(r, d)`` at ``(d // 4) * 512 + r * 4 + d % 4`` (the reduction layout of the 1-CTA main kernels), or with ``pair``
+    at ``(r // 64) * (D // 4) * 256 + (d // 4) * 256 + (r % 64) * 4 + d % 4`` (the pair-row layout of the 2-CTA main
+    kernel, ``D`` 128: each CTA of a pair adds its 64 rows of a tile as one block)."""
+    bh, S, D = dq.shape
+    if pair:
+        # [bh, tile, r // 64, d // 4, r % 64, d % 4]
+        return dq.view(bh, S // BLOCK, 2, BLOCK // 2, D // 4, 4).permute(0, 1, 2, 4, 3, 5).reshape(-1)
+    # [bh, tile, d // 4, r, d % 4]
+    return dq.view(bh, S // BLOCK, BLOCK, D // 4, 4).permute(0, 1, 3, 2, 4).reshape(-1)
+
+
+def from_accumulator(acc: torch.Tensor, B: int, H: int, S: int, D: int, *, pair: bool = False) -> torch.Tensor:
+    """The FP32 dQ accumulator ``acc`` (:func:`accumulator`'s layout) as ``[B, H, S, D]``."""
+    if pair:
+        # [bh * tiles, r // 64, d // 4, r % 64, d % 4] -> [bh * tiles, r // 64, r % 64, d // 4, d % 4]
+        tiles = acc.view(-1, 2, D // 4, BLOCK // 2, 4).permute(0, 1, 3, 2, 4)
+    else:
+        # [bh * tiles, d // 4, r, d % 4] -> [bh * tiles, r, d // 4, d % 4]
+        tiles = acc.view(-1, D // 4, BLOCK, 4).permute(0, 2, 1, 3)
+    return tiles.reshape(B, H, S, D)
+
+
+def main_outputs(
+    x: types.SimpleNamespace, m: types.SimpleNamespace, dtype: torch.dtype, *, pair: bool = False
+) -> dict[str, torch.Tensor]:
+    """``dQ_accum`` (unscaled, in the reduction layout, or with ``pair`` in the pair-row layout of the 2-CTA main
+    kernel: :func:`accumulator`), ``dK`` and ``dV`` of the main stage on ``x`` and its buffers ``m`` in ``dtype``: the
+    FP32 ``lse_log2`` and ``dpsum`` as stored, ``P`` and ``dS`` in ``dtype``."""
     q, k, v, dout = (_heads(t, dtype) for t in (x.q, x.k, x.v, x.dout))
     p = _probabilities(x, q, k, stored(m.lse_log2, dtype))
     ds = (p * (dout @ v.transpose(-1, -2) - stored(m.dpsum, dtype)[..., None])).to(dtype)
     p = p.to(dtype)
-    dq = (ds @ k).view(bh, x.Sq // BLOCK, BLOCK, x.D // 4, 4).permute(0, 1, 3, 2, 4).reshape(-1)
+    dq = accumulator(ds @ k, pair=pair)
     return {
         "dQ_accum": dq,
         "dK": _bshd((ds.transpose(-1, -2) @ q) * x.softmax_scale, x.B, x.H),
         "dV": _bshd(p.transpose(-1, -2) @ dout, x.B, x.H),
+    }
+
+
+def fused_outputs(x: types.SimpleNamespace, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+    """``dq``, ``dk`` and ``dv`` of the one-launch stage (``bwd_fused``, no mask) on the operands ``x`` in ``dtype``:
+    the formula of :func:`backward_outputs` with ``P`` and ``dS`` in ``dtype`` and the row statistics the kernel makes
+    itself.  In float64 (the oracle) ``LSE_log2 = lse * log2(e)`` and ``dPsum = rowsum(out * dout)`` are float64;
+    below float64 (the naive tier) they are FP32 as the kernel computes them (``LSE_log2`` 0 where ``lse`` is
+    ``-inf``, ``dPsum`` summed in FP32) and read as stored.  ``dq = (dS k) * softmax_scale`` cast to ``dtype``."""
+    q, k, v = _heads(x.q, dtype), _heads(x.k, dtype), _heads(x.v, dtype)
+    out, dout = _heads(x.out, dtype), _heads(x.dout, dtype)
+    lse = x.lse.reshape(x.B * x.H, x.Sq)
+    if dtype == ORACLE_DTYPE:
+        lse_log2 = lse.to(dtype) * LOG2_E
+        dpsum = (out * dout).sum(-1)
+    else:
+        lse_log2 = torch.where(lse.isneginf(), 0.0, lse * LOG2_E)
+        dpsum = (_heads(x.out, torch.float32) * _heads(x.dout, torch.float32)).sum(-1)
+    p = _probabilities(x, q, k, lse_log2)
+    ds = (p * (dout @ v.transpose(-1, -2) - dpsum[..., None])).to(dtype)
+    p = p.to(dtype)
+    scale = x.softmax_scale
+    return {
+        "dq": _bshd(((ds @ k) * scale).to(dtype), x.B, x.H),
+        "dk": _bshd((ds.transpose(-1, -2) @ q) * scale, x.B, x.H),
+        "dv": _bshd(p.transpose(-1, -2) @ dout, x.B, x.H),
     }
 
 
@@ -278,10 +335,11 @@ def post_inputs(case: Case, D: int, *, seed: int, device: torch.device) -> types
     )
 
 
-def post_outputs(t: types.SimpleNamespace, dtype: torch.dtype) -> dict[str, torch.Tensor]:
-    """``dq = dQ_accum * softmax_scale`` in ``[B, Sq, H, D]`` in ``dtype``, the FP32 accumulation and scale (the
-    kernel's FP32 argument) as stored."""
-    tiles = t.dq_accum.view(-1, t.D // 4, BLOCK, 4).permute(0, 2, 1, 3).reshape(t.B, t.H, t.S, t.D)
+def post_outputs(t: types.SimpleNamespace, dtype: torch.dtype, *, pair: bool = False) -> dict[str, torch.Tensor]:
+    """``dq = dQ_accum * softmax_scale`` in ``[B, Sq, H, D]`` in ``dtype``, the FP32 accumulation (in the reduction
+    layout, or with ``pair`` in the pair-row layout: :func:`accumulator`) and scale (the kernel's FP32 argument) as
+    stored."""
+    tiles = from_accumulator(t.dq_accum, t.B, t.H, t.S, t.D, pair=pair)
     scale = torch.tensor(t.softmax_scale, dtype=torch.float32, device=t.dq_accum.device)
     return {"dq": (stored(tiles, dtype) * stored(scale, dtype)).to(dtype).permute(0, 2, 1, 3)}
 

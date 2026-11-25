@@ -37,15 +37,23 @@ from ._cake_pplx_api_mok import cake_api
 # Tables and resolvers that live in the package but stay reachable here
 # (``cake_mok_det_train.COMM_SMS``, ``cake_mok_det_train.resolve_comm_sms(...)``, ...).
 _PACKAGE_NAMES = (
+    "ACTIVATIONS",
     "COMM_SMS",
     "IMBALANCE_COMM_SMS",
     "IMBALANCE_DEVICE_THRESHOLDS",
     "IMBALANCE_THRESHOLD",
     "IMBALANCE_THRESHOLDS",
+    "MODE_GROUPS",
     "MOK_PRECISIONS",
+    "ROUTER_WEIGHT_GRADIENTS",
+    "ROUTER_WEIGHT_POSITIONS",
+    "SHARED_EXPERT_MODES",
+    "SOURCE_SPLIT_COMM_SMS",
+    "SOURCE_SPLIT_THRESHOLD",
     "resolve_comm_sms",
     "resolve_imbalance_comm_sms",
     "resolve_imbalance_threshold",
+    "resolve_source_split_comm_sms",
 )
 
 
@@ -63,7 +71,16 @@ def __dir__():
 
 @cake_api
 def prepare_mok_bf16(
-    *, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False
+    *,
+    ep_size=16,
+    local_experts=16,
+    topk=8,
+    clamped_swiglu=False,
+    fp32_wgrad=False,
+    router_weight_position="after_down",
+    router_weight_gradient="quotient",
+    shared_expert="unscaled",
+    activation="swiglu",
 ):
     """Prepare the explicit Cake MoK training backend.
 
@@ -84,10 +101,66 @@ def prepare_mok_bf16(
     adds every weight gradient into caller-owned FP32 accumulators passed as
     ``weight_grad_accumulators``.
 
+    ``router_weight_position`` (one of :data:`ROUTER_WEIGHT_POSITIONS`)
+    places each route's FP32 router weight ``w``. ``"after_down"`` (default)
+    weights the routed expert's output in the combine,
+    ``y = S(x) + sum_k w_k E_k(x)``. ``"before_down"`` weights the SwiGLU
+    activation ``a`` before the down projection, ``h = BF16(w * a)``, and sums
+    the routed outputs unweighted; its router-weight gradient is
+    ``dot(dh, a)`` (``dh`` the gradient of ``h``), defined at a zero weight.
+    ``"before_down"`` runs clamped SwiGLU only (``clamped_swiglu=True`` and a
+    ``swiglu_limit`` on every call), BF16 routed weights only, FP32
+    weight-gradient accumulation only (``fp32_wgrad=True``), on sm_100a,
+    sm_103a and sm_107a; ``recompute_forward_context`` then takes the
+    forward's ``router_weights``.
+
+    ``router_weight_gradient`` (one of :data:`ROUTER_WEIGHT_GRADIENTS`),
+    ``shared_expert`` (one of :data:`SHARED_EXPERT_MODES`) and ``activation``
+    (one of :data:`ACTIVATIONS`) are explicit modes; the defaults
+    (``"quotient"``, ``"unscaled"``, ``"swiglu"``) keep the behavior and every
+    bit above. ``"quotient"`` computes the ``"after_down"`` router-weight
+    gradient as ``dot(dh, h) / w`` with ``dh`` from ``BF16(w * dy)`` (zero at
+    a zero weight); ``"direct"`` as ``dot(dh, h)`` with ``dh`` from the
+    unscaled ``dy`` and the activation gradient ``w * dh`` (defined at a zero
+    weight; the down-projection weight gradient keeps ``BF16(w * dy)``).
+    ``shared_expert="scaled"`` multiplies the shared expert's output by a
+    per-token FP32 scale ``s``: ``forward`` and ``backward`` take it as
+    ``shared_scale`` (FP32 ``[tokens]``), ``y = s * S(x) + sum_k w_k E_k(x)``,
+    and ``backward`` returns ``d_shared_scale = dot(dy, S(x))`` as a ninth
+    item (defined at ``s = 0``). ``activation="clamped_swiglu"`` is
+    ``clamped_swiglu=True``. ``activation="situ_glu"`` runs the routed
+    activation ``beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)``:
+    ``forward``, ``recompute_forward_context`` and ``backward`` take
+    ``situ_beta`` and ``situ_lb`` (finite positive floats, run-time values
+    fixed inside a captured CUDA graph, as ``swiglu_limit``).
+    ``shared_expert="none"`` has no shared expert,
+    ``y = sum_k w_k E_k(x)``: every call takes ``None`` for the shared
+    weights, the forward context's shared fields are ``None``, and
+    ``backward`` takes the three routed FP32 accumulators (gate, up, down) and
+    returns ``None`` for the three shared weight gradients.
+
     Prepare and warm up outside graph capture. Supported scheduler layouts
-    (EP, local experts) are (1, 4) and (4, 4) for diagnostics, 256 routed
-    experts at EP 4/8/16/32/64 and 288 routed experts at EP 8/32, with top-k
-    2 or 8. Tokens, hidden/intermediate widths and per-rank source counts
+    (EP, local experts) are (1, 4) and (4, 4) for diagnostics (top-k 2 in
+    both positions, top-k 8 with ``"after_down"``), 256 routed experts at EP
+    4/8/16/32/64 and 288 routed experts at EP 8/32 with top-k 2 or 8
+    (``"after_down"``), 384 routed experts at EP 4/8/16/32/64 ((4, 96),
+    (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``),
+    512 routed experts at EP8 ((8, 64)) with top-k 10, which runs only
+    with ``"after_down"``, plain SwiGLU, ``fp32_wgrad=True``,
+    ``router_weight_gradient="direct"``, ``shared_expert="scaled"`` and BF16
+    routed weights, and 896 routed experts at EP64 ((64, 14)) with top-k 16,
+    which runs only with ``"after_down"``, ``activation="situ_glu"``,
+    ``fp32_wgrad=True``, ``router_weight_gradient="direct"``,
+    ``shared_expert="none"`` and BF16 routed weights; both on sm_100a and
+    sm_103a (:data:`MODE_GROUPS`). The ``"direct"``, ``"scaled"``,
+    ``"none"`` and ``"situ_glu"`` modes run with those configurations only.
+    Any other combination raises before any kernel is loaded or launched:
+    ``TypeError`` for a position, router-weight gradient, shared-expert mode
+    or activation that is not a ``str``, an ``ep_size``, ``local_experts`` or
+    ``topk`` that is not an ``int`` (a ``bool`` included) and a
+    ``clamped_swiglu`` or ``fp32_wgrad`` that is not a ``bool``, in both
+    positions; ``ValueError`` for every other value.
+    Tokens, hidden/intermediate widths and per-rank source counts
     remain runtime values subject to the documented alignment constraints.
     The backend provides the MoE layer only, with no full-model or optimizer
     integration.
@@ -100,6 +173,10 @@ def prepare_mok_bf16(
         topk=topk,
         clamped_swiglu=clamped_swiglu,
         fp32_wgrad=fp32_wgrad,
+        router_weight_position=router_weight_position,
+        router_weight_gradient=router_weight_gradient,
+        shared_expert=shared_expert,
+        activation=activation,
     )
 
 
@@ -120,6 +197,8 @@ def create_mok_bf16_workspace(
     precision="bf16",
     imbalance_comm_sms="auto",
     imbalance_threshold="auto",
+    source_split_comm_sms="auto",
+    source_split_threshold=1.5,
 ):
     """Collectively create a caller-owned ``(config, workspace)`` pair.
 
@@ -131,25 +210,47 @@ def create_mok_bf16_workspace(
     a small toy ring; see the backend README for capacity and reuse rules.
     The same workspace serves BF16 and MXFP8 routed experts.
     Call outside CUDA Graph capture; retain the workspace for every replay.
+    A routed-row overflow traps the kernel: a ``schedule_capacity_multiplier``
+    of at least ``ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP``
+    (``E`` local experts, ``T`` the physical source rows, at least the
+    largest rank's source rows or ``source_capacity``, ``EP`` the group
+    size; about ``(EP + 1) / EP``) holds every routing; any positive
+    multiplier is accepted. Every rank passes the same configuration, so
+    compute the multiplier from a row bound all ranks agree on, such as
+    ``source_capacity`` (the bound decreases as ``T`` grows).
 
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` are the fixed (forward, backward)
     communication-SM counts of every launch. ``"auto"`` (default, for both)
-    takes the measured row of the device, ``precision`` and EP group size
-    (:func:`resolve_comm_sms`, :data:`COMM_SMS`; GB300 BF16 at EP4-64: 20 / 24,
-    GB300 MXFP8 at EP8/32/64: 44 / 36, Rubin (212 SMs) MXFP8 at EP8: 60 / 60)
-    and the factory split 40 / 40 where there is no row; a pair of integers
-    fixes the split. The split changes time only, never an output bit.
+    gives each launch the measured row of the device, the launch's routed
+    precision (BF16 or MXFP8 routed weights) and the EP group size
+    (:func:`resolve_comm_sms`, :data:`COMM_SMS`; B300 BF16 at EP8: 24 / 40,
+    GB300 BF16 at EP4-64: 20 / 24, GB300 MXFP8 at EP8/32/64: 44 / 36,
+    Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
+    factory split 40 / 40 where there is no row, whatever ``precision`` the
+    workspace was created with (``MoKConfig.bf16_comm_sms`` /
+    ``mxfp8_comm_sms``; the returned ``fwd_num_comm_sms`` /
+    ``bwd_num_comm_sms`` hold the row of ``precision``; on such a config a
+    ``dataclasses.replace`` of ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` alone
+    changes no launch: create the workspace with integers, or replace
+    ``bf16_comm_sms`` / ``mxfp8_comm_sms`` too). A pair of integers sets the
+    fixed split of every launch of both routed precisions; on a device with an
+    imbalance row the imbalance split still replaces it under skew unless
+    ``imbalance_comm_sms=None``. The split changes time only, never an output
+    bit.
     ``imbalance_comm_sms`` is the (forward, backward) communication-SM split the
     launches switch to while the hottest rank's routed-row load is at least
     ``imbalance_threshold`` times the mean per-rank load (observed on the
     gathered expert IDs of each step without a host synchronization; the counts
     are identical on every rank, each rank applies its own latest completed
-    observation). ``"auto"`` (default) takes the measured row of the device
-    for ``precision`` (:func:`resolve_imbalance_comm_sms`, keyed by compute
-    capability and SM count; B200 BF16: 24 / 28, B200 MXFP8: 44 / 36, Rubin
-    (212 SMs) MXFP8: 72 / 60, no row elsewhere - GB200 and GB300 included - so
-    the fixed split stays in force there), ``None`` keeps the fixed split and a
-    pair sets it. ``precision`` only selects that row and the threshold.
+    observation; a CUDA Graph keeps the split in force at its capture, and
+    layers that share one workspace share its latest observation). ``"auto"``
+    (default) takes the measured row of the device for ``precision``
+    (:func:`resolve_imbalance_comm_sms`, keyed by compute capability and SM
+    count; B200 BF16: 24 / 28, B200 MXFP8: 44 / 36, Rubin (212 SMs) MXFP8:
+    72 / 60, no row elsewhere - GB200, GB300 and B300 included - so the fixed
+    split stays in force there),
+    ``None`` keeps the fixed split and a pair sets it. ``precision`` selects
+    that row and the threshold.
     ``imbalance_threshold`` ``"auto"`` (default) takes the measured ratio of
     the device and ``precision`` (:func:`resolve_imbalance_threshold`;
     :data:`IMBALANCE_DEVICE_THRESHOLDS`, else :data:`IMBALANCE_THRESHOLDS`):
@@ -160,6 +261,17 @@ def create_mok_bf16_workspace(
     ``MoKConfig.comm_split_log`` (default ``False``; ``dataclasses.replace(config,
     comm_split_log=True)`` on the returned config) prints each split change per
     rank to stderr.
+    ``source_split_comm_sms`` is the forward communication-SM count of a rank
+    whose source rows exceed ``source_split_threshold`` times the mean source
+    rows of the ranks, for the router-weight-before-down BF16 forward: its
+    kernel decides per launch on the device from that launch's schedule, so
+    CUDA Graph replays and layers that share a workspace decide from their
+    own routing, and only such a rank changes its count (when the count is
+    below the forward count in force). ``"auto"`` (default) takes the measured
+    row of the device and EP group size (:func:`resolve_source_split_comm_sms`,
+    :data:`SOURCE_SPLIT_COMM_SMS`) and ``None`` where there is none; ``None``
+    keeps the forward count and an even count sets it. The split changes time
+    only, never an output bit.
     """
     from ._backends.cake_mok_bf16 import api as _api
 
@@ -178,6 +290,8 @@ def create_mok_bf16_workspace(
         precision=precision,
         imbalance_comm_sms=imbalance_comm_sms,
         imbalance_threshold=imbalance_threshold,
+        source_split_comm_sms=source_split_comm_sms,
+        source_split_threshold=source_split_threshold,
     )
 
 

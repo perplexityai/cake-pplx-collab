@@ -70,7 +70,15 @@ pre-scan with the ``dv_local`` tiles of its chunks computed in the CTA),
 ``dhu_tc2`` (the serial adjoint scan with ``dv_local`` fused, tcgen05, TMA ring
 fills), ``dhu_tc2_dvl32`` (``dhu_tc2`` adding the FP32 ``dv_local`` values to
 ``dv2`` before its one BF16 rounding; ``dhu_tc2``'s arguments, tables and
-``select`` constants), ``dqkwg``, ``wy_bwd`` / ``wy_bwd_bf16``, ``finalize`` /
+``select`` constants), ``dhu_tc2_dvl32_gm`` (the segment maps ``[B | M]`` of
+a split plan whose pass 2 runs on ``dhu_tc2_dvl32``: two states walked by that
+scan in one CTA per (entry, value head) of an entry table of segments, with
+the pre-scan's warm-up threshold (a bound in a segment's last chunk keeps the
+whole map), writing the pre-scan's ``seg_state`` /
+``seg_flag``; ``dhu_tc2``'s arguments, then ``seg_index``, ``seg_mode``,
+``warmup_thresh_log2`` and ``seg_flag``), ``dqkwg``, ``wy_bwd`` /
+``wy_bwd_bf16``, ``dhu_tc2_dvl32_gm2`` (``dhu_tc2_dvl32_gm`` over two CTAs per (entry, value head), grid z 2: ``B`` on
+z 0, ``M`` on z 1; ``dhu_tc2_dvl32_gm``'s arguments and bits), ``finalize`` /
 ``finalize_mlp``, ``tail_g2`` / ``tail_g2_bf16`` (``dqkwg``, the WY pullback
 and the finalize of a value-head group of two in one tcgen05 cluster kernel),
 ``tail_g3`` / ``tail_g3_bf16`` (the same for a value-head group of three,
@@ -78,7 +86,13 @@ a three-CTA cluster) and ``tail_g3_f32x`` / ``tail_g3_f32x_bf16`` (the
 group-of-three cluster kernel that exchanges the group's FP32 ``dq`` / ``dk``
 partials over distributed shared memory in value-head order and rounds them to
 BF16 once; it reads ``v`` and writes ``dq`` / ``dk`` / ``dv`` through
-token-row strides taken at launch, ``dq`` and ``dk`` at one stride).
+token-row strides taken at launch, ``dq`` and ``dk`` at one stride) and
+``tail`` / ``tail_bf16`` (the package tail of every other value-head group:
+the same three stages in one kernel per (chunk, value head), no cluster; at a
+group of two or more each CTA writes its FP32 ``dq`` / ``dk`` partials to its
+own slot of the ``ws`` workspace and the CTA that completes its (chunk, key
+head) tile sums the group's slots in value-head order before one BF16
+rounding; the non-deterministic package's programs).
 ``dhu_tc2_wavefront`` and ``tail_g2_bf16_wavefront``
 are the wavefront pair of ``dhu_tc2`` and ``tail_g2_bf16`` (the same math):
 the scan publishes a ready count per (chunk, value head) in ``ready`` after its
@@ -94,6 +108,11 @@ split plan pairs with the tail: on SM100 / SM103 its store warps release the
 counts in an elected form (one thread fences and adds 64 to each word, once
 per four chunks); on SM107 it is the per-thread program of SM100 / SM103's
 ``dhu_tc2_wavefront``.
+The package tail counts the CTAs of each (chunk, key head) tile in
+``ws_count``: after a CTA's slot is stored, one of its threads adds one with an
+integer atomic increment that wraps to zero at the group size G; the CTA whose
+increment reads G - 1 sums the slots (so every complete launch leaves the
+counts zero), and no value depends on the order of the increments.
 Every other launch is a
 plain stream-ordered launch: nothing cooperative, no PDL (the chain may put
 two launches of one stage on two streams, each over its own sequences, and
@@ -151,6 +170,8 @@ STAGES = (
     "dhu_tc2_wavefront",
     "dhu_tc2_wavefront_split",
     "dhu_tc2_dvl32",
+    "dhu_tc2_dvl32_gm",
+    "dhu_tc2_dvl32_gm2",
     "dqkwg",
     "wy_bwd",
     "wy_bwd_bf16",
@@ -163,6 +184,8 @@ STAGES = (
     "tail_g3_bf16",
     "tail_g3_f32x",
     "tail_g3_f32x_bf16",
+    "tail",
+    "tail_bf16",
 )
 
 MODULES: dict[str, dict[str, Any]] = {
@@ -1626,6 +1649,92 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_gdn_det_train_46f95b7f72767d389f44",
         "stage": "dhu_tc2_dvl32",
     },
+    "dhu_tc2_dvl32_gm": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "qn_tma"],
+            ["buffer", "kn_tma"],
+            ["buffer", "w_tma"],
+            ["buffer", "do_tma"],
+            ["buffer", "g_cs"],
+            ["buffer", "dht"],
+            ["buffer", "dh_out"],
+            ["buffer", "dv2"],
+            ["buffer", "dh0"],
+            ["buffer", "seg_state"],
+            ["buffer", "chunk_start"],
+            ["buffer", "chunk_len"],
+            ["buffer", "seg_chunk_start"],
+            ["buffer", "seg_seq"],
+            ["buffer", "seq_chunk_start"],
+            ["parameter", "num_heads"],
+            ["parameter", "num_v_heads"],
+            ["parameter", "use_final_state_grad"],
+            ["parameter", "store_initial_state_grad"],
+            ["parameter", "scale"],
+            ["buffer", "seg_index"],
+            ["buffer", "seg_mode"],
+            ["parameter", "warmup_thresh_log2"],
+            ["buffer", "seg_flag"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_gdn_det_train_214243f9cfaf2e16a782",
+        "launch": {
+            "block": (320, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 223104,
+            "use_pdl": False,
+        },
+        "library": "cake_gdn_det_train_214243f9cfaf2e16a782",
+        "stage": "dhu_tc2_dvl32_gm",
+    },
+    "dhu_tc2_dvl32_gm2": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "qn_tma"],
+            ["buffer", "kn_tma"],
+            ["buffer", "w_tma"],
+            ["buffer", "do_tma"],
+            ["buffer", "g_cs"],
+            ["buffer", "dht"],
+            ["buffer", "dh_out"],
+            ["buffer", "dv2"],
+            ["buffer", "dh0"],
+            ["buffer", "seg_state"],
+            ["buffer", "chunk_start"],
+            ["buffer", "chunk_len"],
+            ["buffer", "seg_chunk_start"],
+            ["buffer", "seg_seq"],
+            ["buffer", "seq_chunk_start"],
+            ["parameter", "num_heads"],
+            ["parameter", "num_v_heads"],
+            ["parameter", "use_final_state_grad"],
+            ["parameter", "store_initial_state_grad"],
+            ["parameter", "scale"],
+            ["buffer", "seg_index"],
+            ["buffer", "seg_mode"],
+            ["parameter", "warmup_thresh_log2"],
+            ["buffer", "seg_flag"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_gdn_det_train_37dbc82792ae71cc2119",
+        "launch": {
+            "block": (320, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 222976,
+            "use_pdl": False,
+        },
+        "library": "cake_gdn_det_train_37dbc82792ae71cc2119",
+        "stage": "dhu_tc2_dvl32_gm2",
+    },
     "dqkwg": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [
@@ -2120,6 +2229,100 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gdn_det_train_536a6da13d033c759a68",
         "stage": "tail_g3_f32x_bf16",
+    },
+    "tail": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "qn"],
+            ["buffer", "kn"],
+            ["buffer", "rstd_q"],
+            ["buffer", "rstd_k"],
+            ["buffer", "v_new"],
+            ["buffer", "do"],
+            ["buffer", "dv2"],
+            ["buffer", "h"],
+            ["buffer", "dh"],
+            ["buffer", "g_cs"],
+            ["buffer", "v"],
+            ["buffer", "A"],
+            ["buffer", "beta"],
+            ["buffer", "dq_out"],
+            ["buffer", "dk_out"],
+            ["buffer", "dg_out"],
+            ["buffer", "dv_out"],
+            ["buffer", "dbeta_out"],
+            ["buffer", "ws"],
+            ["buffer", "ws_count"],
+            ["buffer", "chunk_start"],
+            ["buffer", "chunk_len"],
+            ["parameter", "num_heads"],
+            ["parameter", "num_v_heads"],
+            ["parameter", "scale"],
+            ["parameter", "normalize_qk"],
+            ["parameter", "ws_tiles"],
+            ["parameter", "v_row_heads"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_gdn_det_train_48d12c773764bd6b5fbe",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 108160,
+            "use_pdl": False,
+        },
+        "library": "cake_gdn_det_train_48d12c773764bd6b5fbe",
+        "stage": "tail",
+    },
+    "tail_bf16": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "qn"],
+            ["buffer", "kn"],
+            ["buffer", "rstd_q"],
+            ["buffer", "rstd_k"],
+            ["buffer", "v_new"],
+            ["buffer", "do"],
+            ["buffer", "dv2"],
+            ["buffer", "h"],
+            ["buffer", "dh"],
+            ["buffer", "g_cs"],
+            ["buffer", "v"],
+            ["buffer", "A"],
+            ["buffer", "beta"],
+            ["buffer", "dq_out"],
+            ["buffer", "dk_out"],
+            ["buffer", "dg_out"],
+            ["buffer", "dv_out"],
+            ["buffer", "dbeta_out"],
+            ["buffer", "ws"],
+            ["buffer", "ws_count"],
+            ["buffer", "chunk_start"],
+            ["buffer", "chunk_len"],
+            ["parameter", "num_heads"],
+            ["parameter", "num_v_heads"],
+            ["parameter", "scale"],
+            ["parameter", "normalize_qk"],
+            ["parameter", "ws_tiles"],
+            ["parameter", "v_row_heads"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_gdn_det_train_6d2a33658b7ce79a49a7",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 108160,
+            "use_pdl": False,
+        },
+        "library": "cake_gdn_det_train_6d2a33658b7ce79a49a7",
+        "stage": "tail_bf16",
     },
 }
 

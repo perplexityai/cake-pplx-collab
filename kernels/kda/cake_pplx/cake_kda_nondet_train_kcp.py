@@ -523,7 +523,8 @@ def cake_kda_nondet_train_kcp_workspace_bytes(
     (``CakeKDANondetKcpWorkspace(use_gate_in_kernel=True)``: the raw mode's local arena, the replay arena; the pools do not
     change).  ``use_qk_l2norm_in_kernel``: the workspace's in-kernel Q / K L2 norm mode
     (``CakeKDANondetKcpWorkspace(use_qk_l2norm_in_kernel=True)``: the local arena of that mode, the replay arena; the pools do
-    not change)."""
+    not change).
+    ``H`` defaults to 64: pass the call's head count for any other ``H`` (the bytes grow with ``H``)."""
     from ._backends.cake_kda_nondet_train_kcp import cake_kcp_plan
 
     if save_transfer is None:
@@ -592,7 +593,8 @@ def cake_kda_nondet_train_kcp_saved_bytes(
     ``"none"`` / ``"intra"`` / ``"wy"`` / ``"tape"`` raises ``ValueError``): ``"tape"`` the sets above, ``"auto"``
     the light set with ``checkpoint_handoff=False`` and the ``"wy"`` set with ``True``, ``"none"`` the light set
     for either ``checkpoint_handoff``, ``"intra"`` / ``"wy"`` the light set plus ``256 * R * H`` / ``768 * R * H``
-    bytes of kept rows (the carry plane stays) for either ``checkpoint_handoff``."""
+    bytes of kept rows (the carry plane stays) for either ``checkpoint_handoff``.
+    ``H`` defaults to 64: pass the call's head count for any other ``H`` (the bytes grow with ``H``)."""
     from ._backends.cake_kda_nondet_train_kcp import cake_kcp_plan
 
     if save_transfer is None and checkpoint_keep is None:
@@ -620,7 +622,8 @@ def cake_kda_nondet_train_kcp_handoff_bytes(
     raises this rank's checkpoint peak (see :func:`cake_kda_nondet_kcp`).  ``saved_rows``: the call's ``saved_rows``
     (``"auto"`` by default: the ``"wy"`` rows form, ``768 * R * H``); ``"tape"`` the tape set (``NC_pad * H * 32768
     + 768 * R * H``); ``"intra"`` / ``"wy"`` the hand-off's rows form (``256 * R * H`` / ``768 * R * H``), ``"none"``
-    0."""
+    0.
+    ``H`` defaults to 64: pass the call's head count for any other ``H`` (the bytes grow with ``H``)."""
     from ._backends.cake_kda_nondet_train_kcp import cake_kcp_plan
 
     return cake_kcp_plan.cake_kda_nondet_train_kcp_handoff_bytes(
@@ -651,7 +654,8 @@ def cake_kda_nondet_train_kcp_comm_bytes(
     convolution channels: the state summaries, the boundary states and the halo rows of the context's collectives,
     as a table per collective and per boundary (``cake_kcp_plan.cake_kda_nondet_train_kcp_comm_bytes``).  ``checkpoint_keep``: the
     traffic of a checkpointed step with a recompute handle of that tier (the tier fixes ``save_transfer``; ``None``
-    is ``False`` without a tier; an explicit value that contradicts the tier raises ``ValueError``)."""
+    is ``False`` without a tier; an explicit value that contradicts the tier raises ``ValueError``).
+    ``H`` defaults to 64: pass the call's head count for any other ``H`` (the bytes grow with ``H``)."""
     from ._backends.cake_kda_nondet_train_kcp import cake_kcp_plan
 
     if save_transfer is None and checkpoint_keep is None:

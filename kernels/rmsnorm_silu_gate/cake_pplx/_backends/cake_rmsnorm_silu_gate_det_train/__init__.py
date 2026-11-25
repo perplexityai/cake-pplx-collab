@@ -33,13 +33,41 @@ Host design (every control is a keyword; no environment variable):
 - The forward saves nothing beyond its inputs; the backward recomputes the
   statistics and the gate from ``x`` and ``z``.
 - Forward: 128-thread CTAs of 16-row blocks (``cake_jit.launch_grid``): one
-  CTA per block below 8192 rows per SM, and from there the fewest whole waves
-  of 6 CTAs per SM that give no CTA more than 2 blocks, a CTA loading its next
-  block while it computes the current one.  One module per architecture, and
-  on SM107 a second one for packed rows (``x`` and ``z`` both read as
-  contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a row
-  with the same FP32 operations in the same order, so the layout changes no
-  bits.  The sum of squares runs in one fixed order per architecture: on
+  CTA per block below a cut of rows per SM of the architecture, and from
+  there the fewest whole waves of 6 CTAs per SM that give no CTA more than 2
+  blocks, a CTA loading its next block while it computes the current one;
+  the grid changes no bits.  The cut depends on the architecture and the
+  layout: on rows the kernel reads as packed (``cake_jit.forward_packed``:
+  ``x`` and ``z`` of head stride 128 and token stride ``H * 128``; its
+  record's ``persistent_from_rows_per_sm``) 5600 on SM103 and 8192 on SM100
+  and SM107, and on other rows (a record's
+  ``persistent_from_rows_per_sm_strided``, which gain from whole waves from
+  far fewer rows per SM) 500 on SM100 and 400 on SM103 and SM107.  A CTA
+  warms its next block and the first block of the CTA a wave later in L2,
+  ``x`` and ``z`` each by its own layout: packed rows as one byte range,
+  rows of head stride 128 and another token stride (a gate sliced from a
+  projection, a broadcast, one token) as one range a token, other layouts
+  (head-major rows) as one 256-byte range a row on SM103 and SM107 and not
+  at all on SM100; a prefetch changes no bits.  One module per architecture,
+  and a second one for packed rows (``x`` and ``z`` both read as contiguous
+  ``[T, H, 128]``, fewer than 2^24 rows; ``cake_jit.forward_module``): on
+  SM107 one that reads each row at its linear offset, on SM100 and SM103 a
+  new module with the forward code of version 0.2.14, which warms only rows
+  packed in both ``x`` and ``z`` (next to the per-layout prefetches, packed
+  rows measured slower at small and mid row counts), up to
+  ``cake_jit.FWD_PACKED_ROWS_PER_SM`` rows per SM (past them it measured no
+  faster than the first module, and up to 0.9 % slower).  Each computes a row
+  with the same FP32
+  operations in the same order, so the layout changes no bits.  Up to
+  ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
+  rows of ``cake_jit.FWD_TINY_GAP_ROWS`` (17 to 32 on SM107), inputs whose
+  rows are packed (``x`` and ``z`` both read as contiguous ``[T, H, 128]``,
+  or one token of head stride 128, whose token stride is never read) run the
+  architecture's tiny forward in their place: one CTA per block of a few
+  rows (its record's ``rows_per_cta``) with no loop, each row read at its
+  linear offset, and each row computed with the row arithmetic of the module
+  it replaces, op for op, so the same bits.  The sum of squares runs in one
+  fixed order per architecture: on
   SM100 and SM103 as two FMA chains (the even and the odd elements, the two
   lanes of one ``.f32x2`` FMA chain) added before the lanes' XOR shuffles, on
   SM107 as four interleaved chains.  ``rstd`` comes from the approximate FP32
@@ -62,24 +90,49 @@ Host design (every control is a keyword; no environment variable):
   kernel reads as packed rows (head stride 128, token stride ``H * 128``;
   ``cake_jit.backward_module``) runs the same backward in a loop that loads a
   block's rows while the previous block's row math runs: the same grid, FP32
-  operations in the same order and workspace, so the same bits; other calls run
-  the default module of their weight-gradient dtype (``cake_jit.ROUTES``).
+  operations in the same order and workspace, so the same bits; so does, from
+  6145 rows per SM on SM100 and SM103 and 4097 on SM107 (one row per SM past
+  the default loop's L2 prefetch share of blocks per CTA times 64), a call
+  with a BF16 weight gradient on rows of other layouts; other calls run the
+  default module of their weight-gradient dtype (``cake_jit.ROUTES``).
+  A call that computes the weight gradient on up to 256 rows runs, in the
+  default module's place (``cake_jit.dw_module``), that backward built for
+  one CTA (up to 16 rows) or for one thread-block cluster of 16 CTAs (17 to
+  256 rows, on a device that ``cake_jit.device_runs_clusters`` passes:
+  elsewhere the default module runs them), CTA ``c`` taking block ``c`` as
+  above with no claim, no ticket and no workspace word: the same FP32
+  operations in the same order on the rows and on each block's FP32 column
+  words, whose sum is exact, so the same bits on a device of at least 4 SMs
+  (where the default module gives each of up to 16 blocks a CTA of its own).
   A call with ``compute_grad_weight=False`` runs a program built without the
   weight gradient (``cake_jit.nodw_module``; its weight-gradient work removed
   at build time), whose ``dx`` and ``dz`` are the bits of the BF16 backward
   that computes it, at every grid: up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM``
   rows per SM (measured: 768 on SM100 and SM103) the strided program, which
   takes no claim and no ticket and reads and writes no workspace word: where
-  ``grad_out``, ``x`` and ``z`` hold packed rows its 128-thread build,
+  ``grad_out``, ``x`` and ``z`` hold packed rows (also one token of head
+  stride 128: its token index is 0, so its token stride never enters an
+  address, and the call passes it as ``H * 128`` so that the packed-row test
+  and the packed-only build's argument check hold; on SM107 only up to the
+  cut of the build of packed rows only, 192 rows per SM) its 128-thread builds,
   ``min(ceil(rows / 8), 8 * SMs)`` CTAs walking their 8-row blocks (a row to
   each 16 lanes, as in the BF16 backward; packed rows read at their linear
-  offsets), on other layouts the BF16 backward's ``min(ceil(rows / 16), 4 *
-  SMs)`` 256-thread CTAs walking their 16-row blocks; past it the claimed
-  program, the BF16 backward's claims and ticket on the workspace (SM107
-  routes none: its strided program runs every row count); and where the
-  BF16 backward runs its long module, the long program built without the
-  weight gradient (or, where none is routed, that long module with
-  ``weight_grad`` 0).
+  offsets), up to ``cake_jit.PACKED_SMALL_ROWS_PER_SM`` rows per SM
+  (measured: 128 on SM100 and SM103, 192 on SM107) the build of packed rows
+  only, which takes no stride test and reduces a row's sum of squares and
+  dot product across its lanes together, past it the build that reads any
+  layout; on other layouts that build up to
+  ``cake_jit.NODW_ANY_LAYOUT_ROWS_PER_SM`` rows per SM (measured: 32 on SM100
+  and SM103, 96 on SM107; other layouts read at their token and head
+  strides), past it the BF16 backward's ``min(ceil(rows / 16), 4 * SMs)``
+  256-thread CTAs
+  walking their 16-row blocks; past the strided cut the claimed program, the
+  BF16 backward's claims and ticket on the workspace (SM107 routes none: its
+  strided program runs every row count); and on packed rows where the BF16
+  backward runs its long module, the long program built without the weight
+  gradient (or, where none is routed, that long module with ``weight_grad``
+  0; the long programs run no rows of other layouts without the weight
+  gradient).
   ``dx`` and ``dz`` are FP32 formulas rounded once each, with ``rstd`` from the
   approximate FP32 reciprocal square root and the sigmoid factor ``s`` from the
   approximate FP32 base-2 exponential of the exact FP32 product of ``-z`` and
@@ -99,9 +152,16 @@ Host design (every control is a keyword; no environment variable):
   to BF16) and zeroes the workspace.  A chunk's runs follow from the row count
   and ``G`` alone, whichever CTA takes it, so the weight gradient is the same
   bits at every call with the same row count on a device with the same SM
-  count.  Every term, run and word is one plain FP32 word (no FP64 and no
-  two-word sums); the digits sum the chunks' words exactly and the CTA that
-  arrives last rounds that sum once.
+  count.  The programs of one CTA or one cluster use no workspace: the one CTA
+  adds its block's words into its own digit counters; in the cluster every CTA
+  pushes its words of the 8 columns a CTA owns to that CTA through the
+  cluster's shared memory, and the owner adds the 16 words of each column
+  exactly into its digit counters; either then rounds each column's sum once
+  by the same integer arithmetic (``grad_weight``'s value added exactly first
+  when accumulating), so up to 256 rows on a device of at least 4 SMs the
+  weight gradient is the same bits whatever the SM count.  Every term, run
+  and word is one plain FP32 word (no FP64 and no two-word sums); the digits
+  sum the chunks' words exactly and one CTA rounds each column's sum once.
 - Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
   either weight gradient, accumulated or not) to the PyTorch BF16 naive
   implementation of the same operation (every op in BF16, the gradients from
@@ -116,8 +176,9 @@ Host design (every control is a keyword; no environment variable):
   32-bit flag word a column (infinite and ``NaN`` sums), and two 32-bit words,
   the arrival ticket and the claim counter.  Every launch uses it, also a
   claimed or long one with ``compute_grad_weight=False`` (its CTAs still take
-  tickets and claim blocks), but the strided program's (no workspace word:
-  a caller workspace is checked and left as it is), and leaves all of it
+  tickets and claim blocks), but a launch of the strided program or of a
+  program of one CTA or one cluster of up to 256 rows (no workspace word: a
+  caller workspace is checked and left as it is), and leaves all of it
   zero, so a workspace zeroed once serves every
   later call on its stream, of any shape and either weight-gradient dtype, and
   every CUDA Graph replay, with no host write.  The size does not depend on
@@ -129,12 +190,14 @@ Host design (every control is a keyword; no environment variable):
 - Retained state: the autograd function saves only ``x``, ``z`` and ``weight``
   through ``save_for_backward``, so a non-reentrant checkpointed forward keeps
   nothing but its output.  A backward without a caller workspace that runs a
-  module with a workspace (every one but the strided program) uses the
+  module with a workspace (every one but the strided program and the
+  programs of one CTA or one cluster) uses the
   zero-filled workspace of its (device, stream), allocated on first use and
   kept in ``_STREAM_WORKSPACES`` for later calls (18952 bytes for every stream
-  that ran such a backward); the strided program takes none, no reserve and
-  only empty tensors for its unread workspace and weight-gradient parameters,
-  made once per device.  Such eager calls also keep a reserve of zero-filled
+  that ran such a backward); those programs take none, no reserve and only
+  empty tensors for their unread workspace parameters (and the strided
+  program's unread weight-gradient parameter), made once per device.  Such
+  eager calls also keep a reserve of zero-filled
   workspaces per device, filled outside any capture in allocations of 64
   (about 1.2 MiB each) whenever fewer than 32 are ready, up to 1024 per
   device (about 18.75 MiB per device), from which a call during CUDA Graph capture takes
@@ -143,10 +206,15 @@ Host design (every control is a keyword; no environment variable):
   zero-fills one of its own).
 - No call synchronizes the host or the device, and every kernel runs on
   torch's current stream of its tensors' device.  No launch is cooperative or
-  uses programmatic dependent launch, and no CTA waits for another CTA: beside
-  a kernel resident on another stream, a backward CTA that is not resident yet
-  starts as any of the backward's CTAs exits and claims only the blocks left
-  (a CTA of the strided program without the weight gradient, which claims
+  uses programmatic dependent launch, and no CTA waits for another CTA but in
+  the cluster program of 17 to 256 rows, whose CTAs wait for the words their
+  peers push to them: the GPU starts the cluster's 16 CTAs together, once one
+  GPC has room for all of them (beside kernels resident on other streams it
+  can start later than single CTAs would), so none waits for a CTA that is
+  not running.  Beside a kernel resident on another stream, a CTA of the
+  other backwards that is not resident yet starts as any of the backward's
+  CTAs exits and claims only the blocks left (a CTA of the strided program
+  without the weight gradient or of the program of one CTA, which claims
   none, runs all of its own blocks once it starts).
 - Mode: the mode is part of the name (``det``).  Every entry point is
   deterministic and takes no ``deterministic`` keyword (passing one is a
@@ -173,9 +241,12 @@ from .cake_jit import (
     ALIGNMENT_ELEMENTS,
     ARCH_BY_CAPABILITY,
     ARCHES,
+    DW_SMALL_ROWS,
     HEAD_DIM,
     INT32_MAX,
     LONG_ROLES,
+    NODW_STRIDED_ROWS_PER_SM,
+    PACKED_SMALL_ROWS_PER_SM,
     ROLES,
     ROUTES,
     arch_for_capability,
@@ -190,6 +261,27 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(
     sorted(ARCH_BY_CAPABILITY)
 )
 _ALIGNMENT_BYTES = ALIGNMENT_ELEMENTS * 2
+# A backward without the weight gradient passes one token of head stride 128
+# as packed rows (token stride ``H * 128``) up to this many rows per SM, on
+# the architectures with a cut of the build of packed rows only
+# (``cake_jit.PACKED_SMALL_ROWS_PER_SM``; measured on SM100, SM103 and
+# SM107): at every row count where a strided cut is (a claimed program past
+# it: SM100 and SM103, as in 0.2.7), else (SM107) up to that cut, where the
+# build of packed rows only runs it.  Past that cut one token would run the
+# 128-thread strided build, which for one token is slower than the
+# 256-thread program from 1533 rows per SM (measured on SM107, cold L2; the
+# same or faster from 384 to 1024), so past the cut one token keeps the
+# token stride 0 and the 256-thread program of 0.2.7.  Elsewhere one token
+# keeps the token stride 0 and runs the programs of other layouts.
+_ONE_TOKEN_PACKED_ROWS_PER_SM = {
+    arch: (
+        2**31
+        if NODW_STRIDED_ROWS_PER_SM[arch].get("bwd_bf16")
+        else cuts["bwd_bf16"]
+    )
+    for arch, cuts in PACKED_SMALL_ROWS_PER_SM.items()
+    if cuts.get("bwd_bf16")
+}
 
 # The workspace factories the backward's refusal of the other mode's workspace
 # names: this package's FP32 workspace and the workspace of the
@@ -440,7 +532,8 @@ def _workspace_elements(arch: str) -> int:
     """FP32 elements of a workspace that serves every backward module of
     ``arch`` (both weight-gradient dtypes and their long modules, any row
     count; the claimed and long programs without the weight gradient take
-    the BF16 backward's layout, and the strided one none).  Cached: the
+    the BF16 backward's layout, and the strided one and the programs of one
+    CTA or one cluster none).  Cached: the
     module tables are constant, and a backward call with a workspace checks
     it against this size, which would otherwise lay out every backward
     module's workspace on every call."""
@@ -524,7 +617,8 @@ def cake_rmsnorm_silu_gate_det_train_reset_workspace(
 # and no fill per call); every backward module with a workspace (both
 # weight-gradient dtypes, their long modules and the claimed and long
 # programs without the weight gradient) reads the same layout, and the
-# strided program reads none.  A call during CUDA Graph capture uses a
+# strided program and the programs of one CTA or one cluster read none.  A
+# call during CUDA Graph capture uses a
 # workspace of its capture instead (``_capture_workspace``), so a graph
 # replayed on another stream never shares a buffer with eager calls or other
 # graphs.
@@ -827,7 +921,8 @@ def _caller_workspace_views(
 def _placeholder(device_index: int, dtype: torch.dtype) -> torch.Tensor:
     """An empty ``dtype`` tensor on CUDA device ``device_index``, made once:
     the argument of a kernel parameter the launch does not read (the weight
-    gradient of a call without it, the workspace of the strided program).
+    gradient of a call without it, the workspace of the strided program and
+    of the programs of one CTA or one cluster).
     The bindings check only its device, dtype and contiguity."""
 
     return torch.empty((0,), dtype=dtype, device=torch.device("cuda", device_index))
@@ -838,7 +933,8 @@ def _no_workspace(
     device_index: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``(acc, flags, done)`` of a launch that reads no workspace (the
-    strided program): empty ``uint64``, ``uint32`` and ``uint32`` tensors on
+    strided program, the programs of one CTA or one cluster): empty
+    ``uint64``, ``uint32`` and ``uint32`` tensors on
     CUDA device ``device_index``, the dtypes the binding checks."""
 
     return (
@@ -877,7 +973,9 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     each chunk, the words added exactly in fixed point in an
     order-independent way, and the sum rounded once to FP32 (then to BF16 for a BF16
     gradient; see the module): the same row count on a device with the same SM
-    count gives the same bits.
+    count gives the same bits, and up to 256 rows (one CTA, or one cluster of
+    16 CTAs that wait for each other's words where the device runs clusters,
+    else the role's module) on any device of at least 4 SMs.
 
     Parameters
     ----------
@@ -908,8 +1006,9 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         contiguous and 16-byte aligned, left zero by the call; the stream's
         own workspace when omitted.  A workspace of the non-deterministic
         package is refused (``ValueError``), also in a call with no rows.
-        A call that reads none (the strided program) checks it and leaves it
-        as it is.
+        A call that reads none (the strided program, and the programs of one
+        CTA or one cluster of a call of up to 256 rows that computes the
+        weight gradient) checks it and leaves it as it is.
         The call keeps a weak reference to a caller's workspace and its checked
         buffers (``torch.utils.swap_tensors`` refuses a tensor with a weak
         reference); a workspace rebound to other memory is checked again at its
@@ -978,27 +1077,53 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         x_head,
         z_tok,
         z_head,
+        dw is not None,
     )
     if dw is None:
         # The program built without the weight gradient (the same dx and dz
         # bits): strided up to its cut (or at every row count where no claimed
-        # one is routed; its 128-thread build on packed rows), else claimed,
-        # or the long one.  The packed-row test is cake_jit.backward_packed,
-        # spelled out: a call would cost this host path more than the test.
+        # one is routed; its 128-thread builds on packed rows and on small row
+        # counts), else claimed, or the long one (backward_module names the
+        # long module for this call on packed rows only).  The packed-row test
+        # is cake_jit.backward_packed, spelled out: a call would cost this
+        # host path more than the test.
         row = heads * HEAD_DIM
-        packed = (
-            dy_head == HEAD_DIM
-            and x_head == HEAD_DIM
-            and z_head == HEAD_DIM
-            and dy_tok == row
-            and x_tok == row
-            and z_tok == row
-        )
+        if dy_head == HEAD_DIM and x_head == HEAD_DIM and z_head == HEAD_DIM:
+            if tokens == 1 and rows <= (
+                _ONE_TOKEN_PACKED_ROWS_PER_SM.get(arch, 0) * sm_count
+            ):
+                # One token: its token index is 0 in every row, so its token
+                # stride (0 from _kernel_view) never enters an address, and its
+                # rows of head stride 128 lie at the linear offsets of packed
+                # rows.
+                # This call alone passes them as packed rows (token stride
+                # heads * 128: the same addresses in every program), on an
+                # architecture with a cut of the build of packed rows only and
+                # up to its limit (_ONE_TOKEN_PACKED_ROWS_PER_SM); the
+                # forward (whose tiny module takes one token's 0 as packed
+                # rows itself, cake_jit.forward_module), the call that
+                # computes the weight gradient and the long module's choice
+                # above keep 0.
+                dy_tok = x_tok = z_tok = row
+                packed = True
+            else:
+                packed = dy_tok == row and x_tok == row and z_tok == row
+        else:
+            packed = False
         name = nodw_module(arch, name, rows, sm_count, packed)
-    if dw is None and "workspace" not in _loader.MODULES[name]:
-        # The strided program reads and writes no workspace word: no stream
-        # workspace and no reserve; a caller's was checked above and is left
-        # as it is.
+        bare = "workspace" not in _loader.MODULES[name]
+    elif rows <= DW_SMALL_ROWS:
+        # Up to 256 rows the module's program of one CTA or of one cluster
+        # (the same dx, dz and dw bits; the cluster program only on a device
+        # that runs clusters).  Past them the module stays, with no lookup.
+        name = _loader.dw_module(arch, name, rows, _loader.device_runs_clusters(index))
+        bare = "workspace" not in _loader.MODULES[name]
+    else:
+        bare = False
+    if bare:
+        # The strided program and the programs of one CTA or one cluster read
+        # and write no workspace word: no stream workspace and no reserve; a
+        # caller's was checked above and is left as it is.
         acc, flags, done = _no_workspace(index)
     elif workspace is None:
         acc, flags, done = _stream_workspace_views(name, arch, device)

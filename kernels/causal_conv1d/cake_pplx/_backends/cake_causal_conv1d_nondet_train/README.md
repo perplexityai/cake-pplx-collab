@@ -59,9 +59,13 @@ q, k, v = cake_causal_conv1d_nondet_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
 
 | operand | shape | dtype | notes |
 |---|---|---|---|
-| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous; the rank's fragments back to back in the partition's order; `C` a multiple of 8 |
-| `weight`, `dweight` | `[C, 4]` | FP32 | contiguous; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
+| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous, 16-byte aligned; the rank's fragments back to back in the partition's order; `C` a multiple of 8 |
+| `weight`, `dweight` | `[C, 4]` | FP32 | contiguous, 16-byte aligned; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
+| `hist` | `[n_hist_rows, C]` | BF16 | the forward's history pool, passed back to the backward unchanged; contiguous, 16-byte aligned |
 | `ctx` | | | the context of the rank's KDA step (`CakeKDADetKcpContext`, from `cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context`): fragment table, halo plan, device tables, process group |
+
+A misaligned operand raises `ValueError` before anything launches; a fresh
+tensor or a `.clone()` is aligned.
 
 Each name maps to the deterministic name with `det` in place of `nondet`. A
 recompute handle (any object with an `entries` dict) serves either package.
@@ -108,10 +112,14 @@ The forward runs two programs:
 
 1. The main program reads no received history row. It writes every row, and it writes the first rows of a
    continuing fragment as at a document start. It is the single-rank `fwd` route program: the program that this
-   package's single-rank forward runs for the call's `C` and token count. It takes each of the rank's fragments as a
-   document of its own, launches its record's full co-resident grid and takes its token chunks from zeroed counters,
-   as the single-rank forward does. It launches without programmatic dependent launch (its `enable_pdl` launch scalar
-   is 0), in every mode.
+   package's single-rank forward runs for the call's `C` and the rank's token count. It takes each of the rank's
+   fragments as a document of its own and launches as the single-rank forward does: at a forward row of
+   `cake_jit.FALLBACK_ROWS`, `cake_jit.DIRECT_ROWS` or `cake_jit.PAIR_ROWS` (C 512 to 1024, inside the row's token
+   range; a `PAIR_ROWS` range first) the static, the direct or the pair direct program, with no counters (a direct
+   or pair direct program's grid capped at its token blocks); elsewhere the dynamic program on its record's full
+   co-resident grid, which takes its token chunks from zeroed counters (a multi call's tensors share one counter
+   buffer, which the static, direct and pair direct programs do not read). It launches without
+   programmatic dependent launch (its `enable_pdl` launch scalar is 0), in every mode.
 2. The history-row program (`kcp_fwd_halo`) runs after the exchange's wait. It writes `y` of the first
    `min(3, len)` rows of every fragment with a history row again, from the received pool, with the `kcp_fwd`
    program's instructions, the instructions of the one-launch forward (the `kcp_fwd` program with the context's
@@ -139,6 +147,11 @@ the architecture (`kcp.FWD_RESERVE_SMS`): on sm_107a it is one SM short of the c
 holds every channel tile, and on sm_100a and sm_103a it is the full co-resident grid.
 
 ### The backward
+
+The backward rows of `cake_jit.DIRECT_ROWS` (channel ranges within C 512 to 1024 at small S, where the single-rank
+backward runs its route's direct program) and of `cake_jit.GRID_CAP_ROWS` (small-S rows on sm_107a, where the
+single-rank backward launches fewer CTAs) do not apply to this route: the KCP backward runs the programs below, on
+their own grids, at every `C` and `S`.
 
 The head program writes the FP32 derivative of each continuing fragment's
 first tokens (the halo adjoints) into the send layout. It matches the
@@ -203,7 +216,8 @@ barrier.
 Both programs use the package's cached backward workspace for the device and
 current stream. The workspace is zero before and after every launch. Inside a CUDA Graph capture the
 package uses a buffer it zeroed before the capture, one per capture and stream (the graph holds it until the graph
-is destroyed). Only eager calls that omit `workspace=` zero these buffers, the forward's and the backward's
+is destroyed). Only eager calls that omit `workspace=` and take counters zero these buffers (a forward inside the
+token range of a row of `FALLBACK_ROWS` / `DIRECT_ROWS` / `PAIR_ROWS` takes none), the forward's and the backward's
 separately, sized to the largest need of such a call whose zeroing succeeded (one that runs out of memory keeps no
 new buffer and keeps their size); a capture with no such eager call of the kind before it, or after earlier captures took
 the `_POOL_DEPTH` ready buffers, or needing more, or begun before their zero fills completed

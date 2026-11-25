@@ -36,6 +36,21 @@ in the default layout (RoPE) and through the NoPE arms.
 Timing: the non-deterministic script's ``median_ms`` (CUPTI activity tracing through ``torch.profiler``, a cold L2
 between iterations), medians over ``--steps`` iterations.
 
+Sink rows (``--sink``, in place of the ``--rows`` rows).  The trainable per-head sink on the rows of the
+non-deterministic script's ``--sink`` mode: ``T`` 16,384 at index widths 640 and 128 (``sink_w640_t16384``,
+``sink_w128_t16384``: a pack with one-token documents, global index rows with ``-1`` holes and a row without a valid
+slot) and the packed rows ``sink_varlen_w640_t16384`` / ``sink_varlen_w128_t16384`` (16 documents of 1,024 tokens, the
+per-document layout), scale ``512 ** -0.5``, the same inputs and sink vector.  Every arm runs with the row's sink and
+without it (``sink=None``; ``--sink-variants`` keeps one of them) under :func:`measure` (the columns above, the
+workspace and, for the deterministic arms, ``repeat_bitwise``).  Arms: ``cake_det_nope_sink`` (the flat entry
+``cake_dsa_sparse_attention_det_nope`` through autograd: the fp32 ``dkv_acc [S, 512]`` allocated in the forward and
+zero-filled inside the backward, ``dq`` and, with the sink, ``dsink`` from one ``autograd.grad``; on a packed row it
+takes the global rows), ``cake_det_nope_varlen_sink`` (the packed entry ``cake_dsa_sparse_attention_det_nope_varlen``
+with the per-document rows and ``cu_seqlens_q`` / ``cu_seqlens_k``, ``causal=False``; packed rows only),
+``cudnn_fe_nope_sink_det`` (the cuDNN frontend's sparse attention with ``attn_sink`` and its deterministic backward,
+``deterministic=True``; the non-deterministic script's ``cudnn_fe_nope_sink`` otherwise), and the non-deterministic
+script's ``cake_nope_sink``, ``cake_nope_varlen_sink`` and ``cudnn_fe_nope_sink`` under the same protocol.
+
 Usage::
 
     python benchmarks/bench_cake_dsa_sparse_attention_det_train.py --rows doc_4096 packed_glm_a_dstmap \\
@@ -44,10 +59,14 @@ Usage::
         nope_glm53_a --arms det,nondet,det_nope,nondet_nope,fa4,fa4_nope
     python benchmarks/bench_cake_dsa_sparse_attention_det_train.py --rows nope_chunk_4096x269564 \\
         nope_tail_4096x131072 p8949_nope --arms det_nope,det_nope_p2,det_nope_p4
+    python benchmarks/bench_cake_dsa_sparse_attention_det_train.py --sink --sink-rows sink_w640_t16384 \\
+        sink_varlen_w640_t16384 --sink-arms cake_det_nope_sink,cake_det_nope_varlen_sink,cudnn_fe_nope_sink_det \\
+        --json det-sink.json
 """
 
 import argparse
 import dataclasses
+import functools
 import json
 import sys
 import traceback
@@ -61,6 +80,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_cake_dsa_sparse_attention_nondet_train as nb  # noqa: E402
 
 from cake_pplx.cake_dsa_sparse_attention_det_train import (  # noqa: E402
+    cake_dsa_sparse_attention_det_nope,
     cake_dsa_sparse_attention_det_nope_varlen,
     cake_dsa_sparse_attention_det_varlen,
 )
@@ -73,6 +93,7 @@ from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_refe
     D_ROPE,
     DEFAULT_NOPE_SCALE,
     DEFAULT_SCALE,
+    SINK_SCALE,
 )
 
 DEFAULT_ROWS = (
@@ -144,8 +165,9 @@ def make_p8949_inputs(nope, device, t=16384, s=65536):
 
 
 class ArmDet(nb.ArmCake):
-    """The deterministic package on a RoPE row (the runner in the default layout, the public varlen entry through
-    autograd in the trainer layout); the backward of :class:`nb.ArmCake` serves both."""
+    """The deterministic package on a RoPE row (the runner in the default layout, with the row's segment count as
+    :class:`nb.ArmCake` passes it; the public varlen entry through autograd in the trainer layout); the backward of
+    :class:`nb.ArmCake` serves both."""
 
     name = "det"
     deterministic = True
@@ -158,6 +180,7 @@ class ArmDet(nb.ArmCake):
         )
         self.runner = None
         if not layout.trainer:
+            self.num_segments = int(inp.cu_seqlens_k.numel()) - 1
             self.runner = cake_backend.prepare_dsa_train(
                 inp.q_latent,
                 inp.q_rope,
@@ -169,6 +192,7 @@ class ArmDet(nb.ArmCake):
                 softmax_scale=DEFAULT_SCALE,
                 backward=self.backward_available,
                 o_lo_scratch=self.o_lo_scratch,
+                num_segments=self.num_segments,
             )
             return
         self.q_latent = layout.q_latent.detach().requires_grad_()
@@ -199,6 +223,9 @@ class ArmDet(nb.ArmCake):
                 stages=list(self.runner.stages),
                 entry="prepare_dsa_train",
                 storage=self.runner.storage,
+                num_segments=self.num_segments,
+                key_passes=self.runner.key_passes,
+                backward_launches=len(self.runner.backward_order),
             )
         module_name, _record = cake_backend.record_for(self.inp.q_latent.device)
         return dict(
@@ -305,6 +332,134 @@ class ArmDetScratch(ArmDet):
     o_lo_scratch = True
 
 
+class ArmDetNopeSink(nb.ArmCakeNopeSink):
+    """The deterministic package's flat NoPE entry ``cake_dsa_sparse_attention_det_nope`` through autograd on a sink row
+    (the protocol of the non-deterministic script's ``cake_nope_sink`` arm, whose forward and backward it runs: scale
+    ``512 ** -0.5``, the caller's index rows as given, the fp32 ``dkv_acc [S, 512]`` allocated in the forward and
+    zero-filled inside the backward, ``dq`` and, with the sink, ``dsink`` from one ``autograd.grad``), with the row's
+    sink (``variant="sink"``) or ``sink=None``."""
+
+    name = "cake_det_nope_sink"
+    deterministic = True
+    backward_available = True
+
+    def __init__(self, inp, variant):
+        program = cake_jit.NOPE_PROGRAM
+        device = inp.q.device
+        if not cake_backend.generated_program_available(
+            device, backward=True, program=program
+        ):
+            raise RuntimeError(
+                "skipped: the NoPE program is not registered for this device"
+            )
+        if variant == "sink":
+            stage = getattr(cake_jit, "NOPE_SINK_FORWARD_STAGE", None)
+            arch = cake_backend.arch_for(device)
+            # the stage that serves the sink forward on this architecture (its scanner-warp build on sm_107a)
+            served = stage and cake_jit.stage_for(stage, arch, program)
+            if served is None or arch not in cake_jit.stage_arches(served, program):
+                raise RuntimeError(f"skipped: no sink build for {arch}")
+        self.fn = cake_dsa_sparse_attention_det_nope
+        self.inp, self.variant = inp, variant
+        self.width = int(inp.indices.shape[1])
+        self.q = inp.q.detach().requires_grad_()
+        self.sink = (
+            inp.sink.detach().clone().requires_grad_() if variant == "sink" else None
+        )
+
+    def versions(self):
+        mode = getattr(cake_backend, "nope_flat_index_mode", None)
+        return dict(
+            module=cake_jit.NOPE_PROGRAM,
+            entry="cake_dsa_sparse_attention_det_nope",
+            sink=self.sink is not None,
+            index_route=mode(self.inp.total_q, self.width) if mode else None,
+        )
+
+    def _workspace(self, num_segments):
+        inp = self.inp
+        return int(
+            cake_backend.dsa_nope_train_workspace_size(
+                inp.total_q,
+                inp.total_k,
+                self.width,
+                inp.q.device,
+                backward=True,
+                num_segments=num_segments,
+                dkv_acc=True,
+                # the autograd backward carves its scratch from the saved o_lo
+                o_lo_scratch=True,
+                **({"sink": True} if self.sink is not None else {}),
+            )
+        )
+
+    def workspace(self):
+        return self._workspace(1)
+
+
+class ArmDetNopeVarlenSink(ArmDetNopeSink):
+    """The deterministic package's packed NoPE entry ``cake_dsa_sparse_attention_det_nope_varlen`` through autograd on a
+    packed sink row (``nb.SINK_VARLEN_ROWS``): the per-document rows with ``cu_seqlens_q`` / ``cu_seqlens_k`` as given
+    (``causal=False``: the rows are causal by construction; the entry offsets them on device inside the timed forward),
+    otherwise as :class:`ArmDetNopeSink`."""
+
+    name = "cake_det_nope_varlen_sink"
+
+    def __init__(self, inp, variant):
+        if not isinstance(inp, nb.SinkVarlenRowInputs):
+            raise RuntimeError(
+                "skipped: the packed entry runs on the packed rows (sink_varlen_*)"
+            )
+        super().__init__(inp, variant)
+        self.fn = cake_dsa_sparse_attention_det_nope_varlen
+
+    def versions(self):
+        inp = self.inp
+        mode = getattr(cake_backend, "varlen_index_mode", None)
+        return dict(
+            module=cake_jit.NOPE_PROGRAM,
+            entry="cake_dsa_sparse_attention_det_nope_varlen",
+            sink=self.sink is not None,
+            index_route=mode(inp.local) if mode else None,
+            num_docs=inp.num_segments,
+            causal=False,
+        )
+
+    def _call(self, dkv_acc):
+        inp = self.inp
+        return self.fn(
+            self.q,
+            inp.kv,
+            inp.local,
+            inp.cu_seqlens_q,
+            inp.cu_seqlens_k,
+            inp.max_seqlen_q,
+            inp.max_seqlen_k,
+            causal=False,
+            softmax_scale=SINK_SCALE,
+            sink=self.sink,
+            return_lse=True,
+            dkv_acc=dkv_acc,
+        )
+
+    def workspace(self):
+        return self._workspace(self.inp.num_segments)
+
+
+class ArmCudnnFeNopeSinkDet(nb.ArmCudnnFeNopeSink):
+    """The non-deterministic script's ``cudnn_fe_nope_sink`` arm with the frontend's deterministic backward
+    (``deterministic=True``; the same forward call): the external deterministic baseline where the frontend serves it
+    (an architecture or head count it refuses raises at the first backward, recorded as the arm's error)."""
+
+    name = "cudnn_fe_nope_sink_det"
+    deterministic = True
+    backward_available = True
+    backward_options = {"deterministic": True}
+
+    def versions(self):
+        return dict(super().versions(), backward="deterministic=True")
+
+
 ROPE_ARMS = {
     ArmDet.name: ArmDet,
     ArmDetScratch.name: ArmDetScratch,
@@ -321,6 +476,16 @@ NOPE_ARMS = {
     "fa4_nope_a2": nb.ArmFA4NopeA2,
     "flashmla_cudnn_nope": nb.ArmFlashMLACudnnNope,
 }
+# the arms of the sink rows (--sink): name -> class(inputs, variant)
+SINK_ARMS = {
+    ArmDetNopeSink.name: ArmDetNopeSink,
+    ArmDetNopeVarlenSink.name: ArmDetNopeVarlenSink,
+    ArmCudnnFeNopeSinkDet.name: ArmCudnnFeNopeSinkDet,
+    nb.ArmCakeNopeSink.name: nb.ArmCakeNopeSink,
+    nb.ArmCakeNopeVarlenSink.name: nb.ArmCakeNopeVarlenSink,
+    nb.ArmCudnnFeNopeSink.name: nb.ArmCudnnFeNopeSink,
+}
+SINK_ROWS = list(nb.SINK_ROWS) + list(nb.SINK_VARLEN_ROWS)
 
 
 def _bits(t):
@@ -409,7 +574,7 @@ def _print(row, name, perf):
     )
 
 
-def _run_arm(make, row, name, steps, entry):
+def _run_arm(make, row, name, steps, entry, workspace=False):
     torch.cuda.synchronize()
     before_arm = torch.cuda.memory_allocated()
     try:
@@ -425,6 +590,8 @@ def _run_arm(make, row, name, steps, entry):
         return
     try:
         perf = measure(arm, steps, before_arm)
+        if workspace:
+            perf["workspace_bytes"] = arm.workspace()
         perf["versions"] = arm.versions()
     except Exception as exc:  # noqa: BLE001 -- record the failure, continue with the next arm
         perf = dict(
@@ -517,6 +684,43 @@ def run_row(row, args, results):
     results["rows"].append(entry)
 
 
+def run_sink(args, results):
+    """The sink rows (``--sink``): every ``--sink-arms`` arm with the row's sink and without one
+    (``--sink-variants``), each under :func:`measure`, recorded as ``arms[name][variant]``."""
+    for row in args.sink_rows:
+        inp, width, packed = nb.make_sink_row(row, device=args.device)
+        entry = dict(
+            row=row,
+            total_q=inp.total_q,
+            total_k=inp.total_k,
+            width=width,
+            ratio=inp.ratio,
+            valid_keys=int((inp.indices >= 0).sum()),
+            softmax_scale=SINK_SCALE,
+            dout_layout="contiguous",
+            **packed,
+            arms={},
+        )
+        print(
+            f"{row:24s} geometry T {inp.total_q} S {inp.total_k} K {width} valid {entry['valid_keys']}",
+            flush=True,
+        )
+        steps = max(
+            args.min_steps,
+            args.steps if inp.total_q * inp.total_k < 2**34 else args.steps_large,
+        )
+        for name in args.sink_arms:
+            entry["arms"][name] = {}
+            for variant in args.sink_variants:
+                label, runs = f"{name}/{variant}", dict(arms={})
+                make = functools.partial(SINK_ARMS[name], inp, variant)
+                _run_arm(make, row, label, steps, runs, workspace=True)
+                entry["arms"][name][variant] = runs["arms"][label]
+        results["sink_rows"].append(entry)
+        del inp
+        torch.cuda.empty_cache()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--rows", nargs="+", default=list(DEFAULT_ROWS))
@@ -530,8 +734,37 @@ def main():
     parser.add_argument("--min-steps", type=int, default=3)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--json", type=Path)
+    parser.add_argument(
+        "--sink",
+        action="store_true",
+        help="the sink rows in place of the --rows rows (see the module docstring)",
+    )
+    parser.add_argument(
+        "--sink-rows",
+        nargs="+",
+        default=SINK_ROWS,
+        choices=SINK_ROWS,
+        help=f"rows for --sink (default {' '.join(SINK_ROWS)})",
+    )
+    parser.add_argument(
+        "--sink-arms",
+        default=",".join(SINK_ARMS),
+        help=f"comma-separated arms of the sink rows, of {sorted(SINK_ARMS)} (default all)",
+    )
+    parser.add_argument(
+        "--sink-variants",
+        default=",".join(nb.SINK_VARIANTS),
+        help="comma-separated variants of every sink arm, of sink, no_sink (default both)",
+    )
     args = parser.parse_args()
     args.arms = [a for a in args.arms.split(",") if a]
+    args.sink_arms = [a for a in args.sink_arms.split(",") if a]
+    args.sink_variants = [v for v in args.sink_variants.split(",") if v]
+    unknown_sink = [a for a in args.sink_arms if a not in SINK_ARMS] + [
+        v for v in args.sink_variants if v not in ("sink", "no_sink")
+    ]
+    if unknown_sink:
+        parser.error(f"unknown sink arms / variants {unknown_sink}")
     unknown = [a for a in args.arms if a not in ROPE_ARMS and a not in NOPE_ARMS]
     unknown_rows = [
         r
@@ -556,9 +789,13 @@ def main():
         ),
         rows=[],
     )
-    for row in args.rows:
-        run_row(row, args, results)
-        torch.cuda.empty_cache()  # the row's inputs are released with run_row's frame
+    if args.sink:
+        results["sink_rows"] = []
+        run_sink(args, results)
+    else:
+        for row in args.rows:
+            run_row(row, args, results)
+            torch.cuda.empty_cache()  # the row's inputs are released with run_row's frame
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(results, indent=2, default=str) + "\n")

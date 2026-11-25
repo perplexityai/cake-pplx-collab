@@ -41,15 +41,19 @@ Every row times, for both modes, on identical generated inputs:
   then the backward (which replays the forward): ``2 * fwd + bwd`` measured.
 
 Each package picks its kernels from the rows and the SM count.  The
-non-deterministic forward of packed rows (the benchmark's inputs) runs its tiny
-forward up to 36 rows per SM on SM100 and SM103 and 65 on SM107 and past
-that its mid, long, extra-long or pipelined forward (its copy of the
-deterministic forward) by bands of rows per SM (``cake_jit.FORWARD_BANDS``).
-Its backward runs one cluster of 16 CTAs for few rows, else one kernel by bands
-of rows per SM (``cake_jit.BACKWARD_BANDS``).  A BF16 weight gradient (the one
-timed here) runs the short backward (one cluster, a fixed-order FP32 sum) up
-to 256 rows and, on SM100 and SM107, the exact tiny backward (one cluster, a
-fixed-order FP32 sum of its own) up to 512 rows.  Past that, on
+non-deterministic forward of packed rows (the benchmark's inputs) runs its
+32-lane tiny forward up to 4 rows per SM on SM100 and 12 on SM103, its tiny
+forward from there up to 36 rows per SM on SM100 and SM103 and up to 65 on
+SM107, and past that its mid, long, extra-long or pipelined forward (its copy
+of the deterministic forward) by bands of rows per SM
+(``cake_jit.FORWARD_BANDS``).
+Its backward runs one CTA or one cluster of 16 CTAs for few rows, else one
+kernel by bands of rows per SM (``cake_jit.BACKWARD_BANDS``).  A BF16 weight
+gradient (the one timed here) runs the solo backward (one CTA, the bits of the
+repeatable backward) up to 16 rows, the short backward (one cluster, a
+fixed-order FP32 sum) from there up to 256 rows and, on SM100 and SM107, the
+exact tiny backward (one cluster, a fixed-order FP32 sum of its own) up to 512
+rows.  Past that, on
 SM100 and SM103, it runs the fused backward (256-thread CTAs of 16-row blocks,
 at most 4 per SM) up to 1000 rows per SM and the repeatable backward (its copy
 of the deterministic package's backward, the same grid; its ``dw`` repeats its
@@ -63,10 +67,11 @@ repeatable backward of an FP32 weight gradient (its copy of the
 deterministic package's FP32 backward) past that, but on SM100 and SM103 the
 static backward past 64 and up to 128 rows per SM, and the repeatable
 backward's long program on packed rows from the same cuts.  At
-``--heads 48`` the default token counts reach
-every forward kernel of packed rows but the extra-long one (401 to 520 rows
-per SM, 1234 to 1603 tokens) and every BF16 backward kernel that a band of a
-148-SM B200 runs (2048 tokens: the pipelined forward).
+``--heads 48`` the default token counts reach every forward kernel of packed
+rows that a band of a 148-SM B200 runs but the mid one (86 to 160 rows per
+SM, 263 to 493 tokens) and the extra-long one (401 to 520 rows per SM, 1234
+to 1603 tokens), and every BF16 backward kernel that a band of it runs but
+the solo one (up to 16 rows).
 
 Timing uses CUPTI kernel activity with a cold L2 (``torch.profiler``, 100
 calls after 10 warm-up calls); each stage reports

@@ -1,0 +1,248 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+typedef signed char        int8_t;
+typedef unsigned char      uint8_t;
+typedef unsigned short     uint16_t;
+typedef unsigned int       uint32_t;
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
+typedef unsigned long long uint64_t;
+#else
+typedef unsigned long      uint64_t;
+#endif
+static_assert(sizeof(uint64_t) == 8, "Cake requires an LP64 CUDA host ABI");
+typedef signed int         int32_t;
+typedef short int          int16_t;
+struct __align__(64) CakeTensorMap64 { uint64_t opaque[16]; };
+static_assert(sizeof(CakeTensorMap64) == 128, "64-aligned tensor-map ABI size");
+static_assert(alignof(CakeTensorMap64) == 64, "64-aligned tensor-map ABI alignment");
+
+#if defined(__CUDACC_RTC__)
+typedef struct __align__(128) { uint64_t opaque[16]; } CUtensorMap;
+#else
+#include <cuda.h>
+#endif
+
+static_assert(sizeof(CUtensorMap) == 128, "CUtensorMap CUDA ABI must be 128 bytes");
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+
+__device__ __forceinline__ int make_warp_uniform(int x) {
+    int result;
+    asm volatile("shfl.sync.idx.b32 %0, %1, 0, 0x1F, 0xFFFFFFFF;"
+                 : "=r"(result) : "r"(x));
+    return result;
+}
+
+#define LAUNCH_MIN_BLOCKS 1
+
+#include <math_constants.h>
+
+
+// ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
+
+__device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 c) {
+    float2 r;
+    asm("fma.rn.f32x2 %0, %1, %2, %3;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(const unsigned long long*)&a),
+          "l"(*(const unsigned long long*)&b),
+          "l"(*(const unsigned long long*)&c));
+    return r;
+}
+
+extern "C" {
+
+__global__ __launch_bounds__(320, LAUNCH_MIN_BLOCKS) void
+kernel_cake_rmsnorm_train_8895b0224bb3d596a3a6(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+{
+    const int tid = threadIdx.x;
+    const int warp = make_warp_uniform(tid / 32);
+    const int lane = tid % 32;
+
+    extern __shared__ __align__(1024) char smem_raw[];
+    int smem;
+#if __CUDA_ARCH__ == 1000
+    asm volatile("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 %0, smem_ptr; }" : "=r"(smem) : "l"(smem_raw));
+    smem = make_warp_uniform(smem);
+#else
+    smem = (int)(unsigned long long)__cvta_generic_to_shared(smem_raw);
+#endif
+
+    const int bid = blockIdx.x;
+    const int num_bids = gridDim.x;
+
+    const int cta_rank = 0;
+
+    // Prologue
+    int* flags = reinterpret_cast<int*>(smem_raw + 0);
+    const int flags_addr = smem + 0;
+    float* dots = reinterpret_cast<float*>(smem_raw + 32);
+    const int dots_addr = smem + 32;
+
+    // === Task calls (declaration order) ===
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    unsigned int nxt = 0;
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    long long g_stride = g_stride_p0;
+    long long x_stride = x_stride_p0;
+    long long gh_stride = g_h_stride_p0;
+    int rg = warp / 5;
+    int tir = tid - rg * 160;
+    unsigned int ww[4];
+    {
+        const uint4* _vptr_0 = reinterpret_cast<const uint4*>(w + (unsigned long long)(tir * 8));
+        uint4* _vdst_0 = reinterpret_cast<uint4*>(&ww[0]);
+        #pragma unroll
+        for (int _blk = 0; _blk < 1; _blk++) {
+            _vdst_0[_blk] = _vptr_0[_blk];
+        }
+    }
+    float acc[8];
+    acc[0] = 0.0f;
+    acc[1] = 0.0f;
+    acc[2] = 0.0f;
+    acc[3] = 0.0f;
+    acc[4] = 0.0f;
+    acc[5] = 0.0f;
+    acc[6] = 0.0f;
+    acc[7] = 0.0f;
+    int c = 0;
+    int first_c = 0;
+    unsigned int gw[4];
+    unsigned int xw[4];
+    unsigned int hw[1];
+    float rr[1];
+    float dot[1];
+    int n_rows = (T + 1) / 2;
+    int n_items = n_rows + 16;
+    if (T == 1) {
+        n_items = n_rows;
+        n_items = 0;
+        if ((int)bid == 0) {
+            unsigned int gq[2];
+            unsigned int xq[2];
+            unsigned int hq[2];
+            unsigned int wq[2];
+            float rq = r[0];
+            {
+                uint2 _vld_1;
+                asm volatile("ld.global.L2::cache_hint.v2.b32 {%0, %1}, [%2], %3;"
+                    : "=r"(_vld_1.x), "=r"(_vld_1.y) : "l"((const void*)(g + (unsigned long long)(4 * (int)tid))), "l"(0x14F0000000000000ULL) : "memory");
+                uint2* _vdst_1 = reinterpret_cast<uint2*>(&gq[0]);
+                *_vdst_1 = _vld_1;
+            }
+            {
+                uint2 _vld_2;
+                asm volatile("ld.global.L2::cache_hint.v2.b32 {%0, %1}, [%2], %3;"
+                    : "=r"(_vld_2.x), "=r"(_vld_2.y) : "l"((const void*)(x + (unsigned long long)(4 * (int)tid))), "l"(0x14F0000000000000ULL) : "memory");
+                uint2* _vdst_2 = reinterpret_cast<uint2*>(&xq[0]);
+                *_vdst_2 = _vld_2;
+            }
+            {
+                uint2 _vld_3;
+                _vld_3 = *reinterpret_cast<const uint2*>(w + (unsigned long long)(4 * (int)tid));
+                uint2* _vdst_3 = reinterpret_cast<uint2*>(&wq[0]);
+                *_vdst_3 = _vld_3;
+            }
+            float2 rr2 = make_float2(rq, rq);
+            float2 zero2 = make_float2(0.0f, 0.0f);
+            float o4_0[4];
+            float2 _f32x2_mul_a_4 = make_float2(__uint_as_float(gq[0] << 16), __uint_as_float(gq[0] & 4294901760u));
+            float2 _f32x2_mul_b_5 = make_float2(__uint_as_float(xq[0] << 16), __uint_as_float(xq[0] & 4294901760u));
+            float2 gx_0;
+            asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_0) : "l"(*(const unsigned long long*)&_f32x2_mul_a_4), "l"(*(const unsigned long long*)&_f32x2_mul_b_5));
+            float2 p_0 = fma_f32x2_rn_noftz(gx_0, rr2, zero2);
+            o4_0[0] = p_0.x;
+            o4_0[1] = p_0.y;
+            float2 _f32x2_mul_a_6 = make_float2(__uint_as_float(gq[1] << 16), __uint_as_float(gq[1] & 4294901760u));
+            float2 _f32x2_mul_b_7 = make_float2(__uint_as_float(xq[1] << 16), __uint_as_float(xq[1] & 4294901760u));
+            float2 gx_1;
+            asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_1) : "l"(*(const unsigned long long*)&_f32x2_mul_a_6), "l"(*(const unsigned long long*)&_f32x2_mul_b_7));
+            float2 p_1 = fma_f32x2_rn_noftz(gx_1, rr2, zero2);
+            o4_0[2] = p_1.x;
+            o4_0[3] = p_1.y;
+            {
+                float4 _v4 = make_float4(o4_0[0 + 0], o4_0[0 + 1], o4_0[0 + 2], o4_0[0 + 3]);
+                *reinterpret_cast<float4*>(dw + (unsigned long long)(4 * (int)tid)) = _v4;
+            }
+            float dq = 0.0f;
+            dq = __fmaf_rn(__uint_as_float(gq[0] << 16) * __uint_as_float(wq[0] << 16), __uint_as_float(xq[0] << 16), dq);
+            dq = __fmaf_rn(__uint_as_float(gq[0] & 4294901760u) * __uint_as_float(wq[0] & 4294901760u), __uint_as_float(xq[0] & 4294901760u), dq);
+            dq = __fmaf_rn(__uint_as_float(gq[1] << 16) * __uint_as_float(wq[1] << 16), __uint_as_float(xq[1] << 16), dq);
+            dq = __fmaf_rn(__uint_as_float(gq[1] & 4294901760u) * __uint_as_float(wq[1] & 4294901760u), __uint_as_float(xq[1] & 4294901760u), dq);
+            float ws = dq;
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                ws += __shfl_xor_sync(0xFFFFFFFF, ws, offset);
+            if (lane == 0) {
+                dots[warp] = ws;
+            }
+            __syncthreads();
+            float tree[10];
+            tree[0] = dots[0];
+            tree[1] = dots[1];
+            tree[2] = dots[2];
+            tree[3] = dots[3];
+            tree[4] = dots[4];
+            tree[5] = dots[5];
+            tree[6] = dots[6];
+            tree[7] = dots[7];
+            tree[8] = dots[8];
+            tree[9] = dots[9];
+            tree[0] = tree[0] + tree[1];
+            tree[2] = tree[2] + tree[3];
+            tree[4] = tree[4] + tree[5];
+            tree[6] = tree[6] + tree[7];
+            tree[8] = tree[8] + tree[9];
+            tree[0] = tree[0] + tree[2];
+            tree[4] = tree[4] + tree[6];
+            tree[0] = tree[0] + tree[4];
+            tree[0] = tree[0] + tree[8];
+            float cq = 0.0f;
+            float _fdiv_8 = __fdiv_rn(tree[0], 1280.0f);
+            cq = _fdiv_8;
+            float kx = rq * rq * rq * cq;
+            float nkx = -kx;
+            float out[4];
+            float g0_0 = __uint_as_float(gq[0] << 16);
+            float g1_0 = __uint_as_float(gq[0] & 4294901760u);
+            float x0_0 = __uint_as_float(xq[0] << 16);
+            float x1_0 = __uint_as_float(xq[0] & 4294901760u);
+            float y0_0 = __fmaf_rn(nkx, x0_0, rq * (g0_0 * __uint_as_float(wq[0] << 16)));
+            float y1_0 = __fmaf_rn(nkx, x1_0, rq * (g1_0 * __uint_as_float(wq[0] & 4294901760u)));
+            out[0] = y0_0;
+            out[1] = y1_0;
+            float g0_1 = __uint_as_float(gq[1] << 16);
+            float g1_1 = __uint_as_float(gq[1] & 4294901760u);
+            float x0_1 = __uint_as_float(xq[1] << 16);
+            float x1_1 = __uint_as_float(xq[1] & 4294901760u);
+            float y0_1 = __fmaf_rn(nkx, x0_1, rq * (g0_1 * __uint_as_float(wq[1] << 16)));
+            float y1_1 = __fmaf_rn(nkx, x1_1, rq * (g1_1 * __uint_as_float(wq[1] & 4294901760u)));
+            out[2] = y0_1;
+            out[3] = y1_1;
+            unsigned int packed[2];
+            #pragma unroll
+            for (int _lp = 0; _lp < 2; _lp++) {
+                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(out[_lp*2 + 0], out[_lp*2+1 + 0]));
+                packed[_lp] = *(uint32_t*)&_bf2;
+            }
+            reinterpret_cast<int2*>(dx + ((unsigned long long)(4 * (int)tid)))[0] = reinterpret_cast<int2*>(packed)[0];
+        }
+    }
+}
+
+} // extern "C"

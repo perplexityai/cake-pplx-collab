@@ -17,11 +17,18 @@ Multi-GPU rows of the non-deterministic ``cake_causal_conv1d_nondet_kcp``: ``W``
 deterministic KCP suite's partitions (contiguous, zigzag, per-document zigzag, ragged tables with a zero-token rank,
 one-token fragments, a fragment that reads its history from three predecessor ranks), plus W = 16 rows (``-k w16``) on
 the layouts any world size partitions: contiguous, zigzag and per-document zigzag (the ragged tables are written for at
-most eight ranks).  The outputs are judged by the naive judge (``tests/cake/test_helpers/cake_naive.py``): every
-rank draws the whole pack from each of 32 seeds (the same on every rank), runs the call on its tokens and judges its
-``y`` / ``dx`` rows and the sum of the ranks' ``dweight`` partials (all-gathered and added in rank order) against the
-float64 oracle of the whole pack and PyTorch's BF16 naive convolution.  No bit rule holds the package: its outputs
-are never compared bit for bit with another launch and never with the deterministic package.  Per row and rank:
+most eight ranks), the deterministic suite's ``F_ROWS`` (W = 2 / 4 at C = 528 and 568 around the forward's token
+floor of the channel count on the running architecture, ``cake_jit.FORWARD_NARROW_ROW_FLOORS``, run as there with the
+forward's small-S rows removed, ``_small_s_rows_removed``: its ``floor:`` rows take the ranks' token counts from that
+floor at run time, a rank at it and one a token below it, so on every architecture one rank's forward runs the narrower
+tiles and another's the single tile), and ``ROWS_KEYS`` (W = 2 / 4 at C = 640, the ranks' token counts inside the
+static range, the pair direct range and the direct range of every architecture's forward keys covering C 640 and above
+the keys, so the ranks of one call run the static, the pair direct, the direct and the dynamic program).  The outputs
+are judged by the naive judge (``tests/cake/test_helpers/cake_naive.py``): every rank draws the whole pack from each of
+32 seeds (the same on every rank), runs the call on its tokens and judges its ``y`` / ``dx`` rows and the sum of the
+ranks' ``dweight`` partials (all-gathered and added in rank order) against the float64 oracle of the whole pack and
+PyTorch's BF16 naive convolution.  No bit rule holds the package: its outputs are never compared bit for bit with
+another launch and never with the deterministic package.  Per row and rank:
 
 - ``REPEATS`` launches of the direct pass on each draw, every launch judged;
 - checkpoints with and without a recompute handle (``use_reentrant`` False and True; 2 x forward + backward) and
@@ -62,19 +69,32 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from tests.test_cake_causal_conv1d_det_train_kcp_dist import (
+    F_ROWS,
     ROWS,
     WIDTH,
     _Counter,
+    _floor_row,
     _free_port,
     _local,
     _partition,
     _requested,
     _row_id,
+    _small_s_rows_removed,
 )
 
 # The seed of every rank's pack (draw 0 of the judges).
 SEED = 7815
 REPEATS = 20
+# W = 2 / 4 at C = 640 with ragged ranks of 3103 tokens (inside every architecture's static range of the ``fwd`` key
+# covering C 640, above its pair direct range), 12003 (inside its direct range), 40003 (above the keys: the dynamic
+# program) and 1; and W = 4 with ranks of 63 and 64 tokens (inside every architecture's pair direct range at C 640,
+# which starts at one token, at four on sm_107a: the pair direct program), 2560 (its last count on sm_107a) and 3073
+# (above it: the static program).
+ROWS_KEYS = [
+    ((10000, 5106), 2, "ragged:3103,12003", 640),
+    ((30000, 20000, 5110), 4, "ragged:3103,12003,40003,1", 640),
+    ((4000, 1760), 4, "ragged:63,64,2560,3073", 640),
+]
 # W = 16 (16-way context parallelism) on the deterministic rows' packs, for the layouts any world size partitions.
 ROWS_W16 = [
     ((100, 640, 77, 1000, 129), 16, "contiguous", 512),
@@ -97,9 +117,9 @@ def _run_rank(
     )
     from tests.cake.test_helpers.cake_causal_conv1d_oracle import judge_draws, problem
 
-    lengths, _w, layout, C = row
     device = torch.device("cuda", local_id % max(torch.cuda.device_count(), 1))
     torch.cuda.set_device(device)
+    lengths, _w, layout, C = _floor_row(row, conv_kcp._device_arch(device))
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", str(port))
@@ -624,7 +644,8 @@ def _spawn_graph_cache_entry(rank: int, W: int, port: int, result_dir: str) -> N
 
 def _spawn_entry(rank: int, W: int, row, port: int, result_dir: str) -> None:
     try:
-        report = _run_rank(rank, W, row, port, result_dir, rank)
+        with _small_s_rows_removed(row):
+            report = _run_rank(rank, W, row, port, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
     finally:
@@ -642,7 +663,7 @@ def _supported() -> bool:
     return is_cake_causal_conv1d_nondet_train_supported(torch.device("cuda"))
 
 
-@pytest.mark.parametrize("row", ROWS + ROWS_W16, ids=_row_id)
+@pytest.mark.parametrize("row", ROWS + F_ROWS + ROWS_KEYS + ROWS_W16, ids=_row_id)
 def test_nondeterministic_kcp_rows(row) -> None:
     W = row[1]
     ntasks = int(os.environ.get("SLURM_NTASKS", "1"))
@@ -653,14 +674,15 @@ def test_nondeterministic_kcp_rows(row) -> None:
             pytest.skip(
                 "the non-deterministic conv package is not rendered or does not support this device"
             )
-        report = _run_rank(
-            int(os.environ["SLURM_PROCID"]),
-            W,
-            row,
-            int(os.environ.get("MASTER_PORT", "29500")),
-            os.environ.get("KCP_TEST_RESULT_DIR"),
-            int(os.environ.get("SLURM_LOCALID", "0")),
-        )
+        with _small_s_rows_removed(row):
+            report = _run_rank(
+                int(os.environ["SLURM_PROCID"]),
+                W,
+                row,
+                int(os.environ.get("MASTER_PORT", "29500")),
+                os.environ.get("KCP_TEST_RESULT_DIR"),
+                int(os.environ.get("SLURM_LOCALID", "0")),
+            )
         assert report["pass"], report
         return
     if not _supported():

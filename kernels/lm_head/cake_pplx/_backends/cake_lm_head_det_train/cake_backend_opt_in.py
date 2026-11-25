@@ -139,10 +139,18 @@ from .cake_backend import (
     _chunk_rows,
     _deferred_operands,
     _device_constants,
+    _EAGER_BASE,
+    _EAGER_FORMED,
+    DX_CAST_FOLD_STAGE,
+    DX_FINALIZE_FOLD_STAGE,
     _dw_stream,
     _dx_keys,
+    _eager_fold_values,
+    _flat_cast_folds,
+    _flat_fold_values,
     _dx_reduce,
     _fold_values,
+    _rlab_fresh_zero,
     _rlab_zero,
     _slab_count,
     _with_rlab_zero,
@@ -440,6 +448,10 @@ def _hidden_count_begin(
     else:
         compaction_index(labels, valid=valid, pos=pos, idx_full=idx_full, ar=ar)
         count_host.copy_(count_dev, non_blocking=True)
+        if rows0 == T:
+            # a one-chunk call: its dX finalize reads this scan of ``valid`` (:func:`.cake_backend._row_scan`), as in
+            # :func:`.cake_backend._hidden_count_begin`
+            setattr(valid, _main._DEVICE_SCAN_ATTR, pos)
     event.record()
     with _ffi_stream_context(index):
         for key in keys:
@@ -835,6 +847,7 @@ def make_plan(
     dx_slices_cap: Optional[int] = None,
     dw_split: Optional[int] = None,
     dw_split_end: Optional[int] = None,
+    cast_fold: bool = False,
 ) -> Plan:
     """The chunk schedule; ``dx_max_slices`` > 1 (K-sliced dX stages registered) picks each chunk's slice count
     (``dx_resident`` = the device's co-resident dX clusters, :func:`cluster_resident`); ``valid_rows`` (compaction)
@@ -857,7 +870,8 @@ def make_plan(
     the chunk loop's FP32 accumulator splits at that vocabulary row (:attr:`Plan.dw_split`, the budget form
     ``"fused_ip"``); ``dw_split_end`` (with ``dw_split``; a multiple of :func:`dw_block_step` in ``[dw_split, V]``,
     default ``V``) ends its upper part there (:attr:`Plan.dw_split_end`, the budget form ``"partial_ip"``; the loss
-    entry with ``keep_row_grad``)."""
+    entry with ``keep_row_grad``).  ``cast_fold``: the compact dX cast folds the label residuals of the one-slice
+    chunks (:attr:`Plan.cast_fold`, :func:`.cake_backend.cast_fold_rows`)."""
     if (logprob_dz or logprob_lbl) and problem.entry != "logprob":
         raise ValueError("the logits GEMM arms belong to the log-probability entry")
     if keep_row_grad and problem.entry != "loss":
@@ -1012,6 +1026,7 @@ def make_plan(
         keep_row_grad=bool(keep_row_grad),
         dw_split=dw_split,
         dw_split_end=dw_split_end,
+        cast_fold=bool(cast_fold),
     )
 
 
@@ -1641,11 +1656,15 @@ def stage_values(
             d_off=0,
         )
         return values
-    if stage == "scale_cast_scatter_bf16":
+    if stage in ("scale_cast_scatter_bf16", DX_FINALIZE_FOLD_STAGE):
         raise ValueError(
-            "scale_cast_scatter_bf16 is bound by finalize_dx at the dX output boundary, not by the chunk loop"
+            f"{stage} is bound by finalize_dx at the dX output boundary, not by the chunk loop"
         )
-    if stage in ("scale_cast_bf16", "scale_cast_f32"):
+    if stage == DX_CAST_FOLD_STAGE and not (index == "dx" and _flat_cast_folds(plan)):
+        raise ValueError(
+            f"{stage} is the dX cast of an uncompacted plan with a cast-fold range"
+        )
+    if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
         acc = t["dx_acc"] if index == "dx" else t["dw_acc"]
         out = t["dx_out"] if index == "dx" else t["dw_out"]
         if acc.numel() != out.numel() or acc.numel() % g.cast_vec:
@@ -1667,6 +1686,8 @@ def stage_values(
             last_chunk=0,
             d_off=0,
         )
+        if stage == DX_CAST_FOLD_STAGE:
+            values.update(_flat_fold_values(plan, t))
         return values
     row0, rows_c = plan.chunks[index]
     stop = row0 + rows_c
@@ -1923,7 +1944,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             src=t["X"], idx=t["row_index"][row0 : row0 + rows_c], out=t["x_c"][:rows_c]
         )
         return values
-    if stage in ("scale_cast_bf16", "scale_cast_f32"):
+    if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
         acc = t["dx_acc"] if index == "dx" else t["dw_acc"]
         out = t["dx_out"] if index == "dx" else t["dw_out"]
         values.update(
@@ -1931,6 +1952,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             g=t["grad_scale"] if p.entry == "loss" else t["unit_scale"],
             out=out.reshape(-1),
         )
+        if stage == DX_CAST_FOLD_STAGE:
+            values.update(labels=t["labels"], rlab=t["rlab"], W=t["W"])
         return values
     row0, rows_c = plan.chunks[index]
     stop = row0 + rows_c
@@ -2038,7 +2061,7 @@ def _slot_values_temperature(
             src=t["X"], idx=t["row_index"][row0 : row0 + rows_c], out=t["x_c"][:rows_c]
         )
         return values
-    if stage in ("scale_cast_bf16", "scale_cast_f32"):
+    if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
         acc = t["dx_acc"] if index == "dx" else t["dw_acc"]
         out = t["dx_out"] if index == "dx" else t["dw_out"]
         values.update(
@@ -2046,6 +2069,8 @@ def _slot_values_temperature(
             g=t["grad_scale"] if p.entry == "loss" else t["unit_scale"],
             out=out.reshape(-1),
         )
+        if stage == DX_CAST_FOLD_STAGE:
+            values.update(labels=t["labels"], rlab=t["rlab"], W=t["W"])
         return values
     row0, rows_c = plan.chunks[index]
     stop = row0 + rows_c
@@ -2259,7 +2284,10 @@ def cast_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
     compacted; the log-probability backward runs it inside :func:`recompute_keys` instead)."""
     keys: list[tuple[str, Any]] = []
     if plan.need_dx and plan.dx_cast:
-        keys.append(("scale_cast_bf16", "dx"))
+        # an uncompacted plan's cast folds the label residuals of its fold range (:func:`cast_fold_rows`)
+        keys.append(
+            (DX_CAST_FOLD_STAGE if _flat_cast_folds(plan) else "scale_cast_bf16", "dx")
+        )
     if (
         plan.need_dw and plan.dw_rows is None
     ):  # a ``dw_rows`` plan leaves its accumulator to the caller
@@ -2296,6 +2324,24 @@ def _with_split_keys(plan: Plan, keys: tuple) -> tuple[tuple[str, Any], ...]:
         ):
             out.append((stage, _UpperRows(index)))
     return tuple(out)
+
+
+def _runner_backward_keys(
+    plan: Plan, template_only: bool = False
+) -> tuple[tuple[str, Any], ...]:
+    """The backward launch keys a runner of ``plan`` binds (``backward_order``): the log-probability backward
+    (:func:`.cake_backend.recompute_keys` through :func:`_with_split_keys`) and the output casts (:func:`cast_keys`).
+    A template-only runner of the loss entry (``_template_only``, the eager entry points' binding build) binds none: it
+    never launches, and its remembered binding (:meth:`_Binding.from_runner`) serves the loss forward only -- the loss
+    backward finalizes the forward's accumulators through the eager casts (:func:`finalize_dx`, :func:`dw_cast`,
+    :func:`_dw_cast_split`), never through a binding."""
+    if template_only and plan.problem.entry == "loss":
+        return ()
+    return (
+        _with_split_keys(plan, recompute_keys(plan))
+        if plan.problem.entry == "logprob"
+        else ()
+    ) + cast_keys(plan)
 
 
 class _SplitDw(NamedTuple):
@@ -2573,13 +2619,21 @@ def _bind_all(
 
 
 def _eager_launch(
-    record, module_name: str, stage: str, values: dict[str, Any], device, geometry
+    record,
+    module_name: str,
+    stage: str,
+    values: dict[str, Any],
+    device,
+    geometry,
+    form: Optional[tuple] = None,
 ) -> tuple[_Launch, list]:
     """``(launch, arguments)`` of one eager stage of the output boundary (:func:`scale_cast`, :func:`scale_cast_scatter`,
     :func:`dw_cast`).  Bound by :func:`_bind_all`; while :data:`BINDING_CACHE` is enabled the templated launch is
-    remembered there per form -- the record, the stage, the device and every non-tensor host value, which fix the grid
-    and the scalar arguments -- and a later call of the same form slots its tensors into it: the same entry, grid and
-    arguments as a fresh binding."""
+    remembered there per form (:func:`.cake_backend._eager_form`) -- the record, the stage, the device and every host
+    value that is neither a tensor nor a per-call scalar, which fix the grid and the other scalar arguments -- and a
+    later call of the same form slots its tensors and per-call scalars into it (:func:`.cake_backend._eager_template`):
+    the same entry, grid and arguments as a fresh binding.  ``form``: the caller's own key of the call's form
+    (:data:`.cake_backend._EAGER_FORMED`), used instead of :func:`.cake_backend._eager_form`."""
     key = (stage, "eager")
     cache = BINDING_CACHE
     if not cache.enabled:
@@ -2587,24 +2641,14 @@ def _eager_launch(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
         return launch, list(launch.arguments)
-    form = (
-        module_name,
-        stage,
-        str(device),
-        tuple(
-            sorted(
-                (name, isinstance(value, torch.Tensor))
-                + ((None,) if isinstance(value, torch.Tensor) else (value,))
-                for name, value in values.items()
-            )
-        ),
-    )
+    if form is None:
+        form = _main._eager_form(module_name, stage, device, values)
     launch = cache.eager_lookup(form, record)
     if launch is None:
         launch = _bind_all(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
-        cache.eager_remember(form, record, launch.templated())
+        cache.eager_remember(form, record, _main._eager_template(launch))
         return launch, list(launch.arguments)
     return launch, launch.arguments_for(values)
 
@@ -2647,6 +2691,7 @@ def prepare_lm_head_det_loss(
     _chunk_views: Optional[_HiddenCount] = None,
     dw_split: Optional[int] = None,
     dw_split_end: Optional[int] = None,
+    cast_fold: bool = False,
 ) -> LmHeadDetLossRunner:
     """Validate one binding and prepare its launches.
 
@@ -2832,6 +2877,10 @@ def prepare_lm_head_det_loss(
         dx_slices_cap=None if dx_slices_cap is None else int(dx_slices_cap),
         dw_split=dw_split,
         dw_split_end=dw_split_end,
+        # the compact dX cast folds the label residuals of the one-slice chunks (:func:`.cake_backend.cast_fold_rows`;
+        # a plan of :func:`make_plan` has no temperature forms); the caller passes the fold operands to
+        # :func:`finalize_dx` (:func:`.cake_backend.cast_fold_operands`)
+        cast_fold=bool(cast_fold and backend == "cake"),
     )
     missing = [s for s in plan.stages if s not in stages]
     if missing:
@@ -2967,8 +3016,9 @@ def prepare_lm_head_det_loss(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -3027,9 +3077,13 @@ def prepare_lm_head_det_loss(
         )
 
     fwd = forward_keys(plan)
-    bwd = (
-        _with_split_keys(plan, recompute_keys(plan)) if entry == "logprob" else ()
-    ) + cast_keys(plan)
+    bwd = _runner_backward_keys(plan, _template_only)
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it
     spare = (("row_grad", 0),) if plan.logprob_dz else ()
@@ -3458,8 +3512,9 @@ def prepare_lm_head_det_loss_temperature(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
-        # ``dz`` arm of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk; the ``rlab_zero`` step zeroes them ahead of a counted
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`, and below the preparation zeroes them once
+        # where an uncounted ``dz`` arm leaves rows to that, :func:`_rlab_fresh_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -3531,6 +3586,12 @@ def prepare_lm_head_det_loss_temperature(
         if entry == "logprob"
         else ()
     ) + cast_keys(plan)
+    seq = tuple(fwd) + tuple(bwd)
+    if not _template_only and "rlab" in t and _rlab_fresh_zero(plan, seq):
+        # one zero fill, here: every step's producers store each row a fold reads (:func:`_rlab_rows_stored`), and a
+        # row an uncounted ``dz`` arm leaves (an ignored row, a label at or past ``V``) keeps this zero or an earlier
+        # step's residual (the labels may change between steps), which no fold reads -- no zero step in the steps
+        t["rlab"].zero_()
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it.  A
     # call with a temperature never recounts on the hidden path (no temperature form of ``row_grad``)
@@ -3622,6 +3683,7 @@ def forward_binding_key(
     dx_finalize=False,
     hidden_count=False,
     logprob_lbl=False,
+    cast_fold=False,
 ) -> tuple:
     """Cache key of a forward binding: ``(data_ptr, shape, stride, dtype)`` of every
     input plus every option that shapes the argument plans; ``valid_rows`` is the
@@ -3631,7 +3693,9 @@ def forward_binding_key(
     ``dx_finalize`` the resolved dX finalize form (the slab reduction's launches differ);
     ``hidden_count`` whether chunk 0's gather and logits GEMM ran before the plan
     (the remembered sequence starts at chunk 0's row kernels); ``logprob_lbl``
-    the resolved log-probability forward's logits form (:func:`logprob_lbl_default`).
+    the resolved log-probability forward's logits form (:func:`logprob_lbl_default`);
+    ``cast_fold`` whether the compact dX cast folds the label residuals of the plan's
+    one-slice chunks (:func:`.cake_backend.cast_fold_rows`; the autograd loss entry).
     A budget form of :func:`memory_plan` appends its plan options ``(dw_rows, keep_row_grad)``, the forms
     ``"fused_ip"`` / ``"partial_ip"`` ``("dw_split", dw_split, dw_split_end, keep_row_grad)``."""
     return (
@@ -3654,6 +3718,7 @@ def forward_binding_key(
         bool(dx_finalize),
         bool(hidden_count),
         bool(logprob_lbl),
+        bool(cast_fold),
     )
 
 
@@ -3719,6 +3784,11 @@ class _Binding:
     owned_bytes: int = 0
     layout: dict = field(default_factory=dict, repr=False)
     memory: dict = field(default_factory=dict, repr=False)
+    # each call allocates its fresh ``rlab`` zero-filled: the plan computes dX and an uncounted ``dz`` arm of the
+    # forward / backward sequence leaves rows unwritten (:func:`.cake_backend._rlab_fresh_zero`; a sequence with the
+    # ``rlab_zero`` step zeroes it there)
+    forward_rlab_zero: bool = False
+    backward_rlab_zero: bool = False
 
     @classmethod
     def from_runner(
@@ -3743,11 +3813,7 @@ class _Binding:
                 hidden_stats=hidden.stats,
             )
             forward_order = forward_keys(plan)
-            backward_order = (
-                _with_split_keys(plan, recompute_keys(plan))
-                if p.entry == "logprob"
-                else ()
-            ) + cast_keys(plan)
+            backward_order = _runner_backward_keys(plan, runner._template_only)
             memory = _hidden_count_memory(
                 memory,
                 num_rows=p.num_rows,
@@ -3793,6 +3859,8 @@ class _Binding:
             owned_bytes=sum(v.numel() * v.element_size() for v in owned.values()),
             layout=runner.layout,
             memory=memory,
+            forward_rlab_zero=_rlab_fresh_zero(plan, forward_order),
+            backward_rlab_zero=_rlab_fresh_zero(plan, backward_order),
         )
 
     def holds_no_tensor(self) -> bool:
@@ -3925,6 +3993,7 @@ class _Binding:
         dw_stream: str = "auto",
         capture: Optional[dict] = None,
         dw_acc: Optional[torch.Tensor] = None,
+        fold_out: Optional[dict] = None,
     ):
         """One forward through the remembered launches; ``dw_stream`` is the call's dW side-stream mode
         (:func:`dw_stream_mode`), a launch placement outside the binding.  ``capture`` (a loss forward of a zero-weight
@@ -3985,7 +4054,9 @@ class _Binding:
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
             if plan.need_dx or plan.need_dw:
-                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+                t["rlab"] = (torch.zeros if self.forward_rlab_zero else torch.empty)(
+                    (T,), dtype=torch.float32, device=self.device
+                )
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -4009,6 +4080,9 @@ class _Binding:
         self._launch(self.forward_late if early else self.forward_order, t, dw_stream)
         if capture is not None:
             capture.update(term=t["term"], loss_weights=t["loss_weights"])
+        if fold_out is not None:
+            # the label residuals the compact dX cast folds (:func:`.cake_backend.cast_fold_operands`)
+            fold_out["fold"] = _main.cast_fold_operands(plan, t)
         if p.entry == "loss":
             return (
                 t["loss"],
@@ -4051,7 +4125,9 @@ class _Binding:
             t["d_in"] = dlogp
         self._scratch(t, hidden)
         if plan.need_dx or plan.need_dw:
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"] = (torch.zeros if self.backward_rlab_zero else torch.empty)(
+                (T,), dtype=torch.float32, device=self.device
+            )
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -4181,6 +4257,8 @@ class _TemperatureBinding(_Binding):
             owned_bytes=sum(v.numel() * v.element_size() for v in owned.values()),
             layout=runner.layout,
             memory=memory,
+            forward_rlab_zero=_rlab_fresh_zero(plan, forward_order),
+            backward_rlab_zero=_rlab_fresh_zero(plan, backward_order),
         )
 
     def _temperature(
@@ -4264,7 +4342,9 @@ class _TemperatureBinding(_Binding):
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
             if plan.need_dx or plan.need_dw:
-                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+                t["rlab"] = (torch.zeros if self.forward_rlab_zero else torch.empty)(
+                    (T,), dtype=torch.float32, device=self.device
+                )
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -4320,7 +4400,9 @@ class _TemperatureBinding(_Binding):
             t["d_in"] = dlogp
         self._scratch(t, hidden)
         if plan.need_dx or plan.need_dw:
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"] = (torch.zeros if self.backward_rlab_zero else torch.empty)(
+                (T,), dtype=torch.float32, device=self.device
+            )
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -4548,6 +4630,10 @@ class _BudgetResultState:
     # rows ``[a, end)`` (``None`` when ``end == a``); ``"partial_ip"`` recomputes the rows ``[end, V)``
     dw_split: Optional[tuple] = None
     dw_acc_hi: Optional[torch.Tensor] = None
+    # the fold operands of the label residuals the compact dX cast folds (:func:`.cake_backend.cast_fold_operands`):
+    # the forward's compact labels, FP32 residuals ``rlab`` and head ``W``, and the rows ``[lo, hi)`` no slab sum folded
+    # (``None``: every row of ``dx_acc`` is final).  Every dX finalize of the result passes them to :func:`finalize_dx`
+    dx_fold: Optional[dict] = None
 
 
 @dataclass
@@ -4620,6 +4706,7 @@ class ForwardResult(_BudgetResultState, _main._TemperatureResultState):
                     self.row_valid,
                     self.num_rows,
                     backend=self.backend if backend is None else backend,
+                    fold=self.dx_fold,
                 )
             )
             x_last = (
@@ -4671,6 +4758,7 @@ class ForwardResult(_BudgetResultState, _main._TemperatureResultState):
                     self.row_valid,
                     self.num_rows,
                     backend=self.backend if backend is None else backend,
+                    fold=self.dx_fold,
                 )
             )
             X, W = self.inputs
@@ -4701,6 +4789,7 @@ class ForwardResult(_BudgetResultState, _main._TemperatureResultState):
             x_idx=self.x_idx,
             row_valid=self.row_valid,
             gemm_tuning=self.gemm_tuning,
+            dx_fold=self.dx_fold,
         )
 
 
@@ -4777,17 +4866,21 @@ def _hidden_count_program(
     compact: bool,
     stats: bool,
     hidden_count: bool,
+    loss_call: bool = False,
 ) -> Optional[tuple[str, dict[str, Any]]]:
     """``(module_name, record)`` of a call that runs the hidden valid-row count (:func:`_hidden_count`'s rules: a
     compacted ``cake`` call with the switch on that :func:`hidden_count_eligible` admits), else ``None``.  Host checks
-    only: nothing is allocated or queued."""
+    only: nothing is allocated or queued.  ``loss_call``: a call of the loss entry without the zero-weight split
+    (:func:`.cake_backend.hidden_count_chunks_admit`)."""
     if not (compact and backend == "cake" and hidden_count):
         return None
     rows, chunk = int(problem.num_rows), int(problem.chunk)
-    if rows <= 0 or (rows + chunk - 1) // chunk < HIDDEN_COUNT_MIN_CHUNKS:
+    if not _main.hidden_count_chunks_admit(rows, chunk, loss_call=loss_call):
         return None  # the chunk rule of :func:`hidden_count_eligible`, ahead of the record lookup
     module_name, record = record_for(X.device)
-    if not hidden_count_eligible(problem, X, record, module_name, stats=stats):
+    if not hidden_count_eligible(
+        problem, X, record, module_name, stats=stats, loss_call=loss_call
+    ):
         return None
     return module_name, record
 
@@ -4803,10 +4896,12 @@ def _hidden_count(
     stats: bool,
     hidden_count: bool,
     loss_weights: Optional[torch.Tensor] = None,
+    loss_call: bool = False,
 ) -> Optional[_HiddenCount]:
     """The hidden valid-row count prologue of a compacted ``cake`` call when the switch (``hidden_count``, resolved by
     the caller) is on and the call is eligible (:func:`hidden_count_eligible`); ``None`` = the shipped
-    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`.cake_backend.gradient_index`)."""
+    :func:`valid_rows` path.  ``loss_weights``: the zero-weight split (:func:`.cake_backend.gradient_index`).
+    ``loss_call``: a call of the loss entry without the zero-weight split (:func:`_hidden_count_program`)."""
     program = _hidden_count_program(
         problem,
         X,
@@ -4814,6 +4909,7 @@ def _hidden_count(
         compact=compact,
         stats=stats,
         hidden_count=hidden_count,
+        loss_call=loss_call,
     )
     if program is None:
         return None
@@ -4898,6 +4994,8 @@ def forward_loss(
     num_valid_rows=None,
     check_num_valid_rows: bool = False,
     return_logp: bool = True,
+    _cast_fold: bool = False,
+    _one_chunk_count: bool = True,
 ) -> ForwardResult:
     """Forward of the loss entry: ``loss`` (FP32 scalar), ``logp`` (FP32 ``[T]``) and the
     FP32 gradient accumulators ``dx_acc`` / ``dw_acc`` of the trainable inputs.
@@ -4926,6 +5024,10 @@ def forward_loss(
     :func:`hidden_count_default`) runs a compacted call's valid-row count on the
     device.  ``gemm_tuning`` (default :func:`gemm_tuning_default`) pins GEMM
     knobs explicitly; the result carries it for the deferred weight gradient.
+    ``_one_chunk_count=False`` (the autograd entry's calls inside a non-reentrant
+    ``torch.utils.checkpoint``): a one-chunk call keeps the host count
+    (:func:`.cake_backend.hidden_count_chunks_admit` without the loss entry's
+    row window).
 
     ``memory_mode`` (default ``None``: the fast form; the autograd entries resolve theirs, :func:`memory_mode_default`,
     to :data:`MEMORY_AUTO` and pass it): ``"budget"`` (``cake`` backend, BF16 ``dW``) picks the weight-gradient form of
@@ -5063,6 +5165,7 @@ def forward_loss(
             stats=True,
             hidden_count=count,
             loss_weights=loss_weights if split else None,
+            loss_call=_one_chunk_count and not split,
         )
         if hc is not None:
             # the hidden valid-row count: chunk 0's gather and logits GEMM are queued; the count arrives through the
@@ -5354,6 +5457,14 @@ def forward_loss(
                 common["need_dw"] = False
     # the exact loss of a zero-weight split: the chunk loop keeps its loss terms and hands their two buffers over
     terms: Optional[dict] = {} if exact else None
+    # the compact dX cast folds the label residuals of the one-slice chunks (:func:`.cake_backend.cast_fold_rows`): no
+    # fold-alone slab sum on those chunks; the result carries the fold operands to its dX finalize
+    # (``_cast_fold``: the autograd entry only, whose backward finalizes ``dx_acc`` with the result's ``dx_fold``; a
+    # direct call keeps every row of ``dx_acc`` final)
+    cast_fold = bool(
+        _cast_fold and backend == "cake" and fused_dx and row_index is not None
+    )
+    fold_out: dict[str, Any] = {}
     cache = BINDING_CACHE
     key = None
     binding = None
@@ -5368,6 +5479,7 @@ def forward_loss(
             gemm_tuning=tuning,
             dx_finalize=fused_dx,
             hidden_count=hc is not None,
+            cast_fold=cast_fold,
             **common,
         )
         if options is not None and "dw_split" in options:
@@ -5402,6 +5514,7 @@ def forward_loss(
             _template_only=backend == "cake",
             dx_slices_cap=dx_cap,
             _chunk_views=hc if backend == "cake" else None,
+            cast_fold=cast_fold,
             **common,
             **(options or {}),
         )
@@ -5471,6 +5584,7 @@ def forward_loss(
             _template_only=backend == "cake",
             dx_slices_cap=dx_cap,
             _chunk_views=hc if backend == "cake" else None,
+            cast_fold=cast_fold,
             **common,
             **(options or {}),
         )
@@ -5512,6 +5626,7 @@ def forward_loss(
             stream_mode,
             capture=terms,
             dw_acc=arena,
+            fold_out=fold_out,
         )
         memory, plan = binding.memory, binding.plan
     hc = arena = None
@@ -5542,6 +5657,8 @@ def forward_loss(
         x_idx=x_idx,
         gemm_tuning=tuning,
     )
+    if fold_out.get("fold") is not None:
+        result.dx_fold = fold_out["fold"]
     if mplan is not None:
         _budget_result(result, mplan, row_state, plan, X, W, dw_acc_hi)
     return _with_zero_weight_rows(
@@ -6154,22 +6271,24 @@ def scale_cast(
     stage = "scale_cast_f32" if out_dtype == torch.float32 else "scale_cast_bf16"
     if acc.numel() % geometry.cast_vec:
         raise ValueError(f"the cast needs a multiple of {geometry.cast_vec} elements")
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
-    values.update(
-        acc=acc.reshape(-1),
-        g=g,
-        out=out.reshape(-1),
-        num_vecs=int(acc.numel() // geometry.cast_vec),
-        loss_div=1.0,
-    )
-    launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
     index = (
         acc.device.index
         if acc.device.index is not None
         else torch.cuda.current_device()
+    )
+    num_vecs = int(acc.numel() // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
+    values.update(
+        acc=acc.reshape(-1), g=g, out=out.reshape(-1), num_vecs=num_vecs, loss_div=1.0
+    )
+    launch, arguments = _eager_launch(
+        record,
+        module_name,
+        stage,
+        values,
+        acc.device,
+        geometry,
+        form=(_EAGER_FORMED, module_name, stage, int(index), num_vecs),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -6186,6 +6305,7 @@ def scale_cast_scatter(
     num_rows: int,
     *,
     backend: str = "cake",
+    fold: Optional[dict[str, Any]] = None,
 ) -> torch.Tensor:
     """``scatter_rows(bf16(g * acc), row_index, num_rows)`` as ONE new BF16 ``[num_rows, H]`` tensor written in one
     pass: ``bf16(g * acc[compact row])`` on the valid rows, exact zeros elsewhere.  ``acc`` is the compact FP32
@@ -6194,7 +6314,14 @@ def scale_cast_scatter(
     ``r``, which the kernel validates through ``row_index[scan[r] - 1] == r``), ``g`` = ``grad`` (``None`` = 1).  The
     same FP32 multiply and BF16 rounding as :func:`scale_cast`, so the valid rows are bitwise the flat cast's; every
     output element is written exactly once.  ``T_v == 0`` (every row ignored) is one zero fill: the kernel reads a
-    candidate compact row for every output row and would have none."""
+    candidate compact row for every output row and would have none.
+
+    ``fold`` (:func:`cast_fold_operands`; the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label
+    residuals no slab sum folded (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
+    such a row's ``acc``, folds ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a
+    nonzero residual -- the fold-alone slab sum's arithmetic and predicate -- and then scales and rounds it: the bits
+    of the slab sum's FP32 store cast as before.  ``None`` or an empty range: no row folds, and the program without a
+    fold operand (``scale_cast_scatter_bf16``) runs."""
     if acc.dtype != torch.float32 or acc.ndim != 2 or not acc.is_contiguous():
         raise ValueError("the accumulator must be a contiguous FP32 [T_v, H] tensor")
     T_v, H = (int(s) for s in acc.shape)
@@ -6232,14 +6359,27 @@ def scale_cast_scatter(
         if grad is None
         else grad.detach().reshape(1).to(device=acc.device, dtype=torch.float32)
     )
+    if fold is None:
+        fold_lo = fold_hi = 0
+    else:
+        fold_lo, fold_hi = int(fold["lo"]), int(fold["hi"])
+        if not 0 <= fold_lo <= fold_hi <= T_v:
+            raise ValueError(
+                f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})"
+            )
     if backend == "reference":
+        if fold_hi > fold_lo:
+            raise NotImplementedError(
+                "the reference backend folds the label residuals in the slab sum"
+            )
         out.zero_()
         out.index_copy_(0, row_index, (acc * g).to(torch.bfloat16))
         return out
     module_name, record = record_for(acc.device)
     record_abi(record)
     geometry = Geometry.from_record(record)
-    stage = "scale_cast_scatter_bf16"
+    # the fold program when a row folds, else the program without a fold operand
+    stage = DX_FINALIZE_FOLD_STAGE if fold_hi > fold_lo else "scale_cast_scatter_bf16"
     if stage not in record:
         raise NotImplementedError(
             f"the registered program {module_name!r} lacks the stage {stage!r}"
@@ -6248,8 +6388,13 @@ def scale_cast_scatter(
         raise ValueError(
             f"the scatter needs a row width of a multiple of {geometry.cast_vec} elements"
         )
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
+    index = (
+        acc.device.index
+        if acc.device.index is not None
+        else torch.cuda.current_device()
+    )
+    row_vecs = int(H // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
     values.update(
         acc=acc,
         g=g,
@@ -6258,17 +6403,18 @@ def scale_cast_scatter(
             torch.int32
         ),  # the low int32 word of each int64 index (stride 2)
         out=out,
-        row_vecs=int(H // geometry.cast_vec),
+        row_vecs=row_vecs,
         num_rows=num_rows,
         loss_div=1.0,
     )
+    # the form: the output rows and the row width, and with a fold the head's rows; the fold rows are per-call slots
+    # (:data:`EAGER_CALL_SCALARS`)
+    form: tuple = (_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows)
+    if fold_hi > fold_lo:
+        values.update(_eager_fold_values(fold, H))
+        form += (int(values["V"]),)
     launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
-    index = (
-        acc.device.index
-        if acc.device.index is not None
-        else torch.cuda.current_device()
+        record, module_name, stage, values, acc.device, geometry, form=form
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -6285,13 +6431,19 @@ def finalize_dx(
     num_rows: Optional[int],
     *,
     backend: str = "cake",
+    fold: Optional[dict[str, Any]] = None,
 ) -> torch.Tensor:
     """The dX output boundary: ``bf16(g * acc)`` restored to the caller's ``[num_rows, H]`` rows.  Every row valid
     (``row_index`` None): :func:`scale_cast`, already one pass over every row.  Compacted rows with the forward's
     valid-row mask (``row_valid``: the fused dX finalize): the inclusive int32 scan -- one ``cumsum``, issued here
-    behind the backward's queued GEMMs -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
+    behind the backward's queued GEMMs, on the host for a mask read back to the host
+    (:func:`.cake_backend._row_scan`) -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
-    (zero fill + ``index_copy_``).  All three produce the same bits."""
+    (zero fill + ``index_copy_``).  All three produce the same bits.  ``fold`` (:func:`cast_fold_operands`): the scatter cast
+    folds the label residuals of the rows no slab sum folded (:func:`scale_cast_scatter`); only the scatter takes it."""
+    if fold is not None and int(fold["hi"]) > int(fold["lo"]):
+        if row_index is None or row_valid is None:
+            raise ValueError("only the compact scatter cast folds label residuals")
     if row_index is None:
         return scale_cast(acc, grad, torch.bfloat16, backend=backend)
     if num_rows is None:
@@ -6304,9 +6456,9 @@ def finalize_dx(
         )
     if row_valid.dtype != torch.bool or tuple(row_valid.shape) != (int(num_rows),):
         raise ValueError(f"row_valid must be the bool [{int(num_rows)}] valid-row mask")
-    scan = torch.cumsum(row_valid, 0, dtype=torch.int32)
+    scan = _main._row_scan(row_valid)
     return scale_cast_scatter(
-        acc, grad, row_index, scan, int(num_rows), backend=backend
+        acc, grad, row_index, scan, int(num_rows), backend=backend, fold=fold
     )
 
 
@@ -6465,8 +6617,7 @@ class _DwCastForm:
         ``out`` = ``cast(g * (acc + dz^T @ x_rows))`` (``[m, H]``; ``acc`` ``None``: ``cast(g * dz^T @ x_rows)``)."""
         rows, m = (int(n) for n in dz.shape)
         H = int(x_rows.shape[1])
-        values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-        values.update({name: 0 for name in COMMON_SCALARS})
+        values: dict[str, Any] = dict(_EAGER_BASE)
         values.update(
             A=dz,
             B=x_rows,
@@ -6489,6 +6640,8 @@ class _DwCastForm:
                 first_chunk=int(acc is None),
             ),
         )
+        # the form: the GEMM's rows, width, vocabulary rows, raster / block and first-chunk arguments (its launch
+        # scalars are :func:`.cake_backend.gemm_scalars` of them; the record fixes the geometry)
         launch, arguments = _eager_launch(
             self.record,
             self.module_name,
@@ -6496,6 +6649,18 @@ class _DwCastForm:
             values,
             self.device,
             self.geometry,
+            form=(
+                _EAGER_FORMED,
+                self.module_name,
+                self.stage,
+                self.index,
+                rows,
+                H,
+                m,
+                self.group_m,
+                self.group_n,
+                int(acc is None),
+            ),
         )
         with _ffi_stream_context(self.index):
             if launch.prepare is not None:
@@ -7225,6 +7390,7 @@ def backward_loss(
     row_valid: Optional[torch.Tensor] = None,
     gemm_tuning: Optional[dict[str, dict[str, Any]]] = None,
     dw_acc_hi: Optional[torch.Tensor] = None,
+    dx_fold: Optional[dict] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Backward of the loss entry from the saved accumulators: ``(dX, dW)`` = ``bf16(g * dX_acc)``,
     ``cast(g * dW_acc)``; the accumulators are read, never written (repeatable).  A compacted forward
@@ -7246,14 +7412,17 @@ def backward_loss(
     :func:`gemm_tuning_default`; ``ForwardResult.gemm_tuning``): the forward's explicit GEMM knobs, which pin the
     deferred weight-gradient GEMM's form (:func:`dw_cast`).  Pass only the accumulators of this package's
     :func:`forward_loss`: raw FP32 accumulators carry no mode tag, so this function cannot refuse those of another
-    package (the non-deterministic package's included)."""
+    package (the non-deterministic package's included).  ``dx_fold`` (``ForwardResult.dx_fold``): the label residuals
+    the compact dX cast folds (:func:`finalize_dx`)."""
     dx = None
     if dx_acc is not None:
         if row_index is not None and num_rows is None:
             raise ValueError(
                 "backward_loss needs num_rows (the caller's T) with row_index"
             )
-        dx = finalize_dx(dx_acc, grad, row_index, row_valid, num_rows, backend=backend)
+        dx = finalize_dx(
+            dx_acc, grad, row_index, row_valid, num_rows, backend=backend, fold=dx_fold
+        )
     if dw_acc_hi is not None:
         # the split accumulator (``"fused_ip"``): checked before any launch
         if dz_last is None or dw_acc is None:
@@ -8191,7 +8360,25 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
     ``dX`` accumulator right after ``dX`` is written, before the weight gradient's buffers exist, the ``dW``
     accumulator and the row state when the backward ends -- instead of when the graph is freed; another backward
     through the same graph then raises.  Otherwise, and in a retained graph, it keeps everything until the graph is
-    freed (the backward is repeatable, the accumulators are read, never written)."""
+    freed (the backward is repeatable, the accumulators are read, never written) -- except the label residual fold's
+    operands (``dx_fold``, :func:`.cake_backend.cast_fold_operands`), which a backward that frees the graph drops right
+    after the dX finalize that reads them.
+
+    The backward's compact dX cast folds the label residuals of the one-slice chunks (``_cast_fold``,
+    :func:`.cake_backend.cast_fold_rows`) only when ``W`` is a leaf that requires a gradient (a parameter, which
+    outlives the backward anyway) and no saved-tensor hooks other than a non-reentrant ``torch.utils.checkpoint``'s are
+    on top.  Such a call saves ``W`` through the autograd context with the other saved tensors (the fast form; the
+    recompute forms and a checkpointed call save it already), the fold operands kept on ``ctx`` carry no ``W``, and the
+    backward hands the unpacked saved ``W`` to the fold and drops its own reference after the dX finalize.  Outside a
+    checkpoint, an in-place write to ``W`` between the forward and the backward then raises PyTorch's saved-tensor
+    version error; a checkpointed call takes ``W`` from its recomputation, as in 0.3.2 (a write raises only where
+    ``torch.utils.checkpoint`` checks it).  Any other call (a non-leaf ``W``, one that requires no gradient, or one
+    under other saved-tensor hooks, such as ``save_on_cpu``, which would copy ``W`` each step) folds every residual in
+    its forward's slab sums, and its dX finalize reads no ``W``: the fast form keeps no reference to ``W`` past its
+    forward (a recompute form and a checkpointed call save ``W`` for their recomputation, as in 0.3.2).  The two paths
+    launch different programs (a fold in the backward: no fold-alone slab sum on those chunks, the fold program
+    ``scale_cast_scatter_fold_bf16``; a fold in the forward: the fold-alone slab sum, ``scale_cast_scatter_bf16``) and
+    give the same ``dX`` and ``dW`` bits."""
 
     @staticmethod
     def forward(
@@ -8218,6 +8405,10 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         check_num_valid_rows,
     ):
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
+        # the backward's compact dX cast folds label residuals only for a head that is a leaf requiring a gradient
+        # (saved through the autograd context below), and not under other saved-tensor hooks (below); any other call
+        # folds them in the forward's slab sums
+        cast_fold = need_dw and W.is_leaf
         # gradient placement "auto" inside a non-reentrant torch.utils.checkpoint (as in :mod:`.cake_backend`): the
         # checkpointed forward computes the loss only and saves the inputs; the recomputation runs this forward and
         # hands its result to the checkpointed call's backward.  Outside one (the plain step): the fused forward
@@ -8256,6 +8447,10 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 ctx, X, grad_weight_dtype, backend, memory_mode
             )
             ckpt = _main._checkpoint_pass()
+            if ckpt is None:
+                # other saved-tensor hooks on top (CPU offload such as save_on_cpu): the forward's slab sums fold, as
+                # in 0.3.2 -- a fold in the backward would pass the head through those hooks (a copy of W each step)
+                cast_fold = False
         if ckpt is not None:
             options = dict(
                 objective=objective,
@@ -8273,6 +8468,10 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 num_valid_rows=num_valid_rows,
                 check_num_valid_rows=check_num_valid_rows,
                 return_logp=bool(return_logp),
+                _cast_fold=cast_fold,
+                # both passes of a checkpointed one-chunk call keep the host count: measured slower with the loss
+                # entry's one-chunk hidden count (its device prologue runs in both passes)
+                _one_chunk_count=False,
             )
             split, handed = _main._loss_checkpoint_split(
                 ctx,
@@ -8326,6 +8525,8 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             num_valid_rows=num_valid_rows,
             check_num_valid_rows=check_num_valid_rows,
             return_logp=bool(return_logp),
+            _cast_fold=cast_fold,
+            _one_chunk_count=ckpt is None,
         )
         CakeLMHeadDetLossFunction._setup(
             ctx, X, grad_weight_dtype, backend, memory_mode
@@ -8335,11 +8536,23 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         # in-place write to X between the forward and the backward raises PyTorch's saved-tensor version error
         # instead of yielding a stale dW.  ``memory_mode="budget"``: the picked form (``None`` = the fast form); a
         # recompute form also saves X, W and labels likewise (an uncompacted call's row-state labels are the caller's
-        # tensor itself) and keeps the row state and plan its recompute reads
+        # tensor itself) and keeps the row state and plan its recompute reads.  A fold in the backward's dX cast
+        # (``dx_fold``): the fast form also saves the head the fold reads, likewise (the backward unpacks it, :meth:`_keep`
+        # leaves none on ctx)
         if result.memory_plan is None or not result.memory_plan.recompute:
-            ctx.save_for_backward(
-                result.dz_last, result.x_last, result.x_src, result.x_idx
-            )
+            dx_fold = getattr(result, "dx_fold", None)
+            if dx_fold is None:
+                ctx.save_for_backward(
+                    result.dz_last, result.x_last, result.x_src, result.x_idx
+                )
+            else:
+                ctx.save_for_backward(
+                    result.dz_last,
+                    result.x_last,
+                    result.x_src,
+                    result.x_idx,
+                    dx_fold["W"],
+                )
         else:
             ctx.save_for_backward(
                 result.dz_last,
@@ -8390,6 +8603,12 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         ctx.row_valid = (
             result.row_valid
         )  # the fused dX finalize's valid-row mask (None otherwise)
+        # the label residuals the compact dX cast folds (:func:`.cake_backend.cast_fold_operands`; None: none), without
+        # the head: the backward hands the fold its saved W (the forward's save, or a checkpointed call's inputs)
+        dx_fold = getattr(result, "dx_fold", None)
+        if dx_fold is not None:
+            dx_fold.pop("W", None)
+        ctx.dx_fold = dx_fold
         # the forward's resolved GEMM knobs: the deferred weight-gradient GEMM takes them
         ctx.gemm_tuning = result.gemm_tuning
         ctx.empty = ctx.num_rows == 0 or (
@@ -8401,6 +8620,7 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         ctx.dx_acc = ctx.dw_acc = ctx.dw_acc_hi = ctx.dw_split = None
         ctx.row_state = ctx.plan = None
         ctx.row_index = ctx.row_valid = None
+        ctx.dx_fold = None
         ctx.released = True
 
     @staticmethod
@@ -8410,13 +8630,15 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             return none
         if ctx.released:
             raise RuntimeError(_SECOND_BACKWARD)
-        saved = None
+        saved = head = None
         if ctx.split is not None:
             # a checkpointed call: unpacking its inputs runs the recomputation, whose fused forward's result (or this
-            # backward's own fused forward) is the gradient state
+            # backward's own fused forward) is the gradient state; the fold's head is the call's saved W
             inputs = ctx.saved_tensors
             state = _main._split_state(ctx, inputs, forward_loss)
             CakeLMHeadDetLossFunction._keep(ctx, state)
+            if ctx.dx_fold is not None:
+                head = inputs[1]
             saved = (state.dz_last, state.x_last, state.x_src, state.x_idx) + (
                 tuple(inputs[:2])
                 if state.memory_plan is not None and state.memory_plan.recompute
@@ -8454,12 +8676,17 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         if mplan is not None and mplan.recompute:
             # (the saved labels only version-check the row state's labels; a checkpointed call saves its inputs)
             dz_last, x_last, x_src, x_idx, X, W = saved[:6]
+            if head is None:
+                head = W
         else:
             mplan = None  # the fast form, or a budget form without a recompute: the weight gradient as before
-            dz_last, x_last, x_src, x_idx = saved
+            dz_last, x_last, x_src, x_idx = saved[:4]
+            if head is None and len(saved) > 4:
+                head = saved[4]  # the fold's head (the forward saves it with a fold)
         # the operations of :func:`backward_loss`, with the saved state released as soon as it is used
         dx = None
         if ctx.dx_acc is not None:
+            dx_fold = getattr(ctx, "dx_fold", None)
             dx = finalize_dx(
                 ctx.dx_acc,
                 grad_loss,
@@ -8467,9 +8694,21 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 ctx.row_valid,
                 ctx.num_rows,
                 backend=ctx.backend,
+                fold=None if dx_fold is None else dict(dx_fold, W=head),
             )
+            # the head serves the fold only: dropped before the weight gradient's buffers exist (a checkpoint inside
+            # offload hooks hands the backward a copy of it)
+            dx_fold = head = None
             if not keep:
                 ctx.dx_acc = None  # released before the weight gradient's buffers exist
+                ctx.dx_fold = None
+            elif getattr(ctx, "dx_fold", None) is not None and not _keep_graph():
+                # the fold operands (the forward's compact labels and FP32 label residuals) serve the dX finalize only:
+                # a backward that frees the graph drops them here, before the weight gradient's buffers exist, so the
+                # step holds no more than the fast form, whose slab sums fold the residuals in the forward
+                ctx.dx_fold = None
+                if ctx.split is not None and ctx.split.result is not None:
+                    ctx.split.result.dx_fold = None
         dw = None
         if ctx.dw_split is not None and dz_last is not None:
             if x_last is None:
@@ -9103,6 +9342,8 @@ class CakeLMHeadDetLogprobAutoFunction(_main.CakeLMHeadDetLogprobFunction):
                 row_index=row_index,
                 mplan=mplan,
             )
+            # (the budget form binds no graph label residuals; a graph-freeing backward drops a held buffer as well)
+            _main._release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 11
 
 
@@ -9164,6 +9405,7 @@ class CakeLMHeadDetLogprobTemperatureAutoFunction(
             dx, dw = _backward_logprob_budget_temperature(
                 X, W, labels, lse, dlogp, temperature_rows=tau_rows, **common
             )
+        _main._release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 13
 
 
@@ -10060,8 +10302,21 @@ class CakeLMHeadDetLogprobOneChunkFunction(CakeLMHeadDetLogprobAutoFunction):
             keep=keep,
         )
         kept = getattr(result, "logits", None)
-        # the kept logits are saved tensors too (see the backend's kept-logits function)
-        ctx.save_for_backward(X, W, labels, result.lse, result.row_index, *(kept or ()))
+        # the kept logits are saved tensors too (see the backend's kept-logits function), behind the forward's
+        # valid-row mask and bound labels (the kept backward forms neither again); the default form saves its five
+        if kept is not None:
+            ctx.save_for_backward(
+                X,
+                W,
+                labels,
+                result.lse,
+                result.row_index,
+                result.row_valid,
+                result.labels_c,
+                *kept,
+            )
+        else:
+            ctx.save_for_backward(X, W, labels, result.lse, result.row_index)
         ctx.one_chunk = ctx.kept = kept is not None
         ctx.auto = bool(auto)
         ctx.chunk_size, ctx.backend, ctx.compact = chunk_size, backend, compact
@@ -10071,6 +10326,15 @@ class CakeLMHeadDetLogprobOneChunkFunction(CakeLMHeadDetLogprobAutoFunction):
         ctx.hidden_count = hidden
         ctx.gemm_tuning = tuning
         ctx.logprob_dz = dz_arm
+        # the graph's label residuals (:func:`.cake_backend._logprob_graph_rlab`): the kept logits' first backward
+        # takes them and stores every row with ``row_grad``, a later one recomputes over the same rows
+        ctx.rlab = _main._logprob_graph_rlab(
+            X,
+            result.row_index,
+            backend=backend,
+            need_dx=bool(ctx.needs_input_grad[0]),
+            need_dw=bool(ctx.needs_input_grad[1]),
+        )
         return result.logp
 
     @staticmethod

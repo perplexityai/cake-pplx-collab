@@ -30,13 +30,37 @@ Host design (every switch is a keyword; no environment variable):
   place, any other buffer must not overlap ``x``.
 - The FP32 scales ``[..., D / G]`` are written when ``return_scales`` is
   true or a ``scales`` buffer is given.
-- A call runs the one program of its route (``cake_jit.selected_module``) in
-  64-thread CTAs on the current torch stream.  The grid is the ``tiles`` rule
-  of ``cake_jit.launch_grid``: one CTA per tile of 128 vectors (256 on
-  sm_107a) once the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on
-  sm_107a), else the resident CTAs walk the tiles.  It does not read device
+- A call runs one program of its route (``cake_jit.selected_module``) on the
+  current torch stream: the small program (256-thread CTAs, tiles of 512
+  vectors) when ``n_vecs = numel / 8`` lies in its range for the call's kind
+  (out of place: 65,537 to 524,288 on sm_100a and sm_103a, to 131,072 for
+  MXFP8 without the scales, 1 to 262,144 on sm_107a; in place: 1 to 262,144
+  on sm_107a only); for MXFP8 without the scales on sm_100a and sm_103a, the
+  wide program (128-thread CTAs, tiles of 512 vectors) above those sizes (out
+  of place from 131,073 vectors to 2,147,483,136, in place from 262,145 to
+  33,554,431); for MXFP4 and MXFP8 on sm_100a and sm_103a, the large program
+  (1024-thread CTAs, tiles of 2,048 vectors) at the largest sizes (in place
+  from 4,194,304 vectors, from 33,554,432 for MXFP8 without the scales, and
+  out of place from 8,388,608 for MXFP8 with the scales only, all to
+  2,147,481,600); else the main program (64-thread CTAs, tiles of 128
+  vectors, 256 on sm_107a).  The grid is the ``tiles`` rule of
+  ``cake_jit.launch_grid``: one CTA per tile once the tiles pass 2.5 waves of
+  resident CTAs (32 per SM, 16 on sm_107a; 8 and 4 for the small program),
+  else the resident CTAs, at most one per tile, walk the tiles; the wide and
+  the large programs always launch one CTA per tile.  It does not read device
   memory on the host and does not synchronize.  A call with no elements
   launches nothing.
+- ``locality`` is ``"off"`` (default: the route above, no driver query and
+  no state) or ``"domain"``.  With ``"domain"``, an out-of-place call on
+  SM107 whose ``x`` and ``out`` both lie in memory from
+  :func:`cake_act_qdq_det_train_domain_empty` (chunks that alternate dies),
+  at the same offset in their chunks and in chunks of the same die, with
+  ``n_vecs`` in the interleaved-domain record's ``vectors`` range, runs that
+  record (``cake_jit.domain_route``); every other call runs the route above.
+  Both give the same bytes.  The placement is read from the package's
+  registry of those ranges, with no driver call; the claim workspaces are
+  the ones of ``cake_domain``.  :func:`cake_act_qdq_det_train_domain_plan`
+  reports the route, its reason and its launch without launching.
 - Every output repeats bit for bit for identical inputs: each group is
   quantized by its own threads, and nothing is summed (``README.md``).
 """
@@ -44,7 +68,8 @@ Host design (every switch is a keyword; no environment variable):
 from __future__ import annotations
 
 import functools
-from typing import Optional, Sequence, Tuple, Union
+import types
+from typing import Any, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -55,6 +80,26 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(sorted(ARCH_
 # The largest element count of one call: ``numel / 8`` vectors, at most
 # ``cake_jit.MAX_VECTORS``.
 MAX_ELEMENTS = cake_jit.VECTOR * cake_jit.MAX_VECTORS
+# The values of ``locality``.
+_LOCALITIES = ("off", "domain")
+
+
+@functools.cache
+def _domain() -> Any:
+    """The module of memory that alternates dies and of the claim workspaces,
+    imported on the first ``"domain"`` call or helper call."""
+
+    from . import cake_domain  # noqa: PLC0415 - only the locality-domain path needs it
+
+    return cake_domain
+
+
+def _domain_requested(locality: object) -> bool:
+    if not isinstance(locality, str):
+        raise TypeError(f"locality must be a str, one of {_LOCALITIES}, got {type(locality).__name__}")
+    if locality not in _LOCALITIES:
+        raise ValueError(f"locality must be one of {_LOCALITIES}, got {locality!r}")
+    return locality == "domain"
 
 
 def _device_index(device: torch.device) -> int:
@@ -159,27 +204,36 @@ def cake_act_qdq_det_train_forward_workspace_bytes(
     format: str,
 ) -> int:
     """The workspace of one forward call of an input of ``shape``: always 0
-    bytes.  The call keeps no state between calls either.  Raises
-    ``ValueError`` for a format or shape the forward refuses."""
+    bytes, as a call takes no caller workspace.  A ``locality="domain"`` call
+    keeps its claim counters in the package's own workspace per stream: 128
+    bytes in each die's memory, from the device's 15,360 eager workspaces
+    (for eager calls) or 1,024 graph workspaces (for CUDA graph captures); a
+    stream or capture that finds its kind all taken keeps both counters in
+    default memory.  Raises ``ValueError`` for a format or shape the forward
+    refuses."""
 
     _check_shape(shape, _group_size(format))
     return 0
 
 
-def cake_act_qdq_det_train_forward(
-    x: torch.Tensor,
-    *,
-    format: str,
-    out: Optional[torch.Tensor] = None,
-    scales: Optional[torch.Tensor] = None,
-    return_scales: bool = False,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    """Quantize ``x`` per group to ``format`` and dequantize it back to BF16.
+class _Call(NamedTuple):
+    """A checked call: what the route and the launch read."""
 
-    Returns ``y``, or ``(y, scales)`` when ``return_scales`` is true or a
-    ``scales`` buffer is given.  ``y`` is ``out`` when given (``out=x``
-    works in place).
-    """
+    arch: str
+    device_index: int
+    numel: int
+    scale_out: bool
+    scale_shape: tuple[int, ...]
+
+
+def _checked_call(
+    x: object,
+    format: str,
+    out: Optional[torch.Tensor],
+    scales: Optional[torch.Tensor],
+    return_scales: bool,
+) -> _Call:
+    """Check the arguments of one call, before any allocation or launch."""
 
     group = _group_size(format)
     if not isinstance(x, torch.Tensor) or not x.is_cuda:
@@ -197,41 +251,193 @@ def cake_act_qdq_det_train_forward(
         raise ValueError(f"x must be {ALIGNMENT_BYTES}-byte aligned")
 
     shape = tuple(x.shape)
-    if out is None:
-        y = torch.empty_like(x, memory_format=torch.contiguous_format)
-    else:
-        y = _check_buffer(out, "out", dtype=torch.bfloat16, shape=shape, device=x.device)
-        if y.data_ptr() % ALIGNMENT_BYTES:
+    if out is not None:
+        _check_buffer(out, "out", dtype=torch.bfloat16, shape=shape, device=x.device)
+        if out.data_ptr() % ALIGNMENT_BYTES:
             raise ValueError(f"out must be {ALIGNMENT_BYTES}-byte aligned")
         # In place is out=x, or a buffer with x's exact bytes; any other
         # overlap is refused.
-        if y.data_ptr() != x.data_ptr() and _overlaps(x, y):
+        if out.data_ptr() != x.data_ptr() and _overlaps(x, out):
             raise ValueError("out must be x itself (in place) or must not overlap x")
 
     scale_out = bool(return_scales) or scales is not None
-    s = None
-    if scale_out:
-        scale_shape = (*shape[:-1], shape[-1] // group)
-        if scales is None:
-            s = torch.empty(scale_shape, dtype=torch.float32, device=x.device)
-        else:
-            s = _check_buffer(
-                scales, "scales", dtype=torch.float32, shape=scale_shape, device=x.device
-            )
-            if _overlaps(s, x) or _overlaps(s, y):
-                raise ValueError("scales must not overlap x or out")
+    scale_shape = (*shape[:-1], shape[-1] // group)
+    if scales is not None:
+        _check_buffer(scales, "scales", dtype=torch.float32, shape=scale_shape, device=x.device)
+        # A new output cannot overlap a caller's buffer.
+        if _overlaps(scales, x) or (out is not None and _overlaps(scales, out)):
+            raise ValueError("scales must not overlap x or out")
+    return _Call(arch, device_index, numel, scale_out, scale_shape)
 
-    if numel:
-        name = cake_jit.selected_module(arch, format, scale_out=scale_out)
-        values = {"x": x, "y": y, "n_vecs": numel // cake_jit.VECTOR}
-        if scale_out:
+
+def _domain_choice(
+    call: _Call,
+    format: str,
+    *,
+    n_vecs: int,
+    in_place: bool,
+    x: torch.Tensor,
+    out: Optional[torch.Tensor],
+) -> tuple[Optional[str], str, Optional[Mapping[str, Any]]]:
+    """``(record, reason, launch)`` of a ``locality="domain"`` call with
+    elements: the interleaved-domain record and its :func:`cake_jit.domain_launch` (read only)
+    when :func:`cake_jit.domain_route` places the call, else ``(None, reason,
+    None)`` for the route's plain program.  Never raises for a placement.
+    The placements are read only for a call that passes the checks that need
+    none (:func:`cake_jit.domain_candidate`), so a call outside the record's
+    size range costs no more than those checks."""
+
+    name, reason = cake_jit.domain_candidate(
+        call.arch,
+        format,
+        scale_out=call.scale_out,
+        n_vecs=n_vecs,
+        in_place=in_place,
+        out_given=out is not None,
+    )
+    if name is None:
+        return None, reason, None
+    chunk = int(cake_jit.MODULES[name]["grid_rule"]["chunk_bytes"])
+    place = _domain().place
+    x_place = place(x, chunk)
+    reason = cake_jit.domain_placement(x_place, place(out, chunk))
+    if reason != "placed":
+        return None, reason, None
+    launch = _domain_launch(name, n_vecs, x_place, cake_jit.sm_count(call.device_index), call.arch)
+    return name, reason, launch
+
+
+@functools.lru_cache(maxsize=1024)
+def _domain_launch(
+    name: str, n_vecs: int, x_place: tuple[int, int], sm_count: int, arch: str
+) -> types.MappingProxyType[str, Any]:
+    """:func:`cake_jit.domain_launch` of record ``name``, read only and kept per argument set: the calls on one pair
+    of buffers repeat it, and it costs about 1 us of host time in front of every launch."""
+
+    return types.MappingProxyType(
+        cake_jit.domain_launch(cake_jit.MODULES[name], n_vecs=n_vecs, x_place=x_place, sm_count=sm_count, arch=arch)
+    )
+
+
+def cake_act_qdq_det_train_forward(
+    x: torch.Tensor,
+    *,
+    format: str,
+    out: Optional[torch.Tensor] = None,
+    scales: Optional[torch.Tensor] = None,
+    return_scales: bool = False,
+    locality: str = "off",
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    """Quantize ``x`` per group to ``format`` and dequantize it back to BF16.
+
+    Returns ``y``, or ``(y, scales)`` when ``return_scales`` is true or a
+    ``scales`` buffer is given.  ``y`` is ``out`` when given (``out=x``
+    works in place).  ``locality`` is ``"off"`` or ``"domain"`` (checked
+    first: ``TypeError`` for a non-string, ``ValueError`` for another
+    string); ``"domain"`` runs the interleaved-domain program where
+    :func:`cake_act_qdq_det_train_domain_plan` says so, and the same bytes
+    either way.
+    """
+
+    domain = _domain_requested(locality)
+    call = _checked_call(x, format, out, scales, return_scales)
+    y = torch.empty_like(x, memory_format=torch.contiguous_format) if out is None else out
+    s = None
+    if call.scale_out:
+        s = torch.empty(call.scale_shape, dtype=torch.float32, device=x.device) if scales is None else scales
+
+    if call.numel:
+        n_vecs = call.numel // cake_jit.VECTOR
+        in_place = y.data_ptr() == x.data_ptr()
+        values = {"x": x, "y": y, "n_vecs": n_vecs}
+        if call.scale_out:
             values["scales"] = s
-        cake_jit.run_module(name, values, device_index=device_index)
+        name = launch = None
+        if domain:
+            name, _, launch = _domain_choice(call, format, n_vecs=n_vecs, in_place=in_place, x=x, out=out)
+        if name is None:
+            name = cake_jit.selected_module(
+                call.arch,
+                format,
+                scale_out=call.scale_out,
+                n_vecs=n_vecs,
+                in_place=in_place,
+            )
+            cake_jit.run_module(name, values, device_index=call.device_index)
+        else:
+            values.update({key: launch[key] for key in ("first_tile", "first_die", "chunk_tile_shift", "batch_shift")})
+            _domain().launch(name, values, device_index=call.device_index, grid=launch["grid"])
         if out is not None:
             _mark_written(y)
         if scales is not None:
             _mark_written(s)
-    return (y, s) if scale_out else y
+    return (y, s) if call.scale_out else y
+
+
+def cake_act_qdq_det_train_domain_empty(
+    shape: Sequence[int],
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+    device: Optional[Union[torch.device, str, int]] = None,
+) -> torch.Tensor:
+    """An uninitialized contiguous tensor of ``shape`` and ``dtype`` in memory
+    whose 2 MB chunks alternate between the two dies of an SM107 (R200)
+    device: ``x`` and ``out`` of a ``locality="domain"`` call.  ``device``
+    defaults to the current CUDA device.  ``TypeError`` for a ``dtype`` that
+    is not a ``torch.dtype``, ``ValueError`` for a negative dimension or a
+    device that is not CUDA, ``torch.cuda.OutOfMemoryError`` when the device
+    has no room, ``RuntimeError`` during a CUDA graph capture on any device
+    in this thread, on another architecture or with fewer than two locality
+    domains (``cake_domain.domain_empty``).  Freeing the last view
+    synchronizes the device."""
+
+    return _domain().domain_empty(shape, dtype=dtype, device=device)
+
+
+def cake_act_qdq_det_train_domain_plan(
+    x: torch.Tensor,
+    *,
+    format: str,
+    out: Optional[torch.Tensor] = None,
+    scales: Optional[torch.Tensor] = None,
+    return_scales: bool = False,
+) -> dict[str, Any]:
+    """What ``cake_act_qdq_det_train_forward(x, format=format, out=out,
+    scales=scales, return_scales=return_scales, locality="domain")`` runs,
+    without a launch or an allocation: ``route`` (``"domain"`` or
+    ``"plain"``), ``reason`` (``"placed"`` for the domain route, else one of
+    ``cake_jit.DOMAIN_REASONS`` or ``"empty"`` for a call with no elements),
+    ``program`` (the ``cake_jit.MODULES`` record, None for no launch),
+    ``first_tile`` and ``first_die`` (None on the plain route) and ``grid``.
+    The arguments are checked as the forward checks them."""
+
+    call = _checked_call(x, format, out, scales, return_scales)
+    if not call.numel:
+        return {
+            "route": "plain",
+            "reason": "empty",
+            "program": None,
+            "first_tile": None,
+            "first_die": None,
+            "grid": None,
+        }
+    n_vecs = call.numel // cake_jit.VECTOR
+    in_place = out is not None and out.data_ptr() == x.data_ptr()
+    name, reason, launch = _domain_choice(call, format, n_vecs=n_vecs, in_place=in_place, x=x, out=out)
+    if name is not None:
+        return {
+            "route": "domain",
+            "reason": reason,
+            "program": name,
+            "first_tile": launch["first_tile"],
+            "first_die": launch["first_die"],
+            "grid": launch["grid"],
+        }
+    name = cake_jit.selected_module(call.arch, format, scale_out=call.scale_out, n_vecs=n_vecs, in_place=in_place)
+    grid = cake_jit.launch_grid(
+        cake_jit.MODULES[name], n_vecs=n_vecs, sm_count=cake_jit.sm_count(call.device_index), arch=call.arch
+    )
+    return {"route": "plain", "reason": reason, "program": name, "first_tile": None, "first_die": None, "grid": grid}
 
 
 __all__ = [
@@ -241,6 +447,8 @@ __all__ = [
     "GROUP_SIZES",
     "MAX_ELEMENTS",
     "SUPPORTED_COMPUTE_CAPABILITIES",
+    "cake_act_qdq_det_train_domain_empty",
+    "cake_act_qdq_det_train_domain_plan",
     "cake_act_qdq_det_train_forward",
     "cake_act_qdq_det_train_forward_workspace_bytes",
     "is_cake_act_qdq_det_train_supported",

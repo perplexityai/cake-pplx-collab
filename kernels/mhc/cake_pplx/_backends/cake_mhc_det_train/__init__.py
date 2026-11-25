@@ -27,7 +27,37 @@ routes ``fwd_prepare_handoff`` (the standard forward with the collapse
 it) and ``bwd_finish_handoff`` (the standard backward with the token-owner
 forms ``bwd_token__<form>_ho``), and the standalone collapse routes
 ``collapse_forward`` / ``collapse_backward`` (no workspace); every output
-repeats bit for bit for a given token count on a given device.
+repeats bit for bit for a given token count on a given device.  On SM107 the
+three collapse records are that architecture's own forms with the same bits
+(``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``, ``collapse_bwd__vjpwa_pfq2``);
+``collapse_forward`` runs ``collapse_fwd__m2`` up to 2047 tokens,
+``collapse_fwd__m2_xhnone_rv`` (the ``collapse_fwd__m2_xhnone`` form with its
+trips in reverse launch order, the same bits) from 2048 to 6655 tokens and
+``collapse_fwd__m2_xhnone`` (the same form without the L2 evict-first policy on
+``X``, the same bits) from 6656 tokens; ``collapse_backward`` runs
+``collapse_bwd__vjpwa_sp4_mb4`` / ``collapse_bwd__vjpwa_sp2_mb4`` (the
+``collapse_bwd__vjpwa`` VJP split over four / two CTAs a token, the same bits)
+up to 215 / from 216 to 383 tokens, ``collapse_bwd__vjpwa`` (the same VJP
+without the L2 prefetch, the same bits) from 384 to 640 tokens and
+``collapse_bwd__vjpwa_pfq2`` from 641 tokens.  On SM100 / SM103
+``collapse_backward`` runs ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens,
+except from 31 to 37 tokens on SM100 and from 31 to 38 tokens on SM103, where
+it runs ``collapse_bwd__vjpwd_sp4_mb4`` (the same split VJP without the
+shared-memory stage, the same bits; each band under its own record name).
+SM100 then runs ``collapse_bwd__vjpwa_sp2_mb4`` (under the record name
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``) from 216 to 1023 tokens,
+``collapse_bwd__vjpwa_pf0`` (the one-CTA VJP that prefetches its own token's
+rows into L2 before its ``cp.async`` stage) from 1024 to 6143 tokens and
+``collapse_bwd__vjpwd`` (the one-CTA VJP without the shared-memory stage)
+from 6144 tokens.  SM103 runs ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 247
+and from 320 to 1023 tokens (record names
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``), ``collapse_bwd`` from
+248 to 319 tokens (record name ``collapse_bwd__h5120__le319``),
+``collapse_bwd__vjpwa_pf0`` from 1024 to 8191 tokens (record name
+``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191``) and
+``collapse_bwd__vjpwd`` from 8192 tokens (record name
+``collapse_bwd__vjpwd__h5120__gt8191``).  Every record gives the same bits.
 """
 
 from __future__ import annotations

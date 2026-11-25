@@ -102,15 +102,15 @@ kernel_cake_kda_train_2967f0b64b43ffc5d99c(__nv_bfloat16* __restrict__ g_raw, fl
     int d0 = lane_1 * 4;
     long long ext0 = (long long)chunk_bos[chunk];
     int clen = chunk_len[chunk];
-    long long int0 = (long long)chunk * 64;
+    long long int0 = (long long)chunk * 64ll;
     int clast = clen - 1;
     if (clast < 0) {
         clast = 0;
     }
     int rs = num_heads * 128;
     int qs = num_qk_heads * 128;
-    long long ibase = (int0 * (long long)num_heads + (long long)head) * 128 + (long long)d0;
-    long long qbase = (ext0 * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)d0;
+    long long ibase = (int0 * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
+    long long qbase = (ext0 * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)d0;
     long long bbase = ext0 * (long long)num_heads + (long long)head;
     float rg_rate = __nv_expf(A_log[head]);
     float rg_clr;
@@ -328,7 +328,7 @@ kernel_cake_kda_train_2967f0b64b43ffc5d99c(__nv_bfloat16* __restrict__ g_raw, fl
             beta_int[(int0 + (long long)t_u_2) * (long long)num_heads + (long long)head] = bt;
         }
     }
-    long long ebase = (ext0 * (long long)num_heads + (long long)head) * 128 + (long long)d0;
+    long long ebase = (ext0 * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
     unsigned int dwa[16];
     int t_u_0 = warp_0 * 8;
     int t_c_0 = t_u_0;

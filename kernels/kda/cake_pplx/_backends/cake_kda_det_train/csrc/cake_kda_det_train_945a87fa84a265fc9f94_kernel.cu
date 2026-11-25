@@ -398,7 +398,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
                 }
                 tmem_st_x16_f32(taddr + (unsigned int)h_row_base + 112, init_row);
             } else if (use_h0 == 1) {
-                long long h0_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long h0_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 #pragma unroll
                 for (int q_5 = 0; q_5 < 4; q_5++) {
                     {
@@ -830,7 +830,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
                 asm volatile("tcgen05.fence::after_thread_sync;");
             }
             if (write_ht == 1) {
-                long long ht_base = (((long long)walk * (long long)num_seqs + (long long)seq) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long ht_base = (((long long)walk * (long long)num_seqs + (long long)seq) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 float tmem_load_r_r_r_0[16];
                 tmem_ld_x16(&tmem_load_r_r_r_0[0], taddr + (unsigned int)h_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -948,7 +948,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
             int h_row_base_1 = warp_in_wg_1 * 32 << 16;
             float gk_pre = 0.0f;
             if (nc_1 > 0) {
-                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                 gk_pre = gk[gn_next];
             }
             unsigned int _phase_hs_ready_0 = 0;
@@ -1031,7 +1031,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
                 }
                 tmem_st_x16_f32(taddr + (unsigned int)h_row_base_1 + 112, hs2_7_7);
                 if (nc_1 > c_1 + 1) {
-                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                     gk_pre = gk[gn_next_1];
                 }
                 asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
@@ -1875,7 +1875,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
                 mbarrier_wait(u_read_addr + (ust) * 8, _phase_u_read);
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 int wcol = (int)wst_c * 64;
-                long long widx = (((long long)(c0_4 + j_16) * 128 + (long long)k_row_2) * (long long)num_heads + (long long)head_4) * 64;
+                long long widx = (((long long)(c0_4 + j_16) * 128ll + (long long)k_row_2) * (long long)num_heads + (long long)head_4) * 64ll;
                 float tmem_load_0[16];
                 tmem_ld_x16(&tmem_load_0[0], taddr + 256 + (unsigned int)row_base + (unsigned int)wcol);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -1997,7 +1997,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
                         const unsigned* _raw_stv8_1 = reinterpret_cast<const unsigned*>(packed_2);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(w_t_out + (widx + 16))), "r"(_raw_stv8_1[0]), "r"(_raw_stv8_1[1]), "r"(_raw_stv8_1[2]), "r"(_raw_stv8_1[3]), "r"(_raw_stv8_1[4]), "r"(_raw_stv8_1[5]), "r"(_raw_stv8_1[6]), "r"(_raw_stv8_1[7]) : "memory");
+                            :: "l"((void*)(w_t_out + (widx + 16ll))), "r"(_raw_stv8_1[0]), "r"(_raw_stv8_1[1]), "r"(_raw_stv8_1[2]), "r"(_raw_stv8_1[3]), "r"(_raw_stv8_1[4]), "r"(_raw_stv8_1[5]), "r"(_raw_stv8_1[6]), "r"(_raw_stv8_1[7]) : "memory");
                     }
                 }
                 float tmem_load_2[16];
@@ -2059,7 +2059,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
                         const unsigned* _raw_stv8_2 = reinterpret_cast<const unsigned*>(packed_3);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(w_t_out + (widx + 32))), "r"(_raw_stv8_2[0]), "r"(_raw_stv8_2[1]), "r"(_raw_stv8_2[2]), "r"(_raw_stv8_2[3]), "r"(_raw_stv8_2[4]), "r"(_raw_stv8_2[5]), "r"(_raw_stv8_2[6]), "r"(_raw_stv8_2[7]) : "memory");
+                            :: "l"((void*)(w_t_out + (widx + 32ll))), "r"(_raw_stv8_2[0]), "r"(_raw_stv8_2[1]), "r"(_raw_stv8_2[2]), "r"(_raw_stv8_2[3]), "r"(_raw_stv8_2[4]), "r"(_raw_stv8_2[5]), "r"(_raw_stv8_2[6]), "r"(_raw_stv8_2[7]) : "memory");
                     }
                 }
                 float tmem_load_3[16];
@@ -2121,7 +2121,7 @@ kernel_cake_kda_det_train_945a87fa84a265fc9f94(const __grid_constant__ CUtensorM
                         const unsigned* _raw_stv8_3 = reinterpret_cast<const unsigned*>(packed_4);
                         asm volatile(
                             "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                            :: "l"((void*)(w_t_out + (widx + 48))), "r"(_raw_stv8_3[0]), "r"(_raw_stv8_3[1]), "r"(_raw_stv8_3[2]), "r"(_raw_stv8_3[3]), "r"(_raw_stv8_3[4]), "r"(_raw_stv8_3[5]), "r"(_raw_stv8_3[6]), "r"(_raw_stv8_3[7]) : "memory");
+                            :: "l"((void*)(w_t_out + (widx + 48ll))), "r"(_raw_stv8_3[0]), "r"(_raw_stv8_3[1]), "r"(_raw_stv8_3[2]), "r"(_raw_stv8_3[3]), "r"(_raw_stv8_3[4]), "r"(_raw_stv8_3[5]), "r"(_raw_stv8_3[6]), "r"(_raw_stv8_3[7]) : "memory");
                     }
                 }
                 float _tmem_load_0[16];

@@ -32,24 +32,25 @@ masked token (``token_mask[t]`` False) gives ``out[t] = x[t]`` and
 nothing to the weight gradients.
 
 The autograd entries and the explicit forward take ``dot_sum``, how the
-forward sums ``P``.  The default, ``"compensated"``, is a compensated FP32 dot
-product: each product split with an FMA, each running sum with an error-free
-two-sum, the error words added once at the end.  ``"fp32"`` (opt-in) sums
-``P`` in one FP32 word: the forward takes about 5-10% less time, depending
-on the GPU (``T = 16384``, FP32 weights: 0.313 ms against 0.329 ms on
-GB300, 0.197 ms against 0.218 ms on VR200) and, where the products nearly
-cancel, rounds more output elements away from the correctly rounded result
-(17802 of the 8.19 million output elements of 25 near-cancelling draws,
-against 117; an FP32 evaluation of the formula: 21917).  The backward is the
-same for both: it recomputes ``P`` as a compensated dot product, so the
-gradients do not depend on ``dot_sum`` (the explicit backward does not take
-it).  As measured on B200, GB200, GB300 and VR200, both choices meet every
-accuracy bound of the acceptance tests: the median and the largest relative
-L2 error against an FP64 reference, over random draws and over draws whose
-dot products nearly cancel (``|dot|`` from 2e-6 to 2e-5), at most twice
-those of an FP32 evaluation of the formula.  The ``out`` errors of the two
-forwards agree to four digits (GB300, near-cancelling: 1.661e-3 median and
-1.669e-3 largest, against bounds of 3.321e-3 and 3.338e-3).
+forward sums ``P``.  The default, ``"fp32"``, sums ``P`` in one FP32 word.
+``"compensated"`` (opt-in) is a compensated FP32 dot product: each product
+split with an FMA, each running sum with an error-free two-sum, the error
+words added once at the end.  The compensated forward takes about 5-18% more
+time, depending on the GPU (``T = 16384``, FP32 weights, ``token_mask=None``:
+0.329 ms against 0.313 ms on GB300, 0.205 ms against 0.174 ms on VR200) and,
+where the products nearly cancel, rounds fewer output elements away from the
+correctly rounded result (117 of the 8.19 million output elements of 25
+near-cancelling draws, against 17802 for the default; an FP32 evaluation of
+the formula: 21917).  The backward is the same for both: it recomputes ``P``
+as a compensated dot product, so the gradients do not depend on ``dot_sum``
+(the explicit backward does not take it).  As measured on B200, GB200, GB300
+and VR200, both choices meet every accuracy bound of the acceptance tests: the
+median and the largest relative L2 error against an FP64 reference, over
+random draws and over draws whose dot products nearly cancel (``|dot|`` from
+2e-6 to 2e-5), at most twice those of an FP32 evaluation of the formula.  The
+``out`` errors of the two forwards agree to four digits (GB300,
+near-cancelling: 1.661e-3 median and 1.669e-3 largest, against bounds of
+3.321e-3 and 3.338e-3).
 
 Entries: :func:`cake_engram_gate_nondet` (with autograd; ``key`` and ``value``
 contiguous or views into one packed ``[T, 25600]``),
@@ -63,13 +64,11 @@ autograd), :func:`cake_engram_gate_nondet_train_workspace_bytes` and
 resolve to the backend's objects on first access.
 
 The mode is part of the name: no entry takes a ``deterministic`` keyword
-(passing one is a ``TypeError``).  The backward adds the weight-gradient
-partial sums of the clusters with float atomics, so ``dq_weight`` and
-``dk_weight`` may differ in their last bits run to run; under
-``torch.use_deterministic_algorithms(True)`` every backward call that
-launches raises PyTorch's ``RuntimeError`` naming the deterministic package's
-entry (``warn_only=True``: one ``UserWarning``, then this package runs).  The
-forward never consults the mode.
+(passing one is a ``TypeError``).  ``out``, ``dx``, ``dkey`` and ``dvalue``
+have one fixed order; ``dq_weight`` and ``dk_weight`` promise no bits run to
+run.  The package launches the deterministic package's kernels under its own
+names (every sum in one fixed order), so nothing consults
+``torch.use_deterministic_algorithms`` (there is nothing to alert about).
 
 A stable API (``@cake_api``; no ``ExperimentalWarning``) of thin wrappers:
 the checks, the launch plan, the autograd Functions and the generated kernels
@@ -93,8 +92,9 @@ Usage::
     kv = projection(rows)                          # BF16 [T, 25600]: four keys, then the value
     out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, eps=1e-20, clamp_value=1e-6)
     out.backward(dout)                             # x.grad, kv.grad [T, 25600], q_weight.grad, k_weight.grad
-    # opt-in: the forward sums each dot product in one FP32 word (faster); the backward is the same
-    out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, dot_sum="fp32")
+    # opt-in: the forward sums each dot product compensated (slower; fewer near-cancelling outputs rounded away
+    # from the correctly rounded result); the backward is the same
+    out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, dot_sum="compensated")
 """
 
 from __future__ import annotations
@@ -169,7 +169,7 @@ def cake_engram_gate_nondet(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
-    dot_sum: str = "compensated",
+    dot_sum: str = "fp32",
 ) -> torch.Tensor:
     r"""The Engram context gate with autograd (``CakeEngramGateNondetFunction``).
 
@@ -190,9 +190,9 @@ def cake_engram_gate_nondet(
         Bool ``[T]``; ``False`` shuts the gate of the token.
     eps, clamp_value : float
         The RMS epsilon and the clamp of ``|dot|`` (run-time values; finite, non-negative).
-    dot_sum : {"compensated", "fp32"}
-        How the forward sums ``P = sum_d w_d h_d k_d``: ``"compensated"`` (default), a compensated FP32 dot product;
-        ``"fp32"`` (opt-in), one FP32 word, faster, with more output elements rounded away from the correctly
+    dot_sum : {"fp32", "compensated"}
+        How the forward sums ``P = sum_d w_d h_d k_d``: ``"fp32"`` (default), one FP32 word; ``"compensated"``
+        (opt-in), a compensated FP32 dot product, slower, with fewer output elements rounded away from the correctly
         rounded result where the products nearly cancel.  Both meet the accuracy bounds as measured on B200, GB200,
         GB300 and VR200 (see the module notes); the backward is the same for both.
 
@@ -210,13 +210,11 @@ def cake_engram_gate_nondet(
         than above; ``eps`` or ``clamp_value`` is not finite and non-negative; ``dot_sum`` is another value.
     RuntimeError
         The device is not one of ``ARCHES``.
-        In the backward under ``torch.use_deterministic_algorithms(True)`` (``warn_only=True``: a warning).
 
     Notes
     -----
-    The weight gradients are summed with float atomics: under ``torch.use_deterministic_algorithms(True)`` the
-    backward raises before it launches.  ``T == 0`` launches nothing, gives zero weight gradients and does not
-    alert.
+    The weight gradients promise no bits run to run; ``torch.use_deterministic_algorithms`` is not consulted.
+    ``T == 0`` launches nothing and gives zero weight gradients.
     """
     return _pkg().cake_engram_gate_nondet(
         x, key, value, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, dot_sum=dot_sum
@@ -233,7 +231,7 @@ def cake_engram_gate_nondet_kv(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
-    dot_sum: str = "compensated",
+    dot_sum: str = "fp32",
 ) -> torch.Tensor:
     r"""The Engram context gate with autograd on the packed projection output (``CakeEngramGateNondetKvFunction``).
 
@@ -259,7 +257,7 @@ def cake_engram_gate_nondet_kv(
 
     Notes
     -----
-    The backward raises PyTorch's alert under ``torch.use_deterministic_algorithms(True)``.
+    The weight gradients promise no bits run to run; ``torch.use_deterministic_algorithms`` is not consulted.
     """
     return _pkg().cake_engram_gate_nondet_kv(
         x, kv, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, dot_sum=dot_sum
@@ -277,7 +275,7 @@ def cake_engram_gate_nondet_train_forward(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
-    dot_sum: str = "compensated",
+    dot_sum: str = "fp32",
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     r"""The forward without autograd.
@@ -348,13 +346,11 @@ def cake_engram_gate_nondet_train_backward(
     ------
     ValueError, RuntimeError
         As in :func:`cake_engram_gate_nondet`.
-        ``RuntimeError`` also under ``torch.use_deterministic_algorithms(True)`` (``warn_only=True``: a warning).
 
     Notes
     -----
-    ``dq_weight`` and ``dk_weight`` are summed with float atomics; under ``torch.use_deterministic_algorithms(True)``
-    the call raises before it allocates or launches anything.  ``T == 0`` launches nothing, returns zero weight
-    gradients and does not alert.
+    ``dq_weight`` and ``dk_weight`` promise no bits run to run; ``torch.use_deterministic_algorithms`` is not
+    consulted.  ``T == 0`` launches nothing and returns zero weight gradients.
     """
     return _pkg().cake_engram_gate_nondet_train_backward(
         dout,
@@ -382,13 +378,15 @@ def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.de
         The token count.
     device : torch.device, int or str, optional
         The CUDA device (None: the current one).
+        The number of partial rows follows its architecture and SM count: ``ValueError`` for a device that is not
+        a CUDA device, ``RuntimeError`` on a CUDA device outside ``ARCHES``.
 
     Returns
     -------
-    80 KiB (``4 * 5120`` FP32), the ``[4, 5120]`` FP32 weight-gradient accumulator; 0 for ``T == 0``.  The backward
-    reads BF16 and FP32 weights as stored (a weight that is not contiguous or not 16-byte aligned is copied first).  A
-    forward call reads them the same way and allocates its output alone, and the state kept for the backward is the
-    inputs alone.
+    80 KiB (``4 * 5120`` FP32) for each ``[4, 5120]`` partial row of the weight gradient (one per cluster of the
+    backward grid); 0 for ``T == 0``.  The backward reads BF16 and FP32 weights as stored (a weight that is not
+    contiguous or not 16-byte aligned is copied first).  A forward call reads them the same way and allocates its
+    output alone, and the state kept for the backward is the inputs alone.
 
     Notes
     -----

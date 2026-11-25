@@ -20,21 +20,21 @@ import itertools
 import json
 import re
 import types
+import zlib
 from pathlib import Path
 
 import pytest
 import torch
 
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
-    GRAD_NAMES,
     LOWER_BOUND,
-    RAW_GRAD_NAMES,
-    elementwise_gate,
-    error_metrics,
-    kda_exact_raw_with_grads,
-    kda_exact_with_grads,
     make_inputs,
     make_raw_inputs,
+)
+from tests.experimental.test_helpers.cake_kda_naive import (
+    assert_bitwise,
+    draw_case,
+    judge_arms,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -53,11 +53,11 @@ BT, D, SCALE = cake_backend.BT, cake_backend.D, cake_backend.SCALE
 CakeKDADetChunkSaved = cake_backend.CakeKDADetChunkSaved
 CakeKDADetWorkspace = cake_backend.CakeKDADetWorkspace
 
-# Accuracy gate, declared before the first run: every output elementwise within
-# ``|cand - ref| <= ATOL + RTOL * |ref|`` of the exact FP64 per-document recurrence of the same BF16 / FP32 inputs
-# (the BF16 outputs and the FP32 ``dg`` alike, compared in FP32).
-ATOL = RTOL = 1e-2
-OUTPUT_NAMES = ("out",) + GRAD_NAMES
+# Accuracy: every floating output (``out`` and each gradient) is judged by ``judge_arms``
+# (``test_helpers/cake_kda_naive.py``): its error against the exact FP64 per-document recurrence of the same BF16 /
+# FP32 inputs beside the error of the naive BF16 tier (``tests/cake_naive.py``) over the judge's draws, each draw's
+# inputs drawn from its seed.  A miss fails unless the owner listed it as a known gap
+# (``test_helpers/cake_kda_known_gaps.py``).
 
 # Dispatch constants the registry rules must reproduce (the kernels' validated regimes).
 TABLE_V2_MAX_DOCS = 256  # the chunk-parallel layout table serves up to 256 documents
@@ -130,6 +130,23 @@ SEG_P_SMALL_BY_ARCH = {
     "sm_100a": 37
 }  # the few-chain count of the architectures with one of their own
 SEG_P_SMALL_MAX_NH = 4
+# The token-aware segment rule (the plans' default, given the pack's token count S): on its envelope (an SM count of
+# SEG_TOKEN_SM_COUNTS_BY_ARCH on its architecture, a head count of SEG_TOKEN_HEADS, the segmented route) a document
+# takes P_u = max(S // (SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG * N) + 1, SEG_TOKEN_MIN_UNIFORM_SEGMENTS,
+# ceil(S / SEG_TOKEN_MAX_SEGMENT_TOKENS)) segments where that is below the occupancy count above, except the packs of a
+# band of SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH ((heads, more than, fewer than tokens) on the architecture: GB300's and
+# VR200's 4-head packs of at most 4096 tokens, for accuracy, and VR200's 16-head packs of 8193 to 16383 tokens, for
+# memory); elsewhere, and without a token count (the registry's selection without num_tokens), the occupancy count
+# stays.
+SEG_TOKEN_SM_COUNTS_BY_ARCH = {"sm_100a": (148,), "sm_103a": (152,), "sm_107a": (212,)}
+SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH = {
+    "sm_103a": ((4, -1, 4097),),
+    "sm_107a": ((16, 8192, 16384), (4, -1, 4097)),
+}
+SEG_TOKEN_HEADS = (4, 8, 16)
+SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG = 384
+SEG_TOKEN_MIN_UNIFORM_SEGMENTS = 12
+SEG_TOKEN_MAX_SEGMENT_TOKENS = 1408
 # The two-level segment carry (seg_carry_v8): the segments of each document's chain in groups of g, the groups'
 # products formed in parallel and chained, the CTAs handing over through CARRY_FLAG_WORDS_PER_CTA release-flag
 # words each under a fresh epoch.  Dispatched on every architecture (CARRY_V8_ARCHES) at most CARRY_V8_MAX_H heads,
@@ -211,6 +228,13 @@ FUSED_L2N_SM103 = {
 # The fused class's saved-rstd twin (glm_bwd_prep v11_g8): a g record the KCP backward launches by name in place of
 # its record (the replay prep) when it reads the saved rstd, on sm_100a / sm_103a; its rule admits no problem
 FUSED_L2N_TWINS = {"bwd_prep_g8_replay_saved_l2n": "bwd_prep_g8_replay_l2n"}
+# The fused class's raw replay prep of the segmented route up to 256 documents (glm_bwd_prep v7_g8's kb_once replay
+# form), a raw record with no g twin: on that row's replay the raw gate's fused intra program (fwd_intra_v14_raw_l2n,
+# which rounds kb once) runs first and normalizes q / k, and this prep reads the normalized rows and rounds kb once as
+# that program does.  It is the flag-off raw replay prep's program built with kb_once = 1 (record -> that prep: the
+# same architectures, plan, logical names, launch and grid, a library of its own); the flag-off raw replay prep
+# serves the flag-off and fallback modes alone.
+FUSED_L2N_RAW_KBONCE = {"bwd_prep_g8_replay_kbonce_raw_l2n": "bwd_prep_g8_replay_raw"}
 RAW_GLM_INTRA = "glm_intra_raw"
 RAW_FINALIZE = "param_finalize"
 # the raw operands the raw records bind in place of the activated gate g (the TMA reader of the forward takes the
@@ -282,6 +306,12 @@ SHAPES = [
 def _shape_id(shape) -> str:
     lengths, heads = shape
     return "s" + "_".join(str(n) for n in lengths) + f"-h{heads}"
+
+
+def _case_seed(test: str, shape) -> int:
+    """The base seed of a judged case (``judge_arms`` draws every input of draw ``j`` from ``draw_seed(base, j)``):
+    a CRC of the test's name and the case, so each case draws its own inputs and a rerun draws the same ones."""
+    return zlib.crc32(f"{test}:{_shape_id(shape)}".encode())
 
 
 def _device_or_skip() -> torch.device:
@@ -386,7 +416,8 @@ GRID_KINDS = (
 # the records delivered for a subset of the architectures (every other record ships on all three, the two-level
 # carry and the no-kb prep among them): the gate epilogue and its unfused GLM intra program on sm_100a, the fused
 # ones on sm_103a (glm_intra_v14) and sm_107a (glm_intra_v18), the fused gradient's hints-off builds on sm_107a,
-# the one architecture their rule admits, and the replay prep's saved-rstd twin on sm_100a / sm_103a
+# the one architecture their rule admits (the in-kernel Q/K L2 norm's two among them), and the replay prep's
+# saved-rstd twin on sm_100a / sm_103a
 RECORD_ARCHES = {
     "glm_intra": ("sm_100a",),
     "glm_intra_v14": ("sm_103a",),
@@ -396,6 +427,8 @@ RECORD_ARCHES = {
     "glm_intra_v30_l2n": ("sm_103a",),
     "dqkg_davq_nohint": ("sm_107a",),
     "dqkg_int_davq_nohint": ("sm_107a",),
+    "dqkg_nohint_l2n": ("sm_107a",),
+    "dqkg_int_nohint_l2n": ("sm_107a",),
     "bwd_prep_g8_replay_saved_l2n": ("sm_100a", "sm_103a"),
 }
 # The records of the segmented adjoint recurrence launch twice per stage (the carry between the passes); the
@@ -491,10 +524,12 @@ def _route_rule(route: str) -> dict:
 def test_registry_records_are_well_formed() -> None:
     # the 67 g-mode records, the 8 raw-gate ones (each raw record its own library), the 3 programs of the
     # in-kernel Q/K L2 norm's fallback route and its 2 GLM intra capture forms (g, raw), and the 14 records of its
-    # fused class (FUSED_L2N_RECORDS: 7 g, 7 raw, each its own library), its sm_103a forward intra and GLM intra
-    # forms (FUSED_L2N_SM103) and the replay prep's saved-rstd twin (FUSED_L2N_TWINS)
-    assert len(cake_jit.MODULES) == 97
-    assert len({r["library"] for r in cake_jit.MODULES.values()}) == 95
+    # fused class (FUSED_L2N_RECORDS: 7 g, 7 raw, each its own library), the raw class's kb-once replay prep
+    # (FUSED_L2N_RAW_KBONCE, its own library), its sm_103a forward intra and GLM intra forms (FUSED_L2N_SM103) and
+    # the replay prep's saved-rstd twin (FUSED_L2N_TWINS), the 5 records of its output backward (dav_l2n*) and the
+    # 4 of its fused gradient (dqkg_*l2n, davq 0): 107 records, 105 libraries (two pairs share one)
+    assert len(cake_jit.MODULES) == 107
+    assert len({r["library"] for r in cake_jit.MODULES.values()}) == 105
     assert tuple(cake_jit.PATHS) == PATHS
     assert tuple(cake_jit.OPTIONAL_STAGES) == OPTIONAL_STAGES
     assert frozenset(cake_jit.GATE_STAGES) == GATE_STAGES
@@ -990,17 +1025,24 @@ def test_the_raw_gate_records_mirror_the_g_records() -> None:
     """The raw class of the gate stages: every g-mode record of the forward intra program and of the backward prep
     has one raw twin with the same select rule, grid rule, architectures and launch (block, cluster, shared memory),
     binding the raw gate, the parameters and the lower bound instead of the activated ``g`` (the plain-pointer
-    readers the raw gate's strides too); one raw GLM intra program serves every architecture (``always``), with the
-    fused raw drain's outputs (``dg_raw`` and the per-chunk partials) instead of the g mode's gate gradients; the
-    parameter finalize runs on every backward path with one CTA per head, reading the partials alone."""
+    readers the raw gate's strides too); the replay prep's twin serves the flag-off and fallback modes alone, so its
+    rule is the g record's replay path without the fused mode's arm (the segmented route up to 256 documents), whose
+    rows the raw class's kb-once replay prep (``FUSED_L2N_RAW_KBONCE``) takes; one raw GLM intra program serves every
+    architecture (``always``), with the fused raw drain's outputs (``dg_raw`` and the per-chunk partials) instead of
+    the g mode's gate gradients; the parameter finalize runs on every backward path with one CTA per head, reading
+    the partials alone."""
     modules = cake_jit.MODULES
     raw_names = {name for name, rec in modules.items() if rec.get("gate") == "raw"}
     # the in-kernel Q/K L2 norm's raw records: the GLM intra capture form, which serves the fallback mode alone
-    # (test_cake_kda_det_train_l2n), and the fused class's raw twins (checked below)
+    # (test_cake_kda_det_train_l2n), the fused class's raw twins and its kb-once replay prep (checked below)
     l2n_raw = {
         name for name in raw_names if "off" not in modules[name].get("l2n", ["off"])
     }
-    assert l2n_raw == {"glm_intra_raw_l2n_capture", *FUSED_L2N_RECORDS.values()}
+    assert l2n_raw == {
+        "glm_intra_raw_l2n_capture",
+        *FUSED_L2N_RECORDS.values(),
+        *FUSED_L2N_RAW_KBONCE,
+    }
     raw_names -= l2n_raw
     assert raw_names == set(RAW_TWIN_RECORDS.values()) | {RAW_GLM_INTRA, RAW_FINALIZE}
     assert modules["gate_epilogue"]["gate"] == "g"
@@ -1020,8 +1062,18 @@ def test_the_raw_gate_records_mirror_the_g_records() -> None:
         a, b = modules[g_name], modules[raw_name]
         assert b["stage"] == a["stage"] and b["stage"] in GATE_STAGES, raw_name
         assert "gate" not in a or a["gate"] == "g", g_name
+        rule = a["select_rule"]
+        if raw_name in FUSED_L2N_RAW_KBONCE.values():
+            # no fused mode: the g record's replay path, without its arm for the fused mode's segmented rows
+            assert a["l2n"] == ["off", "fallback", "fused"], g_name
+            assert b["l2n"] == ["off", "fallback"], raw_name
+            rule = {"kind": "path_in", "paths": ["replay"]}
+            assert a["select_rule"]["kind"] == "all_of", g_name
+            assert a["select_rule"]["rules"][0] == rule, g_name
+        else:
+            assert b.get("l2n", ["off"]) == a.get("l2n", ["off"]), raw_name
         assert (b["select_rule"], b["grid_rule"]) == (
-            a["select_rule"],
+            rule,
             a["grid_rule"],
         ), raw_name
         assert list(b["arches"]) == list(a["arches"]) == list(ARCHES), raw_name
@@ -1138,9 +1190,67 @@ def test_the_raw_gate_records_mirror_the_g_records() -> None:
             if (n in FUSED_L2N_RECORDS or n in FUSED_L2N_SM103 or n in FUSED_L2N_TWINS)
             and modules[n]["stage"] == stage
         )
+        # the raw class: the twins of the g records and the kb-once replay prep, in the registry's order
+        raw_fused = {FUSED_L2N_RECORDS[n] for n in g_fused if n in FUSED_L2N_RECORDS}
+        raw_fused |= {n for n in FUSED_L2N_RAW_KBONCE if modules[n]["stage"] == stage}
         assert fused_only(cake_jit.records_of_stage(stage, "raw")) == tuple(
-            FUSED_L2N_RECORDS[n] for n in g_fused if n in FUSED_L2N_RECORDS
+            n for n in modules if n in raw_fused
         ), stage
+    # the kb-once replay prep: the flag-off raw replay prep's program with kb rounded once (its architectures, plan,
+    # logical names -- q / k, the rows the fused intra program normalized before it, no q_raw / k_raw --, launch and
+    # grid; a library of its own), the fused mode alone, selected on the replay path where the g class's replay prep
+    # keeps the fused mode (the segmented route up to 256 documents): the complement of the raw fused replay prep
+    # bwd_prep_g8_replay_raw_l2n (the serial route or above 256 documents) on the replay
+    g_replay = modules["bwd_prep_g8_replay"]["select_rule"]
+    fused_arm = g_replay["rules"][1]["rules"][1]
+    assert g_replay["rules"][1]["rules"][0] == {
+        "kind": "l2n_in",
+        "modes": ["off", "fallback"],
+    }
+    assert fused_arm == {
+        "kind": "all_of",
+        "rules": [_route_rule("seg"), {"kind": "docs_at_most", "max": 256}],
+    }
+    for name, plain in FUSED_L2N_RAW_KBONCE.items():
+        a, b = modules[name], modules[plain]
+        assert (a["stage"], a["variant"], a["gate"], a["l2n"]) == (
+            "bwd_prep",
+            "g8_replay_kbonce_raw_l2n",
+            "raw",
+            ["fused"],
+        ), name
+        for key in (
+            "arches",
+            "arg_plan",
+            "logical",
+            "launch",
+            "grid_rule",
+            "ffi_entry",
+        ):
+            assert a[key] == b[key], (name, key)
+        assert a["library"] != b["library"], name
+        assert a["kernel_symbol"] == f"kernel_{a['library']}", name
+        assert {"q", "k"} <= set(a["logical"].values()), name
+        assert not {"q_raw", "k_raw", "qn", "kn", "qk_rstd"} & set(
+            a["logical"].values()
+        ), name
+        assert a["select_rule"] == {
+            "kind": "all_of",
+            "rules": [g_replay["rules"][0], *fused_arm["rules"]],
+        }, name
+        assert modules["bwd_prep_g8_replay_raw_l2n"]["select_rule"] == {
+            "kind": "all_of",
+            "rules": [
+                g_replay["rules"][0],
+                {
+                    "kind": "any_of",
+                    "rules": [
+                        _route_rule("serial"),
+                        {"kind": "docs_above", "min": 256},
+                    ],
+                },
+            ],
+        }
     # the sm_103a form: its sibling's plan, launch and rule on sm_103a alone, a library of its own
     for name, sibling in FUSED_L2N_SM103.items():
         a, b = modules[name], modules[sibling]
@@ -1179,14 +1289,26 @@ def test_the_raw_gate_records_mirror_the_g_records() -> None:
 
 
 def _expected_segments(
-    n: int, h: int, sm: int, arch: str | None = None
+    n: int, h: int, sm: int, arch: str | None = None, *, S: int | None = None
 ) -> tuple[str, int, int]:
+    """``(route, P, NSEG)`` of the problem: the occupancy rule, and given the pack's token count ``S`` (a plan's
+    default) the token-aware rule on its envelope (``arch=None`` has no entry)."""
     plan_heads = SEG_PLAN_HEADS_BY_ARCH.get(arch, ()) if arch is not None else ()
     if h <= SEG_MAX_H or h in plan_heads:
         p = min(SEG_P_MAX, max(1, -(-SEG_SLOT_FACTOR * sm // (n * h))))
         p = max(1, min(p, sm // h))  # one walk CTA per SM per document at most
         if n * h <= SEG_P_SMALL_MAX_NH:
             p = min(p, SEG_P_SMALL_BY_ARCH.get(arch, SEG_P_SMALL))
+        envelope = SEG_TOKEN_SM_COUNTS_BY_ARCH.get(arch, ()) if arch is not None else ()
+        bands = SEG_TOKEN_OCCUPANCY_BANDS_BY_ARCH.get(arch, ())
+        banded = S is not None and any(h == bh and lo < S < hi for bh, lo, hi in bands)
+        if S is not None and h in SEG_TOKEN_HEADS and sm in envelope and not banded:
+            p_u = max(
+                S // (SEG_TOKEN_SAVE_MIN_TOKENS_PER_SEG * n) + 1,
+                SEG_TOKEN_MIN_UNIFORM_SEGMENTS,
+                -(-S // SEG_TOKEN_MAX_SEGMENT_TOKENS),
+            )
+            p = min(p, p_u)
         return "seg", p, n * p
     return "serial", 1, 0
 
@@ -1201,14 +1323,23 @@ def _query_arch() -> str | None:
 
 
 def _expected_records(
-    nc_pad: int, n: int, h: int, sm: int, arch: str, path: str, gate: str = "g"
+    nc_pad: int,
+    n: int,
+    h: int,
+    sm: int,
+    arch: str,
+    path: str,
+    gate: str = "g",
+    *,
+    S: int | None = None,
 ) -> dict[str, str | None]:
     """The record of every stage of ``path`` on (``nc_pad``, ``n``, ``h``, ``sm``, ``arch``): the dispatch of the
     kernels' composition, spelled independently of the registry's rules.  ``gate="raw"`` (``use_gate_in_kernel``):
     the gate stages take the raw class (the twin of the g-mode intra program and prep, the one raw GLM intra
     program, no gate epilogue, the parameter finalize on every backward path); every other stage the g-mode
-    record."""
-    route, _p, nseg = _expected_segments(n, h, sm, arch)
+    record.  ``S``: the pack's token count of a plan's token-aware segment count (:func:`_expected_segments`);
+    ``None`` for the occupancy count (the registry's selection without ``num_tokens``)."""
+    route, _p, nseg = _expected_segments(n, h, sm, arch, S=S)
     seg = route == "seg"
     v2 = n * h * RECUR_SLICES["v2"] <= sm * RECUR_CTAS_PER_SM
     few = n * h <= FEW_CHAINS
@@ -1488,17 +1619,22 @@ def test_the_saving_forward_reads_the_token_rows_where_a_program_ships() -> None
     # The intra program writes the internal Aqk / Akk copies (write_int) iff a later program of the path reads them:
     # never on the saving forward's fused serial rows, overlap rows and paired serial rows (the 32-column form below
     # the fused threshold: their token-row records), always on the forward without a saved set and on the replay.
+    # The plans take the token-aware segment count of the pack on the rule's envelope (here 148 SMs of sm_100a and
+    # 212 of sm_107a), where a row the occupancy count puts on the overlap pair may run the plain pass 2 instead.
+    S = 4096
     for n in (1, 3, 4, 7, 300):
         for h in (1, 2, 4, 8, 16, 32, 64):
             for sm in (132, 148, 160, 212):
                 for arch in ARCHES:
-                    p = cake_backend.plan(4096, n, h, sm, arch)
-                    records = _expected_records(p.NC_pad, n, h, sm, arch, "fwd")
+                    p = cake_backend.plan(S, n, h, sm, arch)
+                    route, _p, nseg = _expected_segments(n, h, sm, arch, S=S)
+                    assert (p.recur, p.NSEG) == (route, nseg), (n, h, sm, arch)
+                    records = _expected_records(p.NC_pad, n, h, sm, arch, "fwd", S=S)
                     token = {
                         name for name in records.values() if name in TOKEN_ROW_RECORDS
                     }
-                    seg = _expected_segments(n, h, sm, arch)[0] == "seg"
-                    walk = p.NSEG * h
+                    seg = route == "seg"
+                    walk = nseg * h
                     fused = (
                         not seg
                         and h >= FUSED_FWD_MIN_H
@@ -1993,9 +2129,15 @@ def test_the_backward_reads_the_token_rows_without_chunk_layout_copies() -> None
 
     assert l2n_class("g", False) == preps
     assert l2n_class("g", True) == fused_preps
-    # the raw-gate class: one twin per form, copy-free alike
+    # the raw-gate class: one twin per form, copy-free alike; its fused class also holds the kb-once replay prep
+    # (FUSED_L2N_RAW_KBONCE, no g twin) after the replay prep's twin
     raw_preps = tuple(RAW_TWIN_RECORDS[name] for name in preps)
-    raw_fused_preps = tuple(FUSED_L2N_RECORDS[name] for name in fused_preps)
+    raw_fused_twins = tuple(FUSED_L2N_RECORDS[name] for name in fused_preps)
+    kbonce = tuple(FUSED_L2N_RAW_KBONCE)
+    replay_twin = raw_fused_twins.index("bwd_prep_g8_replay_raw_l2n")
+    raw_fused_preps = (
+        raw_fused_twins[: replay_twin + 1] + kbonce + raw_fused_twins[replay_twin + 1 :]
+    )
     assert l2n_class("raw", False) == raw_preps
     assert l2n_class("raw", True) == raw_fused_preps
     for name in preps + raw_preps + fused_preps + raw_fused_preps:
@@ -2003,14 +2145,16 @@ def test_the_backward_reads_the_token_rows_without_chunk_layout_copies() -> None
         assert prep["grid_rule"] == {"kind": "chunks", "x_factor": 1}
         assert not {"ke_out", "qe_out", "v_int", "vb_out"} & set(prep["logical"])
     # the saved-set paths' prep copies nothing of dout either; the replay's keeps the internal copy
-    for name in preps + fused_preps:
+    for name in preps + fused_preps + kbonce:
         values = set(cake_jit.MODULES[name]["logical"].values())
         replay = name.startswith("bwd_prep_g8_replay")
         assert ("do_int" in values) == replay, name
         assert ("dout" in values) == replay, name
     # the tape set's and the replay's prep fold q into qg; the light sets' forms read no q and write no qg (the
-    # version-4 set carries the forward's), and the w / u rows' form writes no kb either (no wy launch there)
-    for name in ("bwd_prep_g8", "bwd_prep_g8_replay"):
+    # version-4 set carries the forward's), and the w / u rows' form writes no kb either (no wy launch there); the
+    # kb-once replay prep reads the rows its fused intra program normalized (q / k) and writes what the replay prep
+    # writes
+    for name in ("bwd_prep_g8", "bwd_prep_g8_replay", *kbonce):
         values = set(cake_jit.MODULES[name]["logical"].values())
         assert {"q", "qg", "kb", "kg", "gk"} <= values, name
     for name in ("bwd_prep_g8_noqg", "bwd_prep_g8_noqg_nokb"):
@@ -2331,6 +2475,8 @@ def test_plan_without_arch_takes_the_current_device(monkeypatch) -> None:
 
 
 def test_plan_follows_the_chunk_bound_formulas() -> None:
+    # The plans take the token-aware segment count of the pack (S tokens) on the rule's envelope (here 148 SMs of
+    # sm_100a); the occupancy rule's plans of the same problems keep the occupancy count and its records.
     for lengths, heads in SHAPES:
         S, N = sum(lengths), len(lengths)
         for sm in (132, 148):
@@ -2342,7 +2488,17 @@ def test_plan_follows_the_chunk_bound_formulas() -> None:
                     nc_max + nc_max % 2,
                     64 * (nc_max + nc_max % 2),
                 )
-                assert (p.recur, p.P, p.NSEG) == _expected_segments(N, heads, sm, arch)
+                assert (p.recur, p.P, p.NSEG) == _expected_segments(
+                    N, heads, sm, arch, S=S
+                )
+                po = cake_backend.plan(S, N, heads, sm, arch, segment_rule="occupancy")
+                assert (po.recur, po.P, po.NSEG) == _expected_segments(
+                    N, heads, sm, arch
+                )
+                for path in po.records:
+                    assert po.records[path] == _expected_records(
+                        po.NC_pad, N, heads, sm, arch, path
+                    ), (path, lengths, heads, sm, arch)
                 seg = p.recur == "seg"
                 assert set(p.records) == {
                     path for path in PATHS if seg or path != "light_states"
@@ -2363,7 +2519,9 @@ def test_plan_follows_the_chunk_bound_formulas() -> None:
                     arch,
                 )
                 for path in p.records:
-                    expected = _expected_records(p.NC_pad, N, heads, sm, arch, path)
+                    expected = _expected_records(
+                        p.NC_pad, N, heads, sm, arch, path, S=S
+                    )
                     assert p.records[path] == expected, (path, lengths, heads, sm, arch)
                     for stage in cake_jit.STAGES:
                         if stage not in expected:
@@ -2560,7 +2718,7 @@ def test_raw_gate_plans_select_the_raw_class_and_the_fused_layouts() -> None:
                 seg = pr.recur == "seg"
                 for path in pr.records:
                     expected = _expected_records(
-                        pr.NC_pad, N, heads, sm, arch, path, "raw"
+                        pr.NC_pad, N, heads, sm, arch, path, "raw", S=S
                     )
                     assert pr.records[path] == expected, (lengths, heads, arch, path)
                     for stage, name in pr.records[path].items():
@@ -2879,15 +3037,22 @@ def test_seg_state_rule_is_a_pure_function_of_the_scalars() -> None:
     for nseg in (1, 64, 153, 256):
         assert rule(k * nseg, nseg) is True and rule(k * nseg - 1, nseg) is False
     assert rule(10**9, 0) is False  # the serial route has no segment states
-    # the sm_100a rule (a plan without an arch takes the current device's)
+    # the sm_100a rule (a plan without an arch takes the current device's): nseg is the occupancy count, which a
+    # plan takes independently of S off the token-aware rule's envelope; on it (three documents at 8 heads on 148
+    # SMs) a shorter pack takes fewer segments, while the size rule's boundary packs (k * nseg - 1 and k * nseg
+    # tokens) keep the occupancy count
     a0 = cake_jit.ARCHES[0]
     for n, h, sm in ((1, 1, 148), (4, 4, 152), (3, 8, 148), (4, 1, 152)):
-        nseg = cake_backend.plan(1, n, h, sm, a0).NSEG  # independent of S
-        assert (
-            nseg
-            == cake_backend.plan(k * nseg, n, h, sm, a0).NSEG
-            == _expected_segments(n, h, sm, a0)[2]
-        )
+        nseg = _expected_segments(n, h, sm, a0)[2]
+        short = cake_backend.plan(1, n, h, sm, a0)
+        assert short.NSEG == _expected_segments(n, h, sm, a0, S=1)[2]
+        for S in (k * nseg - 1, k * nseg):
+            assert (
+                nseg
+                == cake_backend.plan(S, n, h, sm, a0).NSEG
+                == cake_backend.plan(S, n, h, sm, a0, segment_rule="occupancy").NSEG
+                == _expected_segments(n, h, sm, a0, S=S)[2]
+            )
         assert cake_backend.plan(k * nseg, n, h, sm, a0).seg_save is True
         assert cake_backend.plan(k * nseg - 1, n, h, sm, a0).seg_save is False
     # the serial route
@@ -3136,6 +3301,12 @@ def _pass_bytes_per_th(gate_fused: bool) -> int:
 # whole-sequence set
 LEAN_SINGLE_BYTES = {False: {False: 4108, True: 3340}, True: {False: 4104, True: 3336}}
 LEAN_WHOLE_BYTES = {False: 2820, True: 2052}
+# what an in-kernel Q/K L2 norm mode adds to the whole-sequence set from two passes on: the dAqk the dav_l2n*
+# records write on every row (A32), whole instead of per pass (3076 B per internal token-head, tape 2308)
+L2N_LEAN_DAQK_BYTES = 256
+# rows of H 9-15 (the serial rows whose flag-off backward launches the separate dav program, which a lean arena
+# refuses; in an l2n mode a lean arena serves them)
+L2N_LEAN_ROWS = [((2000, 2000, 2000), 12), ((129, 300), 9), ((63, 1, 65), 15)]
 SEG_NAMES = frozenset(("seg_b", "seg_m", "hseg", "dseg", "dhseg"))
 # the tail stages' operands the tail split hands over per range: offset views of the whole-sequence buffers, the
 # range's table slices and count, the per-pass buffers; everything else they bind is addressed through the
@@ -3242,14 +3413,22 @@ def _slot_bytes(slots, R: int, H: int, NSEG: int, R_b: int) -> int:
 
 
 def _expected_lean_bytes(
-    tape: bool, t: int, R: int, H: int, NC: int, NSEG: int, gate_fused: bool = False
+    tape: bool,
+    t: int,
+    R: int,
+    H: int,
+    NC: int,
+    NSEG: int,
+    gate_fused: bool = False,
+    l2n: bool = False,
 ) -> int:
     """The lean layout's bytes from the documented rule: one pass is the saved-set layout without the replay's
     dout copy (4108 B per internal token-head, tape 3340; the fused architectures 4104 / 3336: no db_int slot);
     from two passes on the whole-sequence set (2820 B per internal token-head, tape 2052) plus the per-pass set
     (without dg_int / db_int where the gate epilogue is fused) packed first-fit, in order, into the dead ``qg`` /
     ``kg`` (512) and ``w`` (256) slots, the rest into an overflow slot shared with the segmented route's three
-    state blocks."""
+    state blocks.  In an in-kernel Q/K L2 norm mode (``l2n``) the whole-sequence set holds ``dAqk`` too
+    (:data:`L2N_LEAN_DAQK_BYTES` more: 3076, tape 2308) and the per-pass set packs none; one pass is unchanged."""
     block = NSEG * H * D * D * 4
     if t == 1:
         single = LEAN_SINGLE_BYTES[gate_fused][tape]
@@ -3258,7 +3437,9 @@ def _expected_lean_bytes(
     capacity = {"qg": 512 * R * H, "w": 256 * R * H}
     used = {"qg": 0, "w": 0}
     overflow = 0
-    for _name, kind, _sub, _life in _pass_occupants(gate_fused):
+    for name, kind, _sub, _life in _pass_occupants(gate_fused):
+        if l2n and name == "dAqk":
+            continue  # whole-sequence in the l2n modes
         nbytes = R_b * H * KIND_BYTES_PER_TH[cake_backend.PASS_KINDS[kind]]
         for host in ("qg", "w"):
             if used[host] + nbytes <= capacity[host]:
@@ -3267,7 +3448,8 @@ def _expected_lean_bytes(
         else:
             overflow += nbytes
     extra = max(overflow, 3 * block) if (overflow or NSEG) else 0
-    return LEAN_WHOLE_BYTES[tape] * R * H + extra
+    whole = LEAN_WHOLE_BYTES[tape] + (L2N_LEAN_DAQK_BYTES if l2n else 0)
+    return whole * R * H + extra
 
 
 def _lean_rows():
@@ -3564,6 +3746,149 @@ def test_lean_layouts_follow_the_byte_formulas() -> None:
         ) == cake_backend.memory_report(S, N, heads, **q)
 
 
+def test_lean_arena_serves_the_l2n_rows_with_their_dav_program() -> None:
+    """In an in-kernel Q/K L2 norm mode every backward path launches a ``dav`` record of
+    that mode (``dav_l2n*``: ``dAqk`` alone, which every lean layout holds whole), so a
+    lean arena serves every head count there (this test: 1 to 64), H 9-15 included (the
+    rows the flag-off test above refuses), in both gate modes, and ``arena_for_budget``
+    takes its lean steps on those rows."""
+    modes = itertools.product(ARCHES, ("g", "raw"), ("fused", "fallback"))
+    for arch, gate, l2n in modes:
+        q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
+        for H in range(1, 65):
+            case = (arch, gate, l2n, H)
+            p = cake_backend.plan(2000, 3, H, 148, arch, gate=gate, l2n=l2n)
+            for path in p.records:
+                if path in ("fwd", "fwd_nosave"):
+                    continue
+                assert p.dispatched("dav", path), (case, path)
+                served = cake_jit.MODULES[p.record("dav", path)].get("l2n", [])
+                assert l2n in served, (case, path)
+            for t in (1, 4):
+                lean = cake_backend.CakeKDADetArena(lean=True, tail_passes=t)
+                p.check_arena(lean)
+                want = p.workspace_bytes("bwd_lean", t)
+                assert p.arena_bytes(arena=lean) == want, (case, t)
+                got = cake_backend.workspace_bytes(2000, 3, H, arena=lean, **q)
+                assert got == want, (case, t)
+                report = cake_backend.memory_report(2000, 3, H, arena=lean, **q)
+                assert report["arena_bwd_configured"] == want, (case, t)
+            if 9 <= H <= 15:
+                got = cake_backend.arena_for_budget(p, p.arena_bytes() - 1)
+                assert got.lean, (case, got)
+
+
+def test_lean_layouts_follow_the_byte_formulas_in_the_l2n_modes() -> None:
+    """The lean layouts of the in-kernel Q/K L2 norm modes (both modes, both gate modes,
+    every architecture: the gate epilogue is fused on all of them), H 9-15 among the
+    rows: one pass is the fused saved-set layout without the replay's dout copy (4104 B
+    per internal token-head, tape 3336; its ``dAqk`` is whole in every mode); from two
+    passes on ``dAqk`` (written whole by the ``dav_l2n*`` records at 4, read per range by
+    GLM intra at 7) is a whole-sequence buffer, 256 B per internal token-head more (3076,
+    tape 2308), and leaves the per-pass set; ``memory_report``'s floors take 3076 / 2308
+    in place of 2820 / 2052."""
+    assert cake_backend._L2N_LEAN_DAQK_BYTES == L2N_LEAN_DAQK_BYTES
+    pass_names = frozenset(n for n, *_ in _pass_occupants(True)) - {"dAqk"}
+    rows = _lean_rows() + L2N_LEAN_ROWS
+    cases = itertools.product(rows, ARCHES, ("g", "raw"), ("fused", "fallback"))
+    for (lengths, heads), arch, gate, l2n in cases:
+        S, N = sum(lengths), len(lengths)
+        p = cake_backend.plan(S, N, heads, 148, arch, gate=gate, l2n=l2n)
+        q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
+        R, H, NC, NSEG = p.R, p.H, p.NC_pad, p.NSEG
+        block = NSEG * H * D * D * 4
+        blocks_over = max(0, 3 * block - 256 * R * H)
+        assert p.gate_fused is True and p.l2n == l2n
+        nc_min = -(-max(lengths) // BT) + 1
+        rows_min = BT * (nc_min + nc_min % 2)
+        block_min = p.P * H * D * D * 4 if p.recur == "seg" else 0
+        for tape in (False, True):
+            mode = "bwd_tape_lean" if tape else "bwd_lean"
+            save_mode = "tape" if tape else "light"
+            whole = LEAN_WHOLE_BYTES[tape] + L2N_LEAN_DAQK_BYTES
+            assert whole == (2308 if tape else 3076)
+            default = cake_backend.memory_report(
+                S,
+                N,
+                heads,
+                save_mode,
+                doc_lengths=lengths,
+                **q,
+            )
+            assert default["arena_floor"] == whole * R * H + 3 * block
+            floor_batched = whole * rows_min * H + 3 * block_min
+            assert default["arena_floor_batched"] == floor_batched
+            for t in (1, 2, 3, 4, 8):
+                arena = cake_backend.CakeKDADetArena(lean=True, tail_passes=t)
+                p.check_arena(arena)
+                regions = p.layout(mode, t)
+                R_b = BT * -(-NC // t)
+                want = p.workspace_bytes(mode, t)
+                assert want == max(r.offset + r.nbytes for r in regions)
+                slots = cake_backend._slots_of(mode, t, R, H, NC, NSEG, l2n)
+                slots = _gate_fused_slots(slots)
+                assert want == _slot_bytes(slots, R, H, NSEG, R_b), (mode, t)
+                by_name = {r.name: r for r in regions}
+                # dAqk is whole on every layout of the mode
+                assert by_name["dAqk"].shape[0] == R, (mode, t)
+                assert not set(GATE_BUFFERS) & set(by_name), (mode, t)
+                if t == 1:
+                    single = LEAN_SINGLE_BYTES[True][tape]
+                    assert want == single * R * H + blocks_over, (mode, t)
+                else:
+                    assert by_name["dAqk"].lifetime == (4, 7), (mode, t)
+                    assert by_name["dAqk"].nbytes == 256 * R * H, (mode, t)
+                    assert pass_names <= set(by_name), (mode, t)
+                    for name in pass_names:
+                        assert by_name[name].shape[0] == R_b, (mode, t, name)
+                    expect = _expected_lean_bytes(
+                        tape,
+                        t,
+                        R,
+                        H,
+                        NC,
+                        NSEG,
+                        gate_fused=True,
+                        l2n=True,
+                    )
+                    assert want == expect, (mode, t)
+                    # the lifetime table of the plan's multi-pass layout: dAqk whole
+                    table = cake_backend.lifetime_table(mode, t, plan=p)
+                    rows_by = {row["buffer"]: row for row in table}
+                    assert set(rows_by) == set(by_name), (mode, t)
+                    daqk = rows_by["dAqk"]
+                    assert daqk["unit"] == "R*H", (mode, t)
+                    assert (daqk["first_write"], daqk["last_read"]) == (4, 7), (mode, t)
+                    if t == 2:
+                        # dq_f / dk_f fill the qg slot, dg_f the w slot; dAkk and db_f
+                        # overflow: 130 B per token-head (258 with the per-pass dAqk)
+                        over = max(130 * R * H, 3 * block)
+                        assert want == whole * R * H + over, (mode, t)
+                    elif t >= 4 and NC % t == 0:  # from four passes on everything fits
+                        assert want == whole * R * H + 3 * block, (mode, t)
+                floor = whole * R * H + 3 * block
+                report = cake_backend.memory_report(
+                    S,
+                    N,
+                    heads,
+                    save_mode,
+                    arena=arena,
+                    **q,
+                )
+                assert report["arena_bwd_configured"] == want, (mode, t)
+                assert report["arena_floor"] == floor <= want, (mode, t)
+                assert want <= report["arena_bwd"], (mode, t)
+                got = cake_backend.workspace_bytes(
+                    S,
+                    N,
+                    heads,
+                    save_mode=save_mode,
+                    arena=arena,
+                    **q,
+                )
+                assert got == want == p.arena_bytes(save_mode=save_mode, arena=arena)
+
+
 def test_lifetime_table_renders_the_lean_layouts() -> None:
     for mode in cake_backend.LEAN_MODES:
         tape = mode == "bwd_tape_lean"
@@ -3708,17 +4033,19 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
     assert set(ARCHES) <= set(arch_flags)
     libraries = manifest["libraries"]
     names = [entry["name"] for entry in libraries]
-    # The 95 programs of cake_jit.MODULES (65 of the g gate, the 8 raw-gate programs, the 5 of the Q/K L2 norm's
-    # fallback route and the 17 of its fused class), each built for the architectures its record delivers (86 on
-    # all three, eight of RECORD_ARCHES on one each, the saved-rstd twin on two: 268 libraries); the KCP programs
-    # have their own package.
+    # The 105 programs of cake_jit.MODULES (65 of the g gate, the 8 raw-gate programs, the 5 of the Q/K L2 norm's
+    # fallback route and the 27 of its fused class, the raw class's kb-once replay prep, the 5 of its output
+    # backward and the 4 of its fused gradient among them), each built for the architectures its record delivers
+    # (94 on all three, ten of RECORD_ARCHES on one each, the saved-rstd twin on two: 94 * 3 + 10 + 2 = 294
+    # libraries); the KCP programs have their own package.
     train_libraries = {
         (record["library"], arch)
         for record in cake_jit.MODULES.values()
         for arch in record["arches"]
     }
-    assert len(train_libraries) == 268
-    assert len(names) == len(set(names)) == 268
+    assert len({library for library, _arch in train_libraries}) == 105
+    assert len(train_libraries) == 94 * 3 + 10 + 2 == 294
+    assert len(names) == len(set(names)) == 294
     for entry in libraries:
         assert entry["arch"] in ARCHES
         assert entry["entry"] == "run"
@@ -3894,33 +4221,31 @@ def _spy_call_workspaces(monkeypatch) -> list:
 
 @pytest.mark.parametrize("shape", SHAPES, ids=_shape_id)
 def test_forward_and_backward_match_the_exact_reference(
-    device, manifest, shape
+    device, manifest, shape, record_property
 ) -> None:
+    """``out`` and the five gradients of the explicit forward / backward pair on the activated FP32 gate, judged by
+    ``judge_arms``: each against the exact FP64 recurrence beside the naive BF16 tier over the judge's draws (the
+    shape and the contract of every output on every draw).  On the first draw the pair runs twice and every result
+    repeats bit for bit (the package's run-to-run contract).  ``s1-h1``, a batch of one one-token document, is the only
+    case in the scope of the owner's one-token gaps."""
     lengths, heads = shape
-    inputs = make_inputs(lengths, heads, device)
-    out, grads, _ = _run_fwd_bwd(inputs)
-    torch.cuda.synchronize(device)
-    ref_out, ref_grads = kda_exact_with_grads(
-        inputs["q"],
-        inputs["k"],
-        inputs["v"],
-        inputs["g"],
-        inputs["beta"],
-        inputs["dout"],
-        inputs["cu_seqlens"],
-        SCALE,
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "g", False, s, device)
+        out, grads, _ = _run_fwd_bwd(inputs)
+        got = {"out": out, **grads}
+        if j == 0:
+            got = {name: t.clone() for name, t in got.items()}
+            again, again_grads, _ = _run_fwd_bwd(inputs)
+            assert_bitwise(got, {"out": again, **again_grads}, tag="run to run")
+        return {"": got}, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("forward_and_backward", shape),
+        scale=SCALE,
     )
-    candidates = {"out": out, **grads}
-    references = {"out": ref_out, **ref_grads}
-    failures = []
-    for name in OUTPUT_NAMES:
-        assert candidates[name].shape == references[name].shape, name
-        gate = elementwise_gate(candidates[name], references[name], ATOL, RTOL)
-        if not gate["pass"]:
-            failures.append(
-                (name, gate, error_metrics(candidates[name], references[name]))
-            )
-    assert not failures, failures
 
 
 @pytest.mark.parametrize("shape", SHAPES[6:10], ids=_shape_id)
@@ -3986,31 +4311,44 @@ def test_replay_and_repeats_are_bitwise_identical(device, manifest, shape) -> No
         assert torch.equal(t, first_grads[name]), name
 
 
-def test_documents_do_not_leak_into_one_another(device, manifest) -> None:
-    lengths, heads = (100, 640, 77), 2
-    packed = make_inputs(lengths, heads, device)
-    out, grads, _ = _run_fwd_bwd(packed)
-    out, grads = _clone_all(out, grads)
-    start = 0
-    for length in lengths:
-        stop = start + length
-        single = {
-            name: packed[name][start:stop].contiguous()
-            for name in ("q", "k", "v", "g", "beta", "dout")
-        }
-        single["cu_seqlens"] = torch.tensor(
-            [0, length], dtype=torch.int32, device=device
-        )
-        s_out, s_grads, _ = _run_fwd_bwd(single)
-        assert elementwise_gate(out[start:stop], s_out, ATOL, RTOL)["pass"], (
-            "out",
-            start,
-        )
-        for name in s_grads:
-            assert elementwise_gate(grads[name][start:stop], s_grads[name], ATOL, RTOL)[
-                "pass"
-            ], (name, start)
-        start = stop
+def test_documents_do_not_leak_into_one_another(
+    device, manifest, record_property
+) -> None:
+    """A pack of three documents and each document run alone (``cu_seqlens`` ``[0, n]``; arm ``alone``: the
+    per-document results concatenated in pack order) are both judged by ``judge_arms`` against the pack's exact FP64
+    recurrence beside the naive BF16 tier: the reference keeps the documents apart, so a pack whose documents read
+    one another's state misses it.  The two sides are not compared with each other."""
+    shape = ((100, 640, 77), 2)
+    lengths, heads = shape
+
+    def draw(j, s):
+        packed = draw_case(lengths, heads, "g", False, s, device)
+        out, grads, _ = _run_fwd_bwd(packed)
+        whole = {"out": out, **grads}
+        parts: dict[str, list[torch.Tensor]] = {name: [] for name in whole}
+        start = 0
+        for length in lengths:
+            stop = start + length
+            single = {
+                name: packed[name][start:stop].contiguous()
+                for name in ("q", "k", "v", "g", "beta", "dout")
+            }
+            single["cu_seqlens"] = torch.tensor(
+                [0, length], dtype=torch.int32, device=device
+            )
+            s_out, s_grads, _ = _run_fwd_bwd(single)
+            for name, t in {"out": s_out, **s_grads}.items():
+                parts[name].append(t)
+            start = stop
+        alone = {name: torch.cat(ts) for name, ts in parts.items()}
+        return {"": whole, "alone": alone}, packed
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("documents_do_not_leak", shape),
+        scale=SCALE,
+    )
 
 
 def test_autograd_and_checkpoint_give_the_explicit_gradients(device, manifest) -> None:
@@ -4494,11 +4832,78 @@ def test_the_states_saving_set_of_a_segmented_16_head_row_feeds_the_plain_passes
             assert torch.equal(mine, theirs)
 
 
-def test_the_two_level_carry_binds_its_group_operands(device, manifest) -> None:
+def _judge_the_two_level_carry_row(
+    record_property, device, lengths, heads, p, choice
+) -> None:
+    """One two-level carry row of :func:`test_the_two_level_carry_binds_its_group_operands`: on the first draw, the
+    carry launches of a forward and a backward on a fresh workspace and their operands, grids and epochs exactly; on
+    every draw, ``out`` and the five gradients (arm: the row's id) judged by ``judge_arms`` against the exact FP64
+    recurrence beside the naive BF16 tier."""
+    S, N = sum(lengths), len(lengths)
+    captured: list = []
+
+    def recording(name, values, *, grid, device_index):
+        if name == "seg_carry_v8":
+            captured.append((dict(values), tuple(grid)))
+        elif name.startswith("seg_carry"):
+            assert not {"gsize", "carry_out_tiles"} & set(values), name
+        cake_jit.run_module(name, values, grid=grid, device_index=device_index)
+
+    ws = CakeKDADetWorkspace.for_problem(S, N, heads, device, launcher=recording)
+    fwd_carry = p.record("seg_carry", "fwd")
+    expected = int(fwd_carry == "seg_carry_v8") + 2 * int(
+        p.record("seg_carry", p.light_path) == "seg_carry_v8"
+    )
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "g", False, s, device)
+        q, k, v, g, beta, cu, dout = (
+            inputs[n] for n in ("q", "k", "v", "g", "beta", "cu_seqlens", "dout")
+        )
+        captured.clear()
+        epoch0 = ws._epoch[0]
+        out, saved = cake_backend.cake_kda_det_train_forward(
+            q, k, v, g, beta, cu, workspace=ws
+        )
+        grads = cake_backend.cake_kda_det_train_backward(
+            q, k, v, g, beta, cu, dout, saved=saved, workspace=ws
+        )
+        if j == 0:
+            assert len(captured) == expected >= 2, (lengths, heads)
+            # one fresh epoch per stamped carry launch (the overlap pair's forward carry stamps one too)
+            epochs = [values["epoch"] for values, _grid in captured]
+            assert epochs == sorted(epochs) and len(set(epochs)) == len(epochs)
+            assert ws._epoch[0] - epoch0 == len(captured) + int(
+                fwd_carry == "seg_carry_ov"
+            )
+            for values, grid in captured:
+                assert grid == (choice[1], 1, 1) == p.grid("seg_carry", p.light_path)
+                assert values["gsize"] == p.gsize
+                assert values["flags"].data_ptr() == ws.flags.data_ptr()
+                assert values["flags"].numel() >= cake_jit.flag_words(grid[0])
+                tiles = values["carry_out_tiles"]
+                assert tiles.shape == (p.NSEG * heads, D, D)
+                assert tiles.data_ptr() == values["carry_out"].data_ptr()
+        names = ("dq", "dk", "dv", "dbeta", "dg")
+        got = {"out": out, **dict(zip(names, grads, strict=True))}
+        return {_shape_id((lengths, heads)): got}, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("two_level_carry", (lengths, heads)),
+        scale=SCALE,
+    )
+
+
+def test_the_two_level_carry_binds_its_group_operands(
+    device, manifest, record_property
+) -> None:
     """Where a path dispatches the two-level carry (every architecture, at most two heads, the rule's rows) its
     launch binds the carried states viewed as [NSEG * H, 128, 128] tiles, the plan's group size, the flag buffer
     (enough words for its grid) and a fresh epoch per launch, at the rule's grid; the chain carry binds none of
-    them."""
+    them.  The results of each two-level row (arm: the row's id, ``s<lengths>-h<heads>``) are judged by
+    ``judge_arms`` against the exact FP64 recurrence beside the naive BF16 tier over the judge's draws."""
     sm, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     seen = 0
     for lengths, heads in (
@@ -4518,52 +4923,9 @@ def test_the_two_level_carry_binds_its_group_operands(device, manifest) -> None:
             continue
         seen += 1
         assert p.gsize == choice[0]
-        inputs = make_inputs(lengths, heads, device)
-        q, k, v, g, beta, cu, dout = (
-            inputs[n] for n in ("q", "k", "v", "g", "beta", "cu_seqlens", "dout")
+        _judge_the_two_level_carry_row(
+            record_property, device, lengths, heads, p, choice
         )
-        captured: list = []
-
-        def recording(name, values, *, grid, device_index):
-            if name == "seg_carry_v8":
-                captured.append((dict(values), tuple(grid)))
-            elif name.startswith("seg_carry"):
-                assert not {"gsize", "carry_out_tiles"} & set(values), name
-            cake_jit.run_module(name, values, grid=grid, device_index=device_index)
-
-        ws = CakeKDADetWorkspace.for_problem(S, N, heads, device, launcher=recording)
-        epoch0 = ws._epoch[0]
-        out, saved = cake_backend.cake_kda_det_train_forward(
-            q, k, v, g, beta, cu, workspace=ws
-        )
-        grads = cake_backend.cake_kda_det_train_backward(
-            q, k, v, g, beta, cu, dout, saved=saved, workspace=ws
-        )
-        fwd_carry = p.record("seg_carry", "fwd")
-        expected = int(fwd_carry == "seg_carry_v8") + 2 * int(
-            p.record("seg_carry", p.light_path) == "seg_carry_v8"
-        )
-        assert len(captured) == expected >= 2, (lengths, heads)
-        # one fresh epoch per stamped carry launch (the overlap pair's forward carry stamps one too)
-        epochs = [values["epoch"] for values, _grid in captured]
-        assert epochs == sorted(epochs) and len(set(epochs)) == len(epochs)
-        assert ws._epoch[0] - epoch0 == len(captured) + int(fwd_carry == "seg_carry_ov")
-        for values, grid in captured:
-            assert grid == (choice[1], 1, 1) == p.grid("seg_carry", p.light_path)
-            assert values["gsize"] == p.gsize
-            assert values["flags"].data_ptr() == ws.flags.data_ptr()
-            assert values["flags"].numel() >= cake_jit.flag_words(grid[0])
-            tiles = values["carry_out_tiles"]
-            assert tiles.shape == (p.NSEG * heads, D, D)
-            assert tiles.data_ptr() == values["carry_out"].data_ptr()
-        # the results are the exact reference's
-        ref_out, ref_grads = kda_exact_with_grads(q, k, v, g, beta, dout, cu, SCALE)
-        names = ("dq", "dk", "dv", "dbeta", "dg")
-        candidates = {"out": out, **dict(zip(names, grads, strict=True))}
-        references = {"out": ref_out, **ref_grads}
-        for name in OUTPUT_NAMES:
-            gate = elementwise_gate(candidates[name], references[name], ATOL, RTOL)
-            assert gate["pass"], (lengths, heads, name)
     assert (seen > 0) is (arch in CARRY_V8_ARCHES)
 
 
@@ -6991,7 +7353,10 @@ def test_batched_arena_content_never_reaches_a_result(device, manifest) -> None:
     the zero-filled default arena's results bit for bit (the forward, the backward from the light and the tape
     sets, a light set on the tape workspace, the forward without a saved set), including a row whose light set
     carries the states (the groups read the saved tensors, not the arena; pass 2 never touches the arena's
-    ``seg_state`` it is bound to at ``write_ht = 0``)."""
+    ``seg_state`` it is bound to at ``write_ht = 0``).  That row saves the states only from ``S >= 384 * NSEG`` on,
+    and the segment count grows with the device's SMs (at 212 SMs NSEG = 212 needs 81408 tokens), so its first
+    document grows as :func:`_saving_pack` gives it on this device and stays alone in the first group."""
+    big = _saving_pack((40000, 20000, 20000, 1000), 4, device)
     cases = (
         ((63, 1, 65, 30), 2, "light", 1, {"batch_tokens": 95}),
         ((100, 640, 77, 1000, 129), 2, "light", 3, {"batch_tokens": 1000}),
@@ -7004,7 +7369,7 @@ def test_batched_arena_content_never_reaches_a_result(device, manifest) -> None:
         ),
         ((63, 1, 65), 64, "light", 3, {"batch_tokens": 129, "max_docs_per_batch": 1}),
         ((100, 640, 77, 1000, 129), 2, "tape", 2, {"batch_tokens": 1000}),
-        ((40000, 20000, 20000, 1000), 4, "light", 4, {"batch_tokens": 40000}),
+        (big, 4, "light", 4, {"batch_tokens": big[0]}),
     )
     for lengths, heads, save_mode, t, kw in cases:
         S, N = sum(lengths), len(lengths)
@@ -7880,49 +8245,44 @@ def _raw_recorder(launched: list):
 
 @pytest.mark.parametrize("shape", SHAPES, ids=_shape_id)
 def test_raw_gate_forward_and_backward_match_the_exact_reference(
-    device, manifest, shape
+    device, manifest, shape, record_property
 ) -> None:
-    """The raw mode against the exact FP64 recurrence whose gate is activated from the same BF16 raw gate and FP32
-    parameters in FP64 (the declared elementwise gate of every output, the parameter gradients included); the
-    result dtypes and shapes: ``dg`` the BF16 contiguous gradient of the raw gate, ``dA_log`` FP32 ``[H]``, ``ddt_bias``
-    FP32 in ``dt_bias``'s shape; the saved set records the gate mode and the lower bound."""
+    """The raw mode's ``out`` and seven gradients (the parameter gradients ``dA_log`` / ``ddt_bias`` included), judged
+    by ``judge_arms`` (``gate="raw"``) against the exact FP64 recurrence whose gate is activated from the same BF16
+    raw gate and FP32 parameters in FP64, beside the naive BF16 tier over the judge's draws.  On the first draw: the
+    result dtypes and shapes (``dg`` the BF16 contiguous gradient of the raw gate, ``dA_log`` FP32 ``[H]``,
+    ``ddt_bias`` FP32 in ``dt_bias``'s shape), the saved set's gate mode and lower bound, and a second run that
+    repeats every result bit for bit (the package's run-to-run contract).  ``s1-h1`` is the only case in the scope
+    of the owner's one-token gaps."""
     lengths, heads = shape
     S = sum(lengths)
-    inputs = make_raw_inputs(lengths, heads, device)
-    out, grads, saved = _run_raw(inputs)
-    torch.cuda.synchronize(device)
-    assert saved.gate == "raw" and saved.lower_bound == LOWER_BOUND
-    assert out.shape == (S, heads, D) and out.dtype == torch.bfloat16
-    assert grads["dg"].shape == (S, heads, D) and grads["dg"].dtype == torch.bfloat16
-    assert grads["dg"].is_contiguous()
-    assert grads["dA_log"].shape == (heads,) and grads["dA_log"].dtype == torch.float32
-    assert grads["ddt_bias"].shape == (heads * D,)
-    assert grads["ddt_bias"].dtype == torch.float32
-    q, k, v, raw, beta, cu, dout = _raw_ops(inputs)
-    ref_out, ref_grads = kda_exact_raw_with_grads(
-        q,
-        k,
-        v,
-        raw,
-        beta,
-        inputs["A_log"],
-        inputs["dt_bias"],
-        dout,
-        cu,
-        SCALE,
-        LOWER_BOUND,
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "raw", False, s, device)
+        out, grads, saved = _run_raw(inputs)
+        got = {"out": out, **grads}
+        if j == 0:
+            assert saved.gate == "raw" and saved.lower_bound == LOWER_BOUND
+            assert out.shape == (S, heads, D) and out.dtype == torch.bfloat16
+            assert grads["dg"].shape == (S, heads, D)
+            assert grads["dg"].dtype == torch.bfloat16
+            assert grads["dg"].is_contiguous()
+            assert grads["dA_log"].shape == (heads,)
+            assert grads["dA_log"].dtype == torch.float32
+            assert grads["ddt_bias"].shape == (heads * D,)
+            assert grads["ddt_bias"].dtype == torch.float32
+            got = {name: t.clone() for name, t in got.items()}
+            again, again_grads, _ = _run_raw(inputs)
+            assert_bitwise(got, {"out": again, **again_grads}, tag="run to run")
+        return {"": got}, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("raw_gate_forward_and_backward", shape),
+        scale=SCALE,
+        lower_bound=LOWER_BOUND,
     )
-    candidates = {"out": out, **grads}
-    references = {"out": ref_out, **ref_grads}
-    failures = []
-    for name in ("out",) + RAW_GRAD_NAMES:
-        assert candidates[name].shape == references[name].shape, name
-        gate = elementwise_gate(candidates[name], references[name], ATOL, RTOL)
-        if not gate["pass"]:
-            failures.append(
-                (name, gate, error_metrics(candidates[name], references[name]))
-            )
-    assert not failures, failures
 
 
 @pytest.mark.parametrize("shape", SHAPES[6:10] + SHAPES[11:13], ids=_shape_id)
@@ -8507,6 +8867,7 @@ RAW_BATCHED_ROWS = [
     ((20, 20, 20, 20, 20, 20, 20), 8),
     ((63, 1, 65), 64),
     ((129, 300), 16),
+    ((63, 1, 65), 96),
 ]
 
 

@@ -57,7 +57,7 @@ removed, with no aliases.
 | `k_scale` | optional `[Tkv]` FP32, contiguous | the FP8 form's per-key scales (see "FP8 form"); BF16 calls take none |
 | `ratio` | positive int | key compression ratio (normally 1) |
 | `max_seqlen_q` | optional int | host mirror of the longest query segment; accepted, not read by any launch decision |
-| `max_seqlen_k` | optional int | the caller's bound on every key segment (`max(cu_seqlens_k[1:] - cu_seqlens_k[:-1])`); sizes the rank finalize's bitmap pool and so selects its program variant (`rank_seg_window`); it also shows the host whether every key segment of a packed call has the same length (`Tkv == S * max_seqlen_k`), and such a call runs its scan program without the longest-segment-first unit order (the `:lsf` copy) -- the results are bitwise identical with and without it; a value above `Tkv` or below `ceil(Tkv / S)` is rejected |
+| `max_seqlen_k` | optional int | the caller's bound on every key segment (`max(cu_seqlens_k[1:] - cu_seqlens_k[:-1])`); sizes the rank finalize's bitmap pool and so selects its program variant (`rank_seg_window`); it also shows the host whether every key segment of a packed call has the same length (`Tkv == S * max_seqlen_k`), and such a call runs its scan program without the longest-segment-first unit order (the `:lsf` copy) -- the results are bitwise identical with and without it; a value above `Tkv` or below `ceil(Tkv / S)` is rejected, and a value that passes those checks but is below a key segment is undefined behavior (no trap) wherever it sizes the rank finalize's pool (BF16 `top_k` 257 to 512 and every call from `rank_top_k_min` on) |
 | `workspace_buffer` | optional uint8 tensor | at least `cake_dsa_indexer_det_train_topk_workspace_size(T, Tkv, S, top_k=..., ratio=..., device=...)` bytes, 8-byte aligned |
 | `indices`, `scores` (outputs) | `[T, top_k]` int32 and FP32 | selected segment-local ids in ascending order and their aligned scores; tail padding `-1` / `-inf` |
 
@@ -264,7 +264,7 @@ pattern terminate.
 ## Candidate blocks
 
 `cake_dsa_indexer_det_train_topk_with_candidates` (BF16, `ratio = 1`,
-`1 <= top_k <= 2047`, default 512; `sm_100a` and `sm_103a`) returns
+`1 <= top_k <= 2047`, default 512; `sm_100a`, `sm_103a` and `sm_107a`) returns
 `(indices, scores, candidate_blocks)`.  `indices` and `scores` are those of
 `cake_dsa_indexer_det_train_topk` with the same `top_k`, bit for bit.
 `candidate_blocks` is int32 `[T, 2048]`: block `b` holds the segment-local
@@ -277,27 +277,54 @@ larger block id (`+0.0 == -0.0`).  Rows are in ascending block id order with
 a `-1` tail (all `-1` when `n == 0`), and every id of `indices` lies in a
 block of its row.
 
-The call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
-`scan_blocks:<narrow|l6>:u1:s0:f<fit>`): the scan program of the same unit
+Any other call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
+`scan_blocks:<narrow|l6>:u<n>:s0:f<fit>`): the scan program of the same unit
 that also folds each tile's block maxima into per-query block entries and
 writes the row.  Only the unsplit, unpaired narrow and l6 units carry it, so
 the host maps the decided kind to one of them (a wide unit or a CTA pair to
-its unpaired unit, a key-range split to narrow) with `n_split = 1`; then the
-finalize orders `indices` as in the plain call.  The block entries follow the
-scan's candidate buffers and ticket tail in the workspace: `blk_cap =
-ceil(W / 8) - 1` entries of 8 bytes per query slot of the grid when
-`ceil(W / 8) > 2048`, else none, `W` being `max_seqlen_k` when given, else
-`Tkv`.  With candidate blocks `max_seqlen_k` therefore bounds every key
-segment of the call: a row with more older blocks than `blk_cap` stops the
-kernel with a device-side trap.
+its unpaired unit, a key-range split to narrow) with `n_split = 1`, at the
+decided tile unroll where its program is registered, else the smallest
+registered one (`sm_100a` and `sm_103a` register `u1`; `sm_107a` also
+registers the narrow `u2` program); then the finalize orders `indices` as in
+the plain call.  The block entries follow the scan's candidate buffers and
+ticket tail in the workspace: `blk_cap = ceil(W / 8) - 1` entries of 8 bytes
+per query slot of the grid when `ceil(W / 8) > 2048`, else none, `W` being
+`max_seqlen_k` when given, else `Tkv`.  With candidate blocks `max_seqlen_k`
+therefore bounds every key segment of the call: a row with more older blocks
+than `blk_cap` stops the kernel with a device-side trap.
+
+A call whose longest key segment holds at most 2048 blocks (`ceil(W / 8) <=
+2048`, `W` as above) keeps every block of every row, so no block score
+decides a row: it runs the plain call's programs as dispatched (any unit, CTA
+pair, key-range split, unit order and finalize, with the plain call's
+workspace), writing each row's `0 .. nb - 1` and `-1` tail on the device
+first (stage `cb_iota`: a few small launches over the rows and one copy of
+the rows, reading the bound segment boundaries and offsets on every run, no
+host synchronization, graph-capturable; plan field `iota`).  A row past
+2048 blocks there (a `max_seqlen_k` below one of its key segments) stops that
+write with a device-side assert, where the `scan_blocks` programs trap; the
+write comes first, so such a call stops before any of its programs runs.
+A prepared runner launches the
+write with no allocation; preparing one (the eager entry prepares on every
+call) adds three small device launches for the write's scratch.  The
+16 MiB table the write copies rows from is made once per device, on the
+stream of its first call, and kept for the life of the process (16 MiB per
+device for this package); a call on another stream waits for that stream's
+event while the table is not complete.
 `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` reports the
-bound; the `[T, 2048]` output is not part of it.  `sm_107a` registers no
-`scan_blocks` program, and the call raises `NotImplementedError` there.
+bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
+`scan_blocks` programs draw their work units from a 16-byte ticket block
+passed as an argument (registry `ticket_arg_arches`), as the plain call's
+ticket-argument programs there do ("No host synchronization" under "Workspace
+and host behaviour"): a prepared runner whose scan draws owns that block,
+zeroed once at prepare, outside the reported bound; the eager entry uses the
+first 16 bytes of the workspace's ticket tail instead.  An architecture
+without a `scan_blocks` program raises `NotImplementedError`.
 
 ## Candidate-restricted top-k
 
 `cake_dsa_indexer_det_train_topk_in_candidates` (BF16, `ratio = 1`,
-`1 <= top_k <= 2048`, default 512; `sm_100a` and `sm_103a`) takes
+`1 <= top_k <= 2048`, default 512; `sm_100a`, `sm_103a` and `sm_107a`) takes
 `candidate_blocks`, int32 `[T, W]` with `W <= 2048` (the `candidate_blocks`
 output of `cake_dsa_indexer_det_train_topk_with_candidates` fits as is), and
 returns `(indices, scores)`.  For query row `t` with `n` visible keys the pool
@@ -324,8 +351,8 @@ of block lists and the ticket word;
 `cake_dsa_indexer_det_train_topk_in_candidates_workspace_size` reports it,
 and it depends on the grid and `top_k` only.  A backend-owned workspace has its
 ticket word zeroed once at prepare, a caller-owned one before every run.  A
-call with `W == 0` launches nothing and returns all `-1` / `-inf`.  `sm_107a`
-registers no `cand` program, and the call raises `NotImplementedError` there.
+call with `W == 0` launches nothing and returns all `-1` / `-inf`.  An
+architecture without a `cand` program raises `NotImplementedError`.
 
 ## Host dispatch
 
@@ -345,7 +372,7 @@ mean key tiles per work unit, `(Tkv - T / (2 ratio)) / S / 128`.
 
 | decision | rule (record fields) |
 |---|---|
-| unit geometry | where the record sets `wide_wave_rule` (the FP8 records of `sm_100a` and `sm_103a`), it replaces `wide_rule` and `wide_first_rule`: `block_q_wide` queries per unit when the unit the `l6_rule` leaves (`block_q_l6`, else `block_q_narrow`) needs at least `wide_wave_rule[1]` times the wide unit's waves of the grid (`ceil(ceil(T / block_q) / grid)`) against `block_q_l6`, from `wide_wave_rule[2]` mean unit tiles on (a fifteen-element rule, `[1.7, 1.15, 64.0, 2048, 1.1, 112.0, 3.5, 14, 1.26, 40.0, 9.0, 8.0, 55.0, 8, 60.0]` on `sm_103a`, raises that count by `wide_wave_rule[6]` per wide wave below `wide_wave_rule[7]` wide waves but on one document to at most `wide_wave_rule[11] / (W - 1) ** 2` (from two wide waves on, at most the larger of that and `wide_wave_rule[12]`, from `wide_wave_rule[13]` wide waves on of that and `wide_wave_rule[14]`) while `W` is at least `wide_wave_rule[8]`, to at least `wide_wave_rule[5]` on a packed call and to at least `wide_wave_rule[9] / (W - 1)` while the ratio `W` of the `block_q_l6` waves to the wide unit's stays below `wide_wave_rule[8]` (on a packed call then also to at least `wide_wave_rule[10] / (W - 1) ** 2`), and multiplies it by `(top_k / wide_wave_rule[3]) ** wide_wave_rule[4]` above `top_k = wide_wave_rule[3]`), or `wide_wave_rule[0]` times against `block_q_narrow`; else that unit.  Without it: `block_q_wide` queries per unit first where the record sets `wide_first_rule`, the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`) and the mean unit tiles reach `wide_first_rule[0]`; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow` |
+| unit geometry | where the record sets `wide_wave_rule` (the FP8 records of `sm_100a` and `sm_103a`), it replaces `wide_rule` and `wide_first_rule`: `block_q_wide` queries per unit when the unit the `l6_rule` leaves (`block_q_l6`, else `block_q_narrow`) needs at least `wide_wave_rule[1]` times the wide unit's waves of the grid (`ceil(ceil(T / block_q) / grid)`) against `block_q_l6`, from `wide_wave_rule[2]` mean unit tiles on (a fifteen-element rule, `[1.7, 1.15, 64.0, 2048, 1.1, 112.0, 3.5, 14, 1.26, 40.0, 9.0, 8.0, 55.0, 8, 60.0]` on `sm_103a`, raises that count by `wide_wave_rule[6]` per wide wave below `wide_wave_rule[7]` wide waves but on one document to at most `wide_wave_rule[11] / (W - 1) ** 2` (from two wide waves on, at most the larger of that and `wide_wave_rule[12]`, from `wide_wave_rule[13]` wide waves on of that and `wide_wave_rule[14]`) while `W` is at least `wide_wave_rule[8]`, to at least `wide_wave_rule[5]` on a packed call and to at least `wide_wave_rule[9] / (W - 1)` while the ratio `W` of the `block_q_l6` waves to the wide unit's stays below `wide_wave_rule[8]` (on a packed call then also to at least `wide_wave_rule[10] / (W - 1) ** 2`), and multiplies it by `(top_k / wide_wave_rule[3]) ** wide_wave_rule[4]` above `top_k = wide_wave_rule[3]`), or `wide_wave_rule[0]` times against `block_q_narrow`; else that unit.  Without it: `block_q_wide` queries per unit first where the record sets a wide-first floor -- `wide_first_k_rule[1]` for `top_k <= wide_first_k_rule[0]` (BF16 calls only: the FP8 form does not take it, `FP8_UNSET_FIELDS`), else `wide_first_rule[0]` --, the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`) and the mean unit tiles reach that floor; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow` |
 | key-range split | `n_split = clamp(grid // units, 1, min(mean tiles // split_min_range_tiles, split_max))`; on architectures with `split_wave_rule` a two-way split when the units are long and the unsplit call would idle `split_wave_rule[1]` of the CTAs in its ragged last round (where the record sets `split_wave_scope` (sm_107a), only for its unit geometries on calls of at most its segment count, and with its third item on sampled calls only); only for a unit geometry of `split_units` (the units whose split program the architecture registers): any other unit runs unsplit. A call this rule splits takes `split_resident_rule` (sm_100a, sm_103a) `min(grid // units, 49152 // top_k, 32, max(8, n_fit if n_fit x top_k <= 32768 else 32))` splits, `n_fit = ceil(mean unit keys / top_k)` in whole 4096-entry merge chunks, so the merge keeps its staged entries in shared memory; elsewhere `split_fit_rule` raises the count to `n_fit` where that fits `split_max` and the grid |
 | CTA pair | the two-CTA multicast program when the mean unit tiles lie in `pair_rule[0..1]`, `top_k >= pair_rule[2]`, the call is not split (grid made even) and the unit geometry is one of `pair_units` (the units whose pair program the architecture registers) |
 | unpaired wide unit | where the record sets `wide_pair_snake_only` (sm_107a), a sampled call keeps the CTA pair of the wide unit only where the pair program walks the snake order; elsewhere it runs the unpaired wide program when that program is registered |
@@ -356,7 +383,7 @@ mean key tiles per work unit, `(Tkv - T / (2 ratio)) / S / 128`.
 | sampled first threshold on buffer-fitting units | when the mean unit tiles are at most `sample_fit_max_mean_tiles`, the mean segment offset leaves fitting units and the program kind is one of `sample_fit_kinds` (the kinds whose sampled-fit program the architecture registers; the split programs, for example, run their plain form on every call) |
 | sampled rank shift | `sample_shift_rule[1]` permille where the record sets `sample_shift_rule` and `top_k >= sample_shift_rule[0]`, else `sample_shift_permille`; where the record sets `sample_long_rule` (sm_107a: `[["l6"], 500]`), a call of more than `sample_dispatch_mean_tiles_max` mean unit tiles on a kind it names takes `sample_long_rule[1]`; otherwise, where the record sets `sample_class_rule` (sm_100a, sm_103a: [8, 500]; sm_107a: [32, 500]), a wide-unit call of two or more segments takes `sample_class_rule[1]`, and a call of two or more segments of at most 4096 queries per segment on average and at most `sample_dispatch_tiny_tiles_max` mean unit tiles samples `sample_class_rule[0]` tiles at that shift (where `sample_class_rule[0]` exceeds `sample_tiles_tiny_units`, only a call of more than `sample_class_rule[0]` mean unit tiles: on shorter units the larger sample covers whole units); an explicit `sample_shift_permille=` / `sample_tiles_max=` knob overrides these.  A launch scalar only: it sets how conservative the sampled first threshold is (a threshold that proves too aggressive is streamed again exactly), never the program, the capacity or an output bit; unsampled calls (`sample_tiles_max=0`) do not read it |
 | candidate capacity | `candidate_multiplier` x `top_k` (`cand_mult_rule[1]` for long units), raised to `cand_cap_floor` slots (`cand_cap_floor_rule[1]` slots from `top_k >= cand_cap_floor_rule[0]` on, where the record sets the rule: on `sm_100a` the 16384-slot floor applies from `top_k = 1024` on and smaller `top_k` keep 8192; `sm_103a` keeps its 16384-slot floor on every `top_k`) and lowered to `cand_cap_ceiling` slots where the record sets one (the multiplier becomes `ceiling // top_k`, so the buffer stops growing with `top_k` once it holds the ceiling), rounded up to whole tiles; with the sampled first threshold off (`sample_tiles_max=0`) the `candidate_multiplier_unsampled` / `cand_mult_rule_unsampled` / `cand_cap_floor_unsampled` / `cand_cap_ceiling_unsampled` values apply instead; the default check period follows the capacity (`check_period_cap_divisor`, per-kind overrides) |
-| finalize program | threads = the smallest power of two of sort slots holding `top_k` (`finalize_threads_fit` x `finalize_items`) for small `top_k`, else `finalize_threads_small` up to `finalize_top_k_small`, else `finalize_threads`.  Where the rank rules admit the call -- `rank_finalize` and `top_k >= rank_top_k_min` -- the row sort is a prefix-popcount rank finalize program sized for the call's **pool**: `Tkv`, or the caller's `max_seqlen_k` where `rank_seg_window` is set (lever RW; a bound above `Tkv` or below `ceil(Tkv / S)` is rejected whether or not the switch is set).  A pool above `rank_slab_window_max` takes the two-level (bucket + word) program of the smallest `rank_two_level_window_variants` entry holding it, with no segment bound, where `rank_two_level` is set and the window is within `rank_two_level_rule` (lever FR2; key `finalize_rank:t<threads>:w<window>:two`, staged where `rank_two_level_staged_rule` admits the window); a pool within the slab bound takes the smallest `rank_window_variants` entry holding it and one bitmap word (32 bits) per thread when `pool <= rank_rule[0]` and the segment -- mean `Tkv / S`, or `max_seqlen_k` itself under lever RW -- is at most `rank_rule[1]`, skipping the `rank_window_variants_seg_only` entries when the pool is `Tkv` (`finalize_rank:t<threads>:w<window>`, stage role `finalize_rank`; the kernel reads the segment boundaries on the device; where `rank_staged` is set and `rank_staged_rule` admits the window, its SMEM-staged, coalesced-I/O form `...:staged` -- lever FRS, same role and arguments); every other call sorts with the CUB block radix sort program (`finalize:t<threads>`, `(Tkv - 1).bit_length()` key bits).  Both produce the same ids and bits  Two forms of the staged program carry their own key tags: `:i16` (`rank_t16` / `rank_t16_slots`: the 4096-slot staged form runs 256 launched threads x 16 slots) and `:bulk` (`rank_bulk_io` / `rank_bulk_align_bytes`: `cp.async.bulk` row I/O when `top_k x 4` and the output addresses are multiples of the granule; unaligned caller-owned outputs run the registered plain twin, same results).  Where the record's `rank_persist_max_k` is above zero (SM107 only), the staged bulk program of rows with `top_k <= rank_persist_max_k` and 8-item threads carries `:persist` (the `:i16` form keeps the one-row program): one persistent grid of `min(rows, rank_persist_ctas_per_sm x (SMs - rank_persist_spare_sms))` CTAs (SM107: 8 x (SMs - 1)) ranks the call's rows, each CTA landing its next row while it ranks the current one (`cake_policy.finalize_grid`); an SM107 SM holds 4 of these 256-thread CTAs at a time, so the grid is two whole waves of the other SMs when another stream holds a block on one SM, not one wave plus a short second one; same results as the one-row program. |
+| finalize program | threads = the smallest power of two of sort slots holding `top_k` (`finalize_threads_fit` x `finalize_items`) for small `top_k`, else `finalize_threads_small` up to `finalize_top_k_small`, else `finalize_threads`.  Where the rank rules admit the call -- `rank_finalize` and `top_k >= rank_top_k_min` -- the row sort is a prefix-popcount rank finalize program sized for the call's **pool**: `Tkv`, or the caller's `max_seqlen_k` where `rank_seg_window` is set (lever RW; a bound above `Tkv` or below `ceil(Tkv / S)` is rejected whether or not the switch is set).  A pool above `rank_slab_window_max` takes the two-level (bucket + word) program of the smallest `rank_two_level_window_variants` entry holding it, with no segment bound, where `rank_two_level` is set and the window is within `rank_two_level_rule` (lever FR2; key `finalize_rank:t<threads>:w<window>:two`, staged where `rank_two_level_staged_rule` admits the window); a pool within the slab bound takes the smallest `rank_window_variants` entry holding it and one bitmap word (32 bits) per thread when `pool <= rank_rule[0]` and the segment -- mean `Tkv / S`, or `max_seqlen_k` itself under lever RW -- is at most `rank_rule[1]`, skipping the `rank_window_variants_seg_only` entries when the pool is `Tkv` (`finalize_rank:t<threads>:w<window>`, stage role `finalize_rank`; the kernel reads the segment boundaries on the device; where `rank_staged` is set and `rank_staged_rule` admits the window, its SMEM-staged, coalesced-I/O form `...:staged` -- lever FRS, same role and arguments); a call of `top_k` within `rank_small_k_rule[0..1]` (below `rank_top_k_min`; `sm_100a`, `sm_103a` and `sm_107a`: `[257, 512, 16384, 131072]`) runs the rank program at `finalize_threads_small` threads where its pool, raised to at least `32 x finalize_threads_small`, fits the slab window `rank_small_k_rule[2]`, else the two-level window `rank_small_k_rule[3]` (`rank_two_level` with `rank_two_level_rule` set; the same staged / `:bulk` / `:persist` forms as above), in place of its right-sized CUB program -- a split call of the slab window runs the merge with that rank finalize fused in (`merge:rank:w16384`, no finalize launch), and the FP8 form keeps its CUB programs (`FP8_UNSET_FIELDS`); every other call sorts with the CUB block radix sort program (`finalize:t<threads>`, `(Tkv - 1).bit_length()` key bits).  Both produce the same ids and bits  Two forms of the staged program carry their own key tags: `:i16` (`rank_t16` / `rank_t16_slots`: the 4096-slot staged form runs 256 launched threads x 16 slots) and `:bulk` (`rank_bulk_io` / `rank_bulk_align_bytes`: `cp.async.bulk` row I/O when `top_k x 4` and the output addresses are multiples of the granule; unaligned caller-owned outputs run the registered plain twin, same results).  Where the record's `rank_persist_max_k` is above zero (SM107 only), the staged bulk program of rows with `top_k <= rank_persist_max_k` and 8-item threads carries `:persist` (the `:i16` form keeps the one-row program): one persistent grid of `min(rows, rank_persist_ctas_per_sm x (SMs - rank_persist_spare_sms))` CTAs (SM107: 8 x (SMs - 1)) ranks the call's rows, each CTA landing its next row while it ranks the current one (`cake_policy.finalize_grid`); an SM107 SM holds 4 of these 256-thread CTAs at a time, so the grid is two whole waves of the other SMs when another stream holds a block on one SM, not one wave plus a short second one; same results as the one-row program. |
 
 The dispatched program must be registered for the device's architecture
 (`cake_jit.PROGRAM_KEYS[arch]`); the backend raises `NotImplementedError`
@@ -388,7 +415,13 @@ that writes the registry verifies the record against them before it is frozen.
   FP8 form decides by its `wide_wave_rule`) now take eight queries per unit as
   well: 148 MiB (155197568 B) at the 16384-slot floor at `top_k = 2048` on 148
   SMs, where the previous package needed 74 MiB (77602944 B); re-size a
-  buffer reused across such calls the same way.  It is
+  buffer reused across such calls the same way.  BF16 calls of `top_k <= 512`
+  that the top_k-keyed wide-first floor (`wide_first_k_rule`: `[512, 64.0]` on
+  `sm_103a`, `[512, 128.0]` on `sm_100a`) moves to the wide unit take eight
+  queries per unit where they took six: at `top_k = 512` 152 MiB (159391872 B)
+  on 152 SMs (`sm_103a`, previously 114 MiB / 119545984 B) and 74 MiB
+  (77602944 B) on 148 SMs (`sm_100a`, previously 56 MiB / 58204288 B); re-size
+  them the same way.  It is
   the larger of the sampled default's plan and the plan with the sampled first
   threshold off (`sample_tiles_max=0`): on sm_107a the unpaired
   three-warpgroup preference can give an unsampled call six queries per unit
@@ -406,14 +439,22 @@ that writes the registry verifies the record against them before it is frozen.
   count and the strides.  The eager entry point allocates the outputs and the
   workspace (unless supplied) through the caching allocator; the scan binding
   zeroes the ticket tail of a supplied workspace right before every scan
-  launch, in the same host call (none on a static call:
-  where the shape alone bounds the work units by the grid,
-  `cake_policy.ticket_static_path`, the scan never touches the ticket word;
-  none for a program of the `static_scan_kinds` of its form's record, which
-  keeps the static unit enumeration on every call: on `sm_107a` every FP8
-  program);
-  the prepared runner (`cake_backend.prepare_dsa_indexer_det_topk`) allocates nothing at launch
-  and is CUDA-graph capturable.
+  launch, in the same host call (none on a static call: where the shape alone
+  bounds the work units by the grid, `cake_policy.ticket_static_path`, the
+  scan never touches the ticket word; none for a program of the
+  `static_scan_kinds` of its form's record, which keeps the static unit
+  enumeration on every call: on `sm_107a` every FP8 program; for a program
+  that reads a ticket argument, only the eager entry's ticket word, below);
+  the prepared runner (`cake_backend.prepare_dsa_indexer_det_topk`) allocates
+  nothing at launch and is CUDA-graph capturable.
+  * On `sm_107a`, a scan program listed in `ticket_arg_arches` draws from a
+    16-byte ticket block passed as an argument instead of the tail.  A
+    prepared runner owns such a block, zeroed once at prepare, outside the
+    reported workspace.  The eager entry passes the first 16 bytes of the
+    workspace's tail instead, and the scan binding zeroes its ticket word
+    right before the launch.  The `:lsf` copies of such programs still keep
+    the segment order in the tail; every launch writes it before it reads it,
+    so it needs no zeroing.
 * **Launch structure**: scan, optional merge, finalize (see above).  No
   `[T, Tkv]` matrix is materialized.
 
@@ -472,30 +513,37 @@ per entry.  `csrc/.clang-format` disables formatting so the digests stay valid.
 
 The candidate-block call has its own suite,
 `tests/experimental/test_cake_dsa_indexer_det_train_candidates.py`, with the
-FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
-host-only registry, plans at the request's shapes, argument checks and the
-`sm_107a` refusal; on the GPU, the exact sets of `indices` and
-`candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
-packed layouts), sampled rows at the request's shapes, the Gaussian rule with
-the scores judged against the naive tier, containment, bitwise repetition and
-the plain call's bits, the caller-owned workspace and outputs, the argument
+FP64 oracle in
+`tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
+registry, plans at the request's shapes on every architecture (on `sm_107a`
+the expected programs), the registered program of every candidate-block plan
+on a dense grid of shapes and `top_k` up to 2047, argument checks and the
+refusal of an architecture whose registry lacks the programs; on the GPU, the
+exact sets of `indices` and `candidate_blocks` against the oracle on
+MXFP4-grid inputs (six cases, two packed layouts), sampled rows at the
+request's shapes, the Gaussian rule with the scores judged against the naive
+tier, containment, bitwise repetition and the plain call's bits (also at
+`top_k` 2044 and 2047; at 2044 with the persistent rank finalize on
+`sm_107a`), a prepared runner that draws its work units on a poisoned
+caller-owned workspace, the caller-owned workspace and outputs, the argument
 checks and the absence of host synchronization.  The benchmark's
 `--rows candidates` times the call next to the plain call at the request's
 shapes.
 
 The candidate-restricted call has its own suite,
-`tests/experimental/test_cake_dsa_indexer_det_train_in_candidates.py`, with the
-FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
-host-only registry, the plan and its workspace bound at the request's shapes,
-argument checks and the `sm_107a` refusal; on the GPU, the exact sets against
-the oracle on MXFP4-grid inputs (six cases, six kinds of candidate rows, two
-packed layouts), the unrestricted sets from the source layer's own candidate
-blocks and from every visible block, keys outside the pool that never count,
-sampled rows at the request's shapes, the Gaussian rule with the scores judged
-against the naive tier, bitwise repetition, the caller-owned workspace and
-outputs, the argument checks and the absence of host synchronization.  The
-benchmark's `cake_in` arm on `--rows candidates` times the call next to the
-plain call.
+`tests/experimental/test_cake_dsa_indexer_det_train_in_candidates.py`, with
+the FP64 oracle in
+`tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
+registry, the plan and its workspace bound at the request's shapes, argument
+checks and the refusal of an architecture whose registry lacks the program; on
+the GPU, the exact sets against the oracle on MXFP4-grid inputs (six cases,
+six kinds of candidate rows, two packed layouts), the unrestricted sets from
+the source layer's own candidate blocks and from every visible block, keys
+outside the pool that never count, sampled rows at the request's shapes, the
+Gaussian rule with the scores judged against the naive tier, bitwise
+repetition, the caller-owned workspace and outputs, the argument checks and
+the absence of host synchronization.  The benchmark's `cake_in` arm on
+`--rows candidates` times the call next to the plain call.
 
 Tests: `tests/experimental/test_cake_dsa_indexer_det_train.py` (the backend suite, which
 imports the package only through `tests/cake/test_helpers/cake_package.py`),

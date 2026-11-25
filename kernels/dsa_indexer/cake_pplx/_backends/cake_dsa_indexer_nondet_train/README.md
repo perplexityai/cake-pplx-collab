@@ -296,7 +296,7 @@ score comparisons, so any bit pattern terminates.
 ## Candidate blocks
 
 `cake_dsa_indexer_nondet_train_topk_with_candidates` (BF16, `ratio = 1`,
-`1 <= top_k <= 2047`, default 512; `sm_100a` and `sm_103a`) returns
+`1 <= top_k <= 2047`, default 512; `sm_100a`, `sm_103a` and `sm_107a`) returns
 `(indices, scores, candidate_blocks)`.  `indices` and `scores` hold the sets
 of `cake_dsa_indexer_nondet_train_topk` with the same `top_k`.
 `candidate_blocks` is int32 `[T, 2048]`: block `b` holds the segment-local
@@ -311,26 +311,51 @@ slots, in no specified order (all `-1` when `n == 0`), and every id of
 `torch.use_deterministic_algorithms(True)` the call raises as the plain call
 does.
 
-The call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
-`scan_blocks:<narrow|l6>:u1:s0:f<fit>`): the deterministic package's
+Any other call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
+`scan_blocks:<narrow|l6>:u<n>:s0:f<fit>`): the deterministic package's
 candidate-block scan program under this package's prefix.  Only the unsplit,
 unpaired narrow and l6 units carry it, so the host maps the decided kind to
-one of them (a wide unit or a CTA pair to its unpaired unit, a key-range
-split to narrow) with `n_split = 1`.  The block entries follow the scan's
-candidate buffers and ticket tail in the workspace: `blk_cap = ceil(W / 8) -
-1` entries of 8 bytes per query slot of the grid when `ceil(W / 8) > 2048`,
-else none, `W` being `max_seqlen_k` when given, else `Tkv`.  With candidate
-blocks `max_seqlen_k` therefore bounds every key segment of the call: a row
-with more older blocks than `blk_cap` stops the kernel with a device-side
-trap.  `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size`
-reports the bound; the `[T, 2048]` output is not part of it.  `sm_107a`
-registers no `scan_blocks` program, and the call raises
-`NotImplementedError` there.
+one of them (a wide unit or a CTA pair to its unpaired unit, a key-range split
+to narrow) with `n_split = 1`, at the decided tile unroll where its program is
+registered, else the smallest registered one (`sm_100a` and `sm_103a` register
+`u1`; `sm_107a` also registers the narrow `u2` program).  The block entries
+follow the scan's candidate buffers and ticket tail in the workspace:
+`blk_cap = ceil(W / 8) - 1` entries of 8 bytes per query slot of the grid when
+`ceil(W / 8) > 2048`, else none, `W` being `max_seqlen_k` when given, else
+`Tkv`.  With candidate blocks `max_seqlen_k` therefore bounds every key
+segment of the call: a row with more older blocks than `blk_cap` stops the
+kernel with a device-side trap.
+
+A call whose longest key segment holds at most 2048 blocks (`ceil(W / 8) <=
+2048`, `W` as above) keeps every block of every row, so no block score
+decides a row: it runs the plain call's programs as dispatched (any unit, CTA
+pair, key-range split with its merge and unit order, with the plain
+call's workspace), writing each row's `0 .. nb - 1` and `-1` tail on the device
+first (stage `cb_iota`: a few small launches over the rows and one copy of
+the rows, reading the bound segment boundaries and offsets on every run, no
+host synchronization, graph-capturable; plan field `iota`).  A row past
+2048 blocks there (a `max_seqlen_k` below one of its key segments) stops that
+write with a device-side assert, where the `scan_blocks` programs trap; the
+write comes first, so such a call stops before any of its programs runs.
+A prepared runner launches the
+write with no allocation; preparing one (the eager entry prepares on every
+call) adds three small device launches for the write's scratch.  The
+16 MiB table the write copies rows from is made once per device, on the
+stream of its first call, and kept for the life of the process (16 MiB per
+device for this package); a call on another stream waits for that stream's
+event while the table is not complete.
+`cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` reports
+the bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
+`scan_blocks` programs are listed in `ticket_arg_arches` and draw from a
+16-byte ticket block passed as an argument, as the plain call's programs
+listed there do ("Ticket tail" under "Workspace and host behaviour"): a
+prepared runner whose scan draws owns that block, outside the reported bound.
+An architecture without a `scan_blocks` program raises `NotImplementedError`.
 
 ## Candidate-restricted top-k
 
 `cake_dsa_indexer_nondet_train_topk_in_candidates` (BF16, `ratio = 1`,
-`1 <= top_k <= 2048`, default 512; `sm_100a` and `sm_103a`) takes
+`1 <= top_k <= 2048`, default 512; `sm_100a`, `sm_103a` and `sm_107a`) takes
 `candidate_blocks`, int32 `[T, W]` with `W <= 2048` (the `candidate_blocks`
 output of `cake_dsa_indexer_nondet_train_topk_with_candidates` fits as is), and
 returns `(indices, scores)`.  For query row `t` with `n` visible keys the pool
@@ -358,8 +383,8 @@ of block lists and the ticket word;
 `cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size` reports it,
 and it depends on the grid and `top_k` only.  A backend-owned workspace has its
 ticket word zeroed once at prepare, a caller-owned one before every run.  A
-call with `W == 0` launches nothing and returns all `-1` / `-inf`.  `sm_107a`
-registers no `cand` program, and the call raises `NotImplementedError` there.
+call with `W == 0` launches nothing and returns all `-1` / `-inf`.  An
+architecture without a `cand` program raises `NotImplementedError`.
 
 ## Host dispatch
 
@@ -400,7 +425,7 @@ mean key tiles per work unit: `(Tkv - T / (2 ratio)) / S / 128`.
 
 | decision | rule (record fields) |
 |---|---|
-| unit geometry | `block_q_wide` queries per unit first where the record sets `wide_first_rule` (sm_103a: `[512.0]`), the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`, `rounds = ceil(T / block_q_wide) / grid`) and the mean unit tiles reach `wide_first_rule[0]`; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow`.  The policy also evaluates `wide_wave_rule`, which replaces both wide rules where a record sets it.  No BF16 record sets it; the FP8 records of `sm_100a` and `sm_103a` do (`POLICY_FP8`), so the FP8 form chooses its wide unit by waves of the persistent grid |
+| unit geometry | `block_q_wide` queries per unit first where the record sets a wide-first floor -- `wide_first_k_rule[1]` for `top_k <= wide_first_k_rule[0]` (BF16 calls only: the FP8 form does not take it, `FP8_UNSET_FIELDS`) (sm_100a: `[512, 128.0]`, sm_103a: `[512, 64.0]`), else `wide_first_rule[0]` (sm_103a: `[512.0]`) --, the call is wide-eligible (at least `wide_rule[0]` wide rounds per CTA and `rounds x mean tiles >= wide_rule[1]`, `rounds = ceil(T / block_q_wide) / grid`) and the mean unit tiles reach that floor; else `block_q_l6` (three math warpgroups) when the mean unit tiles are at most `l6_rule[0]` and `top_k >= l6_rule[1]`; else `block_q_wide` when wide-eligible; else `block_q_narrow`.  The policy also evaluates `wide_wave_rule`, which replaces both wide rules where a record sets it.  No BF16 record sets it; the FP8 records of `sm_100a` and `sm_103a` do (`POLICY_FP8`), so the FP8 form chooses its wide unit by waves of the persistent grid |
 | key-range split | `n_split = max(1, min(grid // units, mean tiles // split_min_range_tiles, split_max))`.  Where `n_split` is 1, a record with `split_wave_rule` splits in two when the units are long (at least `split_wave_rule[0]` and `2 x split_min_range_tiles` mean tiles) and the split raises the share of busy CTAs over the call's rounds by at least `split_wave_rule[1]`.  Where the record sets `split_wave_scope` (sm_107a: `[["narrow"], 1, true]`), that two-way split applies only to its unit geometries, on calls of at most its segment count, and with its third item on sampled calls only.  Only a unit geometry of `split_units` (the units whose split program the architecture registers) splits; any other unit runs unsplit.  A call that this rule splits takes `split_resident_rule` (sm_100a, sm_103a): `min(grid // units, 49152 // top_k, 32, max(8, n_fit if n_fit x top_k <= 32768 else 32))` splits, at least 2.  Here `n_fit = ceil(mean unit keys / top_k)`, rounded up to whole 4096-entry merge chunks, so the merge keeps its staged entries in shared memory.  Elsewhere `split_fit_rule` raises the count to `n_fit` where that fits `split_max` and the grid |
 | CTA pair | the two-CTA multicast program when the mean unit tiles lie in `pair_rule[0..1]`, `top_k >= pair_rule[2]`, the grid has at least two CTAs, the call is not split (grid made even) and the unit geometry is one of `pair_units` (the units whose pair program the architecture registers) |
 | unpaired wide unit | where the record sets `wide_pair_snake_only` (sm_107a), a sampled call keeps the CTA pair of the wide unit only where the pair program walks the snake order; elsewhere it runs the unpaired wide program when that program is registered |
@@ -440,7 +465,12 @@ before the record is frozen.
     prologue writes.
 
   This is the deterministic package's bound for the same BF16 call.  The
-  bound depends on the call geometry.  Size a reused buffer for the largest
+  bound depends on the call geometry.  BF16 calls of `top_k <= 512` that the
+  top_k-keyed wide-first floor (`wide_first_k_rule`) moves to the wide unit
+  take eight queries per unit where they took six: at `top_k = 512` 152 MiB
+  (159391872 B) on 152 SMs (`sm_103a`, previously 114 MiB / 119545984 B) and
+  74 MiB (77602944 B) on 148 SMs (`sm_100a`, previously 56 MiB / 58204288 B);
+  a buffer sized under the previous package for such a call must be re-sized.  Size a reused buffer for the largest
   bound over the geometries it serves.  The bound is the larger of the
   sampled default's plan and the plan with the sampled first threshold off
   (`sample_tiles_max=0`), so a buffer sized by it serves both modes.  The
@@ -633,32 +663,38 @@ those of BF16 calls at the device's grid.  It does not compare the outputs of
 the two packages.
 
 The candidate-block call has its own suite,
-`tests/experimental/test_cake_dsa_indexer_nondet_train_candidates.py`, with the
-FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
-host-only registry, plans at the request's shapes, argument checks and the
-`sm_107a` refusal; on the GPU, the exact sets of `indices` and
-`candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
-packed layouts), sampled rows at the request's shapes, the Gaussian rule with
-the scores judged against the naive tier, containment, the repetition of the
-sets and the plain call's sets, the caller-owned workspace and outputs, the
+`tests/experimental/test_cake_dsa_indexer_nondet_train_candidates.py`, with
+the FP64 oracle in
+`tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
+registry, plans at the request's shapes on every architecture (on `sm_107a`
+the expected programs), the registered program of every candidate-block plan
+on a dense grid of shapes and `top_k` up to 2047, argument checks and the
+refusal of an architecture whose registry lacks the programs; on the GPU, the
+exact sets of `indices` and `candidate_blocks` against the oracle on
+MXFP4-grid inputs (six cases, two packed layouts), sampled rows at the
+request's shapes, the Gaussian rule with the scores judged against the naive
+tier, containment, the repetition of the sets and the plain call's sets (also
+at `top_k` 2044 and 2047), a prepared runner that draws its work units on a
+poisoned caller-owned workspace, the caller-owned workspace and outputs, the
 argument checks, the absence of host synchronization and the
-deterministic-algorithms guard.  The benchmark's `--rows candidates` times
-the call next to the plain call at the request's shapes.
+deterministic-algorithms guard.  The benchmark's `--rows candidates` times the
+call next to the plain call at the request's shapes.
 
 The candidate-restricted call has its own suite,
 `tests/experimental/test_cake_dsa_indexer_nondet_train_in_candidates.py`, with
 the FP64 oracle in
 `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
 registry, the plan and its workspace bound at the request's shapes, argument
-checks and the `sm_107a` refusal; on the GPU, the exact sets against the oracle
-on MXFP4-grid inputs (six cases, six kinds of candidate rows, two packed
-layouts), the unrestricted sets from the source layer's own candidate blocks
-and from every visible block, keys outside the pool that never count, sampled
-rows at the request's shapes, the Gaussian rule with the scores judged against
-the naive tier, the repetition of the sets, the caller-owned workspace and
-outputs, the argument checks, the absence of host synchronization and the
-deterministic-algorithms guard.  The benchmark's `nondet_in` / `det_in` arms
-on `--rows candidates` time the call next to the plain calls.
+checks and the refusal of an architecture whose registry lacks the program; on
+the GPU, the exact sets against the oracle on MXFP4-grid inputs (six cases,
+six kinds of candidate rows, two packed layouts), the unrestricted sets from
+the source layer's own candidate blocks and from every visible block, keys
+outside the pool that never count, sampled rows at the request's shapes, the
+Gaussian rule with the scores judged against the naive tier, the repetition of
+the sets, the caller-owned workspace and outputs, the argument checks, the
+absence of host synchronization and the deterministic-algorithms guard.  The
+benchmark's `nondet_in` / `det_in` arms on `--rows candidates` time the call
+next to the plain calls.
 
 Benchmark: `benchmarks/bench_cake_dsa_indexer_nondet_train.py` times this
 package against the deterministic package on the same rows, in the BF16 form

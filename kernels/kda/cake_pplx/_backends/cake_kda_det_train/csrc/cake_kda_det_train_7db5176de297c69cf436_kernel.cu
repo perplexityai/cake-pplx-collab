@@ -106,15 +106,15 @@ kernel_cake_kda_det_train_7db5176de297c69cf436(float* __restrict__ g, __nv_bfloa
     int d0 = lane_1 * 4;
     long long ext0 = (long long)chunk_bos[chunk];
     int clen = chunk_len[chunk];
-    long long int0 = (long long)chunk * 64;
+    long long int0 = (long long)chunk * 64ll;
     int clast = clen - 1;
     if (clast < 0) {
         clast = 0;
     }
     int rs = num_heads * 128;
     int qs = num_qk_heads * 128;
-    long long ibase = (int0 * (long long)num_heads + (long long)head) * 128 + (long long)d0;
-    long long qbase = (ext0 * (long long)num_qk_heads + (long long)qk_head) * 128 + (long long)d0;
+    long long ibase = (int0 * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
+    long long qbase = (ext0 * (long long)num_qk_heads + (long long)qk_head) * 128ll + (long long)d0;
     long long bbase = ext0 * (long long)num_heads + (long long)head;
     long long qrbase = (long long)qk_head * (long long)q_raw_head_stride + (long long)d0;
     long long krbase = (long long)qk_head * (long long)k_raw_head_stride + (long long)d0;
@@ -122,7 +122,7 @@ kernel_cake_kda_det_train_7db5176de297c69cf436(float* __restrict__ g, __nv_bfloa
     if (head == qk_head * group) {
         l2n_lead = 1;
     }
-    long long ebase_g = (ext0 * (long long)num_heads + (long long)head) * 128 + (long long)d0;
+    long long ebase_g = (ext0 * (long long)num_heads + (long long)head) * 128ll + (long long)d0;
     float x[32];
     unsigned int kw[16];
     unsigned int qw[16];
@@ -160,12 +160,12 @@ kernel_cake_kda_det_train_7db5176de297c69cf436(float* __restrict__ g, __nv_bfloa
         }
         float lr_r = 0.0f;
         if (read_rstd != 0) {
-            lr_r = qk_rstd[(0 * (long long)num_tokens + (long long)(ext0 + (long long)t_c)) * (long long)num_qk_heads + (long long)qk_head];
+            lr_r = qk_rstd[(0ll * (long long)num_tokens + (long long)(ext0 + (long long)t_c)) * (long long)num_qk_heads + (long long)qk_head];
         }
         rq[u] = lr_r;
         float lr_r_0 = 0.0f;
         if (read_rstd != 0) {
-            lr_r_0 = qk_rstd[(1 * (long long)num_tokens + (long long)(ext0 + (long long)t_c)) * (long long)num_qk_heads + (long long)qk_head];
+            lr_r_0 = qk_rstd[(1ll * (long long)num_tokens + (long long)(ext0 + (long long)t_c)) * (long long)num_qk_heads + (long long)qk_head];
         }
         rk[u] = lr_r_0;
         btl[u] = (float)beta[bbase + (long long)(t_c * num_heads)];

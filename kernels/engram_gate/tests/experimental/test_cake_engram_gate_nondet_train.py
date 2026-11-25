@@ -18,7 +18,8 @@ context gate (four streams of width 5120).
 
 Without a device: the registry's records, stages, architectures and launch facts; the record of each stage and dot
 product summation (two forwards, one backward), and the forward record of each ``dot_sum`` choice; the persistent grid
-sizes and the resident cluster table they come from; every stage launcher passes every kernel parameter of its records
+sizes and the resident cluster table they come from; the launch plans a call takes its record and grid from give the
+registry's record and grid at every token count; every stage launcher passes every kernel parameter of its records
 in plan order (the FFI entry replaced by a recorder); ``build.json`` covers every record on every architecture and its
 source digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment
 variable but the JIT shim's.
@@ -33,6 +34,7 @@ FP32 ones over 2^24 FP32 patterns.
 from __future__ import annotations
 
 import ast
+import bisect
 import hashlib
 import json
 import math
@@ -53,12 +55,12 @@ cake_jit = cake_package(PACKAGE, "cake_jit")
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-RECORDS = ("bwd_dot2", "dw_reduce", "fwd_dot2", "fwd_f32")
+RECORDS = ("bwd_dot2", "bwd_dot2_order", "bwd_dot2_stage", "dw_reduce", "fwd_dot2", "fwd_f32", "fwd_f32_cta1")
 # The summations of the dot product each stage ships: the forward both, the backward the compensated one only.
 ACC_MODES = {"fwd": ("f32", "dot2"), "bwd": ("dot2",)}
 FWD_ACCS = ACC_MODES["fwd"]
 # The public ``dot_sum`` choices and the forward record suffix each launches; the first is the default.
-DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
+DOT_SUMS = {"fp32": "f32", "compensated": "dot2"}
 ENTRIES = (
     "cake_engram_gate_nondet",
     "cake_engram_gate_nondet_kv",
@@ -117,7 +119,13 @@ def test_registry_records_are_well_formed() -> None:
         assert set(launch) == {"block", "cluster", "cooperative", "dynamic_smem_bytes", "use_pdl"}, name
         assert launch["cooperative"] is False, name
         if rec["stage"] != "dw_reduce":
-            assert tuple(launch["cluster"]) == (cake_jit.CLUSTER_CTAS, 1, 1), name
+            # a cta1 forward is one CTA of 640 threads a token, with its cluster program's argument plan
+            cta1 = name in cake_jit.CTA1_RECORDS
+            assert tuple(launch["cluster"]) == (1 if cta1 else cake_jit.CLUSTER_CTAS, 1, 1), name
+            assert cake_jit.unit_ctas(name) == launch["cluster"][0], name
+            if cta1:
+                assert tuple(launch["block"]) == (640, 1, 1), name
+                assert rec["arg_plan"] == cake_jit.MODULES[name.removesuffix("_cta1")]["arg_plan"], name
         kinds = [kind for kind, _ in rec["arg_plan"]]
         assert kinds[-3:] == ["grid", "grid", "grid"], name
         assert cake_backend.parameters(name), name
@@ -133,14 +141,45 @@ def test_each_dot_sum_has_a_forward_record_and_one_backward_serves_both() -> Non
         assert cake_jit.record("fwd", acc) == f"fwd_{acc}"
         assert cake_jit.MODULES[f"fwd_{acc}"]["stage"] == "fwd"
     for bad in ("dot2", "f32", "FP32", "", "compensated "):
-        with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
+        with pytest.raises(ValueError, match=r"dot_sum must be one of \['fp32', 'compensated'\]"):
             cake_backend._dot_acc(bad)
     for bad in (None, 1, b"fp32", ("fp32",)):
-        with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
+        with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['fp32', 'compensated'\]"):
             cake_backend._dot_acc(bad)
     assert cake_jit.record("bwd", "dot2") == cake_jit.record("bwd") == "bwd_dot2"
-    assert cake_jit.MODULES["bwd_dot2"]["stage"] == "bwd"
+    bwd = {cake_jit.MODULES[name]["stage"] for name in ("bwd_dot2", "bwd_dot2_stage", "bwd_dot2_order")}
+    assert bwd == {"bwd"}
+    # the three backward programs: a call without a token mask launches bwd_dot2_stage from STAGE_BWD_MIN_TOKENS
+    # tokens on the architectures where it is the faster one; a call with one launches bwd_dot2_order from the
+    # ORDER_BWD_MIN_TOKENS tokens of its architecture; every other call launches bwd_dot2
+    assert cake_jit.STAGE_BWD_ARCHES <= set(ARCHES)
+    assert set(cake_jit.ORDER_BWD_MIN_TOKENS) <= set(ARCHES)
+    assert cake_jit.ORDER_BWD_MIN_TOKENS == {"sm_100a": 8192, "sm_103a": 8192, "sm_107a": 4096}
+    least = cake_jit.STAGE_BWD_MIN_TOKENS
+    for arch in ARCHES:
+        order = cake_jit.ORDER_BWD_MIN_TOKENS.get(arch)
+        for T in sorted({1, least - 1, least, 2**31 - 1} | ({order - 1, order} if order else set())):
+            ordered = order is not None and T >= order
+            assert cake_jit.backward_record(arch, masked=True, T=T) == ("bwd_dot2_order" if ordered else "bwd_dot2")
+            staged = arch in cake_jit.STAGE_BWD_ARCHES and T >= least
+            want = "bwd_dot2_stage" if staged else "bwd_dot2"
+            assert cake_jit.backward_record(arch, masked=False, T=T) == want, (arch, T)
     assert "bwd_f32" not in cake_jit.MODULES
+    # fwd_f32's cta1 form (the same bits; fwd_dot2 has none): a call launches it from CTA1_FWD_MIN_TOKENS tokens on
+    # the devices (architecture, SM count) and summations that table holds, the cluster program everywhere else
+    assert cake_jit.CTA1_RECORDS == {"fwd_f32_cta1"}
+    assert "fwd_dot2_cta1" not in cake_jit.MODULES
+    assert cake_jit.CTA1_FWD_MIN_TOKENS == {("sm_107a", 212, "f32"): 16384}
+    for arch in ARCHES:
+        for sms in (148, 152, 160, 212, 216):
+            for acc in FWD_ACCS:
+                least = cake_jit.CTA1_FWD_MIN_TOKENS.get((arch, sms, acc))
+                for T in sorted({1, 4096, 16384, 65536, 2**31 - 1} | ({least - 1, least} if least else set())):
+                    want = f"fwd_{acc}_cta1" if least is not None and T >= least else f"fwd_{acc}"
+                    assert cake_jit.forward_record(arch, sms, acc, T) == want, (arch, sms, acc, T)
+                    assert cake_jit.MODULES[want]["stage"] == "fwd"
+    with pytest.raises(ValueError):
+        cake_jit.forward_record("sm_107a", 212, "f64", 65536)
     with pytest.raises(ValueError, match=r"unknown acc 'f32' for 'bwd'; it ships \['dot2'\]"):
         cake_jit.record("bwd", "f32")
     for acc in FWD_ACCS:
@@ -167,17 +206,24 @@ MEASURED = {
     ("sm_100a", 148, "fwd_dot2"): 142,
     ("sm_100a", 148, "fwd_f32"): 142,
     ("sm_100a", 148, "bwd_dot2"): 104,
+    ("sm_100a", 148, "bwd_dot2_stage"): 104,
+    ("sm_100a", 148, "bwd_dot2_order"): 104,
     ("sm_100a", 152, "fwd_dot2"): 148,
     ("sm_100a", 152, "fwd_f32"): 148,
     ("sm_100a", 152, "bwd_dot2"): 110,
+    ("sm_100a", 152, "bwd_dot2_stage"): 110,
     ("sm_103a", 152, "fwd_dot2"): 148,
     ("sm_103a", 152, "fwd_f32"): 148,
     ("sm_103a", 152, "bwd_dot2"): 110,
+    ("sm_103a", 152, "bwd_dot2_stage"): 110,
+    ("sm_103a", 152, "bwd_dot2_order"): 110,
     ("sm_107a", 212, "fwd_dot2"): 184,
     ("sm_107a", 212, "fwd_f32"): 184,
     ("sm_107a", 212, "bwd_dot2"): 138,
+    ("sm_107a", 212, "bwd_dot2_stage"): 138,
+    ("sm_107a", 212, "bwd_dot2_order"): 138,
 }
-PERSISTENT_RECORDS = ("bwd_dot2", "fwd_dot2", "fwd_f32")
+PERSISTENT_RECORDS = ("bwd_dot2", "bwd_dot2_order", "bwd_dot2_stage", "fwd_dot2", "fwd_f32")
 
 
 def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
@@ -186,7 +232,7 @@ def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
     never exceeds what a measured device holds)."""
     assert sorted(cake_jit.CTAS_PER_SM) == sorted(PERSISTENT_RECORDS)
     assert sorted(name for name, rec in cake_jit.MODULES.items() if rec["stage"] != "dw_reduce") == sorted(
-        PERSISTENT_RECORDS
+        PERSISTENT_RECORDS + tuple(cake_jit.CTA1_RECORDS)
     )
     for (arch, sms, name), want in MEASURED.items():
         assert cake_jit.resident_clusters(name, arch, sms) == want, (arch, sms, name)
@@ -204,21 +250,158 @@ def test_the_resident_cluster_table_holds_the_measured_devices() -> None:
 
 
 @pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))
-@pytest.mark.parametrize("T", (1, 2, 3, 129, 4096, 16384, 65536, 2**31 - 1))
+@pytest.mark.parametrize("T", (1, 2, 3, 129, 2047, 2048, 4096, 16384, 65536, 2**31 - 1))
 def test_grids_are_persistent_clusters(T, sms) -> None:
-    """``fwd`` and ``bwd`` run ``min(T, resident clusters)`` clusters (at least one) of four CTAs; ``dw_reduce`` covers
-    the 20480 weight-gradient columns on any device."""
+    """``fwd`` and ``bwd`` run ``min(T, resident clusters)`` clusters (at least one) of four CTAs, but a ``bwd`` call of
+    at least ``LARGE_BWD_MIN_TOKENS`` tokens on a device of ``LARGE_BWD_CLUSTERS`` runs ``min(T, its entry)``;
+    ``dw_reduce`` covers the 20480 weight-gradient columns on any device."""
     for arch in ARCHES:
         for name in PERSISTENT_RECORDS:
             resident = cake_jit.resident_clusters(name, arch, sms)
+            large = T >= cake_jit.LARGE_BWD_MIN_TOKENS
+            want = resident
+            if large and cake_jit.MODULES[name]["stage"] == "bwd":
+                want = cake_jit.LARGE_BWD_CLUSTERS.get((arch, sms), resident)
+            assert cake_jit.persistent_clusters(name, arch, sms, large) == want
             clusters = cake_jit.clusters(name, T, arch, sms)
             assert 1 <= clusters <= T
-            assert clusters == max(1, min(T, resident))
+            assert clusters == max(1, min(T, want))
             assert resident <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
+            assert want <= max(1, cake_jit.CTAS_PER_SM[name] * sms // cake_jit.CLUSTER_CTAS)
             assert cake_jit.grid(name, T, arch, sms) == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
         assert cake_jit.grid("dw_reduce", T, arch, sms) == cake_jit.dw_reduce_grid()
     assert cake_jit.dw_reduce_grid() == (STREAMS * HIDDEN // cake_jit.DW_REDUCE_COLUMNS_PER_CTA, 1, 1)
     assert STREAMS * HIDDEN % cake_jit.DW_REDUCE_COLUMNS_PER_CTA == 0
+
+
+def test_b300_backward_of_many_tokens_runs_its_own_grid() -> None:
+    """B300 (``sm_103a``, 148 SMs) has no resident entry: below ``LARGE_BWD_MIN_TOKENS`` tokens the backward and the
+    forward keep the fallback grids (94 and 125 clusters); from it the backward runs 104 clusters (it holds 104) and
+    the forward still 125."""
+    assert cake_jit.LARGE_BWD_MIN_TOKENS == 2048
+    assert cake_jit.LARGE_BWD_CLUSTERS == {("sm_103a", 148): 104}
+    assert ("sm_103a", 148) not in cake_jit.RESIDENT_CLUSTERS
+    for name in ("bwd_dot2", "bwd_dot2_stage", "bwd_dot2_order"):
+        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (1, 94, 129, 2047)] == [1, 94, 94, 94]
+        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (2048, 4096, 65536, 2**31 - 1)] == [104] * 4
+    for name in ("fwd_dot2", "fwd_f32"):
+        assert [cake_jit.clusters(name, T, "sm_103a", 148) for T in (129, 2047, 2048, 65536)] == [125] * 4
+    for (arch, sms), entry in cake_jit.LARGE_BWD_CLUSTERS.items():
+        assert arch in ARCHES
+        assert 1 <= entry <= 3 * sms // cake_jit.CLUSTER_CTAS, (arch, sms)
+
+
+# Devices (architecture, SM count) the launch plans are checked on: every measured kind, B300 (no resident entry, its
+# own backward grid of many tokens) and SM counts no table holds.
+PLAN_DEVICES = (
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_100a", 160),
+    ("sm_103a", 148),
+    ("sm_103a", 152),
+    ("sm_107a", 212),
+    ("sm_107a", 216),
+)
+
+
+def _clear_plans() -> None:
+    cake_backend._forward_classes.cache_clear()
+    cake_backend._backward_classes.cache_clear()
+
+
+def _fake_device(monkeypatch, arch: str, sms: int) -> None:
+    """Device 0 reads as ``arch`` with ``sms`` SMs; the launch plans built so far are dropped."""
+    monkeypatch.setattr(cake_backend, "device_arch", lambda index, arch=arch: arch)
+    monkeypatch.setattr(cake_backend, "sm_count", lambda index, sms=sms: sms)
+    _clear_plans()
+
+
+def _plan_tokens(bounds: tuple[int, ...]) -> list[int]:
+    """Every token count from 1 to twice the largest bound (at least 16384), each bound and its neighbours, and every
+    power of two up to 2^30 with its neighbours and 2^31 - 1, the largest count."""
+    top = max((16384, *(2 * least for least in bounds)))
+    tokens = set(range(1, top + 1)) | {2**31 - 1}
+    for least in (*bounds, *(2**e for e in range(31))):
+        tokens |= {least - 1, least, least + 1}
+    return sorted(t for t in tokens if 1 <= t <= 2**31 - 1)
+
+
+def _launch(plan, T: int) -> tuple[str, int]:
+    """The record and the grid (CTAs) of a call of ``T`` tokens with the launch plan ``plan``, looked up as
+    ``_forward`` and ``_launch_backward`` look them up."""
+    bounds, classes = plan
+    name, units, ctas = classes[bisect.bisect_right(bounds, T)]
+    return name, ctas * (T if T < units else units)
+
+
+def _check_plans(arch: str, sms: int) -> None:
+    """Every forward plan (each summation) and backward plan (with and without a token mask) of device 0 gives, for
+    every token count of :func:`_plan_tokens`, the record of ``cake_jit.forward_record`` / ``backward_record`` and the
+    grid of ``cake_jit.grid``; the bounds are ``cake_jit.token_bounds`` (ascending, each above one token)."""
+    bounds = cake_jit.token_bounds(arch, sms)
+    assert list(bounds) == sorted(set(bounds)) and all(least > 1 for least in bounds), bounds
+    tokens = _plan_tokens(bounds)
+    for acc in FWD_ACCS:
+        plan = cake_backend._forward_classes(arch, 0, acc)
+        assert plan[0] == bounds and len(plan[1]) == len(bounds) + 1, (arch, sms, acc)
+        for T in tokens:
+            name = cake_jit.forward_record(arch, sms, acc, T)
+            assert _launch(plan, T) == (name, cake_jit.grid(name, T, arch, sms)[0]), (arch, sms, acc, T)
+    for masked in (False, True):
+        plan = cake_backend._backward_classes(arch, 0, masked)
+        assert plan[0] == bounds and len(plan[1]) == len(bounds) + 1, (arch, sms, masked)
+        for T in tokens:
+            name = cake_jit.backward_record(arch, masked, T)
+            assert _launch(plan, T) == (name, cake_jit.grid(name, T, arch, sms)[0]), (arch, sms, masked, T)
+
+
+def test_the_launch_plan_gives_the_record_and_the_grid_of_cake_jit(monkeypatch) -> None:
+    """On a faked device of each kind of ``PLAN_DEVICES`` (nothing launched), the plans a forward and a backward call
+    look their record and grid up in (built once per device, summation or mask choice and token class) give the record
+    and the grid the ``cake_jit`` functions give for every token count up to twice the largest bound and around every
+    bound and power of two; the workspace query gives ``cake_jit.clusters`` of the backward.  A plan is built from the
+    tables: after a table changes (a ``cta1`` entry, an ordered or staged threshold, a backward grid of many tokens)
+    and the plans are cleared, the plans follow the changed tables, and the shipped ones again after the undo."""
+    workspace = cake_backend.cake_engram_gate_nondet_train_workspace_bytes
+    try:
+        for arch, sms in PLAN_DEVICES:
+            _fake_device(monkeypatch, arch, sms)
+            _check_plans(arch, sms)
+            for T in (1, 129, 2047, 2048, 4096, 65536):
+                rows = cake_jit.clusters("bwd_dot2", T, arch, sms)
+                assert workspace(T, 0) == rows * STREAMS * HIDDEN * 4, (arch, T)
+        _fake_device(monkeypatch, "sm_100a", 148)
+        shipped = {acc: cake_backend._forward_classes("sm_100a", 0, acc) for acc in FWD_ACCS}
+        monkeypatch.setitem(cake_jit.CTA1_FWD_MIN_TOKENS, ("sm_100a", 148, "f32"), 3000)
+        monkeypatch.setitem(cake_jit.ORDER_BWD_MIN_TOKENS, "sm_100a", 5000)
+        monkeypatch.setitem(cake_jit.LARGE_BWD_CLUSTERS, ("sm_100a", 148), 100)
+        monkeypatch.setattr(cake_jit, "STAGE_BWD_MIN_TOKENS", 6000)
+        _clear_plans()
+        assert cake_jit.token_bounds("sm_100a", 148) == (2048, 3000, 5000, 6000)
+        assert _launch(cake_backend._forward_classes("sm_100a", 0, "f32"), 3000) == ("fwd_f32_cta1", 148)
+        assert _launch(cake_backend._backward_classes("sm_100a", 0, True), 5000) == ("bwd_dot2_order", 400)
+        _check_plans("sm_100a", 148)
+        monkeypatch.undo()
+        _fake_device(monkeypatch, "sm_100a", 148)
+        assert {acc: cake_backend._forward_classes("sm_100a", 0, acc) for acc in FWD_ACCS} == shipped
+        _check_plans("sm_100a", 148)
+    finally:
+        monkeypatch.undo()
+        _clear_plans()
+
+
+@pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))
+@pytest.mark.parametrize("T", (1, 2, 3, 129, 4096, 16384, 65536, 2**31 - 1))
+def test_cta1_grids_are_one_cta_an_sm(T, sms) -> None:
+    """A ``cta1`` forward runs ``min(T, SMs)`` CTAs (at least one) of 640 threads, one an SM; every other ``fwd`` /
+    ``bwd`` record's resident units are its resident four-CTA clusters."""
+    for arch in ARCHES:
+        for name in sorted(cake_jit.CTA1_RECORDS):
+            assert cake_jit.resident_units(name, arch, sms) == sms
+            assert cake_jit.clusters(name, T, arch, sms) == max(1, min(T, sms))
+            assert cake_jit.grid(name, T, arch, sms) == (max(1, min(T, sms)), 1, 1)
+        for name in PERSISTENT_RECORDS:
+            assert cake_jit.resident_units(name, arch, sms) == cake_jit.resident_clusters(name, arch, sms)
 
 
 class _Recorder:
@@ -268,7 +451,7 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         clamp_value=1e-6,
         clusters=clusters,
     )
-    rows = 1  # the accumulator
+    rows = clusters  # one partial row per cluster
     dw = torch.zeros(rows, STREAMS, HIDDEN)
     cake_backend.launch_bwd(
         cake_jit.record("bwd"),
@@ -293,6 +476,30 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
     cake_backend.launch_dw_reduce(
         "dw_reduce", dw=dw, q_weight=ops["q_words"], k_weight=ops["k_words"], dq=dq, dk=dk, wmode=0b0101
     )
+    cta1 = f"fwd_{acc}_cta1"
+    if cta1 in cake_jit.CTA1_RECORDS:  # fwd_f32 only: fwd_dot2 has no cta1 form
+        cake_backend.launch_fwd(
+            cta1,
+            x=ops["x"],
+            key=ops["key"],
+            value=ops["value"],
+            q_weight=ops["q_words"],
+            k_weight=ops["k_words"],
+            wmode=1,
+            mask=mask,
+            out=out,
+            eps=1e-20,
+            clamp_value=1e-6,
+            clusters=clusters,
+        )
+        *calls, (cta1_name, cta1_args) = recorder.calls
+        recorder.calls = calls
+        # the cta1 form takes its cluster program's parameters on ``clusters`` CTAs of 640 threads
+        assert cta1_name == cta1 and cta1_args[-3:] == (clusters, 1, 1)
+        first = dict(recorder.calls)[f"fwd_{acc}"]
+        assert len(cta1_args) == len(first)
+        for mine, theirs in zip(cta1_args[:-3], first[:-3], strict=True):
+            assert mine is theirs or (not isinstance(mine, torch.Tensor) and mine == theirs)
     assert [name for name, _ in recorder.calls] == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
     for name, args in recorder.calls:
         params = cake_backend.parameters(name)
@@ -313,6 +520,30 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         if name == "dw_reduce":
             assert named["dq"] is dq and named["dk"] is dk
             assert (named["wmode"], named["NP"]) == (0b0101, rows)
+
+
+@pytest.mark.parametrize("T", (0, 1, 2, 3))
+@pytest.mark.parametrize("layout", ("contiguous", "wider"))
+def test_the_kv_views_are_the_slices(T, layout) -> None:
+    """The backend's ``key`` and ``value`` views of a packed ``kv`` address what the slices
+    ``kv[:, :20480].unflatten(1, (4, 5120))`` and ``kv[:, 20480:]`` address: the same storage, offsets and sizes and the
+    same strides on every dimension with more than one element, for a contiguous ``kv`` and for a view into a wider
+    buffer. Both views carry ``kv``'s row stride; a dimension of size 0 or 1 addresses no second element, and torch's
+    view rules may give the sliced key another stride there."""
+    width = (STREAMS + 1) * HIDDEN
+    if layout == "contiguous":
+        kv = torch.zeros(T, width, dtype=torch.bfloat16)
+    else:
+        kv = torch.zeros(T, width + 24, dtype=torch.bfloat16)[:, 8 : 8 + width]
+    sliced = (kv[:, : STREAMS * HIDDEN].unflatten(1, (STREAMS, HIDDEN)), kv[:, STREAMS * HIDDEN :])
+    made = (*cake_backend._split_kv(kv), *cake_backend._kv_views(kv))
+    for got, want in zip(made, sliced * 2, strict=True):
+        assert got.shape == want.shape and got.stride(0) == kv.stride(0), (tuple(got.shape), got.stride())
+        for dim, size in enumerate(want.shape):
+            if size > 1:
+                assert got.stride(dim) == want.stride(dim), (dim, got.stride(), want.stride())
+        assert got.storage_offset() == want.storage_offset()
+        assert got.untyped_storage().data_ptr() == want.untyped_storage().data_ptr()
 
 
 def test_the_package_exports_the_backend_entries() -> None:

@@ -15,16 +15,71 @@ backend selection.
 The three operations, their arguments, alignment rules and outputs are the
 deterministic package's (see its README): over `E` groups of rows described by
 an int32 **device** tensor `offs[E]` of cumulative end offsets, or
-`m_indptr[E + 1]`, read by the kernels only.
+`m_indptr[E + 1]`, whose first entry may be above 0 (device slices, below),
+read by the kernels only.
 
 The slice lower bound is `0` for `e == 0` and `offs[e-1]` for `e > 0`.
-For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]`.
+For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]` and the
+lower bound of group 0 is `m_indptr[0]` (device slices, below).
 
 | helper | computation | output |
 | --- | --- | --- |
 | `cake_moe_grouped_gemm_nondet_train_forward(x, w, offs, out=None)` | `Y[offs[e-1]:offs[e]] = X[offs[e-1]:offs[e]] @ W[e].T` | `Y [sum_m, N]` bf16 |
 | `cake_moe_grouped_gemm_nondet_train_dgrad(g, w, offs, out=None)` | `dX[offs[e-1]:offs[e]] = G[offs[e-1]:offs[e]] @ W[e]` (W read in place) | `dX [sum_m, K]` bf16 |
 | `cake_moe_grouped_gemm_nondet_train_wgrad(g, x, offs, out=None, out_dtype=None, num_groups=None, *, accumulate=False)` | `dW[e] = G[offs[e-1]:offs[e]].T @ X[offs[e-1]:offs[e]]`; with `accumulate=True`, `out[e] += dW[e]` | `dW [E, N, K]` bf16 or fp32 |
+
+## Device slices (`m_indptr[0] > 0`)
+
+An `m_indptr[E + 1]` may start above 0. The call then covers the rows
+`[m_indptr[0], m_indptr[E])` of the whole `x` / `g`, in absolute row numbers:
+for example the experts `e0 .. e1 - 1` of a larger table, one chunk of experts
+at a time, without copying rows or reading the table on the host.
+
+```python
+# m_indptr: [E_all + 1] int32 on the device; x: [R, K], g: [R, N]: all routed rows
+chunk = m_indptr[e0 : e1 + 1]  # a view; chunk[0] may be above 0
+y = torch.empty(R, N, dtype=torch.bfloat16, device=x.device)
+cake_moe_grouped_gemm_nondet_train_forward(x, w[e0:e1], chunk, out=y)  # writes rows chunk[0] .. chunk[-1] - 1 of y
+dw = cake_moe_grouped_gemm_nondet_train_wgrad(g, x, chunk, num_groups=e1 - e0)
+```
+
+- Rows outside `[m_indptr[0], m_indptr[E])` do not affect the results and are
+  not written: the forward and the data gradient leave those rows of `out` as
+  they are, so slices of disjoint rows may write one `out`, also from different
+  streams. The entries must be nondecreasing row numbers of the operands, at
+  most `sum_m`.
+- The weight gradient reads the `[E + 1]` form only with `num_groups=E`;
+  without it, `E + 1` entries are `E + 1` end offsets.
+- The kernels read `m_indptr[0]` on the device at every launch: a prepared
+  launch and a CUDA graph that captured it follow new boundaries, the first
+  entry included.
+- Programs: the `m_indptr` form binds the lead twins of the programs (the
+  routes `<route>_lead` of `cake_jit`, programs `<program>_lead` with
+  `twin_of`); the `[E]` form
+  binds the programs themselves (`launch.bound_routes`, `launch.bound_programs`
+  name them). A process JIT-compiles a twin at its first call where the package
+  ships no prebuilt build of it.
+- Cost: the twins read `m_indptr[0]` once per role, and some launches are
+  slightly slower (most a weight gradient with a split tail). When
+  `m_indptr[0]` is 0, pass `m_indptr[1:]` (the `[E]` form): it binds the
+  original programs at no extra cost and gives the same bits.
+- Bits: the plan (k tile, stage, grid, tail split) comes from the shapes, and
+  `sum_m` is `x.shape[0]`, every row, not the rows of the slice. A slice gives
+  the bits of the host-offset call over its rows (`x[m_indptr[0]:m_indptr[E]]`
+  with `offs = m_indptr[1:] - m_indptr[0]`) when the two calls plan the same.
+  When they plan differently (for example the rows per group cross
+  `k512_min_rows_per_group`), it gives the bits of that host-offset call with
+  its rows padded by rows of no group to the same `sum_m`, which plans the
+  same. Both results repeat bit for bit and meet the same accuracy bar.
+- A slice with no row and `accumulate=True` (`m_indptr[0] == m_indptr[E]`)
+  still launches, as the host does not read the table. On the composed route its add of the scratch's exact zeros turns a `-0.0` in
+  `out` into `+0.0`; the fused route does not write empty groups. The values are
+  equal. The host-offset call with no row launches nothing.
+- Autograd: `cake_moe_grouped_gemm_nondet(x, w, chunk)` writes only the slice's rows of
+  `Y` and of the gradient of `x`; the other rows of these new tensors are
+  uninitialized (`torch.empty`). Summing the `x` gradients of several slices
+  of one shared `x` is therefore not supported: a sliced layout calls the
+  op-level functions with caller-owned outputs.
 
 ## Mode rules
 
@@ -307,11 +362,25 @@ release, k256 tail); see that package's README. The L2 evict-first twins
 (`main_wide_ef`) follow the deterministic rules and constants: the data
 gradient's on the architectures of `dgrad_evict_first_archs` (sm_100a, the
 domain-scheduled twin; sm_107a, the A-collector twin) from the architecture's
-`dgrad_evict_first_min_rows` rows per group and `K >= dgrad_evict_first_min_k`
+`dgrad_evict_first_min_rows` rows per group and `K >= dgrad_evict_first_min_k`,
+unless the reduction `N` is at most `dgrad_evict_first_skip_max_n`
 (`dgrad_evict_first`), the forward pass's on those of `fwd_lwh_ef_archs`
 (sm_107a) for `K <= fwd_lwh_ef_max_k` (`fwd_lwh_ef`) and on those of
 `fwd_evict_first_archs` (sm_100a, sm_103a) for `K >= fwd_evict_first_min_k`
-(`fwd_evict_first`). The eviction priority changes no arithmetic. Differences:
+(`fwd_evict_first`). The eviction priority changes no arithmetic. The 3 / 3
+head / tail twins (`main_wide_ts33`, sm_103a) follow the deterministic rules too,
+the short-reduction ones included (`dgrad_wide_ts33_short_n_min` to
+`dgrad_wide_ts33_short_n`, `fwd_wide_ts33_short_k_min` to
+`fwd_wide_ts33_short_k`). A forward
+or data gradient whose output span passes 2^31 - 1 elements launches in row
+chunks on the architectures of `wide_rows_archs` (`sm_100a`, `sm_103a`,
+`sm_107a`) as in
+the deterministic package (wide outputs; `plan["row_chunks"]`,
+`plan["grids"]`, the chunk row tables retained by the launch, with the same
+rules: one prepared wide launch must not be in flight on two streams at once,
+must be kept alive while a CUDA graph that captured it may replay and, after a
+launch on another stream, must be kept alive until that launch completes).
+Differences:
 
 - Ordered one-launch tail (`plan_wgrad(..., ordered_tail=True)`): the
   512-wide k tile on the architectures of
@@ -482,7 +551,7 @@ still fails.
 ## Tests and benchmark
 
 ```bash
-pytest tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_api.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_names.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py
+pytest tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_api.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_names.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_device_slice.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_wide_rows.py
 python benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py --help
 ```
 
@@ -512,6 +581,32 @@ output repeats bit for bit: repeated launches into outputs prefilled with
 `0x00` and `0x5A` bytes, digests from fresh processes, fused and composed
 accumulation over 1 and 4 launches, the autograd entry with and without
 activation checkpointing, CUDA graph replay, and two CUDA streams.
+`test_cake_moe_grouped_gemm_nondet_train_device_slice.py` covers the device
+slices (above): on the CPU the lead routes against their routes, the lead
+builds' CUDA floor, the row table's views and the lead binding over every
+architecture; on a GPU each slice against the `[E]` call over the same rows
+moved to row 0 (bitwise) and the `[E]` call over the slice's rows alone
+(bitwise where it plans the same), every forced stage, edges with the rows
+outside poisoned, padded rows, graph replay over device-copied routings, two
+streams, accumulation, the autograd entry and the bits of the judged `[E]`
+cases.
+`test_cake_moe_grouped_gemm_nondet_train_wide_rows.py` covers the wide
+outputs (host plan, above): on the CPU the chunk arithmetic, the chunks' row
+tables against the rows of each group in each chunk, a call within the span
+bound as one launch, a wide call's chunks, rows and row tables and the
+refusals (an architecture outside `wide_rows_archs`, a row pitch past the
+span); on a GPU forced chunks of
+every served `fwd` / `dgrad` stage bitwise against one launch (an empty chunk,
+a first group past the first chunk, both row tables), the issue's 655,360
+rows over 64 and 32 skewed groups and the boundary row counts 524,287,
+524,288, 524,289 and 1,048,576 against the naive BF16 tier with windows of
+rows (each chunk boundary, row 524,288) bitwise against independent calls
+within the span, an `m_indptr` device slice into a slice of a larger `out`,
+changing device routings eager and from one CUDA graph with no host
+synchronization and no new program load, a checkpointed MoE block bitwise
+against the block without checkpoint, a weight gradient whose operands pass
+2^31 elements against the naive BF16 tier, and repeats. These GPU tests skip
+on a device with too little free memory (up to 72 GiB for the block).
 `test_cake_moe_grouped_gemm_nondet_train_standalone.py` imports a copy under another
 top-level name. `test_cake_moe_grouped_gemm_nondet_train_acc.py` covers the accumulate mode: the
 `_acc` stages against the shipped set and their twins, the plans, the routes
@@ -527,13 +622,21 @@ weight gradient) rows time the accumulation arms (`ovw`, `acc`, `mgB`, `mgF`,
 against `torch._grouped_mm` and a per-group cuBLAS loop. Its rows include
 `E = 1` and `E = 32` at 112,576 and 136,064 rows, and the note of a Cake
 weight-gradient row records its plan (`tail_splits`, `ordered_tail`,
-`unordered_tail`).
+`unordered_tail`). `--wide-rows` runs the wide-output rows instead (the down
+projection's forward and the gate/up projection's data gradient, `[rows, 4096]`
+at 327,680 and 655,360 rows over 64 and 32 balanced or skewed groups).
 
 ## Limitations
 
-- bf16 inputs only; `E`, `sum_m`, `N`, `K` and the output span must fit
-  32-bit element addressing.
+- bf16 inputs only; `E`, `sum_m`, `N` and `K` must fit 32-bit integers. On
+  `sm_100a`, `sm_103a` and `sm_107a`, a forward or data-gradient output whose
+  span passes 2^31 - 1 elements runs the selected program once per row chunk
+  whose span fits 32-bit element addressing (`plan["row_chunks"]`); the chunk
+  row tables are computed on the device. The weight-gradient output span must
+  fit 32-bit addressing.
 - The deterministic package's alignment rules; compute capability 10.0, 10.3
   or 10.7 only.
+- The autograd entry does not support summing the `x` gradients of several
+  device slices of one shared `x` (device slices, above).
 - The optional fused SwiGLU and routing-scale epilogues are not part
   of this family.

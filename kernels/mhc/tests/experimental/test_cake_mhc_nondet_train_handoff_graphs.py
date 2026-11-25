@@ -326,10 +326,12 @@ def test_captured_two_sublayer_chain(record_property) -> None:
     chain.check(record_property)
 
 
-def test_captured_standalone_collapse(record_property) -> None:
+@pytest.mark.parametrize("T", (2049, 768, 129, 64, 34, 8192))
+def test_captured_standalone_collapse(T: int, record_property) -> None:
     """``collapse_forward`` and ``collapse_backward`` captured and replayed on 32 inputs: ``U``, ``dX`` and ``dpre_in``
-    judged against the naive tier."""
-    T = 2049
+    judged against the naive tier (T 768 / 129 / 64 / 34: the split VJPs of the token-count bands of
+    ``collapse_backward``; 34 the stage-free split VJP on sm_100a / sm_103a; 2049 / 8192 the one-CTA
+    ``_vjpwa_pf0`` / stage-free ``_vjpwd`` VJPs on sm_100a / sm_103a)."""
     statics = make_inputs(T, device=_device(), seed=SEED + 5)
 
     def step():
@@ -351,7 +353,7 @@ def test_captured_standalone_collapse(record_property) -> None:
     )
 
 
-@pytest.mark.parametrize("T", (129, 16384))
+@pytest.mark.parametrize("T", (129, 383, 384, 1023, 16384))
 def test_handoff_steady_state_has_no_host_sync(T: int) -> None:
     """After a warm-up, eager iterations of the direct handoff entry points, the autograd chain and the standalone
     collapse run under ``torch.cuda.set_sync_debug_mode("error")`` (any synchronizing CUDA call raises)."""

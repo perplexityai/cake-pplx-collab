@@ -101,13 +101,25 @@ kernel_cake_kda_train_d7656e2b58b9bab49495(int* __restrict__ cu_seqlens, int num
             { uint32_t peer = __shfl_up_sync(0xFFFFFFFF, _cta_scan_sum_prefix_0_ws, 16, 32); if (lane >= 16) { _cta_scan_sum_prefix_0_ws += peer; } }
             if (lane == 31) { warp_tot[warp] = (int)_cta_scan_sum_prefix_0_ws; }
             __syncthreads();
-            const uint32_t _cta_scan_sum_prefix_0_wt = (lane < 8) ? (uint32_t)warp_tot[lane] : 0;
-            uint32_t _cta_scan_sum_prefix_0_wsum = _cta_scan_sum_prefix_0_wt;
-            { uint32_t peer = __shfl_up_sync(0xFFFFFFFF, _cta_scan_sum_prefix_0_wsum, 1, 32); if (lane >= 1) { _cta_scan_sum_prefix_0_wsum += peer; } }
-            { uint32_t peer = __shfl_up_sync(0xFFFFFFFF, _cta_scan_sum_prefix_0_wsum, 2, 32); if (lane >= 2) { _cta_scan_sum_prefix_0_wsum += peer; } }
-            { uint32_t peer = __shfl_up_sync(0xFFFFFFFF, _cta_scan_sum_prefix_0_wsum, 4, 32); if (lane >= 4) { _cta_scan_sum_prefix_0_wsum += peer; } }
-            _cta_scan_sum_total_0 = (int)__shfl_sync(0xFFFFFFFF, _cta_scan_sum_prefix_0_wsum, 7);
-            const uint32_t _cta_scan_sum_prefix_0_before = __shfl_sync(0xFFFFFFFF, _cta_scan_sum_prefix_0_wsum - _cta_scan_sum_prefix_0_wt, warp);
+            uint32_t _cta_scan_sum_prefix_0_before = 0;
+            uint32_t _cta_scan_sum_total_0_sum = 0;
+            { const uint32_t t = (uint32_t)warp_tot[0]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 0) { _cta_scan_sum_prefix_0_before += t; } }
+            { const uint32_t t = (uint32_t)warp_tot[1]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 1) { _cta_scan_sum_prefix_0_before += t; } }
+            { const uint32_t t = (uint32_t)warp_tot[2]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 2) { _cta_scan_sum_prefix_0_before += t; } }
+            { const uint32_t t = (uint32_t)warp_tot[3]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 3) { _cta_scan_sum_prefix_0_before += t; } }
+            { const uint32_t t = (uint32_t)warp_tot[4]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 4) { _cta_scan_sum_prefix_0_before += t; } }
+            { const uint32_t t = (uint32_t)warp_tot[5]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 5) { _cta_scan_sum_prefix_0_before += t; } }
+            { const uint32_t t = (uint32_t)warp_tot[6]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 6) { _cta_scan_sum_prefix_0_before += t; } }
+            { const uint32_t t = (uint32_t)warp_tot[7]; _cta_scan_sum_total_0_sum += t;
+              if (warp > 7) { _cta_scan_sum_prefix_0_before += t; } }
+            _cta_scan_sum_total_0 = (int)_cta_scan_sum_total_0_sum;
             _cta_scan_sum_prefix_0 = (int)(_cta_scan_sum_prefix_0_ws - _cta_scan_sum_prefix_0_own + _cta_scan_sum_prefix_0_before);
         }
         if (i < num_seqs) {

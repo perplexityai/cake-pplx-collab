@@ -39,6 +39,11 @@ activates the gate in the same FP64 graph::
 
 so autograd gives the gradients of the raw gate and of both parameters too
 (:func:`kda_exact_raw_with_grads`).
+
+The reference is the oracle of the naive-tier judge (``cake_kda_naive.judge_arms``): the tests hold no output to a
+tolerance around it.  The Student's t helpers (:func:`t_quantile`, :func:`upper_t_bound`) serve the benchmarks'
+timing statistics, and :func:`check_fla_gate` checks that the benchmarks' adapter of flash-linear-attention's gate
+computes the same formula as :func:`raw_gate`; neither judges a kernel's output.
 """
 
 from __future__ import annotations
@@ -382,42 +387,6 @@ def kda_exact_raw_with_grads(
     return o.detach(), dict(
         zip(RAW_GRAD_NAMES, (x.detach() for x in grads), strict=True)
     )
-
-
-def error_metrics(cand: torch.Tensor, ref: torch.Tensor) -> dict[str, float]:
-    """max |err|, RMS err, relative RMS (err RMS / ref RMS) and the reference RMS, computed in FP64."""
-    c = cand.detach().to(torch.float64)
-    r = ref.detach().to(torch.float64)
-    err = c - r
-    rms_ref = torch.sqrt(torch.mean(r * r)).item() if r.numel() else 0.0
-    rms_err = torch.sqrt(torch.mean(err * err)).item() if err.numel() else 0.0
-    return {
-        "max_abs": err.abs().max().item() if err.numel() else 0.0,
-        "rms": rms_err,
-        "rel_rms": (rms_err / rms_ref)
-        if rms_ref > 0
-        else float("inf")
-        if rms_err > 0
-        else 0.0,
-        "ref_rms": rms_ref,
-    }
-
-
-def elementwise_gate(
-    cand: torch.Tensor, ref: torch.Tensor, atol: float, rtol: float
-) -> dict:
-    """``|cand - ref| <= atol + rtol * |ref|`` elementwise in FP32; the mismatch and non-finite counts."""
-    c = cand.detach().to(torch.float32)
-    r = ref.detach().to(torch.float32)
-    bad = (c - r).abs() > (atol + rtol * r.abs())
-    nonfinite = int((~torch.isfinite(c)).sum().item())
-    mismatch = int(bad.sum().item())
-    return {
-        "mismatch": mismatch,
-        "numel": int(c.numel()),
-        "nonfinite": nonfinite,
-        "pass": mismatch == 0 and nonfinite == 0,
-    }
 
 
 def _betacf(a: float, b: float, x: float) -> float:

@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -208,11 +208,11 @@ kernel_cake_mhc_det_train_fwd_map__tk_nsx_g2_ol2l_ct(const __grid_constant__ CUt
             mbarrier_init(smem + 114712, 1);
             mbarrier_init(smem + 114720, 1);
             mbarrier_init(smem + 114728, 1);
-            // a_empty: 4 barriers, init_count=5
-            mbarrier_init(smem + 114736, 5);
-            mbarrier_init(smem + 114744, 5);
-            mbarrier_init(smem + 114752, 5);
-            mbarrier_init(smem + 114760, 5);
+            // a_empty: 4 barriers, init_count=129
+            mbarrier_init(smem + 114736, 129);
+            mbarrier_init(smem + 114744, 129);
+            mbarrier_init(smem + 114752, 129);
+            mbarrier_init(smem + 114760, 129);
             // --- pipeline 'chunk_pipe' ---
             // big_full: 2 barriers, init_count=1
             mbarrier_init(smem + 114768, 1);
@@ -645,10 +645,8 @@ kernel_cake_mhc_det_train_fwd_map__tk_nsx_g2_ol2l_ct(const __grid_constant__ CUt
                         asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_1) : "f"(qsum[0]), "f"(part[h]));
                         qsum[0] = _add_1;
                     }
-                    __syncwarp();
-                    if (elect_sync()) {
-                        mbarrier_arrive(a_empty_addr + (r_stage) * 8);
-                    }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                    mbarrier_arrive(a_empty_addr + (r_stage) * 8);
                     r_stage += 1;
                     if (r_stage == 4) { r_stage = 0; _phase_a_full_1 ^= 1; }
                     if (st_2 % 2 == 1) {

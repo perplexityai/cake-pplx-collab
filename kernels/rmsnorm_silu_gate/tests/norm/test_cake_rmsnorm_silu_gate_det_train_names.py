@@ -363,16 +363,23 @@ def test_the_two_modes_are_separate_modules() -> None:
         for name in det_backend.cake_jit.MODULES
     )
     # the non-deterministic package routes its call roles, the roles its
-    # forward and backward bands name, the long roles of its banded roles and
-    # backward roles of a BF16 weight gradient that no band runs; a backward
-    # call role has no module where its bands, whose last has no end, take
-    # every row count: the BF16 one on sm_100a and sm_103a, the FP32 one (its
-    # static backward, which a band runs on sm_100a and sm_103a) on sm_107a
+    # forward bands (of packed rows, of each layout class of rows that are not
+    # packed and of other rows) and backward bands name, the long roles of its
+    # banded roles and backward roles of a BF16 weight gradient that no band
+    # runs; a backward call role has no module where its bands, whose last has
+    # no end, take every row count: the BF16 one on sm_100a and sm_103a, the
+    # FP32 one (its static backward, which a band runs on sm_100a and sm_103a)
+    # on sm_107a
     loader = nd_backend.cake_jit
     roles = {record["role"] for record in loader.MODULES.values()}
+    forward_tables = (
+        loader.FORWARD_BANDS,
+        *loader.LAYOUT_FORWARD_BANDS.values(),
+        loader.STRIDED_FORWARD_BANDS,
+    )
     banded = {
         role
-        for table in (loader.FORWARD_BANDS, loader.STRIDED_FORWARD_BANDS)
+        for table in forward_tables
         for bands in table.values()
         for _, role in bands
     } | {
@@ -399,12 +406,19 @@ def test_the_two_modes_are_separate_modules() -> None:
         for role in roles - set(loader.ROLES) - banded - longs
     )
     # the deterministic package routes its call roles, the long modules of its
-    # backward roles, the programs of a backward without the weight gradient
-    # and, on some architectures, a forward of packed rows
+    # backward roles, the programs of a backward without the weight gradient,
+    # the programs of one CTA and of one cluster of a backward of up to 256
+    # rows and, on some architectures, a forward of packed rows and the tiny
+    # forward
     det_loader = det_backend.cake_jit
     roles = {record["role"] for record in det_loader.MODULES.values()}
     routed = {*det_loader.ROLES, *det_loader.LONG_ROLES}
-    others = {*det_loader.PACKED_ROLES, *det_loader.NODW_ROLES}
+    others = {
+        *det_loader.PACKED_ROLES,
+        *det_loader.TINY_ROLES,
+        *det_loader.NODW_ROLES,
+        *det_loader.CLUSTER_ROLES,
+    }
     assert routed <= roles <= routed | others
     for routes in det_loader.ROUTES.values():
         assert routed <= set(routes) <= roles

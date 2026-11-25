@@ -128,8 +128,9 @@ def cake_gated_kv_compression_det_train_forward(
 ) -> torch.Tensor:
     r"""The pooled rows: ``out[r] = BF16(p0 * C[t0] + p1 * C[t1])`` with ``(p0, p1) = softmax(Z[t0], Z[t1])``.
 
-    Two launches on the current stream: the pair table of ``cu_seqlens`` (int32 ``[S + 1]``, a per-call workspace),
-    then one row of 512 columns per pair, in FP32 with one rounding to BF16.
+    One or two launches on the current stream: the pair table of ``cu_seqlens`` (int32 ``[S + 1]``, a per-call
+    workspace) when ``S`` is above 256, then one row of 512 columns per pair, in FP32 with one rounding to BF16.  A
+    forward of at most 256 documents builds the pair table inside its one launch.
 
     Parameters
     ----------
@@ -290,7 +291,9 @@ def cake_gated_kv_compression_det_cz(cz: torch.Tensor, cu_seqlens: torch.Tensor,
 
 
 @cake_api
-def cake_gated_kv_compression_det_train_memory_bytes(num_tokens: int, num_docs: int) -> dict[str, int]:
+def cake_gated_kv_compression_det_train_memory_bytes(
+    num_tokens: int, num_docs: int, device: Any = None
+) -> dict[str, int]:
     """The workspace and the state retained for the backward, in bytes, reported separately.
 
     Parameters
@@ -299,15 +302,21 @@ def cake_gated_kv_compression_det_train_memory_bytes(num_tokens: int, num_docs: 
         ``T``.
     num_docs : int
         ``S``.
+    device : torch.device, int or str, optional
+        A CUDA device: the report of its architecture.  ``None`` (the default): the most any delivered architecture
+        allocates (the pair table's chunk workspace below depends on the architecture).
 
     Returns
     -------
     ``dict`` with
 
-    * ``forward_workspace``: ``4 (S + 1)``, the pair table an explicit forward allocates and frees;
-    * ``backward_workspace``: ``4 (S + 1)``, the pair table an explicit backward without ``pair_offsets`` allocates
-      and frees.  The autograd backward allocates none, except a ``1024 G``-byte contiguous copy of an incoming
-      gradient that is not contiguous and 16-byte aligned (for example the expanded gradient of
+    * ``forward_workspace``: ``4 (S + 1)``, the pair table an explicit forward allocates and frees, plus
+      ``4 ceil(S / chunk)``, the chunk totals of a pair table in two phases (a separate int32 tensor, freed on
+      return), for ``131072 <= S <= 16777216`` on SM100 / SM103 (chunks of 8192 documents) and ``65537 <= S <=
+      16777216`` on SM107 (chunks of 1024);
+    * ``backward_workspace``: the same, the pair table an explicit backward without ``pair_offsets`` allocates
+      and frees, with its chunk totals.  The autograd backward allocates none, except a ``1024 G``-byte contiguous
+      copy of an incoming gradient that is not contiguous and 16-byte aligned (for example the expanded gradient of
       ``out.sum().backward()``), freed on return; the report takes no ``G`` and leaves this copy out;
     * ``retained_for_backward``: ``4 (S + 1)``, the bytes the autograd node allocates in its forward and keeps until
       its backward (its pair table);
@@ -316,7 +325,7 @@ def cake_gated_kv_compression_det_train_memory_bytes(num_tokens: int, num_docs: 
 
     The outputs (``out``, ``dC``, ``dZ``) are not counted.  A call that launches nothing allocates no workspace.
     """
-    return _pkg().cake_gated_kv_compression_det_train_memory_bytes(num_tokens, num_docs)
+    return _pkg().cake_gated_kv_compression_det_train_memory_bytes(num_tokens, num_docs, device)
 
 
 # The backend objects this module serves under its own names, resolved on first access so that importing this module imports no

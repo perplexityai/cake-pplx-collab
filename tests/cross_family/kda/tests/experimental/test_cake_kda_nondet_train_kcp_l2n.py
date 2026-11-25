@@ -13,8 +13,9 @@ limitations under the License.
 The in-kernel Q / K L2 norm of the non-deterministic context-parallel (KCP) KDA training route
 (``use_qk_l2norm_in_kernel=True`` of ``cake_kcp.cake_kda_nondet_kcp`` / ``cake_kda_nondet_train_kcp_forward`` /
 ``cake_kda_nondet_train_kcp_backward``, issue #7817), the mirror of ``test_cake_kda_det_train_kcp_l2n.py``.  In this
-mode the route launches the deterministic package's programs on every row (the single-rank registry selects their copies
-for every stage the mode touches, ``dqkg`` included), so its rows hold the route bitwise to the deterministic package's.
+mode the route launches copies of the deterministic package's programs (the single-rank registry selects their copies
+for every stage the mode touches, ``dqkg`` included): the CPU rows check those records and libraries as a mode contract;
+no output of this package is compared with the deterministic package's.
 
 CPU rows: the keyword (keyword-only, ``False`` by default, a bool, never an option) and the workspace's form knob;
 flag-off identity (the omitted keyword and an explicit ``False`` give the same graph keys, recompute-handle
@@ -38,25 +39,23 @@ collectives.  The flag-on CPU rows of the host plumbing run with the capability 
 nothing launches on the CPU).
 
 GPU rows (one process per rank; ``W = 1`` in the pytest process, ``W > 1`` spawned through a ``file://`` store or one
-process per Slurm task as in ``test_cake_kda_nondet_train_kcp_dist.py``): flag-off identity on one device; then every rank
-runs the flag-on KCP forward / backward in every mode on raw q / k (normalized rows times ``2^e`` per token and head,
-``e`` in ``[-6, 6]``, plus zero and subnormal rows) and must be bitwise repeatable (saved == replay, repeat, autograd ==
-explicit, checkpoint == direct, a recompute handle of both tiers == plain checkpoint -- its recompute issuing no
+process per Slurm task as in ``test_cake_kda_nondet_train_kcp_dist.py``), on each of the 32 draws of the operands of
+``tests/cake_naive.py`` (all draws in one process group): flag-off identity on one device (the records; the omitted
+and the explicit keyword judged); then every rank runs the flag-on KCP forward / backward in every mode on raw q / k
+(normalized rows times ``2^e`` per token and head, ``e`` in ``[-6, 6]``, plus zero and subnormal rows): saved (twice),
+replay, ``save_transfer=False``, autograd, checkpoint, a recompute handle of both tiers -- its recompute issuing no
 collective (the call's counter and sequence, and no torch.distributed call in the recompute phase) --, checkpoint with
-``checkpoint_handoff="on"`` (engaged) == plain checkpoint, save_transfer, ring == a2a, graph
-replay == eager, ``workspace=None``, packed strided q / k == contiguous), run the flag-off route's collectives and
-local stages, keep the FP32 rstd ``[2, T_r, H]`` (empty on a rank without tokens, which runs no local stage); every
-output, gradient, partial sum and the saved rstd are bitwise those of the deterministic package's KCP route with the
-flag on the same rank (both forms; the element counts are reported and the row needs more than zero equal elements and
-all of them equal), its local launches are the deterministic route's (the same libraries, the mode's own records among
-them) and its launch sequence is the same; rank 0 compares the gathered result with the single-rank flag-on path and
-the exact FP64 reference (the normalization differentiated in FP64): relative L2 error of KCP / single-rank <= 1.10
-for ``out, dq, dk, dv, dbeta, dg``.  The fallback form (the workspace's test knob) runs the same: repeatable, within
-the same accuracy gate, bitwise the deterministic route's fallback form; its bitwise equality with the fused form is
-reported, and a fallback form that cannot run yet fails the row with its reason (``fallback_pending``).  A flag-off
-launch record carries no key of the mode.  The raw-gate rows run the same with ``use_gate_in_kernel=True``.  The
-flag-on rows skip with the reason of ``cake_kcp_plan.qk_l2norm_missing()`` until the existing backend serves the
-fused form on the device.
+``checkpoint_handoff="on"`` (engaged), ``workspace=None``, packed strided q / k, the ring exchange where the partition
+allows it and graph replay (eager, capture, replays); it runs the flag-off route's collectives and local stages, keeps
+the FP32 rstd ``[2, T_r, H]`` (empty on a rank without tokens, which runs no local stage) and launches the mode's own
+records.  Rank 0 gathers every pass and judges it (``"<pass>.<output>"``), with the single-rank flag-on path
+(``"single"``), against the exact FP64 reference (the normalization differentiated in FP64) beside the naive BF16 tier
+(the owner-accepted gaps only; this package has no bit contract, so no pass is compared with another's bits).  The
+fallback form (the workspace's test knob) runs the same (twice and in replay mode, judged); a fallback form that cannot
+run yet fails the row with its reason (``fallback_pending``).  A flag-off launch record carries no key of the mode.
+The raw-gate rows run the same with ``use_gate_in_kernel=True`` (``dA_log`` / ``ddt_bias``: the cross-rank sums of
+the partials).  The flag-on rows skip with the reason of ``cake_kcp_plan.qk_l2norm_missing()`` until the existing
+backend serves the fused form on the device.
 """
 
 from __future__ import annotations
@@ -80,6 +79,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from tests.cake_naive import DRAWS, draw_seed
 from tests.experimental.test_cake_kda_det_train_kcp_dist import (
     _partition as _det_partition,
 )
@@ -93,13 +93,16 @@ from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     _programs_exported,
     _rendezvous,
     _requested,
-    _to_global,
 )
 from tests.experimental.test_cake_kda_nondet_train_kcp_handoff import _handoff_delta
+from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
+    NaiveJudge,
+    RankJudge,
+    judged,
+    settle_naive,
+)
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
-    error_metrics,
-    kda_exact_forward,
     make_inputs,
 )
 from tests.cake.test_helpers.cake_package import cake_package
@@ -110,7 +113,8 @@ cake_kcp_jit = cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_jit")
 cake_backend = cake_package("cake.cake_kda_nondet_train", "cake_backend")
 cake_build = cake_package("cake.cake_kda_nondet_train", "cake_build")
 cake_jit = cake_package("cake.cake_kda_nondet_train", "cake_jit")
-# the deterministic package: the baseline of the bitwise rows (imported by the test, never by the package)
+# the deterministic package: the mode contracts of the CPU rows (names, records, libraries, byte queries; imported by
+# the test, never by the package)
 det_kcp = cake_package("cake.cake_kda_det_train_kcp", "cake_kcp")
 det_kcp_plan = cake_package("cake.cake_kda_det_train_kcp", "cake_kcp_plan")
 det_kcp_jit = cake_package("cake.cake_kda_det_train_kcp", "cake_kcp_jit")
@@ -131,11 +135,13 @@ TOKEN_GRADS = (
     "dg",
 )  # the backward's order (dg: the raw gate's in the raw mode)
 PARAM_GRADS = ("dA_log", "ddt_bias")  # raw gate mode: this rank's partial sums
-ACC_GATE = 1.10  # relative L2 error of KCP / single-rank against the FP64 reference
+# the judged operands of the GPU rows: draw j at draw_seed(L2N_SEED, j) (tests/cake_naive.py)
+L2N_SEED = 0x781A
 # Cluster gate hook (flag-off identity against the base of this change): the omitted-keyword snapshot is written to
 # $ND_KCP_L2N_FLAG_OFF_CAPTURE (run there on the base commit with this file copied onto it) and compared with
-# $ND_KCP_L2N_FLAG_OFF_BASELINE (run here); the GPU row uses the same variables with the suffixes ".gpu.json" /
-# ".gpu.pt".  The names are this package's own, apart from the deterministic package's KCP_L2N_FLAG_OFF_* pair.
+# $ND_KCP_L2N_FLAG_OFF_BASELINE (run here); the GPU row uses the same variables with the suffix ".gpu.json" (its
+# records only: no output is compared across versions).  The names are this package's own, apart from the
+# deterministic package's KCP_L2N_FLAG_OFF_* pair.
 ENV_CAPTURE = "ND_KCP_L2N_FLAG_OFF_CAPTURE"
 ENV_BASELINE = "ND_KCP_L2N_FLAG_OFF_BASELINE"
 GRAPH_EVENTS = [
@@ -501,9 +507,12 @@ def _snapshot(kw: dict, H: int = 4) -> dict:
     return _jsonable(snap)
 
 
-# The literal flag-off expectations of :func:`_snapshot` ({}), captured once by executing the base of this change on
-# the CPU (no CUDA device: the byte queries plan for the first exported architecture) with this file copied onto it:
-# ``_golden_view(_snapshot({}))``.  The capture's provenance is under ``"captured"``.
+# The literal flag-off expectations of :func:`_snapshot` ({}): ``_golden_view(_snapshot({}))`` executed on the CPU (no
+# CUDA device: the byte queries plan for the first exported architecture) on the tree of the commit named under
+# ``"captured"`` with the rest of the capture's provenance (first taken on the base of this change with this file
+# copied onto it, retaken after the local plans began passing the occupancy segment rule,
+# ``segment_rule="occupancy"``, at the SM and head counts of the backend's token-aware rule, 148 SMs and 4 heads among
+# them: that capture is the base's with the keyword added to the 4-head calls and no other change).
 GOLDEN_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "test_cake_kda_nondet_train_kcp_l2n_golden.json",
@@ -655,8 +664,8 @@ def test_l2n_vocabulary_is_the_deterministic_packages() -> None:
     """The keyword and the form knob have the deterministic package's kind and default on every entry, byte query and
     workspace; the capability check's grid, SM counts, layouts, slots and pending message, the fallback form's stages
     and the saved set's version are the deterministic package's, and its stages are the deterministic package's
-    plus this package's fused gradient (``dqkg``, an l2n stage of its registry) on the backward's path; the mode adds
-    the same fields to the saved set (in the same place)."""
+    plus the fused gradient (``dqkg``, an l2n stage of both registries) on the backward's path; the mode adds the
+    same fields to the saved set (in the same place)."""
     for (module, name), (det_module, det_name) in zip(
         L2N_ENTRIES, DET_L2N_ENTRIES, strict=True
     ):
@@ -678,7 +687,7 @@ def test_l2n_vocabulary_is_the_deterministic_packages() -> None:
     assert set(det_stages) == {"fused", "fallback"}
     want = {form: stages + gradient for form, stages in det_stages.items()}
     assert want == cake_kcp_plan.QK_L2NORM_STAGES
-    assert "dqkg" in cake_jit.L2N_STAGES and "dqkg" not in det_jit.L2N_STAGES
+    assert {"dav", "dqkg"} <= set(cake_jit.L2N_STAGES) & set(det_jit.L2N_STAGES)
     assert cake_kcp.L2N_FALLBACK_STAGES == det_kcp.L2N_FALLBACK_STAGES
     assert cake_kcp.KCP_SAVED_VERSION == det_kcp.KCP_SAVED_VERSION
     fields = [f.name for f in dataclasses.fields(cake_kcp.CakeKDANondetKcpSaved)]
@@ -1777,9 +1786,12 @@ def test_l2n_stage_order(monkeypatch) -> None:
         c.stage = lambda name, **extra: seq.append((name, extra.get("saved", "-")))
         return c
 
-    # the registry's l2n keys of the records below: a twin serves the fused mode only, whatever its name
-    plain = {"l2n": ["off", "fallback", "fused"]}
-    twin = {"l2n": ["fused"]}
+    # the registry's keys of the records below: a twin serves the fused mode only and reads the raw rows (its logical
+    # names hold q_raw / k_raw), whatever its name; a fused-mode record that reads the rows another program normalized
+    # (the raw gate's kb-once replay prep) is no twin, nor is a plain record
+    plain = {"l2n": ["off", "fallback", "fused"], "logical": dict(NORMALIZED_ROWS)}
+    twin = {"l2n": ["fused"], "logical": dict(RAW_ROWS)}
+    reader = {"l2n": ["fused"], "logical": dict(NORMALIZED_ROWS)}
     monkeypatch.setattr(
         cake_jit,
         "MODULES",
@@ -1789,6 +1801,7 @@ def test_l2n_stage_order(monkeypatch) -> None:
             "fwd_intra_l2n": twin,
             "fwd_intra_v14_l2n": twin,
             "fwd_intra_l2n_v37": twin,
+            KBONCE_PREP: reader,
         },
     )
 
@@ -1812,6 +1825,22 @@ def test_l2n_stage_order(monkeypatch) -> None:
     assert cake_kcp_plan.qk_l2norm_intra_first(Plan("fwd_intra_v14_l2n"))
     assert cake_kcp_plan.qk_l2norm_intra_first(Plan("fwd_intra_l2n_v37"))
     assert not cake_kcp_plan.qk_l2norm_intra_first(Plan("fwd_intra_v14"))
+    assert cake_kcp_plan.qk_l2norm_twin("fwd_intra_v14_l2n")
+    assert not cake_kcp_plan.qk_l2norm_twin(KBONCE_PREP)
+    assert not cake_kcp_plan.qk_l2norm_twin("fwd_intra")
+
+
+# The fake registries' logical names of q / k: the raw rows (the ``_l2n`` twins, which normalize them) or the
+# normalized rows (every other record), and the raw gate's kb-once replay prep, a fused-mode record of the second kind.
+RAW_ROWS = {
+    "q_raw": "q_raw",
+    "k_raw": "k_raw",
+    "qn": "qn",
+    "kn": "kn",
+    "qk_rstd": "qk_rstd",
+}
+NORMALIZED_ROWS = {"q": "q", "k": "k"}
+KBONCE_PREP = "bwd_prep_g8_replay_kbonce_raw_l2n"
 
 
 def _fake_pick(stage: str, path: str, mode: str, docs: int, heads: int, arch: str):
@@ -1895,11 +1924,15 @@ def _fake_registry(
 
     class Modules(dict):
         def __missing__(self, name):
-            # the l2n key as the real registry's: the twins (``_l2n``, any ``_v<N>`` suffix) serve the fused mode only
-            twin = re.search(r"_l2n(_v\d+)?$", name) is not None
+            # the l2n and logical keys as the real registry's: the ``_l2n`` records (any ``_v<N>`` suffix) serve the
+            # fused mode only; they are the twins, which read the raw rows, but for the kb-once replay prep, which
+            # reads the rows the fused intra program normalized; every other record reads the normalized rows
+            fused = re.search(r"_l2n(_v\d+)?$", name) is not None
+            raw = fused and name != KBONCE_PREP
             return {
                 "arches": list((arches or {}).get(name, cake_jit.ARCHES)),
-                "l2n": ["fused"] if twin else ["off", "fallback", "fused"],
+                "l2n": ["fused"] if fused else ["off", "fallback", "fused"],
+                "logical": dict(RAW_ROWS if raw else NORMALIZED_ROWS),
             }
 
     class Libraries:
@@ -2035,6 +2068,13 @@ def test_l2n_capability_check() -> None:
         # a twin with a version suffix (the registry's l2n key decides, not the name)
         (
             {"pick": _pick_but(lambda s, p, m, *k: s == "fwd_intra" and p == F and m == "fused", "fwd_intra_l2n_v37")},
+            None,
+            None,
+        ),
+        # a fused-mode prep that reads the rows the replay's intra twin normalized (the raw gate's kb-once replay prep
+        # at most 256 documents): one normalizing record
+        (
+            {"pick": _pick_but(lambda s, p, m, d, *k: s == "bwd_prep" and m == "fused" and d <= 256, KBONCE_PREP)},
             None,
             None,
         ),
@@ -2357,8 +2397,8 @@ def _refusal_rank(rank: int, W: int, layout: str, rdzv: str, out_dir: str) -> No
             ),
             "workspace": lambda: cake_kcp.CakeKDANondetKcpWorkspace(**L2N),
             "workspace_ctx": lambda: cake_kcp.CakeKDANondetKcpWorkspace(ctx, H, **L2N),
-            "workspace_bytes": lambda: cake_kcp_plan.cake_kda_nondet_train_kcp_workspace_bytes(
-                ctx, H=H, **L2N
+            "workspace_bytes": lambda: (
+                cake_kcp_plan.cake_kda_nondet_train_kcp_workspace_bytes(ctx, H=H, **L2N)
             ),
             "saved_bytes": lambda: cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
                 ctx, H=H, **L2N
@@ -2487,7 +2527,9 @@ def test_l2n_local_stage_values_cover_the_records(
     every logical name of every record they launch; no record outside the mode's own (``_l2n`` twins, the ``qk_*``
     programs) binds ``q_raw`` / ``k_raw``; the first reader gets the saved rstd with (1, 0), a fresh one with (0, 1)
     or none with (0, 0); no gate epilogue launches; stage for stage the records are the flag-off plan's or the mode's
-    twins, the KCP-owned records and the KCP walk / merge / collective sequence unchanged.  ``fuse``: the
+    twins, the KCP-owned records and the KCP walk / merge / collective sequence unchanged but the mode's output
+    backward ``kcp_dav_l2n``, launched once on every backward (before the fused gradient, in place of the flag-off
+    ``kcp_dav`` of the rows whose plan dispatches ``dav``) and never on a forward.  ``fuse``: the
     ``fwd_o_fuse`` knob (1 shipped): a forward that keeps no tape walks ``kcp_fwdh_o``, whose local operands the
     values carry, and launches no ``kcp_fwd_o``; under 0 (and in the replay forward) the tape walk and ``kcp_fwd_o``."""
     missing = cake_kcp_plan.qk_l2norm_missing(form, gate, arch)
@@ -2498,9 +2540,11 @@ def test_l2n_local_stage_values_cover_the_records(
     ctx = _cpu_ctx(sm=sm)
     T = int(ctx.T_r)
     assert T > 0
+    # the local problem's plans: the KCP's segment rule (occupancy)
     plans = {
         mode: cake_backend.plan(
-            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, **cake_kcp_plan.qk_l2norm_plan_kwargs(mode)
+            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
+            **cake_kcp_plan.qk_l2norm_plan_kwargs(mode),
         )
         for mode in ("off", form)
     }  # fmt: skip
@@ -2663,6 +2707,17 @@ def test_l2n_local_stage_values_cover_the_records(
             for s, r, _g, _v in res_off
             if not (s == "backend" and mod(s, r)["stage"] == "gate_epilogue")
         ]
+        # the mode's output backward: kcp_dav_l2n once on a backward, before the fused gradient; the flag-off
+        # kcp_dav only where the flag-off plan dispatches dav
+        dav_l2n, dav_off = ("kcp", "kcp_dav_l2n"), ("kcp", "kcp_dav")
+        assert on_l.count(dav_l2n) == int(kind.startswith("bwd")), (kind, on_l)
+        if dav_l2n in on_l:
+            stages_on = [mod(s, r)["stage"] if s == "backend" else r for s, r in on_l]
+            assert "dqkg" in stages_on, (kind, on_l)
+            assert on_l.index(dav_l2n) < stages_on.index("dqkg"), (kind, on_l)
+        assert dav_off not in on_l, (kind, on_l)
+        on_l = [x for x in on_l if x != dav_l2n]
+        off_l = [x for x in off_l if x != dav_off]
         assert len(on_l) == len(off_l), (kind, on_l, off_l)
         on_stages = collections.Counter(
             mod(s, r)["stage"] if s == "backend" else r for s, r in on_l
@@ -3021,8 +3076,10 @@ def test_l2n_backward_rows_ride_in_the_arena(H, arch, sm, gate, form, kind) -> N
 
     def drive(ctx, mode: str, backward: bool = True):
         T = int(ctx.T_r)
+        # the local problem's plan: the KCP's segment rule (occupancy)
         plan = cake_backend.plan(
-            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, **cake_kcp_plan.qk_l2norm_plan_kwargs(mode)
+            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
+            **cake_kcp_plan.qk_l2norm_plan_kwargs(mode),
         )  # fmt: skip
         zeros = torch.zeros(T, H, D, dtype=torch.bfloat16)
         q_raw, k_raw, _ = _packed_qk(zeros, zeros)
@@ -3145,7 +3202,13 @@ def test_l2n_backward_rows_ride_in_the_arena(H, arch, sm, gate, form, kind) -> N
     )
     assert sum(allocs) - sum(allocs_off) == extra
     assert p.workspace_bytes("replay") == cake_backend.plan(
-        ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate
+        ctx.T_r,
+        ctx.n_frag,
+        H,
+        sm,
+        arch,
+        gate=gate,
+        segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
     ).workspace_bytes("replay")
     # nothing moves on a forward or where the rows exceed twice the tokens (one-token documents)
     fwd, _, _ = drive(ctx, form, backward=False)
@@ -3159,34 +3222,6 @@ def test_l2n_backward_rows_ride_in_the_arena(H, arch, sm, gate, form, kind) -> N
 # --------------------------------------------------------------------------- GPU helpers
 
 
-# the integer dtype of each element width: a floating-point tensor's bit patterns are its same-width integer view
-_BIT_DTYPES = {1: torch.uint8, 2: torch.int16, 4: torch.int32, 8: torch.int64}
-
-
-def _bit_pattern(t: torch.Tensor) -> torch.Tensor:
-    """``t``'s bit patterns as a tensor of the same shape: the same-width integer view of a floating-point tensor,
-    integer and bool tensors as they are (no tensor here is complex).  Equality of the patterns tells ``+0`` from
-    ``-0`` and holds for a NaN of the same payload, as a value compare does not."""
-    if t.dtype.is_complex:
-        raise TypeError(f"no bit-pattern compare for {t.dtype}")
-    if t.dtype.is_floating_point:
-        return t.view(_BIT_DTYPES[t.element_size()])
-    return t
-
-
-def _bits_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
-    """Same shape, same dtype and the same bit pattern in every element."""
-    return (
-        a.shape == b.shape
-        and a.dtype == b.dtype
-        and torch.equal(_bit_pattern(a), _bit_pattern(b))
-    )
-
-
-def _same(x: dict, y: dict, names) -> bool:
-    return all(_bits_equal(x[n], y[n]) for n in names)
-
-
 def _collective_seq(rec: dict) -> list:
     return [s for s in rec["sequence"] if ":" in s]
 
@@ -3195,47 +3230,6 @@ def _local_stages(rec: dict) -> collections.Counter:
     """The local stage calls of a launch record as a multiset (the fused mode may run the intra program before the
     prep: the same stages in another order)."""
     return collections.Counter(s for s in rec["sequence"] if ":" not in s)
-
-
-_BITS = {
-    torch.bfloat16: torch.int16,
-    torch.float16: torch.int16,
-    torch.float32: torch.int32,
-    torch.float64: torch.int64,
-}
-
-
-def _bit_count(a: torch.Tensor, b: torch.Tensor) -> list:
-    """``[equal, total]`` of two tensors that must be bitwise equal: ``total`` the elements of ``a``, ``equal`` the
-    elements whose bit patterns match (NaN payloads included); ``equal = -1`` for another shape or dtype."""
-    if a.shape != b.shape or a.dtype != b.dtype:
-        return [-1, a.numel()]
-    if a.numel() == 0:
-        return [0, 0]
-    bits = _BITS[a.dtype]
-    x = a.detach().contiguous().view(bits)
-    y = b.detach().contiguous().view(bits)
-    return [int((x == y).sum().item()), a.numel()]
-
-
-def _first_mismatch(a: torch.Tensor, b: torch.Tensor) -> dict:
-    """Where two tensors that should be bitwise equal differ (reported, never gated)."""
-    if a.shape != b.shape or a.dtype != b.dtype:
-        return {
-            "shape": [list(a.shape), list(b.shape)],
-            "dtype": [str(a.dtype), str(b.dtype)],
-        }
-    diff = (a != b) & ~(torch.isnan(a) & torch.isnan(b))
-    n = int(diff.sum().item())
-    if n == 0:
-        return {"count": 0}
-    i = int(diff.reshape(-1).nonzero()[0].item())
-    return {
-        "count": n,
-        "first_flat_index": i,
-        "values": [float(a.reshape(-1)[i].item()), float(b.reshape(-1)[i].item())],
-        "max_abs": float((a.double() - b.double()).abs().max().item()),
-    }
 
 
 @contextlib.contextmanager
@@ -3264,13 +3258,6 @@ def _library_of(jit, record: str) -> str:
     """The content hash of ``record``'s library (``<package>_<hash>``): a copied program keeps the deterministic
     library's hash under this package's prefix."""
     return str(jit.MODULES[record]["library"]).rsplit("_", 1)[1]
-
-
-def _libraries(jit, launches: dict) -> dict:
-    """``(library hash, grid)`` of every recorded local launch, per pass (``"fwd"`` / ``"bwd"``), in launch order."""
-    return {
-        p: [(_library_of(jit, r), grid) for r, grid in launches[p]] for p in launches
-    }
 
 
 def _mode_own(record: str) -> int:
@@ -3312,12 +3299,18 @@ def _skip_unless_runnable(W: int, *, gate: str | None = "g") -> None:
 
 
 def _l2n_inputs(
-    lengths, H: int, device, *, raw_gate: bool = False, seed: int | None = None
+    lengths,
+    H: int,
+    device,
+    *,
+    raw_gate: bool = False,
+    seed: int | None = None,
+    dt_bias_2d: bool = False,
 ) -> dict:
     """``make_inputs``' operands with raw q / k: its L2-normalized rows times ``2^e`` per (token, head), ``e`` uniform
     in ``[-6, 6]``, about 1/64 of the rows zero (rstd ``1 / sqrt(1e-6)``) or subnormal (the normalized row times
     ``2^-126``).  ``raw_gate``: ``g`` is a raw BF16 gate with ``A_log`` FP32 ``[H]`` and ``dt_bias`` FP32
-    ``[H * 128]``."""
+    ``[H * 128]`` (``dt_bias_2d``: the same values as ``[H, 128]``)."""
     glob = make_inputs(lengths, H, device, seed=seed)
     S = int(glob["q"].shape[0])
     gen = torch.Generator(device="cpu")
@@ -3334,32 +3327,9 @@ def _l2n_inputs(
         glob["g"] = torch.randn(S, H, D, generator=gen).to(torch.bfloat16).to(device)
         glob["A_log"] = torch.log(torch.rand(H, generator=gen) + 1.0).to(device)
         glob["dt_bias"] = (torch.randn(H * D, generator=gen) * 0.5).to(device)
+        if dt_bias_2d:
+            glob["dt_bias"] = glob["dt_bias"].view(H, D)
     return glob
-
-
-def _exact_l2n(glob: dict, cu_t: torch.Tensor, raw_gate: bool) -> dict:
-    """The exact FP64 output and gradients of the raw inputs: ``x_hat = x / sqrt(sum(x * x) + 1e-6)`` per token and
-    head for q and k (raw gate mode: ``g = lower_bound * sigmoid(exp(A_log) * (raw + dt_bias))``), the exact
-    recurrence, all differentiated in FP64."""
-    f64 = torch.float64
-    names = ("q", "k", "v", "g", "beta") + (("A_log", "dt_bias") if raw_gate else ())
-    leaves = [glob[n].detach().to(f64).requires_grad_(True) for n in names]
-    q, k, v, g, beta = leaves[:5]
-    qn = q * torch.rsqrt((q * q).sum(-1, keepdim=True) + EPS)
-    kn = k * torch.rsqrt((k * k).sum(-1, keepdim=True) + EPS)
-    if raw_gate:
-        A_log, dt_bias = leaves[5:]
-        H = q.shape[1]
-        g = LOWER_BOUND * torch.sigmoid(
-            torch.exp(A_log).view(1, H, 1) * (g + dt_bias.view(1, H, D))
-        )
-    o = kda_exact_forward(qn, kn, v, g, beta, cu_t, SCALE, dtype=f64)
-    grads = torch.autograd.grad(o, leaves, glob["dout"].to(f64))
-    out_names = ("dq", "dk", "dv", "dg", "dbeta") + (PARAM_GRADS if raw_gate else ())
-    return {
-        "out": o.detach().cpu(),
-        **{n: x.detach().cpu() for n, x in zip(out_names, grads, strict=True)},
-    }
 
 
 # --------------------------------------------------------------------------- GPU row: flag-off identity
@@ -3385,85 +3355,93 @@ def _snapshot_threads(pin: bool):
         torch.set_num_threads(threads)
 
 
-def test_gpu_l2n_flag_off_identity_w1() -> None:
-    """On one device, the omitted keyword and an explicit ``False`` give bitwise the same outputs and gradients, the
-    same saved-set tensors (member, shape, strides, dtype, in order), flags and meta, and the same launch inventory
-    (sequence and counters); with ``ND_KCP_L2N_FLAG_OFF_CAPTURE`` / ``_BASELINE`` the omitted form's record (suffix
-    ``.gpu.json``; the backward's launches in the ``"first"`` / ``"main"`` order, :func:`_bwd_sequence_first_main`)
-    and its outputs (``.gpu.pt``) are written on the base or compared with it, from inputs made on one CPU thread
-    (:func:`_snapshot_threads`)."""
+def test_gpu_l2n_flag_off_identity_w1(record_property) -> None:
+    """On one device, on each of the judge's 32 draws of the operands, the omitted keyword and an explicit ``False``
+    give the same saved-set tensors (member, shape, strides, dtype, in order), flags and meta and the same launch
+    inventory (sequence and counters); the outputs and gradients of both are judged (``"<row>.omitted"`` /
+    ``"<row>.explicit"``) against the FP64 reference beside the naive BF16 tier of ``tests/cake_naive.py`` (this
+    package has no bit contract).  With ``ND_KCP_L2N_FLAG_OFF_CAPTURE`` / ``_BASELINE`` the omitted form's record of
+    the first draw (suffix ``.gpu.json``; the backward's launches in the ``"first"`` / ``"main"`` order,
+    :func:`_bwd_sequence_first_main`) is written on the base or compared with it, from inputs made on one CPU thread
+    (:func:`_snapshot_threads`); no output is compared across versions."""
     _skip_unless_runnable(1, gate=None)
     capture, baseline = os.environ.get(ENV_CAPTURE), os.environ.get(ENV_BASELINE)
     device = torch.device("cuda", torch.cuda.current_device())
     rows = (((100, 640, 77, 1000, 129), 4), ((700, 1, 1300, 999), 64))
     record: dict = {}
-    tensors_of: dict = {}
+    judge = NaiveJudge(SCALE)
     for lengths, H in rows:
         part, cu = _partition(lengths, 1, "contiguous")
         ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
             part, None, 0, device
         )
-        with _snapshot_threads(bool(capture or baseline)):
-            glob = make_inputs(lengths, H, device)
-        q, k, v, g, beta, dout = (glob[n] for n in ("q", "k", "v", "g", "beta", "dout"))
-        got = {}
-        for tag, kw in (("omitted", {}), ("explicit", OFF)):
-            ws = cake_kcp.CakeKDANondetKcpWorkspace(**kw)
-            out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
-                q, k, v, g, beta, ctx, workspace=ws, **kw
-            )
-            rec_f = dict(cake_kcp.LAST_CALL["fwd"])
-            grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
-                q, k, v, g, beta, ctx, dout, saved=saved, workspace=ws, **kw
-            )
-            rec_b = dict(cake_kcp.LAST_CALL["bwd"])
-            # as on the base of this change: a flag-off launch record carries no key of the mode
-            assert not {"l2n", "l2n_rstd", "l2n_twin"} & (set(rec_f) | set(rec_b)), tag
-            got[tag] = {
-                "tensors": {"out": out, **dict(zip(TOKEN_GRADS, grads, strict=True))},
-                "record": {
-                    "saved": _saved_summary(saved),
-                    "fwd": _jsonable({x: rec_f.get(x) for x in RECORD_KEYS}),
-                    "bwd": _jsonable({x: rec_b.get(x) for x in RECORD_KEYS}),
-                },
-                # the backward's launches in the "first" / "main" order, the base's (the snapshot's form)
-                "bwd_first_main": _bwd_sequence_first_main(rec_b),
-            }
-            del ws, saved
-        a, b = got["omitted"], got["explicit"]
-        assert _same(a["tensors"], b["tensors"], ("out",) + TOKEN_GRADS), (lengths, H)
-        assert a["record"] == b["record"], (lengths, H)
-        assert "qk_l2norm" not in json.dumps(a["record"]["saved"])
-        # the saved set's meta keys of the base of this change (the golden file, captured by executing the base)
-        assert sorted(a["record"]["saved"]["meta"]) == _golden()["saved_meta_keys"]
         key = f"s{'_'.join(map(str, lengths))}-h{H}"
-        # the snapshot holds the backward's launches in the "first" / "main" order: the base issues its K1 tape
-        # replay before kcp_dav and its dm-form K3 on the call's stream in every backward
-        record[key] = {
-            **a["record"],
-            "bwd": {**a["record"]["bwd"], "sequence": a["bwd_first_main"]},
-        }
-        tensors_of[key] = {n: t.detach().cpu() for n, t in a["tensors"].items()}
+        for j in range(DRAWS):
+            with _snapshot_threads(bool(capture or baseline) and j == 0):
+                glob = make_inputs(lengths, H, device, seed=draw_seed(L2N_SEED, j))
+            q, k, v, g, beta, dout = (
+                glob[n] for n in ("q", "k", "v", "g", "beta", "dout")
+            )
+            got = {}
+            for tag, kw in (("omitted", {}), ("explicit", OFF)):
+                ws = cake_kcp.CakeKDANondetKcpWorkspace(**kw)
+                out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                    q, k, v, g, beta, ctx, workspace=ws, **kw
+                )
+                rec_f = dict(cake_kcp.LAST_CALL["fwd"])
+                grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
+                    q, k, v, g, beta, ctx, dout, saved=saved, workspace=ws, **kw
+                )
+                rec_b = dict(cake_kcp.LAST_CALL["bwd"])
+                # as on the base of this change: a flag-off launch record carries no key of the mode
+                assert not {"l2n", "l2n_rstd", "l2n_twin"} & (
+                    set(rec_f) | set(rec_b)
+                ), tag
+                got[tag] = {
+                    "tensors": {
+                        "out": out,
+                        **dict(zip(TOKEN_GRADS, grads, strict=True)),
+                    },
+                    "record": {
+                        "saved": _saved_summary(saved),
+                        "fwd": _jsonable({x: rec_f.get(x) for x in RECORD_KEYS}),
+                        "bwd": _jsonable({x: rec_b.get(x) for x in RECORD_KEYS}),
+                    },
+                    # the backward's launches in the "first" / "main" order, the base's (the snapshot's form)
+                    "bwd_first_main": _bwd_sequence_first_main(rec_b),
+                }
+                del ws, saved
+            a, b = got["omitted"], got["explicit"]
+            assert a["record"] == b["record"], (lengths, H, j)
+            assert "qk_l2norm" not in json.dumps(a["record"]["saved"])
+            # the saved set's meta keys of the base of this change (the golden file, captured by executing the base)
+            assert sorted(a["record"]["saved"]["meta"]) == _golden()["saved_meta_keys"]
+            judge.add(j, key, {tag: got[tag]["tensors"] for tag in got}, glob)
+            if j == 0:
+                # the snapshot holds the backward's launches in the "first" / "main" order: the base issues its K1
+                # tape replay before kcp_dav and its dm-form K3 on the call's stream in every backward
+                record[key] = {
+                    **a["record"],
+                    "bwd": {**a["record"]["bwd"], "sequence": a["bwd_first_main"]},
+                }
+            del got, a, b
     snap = json.loads(json.dumps(record))
     if capture:
         with open(capture + ".gpu.json", "w") as fh:
             json.dump(snap, fh, indent=1, sort_keys=True)
-        torch.save(tensors_of, capture + ".gpu.pt")
     if baseline:
         with open(baseline + ".gpu.json") as fh:
             ref = json.load(fh)
         assert snap == ref, "the flag-off GPU record differs from the base"
-        ref_t = torch.load(baseline + ".gpu.pt")
-        assert sorted(ref_t) == sorted(tensors_of)
-        for key, ts in tensors_of.items():
-            assert _same(ts, ref_t[key], ("out",) + TOKEN_GRADS), key
+    judge.settle(record_property)
 
 
 # --------------------------------------------------------------------------- GPU rows: flag on (one process per rank)
 
 # (lengths, H, W, layout): W = 1 in-process, CP2 / CP4 spawned, CP8 one process per Slurm task; documents crossing
 # ranks with boundaries inside chunks (cross-document resets), documents over >= 3 ranks, one-token documents and
-# fragments, a zero-token rank at W = 2 / 4 / 8, 4 and 64 heads.
+# fragments, a zero-token rank at W = 2 / 4 / 8, 4 and 64 heads, and 12 (the serial route below 16 heads:
+# kcp_dav_l2n and the hinted fused gradient dqkg_int_l2n, where the norm off launches kcp_dav).
 ROWS = [
     ((100, 640, 77, 1000, 129), 4, 1, "contiguous"),
     ((700, 1, 1300, 999), 64, 1, "contiguous"),
@@ -3478,6 +3456,7 @@ ROWS = [
     ((3000, 2048, 5, 1), 4, 8, "zigzag_per_document"),
     ((4000, 1003), 4, 8, "ragged:1,0,999,1000,1000,1000,1,1002"),
     ((700, 1, 1300, 999), 64, 8, "zigzag"),
+    ((100, 640, 77, 1000, 129), 12, 2, "contiguous"),
 ]
 RAW_GATE_ROWS = [
     ((100, 640, 77, 1000, 129), 4, 1, "contiguous"),
@@ -3485,19 +3464,36 @@ RAW_GATE_ROWS = [
     ((3000,), 4, 4, "ragged:1200,0,900,900"),
     ((4000, 1003), 4, 8, "ragged:1,0,999,1000,1000,1000,1,1002"),
 ]
+# Issue #264, the issue's mode above 64 heads: the raw gate (lower bound -5, ``A_log`` ``[H]``, ``dt_bias`` ``[H, 128]``)
+# with the in-kernel Q / K L2 norm, contiguous fragments: one document over every rank (boundaries inside chunks), and
+# documents that start and end inside a rank, a one-token document among them; at 96 heads over 4 and 8 ranks and at
+# 128 heads (the top of the range) over 4.  The rows of 64 ranks run only in a Slurm step of 64 tasks (one process per
+# task, ``WIDE_HEAD_SLURM``; a run of another size has no such rows, so they never show up as skips there).  The head
+# ownership of 96 heads over 64 ranks (two heads per owner, ranks that own no head) on one node, and a padded owner:
+# 6 heads over 4 ranks and 12 over 8 (two heads per owner, 3 / 6 owners, 1 / 2 ranks without heads), 5 over 4 and 9
+# over 8 (two heads per owner, the last owner holds one head padded to two tiles per slot, 1 / 3 ranks without heads).
+WIDE_HEAD_SLURM = {
+    64: [
+        ((4160,), 96, 64, "contiguous"),
+        ((1000, 1, 1500, 1659), 96, 64, "contiguous"),
+    ],
+}
+WIDE_HEAD_ROWS = [
+    ((3001,), 96, 4, "contiguous"),
+    ((700, 1, 1300, 999), 96, 4, "contiguous"),
+    ((4001,), 96, 8, "contiguous"),
+    ((700, 1, 1300, 999, 1000), 96, 8, "contiguous"),
+    ((3001,), 128, 4, "contiguous"),
+    ((3001,), 6, 4, "contiguous"),
+    ((700, 1, 1300, 999), 5, 4, "contiguous"),
+    ((4001,), 12, 8, "contiguous"),
+    ((700, 1, 1300, 999, 1000), 9, 8, "contiguous"),
+] + WIDE_HEAD_SLURM.get(int(os.environ.get("SLURM_NTASKS", "0") or 0), [])
 
 
 def _row_id(row) -> str:
     lengths, H, W, layout = row
     return "s" + "_".join(map(str, lengths)) + f"-h{H}-w{W}-{layout.split(':')[0]}"
-
-
-def _gather(x: torch.Tensor, W: int) -> list:
-    if W == 1:
-        return [x.detach().cpu()]
-    objs: list = [None] * W
-    dist.all_gather_object(objs, x.detach().cpu())
-    return objs
 
 
 def _run_rank(
@@ -3507,11 +3503,12 @@ def _run_rank(
     rdzv: str | None,
     result_dir: str | None,
     raw_gate: bool = False,
+    dt_bias_2d: bool = False,
 ) -> dict:
-    """One rank: the flag-on KCP passes (both forms) and their bitwise flags, the saved rstd, the flag-off comparison of
-    the collectives and stages, the retained bytes, the deterministic package's KCP route with the flag on the same
-    operands and context (bitwise, with the element counts, the same local libraries and launch sequence); gathered
-    to rank 0 and compared with the single-rank flag-on path and the FP64 reference there."""
+    """One rank: on each of the judge's 32 draws of the operands, the flag-on KCP passes (both forms) with their
+    records and plumbing flags, the saved rstd, the flag-off comparison of the collectives and stages and the retained
+    bytes; every pass's outputs gathered to rank 0 and judged there (``"<pass>.<output>"``), with the single-rank
+    flag-on path (``"single"``), against the FP64 reference beside the naive BF16 tier."""
     from torch.utils.checkpoint import checkpoint
 
     lengths, H, _w, layout = row
@@ -3524,18 +3521,8 @@ def _run_rank(
     ctx = cake_kcp_plan.cake_kda_nondet_train_kcp_build_context(
         part, group, rank, device
     )
-    total = cu[-1]
     T = int(ctx.T_r)
     gate = "raw" if raw_gate else "g"
-    glob = _l2n_inputs(lengths, H, device, raw_gate=raw_gate)
-    names = ("q", "k", "v", "g", "beta", "dout")
-    ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
-    q, k, v, g, beta, dout = (ops[n] for n in names)
-    GK = (
-        dict(use_gate_in_kernel=True, A_log=glob["A_log"], dt_bias=glob["dt_bias"], lower_bound=LOWER_BOUND)
-        if raw_gate
-        else {}
-    )  # fmt: skip
     grad_names = TOKEN_GRADS + (PARAM_GRADS if raw_gate else ())
     tensors = ("out",) + grad_names
     ws = cake_kcp.CakeKDANondetKcpWorkspace(use_gate_in_kernel=raw_gate, **L2N)
@@ -3550,352 +3537,347 @@ def _run_rank(
         if has_fallback
         else None
     )
+    judge = RankJudge(part, cu, W, rank, SCALE)
 
-    def saved_pass(qq=q, kk=k, workspace=ws, l2n=True, launches=None, **opts):
-        """This package's forward / backward pair; ``launches``: a dict whose ``"fwd"`` / ``"bwd"`` lists receive
-        the local launches of each pass (:func:`_local_launches`)."""
-        kw = {**GK, "use_qk_l2norm_in_kernel": l2n}
-        with _local_launches(cake_kcp, None if launches is None else launches["fwd"]):
-            out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
-                qq, kk, v, g, beta, ctx, workspace=workspace, **kw, **opts
-            )
-        rec_f = dict(cake_kcp.LAST_CALL["fwd"])
-        bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
-        with _local_launches(cake_kcp, None if launches is None else launches["bwd"]):
-            grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
-                qq, kk, v, g, beta, ctx, dout, saved=saved, workspace=workspace, **kw, **bwd_opts
-            )  # fmt: skip
-        rec_b = dict(cake_kcp.LAST_CALL["bwd"])
-        res = {"out": out, **dict(zip(grad_names, grads, strict=True))}
-        return res, saved, (rec_f, rec_b)
+    def one_draw(j: int) -> dict:
+        """Draw ``j``: every check of the row on the draw's operands; every pass judged (``judge``)."""
+        glob = _l2n_inputs(
+            lengths,
+            H,
+            device,
+            raw_gate=raw_gate,
+            seed=draw_seed(L2N_SEED, j),
+            dt_bias_2d=dt_bias_2d,
+        )
+        judge.draw(j, glob, l2n=True)
+        names = ("q", "k", "v", "g", "beta", "dout")
+        ops = _local_slices(part, rank, cu, {n: glob[n] for n in names})
+        q, k, v, g, beta, dout = (ops[n] for n in names)
+        GK = (
+            dict(use_gate_in_kernel=True, A_log=glob["A_log"], dt_bias=glob["dt_bias"], lower_bound=LOWER_BOUND)
+            if raw_gate
+            else {}
+        )  # fmt: skip
 
-    def det_pass(workspace, launches=None, **opts):
-        """The deterministic package's KCP route with the flag on the same operands and the same context (a context
-        holds no mode and serves both packages)."""
-        kw = {**GK, **L2N}
-        with _local_launches(det_kcp, None if launches is None else launches["fwd"]):
-            out, saved_d = det_kcp.cake_kda_det_train_kcp_forward(
-                q, k, v, g, beta, ctx, workspace=workspace, **kw, **opts
-            )
-        rec_f = dict(det_kcp.LAST_CALL["fwd"])
-        bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
-        with _local_launches(det_kcp, None if launches is None else launches["bwd"]):
-            grads = det_kcp.cake_kda_det_train_kcp_backward(
-                q, k, v, g, beta, ctx, dout, saved=saved_d, workspace=workspace, **kw, **bwd_opts
-            )  # fmt: skip
-        rec_b = dict(det_kcp.LAST_CALL["bwd"])
-        res = {"out": out, **dict(zip(grad_names, grads, strict=True))}
-        return res, saved_d, (rec_f, rec_b)
+        def keep(arm: str, res) -> None:
+            """Judge one pass (or a list of repeats) as ``arm``; in raw gate mode with the cross-rank sums of its
+            ``A_log`` / ``dt_bias`` partials (a collective: every rank, every pass)."""
+            runs = res if isinstance(res, list) else [res]
+            if raw_gate:
+                for r in runs:
+                    r["dA_log_sum"], r["ddt_bias_sum"] = (
+                        cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
+                            ctx, r["dA_log"], r["ddt_bias"]
+                        )
+                    )
+            judge(arm, runs)
 
-    handle_runs: dict = {}
-
-    def autograd_pass(
-        ckpt: bool = False, handle=None, keep="states", workspace=ws, handoff="auto"
-    ):
-        """With a handle (under the checkpoint) also records in ``handle_runs[keep]`` the original forward's and the
-        recompute's LAST_CALL records, the backward's, and the torch.distributed calls per phase (``_Counter``; the
-        recompute phase from the checkpoint's ``context_fn``)."""
-        srcs = (q, k, v, g, beta) + ((GK["A_log"], GK["dt_bias"]) if raw_gate else ())
-        leaves = [x.detach().clone().requires_grad_(True) for x in srcs]
-        n = len(srcs)
-
-        def fn(*a):
-            gk = {**GK, **({"A_log": a[5], "dt_bias": a[6]} if raw_gate else {})}
-            h = a[n] if len(a) > n else None
-            return cake_kcp.cake_kda_nondet_kcp(
-                *a[:5], ctx, None, "light", "saved", workspace, recompute_handle=h,
-                checkpoint_keep=keep if h is not None else None, checkpoint_handoff=handoff, saved_rows="tape",
-                **gk, **L2N
-            )  # fmt: skip
-
-        extra = (handle,) if handle is not None else ()
-        if handle is not None and ckpt:
-            with _Counter() as cc:
-                out = checkpoint(
-                    fn,
-                    *leaves,
-                    *extra,
-                    use_reentrant=False,
-                    context_fn=lambda: (contextlib.nullcontext(), cc.recompute_cm()),
+        def saved_pass(qq=q, kk=k, workspace=ws, l2n=True, launches=None, **opts):
+            """This package's forward / backward pair; ``launches``: a dict whose ``"fwd"`` / ``"bwd"`` lists
+            receive the local launches of each pass (:func:`_local_launches`)."""
+            kw = {**GK, "use_qk_l2norm_in_kernel": l2n}
+            with _local_launches(
+                cake_kcp, None if launches is None else launches["fwd"]
+            ):
+                out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                    qq, kk, v, g, beta, ctx, workspace=workspace, **kw, **opts
                 )
-                orig = cake_kcp.LAST_CALL.pop("fwd", None)
-                cc.phase = "bwd"
-                out.backward(dout)
-                rep = cake_kcp.LAST_CALL.pop("fwd", None)
-            handle_runs[keep] = (
-                orig,
-                rep,
-                dict(cake_kcp.LAST_CALL["bwd"]),
-                cc.record(),
-            )
-        else:
-            out = (
-                checkpoint(fn, *leaves, *extra, use_reentrant=False)
-                if ckpt
-                else fn(*leaves, *extra)
-            )
-            out.backward(dout)
-        leaf_names = ("dq", "dk", "dv", "dg", "dbeta") + (
-            PARAM_GRADS if raw_gate else ()
-        )
-        got = {x: lf.grad for x, lf in zip(leaf_names, leaves, strict=True)}
-        return {"out": out.detach(), **got}
+            rec_f = dict(cake_kcp.LAST_CALL["fwd"])
+            bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
+            with _local_launches(
+                cake_kcp, None if launches is None else launches["bwd"]
+            ):
+                grads = cake_kcp.cake_kda_nondet_train_kcp_backward(
+                    qq, kk, v, g, beta, ctx, dout, saved=saved, workspace=workspace, **kw, **bwd_opts
+                )  # fmt: skip
+            rec_b = dict(cake_kcp.LAST_CALL["bwd"])
+            res = {"out": out, **dict(zip(grad_names, grads, strict=True))}
+            return res, saved, (rec_f, rec_b)
 
-    nd_launch: dict = {"fwd": [], "bwd": []}
-    res, saved, (rec_f, rec_b) = saved_pass(launches=nd_launch)
-    flags: dict = {}
-    reported: dict = {}
-    rstd = saved.qk_rstd
-    flags["saved_rstd"] = (
-        saved.qk_l2norm is True
-        and tuple(rstd.shape) == (2, T, H)
-        and rstd.dtype == torch.float32
-        and rstd.is_contiguous()
-        and saved.meta().get("qk_l2norm") is True
-        and saved.version == cake_kcp.KCP_SAVED_VERSION
-    )
-    flags["finite"] = all(bool(torch.isfinite(res[x].float()).all()) for x in tensors)
-    flags["records_mark_the_mode"] = (rec_f["l2n"], rec_b["l2n"]) == ("fused", "fused")
-    flags["first_reader_rstd"] = T == 0 or (
-        tuple(rec_f["l2n_rstd"]) == (0, 1) and tuple(rec_b["l2n_rstd"]) == (1, 0)
-    )
-    # the saved-mode backward ran the saved-rstd twin of its plan's prep exactly where one ships for the device (the
-    # call's local plan: its (T_r, n_frag, H) key on this device); the twin's bits are checked by saved_eq_replay
-    reported["saved_rstd_twin"] = rec_b.get("l2n_twin")
-    want_twin = None
-    if T > 0:
-        arch = cake_jit.device_arch(device.index)
-        prep = cake_backend.plan(
-            T, int(ctx.n_frag), H, cake_jit.sm_count(device.index), arch, gate=gate, l2n="fused"
-        ).record("bwd_prep", cake_kcp.LOCAL_PATH_BWD)  # fmt: skip
-        twin = cake_kcp_plan.saved_rstd_record(prep, arch)
-        want_twin = None if twin == prep else (prep, twin)
-    flags["saved_rstd_twin"] = rec_b.get("l2n_twin") == want_twin
-    rep, saved_rep, _ = saved_pass()
-    flags["rstd_repeat_bitwise"] = _bits_equal(saved_rep.qk_rstd, rstd)
-    del saved_rep
-    replay, _, (_, rec_br) = saved_pass(boundary_mode="replay")
-    flags["replay_rstd_rw"] = T == 0 or tuple(rec_br["l2n_rstd"]) == (0, 1)
-    handoff_stats = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
-    runs = {
-        "repeat": rep,
-        "saved_eq_replay": replay,
-        "save_transfer_eq": saved_pass(save_transfer=False)[0],
-        "autograd_eq_saved": autograd_pass(),
-        "ckpt_eq_direct": autograd_pass(ckpt=True),
-        "handle_states_eq_ckpt": autograd_pass(
-            ckpt=True, handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(), keep="states"
-        ),
-        "handle_transfer_eq_ckpt": autograd_pass(
-            ckpt=True,
-            handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
-            keep="transfer",
-        ),
-        # the checkpoint hand-off forced on: the set kept by both passes and read by the backward (a rank with tokens)
-        "handoff_on_eq_ckpt": autograd_pass(ckpt=True, handoff="on"),
-    }
-    handoff_on_bwd = cake_kcp.LAST_CALL["bwd"].get("checkpoint_handoff")
-    runs["ws_none_eq"] = autograd_pass(workspace=None)
-    # the counters: the three checkpointed "auto" calls (no handle, the "states" and the "transfer" handle) decided by
-    # the mode's rule, the forced one engaged
-    flags["handoff_counts"] = _handoff_delta(
-        handoff_stats, ctx, H, gate, True, T, auto_calls=3
-    ) and handoff_on_bwd == ("bound" if T > 0 else None)
-    qp, kp, _buf = _packed_qk(q, k)
-    runs["packed_strided_eq"] = saved_pass(qq=qp, kk=kp)[0]
-    flags.update({name: _same(res, r, tensors) for name, r in runs.items()})
-    flags.update(_handle_recompute_flags(handle_runs, W))
-    # the deterministic package's KCP route with the flag on (saved and replay mode): every output, gradient and
-    # partial sum and the saved rstd bitwise (element counts gathered below), the same local libraries with the same
-    # grids in the same order (the mode's own records among them on a rank with tokens), the same launch sequence (the
-    # backward's in the deterministic package's order: _bwd_sequence_first_main puts back the K1 tape replay this
-    # package issues under b1 and the dm-form K3 it issues on the side stream; neither is a local launch, nor is
-    # kcp_dav, so the local libraries keep their order)
-    det_launch: dict = {"fwd": [], "bwd": []}
-    ws_det = det_kcp.CakeKDADetKcpWorkspace(use_gate_in_kernel=raw_gate, **L2N)
-    det_res, saved_d, (rec_fd, rec_bd) = det_pass(ws_det, launches=det_launch)
-    det_replay = det_pass(ws_det, boundary_mode="replay")[0]
-    counts: dict = {"fused": {n: _bit_count(res[n], det_res[n]) for n in tensors}}
-    counts["fused"]["qk_rstd"] = _bit_count(rstd, saved_d.qk_rstd)
-    counts["replay"] = {n: _bit_count(replay[n], det_replay[n]) for n in tensors}
-    flags["det_eq"] = all(e == t for e, t in counts["fused"].values())
-    flags["det_replay_eq"] = all(e == t for e, t in counts["replay"].values())
-    flags["det_sequence_eq"] = (
-        rec_f["sequence"] == rec_fd["sequence"]
-        and _bwd_sequence_first_main(rec_b) == rec_bd["sequence"]
-    )
-    flags["det_local_launches_eq"] = _libraries(cake_jit, nd_launch) == _libraries(
-        det_jit, det_launch
-    )
-    own = {p: sum(_mode_own(r) for r, _g in nd_launch[p]) for p in nd_launch}
-    n_local = {p: len(nd_launch[p]) for p in nd_launch}
-    flags["mode_records_launched"] = (
-        own["fwd"] > 0 and own["bwd"] > 0 if T > 0 else n_local == {"fwd": 0, "bwd": 0}
-    )
-    reported["local_records"] = {p: [r for r, _g in nd_launch[p]] for p in nd_launch}
-    reported["det_mismatch"] = {
-        n: _first_mismatch(res[n], det_res[n])
-        for n in tensors
-        if counts["fused"][n][0] != counts["fused"][n][1]
-    }
-    launch_counts = {"own": own, "local": n_local}
-    del ws_det, det_replay
-    if W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS:
-        ring = saved_pass(exchange="ring", save_transfer=False)[0]
-        flags["ring_eq_a2a"] = _same(runs["save_transfer_eq"], ring, tensors)
-    cake_kcp.graph_cache_clear()
-    events = []
-    try:
-        for _ in range(len(GRAPH_EVENTS)):
-            res_graph = {x: t.clone() for x, t in saved_pass(graph="replay")[0].items()}
-            events.append(
-                [str(cake_kcp.LAST_CALL[x].get("graph_event")) for x in ("fwd", "bwd")]
+        handle_runs: dict = {}
+
+        def autograd_pass(
+            ckpt: bool = False, handle=None, keep="states", workspace=ws, handoff="auto"
+        ):
+            """With a handle (under the checkpoint) also records in ``handle_runs[keep]`` the original forward's and
+            the recompute's LAST_CALL records, the backward's, and the torch.distributed calls per phase
+            (``_Counter``; the recompute phase from the checkpoint's ``context_fn``)."""
+            srcs = (q, k, v, g, beta) + (
+                (GK["A_log"], GK["dt_bias"]) if raw_gate else ()
             )
-        torch.cuda.synchronize(device)
-    except BaseException as exc:
-        traceback.clear_frames(exc.__traceback__)
-        raise
-    finally:
+            leaves = [x.detach().clone().requires_grad_(True) for x in srcs]
+            n = len(srcs)
+
+            def fn(*a):
+                gk = {**GK, **({"A_log": a[5], "dt_bias": a[6]} if raw_gate else {})}
+                h = a[n] if len(a) > n else None
+                return cake_kcp.cake_kda_nondet_kcp(
+                    *a[:5], ctx, None, "light", "saved", workspace, recompute_handle=h,
+                    checkpoint_keep=keep if h is not None else None, checkpoint_handoff=handoff, saved_rows="tape",
+                    **gk, **L2N
+                )  # fmt: skip
+
+            extra = (handle,) if handle is not None else ()
+            if handle is not None and ckpt:
+                with _Counter() as cc:
+                    out = checkpoint(
+                        fn,
+                        *leaves,
+                        *extra,
+                        use_reentrant=False,
+                        context_fn=lambda: (
+                            contextlib.nullcontext(),
+                            cc.recompute_cm(),
+                        ),
+                    )
+                    orig = cake_kcp.LAST_CALL.pop("fwd", None)
+                    cc.phase = "bwd"
+                    out.backward(dout)
+                    rep = cake_kcp.LAST_CALL.pop("fwd", None)
+                handle_runs[keep] = (
+                    orig,
+                    rep,
+                    dict(cake_kcp.LAST_CALL["bwd"]),
+                    cc.record(),
+                )
+            else:
+                out = (
+                    checkpoint(fn, *leaves, *extra, use_reentrant=False)
+                    if ckpt
+                    else fn(*leaves, *extra)
+                )
+                out.backward(dout)
+            leaf_names = ("dq", "dk", "dv", "dg", "dbeta") + (
+                PARAM_GRADS if raw_gate else ()
+            )
+            got = {x: lf.grad for x, lf in zip(leaf_names, leaves, strict=True)}
+            return {"out": out.detach(), **got}
+
+        nd_launch: dict = {"fwd": [], "bwd": []}
+        res, saved, (rec_f, rec_b) = saved_pass(launches=nd_launch)
+        flags: dict = {}
+        reported: dict = {}
+        rstd = saved.qk_rstd
+        flags["saved_rstd"] = (
+            saved.qk_l2norm is True
+            and tuple(rstd.shape) == (2, T, H)
+            and rstd.dtype == torch.float32
+            and rstd.is_contiguous()
+            and saved.meta().get("qk_l2norm") is True
+            and saved.version == cake_kcp.KCP_SAVED_VERSION
+        )
+        flags["finite"] = all(
+            bool(torch.isfinite(res[x].float()).all()) for x in tensors
+        )
+        flags["records_mark_the_mode"] = (rec_f["l2n"], rec_b["l2n"]) == (
+            "fused",
+            "fused",
+        )
+        flags["first_reader_rstd"] = T == 0 or (
+            tuple(rec_f["l2n_rstd"]) == (0, 1) and tuple(rec_b["l2n_rstd"]) == (1, 0)
+        )
+        # the saved-mode backward ran the saved-rstd twin of its plan's prep exactly where one ships for the device
+        # (the call's local plan: its (T_r, n_frag, H) key on this device)
+        reported["saved_rstd_twin"] = rec_b.get("l2n_twin")
+        want_twin = None
+        if T > 0:
+            arch = cake_jit.device_arch(device.index)
+            prep = cake_backend.plan(
+                T, int(ctx.n_frag), H, cake_jit.sm_count(device.index), arch, gate=gate, l2n="fused"
+            ).record("bwd_prep", cake_kcp.LOCAL_PATH_BWD)  # fmt: skip
+            twin = cake_kcp_plan.saved_rstd_record(prep, arch)
+            want_twin = None if twin == prep else (prep, twin)
+        flags["saved_rstd_twin"] = rec_b.get("l2n_twin") == want_twin
+        rep, saved_rep, _ = saved_pass()
+        del saved_rep
+        replay, _, (_, rec_br) = saved_pass(boundary_mode="replay")
+        flags["replay_rstd_rw"] = T == 0 or tuple(rec_br["l2n_rstd"]) == (0, 1)
+        keep("saved", [res, rep])
+        keep("replay", replay)
+        del rep, replay
+        handoff_stats = cake_kcp.cake_kda_nondet_train_kcp_handoff_stats()
+        keep("save_transfer_off", saved_pass(save_transfer=False)[0])
+        keep("autograd", autograd_pass())
+        keep("ckpt", autograd_pass(ckpt=True))
+        keep(
+            "handle_states",
+            autograd_pass(
+                ckpt=True,
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep="states",
+            ),
+        )
+        keep(
+            "handle_transfer",
+            autograd_pass(
+                ckpt=True,
+                handle=cake_kcp.CakeKDANondetKcpRecomputeHandle(),
+                keep="transfer",
+            ),
+        )
+        # the checkpoint hand-off forced on: the set kept by both passes and read by the backward (a rank with
+        # tokens)
+        keep("handoff_on", autograd_pass(ckpt=True, handoff="on"))
+        handoff_on_bwd = cake_kcp.LAST_CALL["bwd"].get("checkpoint_handoff")
+        keep("ws_none", autograd_pass(workspace=None))
+        # the counters: the three checkpointed "auto" calls (no handle, the "states" and the "transfer" handle)
+        # decided by the mode's rule, the forced one engaged
+        flags["handoff_counts"] = _handoff_delta(
+            handoff_stats, ctx, H, gate, True, T, auto_calls=3
+        ) and handoff_on_bwd == ("bound" if T > 0 else None)
+        qp, kp, _buf = _packed_qk(q, k)
+        keep("packed_strided", saved_pass(qq=qp, kk=kp)[0])
+        flags.update(_handle_recompute_flags(handle_runs, W))
+        # the mode's own records launched (on a rank with tokens), none on a rank without
+        own = {p: sum(_mode_own(r) for r, _g in nd_launch[p]) for p in nd_launch}
+        n_local = {p: len(nd_launch[p]) for p in nd_launch}
+        flags["mode_records_launched"] = (
+            own["fwd"] > 0 and own["bwd"] > 0
+            if T > 0
+            else n_local == {"fwd": 0, "bwd": 0}
+        )
+        reported["local_records"] = {
+            p: [r for r, _g in nd_launch[p]] for p in nd_launch
+        }
+        launch_counts = {"own": own, "local": n_local}
+        if W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS:
+            keep("ring", saved_pass(exchange="ring", save_transfer=False)[0])
         cake_kcp.graph_cache_clear()
-    flags["graph_replay"] = _graph_events_ok(events) and _same(res, res_graph, tensors)
-    # the fallback form (the workspace's test knob): repeatable and in both modes the same bits; its equality with
-    # the fused form is reported (the single-rank tests check it; the accuracy gate below holds either way).  A
-    # fallback form that cannot run yet is recorded with its reason and fails the row (never skipped silently)
-    fb = None
-    flags["fallback_ran"] = has_fallback
-    reported["fallback_pending"] = fallback_pending
-    if has_fallback:
-        fb, saved_fb, (rec_ff, rec_bf) = saved_pass(workspace=ws_fb)
-        flags["fallback_records"] = (rec_ff["l2n"], rec_bf["l2n"]) == (
-            "fallback",
-            "fallback",
-        )
-        flags["fallback_repeat"] = _same(fb, saved_pass(workspace=ws_fb)[0], tensors)
-        flags["fallback_saved_eq_replay"] = _same(
-            fb, saved_pass(workspace=ws_fb, boundary_mode="replay")[0], tensors
-        )
-        reported["fallback_eq_fused"] = _same(fb, res, tensors)
-        reported["fallback_rstd_eq_fused"] = _bits_equal(saved_fb.qk_rstd, rstd)
-        # the deterministic route's fallback form: the same bits, the same local libraries
-        det_fb_missing = det_kcp_plan.qk_l2norm_missing(
-            "fallback", gate, det_kcp_plan.qk_l2norm_arch()
-        )
-        flags["det_fallback_ran"] = det_fb_missing is None
-        reported["det_fallback_pending"] = det_fb_missing
-        if det_fb_missing is None:
-            ws_det_fb = det_kcp.CakeKDADetKcpWorkspace(
-                use_gate_in_kernel=raw_gate, **L2N, **FALLBACK
+        events, graph_runs = [], []
+        try:
+            for _ in range(len(GRAPH_EVENTS)):
+                graph_runs.append(
+                    {x: t.clone() for x, t in saved_pass(graph="replay")[0].items()}
+                )
+                events.append(
+                    [
+                        str(cake_kcp.LAST_CALL[x].get("graph_event"))
+                        for x in ("fwd", "bwd")
+                    ]
+                )
+            torch.cuda.synchronize(device)
+        except BaseException as exc:
+            traceback.clear_frames(exc.__traceback__)
+            raise
+        finally:
+            cake_kcp.graph_cache_clear()
+        flags["graph_replay"] = _graph_events_ok(events)
+        keep("graph", graph_runs)
+        del graph_runs
+        # the fallback form (the workspace's test knob): twice and in replay mode, each judged.  A fallback form that
+        # cannot run yet is recorded with its reason and fails the row (never skipped silently)
+        flags["fallback_ran"] = has_fallback
+        reported["fallback_pending"] = fallback_pending
+        if has_fallback:
+            fb, saved_fb, (rec_ff, rec_bf) = saved_pass(workspace=ws_fb)
+            flags["fallback_records"] = (rec_ff["l2n"], rec_bf["l2n"]) == (
+                "fallback",
+                "fallback",
             )
             fb_launch: dict = {"fwd": [], "bwd": []}
-            det_fb_launch: dict = {"fwd": [], "bwd": []}
-            fb_l = saved_pass(workspace=ws_fb, launches=fb_launch)[0]
-            det_fb, saved_dfb, _ = det_pass(ws_det_fb, launches=det_fb_launch)
-            counts["fallback"] = {n: _bit_count(fb_l[n], det_fb[n]) for n in tensors}
-            counts["fallback"]["qk_rstd"] = _bit_count(
-                saved_fb.qk_rstd, saved_dfb.qk_rstd
-            )
-            flags["det_fallback_eq"] = all(
-                e == t for e, t in counts["fallback"].values()
-            )
-            flags["det_fallback_launches_eq"] = _libraries(
-                cake_jit, fb_launch
-            ) == _libraries(det_jit, det_fb_launch)
+            fb_2 = saved_pass(workspace=ws_fb, launches=fb_launch)[0]
             fb_own = {p: sum(_mode_own(r) for r, _g in fb_launch[p]) for p in fb_launch}
             flags["fallback_mode_records_launched"] = T == 0 or (
                 fb_own["fwd"] > 0 and fb_own["bwd"] > 0
             )
             launch_counts["fallback_own"] = fb_own
-            del ws_det_fb, det_fb, saved_dfb, fb_l
-        del saved_fb
-    # the flag-off route on the same operands: the same collectives and the same local stage calls (the mode's
-    # records replace the q / k readers stage for stage); a rank without tokens runs no local stage
-    res_off, saved_off, (rec_fo, rec_bo) = saved_pass(workspace=ws_off, l2n=False)
-    flags["collectives_eq_flag_off"] = (
-        _collective_seq(rec_f) == _collective_seq(rec_fo)
-        and _collective_seq(rec_b) == _collective_seq(rec_bo)
-        and rec_f["n_collectives"] == rec_fo["n_collectives"]
-        and rec_b["n_collectives"] == rec_bo["n_collectives"]
-    )
-    flags["stages_eq_flag_off"] = _local_stages(rec_f) == _local_stages(rec_fo) and (
-        _local_stages(rec_b) == _local_stages(rec_bo)
-    )
-    # a flag-off launch record carries no key of the mode
-    flags["flag_off_records"] = not (
-        {"l2n", "l2n_rstd", "l2n_twin"} & (set(rec_fo) | set(rec_bo))
-    )
-    flags["zero_token_rank_no_stage"] = T > 0 or (
-        rec_f["n_stages"] == 0 and rec_b["n_stages"] == 0
-    )
-    flags["saved_bytes_eq_query"] = (
-        saved.bytes - saved_off.bytes
-        == 8 * T * H
-        == cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
-            ctx, H=H, with_conv=False, **L2N
+            keep("fallback", [fb, fb_2])
+            keep(
+                "fallback_replay",
+                saved_pass(workspace=ws_fb, boundary_mode="replay")[0],
+            )
+            del fb, fb_2, saved_fb
+        # the flag-off route on the same operands: the same collectives and the same local stage calls (the mode's
+        # records replace the q / k readers stage for stage); a rank without tokens runs no local stage.  Its outputs
+        # are another function (no normalization) and are not judged
+        _res_off, saved_off, (rec_fo, rec_bo) = saved_pass(workspace=ws_off, l2n=False)
+        del _res_off
+        flags["collectives_eq_flag_off"] = (
+            _collective_seq(rec_f) == _collective_seq(rec_fo)
+            and _collective_seq(rec_b) == _collective_seq(rec_bo)
+            and rec_f["n_collectives"] == rec_fo["n_collectives"]
+            and rec_b["n_collectives"] == rec_bo["n_collectives"]
         )
-        - cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(ctx, H=H, with_conv=False)
-    )
-    # reported: the flag-off forward on the materialized bf16(x * rstd) (bitwise only where the mode's intra program
-    # keeps the flag-off arithmetic after the normalization)
-    qn = (q.float() * rstd[0].unsqueeze(-1)).to(torch.bfloat16)
-    kn = (k.float() * rstd[1].unsqueeze(-1)).to(torch.bfloat16)
-    out_c, _ = cake_kcp.cake_kda_nondet_train_kcp_forward(
-        qn, kn, v, g, beta, ctx, workspace=ws_off, save_for_backward=False, **GK
-    )
-    reported["out_eq_flag_off_on_normalized"] = _bits_equal(out_c, res["out"])
-    # retained after a saving forward: the rstd only.  The bytes the callers requested (``requested_bytes``):
-    # ``memory_allocated`` counts the caching allocator's blocks, whose rounding and the slack of an unsplit cached
-    # block (up to 1 MiB per tensor) depend on the allocator state the earlier passes leave
-    torch.cuda.synchronize(device)
-    gc.collect()
-    retained = {}
-    for tag, workspace, l2n in (("on", ws, True), ("off", ws_off, False)):
-        before = _requested(device)
-        kw = {"use_qk_l2norm_in_kernel": l2n, **GK}
-        o, s = cake_kcp.cake_kda_nondet_train_kcp_forward(
-            q, k, v, g, beta, ctx, workspace=workspace, **kw
+        flags["stages_eq_flag_off"] = _local_stages(rec_f) == _local_stages(
+            rec_fo
+        ) and (_local_stages(rec_b) == _local_stages(rec_bo))
+        # a flag-off launch record carries no key of the mode
+        flags["flag_off_records"] = not (
+            {"l2n", "l2n_rstd", "l2n_twin"} & (set(rec_fo) | set(rec_bo))
         )
+        flags["zero_token_rank_no_stage"] = T > 0 or (
+            rec_f["n_stages"] == 0 and rec_b["n_stages"] == 0
+        )
+        flags["saved_bytes_eq_query"] = (
+            saved.bytes - saved_off.bytes
+            == 8 * T * H
+            == cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
+                ctx, H=H, with_conv=False, **L2N
+            )
+            - cake_kcp_plan.cake_kda_nondet_train_kcp_saved_bytes(
+                ctx, H=H, with_conv=False
+            )
+        )
+        del res, saved, saved_off
+        # retained after a saving forward: the rstd only.  The bytes the callers requested (``requested_bytes``):
+        # ``memory_allocated`` counts the caching allocator's blocks, whose rounding and the slack of an unsplit
+        # cached block (up to 1 MiB per tensor) depend on the allocator state the earlier passes leave
         torch.cuda.synchronize(device)
-        retained[tag] = _requested(device) - before
-        del o, s
-    flags["retained_fwd_delta_is_rstd"] = retained["on"] - retained["off"] == 8 * T * H
-    red = red_fb = None
-    if raw_gate:
-        red = cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
-            ctx, res["dA_log"], res["ddt_bias"]
-        )
-        red_ok = True
-        for r in runs.values():
-            ra, rb = cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
-                ctx, r["dA_log"], r["ddt_bias"]
+        gc.collect()
+        retained = {}
+        for tag, workspace, l2n in (("on", ws, True), ("off", ws_off, False)):
+            before = _requested(device)
+            kw = {"use_qk_l2norm_in_kernel": l2n, **GK}
+            o, s = cake_kcp.cake_kda_nondet_train_kcp_forward(
+                q, k, v, g, beta, ctx, workspace=workspace, **kw
             )
-            red_ok &= _bits_equal(ra, red[0]) and _bits_equal(rb, red[1])
-        flags["reduce_eq_modes"] = bool(red_ok)
-        det_red = det_kcp.cake_kda_det_train_kcp_reduce_gate_param_grads(
-            ctx, det_res["dA_log"], det_res["ddt_bias"]
+            torch.cuda.synchronize(device)
+            retained[tag] = _requested(device) - before
+            del o, s
+        flags["retained_fwd_delta_is_rstd"] = (
+            retained["on"] - retained["off"] == 8 * T * H
         )
-        flags["det_reduce_eq"] = _bits_equal(red[0], det_red[0]) and _bits_equal(
-            red[1], det_red[1]
-        )
-        if fb is not None:
-            red_fb = cake_kcp.cake_kda_nondet_train_kcp_reduce_gate_param_grads(
-                ctx, fb["dA_log"], fb["ddt_bias"]
+        # rank 0: the single-rank flag-on path on the whole operands
+        if rank == 0:
+            cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
+            kw_s = {**GK, **L2N}
+            out_s, saved_s = cake_backend.cake_kda_nondet_train_forward(
+                glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], cu_t, **kw_s
             )
-    gathered = {x: _gather(res[x], W) for x in ("out",) + TOKEN_GRADS}
-    gathered_fb = (
-        {x: _gather(fb[x], W) for x in ("out",) + TOKEN_GRADS}
-        if fb is not None
-        else None
-    )
+            grads_s = cake_backend.cake_kda_nondet_train_backward(
+                glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], cu_t, glob["dout"], saved=saved_s, **kw_s
+            )  # fmt: skip
+            judge.add_global(
+                "single", {"out": out_s, **dict(zip(grad_names, grads_s, strict=True))}
+            )
+            del saved_s, out_s, grads_s
+        gc.collect()
+        return {
+            "flags": flags,
+            "reported": reported,
+            "retained": retained,
+            "events": events,
+            "launch_counts": launch_counts,
+        }
+
+    flags: dict = {}
+    first: dict = {}
+    for j in range(DRAWS if judged(lengths, H) else 1):
+        got = one_draw(j)
+        for name, ok in got["flags"].items():
+            flags[name] = flags.get(name, True) and ok
+        if j == 0:
+            first = got
     flag_list: list = [None] * W
     count_list: list = [None] * W
     if W > 1:
         dist.all_gather_object(flag_list, flags)
         dist.all_gather_object(
-            count_list, {"counts": counts, "launches": launch_counts, "T_r": T}
+            count_list, {"launches": first["launch_counts"], "T_r": T}
         )
     else:
         flag_list = [flags]
-        count_list = [{"counts": counts, "launches": launch_counts, "T_r": T}]
+        count_list = [{"launches": first["launch_counts"], "T_r": T}]
     report: dict = {
         "rank": rank,
         "world": W,
@@ -3904,10 +3886,9 @@ def _run_rank(
         "pass": True,
         "flags": {},
         "flags_by_rank": flag_list,
-        "reported": reported,
-        "retained_fwd_bytes": retained,
-        "metrics": {},
-        "graph_events": events,
+        "reported": first["reported"],
+        "retained_fwd_bytes": first["retained"],
+        "graph_events": first["events"],
         "device": torch.cuda.get_device_name(device),
         "arch": cake_jit.device_arch(device.index),
         "host": os.uname().nodename,
@@ -3916,26 +3897,8 @@ def _run_rank(
     for key in sorted({x for f in flag_list for x in f}):
         report["flags"][key] = all(f[key] for f in flag_list if key in f)
         report["pass"] &= report["flags"][key]
-    # the bitwise comparisons with the deterministic route, summed over the ranks: every tensor of every arm has
-    # elements and all of them equal (a vacuous comparison fails); the mode's own records launched on the row
-    det_counts: dict = {}
-    for arm in ("fused", "replay", "fallback"):
-        per = [c["counts"][arm] for c in count_list if arm in c["counts"]]
-        if per:
-            det_counts[arm] = {
-                n: [sum(p[n][0] for p in per), sum(p[n][1] for p in per)]
-                for n in per[0]
-            }
-    report["det_counts"] = det_counts
     report["launch_counts_by_rank"] = [c["launches"] for c in count_list]
-    arms_by_rank = [set(c["counts"]) for c in count_list]
-    report["flags"]["det_counts_nonvacuous"] = (
-        all(a == arms_by_rank[0] for a in arms_by_rank)
-        and {"fused", "replay"} <= arms_by_rank[0]
-        and all(
-            t > 0 and e == t for arm in det_counts.values() for e, t in arm.values()
-        )
-    )
+    # the mode's own records launched on the row
     report["flags"]["mode_records_launched_on_the_row"] = (
         sum(
             c["launches"]["own"]["fwd"] + c["launches"]["own"]["bwd"]
@@ -3943,70 +3906,41 @@ def _run_rank(
         )
         > 0
     )
-    report["pass"] &= report["flags"]["det_counts_nonvacuous"]
     report["pass"] &= report["flags"]["mode_records_launched_on_the_row"]
-    if rank == 0:
-        cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
-        kw_s = {**GK, **L2N}
-        out_s, saved_s = cake_backend.cake_kda_nondet_train_forward(
-            glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], cu_t, **kw_s
-        )
-        grads_s = cake_backend.cake_kda_nondet_train_backward(
-            glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], cu_t, glob["dout"], saved=saved_s, **kw_s
-        )  # fmt: skip
-        single = {"out": out_s, **dict(zip(grad_names, grads_s, strict=True))}
-        del saved_s
-        refs = _exact_l2n(glob, cu_t, raw_gate)
-        arms = [("", gathered, red)] + (
-            [("fallback:", gathered_fb, red_fb)] if gathered_fb else []
-        )
-        for prefix, gath, red_arm in arms:
-            cand = {
-                x: _to_global(part, gath[x], cu, total) for x in ("out",) + TOKEN_GRADS
-            }
-            if raw_gate:
-                cand["dA_log"], cand["ddt_bias"] = red_arm[0].cpu(), red_arm[1].cpu()
-            for x in tensors:
-                ref = refs[x]
-                c = cand[x].to(torch.float64).reshape(ref.shape)
-                s = single[x].detach().cpu().to(torch.float64).reshape(ref.shape)
-                rk = error_metrics(c, ref)["rel_rms"]
-                rs = error_metrics(s, ref)["rel_rms"]
-                ratio = rk / rs if rs > 0 else (1.0 if rk == 0 else float("inf"))
-                # the H-element parameter sums: reported (the raw-gate rows' protocol)
-                gated = x not in PARAM_GRADS
-                one = single[x].detach().cpu().reshape(cand[x].shape)
-                same = _bits_equal(cand[x].cpu(), one)
-                report["metrics"][prefix + x] = {
-                    "kcp_rel_l2": rk,
-                    "single_rel_l2": rs,
-                    "ratio": ratio,
-                    "bitwise_eq_single": bool(same),
-                    "gated": gated,
-                    "pass": bool(torch.isfinite(c).all())
-                    and (ratio <= ACC_GATE or not gated),
-                }
-                report["pass"] &= report["metrics"][prefix + x]["pass"]
     if W > 1:
         verdict: list = [None] * W
         dist.all_gather_object(verdict, report["pass"])
         report["pass"] = all(verdict)
         dist.barrier()
+    if rank == 0:
+        report["naive"] = judge.result()
     if rank == 0 and result_dir:
         os.makedirs(result_dir, exist_ok=True)
-        prefix = "l2n-raw-" if raw_gate else "l2n-"
+        prefix = _result_prefix(raw_gate, dt_bias_2d)
         with open(os.path.join(result_dir, prefix + _row_id(row) + ".json"), "w") as fh:
             json.dump(report, fh, indent=1, default=str)
-    del runs, res, res_off, saved, saved_off, fb, det_res, saved_d
     gc.collect()
     return report
 
 
+def _result_prefix(raw_gate: bool, dt_bias_2d: bool = False) -> str:
+    """The prefix of a row's report file (rank 0's) in the result directory."""
+    if dt_bias_2d:
+        return "l2n-raw-2d-"
+    return "l2n-raw-" if raw_gate else "l2n-"
+
+
 def _spawn_entry(
-    rank: int, W: int, row, rdzv: str | None, result_dir: str, raw_gate: bool
+    rank: int,
+    W: int,
+    row,
+    rdzv: str | None,
+    result_dir: str,
+    raw_gate: bool,
+    dt_bias_2d: bool = False,
 ) -> None:
     try:
-        report = _run_rank(rank, W, row, rdzv, result_dir, raw_gate)
+        report = _run_rank(rank, W, row, rdzv, result_dir, raw_gate, dt_bias_2d)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
     finally:
@@ -4015,47 +3949,68 @@ def _spawn_entry(
             dist.destroy_process_group()
 
 
-def _drive(row, raw_gate: bool) -> None:
+def _drive(row, raw_gate: bool, record_property, dt_bias_2d: bool = False) -> None:
+    """Run the row (one Slurm task, the pytest process at ``W = 1``, or spawned ranks), assert the gathered flags,
+    then record and settle rank 0's verdicts (``report["naive"]``)."""
     lengths, H, W, layout = row
     gate = "raw" if raw_gate else "g"
-    prefix = "l2n-raw-" if raw_gate else "l2n-"
+    prefix = _result_prefix(raw_gate, dt_bias_2d)
     slurm = os.environ.get("SLURM_PROCID") is not None
     if slurm and int(os.environ.get("SLURM_NTASKS", "1")) == W and W > 1:
         _skip_unless_runnable(1, gate=gate)
         report = _run_rank(
             int(os.environ["SLURM_PROCID"]), W, row, None, os.environ.get("KCP_TEST_RESULT_DIR"), raw_gate,
+            dt_bias_2d,
         )  # fmt: skip
-        assert report["pass"], report
+        _settle_row(record_property, report, lengths)
         return
     _skip_unless_runnable(W, gate=gate)
     if W == 1:
         report = _run_rank(
-            0, 1, row, None, os.environ.get("KCP_TEST_RESULT_DIR"), raw_gate
+            0, 1, row, None, os.environ.get("KCP_TEST_RESULT_DIR"), raw_gate, dt_bias_2d
         )
-        assert report["pass"], report
+        _settle_row(record_property, report, lengths)
         return
     with tempfile.TemporaryDirectory(prefix="cake_kcp_l2n_") as tmp:
         result_dir = os.environ.get("KCP_TEST_RESULT_DIR") or tmp
         mp.start_processes(
             _spawn_entry,
-            args=(W, row, _rendezvous(tmp), result_dir, raw_gate),
+            args=(W, row, _rendezvous(tmp), result_dir, raw_gate, dt_bias_2d),
             nprocs=W,
             join=True,
             start_method="spawn",
         )
         with open(os.path.join(result_dir, prefix + _row_id(row) + ".json")) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    _settle_row(record_property, report, lengths)
+
+
+def _settle_row(record_property, report: dict, lengths) -> None:
+    """Assert a row's gathered flags, then record and settle rank 0's verdicts (:func:`settle_naive`; the gaps'
+    scope: the row's documents).  Another rank's report holds no verdicts."""
+    assert report["pass"], {k: v for k, v in report.items() if k != "naive"}
+    if report.get("naive") is not None:
+        settle_naive(record_property, report["naive"], tuple(lengths))
 
 
 @pytest.mark.parametrize("row", ROWS, ids=_row_id)
-def test_l2n_rows_match_single_rank_and_fp64(row) -> None:
-    _drive(row, raw_gate=False)
+def test_l2n_rows_match_single_rank_and_fp64(row, record_property) -> None:
+    """The flag-on rows of :func:`_run_rank`: the KCP passes and the single-rank flag-on path judged against FP64
+    beside the naive BF16 tier, with the records and plumbing flags of the module docstring."""
+    _drive(row, raw_gate=False, record_property=record_property)
 
 
 @pytest.mark.parametrize("row", RAW_GATE_ROWS, ids=_row_id)
-def test_l2n_raw_gate_rows_match_single_rank_and_fp64(row) -> None:
-    """The raw gate mode with the in-kernel Q / K L2 norm: the same checks, the raw gate's gradient among the gated
-    tensors, ``dA_log`` / ``ddt_bias`` (reduced in rank order by ``cake_kda_nondet_train_kcp_reduce_gate_param_grads``, bitwise the
-    same under every mode) reported against FP64."""
-    _drive(row, raw_gate=True)
+def test_l2n_raw_gate_rows_match_single_rank_and_fp64(row, record_property) -> None:
+    """The raw gate mode with the in-kernel Q / K L2 norm: the same checks; the raw gate's gradient and the
+    cross-rank sums of the ``dA_log`` / ``ddt_bias`` partials (``cake_kda_nondet_train_kcp_reduce_gate_param_grads``)
+    judged as ``dA_log`` / ``ddt_bias``."""
+    _drive(row, raw_gate=True, record_property=record_property)
+
+
+@pytest.mark.parametrize("row", WIDE_HEAD_ROWS, ids=_row_id)
+def test_l2n_wide_head_rows_match_single_rank_and_fp64(row, record_property) -> None:
+    """Issue #264: the checks of :func:`test_l2n_raw_gate_rows_match_single_rank_and_fp64` at 96 and 128 heads with
+    ``dt_bias`` ``[H, 128]`` (its gradient judged in that shape), and on the head ownership rows (two heads per owner
+    with ranks that own no head, and a padded owner) over 4 and 8 ranks."""
+    _drive(row, raw_gate=True, record_property=record_property, dt_bias_2d=True)
