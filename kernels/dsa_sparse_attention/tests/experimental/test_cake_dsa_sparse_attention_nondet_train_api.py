@@ -3201,6 +3201,41 @@ def test_public_entries_refuse_other_head_counts(heads, monkeypatch):
 
 
 @pytest.mark.parametrize("heads", (96, 128))
+def test_public_entries_refuse_more_heads_on_sm107a(monkeypatch, heads):
+    """On ``sm_107a`` (host, the architecture stood in) every public entry refuses a ``heads``-head call with the
+    ``NotImplementedError`` of the backend before any kernel of the package launches: the flat and packed (its
+    torch index route) autograd entries and the step forward / backward pair, with query rows and without."""
+    from tests.experimental.test_helpers import (
+        cake_dsa_sparse_attention_host_launches as hl,
+    )
+
+    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
+    monkeypatch.setattr(
+        cake_backend, "nope_index_prep_available", lambda device=None: False
+    )
+    refused = "sm_107a serves 64 query heads only"
+    for T in (8, 0):
+        inp = hl.host_inputs(T, 64, 16, heads)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
+        leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
+        cu_q = torch.tensor([0, T // 2, T], dtype=torch.int32)
+        cu_k = torch.tensor([0, 24, 64], dtype=torch.int32)
+        with pytest.raises(NotImplementedError, match=refused):
+            cake_dsa_sparse_attention_nondet(*leaves, inp.indices)
+        with pytest.raises(NotImplementedError, match=refused):
+            cake_dsa_sparse_attention_nondet_varlen(
+                *leaves, inp.indices % 24, cu_q, cu_k, causal=True
+            )
+        with pytest.raises(NotImplementedError, match=refused):
+            public_api.cake_dsa_sparse_attention_nondet_train_forward(*args)
+        with pytest.raises(NotImplementedError, match=refused):
+            public_api.cake_dsa_sparse_attention_nondet_train_backward(
+                *args, inp.q_latent, -inp.q_latent, inp.lse, inp.dout
+            )
+    assert not h.launches
+
+
+@pytest.mark.parametrize("heads", (96, 128))
 def test_public_entries_at_more_heads(with_o_lo, heads, record_property):
     """At ``heads`` query heads and scale ``192**-0.5``, on a packed batch of two causal documents: the flat
     autograd entry on the global rows, the varlen autograd entry on the document-relative rows and the step forward

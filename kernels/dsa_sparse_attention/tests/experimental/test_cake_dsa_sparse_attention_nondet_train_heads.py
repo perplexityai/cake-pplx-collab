@@ -774,9 +774,14 @@ def test_nope_and_det_forms_reject_more_heads(heads):
 
 @pytest.mark.parametrize("heads", (96, 128))
 def test_sm107a_refuses_more_than_64_heads(monkeypatch, heads):
-    """On sm_107a the windows do not ship yet: a 96- or 128-head call is refused before any launch (host, the
-    architecture stood in); 64 heads launch as before."""
+    """On sm_107a the windows do not ship yet: a 96- or 128-head call is refused before any kernel of the package
+    launches (host, the architecture stood in) -- the eager forward and backward, the flat and packed (varlen, its
+    torch index route) autograd entries, ``prepare_dsa_train`` and the workspace size; 64 heads launch as before.
+    The public step entries: ``test_cake_dsa_sparse_attention_nondet_train_api.py``."""
     h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
+    monkeypatch.setattr(
+        cake_backend, "nope_index_prep_available", lambda device=None: False
+    )
     inp = hl.host_inputs(8, 64, 16, heads)
     h.bind(inp.q_latent, inp.q_rope, inp.dout)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
@@ -785,6 +790,15 @@ def test_sm107a_refuses_more_than_64_heads(monkeypatch, heads):
         cake_backend.forward(*args)
     with pytest.raises(NotImplementedError, match=refused):
         cake_backend.backward(*args, inp.q_latent, -inp.q_latent, inp.lse, inp.dout)
+    leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
+    with pytest.raises(NotImplementedError, match=refused):
+        cake_backend.cake_dsa_sparse_attention_nondet(*leaves, inp.indices)
+    cu_q = torch.tensor([0, 3, 8], dtype=torch.int32)
+    cu_k = torch.tensor([0, 24, 64], dtype=torch.int32)
+    with pytest.raises(NotImplementedError, match=refused):
+        cake_backend.cake_dsa_sparse_attention_nondet_varlen(
+            *leaves, inp.indices % 24, cu_q, cu_k, causal=True
+        )
     with pytest.raises(NotImplementedError, match=refused):
         prepare_dsa_train(*args, dout=inp.dout)
     with pytest.raises(NotImplementedError, match=refused):
