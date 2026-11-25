@@ -485,8 +485,10 @@ token chunk and pass, `bwd_cast`)
 -- plus the two fills of the FP32 dK/dV accumulators; a direct binding (see
 "Direct accumulation from the main stage") launches the natural-layout variant
 of the main stage instead and has neither the fills nor the cast.  A call without query rows
-(`T == 0`) returns empty outputs and zero gradients without launching; `S == 0`
-is rejected.
+(`T == 0`) returns empty outputs and zero gradients without launching (on
+`sm_107a` a call over more than 64 heads on CUDA tensors raises
+`NotImplementedError` instead, see "Query heads above 64 (head windows)");
+`S == 0` is rejected.
 
 Host cost through the autograd wrapper: the `Function.backward` runs on
 PyTorch's autograd device thread, where the two thread handoffs and the Python
@@ -684,7 +686,9 @@ change:
   `out` (`H` KiB) is the call's output and is not counted.  Under
   `torch.utils.checkpoint(..., use_reentrant=False)` nothing is retained.
 * Not served above 64 heads: the deterministic package, the NoPE program and
-  its sink form (`ValueError` naming the rope form).  On `sm_107a` a call with
+  its sink form (`ValueError`; the deterministic and NoPE query checks name
+  the rope form, the sink check says the sink form serves 64 query heads
+  only).  On `sm_107a` a call with
   more than 64 heads raises `NotImplementedError` -- also without query rows,
   on a CUDA tensor -- until its window stages are validated.
 * Cost.  At 96 heads each stage processes 128 heads (the overlap heads
@@ -1030,7 +1034,9 @@ with_o_lo=False  forward writes out, lse           delta = rowsum(dout * out)   
   cached zero-size BF16 placeholder chosen from the plan's mode alone, and
   the autograd `Function`s keep their saved-list length and order (the `o_lo`
   slot holds a zero-size placeholder), so non-reentrant checkpointing still
-  matches by position.  The workspace layouts are the same in both modes.
+  matches by position.  At 64 heads the workspace layouts are the same in
+  both modes; above 64 heads the forward's window `o_lo` scratch
+  (`fwd_o_lo`) exists only with `with_o_lo=True`.
 * Step entries: the step forwards return `None` in the `o_lo` slot (`(out,
   lse, None)`, the packed form `(out, lse, None, indices, topk_length)`); a
   step backward takes `o_lo=None` with `with_o_lo=False`.  `o_lo` is `None`
