@@ -463,7 +463,16 @@ def test_gate_and_qk_l2norm_modes_are_forwarded(
 def test_byte_queries_are_the_backends_and_the_deterministic_packages() -> None:
     # An explicit SM count keeps the queries device-free.  The two packages' workspaces and saved sets have the same
     # size (the layouts are the same; the S1 programs bind the deterministic forms' buffers).
-    for S, N, H in ((1, 1, 1), (129, 2, 4), (4096, 3, 16), (261393, 4, 64)):
+    # 96 and 128 heads: the issue's single-rank pack and one KCP rank's tokens (issue #264)
+    rows = (
+        (1, 1, 1),
+        (129, 2, 4),
+        (4096, 3, 16),
+        (261393, 4, 64),
+        (262144, 6, 96),
+        (16380, 1, 128),
+    )
+    for S, N, H in rows:
         for kwargs in ({}, {"backward": False}, {"save_mode": "tape"}):
             nd = nd_api.cake_kda_nondet_train_workspace_bytes(
                 S, N, H, sm_count=148, **kwargs

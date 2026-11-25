@@ -13,10 +13,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Cake DeepSeek Sparse Attention (top-k sparse MLA, absorbed queries, 64 query
-heads) training forward and backward on SM100 / SM103 / SM107, the
-non-deterministic package: the stable entry points over the backend package
+Cake DeepSeek Sparse Attention (top-k sparse MLA, absorbed queries) training
+forward and backward on SM100 / SM103 / SM107, the non-deterministic package:
+the stable entry points over the backend package
 ``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train``.
+
+Query heads: the rope entries take ``H = q_latent.shape[1]`` heads, ``H`` in
+64, 96 and 128 (96 and 128 on SM100 / SM103; SM107 serves 64); every head
+tensor below written ``[T, 64, ...]`` is ``[T, H, ...]`` for them.  The kernels
+serve 64 heads of a token: 96 and 128 heads run them on two 64-head windows,
+``[H - 64, H)`` and then ``[0, 64)``, with the heads ``[H - 64, 64)`` both
+windows cover taken from the second (see the backend README).  The NoPE
+entries take 64 heads.
 
 Numerical mode: the module name chooses the package, and no entry point takes a
 determinism keyword; ``with_o_lo`` chooses whether the forward writes ``o_lo``
@@ -74,8 +82,11 @@ With ``True`` the forward also writes ``o_lo``, the BF16 rounding residual of
 ``out``, and the backward forms ``delta = rowsum(dout * (out + o_lo))`` in
 FP32, which keeps the gradients accurate on peaked rows (rows whose softmax
 puts almost all weight on one key).  With ``False`` the forward neither
-computes nor stores ``o_lo`` (64 KiB less written and saved per query token)
-and the backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
+computes nor stores ``o_lo`` (``H`` KiB less written and saved per query
+token, ``H`` the call's query head count: 64 on the NoPE entries; above 64
+heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of workspace, and
+no ``o_lo`` window copies) and the
+backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
 the form cuDNN's DSA backward uses; on peaked rows the gradient error grows to
 that class.  ``out`` and ``lse`` have the same accuracy in both modes.  The
 step forwards then return ``None`` in the ``o_lo`` slot, and a step backward
@@ -90,7 +101,9 @@ empty ``out`` / ``lse`` / ``o_lo`` (``None`` for ``o_lo`` with
 ``dq``, a zero FP32 ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a
 sink, a zero ``dsink``; the rope step backward returns empty ``dq_latent`` /
 ``dq_rope`` and zero ``dkv_latent`` / ``dk_rope``, FP32 with ``dkv_fp32=True``
-and BF16 otherwise (``None`` with a tensor ``dkv_acc``).
+and BF16 otherwise (``None`` with a tensor ``dkv_acc``).  On SM107 a rope call
+over 96 or 128 heads on CUDA tensors raises ``NotImplementedError`` instead,
+as a call with query rows does.
 
 Their autograd Functions, ``CakeDSASparseAttentionNondetFunction`` (both rope
 entries), ``CakeDSASparseAttentionNondetNopeFunction`` and
@@ -276,14 +289,17 @@ def cake_dsa_sparse_attention_nondet(
     with_o_lo: bool = True,
 ):
     r"""Differentiable top-k sparse MLA attention with absorbed queries (DeepSeek
-    Sparse Attention) for training, 64 query heads, SM100 / SM103 / SM107 only.
+    Sparse Attention) for training, ``H`` query heads (64 on SM100 / SM103 /
+    SM107; 96 or 128 on SM100 / SM103), SM100 / SM103 / SM107 only.
 
     ``O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent``
     over the keys a row's ``indices`` select (K = V = the latent).
 
     Strided inputs are consumed in place (no host copy): the kernels read the
     query operands through TMA descriptors encoded from the tensor's own head
-    and token strides and gather the key operands by row stride.  Admitted
+    and token strides and gather the key operands by row stride (above 64
+    heads the backward copies a ``dout`` whose token stride is not ``H`` head
+    strides, such as a head-major view, once on the device).  Admitted
     layouts: unit innermost stride; head / token / key-row strides that are
     positive multiples of 8 elements (16 bytes, the TMA descriptor stride
     granule); head stride and key row stride at least the slice width; a
@@ -293,13 +309,15 @@ def cake_dsa_sparse_attention_nondet(
     Parameters
     ----------
     q_latent : torch.Tensor
-        BF16 ``[T, 64, 512]`` absorbed query latents; contiguous or a view of
-        a packed ``[T, 64, 576]`` query (head stride 576).
+        BF16 ``[T, H, 512]`` absorbed query latents, ``H`` in 64, 96 or 128
+        (the call's head count); contiguous or a view of a packed ``[T, H,
+        576]`` query (head stride 576).  Another ``H`` raises ``ValueError``;
+        96 or 128 heads on SM107 raise ``NotImplementedError``.
     q_rope : torch.Tensor
-        BF16 ``[T, 64, 64]`` query rope part; contiguous, a view of the packed
-        ``[T, 64, 576]`` query, or the ``192:256`` channel slice of the
-        pre-absorption ``[T, 64, 256]`` query (head stride 256, token stride
-        16384, storage offset 192 elements).
+        BF16 ``[T, H, 64]`` query rope part; contiguous, a view of the packed
+        ``[T, H, 576]`` query, or the ``192:256`` channel slice of the
+        pre-absorption ``[T, H, 256]`` query (head stride 256, token stride
+        ``H * 256``, storage offset 192 elements).
     kv_latent : torch.Tensor
         BF16 ``[S, 512]`` key/value latent (shared K = V); columns ``0:512`` of
         a packed ``[S, 576]`` or ``[S, 704]`` row (a 128-channel indexer key
@@ -317,7 +335,7 @@ def cake_dsa_sparse_attention_nondet(
     softmax_scale : Optional[float]
         Defaults to ``576 ** -0.5``.
     return_lse : bool
-        Also return the natural-log logsumexp ``[T, 64]`` FP32 of the scaled
+        Also return the natural-log logsumexp ``[T, H]`` FP32 of the scaled
         scores over the valid keys (``-inf`` for fully masked rows).
     key_passes : Optional[int]
         Number of key-range passes of the backward's main stage.  ``None``
@@ -336,7 +354,9 @@ def cake_dsa_sparse_attention_nondet(
         (``<= S``).  The passes carry dQ through
         an FP32 partial in the workspace (``T * 147,456`` B plus ``T * (4 *
         topk + 4)`` B, ~608 MiB at ``T = 4096``, top-k 2048); dQ is still
-        written once per row and the dK/dV accumulation is unchanged.
+        written once per row at 64 heads (above 64 the overlap heads ``[H -
+        64, 64)`` are written by the first window, zeros, and then by the
+        second) and the dK/dV accumulation is unchanged.
     backend : str
         Only ``"cake"``.
     dkv_acc : Optional[torch.Tensor | Callable]
@@ -405,21 +425,25 @@ def cake_dsa_sparse_attention_nondet(
         rowsum(dout * (out + o_lo))`` in FP32.  This keeps the gradients
         accurate on peaked rows (rows whose softmax puts almost all weight on
         one key).  With ``False`` the forward neither computes nor stores
-        ``o_lo`` (64 KiB less written and saved per query token), and the
-        backward forms ``delta = rowsum(dout * out)`` from the BF16 ``out``,
-        the form cuDNN's DSA backward uses; on peaked rows the gradient error
+        ``o_lo`` (``H`` KiB less written and saved per query token; above 64
+        heads also no ``fwd_o_lo`` window scratch, 64 KiB per token of
+        workspace, and no ``o_lo`` window copies), and the backward forms
+        ``delta = rowsum(dout * out)`` from the BF16 ``out``, the form
+        cuDNN's DSA backward uses; on peaked rows the gradient error
         grows to that class.  ``out`` and ``lse`` have the same accuracy in
         both modes.  Any value other than a ``bool`` raises ``ValueError``.
 
     Returns
     -------
     out : torch.Tensor
-        BF16 ``[T, 64, 512]``; zero for fully masked rows.
+        BF16 ``[T, H, 512]``; zero for fully masked rows.
     lse : torch.Tensor
         Only with ``return_lse=True``.
 
     Gradients flow to ``q_latent``, ``q_rope``, ``kv_latent`` and ``k_rope``
-    (``dq`` written once per row; ``dkv`` accumulated in FP32 with atomics,
+    (``dq`` stored, not accumulated: written once per row at 64 heads, and above
+    64 the overlap heads ``[H - 64, 64)`` written by the first window, zeros,
+    and then by the second; ``dkv`` accumulated in FP32 with atomics,
     then cast to BF16, or accumulated into ``dkv_acc``).  BF16 operands into the tensor cores, FP32
     accumulation; the backward recomputes the scores from the BF16 inputs and
     forms ``delta`` in FP32 from the BF16 output and its saved BF16 residual
@@ -979,19 +1003,24 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     o_lo)``, or ``(out, lse, None)`` with ``with_o_lo=False``.
 
     The inputs are those of :func:`cake_dsa_sparse_attention_nondet`. ``out``
-    is BF16 ``[T, 64, 512]`` (zero for a fully masked row), ``lse`` FP32 ``[T,
-    64]`` and ``o_lo`` BF16 ``[T, 64, 512]``, the rounding residual of ``out``
+    is BF16 ``[T, H, 512]`` (zero for a fully masked row), ``lse`` FP32 ``[T,
+    H]`` and ``o_lo`` BF16 ``[T, H, 512]``, the rounding residual of ``out``
     (``out + o_lo`` is the output before its BF16 rounding). Pass the three
     unchanged to :func:`cake_dsa_sparse_attention_nondet_train_backward`.
-    ``out``, ``lse`` and ``o_lo`` come from one forward kernel. A
-    call without query rows returns empty outputs without launching.
+    ``out``, ``lse`` and ``o_lo`` of a head come from one forward kernel launch
+    (with 96 or 128 heads, the launch of the window that delivers the head). A
+    call without query rows returns empty outputs without launching (on SM107
+    a call over 96 or 128 heads on CUDA tensors raises ``NotImplementedError``
+    instead).
 
     ``with_o_lo`` (``bool``, default ``True``): with ``True`` the forward also
     writes ``o_lo`` as above and the step backward forms ``delta =
     rowsum(dout * (out + o_lo))`` in FP32, which keeps the gradients accurate
     on peaked rows (rows whose softmax puts almost all weight on one key).
-    With ``False`` the forward neither computes nor stores ``o_lo`` (64 KiB
-    less written per query token) and returns ``None`` in its slot; pass
+    With ``False`` the forward neither computes nor stores ``o_lo`` (``H`` KiB
+    less written per query token; above 64 heads also no ``fwd_o_lo`` window
+    scratch, 64 KiB per token of workspace, and no ``o_lo`` window copies) and
+    returns ``None`` in its slot; pass
     ``None`` and ``with_o_lo=False`` to the step backward, which forms
     ``delta = rowsum(dout * out)`` from the BF16 ``out``, the form cuDNN's DSA
     backward uses (on peaked rows the gradient error grows to that class).
@@ -1040,8 +1069,10 @@ def cake_dsa_sparse_attention_nondet_train_backward(
 
     ``out``, ``o_lo`` and ``lse`` are the outputs of
     :func:`cake_dsa_sparse_attention_nondet_train_forward` on the same inputs
-    and ``topk_length`` / ``softmax_scale``; ``dout`` is the BF16 ``[T, 64,
-    512]`` gradient of ``out``. The call leaves ``o_lo`` unchanged.
+    and ``topk_length`` / ``softmax_scale``; ``dout`` is the BF16 ``[T, H,
+    512]`` gradient of ``out``. The call leaves ``o_lo`` unchanged.  With 96 or
+    128 heads a ``dout`` whose token stride is not ``H`` head strides (a
+    head-major view) is copied once into the backward's workspace.
     ``dq_latent`` / ``dq_rope`` are BF16. ``dkv_latent`` / ``dk_rope`` are BF16
     in the layout of ``kv_latent`` / ``k_rope``, or FP32 with
     ``dkv_fp32=True``. With a tensor ``dkv_acc`` (FP32 ``[S_dst, >= 576]``) the

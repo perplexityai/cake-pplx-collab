@@ -552,8 +552,18 @@ def _program_stages(names: tuple[str, ...], program: str) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
+# Query head counts the non-deterministic package's RoPE form serves beyond 64; this package serves 64 heads only.
+_NONDET_ONLY_HEADS = (96, 128)
+
+
 def _check_head_tensor(t: torch.Tensor, name: str, last: int) -> None:
     """``[T, 64, last]`` BF16 with a unit channel stride, TMA-admissible head and token strides and base address."""
+    if t.ndim == 3 and int(t.shape[1]) in _NONDET_ONLY_HEADS and t.shape[2] == last:
+        raise ValueError(
+            f"{name} must be a BF16 [T, {NUM_HEADS}, {last}] tensor: the deterministic package serves "
+            f"{NUM_HEADS} query heads only, got {int(t.shape[1])} ({_NONDET_ONLY_HEADS} heads are served by the "
+            "non-deterministic package's RoPE form, cake_pplx.cake_dsa_sparse_attention_nondet_train)"
+        )
     if t.ndim != 3 or t.shape[1] != NUM_HEADS or t.shape[2] != last:
         raise ValueError(f"{name} must be a BF16 [T, {NUM_HEADS}, {last}] tensor")
     if t.dtype != torch.bfloat16:

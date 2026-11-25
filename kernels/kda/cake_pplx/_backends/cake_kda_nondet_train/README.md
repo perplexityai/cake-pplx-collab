@@ -8,8 +8,9 @@ is its backend, internal to `cake_pplx`.  The feature does not participate in
 automatic backend selection, autotuning or trace-apply.
 
 The operands, shapes, dtypes, saved set (versions 4 and 2), workspace, arena
-options, document groups (`batch_tokens`), launch sequences and byte queries
-are the deterministic package's; its README
+options, document groups (`batch_tokens`), segment plan (the token-aware
+segment rule included), launch sequences and byte queries are the
+deterministic package's; its README
 (`cake_pplx/_backends/cake_kda_det_train/README.md`) describes them.  This
 package imports nothing from it and ships its own copies of every program.
 This README describes what differs, including the checkpoint hand-off of
@@ -358,7 +359,8 @@ stage `wy` is no l2n stage).
 
 * `cake_jit.py` -- the `MODULES` registry, `S1_RECORDS`, `HANDOFF_TWINS`,
   `TAPE_TWINS`, the paths, the stage order, the optional stages and the
-  segmented route's constants, the logical vocabulary, the loader glue and
+  segmented route's constants (`SEGMENTS`, and `TOKEN_SEGMENTS` of the
+  token-aware segment rule, `segment_route`), the logical vocabulary, the loader glue and
   `run_module`.  The derived leaves `kernel_symbol`, `launch`, `arg_plan` and
   `logical` are rewritten by the export.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported

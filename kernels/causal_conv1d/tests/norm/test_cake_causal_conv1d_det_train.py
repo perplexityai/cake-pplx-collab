@@ -341,7 +341,9 @@ FWD_NARROW_WORKSPACE_TILES = {
 # Inside a static range the route's fallback (the static program) runs on the
 # route's plan; inside a direct range the route's direct program runs on the
 # arch's ``DIRECT_PLANS_OF_RECORD`` form; outside them the dynamic program.  A
-# range of ``PAIR_ROWS_OF_RECORD`` runs ahead of both where it covers them.
+# direct range starts one token above the static range of its key or, on sm_103a
+# ``fwd_bias`` at C 720-768, lies inside it and runs ahead of it there.  A range
+# of ``PAIR_ROWS_OF_RECORD`` runs ahead of both where it covers them.
 FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
         ("fwd", 512, 512): (1, 24576),
@@ -397,10 +399,10 @@ FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] 
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
         ("fwd_bias", 712, 712): (1, 12800),
-        ("fwd_bias", 720, 728): (13824, 16383),
-        ("fwd_bias", 736, 736): (14336, 16383),
-        ("fwd_bias", 744, 760): (13824, 16383),
-        ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 720, 728): (1, 16383),
+        ("fwd_bias", 736, 736): (1, 16383),
+        ("fwd_bias", 744, 760): (1, 16383),
+        ("fwd_bias", 768, 768): (1, 16384),
         ("fwd_bias", 776, 896): (1, 8192),
         ("fwd_bias", 904, 952): (1, 12288),
         ("fwd_bias", 960, 1024): (1, 20480),
@@ -510,6 +512,10 @@ DIRECT_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = 
         ("fwd_bias", 576, 576): (2049, 16384),
         ("fwd_bias", 584, 640): (4105, 16384),
         ("fwd_bias", 712, 712): (12801, 14592),
+        ("fwd_bias", 720, 728): (12801, 13823),
+        ("fwd_bias", 736, 736): (12801, 14335),
+        ("fwd_bias", 744, 760): (12801, 13823),
+        ("fwd_bias", 768, 768): (12801, 13823),
         ("fwd_bias", 776, 896): (8193, 16384),
         ("fwd_dt", 512, 512): (20481, 24576),
         ("fwd_dt", 520, 568): (8193, 24576),
@@ -587,11 +593,11 @@ PAIR_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd", 512, 1024): (1, 3072),
         ("fwd_dt", 512, 1024): (1, 1792),
         ("fwd_bias", 512, 712): (1, 1536),
-        ("fwd_bias", 720, 768): (16, 1536),
+        ("fwd_bias", 720, 768): (1, 3072),
         ("fwd_bias", 776, 1024): (1, 1536),
     },
     "sm_107a": {
-        ("fwd", 512, 512): (1, 2560),
+        ("fwd", 512, 512): (1, 4096),
         ("fwd", 520, 736): (4, 2560),
         ("fwd", 744, 1024): (1, 2560),
         ("fwd_dt", 512, 1024): (1, 1792),
@@ -1481,12 +1487,64 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     assert "flags" in loader.LOGICAL_SCALARS and "flags" not in loader.PLAN_SCALARS
 
 
+def _small_s_layout_problems(
+    ranges: list[tuple[str, tuple[int, int], tuple[int, int]]],
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """The ``(static span, direct span)`` pairs of one architecture and route
+    (``ranges`` as :func:`_small_s_rows` gives them) that break the layout: a
+    direct range meets the channel counts of a static range only where both have
+    one key, and there it starts one token above the static range or lies
+    inside it."""
+
+    problems = []
+    for each, span, (s_lo, s_hi) in ranges:
+        for other, (d_lo, d_hi), (t_lo, t_hi) in ranges:
+            if each != "static" or other != "direct":
+                continue
+            if span[1] < d_lo or d_hi < span[0]:
+                continue
+            touches = s_hi + 1 == t_lo
+            nested = s_lo <= t_lo <= t_hi <= s_hi
+            if span != (d_lo, d_hi) or not (touches or nested):
+                problems.append((span, (d_lo, d_hi)))
+    return problems
+
+
+def test_small_s_layout_keeps_a_direct_range_inside_its_static_range() -> None:
+    """A direct range inside the static range of its own key, or one token
+    above it, keeps the layout."""
+
+    for static, direct in (
+        ((1, 16383), (12801, 13823)),
+        ((1, 16383), (1, 16383)),
+        ((1, 12800), (12801, 13823)),
+    ):
+        ranges = [("static", (720, 728), static), ("direct", (720, 728), direct)]
+        assert not _small_s_layout_problems(ranges), (static, direct)
+
+
+def test_small_s_layout_refuses_a_partial_overlap() -> None:
+    """A direct range that leaves the static range of its key where it meets
+    it, starts a gap above it or lies below it, or meets the static range of
+    another key, breaks the layout; disjoint channels and pair ranges do not."""
+
+    direct = ("direct", (720, 728), (12801, 13823))
+    for static in ((1, 13000), (12900, 16383), (1, 12000), (13824, 16383)):
+        ranges = [("static", (720, 728), static), direct]
+        assert _small_s_layout_problems(ranges) == [((720, 728), (720, 728))]
+    ranges = [("static", (720, 736), (1, 16383)), direct]
+    assert _small_s_layout_problems(ranges) == [((720, 736), (720, 728))]
+    for other in (("static", (736, 736), (1, 16383)), ("pair", (720, 728), (1, 3072))):
+        assert not _small_s_layout_problems([other, direct]), other
+
+
 def test_small_s_rows_literal_tables() -> None:
     """The small-S forward rows: ``cake_jit.FALLBACK_ROWS``, ``DIRECT_ROWS``,
     ``PAIR_ROWS``, ``DIRECT_PLANS`` and ``PAIR_PLANS`` against the literal
     tables; keys of forward routes only, on multiples of 8, disjoint in ``C``
-    per architecture and route, every range inside ``S >= 1``, a static range
-    below the direct range of a key that both tables cover, the pair keys of
+    per architecture and route, every range inside ``S >= 1``, a direct range
+    that meets a static range only at the same key, one token above it or
+    inside it (:func:`_small_s_layout_problems`), the pair keys of
     ``PAIR_ROWS_OF_RECORD`` per architecture and route (one, two on sm_100a
     ``fwd_dt``, three on sm_103a ``fwd_bias`` and sm_107a ``fwd``); per architecture
     and forward route one static program (the
@@ -1584,12 +1642,7 @@ def test_small_s_rows_literal_tables() -> None:
                     assert end < start, (arch, kind, program, spans)
             for program, span, (s_lo, s_hi) in ranges:
                 assert 1 <= s_lo <= s_hi, (arch, kind, span)
-            for _, (c_lo, c_hi), (_, s_x) in (r for r in ranges if r[0] == "static"):
-                for _, (d_lo, d_hi), (t_lo, _) in (
-                    r for r in ranges if r[0] == "direct"
-                ):
-                    if c_lo <= d_hi and d_lo <= c_hi:
-                        assert s_x < t_lo, (arch, kind, (c_lo, c_hi), (d_lo, d_hi))
+            assert not _small_s_layout_problems(ranges), (arch, kind)
     for name, record in loader.MODULES.items():
         rule = loader.select_rule(record)
         if rule is not None and rule["kind"] == loader.ROWS_KIND:
