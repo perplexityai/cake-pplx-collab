@@ -60,7 +60,9 @@ checks:
   workspace reset, the backend's standalone form (no import of another
   ``cake_pplx`` module; a copy under another name imports), and the strides
   the backend passes for one-head and other inputs (a single head's stride as
-  128, so packed one-head rows pass the kernels' packed-rows test);
+  128, so packed one-head rows pass the kernels' packed-rows test), and the
+  forward's host plan against version 0.2.17's tables (the module differs
+  only in the bands version 0.2.18 moved);
 * on a device: the alert of an autograd node whose backward runs the fused
   backward after ``torch.use_deterministic_algorithms(True)`` was
   enabled (exact texts: a ``RuntimeError`` before the launch, or a
@@ -1632,6 +1634,97 @@ FORWARD_KINDS = {
 }
 
 
+def _v0218_moved(
+    arch: str, rows: int, sm_count: int, packed: bool, layout: str | None
+) -> tuple[str, str] | None:
+    """``(0.2.17 role, 0.2.18 role)`` of the forward of ``rows`` rows on
+    ``arch`` with ``sm_count`` SMs where version 0.2.18 moved its module
+    (``suite.V0218_MOVED_BANDS``: by the class ``layout`` of rows that are not
+    ``packed``, no class for packed rows of ``PACKED_ROWS`` or more), else
+    None."""
+    if packed and rows < loader.PACKED_ROWS:
+        return None
+    band = suite.V0218_MOVED_BANDS.get((arch, None if packed else layout))
+    if band is None:
+        return None
+    lo, hi, old, new = band
+    return (old, new) if lo * sm_count < rows <= hi * sm_count else None
+
+
+# SM counts of the comparison of the forward's plan with version 0.2.17's.
+PLAN_SM_COUNTS = (1, 2, 7, 148, 152, 212, 216)
+
+
+@pytest.mark.parametrize("sm_count", PLAN_SM_COUNTS)
+def test_forward_plan_differs_from_0_2_17_only_in_the_moved_bands(
+    sm_count: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Host plan only, no device: the registry's forward tables are the
+    suite's mirrors, and ``module_for_rows`` of the forward on every
+    architecture, of packed rows and of rows that are not packed of every
+    class (none, ``PROJECTION_LAYOUT``, ``HEAD_MAJOR_LAYOUT``), at every whole
+    rows per SM up to 3200, at every cut of either version's tables and a row
+    either side and at ``PACKED_ROWS`` and ``INT32_MAX``, gives the module it
+    gives with version 0.2.17's tables put back (``suite.V0217_FORWARD_BANDS``)
+    but in the bands of ``suite.V0218_MOVED_BANDS``, where it gives
+    ``fwd_layout_pipe`` in the place of 0.2.17's module: on sm_100a and
+    sm_103a a gate of more than one head sliced from a projection past 599 and
+    629 rows per SM up to 650 and 699 (0.2.17's extra-long forward), and the
+    rows of ``STRIDED_FORWARD_BANDS``, head-major rows among them, from 701 to
+    1500 rows per SM (0.2.17's plain forward).  Every moved band holds rows of
+    the comparison; packed rows, sm_107a and every other band run what 0.2.17
+    ran."""
+    assert loader.PROJECTION_FORWARD_BANDS == suite.PROJECTION_FORWARD_BANDS
+    assert loader.STRIDED_FORWARD_BANDS == suite.STRIDED_FORWARD_BANDS
+    assert loader.LAYOUT_FORWARD_BANDS[loader.PROJECTION_LAYOUT] is (
+        loader.PROJECTION_FORWARD_BANDS
+    )
+    rows_by_arch = {}
+    for arch in loader.ARCHES:
+        rows = {k * sm_count for k in range(1, 3201)}
+        rows |= {1, loader.PACKED_ROWS - 1, loader.PACKED_ROWS}
+        rows |= {loader.PACKED_ROWS + 1, loader.INT32_MAX}
+        tables = [loader.FORWARD_BANDS[arch], loader.STRIDED_FORWARD_BANDS[arch]]
+        tables += [t[arch] for t in loader.LAYOUT_FORWARD_BANDS.values() if arch in t]
+        tables += [t[arch] for t in suite.V0217_FORWARD_BANDS.values() if arch in t]
+        for bands in tables:
+            for last, _ in bands[:-1]:
+                rows |= {last * sm_count + d for d in (-1, 0, 1)}
+        rows_by_arch[arch] = sorted(r for r in rows if r >= 1)
+
+    def plan() -> dict:
+        got = {}
+        for arch, all_rows in rows_by_arch.items():
+            for rows in all_rows:
+                for packed in (True, False):
+                    for layout in (None, *loader.LAYOUT_FORWARD_BANDS):
+                        got[arch, rows, packed, layout] = loader.module_for_rows(
+                            arch, "fwd", rows, sm_count, packed=packed, layout=layout
+                        )
+        return got
+
+    shipped = plan()
+    for table, by_arch in suite.V0217_FORWARD_BANDS.items():
+        current = getattr(loader, table)
+        assert set(by_arch) < set(current), table
+        for arch, bands in by_arch.items():
+            assert bands != current[arch], (table, arch)
+            monkeypatch.setitem(current, arch, bands)
+    old = plan()
+    assert shipped.keys() == old.keys()
+    moved = set()
+    for key, name in shipped.items():
+        arch, rows, packed, layout = key
+        want = _v0218_moved(arch, rows, sm_count, packed, layout)
+        if want is None:
+            assert name == old[key], key
+            continue
+        routes = loader.ROUTES[arch]
+        assert (old[key], name) == (routes[want[0]], routes[want[1]]), key
+        moved.add((arch, None if packed else layout))
+    assert moved == set(suite.V0218_MOVED_BANDS), moved
+
+
 # Forward inputs around and past the ends of the forward's bands: (tokens,
 # heads, layout); ``heads=None`` takes, with ``end`` the last row of band ``i``
 # of a ``FORWARD_KINDS`` kind (``last * SMs``), ``end // h + tokens`` tokens of
@@ -1706,6 +1799,10 @@ FORWARD_CASES = [
     pytest.param(1, None, "other2", id="other-band2-end+1"),
     pytest.param(0, None, "other3", id="other-band3-end"),
     pytest.param(1, None, "other3", id="other-band3-end+1"),
+    pytest.param(0, None, "headmajor4", id="headmajor-band4-end"),
+    pytest.param(1, None, "headmajor4", id="headmajor-band4-end+1"),
+    pytest.param(0, None, "other4", id="other-band4-end"),
+    pytest.param(1, None, "other4", id="other-band4-end+1"),
     pytest.param(7685, 48, "contiguous", id="7685x48"),
     pytest.param(7685, 48, "projection", id="7685x48-projection"),
     pytest.param(7685, 48, "head_major", id="7685x48-head_major"),

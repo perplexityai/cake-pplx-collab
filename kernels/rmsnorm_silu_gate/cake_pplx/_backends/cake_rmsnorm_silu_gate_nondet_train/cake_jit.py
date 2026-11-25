@@ -920,7 +920,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz": 0, "split_gate": 1,
     # "split_layout_prefetch": 1, "store_width": 128, "sum_pairs": 0,
     # "threads": 128, "w_late": 0}); fwd_pipe's grid rule;
-    # PROJECTION_FORWARD_BANDS gives it its rows.
+    # PROJECTION_FORWARD_BANDS and STRIDED_FORWARD_BANDS give it its rows.
     "cake_rmsnorm_silu_gate_train_f99efa1083ef8ff2189a": {
         "arches": [
             "sm_100a",
@@ -3506,39 +3506,55 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 }
 
 # The forward bands of a call whose rows are neither packed nor of a layout with
-# a table of its own (``forward_layout``: ``x`` and ``z`` both sliced, a
-# broadcast over heads or a mixed or padded layout; head-major rows on an
-# architecture without ``HEAD_MAJOR_FORWARD_BANDS``, sm_100a and sm_103a; a
-# broadcast over tokens that its band of packed rows does not run, below), or of
-# packed rows from ``PACKED_ROWS`` on, as ``FORWARD_BANDS`` (the tiny forwards
-# read packed rows only).  The cuts follow the checkpointed training step as
-# ``FORWARD_BANDS`` do, except the short forward's end: 12 rows per SM on
-# sm_100a and sm_103a, where its grid of one 16-row block a CTA has at most as
-# many CTAs as the SMs less 16 (from 64 SMs), and 59 on sm_107a, where it fits
-# one wave of 4 CTAs per SM on all SMs but 16 (from 205 SMs), so beside a kernel
-# holding 16 SMs it ends no later than the plain forward.  The plain forward
-# (the call role ``fwd``: one 64-thread CTA per 8-row block) runs past the
-# persistent forwards' bands, from 701 rows per SM on sm_100a and sm_103a and
-# from 481 on sm_107a: where measured there (from 1000 rows per SM on sm_100a
-# and sm_103a, from 520 on sm_107a) it was the fastest forward alone and made
-# the step 1 to 6 % faster (measured with the pipelined forward's
-# one-CTA-per-block grid of 0.2.13).  No band of this table runs a pipelined
-# forward, which made the step slower at every rows per SM measured (with its
-# grid of 0.2.13; on sm_103a 3 to 7 % slower than the mid forward from 13 to 100
-# rows per SM); the bands of ``PROJECTION_FORWARD_BANDS`` and
-# ``HEAD_MAJOR_FORWARD_BANDS`` run those with the per-layout L2 prefetch walk.
+# a table of its own (``forward_layout``: ``x`` and ``z`` both sliced, a gate of
+# one head sliced from a projection, a broadcast over heads or a mixed or padded
+# layout; head-major rows on an architecture without
+# ``HEAD_MAJOR_FORWARD_BANDS``, sm_100a and sm_103a; a broadcast over tokens
+# that its band of packed rows does not run, below), or of packed rows from
+# ``PACKED_ROWS`` on, as ``FORWARD_BANDS`` (the tiny forwards read packed rows
+# only).  The cuts follow the checkpointed training step as ``FORWARD_BANDS``
+# do, except the short forward's end: 12 rows per SM on sm_100a and sm_103a,
+# where its grid of one 16-row block a CTA has at most as many CTAs as the SMs
+# less 16 (from 64 SMs), and 59 on sm_107a, where it fits one wave of 4 CTAs
+# per SM on all SMs but 16 (from 205 SMs), so beside a kernel holding 16 SMs it
+# ends no later than the plain forward.  The plain forward (the call role
+# ``fwd``: one 64-thread CTA per 8-row block) runs past the persistent
+# forwards' bands, from 1501 rows per SM on sm_100a and sm_103a and from 481 on
+# sm_107a: measured with the pipelined forward's one-CTA-per-block grid of
+# 0.2.13 (``fwd_pipe``, without the per-layout L2 prefetch walk), it was the
+# fastest forward alone from 1000 rows per SM on sm_100a and sm_103a and from
+# 520 on sm_107a and made the step 1 to 6 % faster; that pipelined forward made
+# the step slower at every rows per SM measured (on sm_103a 3 to 7 % slower
+# than the mid forward from 13 to 100 rows per SM).  Version 0.2.18 runs
+# ``fwd_layout_pipe`` (the pipelined forward with the per-layout L2 prefetch
+# walk) on sm_100a and sm_103a from 701 to 1500 rows per SM, where 0.2.17 ran
+# the plain forward: measured against 0.2.17 (CUDA Graph replays, CUPTI, cold
+# L2, two runs; ``x`` and ``z`` both sliced from projections ``2 * H * 128 +
+# 16`` elements wide, 16 and 48 heads, and a gate of one head sliced from such
+# a projection) at 701, 800, 1000, 1250 and 1500 rows per SM, it took 0.9427
+# to 0.9885 of the plain forward's time alone on B200 and 0.9320 to 0.9646 on
+# GB300, and 0.9536 to 0.9985 of the checkpointed step's (either weight
+# gradient) on B200 and 0.9514 to 0.9857 on GB300, its forward not slower
+# than the deterministic package's beyond noise; at 2000 rows per SM the step
+# of a gate of one head took 1.0132 to 1.0147 of 0.2.17's time on B200 and
+# 1.0047 to 1.0051 on GB300, so the band ends at 1500, a measured point.
+# Head-major rows, a broadcast over heads and mixed or padded layouts were not
+# measured in that band.  On sm_107a no band of this table runs a pipelined
+# forward.
 STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
         (700, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
         (700, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
     "sm_107a": (
@@ -3582,17 +3598,28 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # sm_103a runs the plain forward past 2000; on sm_107a (driver 620.70) it found
 # its checkpointed step 1.1 to 1.9 % slower from 309 to 332 rows per SM, so
 # its first sm_107a band ends at 300, a measured point, and the mid forward
-# runs from 301 to 442, as in 0.2.16.  A cut lies between a measured point of
-# its band and one of the next (sm_100a 650: between 443 and 700; sm_103a 699
-# keeps 699.8 rows per SM of 48 heads out); past the last pipelined band the
-# plain forward runs, as in ``STRIDED_FORWARD_BANDS``.  Host plan
-# only, as the other tables.
+# runs from 301 to 442, as in 0.2.16.  Version 0.2.18 ends the extra-long
+# forward's band at 599 rows per SM on sm_100a (650 in 0.2.17) and at 629 on
+# sm_103a (699 in 0.2.17), and ``fwd_layout_pipe`` runs from there: measured
+# against 0.2.17 (CUDA Graph replays, CUPTI, cold L2, two runs; 16, 48 and 64
+# heads with ``z`` sliced from a projection ``2 * H * 128 + 16`` elements wide,
+# and 48 heads with ``z`` sliced from one ``4 * H * 128`` wide), it took at
+# 600 to 650 rows per SM on B200 0.9047 to 0.9237 of the extra-long forward's
+# time alone and 0.9690 to 0.9948 of the checkpointed step's (either weight
+# gradient), and at 630 to 699 on GB300 0.8989 to 0.9208 and 0.9702 to 0.9937,
+# its forward not slower than the deterministic package's beyond noise; below
+# those points the step was slower (B200: 1.0190 to 1.0297 of 0.2.17's time at
+# 560 rows per SM, 1.0041 for 64 heads in one run at 580; GB300: 1.0081 to
+# 1.0085 for 48 and 64 heads at 600, more below), so each cut lies just below
+# the first point where every form passed (whose 64 heads, 599.78 rows per SM
+# on 148 SMs and 629.89 on 152, run ``fwd_layout_pipe``).  Past the last
+# pipelined band the plain forward runs.  Host plan only, as the other tables.
 PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
-        (650, "fwd_xlong"),
+        (599, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
         (3000, "fwd_layout_keep_pipe"),
         (None, "fwd"),
@@ -3600,7 +3627,7 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
-        (699, "fwd_xlong"),
+        (629, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3617,8 +3644,11 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # ``HEAD_MAJOR_LAYOUT``: ``x`` and ``z`` of token stride 128 and head stride ``T
 # * 128``, a ``[H, T, 128]`` tensor viewed as ``[T, H, 128]``), by architecture,
 # by rows per SM as ``FORWARD_BANDS``; an architecture without a table here
-# (sm_100a and sm_103a, where neither pipelined forward with the per-layout walk
-# made the step faster) runs ``STRIDED_FORWARD_BANDS``.  On sm_107a version
+# (sm_100a and sm_103a, where in version 0.2.17's measurement neither pipelined
+# forward with the per-layout walk made the step faster) runs
+# ``STRIDED_FORWARD_BANDS``, from version 0.2.18 its band of
+# ``fwd_layout_pipe`` (701 to 1500 rows per SM, measured on other layouts)
+# too.  On sm_107a version
 # 0.2.17's measurement (as ``PROJECTION_FORWARD_BANDS``; 16 and 48 heads) found
 # ``fwd_layout_keep_pipe`` at 100 rows per SM 9 to 10 % faster alone and the
 # step 3 to 4 % faster than the mid forward of ``STRIDED_FORWARD_BANDS``.  The
