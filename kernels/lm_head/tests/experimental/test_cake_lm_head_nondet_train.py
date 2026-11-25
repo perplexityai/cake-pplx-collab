@@ -6673,6 +6673,56 @@ def test_memory_plan_vocab_major_dx_phase_holds_the_fold_operands():
         ), (T, R, fused, plain)
 
 
+def test_memory_plan_vocab_major_budget_edge_moves_by_the_fold_operands():
+    """Where the vocabulary-major ``dX`` output phase is the form's peak (a compacted call with many ignored rows,
+    under the fused finalize), the fold operands that phase holds (``live(label_bytes * rows) + live(4 * rows)``, 12
+    bytes a row with the int64 labels) raise the smallest budget at which ``memory_plan`` picks ``"vocab_major"`` by
+    exactly that: the edge without them is the ``dx_finalize=False`` prediction less its BF16 ``[rows, H]`` cast.  At
+    the edge it picks ``"vocab_major"``; one byte below it and at the edge without the fold operands (the budgets of
+    that ``12 * rows``-byte window, where the model without them picked ``"vocab_major"``) it picks the chunk loop's
+    fitting form, as the call without the vocabulary-major form does -- another form, whose ``dX`` / ``dW`` round
+    differently -- here ``"recompute"`` for a call of 100 valid rows of 4096."""
+    geometry = cake_backend.DEFAULT_GEOMETRY
+    live = opt_in._allocated_bytes
+    label_bytes = torch.empty((), dtype=geometry.labels_dtype).element_size()
+    for T, R, H, V, C in (
+        (4096, 100, GLM_H, GLM_V, 4096),
+        (60000, 5000, GLM_H, GLM_V, 1024),
+        (65535, 7000, 4096, 32768, 2048),
+    ):
+        kw = dict(
+            num_rows=T,
+            rows=R,
+            hidden=H,
+            vocab=V,
+            chunk=C,
+            geometry=geometry,
+            fuse_dw_cast=False,
+        )
+        top = opt_in.memory_plan(
+            "logprob", vocab_major=True, budget_bytes=1 << 45, **kw
+        )
+        plain = opt_in.memory_plan(
+            "logprob", vocab_major=True, dx_finalize=False, budget_bytes=1 << 45, **kw
+        )
+        assert top.form == plain.form == "vocab_major", (T, R, top, plain)
+        held = live(label_bytes * R) + live(4 * R)
+        edge = top.predicted_bytes
+        assert edge - held == plain.predicted_bytes - live(2 * R * H), (T, R, plain)
+        at = opt_in.memory_plan("logprob", vocab_major=True, budget_bytes=edge, **kw)
+        assert at.form == "vocab_major" and at.fits, (T, R, at)
+        assert at.predicted_bytes == edge, (T, R, at)
+        for budget in (edge - 1, edge - held):
+            got = opt_in.memory_plan(
+                "logprob", vocab_major=True, budget_bytes=budget, **kw
+            )
+            loop = opt_in.memory_plan("logprob", budget_bytes=budget, **kw)
+            assert loop.fits and loop.form != "vocab_major", (T, R, budget, loop)
+            assert got == loop, (T, R, budget, got, loop)
+            if T == 4096:
+                assert got.form == "recompute", (T, R, budget, got)
+
+
 # The forms of the loss entry's explicit byte budget (:func:`opt_in._set_memory_budget_bytes`), in pick order
 _LOSS_BUDGET_FORMS = ("fused", "unfused", "partial", "recompute")
 
