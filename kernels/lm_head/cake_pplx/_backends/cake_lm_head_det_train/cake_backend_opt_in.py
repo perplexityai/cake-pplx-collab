@@ -358,8 +358,9 @@ def _hidden_count_begin(
     launches are bound (argument plans, grids: host work only, nothing enqueued yet); (3) ``labels >= 0`` -> ``cumsum``
     -> ``searchsorted`` (:func:`compaction_index`), the count's ``copy_(non_blocking=True)`` into the pinned cell and
     the event behind it; (4) the gather (rows ``< count`` of ``X`` in valid-row order, exact zeros after) and the GEMM
-    (``M`` / ``m_tiles`` / the raster rule at ``rows0``, the stores bounded by ``min(count, rows0)``) are launched.  The
-    caller resolves the plan on the count afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`).
+    (``M`` / ``m_tiles`` / the raster rule at ``rows0``; it runs the work items of the 256-row pairs below
+    ``min(count, rows0)`` alone, :data:`HIDDEN_COUNT_STAGE`) are launched.  The caller resolves the plan on the count
+    afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`).
 
     ``loss_weights`` (the zero-weight split of a policy call, :func:`gradient_index`): the counted rows are the gradient
     rows ``(labels >= 0) & (loss_weights != 0)`` (``valid`` holds their mask); the zero-weight row count travels in
@@ -503,8 +504,9 @@ def _hidden_count_begin_temperature(
     launches are bound (argument plans, grids: host work only, nothing enqueued yet); (3) ``labels >= 0`` -> ``cumsum``
     -> ``searchsorted`` (:func:`compaction_index`), the count's ``copy_(non_blocking=True)`` into the pinned cell and
     the event behind it; (4) the gather (rows ``< count`` of ``X`` in valid-row order, exact zeros after) and the GEMM
-    (``M`` / ``m_tiles`` / the raster rule at ``rows0``, the stores bounded by ``min(count, rows0)``) are launched.  The
-    caller resolves the plan on the count afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`)."""
+    (``M`` / ``m_tiles`` / the raster rule at ``rows0``; it runs the work items of the 256-row pairs below
+    ``min(count, rows0)`` alone, :data:`HIDDEN_COUNT_STAGE`) are launched.  The caller resolves the plan on the count
+    afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`)."""
     device = X.device
     index = int(
         device.index if device.index is not None else torch.cuda.current_device()

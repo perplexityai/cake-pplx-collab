@@ -368,9 +368,11 @@ keyword.
   index on the device (`labels >= 0` -> an inclusive int32 `cumsum` ->
   `searchsorted`), gathers chunk 0's rows of `X` with the `gather_rows_bf16`
   kernel and runs chunk 0's logits GEMM in its device-count form
-  (`gemm_logits_mcnt` / `gemm_logits_nostats_mcnt`: the stores bounded by the
-  count read from device memory, the buffer extent `min(chunk_size, T)` as
-  `M`), and reads the count back through a pinned cell and a CUDA event only
+  (`gemm_logits_mcnt` / `gemm_logits_nostats_mcnt`: launched at the buffer
+  extent `min(chunk_size, T)` as `M`, it runs the work items of the 256-row
+  pairs below the count read from device memory alone, see `_mcnt` under
+  "Structural forms and launch scalars"), and reads the count back through a
+  pinned cell and a CUDA event only
   after both are queued -- the host waits for the three compaction kernels and
   a 4-byte copy instead of the count and the index.  Every row valid: the
   uncompacted plan with chunk 0's GEMM already done (its `X` rows for the
@@ -1343,9 +1345,9 @@ gather and logits GEMM ran before the count was known, see
   pointer and row pitch (no contiguous copy), the int64 index read as int32
   pairs.  Launched before chunk 0's logits GEMM, which runs in its
   device-count form (`gemm_logits_mcnt` / `gemm_logits_nostats_mcnt`: `M`,
-  `m_tiles` and the raster are the buffer extent `min(chunk_size, T)`, every
-  store and statistics write is bounded by `min(count, M)`; bitwise the
-  host-bound form per row).
+  `m_tiles` and the raster are the buffer extent `min(chunk_size, T)`, and
+  only the work items of the 256-row pairs below `min(count, M)` run, see
+  `_mcnt` below; bitwise the host-bound form per row).
 
 ### Structural forms and launch scalars
 
@@ -1364,9 +1366,16 @@ a record serves every admissible geometry and the host never selects by shape:
   `gemm_logits_nostats_mcnt`) -- chunk 0 of the hidden valid-row count, whose
   valid-row bound is read from device memory while `M`, `m_tiles` and the
   raster height are evaluated at the buffer extent `min(chunk_size, T)`
-  (`cake_backend.hidden_count_eligible`, `Plan.hidden_logits_stage`).
-  Bitwise: the same per-row arithmetic, rows at and beyond the count are not
-  written;
+  (`cake_backend.hidden_count_eligible`, `Plan.hidden_logits_stage`).  Each
+  role (also of the temperature form `gemm_logits_mcnt_tau`) reads
+  `n = min(count, M)` once and runs the work items of the `ceil(n / 256)`
+  256-row pairs below it first, in the plain form's order at `M = n`; the
+  scheduler drains every later item, which runs no K step and stores nothing.
+  Bitwise: the same per-row arithmetic on the rows below `n`.  The statistics
+  of the rows at and beyond `n` are not written; of `z`, `sm_100a` writes no
+  such row, and the staged TMA store of `sm_103a` / `sm_107a` writes +0 (the
+  gather's zero rows) to the rows `[n, min(M, 256 * ceil(n / 256)))` and
+  leaves the later rows unwritten;
 * `_s`: the K-sliced dX GEMM (`k_slices` 2 .. 4 from `recommended_k_slices`;
   one slice runs the plain form);
 * `_tn256`: the narrow dX tile, taken when `H % 512 != 0`, when the launch's

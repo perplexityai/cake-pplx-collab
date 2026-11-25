@@ -147,8 +147,9 @@ Contract
   inclusive int32 ``cumsum`` -> ``searchsorted``), gathers chunk 0's rows of
   ``X`` with the ``gather_rows_bf16`` kernel and runs chunk 0's logits GEMM in
   its device-count form (``gemm_logits_mcnt`` / ``gemm_logits_nostats_mcnt``:
-  the stores bounded by the count read from device memory, the buffer extent
-  ``min(chunk_size, T)`` as ``M``) before the count reaches the host through a
+  launched at the buffer extent ``min(chunk_size, T)`` as ``M``, it runs the
+  work items of the 256-row pairs below the count read from device memory
+  alone, :data:`HIDDEN_COUNT_STAGE`) before the count reaches the host through a
   pinned cell and a CUDA event -- the host waits for the three compaction
   kernels and a 4-byte copy instead of a ``sum().item()`` and a ``nonzero``
   before the first launch (:func:`_hidden_count_begin`).  Every row valid: the
@@ -856,8 +857,14 @@ DX_CAST_FOLD_STAGE = "scale_cast_fold_bf16"
 # ``gather_rows_bf16`` kernel -- ``out[r] = X[idx[r]]`` for ``r < min(count, num_rows)`` with the count read from device
 # memory, exact zeros after; ``x`` is the int32 alias of ``X``'s storage span (``ld_x_words`` = the row pitch in 4-byte words),
 # ``idx_lo`` the int64 compaction index viewed as int32 pairs, ``count`` the int32 cell -- and chunk 0's logits GEMM runs in
-# its device-count form (the ``_mcnt`` variants: ``WS`` is that cell and every store is bounded by ``min(WS[0], M)`` while
-# ``M`` / ``m_tiles`` / the raster rule are the buffer extent ``min(chunk, T)``), both before the count reaches the host.
+# its device-count form (the ``_mcnt`` variants: ``WS`` is that cell; ``M`` / ``m_tiles`` / the raster rule are the
+# buffer extent ``min(chunk, T)``), both before the count reaches the host.  Each role of the GEMM reads
+# ``n = min(WS[0], M)`` once and runs the work items of the ``ceil(n / 256)`` 256-row pairs below it first, in the plain
+# form's order at ``M = n`` (the same K loop and epilogue per row, so the rows below ``n`` keep their bits); the
+# scheduler drains every later item, which runs no K step and stores nothing.  The row statistics are stored for the
+# rows below ``n`` alone.  Of ``z``, sm_100a stores the rows below ``n`` alone; the staged TMA store of sm_103a /
+# sm_107a writes whole 256-row pairs, so the rows ``[n, min(M, 256 * ceil(n / 256)))`` hold +0 (the gather's zero rows)
+# and the later rows are not written.
 HIDDEN_COUNT_STAGE = "gather_rows_bf16"
 # The log-probability entry's logits GEMM arms (one launch per chunk each, no device-count form):
 # ``gemm_logits_dz`` -- the backward's recompute writes ``dz_c = bf16(dlogp_t * (1[v = y_t] - exp(z - lse_t)))`` from its
@@ -2549,7 +2556,7 @@ def _dw_stream(index: int) -> tuple:
 
 def hidden_count_default() -> bool:
     """Default of ``hidden_count`` (``True``; ``cake`` backend, compacted calls): the valid-row index is formed on the
-    device and chunk 0's row gather (:data:`HIDDEN_COUNT_STAGE`) and logits GEMM (its ``_mcnt`` variant, the stores
+    device and chunk 0's row gather (:data:`HIDDEN_COUNT_STAGE`) and logits GEMM (its ``_mcnt`` variant, its work
     bounded by the count read from device memory) are launched before the count reaches the host through a pinned cell
     and a CUDA event (:func:`_hidden_count_begin`); ``False`` counts and indexes on the host before the first launch
     (:func:`valid_rows`; bitwise the same outputs).  Resolved once per call."""
@@ -2670,7 +2677,7 @@ class _HiddenCount(_TemperatureCountState):
     event: Any  # the CUDA event recorded behind that copy
     logits: torch.Tensor = field(
         repr=False
-    )  # bf16 [rows0, V]: chunk 0's z, rows < min(count, rows0) written
+    )  # bf16 [rows0, V]: chunk 0's z on the rows < min(count, rows0) (the later rows: HIDDEN_COUNT_STAGE)
     stats_buf: torch.Tensor = field(repr=False)  # fp32 [rows0, num_tiles, 2]
     x_c: torch.Tensor = field(
         repr=False
@@ -2797,8 +2804,9 @@ def _hidden_count_begin(
     launches are bound (argument plans, grids: host work only, nothing enqueued yet); (3) ``labels >= 0`` -> ``cumsum``
     -> ``searchsorted`` (:func:`compaction_index`), the count's ``copy_(non_blocking=True)`` into the pinned cell and
     the event behind it; (4) the gather (rows ``< count`` of ``X`` in valid-row order, exact zeros after) and the GEMM
-    (``M`` / ``m_tiles`` / the raster rule at ``rows0``, the stores bounded by ``min(count, rows0)``) are launched.  The
-    caller resolves the plan on the count afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`).
+    (``M`` / ``m_tiles`` / the raster rule at ``rows0``; it runs the work items of the 256-row pairs below
+    ``min(count, rows0)`` alone, :data:`HIDDEN_COUNT_STAGE`) are launched.  The caller resolves the plan on the count
+    afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`).
 
     ``loss_weights`` (the zero-weight split of a policy call, :func:`gradient_index`): the counted rows are the gradient
     rows ``(labels >= 0) & (loss_weights != 0)``; the zero-weight row count travels in the same pinned copy (8 bytes)
@@ -2941,8 +2949,9 @@ def _hidden_count_begin_temperature(
     launches are bound (argument plans, grids: host work only, nothing enqueued yet); (3) ``labels >= 0`` -> ``cumsum``
     -> ``searchsorted`` (:func:`compaction_index`), the count's ``copy_(non_blocking=True)`` into the pinned cell and
     the event behind it; (4) the gather (rows ``< count`` of ``X`` in valid-row order, exact zeros after) and the GEMM
-    (``M`` / ``m_tiles`` / the raster rule at ``rows0``, the stores bounded by ``min(count, rows0)``) are launched.  The
-    caller resolves the plan on the count afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`)."""
+    (``M`` / ``m_tiles`` / the raster rule at ``rows0``; it runs the work items of the 256-row pairs below
+    ``min(count, rows0)`` alone, :data:`HIDDEN_COUNT_STAGE`) are launched.  The caller resolves the plan on the count
+    afterwards and skips chunk 0's gather and GEMM (:attr:`Plan.hidden_count`)."""
     device = X.device
     index = int(
         device.index if device.index is not None else torch.cuda.current_device()
