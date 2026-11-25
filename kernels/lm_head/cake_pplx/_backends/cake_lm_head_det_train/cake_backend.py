@@ -2734,7 +2734,7 @@ def valid_rows(
                 padded = index.index_select(0, _pad_select(n, pad)).to(
                     labels.device, non_blocking=True
                 )
-                index = padded.narrow(0, 0, n)
+                index = padded[:n]
                 setattr(index, _PAD_INDEX_ATTR, padded)
                 return index, (valid if mask else None)
         # pageable host memory: the copy is staged before it returns, so the host index may go right away
