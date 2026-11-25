@@ -1,0 +1,169 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+typedef signed char        int8_t;
+typedef unsigned char      uint8_t;
+typedef unsigned short     uint16_t;
+typedef unsigned int       uint32_t;
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
+typedef unsigned long long uint64_t;
+#else
+typedef unsigned long      uint64_t;
+#endif
+static_assert(sizeof(uint64_t) == 8, "Cake requires an LP64 CUDA host ABI");
+typedef signed int         int32_t;
+typedef short int          int16_t;
+struct __align__(64) CakeTensorMap64 { uint64_t opaque[16]; };
+static_assert(sizeof(CakeTensorMap64) == 128, "64-aligned tensor-map ABI size");
+static_assert(alignof(CakeTensorMap64) == 64, "64-aligned tensor-map ABI alignment");
+
+#if defined(__CUDACC_RTC__)
+typedef struct __align__(128) { uint64_t opaque[16]; } CUtensorMap;
+#else
+#include <cuda.h>
+#endif
+
+static_assert(sizeof(CUtensorMap) == 128, "CUtensorMap CUDA ABI must be 128 bytes");
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+
+__device__ __forceinline__ int make_warp_uniform(int x) {
+    int result;
+    asm volatile("shfl.sync.idx.b32 %0, %1, 0, 0x1F, 0xFFFFFFFF;"
+                 : "=r"(result) : "r"(x));
+    return result;
+}
+
+#include <math_constants.h>
+
+extern "C" {
+
+__global__ __launch_bounds__(128) void
+kernel_cake_rmsnorm_train_176f79f9faa86f2fa441(float* __restrict__ partial, float* __restrict__ dw, int n_chunks)
+{
+    const int tid = threadIdx.x;
+    const int warp = make_warp_uniform(tid / 32);
+    const int lane = tid % 32;
+
+    extern __shared__ __align__(1024) char smem_raw[];
+    int smem;
+#if __CUDA_ARCH__ == 1000
+    asm volatile("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 %0, smem_ptr; }" : "=r"(smem) : "l"(smem_raw));
+    smem = make_warp_uniform(smem);
+#else
+    smem = (int)(unsigned long long)__cvta_generic_to_shared(smem_raw);
+#endif
+
+    const int bid = blockIdx.x;
+    const int num_bids = gridDim.x;
+
+    const int cta_rank = 0;
+
+    // Prologue
+    float* red_fold = reinterpret_cast<float*>(smem_raw + 0);
+    const int red_fold_addr = smem + 0;
+
+    // === Task calls (declaration order) ===
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    int s = bid;
+    int rsub = tid / 4;
+    int cg = tid - rsub * 4;
+    int col = s * 8 + cg * 2;
+    float a[2];
+    #pragma unroll
+    for (int e = 0; e < 2; e++) {
+        a[e] = 0.0f;
+    }
+    int n_trips = (n_chunks + 31) / 32;
+    int n_waves = (n_trips + 31) / 32;
+    float cur[64];
+    #pragma unroll
+    for (int i = 0; i < 64; i++) {
+        cur[i] = 0.0f;
+    }
+    #pragma unroll
+    for (int d = 0; d < 32; d++) {
+        int cc = rsub + d * 32;
+        if (cc < n_chunks) {
+            {
+                float2 _v2_0 = *reinterpret_cast<const float2*>(partial + (unsigned long long)cc * 1024ull + (unsigned long long)col);
+                cur[d * 2] = _v2_0.x;
+                cur[d * 2 + 1] = _v2_0.y;
+            }
+        }
+    }
+    for (int w = 0; w < n_waves; w++) {
+        float nxt[64];
+        #pragma unroll
+        for (int i_1 = 0; i_1 < 64; i_1++) {
+            nxt[i_1] = 0.0f;
+        }
+        #pragma unroll
+        for (int d_1 = 0; d_1 < 32; d_1++) {
+            int cc_1 = rsub + ((w + 1) * 32 + d_1) * 32;
+            if (cc_1 < n_chunks) {
+                {
+                    float2 _v2_1 = *reinterpret_cast<const float2*>(partial + (unsigned long long)cc_1 * 1024ull + (unsigned long long)col);
+                    nxt[d_1 * 2] = _v2_1.x;
+                    nxt[d_1 * 2 + 1] = _v2_1.y;
+                }
+            }
+        }
+        #pragma unroll
+        for (int d_2 = 0; d_2 < 32; d_2++) {
+            int cc_2 = rsub + (w * 32 + d_2) * 32;
+            if (cc_2 < n_chunks) {
+                #pragma unroll
+                for (int e_1 = 0; e_1 < 2; e_1++) {
+                    a[e_1] = a[e_1] + cur[d_2 * 2 + e_1];
+                }
+            }
+        }
+        #pragma unroll
+        for (int i_2 = 0; i_2 < 64; i_2++) {
+            cur[i_2] = nxt[i_2];
+        }
+    }
+    #pragma unroll
+    for (int e_2 = 0; e_2 < 2; e_2++) {
+        red_fold[rsub * 8 + cg * 2 + e_2] = a[e_2];
+    }
+    __syncthreads();
+    if (tid < 4) {
+        float o4[2];
+        #pragma unroll
+        for (int e_3 = 0; e_3 < 2; e_3++) {
+            o4[e_3] = 0.0f;
+        }
+        #pragma unroll
+        for (int k = 0; k < 32; k++) {
+            #pragma unroll
+            for (int e_4 = 0; e_4 < 2; e_4++) {
+                float d_3 = red_fold[k * 8 + tid * 2 + e_4];
+                o4[e_4] = o4[e_4] + d_3;
+            }
+        }
+        int ocol = s * 8 + tid * 2;
+        {
+            float2 _v2 = make_float2(o4[0 + 0], o4[0 + 1]);
+            *reinterpret_cast<float2*>(dw + (unsigned long long)ocol) = _v2;
+        }
+    }
+    __syncthreads();
+}
+
+} // extern "C"
