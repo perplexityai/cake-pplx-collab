@@ -243,6 +243,36 @@ def bwd_main_hw(run, values, grid):
     )
 
 
+def fwd_h128(run, values, grid):
+    run(
+        values["q_latent"],
+        values["q_rope"],
+        values["kv_latent"],
+        values["k_rope"],
+        values["out"],
+        values["o_lo"],
+        values["lse"],
+        values["indices"],
+        values["topk_length"],
+        values["num_queries"],
+        values["num_heads"],
+        values["num_kv"],
+        values["topk"],
+        values["idx_stride"],
+        values["indices_offset"],
+        values["has_topk_length"],
+        values["derive_length"],
+        values["scale_log2"],
+        grid[0],
+        grid[1],
+        grid[2],
+    )
+
+
+def fwd_h128_grid(num_queries, num_kv, topk):
+    return (max(1, num_queries) * 2, 1, 1)
+
+
 def index_prep(run, values, grid):
     run(
         values["indices"],
@@ -939,6 +969,52 @@ STAGE_ARGS: dict[str, list[str]] = {
         "grid_y",
         "grid_z",
     ],
+    "fwd_h128": [
+        "q_latent",
+        "q_rope",
+        "kv_latent",
+        "k_rope",
+        "out",
+        "o_lo",
+        "lse",
+        "indices",
+        "topk_length",
+        "num_queries",
+        "num_heads",
+        "num_kv",
+        "topk",
+        "idx_stride",
+        "indices_offset",
+        "has_topk_length",
+        "derive_length",
+        "scale_log2",
+        "grid_x",
+        "grid_y",
+        "grid_z",
+    ],
+    "fwd_h128_no_olo": [
+        "q_latent",
+        "q_rope",
+        "kv_latent",
+        "k_rope",
+        "out",
+        "o_lo",
+        "lse",
+        "indices",
+        "topk_length",
+        "num_queries",
+        "num_heads",
+        "num_kv",
+        "topk",
+        "idx_stride",
+        "indices_offset",
+        "has_topk_length",
+        "derive_length",
+        "scale_log2",
+        "grid_x",
+        "grid_y",
+        "grid_z",
+    ],
     "index_prep": [
         "indices",
         "cu_seqlens_q",
@@ -1417,6 +1493,8 @@ LAUNCH = {
     "bwd_main_pass_hw": bwd_main_hw,
     "bwd_main_pass_natural_hw": bwd_main_hw,
     "fwd_hw_no_olo": fwd_hw,
+    "fwd_h128": fwd_h128,
+    "fwd_h128_no_olo": fwd_h128,
     "index_prep": index_prep,
     "nope_fwd": nope_fwd,
     "nope_bwd_delta": bwd_delta,
@@ -1455,6 +1533,8 @@ GRID = {
     "bwd_main_pass_hw": fwd_grid,
     "bwd_main_pass_natural_hw": fwd_grid,
     "fwd_hw_no_olo": fwd_grid,
+    "fwd_h128": fwd_h128_grid,
+    "fwd_h128_no_olo": fwd_h128_grid,
     "index_prep": bwd_compact_grid,
     "nope_fwd": fwd_grid,
     "nope_bwd_delta": bwd_delta_grid,

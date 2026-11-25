@@ -75,6 +75,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "bwd_main_pass_hw",
             "bwd_main_pass_natural_hw",
             "fwd_hw_no_olo",
+            "fwd_h128",
+            "fwd_h128_no_olo",
         ],
         "key_pass_policy": {
             "l2_budget_bytes": 104857600,
@@ -331,6 +333,30 @@ MODULES: dict[str, dict[str, Any]] = {
                 "cluster": [1, 1, 1],
                 "cooperative": False,
                 "dynamic_smem_bytes": 231680,
+                "use_pdl": True,
+            },
+        },
+        "fwd_h128": {
+            "library": "cake_dsa_h64_train_adfe34021dbfb2cffe71",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [512, 1, 1],
+                "cluster": [2, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 215808,
+                "use_pdl": True,
+            },
+        },
+        "fwd_h128_no_olo": {
+            "library": "cake_dsa_h64_train_16ec3e9236b227e0d8c9",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [512, 1, 1],
+                "cluster": [2, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 215808,
                 "use_pdl": True,
             },
         },
@@ -713,6 +739,17 @@ HEAD_WINDOW_STAGES = {
 }
 STAGES_OF[PROGRAM] += tuple(
     HEAD_WINDOW_STAGES[s] for s in STAGES_OF[PROGRAM] if s in HEAD_WINDOW_STAGES
+)
+# The RoPE program's single-pass forward over 96 or 128 query heads: calls over 64 < H <= 128 query heads run it on
+# sm_100a / sm_103a in place of the head-window forward -- one (2, 1, 1) cluster per token, with its own kernel's
+# arguments (``num_heads``; ``k_rope`` a tensor map) -- and its ``with_o_lo=False`` build in place of
+# ``fwd_hw_no_olo``.  They close the program's order.
+SINGLE_PASS_STAGES = {
+    "fwd_hw": "fwd_h128",
+    "fwd_hw_no_olo": "fwd_h128_no_olo",
+}
+STAGES_OF[PROGRAM] += tuple(
+    SINGLE_PASS_STAGES[s] for s in STAGES_OF[PROGRAM] if s in SINGLE_PASS_STAGES
 )
 
 
