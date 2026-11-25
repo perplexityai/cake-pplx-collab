@@ -128,7 +128,7 @@ MAX_ROWS = 2**29
 # rows, and the four-warp backward on a grid of 8 CTAs per SM is the faster while the call's three BF16 row tensors fit
 # in L2, except in the band of the one-warp-a-row H = 3584 backward, the fastest there.
 ROUTES: dict[str, tuple[tuple[int, str, int], ...]] = {
-    "fwd_h4096": ((1, "fwd_h4096_t32", 0), (8192, "fwd_h4096_flat", 0)),
+    "fwd_h4096": ((1, "fwd_h4096_t32", 0), (10240, "fwd_h4096_flat", 0)),
     "fwd_h3584": ((1, "fwd_h3584", 0), (16384, "fwd_h3584_flat", 0)),
     "bwd_h4096": ((1, "bwd_h4096", 8), (4864, "bwd_h4096", 0)),
     "bwd_h3584": (
