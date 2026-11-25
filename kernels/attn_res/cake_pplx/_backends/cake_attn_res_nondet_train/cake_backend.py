@@ -40,12 +40,13 @@ to 1 in FP32 (a peaked softmax), which would drop the dominant value's term of `
 
 One forward call launches ``fwd`` alone: it writes ``out`` and the state the backward reads, ``p``, ``r`` and ``d``
 (FP32 ``[T, n]`` each, row-major).  One backward call zeroes ``dw`` and launches ``bwd``: every ``dv_j`` from ``dout``,
-the values, ``w`` and that state (no forward sum is recomputed), and ``dw`` added into the zeroed FP32 row with float
-atomics (``red.global.add.f32``).  The kernels take the values as nine pointers (this module passes the first value in
-the slots past ``n``, which the kernels never read) and ``n``, the token count and ``eps`` as run-time scalars.
-``fwd`` and ``bwd`` ship one program per value bound ``nmax`` from 2 to 9 (``nmax`` values held in registers); a call
-of ``n`` values runs the program of the smallest bound at least ``n`` (:func:`.cake_jit.nmax_for`).  Every program
-serves every token count, so the libraries are a fixed set: no shape compiles a new one.
+the values, ``w`` and that state (no forward sum is recomputed).  Each CTA keeps its tokens' ``dw`` sums in registers
+and adds them into the zeroed FP32 ``dw`` once, after its token loop, with vector FP32 atomic reductions
+(``red.global.add.v4.f32``, four columns each).  The kernels take the values as nine pointers (this module passes the
+first value in the slots past ``n``, which the kernels never read) and ``n``, the token count and ``eps`` as run-time
+scalars.  ``fwd`` and ``bwd`` ship one program per value bound ``nmax`` from 2 to 9 (``nmax`` values held in
+registers); a call of ``n`` values runs the program of the smallest bound at least ``n`` (:func:`.cake_jit.nmax_for`).
+Every program serves every token count, so the libraries are a fixed set: no shape compiles a new one.
 
 ``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once
 (:func:`.cake_jit.groups`, from a table of measured counts per architecture and SM count and, on a device the table
@@ -55,15 +56,19 @@ environment variable, reads device memory or synchronizes; grids and buffer size
 architecture and the SM count.
 
 This is the non-deterministic package of its family: ``out``, ``p``, ``r``, ``d`` and every ``dv_j`` have one fixed
-order; ``dw`` adds the tokens' terms in arrival order and promises no bits run to run.  Nothing reads torch's
-deterministic mode.
+order; the CTAs add their ``dw`` sums in the order they finish, so ``dw`` promises no bits run to run.  Under
+``torch.use_deterministic_algorithms(True)`` a backward of ``T > 0`` (explicit or autograd) raises ``RuntimeError``
+right before that launch, or warns (``UserWarning``) and launches under ``warn_only=True``.  The forward never alerts.
 """
 
 from __future__ import annotations
 
 import functools
 import math
+import sys
+import warnings
 from collections.abc import Sequence
+from types import FrameType
 from typing import Any, Optional, Union
 
 import torch
@@ -96,8 +101,8 @@ __all__ = [
     "specs_for_arch",
 ]
 
-# One verified build per architecture: B200 / GB200 (``sm_100a``), B300 / GB300 (``sm_103a``) and R200 (``sm_107a``),
-# each compiled with its exact ``-gencode`` flag set.  No other architecture has a build.
+# One build per architecture: B200 / GB200 (``sm_100a``), B300 / GB300 (``sm_103a``) and Rubin (``sm_107a``), each
+# compiled with its exact ``-gencode`` flag set.  No other architecture has a build.
 ARCHES: tuple[str, ...] = tuple(cake_jit.ARCHES)
 ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = dict(cake_jit.ARCH_BY_CAPABILITY)
 SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(sorted(ARCH_BY_CAPABILITY))
@@ -111,9 +116,14 @@ _ALIGNMENT = 16
 _MAX_TOKENS = 2**31 - 1
 _BF16 = torch.bfloat16
 _FP32 = torch.float32
+# ``eps`` is at least 2**-84: an all-zero value row then has r = 1 / sqrt(eps) <= 2**42, so the backward's r**3 <= 2**126
+# stays finite in FP32 (and the FP32 ``eps`` is not 0).
+_EPS_MIN = 2.0**-84
 
-# The public module the entry points are documented under.
+# The public module the entry points are documented under, and the deterministic module of the family: the alert
+# names both.
 _MODULE = "cake_pplx.cake_attn_res_nondet_train"
+_DET_MODULE = "cake_pplx.cake_attn_res_det_train"
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -319,8 +329,8 @@ def launch_bwd(
     groups: int,
 ) -> None:
     """Launch the backward record ``name`` over ``T = dout.shape[0] >= 1`` tokens on ``groups`` launch groups: every
-    ``dv_j`` (BF16 ``[T, 7168]``, contiguous) written in full, and each token's ``dw`` terms added into ``dw`` (FP32
-    ``[7168]``, zeroed by the caller) with float atomics."""
+    ``dv_j`` (BF16 ``[T, 7168]``, contiguous) written in full, and each CTA's sum of its tokens' ``dw`` terms added
+    once into ``dw`` (FP32 ``[7168]``, zeroed by the caller) with ``red.global.add.v4.f32``."""
     grid = cake_jit.cluster_ctas(name) * int(groups)
     args = (dout, *_slots(values), w, p, r, d, *_slots(dv), dw, int(dout.shape[0]), len(values))
     _run(name, "bwd", dout.get_device(), (*args, grid, 1, 1))
@@ -372,15 +382,42 @@ def _state_layout(name: str, t: Any, T: int, n: int, device: torch.device) -> No
 
 
 def _check_eps(eps: Any) -> float:
-    if type(eps) is float and 0.0 <= eps < math.inf:
+    """``eps`` as a float: a Python float or int (not a bool), finite and at least 2**-84 (so that an all-zero row's
+    ``r**3`` stays finite in FP32); ``TypeError`` for another type (a tensor included: nothing reads a device), ``ValueError``
+    for another value."""
+    if type(eps) is float and _EPS_MIN <= eps < math.inf:
         return eps
+    if isinstance(eps, bool) or not isinstance(eps, (float, int)):
+        raise TypeError(f"eps must be a Python float or int, got {type(eps).__name__}")
     try:
         eps_f = float(eps)
-    except (TypeError, ValueError):
-        raise ValueError(f"eps must be a real number, got {eps!r}") from None
-    if not (math.isfinite(eps_f) and eps_f >= 0.0):
-        raise ValueError(f"eps must be finite and non-negative, got {eps}")
+    except OverflowError:
+        eps_f = math.inf
+    if not (math.isfinite(eps_f) and eps_f >= _EPS_MIN):
+        raise ValueError(f"eps must be finite and at least 2**-84 (about 5.2e-26), got {eps!r}")
     return eps_f
+
+
+def _span(t: torch.Tensor) -> tuple[int, int]:
+    """The bytes ``[data_ptr, data_ptr + numel * element_size)`` of ``t``: all of it when ``t`` is contiguous (every
+    output and every row operand is)."""
+    start = t.data_ptr()
+    return start, start + t.numel() * t.element_size()
+
+
+def _no_overlap(name: str, t: torch.Tensor, others: Sequence[tuple[str, torch.Tensor]]) -> None:
+    """``ValueError`` when the bytes of the caller-owned output ``t`` overlap those of a tensor of ``others``: every
+    kernel pointer is ``__restrict__``.  Addresses only: nothing reads a device."""
+    start, end = _span(t)
+    if start == end:
+        return
+    for other_name, other in others:
+        other_start, other_end = _span(other)
+        if start < other_end and other_start < end:
+            raise ValueError(
+                f"{name} overlaps {other_name}: a caller-owned output must not share memory with an operand or "
+                "another output"
+            )
 
 
 def _valid_tokens(values: Any, w: Any) -> int:
@@ -411,8 +448,8 @@ def _valid_tokens(values: Any, w: Any) -> int:
 
 
 def _check_operands(values: Any, w: Any, eps: Any) -> tuple[int, float]:
-    """``(T, eps)`` of a valid set of forward operands; ``ValueError`` otherwise.  The device checks come before
-    anything that touches CUDA."""
+    """``(T, eps)`` of a valid set of forward operands; ``ValueError`` otherwise (``TypeError`` for an ``eps`` that is
+    not a Python float or int).  The device checks come before anything that touches CUDA."""
     T = _valid_tokens(values, w)
     if T >= 0:
         return T, _check_eps(eps)
@@ -494,6 +531,47 @@ def cake_attn_res_nondet_train_retained_bytes(T: int, n: int) -> int:
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# torch's deterministic mode
+
+
+def _warning_stacklevel() -> int:
+    """The ``stacklevel`` of a warning raised in this module that points at the first frame outside it and the public
+    module (the caller's line)."""
+    level = 1
+    frame: Optional[FrameType] = sys._getframe(1)
+    while frame is not None and frame.f_globals.get("__name__") in (__name__, _MODULE):
+        level += 1
+        frame = frame.f_back
+    return level
+
+
+def _alert_dw_atomics() -> None:
+    """PyTorch's alert for an operation without a deterministic implementation, raised right before the backward
+    launches ``bwd`` (each CTA adds its ``dw`` sums with FP32 atomics, in the order the CTAs finish) while PyTorch's
+    deterministic algorithms are enabled: a ``RuntimeError``, or a ``UserWarning`` under
+    ``torch.use_deterministic_algorithms(True, warn_only=True)``, after which the launch runs; nothing otherwise.  The
+    forward and a backward of ``T == 0`` never call it.  A launch captured into a CUDA graph alerts at capture; a
+    replay does not."""
+    if not torch.are_deterministic_algorithms_enabled():
+        return
+    step = "the backward's weight gradient dw (FP32 atomic adds in the order the CTAs finish)"
+    if torch.is_deterministic_algorithms_warn_only_enabled():
+        warnings.warn(
+            f"{_MODULE}: {step} does not have a deterministic implementation, but you set "
+            "'torch.use_deterministic_algorithms(True, warn_only=True)'; "
+            f"{_DET_MODULE} is the deterministic module",
+            UserWarning,
+            stacklevel=_warning_stacklevel(),
+        )
+        return
+    raise RuntimeError(
+        f"{_MODULE}: {step} does not have a deterministic implementation, but you set "
+        f"'torch.use_deterministic_algorithms(True)'; {_DET_MODULE} is the deterministic module, or use "
+        "the 'warn_only=True' option if that is acceptable for your application"
+    )
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # Forward and backward (explicit, without autograd)
 
 
@@ -510,6 +588,7 @@ def _forward(
         out = _tensor("out", out)
         _on_device("out", out, device)
         _row_layout("out", out, T)
+        _no_overlap("out", out, [*((f"values[{j}]", v) for j, v in enumerate(values)), ("w", w)])
     # One allocation for the three [T, n] states: p, r and d are its contiguous slices.
     state = torch.empty(3, T, n, dtype=_FP32, device=device)
     p, r, d = state.unbind(0)
@@ -534,19 +613,21 @@ def _launch_backward(
     T: int,
     dv: Optional[list[torch.Tensor]],
 ) -> tuple[list[torch.Tensor], torch.Tensor]:
-    """The backward of checked operands over ``T`` tokens: ``(dv, dw)``.  Every buffer is allocated, the argument
-    tuple built and the entry looked up before ``dw`` is zeroed: the zeroing and the kernel launch back to back, so
-    the device does not wait on host work between them."""
+    """The backward of checked operands over ``T`` tokens: ``(dv, dw)``.  For ``T > 0`` torch's deterministic mode
+    is checked first (:func:`_alert_dw_atomics`).  Every buffer is allocated, the argument tuple built and the entry
+    looked up before ``dw`` is zeroed: the zeroing and the kernel launch back to back, so the device does not wait on
+    host work between them."""
     device = dout.device
     n = len(values)
     if dv is None:
         dv = [torch.empty(T, HIDDEN, dtype=_BF16, device=device) for _ in range(n)]
     if T == 0:
-        # No token: nothing to launch; a zero weight gradient.
+        # No token: no Cake kernel and no alert; the weight gradient is a zero fill (torch.zeros).
         return dv, torch.zeros(HIDDEN, dtype=_FP32, device=device)
-    dw = torch.empty(HIDDEN, dtype=_FP32, device=device)
     index = device.index
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    _alert_dw_atomics()
+    dw = torch.empty(HIDDEN, dtype=_FP32, device=device)
     name = cake_jit.record("bwd", n)
     groups = _groups(name, T, index)
     args = (dout, *_slots(values), _weight(w), p, r, d, *_slots(dv), dw, T, n)
@@ -577,6 +658,10 @@ def _backward(
         _state_layout(name, t, T, n, device)
     if dv is not None:
         dv = _check_outputs("dv", dv, T, n, device)
+        operands = [*((f"values[{j}]", v) for j, v in enumerate(values)), ("dout", dout), ("w", w)]
+        operands += [("p", p), ("r", r), ("d", d)]
+        for j, g in enumerate(dv):
+            _no_overlap(f"dv[{j}]", g, [*operands, *((f"dv[{i}]", dv[i]) for i in range(j))])
     return _launch_backward(dout, values, w, p, r, d, T, dv)
 
 
@@ -588,12 +673,12 @@ def cake_attn_res_nondet_train_forward(
     out: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The forward without autograd: ``(out, p, r, d)``, ``out`` BF16 ``[T, 7168]`` (``out`` given: written in place
-    and returned) and the state the backward reads, FP32 ``[T, n]`` each.
+    and returned; it must not overlap a value or ``w``) and the state the backward reads, FP32 ``[T, n]`` each.
 
     ``values`` is a list or tuple of ``n`` (1 to 9) BF16 ``[T, 7168]`` tensors, each contiguous and 16-byte aligned
     (separate tensors: nothing is stacked); ``w`` FP32 ``[7168]``; every tensor on one CUDA device.  ``eps`` is a
-    finite, non-negative run-time float.  ``T == 0`` launches nothing.  The forward never consults
-    ``torch.use_deterministic_algorithms``."""
+    run-time Python float or int, finite and at least 2**-84.  ``T == 0`` launches nothing.  The
+    forward never consults ``torch.use_deterministic_algorithms``."""
     out, p, r, d, _ = _forward(values, w, eps, out)
     return out, p, r, d
 
@@ -611,8 +696,10 @@ def cake_attn_res_nondet_train_backward(
     """The backward without autograd: ``(dv, dw)`` from ``dout`` (BF16 ``[T, 7168]``, contiguous), the forward's
     values and ``w`` and its state ``p``, ``r``, ``d`` (FP32 ``[T, n]``, contiguous); the forward's output is not
     needed.  ``dv`` is a list of ``n`` BF16 ``[T, 7168]`` gradients (``dv`` given: a list or tuple of ``n`` contiguous
-    tensors written in place); ``dw`` is FP32 ``[7168]``.  ``T == 0`` returns a zero ``dw`` and launches nothing.
-    ``dw`` promises no bits run to run; nothing consults ``torch.use_deterministic_algorithms``."""
+    tensors written in place, none overlapping a value, ``dout``, ``w``, ``p``, ``r``, ``d`` or another entry); ``dw``
+    is FP32 ``[7168]``.  ``T == 0`` launches no Cake kernel and returns a zero ``dw`` (a ``torch.zeros`` fill).
+    ``dw`` promises no bits run to run: for ``T > 0``, ``torch.use_deterministic_algorithms(True)`` raises
+    ``RuntimeError`` before the launch, or warns under ``warn_only=True``."""
     return _backward(dout, values, w, p, r, d, dv)
 
 
@@ -650,7 +737,7 @@ class CakeAttnResNondetFunction(torch.autograd.Function):
     saved set is the inputs (``values`` and ``w``, references) and the forward's FP32 state ``p``, ``r``, ``d``
     (``[T, n]`` each); ``eps`` lives on ``ctx``.  The backward reads that state (no forward sum is recomputed); under
     ``torch.utils.checkpoint`` the state is recomputed with the forward.  The backward returns ``dw`` (FP32) and every
-    ``dv_j`` (BF16)."""
+    ``dv_j`` (BF16); for ``T > 0`` it alerts under torch's deterministic mode (:func:`_alert_dw_atomics`)."""
 
     @staticmethod
     def forward(ctx: Any, w: torch.Tensor, eps: float, *values: torch.Tensor) -> torch.Tensor:  # type: ignore[override]

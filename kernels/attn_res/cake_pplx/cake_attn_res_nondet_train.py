@@ -35,8 +35,8 @@ The values are the closed block states and the running sum of a block
 nothing is stacked or copied.  ``w`` is FP32 ``[7168]`` (the caller's product
 of the norm and projection weights); ``dw`` is its FP32 gradient, the one sum
 across tokens.  The norms, dot products and the softmax are FP32; no sum uses
-FP64.  An all-zero value row gives ``r_j = 1 / sqrt(eps)`` and ``d_j = 0``: a
-finite result.
+FP64.  ``eps`` must be at least 2**-84 (about 5.2e-26), so an all-zero
+value row gives ``r_j = 1 / sqrt(eps)`` and ``d_j = 0``: a finite result.
 
 Entries: :func:`cake_attn_res_nondet` (with autograd),
 :func:`cake_attn_res_nondet_train_forward` /
@@ -49,15 +49,20 @@ access.
 
 The mode is part of the name: no entry takes a ``deterministic`` keyword
 (passing one is a ``TypeError``).  ``out`` and every ``dv_j`` have one fixed
-order; the backward adds the tokens' ``dw`` terms with FP32 atomics, so ``dw``
-promises no bits run to run.  Nothing consults
-``torch.use_deterministic_algorithms`` (no alert).
+order.  In the backward each CTA sums its tokens' ``dw`` terms in registers and
+adds them into the zeroed ``dw`` once, with FP32 atomics, in the order the CTAs
+finish, so ``dw`` promises no bits run to run.  Under
+``torch.use_deterministic_algorithms(True)`` a backward of ``T > 0`` (explicit
+or autograd) raises ``RuntimeError`` before that launch, or warns
+(``UserWarning``) and runs under ``warn_only=True``; the forward never alerts.
 
 A stable API (``@cake_api``; no ``ExperimentalWarning``) of thin wrappers:
 the checks, the launch plan, the autograd Function and the generated kernels
 live in the backend package ``cake_pplx._backends.cake_attn_res_nondet_train``,
 imported on first use; this module forwards every keyword.  Every switch is a
-keyword argument; no environment variable is read.  The token count, ``n``
+keyword argument: kernel selection and launches read no environment variable
+(the JIT build shim reads ``CUDA_HOME`` / ``CUDA_PATH``, ``CXX`` and the
+``CAKE_PPLX_*`` build settings of the root README).  The token count, ``n``
 and ``eps`` are run-time values: each stage ships one program per value bound
 from 2 to 9 and a call runs the one of the smallest bound at least ``n``, so
 the libraries are a fixed set and no shape compiles a new one; no call reads
@@ -150,7 +155,8 @@ def cake_attn_res_nondet(values: Sequence[torch.Tensor], w: torch.Tensor, *, eps
     w : torch.Tensor
         FP32 ``[7168]`` (the product of the norm and projection weights).
     eps : float
-        The RMS epsilon (a run-time value; finite, non-negative; 1e-5 by default).
+        The RMS epsilon (a run-time Python float or int; finite and at least 2**-84; 1e-5 by
+        default).
 
     Returns
     -------
@@ -160,15 +166,20 @@ def cake_attn_res_nondet(values: Sequence[torch.Tensor], w: torch.Tensor, *, eps
     ------
     ValueError
         ``values`` is not a list or tuple of 1 to 9 tensors, a tensor is not a CUDA tensor of the first value's device,
-        or has another dtype, shape, layout or alignment than above; ``eps`` is not finite and non-negative.
+        or has another dtype, shape, layout or alignment than above; ``eps`` is not finite or is below
+        2**-84.
+    TypeError
+        ``eps`` is not a Python float or int (a bool or a tensor is not).
     RuntimeError
-        The device is not one of ``ARCHES``.
+        The device is not one of ``ARCHES``; or, in the backward of ``T > 0``,
+        ``torch.use_deterministic_algorithms(True)`` is set (a ``UserWarning`` under ``warn_only=True``).
 
     Notes
     -----
     The autograd node saves references to ``values`` and ``w`` and the forward's FP32 ``p``, ``r``, ``d``
-    (``[T, n]`` each).  ``dw`` promises no bits run to run; ``torch.use_deterministic_algorithms`` is not consulted.
-    ``T == 0`` launches nothing and gives a zero ``dw``.
+    (``[T, n]`` each).  ``dw`` promises no bits run to run, so the backward alerts under
+    ``torch.use_deterministic_algorithms(True)``; the forward never does.  ``T == 0`` launches no Cake kernel and
+    never alerts: the backward's ``dw`` is a zero fill (``torch.zeros``).
     """
     return _pkg().cake_attn_res_nondet(values, w, eps=eps)
 
@@ -188,7 +199,8 @@ def cake_attn_res_nondet_train_forward(
     values, w, eps
         As in :func:`cake_attn_res_nondet`.
     out : torch.Tensor, optional
-        BF16 ``[T, 7168]``, contiguous, 16-byte aligned: written in place and returned.
+        BF16 ``[T, 7168]``, contiguous, 16-byte aligned, sharing no byte with a value or ``w``: written in place and
+        returned.
 
     Returns
     -------
@@ -197,8 +209,9 @@ def cake_attn_res_nondet_train_forward(
 
     Raises
     ------
-    ValueError, RuntimeError
-        As in :func:`cake_attn_res_nondet`.
+    ValueError, TypeError, RuntimeError
+        As in :func:`cake_attn_res_nondet` (the ``RuntimeError`` only for a device outside ``ARCHES``: the forward never
+        alerts); a ``ValueError`` also when ``out`` overlaps a value or ``w``.
 
     Notes
     -----
@@ -229,7 +242,8 @@ def cake_attn_res_nondet_train_backward(
     p, r, d : torch.Tensor
         The forward's state, FP32 ``[T, n]`` each, contiguous (:func:`cake_attn_res_nondet_train_forward`).
     dv : list or tuple of torch.Tensor, optional
-        ``n`` BF16 ``[T, 7168]`` tensors, contiguous, 16-byte aligned: written in place and returned.
+        ``n`` BF16 ``[T, 7168]`` tensors, contiguous, 16-byte aligned, each sharing no byte with a value, ``dout``,
+        ``w``, ``p``, ``r``, ``d`` or another entry: written in place and returned.
 
     Returns
     -------
@@ -238,12 +252,14 @@ def cake_attn_res_nondet_train_backward(
     Raises
     ------
     ValueError, RuntimeError
-        As in :func:`cake_attn_res_nondet`.
+        As in :func:`cake_attn_res_nondet`; a ``ValueError`` also when an entry of ``dv`` overlaps an operand or
+        another entry.
 
     Notes
     -----
-    ``dw`` promises no bits run to run; ``torch.use_deterministic_algorithms`` is not consulted.  ``T == 0`` launches
-    nothing and returns a zero ``dw``.
+    ``dw`` promises no bits run to run.  For ``T > 0``, ``torch.use_deterministic_algorithms(True)`` raises
+    ``RuntimeError`` before the launch, or warns (``UserWarning``) and runs under ``warn_only=True``.  ``T == 0``
+    launches no Cake kernel, never alerts and returns a zero ``dw`` (a ``torch.zeros`` fill).
     """
     return _pkg().cake_attn_res_nondet_train_backward(dout, values, w, p, r, d, dv=dv)
 
@@ -309,7 +325,7 @@ def is_cake_attn_res_nondet_train_supported(device: Union[torch.device, int, str
 
     Returns
     -------
-    True on SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200); False otherwise and without CUDA.
+    True on SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin); False otherwise and without CUDA.
 
     Notes
     -----

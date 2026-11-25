@@ -19,7 +19,8 @@ The public names are the facade's ``__all__`` and the backend objects it forward
 (``cake_pplx._backends.cake_attn_res_nondet_train``): each carries the mode (``nondet``) as a token, the other
 package's names are not bound (no alias), and no entry point takes a ``deterministic`` keyword.  The rules shared by
 every family are checked with ``tests.cake.test_helpers.cake_mode_names``; the checks here are this family's own.
-Nothing reads torch's deterministic mode: the package raises no alert.
+Only the backend reads torch's deterministic mode, for the alert its backward raises; the facade and the registry never
+read it.
 Build identities (library stems ``cake_attn_res_train_<hex>``, kernel symbols, csrc file names) keep their names.
 """
 
@@ -201,14 +202,16 @@ def test_no_entry_takes_a_mode_keyword():
                 getattr(public, name)(*args, deterministic=value)
 
 
-def test_nothing_reads_torch_mode():
-    """The facade and the backend never read torch's deterministic mode and never raise its alert (the API suite
-    checks the strict and ``warn_only`` modes on a device)."""
+def test_only_the_backend_reads_torch_mode():
+    """The facade, the backend package and the registry never read torch's deterministic mode; ``cake_backend`` reads
+    it for the alert of its backward (``... does not have a deterministic implementation ...``; the API suite checks
+    the strict and ``warn_only`` modes on a device)."""
     assert not READS_TORCH_MODE.search(inspect.getsource(public))
-    for module_name in ("cake_backend", "cake_jit", None):
-        source = inspect.getsource(_backend(module_name))
-        assert not READS_TORCH_MODE.search(source), module_name
-        assert "_alert_nondeterministic" not in source, module_name
+    for module_name in ("cake_jit", None):
+        assert not READS_TORCH_MODE.search(inspect.getsource(_backend(module_name))), module_name
+    source = inspect.getsource(_backend("cake_backend"))
+    assert READS_TORCH_MODE.search(source)
+    assert "does not have a deterministic implementation" in source
 
 
 def test_package_identity_and_build_identity():

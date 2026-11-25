@@ -6,10 +6,19 @@ values of width 7168 (forward, backward and an autograd entry) on `sm_100a`, `sm
 - `cake_pplx.cake_attn_res_det_train`
 - `cake_pplx.cake_attn_res_nondet_train`
 
-The values are separate BF16 `[T, 7168]` tensors (nothing is stacked), the weight `w` is FP32 `[7168]` and `eps` is a
-run-time float. The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward. The nondet backward adds the
-weight gradient with FP32 atomics; the det backward sums it in one fixed order. Details are in
+The values are separate BF16 `[T, 7168]` tensors (nothing is stacked) and the weight `w` is FP32 `[7168]`. `eps` is a
+run-time Python float or int (1e-5 by default), finite and at least 2**-84 (another type is a `TypeError`), so an
+all-zero value row gives a finite result. The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward. Caller-owned `out` and `dv` tensors
+are contiguous and 16-byte aligned, and must not overlap the operands or each other. `T = 0` launches no Cake kernel.
+
+The det backward sums the weight gradient in one fixed order, in a workspace of one FP32 `[7168]` row per cluster of
+its grid (the size depends on `n`). In the nondet backward each CTA adds its tokens' weight-gradient sums into `dw`
+once, with FP32 atomic reductions, so `dw` makes no bit promise. Under `torch.use_deterministic_algorithms(True)` a
+nondet backward of `T > 0` tokens alerts; the forward and the det module never do. Details are in
 [`docs/API.md`](../../docs/API.md#attn_res).
+
+The GPU suites and the benchmark ran on B200 (`sm_100a`) and GB300 (`sm_103a`). The `sm_107a` libraries pass the
+package tests on VR200; R200 runs and `sm_107a` sanitizer runs are pending.
 
 Install this family alone, pinned to a commit:
 

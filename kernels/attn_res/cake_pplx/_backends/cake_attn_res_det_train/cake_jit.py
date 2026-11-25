@@ -361,9 +361,10 @@ DW_REDUCE_COLUMNS_PER_CTA = 128
 # R200 was measured on the shipped programs (all of them on GB300).  The four CTAs of a cluster share one GPC, so a
 # device holds fewer clusters than CTAs per SM * SMs / 4, and on VR200 and R200 no more at 5 CTAs per SM than at 4.
 # The GB200 entries at 3 and 4 CTAs per SM are the counts measured on the four-CTA cluster programs of the
-# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.  The GPU tests check every program's
-# entry, and the grid the host takes, against the driver's count (``cuOccupancyMaxActiveClusters``) on the device
-# they run on.
+# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.  GB200 has no entry at 2 CTAs per SM yet:
+# there ``fwd_n2`` .. ``fwd_n4`` and ``bwd_n7`` .. ``bwd_n9`` take the fallback below (64 groups; GB300 holds 74).
+# The GPU tests check every program's entry, and the grid the host takes, against the driver's count
+# (``cuOccupancyMaxActiveClusters``) on the device they run on.
 RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_100a", 148): {2: 71, 3: 104, 4: 142, 5: 175},
     ("sm_100a", 152): {3: 110, 4: 148},

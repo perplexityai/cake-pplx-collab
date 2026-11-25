@@ -38,35 +38,43 @@ Timing boundary (identical for all arms): ``fwd`` = one training forward ``fn(va
 allocation, autograd graph recorded and dropped); ``bwd`` = ``torch.autograd.backward`` of a recorded forward
 (``retain_graph=True``; the leaves' gradients reset to ``None`` first, so gradient allocation is inside); ``ckpt`` =
 ``torch.utils.checkpoint`` (non-reentrant) around the forward, then its backward: two forwards and one backward, the
-issue's training step.  Each phase runs eagerly (``eager`` mode: CUPTI span from the first kernel start to the last
-kernel end of the iteration, host launch gaps included) and as one CUDA graph replay (``graph`` mode).  Cold L2 (a
-2 x L2 buffer zeroed outside the span before every iteration), ``--dry`` untimed iterations, ``--repeat`` timed
-iterations per group, ``--groups`` groups with the arm order rotated per group and reversed every other group; the
-latency is the median of the group medians, the spread the min / max of all samples and the p10 / p90.
+issue's training step.  The ``eager`` arm's recompute stops after its last saved tensor (PyTorch's default checkpoint
+early stop, as in training), so it skips the final batched matmul and the BF16 cast of ``out``; the other arms save
+their state after their forward kernels, so their recompute is a full forward.  Each phase runs eagerly (``eager``
+mode: CUPTI span from the first kernel start to the last kernel end of the iteration, host launch gaps included) and as
+one CUDA graph replay (``graph`` mode).  Cold L2 (a 2 x L2 buffer zeroed outside the span before every iteration),
+``--dry`` untimed iterations, ``--repeat`` timed iterations per group, ``--groups`` groups with the arm order rotated
+per group and reversed every other group; the latency is the median of the group medians, the spread the min / max of
+all samples and the p10 / p90.
 
 Bytes moved (the issue's yardstick traffic, BF16 ``[T, 7168]`` tensors only): ``fwd`` reads the ``n`` values and
 writes ``out``, ``(n + 1) T H 2``; ``bwd`` reads ``dout`` and the values and writes every ``dv_j``, ``(2 n + 1) T H 2``;
-``ckpt`` both, ``(3 n + 2) T H 2`` (the ``[T, n]`` state and ``w`` add under 0.1%).  Achieved GB/s = bytes / time
-(decimal), and the HBM utilization divides it by the device's NVML memory bandwidth (``get_gpu_memory_bandwidth``:
-``nvmlDeviceGetMemoryBusWidth`` times ``nvmlDeviceGetClockInfo(NVML_CLOCK_MEM)`` times 2 / 8 / 1000 GB/s, cached per
-device), the NVML handle found by the device's UUID; the run records the ``CUDA_VISIBLE_DEVICES`` to NVML index map.
+``ckpt`` two forwards and one backward, ``(4 n + 3) T H 2`` (the ``[T, n]`` state and ``w`` add under 0.1%).  Achieved
+GB/s = bytes / time (decimal), and the HBM utilization divides it by the device's NVML memory bandwidth
+(``get_gpu_memory_bandwidth``: ``nvmlDeviceGetMemoryBusWidth`` times ``nvmlDeviceGetClockInfo(NVML_CLOCK_MEM)`` times
+2 / 8 / 1000 GB/s, cached per device), the NVML handle found by the device's UUID; the run records the
+``CUDA_VISIBLE_DEVICES`` to NVML index map.  The report recomputes the bytes, GB/s and HBM utilization from the median
+latency and the recorded NVML bandwidth.
 
-Accuracy bar (the issue's, as the tests apply it): on ``--draws`` draws per ``n`` (``T = 2048``, values ``randn`` times
-``linspace(0.5, 4, n)``, ``w = 0.05 randn``), the error of every arm's ``out``, ``dv_j`` and ``dw`` against an FP64
-evaluation in the L2 and the max norm; ``out`` and ``dv_j`` meet the bar when the median and the largest over the draws
-are at most 1.005 times those of the naive BF16 evaluation, ``dw`` when they are at most 1.005 times those of the
-issue's FP32 sum on the CPU.  A baseline that misses the bar is reported as a diagnostic, not as a speedup reference.
-Beside that bar, every arm's ``dw`` is set against two more FP32 evaluations on the GPU, reported and not gated: the
-issue's written FP32 backward (``dw`` by matmul) and the formula's FP32 backward (``dw`` by a torch reduction over the
-tokens).
+Accuracy bar (the issue's, as the tests apply it): on ``--draws`` draws per ``n`` (``--acc-n``, by default every timed
+``n``; ``T = 2048``, values ``randn`` times ``linspace(0.5, 4, n)``, ``w = 0.05 randn``), the error of every arm's
+``out``, ``dv_j`` and ``dw`` against an FP64 evaluation in the L2 and the max norm; ``out`` and ``dv_j`` meet the bar
+when the median and the largest over the draws are at most 1.005 times those of the naive BF16 evaluation, ``dw`` when
+they are at most 1.005 times those of the issue's FP32 sum on the CPU.  An arm that raises misses the bar at that ``n``
+(its record keeps the error).  A baseline is a speedup reference at an ``n`` only when an accuracy record of the same
+GPU (name and compute capability) shows that it meets the bar there (every such record, when there are several);
+otherwise its latency is a diagnostic, marked ``(misses bar)`` or ``(unverified)`` when no record exists.  Beside that
+bar, every arm's ``dw`` is set against two more FP32 evaluations on the GPU, reported and not gated: the issue's
+written FP32 backward (``dw`` by matmul) and the formula's FP32 backward (``dw`` by a torch reduction over the tokens).
 
-Memory per arm (one forward and backward at the timed row): the bytes a forward keeps beside ``out`` and its inputs,
-and the peak bytes the backward allocates beside the gradients; for the Cake arms also the package's own counts
-(``..._retained_bytes`` and ``..._workspace_bytes``).
+Memory per arm (a second forward and backward at the timed row, after one untimed call, so compilation, autotuning and
+library loading are left out): the bytes a forward keeps beside ``out`` and its inputs, and the peak bytes the backward
+allocates beside the gradients; for the Cake arms also the package's own counts (``..._retained_bytes`` and
+``..._workspace_bytes``).
 
 Subcommands: ``run`` (all rows on one GPU, JSON) and ``report`` (JSON to markdown, with the speedup of each Cake arm
 over the fastest baseline arm that meets the bar, and the latency of every baseline arm; ``--json`` takes several
-comma-separated files, e.g. an accuracy run and a timing run).
+comma-separated files, e.g. an accuracy run and a timing run; the report lists each file's GPU and library versions).
 
 Example (one GPU)::
 
@@ -318,9 +326,10 @@ def nvml_map() -> dict:
 
 
 def bytes_moved(phase: str, T: int, n: int) -> int:
-    """The issue's yardstick traffic of a phase (module docstring)."""
+    """The issue's yardstick traffic of a phase (module docstring); ``ckpt`` is two forwards and one backward."""
     per = T * H * 2
-    return {"fwd": (n + 1) * per, "bwd": (2 * n + 1) * per, "ckpt": (3 * n + 2) * per}[phase]
+    fwd, bwd = (n + 1) * per, (2 * n + 1) * per
+    return {"fwd": fwd, "bwd": bwd, "ckpt": 2 * fwd + bwd}[phase]
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -529,14 +538,18 @@ def _stats(xs):
 def accuracy_unit(arm_names, n, draws, device):
     """Per arm and output: the median and the largest error over the draws in the L2 and the max norm, beside the bar
     (the naive BF16 evaluation for ``out`` and ``dv_j``, the issue's FP32 sum for ``dw``), and the verdict; ``dw``
-    also beside each of :data:`DW_YARDSTICKS`."""
+    also beside each of :data:`DW_YARDSTICKS`.  An arm that raises misses the bar: its record keeps the error, and the
+    other arms go on."""
     T = 2048
-    arms = {}
+    arms, failed = {}, {}
     for name in arm_names:
         try:
             arms[name] = make_arm(name).layer()
         except Unsupported as exc:
             log(f"accuracy {name}: unsupported: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            failed[name] = _tail(exc)
+            log(f"accuracy n={n} {name}: ERROR at setup: {failed[name]}")
     errs = {name: collections.defaultdict(list) for name in [*arms, "bar", *DW_YARDSTICKS]}
     for draw in range(draws):
         g = torch.Generator(device=device).manual_seed(1000 * n + draw)
@@ -559,13 +572,34 @@ def accuracy_unit(arm_names, n, draws, device):
             for norm, e in _errors(t, exact["dw"]).items():
                 errs[ys][("dw", norm)].append(e)
         for name, fn in arms.items():
-            got = _outputs(fn, values, w, dout)
-            for key, t in got.items():
-                for norm, e in _errors(t, exact[key]).items():
-                    errs[name][(key, norm)].append(e)
+            if name in failed:
+                continue
+            try:
+                got = _outputs(fn, values, w, dout)
+                for key, t in got.items():
+                    for norm, e in _errors(t, exact[key]).items():
+                        errs[name][(key, norm)].append(e)
+            except Exception as exc:  # noqa: BLE001
+                failed[name] = _tail(exc)
+                log(f"accuracy n={n} {name}: ERROR at draw {draw}: {failed[name]}")
     records = []
     keys = ["out", *(f"dv{j}" for j in range(n)), "dw"]
-    for name in arms:
+    for name in arm_names:
+        if name in failed:
+            records.append(
+                {
+                    "kind": "accuracy",
+                    "arm": name,
+                    "n": n,
+                    "T": T,
+                    "draws": draws,
+                    "meets_bar": False,
+                    "error": failed[name],
+                }
+            )
+            continue
+        if name not in arms:
+            continue
         rows, ok = {}, True
         for key in keys:
             row = {}
@@ -601,9 +635,7 @@ def accuracy_unit(arm_names, n, draws, device):
                 "draws": draws,
                 "l2": _stats(errs[ys][("dw", "l2")]),
                 "max": _stats(errs[ys][("dw", "max")]),
-                "rel_l2_median": statistics.median(
-                    e / r for e, r in zip(errs[ys][("dw", "l2")], refs, strict=True)
-                ),
+                "rel_l2_median": statistics.median(e / r for e, r in zip(errs[ys][("dw", "l2")], refs, strict=True)),
             }
         )
     return records
@@ -675,8 +707,15 @@ def timing_unit(arm_names, T, n, args, device, cap_stream):
             base["library"] = arm.library()
             lay = arm.layer()
             t0 = time.time()
+            # One untimed forward and backward first (compilation, autotuning, library loading), so the memory below
+            # is that of a warm call.
+            _reset(leaves)
+            y = lay(values, w)
+            torch.autograd.backward([y], [dout])
+            del y
             _reset(leaves)
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()
             m0 = torch.cuda.memory_allocated()
             torch.cuda.reset_peak_memory_stats()
             y = lay(values, w)
@@ -854,6 +893,8 @@ def cmd_run(args):
     for attr in ("cache_size_limit", "recompile_limit"):
         if hasattr(torch._dynamo.config, attr):
             setattr(torch._dynamo.config, attr, 4096)
+    if args.acc_n is None:
+        args.acc_n = list(args.n)
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)
     cap_stream = torch.cuda.Stream(device)
@@ -890,17 +931,26 @@ def cmd_run(args):
     log("RUN_DONE")
 
 
-def _load_runs(spec: str) -> tuple[dict, list]:
-    """The ``env_start`` of the first run that timed a row (else of the first run) and every run's records, from
-    comma-separated JSON paths."""
-    envs, recs = [], []
+def _load_runs(spec: str) -> tuple[dict, list, list]:
+    """From comma-separated JSON paths: the ``env_start`` of the first run that timed a row (else of the first run),
+    every run's records (each tagged with the index of its run in ``_run``), and per run its file name, record kinds
+    and ``env_start``."""
+    runs, recs = [], []
     for path in (p for p in spec.split(",") if p):
         data = json.loads(Path(path).read_text())
         part = data.get("records", [])
-        envs.append((any(r.get("kind") == "timing" for r in part), data.get("env_start", {})))
+        for r in part:
+            r["_run"] = len(runs)
+        kinds = sorted({str(r.get("kind")) for r in part})
+        runs.append({"file": Path(path).name, "kinds": kinds, "env": data.get("env_start", {})})
         recs.extend(part)
-    timed = [env for has, env in envs if has]
-    return (timed or [env for _, env in envs] or [{}])[0], recs
+    timed = [run["env"] for run in runs if "timing" in run["kinds"]]
+    return (timed or [run["env"] for run in runs] or [{}])[0], recs, runs
+
+
+def _gpu(env: dict) -> tuple:
+    """The GPU of a run: its name and compute capability."""
+    return env.get("gpu"), env.get("capability")
 
 
 def _mb(x) -> str:
@@ -908,10 +958,31 @@ def _mb(x) -> str:
 
 
 def cmd_report(args):
-    env, recs = _load_runs(args.json)
-    acc = {(r["arm"], r["n"]): r for r in recs if r.get("kind") == "accuracy"}
+    env, recs, runs = _load_runs(args.json)
+    acc = sorted((r for r in recs if r.get("kind") == "accuracy"), key=lambda r: (r["n"], r["arm"], r["_run"]))
     yard = {(r["yardstick"], r["n"]): r for r in recs if r.get("kind") == "dw_yardstick"}
     timing = [r for r in recs if r.get("kind") == "timing" and "mode" in r]
+
+    def gpu_of(r):
+        return _gpu(runs[r["_run"]]["env"])
+
+    # Every accuracy verdict per arm, n and GPU (duplicates kept): a timed baseline meets the bar when every verdict
+    # of its own GPU passes, and is unverified (None) when there is none.
+    verdicts = collections.defaultdict(list)
+    for r in acc:
+        verdicts[(r["arm"], r["n"], gpu_of(r))].append(bool(r["meets_bar"]))
+
+    def meets(r):
+        found = verdicts.get((r["arm"], r["n"], gpu_of(r)))
+        return all(found) if found else None
+
+    timed_gpus = {gpu_of(r) for r in timing}
+
+    def other_gpu(r):
+        """The mark of an accuracy record from a GPU that timed no row here (it gates nothing)."""
+        gpu = gpu_of(r)
+        return f" (other GPU: {gpu[0]}, cc {gpu[1]})" if timed_gpus and gpu not in timed_gpus else ""
+
     lines = [f"## {args.title}", ""]
     nvml = env.get("nvml", {})
     dev0 = (nvml.get("devices") or [{}])[0]
@@ -922,6 +993,18 @@ def cmd_report(args):
         f"(mem clock {dev0.get('mem_clock_mhz')} MHz x bus {dev0.get('bus_width_bits')} bit; CUDA_VISIBLE_DEVICES="
         f"{nvml.get('CUDA_VISIBLE_DEVICES')}, cuda:0 = NVML {dev0.get('nvml_index')} {dev0.get('uuid')})."
     )
+    lines.append("")
+    lines += [
+        "| run file | records | GPU | cc | torch (CUDA) | triton | flash-linear-attention | cake-pplx-attn-res |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for run in runs:
+        e = run["env"]
+        lines.append(
+            f"| {run['file']} | {', '.join(run['kinds'])} | {e.get('gpu')} | {e.get('capability')} | "
+            f"{e.get('torch')} (CUDA {e.get('torch_cuda')}) | {e.get('dist:triton')} | "
+            f"{e.get('dist:flash-linear-attention')} | {e.get('dist:cake-pplx-attn-res')} |"
+        )
     lines.append("")
     libraries = {}
     for r in timing:
@@ -948,13 +1031,19 @@ def cmd_report(args):
         def pair(xs):
             return f"{xs[0]:.3e} / {xs[1]:.3e}"
 
-        for (arm, n), r in sorted(acc.items(), key=lambda kv: (kv[0][1], kv[0][0])):
+        for r in acc:
+            arm, n = r["arm"], r["n"]
+            verdict = ("yes" if r["meets_bar"] else "no") + other_gpu(r)
+            if "rows" not in r:
+                error = str(r.get("error")).replace("|", "/").replace("\n", " ")
+                lines.append(f"| {arm} | {n} | {r.get('draws')} | {verdict} (error: {error}) |" + " |" * 9)
+                continue
             rows = r["rows"]
             dvs = [k for k in rows if k.startswith("dv")]
             worst = max(dvs, key=lambda k: rows[k]["l2"]["ours"][1] / max(rows[k]["l2"]["bar"][1], 1e-300))
             dv_rel = max(rows[k]["rel_l2_median"] for k in dvs)
             lines.append(
-                f"| {arm} | {n} | {r['draws']} | {'yes' if r['meets_bar'] else 'no'} | "
+                f"| {arm} | {n} | {r['draws']} | {verdict} | "
                 f"{pair(rows['out']['l2']['ours'])} | {pair(rows['out']['l2']['bar'])} | "
                 f"{pair(rows['out']['max']['ours'])} | {pair(rows['out']['max']['bar'])} | "
                 f"{pair(rows[worst]['l2']['ours'])} ({worst}) | {pair(rows[worst]['l2']['bar'])} | "
@@ -971,7 +1060,8 @@ def cmd_report(args):
                 "when all four are at most 1.005 x the yardstick's.",
                 "",
                 "| n | evaluation | dw L2 (median / largest) | dw max-norm (median / largest) | meets "
-                + " / ".join(names) + " |",
+                + " / ".join(names)
+                + " |",
                 "|---|---|---|---|---|",
             ]
             for n in sorted({k[1] for k in yard}):
@@ -980,26 +1070,25 @@ def cmd_report(args):
                         lines.append(
                             f"| {n} | {y} (yardstick) | {pair(yard[(y, n)]['l2'])} | {pair(yard[(y, n)]['max'])} | |"
                         )
-                for arm in sorted({k[0] for k in acc}):
-                    r = acc.get((arm, n))
-                    if r is None or "yardsticks" not in r["rows"]["dw"]:
+                for r in acc:
+                    if r["n"] != n or "yardsticks" not in r.get("rows", {}).get("dw", {}):
                         continue
                     vs = r["rows"]["dw"]["yardsticks"]
                     verdict = " / ".join("yes" if vs[y]["meets"] else "no" for y in names if y in vs)
                     lines.append(
-                        f"| {n} | {arm} | {pair(r['rows']['dw']['l2']['ours'])} | "
+                        f"| {n} | {r['arm']}{other_gpu(r)} | {pair(r['rows']['dw']['l2']['ours'])} | "
                         f"{pair(r['rows']['dw']['max']['ours'])} | {verdict} |"
                     )
             lines.append("")
-    meets = {key: r["meets_bar"] for key, r in acc.items()}
     mem_rows = {}
     for r in timing:
         if "memory" in r:
             mem_rows.setdefault((r["T"], r["n"], r["arm"]), r["memory"])
     if mem_rows:
         lines += [
-            "### Memory (MB; one forward and backward at the timed row)",
+            "### Memory (MB; a warm forward and backward at the timed row)",
             "",
+            "Measured on the second call, after one untimed forward and backward. "
             "Retained: bytes a forward keeps beside `out` and its inputs (allocator delta). Backward peak: bytes the "
             "backward allocates beside the gradients (allocator peak). Cake API: the package's own retained-state and "
             "workspace counts.",
@@ -1017,6 +1106,13 @@ def cmd_report(args):
     by = collections.defaultdict(dict)
     for r in timing:
         by[(r["mode"], r["phase"], r["T"], r["n"])][r["arm"]] = r
+    if by:
+        lines += [
+            "Speedup: over the fastest baseline that meets the accuracy bar on the same GPU; `(misses bar)` and "
+            "`(unverified)` mark baselines that do not qualify. Bytes, GB/s and HBM util follow the issue's traffic "
+            "(`ckpt`: two forwards and one backward).",
+            "",
+        ]
     for mode in MODES:
         for phase in PHASES:
             keys = sorted(k for k in by if k[0] == mode and k[1] == phase)
@@ -1031,25 +1127,35 @@ def cmd_report(args):
             for key in keys:
                 arms = by[key]
                 T, n = key[2], key[3]
-                base = [
-                    arms[a] for a in BASELINE_ARMS if a in arms and "median_us" in arms[a] and meets.get((a, n), True)
-                ]
+                timed = [a for a in BASELINE_ARMS if "median_us" in arms.get(a, {})]
+                ok = {a: meets(arms[a]) for a in timed}
+                base = [arms[a] for a in timed if ok[a] is True]
                 best = min(base, key=lambda r: r["median_us"]) if base else None
-                cells = [str(T), str(n), f"{bytes_moved(phase, T, n) / 1e6:.0f} MB"]
+                moved = bytes_moved(phase, T, n)
+                cells = [str(T), str(n), f"{moved / 1e6:.0f} MB"]
                 for a in present:
                     r = arms.get(a, {})
                     if "median_us" in r:
-                        cells.append(f"{r['median_us']:.1f}" + ("" if meets.get((a, n), True) else " (misses bar)"))
+                        mark = {True: "", False: " (misses bar)", None: " (unverified)"}[ok[a]]
+                        cells.append(f"{r['median_us']:.1f}{mark}")
                     else:
                         cells.append("unsupported" if "unsupported" in r else ("error" if "error" in r else "n/a"))
-                cells.append(f"{best['median_us']:.1f} ({best['arm']})" if best else "n/a")
+                if best:
+                    cells.append(f"{best['median_us']:.1f} ({best['arm']})")
+                else:
+                    cells.append("unverified" if None in ok.values() else "n/a")
                 for arm in CAKE_ARMS:
                     r = arms.get(arm)
                     if r is None or "median_us" not in r:
                         cells += ["n/a", "", "", ""]
                         continue
                     speed = f"{best['median_us'] / r['median_us']:.2f}x" if best else "n/a"
-                    cells += [f"{r['median_us']:.1f}", speed, f"{r['gbs']:.0f}", f"{100 * r['hbm_utilization']:.1f}%"]
+                    # Recomputed from the latency, so runs recorded with an older byte count stay consistent.
+                    gbs = moved / (r["median_us"] * 1e-6) / 1e9
+                    bandwidth = r.get("nvml_bandwidth_gbs")
+                    util = gbs / bandwidth if bandwidth else None
+                    util_cell = "n/a" if util is None else f"{100 * util:.1f}%"
+                    cells += [f"{r['median_us']:.1f}", speed, f"{gbs:.0f}", util_cell]
                     summary.append(
                         {
                             "mode": mode,
@@ -1060,17 +1166,14 @@ def cmd_report(args):
                             "us": round(r["median_us"], 2),
                             "p10_us": round(r["p10_us"], 2),
                             "p90_us": round(r["p90_us"], 2),
-                            "bytes": r["bytes"],
-                            "gbs": round(r["gbs"], 1),
-                            "hbm_utilization": round(r["hbm_utilization"], 4),
+                            "bytes": moved,
+                            "gbs": round(gbs, 1),
+                            "hbm_utilization": None if util is None else round(util, 4),
                             "best_baseline": best["arm"] if best else None,
                             "best_baseline_us": round(best["median_us"], 2) if best else None,
                             "speedup": round(best["median_us"] / r["median_us"], 3) if best else None,
-                            "baselines_us": {
-                                a: round(arms[a]["median_us"], 2)
-                                for a in BASELINE_ARMS
-                                if "median_us" in arms.get(a, {})
-                            },
+                            "baselines_us": {a: round(arms[a]["median_us"], 2) for a in timed},
+                            "baselines_meets_bar": dict(ok),
                         }
                     )
                 lines.append("| " + " | ".join(cells) + " |")
@@ -1079,7 +1182,7 @@ def cmd_report(args):
     if args.md:
         Path(args.md).write_text(text)
     if args.summary:
-        Path(args.summary).write_text(json.dumps({"env": env, "rows": summary}, indent=1))
+        Path(args.summary).write_text(json.dumps({"env": env, "runs": runs, "rows": summary}, indent=1))
     print(text)
 
 
@@ -1095,7 +1198,7 @@ def main():
     run.add_argument("--arms", type=csv_list(str), default=list(DEFAULT_ARMS))
     run.add_argument("--T", type=csv_list(int), default=[16380])
     run.add_argument("--n", type=csv_list(int), default=list(range(2, 10)))
-    run.add_argument("--acc-n", type=csv_list(int), default=[2, 5, 9])
+    run.add_argument("--acc-n", type=csv_list(int), help="n of the accuracy units (default: the --n list)")
     run.add_argument("--draws", type=int, default=8)
     run.add_argument("--modes", type=csv_list(str), default=list(MODES))
     run.add_argument("--phases", type=csv_list(str), default=list(PHASES))

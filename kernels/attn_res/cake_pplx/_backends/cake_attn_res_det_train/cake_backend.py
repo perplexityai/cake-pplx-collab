@@ -99,8 +99,8 @@ __all__ = [
     "specs_for_arch",
 ]
 
-# One verified build per architecture: B200 / GB200 (``sm_100a``), B300 / GB300 (``sm_103a``) and R200 (``sm_107a``),
-# each compiled with its exact ``-gencode`` flag set.  No other architecture has a build.
+# One build per architecture: B200 / GB200 (``sm_100a``), B300 / GB300 (``sm_103a``) and Rubin (``sm_107a``), each
+# compiled with its exact ``-gencode`` flag set.  No other architecture has a build.
 ARCHES: tuple[str, ...] = tuple(cake_jit.ARCHES)
 ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = dict(cake_jit.ARCH_BY_CAPABILITY)
 SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(sorted(ARCH_BY_CAPABILITY))
@@ -119,6 +119,9 @@ _DW_REDUCE_RECORD: str = cake_jit.record("dw_reduce")
 _DW_REDUCE_GRID: tuple[int, int, int] = cake_jit.dw_reduce_grid()
 # Bytes of one FP32 [7168] row (a partial row of the backward's weight gradient).
 _ROW_BYTES = HIDDEN * 4
+# ``eps`` is at least 2**-84: an all-zero value row then has r = 1 / sqrt(eps) <= 2**42, so the backward's r**3 <= 2**126
+# stays finite in FP32 (and the FP32 ``eps`` is not 0).
+_EPS_MIN = 2.0**-84
 
 # The public module the entry points are documented under.
 _MODULE = "cake_pplx.cake_attn_res_det_train"
@@ -388,15 +391,42 @@ def _state_layout(name: str, t: Any, T: int, n: int, device: torch.device) -> No
 
 
 def _check_eps(eps: Any) -> float:
-    if type(eps) is float and 0.0 <= eps < math.inf:
+    """``eps`` as a float: a Python float or int (not a bool), finite and at least 2**-84 (so that an all-zero row's
+    ``r**3`` stays finite in FP32); ``TypeError`` for another type (a tensor included: nothing reads a device), ``ValueError``
+    for another value."""
+    if type(eps) is float and _EPS_MIN <= eps < math.inf:
         return eps
+    if isinstance(eps, bool) or not isinstance(eps, (float, int)):
+        raise TypeError(f"eps must be a Python float or int, got {type(eps).__name__}")
     try:
         eps_f = float(eps)
-    except (TypeError, ValueError):
-        raise ValueError(f"eps must be a real number, got {eps!r}") from None
-    if not (math.isfinite(eps_f) and eps_f >= 0.0):
-        raise ValueError(f"eps must be finite and non-negative, got {eps}")
+    except OverflowError:
+        eps_f = math.inf
+    if not (math.isfinite(eps_f) and eps_f >= _EPS_MIN):
+        raise ValueError(f"eps must be finite and at least 2**-84 (about 5.2e-26), got {eps!r}")
     return eps_f
+
+
+def _span(t: torch.Tensor) -> tuple[int, int]:
+    """The bytes ``[data_ptr, data_ptr + numel * element_size)`` of ``t``: all of it when ``t`` is contiguous (every
+    output and every row operand is)."""
+    start = t.data_ptr()
+    return start, start + t.numel() * t.element_size()
+
+
+def _no_overlap(name: str, t: torch.Tensor, others: Sequence[tuple[str, torch.Tensor]]) -> None:
+    """``ValueError`` when the bytes of the caller-owned output ``t`` overlap those of a tensor of ``others``: every
+    kernel pointer is ``__restrict__``.  Addresses only: nothing reads a device."""
+    start, end = _span(t)
+    if start == end:
+        return
+    for other_name, other in others:
+        other_start, other_end = _span(other)
+        if start < other_end and other_start < end:
+            raise ValueError(
+                f"{name} overlaps {other_name}: a caller-owned output must not share memory with an operand or "
+                "another output"
+            )
 
 
 def _valid_tokens(values: Any, w: Any) -> int:
@@ -427,8 +457,8 @@ def _valid_tokens(values: Any, w: Any) -> int:
 
 
 def _check_operands(values: Any, w: Any, eps: Any) -> tuple[int, float]:
-    """``(T, eps)`` of a valid set of forward operands; ``ValueError`` otherwise.  The device checks come before
-    anything that touches CUDA."""
+    """``(T, eps)`` of a valid set of forward operands; ``ValueError`` otherwise (``TypeError`` for an ``eps`` that is
+    not a Python float or int).  The device checks come before anything that touches CUDA."""
     T = _valid_tokens(values, w)
     if T >= 0:
         return T, _check_eps(eps)
@@ -530,6 +560,7 @@ def _forward(
         out = _tensor("out", out)
         _on_device("out", out, device)
         _row_layout("out", out, T)
+        _no_overlap("out", out, [*((f"values[{j}]", v) for j, v in enumerate(values)), ("w", w)])
     # One allocation for the three [T, n] states: p, r and d are its contiguous slices.
     state = torch.empty(3, T, n, dtype=_FP32, device=device)
     p, r, d = state.unbind(0)
@@ -561,7 +592,7 @@ def _launch_backward(
     if dv is None:
         dv = [torch.empty(T, HIDDEN, dtype=_BF16, device=device) for _ in range(n)]
     if T == 0:
-        # No token: nothing to launch; a zero weight gradient.
+        # No token: no Cake kernel; the weight gradient is a zero fill (torch.zeros).
         return dv, torch.zeros(HIDDEN, dtype=_FP32, device=device)
     index = device.index
     device_arch(index)  # RuntimeError on a device outside ARCHES
@@ -596,6 +627,10 @@ def _backward(
         _state_layout(name, t, T, n, device)
     if dv is not None:
         dv = _check_outputs("dv", dv, T, n, device)
+        operands = [*((f"values[{j}]", v) for j, v in enumerate(values)), ("dout", dout), ("w", w)]
+        operands += [("p", p), ("r", r), ("d", d)]
+        for j, g in enumerate(dv):
+            _no_overlap(f"dv[{j}]", g, [*operands, *((f"dv[{i}]", dv[i]) for i in range(j))])
     return _launch_backward(dout, values, w, p, r, d, T, dv)
 
 
@@ -607,12 +642,12 @@ def cake_attn_res_det_train_forward(
     out: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The forward without autograd: ``(out, p, r, d)``, ``out`` BF16 ``[T, 7168]`` (``out`` given: written in place
-    and returned) and the state the backward reads, FP32 ``[T, n]`` each.
+    and returned; it must not overlap a value or ``w``) and the state the backward reads, FP32 ``[T, n]`` each.
 
     ``values`` is a list or tuple of ``n`` (1 to 9) BF16 ``[T, 7168]`` tensors, each contiguous and 16-byte aligned
     (separate tensors: nothing is stacked); ``w`` FP32 ``[7168]``; every tensor on one CUDA device.  ``eps`` is a
-    finite, non-negative run-time float.  ``T == 0`` launches nothing.  The forward never consults
-    ``torch.use_deterministic_algorithms``."""
+    run-time Python float or int, finite and at least 2**-84.  ``T == 0`` launches nothing.  The
+    forward never consults ``torch.use_deterministic_algorithms``."""
     out, p, r, d, _ = _forward(values, w, eps, out)
     return out, p, r, d
 
@@ -630,7 +665,8 @@ def cake_attn_res_det_train_backward(
     """The backward without autograd: ``(dv, dw)`` from ``dout`` (BF16 ``[T, 7168]``, contiguous), the forward's
     values and ``w`` and its state ``p``, ``r``, ``d`` (FP32 ``[T, n]``, contiguous); the forward's output is not
     needed.  ``dv`` is a list of ``n`` BF16 ``[T, 7168]`` gradients (``dv`` given: a list or tuple of ``n`` contiguous
-    tensors written in place); ``dw`` is FP32 ``[7168]``.  ``T == 0`` returns a zero ``dw`` and launches nothing.
+    tensors written in place, none overlapping a value, ``dout``, ``w``, ``p``, ``r``, ``d`` or another entry); ``dw``
+    is FP32 ``[7168]``.  ``T == 0`` launches no Cake kernel and returns a zero ``dw`` (a ``torch.zeros`` fill).
     Every output repeats bit for bit for identical inputs on one device; nothing consults
     ``torch.use_deterministic_algorithms``."""
     return _backward(dout, values, w, p, r, d, dv)

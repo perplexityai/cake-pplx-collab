@@ -35,8 +35,8 @@ The values are the closed block states and the running sum of a block
 nothing is stacked or copied.  ``w`` is FP32 ``[7168]`` (the caller's product
 of the norm and projection weights); ``dw`` is its FP32 gradient, the one sum
 across tokens.  The norms, dot products and the softmax are FP32; no sum uses
-FP64.  An all-zero value row gives ``r_j = 1 / sqrt(eps)`` and ``d_j = 0``: a
-finite result.
+FP64.  ``eps`` must be at least 2**-84 (about 5.2e-26), so an all-zero
+value row gives ``r_j = 1 / sqrt(eps)`` and ``d_j = 0``: a finite result.
 
 Entries: :func:`cake_attn_res_det` (with autograd),
 :func:`cake_attn_res_det_train_forward` /
@@ -58,7 +58,9 @@ A stable API (``@cake_api``; no ``ExperimentalWarning``) of thin wrappers:
 the checks, the launch plan, the autograd Function and the generated kernels
 live in the backend package ``cake_pplx._backends.cake_attn_res_det_train``,
 imported on first use; this module forwards every keyword.  Every switch is a
-keyword argument; no environment variable is read.  The token count, ``n``
+keyword argument: kernel selection and launches read no environment variable
+(the JIT build shim reads ``CUDA_HOME`` / ``CUDA_PATH``, ``CXX`` and the
+``CAKE_PPLX_*`` build settings of the root README).  The token count, ``n``
 and ``eps`` are run-time values: each stage ships one program per value bound
 from 2 to 9 and a call runs the one of the smallest bound at least ``n``, so
 the libraries are a fixed set and no shape compiles a new one; no call reads
@@ -69,7 +71,8 @@ Memory: the state kept for the backward is references to the inputs and the
 forward's FP32 ``p``, ``r`` and ``d`` (``[T, n]`` each, ``12 T n`` bytes:
 :func:`cake_attn_res_det_train_retained_bytes`).  A backward call allocates
 FP32 ``[7168]`` rows of ``dw`` partial sums beside its outputs, one per launch
-group of its grid (:func:`cake_attn_res_det_train_workspace_bytes`).
+group of its grid, so their count follows ``T``, ``n`` and the device
+(:func:`cake_attn_res_det_train_workspace_bytes`).
 
 Usage::
 
@@ -151,7 +154,8 @@ def cake_attn_res_det(values: Sequence[torch.Tensor], w: torch.Tensor, *, eps: f
     w : torch.Tensor
         FP32 ``[7168]`` (the product of the norm and projection weights).
     eps : float
-        The RMS epsilon (a run-time value; finite, non-negative; 1e-5 by default).
+        The RMS epsilon (a run-time Python float or int; finite and at least 2**-84; 1e-5 by
+        default).
 
     Returns
     -------
@@ -161,7 +165,10 @@ def cake_attn_res_det(values: Sequence[torch.Tensor], w: torch.Tensor, *, eps: f
     ------
     ValueError
         ``values`` is not a list or tuple of 1 to 9 tensors, a tensor is not a CUDA tensor of the first value's device,
-        or has another dtype, shape, layout or alignment than above; ``eps`` is not finite and non-negative.
+        or has another dtype, shape, layout or alignment than above; ``eps`` is not finite or is below
+        2**-84.
+    TypeError
+        ``eps`` is not a Python float or int (a bool or a tensor is not).
     RuntimeError
         The device is not one of ``ARCHES``.
 
@@ -169,7 +176,8 @@ def cake_attn_res_det(values: Sequence[torch.Tensor], w: torch.Tensor, *, eps: f
     -----
     The autograd node saves references to ``values`` and ``w`` and the forward's FP32 ``p``, ``r``, ``d``
     (``[T, n]`` each).  Every output repeats bit for bit for identical inputs on one device;
-    ``torch.use_deterministic_algorithms`` is not consulted.  ``T == 0`` launches nothing and gives a zero ``dw``.
+    ``torch.use_deterministic_algorithms`` is not consulted.  ``T == 0`` launches no Cake kernel: the backward's
+    ``dw`` is a zero fill (``torch.zeros``).
     """
     return _pkg().cake_attn_res_det(values, w, eps=eps)
 
@@ -189,7 +197,8 @@ def cake_attn_res_det_train_forward(
     values, w, eps
         As in :func:`cake_attn_res_det`.
     out : torch.Tensor, optional
-        BF16 ``[T, 7168]``, contiguous, 16-byte aligned: written in place and returned.
+        BF16 ``[T, 7168]``, contiguous, 16-byte aligned, sharing no byte with a value or ``w``: written in place and
+        returned.
 
     Returns
     -------
@@ -198,8 +207,8 @@ def cake_attn_res_det_train_forward(
 
     Raises
     ------
-    ValueError, RuntimeError
-        As in :func:`cake_attn_res_det`.
+    ValueError, TypeError, RuntimeError
+        As in :func:`cake_attn_res_det`; a ``ValueError`` also when ``out`` overlaps a value or ``w``.
 
     Notes
     -----
@@ -230,7 +239,8 @@ def cake_attn_res_det_train_backward(
     p, r, d : torch.Tensor
         The forward's state, FP32 ``[T, n]`` each, contiguous (:func:`cake_attn_res_det_train_forward`).
     dv : list or tuple of torch.Tensor, optional
-        ``n`` BF16 ``[T, 7168]`` tensors, contiguous, 16-byte aligned: written in place and returned.
+        ``n`` BF16 ``[T, 7168]`` tensors, contiguous, 16-byte aligned, each sharing no byte with a value, ``dout``,
+        ``w``, ``p``, ``r``, ``d`` or another entry: written in place and returned.
 
     Returns
     -------
@@ -239,12 +249,13 @@ def cake_attn_res_det_train_backward(
     Raises
     ------
     ValueError, RuntimeError
-        As in :func:`cake_attn_res_det`.
+        As in :func:`cake_attn_res_det`; a ``ValueError`` also when an entry of ``dv`` overlaps an operand or another
+        entry.
 
     Notes
     -----
     Every output repeats bit for bit for identical inputs on one device; ``torch.use_deterministic_algorithms`` is not
-    consulted.  ``T == 0`` launches nothing and returns a zero ``dw``.
+    consulted.  ``T == 0`` launches no Cake kernel and returns a zero ``dw`` (a ``torch.zeros`` fill).
     """
     return _pkg().cake_attn_res_det_train_backward(dout, values, w, p, r, d, dv=dv)
 
@@ -266,7 +277,8 @@ def cake_attn_res_det_train_workspace_bytes(T: int, n: int, device: Union[torch.
     Returns
     -------
     28 KiB (``7168`` FP32) for each ``[7168]`` row of ``dw`` partial sums, one per launch group of the backward grid; 0
-    for ``T == 0``.  It does not depend on ``n``.
+    for ``T == 0``.  The grid has ``min(T, resident groups)`` groups, and ``n`` picks the backward program and so its
+    resident groups: on B200 at ``T >= 142``, 142 rows for ``n <= 5``, 104 for ``n = 6`` and 71 for ``n >= 7``.
 
     Notes
     -----
@@ -308,7 +320,7 @@ def is_cake_attn_res_det_train_supported(device: Union[torch.device, int, str, N
 
     Returns
     -------
-    True on SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200); False otherwise and without CUDA.
+    True on SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin); False otherwise and without CUDA.
 
     Notes
     -----

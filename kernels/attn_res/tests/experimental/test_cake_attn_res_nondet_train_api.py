@@ -23,13 +23,15 @@ behaviour under ``torch.use_deterministic_algorithms``, ``values`` that is not a
 On SM100 / SM103 / SM107: CUPTI counts the GPU activities of a forward and a backward call; the autograd entry meets
 the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws) for the output and every gradient; the
 explicit forward and backward give the autograd entry's ``out`` and value gradients bit for bit and write caller
-outputs in place; ``n`` and the token count change from call to call without a new build; ``T = 0`` and ``T = 1``
-work; every documented ``ValueError``; a device outside the architectures is a ``RuntimeError``; the
-``torch.use_deterministic_algorithms`` behaviour; the launches run on the current stream without synchronizing; a
-forward and a backward captured in one CUDA graph replay; ``torch.utils.checkpoint(use_reentrant=False)`` gives the
-plain output and value gradients; the retained state and the workspace are reported.  ``dw`` promises no bits: it is
-compared bit for bit with nothing; ``out`` and every ``dv_j`` have one fixed order.  The issue's acceptance criteria
-are ``test_cake_attn_res_acceptance.py``.
+outputs in place; ``n`` and the token count change from call to call without a new build; ``T = 0`` launches no Cake
+program and ``T = 1`` works; every documented ``ValueError``; ``eps`` is a positive Python float or int (else a
+``TypeError`` or a ``ValueError``); a caller output that overlaps an operand is a ``ValueError``; a device outside the
+architectures is a ``RuntimeError``; under ``torch.use_deterministic_algorithms(True)`` the backward alerts (a
+``RuntimeError``, a ``UserWarning`` with ``warn_only=True``) and the forward does not; the launches run on the current
+stream without synchronizing; a forward and a backward captured in one CUDA graph replay;
+``torch.utils.checkpoint(use_reentrant=False)`` gives the plain output and value gradients; the retained state and
+the workspace are reported.  ``dw`` promises no bits: it is compared bit for bit with nothing; ``out`` and every
+``dv_j`` have one fixed order.  The issue's acceptance criteria are ``test_cake_attn_res_acceptance.py``.
 """
 
 from __future__ import annotations
@@ -65,6 +67,8 @@ ENTRIES = (
 LAUNCHES = {"forward": 1, "backward": 2}
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
 SLEEP_CYCLES = 200_000_000
+# The words of PyTorch's alert for an operation without a deterministic implementation.
+ALERT = r"cake_pplx\.cake_attn_res_nondet_train: the backward's weight gradient dw .* does not have a deterministic implementation"
 
 
 def _backend():
@@ -103,6 +107,11 @@ def _torch_deterministic(*, warn_only: bool):
         torch.use_deterministic_algorithms(enabled, warn_only=was_warn_only)
 
 
+def _leaves(ns):
+    """Fresh leaf copies of the values and ``w`` that require gradients: ``(values, w)``."""
+    return [v.detach().clone().requires_grad_(True) for v in ns.values], ns.w.detach().clone().requires_grad_(True)
+
+
 def _autograd(ns, *, checkpoint: bool = False) -> dict:
     """Output and gradients of the autograd entry (``checkpoint``: under
     ``torch.utils.checkpoint(use_reentrant=False)``), keyed as the judge's outputs."""
@@ -130,6 +139,11 @@ def _record_failures(judge, failures, record_property) -> None:
 def _cpu_operands(T: int = 2, n: int = 3):
     values = [torch.zeros(T, HIDDEN, dtype=torch.bfloat16) for _ in range(n)]
     return values, torch.ones(HIDDEN)
+
+
+def _no_launch(name: str, arch: str):
+    """Stands in for the backend's FFI entry lookup where nothing may launch."""
+    raise AssertionError(f"Cake program {name} ({arch}) looked up")
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -338,15 +352,23 @@ def test_dynamic_token_counts_and_values_need_no_new_build() -> None:
 
 
 @pytest.mark.parametrize("n", (1, 5, 9))
-def test_no_token(n) -> None:
-    """``T = 0``: an empty output and state, empty value gradients and a zero ``dw``; nothing launches, nothing
-    alerts."""
+def test_no_token(n, monkeypatch) -> None:
+    """``T = 0``: an empty output and state, empty value gradients and a zero ``dw``.  No Cake program is looked up
+    or launched (the backend's FFI entry is replaced by one that fails); the forward allocates no device memory and the
+    backward only ``dw``, its one ``torch.zeros`` fill.  Nothing alerts under ``torch.use_deterministic_algorithms``."""
     device = _device_or_skip()
     ns = make_inputs(0, n, seed=3, device=device)
+    monkeypatch.setattr(_backend(), "_entry", _no_launch)
     with _torch_deterministic(warn_only=False):
         got = _autograd(ns)
+        before = torch.cuda.memory_allocated(device)
         out, p, r, d = api.cake_attn_res_nondet_train_forward(ns.values, ns.w)
+        forward = torch.cuda.memory_allocated(device) - before
         dv, dw = api.cake_attn_res_nondet_train_backward(ns.dout, ns.values, ns.w, p, r, d)
+        backward = torch.cuda.memory_allocated(device) - before - forward
+        like = torch.empty_like(dw)
+        one_dw = torch.cuda.memory_allocated(device) - before - forward - backward
+    assert like.shape == dw.shape and (forward, backward) == (0, one_dw), (forward, backward, one_dw)
     assert tuple(got["out"].shape) == (0, HIDDEN) and tuple(out.shape) == (0, HIDDEN)
     assert all(tuple(t.shape) == (0, n) for t in (p, r, d))
     assert len(dv) == n and all(tuple(t.shape) == (0, HIDDEN) for t in dv)
@@ -373,10 +395,6 @@ def _malformed(ns, device):
         ("w-bf16", v, ns.w.bfloat16(), 1e-5, None),
         ("w-shape", v, torch.ones(HIDDEN + 1, device=device), 1e-5, None),
         ("w-cpu", v, ns.w.cpu(), 1e-5, None),
-        ("eps-nan", v, ns.w, math.nan, None),
-        ("eps-negative", v, ns.w, -1.0, None),
-        ("eps-inf", v, ns.w, math.inf, None),
-        ("eps-str", v, ns.w, "eps", None),
         ("out-strided", v, ns.w, 1e-5, torch.zeros(HIDDEN, T, **bf16).t()),
         ("out-fp32", v, ns.w, 1e-5, torch.zeros(T, HIDDEN, device=device)),
     ]
@@ -389,7 +407,7 @@ def test_malformed_operands_are_a_value_error() -> None:
         with pytest.raises(ValueError):
             api.cake_attn_res_nondet_train_forward(values, w, eps=eps, out=out)
             pytest.fail(f"forward accepted {label}")
-        if out is not None or label.startswith("eps"):
+        if out is not None:
             continue
         with pytest.raises(ValueError):
             api.cake_attn_res_nondet(values, w)
@@ -408,6 +426,95 @@ def test_malformed_operands_are_a_value_error() -> None:
         with pytest.raises(ValueError):
             api.cake_attn_res_nondet_train_backward(dout, ns.values, ns.w, *state, dv=dv)
             pytest.fail(f"backward accepted {label}")
+
+
+def test_eps_must_be_a_positive_float_or_int() -> None:
+    """``eps`` is a Python float or int.  A bool, a tensor or any other type is a ``TypeError``, raised without a
+    device-to-host read (under ``torch.cuda.set_sync_debug_mode("error")``); 0, a negative, NaN, an infinity, 1e-46
+    (0 in FP32), 1e-30 and 2**-85 (below 2**-84) are a ``ValueError``; both name ``eps``, from the explicit forward and the autograd entry.  An int is
+    the float of its value."""
+    device = _device_or_skip()
+    ns = make_inputs(4, 3, seed=2, device=device)
+    fwd = api.cake_attn_res_nondet_train_forward
+    entries = (fwd, api.cake_attn_res_nondet)
+    wrong_types = (torch.tensor(1e-5, device=device), torch.tensor(1e-5), True, False, "1e-5", None)
+    torch.cuda.synchronize(device)
+    previous = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        for eps in wrong_types:
+            for entry in entries:
+                with pytest.raises(TypeError, match="eps"):
+                    entry(ns.values, ns.w, eps=eps)
+                    pytest.fail(f"{entry.__name__} accepted eps of type {type(eps).__name__}")
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+    for eps in (0.0, 0, -1.0, -1, math.nan, math.inf, -math.inf, 1e-46, 1e-30, 2.0**-85):
+        for entry in entries:
+            with pytest.raises(ValueError, match="eps"):
+                entry(ns.values, ns.w, eps=eps)
+                pytest.fail(f"{entry.__name__} accepted eps={eps!r}")
+    for a, b in zip(fwd(ns.values, ns.w, eps=1), fwd(ns.values, ns.w, eps=1.0), strict=True):
+        assert _same_bits(a, b)
+
+
+def test_a_caller_output_that_overlaps_an_operand_is_a_value_error(monkeypatch) -> None:
+    """A caller-owned ``out`` that shares a byte with a value, or a ``dv_j`` that shares a byte with a value, ``dout``
+    or another ``dv`` entry (the same tensor, or two views of one buffer a row apart), is a ``ValueError`` before
+    anything launches.  Views of one buffer that only meet (adjacent rows) are accepted and give the bits of separate
+    buffers."""
+    device = _device_or_skip()
+    T, n = 4, 3
+    ns = make_inputs(T, n, seed=2, device=device)
+    fwd, bwd = api.cake_attn_res_nondet_train_forward, api.cake_attn_res_nondet_train_backward
+    out, p, r, d = fwd(ns.values, ns.w)
+    dv, _ = bwd(ns.dout, ns.values, ns.w, p, r, d)
+    # Two [T, 7168] views of one buffer of T + 1 rows, a row apart: they share T - 1 rows.
+    flat = torch.zeros((T + 1) * HIDDEN, dtype=torch.bfloat16, device=device)
+    head, tail = flat[: T * HIDDEN].view(T, HIDDEN), flat[HIDDEN:].view(T, HIDDEN)
+    fresh = [torch.empty_like(ns.dout) for _ in range(n)]
+    _, v1, v2 = ns.values
+    with monkeypatch.context() as patch:
+        patch.setattr(_backend(), "_entry", _no_launch)
+        for label, values, given in (
+            ("out-is-a-value", ns.values, v1),
+            ("out-overlaps-a-value", [head, v1, v2], tail),
+        ):
+            with pytest.raises(ValueError, match="overlap"):
+                fwd(values, ns.w, out=given)
+                pytest.fail(f"forward accepted {label}")
+        for label, values, given in (
+            ("dv-is-a-value", ns.values, [fresh[0], v1, fresh[2]]),
+            ("dv-overlaps-a-value", [head, v1, v2], [tail, fresh[1], fresh[2]]),
+            ("dv-is-dout", ns.values, [fresh[0], fresh[1], ns.dout]),
+            ("dv-repeated", ns.values, [fresh[0], fresh[0], fresh[2]]),
+            ("dv-overlaps-another", ns.values, [head, tail, fresh[2]]),
+        ):
+            with pytest.raises(ValueError, match="overlap"):
+                bwd(ns.dout, values, ns.w, p, r, d, dv=given)
+                pytest.fail(f"backward accepted {label}")
+        # An ``out`` or a ``dv_j`` that shares bytes with ``w``, ``p``, ``r`` or ``d`` (FP32 views of one BF16 buffer).
+        buf = torch.zeros(T * HIDDEN, dtype=torch.bfloat16, device=device)
+        shared = buf.view(T, HIDDEN)
+        w_alias = buf.view(torch.float32)[:HIDDEN]
+        state_alias = buf.view(torch.float32)[: T * n].view(T, n)
+        with pytest.raises(ValueError, match="overlap"):
+            fwd(ns.values, w_alias, out=shared)
+            pytest.fail("forward accepted out-overlaps-w")
+        for label, state in (
+            ("dv-overlaps-w", (w_alias, p, r, d)),
+            ("dv-overlaps-p", (ns.w, state_alias, r, d)),
+            ("dv-overlaps-r", (ns.w, p, state_alias, d)),
+            ("dv-overlaps-d", (ns.w, p, r, state_alias)),
+        ):
+            with pytest.raises(ValueError, match="overlap"):
+                bwd(ns.dout, ns.values, *state, dv=[shared, fresh[1], fresh[2]])
+                pytest.fail(f"backward accepted {label}")
+    rows = torch.empty(n * T, HIDDEN, dtype=torch.bfloat16, device=device)
+    got, _ = bwd(ns.dout, ns.values, ns.w, p, r, d, dv=list(rows.split(T)))
+    for j in range(n):
+        assert _same_bits(got[j], dv[j]), j
+    assert _same_bits(fwd(ns.values, ns.w, out=rows[T : 2 * T])[0], out)
 
 
 def test_a_base_off_a_16_byte_boundary_is_a_value_error() -> None:
@@ -438,21 +545,40 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 # On SM100 / SM103 / SM107: determinism, streams, graphs, checkpoint, memory
 
 
-def test_deterministic_mode_changes_nothing() -> None:
-    """Under ``torch.use_deterministic_algorithms(True)``, strict or ``warn_only``: nothing alerts or warns, and the
-    output and the value gradients are the bits of a call outside the mode."""
+def test_the_backward_alerts_under_torch_deterministic_mode() -> None:
+    """Under ``torch.use_deterministic_algorithms(True)`` the backward, explicit and through autograd, raises PyTorch's
+    ``RuntimeError`` (``... does not have a deterministic implementation ...``); with ``warn_only=True`` it warns (a
+    ``UserWarning``) and runs: ``out`` and the value gradients are the bits of a call outside the mode, and ``dw`` is
+    a finite FP32 ``[7168]``.  The forward never alerts or warns."""
     device = _device_or_skip()
-    ns = make_inputs(1031, 5, seed=19, device=device, data="zero_rows")
+    n = 5
+    ns = make_inputs(1031, n, seed=19, device=device, data="zero_rows")
     first = _autograd(ns)
+    fwd, bwd = api.cake_attn_res_nondet_train_forward, api.cake_attn_res_nondet_train_backward
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         with _torch_deterministic(warn_only=False):
-            second = _autograd(ns)
+            state = fwd(ns.values, ns.w)
+            out = api.cake_attn_res_nondet(*_leaves(ns))
+            with pytest.raises(RuntimeError, match=ALERT):
+                bwd(ns.dout, ns.values, ns.w, *state[1:])
+            with pytest.raises(RuntimeError, match=ALERT):
+                out.backward(ns.dout)
+        values, w = _leaves(ns)
         with _torch_deterministic(warn_only=True):
-            third = _autograd(ns)
-    for name in ("out", *(f"dv{j}" for j in range(5))):
-        assert _same_bits(first[name], second[name]), name
-        assert _same_bits(first[name], third[name]), name
+            state = fwd(ns.values, ns.w)
+            out = api.cake_attn_res_nondet(values, w)
+            with pytest.warns(UserWarning, match=ALERT):
+                dv, dw = bwd(ns.dout, ns.values, ns.w, *state[1:])
+            with pytest.warns(UserWarning, match=ALERT):
+                out.backward(ns.dout)
+    explicit = {"out": state[0], **{f"dv{j}": g for j, g in enumerate(dv)}}
+    autograd = {"out": out.detach(), **{f"dv{j}": v.grad for j, v in enumerate(values)}}
+    for name in ("out", *(f"dv{j}" for j in range(n))):
+        assert _same_bits(first[name], explicit[name]), name
+        assert _same_bits(first[name], autograd[name]), name
+    for t in (dw, w.grad):
+        assert t.dtype == torch.float32 and tuple(t.shape) == (HIDDEN,) and torch.isfinite(t).all()
 
 
 def test_runs_on_the_current_stream_without_synchronizing() -> None:

@@ -16,7 +16,7 @@ limitations under the License.
 The accuracy judges of the family's attention residual (AttnRes; values of width 7168): the FP64 oracle, the naive
 BF16 tier and the inputs of each judged form, for the judge of ``tests/cake_naive.py``; and the yardstick of issue
 #262 (the issue's own reference, FP32 math on the BF16 values with one BF16 rounding of ``out`` and each ``dv_j``,
-on the CPU), against which the weight gradient ``dw`` is judged.
+on the CPU or on the device), against which the weight gradient ``dw`` is judged.
 
 Per token ``t`` (``H = 7168``), values ``v_0 .. v_{n-1}`` and the weight ``w``::
 
@@ -221,17 +221,20 @@ def judge_draws(run, make, *, seed: int, draws: Optional[int] = None):
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The issue's yardstick: FP32 math on the BF16 values (CPU), one BF16 rounding of out and each dv_j
+# The issue's yardstick: FP32 math on the BF16 values (CPU or device), one BF16 rounding of out and each dv_j
 
 
-def issue_fp32(ns: types.SimpleNamespace, *, eps: float = EPS) -> dict[str, torch.Tensor]:
-    """The issue's FP32 evaluation of every output (its yardstick script, on the CPU): ``out`` from :func:`released`
-    and ``dv_j`` from :func:`issue_backward` in FP32, each rounded once to BF16; ``dw`` the FP32 sum of
-    :func:`issue_backward`."""
-    v32 = [v.cpu().float() for v in ns.values]
-    w32 = ns.w.cpu().float()
+def issue_fp32(
+    ns: types.SimpleNamespace, *, eps: float = EPS, device: Optional[torch.device] = None
+) -> dict[str, torch.Tensor]:
+    """The issue's FP32 evaluation of every output (its yardstick script, on the CPU, or on ``device`` when given):
+    ``out`` from :func:`released` and ``dv_j`` from :func:`issue_backward` in FP32, each rounded once to BF16; ``dw``
+    the FP32 sum of :func:`issue_backward`."""
+    where = torch.device("cpu") if device is None else device
+    v32 = [v.to(where).float() for v in ns.values]
+    w32 = ns.w.to(where).float()
     found = {"out": released(v32, w32, torch.ones_like(w32), eps).bfloat16()}
-    dv, dw = issue_backward(ns.dout.cpu().float(), v32, w32, eps)
+    dv, dw = issue_backward(ns.dout.to(where).float(), v32, w32, eps)
     for j, g in enumerate(dv):
         found[f"dv{j}"] = g.bfloat16()
     found["dw"] = dw

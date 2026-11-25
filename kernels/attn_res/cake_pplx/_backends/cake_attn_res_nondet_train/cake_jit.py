@@ -32,9 +32,10 @@ The stages, in launch order: ``fwd`` (per token, the FP32 norms ``r_j``, the
 dot products ``d_j`` with ``w``, the softmax ``p`` of ``r_j d_j`` over the
 values and ``out = bf16(sum_j p_j v_j)``; it writes ``p``, ``r`` and ``d``,
 FP32 ``[T, n]``, the state the backward reads) and ``bwd`` (from that state,
-``dout`` and the values: every ``dv_j``, and the FP32 weight gradient ``dw``
-added into a zeroed ``[7168]`` row by ``red.global.add.f32``, so its bits may
-change run to run).  The kernels take the values as nine pointers (the host
+``dout`` and the values: every ``dv_j``, and the FP32 weight gradient ``dw``:
+each CTA keeps its tokens' ``dw`` sums in registers and adds them into a
+zeroed ``[7168]`` row once, after its token loop, with ``red.global.add.v4.f32``,
+so its bits may change run to run).  The kernels take the values as nine pointers (the host
 passes the first value for the slots past ``n``) and ``n`` and the token count
 as run-time scalars.  The ``fwd`` and ``bwd`` stages ship one program per value
 bound ``nmax`` (2 to 9, :data:`NMAX`): program ``nmax`` keeps ``nmax`` values in
@@ -343,9 +344,10 @@ CTAS_PER_SM = {
 # R200 was measured on the shipped programs (all of them on GB300).  The four CTAs of a cluster share one GPC, so a
 # device holds fewer clusters than CTAs per SM * SMs / 4, and on VR200 and R200 no more at 5 CTAs per SM than at 4.
 # The GB200 entries at 3 and 4 CTAs per SM are the counts measured on the four-CTA cluster programs of the
-# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.  The GPU tests check every program's
-# entry, and the grid the host takes, against the driver's count (``cuOccupancyMaxActiveClusters``) on the device
-# they run on.
+# engram_gate family, which give the same GB300 and B200 counts at 3 and 4.  GB200 has no entry at 2 CTAs per SM yet:
+# there ``fwd_n2`` .. ``fwd_n4`` and ``bwd_n7`` .. ``bwd_n9`` take the fallback below (64 groups; GB300 holds 74).
+# The GPU tests check every program's entry, and the grid the host takes, against the driver's count
+# (``cuOccupancyMaxActiveClusters``) on the device they run on.
 RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
     ("sm_100a", 148): {2: 71, 3: 104, 4: 142, 5: 175},
     ("sm_100a", 152): {3: 110, 4: 148},

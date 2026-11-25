@@ -14,10 +14,12 @@ The backward evaluates `ds_j = p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `
 first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1.
 
 The facade `cake_pplx.cake_attn_res_nondet_train` is a stable API; this backend package is experimental (no
-compatibility guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the
-supported architectures; another device raises `RuntimeError`. Its libraries are loaded prebuilt from `aot/` when a
-builder compiled them and JIT-built from the sources and flags `build.json` records otherwise. The package reads no
-environment variable.
+compatibility guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin) are the
+supported architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests on
+VR200; R200 runs and `sm_107a` sanitizer runs are pending. Its libraries are loaded prebuilt from `aot/` when a builder
+compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and launches
+read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX` and the
+`CAKE_PPLX_*` build settings of the root README.
 
 ## Opt-in
 
@@ -29,7 +31,8 @@ out.backward(dout)                                       # v0.grad, v1.grad, v2.
 ```
 
 `cake_attn_res_nondet_train_forward` returns `(out, p, r, d)`; `cake_attn_res_nondet_train_backward(dout, values, w,
-p, r, d)` returns `(dv, dw)` and writes caller-owned `dv` tensors when they are given.
+p, r, d)` returns `(dv, dw)` and writes caller-owned `dv` tensors when they are given. A caller-owned `out` or `dv[j]`
+must share no byte with an operand or another output (`ValueError`).
 
 ## Operands
 
@@ -39,23 +42,27 @@ p, r, d)` returns `(dv, dw)` and writes caller-owned `dv` tensors when they are 
 | `w`, `dw` | `[7168]` | FP32 | any (`w`); contiguous (`dw`) |
 | `p`, `r`, `d` | `[T, n]` | FP32 | contiguous (row-major) |
 
-`eps` is a run-time scalar (finite, non-negative); `T >= 0` and `n` are run-time values. `fwd` and `bwd` ship one program per value bound `nmax` from 2 to 9; a call of `n` values runs the program of the smallest bound at least `n` (`cake_jit.nmax_for`). The libraries are a fixed set: no shape compiles a new one.
+`eps` is a run-time Python float or int (finite and at least 2**-84, about 5.2e-26; a bool or a tensor is a `TypeError`); `T >= 0` and `n` are run-time values. `fwd` and `bwd` ship one program per value bound `nmax` from 2 to 9; a call of `n` values runs the program of the smallest bound at least `n` (`cake_jit.nmax_for`). The libraries are a fixed set: no shape compiles a new one.
 
 ## Kernels
 
 | Stage | Record | Grid | Work |
 | --- | --- | --- | --- |
 | `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d`. `fwd_n2` .. `fwd_n4`: each CTA serves whole tokens (no exchange); `fwd_n5` .. `fwd_n9`: the four CTAs of a cluster split each token's columns |
-| `bwd` | `bwd_n2` .. `bwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: every `dv_j`; adds the token's `dw` terms into the zeroed `dw` with `red.global.add.f32` |
+| `bwd` | `bwd_n2` .. `bwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: every `dv_j`. Each CTA keeps its tokens' `dw` sums in registers and adds them into the zeroed `dw` once, after its token loop, with `red.global.add.v4.f32` (four columns per instruction) |
 
-`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB300, VR200 and R200; on another device a fallback under every measured count). The host zeroes
+`T = 0` launches no Cake kernel: the backward returns a zero `dw` (a `torch.zeros` fill).
+
+`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB300, VR200 and R200; GB200's counts at 3 and 4 CTAs per SM come from another family's measurements, and GB200 has no count at 2 yet, so there `fwd_n2` .. `fwd_n4` and `bwd_n7` .. `bwd_n9` take the fallback; on another device a fallback under every measured count). The host zeroes
 `dw` before the backward launch. The kernels take nine value pointers; the host passes the first value in the slots
 past `n`, which the kernels never read.
 
 ## Determinism
 
-`out`, `p`, `r`, `d` and every `dv_j` have one fixed order. `dw` adds the tokens' terms in arrival order: it promises
-no bits run to run. Nothing consults `torch.use_deterministic_algorithms`.
+`out`, `p`, `r`, `d` and every `dv_j` have one fixed order. The CTAs add their `dw` sums in the order they finish, so
+`dw` promises no bits run to run. Under `torch.use_deterministic_algorithms(True)` a backward of `T > 0` (explicit or
+autograd) raises `RuntimeError` before the `bwd` launch, or warns (`UserWarning`) and runs under `warn_only=True`. The
+forward and `T = 0` never alert. A launch captured into a CUDA graph alerts at capture; a replay does not.
 
 ## Memory
 

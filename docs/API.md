@@ -30,7 +30,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | mhc | Plain FP32 sums. On `sm_107a` with the default `accumulation="fp32"` the backward adds `dfn` with FP32 atomic reductions in arrival order; every other sum has a fixed order today. No bit promise; not compared bitwise with det. | No alert. The `sm_107a` backward then runs the fixed-order `dfn` fold in place of the arrival-order reductions |
 | mhc_head | Same kernels as det | No alert |
 | engram_gate | Same kernels as det. `out`, `dX`, `dK`, `dV` have one fixed order; no bit promise for `dq_weight` / `dk_weight`. | No alert |
-| attn_res | The same forward. The backward adds `dw` with FP32 atomics: no bit promise for `dw`. `out` and every `dv_j` have one fixed order. | No alert |
+| attn_res | The same forward. The backward adds each CTA's `dw` sums with FP32 atomics: no bit promise for `dw`. `out` and every `dv_j` have one fixed order. | Backward alerts for `T > 0` (raises; warns with `warn_only=True`). The forward never alerts |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
 | fmha | Has no det module. On the three-kernel routes `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. On the one-launch route all three have one fixed order. | Raises before launch |
 | dsa_indexer | Each row holds its selected set in no specified slot order | Raises before launch |
@@ -1039,11 +1039,13 @@ dv_j = BF16(p_j dout + ds_j r_j w - (ds_j d_j r_j^3 / 7168) v_j)
 dw   = sum over t and j of ds_j r_j v_j   (FP32)
 ```
 
-The kernels evaluate `ds_j` as `p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `c` the value of the largest `p_j` (the first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1 (a peaked softmax). The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward, which recomputes no forward sum. No sum uses FP64. An all-zero value row gives `r_j = 1 / sqrt(eps)` and `d_j = 0`: a finite result.
+The kernels evaluate `ds_j` as `p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `c` the value of the largest `p_j` (the first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1 (a peaked softmax). The forward keeps `p`, `r` and `d` (FP32 `[T, n]` each) for the backward, which recomputes no forward sum. No sum uses FP64. `eps` is greater than 0, so an all-zero value row gives `r_j = 1 / sqrt(eps)` and `d_j = 0`: a finite result.
 
-**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward and the backward ship one program per value bound from 2 to 9 (the bound is the number of values the program keeps in registers); a call of `n` values runs the program of the smallest bound at least `n`. The forward programs serve both modules. The det backward adds a fixed-order sum of the weight-gradient rows. Every program serves every token count, so the libraries are a fixed set.
+**Architectures.** `sm_100a`, `sm_103a` and `sm_107a`. The forward and the backward ship one program per value bound from 2 to 9 (the bound is the number of values the program keeps in registers); a call of `n` values runs the program of the smallest bound at least `n`. The forward programs serve both modules. The det backward adds a fixed-order sum of the weight-gradient rows. Every program serves every token count, so the libraries are a fixed set. The GPU suites and the benchmark ran on B200 (`sm_100a`) and GB300 (`sm_103a`) with CUDA 13.5, against the acceptance criteria of issue #262. The `sm_107a` libraries ship, and `is_*_supported` reports SM107 (Rubin) devices as supported. Those libraries pass the package tests on VR200; the R200 runs and the `sm_107a` sanitizer runs are pending.
 
-**Inputs.** `values`: a list or tuple of `n` BF16 `[T, 7168]` tensors, each contiguous and 16-byte aligned, all on one CUDA device. They stay separate: nothing is stacked or copied. `w`: FP32 `[7168]` (the product of the norm and projection weights; its gradient is `dw`). `eps`: a run-time float, 1e-5 by default. `T >= 0` and `n` are run-time values: no shape compiles a new library.
+**Inputs.** `values`: a list or tuple of `n` BF16 `[T, 7168]` tensors, each contiguous and 16-byte aligned, all on one CUDA device. They stay separate: nothing is stacked or copied. `w`: FP32 `[7168]` (the product of the norm and projection weights; its gradient is `dw`). `eps`: a Python `float` or `int`, 1e-5 by default. It must be finite and at least 2**-84 (about 5.2e-26), so that an all-zero value row stays finite in the backward; otherwise `ValueError`. A `bool`, a tensor or another type raises `TypeError`: no call reads device memory to the host. `T >= 0` and `n` are run-time values: no shape compiles a new library.
+
+**Caller-owned outputs.** `out` (forward) and every `dv[j]` (backward) are BF16 `[T, 7168]`, contiguous and 16-byte aligned. `out` must not overlap any value or `w`. Each `dv[j]` must not overlap any value, `dout`, `w`, `p`, `r`, `d` or another `dv` entry. The checks compare byte ranges (metadata only, no synchronization) and raise `ValueError`.
 
 ### `cake_pplx.cake_attn_res_det_train`
 
@@ -1052,28 +1054,28 @@ Every sum has one fixed order. Each cluster of the backward writes its own FP32 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_attn_res_det` | `(values, w, *, eps=1e-5)` | As above; any may require grad | Autograd. Returns BF16 `out [T, 7168]`. The node saves references to the inputs and `p`, `r`, `d`. Gradients: BF16 `dv_j`, FP32 `dw`. |
-| `cake_attn_res_det_train_forward` | `(values, w, *, eps=1e-5, out=None)` | `out` BF16 `[T, 7168]`, contiguous | Returns `(out, p, r, d)`, the state FP32 `[T, n]` each. |
-| `cake_attn_res_det_train_backward` | `(dout, values, w, p, r, d, *, dv=None)` | `dout` BF16 `[T, 7168]`, contiguous; `p`, `r`, `d` the forward's; `dv` a list of `n` BF16 `[T, 7168]`, contiguous | Returns `(dv, dw)`: a list of `n` BF16 value gradients and FP32 `dw [7168]`. |
-| `cake_attn_res_det_train_workspace_bytes` | `(T, n, device=None)` | | Device bytes one backward allocates beside its operands and outputs: one FP32 `[7168]` row per cluster of the backward grid (see Caveats). |
+| `cake_attn_res_det_train_forward` | `(values, w, *, eps=1e-5, out=None)` | `out` BF16 `[T, 7168]`, contiguous, 16-byte aligned; it must not overlap a value or `w` | Returns `(out, p, r, d)`, the state FP32 `[T, n]` each. `T == 0` launches nothing. |
+| `cake_attn_res_det_train_backward` | `(dout, values, w, p, r, d, *, dv=None)` | `dout` BF16 `[T, 7168]`, contiguous, 16-byte aligned; `p`, `r`, `d` the forward's; `dv` a list of `n` BF16 `[T, 7168]`, contiguous, 16-byte aligned; no `dv[j]` may overlap an operand or another `dv` entry | Returns `(dv, dw)`: a list of `n` BF16 value gradients and FP32 `dw [7168]`. `T == 0` launches no Cake kernel and returns a zero-filled `dw` (a `torch.zeros` fill). |
+| `cake_attn_res_det_train_workspace_bytes` | `(T, n, device=None)` | | Device bytes one backward allocates beside its operands and outputs: one FP32 `[7168]` row, 28 KiB, per cluster of the backward grid; 0 for `T == 0`. It depends on `n` through the backward program's resident clusters: on B200, 142 rows for `n <= 5`, 104 for `n = 6` and 71 for `n >= 7` (fewer when `T` is smaller). |
 | `cake_attn_res_det_train_retained_bytes` | `(T, n)` | | Bytes of the state a forward keeps for the backward beside its inputs: `12 * T * n`. |
 
 Other public names: `is_cake_attn_res_det_train_supported(device=None)`, `CakeAttnResDetFunction`, `ARCHES`, `HIDDEN` (7168), `MAX_VALUES` (9), `SUPPORTED_COMPUTE_CAPABILITIES`.
 
 ### `cake_pplx.cake_attn_res_nondet_train`
 
-The forward is det's. The backward adds each cluster's weight-gradient sums into one zeroed FP32 `dw` with float atomics, so `dw` makes no bit promise; `out` and every `dv_j` have one fixed order. It allocates no workspace. It raises no alert. Source: [`kernels/attn_res/cake_pplx/cake_attn_res_nondet_train.py`](../kernels/attn_res/cake_pplx/cake_attn_res_nondet_train.py).
+The forward is det's. In the backward, each CTA keeps its tokens' weight-gradient sums in registers. After its token loop it adds them once into one zeroed FP32 `dw` with vector FP32 atomic reductions (`red.global.add.v4.f32`). The order of those adds varies, so `dw` makes no bit promise; `out` and every `dv_j` have one fixed order. It allocates no workspace. Under `torch.use_deterministic_algorithms(True)`, a backward of `T > 0` tokens (explicit or autograd) raises `RuntimeError` before the `dw` launch; with `warn_only=True` it emits a `UserWarning` and runs. The forward and a `T == 0` backward never alert. A launch captured into a CUDA graph alerts at capture, not at replay. Source: [`kernels/attn_res/cake_pplx/cake_attn_res_nondet_train.py`](../kernels/attn_res/cake_pplx/cake_attn_res_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_attn_res_nondet` | As det | As det | Autograd. |
-| `cake_attn_res_nondet_train_forward` | As det | As det | Returns `(out, p, r, d)`. |
-| `cake_attn_res_nondet_train_backward` | As det | As det | Returns `(dv, dw)`. |
+| `cake_attn_res_nondet` | As det | As det | Autograd. The backward alerts for `T > 0` (see above). |
+| `cake_attn_res_nondet_train_forward` | As det | As det | Returns `(out, p, r, d)`. Never alerts. |
+| `cake_attn_res_nondet_train_backward` | As det | As det | Returns `(dv, dw)`. Alerts for `T > 0` (see above). |
 | `cake_attn_res_nondet_train_workspace_bytes` | `(T, n, device=None)` | | 0. |
 | `cake_attn_res_nondet_train_retained_bytes` | `(T, n)` | | As det. |
 
 Other public names: `is_cake_attn_res_nondet_train_supported(device=None)`, `CakeAttnResNondetFunction`, `ARCHES`, `HIDDEN`, `MAX_VALUES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
 
-**Options and environment.** The keyword options are `eps`, `out` and `dv`. This family has no environment variables of its own.
+**Options and environment.** The keyword options are `eps`, `out` and `dv`. This family has no environment variables of its own: kernel selection and launches read none. The JIT build reads the variables of the [README](../README.md#jit-build-and-cache) (`CUDA_HOME` / `CUDA_PATH`, `CXX` and the `CAKE_PPLX_*` build settings).
 
 **Cross-family.** None.
 
@@ -1094,8 +1096,8 @@ h.backward(torch.randn_like(h))                  # values[j].grad (BF16), w.grad
 
 **Caveats.**
 
-- State kept for the backward: references to the inputs and `p`, `r`, `d`, `12 * T * n` bytes. Workspace of a backward call: none in nondet (`dw` is zeroed in place before the kernel adds into it); in det the FP32 `[7168]` weight-gradient rows, 28 KiB each, one per cluster of the backward grid. The det workspace query reads the device's architecture and SM count for `T > 0`.
-- The backward and the forward of 5 to 9 values run one cluster of four CTAs per token; the forward of 2 to 4 values runs one CTA per token (its clusters of four exchange nothing). Both run persistently: `min(T, resident clusters)` clusters, the resident count from counts measured per launch bound on B200, GB300, VR200 and R200 (another device takes a count under every measured one). The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
+- State kept for the backward: references to the inputs and `p`, `r`, `d`, `12 * T * n` bytes. Workspace of a backward call: none in nondet (`dw` is zeroed in place before the kernel adds into it); in det the FP32 `[7168]` weight-gradient rows, 28 KiB each, one per cluster of the backward grid, so it depends on `n`. The det workspace query reads the device's architecture and SM count for `T > 0`.
+- The backward and the forward of 5 to 9 values run one cluster of four CTAs per token; the forward of 1 to 4 values runs one CTA per token (its clusters of four exchange nothing). Both run persistently: `min(T, resident clusters)` clusters. The resident counts were measured per launch bound on B200, GB300, VR200 and R200. On GB200 (152-SM `sm_100a`) the counts at 3 and 4 CTAs per SM come from the four-CTA cluster programs of the engram_gate family, and there is no count at 2 CTAs per SM yet: there the forward of `n <= 4` and the backward of `n >= 7` take the fallback, a count under every measured one, as any other device does (measuring it is a follow-up). The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
 - No double backward.
 - Capture in a CUDA graph only after one eager call has loaded the programs.
 

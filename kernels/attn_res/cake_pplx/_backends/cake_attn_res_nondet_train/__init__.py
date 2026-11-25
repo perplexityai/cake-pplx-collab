@@ -18,8 +18,9 @@ limitations under the License.
 # 1 to 9 BF16 values of width 7168 (forward, backward and autograd) on SM100 / SM103 / SM107.  The values are separate
 # BF16 ``[T, 7168]`` tensors (nothing is stacked), ``w`` FP32 ``[7168]``, ``eps`` a run-time float; any token
 # count.  The non-deterministic package of the family.  The registry and the host plan live in ``cake_jit``, the
-# loader, checks, launches and autograd in ``cake_backend``.  Every switch is an explicit keyword argument; the package
-# reads no environment variable.
+# loader, checks, launches and autograd in ``cake_backend``.  Every switch is an explicit keyword argument: kernel
+# selection and launches read no environment variable; the JIT build shim ``_cake_pplx_jit.py`` reads ``CUDA_HOME`` /
+# ``CUDA_PATH``, ``CXX`` and the ``CAKE_PPLX_*`` build settings.
 
 from .cake_backend import (
     ARCHES,

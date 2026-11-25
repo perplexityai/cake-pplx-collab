@@ -249,17 +249,26 @@ def test_stage_launchers_pass_every_kernel_parameter(n, monkeypatch) -> None:
                 assert named[f"dv{j}"] is dv[j if j < n else 0], (name, j)
 
 
+def _device_is(monkeypatch, arch: str, sms: int) -> None:
+    """The backend sees CUDA device 0 as a device of ``arch`` with ``sms`` SMs (nothing is queried)."""
+    monkeypatch.setattr(cake_backend, "device_arch", lambda index: arch)
+    monkeypatch.setattr(cake_backend, "sm_count", lambda index: sms)
+    monkeypatch.setattr(cake_backend, "_resident", lambda name, index: cake_jit.resident_groups(name, arch, sms))
+
+
 def test_workspace_and_retained_bytes(monkeypatch) -> None:
-    """The backward's workspace is one FP32 ``[7168]`` row per launch group of the grid of the program ``n`` runs;
-    the forward keeps ``p``, ``r``, ``d``: ``12 T n`` bytes."""
-    monkeypatch.setattr(cake_backend, "device_arch", lambda index: "sm_103a")
-    monkeypatch.setattr(cake_backend, "sm_count", lambda index: 152)
-    monkeypatch.setattr(cake_backend, "_resident", lambda name, index: cake_jit.resident_groups(name, "sm_103a", 152))
+    """The backward's workspace is one FP32 ``[7168]`` row per launch group of the grid of the program ``n`` runs, so
+    it depends on ``n`` (on B200 at ``T = 16380``: 142 rows for ``n <= 5``, 104 for ``n = 6``, 71 for ``n >= 7``) and
+    is 0 for ``T = 0``; the forward keeps ``p``, ``r``, ``d``: ``12 T n`` bytes."""
+    _device_is(monkeypatch, "sm_103a", 152)
     for T in (0, 1, 16380):
         for n in (1, 2, 5, 9):
             assert pkg.cake_attn_res_det_train_retained_bytes(T, n) == 12 * T * n
             rows = cake_jit.groups(cake_jit.record("bwd", n), T, "sm_103a", 152) if T else 0
             assert pkg.cake_attn_res_det_train_workspace_bytes(T, n, "cuda:0") == 4 * HIDDEN * rows
+    _device_is(monkeypatch, "sm_100a", 148)
+    rows = {n: pkg.cake_attn_res_det_train_workspace_bytes(16380, n, "cuda:0") // (4 * HIDDEN) for n in range(1, 10)}
+    assert rows == {**dict.fromkeys(range(1, 6), 142), 6: 104, **dict.fromkeys(range(7, 10), 71)}, rows
     for bad in ((-1, 2), (1, 0), (1, 10)):
         with pytest.raises(ValueError):
             pkg.cake_attn_res_det_train_retained_bytes(*bad)
