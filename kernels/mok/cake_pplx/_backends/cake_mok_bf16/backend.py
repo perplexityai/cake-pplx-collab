@@ -25,6 +25,8 @@ import torch.distributed as dist
 from . import workspace as native
 from ._kernels import (
     EPILOGUE_TOPKS,
+    MODE_GROUPS,
+    SCALED_EPILOGUE_TOPKS,
     SCHEDULER_LAYOUTS,
     check_configuration,
     check_target,
@@ -37,6 +39,7 @@ from ._kernels import (
     MoKRecompute,
     MoKRecomputeMXFP8,
     MoKScheduler,
+    MoKSharedScale,
     SOURCE_SPLIT_UNIT,
     _ffi_stream,
     _recall,
@@ -232,6 +235,11 @@ class MoKFunctional:
     # the router-weight-after-down adapter.
     router_weight_position = "after_down"
     weight_before_down = False
+    router_weight_gradient = "quotient"
+    shared_expert = "unscaled"
+    activation = "swiglu"
+    group = None
+    shared_scale_kernels = None
 
     def __init__(
         self,
@@ -242,6 +250,9 @@ class MoKFunctional:
         clamped_swiglu=False,
         fp32_wgrad=False,
         router_weight_position="after_down",
+        router_weight_gradient="quotient",
+        shared_expert="unscaled",
+        activation="swiglu",
     ):
         """``clamped_swiglu`` selects which SwiGLU variant is compiled now.
 
@@ -268,24 +279,57 @@ class MoKFunctional:
         a ``str``, an ``ep``, ``local_experts`` or ``topk`` that is not an
         ``int`` and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
         ``bool`` (in both positions), ``ValueError`` for every other value.
+
+        ``router_weight_gradient`` (:data:`ROUTER_WEIGHT_GRADIENTS`),
+        ``shared_expert`` (:data:`SHARED_EXPERT_MODES`) and ``activation``
+        (:data:`ACTIVATIONS`) are explicit modes; their defaults keep the
+        behavior and the bits above. ``"direct"`` computes the
+        ``"after_down"`` router-weight gradient as ``dot(dh, h)`` from the
+        unscaled ``dy`` (defined at a zero weight; ``"quotient"`` divides by
+        the weight). ``"scaled"`` multiplies the shared expert's output by a
+        per-token FP32 scale ``s``, passed as ``shared_scale`` to every
+        ``forward`` and ``backward``; ``backward`` then also returns
+        ``d_shared_scale`` (a ninth item). ``activation="clamped_swiglu"`` is
+        ``clamped_swiglu=True``. A mode, layout or top-k of a
+        :data:`MODE_GROUPS` group runs that group's configuration only: the
+        512 routed experts at EP8 ``(8, 64)`` at top-k 10 with
+        ``"after_down"``, plain SwiGLU, ``fp32_wgrad=True``,
+        ``router_weight_gradient="direct"``, ``shared_expert="scaled"`` and
+        BF16 routed weights, on sm_100a and sm_103a. ``"situ_glu"`` and
+        ``"none"`` have no build in this package yet. The type of each mode is
+        checked with the other types (``TypeError``), its value after them
+        (``ValueError``).
         """
-        check_configuration(
+        group = check_configuration(
             ep,
             local_experts,
             topk,
             clamped_swiglu=clamped_swiglu,
             fp32_wgrad=fp32_wgrad,
             router_weight_position=router_weight_position,
+            router_weight_gradient=router_weight_gradient,
+            shared_expert=shared_expert,
+            activation=activation,
         )
-        if (ep, local_experts) not in SCHEDULER_LAYOUTS or topk not in EPILOGUE_TOPKS:
+        if (ep, local_experts) not in SCHEDULER_LAYOUTS or topk not in (
+            *EPILOGUE_TOPKS,
+            *SCALED_EPILOGUE_TOPKS,
+        ):
             raise ValueError("Unsupported exported (EP, local experts, top-k) layout")
         self.ep, self.local_experts, self.topk = ep, local_experts, topk
         self.router_weight_position = router_weight_position
         self.weight_before_down = router_weight_position == "before_down"
+        self.router_weight_gradient = router_weight_gradient
+        self.shared_expert, self.activation, self.group = (
+            shared_expert,
+            activation,
+            group,
+        )
+        clamped_swiglu = clamped_swiglu or activation == "clamped_swiglu"
         self.device = torch.device("cuda", torch.cuda.current_device())
         from .jit import target_arch
 
-        check_target(router_weight_position, target_arch(self.device))
+        check_target(router_weight_position, target_arch(self.device), group)
         self.communication = MoKCommunication()
         self.scheduler = MoKScheduler(ep, local_experts)
         self.fp32_wgrad = fp32_wgrad
@@ -304,12 +348,30 @@ class MoKFunctional:
         # per MoE layer and operation, no reference to any weight.
         self._validated = {}
         self._kernels(1.0 if clamped_swiglu else None)
-        self.epilogues = MoKEpilogues(topk, weighted=not self.weight_before_down)
+        scaled = shared_expert == "scaled"
+        self.epilogues = MoKEpilogues(
+            topk,
+            weighted=not self.weight_before_down,
+            shared_row="scaled" if scaled else "unscaled",
+        )
+        self.shared_scale_kernels = MoKSharedScale() if scaled else None
 
     def _check_variant(self, swiglu_limit, mxfp8):
-        """The per-call refusals of ``router_weight_position="before_down"``,
-        before any copy, barrier or launch: plain SwiGLU and MXFP8 routed
-        weights run with ``"after_down"`` only."""
+        """The per-call refusals of ``router_weight_position="before_down"``
+        and of a :data:`MODE_GROUPS` group, before any copy, barrier or launch:
+        plain SwiGLU and MXFP8 routed weights run with ``"after_down"`` only,
+        and a group runs its activation with BF16 routed weights only."""
+        if self.group is not None:
+            description = MODE_GROUPS[self.group].description
+            if swiglu_limit is not None:
+                raise ValueError(
+                    f"The {description} runs plain SwiGLU: pass swiglu_limit=None"
+                )
+            if mxfp8:
+                raise ValueError(
+                    f"The {description} takes BF16 routed weights, not MXFP8 tuples"
+                )
+            return
         if not self.weight_before_down:
             return
         if swiglu_limit is None:
@@ -337,6 +399,15 @@ class MoKFunctional:
                 self._forward_kernels[key] = MoKForward(True, weight_before_down=True)
                 self._backward_kernels[key] = MoKBackward(
                     True, True, weight_before_down=True
+                )
+                return self._forward_kernels[key], self._backward_kernels[key]
+            if self.group is not None:
+                self._forward_kernels[key] = MoKForward(False)
+                self._backward_kernels[key] = MoKBackward(
+                    False,
+                    self.fp32_wgrad,
+                    router_weight_gradient=self.router_weight_gradient,
+                    shared_operands=self.shared_expert == "scaled",
                 )
                 return self._forward_kernels[key], self._backward_kernels[key]
             forward, backward = (
@@ -538,6 +609,47 @@ class MoKFunctional:
                 *(buffer[(end - pad) * width : end * width] for buffer, width in tails),
             )
         return views
+
+    def _check_shared_scale(self, shared_scale, workspace, source_count):
+        """The per-call ``shared_scale``: required exactly with
+        ``shared_expert="scaled"``, a contiguous FP32 ``[source rows]`` tensor
+        on the workspace device (``TypeError`` for another type). Checked
+        before any copy, barrier or launch."""
+        if self.shared_expert != "scaled":
+            if shared_scale is not None:
+                raise ValueError(
+                    "shared_scale is taken only with shared_expert='scaled'"
+                )
+            return
+        if shared_scale is None:
+            raise ValueError(
+                "shared_expert='scaled' requires shared_scale (contiguous FP32 "
+                "[tokens]) on every forward and backward"
+            )
+        if not isinstance(shared_scale, torch.Tensor):
+            raise TypeError(
+                f"shared_scale must be a torch.Tensor, got {type(shared_scale).__name__}"
+            )
+        _check_input(
+            "shared_scale",
+            shared_scale,
+            torch.float32,
+            (source_count,),
+            workspace.device.index,
+        )
+
+    @staticmethod
+    def _scale_rows(shared_scale, shared_rows):
+        """The FP32 ``[shared_rows]`` scales the epilogues and the helpers read:
+        the caller's ``shared_scale``, or with padding rows a new tensor of the
+        caller's scales then ones (a padding row's shared output and inputs are
+        zero, so its scale reaches no returned value)."""
+        count = shared_scale.shape[0]
+        if count == shared_rows:
+            return shared_scale
+        rows = torch.ones(shared_rows, dtype=torch.float32, device=shared_scale.device)
+        rows[:count].copy_(shared_scale)
+        return rows
 
     def _check_device(self, workspace):
         if (
@@ -1162,8 +1274,14 @@ class MoKFunctional:
         swiglu_limit=None,
         *,
         save_context=True,
+        shared_scale=None,
     ):
         """Returns ``(y, context)``.
+
+        ``shared_scale`` (exactly with ``shared_expert="scaled"``): the FP32
+        ``[tokens]`` per-token scale ``s`` of the shared expert's output,
+        ``y = s * S(x) + sum_k w_k E_k(x)`` (``s * BF16(S(x))`` in FP32, then
+        the routed terms, one BF16 rounding).
 
         ``save_context=False`` (BF16 routed experts) runs the context-free
         forward of an activation-checkpointed step: it stores no gate/up
@@ -1199,11 +1317,13 @@ class MoKFunctional:
                 "save_context=False requires BF16 routed experts; the MXFP8 "
                 "forward always saves its context"
             )
+        self._check_shared_scale(shared_scale, workspace, source_count)
         shared_rows = self._shared_rows(source_count)
         if mxfp8 or schedule.layout is None:
             return self._forward_native(
                 config, workspace, schedule, x, router_weights, weights,
                 swiglu_limit, source_count, shared_rows, mxfp8, save_context,
+                shared_scale,
             )  # fmt: skip
         topk = workspace.topk
         if save_context:
@@ -1320,8 +1440,15 @@ class MoKFunctional:
             )
             if barrier is not None:
                 barrier.launch(())
+            # The shared scale is passed only with shared_expert="scaled": the
+            # default call keeps its form.
+            scales = (
+                ()
+                if shared_scale is None
+                else (self._scale_rows(shared_scale, shared_rows),)
+            )
             output = self.epilogues.launch_planned(
-                plan.epilogue, values[7], None if before_down else scores
+                plan.epilogue, values[7], None if before_down else scores, *scales
             )
         if not save_context:
             return output[:source_count], None
@@ -1350,6 +1477,7 @@ class MoKFunctional:
         shared_rows,
         mxfp8,
         save_context,
+        shared_scale=None,
     ):
         """Unplanned forward (MXFP8 routed experts, or a schedule without
         layout): the launchers' own validation and launch path."""
@@ -1410,8 +1538,16 @@ class MoKFunctional:
         if self.weight_before_down:
             output = self.epilogues.backward(values[7], combine)
         else:
+            scales = (
+                ()
+                if shared_scale is None
+                else (self._scale_rows(shared_scale, shared_rows),)
+            )
             output = self.epilogues.forward(
-                values[7], combine, workspace.router_weight_buffer[:shared_rows]
+                values[7],
+                combine,
+                workspace.router_weight_buffer[:shared_rows],
+                *scales,
             )
         if not save_context:
             return output[:source_count], None
@@ -1647,16 +1783,35 @@ class MoKFunctional:
         routed_down_weights,
         swiglu_limit=None,
         weight_grad_accumulators=None,
+        *,
+        shared_scale=None,
     ):
         """``weight_grad_accumulators``: with ``fp32_wgrad=True``, six FP32
         tensors (shared gate, up, down, routed gate, up, down) to which this
         call adds the weight gradients in FP32; the same tensors are returned.
         Routed macrobatch contributions are added in a fixed order.
 
+        Returns ``(dx, dscores, routed gate, up, down, shared gate, up, down
+        weight gradients)``, and with ``shared_expert="scaled"`` a ninth item,
+        the FP32 ``[tokens]`` ``d_shared_scale``.
+
         ``dscores`` is ``dot(d_hidden, hidden) / score`` with
-        ``router_weight_position="after_down"`` (zero at a zero score) and
-        ``dot(dh, a)`` with ``"before_down"`` (``dh`` the gradient of the down
-        projection's input, ``a`` the SwiGLU output; defined at a zero weight)."""
+        ``router_weight_position="after_down"`` and the default
+        ``router_weight_gradient="quotient"`` (zero at a zero score),
+        ``dot(dh, hidden)`` with ``router_weight_gradient="direct"`` (``dh``
+        from the unscaled ``dy``; defined at a zero weight) and ``dot(dh, a)``
+        with ``"before_down"`` (``dh`` the gradient of the down projection's
+        input, ``a`` the SwiGLU output; defined at a zero weight).
+
+        ``shared_scale`` (exactly with ``shared_expert="scaled"``): the
+        forward's FP32 ``[tokens]`` scale ``s``. ``dx`` adds ``s * dx_shared``
+        (``dx_shared`` from the unscaled ``dy``) to the routed rows in FP32,
+        then rounds once; the shared down-projection weight gradient reads
+        ``BF16(s * dy)``, the shared gate/up weight gradients read
+        ``BF16(s * x)``; ``d_shared_scale = dot(dh_shared, hidden_shared)``,
+        ``dh_shared = BF16(dy Wd_shared)`` and ``hidden_shared`` the context's
+        shared activation, summed in FP32 in a fixed order (defined at
+        ``s = 0``)."""
         workspace, source_count = self._inputs(
             config, workspace, schedule, x, router_weights, grad_output
         )
@@ -1680,12 +1835,13 @@ class MoKFunctional:
         self._check_variant(swiglu_limit, mxfp8)
         if mxfp8 != isinstance(forward_context.x_routed, tuple):
             raise ValueError("Forward context and routed weights differ in precision")
+        self._check_shared_scale(shared_scale, workspace, source_count)
         shared_rows = self._shared_rows(source_count)
         if mxfp8 or schedule.layout is None:
             return self._backward_native(
                 config, workspace, schedule, forward_context, grad_output, x,
                 router_weights, weights, swiglu_limit, weight_grad_accumulators,
-                source_count, shared_rows, mxfp8,
+                source_count, shared_rows, mxfp8, shared_scale,
             )  # fmt: skip
         topk = workspace.topk
         _, backward_kernel = self._kernels(swiglu_limit, False)
@@ -1791,6 +1947,19 @@ class MoKFunctional:
                     workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
                 else:
                     plan.scores.copy_(router_weights)
+            scale_rows = shared_operands = None
+            if shared_scale is not None:
+                # BF16(s * dy) and BF16(s * x): the shared weight gradients' operands.
+                scale_rows = self._scale_rows(shared_scale, shared_rows)
+                helpers = self.shared_scale_kernels
+                shared_operands = (
+                    helpers.rows(plan.dy_rows, scale_rows),
+                    helpers.rows(x_local, scale_rows),
+                )
+            # Passed only with the shared scale: the default call keeps its form.
+            program = (
+                {} if shared_operands is None else {"shared_operands": shared_operands}
+            )
             if barrier is not None:
                 barrier.launch(())
             values = backward_kernel.launch_planned(
@@ -1815,21 +1984,40 @@ class MoKFunctional:
                 schedule.tokens_per_expert,
                 schedule.layout,
                 weight_grad_accumulators,
+                **program,
             )
-            # Only dx_shared and the six weight gradients outlive the launch;
-            # the scratch is dropped before the epilogue output and the
-            # score-gradient copy are allocated (see ``_backward_native``).
+            # Only dx_shared and the six weight gradients outlive the launch
+            # (and, with the shared scale, dh_shared until its row dots are
+            # taken); the scratch is dropped before the epilogue output and
+            # the score-gradient copy are allocated (see ``_backward_native``).
+            d_shared_scale = None
+            del program
+            if shared_scale is not None:
+                del shared_operands
+                d_shared_scale = self.shared_scale_kernels.dot(
+                    values[6], context.hidden_shared
+                )
             dx_shared, weight_grads = values[0], values[9:]
             del values
             if barrier is not None:
                 barrier.launch(())
-            dx = self.epilogues.launch_planned(plan.epilogue, dx_shared)
+            # The default call keeps its form (no shared_scale argument).
+            scales = {} if scale_rows is None else {"shared_scale": scale_rows}
+            dx = self.epilogues.launch_planned(plan.epilogue, dx_shared, **scales)
             del dx_shared
         dscores = workspace.d_router_weight_buffer[:source_count].clone()
+        return self._backward_result(
+            dx, dscores, weight_grads, d_shared_scale, source_count
+        )
+
+    @staticmethod
+    def _backward_result(dx, dscores, weight_grads, d_shared_scale, source_count):
+        """``backward``'s return value: ``dx``, ``dscores``, the routed then the
+        shared weight gradients, and with the shared scale its gradient."""
         dwg_shared, dwg_routed, dwu_shared, dwu_routed, dwd_shared, dwd_routed = (
             weight_grads
         )
-        return (
+        grads = (
             dx[:source_count],
             dscores,
             dwg_routed,
@@ -1839,6 +2027,9 @@ class MoKFunctional:
             dwu_shared,
             dwd_shared,
         )
+        if d_shared_scale is None:
+            return grads
+        return (*grads, d_shared_scale[:source_count])
 
     def _backward_native(
         self,
@@ -1855,6 +2046,7 @@ class MoKFunctional:
         source_count,
         shared_rows,
         mxfp8,
+        shared_scale=None,
     ):
         """Unplanned backward (see :meth:`_forward_native`)."""
         (
@@ -1885,9 +2077,22 @@ class MoKFunctional:
                 source_count * workspace.topk : shared_rows * workspace.topk
             ].zero_()
             workspace.d_router_weight_buffer[source_count:shared_rows].zero_()
+        scale_rows = shared_operands = None
+        if shared_scale is not None:
+            scale_rows = self._scale_rows(shared_scale, shared_rows)
+            with _ffi_stream():
+                shared_operands = (
+                    self.shared_scale_kernels.rows(
+                        workspace.d_y_buffer[:shared_rows], scale_rows
+                    ),
+                    self.shared_scale_kernels.rows(x_local, scale_rows),
+                )
         self._barrier(workspace)
         _, backward_kernel = self._kernels(swiglu_limit, mxfp8)
         _, bwd_comm_sms = self._comm_split(config, workspace, mxfp8)
+        program = (
+            {} if shared_operands is None else {"shared_operands": shared_operands}
+        )
         values = backward_kernel(
             workspace.d_y_buffer[:shared_rows],
             workspace.d_y_buffer_ptrs,
@@ -1920,32 +2125,33 @@ class MoKFunctional:
             config.minibatch_size,
             weight_grad_accumulators=weight_grad_accumulators,
             layout=schedule.layout,
+            **program,
         )
         # Only dx_shared and the six weight gradients outlive the launch. The
         # kernel's routed and shared scratch (values[1:9]) is dropped here,
         # before the epilogue output and the score-gradient copy are allocated,
         # instead of at return: the caching allocator hands its blocks only to
         # later allocations on this stream, which are ordered after the kernel.
+        # With the shared scale, the row dots of dh_shared are taken first.
+        d_shared_scale = None
+        if shared_scale is not None:
+            del program, shared_operands
+            with _ffi_stream():
+                d_shared_scale = self.shared_scale_kernels.dot(
+                    values[6], forward_context.hidden_shared
+                )
         dx_shared, weight_grads = values[0], values[9:]
         del values
         self._barrier(workspace)
         dx = self.epilogues.backward(
-            dx_shared, workspace.d_x_routed_buffer[: shared_rows * workspace.topk]
+            dx_shared,
+            workspace.d_x_routed_buffer[: shared_rows * workspace.topk],
+            *(() if scale_rows is None else (scale_rows,)),
         )
         del dx_shared
         dscores = workspace.d_router_weight_buffer[:source_count].clone()
-        dwg_shared, dwg_routed, dwu_shared, dwu_routed, dwd_shared, dwd_routed = (
-            weight_grads
-        )
-        return (
-            dx[:source_count],
-            dscores,
-            dwg_routed,
-            dwu_routed,
-            dwd_routed,
-            dwg_shared,
-            dwu_shared,
-            dwd_shared,
+        return self._backward_result(
+            dx, dscores, weight_grads, d_shared_scale, source_count
         )
 
 

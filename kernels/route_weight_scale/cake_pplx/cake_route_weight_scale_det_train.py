@@ -74,11 +74,12 @@ host; every kernel runs on the current torch stream of the operands' device.
 Every argument is checked before a call allocates an output, so a call refused
 for its arguments allocates and launches nothing.  Workspace: none; a call
 allocates only the outputs it is not given.  A program's library loads (and,
-without a prebuilt one, JIT-builds) at its first launch: before capturing a
-CUDA graph, run an eager call of each width and stage the graph captures (or
-build every library of the architecture with the backend's
-``specs_for_arch``).  This module imports its backend package on first use and
-reads no environment variable.
+without a prebuilt one, JIT-builds) at its first launch.  The forward at
+``H = 4096`` and the backward at both widths pick a program and a grid by the
+row count (the same bits), so before capturing a CUDA graph, run an eager call
+of each stage, width and row count the graph captures (or build every library
+of the architecture with the backend's ``specs_for_arch``).  This module imports its backend package on
+first use and reads no environment variable.
 
 Usage::
 
@@ -231,8 +232,8 @@ def cake_route_weight_scale_det_train_backward(
     -----
     ``dw`` is one FP32 word per row: the products ``dy * x`` are exact in FP32, and the additions form a balanced
     binary tree in one fixed order (pairs within a load of 8 columns, the loads of a lane pairwise, the even and odd
-    halves, then five XOR shuffles across the row's 32 lanes).  It does not divide by ``w``, so a zero-weight row
-    keeps its sum.  ``rows = 0`` launches nothing.
+    halves, then five XOR shuffles across 32 lanes).  It does not divide by ``w``, so a zero-weight row keeps its
+    sum.  ``rows = 0`` launches nothing.
     """
 
     return _backend().cake_route_weight_scale_det_train_backward(x, dy, w, dx=dx, dw=dw)

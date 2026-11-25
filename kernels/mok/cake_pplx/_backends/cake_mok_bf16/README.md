@@ -26,6 +26,13 @@ Shared-expert weight gradients remain source-rank local.
   unweighted; top-k 6 over 384 routed experts (`(4, 96)`, `(8, 48)`,
   `(16, 24)`, `(32, 12)`, `(64, 6)`) and top-k 2 on the diagnostic layouts,
   with clamped SwiGLU and FP32 weight-gradient accumulation (see Contract).
+- **Explicit modes** (`router_weight_gradient`, `shared_expert`, `activation`;
+  defaults `"quotient"`, `"unscaled"`, `"swiglu"` keep every earlier bit):
+  the direct router-weight gradient (`"direct"`: `dot(dh, h)` from the
+  unscaled `dy`, defined at a zero weight) and the per-token shared-expert
+  scale (`"scaled"`: `y = s * S(x) + sum_k w_k E_k(x)` with its gradient
+  `d_s`), run by the 512-routed-expert group at EP8 `(8, 64)`, top-k 10, on
+  SM100a and SM103a (see Contract, "Explicit modes").
 
 The implementation uses standalone generated CUDA sources, loaded prebuilt
 from `aot/` when the package ships them and otherwise built by the package's
@@ -116,6 +123,31 @@ context = backend.recompute_forward_context(
     router_weights=router_w)
 grads = backend.backward(config, workspace, schedule, context, dy, x, router_w, *weights,
                          swiglu_limit=10.0, weight_grad_accumulators=accumulators)
+
+# 512 routed experts at EP8 (64 local experts), top-10, with the direct
+# router-weight gradient and a per-token FP32 shared-expert scale s
+# (shape [n]): y = s * S(x) + sum_k w_k E_k(x). Plain SwiGLU, FP32 weight
+# gradients, BF16 routed weights; a workspace of its own at the worst-case
+# schedule capacity, as above.
+ep, local, k = 8, 64, 10
+worst = min(k, local) * max_rows * ep + local * 255
+m = math.ceil(worst / (max_rows * k)) / ep
+config, workspace = create_mok_bf16_workspace(
+    group=group, device=device, num_local_tokens=n, hidden_size=4096, topk=k,
+    source_capacity=max_rows, schedule_capacity_multiplier=m,
+)
+accumulators = [torch.zeros(w.shape, device=device) for w in weights]  # FP32
+backend = prepare_mok_bf16(ep_size=ep, local_experts=local, topk=k, fp32_wgrad=True,
+                           router_weight_gradient="direct", shared_expert="scaled")
+backend.prepare(save_context=False)  # compile before CUDA Graph capture
+schedule = backend.build_schedule(workspace, config, ids, num_local_experts=local)
+y, _ = backend.forward(config, workspace, schedule, x, router_w, *weights,
+                       save_context=False, shared_scale=s)
+context = backend.recompute_forward_context(
+    config, workspace, schedule, x, *weights[:2], *weights[3:5])
+dx, d_w, *weight_grads, d_s = backend.backward(
+    config, workspace, schedule, context, dy, x, router_w, *weights,
+    weight_grad_accumulators=accumulators, shared_scale=s)
 ```
 
 `weights` contains shared gate/up/down followed by routed gate/up/down; gate
@@ -163,9 +195,13 @@ A forward context holds the shared-expert activations and the routed
 activations of the first macrobatch, which stays resident in the forward ring
 (MXFP8 keeps the routed x and activation transposed in MXFP8 and gate/up in
 E4M3). Backward replays later macrobatches inside the fused kernel. No routed
-expert output is saved: the router-score gradient is fused into SwiGLU
-backward as `dot(d_hidden, hidden) / score`, as in native MoK. Scores must be
-positive; a zero score yields a zero score gradient. With
+expert output is saved: with the default
+`router_weight_gradient="quotient"` the router-score gradient is fused into
+SwiGLU backward as `dot(d_hidden, hidden) / score`, as in native MoK. Scores
+must be positive there; a zero score yields a zero score gradient. With
+`router_weight_gradient="direct"` (the 512-expert top-10 group) the
+router-weight gradient is `dot(dh, h)` with `dh` from the unscaled `dy`, with
+no division: router weights are `>= 0` and a zero weight has its gradient. With
 `router_weight_position="before_down"` the router-weight gradient is
 `dot(dh, a)` (`dh` the gradient of the down projection's input `h`, `a` the
 SwiGLU activation), with no division: it is defined at a zero weight, whose
@@ -256,6 +292,17 @@ SM103a and SM107a. The forward and recompute take two arguments more than their
 clamped roles (`weight_peers`, the uint64 table of the ranks' router-weight
 buffers, and `row_weights`, the per-call FP32 `[macro_size]` ring); the
 backward takes the clamped FP32 backward's arguments.
+
+The 512-expert top-10 group's kernels (`MODE_GROUPS["scaled_top10"]`) are
+generated for SM100a and SM103a only: the direct-gradient backward
+`backward_fp32_direct` (the arguments of `backward_fp32` and `dy_scaled_ptr`,
+the second per-call `[macro_size, hidden]` BF16 ring that holds the scaled
+`dy` rows the down-projection weight gradient reads), the scaled top-10
+epilogues `epilogue_forward_scaled_10` and `epilogue_backward_scaled_10` (the
+arguments of the top-8 ones and `shared_scale`, FP32 `[tokens]`), the two
+shared-scale helpers `shared_scale_rows` and `shared_scale_dot`, and the count /
+rows kernels of `(8, 64)`. The adapter refuses the group on any other target
+before it loads a kernel.
 
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
 over the two dies of an SM107a GPU, are not shipped: this package has no such
@@ -387,10 +434,34 @@ across communication-SM splits and under CUDA Graph replay.
   | `"before_down"` | `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` | 6 | clamped | FP32 | BF16 | SM100a, SM103a, SM107a |
   | `"before_down"` | `(1, 4)`, `(4, 4)` (diagnostic) | 2 | clamped | FP32 | BF16 | SM100a, SM103a, SM107a |
 
+- Explicit modes (`prepare_mok_bf16` keywords; the first value of each table is
+  the default and keeps every earlier bit). Their types are checked with the
+  other types (`TypeError`), their values after them (`ValueError`):
+
+  | Keyword | Values | Meaning |
+  | --- | --- | --- |
+  | `router_weight_gradient` (`ROUTER_WEIGHT_GRADIENTS`) | `"quotient"`, `"direct"` | `"after_down"` router-weight gradient. `"quotient"`: `dh = BF16(BF16(w * dy) Wd)`, `d_w = dot(dh, h) / w`, zero at a zero weight. `"direct"`: `dh = BF16(dy Wd)` from the unscaled `dy`, activation gradient `w * dh` in FP32, `d_w = dot(dh, h)` (FP32, fixed order), defined at a zero weight; the down-projection weight gradient reads `BF16(w * dy)` in both, bit for bit the same |
+  | `shared_expert` (`SHARED_EXPERT_MODES`) | `"unscaled"`, `"scaled"`, `"none"` | `"scaled"`: `forward` and `backward` take `shared_scale` (FP32 `[tokens]`, the forward's on the backward), `y = BF16(s * BF16(S(x)) + sum_k w_k o_k)` in FP32; `dx` adds `s * dx_shared` (`dx_shared` from the unscaled `dy`); the shared down-projection weight gradient reads `BF16(s * dy)`, the shared gate/up weight gradients `BF16(s * x)`; `backward` returns `d_shared_scale = dot(dh_shared, hidden_shared)` (FP32, fixed order; `dh_shared = BF16(dy Wd_shared)`) as a ninth item, defined at `s = 0`. `s = 1` gives the unscaled values bit for bit. `"none"` has no build in this package yet |
+  | `activation` (`ACTIVATIONS`) | `"swiglu"`, `"clamped_swiglu"`, `"situ_glu"` | `"clamped_swiglu"` is `clamped_swiglu=True`; `"situ_glu"` has no build in this package yet |
+
+  A configuration that uses a layout, the top-k or a mode of a kernel group
+  (`MODE_GROUPS`) runs exactly that group's configuration:
+
+  | Group | Layouts (EP, local experts) | Top-k | Position | SwiGLU | Weight gradients | `router_weight_gradient` | `shared_expert` | Routed weights | Targets |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | `"scaled_top10"` | `(8, 64)` (512 routed experts) | 10 | `"after_down"` | plain | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a |
+
+  Recompute (`recompute_forward_context`) is unchanged by the modes. The group's
+  backward holds, beyond the unscaled backward, the scaled `dy` ring
+  (`macro_size x hidden` BF16) and the two shared operands `BF16(s * dy)` and
+  `BF16(s * x)` (`source rows x hidden` BF16 each) until its launch ends, and
+  `dh_shared` until its row dots are taken.
+
 - BF16 inputs, shared weights and outputs; FP32 router scores (positive with
-  `"after_down"`, nonnegative with `"before_down"`); contiguous int64 expert
-  IDs. Each token selects distinct, valid expert IDs. Scores are already
-  normalized/scaled by the caller.
+  `"after_down"` and the default `"quotient"` gradient; nonnegative with
+  `"before_down"` and with `"direct"`, where a zero weight has a defined
+  gradient); contiguous int64 expert IDs. Each token selects distinct, valid
+  expert IDs. Scores are already normalized/scaled by the caller.
 - Logical source token counts may differ across ranks and may be zero. Hidden
   and intermediate widths are positive multiples of 256; MXFP8 also requires a
   hidden width that is a multiple of 512. Below CUDA 13.1 the MXFP8 forward

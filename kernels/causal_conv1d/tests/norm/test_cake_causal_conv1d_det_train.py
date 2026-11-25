@@ -57,8 +57,11 @@ on channel tiles of its own, or a pair direct program (two channels per thread) 
 counters: the suite checks the literal tables, the selection at every range bound, the direct and pair plans and
 their token-block grid, and at the first and the last row of every range the launched program, ``y`` bitwise the
 dynamic program's and run to run, a caller-owned workspace left as it was, the naive-tier judge and a CUDA Graph
-with no fill node; at each pair key, for three channel counts, ``S_lo`` on one document, S 1000, ``S_hi`` and one
-token outside each end, ``y`` bitwise the program's without the pair rows and the static program's.
+with no fill node; at each pair key, at both ends of its C range and at C 512, 776 and 1024 where it holds them,
+``S_lo`` on one document, S 1000, ``S_hi`` and one token outside each end (no S 0), and S 1, 2, 3, 4, 8, 15, 16, 31,
+32 and 63 in the two packings of ``_pair_short_docs`` (an empty document, a one-token document, another empty one
+and the other ``S - 1`` tokens; ``S`` one-token documents with an empty document between each two), ``y`` bitwise
+the program's without the pair rows and the static program's.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
@@ -375,10 +378,8 @@ FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] 
         ("fwd_dt", 904, 1024): (1, 12288),
     },
     "sm_103a": {
-        ("fwd", 512, 512): (1, 2048),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
-        ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
@@ -387,7 +388,6 @@ FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] 
         ("fwd", 776, 824): (1, 4096),
         ("fwd", 832, 832): (1, 8192),
         ("fwd", 840, 896): (1, 4096),
-        ("fwd", 904, 952): (1, 2048),
         ("fwd", 960, 1024): (1, 24576),
         ("fwd_bias", 512, 512): (1, 24576),
         ("fwd_bias", 520, 520): (1, 12288),
@@ -427,7 +427,6 @@ FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] 
         ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
-        ("fwd", 768, 768): (1, 2048),
         ("fwd", 776, 824): (1, 32768),
         ("fwd", 832, 832): (1, 4096),
         ("fwd", 840, 888): (1, 8192),
@@ -572,26 +571,31 @@ DIRECT_PLANS_OF_RECORD: dict[str, dict[str, tuple[int, int]]] = {
 }
 # The pair direct programs' rows (``cake_jit.PAIR_ROWS``): arch -> (route, C_lo,
 # C_hi) -> (S_lo, S_hi), the keys of one architecture and forward route disjoint
-# in C (one key, two on sm_100a ``fwd_dt``).  Inside a pair range the route's
-# pair direct program (geometry ``vec`` 2) runs on the arch's
-# ``PAIR_PLANS_OF_RECORD`` form, ahead of the static and the direct ranges it
-# covers; outside it those tables and the rules decide.
+# in C (one key, two on sm_100a ``fwd_dt``, three on sm_103a ``fwd_bias`` and
+# sm_107a ``fwd``).  Inside a pair range the route's pair direct program
+# (geometry ``vec`` 2) runs on the arch's ``PAIR_PLANS_OF_RECORD`` form, ahead
+# of the static and the direct ranges it covers; outside it those tables and the
+# rules decide.
 PAIR_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
-        ("fwd", 512, 1024): (64, 3072),
-        ("fwd_dt", 512, 640): (64, 1536),
-        ("fwd_dt", 648, 1024): (64, 1024),
-        ("fwd_bias", 512, 1024): (128, 1536),
+        ("fwd", 512, 1024): (1, 3072),
+        ("fwd_dt", 512, 640): (1, 1536),
+        ("fwd_dt", 648, 1024): (1, 1024),
+        ("fwd_bias", 512, 1024): (1, 1536),
     },
     "sm_103a": {
-        ("fwd", 512, 1024): (64, 3072),
-        ("fwd_dt", 512, 1024): (32, 1792),
-        ("fwd_bias", 512, 1024): (16, 1536),
+        ("fwd", 512, 1024): (1, 3072),
+        ("fwd_dt", 512, 1024): (1, 1792),
+        ("fwd_bias", 512, 712): (1, 1536),
+        ("fwd_bias", 720, 768): (16, 1536),
+        ("fwd_bias", 776, 1024): (1, 1536),
     },
     "sm_107a": {
-        ("fwd", 512, 1024): (64, 2560),
-        ("fwd_dt", 512, 1024): (16, 1792),
-        ("fwd_bias", 512, 1024): (16, 1792),
+        ("fwd", 512, 512): (1, 2560),
+        ("fwd", 520, 736): (4, 2560),
+        ("fwd", 744, 1024): (1, 2560),
+        ("fwd_dt", 512, 1024): (1, 1792),
+        ("fwd_bias", 512, 1024): (1, 1792),
     },
 }
 # The pair direct programs' channel tiles: arch -> route -> (ct_vec, n_sub),
@@ -1484,7 +1488,8 @@ def test_small_s_rows_literal_tables() -> None:
     per architecture and route, every range inside ``S >= 1``, a static range
     below the direct range of a key that both tables cover, the pair keys of
     ``PAIR_ROWS_OF_RECORD`` per architecture and route (one, two on sm_100a
-    ``fwd_dt``); per architecture and forward route one static program (the
+    ``fwd_dt``, three on sm_103a ``fwd_bias`` and sm_107a ``fwd``); per architecture
+    and forward route one static program (the
     route's fallback, listed first), one direct program (geometry ``vec`` 8,
     named by every direct key of the route) and one pair direct program
     (geometry ``vec`` 2, named by every pair key of the route), listed last in
@@ -1604,8 +1609,8 @@ def test_small_s_rows_select_their_programs(monkeypatch) -> None:
     its direct program, else inside one of ``FALLBACK_ROWS_OF_RECORD`` its
     static program, and elsewhere the dynamic program the rules select without
     the rows: at ``S`` 1, 1000, each bound of every range of the key and of
-    every pair range of the route (where a route has two pair keys, each key's
-    ``C`` also runs at the other key's bounds) and one token beyond it, for the
+    every pair range of the route (where a route has more than one pair key, each
+    key's ``C`` also runs at the other keys' bounds) and one token beyond it, for the
     first, a middle and the last ``C`` of every key, on every architecture and
     forward route.  Each table gives the range of its own key covering ``C``.
     ``S`` of ``None`` under a key is refused; outside every key it is not
@@ -3026,12 +3031,7 @@ def test_autograd_end_to_end(kind) -> None:
 
 def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
     arch = _arch()
-    # One shape per backward program of the route: C = 128 runs the fallback program, each channel threshold
-    # its own program.  The shape loop below must then load nothing.
-    for C in (128, *_backward_thresholds(arch)):
-        _check(64, C, None)
-    loaded_before = loader.load.cache_info().misses
-    for S, C, docs in (
+    shapes = (
         (1, 128, None),
         (65, 256, (64, 1)),
         (5, 136, (2, 0, 3)),
@@ -3039,7 +3039,26 @@ def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
         (4097, 2048, (1000, 0, 3, 3094)),
         (4097, 1024, (0, 4097, 0)),
         (4097, 1280, (1000, 0, 3, 3094)),
-    ):
+    )
+    # One shape per backward program of the route: C = 128 runs the fallback program, each channel threshold
+    # its own program.
+    for C in (128, *_backward_thresholds(arch)):
+        _check(64, C, None)
+    # Per shape of the loop, one document one token shorter (two tokens for S = 1), which selects the same forward
+    # and backward programs: the forward selects its static, direct and pair direct programs by S, at rows the
+    # shapes above need not reach (S 4097 at C 1024 runs the static program).  No warm-up size is a loop size.
+    # The shape loop below must then load nothing.
+    sizes = {(S, C) for S, C, _ in shapes}
+    for S, C, _ in shapes:
+        S_warm = 2 if S == 1 else S - 1
+        assert (S_warm, C) not in sizes
+        for route in (FORWARD_OF["bwd"], "bwd"):
+            assert loader.selected_modules(arch, route, C=C, S=S_warm) == loader.selected_modules(
+                arch, route, C=C, S=S
+            ), f"route {route} on {arch} selects another program at S={S_warm} than at S={S} (C={C})"
+        _check(S_warm, C, None)
+    loaded_before = loader.load.cache_info().misses
+    for S, C, docs in shapes:
         _check(S, C, docs)
     assert loader.load.cache_info().misses == loaded_before, (
         "a changed problem size rebuilt a module"
@@ -3637,6 +3656,19 @@ def test_small_s_rows_cuda_graph_has_no_fill_node(kind) -> None:
 # The channel counts of the pair rows' launch test besides both ends of each
 # pair key: C 512 to 1024 and C 776, whose last pair tile is partial.
 PAIR_ROW_CHANNELS = (512, 776, 1024)
+# The token counts below 64 of the pair rows' launch test, each in the two
+# packings of ``_pair_short_docs``.
+PAIR_SHORT_TOKENS = (1, 2, 3, 4, 8, 15, 16, 31, 32, 63)
+
+
+def _pair_short_docs(S: int) -> tuple:
+    """Two packings of ``S`` tokens with one-token and empty documents: an empty
+    document, a one-token document, another empty one and the other ``S - 1``
+    tokens (``(0, 1, 0)`` at S 1); ``S`` one-token documents with an empty
+    document between each two (more than 31 documents from S 17)."""
+
+    mixed = (0, 1, 0, S - 1) if S > 1 else (0, 1, 0)
+    return mixed, (1, 0) * (S - 1) + (1,)
 
 
 @pytest.mark.parametrize("kind", ("fwd", "fwd_dt", "fwd_bias"))
@@ -3647,13 +3679,17 @@ def test_pair_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
     at ``S_hi`` the forward launches the route's pair direct program on the
     ``PAIR_PLANS_OF_RECORD`` form (``ceil(C / 2 / 16)`` tiles) and its
     token-block grid, with no ``work`` counters; one token outside the range
-    (``S_lo - 1``, ``S_hi + 1``) it launches another program.  Where the route
-    has two pair keys, each key's C also runs at the other key's ``S_hi`` and
-    one token beyond it.  At every row ``y`` repeats bit for bit, equals bit
-    for bit the forward's without ``PAIR_ROWS`` (the static, direct or dynamic
-    program the other tables and the rules pick) and the route's static
-    program's launched on its own on the one-tile plan, and is judged against
-    the naive tier."""
+    (``S_lo - 1`` above S 1, ``S_hi + 1``) it launches another program.  Where
+    the route has more than one pair key, each key's C also runs at the other
+    keys' ``S_hi`` and one token beyond each.  Each C also runs every S of
+    ``PAIR_SHORT_TOKENS`` in both packings of ``_pair_short_docs`` (an empty
+    document, a one-token document, another empty one and the other ``S - 1``
+    tokens; ``S`` one-token documents with an empty document between each two),
+    inside the range or below it.  At every row ``y`` repeats bit for bit,
+    equals bit for bit the forward's without ``PAIR_ROWS`` (the static, direct
+    or dynamic program the other tables and the rules pick) and the route's
+    static program's launched on its own on the one-tile plan, and is judged
+    against the naive tier."""
 
     _require_route(kind)
     arch = _arch()
@@ -3672,10 +3708,11 @@ def test_pair_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
             (s_lo, None),
             (1000, "perf"),
             (s_hi, "perf"),
-            (s_lo - 1, _row_docs(s_lo - 1)),
+            *(((s_lo - 1, _row_docs(s_lo - 1)),) if s_lo > 1 else ()),
             (s_hi + 1, "perf"),
         ]
         rows += [(S, "perf") for end in ends if end != s_hi for S in (end, end + 1)]
+        rows += [(S, docs) for S in PAIR_SHORT_TOKENS for docs in _pair_short_docs(S)]
         held = {C for C in PAIR_ROW_CHANNELS if c_lo <= C <= c_hi}
         cases += [(C, (s_lo, s_hi), rows) for C in sorted({c_lo, c_hi} | held)]
     pair = _rows_program(arch, kind, PAIR_VEC)
