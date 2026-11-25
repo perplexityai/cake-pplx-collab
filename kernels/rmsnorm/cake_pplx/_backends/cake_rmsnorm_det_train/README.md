@@ -55,15 +55,16 @@ slot `s` the rows `s`, `s + n`, `s + 2n`, ... with `n` = min(`T`, slots), and ea
 sums its rows plainly in row order into its partial row; where its kernel runs beside a
 side stream, the window leaves eight SMs out of the slot count (`ctas_per_sm` x (SM
 count - 8)). The sm_107a grouped windows (H = 1024 and 1280) give slot `s` the tiles
-`s`, `s + n`, ... of five rows (one per row group), with `n` = min(ceil(`T` / 5),
-slots), and leave one SM out (`ctas_per_sm` x (SM count - 1)), so a kernel resident on
-one SM holds back no slot. A column-task window sums each column over every row in one
-CTA in a fixed order (FP32 sums per row lane, the lanes' sums added in FP32), so there
-`dw` does not depend on the SM count. The FP32-weight routes use the same windows and
-orders, except the `_w32` routes the tables list: they keep the programs of windows
-where the BF16 route runs a program without an FP32-weight build, or run another
-program's FP32-weight build where that one is faster with an FP32 weight. Program and
-reduce names are the first eight hex digits of the program name.
+`s`, `s + n`, ... of `R` rows (one per row group: five, or three above 32767 rows of
+H = 1280), with `n` = min(ceil(`T` / `R`), slots), and leave one SM out (`ctas_per_sm`
+x (SM count - 1)), so a kernel resident on one SM holds back no slot. A column-task
+window sums each column over every row in one CTA in a fixed order (FP32 sums per row
+lane, the lanes' sums added in FP32), so there `dw` does not depend on the SM count.
+The FP32-weight routes use the same windows and orders, except the `_w32` routes the
+tables list: they keep the programs of windows where the BF16 route runs a program
+without an FP32-weight build, or run another program's FP32-weight build where that
+one is faster with an FP32 weight. Program and reduce names are the first eight hex
+digits of the program name.
 
 ### sm_100a
 
@@ -252,13 +253,15 @@ reduce names are the first eight hex digits of the program name.
 | `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
 | `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
 | `bwd_h1280` | (512, 6143] | 12bbedff | plain | row-strided slots | 849ee5d8 (chain, column-split) |
-| `bwd_h1280` | (6143, inf) | cbeec4e6 | plain | row-strided slots, 1 SMs left out | 3ce544b3 (chain) |
+| `bwd_h1280` | (6143, 32767] | 3f26352e | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
+| `bwd_h1280` | (32767, inf) | 7ac3bb64 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
 | `bwd_w32_h1280` | (0, 1] | 103805d9 | column task | - | - |
 | `bwd_w32_h1280` | (1, 128] | 8d8ef930 | column task | - | - |
 | `bwd_w32_h1280` | (128, 512] | e476d0b2 | column task | - | - |
 | `bwd_w32_h1280` | (512, 4096] | 80956d25 | plain | row-strided slots | 849ee5d8 (chain, column-split) |
 | `bwd_w32_h1280` | (4096, 6143] | c66b8cbd | plain | row-strided slots | 382c8727 (chain, column-split) |
-| `bwd_w32_h1280` | (6143, inf) | 3a321b74 | plain | row-strided slots, 1 SMs left out | 3ce544b3 (chain) |
+| `bwd_w32_h1280` | (6143, 32767] | b1a35315 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
+| `bwd_w32_h1280` | (32767, inf) | 7a4606b0 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
 | `bwd_h1536` | (0, 1] | c3b1b46a | column task | - | - |
 | `bwd_h1536` | (1, 576] | 1207b056 | column task | - | - |
 | `bwd_h1536` | (576, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 628248fe (tree) |

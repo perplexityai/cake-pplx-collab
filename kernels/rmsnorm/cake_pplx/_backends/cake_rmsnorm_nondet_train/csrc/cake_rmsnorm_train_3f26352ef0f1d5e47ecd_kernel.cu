@@ -117,7 +117,7 @@ __device__ __forceinline__ void cp_async_bulk_gmem2smem(
 extern "C" {
 
 __global__ __launch_bounds__(1024, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+kernel_cake_rmsnorm_train_3f26352ef0f1d5e47ecd(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -206,27 +206,14 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
             int wg = (int)warp - gi * 5;
             int t = (int)tid - gi * 160;
             int ring_at = (int)ring_addr;
-            float ww[8];
+            unsigned int ww[4];
             {
-                unsigned _ldv8_0_0;
-                unsigned _ldv8_0_1;
-                unsigned _ldv8_0_2;
-                unsigned _ldv8_0_3;
-                unsigned _ldv8_0_4;
-                unsigned _ldv8_0_5;
-                unsigned _ldv8_0_6;
-                unsigned _ldv8_0_7;
-                asm volatile(
-                    "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                    : "=r"(_ldv8_0_0), "=r"(_ldv8_0_1), "=r"(_ldv8_0_2), "=r"(_ldv8_0_3), "=r"(_ldv8_0_4), "=r"(_ldv8_0_5), "=r"(_ldv8_0_6), "=r"(_ldv8_0_7) : "l"((const void*)(w + ((unsigned long long)((0 + t) * 8)))) : "memory");
-                ww[0 + 0] = __uint_as_float(_ldv8_0_0);
-                ww[0 + 1] = __uint_as_float(_ldv8_0_1);
-                ww[0 + 2] = __uint_as_float(_ldv8_0_2);
-                ww[0 + 3] = __uint_as_float(_ldv8_0_3);
-                ww[0 + 4] = __uint_as_float(_ldv8_0_4);
-                ww[0 + 5] = __uint_as_float(_ldv8_0_5);
-                ww[0 + 6] = __uint_as_float(_ldv8_0_6);
-                ww[0 + 7] = __uint_as_float(_ldv8_0_7);
+                const uint4* _vptr_0 = reinterpret_cast<const uint4*>(w + (unsigned long long)((0 + t) * 8));
+                uint4* _vdst_0 = reinterpret_cast<uint4*>(&ww[0]);
+                #pragma unroll
+                for (int _blk = 0; _blk < 1; _blk++) {
+                    _vdst_0[_blk] = _vptr_0[_blk];
+                }
             }
             float acc[8];
             float part[8];
@@ -265,26 +252,26 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
                     float gb_0 = __uint_as_float(gw[0] & 4294901760u);
                     float xa_0 = __uint_as_float(xw[0] << 16);
                     float xb_0 = __uint_as_float(xw[0] & 4294901760u);
-                    dq = __fmaf_rn(ga_0 * ww[0], xa_0, dq);
-                    dq = __fmaf_rn(gb_0 * ww[1], xb_0, dq);
+                    dq = __fmaf_rn(ga_0 * __uint_as_float(ww[0] << 16), xa_0, dq);
+                    dq = __fmaf_rn(gb_0 * __uint_as_float(ww[0] & 4294901760u), xb_0, dq);
                     float ga_1 = __uint_as_float(gw[1] << 16);
                     float gb_1 = __uint_as_float(gw[1] & 4294901760u);
                     float xa_1 = __uint_as_float(xw[1] << 16);
                     float xb_1 = __uint_as_float(xw[1] & 4294901760u);
-                    dq = __fmaf_rn(ga_1 * ww[2], xa_1, dq);
-                    dq = __fmaf_rn(gb_1 * ww[3], xb_1, dq);
+                    dq = __fmaf_rn(ga_1 * __uint_as_float(ww[1] << 16), xa_1, dq);
+                    dq = __fmaf_rn(gb_1 * __uint_as_float(ww[1] & 4294901760u), xb_1, dq);
                     float ga_2 = __uint_as_float(gw[2] << 16);
                     float gb_2 = __uint_as_float(gw[2] & 4294901760u);
                     float xa_2 = __uint_as_float(xw[2] << 16);
                     float xb_2 = __uint_as_float(xw[2] & 4294901760u);
-                    dq = __fmaf_rn(ga_2 * ww[4], xa_2, dq);
-                    dq = __fmaf_rn(gb_2 * ww[5], xb_2, dq);
+                    dq = __fmaf_rn(ga_2 * __uint_as_float(ww[2] << 16), xa_2, dq);
+                    dq = __fmaf_rn(gb_2 * __uint_as_float(ww[2] & 4294901760u), xb_2, dq);
                     float ga_3 = __uint_as_float(gw[3] << 16);
                     float gb_3 = __uint_as_float(gw[3] & 4294901760u);
                     float xa_3 = __uint_as_float(xw[3] << 16);
                     float xb_3 = __uint_as_float(xw[3] & 4294901760u);
-                    dq = __fmaf_rn(ga_3 * ww[6], xa_3, dq);
-                    dq = __fmaf_rn(gb_3 * ww[7], xb_3, dq);
+                    dq = __fmaf_rn(ga_3 * __uint_as_float(ww[3] << 16), xa_3, dq);
+                    dq = __fmaf_rn(gb_3 * __uint_as_float(ww[3] & 4294901760u), xb_3, dq);
                     float dsum = dq;
                     #pragma unroll
                     for (int offset = 16; offset > 0; offset >>= 1)
@@ -306,17 +293,12 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
                     tot = tot + dv[2];
                     tot = tot + dv[3];
                     tot = tot + dv[4];
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                    mbarrier_arrive(empty_addr + (gi + 5 * (int)((unsigned int)k % 3)) * 8);
                     float cq = tot * 0.00078125f;
                     float kx = rq * rq * rq * cq;
                     float nkx = -kx;
                     unsigned long long dx_base = (unsigned long long)row * 1280ull;
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&gw[0])), "=r"(*reinterpret_cast<uint32_t*>(&gw[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&gw[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&gw[(0) + 3]))
-                        : "r"(sbase + (0 + t) * 8 * 2));
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&xw[0])), "=r"(*reinterpret_cast<uint32_t*>(&xw[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&xw[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&xw[(0) + 3]))
-                        : "r"(sbase + 2560 + (0 + t) * 8 * 2));
-                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     float out_0[8];
                     float g0_0 = __uint_as_float(gw[0] << 16);
                     float g1_0 = __uint_as_float(gw[0] & 4294901760u);
@@ -324,8 +306,8 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
                     float x1_0 = __uint_as_float(xw[0] & 4294901760u);
                     float rg0_0 = rq * g0_0;
                     float rg1_0 = rq * g1_0;
-                    out_0[0] = __fmaf_rn(nkx, x0_0, rg0_0 * ww[0]);
-                    out_0[1] = __fmaf_rn(nkx, x1_0, rg1_0 * ww[1]);
+                    out_0[0] = __fmaf_rn(nkx, x0_0, rg0_0 * __uint_as_float(ww[0] << 16));
+                    out_0[1] = __fmaf_rn(nkx, x1_0, rg1_0 * __uint_as_float(ww[0] & 4294901760u));
                     acc[0] = ((row < T) ? __fmaf_rn(rg0_0, x0_0, acc[0]) : acc[0]);
                     acc[1] = ((row < T) ? __fmaf_rn(rg1_0, x1_0, acc[1]) : acc[1]);
                     float g0_1 = __uint_as_float(gw[1] << 16);
@@ -334,8 +316,8 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
                     float x1_1 = __uint_as_float(xw[1] & 4294901760u);
                     float rg0_1 = rq * g0_1;
                     float rg1_1 = rq * g1_1;
-                    out_0[2] = __fmaf_rn(nkx, x0_1, rg0_1 * ww[2]);
-                    out_0[3] = __fmaf_rn(nkx, x1_1, rg1_1 * ww[3]);
+                    out_0[2] = __fmaf_rn(nkx, x0_1, rg0_1 * __uint_as_float(ww[1] << 16));
+                    out_0[3] = __fmaf_rn(nkx, x1_1, rg1_1 * __uint_as_float(ww[1] & 4294901760u));
                     acc[2] = ((row < T) ? __fmaf_rn(rg0_1, x0_1, acc[2]) : acc[2]);
                     acc[3] = ((row < T) ? __fmaf_rn(rg1_1, x1_1, acc[3]) : acc[3]);
                     float g0_2 = __uint_as_float(gw[2] << 16);
@@ -344,8 +326,8 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
                     float x1_2 = __uint_as_float(xw[2] & 4294901760u);
                     float rg0_2 = rq * g0_2;
                     float rg1_2 = rq * g1_2;
-                    out_0[4] = __fmaf_rn(nkx, x0_2, rg0_2 * ww[4]);
-                    out_0[5] = __fmaf_rn(nkx, x1_2, rg1_2 * ww[5]);
+                    out_0[4] = __fmaf_rn(nkx, x0_2, rg0_2 * __uint_as_float(ww[2] << 16));
+                    out_0[5] = __fmaf_rn(nkx, x1_2, rg1_2 * __uint_as_float(ww[2] & 4294901760u));
                     acc[4] = ((row < T) ? __fmaf_rn(rg0_2, x0_2, acc[4]) : acc[4]);
                     acc[5] = ((row < T) ? __fmaf_rn(rg1_2, x1_2, acc[5]) : acc[5]);
                     float g0_3 = __uint_as_float(gw[3] << 16);
@@ -354,8 +336,8 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
                     float x1_3 = __uint_as_float(xw[3] & 4294901760u);
                     float rg0_3 = rq * g0_3;
                     float rg1_3 = rq * g1_3;
-                    out_0[6] = __fmaf_rn(nkx, x0_3, rg0_3 * ww[6]);
-                    out_0[7] = __fmaf_rn(nkx, x1_3, rg1_3 * ww[7]);
+                    out_0[6] = __fmaf_rn(nkx, x0_3, rg0_3 * __uint_as_float(ww[3] << 16));
+                    out_0[7] = __fmaf_rn(nkx, x1_3, rg1_3 * __uint_as_float(ww[3] & 4294901760u));
                     acc[6] = ((row < T) ? __fmaf_rn(rg0_3, x0_3, acc[6]) : acc[6]);
                     acc[7] = ((row < T) ? __fmaf_rn(rg1_3, x1_3, acc[7]) : acc[7]);
                     unsigned int packed_0[4];
@@ -367,7 +349,6 @@ kernel_cake_rmsnorm_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __
                     if (row < T) {
                         reinterpret_cast<int4*>(dx + (dx_base + (unsigned long long)((0 + t) * 8)))[0] = reinterpret_cast<int4*>(packed_0)[0];
                     }
-                    mbarrier_arrive(empty_addr + (gi + 5 * (int)((unsigned int)k % 3)) * 8);
                     tile = tile + n_chunks;
                     k += 1;
                 }

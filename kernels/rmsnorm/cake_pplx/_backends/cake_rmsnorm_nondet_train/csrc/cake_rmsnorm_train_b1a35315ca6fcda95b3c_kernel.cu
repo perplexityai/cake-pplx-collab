@@ -117,7 +117,7 @@ __device__ __forceinline__ void cp_async_bulk_gmem2smem(
 extern "C" {
 
 __global__ __launch_bounds__(1024, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_det_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+kernel_cake_rmsnorm_train_b1a35315ca6fcda95b3c(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -306,17 +306,12 @@ kernel_cake_rmsnorm_det_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g
                     tot = tot + dv[2];
                     tot = tot + dv[3];
                     tot = tot + dv[4];
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                    mbarrier_arrive(empty_addr + (gi + 5 * (int)((unsigned int)k % 3)) * 8);
                     float cq = tot * 0.00078125f;
                     float kx = rq * rq * rq * cq;
                     float nkx = -kx;
                     unsigned long long dx_base = (unsigned long long)row * 1280ull;
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&gw[0])), "=r"(*reinterpret_cast<uint32_t*>(&gw[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&gw[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&gw[(0) + 3]))
-                        : "r"(sbase + (0 + t) * 8 * 2));
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&xw[0])), "=r"(*reinterpret_cast<uint32_t*>(&xw[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&xw[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&xw[(0) + 3]))
-                        : "r"(sbase + 2560 + (0 + t) * 8 * 2));
-                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     float out_0[8];
                     float g0_0 = __uint_as_float(gw[0] << 16);
                     float g1_0 = __uint_as_float(gw[0] & 4294901760u);
@@ -367,7 +362,6 @@ kernel_cake_rmsnorm_det_train_3a321b74c7b4fee64877(__nv_bfloat16* __restrict__ g
                     if (row < T) {
                         reinterpret_cast<int4*>(dx + (dx_base + (unsigned long long)((0 + t) * 8)))[0] = reinterpret_cast<int4*>(packed_0)[0];
                     }
-                    mbarrier_arrive(empty_addr + (gi + 5 * (int)((unsigned int)k % 3)) * 8);
                     tile = tile + n_chunks;
                     k += 1;
                 }
