@@ -376,9 +376,11 @@ RESIDENT_GROUPS: dict[tuple[str, int], dict[int, int]] = {
 # Launch groups a program takes at most, below the groups the device holds: (architecture, SM count) -> {record:
 # groups}.  ``fwd_n4`` (the whole-token forward of four values, two CTAs per SM) runs up to 7 % faster at 64 groups
 # than at all 74 resident groups on GB200 and GB300 and all 71 on B200 (CUDA graph replays, cold L2, T = 4097, 16380
-# and 32768, two to four GPUs of each, both packages); 62 to 66 groups measure within 2 % of 64.  Every other
-# program, ``fwd_n2`` and ``fwd_n3`` included, shows no consistent gain below its resident groups on these devices
-# and has no cap.  A device without an entry here takes the resident groups.
+# and 32768, two to four GPUs of each, both packages); 62 to 66 groups measure within 3 % of 64.  ``fwd_n2``,
+# ``fwd_n3`` and ``bwd_n7`` .. ``bwd_n9`` (the other two-CTA programs) and the spot-checked ``fwd_n5``, ``bwd_n5``
+# and ``fwd_n9`` show no consistent gain below their resident groups on these devices; ``fwd_n6`` .. ``fwd_n8``,
+# ``bwd_n2`` .. ``bwd_n4`` and ``bwd_n6`` were not measured below them.  No program but ``fwd_n4`` has a cap.  A
+# device without an entry here takes the resident groups.
 GROUP_CAPS: dict[tuple[str, int], dict[str, int]] = {
     ("sm_100a", 148): {"fwd_n4": 64},
     ("sm_100a", 152): {"fwd_n4": 64},

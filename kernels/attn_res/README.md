@@ -18,8 +18,9 @@ nondet backward of `T > 0` tokens alerts; the forward and the det module never d
 [`docs/API.md`](../../docs/API.md#attn_res).
 
 The GPU suites and the benchmark ran on B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`).
-compute-sanitizer passes on VR200 and R200 (memcheck, racecheck, synccheck and initcheck) and on GB300 (memcheck,
-synccheck and initcheck).
+At 0.1.1, compute-sanitizer passes on GB300 (memcheck, synccheck and initcheck). On VR200 and R200 it passed at 0.1.0
+(memcheck, racecheck, synccheck and initcheck); the kernels are unchanged since then, and 0.1.1 adds the `dw` memset
+to the nondet backward bindings.
 
 Install this family alone, pinned to a commit:
 

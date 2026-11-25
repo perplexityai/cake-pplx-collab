@@ -15,8 +15,9 @@ first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp
 
 The facade `cake_pplx.cake_attn_res_nondet_train` is a stable API; this backend package is experimental (no
 compatibility guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin) are the
-supported architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests and the
-compute-sanitizer runs on VR200 and R200. Its libraries are loaded prebuilt from `aot/` when a builder
+supported architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests on
+VR200 and R200; their compute-sanitizer runs there were at 0.1.0, and 0.1.1 adds the `dw` memset to the backward
+bindings (the kernels are unchanged). Its libraries are loaded prebuilt from `aot/` when a builder
 compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and launches
 read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX` and the
 `CAKE_PPLX_*` build settings of the root README.
