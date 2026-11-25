@@ -60,6 +60,35 @@ peaked variant):
   and ``cake_main_cb`` / ``cake_main_cb_aa`` / ``cake_main_in`` are the
   candidate-block and candidate-restricted calls of the ``--main-package``
   copy.
+  ``cake_cb_nosample`` / ``cake_main_cb_nosample`` run the candidate-block
+  call of this package / of the ``--main-package`` copy with the sampled first
+  threshold off, and ``cake_cb_open`` / ``cake_cb_open_nosample`` this
+  package's call with ``cake_policy.CB_TWIN_RULE`` opened to every call with
+  block entries (``TWIN_RULE_OPEN``): on sm_103a a call whose plan runs the
+  CTA-pair l6 program, or a wide plan of ``top_k`` 512, then runs the
+  CTA-pair twin outside the rule too (measurements only; the package itself
+  routes the twins inside the rule).  ``cake_cb_closed`` runs this package's
+  call with the rule closed to every call (``TWIN_RULE_CLOSED``): the unpaired
+  l6 program of the plan before the twins in the same package, so a twin row
+  compares the twin with its own package's l6 program.
+* the CTA-pair twin rows (``--rows twins``), top-k 512 unless named: inside
+  ``cake_policy.CB_TWIN_RULE``, wide plans whose candidate-block call runs the
+  CTA-pair twin, ``q16k_k128k_k512`` (16384 queries at the tail of 131072
+  keys, 960 mean unit tiles), ``q32k_k128k_k512`` (32768 queries at the tail
+  of 131072 keys, 896: more queries than the timed calls) and
+  ``pk2_q8k_k128k_k64k_k512`` (two segments of 8192 queries over 131072 /
+  65536 keys, 736, the longest-first twin; without ``max_seqlen_k``, so its
+  block entries follow ``Tkv``); then calls outside the rule whose plan runs a
+  twin's program with the rule opened: ``q4k_k64k_k512`` (4096 queries at the
+  tail of 65536 keys), ``pk2_q1k_k64k_k512`` (two segments of 1024 queries
+  over 65536 / 16384 keys) and ``pk8_q147_k36k_k512`` (eight segments of 147
+  queries over 35785 / 35786 keys), plans of the CTA-pair l6 program itself
+  with fewer queries than the rule's floor (496 / 316 / 279 mean unit tiles),
+  ``tail64k_k1024`` / ``tail64k_k2047`` and ``P1_k1024`` / ``P1_k1024_bound``
+  (top-k 1024 / 2047), ``q512_k17k_k512`` / ``pk2_q256_k32k_k512`` /
+  ``q16k_k32k_k1024`` / ``pk8_q2k_k32k_k1024`` / ``pk8_q2k_k32k_k1024_bound``
+  (134 to 248 mean unit tiles) and ``tail1m_k512`` (16384 queries at the tail
+  of 1048576 keys: a wide plan of 8128 mean unit tiles, past the rule's cap).
   ``cake_in`` / ``cake_in_aa`` time ``prepare_dsa_indexer_det_topk_in_candidates``
   (the top-k restricted to the row's own candidate blocks, computed once by
   the candidate-block call outside the timed span; its workspace bound from
@@ -462,6 +491,140 @@ ROWS["P1_k512_bound"] = _row(
     note="P1 geometry, top-k 512, max_seqlen_k given",
 )
 CB_ROWS = ["tail16k_k512", "tail64k_k512", "tail256k_k512", "P1_k512", "P1_k512_bound"]
+# the CTA-pair twin rows (see the module docstring): inside ``cake_policy.CB_TWIN_RULE`` (the first three), then
+# outside it (``cake_cb_open`` runs the twin there)
+ROWS["q16k_k128k_k512"] = _row(
+    [16384],
+    [131072],
+    top_k=512,
+    seed=7795,
+    note="16384 queries at the tail of 131072 keys, top-k 512",
+)
+ROWS["q32k_k128k_k512"] = _row(
+    [32768],
+    [131072],
+    top_k=512,
+    seed=7796,
+    note="32768 queries at the tail of 131072 keys, top-k 512",
+)
+ROWS["pk2_q8k_k128k_k64k_k512"] = _row(
+    [8192, 8192],
+    [131072, 65536],
+    top_k=512,
+    seed=7797,
+    note="2 x 8192 queries over 131072 / 65536 keys, top-k 512",
+)
+ROWS["q4k_k64k_k512"] = _row(
+    [4096],
+    [65536],
+    top_k=512,
+    seed=7785,
+    note="4096 queries at the tail of 65536 keys, top-k 512",
+)
+ROWS["pk2_q1k_k64k_k512"] = _row(
+    [1024, 1024],
+    [65536, 16384],
+    top_k=512,
+    seed=7786,
+    note="2 x 1024 queries over 65536 / 16384 keys, top-k 512",
+)
+ROWS["pk8_q147_k36k_k512"] = _row(
+    [147] * 8,
+    [35786, 35785] * 4,
+    top_k=512,
+    seed=7798,
+    note="8 x 147 queries over 35786 / 35785 keys, top-k 512",
+)
+ROWS["tail64k_k1024"] = _row(
+    [16384],
+    [65536],
+    top_k=1024,
+    seed=7787,
+    note="16384 queries at the tail of 65536 keys, top-k 1024",
+)
+ROWS["tail64k_k2047"] = _row(
+    [16384],
+    [65536],
+    top_k=2047,
+    seed=7788,
+    note="16384 queries at the tail of 65536 keys, top-k 2047",
+)
+ROWS["P1_k1024"] = _row(
+    _lengths(P1_CU_SEQLENS_Q),
+    _lengths(P1_CU_SEQLENS_K),
+    top_k=1024,
+    seed=7789,
+    note="P1 geometry, top-k 1024",
+)
+ROWS["P1_k1024_bound"] = _row(
+    _lengths(P1_CU_SEQLENS_Q),
+    _lengths(P1_CU_SEQLENS_K),
+    top_k=1024,
+    seed=7789,
+    bound_seqlen=True,
+    note="P1 geometry, max_seqlen_k given, top-k 1024",
+)
+ROWS["q512_k17k_k512"] = _row(
+    [512],
+    [17408],
+    top_k=512,
+    seed=7790,
+    note="512 queries at the tail of 17408 keys, top-k 512",
+)
+ROWS["pk2_q256_k32k_k512"] = _row(
+    [256, 256],
+    [32768, 8192],
+    top_k=512,
+    seed=7791,
+    note="2 x 256 queries over 32768 / 8192 keys, top-k 512",
+)
+ROWS["q16k_k32k_k1024"] = _row(
+    [16384],
+    [32768],
+    top_k=1024,
+    seed=7792,
+    note="16384 queries at the tail of 32768 keys, top-k 1024",
+)
+ROWS["pk8_q2k_k32k_k1024"] = _row(
+    [2048] * 8,
+    [32768] * 8,
+    top_k=1024,
+    seed=7793,
+    note="8 x 2048 queries over 32768 keys each, top-k 1024",
+)
+ROWS["pk8_q2k_k32k_k1024_bound"] = _row(
+    [2048] * 8,
+    [32768] * 8,
+    top_k=1024,
+    seed=7793,
+    bound_seqlen=True,
+    note="8 x 2048 queries over 32768 keys each, max_seqlen_k given, top-k 1024",
+)
+ROWS["tail1m_k512"] = _row(
+    [16384],
+    [1048576],
+    top_k=512,
+    seed=7794,
+    note="16384 queries at the tail of 1048576 keys, top-k 512",
+)
+TWIN_ROWS = [
+    "q16k_k128k_k512",
+    "q32k_k128k_k512",
+    "pk2_q8k_k128k_k64k_k512",
+    "q4k_k64k_k512",
+    "pk2_q1k_k64k_k512",
+    "pk8_q147_k36k_k512",
+    "tail64k_k1024",
+    "tail64k_k2047",
+    "P1_k1024",
+    "P1_k1024_bound",
+    "q512_k17k_k512",
+    "pk2_q256_k32k_k512",
+    "q16k_k32k_k1024",
+    "pk8_q2k_k32k_k1024",
+    "pk8_q2k_k32k_k1024_bound",
+    "tail1m_k512",
+]
 ROW_GROUPS = {
     "iid": IID_ROWS,
     "sink": SINK_ROWS,
@@ -469,13 +632,14 @@ ROW_GROUPS = {
     "all": DEFAULT_ROWS,
     "fp8": FP8_ROWS,
     "candidates": CB_ROWS,
+    "twins": TWIN_ROWS,
 }
 FORMS = ("bf16", "fp8")
 
 
 def expand_rows(names):
-    """``--rows`` with the group names ``iid`` / ``sink`` / ``pool`` / ``all`` / ``fp8`` / ``candidates`` expanded, in
-    order, without repeats."""
+    """``--rows`` with the group names ``iid`` / ``sink`` / ``pool`` / ``all`` / ``fp8`` / ``candidates`` / ``twins``
+    expanded, in order, without repeats."""
     out = []
     for name in names:
         for row in ROW_GROUPS.get(name, [name]):
@@ -742,6 +906,31 @@ def scan_blocks_only(backend):
         backend.select_cb_program = original
 
 
+# ``cake_policy.CB_TWIN_RULE`` opened to every call with block entries (``cake_cb_open``): ``(min top_k, max top_k, min
+# mean unit tiles, max mean unit tiles, min queries, sampled calls only)``
+TWIN_RULE_OPEN = (1, 2047, 0.0, float("inf"), 0, False)
+# ``cake_policy.CB_TWIN_RULE`` closed to every call (``cake_cb_closed``: no ``top_k`` lies in ``[1, 0]``)
+TWIN_RULE_CLOSED = (1, 0, 0.0, 0.0, 0, True)
+
+
+@contextlib.contextmanager
+def forced_twin_rule(backend, rule):
+    """``CB_TWIN_RULE`` of ``backend``'s policy module replaced by ``rule`` for an arm built inside this scope: the
+    candidate-block dispatch (``select_cb_program``) reads it at every call, so the workspace bound, the plan record and
+    the prepared launches follow it; the original is restored on exit.  A package without the rule is refused."""
+    module = sys.modules[backend.select_cb_program.__module__]
+    if not hasattr(module, "CB_TWIN_RULE"):
+        raise ValueError(
+            f"{module.__name__} has no CB_TWIN_RULE: a package before the twins"
+        )
+    saved = module.CB_TWIN_RULE
+    module.CB_TWIN_RULE = tuple(rule)
+    try:
+        yield
+    finally:
+        module.CB_TWIN_RULE = saved
+
+
 @contextlib.contextmanager
 def forced_fp8_fallback(backend, overrides: dict):
     """The previous FP8 dispatch for an arm built inside this scope: entries of the FP8 kind fallback
@@ -800,6 +989,7 @@ class CakeArm(Arm):
         with_candidates=False,
         in_candidates=False,
         cb_scan=False,
+        twin_rule=None,
     ):
         super().__init__(inputs)
         self.backend = cake_backend if backend is None else backend
@@ -830,6 +1020,10 @@ class CakeArm(Arm):
         self.cb_scan = bool(cb_scan)
         if self.cb_scan:
             scope.enter_context(scan_blocks_only(self.backend))
+        # the candidate-block call with CB_TWIN_RULE replaced (None: the package's own rule)
+        self.twin_rule = None if twin_rule is None else tuple(twin_rule)
+        if self.twin_rule is not None:
+            scope.enter_context(forced_twin_rule(self.backend, self.twin_rule))
         with scope:  # one scope: the workspace bound, the plan record and prepare see the same policy
             if self.with_candidates:
                 self._prepare_with_candidates(inputs)
@@ -1119,6 +1313,7 @@ def _cake(
     with_candidates=False,
     in_candidates=False,
     cb_scan=False,
+    twin_rule=None,
 ):
     def make(inputs):
         return CakeArm(
@@ -1132,6 +1327,7 @@ def _cake(
             with_candidates=with_candidates,
             in_candidates=in_candidates,
             cb_scan=cb_scan,
+            twin_rule=twin_rule,
         )
 
     return make
@@ -1193,8 +1389,26 @@ ARMS = {
     "cake_cb_aa": _cake("cake_cb_aa", with_candidates=True),
     # the same call on its scan_blocks program where every row keeps all its blocks (the dispatch before iota)
     "cake_cb_scan": _cake("cake_cb_scan", with_candidates=True, cb_scan=True),
+    # the same call with the sampled first threshold off, and with CB_TWIN_RULE opened (TWIN_RULE_OPEN)
+    "cake_cb_nosample": _cake("cake_cb_nosample", knobs=NOSAMPLE, with_candidates=True),
+    "cake_cb_open": _cake(
+        "cake_cb_open", with_candidates=True, twin_rule=TWIN_RULE_OPEN
+    ),
+    "cake_cb_open_nosample": _cake(
+        "cake_cb_open_nosample",
+        knobs=NOSAMPLE,
+        with_candidates=True,
+        twin_rule=TWIN_RULE_OPEN,
+    ),
+    # the same call with CB_TWIN_RULE closed (TWIN_RULE_CLOSED): this package's l6 program of the plan before the twins
+    "cake_cb_closed": _cake(
+        "cake_cb_closed", with_candidates=True, twin_rule=TWIN_RULE_CLOSED
+    ),
     # the candidate-block and candidate-restricted calls of the --main-package copy
     "cake_main_cb": _cake("cake_main_cb", backend="main", with_candidates=True),
+    "cake_main_cb_nosample": _cake(
+        "cake_main_cb_nosample", backend="main", knobs=NOSAMPLE, with_candidates=True
+    ),
     "cake_main_cb_aa": _cake("cake_main_cb_aa", backend="main", with_candidates=True),
     "cake_main_in": _cake("cake_main_in", backend="main", in_candidates=True),
     # the candidate-restricted call over the row's own candidate blocks (``--rows candidates``) and its A/A twin
@@ -1209,6 +1423,7 @@ MAIN_ARMS = (
     "cake_main_aa",
     "cake_main_cb",
     "cake_main_cb_aa",
+    "cake_main_cb_nosample",
     "cake_main_in",
 )
 # arms that take the FP8 inputs in ``--form fp8``; every other arm takes the same data dequantized to BF16
@@ -1489,6 +1704,7 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
             record["policy_overrides"] = arm.policy
             record["fp8_kind_fallback_overrides"] = arm.fp8_fallback
             record["fp8_hidden_kinds"] = arm.fp8_hidden
+            record["twin_rule"] = arm.twin_rule
             record["package"] = (
                 "main" if arm.backend is not cake_backend else "candidate"
             )

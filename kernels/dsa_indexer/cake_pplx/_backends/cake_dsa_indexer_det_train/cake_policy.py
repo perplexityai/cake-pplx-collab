@@ -2446,11 +2446,13 @@ def select_fp8_program(
 # ---------------------------------------------------------------------------
 
 # A ``scan_blocks`` program is a scan program that also writes each query's candidate blocks: ``CB_SLOTS`` int32 slots
-# per row naming blocks of ``CB_BLOCK`` keys (block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``).  Only the
-# unsplit, unpaired BF16 narrow and l6 units carry it, so a call runs the ``scan_blocks`` program of the unit
-# ``CB_KIND_FALLBACK`` maps the decided physical kind to (a wide unit, a CTA pair and a key-range split run their unit
-# geometry's unpaired, unsplit program; a split call runs narrow, the unit of more work units per query), with
-# ``n_split = 1``.  ``top_k`` is at most ``CB_MAX_TOP_K``: then every returned id lies in a returned block.
+# per row naming blocks of ``CB_BLOCK`` keys (block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``).  The
+# unsplit, unpaired BF16 narrow and l6 units carry it (``scan_blocks:<narrow|l6>:u<n>:s0:f<fit>``) and an architecture
+# may register twins of the CTA-pair l6 unit (``scan_blocks:pair_l6:u1:s0:f0[:lsf]``, ``CB_TWIN_FORMS``), so a call
+# runs the ``scan_blocks`` program of the unit ``CB_KIND_FALLBACK`` maps the decided physical kind to (a wide unit, a
+# CTA pair and a key-range split run their unit geometry's unpaired, unsplit program; a split call runs narrow, the
+# unit of more work units per query), with ``n_split = 1`` -- unless a twin serves the call
+# (``CB_TWIN_RULE``).  ``top_k`` is at most ``CB_MAX_TOP_K``: then every returned id lies in a returned block.
 # A call whose longest key segment holds at most ``CB_SLOTS`` blocks (``cb_block_cap`` 0) keeps every block of every
 # row, so no block score decides a row: it runs the plain call's plan as dispatched (any unit, pair, split, order and
 # finalize) and the backend writes each row's ``0 .. nb - 1`` and ``-1`` tail on the device before it (stage
@@ -2472,7 +2474,47 @@ CB_KIND_FALLBACK = {
     "split_l6": "narrow",
     "split_wide": "narrow",
 }
-_CB_KEY = re.compile(r"scan_blocks:(narrow|l6):u([0-9]+):s0:f([01])")
+# The twins: plain scan programs, as ``(physical kind, lsf)``, whose own ``scan_blocks`` copy an architecture may
+# register beside the units of ``CB_KIND_FALLBACK``, each in its no-sample-fit form only (``f0``): the CTA-pair l6
+# program in both segment orders (sm_103a).  A twin keeps its plain program's query layout: each CTA of a pair scores
+# its own ``block_q`` queries in its own query slots, so a twin's block entries are those of its launched grid.  A call
+# with block entries (``cb_block_cap`` > 0) inside ``CB_TWIN_RULE`` whose plain plan runs one of them in the plain unit
+# order (``s0``) runs its twin where the registry has it (``cb_twin_key``): the plain plan as decided -- unit, CTA
+# pair, launched grid (even for the pair), segment order, sampled first threshold, check period, workspace and the rest
+# of the call -- with the twin's key.  On sm_103a's record no call of the package tests' dense grid inside
+# ``CB_TWIN_RULE`` plans that program, so the calls the rule admits take the wide route below.  A sample-fit plan, a
+# plan of any other program, a call outside ``CB_TWIN_RULE`` and a plan whose twin the registry lacks run the
+# ``CB_KIND_FALLBACK`` unit as before.
+CB_TWIN_FORMS = frozenset({("pair_l6", False), ("pair_l6", True)})
+# the units of ``CB_KIND_FALLBACK``, whose programs in the argument segment order ``cb_scan_programs`` indexes
+CB_UNITS = ("narrow", "l6")
+# The calls a twin serves (``cb_twin_rule_holds``): ``(min top_k, max top_k, min mean unit tiles, max mean unit tiles,
+# min queries, sampled calls only)``, a window of ``top_k``, mean unit tiles and query count around the calls the twins
+# were timed on.  Each twin was timed at kernel level, as a forced program on the call's geometry against the unpaired
+# l6 ``scan_blocks`` program, on GB300 (sm_103a, 152 SMs), with equal bits, at ``top_k`` 512 with the sampled first
+# threshold, on three calls whose plain plan runs the wide program: the CTA-pair twin on 16384 queries at the tail of
+# 65536 keys (448 mean unit tiles) and of 262144 keys (1984) and on the 8-segment packed call of 16231 queries over
+# 268757 keys (254.5), its longest-first copy on that packed call only; each ran faster there.  The tile floor and cap
+# are the smallest and largest mean unit tiles of those calls and the query floor their smallest query count (a call of
+# fewer queries fills fewer waves of the grid).  The rule extends the timed calls, untimed, to the mean unit tiles
+# between them, to more queries (more waves of the same units) and to other segment layouts; no twin was timed at
+# another ``top_k``, with the sampled first threshold off, on a plan of the CTA-pair l6 program itself or on another
+# device.  Outside the window the CTA-pair twin was timed at 16384 queries only: slower at 96 mean unit tiles and faster
+# at 192; a sample-fit CTA-pair program that is not shipped was slower at 64, on a call that keeps every block.
+CB_TWIN_RULE = (512, 512, 254.5, 1984.0, 16231, True)
+# The CTA-pair twin of a wide plan: a call with block entries inside ``CB_TWIN_RULE`` whose plan runs the unsplit wide
+# program (either walk direction) on a grid of at least two CTAs, at a ``top_k`` from the one at which the record's CTA
+# pair serves the l6 unit (``pair_units``, ``pair_rule[2]``) up to ``wide_first_k_rule[0]``, with no sample fit for the
+# CTA-pair l6 unit and no preference for the l6 unit without a pair (``l6_solo_for``), runs the CTA-pair l6 twin in the
+# plan's segment order (``scan_blocks:pair_l6:u1:s0:f0``, ``:lsf`` for a longest-first plan; ``cb_pair_twin_key``)
+# where the registry has it, on the CTA-pair l6 unit's geometry (``block_q_l6``, the requested grid made even) with
+# that unit's sampled first threshold and check period (``fallback_knobs``), on a call where the rule asks for the
+# sampled first threshold only when that unit's threshold is on too; else the ``CB_KIND_FALLBACK`` unit (l6).  On
+# sm_103a (``pair_rule[2]`` = ``wide_first_k_rule[0]`` = 512) these are the wide plans of ``top_k`` 512, the three
+# timed calls among them.  The plain dispatch plans the CTA-pair l6 unit up to ``pair_rule[1]`` (1024) mean unit tiles
+# only; above it the twin runs where the plain dispatch never plans that unit, timed on the call of 1984 mean unit
+# tiles alone.  Only sm_103a registers the twins.
+_CB_KEY = re.compile(r"scan_blocks:(narrow|l6|pair_l6):u([0-9]+):s0:f([01])(:lsf)?")
 
 
 def cb_block_cap(num_keys: int, max_seqlen_k: Optional[int] = None) -> int:
@@ -2521,13 +2563,80 @@ class CandidateBlocksChoice:
 
 
 def cb_scan_programs(scan_keys: Collection[str]) -> dict:
-    """The ``scan_blocks`` programs an architecture registers: ``(kind, sample_fit) -> {tile_unroll: key}``."""
+    """The ``scan_blocks`` programs of the ``CB_KIND_FALLBACK`` units an architecture registers: ``(kind, sample_fit)
+    -> {tile_unroll: key}``, in the argument segment order (the twins of ``CB_TWIN_FORMS`` are looked up by their own
+    key, ``cb_twin_key``)."""
     programs: dict = {}
     for key in scan_keys:
         match = _CB_KEY.fullmatch(key)
-        if match is not None:
+        if match is not None and match[1] in CB_UNITS and match[4] is None:
             programs.setdefault((match[1], match[3] == "1"), {})[int(match[2])] = key
     return programs
+
+
+def cb_twin_key(choice: ProgramChoice) -> Optional[str]:
+    """The ``scan_blocks`` twin of the plain plan ``choice``'s own scan program (``CB_TWIN_FORMS``): its scan key with
+    the ``scan_blocks`` role (``scan:pair_l6:u1:s0:f0:lsf`` -> ``scan_blocks:pair_l6:u1:s0:f0:lsf``); None for any
+    other plan (a split, sample-fit, snake-order or descending-walk program, or a program of another form).
+    ``select_cb_program`` runs it only on a call inside ``CB_TWIN_RULE``."""
+    if (
+        choice.split
+        or choice.snake
+        or choice.sample_fit
+        or (choice.physical_kind, bool(choice.lsf)) not in CB_TWIN_FORMS
+    ):
+        return None
+    key = scan_key(choice.physical_kind, choice.tile_unroll, False, False, choice.lsf)
+    return CB_ROLE + key[len("scan") :] if key == choice.scan_key else None
+
+
+def cb_twin_rule_holds(policy: DispatchPolicy, choice: ProgramChoice) -> bool:
+    """Whether the plain plan ``choice`` is a call of ``CB_TWIN_RULE``: its ``top_k`` and its mean unit tiles
+    (``DispatchPolicy.mean_unit_tiles``) in the rule's ranges, at least the rule's queries and, where the rule asks for
+    it, the sampled first threshold on (``sample_tiles_max`` > 0)."""
+    min_k, max_k, min_tiles, max_tiles, min_queries, sampled_only = CB_TWIN_RULE
+    tiles = policy.mean_unit_tiles(
+        choice.num_queries, choice.num_keys, choice.num_segments, choice.ratio
+    )
+    return (
+        int(min_k) <= int(choice.top_k) <= int(max_k)
+        and float(min_tiles) <= tiles <= float(max_tiles)
+        and int(choice.num_queries) >= int(min_queries)
+        and (not sampled_only or int(choice.sample_tiles_max) > 0)
+    )
+
+
+def cb_pair_twin_key(policy: DispatchPolicy, choice: ProgramChoice) -> Optional[str]:
+    """The CTA-pair l6 twin of the plain plan ``choice`` when it runs the unsplit wide program on a grid of at least two
+    CTAs, its ``top_k`` lies from the one at which the record's CTA pair serves the l6 unit (``pair_units``,
+    ``pair_rule[2]``) up to ``wide_first_k_rule[0]``, the CTA-pair l6 unit has no sample fit and the l6 unit without a
+    pair is not preferred (``l6_solo_for``):
+    ``scan_blocks:pair_l6:u<n>:s0:f0`` at that unit's tile unroll, with ``:lsf`` for a longest-first plan; None for any
+    other plan.  ``select_cb_program`` runs it only on a call inside ``CB_TWIN_RULE``."""
+    T, Tkv, S, r = (
+        choice.num_queries,
+        choice.num_keys,
+        choice.num_segments,
+        choice.ratio,
+    )
+    rule = policy.pair_rule
+    if (
+        choice.physical_kind != "wide"
+        or choice.split
+        or int(choice.grid) < 2
+        or rule is None
+        or "l6" not in policy.pair_units
+        or int(choice.top_k) < int(rule[2])
+        or policy.wide_first_k_rule is None
+        or int(choice.top_k) > int(policy.wide_first_k_rule[0])
+        or policy.sample_fit_for(T, Tkv, S, r, choice.cand_cap, "pair_l6")
+        or policy.l6_solo_for(
+            T, Tkv, S, r, sampled=int(choice.sample_tiles_max) > 0, pair_l6=True
+        )
+    ):
+        return None
+    unroll = policy.tile_unroll_for("pair_l6", choice.top_k, False, policy.block_q_l6)
+    return f"{CB_ROLE}:pair_l6:u{int(unroll)}:s0:f0" + (":lsf" if choice.lsf else "")
 
 
 def select_cb_program(
@@ -2538,18 +2647,24 @@ def select_cb_program(
     **call: Any,
 ) -> CandidateBlocksChoice:
     """The host dispatch of one call that also returns candidate blocks: the decision procedure of ``select_program``
-    (``call``: its keywords), run by the ``scan_blocks`` program of the decided kind's ``CB_KIND_FALLBACK`` unit,
+    (``call``: its keywords), on a call inside ``CB_TWIN_RULE`` run by the twin of the decided program
+    (``cb_twin_key``, ``CB_TWIN_FORMS``) where ``scan_keys`` registers it -- the decided plan with the twin's key --,
+    else, for a wide plan, by the CTA-pair l6 twin where registered (``cb_pair_twin_key``) on the CTA-pair l6 unit's
+    geometry with that unit's knobs; else by the ``scan_blocks`` program of the decided kind's ``CB_KIND_FALLBACK``
+    unit,
     unsplit and unpaired on the requested grid, without the snake and longest-first orders, with that unit's sampled
     first threshold and check period where the kind changed (``fallback_knobs``), the sample-fit form of its unit and
     the decided tile unroll where its program is registered, else the smallest registered one.  The block entries
-    follow ``cb_block_cap(num_keys, max_seqlen_k)``.  When that is 0 (every row keeps all its blocks) the plan is
+    follow ``cb_block_cap(num_keys, max_seqlen_k)``, per query slot of the launched grid.  When that is 0 (every row
+    keeps all its blocks) the plan is
     ``select_program``'s own with ``iota`` set: the plain call's programs, workspace and launches, and the rows written
     by the backend (``iota=False``: the ``scan_blocks`` program writes them, the plan of the package before ``iota``,
     the same rows; measurements only).  Raises ``NotImplementedError`` when ``scan_keys`` registers no
     ``scan_blocks`` program of the unit (an ``iota`` plan: no ``scan_blocks`` program at all)."""
     choice = select_program(policy, scan_keys=scan_keys, **call)
     programs = cb_scan_programs(scan_keys)
-    if iota and cb_block_cap(choice.num_keys, call.get("max_seqlen_k")) == 0:
+    blk_cap = cb_block_cap(choice.num_keys, call.get("max_seqlen_k"))
+    if iota and blk_cap == 0:
         if not programs:
             raise NotImplementedError(
                 "the candidate-block call needs an architecture with scan_blocks programs: no registered scan_blocks "
@@ -2561,6 +2676,63 @@ def select_cb_program(
             blk_bytes=0,
             workspace_bytes=int(choice.workspace_bytes),
             iota=True,
+        )
+    # the twin of the decided program, on a call with block entries inside CB_TWIN_RULE: the decided plan with the
+    # twin's key, the block entries of its launched grid (even for the CTA pair) behind its workspace
+    in_rule = blk_cap > 0 and cb_twin_rule_holds(policy, choice)
+    twin = cb_twin_key(choice) if in_rule else None
+    if twin is not None and twin in scan_keys:
+        choice = replace(choice, scan_key=twin)
+        blk_bytes = (
+            int(choice.grid_ctas) * int(choice.block_q) * blk_cap * CB_ENTRY_BYTES
+        )
+        return CandidateBlocksChoice(
+            choice=choice,
+            blk_cap=blk_cap,
+            blk_bytes=blk_bytes,
+            workspace_bytes=int(choice.workspace_bytes) + blk_bytes,
+        )
+    # the CTA-pair twin of a wide plan inside CB_TWIN_RULE: the CTA-pair l6 unit on the requested grid made even, its
+    # sampled first threshold (on where the rule asks for it) and check period, unsplit, in the plan's segment order
+    pair_twin = cb_pair_twin_key(policy, choice) if in_rule else None
+    knobs = (
+        fallback_knobs(policy, choice, "pair_l6", call)
+        if pair_twin is not None and pair_twin in scan_keys
+        else None
+    )
+    if knobs is not None and (not CB_TWIN_RULE[5] or int(knobs.sample_tiles_max) > 0):
+        choice = knobs
+        grid_ctas = int(choice.grid) - int(choice.grid) % 2
+        block_q = policy.block_q_l6
+        unroll = policy.tile_unroll_for("pair_l6", choice.top_k, False, block_q)
+        scan_entries = grid_ctas * block_q * int(choice.cand_cap)
+        workspace = scan_entries * policy.candidate_entry_bytes + TICKET_TAIL_BYTES
+        choice = replace(
+            choice,
+            grid_ctas=grid_ctas,
+            block_q=block_q,
+            unit="l6",
+            n_split=1,
+            split=False,
+            pair=True,
+            kind="pair_l6",
+            physical_kind="pair_l6",
+            snake=False,
+            tile_unroll=int(unroll),
+            sample_fit=False,
+            scan_key=pair_twin,
+            merge_key=None,
+            scan_entries=scan_entries,
+            staging_entries=0,
+            workspace_bytes=workspace,
+            merge_rank=False,
+        )
+        blk_bytes = grid_ctas * block_q * blk_cap * CB_ENTRY_BYTES
+        return CandidateBlocksChoice(
+            choice=choice,
+            blk_cap=blk_cap,
+            blk_bytes=blk_bytes,
+            workspace_bytes=int(choice.workspace_bytes) + blk_bytes,
         )
     physical = CB_KIND_FALLBACK[choice.physical_kind]
     if physical != choice.physical_kind:
@@ -2603,7 +2775,6 @@ def select_cb_program(
         workspace_bytes=scan_entries * policy.candidate_entry_bytes + TICKET_TAIL_BYTES,
         merge_rank=False,
     )
-    blk_cap = cb_block_cap(Tkv, call.get("max_seqlen_k"))
     blk_bytes = grid_ctas * block_q * blk_cap * CB_ENTRY_BYTES
     return CandidateBlocksChoice(
         choice=choice,
@@ -2751,6 +2922,9 @@ __all__ = [
     "CB_MAX_TOP_K",
     "CB_ROLE",
     "CB_SLOTS",
+    "CB_TWIN_FORMS",
+    "CB_TWIN_RULE",
+    "CB_UNITS",
     "FINALIZE_RANK_ROLE",
     "FINALIZE_ROLE",
     "FORMS",
@@ -2771,7 +2945,10 @@ __all__ = [
     "cand_capacity",
     "cand_check_period",
     "cb_block_cap",
+    "cb_pair_twin_key",
     "cb_scan_programs",
+    "cb_twin_key",
+    "cb_twin_rule_holds",
     "fallback_knobs",
     "finalize_key",
     "finalize_role",
