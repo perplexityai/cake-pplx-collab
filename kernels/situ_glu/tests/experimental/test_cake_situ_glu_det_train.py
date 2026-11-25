@@ -110,6 +110,8 @@ THREADS = 128
 # The smallest number that FP32 and BF16 hold as a normal number.
 MIN_NORMAL = 2.0**-126
 
+# The backward's outputs, the only ones the tiny-input cases judge.
+GRADS = ("d_gate", "d_up")
 # The judged cases: row counts 1 to 4097, widths 256 to 33792, every layout, the data kinds and other scalars.  A pass
 # of the forward's CTA covers 12 segments of 256 columns (3072 columns), one of the backward's 8 (2048 columns).
 CASES = [
@@ -138,6 +140,15 @@ CASES = [
     Case(257, 6144, data="saturated"),
     Case(257, data="deep_negative"),
     Case(257, data="small"),
+    # Tiny gates or ups, one band a case, for the backward: near where its two forms of beta (1 - E) meet (8), where
+    # 1 - E from E alone is off by percents (20), and deep in the FP32 range, where E rounds to 1 (60).  The forward
+    # takes 1 - E from E (its bound is in the package's README), so these cases judge d_gate and d_up only.
+    Case(65, data="tiny_gate", band=8, judged=GRADS),
+    Case(65, data="tiny_gate", band=20, judged=GRADS),
+    Case(65, layout="merged", data="tiny_gate", band=60, judged=GRADS),
+    Case(65, data="tiny_up", band=20, judged=GRADS),
+    Case(65, 6144, data="tiny_up", band=60, judged=GRADS),
+    Case(65, data="tiny_gate", band=20, beta=2.5, lb=10.0, judged=GRADS),
     Case(257, data="zero_gate"),
     Case(257, layout="merged", data="zero_up"),
     Case(22, data="all_gates"),  # 22 x 3072 >= 65536 gate patterns

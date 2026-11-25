@@ -32,6 +32,9 @@ that are not multiples of 8 elements: the host copies them once).  ``data`` shap
 - ``"saturated"``: ``g`` uniform in ``[-200, 200]`` and ``u`` in ``[-1000, 1000]``;
 - ``"deep_negative"``: every gate in ``[-100, -80]``, where the sigmoid is subnormal or under FP32;
 - ``"small"``: ``g`` and ``u`` uniform in ``[-0.5, 0.5]``, where ``1 - E`` and ``1 - W`` are small;
+- ``"tiny_gate"`` and ``"tiny_up"``: every gate ``|g|`` (or up ``|u|``) in ``beta 2^-band [1, 2)`` (``lb 2^-band
+  [1, 2)``) with a random sign, the other input normal.  ``1 - E`` (``1 - W``) is then in ``2^(1 - band) [1, 2)`` for
+  every element, so the L2 and max norms of one band weigh each element by its relative error;
 - ``"zero_gate"`` and ``"zero_up"``: a random half of the gates, or of the ups, is 0, so ``h`` is 0 there;
 - ``"all_gates"``: every finite BF16 bit pattern as a gate, in order, and 0 for the others.
 
@@ -59,7 +62,18 @@ NAIVE_DTYPE = TIER_DTYPES[_TIER]
 # The issue's widths.
 WIDTHS = (3072, 6144, 33792)
 LAYOUTS = ("split", "merged", "sliced", "copied")
-DATA = ("normal", "wide", "saturated", "deep_negative", "small", "zero_gate", "zero_up", "all_gates")
+DATA = (
+    "normal",
+    "wide",
+    "saturated",
+    "deep_negative",
+    "small",
+    "tiny_gate",
+    "tiny_up",
+    "zero_gate",
+    "zero_up",
+    "all_gates",
+)
 # The model's scalars, the defaults of every entry point.
 BETA = 4.0
 LB = 25.0
@@ -71,7 +85,7 @@ PADS = {"sliced": (32, 8, 16), "copied": (3, 1, 5)}
 
 
 class Case(NamedTuple):
-    """One judged case: ``R`` rows of width ``I``, a layout, a data kind and the scalars."""
+    """One judged case: ``R`` rows of width ``I``, a layout, a data kind, the scalars and the outputs it judges."""
 
     R: int
     I: int = 3072  # noqa: E741 - the issue's name of the width
@@ -79,12 +93,18 @@ class Case(NamedTuple):
     data: str = "normal"
     beta: float = BETA
     lb: float = LB
+    band: int = 20
+    judged: tuple[str, ...] = ("h", "d_gate", "d_up")
 
     @property
     def id(self) -> str:
         parts = [f"R{self.R}", f"I{self.I}", self.layout, self.data]
+        if self.data in ("tiny_gate", "tiny_up"):
+            parts.append(f"band{self.band}")
         if self.beta != BETA or self.lb != LB:
             parts.append(f"beta{self.beta:g}-lb{self.lb:g}")
+        if self.judged != ("h", "d_gate", "d_up"):
+            parts.append("+".join(self.judged))
         return "-".join(parts)
 
 
@@ -97,7 +117,17 @@ def _uniform(rows: int, width: int, low: float, high: float, gen: torch.Generato
     return low + (high - low) * torch.rand(rows, width, device=device, generator=gen)
 
 
-def draw_values(data: str, rows: int, width: int, gen: torch.Generator, device) -> tuple[torch.Tensor, torch.Tensor]:
+def draw_values(
+    data: str,
+    rows: int,
+    width: int,
+    gen: torch.Generator,
+    device,
+    *,
+    beta: float = BETA,
+    lb: float = LB,
+    band: int = 20,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """The FP32 gate and up values of ``data`` (rounded to BF16 by the caller)."""
     g = 2.0 * torch.randn(rows, width, device=device, generator=gen)
     u = 2.0 * torch.randn(rows, width, device=device, generator=gen)
@@ -109,6 +139,10 @@ def draw_values(data: str, rows: int, width: int, gen: torch.Generator, device) 
         g = _uniform(rows, width, -100.0, -80.0, gen, device)
     elif data == "small":
         g, u = _uniform(rows, width, -0.5, 0.5, gen, device), _uniform(rows, width, -0.5, 0.5, gen, device)
+    elif data in ("tiny_gate", "tiny_up"):
+        tiny = (beta if data == "tiny_gate" else lb) * 2.0**-band * _uniform(rows, width, 1.0, 2.0, gen, device)
+        tiny = torch.where(torch.rand(rows, width, device=device, generator=gen) < 0.5, -tiny, tiny)
+        g, u = (tiny, u) if data == "tiny_gate" else (g, tiny)
     elif data == "zero_gate":
         g = torch.where(torch.rand(rows, width, device=device, generator=gen) < 0.5, 0.0, g)
     elif data == "zero_up":
@@ -154,7 +188,7 @@ def arrange(gate: torch.Tensor, up: torch.Tensor, dh: torch.Tensor, layout: str,
 def make_inputs(case: Case, *, seed: int, device: torch.device) -> types.SimpleNamespace:
     """The inputs of ``case`` drawn from ``seed`` (:func:`arrange`), with the FP32 ``beta`` and ``lb``."""
     gen = torch.Generator(device=device).manual_seed(seed)
-    g, u = draw_values(case.data, case.R, case.I, gen, device)
+    g, u = draw_values(case.data, case.R, case.I, gen, device, beta=fp32(case.beta), lb=fp32(case.lb), band=case.band)
     dh = torch.randn(case.R, case.I, device=device, generator=gen).bfloat16()
     return arrange(g.bfloat16(), u.bfloat16(), dh, case.layout, case=case, beta=fp32(case.beta), lb=fp32(case.lb))
 
@@ -210,8 +244,8 @@ def judge(
     seed: int = 0,
 ) -> None:
     """Judge ``case`` over the draws of :func:`judge_case`: each draw's inputs from its seed, the forward and the
-    backward launched once, every output held to its contract and to the naive tier.  Every verdict is recorded
-    (``TIER`` lines), and any failure fails the test with the judge's numbers."""
+    backward launched once, every output of ``case.judged`` held to its contract and to the naive tier.  Every verdict
+    is recorded (``TIER`` lines), and any failure fails the test with the judge's numbers."""
     held: dict[int, dict] = {}
 
     def run(j: int, s: int):
@@ -219,7 +253,7 @@ def judge(
         found = outputs(fwd, bwd, t)
         held.clear()
         held[j] = naive(t)
-        return found, oracle(t)
+        return {name: found[name] for name in case.judged}, oracle(t)
 
     found_judge, failures = judge_case(run, lambda j, tier: held[j], seed=seed)
     found_judge.record(record_property)

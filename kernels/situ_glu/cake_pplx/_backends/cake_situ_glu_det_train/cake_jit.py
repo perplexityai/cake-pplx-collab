@@ -52,8 +52,8 @@ from __future__ import annotations
 
 from typing import Any
 
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 PACKAGE = "cake_pplx._backends.cake_situ_glu_det_train"
 LIBRARY_PREFIX = "cake_situ_glu_det_train"
 MANIFEST = "build.json"
@@ -65,7 +65,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # The forward: h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb)), one row a CTA, four warps a row, three
     # segments of 256 columns a warp per pass.
     "cake_situ_glu_det_train_0d8b30c1317b470593ea": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "width"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "beta"], ["parameter", "lb"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_situ_glu_det_train_0d8b30c1317b470593ea",
@@ -80,12 +80,12 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "fwd",
     },
     # The backward: d_gate and d_up (BF16) from gate, up and dh, the activation recomputed, two rows a CTA, two warps
-    # a row, six segments of 256 columns a warp per pass.
-    "cake_situ_glu_det_train_9830620c58096d1142ec": {
-        "arches": ["sm_100a", "sm_103a"],
+    # a row, one segment of 256 columns a warp per pass.
+    "cake_situ_glu_det_train_795723884647477adbd7": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "d_gate"], ["buffer", "d_up"], ["parameter", "rows"], ["parameter", "width"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "beta"], ["parameter", "lb"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_situ_glu_det_train_9830620c58096d1142ec",
+        "kernel_symbol": "kernel_cake_situ_glu_det_train_795723884647477adbd7",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -93,7 +93,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_situ_glu_det_train_9830620c58096d1142ec",
+        "library": "cake_situ_glu_det_train_795723884647477adbd7",
         "stage": "bwd",
     },
 }
