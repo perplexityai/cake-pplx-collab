@@ -2293,7 +2293,7 @@ if torch.cuda.get_device_capability() == (10, 7):
 
 - `x`, `dy`: BF16 `[rows, H]`, `H` 4096 or 3584. Each BF16 operand, inputs and outputs, has a unit column stride, a row stride that is a multiple of 8 elements and a 16-byte aligned base, so row slices of wider or longer buffers are read and written in place. An output's row stride is at least `H`. A single row's stride is not read.
 - `w`: FP32 `[rows]`, contiguous. Any value; zeros allowed.
-- `rows` is any count from 0 to `2**31 - 257`, read from the tensor shape. Row offsets are 64-bit, so 1,048,576 rows at `H = 4096` (more than 2^31 elements) are one call. `rows` and the strides are launch arguments: one library per program and architecture serves every call, with no recompilation.
+- `rows` is any count from 0 to `2**29 - 1`, read from the tensor shape. Row offsets are 64-bit, so 1,048,576 rows at `H = 4096` (more than 2^31 elements) are one call. `rows` and the strides are launch arguments: one library per program and architecture serves every call, with no recompilation.
 - Every operand is on one CUDA device. An operand of another dtype, shape or layout raises `ValueError` before any allocation or launch; nothing is copied.
 
 ### `cake_pplx.cake_route_weight_scale_det_train`
@@ -2347,4 +2347,4 @@ cake_route_weight_scale_det_train_forward(x.detach(), w.detach(), out=buffer[:ro
 - Workspace: none. A call allocates only the outputs it is not given. Retained state of the autograd function: `x` and `w` (references, no copy).
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills each output a call allocates with NaN before the kernel writes it: one more fill launch per new output. Output buffers passed to every call avoid the fills. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. Not tested under `torch.compile`.
-- A program's library builds at its first launch. The forward at `H = 4096` and the backward at both widths pick a program and a grid by the row count, with the same bits. Before capturing a CUDA graph, run an eager call of each stage, width and row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
+- A program's library builds at its first launch. The forward and the backward at both widths pick a program and a grid by the row count, with the same bits. Before capturing a CUDA graph, run an eager call of each stage, width and row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.

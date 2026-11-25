@@ -17,15 +17,20 @@ Registry of the Cake route-weight row scaling training kernels of a routed MoE
 expert (SM100 / SM103), deterministic.  The sm_107a builds follow once they
 run on an SM107 device.
 
-``MODULES`` has six records.  Four, keyed ``<stage>_h<width>``, serve one
-stage and width each; the other two are second programs that the host takes in
-a band of row counts (:data:`ROUTES`): ``fwd_h4096_t32``, a forward at
-H = 4096, and ``bwd_h3584_warp``, a backward at H = 3584.  Each record is one
+``MODULES`` has eight records.  Four, keyed ``<stage>_h<width>``, are the
+programs of one stage and width each (no band of :data:`ROUTES` takes
+``fwd_h4096``; the tests launch it as the reference); the other four are
+further programs that the host takes in a band of row counts (:data:`ROUTES`):
+``fwd_h4096_t32``, a forward at H = 4096 for few rows, ``fwd_h4096_flat`` and
+``fwd_h3584_flat``, the forward of each width for many rows, and
+``bwd_h3584_warp``, a backward at H = 3584.
+Each record is one
 exported program (a CUDA device translation unit plus a tvm-ffi binding),
 compiled once per architecture.  A record carries the host plan: the
 ``stage`` it serves (``fwd`` or ``bwd``), its ``width`` (the hidden size H),
-the rows one CTA owns (``rows_per_cta``), the architectures it is delivered
-for and the ``run`` entry.  The derived leaves (``library``,
+the rows one CTA owns (``rows_per_cta``) or, for a flat program, the elements
+one CTA owns (``elements_per_cta``), the architectures it is delivered for and
+the ``run`` entry.  The derived leaves (``library``,
 ``kernel_symbol``, ``launch``, ``arg_plan``) are written by the exporter from
 the rendered binding; ``library`` is the program identity
 (``cake_route_weight_scale_det_train_<20 hex>``), so a kernel change renames
@@ -44,14 +49,24 @@ The stages, per row ``r < rows`` and column ``c < H``:
 
 Launch geometry.  A row's columns are spread over 32 lanes: lane ``l`` makes
 ``H / 256`` loads of 8 elements at columns ``(p * 32 + l) * 8``, so each load
-of a warp is contiguous.  Four kinds of program:
+of a warp is contiguous.  Five kinds of program:
 
 - ``fwd_h4096`` and ``fwd_h3584``: a CTA of 128 threads owns 4 consecutive
   rows, one warp a row (``rows_per_cta`` 4).
 - ``fwd_h4096_t32``: a CTA of 32 threads owns one row (``rows_per_cta`` 1)
   and runs the per-element instructions of ``fwd_h4096``, so it stores the
   same bits.  The host takes it at H = 4096 in its band of :data:`ROUTES`
-  (:func:`route`), ``fwd_h4096`` above it.
+  (:func:`route`).
+- ``fwd_h4096_flat`` and ``fwd_h3584_flat``: the flat program, torch.compile's
+  elementwise schedule.  The tensors are one row-major index of ``rows * H``
+  elements; a CTA of 128 threads owns a chunk of 2048 consecutive elements
+  (``elements_per_cta`` 2048), each thread two loads of 8 at ``(i * 128 + t) *
+  8`` past the chunk's start.  A vector never crosses a row.  Each vector finds
+  its row and column by a division by H, in 32-bit arithmetic where every
+  element index and offset of the call fits, else in 64-bit; both loops make
+  the same loads and stores.  It runs the per-element instructions of
+  ``fwd_h<width>``, so it stores the same bits.  The host takes it in its band
+  of :data:`ROUTES`, above the row programs' bands.
 - ``bwd_h4096`` and ``bwd_h3584``: a CTA of 4 warps (128 threads) owns one
   row (``rows_per_cta`` 1).  Each warp sums one run of each lane's loads
   (H = 4096: 4, 4, 4, 4 loads; H = 3584: 4, 4, 4, 2) as a subtree of the
@@ -67,10 +82,10 @@ of a warp is contiguous.  Four kinds of program:
   at H = 3584 in its band of :data:`ROUTES`.
 
 Every program of one stage and width stores the same bits, whatever the row
-count and the grid.  Every program strides over the blocks of
-``rows_per_cta`` rows with a 32-bit block counter, so a grid of ``g`` CTAs
-covers ``nblocks = ceil(rows / rows_per_cta)`` blocks only while
-``nblocks + g <= 2**31``.  The host launches ``min(nblocks, 2**31 -
+count and the grid.  Every program strides over its blocks (``rows_per_cta``
+rows, or ``elements_per_cta`` elements) with a 32-bit block counter, so a grid
+of ``g`` CTAs covers ``nblocks = ceil(rows / rows_per_cta)`` (or ``ceil(rows *
+H / elements_per_cta)``) blocks only while ``nblocks + g <= 2**31``.  The host launches ``min(nblocks, 2**31 -
 nblocks)`` CTAs (:func:`grid`), which is ``nblocks`` up to ``2**30`` blocks;
 in a band of :data:`ROUTES` with a cap it launches at most ``ctas_per_sm``
 CTAs per SM of the device (a persistent grid, each CTA striding over several
@@ -101,18 +116,20 @@ WIDTHS = (4096, 3584)
 # to it.
 VECTOR_ELEMENTS = 8
 ALIGNMENT_BYTES = 16
-# The row count is a 32-bit kernel parameter: the host refuses ``rows >= MAX_ROWS``.
-MAX_ROWS = 2**31 - 256
+# The host refuses ``rows >= MAX_ROWS``: below it the flat programs' blocks stay below ``2**30`` (H = 4096: ``2 * rows``
+# blocks), so their 32-bit block counter covers every block on the full grid.  One tensor of ``MAX_ROWS`` rows of
+# H = 3584 already needs 3.5 TiB.
+MAX_ROWS = 2**29
 # The program and grid of each call, keyed by the call's ``<stage>_h<width>``: bands ``(first_row, record,
 # ctas_per_sm)`` in strictly increasing ``first_row`` order, the first from 1.  A call of ``rows`` rows takes the last
 # band whose ``first_row <= rows``; ``ctas_per_sm > 0`` caps its grid at that many CTAs per SM of the device, 0 leaves
 # it uncapped.  Every record of one stage and width stores the same bits.  Measured on B200 and GB300: the H = 4096
-# forward at one row a CTA of 32 threads is the faster for few rows, and the four-warp backward on a grid of 8 CTAs per
-# SM is the faster while the call's three BF16 row tensors fit in L2, except in the band of the one-warp-a-row
-# H = 3584 backward, the fastest there.
+# forward at one row a CTA of 32 threads is the faster for few rows, the flat forward of each width the faster for many
+# rows, and the four-warp backward on a grid of 8 CTAs per SM is the faster while the call's three BF16 row tensors fit
+# in L2, except in the band of the one-warp-a-row H = 3584 backward, the fastest there.
 ROUTES: dict[str, tuple[tuple[int, str, int], ...]] = {
-    "fwd_h4096": ((1, "fwd_h4096_t32", 0), (10240, "fwd_h4096", 0)),
-    "fwd_h3584": ((1, "fwd_h3584", 0),),
+    "fwd_h4096": ((1, "fwd_h4096_t32", 0), (8192, "fwd_h4096_flat", 0)),
+    "fwd_h3584": ((1, "fwd_h3584", 0), (16384, "fwd_h3584_flat", 0)),
     "bwd_h4096": ((1, "bwd_h4096", 8), (4864, "bwd_h4096", 0)),
     "bwd_h3584": (
         (1, "bwd_h3584", 8),
@@ -128,7 +145,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_cb5cdccb7cf7465f5128",
+        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_bd43b17800f7121c6434",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -136,7 +153,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_route_weight_scale_det_train_cb5cdccb7cf7465f5128",
+        "library": "cake_route_weight_scale_det_train_bd43b17800f7121c6434",
         "rows_per_cta": 4,
         "stage": "fwd",
         "width": 4096,
@@ -147,7 +164,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_81f4f7c0d9059af49cd4",
+        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_edfd720e5f7640b79cf4",
         "launch": {
             "block": (32, 1, 1),
             "cluster": (1, 1, 1),
@@ -155,7 +172,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_route_weight_scale_det_train_81f4f7c0d9059af49cd4",
+        "library": "cake_route_weight_scale_det_train_edfd720e5f7640b79cf4",
         "rows_per_cta": 1,
         "stage": "fwd",
         "width": 4096,
@@ -165,7 +182,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_83007fd313fa63aaab26",
+        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_40ea8f7288b169790f4c",
         "launch": {
             "block": (128, 1, 1),
             "cluster": (1, 1, 1),
@@ -173,8 +190,48 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_route_weight_scale_det_train_83007fd313fa63aaab26",
+        "library": "cake_route_weight_scale_det_train_40ea8f7288b169790f4c",
         "rows_per_cta": 4,
+        "stage": "fwd",
+        "width": 3584,
+    },
+    # The forward, H = 4096, for many rows: the flat program, a CTA of 128 threads owns a chunk of 2048 consecutive
+    # elements of the row-major index (torch.compile's elementwise schedule), with the per-element instructions of
+    # fwd_h4096 (the same bits).  The host takes it in its band of ROUTES.
+    "fwd_h4096_flat": {
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "elements_per_cta": 2048,
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_c8a39889d6f827831ba5",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_route_weight_scale_det_train_c8a39889d6f827831ba5",
+        "stage": "fwd",
+        "width": 4096,
+    },
+    # The forward, H = 3584, for many rows: the flat program, a CTA of 128 threads owns a chunk of 2048 consecutive
+    # elements of the row-major index (torch.compile's elementwise schedule), with the per-element instructions of
+    # fwd_h3584 (the same bits).  The host takes it in its band of ROUTES.
+    "fwd_h3584_flat": {
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "elements_per_cta": 2048,
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_route_weight_scale_det_train_76225253b414f853a74d",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_route_weight_scale_det_train_76225253b414f853a74d",
         "stage": "fwd",
         "width": 3584,
     },
@@ -259,13 +316,18 @@ def route(stage: str, width: int, rows: int) -> tuple[str, int]:
 
 def grid(rows: int, name: str, ctas_per_sm: int = 0, sm_count: int = 0) -> tuple[int, int, int]:
     """The launch grid of record ``name`` for ``rows >= 1`` rows.  The program owns ``nblocks = ceil(rows /
-    rows_per_cta)`` blocks of its ``rows_per_cta`` rows and strides over them with a 32-bit counter, so any grid of
+    rows_per_cta)`` blocks of its ``rows_per_cta`` rows (a flat program: ``ceil(rows * width / elements_per_cta)``
+    blocks of its ``elements_per_cta`` elements) and strides over them with a 32-bit counter, so any grid of
     ``g >= 1`` CTAs covers every block while ``nblocks + g <= 2**31``.  The grid is ``min(nblocks, 2**31 - nblocks)``
     CTAs (one CTA per block up to ``2**30`` blocks) and, with ``ctas_per_sm > 0``, at most ``ctas_per_sm *
     sm_count`` CTAs: a persistent grid over the ``sm_count >= 1`` SMs of the device, the same bits."""
     if rows < 1:
         raise ValueError(f"a launch needs at least one row, got {rows}")
-    blocks = -(-int(rows) // MODULES[name]["rows_per_cta"])
+    record = MODULES[name]
+    if "elements_per_cta" in record:
+        blocks = -(-int(rows) * record["width"] // record["elements_per_cta"])
+    else:
+        blocks = -(-int(rows) // record["rows_per_cta"])
     ctas = min(blocks, 2**31 - blocks)
     if ctas_per_sm > 0:
         if sm_count < 1:
