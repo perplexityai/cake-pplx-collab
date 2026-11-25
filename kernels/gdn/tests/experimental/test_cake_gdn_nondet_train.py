@@ -9791,3 +9791,154 @@ def test_the_forward_and_backward_plan_flags(
         return runs
 
     _judge_forms(record_property, 7189, seq_lens, heads, device, forms)
+
+
+# --------------------------------------------------------------------------- PV_TF32 per call (the pv_tf32 prototype)
+# With cake_chain.PV_TF32 on, only a backward whose final state receives a gradient runs the pv_tf32 adjoint scan and
+# tail (cake_chain.pv_tf32_stages); every other call keeps the 0.2.3 programs and launches, and only those calls record
+# or replay a backward plan.  The package fixes no bits, so the calls compare by their launches (stage, grid, stream,
+# every value's shape, strides and dtype, every scalar: :func:`_logged_launches`).  The call kinds: (initial state,
+# output_final_state, a final-state gradient).  "h0-final" asks for the final state and gives it no gradient: autograd
+# then passes the backward no dht (the forward turns its zero fill off) and the chain reads the zeros that autograd
+# filled in before (cake_chain._grads_of).
+PV_CALLS = {
+    "stateless": (False, False, False),
+    "h0": (True, False, False),
+    "h0-final": (True, True, False),
+    "dht": (False, True, True),
+    "h0-dht": (True, True, True),
+}
+
+
+def _pv_or_skip() -> None:
+    arch = cake_backend.device_arch(torch.cuda.current_device())
+    if arch not in cake_chain.PV_TF32_ARCHS:
+        pytest.skip(f"PV_TF32 runs on {cake_chain.PV_TF32_ARCHS}, not {arch}")
+    stages = (*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values())
+    missing = [stage for stage in stages if not cake_chain._available(stage, arch)]
+    if missing:
+        pytest.skip(f"this build has no pv_tf32 record for {missing}")
+
+
+def _pv_call(inputs, seq_lens, heads, kind, device, seed) -> dict:
+    with_h0, final, grad = PV_CALLS[kind]
+    h0, dht = _states(seq_lens, heads[1], device, seed)
+    return _run(inputs, seq_lens, initial_state=h0 if with_h0 else None, output_final_state=final,
+                dht=dht if grad else None)  # fmt: skip
+
+
+def test_grads_of_fills_the_zeros_of_autograd_and_reads_the_final_state_grad() -> None:
+    # no device: an output without a gradient comes back as the zeros that autograd's fill made before (its shape,
+    # dtype and device, +0.0), and only a gradient that autograd gave the final state counts, zeros included
+    cpu = torch.device("cpu")
+    o_shape, state_shape = (1, 5, 4, HEAD_DIM), (2, 4, HEAD_DIM, HEAD_DIM)
+    with_state = types.SimpleNamespace(
+        zero_fill=(o_shape, torch.bfloat16, cpu, (state_shape, torch.float32))
+    )
+    without_state = types.SimpleNamespace(
+        zero_fill=(o_shape, torch.bfloat16, cpu, None)
+    )
+    do, dht, grad = cake_chain._grads_of(with_state, None, None)
+    assert not grad
+    assert do.shape == o_shape and do.dtype == torch.bfloat16 and do.device == cpu
+    assert dht.shape == state_shape and dht.dtype == torch.float32 and dht.device == cpu
+    assert not do.view(torch.int16).any() and not dht.view(torch.int32).any()
+    given = torch.ones(o_shape, dtype=torch.bfloat16)
+    do, dht, grad = cake_chain._grads_of(without_state, given, None)
+    assert do is given and dht is None and not grad
+    zeros = torch.zeros(state_shape)
+    do, dht, grad = cake_chain._grads_of(with_state, given, zeros)
+    assert do is given and dht is zeros and grad
+
+
+@pytest.mark.parametrize("case", ["g1", "g2", "g3"])
+def test_pv_tf32_runs_only_for_a_final_state_gradient(
+    case, device, monkeypatch
+) -> None:
+    # PV_TF32 on against off, per call kind on one draw (BWD_PLAN off: the general path of every call): a call
+    # without a final-state gradient makes the launches of the flag off (the 0.2.3 programs); a call with one launches
+    # the pv_tf32 scan and tail in place of the 0.2.3 ones and every other stage as the flag off does
+    _pv_or_skip()
+    heads, seq_lens = FWD_A_CASES[case]
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=41)
+    monkeypatch.setattr(cake_chain, "BWD_PLAN", False)
+    log = _logged_launches(monkeypatch)
+    swap = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
+    for kind, (_h0, _final, grad) in PV_CALLS.items():
+        launched = {}
+        for flag in (False, True):
+            monkeypatch.setattr(cake_chain, "PV_TF32", flag)
+            log.clear()
+            _pv_call(inputs, seq_lens, heads, kind, device, 42)
+            launched[flag] = list(log)
+        if grad:
+            stages = [entry[0] for entry in launched[True]]
+            assert stages == [swap.get(e[0], e[0]) for e in launched[False]], (
+                kind,
+                stages,
+            )
+            assert set(swap.values()) & set(stages), (kind, stages)
+        else:
+            assert launched[True] == launched[False], kind
+            assert not set(swap.values()) & {e[0] for e in launched[True]}, kind
+
+
+def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
+    # PV_TF32 on, BWD_PLAN on: every call kind on one layout, interleaved in two orders from empty plan caches, makes
+    # the launches of the kind's first call; a call with a final-state gradient neither records nor replays a backward
+    # plan, the calls without one replay theirs and no recorded plan launches a pv_tf32 program; and three backwards
+    # over one graph each take their own path: with the final-state gradient the pv_tf32 programs, without it the
+    # h0-final call's backward launches, and with no gradient for o (do filled with zeros) the pv_tf32 programs again
+    _pv_or_skip()
+    heads, seq_lens = FWD_A_CASES["g2"]
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=43)
+    monkeypatch.setattr(cake_chain, "PV_TF32", True)
+    log = _logged_launches(monkeypatch)
+    replays = _counted_replays(monkeypatch)
+    pv_stages = {*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values()}
+    first = {}
+    kinds = list(PV_CALLS)
+    for order in (kinds, kinds[::-1]):
+        monkeypatch.setattr(cake_chain, "_BWD_PLANS", {})
+        monkeypatch.setattr(cake_chain, "_FWD_PLANS", {})
+        replayed = set()
+        for kind in (*order, *order):
+            log.clear()
+            replays.clear()
+            _pv_call(inputs, seq_lens, heads, kind, device, 44)
+            if PV_CALLS[kind][2]:
+                assert not replays, kind
+            elif replays:
+                replayed.add(kind)
+            first.setdefault(kind, list(log))
+            assert log == first[kind], kind
+        assert {"stateless", "h0"} <= replayed, replayed
+        for plan in cake_chain._BWD_PLANS.values():
+            launched = {
+                op[1] for op in plan.ops or () if op[0] == cake_chain._OP_LAUNCH
+            }
+            assert not launched & pv_stages, launched
+    h0, dht = _states(seq_lens, heads[1], device, 44)
+    leaves = {
+        n: inputs[n].detach().clone().requires_grad_(True)
+        for n in ("q", "k", "v", "g", "beta")
+    }
+    h0_leaf = h0.detach().clone().requires_grad_(True)
+    cu = _cu(seq_lens)
+    o, final = cake_gdn_nondet(*(leaves[n] for n in ("q", "k", "v", "g", "beta")), scale=1.0 / math.sqrt(HEAD_DIM),
+                               initial_state=h0_leaf, output_final_state=True, use_qk_l2norm_in_kernel=True,
+                               cu_seqlens=torch.tensor(cu, dtype=torch.int64, device=device),
+                               cu_seqlens_cpu=torch.tensor(cu, dtype=torch.int64))  # fmt: skip
+    wrt = [*(leaves[n] for n in ("q", "k", "v", "g", "beta")), h0_leaf]
+    backwards = {}
+    for name, outputs, grads in (("with", [o, final], [inputs["do"], dht]), ("without", [o], [inputs["do"]]),
+                                 ("no_do", [final], [dht])):  # fmt: skip
+        log.clear()
+        got = torch.autograd.grad(outputs, wrt, grads, retain_graph=name != "no_do")
+        assert all(t is not None for t in got), name
+        backwards[name] = list(log)
+    torch.cuda.synchronize()
+    assert pv_stages & {e[0] for e in backwards["with"]}
+    assert pv_stages & {e[0] for e in backwards["no_do"]}
+    assert backwards["without"] == first["h0-final"][-len(backwards["without"]) :]
+    assert not pv_stages & {e[0] for e in backwards["without"]}

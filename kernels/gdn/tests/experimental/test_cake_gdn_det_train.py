@@ -10918,3 +10918,174 @@ def test_the_record_gate_leaves_an_unready_plan_without_credit(
     assert not plan.ready(plan.meta, plan.stream)
     for got in runs:
         _assert_bitwise(got, want, OUTPUT_NAMES)
+
+
+# --------------------------------------------------------------------------- PV_TF32 per call (the pv_tf32 prototype)
+# With cake_chain.PV_TF32 on, only a backward whose final state receives a gradient runs the pv_tf32 adjoint scan and
+# tail (cake_chain.pv_tf32_stages); every other call keeps the 0.2.3 programs, launches and bits.  The call kinds:
+# (initial state, output_final_state, a final-state gradient).  "h0-final" asks for the final state and gives it no
+# gradient: autograd then passes the backward no dht (the forward turns its zero fill off) and the chain reads the
+# zeros that autograd filled in before (cake_chain._grads_of).
+PV_CALLS = {
+    "stateless": (False, False, False),
+    "h0": (True, False, False),
+    "h0-final": (True, True, False),
+    "dht": (False, True, True),
+    "h0-dht": (True, True, True),
+}
+PV_NAMES = OUTPUT_NAMES + ("final_state", "dh0")
+
+
+def _pv_or_skip() -> None:
+    arch = _current_arch()
+    if arch not in cake_chain.PV_TF32_ARCHS:
+        pytest.skip(f"PV_TF32 runs on {cake_chain.PV_TF32_ARCHS}, not {arch}")
+    stages = (*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values())
+    missing = [stage for stage in stages if not cake_chain._available(stage, arch)]
+    if missing:
+        pytest.skip(f"this build has no pv_tf32 record for {missing}")
+
+
+def _same_bits(a: dict, b: dict, names) -> None:
+    """Every output of ``names`` that ``a`` has, bit for bit (dtype, shape and bytes) in ``b``."""
+    differing = [
+        n
+        for n in names
+        if n in a
+        and not (
+            a[n].dtype == b[n].dtype
+            and a[n].shape == b[n].shape
+            and torch.equal(
+                a[n].contiguous().view(torch.uint8), b[n].contiguous().view(torch.uint8)
+            )
+        )
+    ]
+    assert not differing, f"not bitwise equal: {differing}"
+
+
+def _pv_call(inputs, seq_lens, heads, kind, device, seed) -> dict:
+    with_h0, final, grad = PV_CALLS[kind]
+    h0, dht = _state_pair(seq_lens, heads, device, seed)
+    return _run(inputs, seq_lens, initial_state=h0 if with_h0 else None, output_final_state=final,
+                dht=dht if grad else None)  # fmt: skip
+
+
+def test_grads_of_fills_the_zeros_of_autograd_and_reads_the_final_state_grad() -> None:
+    # no device: an output without a gradient comes back as the zeros that autograd's fill made before (its shape,
+    # dtype and device, +0.0), and only a gradient that autograd gave the final state counts, zeros included
+    cpu = torch.device("cpu")
+    o_shape, state_shape = (1, 5, 4, HEAD_DIM), (2, 4, HEAD_DIM, HEAD_DIM)
+    with_state = types.SimpleNamespace(
+        zero_fill=(o_shape, torch.bfloat16, cpu, (state_shape, torch.float32))
+    )
+    without_state = types.SimpleNamespace(
+        zero_fill=(o_shape, torch.bfloat16, cpu, None)
+    )
+    do, dht, grad = cake_chain._grads_of(with_state, None, None)
+    assert not grad
+    assert do.shape == o_shape and do.dtype == torch.bfloat16 and do.device == cpu
+    assert dht.shape == state_shape and dht.dtype == torch.float32 and dht.device == cpu
+    assert not do.view(torch.int16).any() and not dht.view(torch.int32).any()
+    given = torch.ones(o_shape, dtype=torch.bfloat16)
+    do, dht, grad = cake_chain._grads_of(without_state, given, None)
+    assert do is given and dht is None and not grad
+    zeros = torch.zeros(state_shape)
+    do, dht, grad = cake_chain._grads_of(with_state, given, zeros)
+    assert do is given and dht is zeros and grad
+
+
+@pytest.mark.parametrize("case", ["g1", "g2", "g3"])
+def test_pv_tf32_runs_only_for_a_final_state_gradient(
+    case, device, monkeypatch
+) -> None:
+    # PV_TF32 on against off, per call kind on one draw: a call without a final-state gradient launches what the
+    # flag off launches and gives its bits (the 0.2.3 programs); a call with one launches the pv_tf32 scan and tail
+    # in place of the 0.2.3 ones and nothing else differs, o / final_state / dq keep their bits; each repeats its bits
+    _pv_or_skip()
+    heads, seq_lens = FWD_A_CASES[case]
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=41)
+    stages = _record_launches(monkeypatch)
+    swap = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
+    for kind, (_h0, _final, grad) in PV_CALLS.items():
+        runs, launched = {}, {}
+        for flag in (False, True):
+            monkeypatch.setattr(cake_chain, "PV_TF32", flag)
+            stages.clear()
+            runs[flag] = _pv_call(inputs, seq_lens, heads, kind, device, 42)
+            launched[flag] = list(stages)
+        _same_bits(
+            runs[True], _pv_call(inputs, seq_lens, heads, kind, device, 42), PV_NAMES
+        )
+        if grad:
+            assert launched[True] == [swap.get(s, s) for s in launched[False]], (
+                kind,
+                launched,
+            )
+            assert set(swap.values()) & set(launched[True]), (kind, launched[True])
+            _same_bits(runs[True], runs[False], ("o", "final_state", "dq"))
+        else:
+            assert launched[True] == launched[False], (kind, launched)
+            assert not set(swap.values()) & set(launched[True]), (kind, launched[True])
+            _same_bits(runs[True], runs[False], PV_NAMES)
+
+
+def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
+    # PV_TF32 on: every call kind on one layout, interleaved in two orders from an empty host table cache, gives the
+    # launches and bits of the kind's first call; and three backwards over one graph each take their own path: with
+    # the final-state gradient the pv_tf32 programs, without it the 0.2.3 ones (the h0-final call's bits), and with
+    # no gradient for o (do filled with zeros) the dht call's bits on zeros
+    _pv_or_skip()
+    heads, seq_lens = FWD_A_CASES["g2"]
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=43)
+    monkeypatch.setattr(cake_chain, "PV_TF32", True)
+    stages = _record_launches(monkeypatch)
+    first = {}
+    kinds = list(PV_CALLS)
+    for order in (kinds, kinds[::-1]):
+        monkeypatch.setattr(cake_chain, "_META_FRONT", {})
+        for kind in (*order, *order):
+            stages.clear()
+            got = _pv_call(inputs, seq_lens, heads, kind, device, 44)
+            if kind not in first:
+                first[kind] = (got, list(stages))
+                continue
+            assert stages == first[kind][1], kind
+            _same_bits(got, first[kind][0], PV_NAMES)
+    h0, dht = _state_pair(seq_lens, heads, device, 44)
+    leaves = {
+        n: inputs[n].detach().clone().requires_grad_(True)
+        for n in ("q", "k", "v", "g", "beta")
+    }
+    h0_leaf = h0.detach().clone().requires_grad_(True)
+    cu = _cu(seq_lens)
+    o, final = cake_gdn_det(*(leaves[n] for n in ("q", "k", "v", "g", "beta")), scale=1.0 / math.sqrt(HEAD_DIM),
+                            initial_state=h0_leaf, output_final_state=True, use_qk_l2norm_in_kernel=True,
+                            cu_seqlens=torch.tensor(cu, dtype=torch.int64, device=device),
+                            cu_seqlens_cpu=torch.tensor(cu, dtype=torch.int64))  # fmt: skip
+    wrt = [*(leaves[n] for n in ("q", "k", "v", "g", "beta")), h0_leaf]
+    names = ("dq", "dk", "dv", "dg", "dbeta", "dh0")
+    stages.clear()
+    with_grad = dict(
+        zip(
+            names,
+            torch.autograd.grad(
+                [o, final], wrt, [inputs["do"], dht], retain_graph=True
+            ),
+        )
+    )
+    assert set(cake_chain.PV_TF32_SCANS.values()) & set(stages), stages
+    stages.clear()
+    without = dict(
+        zip(names, torch.autograd.grad([o], wrt, [inputs["do"]], retain_graph=True))
+    )
+    assert not set(cake_chain.PV_TF32_SCANS.values()) & set(stages), stages
+    no_do = dict(zip(names, torch.autograd.grad([final], wrt, [dht])))
+    torch.cuda.synchronize()
+    _same_bits(with_grad, first["h0-dht"][0], names)
+    _same_bits(without, first["h0-final"][0], names)
+    zero_do = {**inputs, "do": torch.zeros_like(inputs["do"])}
+    _same_bits(
+        no_do,
+        _run(zero_do, seq_lens, initial_state=h0, output_final_state=True, dht=dht),
+        names,
+    )
