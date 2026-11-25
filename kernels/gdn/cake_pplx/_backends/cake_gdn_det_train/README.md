@@ -111,8 +111,10 @@ from the stitched segment states, where a second cost rule prices it at most
 cheaper; its pre-scan then computes the `dv_local` tiles of its chunks itself,
 so no `dv_local` stage runs.  Both forms give the same bits on `dhu_tc2`;
 every value-head group but two (`G = HV / H`) runs `dhu_tc2_dvl32` instead on
-the architectures of `DVL32_ARCHS` (below).  Then the tail computes `dq`, `dk`,
-`dv`, `dg` and `dbeta`:
+the architectures of `DVL32_ARCHS` (below), and at `G = 3` there
+`dhu_tc2_dvl32_gm` forms the segment maps that the stitch composes in place of
+the pre-scan (on `sm_107a` only where its grid is larger than half the SMs).
+Then the tail computes `dq`, `dk`, `dv`, `dg` and `dbeta`:
 
 | `G` | tail | tcgen05 adjoint scan |
 |---|---|---|
@@ -194,6 +196,44 @@ initial-state gradient: the cost rules and the `dhu_scan`
 pin pick the bits, and on a split `(64, 1)` plan the device-table route always
 runs the register pass.  Groups of two keep `tail_g2` and `dhu_tc2`.
 
+In the second pass of a split plan of a value-head group of three on
+`dhu_tc2_dvl32`, on `sm_100a`, `sm_103a` and `sm_107a` (`ADJOINT_MAP_ARCHS`),
+the segment maps that the stitch composes come from `dhu_tc2_dvl32_gm` instead
+of the register pre-scan: one CTA per segment and value head walks two states
+in one pass with the `dhu_tc2_dvl32` scan (one from zero with `do`, one from
+the identity without it) and stores the segment's map.  It skips the first
+segment of each sequence, whose map the stitch does not read, and uses the
+pre-scan's warm-up threshold: a segment whose gate sum falls below the
+threshold before its last chunk keeps only the chunks up to there.  A map whose
+bound falls in its last chunk is kept whole, where the pre-scan keeps only
+those chunks (other bits there).  The maps carry the FP32 `dv_local` values, so
+where a map carries state into the segment before it (slowly decaying gates)
+`dk`, `dv`, `dg`, `dbeta` and the initial-state gradient take other bits than
+with the pre-scan; `o`, `dq` and the final state keep theirs, and the gradients
+repeat bit for bit.  The segment table, the stitch, the second pass, the tails
+and the route rules are unchanged.
+
+Where the maps' grid of one CTA per entry and value head fills at most half of
+the SMs (`2 x entries x HV <= SMs`), `dhu_tc2_dvl32_gm2` stores them instead:
+two CTAs per entry and value head (grid z 2), `B` and `seg_flag` on one and `M`
+on the other, each with the products, roundings and orders of
+`dhu_tc2_dvl32_gm` on its half, so the maps and every output keep their bits.
+The rule (`split_map_launch`) reads host facts only: the entries come with the
+host table, and the most entries of the two-CTA form is decided once per
+architecture, value-head count and SM count.  A grid of more than one wave
+keeps `dhu_tc2_dvl32_gm`.  On `sm_107a` (`ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`)
+a call with `2 x entries x HV <= SMs` keeps the fused pre-scan instead of
+either map form, as in 0.2.7.
+
+In 0.2.8 the segment maps of a split pass 2 at `G = 3` on `dhu_tc2_dvl32` come
+from `dhu_tc2_dvl32_gm` or `dhu_tc2_dvl32_gm2` (above), where 0.2.3 to 0.2.7
+ran the fused pre-scan.  Where a map carries state into the segment before it,
+`dk`, `dv`, `dg`, `dbeta` and the initial-state gradient of such a call take
+other bits than in 0.2.7; `o`, `dq` and the final state keep them, and every
+other route keeps the 0.2.7 bits.  On `sm_107a`, a call with
+`2 x entries x HV <= SMs` runs the fused pre-scan, the 0.2.7 route, and keeps
+the 0.2.7 bits.
+
 In 0.2.7 the package tail and `dhu_tc2_dvl32` serve `G = 1` and `G >= 4`,
 where 0.2.3 to 0.2.6 ran the unfused tail on `dhu_tc2`.  Groups of two and
 three keep the 0.2.6 bits on every route; `o` and the final state keep them
@@ -210,9 +250,15 @@ bits, and the bits may change between versions.
 The switches are module constants of `cake_chain` with the off value `()`:
 `PACKAGE_TAIL_ARCHS` (off: the unfused tail on the same adjoint scan at `G = 1`
 and `G >= 4`), `DVL32_ARCHS` (off: `dhu_tc2` for every group, `G = 3`
-included) and `F32X_TAIL_ARCHS` (off: `tail_g3` at `G = 3`).  With the first
-two off, `G = 1` and `G >= 4` run their 0.2.6 route, the unfused tail on
-`dhu_tc2`, with its bits.  `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` maps an
+included), `F32X_TAIL_ARCHS` (off: `tail_g3` at `G = 3`), `ADJOINT_MAP_ARCHS`
+(off: the fused pre-scan forms the segment maps at `G = 3`, the 0.2.7 route
+with its bits), `ADJOINT_MAP_SPLIT_ARCHS` (off: `dhu_tc2_dvl32_gm` on every
+grid that takes a map form, the same bits; on `sm_107a` a grid that fits one
+wave still keeps the fused pre-scan while `ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`
+is on) and `ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS` (off: the maps on every grid,
+`dhu_tc2_dvl32_gm2` where it fits one wave, with the bits of the maps).  With
+the first two off, `G = 1` and `G >= 4` run their
+0.2.6 route, the unfused tail on `dhu_tc2`, with its bits.  `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` maps an
 architecture to its threshold; an architecture missing from it, or 0, has
 none.
 
@@ -343,8 +389,8 @@ per-stream ones.
 | `scan_config` | planner | register-scan `(value block, key split)` of both scans: `(32, 2)`, `(32, 1)` or `(64, 1)`; keeps the call on the prep forward |
 | `segment_chunks` | planner | segment length in chunks of the segment-parallel scans; `0` forces the serial scan; lengths above 128 (the chunks one pre-scan CTA covers) are not supported: a call whose plan then splits a sequence raises `ValueError`; keeps the call on the prep forward |
 | `finalize` | by size | finalize of the unfused tail (`HV != 2 * H`): `"finalize"` or `"finalize_mlp"` (the latter needs `HV == 3 * H`); a pin runs the unfused tail instead of `tail_g3_f32x` or the package tail (`dv`, `dg` and `dbeta` the same bits; `dq` / `dk` rounded per value head) |
-| `warmup_log2` | `-10 / ln 2` | warm-up threshold of the pre-scans |
-| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`; `dhu_tc2_dvl32` for `HV != 2 * H` on `DVL32_ARCHS`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan); `"tc"` gives the bits of `"reg"` on `dhu_tc2`, and on `dhu_tc2_dvl32` the same `o` and final state with other gradient bits |
+| `warmup_log2` | `-10 / ln 2` | warm-up threshold of the pre-scans and of the `dhu_tc2_dvl32_gm` segment maps |
+| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`; `dhu_tc2_dvl32` for `HV != 2 * H` on `DVL32_ARCHS`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan, or at `HV == 3 * H` on `dhu_tc2_dvl32` with the `dhu_tc2_dvl32_gm` segment maps where the rule above names them); `"tc"` gives the bits of `"reg"` on `dhu_tc2`, and on `dhu_tc2_dvl32` the same `o` and final state with other gradient bits |
 | `prep` | rule | forward prep: `"plain"` or `"tma"` (`prep_tma`; Q or K not 16-byte aligned still take the plain prep); keeps the call on the prep forward |
 | `save_state` | `True` | keep the forward state of the tape level (`w`, `h`, `v_new`) for the backward; `False` recomputes them |
 | `host_cache` | `True` | keep the chunk tables, the `dhu_tc2` selections and the per-stream workspaces between calls, the package tail's among them (a CUDA graph capture takes its own workspaces) |
