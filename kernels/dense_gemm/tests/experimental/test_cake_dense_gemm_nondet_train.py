@@ -16770,7 +16770,7 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5(monkeypatch):
     test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7; the sm_100a and sm_103a parts of that table (version
     0.3.8): test_k1_rows_follow_the_deterministic_ranges_of_0_3_8 (their raster ranges of versions 0.3.9 - 0.3.11:
     the raster tests)."""
-    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked above
     bf16, f32 = torch.bfloat16, torch.float32
     arch, sms = "sm_107a", 212
     l2 = K1_DGRAD_PARTS[(arch, sms)]
@@ -16998,7 +16998,7 @@ def test_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch):
     the o_proj weight gradient at T 12288 its three-way K split (``DET_212_F32_WGRAD_038_SPLIT``).  The checks read
     the ranges of version 0.3.8 (``_det_tables_038``; the raster groups of versions 0.3.9 - 0.3.11:
     ``test_k1_rows_follow_the_deterministic_raster_ranges_of_0_3_9``, ``..._of_0_3_10`` and ``..._of_0_3_11``)."""
-    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked above
     bf16, f32 = torch.bfloat16, torch.float32
     prefix = det_backend._TEMPLATE_PREFIX
     _det_tables_038(monkeypatch)
@@ -17631,7 +17631,8 @@ def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch, recor
     package's single-CTA program ``kn_n128_f32_tma2_s4_c1``; on the 212-SM ``sm_107a`` part each FP32
     weight gradient of ``DET_212_F32_WGRAD_038`` binds the deterministic plan (no plan of this package's split tables),
     the range's program.  Each meets the naive BF16 tier against FP64 over the draws, the first draw launched
-    ``1 + RERUNS`` times into NaN-poisoned outputs.  The ranges are the deterministic package's current ones: on 152-SM
+    ``1 + RERUNS`` times into NaN-poisoned outputs.  The ranges are those of the deterministic package's version 0.3.26
+    (:func:`_det_tables_0326`; version 0.3.27: ``test_k1_det_0327_wgrad_rows_follow_the_det_tables``): on 152-SM
     ``sm_103a`` parts also the raster ranges of version 0.3.9 (``DET_DGRAD_RASTER_039``), on 148-SM parts those of
     version 0.3.10 (``DET_DGRAD_RASTER_0310``; the 148-SM ``sm_100a`` part has no other range), on 152-SM ``sm_100a``
     parts those of version 0.3.11 (``DET_DGRAD_RASTER_0311``); its FP32 ranges alone (the BF16 start-path ranges of
@@ -17640,7 +17641,7 @@ def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch, recor
     ``test_gpu_k1_rows_follow_the_deterministic_128_column_programs``, and their cells of version 0.3.14:
     ``test_gpu_k1_rows_follow_the_deterministic_tile_cells_of_0_3_14``, and of version 0.3.15:
     ``test_gpu_k1_rows_follow_the_deterministic_tile_cells_of_0_3_15``).  Another part skips."""
-    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked above
     device, arch, sms = _part_or_skip()
     ranges = (
         {
