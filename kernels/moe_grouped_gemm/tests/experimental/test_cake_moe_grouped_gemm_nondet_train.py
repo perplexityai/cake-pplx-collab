@@ -123,7 +123,8 @@ ROW_PAD = 256  # extra columns of the wider tensors row-padded operands are cut 
 # bytes for the multiples of 64 columns the weight gradient takes
 PITCH_OFF_16 = 4
 # Two ragged groups of at least every architecture's ``dgrad_evict_first_min_rows``
-# rows on average: with ``K >= dgrad_evict_first_min_k`` the data gradient takes the
+# rows on average: with ``K >= dgrad_evict_first_min_k`` (and ``N`` over
+# ``dgrad_evict_first_skip_max_n``) the data gradient takes the
 # evict-first twin of its wide tile on the architectures of ``dgrad_evict_first_archs``
 # (sm_100a: the domain-scheduled twin; sm_107a: the A-collector twin).
 EVICT_FIRST_E2 = [16390, 16500]
@@ -190,11 +191,11 @@ def _arch(device):
     return SUPPORTED_COMPUTE_CAPABILITIES[torch.cuda.get_device_capability(device)]
 
 
-def _evict_first(op, k, arch, sum_m, groups, c):
-    """The evict-first rule of ``op``: ``dgrad_evict_first``; ``fwd_lwh_ef`` or
-    ``fwd_evict_first``."""
+def _evict_first(op, k, arch, sum_m, groups, c, n=None):
+    """The evict-first rule of ``op``: ``dgrad_evict_first`` (with the dgrad reduction
+    ``n``); ``fwd_lwh_ef`` or ``fwd_evict_first``."""
     if op == "dgrad":
-        return cb.dgrad_evict_first(k, arch, sum_m, groups, c)
+        return cb.dgrad_evict_first(k, arch, sum_m, groups, c, n=n)
     return cb.fwd_lwh_ef(k, arch, c) or cb.fwd_evict_first(k, arch, c)
 
 
@@ -223,6 +224,12 @@ def _bounds(sizes):
 
 # The output each op's launch writes, as the TIER lines name it.
 OUT_NAMES = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}
+
+
+def _tile_k(name):
+    """The k tile of weight-gradient route ``name``, a public route or its lead twin."""
+    base = name.removesuffix(cake_jit.LEAD_SUFFIX)
+    return 512 if base.endswith("_k512") else 256
 
 
 def _operands(op, x, w, g):
@@ -719,10 +726,10 @@ def test_ordered_tail_archs_bind_the_ordered_k512_builds():
     for name, route in ROUTES.items():
         if route["op"] != "wgrad":
             continue
-        if name.endswith("_k512"):
+        if _tile_k(name) == 512:
             k512_arches |= set(route["arches"])
             assert set(route["arches"]) <= set(c["ordered_tail_archs"]), name
-        tile_k = 512 if name.endswith("_k512") else 256
+        tile_k = _tile_k(name)
         for arch in route["arches"]:
             ordered = cb.wgrad_ordered_tail(tile_k, arch, c)
             assert ordered == (tile_k == 512 and arch in c["ordered_tail_archs"])
@@ -786,7 +793,7 @@ def test_program_choice_follows_the_host_plan_constants():
                 wide = cols % wide_n == 0 and arch in wide_archs
                 assert tile_n == (wide_n if wide else block_n)
                 assert stage.startswith("main_wide") == wide
-                ef = wide and served_ef and _evict_first(op, k, arch, 4096, 4, c)
+                ef = wide and served_ef and _evict_first(op, k, arch, 4096, 4, c, n=n)
                 assert (stage == "main_wide_ef") == ef, (name, arch, n, k, stage)
     min_k = int(c["wave_sync_min_k"])
     for out_dtype in ("bfloat16", "float32"):
@@ -859,7 +866,8 @@ def test_bench_and_expert_rows_take_the_measured_dgrad_stage(arch):
                 arch == "sm_100a" or (arch == "sm_107a" and groups in (4, 8))
             )
             ts33 = arch == "sm_103a" and gate_up and groups in (4, 8, 16)
-            assert cb.dgrad_evict_first(k, arch, sum_m, groups, c) == ef, (proj, label)
+            rule = cb.dgrad_evict_first(k, arch, sum_m, groups, c, n=n)
+            assert rule == ef, (proj, label)
             stage, tile_n = cb.select_row_stage(
                 name, "dgrad", n, k, arch, c, sum_m=sum_m, num_groups=groups
             )
@@ -908,6 +916,113 @@ def test_bench_and_expert_rows_take_the_measured_fwd_stage(arch):
     assert taken["main_wide_ts33"] == {"sm_100a": 0, "sm_103a": 2, "sm_107a": 0}[arch]
 
 
+# The short-reduction rules (``dgrad_evict_first_skip_max_n``,
+# ``dgrad_wide_ts33_short_n_min`` to ``dgrad_wide_ts33_short_n``,
+# ``fwd_wide_ts33_short_k_min`` to ``fwd_wide_ts33_short_k``) at their edges (448 /
+# 512, 1024 / 1025) over 64 groups and 4096 output columns: (op, reduction, rows per
+# group) -> the stage on sm_100a, sm_103a and sm_107a; a pair is (the stage without
+# the three rules, the stage with them).
+_W, _E, _T = "main_wide", "main_wide_ef", "main_wide_ts33"
+SHORT_REDUCTION_EDGES = {
+    ("dgrad", 1024, 5120): ((_E, _W), (_W, _T), _W),
+    ("dgrad", 1025, 5120): (_E, _W, _W),
+    ("dgrad", 512, 5120): ((_E, _W), (_W, _T), _W),
+    ("dgrad", 448, 5120): ((_E, _W), _W, _W),
+    ("dgrad", 1024, 4095): (_W, (_W, _T), _W),
+    ("dgrad", 1024, 1024): (_W, (_W, _T), _W),
+    ("dgrad", 1024, 1023): (_W, _W, _W),
+    ("dgrad", 1025, 1024): (_W, _W, _W),
+    ("dgrad", 512, 1024): (_W, (_W, _T), _W),
+    ("dgrad", 448, 1024): (_W, _W, _W),
+    ("dgrad", 1024, 8192): ((_E, _W), _T, _W),
+    ("dgrad", 1025, 8192): (_E, _T, _W),
+    ("dgrad", 448, 8192): ((_E, _W), _T, _W),
+    ("dgrad", 1024, 16384): ((_E, _W), _T, _E),
+    ("fwd", 1024, 4096): (_W, _T, _E),
+    ("fwd", 1024, 4097): (_W, (_W, _T), _E),
+    ("fwd", 1024, 65536): (_W, (_W, _T), _E),
+    ("fwd", 1025, 4096): (_W, _T, _E),
+    ("fwd", 1025, 4097): (_W, _W, _E),
+    ("fwd", 512, 5120): (_W, (_W, _T), _E),
+    ("fwd", 512, 65536): (_W, (_W, _T), _E),
+    ("fwd", 448, 5120): (_W, _W, _E),
+    ("fwd", 448, 4096): (_W, _T, _E),
+}
+SHORT_REDUCTION_KEYS = (
+    "dgrad_evict_first_skip_max_n",
+    "dgrad_wide_ts33_short_n",
+    "fwd_wide_ts33_short_k",
+)
+
+
+@pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
+def test_short_reductions_take_the_measured_wide_twins(arch):
+    """A data gradient whose reduction ``N`` is at most the architecture's
+    ``dgrad_evict_first_skip_max_n`` (sm_100a: 1024) keeps the plain wide tile where its
+    evict-first twin served it; one from ``dgrad_wide_ts33_short_n_min`` to
+    ``dgrad_wide_ts33_short_n`` (sm_103a: 512 to 1024) takes ``main_wide_ts33`` from
+    ``dgrad_wide_ts33_short_n_min_rows`` (1024) rows per group; a forward pass whose
+    reduction ``K`` is from ``fwd_wide_ts33_short_k_min`` to ``fwd_wide_ts33_short_k``
+    (sm_103a: 512 to 1024) takes ``main_wide_ts33`` at any rows per group.  The edges
+    (``SHORT_REDUCTION_EDGES``: 448 / 512 and 1024 / 1025, 1023 / 1024 rows per group)
+    take the listed stages, sm_107a has none of the rules, and over a grid of shapes
+    every stage the rules change is one of those three swaps, at a reduction of at
+    most 1024 (sm_100a) or of 512 to 1024 (sm_103a)."""
+    c = HOST_PLAN_CONSTANTS
+    assert set(c["dgrad_evict_first_skip_max_n"]) <= set(c["dgrad_evict_first_archs"])
+    assert set(c["dgrad_wide_ts33_short_n"]) <= set(c["dgrad_wide_ts33_archs"])
+    assert set(c["dgrad_wide_ts33_short_n_min_rows"]) == set(
+        c["dgrad_wide_ts33_short_n"]
+    )
+    assert set(c["dgrad_wide_ts33_short_n_min"]) == set(c["dgrad_wide_ts33_short_n"])
+    assert set(c["fwd_wide_ts33_short_k"]) <= set(c["fwd_wide_ts33_archs"])
+    assert set(c["fwd_wide_ts33_short_k_min"]) == set(c["fwd_wide_ts33_short_k"])
+    plain = dict(c, **{key: {} for key in SHORT_REDUCTION_KEYS})
+    wide_n = int(c["wide_block_n"])
+
+    def stage(op, cols, red, rows, groups, constants):
+        n, k = (cols, red) if op == "fwd" else (red, cols)
+        got, tile_n = cb.select_row_stage(
+            cake_jit.record_name(op),
+            op,
+            n,
+            k,
+            arch,
+            constants,
+            sum_m=rows * groups,
+            num_groups=groups,
+        )
+        assert tile_n == (wide_n if cols % wide_n == 0 else int(c["block_n"]))
+        return got
+
+    column = ("sm_100a", "sm_103a", "sm_107a").index(arch)
+    for (op, red, rows), stages in SHORT_REDUCTION_EDGES.items():
+        want = stages[column]
+        before, after = want if isinstance(want, tuple) else (want, want)
+        assert stage(op, 4096, red, rows, 64, plain) == before, (op, red, rows)
+        assert stage(op, 4096, red, rows, 64, c) == after, (op, red, rows)
+    # Each swap and the reductions it may change.
+    swaps = {
+        "sm_100a": {("dgrad", _E, _W): (1, 1024)},
+        "sm_103a": {("dgrad", _W, _T): (512, 1024), ("fwd", _W, _T): (512, 1024)},
+        "sm_107a": {},
+    }[arch]
+    changed = 0
+    for op in ("fwd", "dgrad"):
+        for cols in (1024, 4096, 7168, 8192):
+            for red in (256, 448, 512, 1024, 1025, 2048, 4096):
+                for rows in (256, 1023, 1024, 4096, 4097, 8192, 65536):
+                    for groups in (4, 64):
+                        before = stage(op, cols, red, rows, groups, plain)
+                        after = stage(op, cols, red, rows, groups, c)
+                        if before != after:
+                            assert (op, before, after) in swaps, (op, cols, red, rows)
+                            low, high = swaps[(op, before, after)]
+                            assert low <= red <= high, (op, cols, red, rows)
+                            changed += 1
+    assert (changed > 0) == bool(swaps), (arch, changed)
+
+
 def test_workspace_arguments_of_the_argument_plans():
     """``sched`` is followed by ``c0``, ``c1`` (a queue-walk program's ``sched``, its tile
     counters, is its last argument before the grid); ``wave_sync`` by ``wave_mode``; ``tail_sums`` by
@@ -938,7 +1053,7 @@ def test_workspace_arguments_of_the_argument_plans():
         for stage in route["stages"]:
             program = PROGRAMS[stage["program"]]
             plan = [tuple(item) for item in program["arg_plan"]]
-            tile_k = 512 if name.endswith("_k512") else 256
+            tile_k = _tile_k(name)
             one_launch = route["op"] == "wgrad" and any(
                 cb.wgrad_ordered_tail(tile_k, arch)
                 or cb.wgrad_unordered_tail(tile_k, arch)
@@ -1022,6 +1137,9 @@ def test_bind_accepts_row_strided_operands_of_the_row_base_programs(monkeypatch)
             if not rows:
                 continue
             host = cb.HOST_ARGUMENTS[cb.host_binding(route["op"], stage["name"])]
+            # ``m_begin`` goes to a lead twin only (``_bind`` refuses it elsewhere).
+            if cb.M_BEGIN not in plan_args:
+                host = host - {cb.M_BEGIN}
             for arch in program["arches"]:
                 if arch not in route["arches"]:
                     continue
@@ -1168,11 +1286,13 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch, record_property
     device = _require_program("dgrad")
     c = HOST_PLAN_CONSTANTS
     arch = _arch(device)
-    n, k = 64, int(c["dgrad_evict_first_min_k"])
+    # A reduction over every architecture's ``dgrad_evict_first_skip_max_n``.
+    n, k = 1088, int(c["dgrad_evict_first_min_k"])
     sizes = EVICT_FIRST_E2
     assert sum(sizes) // len(sizes) >= max(
         int(v) for v in c["dgrad_evict_first_min_rows"].values()
     )
+    assert n > max(c["dgrad_evict_first_skip_max_n"].values(), default=0)
     case = _Case(sizes, n, k, device)
     w, g, offs = case.w, case.g, case.offs
     launch = prepare_dgrad(g, w, offs)
@@ -1186,7 +1306,7 @@ def test_dgrad_evict_first_gives_the_wide_tile_bits(monkeypatch, record_property
     ts33 = (
         wide
         and not ef
-        and cb.dgrad_wide_ts33(k, arch, sum(sizes), len(sizes), c)
+        and cb.dgrad_wide_ts33(k, arch, sum(sizes), len(sizes), c, n=n)
         and cake_jit.stage_served(name, "main_wide_ts33", arch)
     )
     assert ef == (arch in c["dgrad_evict_first_archs"]), arch
@@ -2070,20 +2190,52 @@ def _m_indptr(sizes, device):
     return torch.tensor([0] + ends, dtype=torch.int32, device=device)
 
 
+def _bits(t):
+    """The integer view of ``t``'s elements (a bitwise comparison: ``-0.0`` differs from
+    ``+0.0``, and a NaN equals only its own payload)."""
+    return t.view(_BIT_VIEWS[t.dtype])
+
+
+def _assert_lead_binding(lead, base):
+    """``lead`` (an ``m_indptr`` call) binds the lead twins of what ``base`` (the ``[E]``
+    call over the same shapes) binds: the same plan and stages, every launch on the lead
+    twin of its route, every program the twin of the base program."""
+    assert lead.record_name == base.record_name
+    assert lead.plan == base.plan and lead.stages == base.stages
+    assert base.bound_routes and not any(
+        cake_jit.is_lead_route(r) for r in base.bound_routes
+    )
+    assert lead.bound_routes == tuple(cake_jit.lead_route(r) for r in base.bound_routes)
+    assert lead.bound_programs == tuple(
+        cake_jit.lead_twin(p) for p in base.bound_programs
+    )
+
+
 def test_m_indptr_form_matches_offs_form(record_property):
+    """An ``m_indptr`` from 0 binds the lead twins (``_assert_lead_binding``) and gives the
+    bits of the ``[E]`` form, which binds the programs themselves; its weight gradient is
+    judged over the draws; a table of neither ``E`` nor ``E + 1`` entries is refused."""
     _require_program("fwd")
     _require_program("dgrad")
     device = _require_program("wgrad", torch.bfloat16)
     x, w, g, offs = _inputs(RAGGED_E6, 512, 256, device)
     m_indptr = _m_indptr(RAGGED_E6, device)
-    assert torch.equal(
-        pkg.cake_moe_grouped_gemm_nondet_train_forward(x, w, m_indptr),
-        pkg.cake_moe_grouped_gemm_nondet_train_forward(x, w, offs),
-    )
-    assert torch.equal(
-        pkg.cake_moe_grouped_gemm_nondet_train_dgrad(g, w, m_indptr),
-        pkg.cake_moe_grouped_gemm_nondet_train_dgrad(g, w, offs),
-    )
+    for prepare, a, b, kwargs in (
+        (cb.cake_moe_grouped_gemm_nondet_train_prepare_forward, x, w, {}),
+        (cb.cake_moe_grouped_gemm_nondet_train_prepare_dgrad, g, w, {}),
+        (
+            cb.cake_moe_grouped_gemm_nondet_train_prepare_wgrad,
+            g,
+            x,
+            {"num_groups": len(RAGGED_E6)},
+        ),
+    ):
+        lead = prepare(a, b, m_indptr, **kwargs)
+        base = prepare(a, b, offs)
+        _assert_lead_binding(lead, base)
+        lead.out.fill_(float("nan"))
+        base.out.fill_(float("nan"))
+        assert torch.equal(_bits(lead.launch()), _bits(base.launch())), prepare.__name__
 
     def draw(d):
         x1, _w1, g1, _ = _inputs(RAGGED_E6, 512, 256, device, seed=d.seed)

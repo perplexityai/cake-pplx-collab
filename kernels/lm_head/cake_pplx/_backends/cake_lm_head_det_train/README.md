@@ -80,13 +80,56 @@ keyword.
   log-probability `dz` arm of the logits GEMM) also store each row's
   `r_t = s_t - f32(bf16(s_t))`, `s_t` the FP32 gradient of the label column
   and `bf16(s_t)` the value `dz` holds there (0 where `bf16(s_t)` is not
-  finite), into an FP32 `[T]` buffer `rlab` (outside the workspace).  An
-  ignored row, a label at or beyond `V` and a row the zero-gradient skip
-  leaves out hold 0 there: `row_grad` stores +0 on such a row of its chunk,
-  and a call that computes `dX` with a `dz` arm among its producers (which
-  store only the rows whose label lies in the head) zeroes `rlab` once before
-  the first of them.  Every chunk's `dX` rows end with the `slab_sum` kernel,
-  which folds it:
+  finite), into an FP32 `[T]` buffer `rlab` (outside the workspace).
+  `row_grad` stores +0 on an ignored row and on a label at or beyond `V`, so
+  it writes every row of its chunk; the `dz` arms store only the rows whose
+  label lies in the head (`[0, V)`, the arm's `ldc` being `V`), and the
+  counted `dz` arm of the zero-gradient skip only the rows under its count.
+  A fold (the slab sum, the dX cast's fold programs, below) adds a row's
+  residual only when the row's label lies in `[0, V)` and the residual is
+  nonzero.  A counted plan is one of the zero-gradient skip (`Plan.dcnt`), its
+  mixed temperature plan included, whose `dz` arm is uncounted but whose skip
+  orders the rows per call.  So on a plan that is not counted and whose chunks
+  tile the rows, every row a fold reads holds the call's own residual, and the
+  other rows are never folded: such a call runs no zero fill of `rlab`.  When
+  a `dz` arm is among the producers of a call that computes `dX`, a prepared
+  runner zeroes its `rlab` once, when it is prepared (a row the arm does not
+  store then keeps that zero or an earlier step's residual), and a remembered
+  binding allocates each call's `rlab` zero-filled (one fill at its creation:
+  a fold loads a row's residual before its label test); a runner or a binding
+  call without `dX` leaves its own `rlab` unfilled (no fold reads it); a
+  log-probability autograd graph holds one `rlab` that every backward of the
+  graph binds as it is.  A counted plan and a plan whose chunks do not tile
+  the rows start every call that computes `dX` from a zeroed `rlab`: a host
+  step zeroes it before the first producer (a remembered binding allocates
+  it zero-filled instead), so a row the producers leave reads 0.  The
+  forward takes no buffer: the first backward
+  that binds the graph's `rlab` takes one from a free list of the caller's
+  stream (a buffer the list does not hold is zero-filled once, when it is
+  requested; a buffer from the list is bound as an earlier graph left it,
+  with no fill; where no list serves, the buffer is requested zero-filled
+  unless the backward's producers store every row); a backward that frees
+  the graph (no `retain_graph` / `create_graph`) puts it back when it
+  returns, a retained graph when the graph is freed (at most 4 free buffers
+  per stream, which stay allocated, for at most 64 streams; capacities
+  rounded up to 128 rows; no list under a CUDA graph capture, from another
+  current device or above 1 MiB).  A new buffer
+  is requested with a per-device holding stream current, so the held tensor
+  does not split the small caching-allocator blocks a forward running while
+  the graph is alive reuses.  The package makes two holding streams per
+  device, each once (`cudaStreamCreate`, never destroyed): one for the calls
+  on the device's default stream and a side one for the calls on any other
+  stream or from another current device.  Each has its own allocator
+  segment.  The holding streams are taken only under torch's native caching
+  allocator with fixed segments: the allocator settings string
+  (`torch._C._accelerator_getAllocatorSettings()`, read on every request) is
+  empty or names `expandable_segments` with the last value `False`.  With
+  another allocator backend or settings string, a torch without these
+  queries, under a CUDA graph capture, above 1 MiB or where a stream cannot
+  be made, the request is an ordinary allocation on the caller's stream (the
+  gate reads no environment variable).
+  Every chunk's `dX` rows end with the `slab_sum` kernel, which folds it
+  (except the rows the dX cast folds, below):
   `dX_acc[t, h] = fma(r_t, f32(W[y_t, h]), A)`, `A` the row's FP32 `dz @ W`
   (after the slab adds of a K-sliced GEMM), one rounding of the exact
   product.  `dX_acc` is then `dz @ W + r * W[y]` in FP32, and the output cast
@@ -98,7 +141,39 @@ keyword.
   to 8193, the loss and log-probability entries) `loss`, `logp`, `lse` and
   `dW` are bitwise those of version 0.2.1, and only `dX` changes.  The
   candidate-support entries fold nothing.  The call holds `rlab` beside `lse`
-  (4 bytes a row of the chunk loop).
+  (4 bytes a row of the chunk loop).  A compacted plan under the fused dX
+  finalize whose `dX` goes through the scatter cast (the autograd loss entry
+  of `cake_backend_opt_in.py` -- the facade's route for a loss call whose
+  `W` requires a gradient -- when `W` is a leaf and no saved-tensor hooks
+  other than a non-reentrant `torch.utils.checkpoint`'s are on top, and
+  `cake_backend.py`'s log-probability backward, kept logits included; not a
+  temperature plan)
+  launches no fold-alone `slab_sum` on its longest run of adjacent
+  one-slice chunks (`cake_backend.cast_fold_rows`): it hands those rows'
+  labels, `rlab` and `W` to the scatter cast's fold program
+  `scale_cast_scatter_fold_bf16`, which applies the same `fma` and predicate
+  before its scale (a call that folds no row launches
+  `scale_cast_scatter_bf16`, which reads no fold operand).  The loss entry
+  then holds the labels and `rlab` from the forward to its backward's dX
+  finalize and saves `W` through its autograd context.  Outside a
+  checkpoint, an in-place write to `W` between the forward and the backward
+  then raises PyTorch's saved-tensor version error; a checkpointed call
+  takes `W` from its recomputation, as in 0.3.2.  A backward that frees the
+  graph drops the labels and `rlab` at the dX finalize, before the weight
+  gradient's buffers exist.  A loss call whose `W` is not a leaf or requires
+  no gradient, a call under other saved-tensor hooks (CPU offload such as
+  `save_on_cpu`, which would copy `W` each step), and every call of
+  `cake_backend.py`'s own loss entry fold every row in the forward's slab
+  sums: the dX finalize reads no `W`, and the fast form keeps no reference
+  to it (a recompute form or a checkpointed call saves `W` for its
+  recomputation, as in 0.3.2).  The two paths launch different programs and
+  give the same `dX` and `dW` bits.
+  An uncompacted log-probability backward of
+  `cake_backend.py` (not a kept-logits or temperature plan) folds the same
+  run in its in-loop flat cast, the fold program `scale_cast_fold_bf16`,
+  with the labels and the head its autograd context saved.  An uncompacted
+  loss plan keeps its forward's slab sums, so its backward reads neither the
+  labels nor the head.
 * Gradient placement (`cake_backend.set_gradient_placement(mode)`, returns the
   previous mode; `cake_backend.gradient_placement()` reads it; default
   `"auto"`; read once per call, it covers `cake_lm_head_det_train_loss` in every
@@ -211,7 +286,9 @@ keyword.
   different chunk boundaries and differ by FP32 rounding (deterministic run to
   run).  All rows valid: the uncompacted path (no gather, no scatter).  Every
   row ignored: zeros without a launch.  On this host-count path (the calls the
-  hidden valid-row count below does not serve: one and two chunks) a
+  hidden valid-row count below does not serve: one and two chunks, except, on
+  `sm_100a` and `sm_103a`, the loss entry's one-chunk calls of 32 to 1024
+  rows) a
   remembered forward launches chunk 0's row gather and logits GEMM right
   behind the count and binds the rest of the call -- the compacted labels, the
   policy operands, the row vectors, the accumulators -- behind them
@@ -255,11 +332,19 @@ keyword.
   next to the row index (`ForwardResult.row_valid`); `backward_loss(...,
   row_valid=...)` / `finalize_dx` select the one-pass form, the log-probability
   backward finalizes its accumulator the same way, and every row valid stays
-  the single flat cast.  The same FP32 operations in the same order: `dX` is
+  the single flat cast.  A mask that a call of at most `HOST_COUNT_MAX_ROWS`
+  (1024) rows read back to the host (the valid-row mask, or the gradient-row
+  mask of the zero-weight split below) keeps that host copy (`T` host
+  bytes from the forward to the backward, no device memory): the dX finalize
+  scans it on the host and copies the int32 scan to the device in one
+  `4 T`-byte copy, in place of the device's cast and scan kernels (the device
+  scans under a CUDA graph capture or from another current device).  The
+  same scan either way.  The same FP32 operations in the same order: `dX` is
   bitwise the previous path's, and `dx_finalize=False` restores that path.  The prepared runner
   keeps its compact `dx_out` contract (`runner.scatter` restores `[T, H]`) and
   gains the kernel slab reduction only.  Either way every chunk's `dX` rows
-  end with `slab_sum`, which folds their FP32 label residuals (above): with
+  end with `slab_sum`, which folds their FP32 label residuals (above), except
+  the one-slice chunks whose fold the dX cast makes (above): with
   `dx_finalize=False` (after the host `add_` chain of a sliced GEMM) and after
   a one-slice GEMM it runs as the fold alone (`n_slabs = 0`).
 * dW side stream (`dw_stream`, keyword: `None` / `"auto"` (default) = calls of
@@ -301,9 +386,36 @@ keyword.
   two-chunk calls measured 5-16 % slower with it, so, like the dW side
   stream's `auto` rule, it serves calls of three or more chunks) and every
   `sm_103a` call on CUDA 13.0 (the toolchain note below) take the previous
-  path; the prepared runner (`prepare_lm_head_det_loss`) is
-  unchanged.  The chunk buffers and the gather buffer exist at the buffer
-  extent before the count is known (`memory_report(..., hidden_count=True)`;
+  path.  The exception is, on the architectures of
+  `cake_backend.HIDDEN_COUNT_LOSS_ROWS_BY_ARCH` (`sm_100a` and `sm_103a`: 32
+  to 1024 rows),
+  the loss entry's one-chunk calls in that row window without the zero-weight
+  split (`cake_backend.hidden_count_chunks_admit`): their chunk 0 GEMM runs on
+  `T` rows and the GPU no longer waits for the host count's readback and the
+  host work after it (measured on GB300 against the host count,
+  cross-entropy, chunk 4096, 18 fresh processes per side: behind queued work
+  the forward 228 to 374 us faster and the backward 3.9 to 7.9 us faster at
+  `T` = 32 to 1024, the `T` = 1024 forward + backward step 3482.8 -> 3182.4
+  us; no slower forward, backward, step, cleared-cache step or checkpointed
+  step in CUPTI span or behind queued work; at `T` = 8 a step with a cleared
+  binding cache measured slower, 1980.0 -> 2087.9 us, so smaller calls keep
+  the host count).  Their dX finalize reads
+  the scan the count's compaction formed, so no backward -- a retained
+  graph's second one included -- launches a scan of its own, and a call
+  inside a non-reentrant `torch.utils.checkpoint` keeps the host count in
+  both passes: without these two rules the retained second backward and the
+  checkpointed step measured slower with the hidden count on B200 and R200.
+  With both rules, on B200 (measured the same way against the host count):
+  behind queued work the forward at `T` = 32 / 1024 841.5 -> 679.4 /
+  2797.4 -> 2636.4 us, the backward 431.0 -> 426.5 / 1236.6 -> 1232.0 us, the
+  `T` = 1024 forward + backward step 4069.1 -> 3906.4 us, the checkpointed
+  step at `T` = 128 2307.0 -> 2304.9 us (the host count in both), and no
+  slower call at `T` = 32 to 1024.  On R200 these one-chunk calls keep the
+  host count (the two rules were not timed there).  The
+  log-probability entries keep the previous rule.  The prepared runner
+  (`prepare_lm_head_det_loss`) is unchanged.  The chunk buffers and the gather
+  buffer exist at the buffer extent before the count is known
+  (`memory_report(..., hidden_count=True)`;
   `cake_backend.hidden_count_eligible` / `_hidden_count_begin`).
 * Log-probability logits GEMM arms (`logprob_dz` / `logprob_lbl`, keywords of
   the log-probability entry points, default `True`; `False` restores the
@@ -348,8 +460,13 @@ keyword.
   held after the checkpointed forward).  `row_grad` overwrites them, so a
   second backward through a retained graph recomputes (bitwise the same), and
   `backward_logprob_keep` marks the views it consumed (a second call on them
-  is a `ValueError`).  A forward with a trainable input whose backward never
-  runs pays the full-logits forward instead of the label-column arm
+  is a `ValueError`).  The autograd entries also save the forward's bound
+  labels (the valid rows' labels when compacted) and the valid-row mask of its
+  count (`KeptForwardResult.labels_c` / `row_valid`, `8 * T_v + T` bytes): the
+  kept backward neither compares nor gathers the labels again (the same mask
+  and labels, so the same bits).  A forward with a trainable input whose
+  backward never runs pays the full-logits forward instead of the label-column
+  arm
   (measured per call, both call orders combined: at `T` = 1 +0.4 to +1.6 us on
   B200 and +9.6 to +13.1 us on GB300; at `T` = 32 and 128 -3.3 to +1.2 us on
   B200 and 5.4 to 13.0 us faster on GB300) and holds the kept logits until its
@@ -625,7 +742,7 @@ keyword.
   the fast call the memory rule picks (the split or the call without it,
   with the logp-only pass where it runs) and, when it does not fit and a
   budget plan does, runs as a `"budget"` call (without the hidden count).
-  The package reads no environment variable; through the public facade the
+  No switch reads an environment variable; through the public facade the
   `CAKE_PPLX_LM_HEAD_LOSS_*` variables (`COMPACT_ROWS`,
   `FUSE_DW_CAST`, `DX_FINALIZE`, `HIDDEN_COUNT`, `GEMM_TUNING`) set switches
   that are inputs of this rule -- an uncompacted default call keeps the fast
@@ -988,12 +1105,13 @@ it handles these rows on the device, without a host synchronization:
   each chunk with the forms and K-slice counts the plan takes without the
   skip (the chunks keep their sizes).  The rows past a chunk's count may read
   `dz` rows the counted dz arm did not write, so their `dX_acc` rows hold
-  values that nothing reads: the fused dX finalize (`scale_cast_scatter_bf16`)
-  addresses the accumulator through the partition's live-row scan only and
-  writes exact `+0` on every other row.  The skip therefore requires the
-  fused dX finalize whenever the call forms `dX`.  A row the counted dz arm
-  does not run stores no label residual: the call's zero fill leaves it 0,
-  and the slab sum folds nothing into its `dX_acc` row.
+  values that nothing reads: the fused dX finalize (`scale_cast_scatter_bf16`
+  or its fold program) addresses the accumulator through the partition's
+  live-row scan only and writes exact `+0` on every other row.  The skip
+  therefore requires the fused dX finalize whenever the call forms `dX`.  A
+  row the counted dz arm does not run stores no label residual: the call's
+  zero fill leaves it 0, and the slab sum (or the cast's fold) folds nothing
+  into its row.
 * Memory: the call holds the partition's int64 row order (8 bytes per valid
   row), int32 live-row scan (4 bytes per row of `T`) and per-chunk counts
   until the dX output boundary, and its FP32 reordered `lse` (4 bytes per
@@ -1078,10 +1196,13 @@ the valid-row tensor, default `False`, and no `hidden_count`; `forward_logprob`
 and `backward_loss` take no `dw_stream`; `logprob_lbl` belongs to the
 log-probability forward and `logprob_dz` to its backward), `None` selecting the documented default
 (`cake_backend.compact_rows_default()` and friends return the constants); the
-autograd entries resolve every switch once in the forward.  **The package reads
-no environment variable.**  The `CAKE_PPLX_LM_HEAD_LOSS_*` variables are
-the facades' own A/B knobs, read only by the LM-head facades (through
-`cake_pplx/_cake_lm_head_train_knobs.py`): a
+autograd entries resolve every switch once in the forward.  **No switch reads
+an environment variable** (the build loader `_cake_pplx_jit.py` reads only its
+build variables: `CUDA_HOME` / `CUDA_PATH` (else the `nvcc` on `PATH`),
+`CAKE_PPLX_CACHE_DIR`, `CAKE_PPLX_NVCC`, `CXX`, `CAKE_PPLX_DISABLE_JIT`,
+`CAKE_PPLX_JIT_WORKERS`).
+The `CAKE_PPLX_LM_HEAD_LOSS_*` variables are the facades' own A/B knobs, read
+only by the LM-head facades (through `cake_pplx/_cake_lm_head_train_knobs.py`): a
 switch keyword left at `None` there falls back to its variable and the resolved
 value is passed down; the two binding-cache variables are read when that
 module is imported and applied through `BINDING_CACHE.configure` when it first
@@ -1190,13 +1311,31 @@ gather and logits GEMM ran before the count was known, see
   whose label lies in `[0, V)` and whose residual is nonzero (`W` contiguous,
   its row read in `row_vecs` 8-element vectors; `lr = 0` turns the fold off).
   Every chunk of a call that computes `dX` runs it as the last FP32 write of
-  its rows; after a one-slice GEMM or the host's adds it is the fold alone
-  (`n_slabs = 0`, `ws` unread).
+  its rows, except the chunks whose fold the dX cast's fold programs make (FP32
+  label residual, above); after a one-slice GEMM or the host's adds it is the fold
+  alone (`n_slabs = 0`, `ws` unread).  A thread walks its vectors one trip
+  ahead (it loads the next trip's label and residual during the current
+  trip).  It launches with programmatic dependent launch behind the dX GEMM
+  or `dx_reduce`, which launch without it: before its `griddepcontrol.wait`
+  it reads only its first vector's label, residual and head row, whose
+  writers run before the dX GEMM; every read of `dX_acc` and the slabs
+  follows the wait.
 * `scale_cast_scatter_bf16`: the dX output boundary of a compacted call with
   the fused dX finalize -- `out[r] = bf16(g * acc[scan[r] - 1])` when
   `row_index[scan[r] - 1] == r`, exact zeros otherwise, one CTA per output row
   per iteration, every element written once (launched by `finalize_dx`, not
-  by the chunk loop).
+  by the chunk loop).  It reads no fold operand.
+* `scale_cast_scatter_fold_bf16`: `scale_cast_scatter_bf16` with the fold
+  operands (`labels`, `rlab`, `W`, `V`, `fold_lo`, `fold_hi`), launched in
+  its place only when a row folds (FP32 label residual, above): a compact
+  row `j` in `[fold_lo, fold_hi)` whose label lies in `[0, V)` and whose
+  residual is nonzero is cast as `bf16(g * fma(rlab[j], f32(W[y_j, h]),
+  acc))`, the bits of the fold-alone `slab_sum` and the cast.
+* `scale_cast_fold_bf16`: `scale_cast_bf16` (BF16) with the same fold
+  operands, the in-loop flat `dX` cast of an uncompacted log-probability
+  backward that folds a row (FP32 label residual, above): a row in
+  `[fold_lo, fold_hi)` folds as above before the scale; every other row is
+  cast as by `scale_cast_bf16`.
 * `gather_rows_bf16`: chunk 0's row gather of the hidden valid-row count
   (the eager entry points) -- `out[r] = X[idx[r]]` for `r < min(count,
   num_rows)` with the count read from device memory, exact zeros after; one
@@ -1347,6 +1486,60 @@ wider work items, and the kernel reads the runtime cluster size.  The GEMM opera
 described by TMA descriptors the host prepares in a per-runner descriptor
 workspace; the logits GEMM's output descriptor covers the chunk's rows only.
 
+On `sm_107a` the log-probability entry's eager calls without a temperature
+(`cake_lm_head_det_train_logprob` and the backend's `forward_logprob` /
+`backward_logprob`, their kept-logits forms included) of one compacted chunk
+of 1 to 182 valid rows (`cake_backend.A_EXTENT_WINDOW_BY_ARCH`, fewer than
+the 256 rows `cake_backend.A_EXTENT_ROWS_BY_ARCH` names;
+`cake_backend.a_extent_rows`)
+give their logits GEMMs -- the kept forward's, the label-column arm's forward
+and the `dz` arm's recompute -- an `A` descriptor of 256 rows: the gather
+buffer holds them (its rows past the chunk: below).  The recompute backward's
+dX GEMM reads its `dz` the same way (`DX_A_EXTENT_ROWS_BY_ARCH`, 256 rows of
+the chunk's logits buffer; not the kept backward, which reads the kept
+logits).  `M`, the output and workspace descriptors, the statistics, every
+per-row operand, the grid and the K slices keep the chunk's rows, so the
+extra rows only form accumulator rows that no epilogue stores: every output
+keeps its bits.  The shipped programs run a chunk of a few rows slower than
+one of 256 rows there (CUPTI, the logits GEMM of a log-probability step at
+14 valid rows 325.6 -> 167.2 us, at 182 valid rows 237.7 -> 175.2 us; at
+242 valid rows the forward measured slower, so the window stops at the
+measured 182).  From 1 to 12 valid rows the GEMM's time without the extent
+follows where the gathered rows land in memory (the log-probability
+forward's logits GEMM at 1 / 2 / 6 / 8 / 12 valid rows over 24 placements:
+324.8 to 474.7 us; with the 256-row extent 165.4 to 167.2 us).  Measured on
+the default autograd call: the step at `T` = 16
+(15 valid rows) 1450.7 -> 1230.7 us (against 0.3.4: 1402.3 -> 1230.7 us), its
+checkpointed step (the recompute backward and its dX GEMM) 2142.5 -> 1594.8
+us.  A call that counts its valid rows on the host gathers the gather
+buffer's padded rows too: the count copies a padded index (the valid rows,
+then the last one repeated; `cake_backend.valid_rows`' `pad`) to the device
+in its one copy, so no launch fills them.  Other padded rows are zeroed where
+the buffer is allocated (per call).  They add up to `2 * 256 * V` bytes of
+logits buffer, which `memory_report` does not count.  The loss entry (its zero-weight rows'
+log-probability pass included), the temperature forms,
+the prepared runners (`prepare_lm_head_det_loss`, CUDA graphs included), the
+previous path's plain logits GEMM
+(`logprob_lbl=False` / `logprob_dz=False`), calls with every row valid
+(uncompacted), longer calls, the hidden valid-row count and the other
+architectures keep the chunk's rows: the extent was measured only on the
+default log-probability call.
+
+On `sm_100a` / `sm_103a` the same calls of 1 to 10 valid rows
+(`cake_backend.A_EXTENT_WINDOW_BY_ARCH`) give their logits GEMMs an `A`
+descriptor of 16 rows the same way (no dX extent).  With fewer rows the
+GEMM's time follows where the gathered rows land in memory (the
+log-probability forward's logits GEMM with its `A` operand moved over many
+placements: B200 at 6 / 1 valid rows over 130 placements 338.8 to 428.0 /
+357.6 to 463.5 us, with the 16-row extent 331.9 to 337.8 us at every
+placement; GB300 at 6 / 1 valid rows over 75 placements 337.3 to 451.4 /
+341.9 to 474.7 us, with the 16-row extent 316.1 to 317.8 / 314.2 to 316.5
+us; at 10 valid rows B200 340.2 to 414.4 us and GB300 334.4 to 442.0 us, with
+the extent 337.0 to 339.0 / 317.3 to 318.5 us).  From 11 valid rows on the
+time does not follow placement (B200 at 11 to 15 valid rows 337.7 to 340.1
+us, GB300 at 11 to 13 valid rows 317.5 to 319.4 us), so the window stops at
+10 rows: larger calls keep their rows and their count pads no index.
+
 ## Layout of this package
 
 * `cake_jit.py` -- `MODULES` registry (one record per architecture, expanded
@@ -1399,7 +1592,8 @@ workspace; the logits GEMM's output descriptor covers the chunk's rows only.
 The registry holds one record per architecture (`sm_100a`, `sm_103a`,
 `sm_107a`), `cake_lm_head_det_loss_<arch>`, geometry-free (`H` / `V` and the rules'
 outputs are launch scalars: every `H` a multiple of 512 and `V` a multiple of
-256 runs on it), with the sixteen base stages above plus the sixteen structural
+256 runs on it), with the nineteen base stages (`cake_jit.BASE_STAGES`, the
+casts' two fold programs included) plus the sixteen structural
 forms the rules can reach on `sm_100a` and `sm_103a` (`abi = lm_head_loss_v1`),
 the four temperature forms of the log-probability entry and the fourteen
 candidate-support programs (`cake_support.SUPPORT_STAGES`: the validation stage

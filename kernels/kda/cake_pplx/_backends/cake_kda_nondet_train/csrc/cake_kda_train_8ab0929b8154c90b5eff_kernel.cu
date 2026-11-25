@@ -402,7 +402,7 @@ kernel_cake_kda_train_8ab0929b8154c90b5eff(const __grid_constant__ CUtensorMap w
                 }
                 __syncwarp();
                 asm volatile("tcgen05.fence::after_thread_sync;");
-                long long h0_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long h0_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 #pragma unroll
                 for (int q = 0; q < 4; q++) {
                     {
@@ -593,7 +593,7 @@ kernel_cake_kda_train_8ab0929b8154c90b5eff(const __grid_constant__ CUtensorMap w
             u_pk[31] = 0;
             if (nc > 0) {
                 if (walk == 0) {
-                    long long u_next = ((long long)(row0 + t_row) * (long long)num_heads + (long long)head) * 128;
+                    long long u_next = ((long long)(row0 + t_row) * (long long)num_heads + (long long)head) * 128ll;
                     #pragma unroll
                     for (int q_7 = 0; q_7 < 2; q_7++) {
                         {
@@ -757,7 +757,7 @@ kernel_cake_kda_train_8ab0929b8154c90b5eff(const __grid_constant__ CUtensorMap w
                 _phase_vp_ready_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 int trow = row0 + c * 64 + t_row;
-                long long u_base = ((long long)trow * (long long)num_heads + (long long)head) * 128;
+                long long u_base = ((long long)trow * (long long)num_heads + (long long)head) * 128ll;
                 float _tmem_load_24[16];
                 asm volatile(
                     "tcgen05.ld.sync.aligned.16x32bx2.x16.b32"
@@ -931,7 +931,7 @@ kernel_cake_kda_train_8ab0929b8154c90b5eff(const __grid_constant__ CUtensorMap w
                 asm volatile("tcgen05.fence::after_thread_sync;");
             }
             if (write_ht == 1) {
-                long long ht_base = (((long long)walk * (long long)num_seqs + (long long)seq) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long ht_base = (((long long)walk * (long long)num_seqs + (long long)seq) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 float tmem_load_r_0[16];
                 tmem_ld_x16(&tmem_load_r_0[0], taddr + (unsigned int)h_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -1059,7 +1059,7 @@ kernel_cake_kda_train_8ab0929b8154c90b5eff(const __grid_constant__ CUtensorMap w
             }
             float gk_pre = 0.0f;
             if (nc_1 > 0) {
-                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                 gk_pre = gk[gn_next];
             }
             unsigned int _phase_hs_ready_0 = 0;
@@ -1143,7 +1143,7 @@ kernel_cake_kda_train_8ab0929b8154c90b5eff(const __grid_constant__ CUtensorMap w
                 }
                 tmem_st_x16_f32(taddr + (unsigned int)h_row_base_1 + 112, hs2_7_7);
                 if (nc_1 > c_1 + 1) {
-                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                     gk_pre = gk[gn_next_1];
                 }
                 asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
@@ -1155,7 +1155,7 @@ kernel_cake_kda_train_8ab0929b8154c90b5eff(const __grid_constant__ CUtensorMap w
                     ext_next = chunk_bos[c0_1 + c_1 + 1];
                     clen_next = chunk_len[c0_1 + c_1 + 1];
                 }
-                long long obase = ((long long)(ext0 + t_row_1) * (long long)num_heads + (long long)head_1) * 128;
+                long long obase = ((long long)(ext0 + t_row_1) * (long long)num_heads + (long long)head_1) * 128ll;
                 mbarrier_wait(o_done_addr, _phase_o_done_0);
                 _phase_o_done_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");

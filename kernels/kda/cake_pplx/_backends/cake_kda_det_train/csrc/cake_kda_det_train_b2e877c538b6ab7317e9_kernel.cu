@@ -526,7 +526,7 @@ kernel_cake_kda_det_train_b2e877c538b6ab7317e9(const __grid_constant__ CUtensorM
             int h_row_base_1 = warp_in_wg_1 * 32 << 16;
             float gk_pre = 0.0f;
             if (nc_1 > 0) {
-                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                 gk_pre = gk[gn_next];
             }
             unsigned int _phase_w_tape_read_0 = 1;
@@ -640,7 +640,7 @@ kernel_cake_kda_det_train_b2e877c538b6ab7317e9(const __grid_constant__ CUtensorM
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 mbarrier_arrive(dec_done_addr);
                 if (nc_1 > c_1 + 1) {
-                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                     gk_pre = gk[gn_next_1];
                 }
                 if (nc_1 > c_1 + 1) {

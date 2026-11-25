@@ -56,7 +56,10 @@ natural-log decay gate, preactivated), ``beta`` BF16 ``[1, S, H]`` (through
 the sigmoid), ``cu_seqlens`` int32 ``[num_docs + 1]`` on the device.  The
 batch axis of 1 is optional; outputs take the rank of the inputs.  Gradients:
 ``dq, dk, dv, dbeta`` BF16, ``dg`` FP32.  Per-document zero initial state, no
-final state, ``scale = 128 ** -0.5`` by default, ``H`` in ``1..64``.
+final state, ``scale = 128 ** -0.5`` by default, ``H`` in ``1..128``
+(``R * H * 64 < 2**31`` over the padded rows ``R = 64 * NC_pad``, ``NC_pad``
+the even round-up of ``ceil(S / 64) + num_docs``: at ``H = 128`` one
+document of up to 261,952 tokens, at ``H = 96`` up to 349,376).
 
 Usage::
 
@@ -355,7 +358,8 @@ def cake_kda_nondet_train_arena(
     pass instead of the default's 4488, tape 3720; no checkpoint replay on such a workspace); ``tail_passes >= 2``
     (implies ``lean``) runs the backward's tail, the fused gradient / GLM intra / gate epilogue, once per range of
     ``ceil(NC_pad / tail_passes)`` chunks over per-range buffers: 2820 B per internal token-head plus three state blocks
-    on the floor, the same gradients bitwise, some speed cost (see the package README).  ``batch_tokens`` runs the
+    on the floor (3076 with ``use_qk_l2norm_in_kernel=True``, whose backward keeps a whole-sequence ``dAqk``), the
+    same gradients bitwise, some speed cost (see the package README).  ``batch_tokens`` runs the
     forward and the backward over groups of whole, contiguous documents of at most that many tokens (and at most
     ``max_docs_per_batch`` documents, which needs ``batch_tokens``) in an arena sized for the largest group (at
     ``tail_passes``; each group runs its tail in the fewest passes up to that which fit the arena); the calls then take

@@ -442,7 +442,8 @@ def cake_kda_det_train_kcp_workspace_bytes(
     (``CakeKDADetKcpWorkspace(use_gate_in_kernel=True)``: the raw mode's local arena, the replay arena; the pools do not
     change).  ``use_qk_l2norm_in_kernel``: the workspace's in-kernel Q / K L2 norm mode
     (``CakeKDADetKcpWorkspace(use_qk_l2norm_in_kernel=True)``: the local arena of that mode, the replay arena; the pools do
-    not change)."""
+    not change).
+    ``H`` defaults to 64: pass the call's head count for any other ``H`` (the bytes grow with ``H``)."""
     from ._backends.cake_kda_det_train_kcp import cake_kcp_plan
 
     if save_transfer is None:
@@ -498,7 +499,8 @@ def cake_kda_det_train_kcp_saved_bytes(
     ``use_qk_l2norm_in_kernel``: the saved set of the in-kernel Q / K L2 norm adds its FP32 rstd, ``8 * S_local * H``
     bytes (a recompute handle's bytes do not change).  ``use_gate_in_kernel``: the call's gate mode; the bytes do not
     depend on it, but with ``use_qk_l2norm_in_kernel=True`` the query raises ``NotImplementedError`` while the
-    in-kernel Q / K L2 norm is not available in that gate mode, as the call does."""
+    in-kernel Q / K L2 norm is not available in that gate mode, as the call does.
+    ``H`` defaults to 64: pass the call's head count for any other ``H`` (the bytes grow with ``H``)."""
     from ._backends.cake_kda_det_train_kcp import cake_kcp_plan
 
     if save_transfer is None and checkpoint_keep is None:
@@ -530,7 +532,8 @@ def cake_kda_det_train_kcp_comm_bytes(
     convolution channels: the state summaries, the boundary states and the halo rows of the context's collectives,
     as a table per collective and per boundary (``cake_kcp_plan.cake_kda_det_train_kcp_comm_bytes``).  ``checkpoint_keep``: the
     traffic of a checkpointed step with a recompute handle of that tier (the tier fixes ``save_transfer``; ``None``
-    is ``False`` without a tier; an explicit value that contradicts the tier raises ``ValueError``)."""
+    is ``False`` without a tier; an explicit value that contradicts the tier raises ``ValueError``).
+    ``H`` defaults to 64: pass the call's head count for any other ``H`` (the bytes grow with ``H``)."""
     from ._backends.cake_kda_det_train_kcp import cake_kcp_plan
 
     if save_transfer is None and checkpoint_keep is None:

@@ -189,10 +189,11 @@ def test_manifests_name_the_nondet_package_and_keep_the_library_names() -> None:
     if test_only.is_file():
         assert json.loads(test_only.read_text())["package"] == NEW_PACKAGE
     single = {record["library"] for record in cake_jit.MODULES.values()}
-    # the deterministic package's 95 programs (copies) and this package's own 10 (the seven S1 programs, the two
-    # hand-off intra twins and the tape WY twin): 75 g-gate, 8 raw-gate, 5 Q/K L2 norm fallback and 17 fused Q/K L2
-    # norm programs (10 g-gate and 7 raw-gate)
-    assert len(single) == 105
+    # the deterministic package's 105 programs (copies) and this package's own 10 (the seven S1 programs, the two
+    # hand-off intra twins and the tape WY twin): 75 g-gate, 8 raw-gate, 5 Q/K L2 norm fallback and 27 fused Q/K L2
+    # norm programs (10 g-gate and 8 raw-gate, the kb-once replay prep bwd_prep_g8_replay_kbonce_raw_l2n among them,
+    # and the 9 of both gate modes: the 5 output backward programs and the 4 fused gradient programs)
+    assert len(single) == 115
     # the library names (and so the program prefix, the kernel symbols and the source files) keep their names
     for library in single:
         assert re.fullmatch(r"cake_kda_train_[0-9a-f]{20}", library), library

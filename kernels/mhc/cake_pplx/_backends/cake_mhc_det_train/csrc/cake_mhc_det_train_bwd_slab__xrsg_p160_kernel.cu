@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -2460,6 +2460,7 @@ kernel_cake_mhc_det_train_bwd_slab__xrsg_p160(const __grid_constant__ CUtensorMa
                     asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(rh5_1_31) : "f"(c3_1_31), "f"(dyh_1_15[3]), "f"(rh4_1_31));
                     unsigned int word_1_31 = __as_u32(__float22bfloat162_rn(make_float2(rl5_1_31, rh5_1_31)));
                     asm volatile("st.shared.b32 [%0], %1;" :: "r"(xw1_1_7 + 8192), "r"(word_1_31) : "memory");
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     int nxt = tile_2 + 1;
                     if (nxt < n_tiles_2) {
                         asm volatile("tcgen05.fence::before_thread_sync;");
@@ -2583,7 +2584,6 @@ kernel_cake_mhc_det_train_bwd_slab__xrsg_p160(const __grid_constant__ CUtensorMa
                     }
                     acc_ep += 1;
                     if (acc_ep == 2) { acc_ep = 0; _phase_acc_full ^= 1; }
-                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("tcgen05.fence::before_thread_sync;");
                     __syncwarp();
                     asm volatile("tcgen05.fence::after_thread_sync;");

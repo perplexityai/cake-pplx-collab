@@ -334,7 +334,7 @@ kernel_cake_kda_train_612492edb453070b0d6a(const __grid_constant__ CUtensorMap w
             u_pk[14] = 0;
             u_pk[15] = 0;
             if (nc > 0) {
-                long long u_next = ((long long)(row0 + t_row) * (long long)num_heads + (long long)head) * 128 + (long long)vbase;
+                long long u_next = ((long long)(row0 + t_row) * (long long)num_heads + (long long)head) * 128ll + (long long)vbase;
                 #pragma unroll
                 for (int q = 0; q < 2; q++) {
                     {
@@ -423,7 +423,7 @@ kernel_cake_kda_train_612492edb453070b0d6a(const __grid_constant__ CUtensorMap w
                 _phase_vp_ready_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 int trow = row0 + c * 64 + t_row;
-                long long u_base = ((long long)trow * (long long)num_heads + (long long)head) * 128 + (long long)vbase;
+                long long u_base = ((long long)trow * (long long)num_heads + (long long)head) * 128ll + (long long)vbase;
                 float _tmem_load_4_0[16];
                 asm volatile(
                     "tcgen05.ld.sync.aligned.16x32bx2.x16.b32"
@@ -536,7 +536,7 @@ kernel_cake_kda_train_612492edb453070b0d6a(const __grid_constant__ CUtensorMap w
             int h_row_base_1 = warp_in_wg_1 * 32 << 16;
             float gk_pre = 0.0f;
             if (nc_1 > 0) {
-                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                long long gn_next = ((long long)(row0_1 + 64 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                 gk_pre = gk[gn_next];
             }
             unsigned int _phase_hs_ready_0 = 0;
@@ -586,7 +586,7 @@ kernel_cake_kda_train_612492edb453070b0d6a(const __grid_constant__ CUtensorMap w
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 mbarrier_arrive(dec_done_addr);
                 if (nc_1 > c_1 + 1) {
-                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128 + (long long)k_row_1;
+                    long long gn_next_1 = ((long long)(row0_1 + c_1 * 64 + 128 - 1) * (long long)num_heads + (long long)head_1) * 128ll + (long long)k_row_1;
                     gk_pre = gk[gn_next_1];
                 }
             }

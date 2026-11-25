@@ -30,9 +30,10 @@ and 4097 with documents of lengths 1, 2 and 3 and empty documents before, betwee
 changing shapes (bitwise eager), argument validation, the workspace helpers and one ``S x C > 2^31`` case guarded
 by free device memory.  Beside the default routes the suite covers the routes for BF16 taps (``fwd_dt``) and a
 BF16 ``dweight`` with FP32 taps (``bwd_dt``), an FP32 or BF16 bias with its gradient (``*_bias``), SiLU' at the
-unrounded FP32 preactivation (``bwd_fp32g``, judged at the perf size too), their combination and the backward
-routes of BF16 taps (``bwd_dt_bf16_taps``, ``bwd_bias_bf16_taps``: the ``bwd_dt`` / ``bwd_bias`` programs with
-SiLU' at the unrounded FP32 preactivation) -- each with a NaN-poisoned
+unrounded FP32 preactivation (``bwd_fp32g``, judged at the perf size too), their combination, the dt route's calls
+with BF16 taps and no bias and the bias route's calls with FP32 and with BF16 taps and bias (``bwd_dt`` and
+``bwd_bias`` evaluate SiLU' at the unrounded FP32 preactivation with FP32 and with BF16 taps; only ``bwd``, FP32 taps
+and ``dweight`` without a bias, keeps the BF16-rounded preactivation under ``"bf16"``) -- each with a NaN-poisoned
 workspace, run-to-run bitwise gradients and graph replay; a route an architecture has not rendered yet skips its
 tests, and the registry test fails until every route's libraries are in ``build.json``.  An architecture whose
 route ships several programs (every backward route; the forward routes on sm_107a) selects one by the channel
@@ -48,13 +49,19 @@ two buffers running at once, CUDA Graph capture and replay with and without a ca
 package's per-(device, stream) buffer of the calls that pass none.  The forward's narrow rows (C 576 to 768 on
 32-vector or whole tiles; C 520 to 568 on one tile below a token floor of their own per architecture and on
 narrower tiles from it) keep ``y``'s bits: the suite checks the literal plans per route, token count and
-architecture, and at every C 520 to 568 row one token below its floor and at it the launched plan, ``y``
-bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.  Inside the token
-range of a row (C 576 to 768, ``FALLBACK_ROWS_OF_RECORD`` and ``DIRECT_ROWS_OF_RECORD``) the forward runs a static
-program, or a direct program on channel tiles of its own, and takes no counters: the suite checks the literal
-tables, the selection at every range bound, the direct plan and its token-block grid, and at the first and the
-last row of every range the launched program, ``y`` bitwise the dynamic program's and run to run, a caller-owned
-workspace left as it was, the naive-tier judge and a CUDA Graph with no fill node.
+architecture, and at every C 520 to 568 row one token below its floor and at it (the small-S rows removed) the
+launched plan, ``y`` bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.
+Inside the token range of a row (C 512 to 1024, ``FALLBACK_ROWS_OF_RECORD``, ``DIRECT_ROWS_OF_RECORD`` and
+``PAIR_ROWS_OF_RECORD``, a pair range ahead of the other two) the forward runs a static program, a direct program
+on channel tiles of its own, or a pair direct program (two channels per thread) on its own tiles, and takes no
+counters: the suite checks the literal tables, the selection at every range bound, the direct and pair plans and
+their token-block grid, and at the first and the last row of every range the launched program, ``y`` bitwise the
+dynamic program's and run to run, a caller-owned workspace left as it was, the naive-tier judge and a CUDA Graph
+with no fill node; at each pair key, at both ends of its C range and at C 512, 776 and 1024 where it holds them,
+``S_lo`` on one document, S 1000, ``S_hi`` and one token outside each end (no S 0), and S 1, 2, 3, 4, 8, 15, 16, 31,
+32 and 63 in the two packings of ``_pair_short_docs`` (an empty document, a one-token document, another empty one
+and the other ``S - 1`` tokens; ``S`` one-token documents with an empty document between each two), ``y`` bitwise
+the program's without the pair rows and the static program's.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
@@ -333,102 +340,220 @@ FWD_NARROW_WORKSPACE_TILES = {
 # -> (route, C_lo, C_hi) -> (S_lo, S_hi), every multiple of 8 from C_lo to C_hi.
 # Inside a static range the route's fallback (the static program) runs on the
 # route's plan; inside a direct range the route's direct program runs on the
-# arch's ``DIRECT_PLANS_OF_RECORD`` form; outside them the dynamic program.
+# arch's ``DIRECT_PLANS_OF_RECORD`` form; outside them the dynamic program.  A
+# direct range starts one token above the static range of its key or, on sm_103a
+# ``fwd_bias`` at C 720-768, lies inside it and runs ahead of it there.  A range
+# of ``PAIR_ROWS_OF_RECORD`` runs ahead of both where it covers them.
 FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
+        ("fwd", 512, 512): (1, 24576),
+        ("fwd", 520, 544): (1, 12288),
+        ("fwd", 552, 568): (1, 8192),
         ("fwd", 576, 576): (1, 4096),
         ("fwd", 584, 640): (1, 8192),
         ("fwd", 648, 704): (1, 12288),
         ("fwd", 712, 712): (1, 12288),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 12288),
+        ("fwd", 904, 952): (1, 8192),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 544): (1, 12288),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 4096),
-        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 584, 640): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
         ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_bias", 776, 776): (1, 8192),
+        ("fwd_bias", 784, 896): (1, 8192),
+        ("fwd_bias", 904, 1024): (1, 12288),
+        ("fwd_dt", 512, 512): (1, 24576),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 576): (1, 4096),
         ("fwd_dt", 584, 640): (1, 8192),
         ("fwd_dt", 648, 696): (1, 8192),
         ("fwd_dt", 704, 704): (1, 12288),
         ("fwd_dt", 712, 768): (1, 16384),
+        ("fwd_dt", 776, 896): (1, 12288),
+        ("fwd_dt", 904, 1024): (1, 12288),
     },
     "sm_103a": {
-        ("fwd", 576, 632): (1, 2048),
+        ("fwd", 520, 520): (1, 8192),
+        ("fwd", 528, 568): (1, 4096),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
-        ("fwd", 720, 760): (1, 8192),
+        ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 824): (1, 4096),
+        ("fwd", 832, 832): (1, 8192),
+        ("fwd", 840, 896): (1, 4096),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 520): (1, 12288),
+        ("fwd_bias", 528, 544): (1, 24576),
+        ("fwd_bias", 552, 568): (1, 8192),
+        ("fwd_bias", 576, 576): (1, 2048),
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
-        ("fwd_bias", 720, 728): (13824, 16383),
-        ("fwd_bias", 736, 736): (14336, 16383),
-        ("fwd_bias", 744, 760): (13824, 16383),
-        ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 712, 712): (1, 12800),
+        ("fwd_bias", 720, 728): (1, 16383),
+        ("fwd_bias", 736, 736): (1, 16383),
+        ("fwd_bias", 744, 760): (1, 16383),
+        ("fwd_bias", 768, 768): (1, 16384),
+        ("fwd_bias", 776, 896): (1, 8192),
+        ("fwd_bias", 904, 952): (1, 12288),
+        ("fwd_bias", 960, 1024): (1, 20480),
+        ("fwd_dt", 512, 512): (1, 20480),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 640): (1, 8192),
         ("fwd_dt", 648, 704): (1, 8192),
         ("fwd_dt", 712, 752): (1, 12800),
         ("fwd_dt", 760, 760): (1, 12288),
         ("fwd_dt", 768, 768): (1, 12288),
+        ("fwd_dt", 776, 776): (1, 12288),
+        ("fwd_dt", 784, 832): (1, 12288),
+        ("fwd_dt", 840, 888): (1, 8192),
+        ("fwd_dt", 896, 896): (1, 8192),
+        ("fwd_dt", 904, 952): (1, 8192),
+        ("fwd_dt", 960, 1016): (1, 20480),
+        ("fwd_dt", 1024, 1024): (1, 24576),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (1, 8192),
+        ("fwd", 520, 520): (1, 24575),
+        ("fwd", 528, 528): (1, 16384),
+        ("fwd", 536, 536): (1, 16384),
+        ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
-        ("fwd", 768, 768): (1, 2048),
+        ("fwd", 776, 824): (1, 32768),
+        ("fwd", 832, 832): (1, 4096),
+        ("fwd", 840, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 16384),
+        ("fwd", 904, 1016): (1, 12288),
+        ("fwd", 1024, 1024): (1, 32768),
+        ("fwd_bias", 512, 512): (1, 32768),
+        ("fwd_bias", 520, 528): (1, 24575),
+        ("fwd_bias", 536, 568): (1, 32768),
         ("fwd_bias", 576, 576): (1, 12296),
-        ("fwd_bias", 584, 584): (1, 16392),
-        ("fwd_bias", 592, 624): (1, 16384),
-        ("fwd_bias", 632, 632): (1, 16392),
+        ("fwd_bias", 584, 584): (1, 24576),
+        ("fwd_bias", 592, 592): (1, 16384),
+        ("fwd_bias", 600, 600): (1, 24576),
+        ("fwd_bias", 608, 608): (1, 16384),
+        ("fwd_bias", 616, 616): (1, 24576),
+        ("fwd_bias", 624, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 24576),
         ("fwd_bias", 640, 696): (1, 24576),
         ("fwd_bias", 704, 768): (1, 32768),
+        ("fwd_bias", 776, 1024): (1, 32768),
+        ("fwd_dt", 512, 512): (1, 32768),
+        ("fwd_dt", 520, 528): (1, 16384),
+        ("fwd_dt", 536, 544): (1, 16384),
+        ("fwd_dt", 552, 568): (1, 16384),
         ("fwd_dt", 576, 640): (1, 12288),
         ("fwd_dt", 648, 704): (1, 12288),
         ("fwd_dt", 712, 712): (1, 32768),
         ("fwd_dt", 720, 768): (1, 12288),
+        ("fwd_dt", 776, 824): (1, 24576),
+        ("fwd_dt", 832, 832): (1, 20480),
+        ("fwd_dt", 840, 888): (1, 20480),
+        ("fwd_dt", 896, 896): (1, 20480),
+        ("fwd_dt", 904, 1024): (1, 32768),
     },
 }
 DIRECT_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
+        ("fwd", 520, 544): (12289, 24576),
+        ("fwd", 552, 568): (8193, 24576),
         ("fwd", 576, 576): (4097, 24576),
         ("fwd", 584, 640): (8193, 24576),
         ("fwd", 648, 704): (12289, 24576),
         ("fwd", 712, 712): (12289, 20480),
         ("fwd", 720, 768): (8193, 20480),
+        ("fwd", 776, 888): (8193, 24576),
+        ("fwd", 896, 896): (12289, 24576),
+        ("fwd", 904, 952): (8193, 20480),
+        ("fwd_bias", 520, 544): (12289, 24576),
+        ("fwd_bias", 552, 568): (8193, 24576),
         ("fwd_bias", 576, 576): (4097, 24576),
-        ("fwd_bias", 584, 632): (4097, 20480),
+        ("fwd_bias", 584, 640): (4097, 20480),
         ("fwd_bias", 648, 696): (8193, 20480),
         ("fwd_bias", 704, 704): (17409, 20480),
+        ("fwd_bias", 776, 776): (8193, 20480),
+        ("fwd_bias", 784, 896): (8193, 14336),
+        ("fwd_dt", 520, 568): (8193, 24576),
         ("fwd_dt", 576, 576): (4097, 24576),
         ("fwd_dt", 584, 640): (8193, 24576),
         ("fwd_dt", 648, 696): (8193, 20480),
         ("fwd_dt", 704, 704): (12289, 20480),
         ("fwd_dt", 712, 768): (16385, 20480),
+        ("fwd_dt", 776, 896): (12289, 24576),
+        ("fwd_dt", 904, 1024): (12289, 20480),
     },
     "sm_103a": {
+        ("fwd", 512, 512): (2049, 24576),
+        ("fwd", 520, 520): (8193, 24576),
+        ("fwd", 528, 568): (4097, 24576),
         ("fwd", 576, 632): (2049, 24576),
         ("fwd", 640, 688): (4097, 24576),
         ("fwd", 696, 696): (4097, 20480),
         ("fwd", 704, 704): (8193, 24576),
         ("fwd", 712, 712): (8193, 20479),
-        ("fwd", 720, 760): (8193, 19456),
+        ("fwd", 720, 768): (8193, 19456),
+        ("fwd", 776, 824): (4097, 24576),
+        ("fwd", 832, 832): (8193, 24576),
+        ("fwd", 840, 896): (4097, 24576),
+        ("fwd", 904, 952): (2049, 20480),
+        ("fwd_bias", 520, 520): (12289, 24576),
+        ("fwd_bias", 552, 568): (8193, 16384),
+        ("fwd_bias", 576, 576): (2049, 16384),
         ("fwd_bias", 584, 640): (4105, 16384),
+        ("fwd_bias", 712, 712): (12801, 14592),
+        ("fwd_bias", 720, 728): (12801, 13823),
+        ("fwd_bias", 736, 736): (12801, 14335),
+        ("fwd_bias", 744, 760): (12801, 13823),
+        ("fwd_bias", 768, 768): (12801, 13823),
+        ("fwd_bias", 776, 896): (8193, 16384),
+        ("fwd_dt", 512, 512): (20481, 24576),
+        ("fwd_dt", 520, 568): (8193, 24576),
         ("fwd_dt", 576, 640): (8193, 24576),
         ("fwd_dt", 648, 704): (8193, 18432),
         ("fwd_dt", 712, 752): (12801, 19456),
         ("fwd_dt", 760, 760): (12289, 19456),
         ("fwd_dt", 768, 768): (12289, 20480),
+        ("fwd_dt", 776, 776): (12289, 24576),
+        ("fwd_dt", 784, 832): (12289, 20480),
+        ("fwd_dt", 840, 888): (8193, 20480),
+        ("fwd_dt", 896, 896): (8193, 24576),
+        ("fwd_dt", 904, 952): (8193, 16384),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (8193, 32768),
+        ("fwd", 528, 528): (16385, 24575),
+        ("fwd", 536, 536): (16385, 32768),
+        ("fwd", 544, 568): (16385, 32768),
         ("fwd", 576, 704): (4097, 32768),
         ("fwd", 712, 760): (4097, 16384),
         ("fwd", 768, 768): (2049, 24576),
+        ("fwd", 832, 832): (4097, 32768),
+        ("fwd", 840, 888): (8193, 16384),
+        ("fwd", 896, 896): (16385, 32768),
+        ("fwd", 904, 1016): (12289, 16384),
         ("fwd_bias", 576, 576): (12297, 32768),
-        ("fwd_bias", 584, 584): (16393, 20480),
-        ("fwd_bias", 592, 624): (16385, 24576),
-        ("fwd_bias", 632, 632): (16393, 20480),
+        ("fwd_bias", 592, 592): (16385, 24576),
+        ("fwd_bias", 608, 608): (16385, 24576),
+        ("fwd_bias", 624, 624): (16385, 24576),
+        ("fwd_dt", 520, 528): (16385, 24575),
+        ("fwd_dt", 536, 544): (16385, 32768),
+        ("fwd_dt", 552, 568): (16385, 24576),
         ("fwd_dt", 576, 640): (12289, 32768),
         ("fwd_dt", 648, 704): (12289, 24576),
         ("fwd_dt", 720, 768): (12289, 24576),
+        ("fwd_dt", 832, 832): (20481, 24576),
+        ("fwd_dt", 896, 896): (20481, 32768),
     },
 }
 # The direct programs' channel tiles: arch -> route -> (ct_vec, n_sub), so a
@@ -450,6 +575,47 @@ DIRECT_PLANS_OF_RECORD: dict[str, dict[str, tuple[int, int]]] = {
         "fwd_bias": (8, 16),
     },
 }
+# The pair direct programs' rows (``cake_jit.PAIR_ROWS``): arch -> (route, C_lo,
+# C_hi) -> (S_lo, S_hi), the keys of one architecture and forward route disjoint
+# in C (one key, two on sm_100a ``fwd_dt``, three on sm_103a ``fwd_bias`` and
+# sm_107a ``fwd``).  Inside a pair range the route's pair direct program
+# (geometry ``vec`` 2) runs on the arch's ``PAIR_PLANS_OF_RECORD`` form, ahead
+# of the static and the direct ranges it covers; outside it those tables and the
+# rules decide.
+PAIR_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
+    "sm_100a": {
+        ("fwd", 512, 1024): (1, 3072),
+        ("fwd_dt", 512, 640): (1, 1536),
+        ("fwd_dt", 648, 1024): (1, 1024),
+        ("fwd_bias", 512, 1024): (1, 1536),
+    },
+    "sm_103a": {
+        ("fwd", 512, 1024): (1, 3072),
+        ("fwd_dt", 512, 1024): (1, 1792),
+        ("fwd_bias", 512, 712): (1, 1536),
+        ("fwd_bias", 720, 768): (1, 3072),
+        ("fwd_bias", 776, 1024): (1, 1536),
+    },
+    "sm_107a": {
+        ("fwd", 512, 512): (1, 4096),
+        ("fwd", 520, 736): (4, 2560),
+        ("fwd", 744, 1024): (1, 2560),
+        ("fwd_dt", 512, 1024): (1, 1792),
+        ("fwd_bias", 512, 1024): (1, 1792),
+    },
+}
+# The pair direct programs' channel tiles: arch -> route -> (ct_vec, n_sub),
+# ``ct_vec`` in channel pairs, so a pair row of C channels runs (ct_vec, n_sub,
+# ceil(C / 2 / ct_vec)).
+PAIR_PLANS_OF_RECORD: dict[str, dict[str, tuple[int, int]]] = {
+    arch: {kind: (16, 8) for kind in ("fwd", "fwd_dt", "fwd_bias")}
+    for arch in ("sm_100a", "sm_103a", "sm_107a")
+}
+# The channels per thread of the direct and the pair direct programs' geometry.
+DIRECT_VEC = 8
+PAIR_VEC = 2
+# The co-resident CTAs per SM of each forward route's pair direct program.
+PAIR_CTAS_PER_SM = {"fwd": 7, "fwd_dt": 7, "fwd_bias": 6}
 # Single-tile rows outside each role's narrow set (one tile on every route).
 ONE_TILE_ROWS = {
     "bwd": (160, 192, 256, 512, 1024),
@@ -469,46 +635,64 @@ NARROW_CASES = (
     (65536, 576, "perf"),
     (4097, 1016, (1000, 0, 3, 3094)),
 )
-# The call settings that resolve to each backward route (the forward route
-# follows: fwd, fwd, fwd_bias, fwd, fwd_bias, fwd_dt, fwd_bias).  ``dweight_dtype``
-# is the dtype of the preallocated ``dweight`` out a call of the route passes
-# (``None``: none, the taps' dtype): ``bwd_dt`` is FP32 taps with a BF16
-# ``dweight`` out (:func:`_backward` with ``kind`` allocates a fresh one per call).
+# The call settings of each label (a backward route's name, or another label of
+# the route, :data:`ROUTE_LABELS`), which resolve to the label's route (the
+# forward route follows: fwd, fwd, fwd_bias, fwd, fwd_bias, fwd_dt, fwd_bias).
+# ``dweight_dtype`` is the dtype of the preallocated ``dweight`` out a call of the
+# route passes (``None``: none, the taps' dtype): ``bwd_dt`` is FP32 taps with a
+# BF16 ``dweight`` out (:func:`_backward` with ``kind`` allocates a fresh one per
+# call).
 ROUTE_SETTINGS = {
     "bwd": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=None),
     "bwd_dt": dict(weight_dtype=F32, bias_dtype=None, policy="bf16", dweight_dtype=BF16),
     "bwd_bias": dict(weight_dtype=F32, bias_dtype=F32, policy="bf16", dweight_dtype=None),
     "bwd_fp32g": dict(weight_dtype=F32, bias_dtype=None, policy="fp32", dweight_dtype=None),
     "bwd_bias_fp32g": dict(weight_dtype=F32, bias_dtype=F32, policy="fp32", dweight_dtype=None),
-    "bwd_dt_bf16_taps": dict(weight_dtype=BF16, bias_dtype=None, policy="bf16", dweight_dtype=None),
-    "bwd_bias_bf16_taps": dict(weight_dtype=BF16, bias_dtype=BF16, policy="bf16", dweight_dtype=None),
+    "bwd_dt-bf16": dict(weight_dtype=BF16, bias_dtype=None, policy="bf16", dweight_dtype=None),
+    "bwd_bias-bf16": dict(weight_dtype=BF16, bias_dtype=BF16, policy="bf16", dweight_dtype=None),
 }
+# The other labels of a backward route's calls (:data:`ROUTE_SETTINGS`), by
+# route: a route's name labels its calls of the first settings, and routes
+# ``bwd_dt`` and ``bwd_bias`` (SiLU' at the unrounded FP32 preactivation with
+# FP32 and with BF16 taps) run their calls with BF16 taps (and a BF16 bias)
+# under the labels ``"bwd_dt-bf16"`` and ``"bwd_bias-bf16"`` as well.
+ROUTE_LABELS = {"bwd_dt": ("bwd_dt-bf16",), "bwd_bias": ("bwd_bias-bf16",)}
 NEW_BWD_KINDS = (
     "bwd_dt",
     "bwd_bias",
     "bwd_fp32g",
     "bwd_bias_fp32g",
-    "bwd_dt_bf16_taps",
-    "bwd_bias_bf16_taps",
+    "bwd_dt-bf16",
+    "bwd_bias-bf16",
 )
-# The backward routes the autograd entry reaches: it returns ``dweight`` in the
-# taps' dtype, so ``bwd_dt`` (FP32 taps with a BF16 ``dweight`` out) is a route
-# of direct backward calls only.
+# The labels the autograd entry reaches: it returns ``dweight`` in the taps'
+# dtype, so the label ``bwd_dt`` (FP32 taps with a BF16 ``dweight`` out) is one
+# of direct backward calls only (the entry reaches route ``bwd_dt`` with BF16
+# taps, ``bwd_dt-bf16``).
 AUTOGRAD_KINDS = tuple(
     kind for kind, settings in ROUTE_SETTINGS.items() if settings["dweight_dtype"] is None
 )
 # The opt-in backward grid multiples beside the default 1 (``bwd_grid_mult``).
 OPT_IN_GRID_MULTS = (2, 3, 4)
-# The forward route each backward route's inputs select.
+# The forward route the inputs of each label (:data:`ROUTE_SETTINGS`) select.
 FORWARD_OF = {
     "bwd": "fwd",
     "bwd_dt": "fwd",
     "bwd_bias": "fwd_bias",
     "bwd_fp32g": "fwd",
     "bwd_bias_fp32g": "fwd_bias",
-    "bwd_dt_bf16_taps": "fwd_dt",
-    "bwd_bias_bf16_taps": "fwd_bias",
+    "bwd_dt-bf16": "fwd_dt",
+    "bwd_bias-bf16": "fwd_bias",
 }
+
+
+def _route_of(kind: str) -> str:
+    """The backward route a label resolves to (:data:`ROUTE_LABELS`; a route's name labels the route itself)."""
+
+    for route, labels in ROUTE_LABELS.items():
+        if kind in labels:
+            return route
+    return kind
 
 
 def _device() -> torch.device:
@@ -564,6 +748,7 @@ def _route_pending(arch: str, kind: str) -> str | None:
     """Why ``kind`` cannot run on ``arch`` yet (``None`` when it can): the route is not in the registry, or a
     record of it names a library ``build.json`` has no entry for (the exporter has not rendered it)."""
 
+    kind = _route_of(kind)
     if kind not in loader.ROUTES.get(arch, {}):
         return f"route {kind!r} is not exported for {arch}"
     libraries = cake_build.libraries_by_name()
@@ -578,7 +763,8 @@ def _require_route(*kinds: str) -> None:
     """Skip unless every route of ``kinds`` (a backward route brings its forward route along) can run."""
 
     for kind in kinds:
-        for needed in (kind, FORWARD_OF.get(kind, kind)):
+        route = _route_of(kind)
+        for needed in (route, FORWARD_OF.get(kind, route)):
             pending = _route_pending(_arch(), needed)
             if pending:
                 pytest.skip(pending)
@@ -588,6 +774,7 @@ def _backward_thresholds(arch: str, kind: str = "bwd") -> tuple[int, ...]:
     """The channel thresholds of the programs route ``kind`` selects by channel count on ``arch`` (empty when the
     route ships the fallback program only)."""
 
+    kind = _route_of(kind)
     thresholds = set()
     for name in loader.route_modules(arch, kind):
         rule = loader.select_rule(loader.MODULES[name])
@@ -615,6 +802,7 @@ def _token_floors(
     """The routed programs of route ``kind`` on ``arch`` whose rule carries a token floor: name -> (channel
     thresholds, token floor)."""
 
+    kind = _route_of(kind)
     floors = {}
     for name in loader.route_modules(arch, kind):
         rule = loader.select_rule(loader.MODULES[name])
@@ -626,6 +814,7 @@ def _token_floors(
 def _fallback_program(arch: str, kind: str = "bwd") -> str:
     """The program of route ``kind`` without a selection rule: the one every unrouted channel count runs."""
 
+    kind = _route_of(kind)
     names = [
         name
         for name in loader.route_modules(arch, kind)
@@ -633,6 +822,22 @@ def _fallback_program(arch: str, kind: str = "bwd") -> str:
     ]
     assert len(names) == 1, f"{arch} {kind}: fallback programs {names}"
     return names[0]
+
+
+def _program_of_record(arch: str, kind: str, C: int, S: int, ruled: str) -> str:
+    """The program route ``kind`` on ``arch`` runs at ``C`` channels and ``S`` tokens where the selection rules pick
+    ``ruled``: the route's pair direct program inside a range of ``PAIR_ROWS_OF_RECORD``, else its direct program
+    inside a range of ``DIRECT_ROWS_OF_RECORD``, else its fallback (the static program) inside a range of
+    ``FALLBACK_ROWS_OF_RECORD``, ``ruled`` elsewhere."""
+
+    ran = _ran_of_record(arch, kind, C, S)
+    if ran == "pair":
+        return _rows_program(arch, kind, PAIR_VEC)
+    if ran == "direct":
+        return _rows_program(arch, kind, DIRECT_VEC)
+    if ran == "static":
+        return _fallback_program(arch, kind)
+    return ruled
 
 
 def _generator(*keys: int, seed: int = SEED) -> torch.Generator:
@@ -833,9 +1038,9 @@ def _call_route(w, b, policy, dweight=None) -> str:
 
 
 def _backward(x, w, cu, dy, b, policy, *, kind=None, **kwargs):
-    """``(dx, dweight, dbias_or_None)`` of one backward call.  With ``kind`` (a backward route of
-    :data:`ROUTE_SETTINGS`) and no ``dweight`` out passed, the call writes a fresh NaN-filled ``dweight`` out of the
-    route's ``dweight_dtype`` when it names one (``bwd_dt``), and the call's arguments must resolve to ``kind``."""
+    """``(dx, dweight, dbias_or_None)`` of one backward call.  With ``kind`` (a label of :data:`ROUTE_SETTINGS`) and
+    no ``dweight`` out passed, the call writes a fresh NaN-filled ``dweight`` out of the label's ``dweight_dtype``
+    when it names one (``bwd_dt``), and the call's arguments must resolve to the label's route."""
 
     if kind is not None:
         dweight_dtype = ROUTE_SETTINGS[kind]["dweight_dtype"]
@@ -844,7 +1049,9 @@ def _backward(x, w, cu, dy, b, policy, *, kind=None, **kwargs):
                 (w.shape[0], WIDTH), float("nan"), dtype=dweight_dtype, device=w.device
             )
         route = _call_route(w, b, policy, kwargs.get("dweight"))
-        assert route == kind, f"the call resolves to route {route}, not {kind}"
+        assert route == _route_of(kind), (
+            f"the call resolves to route {route}, not {kind}"
+        )
     grads = cake_causal_conv1d_det_train_backward(
         x, w, cu, dy, bias=b, silu_grad_preactivation=policy, **kwargs
     )
@@ -871,21 +1078,85 @@ def _static_of_record(arch: str, kind: str, C: int, S: int) -> bool:
 
 
 def _direct_of_record(
-    arch: str, kind: str, C: int, S: int
+    arch: str, kind: str, C: int, S: int, vec: int = DIRECT_VEC
 ) -> tuple[int, int, int] | None:
     """The plan ``(ct_vec, n_sub, n_ch_tiles)`` of the direct program where a
     forward call of route ``kind`` on ``arch`` with ``C`` channels and ``S``
     tokens lies in a range of ``DIRECT_ROWS_OF_RECORD`` (the arch's
-    ``DIRECT_PLANS_OF_RECORD`` form, ``ceil(C / 8 / ct_vec)`` tiles), ``None``
-    outside every range."""
+    ``DIRECT_PLANS_OF_RECORD`` form, ``ceil(C / vec / ct_vec)`` tiles of the
+    planned geometry's ``vec``), ``None`` outside every range."""
 
-    for (route, c_lo, c_hi), (s_lo, s_hi) in DIRECT_ROWS_OF_RECORD.get(
-        arch, {}
-    ).items():
+    return _form_of_record(
+        DIRECT_ROWS_OF_RECORD, DIRECT_PLANS_OF_RECORD, arch, kind, C, S, vec
+    )
+
+
+def _pair_of_record(
+    arch: str, kind: str, C: int, S: int, vec: int = PAIR_VEC
+) -> tuple[int, int, int] | None:
+    """The plan ``(ct_vec, n_sub, n_ch_tiles)`` of the pair direct program where
+    a forward call of route ``kind`` on ``arch`` with ``C`` channels and ``S``
+    tokens lies in a range of ``PAIR_ROWS_OF_RECORD`` (the arch's
+    ``PAIR_PLANS_OF_RECORD`` form, ``ceil(C / vec / ct_vec)`` tiles of the
+    planned geometry's ``vec``), ``None`` outside every range."""
+
+    return _form_of_record(
+        PAIR_ROWS_OF_RECORD, PAIR_PLANS_OF_RECORD, arch, kind, C, S, vec
+    )
+
+
+def _form_of_record(
+    rows: dict, plans: dict, arch: str, kind: str, C: int, S: int, vec: int
+) -> tuple[int, int, int] | None:
+    """The plan of ``plans`` where a key of ``rows`` holds the call, else
+    ``None``."""
+
+    for (route, c_lo, c_hi), (s_lo, s_hi) in rows.get(arch, {}).items():
         if route == kind and c_lo <= C <= c_hi and s_lo <= S <= s_hi:
-            ct_vec, n_sub = DIRECT_PLANS_OF_RECORD[arch][kind]
-            return ct_vec, n_sub, -(-(C // 8) // ct_vec)
+            ct_vec, n_sub = plans[arch][kind]
+            return ct_vec, n_sub, -(-(C // vec) // ct_vec)
     return None
+
+
+def _range_of_record(
+    rows: dict, arch: str, kind: str, C: int
+) -> tuple[int, int] | None:
+    """The ``(S_lo, S_hi)`` of the key of ``rows`` covering ``C`` on ``arch`` and
+    route ``kind``, ``None`` without one."""
+
+    for (route, c_lo, c_hi), bounds in rows.get(arch, {}).items():
+        if route == kind and c_lo <= C <= c_hi:
+            return bounds
+    return None
+
+
+def _rows_plan_of_record(
+    arch: str, kind: str, C: int, S: int, vec: int
+) -> tuple[int, int, int] | None:
+    """The plan any forward record of geometry ``vec`` takes inside a pair or a
+    direct range: the pair form inside a range of ``PAIR_ROWS_OF_RECORD`` (it
+    runs ahead of the direct ranges), else the direct form, ``None`` outside
+    both."""
+
+    return _pair_of_record(arch, kind, C, S, vec) or _direct_of_record(
+        arch, kind, C, S, vec
+    )
+
+
+def _rows_program(arch: str, kind: str, vec: int) -> str:
+    """The record of forward route ``kind`` on ``arch`` whose selection rule is of
+    kind ``rows`` and whose geometry's ``vec`` is ``vec``: the direct program
+    (:data:`DIRECT_VEC`) or the pair direct program (:data:`PAIR_VEC`)."""
+
+    names = [
+        name
+        for name in loader.route_modules(arch, kind)
+        if (loader.select_rule(loader.MODULES[name]) or {}).get("kind")
+        == loader.ROWS_KIND
+        and loader.MODULES[name]["grid_rule"]["geometry"]["vec"] == vec
+    ]
+    assert len(names) == 1, (arch, kind, vec, names)
+    return names[0]
 
 
 def _small_s_rows(
@@ -893,17 +1164,32 @@ def _small_s_rows(
 ) -> list[tuple[str, tuple[int, int], tuple[int, int]]]:
     """``(program, (C_lo, C_hi), (S_lo, S_hi))`` of every range of forward route
     ``kind`` on ``arch``: ``"static"`` for ``FALLBACK_ROWS_OF_RECORD``, then
-    ``"direct"`` for ``DIRECT_ROWS_OF_RECORD``."""
+    ``"direct"`` for ``DIRECT_ROWS_OF_RECORD``, then ``"pair"`` for
+    ``PAIR_ROWS_OF_RECORD``."""
 
     return [
         (program, (c_lo, c_hi), bounds)
         for program, table in (
             ("static", FALLBACK_ROWS_OF_RECORD),
             ("direct", DIRECT_ROWS_OF_RECORD),
+            ("pair", PAIR_ROWS_OF_RECORD),
         )
         for (route, c_lo, c_hi), bounds in table.get(arch, {}).items()
         if route == kind
     ]
+
+
+def _ran_of_record(arch: str, kind: str, C: int, S: int) -> str | None:
+    """The small-S program a forward call runs: ``"pair"`` inside a range of
+    ``PAIR_ROWS_OF_RECORD``, else ``"direct"`` inside one of
+    ``DIRECT_ROWS_OF_RECORD``, else ``"static"`` inside one of
+    ``FALLBACK_ROWS_OF_RECORD``, else ``None`` (the rules decide)."""
+
+    if _pair_of_record(arch, kind, C, S) is not None:
+        return "pair"
+    if _direct_of_record(arch, kind, C, S) is not None:
+        return "direct"
+    return "static" if _static_of_record(arch, kind, C, S) else None
 
 
 def _fallback_of_record(cv: int, role: str) -> int:
@@ -985,8 +1271,9 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     floor; no architecture; an architecture or row the floors do not list),
     the kept one-tile rows, every multiple of eight up to 8192 against the
     route-free rule, the plan's ``route`` / ``S`` / ``arch`` (inside a range of
-    ``DIRECT_ROWS_OF_RECORD`` the plan of the arch's direct form, the channel
-    split the route's) and the refused routes and architectures."""
+    ``PAIR_ROWS_OF_RECORD`` or ``DIRECT_ROWS_OF_RECORD`` the plan of the arch's
+    pair or direct form, the channel split the route's) and the refused routes
+    and architectures."""
 
     geometry = {"threads": 128, "vec": 8}
     assert loader.NARROW_TILE_ROUTES == {
@@ -997,8 +1284,6 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
             "bwd_bias",
             "bwd_fp32g",
             "bwd_bias_fp32g",
-            "bwd_dt_bf16_taps",
-            "bwd_bias_bf16_taps",
             "bwd_fp32g_pair",
             "bwd_bias_fp32g_pair",
         ),
@@ -1055,9 +1340,9 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
                         S, C, 3, geometry=geometry, role=role, route=kind, arch=arch
                     )
                     split = (scalars["ct_vec"], scalars["n_sub"], scalars["n_ch_tiles"])
-                    # Inside a direct range the plan is the direct form.
-                    direct = _direct_of_record(arch, kind, C, S)
-                    assert split == (direct or want), (kind, C, arch, S)
+                    # Inside a pair or a direct range the plan is its form.
+                    rows = _rows_plan_of_record(arch, kind, C, S, geometry["vec"])
+                    assert split == (rows or want), (kind, C, arch, S)
                     split = loader.channel_split(
                         C,
                         geometry=geometry,
@@ -1101,9 +1386,9 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
                         S, C, 3, geometry=geometry, role=role, route=kind, arch=arch
                     )
                     split = (scalars["ct_vec"], scalars["n_sub"], scalars["n_ch_tiles"])
-                    # Inside a direct range the plan is the direct form.
-                    direct = _direct_of_record(arch, kind, C, S)
-                    assert split == (direct or want), (kind, C, arch, S)
+                    # Inside a pair or a direct range the plan is its form.
+                    rows = _rows_plan_of_record(arch, kind, C, S, geometry["vec"])
+                    assert split == (rows or want), (kind, C, arch, S)
                     split = loader.channel_split(
                         C,
                         geometry=geometry,
@@ -1202,35 +1487,103 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     assert "flags" in loader.LOGICAL_SCALARS and "flags" not in loader.PLAN_SCALARS
 
 
+def _small_s_layout_problems(
+    ranges: list[tuple[str, tuple[int, int], tuple[int, int]]],
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """The ``(static span, direct span)`` pairs of one architecture and route
+    (``ranges`` as :func:`_small_s_rows` gives them) that break the layout: a
+    direct range meets the channel counts of a static range only where both have
+    one key, and there it starts one token above the static range or lies
+    inside it."""
+
+    problems = []
+    for each, span, (s_lo, s_hi) in ranges:
+        for other, (d_lo, d_hi), (t_lo, t_hi) in ranges:
+            if each != "static" or other != "direct":
+                continue
+            if span[1] < d_lo or d_hi < span[0]:
+                continue
+            touches = s_hi + 1 == t_lo
+            nested = s_lo <= t_lo <= t_hi <= s_hi
+            if span != (d_lo, d_hi) or not (touches or nested):
+                problems.append((span, (d_lo, d_hi)))
+    return problems
+
+
+def test_small_s_layout_keeps_a_direct_range_inside_its_static_range() -> None:
+    """A direct range inside the static range of its own key, or one token
+    above it, keeps the layout."""
+
+    for static, direct in (
+        ((1, 16383), (12801, 13823)),
+        ((1, 16383), (1, 16383)),
+        ((1, 12800), (12801, 13823)),
+    ):
+        ranges = [("static", (720, 728), static), ("direct", (720, 728), direct)]
+        assert not _small_s_layout_problems(ranges), (static, direct)
+
+
+def test_small_s_layout_refuses_a_partial_overlap() -> None:
+    """A direct range that leaves the static range of its key where it meets
+    it, starts a gap above it or lies below it, or meets the static range of
+    another key, breaks the layout; disjoint channels and pair ranges do not."""
+
+    direct = ("direct", (720, 728), (12801, 13823))
+    for static in ((1, 13000), (12900, 16383), (1, 12000), (13824, 16383)):
+        ranges = [("static", (720, 728), static), direct]
+        assert _small_s_layout_problems(ranges) == [((720, 728), (720, 728))]
+    ranges = [("static", (720, 736), (1, 16383)), direct]
+    assert _small_s_layout_problems(ranges) == [((720, 736), (720, 728))]
+    for other in (("static", (736, 736), (1, 16383)), ("pair", (720, 728), (1, 3072))):
+        assert not _small_s_layout_problems([other, direct]), other
+
+
 def test_small_s_rows_literal_tables() -> None:
-    """The small-S forward rows: ``cake_jit.FALLBACK_ROWS``, ``DIRECT_ROWS`` and
-    ``DIRECT_PLANS`` against the literal tables; keys of forward routes only, on
-    multiples of 8, disjoint in ``C`` per architecture and route, every range
-    inside ``S >= 1``, a static range below the direct range of a key that both
-    tables cover; per architecture and forward route one static program (the
-    route's fallback, listed first) and at most one direct program (listed
-    last, named by every direct key of the route); the static and the direct
-    programs take no counters and launch without PDL, only the direct program
-    caps its grid; each direct program's architectures are the ones whose
-    direct rows name it; each direct form fills the forward's threads."""
+    """The small-S forward rows: ``cake_jit.FALLBACK_ROWS``, ``DIRECT_ROWS``,
+    ``PAIR_ROWS``, ``DIRECT_PLANS`` and ``PAIR_PLANS`` against the literal
+    tables; keys of forward routes only, on multiples of 8, disjoint in ``C``
+    per architecture and route, every range inside ``S >= 1``, a direct range
+    that meets a static range only at the same key, one token above it or
+    inside it (:func:`_small_s_layout_problems`), the pair keys of
+    ``PAIR_ROWS_OF_RECORD`` per architecture and route (one, two on sm_100a
+    ``fwd_dt``, three on sm_103a ``fwd_bias`` and sm_107a ``fwd``); per architecture
+    and forward route one static program (the
+    route's fallback, listed first), one direct program (geometry ``vec`` 8,
+    named by every direct key of the route) and one pair direct program
+    (geometry ``vec`` 2, named by every pair key of the route), listed last in
+    that order; the static and the rows programs take no counters and launch
+    without PDL, only the rows programs cap their grid (the pair direct
+    programs: ``PAIR_CTAS_PER_SM`` co-resident CTAs per SM); each rows
+    program's architectures are the ones whose rows name it; each direct and
+    pair form fills the forward's threads."""
 
     assert loader.ROWS_KIND == "rows" and loader.ROWS_KIND not in loader.SELECT_KINDS
     assert loader.GRID_CAPS == ("token_blocks",) and loader.DIRECT_BLOCK_TOKENS == 8
     fallback = {arch: dict(rows) for arch, rows in loader.FALLBACK_ROWS.items() if rows}
     assert fallback == FALLBACK_ROWS_OF_RECORD
-    direct = {
-        arch: {key: (s_lo, s_hi) for key, (s_lo, s_hi, _name) in rows.items()}
-        for arch, rows in loader.DIRECT_ROWS.items()
-        if rows
-    }
-    assert direct == DIRECT_ROWS_OF_RECORD
-    plans = {arch: dict(forms) for arch, forms in loader.DIRECT_PLANS.items() if forms}
-    assert plans == DIRECT_PLANS_OF_RECORD
+    for table, want in (
+        (loader.DIRECT_ROWS, DIRECT_ROWS_OF_RECORD),
+        (loader.PAIR_ROWS, PAIR_ROWS_OF_RECORD),
+    ):
+        got = {
+            arch: {key: (s_lo, s_hi) for key, (s_lo, s_hi, _name) in rows.items()}
+            for arch, rows in table.items()
+            if rows
+        }
+        assert got == want
+    for table, want in (
+        (loader.DIRECT_PLANS, DIRECT_PLANS_OF_RECORD),
+        (loader.PAIR_PLANS, PAIR_PLANS_OF_RECORD),
+    ):
+        assert {arch: dict(forms) for arch, forms in table.items() if forms} == want
     forward = loader.NARROW_TILE_ROUTES["fwd"]
-    for table in (loader.FALLBACK_ROWS, loader.DIRECT_ROWS):
+    for table in (loader.FALLBACK_ROWS, loader.DIRECT_ROWS, loader.PAIR_ROWS):
         assert set(table) <= set(loader.ARCHES)
         for arch, rows in table.items():
             assert all(route in forward for route, _, _ in rows), (arch, sorted(rows))
+    tables = {"direct": loader.DIRECT_ROWS, "pair": loader.PAIR_ROWS}
+    plans = {"direct": DIRECT_PLANS_OF_RECORD, "pair": PAIR_PLANS_OF_RECORD}
+    vecs = {"direct": DIRECT_VEC, "pair": PAIR_VEC}
     named: dict[str, set[str]] = {}
     for arch in loader.ARCHES:
         for kind in forward:
@@ -1252,20 +1605,32 @@ def test_small_s_rows_literal_tables() -> None:
                 assert record["launch"]["use_pdl"] is False, name
                 assert ("cap" in record["grid_rule"]) == (name in rows), name
             ranges = _small_s_rows(arch, kind)
-            direct_keys = [
-                (span, bounds)
-                for program, span, bounds in ranges
-                if program == "direct"
-            ]
-            if direct_keys:
-                assert len(rows) == 1 and names[-1] == rows[0], (arch, kind, names)
-                assert kind in DIRECT_PLANS_OF_RECORD[arch], (arch, kind)
-                named.setdefault(rows[0], set()).add(arch)
-                for (c_lo, c_hi), _ in direct_keys:
-                    assert loader.DIRECT_ROWS[arch][(kind, c_lo, c_hi)][2] == rows[0]
-            else:
-                assert not rows, (arch, kind, rows)
-            for program in ("static", "direct"):
+            listed = []
+            for program in ("direct", "pair"):
+                keys = [(span, b) for each, span, b in ranges if each == program]
+                of_vec = [
+                    name
+                    for name in rows
+                    if loader.MODULES[name]["grid_rule"]["geometry"]
+                    == {"threads": 128, "vec": vecs[program]}
+                ]
+                assert keys and len(of_vec) == 1, (arch, kind, program, rows)
+                assert kind in plans[program][arch], (arch, kind, program)
+                named.setdefault(of_vec[0], set()).add(arch)
+                listed.append(of_vec[0])
+                for (c_lo, c_hi), _ in keys:
+                    key = (kind, c_lo, c_hi)
+                    assert tables[program][arch][key][2] == of_vec[0], (arch, key)
+            # One direct and one pair direct program close the route, in that order.
+            assert sorted(rows) == sorted(listed), (arch, kind, rows)
+            assert list(names[-2:]) == listed, (arch, kind, names)
+            pair = loader.MODULES[listed[1]]["grid_rule"]
+            assert pair["kind"] == "co_resident" and pair["cap"] == "token_blocks"
+            assert pair["ctas_per_sm"] == PAIR_CTAS_PER_SM[kind], (arch, kind)
+            n_pair = len([key for key in PAIR_ROWS_OF_RECORD[arch] if key[0] == kind])
+            pairs = [span for each, span, _ in ranges if each == "pair"]
+            assert len(pairs) == n_pair, (arch, kind, pairs)
+            for program in ("static", "direct", "pair"):
                 spans = sorted(span for each, span, _ in ranges if each == program)
                 for c_lo, c_hi in spans:
                     assert c_lo % 8 == 0 and c_hi % 8 == 0 and 8 <= c_lo <= c_hi, (
@@ -1277,12 +1642,7 @@ def test_small_s_rows_literal_tables() -> None:
                     assert end < start, (arch, kind, program, spans)
             for program, span, (s_lo, s_hi) in ranges:
                 assert 1 <= s_lo <= s_hi, (arch, kind, span)
-            for _, (c_lo, c_hi), (_, s_x) in (r for r in ranges if r[0] == "static"):
-                for _, (d_lo, d_hi), (t_lo, _) in (
-                    r for r in ranges if r[0] == "direct"
-                ):
-                    if c_lo <= d_hi and d_lo <= c_hi:
-                        assert s_x < t_lo, (arch, kind, (c_lo, c_hi), (d_lo, d_hi))
+            assert not _small_s_layout_problems(ranges), (arch, kind)
     for name, record in loader.MODULES.items():
         rule = loader.select_rule(record)
         if rule is not None and rule["kind"] == loader.ROWS_KIND:
@@ -1290,44 +1650,54 @@ def test_small_s_rows_literal_tables() -> None:
                 name,
                 record["arches"],
             )
-    for arch, forms in DIRECT_PLANS_OF_RECORD.items():
-        for kind, (ct_vec, n_sub) in forms.items():
-            assert ct_vec * n_sub == loader.NARROW_TILE_THREADS, (arch, kind)
+    for table in (DIRECT_PLANS_OF_RECORD, PAIR_PLANS_OF_RECORD):
+        for arch, forms in table.items():
+            for kind, (ct_vec, n_sub) in forms.items():
+                assert ct_vec * n_sub == loader.NARROW_TILE_THREADS, (arch, kind)
 
 
 def test_small_s_rows_select_their_programs(monkeypatch) -> None:
-    """Inside a range of ``DIRECT_ROWS_OF_RECORD`` a forward call selects the
-    route's direct program, inside one of ``FALLBACK_ROWS_OF_RECORD`` its static
-    program, and elsewhere the dynamic program the rules select without the rows:
-    at ``S`` 1, 1000, each bound of every range of the key and one token beyond
-    it, for the first, a middle and the last ``C`` of every key, on every
-    architecture and forward route.  ``S`` of ``None`` under a key is refused;
-    outside every key it is not needed; a ``C`` off the multiple of 8 lies in no
-    row; a direct key naming a record that is no ``rows`` record of the route is
-    a registry error."""
+    """Inside a range of ``PAIR_ROWS_OF_RECORD`` a forward call selects the
+    route's pair direct program, else inside one of ``DIRECT_ROWS_OF_RECORD``
+    its direct program, else inside one of ``FALLBACK_ROWS_OF_RECORD`` its
+    static program, and elsewhere the dynamic program the rules select without
+    the rows: at ``S`` 1, 1000, each bound of every range of the key and of
+    every pair range of the route (where a route has more than one pair key, each
+    key's ``C`` also runs at the other keys' bounds) and one token beyond it, for the
+    first, a middle and the last ``C`` of every key, on every architecture and
+    forward route.  Each table gives the range of its own key covering ``C``.
+    ``S`` of ``None`` under a key is refused; outside every key it is not
+    needed; a ``C`` off the multiple of 8 lies in no row; a direct or pair key
+    naming a record that is no ``rows`` record of the route is a registry
+    error."""
 
     for arch in loader.ARCHES:
         for kind in loader.NARROW_TILE_ROUTES["fwd"]:
-            static = _fallback_program(arch, kind)
-            direct = [
-                name
-                for name in loader.route_modules(arch, kind)
-                if (loader.select_rule(loader.MODULES[name]) or {}).get("kind")
-                == loader.ROWS_KIND
-            ]
+            programs = {
+                "static": _fallback_program(arch, kind),
+                "direct": _rows_program(arch, kind, DIRECT_VEC),
+                "pair": _rows_program(arch, kind, PAIR_VEC),
+            }
             ranges = _small_s_rows(arch, kind)
+            pair_tokens = {
+                S
+                for program, _, (s_lo, s_hi) in ranges
+                if program == "pair"
+                for S in (s_lo - 1, s_lo, s_hi, s_hi + 1)
+            }
             for c_lo, c_hi in sorted({span for _, span, _ in ranges}):
                 bounds = {
                     program: (s_lo, s_hi)
                     for program, span, (s_lo, s_hi) in ranges
                     if span == (c_lo, c_hi)
                 }
-                tokens = {1, 1000}
+                tokens = {1, 1000} | pair_tokens
                 for s_lo, s_hi in bounds.values():
                     tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
                 for C in sorted({c_lo, c_lo + 8 * ((c_hi - c_lo) // 16), c_hi}):
                     for S in sorted(S for S in tokens if S >= 1):
                         with monkeypatch.context() as m:
+                            m.setattr(loader, "PAIR_ROWS", {})
                             m.setattr(loader, "DIRECT_ROWS", {})
                             m.setattr(loader, "FALLBACK_ROWS", {})
                             rules = loader.selected_modules(arch, kind, C=C, S=S)
@@ -1337,39 +1707,51 @@ def test_small_s_rows_select_their_programs(monkeypatch) -> None:
                             C,
                             S,
                         )
-                        in_direct = _direct_of_record(arch, kind, C, S) is not None
-                        if in_direct:
-                            want = (direct[0],)
-                        elif _static_of_record(arch, kind, C, S):
-                            want = (static,)
-                        else:
-                            want = rules
+                        ran = _ran_of_record(arch, kind, C, S)
+                        want = rules if ran is None else (programs[ran],)
                         got = loader.selected_modules(arch, kind, C=C, S=S)
                         assert got == want, (arch, kind, C, S, got, want)
+                        in_direct = _direct_of_record(arch, kind, C, S) is not None
+                        in_pair = _pair_of_record(arch, kind, C, S) is not None
                         assert loader.direct_row(arch, kind, C, S) is in_direct, (
                             arch,
                             kind,
                             C,
                             S,
                         )
+                        assert loader.pair_row(arch, kind, C, S) is in_pair, (
+                            arch,
+                            kind,
+                            C,
+                            S,
+                        )
                         assert loader.direct_module(arch, kind, C, S) == (
-                            direct[0] if in_direct else None
+                            programs["direct"] if in_direct else None
                         ), (arch, kind, C, S)
-                    assert loader.fallback_row_range(arch, kind, C) == bounds.get(
-                        "static"
-                    ), (arch, kind, C)
-                    assert loader.direct_row_range(arch, kind, C) == bounds.get(
-                        "direct"
-                    ), (arch, kind, C)
+                        assert loader.pair_module(arch, kind, C, S) == (
+                            programs["pair"] if in_pair else None
+                        ), (arch, kind, C, S)
+                    for table, row_range in (
+                        (FALLBACK_ROWS_OF_RECORD, loader.fallback_row_range),
+                        (DIRECT_ROWS_OF_RECORD, loader.direct_row_range),
+                        (PAIR_ROWS_OF_RECORD, loader.pair_row_range),
+                    ):
+                        assert row_range(arch, kind, C) == _range_of_record(
+                            table, arch, kind, C
+                        ), (arch, kind, C)
+                        assert row_range(arch, kind, C + 4) is None
                     with pytest.raises(ValueError, match="needs S"):
                         loader.selected_modules(arch, kind, C=C)
-                    if "direct" in bounds:
-                        with pytest.raises(ValueError, match="needs S"):
-                            loader.direct_module(arch, kind, C, None)
-                    assert loader.fallback_row_range(arch, kind, C + 4) is None
-                    assert loader.direct_row_range(arch, kind, C + 4) is None
-                    assert not loader.direct_row(arch, kind, C, None)
-                    assert not loader.direct_row(None, kind, C, 1000)
+                    for table, module in (
+                        (DIRECT_ROWS_OF_RECORD, loader.direct_module),
+                        (PAIR_ROWS_OF_RECORD, loader.pair_module),
+                    ):
+                        if _range_of_record(table, arch, kind, C) is not None:
+                            with pytest.raises(ValueError, match="needs S"):
+                                module(arch, kind, C, None)
+                    for row in (loader.direct_row, loader.pair_row):
+                        assert not row(arch, kind, C, None)
+                        assert not row(None, kind, C, 1000)
             # Below every key no S is needed.
             assert loader.selected_modules(arch, kind, C=8) == loader.selected_modules(
                 arch, kind, C=8, S=1
@@ -1378,49 +1760,61 @@ def test_small_s_rows_select_their_programs(monkeypatch) -> None:
         for C in (576, 640, 768):
             assert loader.fallback_row_range(arch, "bwd", C) is None
             assert loader.direct_module(arch, "bwd", C, 1000) is None
-    arch, key = next(
-        (arch, key) for arch, rows in loader.DIRECT_ROWS.items() for key in rows
-    )
-    s_lo, s_hi, _name = loader.DIRECT_ROWS[arch][key]
-    for wrong in (
-        _fallback_program(arch, key[0]),
-        "cake_causal_conv1d_det_train_unknown",
-    ):
-        with monkeypatch.context() as m:
-            m.setitem(
-                loader.DIRECT_ROWS,
-                arch,
-                {**loader.DIRECT_ROWS[arch], key: (s_lo, s_hi, wrong)},
-            )
-            with pytest.raises(RuntimeError, match="no record of the route"):
-                loader.selected_modules(arch, key[0], C=key[1], S=s_lo)
+            assert loader.pair_module(arch, "bwd", C, 1000) is None
+    for table in (loader.DIRECT_ROWS, loader.PAIR_ROWS):
+        arch, key = next((arch, key) for arch, rows in table.items() for key in rows)
+        s_lo, s_hi, _name = table[arch][key]
+        for wrong in (
+            _fallback_program(arch, key[0]),
+            "cake_causal_conv1d_det_train_unknown",
+        ):
+            with monkeypatch.context() as m:
+                m.setitem(table, arch, {**table[arch], key: (s_lo, s_hi, wrong)})
+                # The other table's ranges step aside.
+                for other in ("PAIR_ROWS", "DIRECT_ROWS"):
+                    if getattr(loader, other) is not table:
+                        m.setattr(loader, other, {})
+                with pytest.raises(RuntimeError, match="no record of the route"):
+                    loader.selected_modules(arch, key[0], C=key[1], S=s_lo)
 
 
 def test_direct_rows_plan_and_grid(monkeypatch) -> None:
     """Inside a direct range the forward plan is the architecture's direct form
     (``DIRECT_PLANS_OF_RECORD``: ``ct_vec`` vectors, ``n_sub`` sub-tiles,
-    ``ceil(C / 8 / ct_vec)`` tiles), the same as :func:`cake_jit.direct_split`;
-    one token outside it, without an architecture or ``S``, in the legacy form
-    and on the backward the plan is :func:`cake_jit.channel_split`'s.  The
-    direct program launches ``min(ctas_per_sm x SMs, n_ch_tiles x ceil(S / (8 x
-    n_sub)))`` CTAs and needs ``C`` and ``S`` for it; the static program
-    launches the co-resident grid.  ``direct_split`` refuses an architecture or
-    route without a form and a form beyond the geometry's threads; a cap on
-    another grid kind or an unknown cap is refused."""
+    ``ceil(C / vec / ct_vec)`` tiles of the record's ``vec``), and inside a pair
+    range, ahead of a direct range it covers, the pair form
+    (``PAIR_PLANS_OF_RECORD``, ``ct_vec`` in channel pairs), the same as
+    :func:`cake_jit.direct_split` (``pair=True`` for the pair form); one token
+    outside them, without an architecture or ``S``, in the legacy form and on
+    the backward the plan is :func:`cake_jit.channel_split`'s.  The direct and
+    the pair direct programs launch ``min(ctas_per_sm x SMs, n_ch_tiles x
+    ceil(S / (8 x n_sub)))`` CTAs of the call's plan and need ``C`` and ``S``
+    for it; the static program launches the co-resident grid.
+    ``direct_split`` refuses an architecture or route without a form and a form
+    beyond the geometry's threads; a cap on another grid kind or an unknown cap
+    is refused."""
 
-    geometry = {"threads": 128, "vec": 8}
+    base = {"threads": 128, "vec": DIRECT_VEC}
     for arch in loader.ARCHES:
         for kind in loader.NARROW_TILE_ROUTES["fwd"]:
             static = loader.MODULES[_fallback_program(arch, kind)]
             for program, (c_lo, c_hi), (s_lo, s_hi) in _small_s_rows(arch, kind):
-                if program != "direct":
+                if program == "static":
                     continue
-                ct_vec, n_sub = DIRECT_PLANS_OF_RECORD[arch][kind]
-                record = loader.MODULES[loader.DIRECT_ROWS[arch][(kind, c_lo, c_hi)][2]]
+                pair = program == "pair"
+                table = loader.PAIR_ROWS if pair else loader.DIRECT_ROWS
+                forms = PAIR_PLANS_OF_RECORD if pair else DIRECT_PLANS_OF_RECORD
+                ct_vec, n_sub = forms[arch][kind]
+                record = loader.MODULES[table[arch][(kind, c_lo, c_hi)][2]]
+                geometry = record["grid_rule"]["geometry"]
+                vec = int(geometry["vec"])
+                assert vec == (PAIR_VEC if pair else DIRECT_VEC), record["kernel"]
                 for C in (c_lo, c_hi):
-                    want = (ct_vec, n_sub, -(-(C // 8) // ct_vec))
+                    want = (ct_vec, n_sub, -(-(C // vec) // ct_vec))
                     assert (
-                        loader.direct_split(C, geometry=geometry, route=kind, arch=arch)
+                        loader.direct_split(
+                            C, geometry=geometry, route=kind, arch=arch, pair=pair
+                        )
                         == want
                     )
                     for S in (s_lo - 1, s_lo, s_hi, s_hi + 1):
@@ -1428,8 +1822,13 @@ def test_direct_rows_plan_and_grid(monkeypatch) -> None:
                             C, geometry=geometry, role="fwd", route=kind, S=S, arch=arch
                         )
                         inside = s_lo <= S <= s_hi
+                        # A pair range runs ahead of the direct range it covers.
+                        rows = _rows_plan_of_record(arch, kind, C, S, vec)
+                        if inside and pair:
+                            assert rows == want, (arch, kind, C, S)
+                        assert rows is not None or not inside, (arch, kind, C, S)
                         for args, expected in (
-                            (dict(route=kind, arch=arch), want if inside else split),
+                            (dict(route=kind, arch=arch), rows or split),
                             (
                                 dict(route=kind),
                                 loader.channel_split(
@@ -1454,7 +1853,7 @@ def test_direct_rows_plan_and_grid(monkeypatch) -> None:
                             S,
                             C,
                             3,
-                            geometry=geometry,
+                            geometry=base,
                             role="bwd",
                             route="bwd",
                             arch=arch,
@@ -1465,7 +1864,7 @@ def test_direct_rows_plan_and_grid(monkeypatch) -> None:
                             bwd["n_ch_tiles"],
                         ) == loader.channel_split(
                             C,
-                            geometry=geometry,
+                            geometry=base,
                             role="bwd",
                             route="bwd",
                             S=S,
@@ -1483,12 +1882,12 @@ def test_direct_rows_plan_and_grid(monkeypatch) -> None:
                                 m.setattr(
                                     loader, "sm_count", lambda _index, sms=sms: sms
                                 )
-                                blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * n_sub))
+                                blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * rows[1]))
                                 co_resident = record["grid_rule"]["ctas_per_sm"] * sms
                                 assert loader.launch_grid(
                                     record, device_index=0, C=C, S=S
                                 ) == (
-                                    max(1, min(co_resident, want[2] * blocks)),
+                                    max(1, min(co_resident, rows[2] * blocks)),
                                     1,
                                     1,
                                 ), (arch, kind, C, S, sms)
@@ -1522,26 +1921,45 @@ def test_direct_rows_plan_and_grid(monkeypatch) -> None:
                                             S=S,
                                         )
         for kind in loader.NARROW_TILE_ROUTES["fwd"]:
-            if kind not in DIRECT_PLANS_OF_RECORD.get(arch, {}):
-                with pytest.raises(ValueError, match="no direct plan"):
-                    loader.direct_split(640, geometry=geometry, route=kind, arch=arch)
-    for arch, forms in DIRECT_PLANS_OF_RECORD.items():
-        kind = next(iter(forms))
-        with pytest.raises(ValueError, match="does not fit"):
-            loader.direct_split(
-                640, geometry={"threads": 32, "vec": 8}, route=kind, arch=arch
-            )
-        with pytest.raises(ValueError, match="no direct plan"):
-            loader.direct_split(640, geometry=geometry, route="bwd", arch=arch)
+            for forms, pair, what in (
+                (DIRECT_PLANS_OF_RECORD, False, "direct"),
+                (PAIR_PLANS_OF_RECORD, True, "pair"),
+            ):
+                if kind not in forms.get(arch, {}):
+                    with pytest.raises(ValueError, match=f"no {what} plan"):
+                        loader.direct_split(
+                            640, geometry=base, route=kind, arch=arch, pair=pair
+                        )
+    for forms, pair, what in (
+        (DIRECT_PLANS_OF_RECORD, False, "direct"),
+        (PAIR_PLANS_OF_RECORD, True, "pair"),
+    ):
+        for arch, kinds in forms.items():
+            kind = next(iter(kinds))
+            with pytest.raises(ValueError, match="does not fit"):
+                loader.direct_split(
+                    640,
+                    geometry={"threads": 32, "vec": base["vec"]},
+                    route=kind,
+                    arch=arch,
+                    pair=pair,
+                )
+            with pytest.raises(ValueError, match=f"no {what} plan"):
+                loader.direct_split(
+                    640, geometry=base, route="bwd", arch=arch, pair=pair
+                )
     for arch in ("sm_90a", ""):
-        with pytest.raises(ValueError, match="arch must be one of"):
-            loader.direct_split(640, geometry=geometry, route="fwd", arch=arch)
+        for pair in (False, True):
+            with pytest.raises(ValueError, match="arch must be one of"):
+                loader.direct_split(
+                    640, geometry=base, route="fwd", arch=arch, pair=pair
+                )
 
 
 # The whole-rank trim of the backward main grid (``cake_jit.main_grid``) at 128
 # threads x 8 channels: ``(arch, co-resident grid, S, C) -> grid`` on the
 # routes the arch's rule trims (sm_103a: ``bwd`` at 304 CTAs; sm_100a: ``bwd``
-# / ``bwd_dt`` / ``bwd_fp32g`` / ``bwd_dt_bf16_taps`` at 296; sm_107a: none);
+# / ``bwd_dt`` / ``bwd_fp32g`` at 296; sm_107a: none);
 # every other route keeps the co-resident grid.  The rows are the kernel
 # module's rules-test rows.
 MAIN_GRID_TABLE = (
@@ -1608,7 +2026,7 @@ MAIN_GRID_TABLE = (
     ("sm_107a", 296, 250340, 1160, 296),
 )
 MAIN_GRID_TRIMMED_ROUTES = {
-    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g", "bwd_dt_bf16_taps"),
+    "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g"),
     "sm_103a": ("bwd",),
     "sm_107a": (),
 }
@@ -1635,7 +2053,7 @@ def test_main_grid_literal_table() -> None:
         "sm_107a": {},
     }
     assert loader.TILE_ALIGNED_CLASS_ROUTES == {
-        "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g", "bwd_dt_bf16_taps"),
+        "sm_100a": ("bwd", "bwd_dt", "bwd_fp32g"),
         "sm_103a": (),
         "sm_107a": (),
     }
@@ -1643,7 +2061,7 @@ def test_main_grid_literal_table() -> None:
     for arch, co_resident, S, C, grid in MAIN_GRID_TABLE:
         ct_vec, _, n_ch_tiles = loader.channel_split(C, geometry=geometry, role="bwd")
         row = {"C": C, "n_ch_tiles": n_ch_tiles, "S": S, "ct_vec": ct_vec}
-        for kind in ROUTE_SETTINGS:
+        for kind in dict.fromkeys(_route_of(label) for label in ROUTE_SETTINGS):
             trims = kind in MAIN_GRID_TRIMMED_ROUTES[arch]
             got = loader.main_grid(co_resident, arch=arch, route=kind, **row)
             assert got == (grid if trims else co_resident), (arch, kind, S, C)
@@ -1964,16 +2382,16 @@ def test_route_tables() -> None:
     table = (
         (False, False, False, False, "bwd"),
         (False, False, False, True, "bwd_dt"),
-        (False, False, True, False, "bwd_dt_bf16_taps"),
-        (False, False, True, True, "bwd_dt_bf16_taps"),
+        (False, False, True, False, "bwd_dt"),
+        (False, False, True, True, "bwd_dt"),
         (False, True, False, False, "bwd_fp32g"),
         (False, True, False, True, "bwd_fp32g"),
         (False, True, True, False, "bwd_fp32g"),
         (False, True, True, True, "bwd_fp32g"),
         (True, False, False, False, "bwd_bias"),
         (True, False, False, True, "bwd_bias"),
-        (True, False, True, False, "bwd_bias_bf16_taps"),
-        (True, False, True, True, "bwd_bias_bf16_taps"),
+        (True, False, True, False, "bwd_bias"),
+        (True, False, True, True, "bwd_bias"),
         (True, True, False, False, "bwd_bias_fp32g"),
         (True, True, False, True, "bwd_bias_fp32g"),
         (True, True, True, False, "bwd_bias_fp32g"),
@@ -1998,19 +2416,16 @@ def test_route_tables() -> None:
                 )
                 == f"{kind}_pair"
             )
-    assert {row[4] for row in table} == set(ROUTE_SETTINGS)
-    # Every entry of ROUTE_SETTINGS resolves to its route.
+    assert {row[4] for row in table} == {_route_of(kind) for kind in ROUTE_SETTINGS}
+    # Every entry of ROUTE_SETTINGS resolves to its label's route.
     for kind, settings in ROUTE_SETTINGS.items():
         dweight_dtype = settings["dweight_dtype"] or settings["weight_dtype"]
-        assert (
-            loader.backward_route(
-                bias=settings["bias_dtype"] is not None,
-                fp32_grad=settings["policy"] == "fp32",
-                bf16_taps=settings["weight_dtype"] == BF16,
-                bf16_dweight=dweight_dtype == BF16,
-            )
-            == kind
-        ), kind
+        assert loader.backward_route(
+            bias=settings["bias_dtype"] is not None,
+            fp32_grad=settings["policy"] == "fp32",
+            bf16_taps=settings["weight_dtype"] == BF16,
+            bf16_dweight=dweight_dtype == BF16,
+        ) == _route_of(kind), kind
     # The opt-in pair routes (dweight_sum="fp32_pair") and the routes they pair.
     assert loader.PAIR_ROUTES == {
         "bwd_fp32g_pair": "bwd_fp32g",
@@ -2020,7 +2435,7 @@ def test_route_tables() -> None:
         "fwd",
         "fwd_dt",
         "fwd_bias",
-        *ROUTE_SETTINGS,
+        *map(_route_of, ROUTE_SETTINGS),
         *loader.PAIR_ROUTES,
     }
     assert set(loader.REQUIRED_KINDS) == {"fwd", "bwd"}
@@ -2140,7 +2555,7 @@ def test_backward_programs_switch_on_channel_count(kind) -> None:
 
     _require_route(kind)
     arch = _arch()
-    names = loader.route_modules(arch, kind)
+    names = loader.route_modules(arch, _route_of(kind))
     thresholds = _backward_thresholds(arch, kind)
     if not thresholds:
         pytest.skip(
@@ -2165,7 +2580,7 @@ def test_backward_programs_switch_on_channel_count(kind) -> None:
                 rows.append((floor, "perf", end - 8))
     launched = set()
     for S, docs, C in rows:
-        selected = loader.selected_modules(arch, kind, C=C, S=S)
+        selected = loader.selected_modules(arch, _route_of(kind), C=C, S=S)
         assert len(selected) == 1, f"S={S} C={C}: {selected}"
         launched.add(selected[0])
         workspace = cake_causal_conv1d_det_train_backward_workspace(S, C, _device())
@@ -2187,9 +2602,9 @@ def test_forward_programs_switch_on_channel_count(kind) -> None:
     """Exactly one forward program of the route runs per call, every program of the route runs for some channel
     count, and on both sides of each channel threshold (at a floored program's token floor as well, and at the
     corners of each small-S range: the static program's of ``FALLBACK_ROWS_OF_RECORD``, the direct program's of
-    ``DIRECT_ROWS_OF_RECORD``) ``y`` is judged against the naive tier and equals, bit for bit, the route's fallback
-    (static) program launched on its own on the one-tile plan on every draw (every forward program rounds ``y`` as
-    the static one does)."""
+    ``DIRECT_ROWS_OF_RECORD``, the pair direct program's of ``PAIR_ROWS_OF_RECORD``) ``y`` is judged against the
+    naive tier and equals, bit for bit, the route's fallback (static) program launched on its own on the one-tile
+    plan on every draw (every forward program rounds ``y`` as the static one does)."""
 
     _require_route(kind)
     arch = _arch()
@@ -2228,9 +2643,9 @@ def test_forward_programs_switch_on_channel_count(kind) -> None:
         for C in (*FWD_ROW_SPLIT_TABLE, *NARROW_SPLIT_TABLE["fwd"])
         if min(floored) <= C
     ]
-    # The small-S rows: the first and the last (S, C) of each static and each
-    # direct range of the route on the architecture.
-    for table in (FALLBACK_ROWS_OF_RECORD, DIRECT_ROWS_OF_RECORD):
+    # The small-S rows: the first and the last (S, C) of each static, each direct
+    # and each pair range of the route on the architecture.
+    for table in (FALLBACK_ROWS_OF_RECORD, DIRECT_ROWS_OF_RECORD, PAIR_ROWS_OF_RECORD):
         for (route, c_lo, c_hi), (s_lo, s_hi) in table.get(arch, {}).items():
             if route == kind:
                 rows += [(s_lo, _row_docs(s_lo), c_lo), (s_hi, _row_docs(s_hi), c_hi)]
@@ -2379,7 +2794,7 @@ def _capture_and_replay(cases, kind: str, *, key: int) -> int:
         dw = torch.empty(
             C, WIDTH, dtype=ROUTE_SETTINGS[kind]["dweight_dtype"] or w.dtype, device=device
         )
-        assert _call_route(w, b, policy, dw) == kind
+        assert _call_route(w, b, policy, dw) == _route_of(kind)
         db = None if b is None else torch.empty(C, dtype=b.dtype, device=device)
         workspace = cake_causal_conv1d_det_train_backward_workspace(S, C, device)
 
@@ -2456,8 +2871,8 @@ def test_cuda_graph_replays_match_eager() -> None:
 
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
 def test_cuda_graph_replays_match_eager_per_route(kind) -> None:
-    """Graph capture and replay of the dt, bias, fp32g and bf16_taps routes (BF16 gradient outs and the dbias output
-    included)."""
+    """Graph capture and replay of the dt, bias and fp32g routes and of the dt and the bias route with BF16 taps (and
+    bias) (BF16 gradient outs and the dbias output included)."""
 
     _require_route(kind)
     replays = _capture_and_replay(ROUTE_CASES, kind, key=11)
@@ -2467,7 +2882,8 @@ def test_cuda_graph_replays_match_eager_per_route(kind) -> None:
 def test_backward_launches_the_selected_program_then_its_reduce(monkeypatch) -> None:
     """A backward call is two launches: the program ``C`` selects, then that record's ``reduce`` program with
     the main grid's CTA count as its ``main_ctas`` scalar, a partial view of that grid's rows and ``ceil(C / 4)``
-    CTAs; the forward launches the one program its route selects for ``C``."""
+    CTAs; the forward (at C 384, below the forward keys) launches the one program its route selects for that ``C``,
+    with its token-chunk counters."""
 
     S, C, docs = 1000, 512, "perf"
     device = _device()
@@ -2513,18 +2929,21 @@ def test_backward_launches_the_selected_program_then_its_reduce(monkeypatch) -> 
     with pytest.raises(ValueError, match="needs the channel count"):
         loader.launch_grid(reduce, device_index=device.index)
     launched.clear()
-    cake_causal_conv1d_det_train_forward(x, w, cu)
+    # C 512 lies in the forward keys (C 512 to 1024), whose static, direct and pair direct programs take no
+    # counters.
+    C_fwd = 384
+    cake_causal_conv1d_det_train_forward(*_inputs(S, C_fwd, docs)[:3])
     assert [name for name, _, _, _ in launched] == list(
-        loader.selected_modules(arch, "fwd", C=C, S=S)
+        loader.selected_modules(arch, "fwd", C=C_fwd, S=S)
     )
     # The forward passes its token-chunk counters: int32, at least two words per channel tile of its plan.
     forward = loader.MODULES[launched[0][0]]
     assert launched[0][3] == loader.launch_grid(
-        forward, device_index=device.index, C=C, S=S
+        forward, device_index=device.index, C=C_fwd, S=S
     )
     work = launched[0][1]["work"]
     _, _, fwd_tiles = loader.channel_split(
-        C, geometry=forward["grid_rule"]["geometry"], role="fwd"
+        C_fwd, geometry=forward["grid_rule"]["geometry"], role="fwd"
     )
     assert work.dtype == torch.int32 and work.numel() >= 2 * fwd_tiles
     assert loader.counter_words(forward, fwd_tiles) == 2 * fwd_tiles
@@ -2665,12 +3084,7 @@ def test_autograd_end_to_end(kind) -> None:
 
 def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
     arch = _arch()
-    # One shape per backward program of the route: C = 128 runs the fallback program, each channel threshold
-    # its own program.  The shape loop below must then load nothing.
-    for C in (128, *_backward_thresholds(arch)):
-        _check(64, C, None)
-    loaded_before = loader.load.cache_info().misses
-    for S, C, docs in (
+    shapes = (
         (1, 128, None),
         (65, 256, (64, 1)),
         (5, 136, (2, 0, 3)),
@@ -2678,7 +3092,26 @@ def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
         (4097, 2048, (1000, 0, 3, 3094)),
         (4097, 1024, (0, 4097, 0)),
         (4097, 1280, (1000, 0, 3, 3094)),
-    ):
+    )
+    # One shape per backward program of the route: C = 128 runs the fallback program, each channel threshold
+    # its own program.
+    for C in (128, *_backward_thresholds(arch)):
+        _check(64, C, None)
+    # Per shape of the loop, one document one token shorter (two tokens for S = 1), which selects the same forward
+    # and backward programs: the forward selects its static, direct and pair direct programs by S, at rows the
+    # shapes above need not reach (S 4097 at C 1024 runs the static program).  No warm-up size is a loop size.
+    # The shape loop below must then load nothing.
+    sizes = {(S, C) for S, C, _ in shapes}
+    for S, C, _ in shapes:
+        S_warm = 2 if S == 1 else S - 1
+        assert (S_warm, C) not in sizes
+        for route in (FORWARD_OF["bwd"], "bwd"):
+            assert loader.selected_modules(arch, route, C=C, S=S_warm) == loader.selected_modules(
+                arch, route, C=C, S=S
+            ), f"route {route} on {arch} selects another program at S={S_warm} than at S={S} (C={C})"
+        _check(S_warm, C, None)
+    loaded_before = loader.load.cache_info().misses
+    for S, C, docs in shapes:
         _check(S, C, docs)
     assert loader.load.cache_info().misses == loaded_before, (
         "a changed problem size rebuilt a module"
@@ -2689,14 +3122,14 @@ def test_changing_shapes_in_one_process_do_not_rebuild() -> None:
 @pytest.mark.parametrize("dweight_dtype", (F32, BF16), ids=_dtype_id)
 @pytest.mark.parametrize("case", ROUTE_CASES, ids=_case_id)
 def test_bf16_taps_and_bf16_dweight(case, weight_dtype, dweight_dtype) -> None:
-    """BF16 taps (``fwd_dt`` / ``bwd_dt_bf16_taps``, either ``dweight`` dtype) and a BF16 ``dweight`` out with FP32
-    taps (``bwd_dt``), in every combination with FP32; the FP32 / FP32 combination is the default route and is not
-    this test's."""
+    """BF16 taps (``fwd_dt`` / ``bwd_dt``, either ``dweight`` dtype) and a BF16 ``dweight`` out with FP32 taps
+    (``bwd_dt``), in every combination with FP32; the FP32 / FP32 combination is the default route and is not this
+    test's."""
 
     if weight_dtype == F32 and dweight_dtype == F32:
         pytest.skip("FP32 taps and dweight run the default routes")
-    # The backward route brings its forward route along (fwd_dt for BF16 taps, fwd for FP32 taps).
-    _require_route("bwd_dt_bf16_taps" if weight_dtype == BF16 else "bwd_dt")
+    # Route bwd_dt with either taps dtype, and the forward route of the taps (fwd_dt for BF16 taps, fwd for FP32).
+    _require_route("bwd_dt", "fwd_dt" if weight_dtype == BF16 else "fwd")
     S, C, docs = case
     _check(S, C, docs, weight_dtype=weight_dtype, dweight_dtype=dweight_dtype)
 
@@ -2713,7 +3146,7 @@ def test_bias_routes(case, weight_dtype, bias_dtype, policy) -> None:
     if policy == "fp32":
         _require_route("bwd_bias_fp32g")
     else:
-        _require_route("bwd_bias_bf16_taps" if weight_dtype == BF16 else "bwd_bias")
+        _require_route("bwd_bias")
     S, C, docs = case
     _check(S, C, docs, weight_dtype=weight_dtype, bias_dtype=bias_dtype, policy=policy)
     # Preallocated gradient outs in the other dtype than the parameter's.
@@ -2729,15 +3162,15 @@ def test_bias_routes(case, weight_dtype, bias_dtype, policy) -> None:
     )
 
 
-# BF16 taps without a bias (bwd_dt_bf16_taps) and with a BF16 bias (bwd_bias_bf16_taps) under the "bf16" policy, at
+# BF16 taps without a bias (bwd_dt, label bwd_dt-bf16) and with a BF16 bias (bwd_bias) under the "bf16" policy, at
 # keys whose draws put dx, dweight or dbias past the naive tier when SiLU' is evaluated at the BF16-rounded
 # preactivation (C 512 runs other programs on sm_107a than on sm_100a / sm_103a; each architecture misses on some of
 # these keys).
 BF16_TAPS_KEYS = (
-    ("bwd_dt_bf16_taps", None, 51),
-    ("bwd_dt_bf16_taps", None, 55),
-    ("bwd_bias_bf16_taps", BF16, 17),
-    ("bwd_bias_bf16_taps", BF16, 29),
+    ("bwd_dt-bf16", None, 51),
+    ("bwd_dt-bf16", None, 55),
+    ("bwd_bias", BF16, 17),
+    ("bwd_bias", BF16, 29),
 )
 
 
@@ -2753,6 +3186,122 @@ def test_bf16_taps_routes_match_reference(kind, bias_dtype, key) -> None:
     _require_route(kind)
     _check(1000, 512, "perf", weight_dtype=BF16, bias_dtype=bias_dtype, policy="bf16", key=key,
            label=f"{kind} BF16 taps key {key}")
+
+
+# The two cross storages of the bias route under the "bf16" policy: FP32 taps with a BF16 bias and BF16 taps with an
+# FP32 bias (``flags`` names the taps' dtype; SiLU' at the unrounded FP32 preactivation with either).
+BIAS_CROSS_STORAGES = ((F32, BF16), (BF16, F32))
+
+
+@pytest.mark.parametrize(
+    "weight_dtype, bias_dtype",
+    BIAS_CROSS_STORAGES,
+    ids=[f"w{_dtype_id(w)}-b{_dtype_id(b)}" for w, b in BIAS_CROSS_STORAGES],
+)
+def test_bias_route_cross_storages_match_reference(
+    weight_dtype, bias_dtype, monkeypatch
+) -> None:
+    """FP32 taps with a BF16 bias and BF16 taps with an FP32 bias under the "bf16" policy resolve to the ``bwd_bias``
+    route and launch its selected program, then that record's reduce program, at S = 1000, C = 512 ("perf"
+    documents): ``y``, ``dx``, ``dweight`` and ``dbias`` judged against the naive tier."""
+
+    kind = "bwd_bias"
+    _require_route(kind)
+    bf16_taps = weight_dtype == BF16
+    assert (
+        loader.backward_route(
+            bias=True, fp32_grad=False, bf16_taps=bf16_taps, bf16_dweight=bf16_taps
+        )
+        == kind
+    )
+    S, C, docs = 1000, 512, "perf"
+    expected = loader.selected_modules(_arch(), kind, C=C, S=S)[0]
+    reduce = loader.MODULES[expected]["reduce"]
+    launched = []
+    run_modules = pkg.run_modules
+
+    def record_launches(launches, values, *, device_index):
+        launched.append([name for name, _ in launches])
+        return run_modules(launches, values, device_index=device_index)
+
+    monkeypatch.setattr(pkg, "run_modules", record_launches)
+    label = f"{kind} w{_dtype_id(weight_dtype)}-b{_dtype_id(bias_dtype)} S={S} C={C} program={expected}"
+    _check(
+        S,
+        C,
+        docs,
+        weight_dtype=weight_dtype,
+        bias_dtype=bias_dtype,
+        policy="bf16",
+        key=57,
+        label=label,
+    )
+    assert launched, f"{label}: no backward launch"
+    assert all(names == [expected, reduce] for names in launched), (
+        f"{label}: launched {launched}"
+    )
+
+
+# The two cross storages of the dt route under the "bf16" policy: FP32 taps with a BF16 ``dweight`` out and BF16 taps
+# with an FP32 one (``flags`` names the taps' and the ``dweight`` out's dtype; SiLU' at the unrounded FP32
+# preactivation with either), at S 1000, C 512 and at the perf-size row S 250340, C 128, where SiLU' at the
+# BF16-rounded preactivation put a BF16 ``dweight`` past the naive tier on sm_107a.
+DT_CROSS_STORAGES = ((F32, BF16), (BF16, F32))
+DT_CROSS_CASES = ((1000, 512, "perf"), (250340, 128, "perf"))
+
+
+@pytest.mark.parametrize(
+    "weight_dtype, dweight_dtype",
+    DT_CROSS_STORAGES,
+    ids=[f"w{_dtype_id(w)}-dw{_dtype_id(dw)}" for w, dw in DT_CROSS_STORAGES],
+)
+def test_dt_route_cross_storages_match_reference(
+    weight_dtype, dweight_dtype, monkeypatch
+) -> None:
+    """FP32 taps with a BF16 ``dweight`` out and BF16 taps with an FP32 ``dweight`` out under the "bf16" policy
+    resolve to the ``bwd_dt`` route and launch its selected program, then that record's reduce program, at each row
+    of ``DT_CROSS_CASES`` ("perf" documents): ``y``, ``dx`` and ``dweight`` judged against the naive tier."""
+
+    kind = "bwd_dt"
+    _require_route(kind, "fwd_dt" if weight_dtype == BF16 else "fwd")
+    assert (
+        loader.backward_route(
+            bias=False,
+            fp32_grad=False,
+            bf16_taps=weight_dtype == BF16,
+            bf16_dweight=dweight_dtype == BF16,
+        )
+        == kind
+    )
+    launched = []
+    run_modules = pkg.run_modules
+
+    def record_launches(launches, values, *, device_index):
+        launched.append([name for name, _ in launches])
+        return run_modules(launches, values, device_index=device_index)
+
+    monkeypatch.setattr(pkg, "run_modules", record_launches)
+    storage = f"w{_dtype_id(weight_dtype)}-dw{_dtype_id(dweight_dtype)}"
+    for S, C, docs in DT_CROSS_CASES:
+        expected = loader.selected_modules(_arch(), kind, C=C, S=S)[0]
+        reduce = loader.MODULES[expected]["reduce"]
+        label = f"{kind} {storage} S={S} C={C} program={expected}"
+        launched.clear()
+        _check(
+            S,
+            C,
+            docs,
+            weight_dtype=weight_dtype,
+            dweight_dtype=dweight_dtype,
+            policy="bf16",
+            key=57,
+            label=label,
+        )
+        assert launched, f"{label}: no backward launch"
+        assert all(names == [expected, reduce] for names in launched), (
+            f"{label}: launched {launched}"
+        )
+    torch.cuda.empty_cache()
 
 
 @pytest.mark.parametrize("weight_dtype", (F32, BF16), ids=_dtype_id)
@@ -2801,7 +3350,8 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
     architecture's ``FWD_NARROW_FLOORS`` floor; the default backward's SM-wide
     band rows from its ``BWD_SM_CTA_RULE`` floor on that program's plan, one
     whole channel tile of ``threads // (C / 8)`` sub-tiles; inside a range of
-    ``DIRECT_ROWS_OF_RECORD`` the forward's direct form) for the backward and
+    ``PAIR_ROWS_OF_RECORD`` the forward's pair form, else inside one of
+    ``DIRECT_ROWS_OF_RECORD`` its direct form) for the backward and
     for the forward its inputs select; ``y`` and ``dx`` are bitwise the
     one-tile plan's (the forward's dynamic program, without the small-S rows),
     ``dweight`` / ``dbias`` are bitwise reproducible, and every output is
@@ -2828,7 +3378,7 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
             cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
         bwd_values, fwd_values = launched[0], launched[1]
         for values, route, role in (
-            (bwd_values, kind, "bwd"),
+            (bwd_values, _route_of(kind), "bwd"),
             (fwd_values, fwd_kind, "fwd"),
         ):
             narrow = (
@@ -2842,9 +3392,14 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
             if role == "fwd" and narrow and floor is not None and floor <= S:
                 want = FWD_WIDE_SPLIT_TABLE[C]
             if role == "fwd":
-                # Inside a direct range the direct program's form; a static
-                # range keeps the route's plan.
-                want = _direct_of_record(arch, route, C, S) or want
+                # Inside a pair range the pair direct program's form, else inside
+                # a direct range the direct program's; a static range keeps the
+                # route's plan.
+                want = (
+                    _pair_of_record(arch, route, C, S)
+                    or _direct_of_record(arch, route, C, S)
+                    or want
+                )
             if (
                 role == "bwd"
                 and route == "bwd"
@@ -2873,6 +3428,7 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
         try:
             with monkeypatch.context() as m:
                 m.setattr(loader, "NARROW_TILE_ROUTES", {"fwd": (), "bwd": ()})
+                m.setattr(loader, "PAIR_ROWS", {})
                 m.setattr(loader, "DIRECT_ROWS", {})
                 m.setattr(loader, "FALLBACK_ROWS", {})
                 _clear_tile_rule_caches()
@@ -2884,15 +3440,17 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
         assert torch.equal(_bits(grads[0]), _bits(one[0])), (kind, S, C, "dx")
 
 
-# The backward routes whose inputs select each forward route and taps dtype of
-# the row-floor test: FP32 taps, BF16 taps, FP32 taps and bias, BF16 taps and bias.
-FWD_ROW_KINDS = ("bwd", "bwd_dt_bf16_taps", "bwd_bias", "bwd_bias_bf16_taps")
+# The labels of the backward routes whose inputs select each forward route and
+# taps dtype of the row-floor test: FP32 taps, BF16 taps, FP32 taps and bias,
+# BF16 taps and bias.
+FWD_ROW_KINDS = ("bwd", "bwd_dt-bf16", "bwd_bias", "bwd_bias-bf16")
 
 
 @pytest.mark.parametrize("kind", FWD_ROW_KINDS)
 def test_forward_row_floors_launch_and_keep_y_bits(kind, monkeypatch) -> None:
     """At every row of ``FWD_ROW_SPLIT_TABLE`` (C 520 to 568), one token below the
-    device architecture's ``FWD_ROW_FLOORS`` floor and at it, the forward of the
+    device architecture's ``FWD_ROW_FLOORS`` floor and at it, with the small-S
+    rows removed (the floors are the dynamic program's), the forward of the
     inputs of backward route ``kind`` launches one tile below the floor and the
     row's ``FWD_ROW_SPLIT_TABLE`` plan from it, with two counter words per
     channel tile; ``y`` repeats bit for bit, is bitwise the one-tile plan's and
@@ -2904,6 +3462,10 @@ def test_forward_row_floors_launch_and_keep_y_bits(kind, monkeypatch) -> None:
     fwd_kind = FORWARD_OF[kind]
     arch = _arch()
     device = _device()
+    # The forward keys (C 512 to 1024) hold many of these floors.
+    monkeypatch.setattr(loader, "PAIR_ROWS", {})
+    monkeypatch.setattr(loader, "DIRECT_ROWS", {})
+    monkeypatch.setattr(loader, "FALLBACK_ROWS", {})
     for C, tiles in FWD_ROW_SPLIT_TABLE.items():
         floor = FWD_ROW_FLOORS[arch][C // 8]
         one_tile = (C // 8, 128 // (C // 8), 1)
@@ -3002,16 +3564,18 @@ def _graph_nodes(graph: torch.cuda.CUDAGraph) -> tuple[int, int]:
 
 @pytest.mark.parametrize("kind", ("fwd", "fwd_dt", "fwd_bias"))
 def test_small_s_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
-    """At the first and the last ``(S, C)`` of every static and every direct
-    range of forward route ``kind`` on the device's architecture
-    (``FALLBACK_ROWS_OF_RECORD``, ``DIRECT_ROWS_OF_RECORD``) the forward
-    launches the table's program with no ``work`` counters: the static program
-    on the route's plan and the co-resident grid, the direct program on the
-    architecture's ``DIRECT_PLANS_OF_RECORD`` form and its token-block grid.
-    ``y`` repeats bit for bit, equals the call's with a caller-owned workspace
-    (left as it was: the program does not read or write it) and the dynamic
-    program's on the one-tile plan (the rows removed), and is judged against
-    the naive tier."""
+    """At the first and the last ``(S, C)`` of every static, every direct and
+    every pair range of forward route ``kind`` on the device's architecture
+    (``FALLBACK_ROWS_OF_RECORD``, ``DIRECT_ROWS_OF_RECORD``,
+    ``PAIR_ROWS_OF_RECORD``) the forward launches the table's program with no
+    ``work`` counters (the pair direct program where a pair range also holds
+    the call): the static program on the route's plan and the co-resident
+    grid, the direct program on the architecture's ``DIRECT_PLANS_OF_RECORD``
+    form, the pair direct program on its ``PAIR_PLANS_OF_RECORD`` form, each
+    on its token-block grid.  ``y`` repeats bit for bit, equals the call's
+    with a caller-owned workspace (left as it was: the program does not read
+    or write it) and the dynamic program's on the one-tile plan (the rows
+    removed), and is judged against the naive tier."""
 
     _require_route(kind)
     arch = _arch()
@@ -3037,23 +3601,23 @@ def test_small_s_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
             assert len(launched) == 1, (label, len(launched))
             name, values, grid = launched[0]
             record = loader.MODULES[name]
-            direct = _direct_of_record(arch, kind, C, S)
-            if program == "direct":
-                assert direct is not None, label
+            # A pair range runs ahead of the static and the direct range it covers.
+            ran = _ran_of_record(arch, kind, C, S)
+            assert ran in (program, "pair"), (label, ran)
+            if ran != "static":
+                vec = PAIR_VEC if ran == "pair" else DIRECT_VEC
+                assert name == _rows_program(arch, kind, vec), (label, name)
                 assert loader.select_rule(record) == {"kind": loader.ROWS_KIND}, (
                     label,
                     name,
                 )
-                want = direct
+                want = _rows_plan_of_record(arch, kind, C, S, vec)
                 blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * want[1]))
                 want_grid = min(
                     record["grid_rule"]["ctas_per_sm"] * sms, want[2] * blocks
                 )
             else:
-                assert direct is None and name == _fallback_program(arch, kind), (
-                    label,
-                    name,
-                )
+                assert name == _fallback_program(arch, kind), (label, name)
                 want = loader.channel_split(
                     C,
                     geometry=record["grid_rule"]["geometry"],
@@ -3081,6 +3645,7 @@ def test_small_s_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
             try:
                 with monkeypatch.context() as m:
                     m.setattr(loader, "NARROW_TILE_ROUTES", {"fwd": (), "bwd": ()})
+                    m.setattr(loader, "PAIR_ROWS", {})
                     m.setattr(loader, "DIRECT_ROWS", {})
                     m.setattr(loader, "FALLBACK_ROWS", {})
                     _clear_tile_rule_caches()
@@ -3097,11 +3662,12 @@ def test_small_s_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
 
 @pytest.mark.parametrize("kind", ("fwd", "fwd_dt", "fwd_bias"))
 def test_small_s_rows_cuda_graph_has_no_fill_node(kind) -> None:
-    """At the last ``(S, C)`` of the first static and the first direct range of
-    forward route ``kind`` on the device's architecture, a CUDA Graph of the
-    forward, without a workspace and with a caller-owned one, holds the one
-    kernel node of the table's program and no fill node (the call zeroes no
-    counter buffer), and every replay equals the eager ``y`` bit for bit."""
+    """At the last ``(S, C)`` of the first static, the first direct and the pair
+    range of forward route ``kind`` on the device's architecture, a CUDA Graph of
+    the forward, without a workspace and with a caller-owned one, holds the one
+    kernel node of the program the call selects and no fill node (the call
+    zeroes no counter buffer), and every replay equals the eager ``y`` bit for
+    bit."""
 
     _require_route(kind)
     arch = _arch()
@@ -3140,11 +3706,152 @@ def test_small_s_rows_cuda_graph_has_no_fill_node(kind) -> None:
                 assert torch.equal(_bits(y_graph), _bits(eager)), (label, replay)
 
 
+# The channel counts of the pair rows' launch test besides both ends of each
+# pair key: C 512 to 1024 and C 776, whose last pair tile is partial.
+PAIR_ROW_CHANNELS = (512, 776, 1024)
+# The token counts below 64 of the pair rows' launch test, each in the two
+# packings of ``_pair_short_docs``.
+PAIR_SHORT_TOKENS = (1, 2, 3, 4, 8, 15, 16, 31, 32, 63)
+
+
+def _pair_short_docs(S: int) -> tuple:
+    """Two packings of ``S`` tokens with one-token and empty documents: an empty
+    document, a one-token document, another empty one and the other ``S - 1``
+    tokens (``(0, 1, 0)`` at S 1); ``S`` one-token documents with an empty
+    document between each two (more than 31 documents from S 17)."""
+
+    mixed = (0, 1, 0, S - 1) if S > 1 else (0, 1, 0)
+    return mixed, (1, 0) * (S - 1) + (1,)
+
+
+@pytest.mark.parametrize("kind", ("fwd", "fwd_dt", "fwd_bias"))
+def test_pair_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
+    """At each pair key of forward route ``kind`` on the device's architecture
+    (``PAIR_ROWS_OF_RECORD``), at both ends of its C range and at each C of
+    ``PAIR_ROW_CHANNELS`` it holds: at ``S_lo`` on one document, at S 1000 and
+    at ``S_hi`` the forward launches the route's pair direct program on the
+    ``PAIR_PLANS_OF_RECORD`` form (``ceil(C / 2 / 16)`` tiles) and its
+    token-block grid, with no ``work`` counters; one token outside the range
+    (``S_lo - 1`` above S 1, ``S_hi + 1``) it launches another program.  Where
+    the route has more than one pair key, each key's C also runs at the other
+    keys' ``S_hi`` and one token beyond each.  Each C also runs every S of
+    ``PAIR_SHORT_TOKENS`` in both packings of ``_pair_short_docs`` (an empty
+    document, a one-token document, another empty one and the other ``S - 1``
+    tokens; ``S`` one-token documents with an empty document between each two),
+    inside the range or below it.  At every row ``y`` repeats bit for bit,
+    equals bit for bit the forward's without ``PAIR_ROWS`` (the static, direct
+    or dynamic program the other tables and the rules pick) and the route's
+    static program's launched on its own on the one-tile plan, and is judged
+    against the naive tier."""
+
+    _require_route(kind)
+    arch = _arch()
+    device = _device()
+    settings = FORWARD_ROUTE_SETTINGS[kind]
+    keys = [
+        (span, bounds)
+        for program, span, bounds in _small_s_rows(arch, kind)
+        if program == "pair"
+    ]
+    assert keys, (arch, kind)
+    ends = sorted({s_hi for _, (_, s_hi) in keys})
+    cases = []
+    for (c_lo, c_hi), (s_lo, s_hi) in keys:
+        rows = [
+            (s_lo, None),
+            (1000, "perf"),
+            (s_hi, "perf"),
+            *(((s_lo - 1, _row_docs(s_lo - 1)),) if s_lo > 1 else ()),
+            (s_hi + 1, "perf"),
+        ]
+        rows += [(S, "perf") for end in ends if end != s_hi for S in (end, end + 1)]
+        rows += [(S, docs) for S in PAIR_SHORT_TOKENS for docs in _pair_short_docs(S)]
+        held = {C for C in PAIR_ROW_CHANNELS if c_lo <= C <= c_hi}
+        cases += [(C, (s_lo, s_hi), rows) for C in sorted({c_lo, c_hi} | held)]
+    pair = _rows_program(arch, kind, PAIR_VEC)
+    static = _fallback_program(arch, kind)
+    record = loader.MODULES[static]
+    sms = loader.sm_count(device.index)
+    for C, (s_lo, s_hi), rows in cases:
+        for S, docs in rows:
+            inside = s_lo <= S <= s_hi
+            label = f"{kind} pair S={S} C={C} docs={docs}"
+            x, w, cu, _, b, _ = _route_inputs(S, C, docs, settings)
+            launched = []
+
+            def record_launch(name, values, *, device_index, grid=None):
+                launched.append((name, dict(values), grid))
+
+            with monkeypatch.context() as m:
+                m.setattr(pkg, "run_module", record_launch)
+                cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            assert len(launched) == 1, (label, len(launched))
+            name, values, grid = launched[0]
+            if inside:
+                want = _pair_of_record(arch, kind, C, S)
+                assert want == (16, 8, -(-(C // PAIR_VEC) // 16)), (label, want)
+                assert name == pair, (label, name)
+                got = tuple(values[key] for key in ("ct_vec", "n_sub", "n_ch_tiles"))
+                assert got == want, (label, got, want)
+                blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * want[1]))
+                ctas = loader.MODULES[pair]["grid_rule"]["ctas_per_sm"] * sms
+                assert grid == (max(1, min(ctas, want[2] * blocks)), 1, 1), (
+                    label,
+                    grid,
+                )
+                assert "work" not in values, label
+            else:
+                assert name != pair, (label, name)
+            y = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            again = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            assert torch.equal(_bits(again), _bits(y)), (label, "repeat")
+            try:
+                with monkeypatch.context() as m:
+                    m.setattr(loader, "PAIR_ROWS", {})
+                    _clear_tile_rule_caches()
+                    y_rest = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            finally:
+                _clear_tile_rule_caches()
+            assert torch.equal(_bits(y_rest), _bits(y)), (label, "without pair rows")
+            scalars = loader.plan(
+                S,
+                C,
+                int(cu.numel()) - 1,
+                geometry=record["grid_rule"]["geometry"],
+                role=record["role"],
+            )
+            y_static = torch.full_like(y, float("nan"))
+            values = {
+                "x": x,
+                "w": w,
+                "cu": cu,
+                "y": y_static,
+                "work": torch.zeros(
+                    loader.counter_words(record, scalars["n_ch_tiles"]),
+                    dtype=torch.int32,
+                    device=device,
+                ),
+                **{key: int(scalars[key]) for key in loader.PLAN_SCALARS},
+                "flags": pkg._flags(w, b=b),
+            }
+            if b is not None:
+                values["b"] = b
+            loader.run_module(static, values, device_index=device.index)
+            torch.cuda.synchronize(device)
+            assert torch.equal(_bits(y_static), _bits(y)), (label, static)
+
+            def forward(x, w, cu, b, _draw):
+                return cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+
+            _judge_forward(S, C, docs, forward, kind=settings, label=label)
+
+
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
 def test_nan_poisoned_workspace_per_route(kind) -> None:
-    """Every backward program of the dt, bias, fp32g and bf16_taps routes rewrites every partial row it reduces, the
-    dbias slab included: a NaN-filled workspace (sized for the whole architecture) leaves finite gradients that are
-    judged against the naive tier and equal the gradients of a fresh workspace."""
+    """Every backward program of the dt, bias and fp32g routes (with BF16 taps, and bias, on the dt and the bias
+    route too) rewrites every partial row it reduces, the dbias slab included: a NaN-filled workspace (sized
+    for the whole architecture) leaves finite gradients that are judged against the naive tier and equal the
+    gradients of a fresh workspace."""
 
     _require_route(kind)
     for S, C, docs in ROUTE_CASES:
@@ -3165,8 +3872,8 @@ def test_nan_poisoned_workspace_per_route(kind) -> None:
 
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
 def test_gradients_are_bitwise_reproducible_per_route(kind) -> None:
-    """Three launches of each dt, bias, fp32g and bf16_taps route give bitwise equal ``dx``, ``dweight`` and
-    ``dbias``."""
+    """Three launches of each dt, bias and fp32g route (and of the dt and the bias route with BF16 taps, and bias)
+    give bitwise equal ``dx``, ``dweight`` and ``dbias``."""
 
     _require_route(kind)
     for S, C, docs in ROUTE_CASES:
@@ -3177,77 +3884,6 @@ def test_gradients_are_bitwise_reproducible_per_route(kind) -> None:
             for got, expected in zip(again, first, strict=True):
                 if expected is not None:
                     assert torch.equal(got, expected), (kind, S, C)
-
-
-@pytest.mark.parametrize("case", ROUTE_CASES, ids=_case_id)
-def test_dt_route_with_f32_taps_matches_default_route_bitwise(case) -> None:
-    """The ``bwd_dt`` route with FP32 taps (selected by a BF16 ``dweight`` out, ``flags`` bit 1 only) gives the
-    default route's ``dx`` bits: the tap load form is the only difference.  The route's fallback program
-    launched directly with ``flags`` 0 on its own grid gives the default fallback's ``dw`` bits too when the
-    grids are equal (reported otherwise: the fixed-order partition follows each grid).  The BF16 ``dweight`` of
-    this call is judged against the naive tier by ``test_bf16_taps_and_bf16_dweight`` (FP32 taps, BF16
-    ``dweight``)."""
-
-    _require_route("bwd_dt")
-    S, C, docs = case
-    arch, device = _arch(), _device()
-    x, w, cu, dy = _inputs(S, C, docs)
-    dx, dw = cake_causal_conv1d_det_train_backward(x, w, cu, dy)
-    dx_dt, dw_dt = cake_causal_conv1d_det_train_backward(
-        x, w, cu, dy, dweight=torch.empty(C, WIDTH, dtype=BF16, device=device)
-    )
-    assert dw_dt.dtype == BF16
-    assert torch.equal(dx_dt, dx), f"bwd_dt dx differs from bwd dx at S={S} C={C}"
-    # The dt fallback with flags 0 and an FP32 dw against the default fallback.
-    results = {}
-    for kind in ("bwd", "bwd_dt"):
-        name = _fallback_program(arch, kind)
-        record = loader.MODULES[name]
-        scalars = loader.plan(
-            S,
-            C,
-            int(cu.numel()) - 1,
-            geometry=record["grid_rule"]["geometry"],
-            role=record["role"],
-        )
-        grid_x = loader.launch_grid(record, device_index=device.index)[0]
-        rows = loader.partial_rows(grid_x, scalars["n_ch_tiles"])
-        dx_f = torch.full_like(dx, float("nan"))
-        dw_f = torch.full((C, WIDTH), float("nan"), dtype=F32, device=device)
-        partial = torch.full(
-            (rows, C, record["workspace_rule"]["taps"]),
-            float("nan"),
-            dtype=F32,
-            device=device,
-        )
-        values = {
-            "x": x,
-            "w": w,
-            "cu": cu,
-            "dy": dy,
-            "dx": dx_f,
-            "dw": dw_f,
-            "partial": partial,
-            **{key: int(scalars[key]) for key in loader.PLAN_SCALARS},
-            "flags": 0,
-            "main_ctas": grid_x,
-        }
-        loader.run_module(name, values, device_index=device.index)
-        loader.run_module(record["reduce"], values, device_index=device.index)
-        torch.cuda.synchronize(device)
-        results[kind] = (dx_f, dw_f, grid_x)
-    assert torch.equal(results["bwd_dt"][0], results["bwd"][0]), (
-        "fallback dx differs across routes"
-    )
-    if results["bwd_dt"][2] == results["bwd"][2]:
-        assert torch.equal(results["bwd_dt"][1], results["bwd"][1]), (
-            f"dw of the bwd_dt fallback differs from the bwd fallback at an equal grid, S={S} C={C}"
-        )
-    else:
-        print(
-            f"S={S} C={C}: bwd_dt fallback grid {results['bwd_dt'][2]} != bwd fallback grid "
-            f"{results['bwd'][2]}; dw bits are not compared"
-        )
 
 
 def test_workspace_bytes_and_layout() -> None:
@@ -3513,7 +4149,7 @@ def test_bwd_grid_mult_launches_k_times_the_untrimmed_grid(kind, monkeypatch) ->
     monkeypatch.setattr(pkg, "run_modules", record_launches)
     for S, C, docs in ((1000, 512, "perf"), (4097, 1280, (1000, 0, 3, 3094))):
         x, w, cu, dy, b, policy = _route_inputs(S, C, docs, kind)
-        main = loader.selected_modules(arch, kind, C=C, S=S)[0]
+        main = loader.selected_modules(arch, _route_of(kind), C=C, S=S)[0]
         record = loader.MODULES[main]
         _, _, n_ch_tiles = loader.channel_split(
             C, geometry=record["grid_rule"]["geometry"], role=record["role"]
@@ -3617,8 +4253,8 @@ FORWARD_WORKSPACE_CASES = (
     (65, 256, (64, 1)),
     (5, 1536, (2, 0, 3)),
 )
-# The backward route settings whose inputs select each forward route (their taps' dtype is the forward route's).
-FORWARD_ROUTE_SETTINGS = {"fwd": "bwd", "fwd_dt": "bwd_dt_bf16_taps", "fwd_bias": "bwd_bias"}
+# The labels of ROUTE_SETTINGS whose inputs select each forward route (their taps' dtype is the forward route's).
+FORWARD_ROUTE_SETTINGS = {"fwd": "bwd", "fwd_dt": "bwd_dt-bf16", "fwd_bias": "bwd_bias"}
 
 
 def _forward_tiles(C: int) -> int:
@@ -3632,8 +4268,9 @@ def _forward_tiles(C: int) -> int:
 
 def test_forward_workspace_bytes() -> None:
     """Two int32 counters per channel tile of the forward's plan, the most over every forward route and both plans
-    of a row whose tiles change at a token floor (``FWD_NARROW_WORKSPACE_TILES``); the static and the direct
-    programs of the small-S rows take none; independent of ``S``; the allocated buffer is zero."""
+    of a row whose tiles change at a token floor (``FWD_NARROW_WORKSPACE_TILES``); the static, the direct and the
+    pair direct programs of the small-S rows take none; every forward program but the pair direct one (two channels
+    per thread) shares one geometry; independent of ``S``; the allocated buffer is zero."""
 
     device = _device()
     arch = _arch()
@@ -3644,7 +4281,8 @@ def test_forward_workspace_bytes() -> None:
             record = loader.MODULES[name]
             rule = loader.select_rule(record)
             if rule is None or rule["kind"] == loader.ROWS_KIND:
-                # The static program (the route's fallback) and the direct program.
+                # The static program (the route's fallback), the direct and the
+                # pair direct program.
                 assert record["workspace_rule"] is None, name
                 assert "work" not in record["logical"].values(), name
                 assert loader.counter_words(record, 1) == 0, name
@@ -3653,8 +4291,12 @@ def test_forward_workspace_bytes() -> None:
                     "kind": "tile_counters",
                     "words_per_tile": 2,
                 }, name
-            geometries.add(tuple(sorted(record["grid_rule"]["geometry"].items())))
-    assert len(geometries) == 1
+            geometry = record["grid_rule"]["geometry"]
+            if name == _rows_program(arch, kind, PAIR_VEC):
+                assert geometry == {"threads": 128, "vec": PAIR_VEC}, name
+                continue
+            geometries.add(tuple(sorted(geometry.items())))
+    assert geometries == {(("threads", 128), ("vec", DIRECT_VEC))}
     for C in (8, 128, 136, 1024, 1160, 1280, 1344, 1600, 2560, 3200, 8192):
         tiles = _forward_tiles(C)
         assert loader.forward_workspace_words(arch, C) == 2 * tiles, C
@@ -3796,7 +4438,8 @@ def test_forward_workspace_cache_per_device_and_stream() -> None:
 
     device = _device()
     cache = pkg._FORWARD_WORKSPACES
-    small = _inputs(1000, 512, "perf", key=19)[:3]
+    # C 384 and 2560 lie outside the forward keys (C 512 to 1024): both calls take counters.
+    small = _inputs(1000, 384, "perf", key=19)[:3]
     large = _inputs(4097, 2560, (1000, 0, 3, 3094), key=19)[:3]
     stream, other = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
     key = (device.index, stream.cuda_stream)
@@ -3810,7 +4453,7 @@ def test_forward_workspace_cache_per_device_and_stream() -> None:
     with torch.cuda.stream(stream):
         y1 = cake_causal_conv1d_det_train_forward(*small)
         first = cache[key]
-        assert first.dtype == torch.int32 and first.numel() == 2 * _forward_tiles(512)
+        assert first.dtype == torch.int32 and first.numel() == 2 * _forward_tiles(384)
         y2 = cake_causal_conv1d_det_train_forward(*small)
         assert cache[key] is first
         y3 = cake_causal_conv1d_det_train_forward(*large)
@@ -3838,7 +4481,7 @@ def test_forward_workspace_cache_per_device_and_stream() -> None:
         assert int(torch.count_nonzero(cache[key])) == 0
         return y
 
-    _judge_forward(1000, 512, "perf", on_stream, key=19, label="y C=512 stream buffer")
+    _judge_forward(1000, 384, "perf", on_stream, key=19, label="y C=384 stream buffer")
     _judge_forward(4097, 2560, (1000, 0, 3, 3094), on_stream, key=19, label="y C=2560 stream buffer")
 
 
@@ -4036,6 +4679,158 @@ def test_argument_validation() -> None:
         cake_causal_conv1d_det_train_forward(x, w, [0, S])
 
 
+def _view_at(base: torch.Tensor, offset: int, shape: tuple[int, ...]) -> torch.Tensor:
+    """A ``shape`` view of fresh zeroed storage of ``base``'s dtype that starts ``offset`` elements past a 32-byte
+    aligned address, holding ``base``'s values."""
+
+    n = base.numel()
+    buf = torch.zeros(n + offset, dtype=base.dtype, device=base.device)
+    assert buf.data_ptr() % 32 == 0
+    view = buf[offset : offset + n].view(shape)
+    view.copy_(base.reshape(shape))
+    return view
+
+
+def _same_bits(a, b) -> bool:
+    """Two outputs (tensors, or tuples of tensors and ``None``) bit for bit."""
+
+    if isinstance(a, tuple):
+        pairs = zip(a, b, strict=True)
+        return len(a) == len(b) and all(_same_bits(p, q) for p, q in pairs)
+    if a is None or b is None:
+        return a is None and b is None
+    return torch.equal(_bits(a), _bits(b))
+
+
+def test_bias_must_be_aligned() -> None:
+    """The forward programs load eight bias channels per vector (32 bytes in FP32, 16 in BF16), the backward
+    programs as 16-byte vectors.  A bias off that grid (FP32 or BF16, 1 to 7 elements past a 32-byte boundary) is
+    refused (``ValueError``) by the forward and the autograd entry, and off the 16-byte grid by the standalone
+    backward, before anything launches: ``out``, the gradient outs and both workspaces stay zero.  A bias view on the
+    grid inside a larger buffer gives ``y``, ``dx``, ``dweight`` and ``dbias`` bitwise equal to a fresh bias (an FP32
+    bias 16 bytes past a 32-byte boundary runs the standalone backward too)."""
+
+    S, C, docs = 1000, 512, "perf"
+    device = _device()
+    x, w, cu, dy = _inputs(S, C, docs, key=9)
+    out, dx = torch.zeros_like(x), torch.zeros_like(x)
+    dw = torch.zeros(C, WIDTH, dtype=F32, device=device)
+    fws = cake_causal_conv1d_det_train_forward_workspace(S, C, device)
+    bws = cake_causal_conv1d_det_train_backward_workspace(S, C, device).zero_()
+    for dtype, need in ((F32, 32), (BF16, 16)):
+        b = _bias_input(C, dtype, key=9)
+        big = torch.zeros(C + 8, dtype=dtype, device=device)
+        assert big.data_ptr() % 32 == 0
+        db = torch.zeros(C, dtype=dtype, device=device)
+        for k in range(1, 8):
+            bias = big[k : k + C]
+            assert bias.data_ptr() % need != 0
+            with pytest.raises(ValueError, match=f"bias must be {need}-byte aligned"):
+                cake_causal_conv1d_det_train_forward(
+                    x, w, cu, bias=bias, out=out, workspace=fws
+                )
+            with pytest.raises(ValueError, match=f"bias must be {need}-byte aligned"):
+                cake_causal_conv1d_det(x, w, cu, bias)
+            if bias.data_ptr() % 16 == 0:
+                continue  # FP32, k = 4: the standalone backward takes it (below)
+            outs = dict(dx=dx, dweight=dw, dbias=db, workspace=bws)
+            with pytest.raises(ValueError, match="bias must be 16-byte aligned"):
+                _backward(x, w, cu, dy, bias, "bf16", **outs)
+        torch.cuda.synchronize(device)
+        for t in (big, db, out, dx, dw, fws, bws):
+            assert int(torch.count_nonzero(t)) == 0
+        # 8 elements: 32 bytes (FP32) / 16 bytes (BF16) past a 32-byte boundary;
+        # 4 FP32 elements: 16 bytes past one
+        y = cake_causal_conv1d_det_train_forward(x, w, cu, bias=_view_at(b, 8, (C,)))
+        assert _same_bits(y, cake_causal_conv1d_det_train_forward(x, w, cu, bias=b))
+        ref = _backward(x, w, cu, dy, b, "bf16")
+        for offset in (8, 4) if dtype == F32 else (8,):
+            grads = _backward(x, w, cu, dy, _view_at(b, offset, (C,)), "bf16")
+            assert _same_bits(grads, ref), (dtype, offset)
+
+
+def test_tokens_and_taps_must_be_aligned() -> None:
+    """The programs move the token rows (``x``, ``dy``, ``out``, ``dx``) as 16-byte vectors and one channel's taps as
+    one vector (16 bytes FP32, 8 bytes BF16).  A token tensor 1 to 7 elements past a 32-byte boundary and taps 1 to 3
+    elements past one are refused (``ValueError``) by the forward, the backward and the autograd entry before
+    anything launches: the outputs and both workspaces stay zero.  Views that start at a whole row of a larger buffer
+    (``x``, ``dy``, ``out``, ``dx`` and the taps one row in) are read and written in place, with ``y``, ``dx`` and
+    ``dweight`` bitwise equal to fresh tensors, with FP32 and BF16 taps."""
+
+    S, C, docs = 1000, 512, "perf"
+    device = _device()
+    x, w, cu, dy = _inputs(S, C, docs, key=10)
+    out, dx = torch.zeros_like(x), torch.zeros_like(x)
+    fws = cake_causal_conv1d_det_train_forward_workspace(S, C, device)
+    bws = cake_causal_conv1d_det_train_backward_workspace(S, C, device).zero_()
+
+    def refused(name: str, need: int, fn, *args, **kwargs) -> None:
+        with pytest.raises(ValueError, match=f"{name} must be {need}-byte aligned"):
+            fn(*args, **kwargs)
+
+    forward, backward = cake_causal_conv1d_det_train_forward, _backward
+    flat = torch.zeros(S * C + 8, dtype=BF16, device=device)
+    assert flat.data_ptr() % 32 == 0
+    for k in range(1, 8):
+        v = flat[k : k + S * C].view(S, C)
+        assert v.data_ptr() % 16 != 0
+        refused("x", 16, forward, v, w, cu, out=out, workspace=fws)
+        refused("x", 16, backward, v, w, cu, dy, None, "bf16", dx=dx, workspace=bws)
+        refused("x", 16, cake_causal_conv1d_det, v, w, cu)
+        refused("dy", 16, backward, x, w, cu, v, None, "bf16", dx=dx, workspace=bws)
+        refused("out", 16, forward, x, w, cu, out=v, workspace=fws)
+        refused("dx", 16, backward, x, w, cu, dy, None, "bf16", dx=v, workspace=bws)
+    for dtype, need in ((F32, 16), (BF16, 8)):
+        for k in range(1, 4):
+            taps = torch.zeros(C * WIDTH + k, dtype=dtype, device=device)
+            taps = taps[k:].view(C, WIDTH)
+            assert taps.data_ptr() % need != 0
+            refused("weight", need, forward, x, taps, cu, out=out, workspace=fws)
+            outs = dict(dx=dx, workspace=bws)
+            refused("weight", need, backward, x, taps, cu, dy, None, "bf16", **outs)
+            refused("weight", need, cake_causal_conv1d_det, x, taps, cu)
+    torch.cuda.synchronize(device)
+    for t in (flat, out, dx, fws, bws):
+        assert int(torch.count_nonzero(t)) == 0
+
+    for weight_dtype in (F32, BF16):
+        wt = w.to(weight_dtype)
+        xv, dyv = _view_at(x, C, (S, C)), _view_at(dy, C, (S, C))
+        wv = _view_at(wt, WIDTH, (C, WIDTH))
+        outv = _view_at(torch.zeros_like(x), C, (S, C))
+        dxv = _view_at(torch.zeros_like(x), C, (S, C))
+        y = forward(xv, wv, cu, out=outv)
+        grads = backward(xv, wv, cu, dyv, None, "bf16", dx=dxv)
+        assert y is outv and grads[0] is dxv
+        assert _same_bits(y, forward(x, wt, cu)), weight_dtype
+        assert _same_bits(grads, backward(x, wt, cu, dy, None, "bf16")), weight_dtype
+
+
+def test_autograd_copies_a_misaligned_incoming_gradient() -> None:
+    """Autograd can hand the backward a contiguous BF16 gradient off the 16-byte grid: the backward of
+    ``torch.cat([pad, y.reshape(-1)])`` narrows its gradient one element in, 2 bytes past an aligned address.  The
+    autograd entry copies it, so the backward runs (no ``ValueError``) and ``dx``, ``dweight`` and ``dbias`` are
+    bitwise equal to the direct backward of the same gradient, without a bias and with FP32 and BF16 biases."""
+
+    S, C, docs = 1000, 512, "perf"
+    x0, w0, cu, dy = _inputs(S, C, docs, key=11)
+    for bias_dtype in (None, F32, BF16):
+        b0 = None if bias_dtype is None else _bias_input(C, bias_dtype, key=11)
+        x = x0.detach().clone().requires_grad_(True)
+        w = w0.detach().clone().requires_grad_(True)
+        b = None if b0 is None else b0.detach().clone().requires_grad_(True)
+        y = cake_causal_conv1d_det(x, w, cu, b)
+        seen = []
+        y.register_hook(lambda g: seen.append(g.data_ptr() % 16))
+        pad = y.new_zeros(1)
+        torch.cat([pad, y.reshape(-1)]).backward(torch.cat([pad, dy.reshape(-1)]))
+        assert seen == [2], (bias_dtype, seen)
+        dx_ref, dw_ref, db_ref = _backward(x0, w0, cu, dy, b0, "bf16")
+        assert _same_bits(x.grad, dx_ref) and _same_bits(w.grad, dw_ref), bias_dtype
+        if b0 is not None:
+            assert _same_bits(b.grad, db_ref), bias_dtype
+
+
 def test_every_route_ships_on_every_architecture() -> None:
     """The delivered package has no trap: every route of ``KINDS`` is exported on every architecture, with every
     library in ``build.json``.  Fails until the exporter has rendered every route's programs."""
@@ -4202,8 +4997,8 @@ def test_registry_records_reference_the_build_manifest() -> None:
         # The selection vocabulary: a forward or backward rule is ``channels_at_least`` with one positive
         # multiple-of-8 threshold (or an increasing list of them) per architecture it names, or
         # ``channels_tokens_at_least`` with a positive token floor beside each as well (backward programs, and
-        # the sm_107a two-stage forward programs); a direct forward program's rule is ``rows`` alone (the
-        # rows of ``DIRECT_ROWS`` select it).
+        # the sm_107a two-stage forward programs); a direct or pair direct forward program's rule is ``rows``
+        # alone (the rows of ``DIRECT_ROWS`` or ``PAIR_ROWS`` select it).
         rule = loader.select_rule(record)
         if rule is not None and rule["kind"] == loader.ROWS_KIND:
             assert record["role"] == "fwd" and rule == {"kind": loader.ROWS_KIND}, name
@@ -4264,7 +5059,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
     # sm_107a backward has five since its 520 channel band's copy -- and at most two with one), one program
     # selected per channel count and token count -- the highest threshold at
     # most C whose token floor (if any) S meets, the floored program first at a shared one, the fallback
-    # below the lowest.
+    # below the lowest; inside a small-S row of record the row's program runs instead.
     for arch in loader.ARCHES:
         for kind in loader.KINDS:
             if kind not in loader.ROUTES[arch]:
@@ -4307,13 +5102,15 @@ def test_registry_records_reference_the_build_manifest() -> None:
                 for threshold in sorted(owners):
                     at = loader.selected_modules(arch, kind, C=threshold, S=S)
                     below = loader.selected_modules(arch, kind, C=threshold - 8, S=S)
-                    assert below == (previous,), (arch, kind, S, threshold)
+                    want = _program_of_record(arch, kind, threshold - 8, S, previous)
+                    assert below == (want,), (arch, kind, S, threshold)
                     by_floor = owners[threshold]
                     name = by_floor.get(True)
                     if name is None or floors[name][1] > S:
                         # Below its token floor a floored program never runs.
                         name = by_floor.get(False, previous)
-                    assert at == (name,), (arch, kind, S, threshold)
+                    want = _program_of_record(arch, kind, threshold, S, name)
+                    assert at == (want,), (arch, kind, S, threshold)
                     previous = name
                 top = loader.selected_modules(arch, kind, C=8192, S=S)
                 assert top == (previous,), (arch, kind, S)

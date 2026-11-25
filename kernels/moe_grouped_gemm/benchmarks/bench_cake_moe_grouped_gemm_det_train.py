@@ -43,6 +43,13 @@ GEMM launches inside ``forward`` so that a checkpoint always recomputes it
 in which their outputs and gradients differ -- none).  ``--census`` adds the
 CUDA kernel count of one call per arm (``torch.profiler``).
 
+Opt-in ``--wide-rows``: instead of the rows above, 16 rows of wide outputs --
+the forward of a down projection (``N=4096, K=1024``) and the data gradient of
+a gate/up projection (``N=1024, K=4096``), both ``[rows, 4096]``, at 327,680 and
+655,360 rows over 64 and 32 balanced or skewed groups (one group of 90 % of
+the rows, empty groups); 655,360 rows pass 2^31 - 1 output elements, so the
+Cake arms launch in two row chunks there.
+
 Usage::
 
     python benchmarks/bench_cake_moe_grouped_gemm_det_train.py [--ops fwd,wgrad,step] [--rows e4_m112576] [--cupti] [--json out.json]
@@ -52,6 +59,7 @@ Usage::
 import argparse
 import json
 import math
+import random
 
 import torch
 import torch.profiler
@@ -153,13 +161,75 @@ def build_rows():
     return rows
 
 
+# The wide-output rows (``--wide-rows``): the down projection's forward and the gate/up projection's
+# data gradient of a model of hidden size 4096 and expert width 1024 (``[rows, 4096]`` outputs), at the
+# typical receive of 327,680 rows and the receive buffer of 655,360 rows (2^31 - 1 elements pass at
+# 524,288 rows: the call launches in two row chunks), 64 and 32 groups, balanced and skewed.
+WIDE_ROWS_OPS = {"fwd": ("down_h4096", 4096, 1024), "dgrad": ("gate_up_h4096", 1024, 4096)}
+WIDE_ROWS_COUNTS = (327_680, 655_360)
+WIDE_ROWS_EXPERTS = (64, 32)
+WIDE_ROWS_DISTS = ("balanced", "skewed")
+
+
+def wide_rows_sizes(sum_m, e, dist, seed=260):
+    """``e`` group sizes summing to ``sum_m``: ``balanced`` (equal, the first ``sum_m % e`` one row
+    more) or ``skewed``: one group of ``round(0.9 * sum_m)`` rows, ``max(2, e // 8)`` empty groups and
+    the rest ragged (log-normal weights, at least one row each), the indices drawn from ``seed``."""
+    if dist == "balanced":
+        q, r = divmod(sum_m, e)
+        return [q + (1 if i < r else 0) for i in range(e)]
+    rng = random.Random(seed * 1_000_003 + sum_m * 131 + e)
+    order = list(range(e))
+    rng.shuffle(order)
+    dominant, empty = order[0], set(order[1 : 1 + max(2, e // 8)])
+    rest = [i for i in range(e) if i != dominant and i not in empty]
+    big = round(0.9 * sum_m)
+    left = sum_m - big
+    sizes = [0] * e
+    sizes[dominant] = big
+    weights = [math.exp(rng.gauss(0.0, 1.5)) for _ in rest]
+    total = sum(weights)
+    parts = [1 + int((left - len(rest)) * x / total) for x in weights]
+    for _ in range(left - sum(parts)):
+        parts[rng.randrange(len(rest))] += 1
+    for i, part in zip(rest, parts, strict=True):
+        sizes[i] = part
+    assert sum(sizes) == sum_m
+    return sizes
+
+
+def build_wide_rows():
+    """The 16 wide-output rows (``--wide-rows``)."""
+    rows = []
+    for op, (proj, n, k) in WIDE_ROWS_OPS.items():
+        for sum_m in WIDE_ROWS_COUNTS:
+            for e in WIDE_ROWS_EXPERTS:
+                for dist in WIDE_ROWS_DISTS:
+                    rows.append(
+                        {
+                            "label": f"{op}_{proj}_e{e}_m{sum_m}_{dist}_bf16",
+                            "op": op,
+                            "proj": proj,
+                            "sizes": wide_rows_sizes(sum_m, e, dist),
+                            "N": n,
+                            "K": k,
+                            "out_dtype": torch.bfloat16,
+                        }
+                    )
+    assert len(rows) == 16
+    return rows
+
+
 def row_flops(row):
     """The row's FLOPs.  ``step`` counts the four GEMMs every arm runs with early stop
     off (two forward passes, the data and the weight gradient); the other autograd rows
     the forward, data and weight gradient of each GEMM (useful work, no recompute)."""
     sum_m = sum(row["sizes"])
-    projs = ("gate_up", "down") if row["op"] in BLOCK_OPS else (row["proj"],)
-    flops = sum(2.0 * sum_m * n * k for n, k in (PROJECTIONS[p] for p in projs))
+    if row["op"] in BLOCK_OPS:
+        projs = ("gate_up", "down")
+        flops = sum(2.0 * sum_m * n * k for n, k in (PROJECTIONS[p] for p in projs))
+    else:
+        flops = 2.0 * sum_m * row["N"] * row["K"]
     if row["op"] == "step":
         return flops * 4
     if row["op"] in AUTOGRAD_OPS:
@@ -537,6 +607,12 @@ def main():
         help="count the CUDA kernels of one call per arm with torch.profiler after "
         "timing it (a separate run: the profiler may perturb later timings)",
     )
+    parser.add_argument(
+        "--wide-rows",
+        action="store_true",
+        help="run the 16 wide-output rows (outputs of 327,680 and 655,360 rows x 4096) "
+        "instead of the default rows",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--json", default="", help="write per-row results to this file")
     args = parser.parse_args()
@@ -560,7 +636,7 @@ def main():
     results = []
     header = f"{'row':48s} {'sum_m':>7s} " + " ".join(f"{arm:>18s}" for arm in arms)
     print(header)
-    for row in build_rows():
+    for row in build_wide_rows() if args.wide_rows else build_rows():
         if row["op"] not in ops or (
             filters and not any(f in row["label"] for f in filters)
         ):

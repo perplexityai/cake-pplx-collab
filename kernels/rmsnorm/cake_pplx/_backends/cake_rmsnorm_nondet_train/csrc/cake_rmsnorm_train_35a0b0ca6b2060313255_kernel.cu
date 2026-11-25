@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -490,14 +490,24 @@ kernel_cake_rmsnorm_train_35a0b0ca6b2060313255(__nv_bfloat16* __restrict__ g, __
                 int sg = my_g + slot * 16384;
                 #pragma unroll
                 for (int v_1 = 0; v_1 < 2; v_1++) {
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_15[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_15[0]), "=l"(_smem_raw_15[1]) : "r"(sg + v_1 * 4096));
+#else
                     __int128_t _smem_raw_15;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_15) : "r"(sg + v_1 * 4096));
+#endif
                     gw[v_1 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_15)[0];
                     gw[(v_1 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_15)[1];
                     gw[(v_1 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_15)[2];
                     gw[(v_1 * 4) + 3] = reinterpret_cast<const uint32_t*>(&_smem_raw_15)[3];
+#if defined(_MSC_VER)
+                    uint64_t _smem_raw_16[2];
+                    asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_16[0]), "=l"(_smem_raw_16[1]) : "r"(sg + (8192 + v_1 * 4096)));
+#else
                     __int128_t _smem_raw_16;
                     asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_16) : "r"(sg + (8192 + v_1 * 4096)));
+#endif
                     xw[v_1 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_16)[0];
                     xw[(v_1 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_16)[1];
                     xw[(v_1 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_16)[2];
@@ -605,11 +615,7 @@ kernel_cake_rmsnorm_train_35a0b0ca6b2060313255(__nv_bfloat16* __restrict__ g, __
                         reinterpret_cast<int4*>(dx + (dx_base + (unsigned long long)dcol))[0] = reinterpret_cast<int4*>(_packed_0)[0];
                     }
                 }
-#if __CUDA_ARCH__ == 1030
-                if ((kc + i_1 + 1 & 15) == 0) {
-#else
                 if ((kc + i_1 + 1 & 7) == 0) {
-#endif
                     #pragma unroll
                     for (int jf = 0; jf < 16; jf++) {
                         float pf = part_sm[jf * 256 + tid];
@@ -653,14 +659,24 @@ kernel_cake_rmsnorm_train_35a0b0ca6b2060313255(__nv_bfloat16* __restrict__ g, __
             int sg_1 = my_g + slot_1 * 16384;
             #pragma unroll
             for (int v_4 = 0; v_4 < 2; v_4++) {
+#if defined(_MSC_VER)
+                uint64_t _smem_raw_21[2];
+                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_21[0]), "=l"(_smem_raw_21[1]) : "r"(sg_1 + v_4 * 4096));
+#else
                 __int128_t _smem_raw_21;
                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_21) : "r"(sg_1 + v_4 * 4096));
+#endif
                 gw[v_4 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[0];
                 gw[(v_4 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[1];
                 gw[(v_4 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[2];
                 gw[(v_4 * 4) + 3] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[3];
+#if defined(_MSC_VER)
+                uint64_t _smem_raw_22[2];
+                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_22[0]), "=l"(_smem_raw_22[1]) : "r"(sg_1 + (8192 + v_4 * 4096)));
+#else
                 __int128_t _smem_raw_22;
                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_22) : "r"(sg_1 + (8192 + v_4 * 4096)));
+#endif
                 xw[v_4 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_22)[0];
                 xw[(v_4 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_22)[1];
                 xw[(v_4 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_22)[2];
@@ -839,11 +855,7 @@ kernel_cake_rmsnorm_train_35a0b0ca6b2060313255(__nv_bfloat16* __restrict__ g, __
                     reinterpret_cast<int4*>(dx + (dx_base_1 + (unsigned long long)dcol_1))[0] = reinterpret_cast<int4*>(packed)[0];
                 }
             }
-#if __CUDA_ARCH__ == 1030
-            if ((kc + run + 1 & 15) == 0) {
-#else
             if ((kc + run + 1 & 7) == 0) {
-#endif
                 #pragma unroll
                 for (int jf_1 = 0; jf_1 < 16; jf_1++) {
                     float pf_1 = part_sm[jf_1 * 256 + tid];

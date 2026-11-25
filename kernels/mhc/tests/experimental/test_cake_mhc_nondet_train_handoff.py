@@ -94,13 +94,35 @@ SEED = 7900
 T_ACCURACY = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 16384, 32768, 65536)
 # The standalone collapse; 215 / 216, 383 / 384 and 640 / 641 pin both sides of each edge of sm_107a's token-count
 # band of ``collapse_backward`` (460 / 461 inside its ``collapse_bwd__vjpwa`` band, 656 / 657 inside the last),
-# 2047 / 2048 and 6655 / 6656 both sides of each edge of its band of ``collapse_forward``.
+# 2047 / 2048 and 6655 / 6656 both sides of each edge of its band of ``collapse_forward``; 215 / 216, 1023 / 1024,
+# 6143 / 6144 (sm_100a) and 8191 / 8192 (sm_103a) both sides of each edge of sm_100a's and sm_103a's band of
+# ``collapse_backward`` from 216 tokens (768 inside the ``_vjpwa_sp2_mb4`` records, 2047 to 2049 inside the
+# ``_vjpwa_pf0`` records, 16384 and 65536 inside the ``_vjpwd`` records), 247 / 248 and 319 / 320 both sides of the
+# edges of sm_103a's ``collapse_bwd`` record from 248 to 319 tokens (both inside sm_100a's ``_vjpwa_sp2_mb4`` record);
+# 30 / 31, 37 / 38 and 38 / 39 both sides of each edge of the stage-free split VJP's band (sm_100a 31 to 37 tokens,
+# sm_103a 31 to 38), 53 / 54, 54 / 55, 74 / 75 and 77 / 78 inside the next record.
 T_COLLAPSE = (
     1,
     7,
+    30,
+    31,
+    37,
+    38,
+    39,
+    53,
+    54,
+    55,
+    74,
+    75,
+    77,
+    78,
     215,
     216,
+    247,
+    248,
     257,
+    319,
+    320,
     383,
     384,
     460,
@@ -109,9 +131,14 @@ T_COLLAPSE = (
     641,
     656,
     657,
+    768,
+    1023,
+    1024,
     2047,
     2048,
     2049,
+    6143,
+    6144,
     6655,
     6656,
     8191,
@@ -135,12 +162,28 @@ T_COLLAPSE_BAND = (
     8192,
     16384,
 )
-# Every record of a token-count band of ``collapse_backward``, launched on its own.
+# Every record of a token-count band of ``collapse_backward``, launched on its own (both sides of every edge).
 T_COLLAPSE_BWD_BAND = (
     1,
+    30,
+    31,
+    37,
+    38,
+    39,
+    53,
+    54,
+    55,
+    74,
+    75,
+    77,
+    78,
     129,
     215,
     216,
+    247,
+    248,
+    319,
+    320,
     383,
     384,
     460,
@@ -150,7 +193,14 @@ T_COLLAPSE_BWD_BAND = (
     641,
     656,
     657,
+    768,
+    1023,
+    1024,
     2049,
+    6143,
+    6144,
+    8191,
+    8192,
 )
 # The backward workspace's zero prefix: the ticket region (256 bytes) and the column slab's arrival counts (512 bytes).
 ZERO_PREFIX_BYTES = 768
@@ -377,10 +427,17 @@ def test_every_collapse_forward_record_matches_fp64(T: int, record_property) -> 
 def test_every_collapse_backward_record_matches_fp64(T: int, record_property) -> None:
     """Where ``collapse_backward`` is a token-count band of records (sm_107a: ``collapse_bwd__vjpwa_sp4_mb4`` up to
     215 tokens, ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383, ``collapse_bwd__vjpwa`` from 384 to 640,
-    ``collapse_bwd__vjpwa_pfq2`` from 641), every record of the route, launched on its own (the split records on their
-    grid of 4 T / 2 T CTAs) into a NaN-filled ``dX`` and ``dpre_in``, writes every word, and its ``dX`` and
-    ``dpre_in`` are judged against the naive BF16 tier over 32 inputs; ``dpre_in`` within 2 x the IEEE-FP32
-    evaluation's error (median at every ``T``, largest at ``T >= 257``)."""
+    ``collapse_bwd__vjpwa_pfq2`` from 641; sm_100a: the ``collapse_bwd__vjpwa_sp4_mb4`` library up to 215 tokens but
+    the stage-free ``collapse_bwd__vjpwd_sp4_mb4`` library from 31 to 37, each band under its own record,
+    ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` from 216 to 1023, ``collapse_bwd__vjpwa_pf0`` from 1024 to 6143,
+    ``collapse_bwd__vjpwd`` from 6144; sm_103a: the same up to 215 tokens but the stage-free library from 31 to 38,
+    ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` from 216 to 247, ``collapse_bwd__h5120__le319`` from 248 to 319,
+    ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023`` from 320 to 1023,
+    ``collapse_bwd__vjpwa_pf0__h5120__gt1023_le8191`` from 1024 to 8191 and ``collapse_bwd__vjpwd__h5120__gt8191``
+    from 8192), every record of the
+    route, launched on its own (the split records on their grid of 4 T / 2 T CTAs) into a NaN-filled ``dX`` and
+    ``dpre_in``, writes every word, and its ``dX`` and ``dpre_in`` are judged against the naive BF16 tier over 32
+    inputs; ``dpre_in`` within 2 x the IEEE-FP32 evaluation's error (median at every ``T``, largest at ``T >= 257``)."""
     route = loader.route_modules(_arch(), HIDDEN, "collapse_backward")
     if len(route) < 2:
         pytest.skip(f"collapse_backward is one record on {_arch()}")

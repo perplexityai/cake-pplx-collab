@@ -239,12 +239,12 @@ kernel_cake_kda_det_train_0fb763e9a81e9066d776(const __grid_constant__ CUtensorM
             int row_base = quad * 32 << 16;
             int kcol = khalf * 64;
             int k0 = kcol + (lane >> 4) * 32;
-            long long k_off = (long long)k0 * 128;
+            long long k_off = (long long)k0 * 128ll;
             int first = seg0;
             if (reverse == 1) {
                 first = seg0 + nseg - 1;
             }
-            long long base = ((long long)first * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v;
+            long long base = ((long long)first * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v;
             long long zero_base = base + k_off;
             float zeros[32];
             zeros[0] = 0.0f;
@@ -309,7 +309,7 @@ kernel_cake_kda_det_train_0fb763e9a81e9066d776(const __grid_constant__ CUtensorM
                 rd += 1;
                 if (rd == 3) { rd = 0; _phase_mma_done ^= 1; }
                 asm volatile("tcgen05.fence::after_thread_sync;");
-                long long base_1 = ((long long)sout * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v;
+                long long base_1 = ((long long)sout * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v;
                 long long o_base = base_1 + k_off;
                 float _tmem_load_0[32];
                 asm volatile(
@@ -352,7 +352,7 @@ kernel_cake_kda_det_train_0fb763e9a81e9066d776(const __grid_constant__ CUtensorM
             int row_base_1 = quad_1 * 32 << 16;
             int kcol_1 = khalf_1 * 64;
             int k0_1 = kcol_1 + (lane >> 4) * 32;
-            long long k_off_1 = (long long)k0_1 * 128;
+            long long k_off_1 = (long long)k0_1 * 128ll;
             float zeros_1[32];
             zeros_1[0] = 0.0f;
             zeros_1[1] = 0.0f;
@@ -397,7 +397,7 @@ kernel_cake_kda_det_train_0fb763e9a81e9066d776(const __grid_constant__ CUtensorM
                     s_1 = nseg_1 - 1;
                 }
                 int segment_1 = seg0_1 + s_1;
-                long long base_2 = ((long long)segment_1 * (long long)num_heads + (long long)head_1) * 16384 + (long long)lane_v_1;
+                long long base_2 = ((long long)segment_1 * (long long)num_heads + (long long)head_1) * 16384ll + (long long)lane_v_1;
                 #pragma unroll
                 for (int k_2 = 0; k_2 < 32; k_2++) {
                     {
@@ -418,7 +418,7 @@ kernel_cake_kda_det_train_0fb763e9a81e9066d776(const __grid_constant__ CUtensorM
                     s_2 = nseg_1 - 1 - 1;
                 }
                 int segment_2 = seg0_1 + s_2;
-                long long base_3 = ((long long)segment_2 * (long long)num_heads + (long long)head_1) * 16384 + (long long)lane_v_1;
+                long long base_3 = ((long long)segment_2 * (long long)num_heads + (long long)head_1) * 16384ll + (long long)lane_v_1;
                 #pragma unroll
                 for (int k_3 = 0; k_3 < 32; k_3++) {
                     {
@@ -459,7 +459,7 @@ kernel_cake_kda_det_train_0fb763e9a81e9066d776(const __grid_constant__ CUtensorM
                         s_3 = nseg_1 - 1 - (step_1 + 2);
                     }
                     int segment_3 = seg0_1 + s_3;
-                    long long base_4 = ((long long)segment_3 * (long long)num_heads + (long long)head_1) * 16384 + (long long)lane_v_1;
+                    long long base_4 = ((long long)segment_3 * (long long)num_heads + (long long)head_1) * 16384ll + (long long)lane_v_1;
                     #pragma unroll
                     for (int k_4 = 0; k_4 < 32; k_4++) {
                         {

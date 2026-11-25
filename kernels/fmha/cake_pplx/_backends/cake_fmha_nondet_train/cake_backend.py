@@ -20,12 +20,23 @@ The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
 one record per program (its ``library`` stem; the ``build.json`` entries are
 ``<library>_<arch>``), ``RECORD_OF`` the three records of each variant,
 ``SEQUENCES`` the host sequence of each variant (its ``library`` stem and
-records) and :func:`.cake_jit.grid` the launch grids.  :mod:`.cake_build`
+records), ``FUSED_OF`` the one-launch record of each (head dimension, causal)
+and :func:`.cake_jit.grid` the launch grids.  :mod:`.cake_build`
 serves a library from a prebuilt ``aot/`` file when a builder compiled it and
 otherwise through the package's JIT build shim (``_cake_pplx_jit.py``) from the
 sources and flags of ``build.json``.
 
-One backward call runs three kernels on the current torch stream of the
+A backward call runs one kernel on the one-launch route, else three.  A call
+that :func:`.cake_jit.fused_record` places in the region of its architecture
+and head dimension (``cake_jit.FUSED_REGION`` without the mask,
+``cake_jit.FUSED_CAUSAL_REGION`` with it, ``Sq == Skv``) takes the one-launch
+route: the ``bwd_fused`` kernel of its mask, on the grid
+``(Sq / 128 + Skv / 128, H, B)``, whose first ``Sq / 128`` CTAs of a (head,
+batch) each write the dq of one query block and whose other CTAs each write dk
+and dv of one key block.  It makes ``lse * log2(e)`` and ``rowsum(out * dout)``
+itself and needs no workspace.
+
+Every other call runs three kernels on the current torch stream of the
 operands' device, in this order:
 
 1. ``bwd_pre``: ``dPsum = rowsum(out * dout)`` and ``LSE_log2 = lse * log2(e)``
@@ -35,23 +46,25 @@ operands' device, in this order:
    the dQ tiles added into the FP32 accumulator by bulk reductions.
 3. ``bwd_post``: ``dq = bf16(acc * softmax_scale)`` in the layout of ``q``.
 
-A head-dimension 128 call whose key length is a multiple of 256, with at least
-as many queries as keys, takes the pair route where a region of
+A head-dimension 128 call whose key length is a multiple of 256 takes the pair
+route (long sequences; :func:`.cake_jit.variant` picks the ``RECORD_OF``
+variant) where, with at least as many queries as keys, a region of
 ``cake_jit.PAIR_REGIONS`` for its architecture and mask holds its ``B * H`` and
-key length (long sequences; :func:`.cake_jit.variant` picks the ``RECORD_OF``
-variant): its main stage is the 2-CTA kernel, one CTA pair per 256 keys, which
-adds the dQ tiles in the pair-row order, and its postprocess is the build that
-reads that order.  The kernel parameters, grids and workspace are the same on
-both routes.
+key length, or where, with no mask and fewer queries than keys, the call is
+inside the bounds ``cake_jit.PAIR_FEWER_QUERIES`` of its architecture: its main
+stage is the 2-CTA kernel, one CTA pair per 256 keys, which adds the dQ tiles
+in the pair-row order, and its postprocess is the build that reads that order.
+The kernel parameters, grids and workspace are the same on both three-kernel
+routes.
 
-The backward runs the three launches in one host call: the library of the
-variant's host sequence compiles the three kernel units beside a host unit
-that launches them in order, with the arguments and grids of the stage
+The three-kernel backward runs the three launches in one host call: the library
+of the variant's host sequence compiles the three kernel units beside a host
+unit that launches them in order, with the arguments and grids of the stage
 launchers, and takes ``lse_log2``, ``dpsum`` and ``dq_accum`` from the tvm-ffi
 environment allocator (PyTorch's caching allocator, on the current stream).
 Without an environment allocator the backward allocates them and passes them
-in.  The stage launchers ``launch_bwd_pre``, ``launch_bwd_main`` and
-``launch_bwd_post`` launch one stage each.
+in.  The stage launchers ``launch_bwd_pre``, ``launch_bwd_main``,
+``launch_bwd_post`` and ``launch_bwd_fused`` launch one stage each.
 
 Every launch is a plain stream-ordered launch: nothing cooperative, no PDL, no
 co-residency requirement beyond the clusters of two CTAs of the pair route's
@@ -60,11 +73,13 @@ reads an environment variable, reads device memory or synchronizes; grids and
 buffer sizes come from tensor shapes.
 
 This is the non-deterministic package of its family, and the family has no
-deterministic package: the dQ tiles of the key blocks of one head reach the
-FP32 accumulator in scheduling order, so ``dq`` may differ in its last bits
-run to run.  ``dk``, ``dv`` and the preprocess outputs have one fixed order.
-Every backward call that launches raises PyTorch's deterministic-algorithms
-alert first (:func:`_alert_nondeterministic`).
+deterministic package: on the three-kernel routes the dQ tiles of the key
+blocks of one head reach the FP32 accumulator in scheduling order, so ``dq``
+may differ in its last bits run to run.  ``dk``, ``dv`` and the preprocess
+outputs have one fixed order.  On the one-launch route dq, dk and dv each have
+one fixed order; the package stays non-deterministic all the same.  Every
+backward call that launches raises PyTorch's deterministic-algorithms alert
+first (:func:`_alert_nondeterministic`).
 """
 
 from __future__ import annotations
@@ -90,6 +105,7 @@ __all__ = [
     "cake_fmha_nondet_train_backward",
     "device_arch",
     "is_prebuilt",
+    "launch_bwd_fused",
     "launch_bwd_main",
     "launch_bwd_post",
     "launch_bwd_pre",
@@ -285,20 +301,40 @@ _POSITIONAL = {
         "num_heads",
     ),
     "bwd_post": ("dQ_accum", "dQ", "seqlen_q", "softmax_scale", "num_heads"),
+    "bwd_fused": (
+        "dQ",
+        "LSE",
+        "O_gmem",
+        "dO_gmem",
+        "Q",
+        "K",
+        "V",
+        "dO",
+        "dK",
+        "dV",
+        "seqlen_q",
+        "seqlen_kv",
+        "softmax_scale",
+        "softmax_scale_log2",
+        "num_m_blocks",
+        "num_n_blocks",
+        "num_heads",
+    ),
 }
 
 
 @functools.cache
 def _positional(name: str, stage: str) -> bool:
     """Whether record ``name`` serves ``stage``, takes the parameters of ``_POSITIONAL[stage]`` in that order and
-    :func:`.cake_jit.grid` gives ``stage`` the grid ``(S / BLOCK, H, B)``; its stage launcher then passes the
-    arguments positionally to the FFI entry, and otherwise launches through :func:`_launch`.  An unknown record is
-    the ``KeyError`` of :func:`record`."""
+    :func:`.cake_jit.grid` gives ``stage`` the grid of its stage launcher: ``(S / BLOCK, H, B)``, and ``(Sq / BLOCK +
+    Skv / BLOCK, H, B)`` for ``bwd_fused``; the stage launcher then passes the arguments positionally to the FFI
+    entry, and otherwise launches through :func:`_launch`.  An unknown record is the ``KeyError`` of
+    :func:`record`."""
     if record(name)["stage"] != stage or parameters(name) != _POSITIONAL[stage]:
         return False
     # Distinct sizes, each one row past a multiple of BLOCK: a swapped axis, another tile size or a rounded-up tile
-    # count gives another grid than the stage launchers' (S // BLOCK, H, B).
-    rows = 11 if stage == "bwd_main" else 7
+    # count gives another grid than the stage launchers' (S // BLOCK, H, B), or (Sq // BLOCK + Skv // BLOCK, H, B).
+    rows = {"bwd_main": 11, "bwd_fused": 7 + 11}.get(stage, 7)
     return tuple(cake_jit.grid(stage, 3, 5, 7 * BLOCK + 1, 11 * BLOCK + 1)) == (rows, 5, 3)
 
 
@@ -429,6 +465,75 @@ def launch_bwd_post(
         "num_heads": dims["H"],
     }
     _launch("bwd_post", name, values, dims, dq.device)
+
+
+def launch_bwd_fused(
+    name: str,
+    *,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    dout: torch.Tensor,
+    dq: torch.Tensor,
+    dk: torch.Tensor,
+    dv: torch.Tensor,
+    softmax_scale: float,
+) -> None:
+    """Launch the one-launch record ``name`` (stage ``bwd_fused``, the build without the mask or the causal build):
+    from ``q``, ``out``, ``dout`` (BF16 ``[B, Sq, H, D]``), ``k``, ``v`` (BF16 ``[B, Skv, H, D]``) and ``lse`` (FP32
+    natural log ``[B, H, Sq]``) it writes ``dq`` (BF16 ``[B, Sq, H, D]``), ``dk`` and ``dv`` (BF16 ``[B, Skv, H, D]``),
+    each once and in one fixed order; no workspace."""
+    B, Sq, H, _ = q.shape
+    Skv = k.shape[1]
+    scale = float(softmax_scale)
+    if _positional(name, "bwd_fused"):
+        # The parameters of _POSITIONAL["bwd_fused"] in order, then the grid (Sq // BLOCK + Skv // BLOCK, H, B).
+        _entry(name, device_arch(q.device.index))(
+            dq,
+            lse,
+            out,
+            dout,
+            q,
+            k,
+            v,
+            dout,
+            dk,
+            dv,
+            Sq,
+            Skv,
+            scale,
+            _fp32(scale * LOG2_E),
+            Sq // BLOCK,
+            Skv // BLOCK,
+            H,
+            Sq // BLOCK + Skv // BLOCK,
+            H,
+            B,
+        )
+        return
+    dims = {"B": int(B), "H": int(H), "Sq": int(Sq), "Skv": int(Skv)}
+    values = {
+        "dQ": dq,
+        "LSE": lse,
+        "O_gmem": out,
+        "dO_gmem": dout,
+        "Q": q,
+        "K": k,
+        "V": v,
+        "dO": dout,
+        "dK": dk,
+        "dV": dv,
+        "seqlen_q": dims["Sq"],
+        "seqlen_kv": dims["Skv"],
+        "softmax_scale": scale,
+        "softmax_scale_log2": _fp32(scale * LOG2_E),
+        "num_m_blocks": dims["Sq"] // BLOCK,
+        "num_n_blocks": dims["Skv"] // BLOCK,
+        "num_heads": dims["H"],
+    }
+    _launch("bwd_fused", name, values, dims, q.device)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -654,8 +759,10 @@ def cake_fmha_nondet_train_backward(
     keys ``j <= i``) needs ``Sq == Skv``.  ``softmax_scale`` defaults to ``D ** -0.5`` and must be the forward's.
     Returns contiguous BF16 ``dq [B, Sq, H, D]``, ``dk`` and ``dv [B, Skv, H, D]`` on the operands' device.
 
-    The dQ tiles of the key blocks of one head are added into an FP32 accumulator in arrival order, so ``dq`` is not
-    bitwise reproducible run to run; ``dk`` and ``dv`` have one fixed order.  Under
+    A call inside the one-launch region (:func:`.cake_jit.fused_record`) runs one kernel; every other call runs three.
+    On the three-kernel routes the dQ tiles of the key blocks of one head are added into an FP32 accumulator in
+    arrival order, so ``dq`` may differ in its last bits run to run; ``dk`` and ``dv`` have one fixed order.  On the
+    one-launch route ``dq``, ``dk`` and ``dv`` each have one fixed order.  Under
     ``torch.use_deterministic_algorithms(True)`` the call raises PyTorch's ``RuntimeError`` before it launches
     (``warn_only=True``: one ``UserWarning``, then it runs).  An empty batch returns empty gradients without an
     alert.  The kernels run on the current stream of the operands' device; nothing synchronizes.
@@ -677,6 +784,15 @@ def cake_fmha_nondet_train_backward(
         dk = torch.empty(0, Skv, H, D, dtype=torch.bfloat16, device=device)
         return dq, dk, torch.empty_like(dk)
     arch = device_arch(device.index)  # RuntimeError on a device outside ARCHES, before the alert
+    fused = cake_jit.fused_record(arch, B, H, Sq, Skv, D, causal)
+    if fused is not None:
+        # The one-launch route: one kernel writes dq, dk and dv; no workspace.
+        _alert_nondeterministic(_ENTRY)
+        dq = torch.empty(B, Sq, H, D, dtype=torch.bfloat16, device=device)
+        dk = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=device)
+        dv = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=device)
+        launch_bwd_fused(fused, q=q, k=k, v=v, out=out, lse=lse, dout=dout, dq=dq, dk=dk, dv=dv, softmax_scale=scale)
+        return dq, dk, dv
     variant = cake_jit.variant(D, causal, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
     pre, main, post = cake_jit.RECORD_OF[variant]
     _alert_nondeterministic(_ENTRY)

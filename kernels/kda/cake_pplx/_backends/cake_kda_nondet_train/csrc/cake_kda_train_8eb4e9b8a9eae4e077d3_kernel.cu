@@ -360,7 +360,7 @@ kernel_cake_kda_train_8eb4e9b8a9eae4e077d3(const __grid_constant__ CUtensorMap k
             unsigned int tr = 0;
             unsigned int _phase_tapes_read = 1;
             if (nc > 0) {
-                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                 gk_pre = gk[gn_next];
                 mbarrier_wait(tapes_read_addr + (tr) * 8, _phase_tapes_read);
                 tr += 1;
@@ -439,7 +439,7 @@ kernel_cake_kda_train_8eb4e9b8a9eae4e077d3(const __grid_constant__ CUtensorMap k
                 mbarrier_arrive(bdv_ready_addr + ((int)((unsigned int)rc % 2)) * 8);
                 tw = 1 - tw;
                 if (nc > rc + 1) {
-                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                     gk_pre = gk[gn_next_1];
                 }
                 mbarrier_wait(tapes_read_addr + (tr) * 8, _phase_tapes_read);

@@ -1,9 +1,10 @@
 {
  "captured": {
-  "base": "6de9ddcb46a572044cafb52f5b3a34cc73b5ed50",
+  "checked_against": "53314c719e162fc2a50911c813d205d72cda196a: its capture (this test file copied onto it) equals this one with [\"segment_rule\", \"occupancy\"] removed from the 16 plan / workspace_bytes calls of 4 heads",
+  "commit": "65b72dec2c85bc08865d8e9c220c50779165ab37",
   "device": "cpu (no CUDA device)",
   "first_exported_arch": "sm_100a",
-  "how": "_golden_view(_snapshot({})) executed on the tree of this base commit",
+  "how": "_golden_view(_snapshot({})) executed on the tree of this commit (test_l2n_flag_off_snapshot_matches_the_base with KCP_L2N_FLAG_OFF_CAPTURE)",
   "python": "3.12.15",
   "torch": "2.14.1+cu130"
  },
@@ -64,6 +65,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -96,6 +101,10 @@
      "light"
     ],
     [
+     "segment_rule",
+     "occupancy"
+    ],
+    [
      "sm_count",
      148
     ]
@@ -117,6 +126,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -147,6 +160,10 @@
     [
      "save_mode",
      "light"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ],
     [
      "sm_count",
@@ -276,6 +293,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -308,6 +329,10 @@
      "light"
     ],
     [
+     "segment_rule",
+     "occupancy"
+    ],
+    [
      "sm_count",
      148
     ]
@@ -329,6 +354,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -361,6 +390,10 @@
      "light"
     ],
     [
+     "segment_rule",
+     "occupancy"
+    ],
+    [
      "sm_count",
      148
     ]
@@ -382,6 +415,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -414,6 +451,10 @@
      "light"
     ],
     [
+     "segment_rule",
+     "occupancy"
+    ],
+    [
      "sm_count",
      148
     ]
@@ -435,6 +476,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -467,6 +512,10 @@
      "light"
     ],
     [
+     "segment_rule",
+     "occupancy"
+    ],
+    [
      "sm_count",
      148
     ]
@@ -488,6 +537,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -518,6 +571,10 @@
     [
      "save_mode",
      "light"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ],
     [
      "sm_count",
@@ -541,6 +598,10 @@
     [
      "gate",
      "g"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ]
    ]
   ],
@@ -571,6 +632,10 @@
     [
      "save_mode",
      "light"
+    ],
+    [
+     "segment_rule",
+     "occupancy"
     ],
     [
      "sm_count",

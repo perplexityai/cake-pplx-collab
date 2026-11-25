@@ -37,7 +37,7 @@ takes a `deterministic` keyword, and passing one is Python's own `TypeError`.
 | log-probability backward of 2 to 4 chunks (see the exception below) | the chunk loop | vocabulary-major by default: no FP32 `[V, H]` weight-gradient accumulator, `dX` / `dW` summed in one fixed order, no run-to-run bit promise (see "Vocabulary-major log-probability backward") |
 | log-probability rows with `dlogp == 0` | ordered last; the dz arm and the weight-gradient GEMMs skip their work (the dX GEMM computes every row), from 1946 valid rows on sm_100a, 3891 on sm_103a and 4097 elsewhere (sm_107a included); not in the opt-in forms (`memory_mode="budget"`, `num_valid_rows`) or a default call's automatic budget form | ordered last; the backward's GEMMs skip their work, from 1946 valid rows on sm_107a (the other floors are the deterministic package's), also in a default call that the deterministic package runs in a budget form, so `dW` bits may differ from the deterministic package's (see "Zero-gradient rows of the log-probability backward") |
 | `dW` | chunk order, bitwise run to run | chunk order (the same programs); no run-to-run promise; the vocabulary-major log-probability backward forms each block in one GEMM (see "Vocabulary-major log-probability backward"); a one-pass cross-entropy call writes `dW` once from its kept logits, not the deterministic package's bits |
-| `dX` of a K-sliced chunk | slice 0 stored, slices `>= 1` in FP32 slabs added in slab order | every slice in an FP32 slab; one slab-sum launch per chunk stores the slices' sum, in slice order, into the FP32 accumulator rows (one fixed order, no run-to-run bit promise); its bits may differ from the deterministic package's; a one-slice chunk stores its rows as the deterministic package does; the slab sum then folds the rows' FP32 label residuals (the fold alone after one slice) |
+| `dX` of a K-sliced chunk | slice 0 stored, slices `>= 1` in FP32 slabs added in slab order | every slice in an FP32 slab; one slab-sum launch per chunk stores the slices' sum, in slice order, into the FP32 accumulator rows (one fixed order, no run-to-run bit promise); its bits may differ from the deterministic package's; a one-slice chunk stores its rows as the deterministic package does; the slab sum then folds the rows' FP32 label residuals (the fold alone after one slice, unless the dX cast folds them) |
 | precision boundaries | BF16 logits and `dlogits`, FP32 loss arithmetic, FP32 `dX` / `dW` accumulation, one final cast each; the `dX` of the loss and log-probability entries also folds each row's FP32 label residual (what the BF16 `dz` store dropped from the label column's FP32 gradient), so `dX`, `ForwardResult.dx_acc` and the `dx_cast=False` accumulator round differently from version 0.2.1 (the change of version 0.3.0; the other outputs' arithmetic is unchanged; the candidate-support entries fold nothing) | the same |
 | under `torch.use_deterministic_algorithms(True)` | runs, never alerts | raises PyTorch's alert before a K-sliced dX launch (below); with `warn_only=True` it warns and runs this package; nothing falls back to the deterministic package |
 
@@ -383,9 +383,10 @@ warps.
 
 The switches and the `CAKE_PPLX_LM_HEAD_LOSS_*` variables are those of
 the deterministic package (its README's table): every switch is a keyword of
-the entries it affects, `None` selecting the documented default, and the
-package reads no environment variable.  `cake_pplx.cake_lm_head_nondet_train`
-resolves the variables through `cake_pplx._cake_lm_head_train_knobs` (the
+the entries it affects, `None` selecting the documented default, and no
+switch reads an environment variable (the build loader reads only its build
+variables, as in the deterministic package).
+`cake_pplx.cake_lm_head_nondet_train` resolves the variables through `cake_pplx._cake_lm_head_train_knobs` (the
 parser the deterministic module uses too) and configures this package's two
 binding caches (`cake_backend.BINDING_CACHE`,
 `cake_backend_opt_in.BINDING_CACHE`) with the binding-cache settings it read
@@ -403,9 +404,9 @@ the previous value; an entry call reads them once):
 | `cake_backend.set_zero_dlogp_temperature_dz_counted` | `True` | under the zero-gradient row skip a call with a temperature runs the counted temperature form of the dz arm (`gemm_logits_dz_dcnt_tau`); `False` runs the uncounted one over every row (the same outputs); part of the backward binding key |
 | `cake_backend.set_gradient_placement` | `"auto"` | where the loss entries (`cake_lm_head_nondet_train_loss` of both modules, every form) run the dX / dW GEMMs. `"auto"`: a call no backward can follow (grad mode off, or neither `X` nor `W` trainable) computes the loss (and `logp`) only; inside a non-reentrant `torch.utils.checkpoint` (its own saved-tensor hooks innermost) the checkpointed forward computes the loss only and saves its inputs, and the recomputation in the backward runs the fused forward and hands the gradient accumulators to the checkpointed call's backward, so a checkpointed step forms them once and keeps no FP32 accumulator from the forward to the backward (paired per checkpoint frame and graph by call order and checked against the inputs' metadata and the call's options; without a handed result the backward runs the fused forward itself, with a `RuntimeWarning`); other hooks innermost (CPU offload), torch's deterministic algorithms, or a torch whose checkpoint lacks those hooks keep the fused forward. Under selective activation checkpointing (`context_fn` of `create_selective_checkpoint_contexts`, whose recomputation replays the checkpointed forward's operators by position) every entry of this package -- the loss, log-probability (default, budget, kept logits, with a temperature) and candidate-support entries -- runs its forward with all active torch dispatch modes popped, the checkpoint's and any user mode on the stack (a `FlopCounterMode` does not see the entry's operators; a tracing mode such as `FakeTensorMode` or a `torch.compile` trace gets real launches on fake inputs and fails loudly), and behaves as in a plain non-reentrant checkpoint; the per-device constant cells and the calling thread's count cells and `arange` constant are formed outside active dispatch modes. `"forward"`: every call with a trainable input forms the gradients in its forward (the previous behavior). The same kernels on the same operands either way (one fixed order; no run-to-run bit promise; the K-sliced dX reduction sums its slices in slice order either way). `cake_lm_head_nondet_train_logprob` (with or without a temperature; not its budget or kept-logits forms, including a call of at most 256 rows without a temperature that `set_small_t_keep` sends to the kept-logits Function, whose checkpointed forward and recomputation each run the logits GEMM) forms no gradient in its forward; under `"auto"` inside a non-reentrant `torch.utils.checkpoint` its checkpointed forward keeps the call's row results (`logp`, the FP32 `lse`, the valid-row index and the compact temperature: O(T) bytes until the backward), and the recomputation in the backward returns a copy of that `logp` and saves those results instead of running the logits GEMMs again, so a checkpointed step runs them once, as an uncheckpointed one (paired per checkpoint frame and graph by call order; taken only for the same input tensors, unchanged since -- version counters -- and the same options, else the recomputation runs the forward). The backward reads those saved row results. |
 | `cake_backend.set_kept_logits_form` | `tail_fold=True, one_pass=True, one_pass_rows=0, dx_one_pass=False, dx_side=False, hidden_count=True` | the kept-logits form of `memory_mode="keep_logits"` (see "Kept log-probability logits"): the short-tail fold, the first backward's one weight-gradient GEMM over the contiguous kept buffer up to `one_pass_rows` rows (`0`: 65535) with dX in the forward's chunks (`dx_side`: on the side stream; `dx_one_pass`: one dX GEMM over every row), and the kept entry's `hidden_count` default (`True`: the hidden count where eligible); `one_pass=False` (with `tail_fold` on) gives the default chunk loop's `dW` bits |
-| `cake_backend.set_uncompacted_max_rows` | `256` | a call of the loss, log-probability or temperature entry on CUDA (`backend="cake"`) of `0 < T <= min(rows, chunk_size)` rows that would compact its valid rows (and that the zero-weight split does not serve) runs the uncompacted path on staged rows: no valid-row count, so no host synchronization. The entry first copies `X` into one buffer with its ignored rows (`labels < 0`) zeroed (policy `infer_logp` / `loss_weights` likewise); the call saves that buffer for its backward, so a non-finite value in an ignored row of `X`, of the policy operands or of the incoming gradient reaches no output (the kernels write `+0` `dz` on ignored rows). A call whose rows are all ignored launches its kernels (zeros out) instead of returning zeros without a launch; an explicit `compact_rows=False`, the kept-logits entry and the low-level `forward_*` / `backward_*` functions keep their own resolution; `0` = off |
+| `cake_backend.set_uncompacted_max_rows` | `256` | a call of the loss, log-probability or temperature entry on CUDA (`backend="cake"`) of `0 < T <= min(rows, chunk_size)` rows that would compact its valid rows (and that the zero-weight split does not serve) runs the uncompacted path on staged rows: no valid-row count, so no host synchronization. The entry copies `X` into one buffer with its ignored rows (`labels < 0`) zeroed (policy `infer_logp` / `loss_weights` likewise) right before the call's first launch, after its plan and binding lookup (a call with a per-token temperature tensor stages when its temperature is resolved, before the plan, because the temperature check reads the staged rows; the staging uses a cached zero cell of the device); the call saves that buffer for its backward, so a non-finite value in an ignored row of `X`, of the policy operands or of the incoming gradient reaches no output (the kernels write `+0` `dz` on ignored rows). A call whose rows are all ignored launches its kernels (zeros out) instead of returning zeros without a launch; an explicit `compact_rows=False`, the kept-logits entry and the low-level `forward_*` / `backward_*` functions keep their own resolution; `0` = off |
 | `cake_backend.set_small_t_keep` | `True` | a log-probability call (`cake_lm_head_nondet_train_logprob`) of at most 256 rows where a backward can follow runs the kept-logits Function (a small call on its staged rows): the backward forms `dz` from the BF16 logits kept from the forward (`2 * T * V` bytes, at most 79 MB at `V = 154880`) instead of recomputing them; the same `logp` bits, `dX` the same products, and the same `dW` bits for a call of one chunk (`T <= chunk_size`; with more chunks the kept form's one weight-gradient GEMM over every row groups `dW` differently from the default Function's; both are judged against the naive tier); `False` runs the default Function |
-| `cake_backend.set_small_pad_rows` | `None`: `16` rows; the log-probability entries (plain and with a temperature) on sm_107a: `256` rows (`SMALL_PAD_ROWS_LOGPROB_BY_ARCH`) | `rows > 0`: a small call (`set_uncompacted_max_rows`) of `T < rows` rows stages `rows` rows when `rows <= min(uncompacted_max_rows, chunk_size)`: its own, then `rows - T` ignored rows (zero `X` rows, label `-100`, zero weights / reference log-probabilities, temperature 1), and returns the first `T` rows of its per-row outputs (the one-row logits GEMMs run well below the bandwidth of the same programs at 16 rows and more; on R200 a log-probability call of 256 rows runs below one of 16 to 64 rows); every staged tensor of a call is a view of one allocation, so a repeated call meets its remembered bindings; the valid rows' outputs are unchanged; an int applies to every entry, `0` = off, `None` = the defaults (`small_pad_rows(entry, device)` reads the value in effect) |
+| `cake_backend.set_small_pad_rows` | `None`: `16` rows; on sm_107a `256` rows for the log-probability entries (plain and with a temperature; `SMALL_PAD_ROWS_LOGPROB_BY_ARCH`) and for the loss entry's calls of at most 128 rows (`SMALL_PAD_ROWS_LOSS_BY_ARCH`, `SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH`: its forward + backward step runs faster at 256 rows there, its backward alone slower; longer loss calls keep their rows, where the checkpointed step measured slower at 256 rows; its `loss` / `dW` bits may differ from the 16-row call, judged against the naive tier; such a call holds its deferred weight gradient's BF16 `[256, V]` `dz` rows from the forward to the backward, 79 MB at `V` 154880 where a 16-row call holds 5 MB; a call's first forward, a binding-cache miss, allocates no `[V, H]` weight-gradient output for the binding's template) | `rows > 0`: a small call (`set_uncompacted_max_rows`) of `T < rows` rows stages `rows` rows when `rows <= min(uncompacted_max_rows, chunk_size)`: its own, then `rows - T` ignored rows (zero `X` rows, label `-100`, zero weights / reference log-probabilities, temperature 1), and returns the first `T` rows of its per-row outputs (the one-row logits GEMMs run well below the bandwidth of the same programs at 16 rows and more; on R200 a log-probability call and a loss step of 256 rows run below one of 16 to 64 rows); every staged tensor of a call is a view of one allocation, so a repeated call meets its remembered bindings; the valid rows' outputs are unchanged; an int applies to every entry, `0` = off, `None` = the defaults (`small_pad_rows(entry, device, rows)` reads the value in effect) |
 | `cake_backend.set_one_pass_rows` | `{1}` | a cross-entropy loss entry call (`cake_lm_head_nondet_train_loss`) of a row count in the set (`1`, `2`), `H = 6144`, one chunk, `backend="cake"`, compacted rows and no explicit `gemm_tuning` runs the one-pass programs before any small-call staging: the forward reads `W` once (the kept BF16 logits, the online softmax statistics and the softmax-weighted head-row sums per CTA), a merge forms `lse`, `logp`, the loss and the FP32 `dX` accumulator, and the backward writes `dW` once from the kept logits (no FP32 `dW` accumulator); `z` is the chunked path's; `lse` and the loss sum in another fixed order, so `loss`, `logp`, `lse`, `dz` and `dW` are not the deterministic package's bits (they are judged against the naive tier); `dX` from the FP32 softmax weights; empty = off |
 
 The side streams, events, pinned count cells and the `arange` constant of the
@@ -715,20 +716,56 @@ policy objectives; it takes no temperature) and the log-probability entry
 The stages and their order are the deterministic package's: `gemm_logits`
 (and its forms), `row_finalize`, `loss_reduce`, `row_grad`, the dX GEMM,
 `gemm_dw_acc`, `gemm_dw_cast_bf16` / `gemm_dw_cast_f32`, the scale casts,
-`scale_cast_scatter_bf16` and `gather_rows_bf16`, rendered from the same kernel
-modules with the same configurations under this package's prefix.  The one
-stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
+`scale_cast_scatter_bf16`, the casts' fold programs (`scale_cast_fold_bf16`,
+`scale_cast_scatter_fold_bf16`) and `gather_rows_bf16`, rendered from the same kernel
+modules with the same configurations under this package's prefix.  As in the
+deterministic package, a call of at most `HOST_COUNT_MAX_ROWS` (1024) rows
+keeps the valid-row (or gradient-row) mask it read back to the host, and the
+dX finalize scans that copy on the host (one `4 T`-byte copy of the int32
+scan).  The one stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
 
 * A chunk the slice rule leaves at one K slice stores its `dX_acc` rows
   directly (the same arithmetic as the deterministic package), and the slab
   sum `dx_slab_sum` follows it as the fold alone (`n_slabs = 0`: it reads the
-  stored rows and folds their FP32 label residuals).
+  stored rows and folds their FP32 label residuals), except on the chunks
+  whose fold the dX cast makes, as in the deterministic package.  A
+  compacted plan under the fused dX finalize whose `dX` goes through the
+  scatter cast (the autograd loss entry of `cake_backend.py` when `W` is a
+  leaf that requires a gradient and no saved-tensor hooks other than a
+  non-reentrant `torch.utils.checkpoint`'s are on top, and its
+  log-probability backward, without
+  the kept logits, a temperature or the vocabulary-major form) hands the
+  longest run of adjacent one-slice chunks
+  (`cake_backend.cast_fold_rows`) to `scale_cast_scatter_fold_bf16`, which
+  folds those rows with the same `fma` and predicate before its scale; an
+  uncompacted log-probability backward of `cake_backend.py` (with the same
+  exceptions) folds them in its in-loop flat cast, `scale_cast_fold_bf16`.
+  The autograd loss entry holds those rows' labels and `rlab` from the
+  forward to its backward's dX finalize and saves `W` through its autograd
+  context (outside a checkpoint, an in-place write to `W` before the
+  backward raises PyTorch's saved-tensor version error; a checkpointed call
+  takes `W` from its recomputation, as in 0.3.2); a backward that frees the
+  graph drops the labels and `rlab` there, before the weight gradient's
+  buffers exist.  A loss call whose `W` is not a leaf or requires no
+  gradient, or a call under other saved-tensor hooks (CPU offload such as
+  `save_on_cpu`, which would copy `W` each step), folds every row in the
+  forward's slab sums and keeps no reference to `W` (a checkpointed call
+  saves `W` for its recomputation, as in 0.3.2).  A
+  log-probability autograd graph holds the `rlab` its backwards bind as in
+  the deterministic package (its README, "FP32 label residual"): the first
+  backward that binds it takes the buffer from the free list of the caller's
+  stream, a new buffer is requested with one of the package's two holding
+  streams per device current (default and side, each with its own allocator
+  segment), and the holding streams are taken only under the same allocator
+  gate.
 * A chunk split into `S > 1` K slices (along the vocabulary, the GEMM's K) is
   one launch of a `gemm_dx_red*` stage and, right behind it, one launch of
   the slab sum `dx_slab_sum` (`dx_slab_sum_dcnt` after a counted GEMM).  The
   GEMM's work items store every slice's FP32 partial tile, slice 0 included,
   into the slice's own rows of the call's slab (TMA tensor stores).  The slab
-  sum, launched with programmatic dependent launch, adds the `S` tiles of
+  sum, launched with programmatic dependent launch (before its
+  `griddepcontrol.wait` a thread reads only its first vector's label and
+  residual; it walks its vectors one trip ahead), adds the `S` tiles of
   each element in slice order (`((s_0 + s_1) + ...)`, IEEE round-to-nearest
   without flushing subnormals) and stores the sum into the chunk's `dX_acc`
   rows.  It never reads those rows and is their only writer, so no call
@@ -892,8 +929,10 @@ one-chunk explicit-budget case, and a few short calls and one call per entry at
 the production vocabulary of 154880) and the candidate-support
 entries at their own shapes.  Calls at the production shape keep their
 contract, exact zeros and the one-feature bit checks documented above (one
-option against another on the same inputs); no test asserts run-to-run bit
-equality.  No test compares an output with the deterministic package.  Each
+option against another on the same inputs); no accuracy test asserts
+run-to-run bit equality (the label-residual fill tests compare repeated calls
+of the chunk loop, whose outputs are summed in one fixed order, bit for bit).
+No test compares an output with the deterministic package.  Each
 verdict prints a `TIER` line in pytest's terminal summary.  The outputs that
 miss the tier today are listed per architecture in
 `tests/experimental/test_helpers/cake_lm_head_known_misses.py`, each with a

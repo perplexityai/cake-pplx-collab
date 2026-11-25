@@ -19,7 +19,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -6331,341 +6331,1373 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                 int col0 = (int)k_block_e * TILE_K;
 #if CAKE_WGRAD_OUT == 32
                 int er_outf = (int)e_ue * stride_e + row_n * ldc + col0 + epi_half * 128;
-#else
-                int er_out = (int)e_ue * stride_e + row_n * ldc + col0 + epi_half * 128;
-#endif  // CAKE_WGRAD_OUT
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_33_0 = __float_as_uint(_er_f[0 + 0]);
-                    unsigned _stv8_33_1 = __float_as_uint(_er_f[0 + 1]);
-                    unsigned _stv8_33_2 = __float_as_uint(_er_f[0 + 2]);
-                    unsigned _stv8_33_3 = __float_as_uint(_er_f[0 + 3]);
-                    unsigned _stv8_33_4 = __float_as_uint(_er_f[0 + 4]);
-                    unsigned _stv8_33_5 = __float_as_uint(_er_f[0 + 5]);
-                    unsigned _stv8_33_6 = __float_as_uint(_er_f[0 + 6]);
-                    unsigned _stv8_33_7 = __float_as_uint(_er_f[0 + 7]);
-#else
-                    const unsigned* _raw_stv8_17 = reinterpret_cast<const unsigned*>(_er_packed);
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + er_outf + (0))), "r"(_stv8_33_0), "r"(_stv8_33_1), "r"(_stv8_33_2), "r"(_stv8_33_3), "r"(_stv8_33_4), "r"(_stv8_33_5), "r"(_stv8_33_6), "r"(_stv8_33_7) : "memory");
-#else
-                        :: "l"((void*)(C + er_out)), "r"(_raw_stv8_17[0]), "r"(_raw_stv8_17[1]), "r"(_raw_stv8_17[2]), "r"(_raw_stv8_17[3]), "r"(_raw_stv8_17[4]), "r"(_raw_stv8_17[5]), "r"(_raw_stv8_17[6]), "r"(_raw_stv8_17[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_34_0 = __float_as_uint(_er_f[8 + 0]);
-                    unsigned _stv8_34_1 = __float_as_uint(_er_f[8 + 1]);
-                    unsigned _stv8_34_2 = __float_as_uint(_er_f[8 + 2]);
-                    unsigned _stv8_34_3 = __float_as_uint(_er_f[8 + 3]);
-                    unsigned _stv8_34_4 = __float_as_uint(_er_f[8 + 4]);
-                    unsigned _stv8_34_5 = __float_as_uint(_er_f[8 + 5]);
-                    unsigned _stv8_34_6 = __float_as_uint(_er_f[8 + 6]);
-                    unsigned _stv8_34_7 = __float_as_uint(_er_f[8 + 7]);
-#else
-                    const unsigned* _raw_stv8_18 = reinterpret_cast<const unsigned*>(_er_packed + (64));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 8) + (0))), "r"(_stv8_34_0), "r"(_stv8_34_1), "r"(_stv8_34_2), "r"(_stv8_34_3), "r"(_stv8_34_4), "r"(_stv8_34_5), "r"(_stv8_34_6), "r"(_stv8_34_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 256))), "r"(_raw_stv8_18[0]), "r"(_raw_stv8_18[1]), "r"(_raw_stv8_18[2]), "r"(_raw_stv8_18[3]), "r"(_raw_stv8_18[4]), "r"(_raw_stv8_18[5]), "r"(_raw_stv8_18[6]), "r"(_raw_stv8_18[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_35_0 = __float_as_uint(_er_f[16 + 0]);
-                    unsigned _stv8_35_1 = __float_as_uint(_er_f[16 + 1]);
-                    unsigned _stv8_35_2 = __float_as_uint(_er_f[16 + 2]);
-                    unsigned _stv8_35_3 = __float_as_uint(_er_f[16 + 3]);
-                    unsigned _stv8_35_4 = __float_as_uint(_er_f[16 + 4]);
-                    unsigned _stv8_35_5 = __float_as_uint(_er_f[16 + 5]);
-                    unsigned _stv8_35_6 = __float_as_uint(_er_f[16 + 6]);
-                    unsigned _stv8_35_7 = __float_as_uint(_er_f[16 + 7]);
-#else
-                    const unsigned* _raw_stv8_19 = reinterpret_cast<const unsigned*>(_er_packed + (8));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 16) + (0))), "r"(_stv8_35_0), "r"(_stv8_35_1), "r"(_stv8_35_2), "r"(_stv8_35_3), "r"(_stv8_35_4), "r"(_stv8_35_5), "r"(_stv8_35_6), "r"(_stv8_35_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 16))), "r"(_raw_stv8_19[0]), "r"(_raw_stv8_19[1]), "r"(_raw_stv8_19[2]), "r"(_raw_stv8_19[3]), "r"(_raw_stv8_19[4]), "r"(_raw_stv8_19[5]), "r"(_raw_stv8_19[6]), "r"(_raw_stv8_19[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_36_0 = __float_as_uint(_er_f[24 + 0]);
-                    unsigned _stv8_36_1 = __float_as_uint(_er_f[24 + 1]);
-                    unsigned _stv8_36_2 = __float_as_uint(_er_f[24 + 2]);
-                    unsigned _stv8_36_3 = __float_as_uint(_er_f[24 + 3]);
-                    unsigned _stv8_36_4 = __float_as_uint(_er_f[24 + 4]);
-                    unsigned _stv8_36_5 = __float_as_uint(_er_f[24 + 5]);
-                    unsigned _stv8_36_6 = __float_as_uint(_er_f[24 + 6]);
-                    unsigned _stv8_36_7 = __float_as_uint(_er_f[24 + 7]);
-#else
-                    const unsigned* _raw_stv8_20 = reinterpret_cast<const unsigned*>(_er_packed + (72));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 24) + (0))), "r"(_stv8_36_0), "r"(_stv8_36_1), "r"(_stv8_36_2), "r"(_stv8_36_3), "r"(_stv8_36_4), "r"(_stv8_36_5), "r"(_stv8_36_6), "r"(_stv8_36_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 272))), "r"(_raw_stv8_20[0]), "r"(_raw_stv8_20[1]), "r"(_raw_stv8_20[2]), "r"(_raw_stv8_20[3]), "r"(_raw_stv8_20[4]), "r"(_raw_stv8_20[5]), "r"(_raw_stv8_20[6]), "r"(_raw_stv8_20[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_37_0 = __float_as_uint(_er_f[32 + 0]);
-                    unsigned _stv8_37_1 = __float_as_uint(_er_f[32 + 1]);
-                    unsigned _stv8_37_2 = __float_as_uint(_er_f[32 + 2]);
-                    unsigned _stv8_37_3 = __float_as_uint(_er_f[32 + 3]);
-                    unsigned _stv8_37_4 = __float_as_uint(_er_f[32 + 4]);
-                    unsigned _stv8_37_5 = __float_as_uint(_er_f[32 + 5]);
-                    unsigned _stv8_37_6 = __float_as_uint(_er_f[32 + 6]);
-                    unsigned _stv8_37_7 = __float_as_uint(_er_f[32 + 7]);
-#else
-                    const unsigned* _raw_stv8_21 = reinterpret_cast<const unsigned*>(_er_packed + (16));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 32) + (0))), "r"(_stv8_37_0), "r"(_stv8_37_1), "r"(_stv8_37_2), "r"(_stv8_37_3), "r"(_stv8_37_4), "r"(_stv8_37_5), "r"(_stv8_37_6), "r"(_stv8_37_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 32))), "r"(_raw_stv8_21[0]), "r"(_raw_stv8_21[1]), "r"(_raw_stv8_21[2]), "r"(_raw_stv8_21[3]), "r"(_raw_stv8_21[4]), "r"(_raw_stv8_21[5]), "r"(_raw_stv8_21[6]), "r"(_raw_stv8_21[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_38_0 = __float_as_uint(_er_f[40 + 0]);
-                    unsigned _stv8_38_1 = __float_as_uint(_er_f[40 + 1]);
-                    unsigned _stv8_38_2 = __float_as_uint(_er_f[40 + 2]);
-                    unsigned _stv8_38_3 = __float_as_uint(_er_f[40 + 3]);
-                    unsigned _stv8_38_4 = __float_as_uint(_er_f[40 + 4]);
-                    unsigned _stv8_38_5 = __float_as_uint(_er_f[40 + 5]);
-                    unsigned _stv8_38_6 = __float_as_uint(_er_f[40 + 6]);
-                    unsigned _stv8_38_7 = __float_as_uint(_er_f[40 + 7]);
-#else
-                    const unsigned* _raw_stv8_22 = reinterpret_cast<const unsigned*>(_er_packed + (80));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 40) + (0))), "r"(_stv8_38_0), "r"(_stv8_38_1), "r"(_stv8_38_2), "r"(_stv8_38_3), "r"(_stv8_38_4), "r"(_stv8_38_5), "r"(_stv8_38_6), "r"(_stv8_38_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 288))), "r"(_raw_stv8_22[0]), "r"(_raw_stv8_22[1]), "r"(_raw_stv8_22[2]), "r"(_raw_stv8_22[3]), "r"(_raw_stv8_22[4]), "r"(_raw_stv8_22[5]), "r"(_raw_stv8_22[6]), "r"(_raw_stv8_22[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_39_0 = __float_as_uint(_er_f[48 + 0]);
-                    unsigned _stv8_39_1 = __float_as_uint(_er_f[48 + 1]);
-                    unsigned _stv8_39_2 = __float_as_uint(_er_f[48 + 2]);
-                    unsigned _stv8_39_3 = __float_as_uint(_er_f[48 + 3]);
-                    unsigned _stv8_39_4 = __float_as_uint(_er_f[48 + 4]);
-                    unsigned _stv8_39_5 = __float_as_uint(_er_f[48 + 5]);
-                    unsigned _stv8_39_6 = __float_as_uint(_er_f[48 + 6]);
-                    unsigned _stv8_39_7 = __float_as_uint(_er_f[48 + 7]);
-#else
-                    const unsigned* _raw_stv8_23 = reinterpret_cast<const unsigned*>(_er_packed + (24));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 48) + (0))), "r"(_stv8_39_0), "r"(_stv8_39_1), "r"(_stv8_39_2), "r"(_stv8_39_3), "r"(_stv8_39_4), "r"(_stv8_39_5), "r"(_stv8_39_6), "r"(_stv8_39_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 48))), "r"(_raw_stv8_23[0]), "r"(_raw_stv8_23[1]), "r"(_raw_stv8_23[2]), "r"(_raw_stv8_23[3]), "r"(_raw_stv8_23[4]), "r"(_raw_stv8_23[5]), "r"(_raw_stv8_23[6]), "r"(_raw_stv8_23[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_40_0 = __float_as_uint(_er_f[56 + 0]);
-                    unsigned _stv8_40_1 = __float_as_uint(_er_f[56 + 1]);
-                    unsigned _stv8_40_2 = __float_as_uint(_er_f[56 + 2]);
-                    unsigned _stv8_40_3 = __float_as_uint(_er_f[56 + 3]);
-                    unsigned _stv8_40_4 = __float_as_uint(_er_f[56 + 4]);
-                    unsigned _stv8_40_5 = __float_as_uint(_er_f[56 + 5]);
-                    unsigned _stv8_40_6 = __float_as_uint(_er_f[56 + 6]);
-                    unsigned _stv8_40_7 = __float_as_uint(_er_f[56 + 7]);
-#else
-                    const unsigned* _raw_stv8_24 = reinterpret_cast<const unsigned*>(_er_packed + (88));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 56) + (0))), "r"(_stv8_40_0), "r"(_stv8_40_1), "r"(_stv8_40_2), "r"(_stv8_40_3), "r"(_stv8_40_4), "r"(_stv8_40_5), "r"(_stv8_40_6), "r"(_stv8_40_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 304))), "r"(_raw_stv8_24[0]), "r"(_raw_stv8_24[1]), "r"(_raw_stv8_24[2]), "r"(_raw_stv8_24[3]), "r"(_raw_stv8_24[4]), "r"(_raw_stv8_24[5]), "r"(_raw_stv8_24[6]), "r"(_raw_stv8_24[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_41_0 = __float_as_uint(_er_f[64 + 0]);
-                    unsigned _stv8_41_1 = __float_as_uint(_er_f[64 + 1]);
-                    unsigned _stv8_41_2 = __float_as_uint(_er_f[64 + 2]);
-                    unsigned _stv8_41_3 = __float_as_uint(_er_f[64 + 3]);
-                    unsigned _stv8_41_4 = __float_as_uint(_er_f[64 + 4]);
-                    unsigned _stv8_41_5 = __float_as_uint(_er_f[64 + 5]);
-                    unsigned _stv8_41_6 = __float_as_uint(_er_f[64 + 6]);
-                    unsigned _stv8_41_7 = __float_as_uint(_er_f[64 + 7]);
-#else
-                    const unsigned* _raw_stv8_25 = reinterpret_cast<const unsigned*>(_er_packed + (32));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 64) + (0))), "r"(_stv8_41_0), "r"(_stv8_41_1), "r"(_stv8_41_2), "r"(_stv8_41_3), "r"(_stv8_41_4), "r"(_stv8_41_5), "r"(_stv8_41_6), "r"(_stv8_41_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 64))), "r"(_raw_stv8_25[0]), "r"(_raw_stv8_25[1]), "r"(_raw_stv8_25[2]), "r"(_raw_stv8_25[3]), "r"(_raw_stv8_25[4]), "r"(_raw_stv8_25[5]), "r"(_raw_stv8_25[6]), "r"(_raw_stv8_25[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_42_0 = __float_as_uint(_er_f[72 + 0]);
-                    unsigned _stv8_42_1 = __float_as_uint(_er_f[72 + 1]);
-                    unsigned _stv8_42_2 = __float_as_uint(_er_f[72 + 2]);
-                    unsigned _stv8_42_3 = __float_as_uint(_er_f[72 + 3]);
-                    unsigned _stv8_42_4 = __float_as_uint(_er_f[72 + 4]);
-                    unsigned _stv8_42_5 = __float_as_uint(_er_f[72 + 5]);
-                    unsigned _stv8_42_6 = __float_as_uint(_er_f[72 + 6]);
-                    unsigned _stv8_42_7 = __float_as_uint(_er_f[72 + 7]);
-#else
-                    const unsigned* _raw_stv8_26 = reinterpret_cast<const unsigned*>(_er_packed + (96));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 72) + (0))), "r"(_stv8_42_0), "r"(_stv8_42_1), "r"(_stv8_42_2), "r"(_stv8_42_3), "r"(_stv8_42_4), "r"(_stv8_42_5), "r"(_stv8_42_6), "r"(_stv8_42_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 320))), "r"(_raw_stv8_26[0]), "r"(_raw_stv8_26[1]), "r"(_raw_stv8_26[2]), "r"(_raw_stv8_26[3]), "r"(_raw_stv8_26[4]), "r"(_raw_stv8_26[5]), "r"(_raw_stv8_26[6]), "r"(_raw_stv8_26[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_43_0 = __float_as_uint(_er_f[80 + 0]);
-                    unsigned _stv8_43_1 = __float_as_uint(_er_f[80 + 1]);
-                    unsigned _stv8_43_2 = __float_as_uint(_er_f[80 + 2]);
-                    unsigned _stv8_43_3 = __float_as_uint(_er_f[80 + 3]);
-                    unsigned _stv8_43_4 = __float_as_uint(_er_f[80 + 4]);
-                    unsigned _stv8_43_5 = __float_as_uint(_er_f[80 + 5]);
-                    unsigned _stv8_43_6 = __float_as_uint(_er_f[80 + 6]);
-                    unsigned _stv8_43_7 = __float_as_uint(_er_f[80 + 7]);
-#else
-                    const unsigned* _raw_stv8_27 = reinterpret_cast<const unsigned*>(_er_packed + (40));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 80) + (0))), "r"(_stv8_43_0), "r"(_stv8_43_1), "r"(_stv8_43_2), "r"(_stv8_43_3), "r"(_stv8_43_4), "r"(_stv8_43_5), "r"(_stv8_43_6), "r"(_stv8_43_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 80))), "r"(_raw_stv8_27[0]), "r"(_raw_stv8_27[1]), "r"(_raw_stv8_27[2]), "r"(_raw_stv8_27[3]), "r"(_raw_stv8_27[4]), "r"(_raw_stv8_27[5]), "r"(_raw_stv8_27[6]), "r"(_raw_stv8_27[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_44_0 = __float_as_uint(_er_f[88 + 0]);
-                    unsigned _stv8_44_1 = __float_as_uint(_er_f[88 + 1]);
-                    unsigned _stv8_44_2 = __float_as_uint(_er_f[88 + 2]);
-                    unsigned _stv8_44_3 = __float_as_uint(_er_f[88 + 3]);
-                    unsigned _stv8_44_4 = __float_as_uint(_er_f[88 + 4]);
-                    unsigned _stv8_44_5 = __float_as_uint(_er_f[88 + 5]);
-                    unsigned _stv8_44_6 = __float_as_uint(_er_f[88 + 6]);
-                    unsigned _stv8_44_7 = __float_as_uint(_er_f[88 + 7]);
-#else
-                    const unsigned* _raw_stv8_28 = reinterpret_cast<const unsigned*>(_er_packed + (104));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 88) + (0))), "r"(_stv8_44_0), "r"(_stv8_44_1), "r"(_stv8_44_2), "r"(_stv8_44_3), "r"(_stv8_44_4), "r"(_stv8_44_5), "r"(_stv8_44_6), "r"(_stv8_44_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 336))), "r"(_raw_stv8_28[0]), "r"(_raw_stv8_28[1]), "r"(_raw_stv8_28[2]), "r"(_raw_stv8_28[3]), "r"(_raw_stv8_28[4]), "r"(_raw_stv8_28[5]), "r"(_raw_stv8_28[6]), "r"(_raw_stv8_28[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_45_0 = __float_as_uint(_er_f[96 + 0]);
-                    unsigned _stv8_45_1 = __float_as_uint(_er_f[96 + 1]);
-                    unsigned _stv8_45_2 = __float_as_uint(_er_f[96 + 2]);
-                    unsigned _stv8_45_3 = __float_as_uint(_er_f[96 + 3]);
-                    unsigned _stv8_45_4 = __float_as_uint(_er_f[96 + 4]);
-                    unsigned _stv8_45_5 = __float_as_uint(_er_f[96 + 5]);
-                    unsigned _stv8_45_6 = __float_as_uint(_er_f[96 + 6]);
-                    unsigned _stv8_45_7 = __float_as_uint(_er_f[96 + 7]);
-#else
-                    const unsigned* _raw_stv8_29 = reinterpret_cast<const unsigned*>(_er_packed + (48));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 96) + (0))), "r"(_stv8_45_0), "r"(_stv8_45_1), "r"(_stv8_45_2), "r"(_stv8_45_3), "r"(_stv8_45_4), "r"(_stv8_45_5), "r"(_stv8_45_6), "r"(_stv8_45_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 96))), "r"(_raw_stv8_29[0]), "r"(_raw_stv8_29[1]), "r"(_raw_stv8_29[2]), "r"(_raw_stv8_29[3]), "r"(_raw_stv8_29[4]), "r"(_raw_stv8_29[5]), "r"(_raw_stv8_29[6]), "r"(_raw_stv8_29[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_46_0 = __float_as_uint(_er_f[104 + 0]);
-                    unsigned _stv8_46_1 = __float_as_uint(_er_f[104 + 1]);
-                    unsigned _stv8_46_2 = __float_as_uint(_er_f[104 + 2]);
-                    unsigned _stv8_46_3 = __float_as_uint(_er_f[104 + 3]);
-                    unsigned _stv8_46_4 = __float_as_uint(_er_f[104 + 4]);
-                    unsigned _stv8_46_5 = __float_as_uint(_er_f[104 + 5]);
-                    unsigned _stv8_46_6 = __float_as_uint(_er_f[104 + 6]);
-                    unsigned _stv8_46_7 = __float_as_uint(_er_f[104 + 7]);
-#else
-                    const unsigned* _raw_stv8_30 = reinterpret_cast<const unsigned*>(_er_packed + (112));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 104) + (0))), "r"(_stv8_46_0), "r"(_stv8_46_1), "r"(_stv8_46_2), "r"(_stv8_46_3), "r"(_stv8_46_4), "r"(_stv8_46_5), "r"(_stv8_46_6), "r"(_stv8_46_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 352))), "r"(_raw_stv8_30[0]), "r"(_raw_stv8_30[1]), "r"(_raw_stv8_30[2]), "r"(_raw_stv8_30[3]), "r"(_raw_stv8_30[4]), "r"(_raw_stv8_30[5]), "r"(_raw_stv8_30[6]), "r"(_raw_stv8_30[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_47_0 = __float_as_uint(_er_f[112 + 0]);
-                    unsigned _stv8_47_1 = __float_as_uint(_er_f[112 + 1]);
-                    unsigned _stv8_47_2 = __float_as_uint(_er_f[112 + 2]);
-                    unsigned _stv8_47_3 = __float_as_uint(_er_f[112 + 3]);
-                    unsigned _stv8_47_4 = __float_as_uint(_er_f[112 + 4]);
-                    unsigned _stv8_47_5 = __float_as_uint(_er_f[112 + 5]);
-                    unsigned _stv8_47_6 = __float_as_uint(_er_f[112 + 6]);
-                    unsigned _stv8_47_7 = __float_as_uint(_er_f[112 + 7]);
-#else
-                    const unsigned* _raw_stv8_31 = reinterpret_cast<const unsigned*>(_er_packed + (56));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 112) + (0))), "r"(_stv8_47_0), "r"(_stv8_47_1), "r"(_stv8_47_2), "r"(_stv8_47_3), "r"(_stv8_47_4), "r"(_stv8_47_5), "r"(_stv8_47_6), "r"(_stv8_47_7) : "memory");
-#else
-                        :: "l"((void*)(C + (er_out + 112))), "r"(_raw_stv8_31[0]), "r"(_raw_stv8_31[1]), "r"(_raw_stv8_31[2]), "r"(_raw_stv8_31[3]), "r"(_raw_stv8_31[4]), "r"(_raw_stv8_31[5]), "r"(_raw_stv8_31[6]), "r"(_raw_stv8_31[7]) : "memory");
-#endif  // CAKE_WGRAD_OUT
-                }
-                {
-#if CAKE_WGRAD_OUT == 32
-                    unsigned _stv8_48_0 = __float_as_uint(_er_f[120 + 0]);
-                    unsigned _stv8_48_1 = __float_as_uint(_er_f[120 + 1]);
-                    unsigned _stv8_48_2 = __float_as_uint(_er_f[120 + 2]);
-                    unsigned _stv8_48_3 = __float_as_uint(_er_f[120 + 3]);
-                    unsigned _stv8_48_4 = __float_as_uint(_er_f[120 + 4]);
-                    unsigned _stv8_48_5 = __float_as_uint(_er_f[120 + 5]);
-                    unsigned _stv8_48_6 = __float_as_uint(_er_f[120 + 6]);
-                    unsigned _stv8_48_7 = __float_as_uint(_er_f[120 + 7]);
-#else
-                    const unsigned* _raw_stv8_32 = reinterpret_cast<const unsigned*>(_er_packed + (120));
-#endif  // CAKE_WGRAD_OUT
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-#if CAKE_WGRAD_OUT == 32
-                        :: "l"((void*)(C + (er_outf + 120) + (0))), "r"(_stv8_48_0), "r"(_stv8_48_1), "r"(_stv8_48_2), "r"(_stv8_48_3), "r"(_stv8_48_4), "r"(_stv8_48_5), "r"(_stv8_48_6), "r"(_stv8_48_7) : "memory");
+                int ac_live = 1;
+                int er_at2 = er_outf + (lane & 7) * (4 - ldc);
+                if (ac_live == 1) {
+                    int ar_bit_0 = lane >> 2 & 1;
+                    float ar_x0_0 = _er_f[0];
+                    float ar_x1_0 = _er_f[16];
+                    float ar_send_0 = ((ar_bit_0 == 1) ? ar_x0_0 : ar_x1_0);
+                    float ar_got_0 = __shfl_xor_sync(0xFFFFFFFF, ar_send_0, 4);
+                    _er_f[0] = ((ar_bit_0 == 1) ? ar_got_0 : ar_x0_0);
+                    _er_f[16] = ((ar_bit_0 == 1) ? ar_x1_0 : ar_got_0);
+                    float ar_x0_1 = _er_f[4];
+                    float ar_x1_1 = _er_f[20];
+                    float ar_send_1 = ((ar_bit_0 == 1) ? ar_x0_1 : ar_x1_1);
+                    float ar_got_1 = __shfl_xor_sync(0xFFFFFFFF, ar_send_1, 4);
+                    _er_f[4] = ((ar_bit_0 == 1) ? ar_got_1 : ar_x0_1);
+                    _er_f[20] = ((ar_bit_0 == 1) ? ar_x1_1 : ar_got_1);
+                    float ar_x0_2 = _er_f[8];
+                    float ar_x1_2 = _er_f[24];
+                    float ar_send_2 = ((ar_bit_0 == 1) ? ar_x0_2 : ar_x1_2);
+                    float ar_got_2 = __shfl_xor_sync(0xFFFFFFFF, ar_send_2, 4);
+                    _er_f[8] = ((ar_bit_0 == 1) ? ar_got_2 : ar_x0_2);
+                    _er_f[24] = ((ar_bit_0 == 1) ? ar_x1_2 : ar_got_2);
+                    float ar_x0_3 = _er_f[12];
+                    float ar_x1_3 = _er_f[28];
+                    float ar_send_3 = ((ar_bit_0 == 1) ? ar_x0_3 : ar_x1_3);
+                    float ar_got_3 = __shfl_xor_sync(0xFFFFFFFF, ar_send_3, 4);
+                    _er_f[12] = ((ar_bit_0 == 1) ? ar_got_3 : ar_x0_3);
+                    _er_f[28] = ((ar_bit_0 == 1) ? ar_x1_3 : ar_got_3);
+                    int ar_bit_1 = lane >> 1 & 1;
+                    float ar_x0_4 = _er_f[0];
+                    float ar_x1_4 = _er_f[8];
+                    float ar_send_4 = ((ar_bit_1 == 1) ? ar_x0_4 : ar_x1_4);
+                    float ar_got_4 = __shfl_xor_sync(0xFFFFFFFF, ar_send_4, 2);
+                    _er_f[0] = ((ar_bit_1 == 1) ? ar_got_4 : ar_x0_4);
+                    _er_f[8] = ((ar_bit_1 == 1) ? ar_x1_4 : ar_got_4);
+                    float ar_x0_5 = _er_f[4];
+                    float ar_x1_5 = _er_f[12];
+                    float ar_send_5 = ((ar_bit_1 == 1) ? ar_x0_5 : ar_x1_5);
+                    float ar_got_5 = __shfl_xor_sync(0xFFFFFFFF, ar_send_5, 2);
+                    _er_f[4] = ((ar_bit_1 == 1) ? ar_got_5 : ar_x0_5);
+                    _er_f[12] = ((ar_bit_1 == 1) ? ar_x1_5 : ar_got_5);
+                    float ar_x0_6 = _er_f[16];
+                    float ar_x1_6 = _er_f[24];
+                    float ar_send_6 = ((ar_bit_1 == 1) ? ar_x0_6 : ar_x1_6);
+                    float ar_got_6 = __shfl_xor_sync(0xFFFFFFFF, ar_send_6, 2);
+                    _er_f[16] = ((ar_bit_1 == 1) ? ar_got_6 : ar_x0_6);
+                    _er_f[24] = ((ar_bit_1 == 1) ? ar_x1_6 : ar_got_6);
+                    float ar_x0_7 = _er_f[20];
+                    float ar_x1_7 = _er_f[28];
+                    float ar_send_7 = ((ar_bit_1 == 1) ? ar_x0_7 : ar_x1_7);
+                    float ar_got_7 = __shfl_xor_sync(0xFFFFFFFF, ar_send_7, 2);
+                    _er_f[20] = ((ar_bit_1 == 1) ? ar_got_7 : ar_x0_7);
+                    _er_f[28] = ((ar_bit_1 == 1) ? ar_x1_7 : ar_got_7);
+                    int ar_bit_2 = lane & 1;
+                    float ar_x0_8 = _er_f[0];
+                    float ar_x1_8 = _er_f[4];
+                    float ar_send_8 = ((ar_bit_2 == 1) ? ar_x0_8 : ar_x1_8);
+                    float ar_got_8 = __shfl_xor_sync(0xFFFFFFFF, ar_send_8, 1);
+                    _er_f[0] = ((ar_bit_2 == 1) ? ar_got_8 : ar_x0_8);
+                    _er_f[4] = ((ar_bit_2 == 1) ? ar_x1_8 : ar_got_8);
+                    float ar_x0_9 = _er_f[8];
+                    float ar_x1_9 = _er_f[12];
+                    float ar_send_9 = ((ar_bit_2 == 1) ? ar_x0_9 : ar_x1_9);
+                    float ar_got_9 = __shfl_xor_sync(0xFFFFFFFF, ar_send_9, 1);
+                    _er_f[8] = ((ar_bit_2 == 1) ? ar_got_9 : ar_x0_9);
+                    _er_f[12] = ((ar_bit_2 == 1) ? ar_x1_9 : ar_got_9);
+                    float ar_x0_10 = _er_f[16];
+                    float ar_x1_10 = _er_f[20];
+                    float ar_send_10 = ((ar_bit_2 == 1) ? ar_x0_10 : ar_x1_10);
+                    float ar_got_10 = __shfl_xor_sync(0xFFFFFFFF, ar_send_10, 1);
+                    _er_f[16] = ((ar_bit_2 == 1) ? ar_got_10 : ar_x0_10);
+                    _er_f[20] = ((ar_bit_2 == 1) ? ar_x1_10 : ar_got_10);
+                    float ar_x0_11 = _er_f[24];
+                    float ar_x1_11 = _er_f[28];
+                    float ar_send_11 = ((ar_bit_2 == 1) ? ar_x0_11 : ar_x1_11);
+                    float ar_got_11 = __shfl_xor_sync(0xFFFFFFFF, ar_send_11, 1);
+                    _er_f[24] = ((ar_bit_2 == 1) ? ar_got_11 : ar_x0_11);
+                    _er_f[28] = ((ar_bit_2 == 1) ? ar_x1_11 : ar_got_11);
+                    int ar_bit_3 = lane >> 2 & 1;
+                    float ar_x0_12 = _er_f[1];
+                    float ar_x1_12 = _er_f[17];
+                    float ar_send_12 = ((ar_bit_3 == 1) ? ar_x0_12 : ar_x1_12);
+                    float ar_got_12 = __shfl_xor_sync(0xFFFFFFFF, ar_send_12, 4);
+                    _er_f[1] = ((ar_bit_3 == 1) ? ar_got_12 : ar_x0_12);
+                    _er_f[17] = ((ar_bit_3 == 1) ? ar_x1_12 : ar_got_12);
+                    float ar_x0_13 = _er_f[5];
+                    float ar_x1_13 = _er_f[21];
+                    float ar_send_13 = ((ar_bit_3 == 1) ? ar_x0_13 : ar_x1_13);
+                    float ar_got_13 = __shfl_xor_sync(0xFFFFFFFF, ar_send_13, 4);
+                    _er_f[5] = ((ar_bit_3 == 1) ? ar_got_13 : ar_x0_13);
+                    _er_f[21] = ((ar_bit_3 == 1) ? ar_x1_13 : ar_got_13);
+                    float ar_x0_14 = _er_f[9];
+                    float ar_x1_14 = _er_f[25];
+                    float ar_send_14 = ((ar_bit_3 == 1) ? ar_x0_14 : ar_x1_14);
+                    float ar_got_14 = __shfl_xor_sync(0xFFFFFFFF, ar_send_14, 4);
+                    _er_f[9] = ((ar_bit_3 == 1) ? ar_got_14 : ar_x0_14);
+                    _er_f[25] = ((ar_bit_3 == 1) ? ar_x1_14 : ar_got_14);
+                    float ar_x0_15 = _er_f[13];
+                    float ar_x1_15 = _er_f[29];
+                    float ar_send_15 = ((ar_bit_3 == 1) ? ar_x0_15 : ar_x1_15);
+                    float ar_got_15 = __shfl_xor_sync(0xFFFFFFFF, ar_send_15, 4);
+                    _er_f[13] = ((ar_bit_3 == 1) ? ar_got_15 : ar_x0_15);
+                    _er_f[29] = ((ar_bit_3 == 1) ? ar_x1_15 : ar_got_15);
+                    int ar_bit_4 = lane >> 1 & 1;
+                    float ar_x0_16 = _er_f[1];
+                    float ar_x1_16 = _er_f[9];
+                    float ar_send_16 = ((ar_bit_4 == 1) ? ar_x0_16 : ar_x1_16);
+                    float ar_got_16 = __shfl_xor_sync(0xFFFFFFFF, ar_send_16, 2);
+                    _er_f[1] = ((ar_bit_4 == 1) ? ar_got_16 : ar_x0_16);
+                    _er_f[9] = ((ar_bit_4 == 1) ? ar_x1_16 : ar_got_16);
+                    float ar_x0_17 = _er_f[5];
+                    float ar_x1_17 = _er_f[13];
+                    float ar_send_17 = ((ar_bit_4 == 1) ? ar_x0_17 : ar_x1_17);
+                    float ar_got_17 = __shfl_xor_sync(0xFFFFFFFF, ar_send_17, 2);
+                    _er_f[5] = ((ar_bit_4 == 1) ? ar_got_17 : ar_x0_17);
+                    _er_f[13] = ((ar_bit_4 == 1) ? ar_x1_17 : ar_got_17);
+                    float ar_x0_18 = _er_f[17];
+                    float ar_x1_18 = _er_f[25];
+                    float ar_send_18 = ((ar_bit_4 == 1) ? ar_x0_18 : ar_x1_18);
+                    float ar_got_18 = __shfl_xor_sync(0xFFFFFFFF, ar_send_18, 2);
+                    _er_f[17] = ((ar_bit_4 == 1) ? ar_got_18 : ar_x0_18);
+                    _er_f[25] = ((ar_bit_4 == 1) ? ar_x1_18 : ar_got_18);
+                    float ar_x0_19 = _er_f[21];
+                    float ar_x1_19 = _er_f[29];
+                    float ar_send_19 = ((ar_bit_4 == 1) ? ar_x0_19 : ar_x1_19);
+                    float ar_got_19 = __shfl_xor_sync(0xFFFFFFFF, ar_send_19, 2);
+                    _er_f[21] = ((ar_bit_4 == 1) ? ar_got_19 : ar_x0_19);
+                    _er_f[29] = ((ar_bit_4 == 1) ? ar_x1_19 : ar_got_19);
+                    int ar_bit_5 = lane & 1;
+                    float ar_x0_20 = _er_f[1];
+                    float ar_x1_20 = _er_f[5];
+                    float ar_send_20 = ((ar_bit_5 == 1) ? ar_x0_20 : ar_x1_20);
+                    float ar_got_20 = __shfl_xor_sync(0xFFFFFFFF, ar_send_20, 1);
+                    _er_f[1] = ((ar_bit_5 == 1) ? ar_got_20 : ar_x0_20);
+                    _er_f[5] = ((ar_bit_5 == 1) ? ar_x1_20 : ar_got_20);
+                    float ar_x0_21 = _er_f[9];
+                    float ar_x1_21 = _er_f[13];
+                    float ar_send_21 = ((ar_bit_5 == 1) ? ar_x0_21 : ar_x1_21);
+                    float ar_got_21 = __shfl_xor_sync(0xFFFFFFFF, ar_send_21, 1);
+                    _er_f[9] = ((ar_bit_5 == 1) ? ar_got_21 : ar_x0_21);
+                    _er_f[13] = ((ar_bit_5 == 1) ? ar_x1_21 : ar_got_21);
+                    float ar_x0_22 = _er_f[17];
+                    float ar_x1_22 = _er_f[21];
+                    float ar_send_22 = ((ar_bit_5 == 1) ? ar_x0_22 : ar_x1_22);
+                    float ar_got_22 = __shfl_xor_sync(0xFFFFFFFF, ar_send_22, 1);
+                    _er_f[17] = ((ar_bit_5 == 1) ? ar_got_22 : ar_x0_22);
+                    _er_f[21] = ((ar_bit_5 == 1) ? ar_x1_22 : ar_got_22);
+                    float ar_x0_23 = _er_f[25];
+                    float ar_x1_23 = _er_f[29];
+                    float ar_send_23 = ((ar_bit_5 == 1) ? ar_x0_23 : ar_x1_23);
+                    float ar_got_23 = __shfl_xor_sync(0xFFFFFFFF, ar_send_23, 1);
+                    _er_f[25] = ((ar_bit_5 == 1) ? ar_got_23 : ar_x0_23);
+                    _er_f[29] = ((ar_bit_5 == 1) ? ar_x1_23 : ar_got_23);
+                    int ar_bit_6 = lane >> 2 & 1;
+                    float ar_x0_24 = _er_f[2];
+                    float ar_x1_24 = _er_f[18];
+                    float ar_send_24 = ((ar_bit_6 == 1) ? ar_x0_24 : ar_x1_24);
+                    float ar_got_24 = __shfl_xor_sync(0xFFFFFFFF, ar_send_24, 4);
+                    _er_f[2] = ((ar_bit_6 == 1) ? ar_got_24 : ar_x0_24);
+                    _er_f[18] = ((ar_bit_6 == 1) ? ar_x1_24 : ar_got_24);
+                    float ar_x0_25 = _er_f[6];
+                    float ar_x1_25 = _er_f[22];
+                    float ar_send_25 = ((ar_bit_6 == 1) ? ar_x0_25 : ar_x1_25);
+                    float ar_got_25 = __shfl_xor_sync(0xFFFFFFFF, ar_send_25, 4);
+                    _er_f[6] = ((ar_bit_6 == 1) ? ar_got_25 : ar_x0_25);
+                    _er_f[22] = ((ar_bit_6 == 1) ? ar_x1_25 : ar_got_25);
+                    float ar_x0_26 = _er_f[10];
+                    float ar_x1_26 = _er_f[26];
+                    float ar_send_26 = ((ar_bit_6 == 1) ? ar_x0_26 : ar_x1_26);
+                    float ar_got_26 = __shfl_xor_sync(0xFFFFFFFF, ar_send_26, 4);
+                    _er_f[10] = ((ar_bit_6 == 1) ? ar_got_26 : ar_x0_26);
+                    _er_f[26] = ((ar_bit_6 == 1) ? ar_x1_26 : ar_got_26);
+                    float ar_x0_27 = _er_f[14];
+                    float ar_x1_27 = _er_f[30];
+                    float ar_send_27 = ((ar_bit_6 == 1) ? ar_x0_27 : ar_x1_27);
+                    float ar_got_27 = __shfl_xor_sync(0xFFFFFFFF, ar_send_27, 4);
+                    _er_f[14] = ((ar_bit_6 == 1) ? ar_got_27 : ar_x0_27);
+                    _er_f[30] = ((ar_bit_6 == 1) ? ar_x1_27 : ar_got_27);
+                    int ar_bit_7 = lane >> 1 & 1;
+                    float ar_x0_28 = _er_f[2];
+                    float ar_x1_28 = _er_f[10];
+                    float ar_send_28 = ((ar_bit_7 == 1) ? ar_x0_28 : ar_x1_28);
+                    float ar_got_28 = __shfl_xor_sync(0xFFFFFFFF, ar_send_28, 2);
+                    _er_f[2] = ((ar_bit_7 == 1) ? ar_got_28 : ar_x0_28);
+                    _er_f[10] = ((ar_bit_7 == 1) ? ar_x1_28 : ar_got_28);
+                    float ar_x0_29 = _er_f[6];
+                    float ar_x1_29 = _er_f[14];
+                    float ar_send_29 = ((ar_bit_7 == 1) ? ar_x0_29 : ar_x1_29);
+                    float ar_got_29 = __shfl_xor_sync(0xFFFFFFFF, ar_send_29, 2);
+                    _er_f[6] = ((ar_bit_7 == 1) ? ar_got_29 : ar_x0_29);
+                    _er_f[14] = ((ar_bit_7 == 1) ? ar_x1_29 : ar_got_29);
+                    float ar_x0_30 = _er_f[18];
+                    float ar_x1_30 = _er_f[26];
+                    float ar_send_30 = ((ar_bit_7 == 1) ? ar_x0_30 : ar_x1_30);
+                    float ar_got_30 = __shfl_xor_sync(0xFFFFFFFF, ar_send_30, 2);
+                    _er_f[18] = ((ar_bit_7 == 1) ? ar_got_30 : ar_x0_30);
+                    _er_f[26] = ((ar_bit_7 == 1) ? ar_x1_30 : ar_got_30);
+                    float ar_x0_31 = _er_f[22];
+                    float ar_x1_31 = _er_f[30];
+                    float ar_send_31 = ((ar_bit_7 == 1) ? ar_x0_31 : ar_x1_31);
+                    float ar_got_31 = __shfl_xor_sync(0xFFFFFFFF, ar_send_31, 2);
+                    _er_f[22] = ((ar_bit_7 == 1) ? ar_got_31 : ar_x0_31);
+                    _er_f[30] = ((ar_bit_7 == 1) ? ar_x1_31 : ar_got_31);
+                    int ar_bit_8 = lane & 1;
+                    float ar_x0_32 = _er_f[2];
+                    float ar_x1_32 = _er_f[6];
+                    float ar_send_32 = ((ar_bit_8 == 1) ? ar_x0_32 : ar_x1_32);
+                    float ar_got_32 = __shfl_xor_sync(0xFFFFFFFF, ar_send_32, 1);
+                    _er_f[2] = ((ar_bit_8 == 1) ? ar_got_32 : ar_x0_32);
+                    _er_f[6] = ((ar_bit_8 == 1) ? ar_x1_32 : ar_got_32);
+                    float ar_x0_33 = _er_f[10];
+                    float ar_x1_33 = _er_f[14];
+                    float ar_send_33 = ((ar_bit_8 == 1) ? ar_x0_33 : ar_x1_33);
+                    float ar_got_33 = __shfl_xor_sync(0xFFFFFFFF, ar_send_33, 1);
+                    _er_f[10] = ((ar_bit_8 == 1) ? ar_got_33 : ar_x0_33);
+                    _er_f[14] = ((ar_bit_8 == 1) ? ar_x1_33 : ar_got_33);
+                    float ar_x0_34 = _er_f[18];
+                    float ar_x1_34 = _er_f[22];
+                    float ar_send_34 = ((ar_bit_8 == 1) ? ar_x0_34 : ar_x1_34);
+                    float ar_got_34 = __shfl_xor_sync(0xFFFFFFFF, ar_send_34, 1);
+                    _er_f[18] = ((ar_bit_8 == 1) ? ar_got_34 : ar_x0_34);
+                    _er_f[22] = ((ar_bit_8 == 1) ? ar_x1_34 : ar_got_34);
+                    float ar_x0_35 = _er_f[26];
+                    float ar_x1_35 = _er_f[30];
+                    float ar_send_35 = ((ar_bit_8 == 1) ? ar_x0_35 : ar_x1_35);
+                    float ar_got_35 = __shfl_xor_sync(0xFFFFFFFF, ar_send_35, 1);
+                    _er_f[26] = ((ar_bit_8 == 1) ? ar_got_35 : ar_x0_35);
+                    _er_f[30] = ((ar_bit_8 == 1) ? ar_x1_35 : ar_got_35);
+                    int ar_bit_9 = lane >> 2 & 1;
+                    float ar_x0_36 = _er_f[3];
+                    float ar_x1_36 = _er_f[19];
+                    float ar_send_36 = ((ar_bit_9 == 1) ? ar_x0_36 : ar_x1_36);
+                    float ar_got_36 = __shfl_xor_sync(0xFFFFFFFF, ar_send_36, 4);
+                    _er_f[3] = ((ar_bit_9 == 1) ? ar_got_36 : ar_x0_36);
+                    _er_f[19] = ((ar_bit_9 == 1) ? ar_x1_36 : ar_got_36);
+                    float ar_x0_37 = _er_f[7];
+                    float ar_x1_37 = _er_f[23];
+                    float ar_send_37 = ((ar_bit_9 == 1) ? ar_x0_37 : ar_x1_37);
+                    float ar_got_37 = __shfl_xor_sync(0xFFFFFFFF, ar_send_37, 4);
+                    _er_f[7] = ((ar_bit_9 == 1) ? ar_got_37 : ar_x0_37);
+                    _er_f[23] = ((ar_bit_9 == 1) ? ar_x1_37 : ar_got_37);
+                    float ar_x0_38 = _er_f[11];
+                    float ar_x1_38 = _er_f[27];
+                    float ar_send_38 = ((ar_bit_9 == 1) ? ar_x0_38 : ar_x1_38);
+                    float ar_got_38 = __shfl_xor_sync(0xFFFFFFFF, ar_send_38, 4);
+                    _er_f[11] = ((ar_bit_9 == 1) ? ar_got_38 : ar_x0_38);
+                    _er_f[27] = ((ar_bit_9 == 1) ? ar_x1_38 : ar_got_38);
+                    float ar_x0_39 = _er_f[15];
+                    float ar_x1_39 = _er_f[31];
+                    float ar_send_39 = ((ar_bit_9 == 1) ? ar_x0_39 : ar_x1_39);
+                    float ar_got_39 = __shfl_xor_sync(0xFFFFFFFF, ar_send_39, 4);
+                    _er_f[15] = ((ar_bit_9 == 1) ? ar_got_39 : ar_x0_39);
+                    _er_f[31] = ((ar_bit_9 == 1) ? ar_x1_39 : ar_got_39);
+                    int ar_bit_10 = lane >> 1 & 1;
+                    float ar_x0_40 = _er_f[3];
+                    float ar_x1_40 = _er_f[11];
+                    float ar_send_40 = ((ar_bit_10 == 1) ? ar_x0_40 : ar_x1_40);
+                    float ar_got_40 = __shfl_xor_sync(0xFFFFFFFF, ar_send_40, 2);
+                    _er_f[3] = ((ar_bit_10 == 1) ? ar_got_40 : ar_x0_40);
+                    _er_f[11] = ((ar_bit_10 == 1) ? ar_x1_40 : ar_got_40);
+                    float ar_x0_41 = _er_f[7];
+                    float ar_x1_41 = _er_f[15];
+                    float ar_send_41 = ((ar_bit_10 == 1) ? ar_x0_41 : ar_x1_41);
+                    float ar_got_41 = __shfl_xor_sync(0xFFFFFFFF, ar_send_41, 2);
+                    _er_f[7] = ((ar_bit_10 == 1) ? ar_got_41 : ar_x0_41);
+                    _er_f[15] = ((ar_bit_10 == 1) ? ar_x1_41 : ar_got_41);
+                    float ar_x0_42 = _er_f[19];
+                    float ar_x1_42 = _er_f[27];
+                    float ar_send_42 = ((ar_bit_10 == 1) ? ar_x0_42 : ar_x1_42);
+                    float ar_got_42 = __shfl_xor_sync(0xFFFFFFFF, ar_send_42, 2);
+                    _er_f[19] = ((ar_bit_10 == 1) ? ar_got_42 : ar_x0_42);
+                    _er_f[27] = ((ar_bit_10 == 1) ? ar_x1_42 : ar_got_42);
+                    float ar_x0_43 = _er_f[23];
+                    float ar_x1_43 = _er_f[31];
+                    float ar_send_43 = ((ar_bit_10 == 1) ? ar_x0_43 : ar_x1_43);
+                    float ar_got_43 = __shfl_xor_sync(0xFFFFFFFF, ar_send_43, 2);
+                    _er_f[23] = ((ar_bit_10 == 1) ? ar_got_43 : ar_x0_43);
+                    _er_f[31] = ((ar_bit_10 == 1) ? ar_x1_43 : ar_got_43);
+                    int ar_bit_11 = lane & 1;
+                    float ar_x0_44 = _er_f[3];
+                    float ar_x1_44 = _er_f[7];
+                    float ar_send_44 = ((ar_bit_11 == 1) ? ar_x0_44 : ar_x1_44);
+                    float ar_got_44 = __shfl_xor_sync(0xFFFFFFFF, ar_send_44, 1);
+                    _er_f[3] = ((ar_bit_11 == 1) ? ar_got_44 : ar_x0_44);
+                    _er_f[7] = ((ar_bit_11 == 1) ? ar_x1_44 : ar_got_44);
+                    float ar_x0_45 = _er_f[11];
+                    float ar_x1_45 = _er_f[15];
+                    float ar_send_45 = ((ar_bit_11 == 1) ? ar_x0_45 : ar_x1_45);
+                    float ar_got_45 = __shfl_xor_sync(0xFFFFFFFF, ar_send_45, 1);
+                    _er_f[11] = ((ar_bit_11 == 1) ? ar_got_45 : ar_x0_45);
+                    _er_f[15] = ((ar_bit_11 == 1) ? ar_x1_45 : ar_got_45);
+                    float ar_x0_46 = _er_f[19];
+                    float ar_x1_46 = _er_f[23];
+                    float ar_send_46 = ((ar_bit_11 == 1) ? ar_x0_46 : ar_x1_46);
+                    float ar_got_46 = __shfl_xor_sync(0xFFFFFFFF, ar_send_46, 1);
+                    _er_f[19] = ((ar_bit_11 == 1) ? ar_got_46 : ar_x0_46);
+                    _er_f[23] = ((ar_bit_11 == 1) ? ar_x1_46 : ar_got_46);
+                    float ar_x0_47 = _er_f[27];
+                    float ar_x1_47 = _er_f[31];
+                    float ar_send_47 = ((ar_bit_11 == 1) ? ar_x0_47 : ar_x1_47);
+                    float ar_got_47 = __shfl_xor_sync(0xFFFFFFFF, ar_send_47, 1);
+                    _er_f[27] = ((ar_bit_11 == 1) ? ar_got_47 : ar_x0_47);
+                    _er_f[31] = ((ar_bit_11 == 1) ? ar_x1_47 : ar_got_47);
+                    int ar_ri_0 = er_at2;
+                    asm("" : "+r"(ar_ri_0));
+                    {
+                        float4 _v4 = make_float4(_er_f[0 + 0], _er_f[0 + 1], _er_f[0 + 2], _er_f[0 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    ar_ri_0 = ar_ri_0 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[4 + 0], _er_f[4 + 1], _er_f[4 + 2], _er_f[4 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    ar_ri_0 = ar_ri_0 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[8 + 0], _er_f[8 + 1], _er_f[8 + 2], _er_f[8 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    ar_ri_0 = ar_ri_0 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[12 + 0], _er_f[12 + 1], _er_f[12 + 2], _er_f[12 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    ar_ri_0 = ar_ri_0 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[16 + 0], _er_f[16 + 1], _er_f[16 + 2], _er_f[16 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    ar_ri_0 = ar_ri_0 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[20 + 0], _er_f[20 + 1], _er_f[20 + 2], _er_f[20 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    ar_ri_0 = ar_ri_0 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[24 + 0], _er_f[24 + 1], _er_f[24 + 2], _er_f[24 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    ar_ri_0 = ar_ri_0 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[28 + 0], _er_f[28 + 1], _er_f[28 + 2], _er_f[28 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_0) = _v4;
+                    }
+                    int ar_bit_12 = lane >> 2 & 1;
+                    float ar_x0_48 = _er_f[32];
+                    float ar_x1_48 = _er_f[48];
+                    float ar_send_48 = ((ar_bit_12 == 1) ? ar_x0_48 : ar_x1_48);
+                    float ar_got_48 = __shfl_xor_sync(0xFFFFFFFF, ar_send_48, 4);
+                    _er_f[32] = ((ar_bit_12 == 1) ? ar_got_48 : ar_x0_48);
+                    _er_f[48] = ((ar_bit_12 == 1) ? ar_x1_48 : ar_got_48);
+                    float ar_x0_49 = _er_f[36];
+                    float ar_x1_49 = _er_f[52];
+                    float ar_send_49 = ((ar_bit_12 == 1) ? ar_x0_49 : ar_x1_49);
+                    float ar_got_49 = __shfl_xor_sync(0xFFFFFFFF, ar_send_49, 4);
+                    _er_f[36] = ((ar_bit_12 == 1) ? ar_got_49 : ar_x0_49);
+                    _er_f[52] = ((ar_bit_12 == 1) ? ar_x1_49 : ar_got_49);
+                    float ar_x0_50 = _er_f[40];
+                    float ar_x1_50 = _er_f[56];
+                    float ar_send_50 = ((ar_bit_12 == 1) ? ar_x0_50 : ar_x1_50);
+                    float ar_got_50 = __shfl_xor_sync(0xFFFFFFFF, ar_send_50, 4);
+                    _er_f[40] = ((ar_bit_12 == 1) ? ar_got_50 : ar_x0_50);
+                    _er_f[56] = ((ar_bit_12 == 1) ? ar_x1_50 : ar_got_50);
+                    float ar_x0_51 = _er_f[44];
+                    float ar_x1_51 = _er_f[60];
+                    float ar_send_51 = ((ar_bit_12 == 1) ? ar_x0_51 : ar_x1_51);
+                    float ar_got_51 = __shfl_xor_sync(0xFFFFFFFF, ar_send_51, 4);
+                    _er_f[44] = ((ar_bit_12 == 1) ? ar_got_51 : ar_x0_51);
+                    _er_f[60] = ((ar_bit_12 == 1) ? ar_x1_51 : ar_got_51);
+                    int ar_bit_13 = lane >> 1 & 1;
+                    float ar_x0_52 = _er_f[32];
+                    float ar_x1_52 = _er_f[40];
+                    float ar_send_52 = ((ar_bit_13 == 1) ? ar_x0_52 : ar_x1_52);
+                    float ar_got_52 = __shfl_xor_sync(0xFFFFFFFF, ar_send_52, 2);
+                    _er_f[32] = ((ar_bit_13 == 1) ? ar_got_52 : ar_x0_52);
+                    _er_f[40] = ((ar_bit_13 == 1) ? ar_x1_52 : ar_got_52);
+                    float ar_x0_53 = _er_f[36];
+                    float ar_x1_53 = _er_f[44];
+                    float ar_send_53 = ((ar_bit_13 == 1) ? ar_x0_53 : ar_x1_53);
+                    float ar_got_53 = __shfl_xor_sync(0xFFFFFFFF, ar_send_53, 2);
+                    _er_f[36] = ((ar_bit_13 == 1) ? ar_got_53 : ar_x0_53);
+                    _er_f[44] = ((ar_bit_13 == 1) ? ar_x1_53 : ar_got_53);
+                    float ar_x0_54 = _er_f[48];
+                    float ar_x1_54 = _er_f[56];
+                    float ar_send_54 = ((ar_bit_13 == 1) ? ar_x0_54 : ar_x1_54);
+                    float ar_got_54 = __shfl_xor_sync(0xFFFFFFFF, ar_send_54, 2);
+                    _er_f[48] = ((ar_bit_13 == 1) ? ar_got_54 : ar_x0_54);
+                    _er_f[56] = ((ar_bit_13 == 1) ? ar_x1_54 : ar_got_54);
+                    float ar_x0_55 = _er_f[52];
+                    float ar_x1_55 = _er_f[60];
+                    float ar_send_55 = ((ar_bit_13 == 1) ? ar_x0_55 : ar_x1_55);
+                    float ar_got_55 = __shfl_xor_sync(0xFFFFFFFF, ar_send_55, 2);
+                    _er_f[52] = ((ar_bit_13 == 1) ? ar_got_55 : ar_x0_55);
+                    _er_f[60] = ((ar_bit_13 == 1) ? ar_x1_55 : ar_got_55);
+                    int ar_bit_14 = lane & 1;
+                    float ar_x0_56 = _er_f[32];
+                    float ar_x1_56 = _er_f[36];
+                    float ar_send_56 = ((ar_bit_14 == 1) ? ar_x0_56 : ar_x1_56);
+                    float ar_got_56 = __shfl_xor_sync(0xFFFFFFFF, ar_send_56, 1);
+                    _er_f[32] = ((ar_bit_14 == 1) ? ar_got_56 : ar_x0_56);
+                    _er_f[36] = ((ar_bit_14 == 1) ? ar_x1_56 : ar_got_56);
+                    float ar_x0_57 = _er_f[40];
+                    float ar_x1_57 = _er_f[44];
+                    float ar_send_57 = ((ar_bit_14 == 1) ? ar_x0_57 : ar_x1_57);
+                    float ar_got_57 = __shfl_xor_sync(0xFFFFFFFF, ar_send_57, 1);
+                    _er_f[40] = ((ar_bit_14 == 1) ? ar_got_57 : ar_x0_57);
+                    _er_f[44] = ((ar_bit_14 == 1) ? ar_x1_57 : ar_got_57);
+                    float ar_x0_58 = _er_f[48];
+                    float ar_x1_58 = _er_f[52];
+                    float ar_send_58 = ((ar_bit_14 == 1) ? ar_x0_58 : ar_x1_58);
+                    float ar_got_58 = __shfl_xor_sync(0xFFFFFFFF, ar_send_58, 1);
+                    _er_f[48] = ((ar_bit_14 == 1) ? ar_got_58 : ar_x0_58);
+                    _er_f[52] = ((ar_bit_14 == 1) ? ar_x1_58 : ar_got_58);
+                    float ar_x0_59 = _er_f[56];
+                    float ar_x1_59 = _er_f[60];
+                    float ar_send_59 = ((ar_bit_14 == 1) ? ar_x0_59 : ar_x1_59);
+                    float ar_got_59 = __shfl_xor_sync(0xFFFFFFFF, ar_send_59, 1);
+                    _er_f[56] = ((ar_bit_14 == 1) ? ar_got_59 : ar_x0_59);
+                    _er_f[60] = ((ar_bit_14 == 1) ? ar_x1_59 : ar_got_59);
+                    int ar_bit_15 = lane >> 2 & 1;
+                    float ar_x0_60 = _er_f[33];
+                    float ar_x1_60 = _er_f[49];
+                    float ar_send_60 = ((ar_bit_15 == 1) ? ar_x0_60 : ar_x1_60);
+                    float ar_got_60 = __shfl_xor_sync(0xFFFFFFFF, ar_send_60, 4);
+                    _er_f[33] = ((ar_bit_15 == 1) ? ar_got_60 : ar_x0_60);
+                    _er_f[49] = ((ar_bit_15 == 1) ? ar_x1_60 : ar_got_60);
+                    float ar_x0_61 = _er_f[37];
+                    float ar_x1_61 = _er_f[53];
+                    float ar_send_61 = ((ar_bit_15 == 1) ? ar_x0_61 : ar_x1_61);
+                    float ar_got_61 = __shfl_xor_sync(0xFFFFFFFF, ar_send_61, 4);
+                    _er_f[37] = ((ar_bit_15 == 1) ? ar_got_61 : ar_x0_61);
+                    _er_f[53] = ((ar_bit_15 == 1) ? ar_x1_61 : ar_got_61);
+                    float ar_x0_62 = _er_f[41];
+                    float ar_x1_62 = _er_f[57];
+                    float ar_send_62 = ((ar_bit_15 == 1) ? ar_x0_62 : ar_x1_62);
+                    float ar_got_62 = __shfl_xor_sync(0xFFFFFFFF, ar_send_62, 4);
+                    _er_f[41] = ((ar_bit_15 == 1) ? ar_got_62 : ar_x0_62);
+                    _er_f[57] = ((ar_bit_15 == 1) ? ar_x1_62 : ar_got_62);
+                    float ar_x0_63 = _er_f[45];
+                    float ar_x1_63 = _er_f[61];
+                    float ar_send_63 = ((ar_bit_15 == 1) ? ar_x0_63 : ar_x1_63);
+                    float ar_got_63 = __shfl_xor_sync(0xFFFFFFFF, ar_send_63, 4);
+                    _er_f[45] = ((ar_bit_15 == 1) ? ar_got_63 : ar_x0_63);
+                    _er_f[61] = ((ar_bit_15 == 1) ? ar_x1_63 : ar_got_63);
+                    int ar_bit_16 = lane >> 1 & 1;
+                    float ar_x0_64 = _er_f[33];
+                    float ar_x1_64 = _er_f[41];
+                    float ar_send_64 = ((ar_bit_16 == 1) ? ar_x0_64 : ar_x1_64);
+                    float ar_got_64 = __shfl_xor_sync(0xFFFFFFFF, ar_send_64, 2);
+                    _er_f[33] = ((ar_bit_16 == 1) ? ar_got_64 : ar_x0_64);
+                    _er_f[41] = ((ar_bit_16 == 1) ? ar_x1_64 : ar_got_64);
+                    float ar_x0_65 = _er_f[37];
+                    float ar_x1_65 = _er_f[45];
+                    float ar_send_65 = ((ar_bit_16 == 1) ? ar_x0_65 : ar_x1_65);
+                    float ar_got_65 = __shfl_xor_sync(0xFFFFFFFF, ar_send_65, 2);
+                    _er_f[37] = ((ar_bit_16 == 1) ? ar_got_65 : ar_x0_65);
+                    _er_f[45] = ((ar_bit_16 == 1) ? ar_x1_65 : ar_got_65);
+                    float ar_x0_66 = _er_f[49];
+                    float ar_x1_66 = _er_f[57];
+                    float ar_send_66 = ((ar_bit_16 == 1) ? ar_x0_66 : ar_x1_66);
+                    float ar_got_66 = __shfl_xor_sync(0xFFFFFFFF, ar_send_66, 2);
+                    _er_f[49] = ((ar_bit_16 == 1) ? ar_got_66 : ar_x0_66);
+                    _er_f[57] = ((ar_bit_16 == 1) ? ar_x1_66 : ar_got_66);
+                    float ar_x0_67 = _er_f[53];
+                    float ar_x1_67 = _er_f[61];
+                    float ar_send_67 = ((ar_bit_16 == 1) ? ar_x0_67 : ar_x1_67);
+                    float ar_got_67 = __shfl_xor_sync(0xFFFFFFFF, ar_send_67, 2);
+                    _er_f[53] = ((ar_bit_16 == 1) ? ar_got_67 : ar_x0_67);
+                    _er_f[61] = ((ar_bit_16 == 1) ? ar_x1_67 : ar_got_67);
+                    int ar_bit_17 = lane & 1;
+                    float ar_x0_68 = _er_f[33];
+                    float ar_x1_68 = _er_f[37];
+                    float ar_send_68 = ((ar_bit_17 == 1) ? ar_x0_68 : ar_x1_68);
+                    float ar_got_68 = __shfl_xor_sync(0xFFFFFFFF, ar_send_68, 1);
+                    _er_f[33] = ((ar_bit_17 == 1) ? ar_got_68 : ar_x0_68);
+                    _er_f[37] = ((ar_bit_17 == 1) ? ar_x1_68 : ar_got_68);
+                    float ar_x0_69 = _er_f[41];
+                    float ar_x1_69 = _er_f[45];
+                    float ar_send_69 = ((ar_bit_17 == 1) ? ar_x0_69 : ar_x1_69);
+                    float ar_got_69 = __shfl_xor_sync(0xFFFFFFFF, ar_send_69, 1);
+                    _er_f[41] = ((ar_bit_17 == 1) ? ar_got_69 : ar_x0_69);
+                    _er_f[45] = ((ar_bit_17 == 1) ? ar_x1_69 : ar_got_69);
+                    float ar_x0_70 = _er_f[49];
+                    float ar_x1_70 = _er_f[53];
+                    float ar_send_70 = ((ar_bit_17 == 1) ? ar_x0_70 : ar_x1_70);
+                    float ar_got_70 = __shfl_xor_sync(0xFFFFFFFF, ar_send_70, 1);
+                    _er_f[49] = ((ar_bit_17 == 1) ? ar_got_70 : ar_x0_70);
+                    _er_f[53] = ((ar_bit_17 == 1) ? ar_x1_70 : ar_got_70);
+                    float ar_x0_71 = _er_f[57];
+                    float ar_x1_71 = _er_f[61];
+                    float ar_send_71 = ((ar_bit_17 == 1) ? ar_x0_71 : ar_x1_71);
+                    float ar_got_71 = __shfl_xor_sync(0xFFFFFFFF, ar_send_71, 1);
+                    _er_f[57] = ((ar_bit_17 == 1) ? ar_got_71 : ar_x0_71);
+                    _er_f[61] = ((ar_bit_17 == 1) ? ar_x1_71 : ar_got_71);
+                    int ar_bit_18 = lane >> 2 & 1;
+                    float ar_x0_72 = _er_f[34];
+                    float ar_x1_72 = _er_f[50];
+                    float ar_send_72 = ((ar_bit_18 == 1) ? ar_x0_72 : ar_x1_72);
+                    float ar_got_72 = __shfl_xor_sync(0xFFFFFFFF, ar_send_72, 4);
+                    _er_f[34] = ((ar_bit_18 == 1) ? ar_got_72 : ar_x0_72);
+                    _er_f[50] = ((ar_bit_18 == 1) ? ar_x1_72 : ar_got_72);
+                    float ar_x0_73 = _er_f[38];
+                    float ar_x1_73 = _er_f[54];
+                    float ar_send_73 = ((ar_bit_18 == 1) ? ar_x0_73 : ar_x1_73);
+                    float ar_got_73 = __shfl_xor_sync(0xFFFFFFFF, ar_send_73, 4);
+                    _er_f[38] = ((ar_bit_18 == 1) ? ar_got_73 : ar_x0_73);
+                    _er_f[54] = ((ar_bit_18 == 1) ? ar_x1_73 : ar_got_73);
+                    float ar_x0_74 = _er_f[42];
+                    float ar_x1_74 = _er_f[58];
+                    float ar_send_74 = ((ar_bit_18 == 1) ? ar_x0_74 : ar_x1_74);
+                    float ar_got_74 = __shfl_xor_sync(0xFFFFFFFF, ar_send_74, 4);
+                    _er_f[42] = ((ar_bit_18 == 1) ? ar_got_74 : ar_x0_74);
+                    _er_f[58] = ((ar_bit_18 == 1) ? ar_x1_74 : ar_got_74);
+                    float ar_x0_75 = _er_f[46];
+                    float ar_x1_75 = _er_f[62];
+                    float ar_send_75 = ((ar_bit_18 == 1) ? ar_x0_75 : ar_x1_75);
+                    float ar_got_75 = __shfl_xor_sync(0xFFFFFFFF, ar_send_75, 4);
+                    _er_f[46] = ((ar_bit_18 == 1) ? ar_got_75 : ar_x0_75);
+                    _er_f[62] = ((ar_bit_18 == 1) ? ar_x1_75 : ar_got_75);
+                    int ar_bit_19 = lane >> 1 & 1;
+                    float ar_x0_76 = _er_f[34];
+                    float ar_x1_76 = _er_f[42];
+                    float ar_send_76 = ((ar_bit_19 == 1) ? ar_x0_76 : ar_x1_76);
+                    float ar_got_76 = __shfl_xor_sync(0xFFFFFFFF, ar_send_76, 2);
+                    _er_f[34] = ((ar_bit_19 == 1) ? ar_got_76 : ar_x0_76);
+                    _er_f[42] = ((ar_bit_19 == 1) ? ar_x1_76 : ar_got_76);
+                    float ar_x0_77 = _er_f[38];
+                    float ar_x1_77 = _er_f[46];
+                    float ar_send_77 = ((ar_bit_19 == 1) ? ar_x0_77 : ar_x1_77);
+                    float ar_got_77 = __shfl_xor_sync(0xFFFFFFFF, ar_send_77, 2);
+                    _er_f[38] = ((ar_bit_19 == 1) ? ar_got_77 : ar_x0_77);
+                    _er_f[46] = ((ar_bit_19 == 1) ? ar_x1_77 : ar_got_77);
+                    float ar_x0_78 = _er_f[50];
+                    float ar_x1_78 = _er_f[58];
+                    float ar_send_78 = ((ar_bit_19 == 1) ? ar_x0_78 : ar_x1_78);
+                    float ar_got_78 = __shfl_xor_sync(0xFFFFFFFF, ar_send_78, 2);
+                    _er_f[50] = ((ar_bit_19 == 1) ? ar_got_78 : ar_x0_78);
+                    _er_f[58] = ((ar_bit_19 == 1) ? ar_x1_78 : ar_got_78);
+                    float ar_x0_79 = _er_f[54];
+                    float ar_x1_79 = _er_f[62];
+                    float ar_send_79 = ((ar_bit_19 == 1) ? ar_x0_79 : ar_x1_79);
+                    float ar_got_79 = __shfl_xor_sync(0xFFFFFFFF, ar_send_79, 2);
+                    _er_f[54] = ((ar_bit_19 == 1) ? ar_got_79 : ar_x0_79);
+                    _er_f[62] = ((ar_bit_19 == 1) ? ar_x1_79 : ar_got_79);
+                    int ar_bit_20 = lane & 1;
+                    float ar_x0_80 = _er_f[34];
+                    float ar_x1_80 = _er_f[38];
+                    float ar_send_80 = ((ar_bit_20 == 1) ? ar_x0_80 : ar_x1_80);
+                    float ar_got_80 = __shfl_xor_sync(0xFFFFFFFF, ar_send_80, 1);
+                    _er_f[34] = ((ar_bit_20 == 1) ? ar_got_80 : ar_x0_80);
+                    _er_f[38] = ((ar_bit_20 == 1) ? ar_x1_80 : ar_got_80);
+                    float ar_x0_81 = _er_f[42];
+                    float ar_x1_81 = _er_f[46];
+                    float ar_send_81 = ((ar_bit_20 == 1) ? ar_x0_81 : ar_x1_81);
+                    float ar_got_81 = __shfl_xor_sync(0xFFFFFFFF, ar_send_81, 1);
+                    _er_f[42] = ((ar_bit_20 == 1) ? ar_got_81 : ar_x0_81);
+                    _er_f[46] = ((ar_bit_20 == 1) ? ar_x1_81 : ar_got_81);
+                    float ar_x0_82 = _er_f[50];
+                    float ar_x1_82 = _er_f[54];
+                    float ar_send_82 = ((ar_bit_20 == 1) ? ar_x0_82 : ar_x1_82);
+                    float ar_got_82 = __shfl_xor_sync(0xFFFFFFFF, ar_send_82, 1);
+                    _er_f[50] = ((ar_bit_20 == 1) ? ar_got_82 : ar_x0_82);
+                    _er_f[54] = ((ar_bit_20 == 1) ? ar_x1_82 : ar_got_82);
+                    float ar_x0_83 = _er_f[58];
+                    float ar_x1_83 = _er_f[62];
+                    float ar_send_83 = ((ar_bit_20 == 1) ? ar_x0_83 : ar_x1_83);
+                    float ar_got_83 = __shfl_xor_sync(0xFFFFFFFF, ar_send_83, 1);
+                    _er_f[58] = ((ar_bit_20 == 1) ? ar_got_83 : ar_x0_83);
+                    _er_f[62] = ((ar_bit_20 == 1) ? ar_x1_83 : ar_got_83);
+                    int ar_bit_21 = lane >> 2 & 1;
+                    float ar_x0_84 = _er_f[35];
+                    float ar_x1_84 = _er_f[51];
+                    float ar_send_84 = ((ar_bit_21 == 1) ? ar_x0_84 : ar_x1_84);
+                    float ar_got_84 = __shfl_xor_sync(0xFFFFFFFF, ar_send_84, 4);
+                    _er_f[35] = ((ar_bit_21 == 1) ? ar_got_84 : ar_x0_84);
+                    _er_f[51] = ((ar_bit_21 == 1) ? ar_x1_84 : ar_got_84);
+                    float ar_x0_85 = _er_f[39];
+                    float ar_x1_85 = _er_f[55];
+                    float ar_send_85 = ((ar_bit_21 == 1) ? ar_x0_85 : ar_x1_85);
+                    float ar_got_85 = __shfl_xor_sync(0xFFFFFFFF, ar_send_85, 4);
+                    _er_f[39] = ((ar_bit_21 == 1) ? ar_got_85 : ar_x0_85);
+                    _er_f[55] = ((ar_bit_21 == 1) ? ar_x1_85 : ar_got_85);
+                    float ar_x0_86 = _er_f[43];
+                    float ar_x1_86 = _er_f[59];
+                    float ar_send_86 = ((ar_bit_21 == 1) ? ar_x0_86 : ar_x1_86);
+                    float ar_got_86 = __shfl_xor_sync(0xFFFFFFFF, ar_send_86, 4);
+                    _er_f[43] = ((ar_bit_21 == 1) ? ar_got_86 : ar_x0_86);
+                    _er_f[59] = ((ar_bit_21 == 1) ? ar_x1_86 : ar_got_86);
+                    float ar_x0_87 = _er_f[47];
+                    float ar_x1_87 = _er_f[63];
+                    float ar_send_87 = ((ar_bit_21 == 1) ? ar_x0_87 : ar_x1_87);
+                    float ar_got_87 = __shfl_xor_sync(0xFFFFFFFF, ar_send_87, 4);
+                    _er_f[47] = ((ar_bit_21 == 1) ? ar_got_87 : ar_x0_87);
+                    _er_f[63] = ((ar_bit_21 == 1) ? ar_x1_87 : ar_got_87);
+                    int ar_bit_22 = lane >> 1 & 1;
+                    float ar_x0_88 = _er_f[35];
+                    float ar_x1_88 = _er_f[43];
+                    float ar_send_88 = ((ar_bit_22 == 1) ? ar_x0_88 : ar_x1_88);
+                    float ar_got_88 = __shfl_xor_sync(0xFFFFFFFF, ar_send_88, 2);
+                    _er_f[35] = ((ar_bit_22 == 1) ? ar_got_88 : ar_x0_88);
+                    _er_f[43] = ((ar_bit_22 == 1) ? ar_x1_88 : ar_got_88);
+                    float ar_x0_89 = _er_f[39];
+                    float ar_x1_89 = _er_f[47];
+                    float ar_send_89 = ((ar_bit_22 == 1) ? ar_x0_89 : ar_x1_89);
+                    float ar_got_89 = __shfl_xor_sync(0xFFFFFFFF, ar_send_89, 2);
+                    _er_f[39] = ((ar_bit_22 == 1) ? ar_got_89 : ar_x0_89);
+                    _er_f[47] = ((ar_bit_22 == 1) ? ar_x1_89 : ar_got_89);
+                    float ar_x0_90 = _er_f[51];
+                    float ar_x1_90 = _er_f[59];
+                    float ar_send_90 = ((ar_bit_22 == 1) ? ar_x0_90 : ar_x1_90);
+                    float ar_got_90 = __shfl_xor_sync(0xFFFFFFFF, ar_send_90, 2);
+                    _er_f[51] = ((ar_bit_22 == 1) ? ar_got_90 : ar_x0_90);
+                    _er_f[59] = ((ar_bit_22 == 1) ? ar_x1_90 : ar_got_90);
+                    float ar_x0_91 = _er_f[55];
+                    float ar_x1_91 = _er_f[63];
+                    float ar_send_91 = ((ar_bit_22 == 1) ? ar_x0_91 : ar_x1_91);
+                    float ar_got_91 = __shfl_xor_sync(0xFFFFFFFF, ar_send_91, 2);
+                    _er_f[55] = ((ar_bit_22 == 1) ? ar_got_91 : ar_x0_91);
+                    _er_f[63] = ((ar_bit_22 == 1) ? ar_x1_91 : ar_got_91);
+                    int ar_bit_23 = lane & 1;
+                    float ar_x0_92 = _er_f[35];
+                    float ar_x1_92 = _er_f[39];
+                    float ar_send_92 = ((ar_bit_23 == 1) ? ar_x0_92 : ar_x1_92);
+                    float ar_got_92 = __shfl_xor_sync(0xFFFFFFFF, ar_send_92, 1);
+                    _er_f[35] = ((ar_bit_23 == 1) ? ar_got_92 : ar_x0_92);
+                    _er_f[39] = ((ar_bit_23 == 1) ? ar_x1_92 : ar_got_92);
+                    float ar_x0_93 = _er_f[43];
+                    float ar_x1_93 = _er_f[47];
+                    float ar_send_93 = ((ar_bit_23 == 1) ? ar_x0_93 : ar_x1_93);
+                    float ar_got_93 = __shfl_xor_sync(0xFFFFFFFF, ar_send_93, 1);
+                    _er_f[43] = ((ar_bit_23 == 1) ? ar_got_93 : ar_x0_93);
+                    _er_f[47] = ((ar_bit_23 == 1) ? ar_x1_93 : ar_got_93);
+                    float ar_x0_94 = _er_f[51];
+                    float ar_x1_94 = _er_f[55];
+                    float ar_send_94 = ((ar_bit_23 == 1) ? ar_x0_94 : ar_x1_94);
+                    float ar_got_94 = __shfl_xor_sync(0xFFFFFFFF, ar_send_94, 1);
+                    _er_f[51] = ((ar_bit_23 == 1) ? ar_got_94 : ar_x0_94);
+                    _er_f[55] = ((ar_bit_23 == 1) ? ar_x1_94 : ar_got_94);
+                    float ar_x0_95 = _er_f[59];
+                    float ar_x1_95 = _er_f[63];
+                    float ar_send_95 = ((ar_bit_23 == 1) ? ar_x0_95 : ar_x1_95);
+                    float ar_got_95 = __shfl_xor_sync(0xFFFFFFFF, ar_send_95, 1);
+                    _er_f[59] = ((ar_bit_23 == 1) ? ar_got_95 : ar_x0_95);
+                    _er_f[63] = ((ar_bit_23 == 1) ? ar_x1_95 : ar_got_95);
+                    int ar_ri_1 = er_at2 + 32;
+                    asm("" : "+r"(ar_ri_1));
+                    {
+                        float4 _v4 = make_float4(_er_f[32 + 0], _er_f[32 + 1], _er_f[32 + 2], _er_f[32 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    ar_ri_1 = ar_ri_1 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[36 + 0], _er_f[36 + 1], _er_f[36 + 2], _er_f[36 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    ar_ri_1 = ar_ri_1 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[40 + 0], _er_f[40 + 1], _er_f[40 + 2], _er_f[40 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    ar_ri_1 = ar_ri_1 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[44 + 0], _er_f[44 + 1], _er_f[44 + 2], _er_f[44 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    ar_ri_1 = ar_ri_1 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[48 + 0], _er_f[48 + 1], _er_f[48 + 2], _er_f[48 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    ar_ri_1 = ar_ri_1 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[52 + 0], _er_f[52 + 1], _er_f[52 + 2], _er_f[52 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    ar_ri_1 = ar_ri_1 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[56 + 0], _er_f[56 + 1], _er_f[56 + 2], _er_f[56 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    ar_ri_1 = ar_ri_1 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[60 + 0], _er_f[60 + 1], _er_f[60 + 2], _er_f[60 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_1) = _v4;
+                    }
+                    int ar_bit_24 = lane >> 2 & 1;
+                    float ar_x0_96 = _er_f[64];
+                    float ar_x1_96 = _er_f[80];
+                    float ar_send_96 = ((ar_bit_24 == 1) ? ar_x0_96 : ar_x1_96);
+                    float ar_got_96 = __shfl_xor_sync(0xFFFFFFFF, ar_send_96, 4);
+                    _er_f[64] = ((ar_bit_24 == 1) ? ar_got_96 : ar_x0_96);
+                    _er_f[80] = ((ar_bit_24 == 1) ? ar_x1_96 : ar_got_96);
+                    float ar_x0_97 = _er_f[68];
+                    float ar_x1_97 = _er_f[84];
+                    float ar_send_97 = ((ar_bit_24 == 1) ? ar_x0_97 : ar_x1_97);
+                    float ar_got_97 = __shfl_xor_sync(0xFFFFFFFF, ar_send_97, 4);
+                    _er_f[68] = ((ar_bit_24 == 1) ? ar_got_97 : ar_x0_97);
+                    _er_f[84] = ((ar_bit_24 == 1) ? ar_x1_97 : ar_got_97);
+                    float ar_x0_98 = _er_f[72];
+                    float ar_x1_98 = _er_f[88];
+                    float ar_send_98 = ((ar_bit_24 == 1) ? ar_x0_98 : ar_x1_98);
+                    float ar_got_98 = __shfl_xor_sync(0xFFFFFFFF, ar_send_98, 4);
+                    _er_f[72] = ((ar_bit_24 == 1) ? ar_got_98 : ar_x0_98);
+                    _er_f[88] = ((ar_bit_24 == 1) ? ar_x1_98 : ar_got_98);
+                    float ar_x0_99 = _er_f[76];
+                    float ar_x1_99 = _er_f[92];
+                    float ar_send_99 = ((ar_bit_24 == 1) ? ar_x0_99 : ar_x1_99);
+                    float ar_got_99 = __shfl_xor_sync(0xFFFFFFFF, ar_send_99, 4);
+                    _er_f[76] = ((ar_bit_24 == 1) ? ar_got_99 : ar_x0_99);
+                    _er_f[92] = ((ar_bit_24 == 1) ? ar_x1_99 : ar_got_99);
+                    int ar_bit_25 = lane >> 1 & 1;
+                    float ar_x0_100 = _er_f[64];
+                    float ar_x1_100 = _er_f[72];
+                    float ar_send_100 = ((ar_bit_25 == 1) ? ar_x0_100 : ar_x1_100);
+                    float ar_got_100 = __shfl_xor_sync(0xFFFFFFFF, ar_send_100, 2);
+                    _er_f[64] = ((ar_bit_25 == 1) ? ar_got_100 : ar_x0_100);
+                    _er_f[72] = ((ar_bit_25 == 1) ? ar_x1_100 : ar_got_100);
+                    float ar_x0_101 = _er_f[68];
+                    float ar_x1_101 = _er_f[76];
+                    float ar_send_101 = ((ar_bit_25 == 1) ? ar_x0_101 : ar_x1_101);
+                    float ar_got_101 = __shfl_xor_sync(0xFFFFFFFF, ar_send_101, 2);
+                    _er_f[68] = ((ar_bit_25 == 1) ? ar_got_101 : ar_x0_101);
+                    _er_f[76] = ((ar_bit_25 == 1) ? ar_x1_101 : ar_got_101);
+                    float ar_x0_102 = _er_f[80];
+                    float ar_x1_102 = _er_f[88];
+                    float ar_send_102 = ((ar_bit_25 == 1) ? ar_x0_102 : ar_x1_102);
+                    float ar_got_102 = __shfl_xor_sync(0xFFFFFFFF, ar_send_102, 2);
+                    _er_f[80] = ((ar_bit_25 == 1) ? ar_got_102 : ar_x0_102);
+                    _er_f[88] = ((ar_bit_25 == 1) ? ar_x1_102 : ar_got_102);
+                    float ar_x0_103 = _er_f[84];
+                    float ar_x1_103 = _er_f[92];
+                    float ar_send_103 = ((ar_bit_25 == 1) ? ar_x0_103 : ar_x1_103);
+                    float ar_got_103 = __shfl_xor_sync(0xFFFFFFFF, ar_send_103, 2);
+                    _er_f[84] = ((ar_bit_25 == 1) ? ar_got_103 : ar_x0_103);
+                    _er_f[92] = ((ar_bit_25 == 1) ? ar_x1_103 : ar_got_103);
+                    int ar_bit_26 = lane & 1;
+                    float ar_x0_104 = _er_f[64];
+                    float ar_x1_104 = _er_f[68];
+                    float ar_send_104 = ((ar_bit_26 == 1) ? ar_x0_104 : ar_x1_104);
+                    float ar_got_104 = __shfl_xor_sync(0xFFFFFFFF, ar_send_104, 1);
+                    _er_f[64] = ((ar_bit_26 == 1) ? ar_got_104 : ar_x0_104);
+                    _er_f[68] = ((ar_bit_26 == 1) ? ar_x1_104 : ar_got_104);
+                    float ar_x0_105 = _er_f[72];
+                    float ar_x1_105 = _er_f[76];
+                    float ar_send_105 = ((ar_bit_26 == 1) ? ar_x0_105 : ar_x1_105);
+                    float ar_got_105 = __shfl_xor_sync(0xFFFFFFFF, ar_send_105, 1);
+                    _er_f[72] = ((ar_bit_26 == 1) ? ar_got_105 : ar_x0_105);
+                    _er_f[76] = ((ar_bit_26 == 1) ? ar_x1_105 : ar_got_105);
+                    float ar_x0_106 = _er_f[80];
+                    float ar_x1_106 = _er_f[84];
+                    float ar_send_106 = ((ar_bit_26 == 1) ? ar_x0_106 : ar_x1_106);
+                    float ar_got_106 = __shfl_xor_sync(0xFFFFFFFF, ar_send_106, 1);
+                    _er_f[80] = ((ar_bit_26 == 1) ? ar_got_106 : ar_x0_106);
+                    _er_f[84] = ((ar_bit_26 == 1) ? ar_x1_106 : ar_got_106);
+                    float ar_x0_107 = _er_f[88];
+                    float ar_x1_107 = _er_f[92];
+                    float ar_send_107 = ((ar_bit_26 == 1) ? ar_x0_107 : ar_x1_107);
+                    float ar_got_107 = __shfl_xor_sync(0xFFFFFFFF, ar_send_107, 1);
+                    _er_f[88] = ((ar_bit_26 == 1) ? ar_got_107 : ar_x0_107);
+                    _er_f[92] = ((ar_bit_26 == 1) ? ar_x1_107 : ar_got_107);
+                    int ar_bit_27 = lane >> 2 & 1;
+                    float ar_x0_108 = _er_f[65];
+                    float ar_x1_108 = _er_f[81];
+                    float ar_send_108 = ((ar_bit_27 == 1) ? ar_x0_108 : ar_x1_108);
+                    float ar_got_108 = __shfl_xor_sync(0xFFFFFFFF, ar_send_108, 4);
+                    _er_f[65] = ((ar_bit_27 == 1) ? ar_got_108 : ar_x0_108);
+                    _er_f[81] = ((ar_bit_27 == 1) ? ar_x1_108 : ar_got_108);
+                    float ar_x0_109 = _er_f[69];
+                    float ar_x1_109 = _er_f[85];
+                    float ar_send_109 = ((ar_bit_27 == 1) ? ar_x0_109 : ar_x1_109);
+                    float ar_got_109 = __shfl_xor_sync(0xFFFFFFFF, ar_send_109, 4);
+                    _er_f[69] = ((ar_bit_27 == 1) ? ar_got_109 : ar_x0_109);
+                    _er_f[85] = ((ar_bit_27 == 1) ? ar_x1_109 : ar_got_109);
+                    float ar_x0_110 = _er_f[73];
+                    float ar_x1_110 = _er_f[89];
+                    float ar_send_110 = ((ar_bit_27 == 1) ? ar_x0_110 : ar_x1_110);
+                    float ar_got_110 = __shfl_xor_sync(0xFFFFFFFF, ar_send_110, 4);
+                    _er_f[73] = ((ar_bit_27 == 1) ? ar_got_110 : ar_x0_110);
+                    _er_f[89] = ((ar_bit_27 == 1) ? ar_x1_110 : ar_got_110);
+                    float ar_x0_111 = _er_f[77];
+                    float ar_x1_111 = _er_f[93];
+                    float ar_send_111 = ((ar_bit_27 == 1) ? ar_x0_111 : ar_x1_111);
+                    float ar_got_111 = __shfl_xor_sync(0xFFFFFFFF, ar_send_111, 4);
+                    _er_f[77] = ((ar_bit_27 == 1) ? ar_got_111 : ar_x0_111);
+                    _er_f[93] = ((ar_bit_27 == 1) ? ar_x1_111 : ar_got_111);
+                    int ar_bit_28 = lane >> 1 & 1;
+                    float ar_x0_112 = _er_f[65];
+                    float ar_x1_112 = _er_f[73];
+                    float ar_send_112 = ((ar_bit_28 == 1) ? ar_x0_112 : ar_x1_112);
+                    float ar_got_112 = __shfl_xor_sync(0xFFFFFFFF, ar_send_112, 2);
+                    _er_f[65] = ((ar_bit_28 == 1) ? ar_got_112 : ar_x0_112);
+                    _er_f[73] = ((ar_bit_28 == 1) ? ar_x1_112 : ar_got_112);
+                    float ar_x0_113 = _er_f[69];
+                    float ar_x1_113 = _er_f[77];
+                    float ar_send_113 = ((ar_bit_28 == 1) ? ar_x0_113 : ar_x1_113);
+                    float ar_got_113 = __shfl_xor_sync(0xFFFFFFFF, ar_send_113, 2);
+                    _er_f[69] = ((ar_bit_28 == 1) ? ar_got_113 : ar_x0_113);
+                    _er_f[77] = ((ar_bit_28 == 1) ? ar_x1_113 : ar_got_113);
+                    float ar_x0_114 = _er_f[81];
+                    float ar_x1_114 = _er_f[89];
+                    float ar_send_114 = ((ar_bit_28 == 1) ? ar_x0_114 : ar_x1_114);
+                    float ar_got_114 = __shfl_xor_sync(0xFFFFFFFF, ar_send_114, 2);
+                    _er_f[81] = ((ar_bit_28 == 1) ? ar_got_114 : ar_x0_114);
+                    _er_f[89] = ((ar_bit_28 == 1) ? ar_x1_114 : ar_got_114);
+                    float ar_x0_115 = _er_f[85];
+                    float ar_x1_115 = _er_f[93];
+                    float ar_send_115 = ((ar_bit_28 == 1) ? ar_x0_115 : ar_x1_115);
+                    float ar_got_115 = __shfl_xor_sync(0xFFFFFFFF, ar_send_115, 2);
+                    _er_f[85] = ((ar_bit_28 == 1) ? ar_got_115 : ar_x0_115);
+                    _er_f[93] = ((ar_bit_28 == 1) ? ar_x1_115 : ar_got_115);
+                    int ar_bit_29 = lane & 1;
+                    float ar_x0_116 = _er_f[65];
+                    float ar_x1_116 = _er_f[69];
+                    float ar_send_116 = ((ar_bit_29 == 1) ? ar_x0_116 : ar_x1_116);
+                    float ar_got_116 = __shfl_xor_sync(0xFFFFFFFF, ar_send_116, 1);
+                    _er_f[65] = ((ar_bit_29 == 1) ? ar_got_116 : ar_x0_116);
+                    _er_f[69] = ((ar_bit_29 == 1) ? ar_x1_116 : ar_got_116);
+                    float ar_x0_117 = _er_f[73];
+                    float ar_x1_117 = _er_f[77];
+                    float ar_send_117 = ((ar_bit_29 == 1) ? ar_x0_117 : ar_x1_117);
+                    float ar_got_117 = __shfl_xor_sync(0xFFFFFFFF, ar_send_117, 1);
+                    _er_f[73] = ((ar_bit_29 == 1) ? ar_got_117 : ar_x0_117);
+                    _er_f[77] = ((ar_bit_29 == 1) ? ar_x1_117 : ar_got_117);
+                    float ar_x0_118 = _er_f[81];
+                    float ar_x1_118 = _er_f[85];
+                    float ar_send_118 = ((ar_bit_29 == 1) ? ar_x0_118 : ar_x1_118);
+                    float ar_got_118 = __shfl_xor_sync(0xFFFFFFFF, ar_send_118, 1);
+                    _er_f[81] = ((ar_bit_29 == 1) ? ar_got_118 : ar_x0_118);
+                    _er_f[85] = ((ar_bit_29 == 1) ? ar_x1_118 : ar_got_118);
+                    float ar_x0_119 = _er_f[89];
+                    float ar_x1_119 = _er_f[93];
+                    float ar_send_119 = ((ar_bit_29 == 1) ? ar_x0_119 : ar_x1_119);
+                    float ar_got_119 = __shfl_xor_sync(0xFFFFFFFF, ar_send_119, 1);
+                    _er_f[89] = ((ar_bit_29 == 1) ? ar_got_119 : ar_x0_119);
+                    _er_f[93] = ((ar_bit_29 == 1) ? ar_x1_119 : ar_got_119);
+                    int ar_bit_30 = lane >> 2 & 1;
+                    float ar_x0_120 = _er_f[66];
+                    float ar_x1_120 = _er_f[82];
+                    float ar_send_120 = ((ar_bit_30 == 1) ? ar_x0_120 : ar_x1_120);
+                    float ar_got_120 = __shfl_xor_sync(0xFFFFFFFF, ar_send_120, 4);
+                    _er_f[66] = ((ar_bit_30 == 1) ? ar_got_120 : ar_x0_120);
+                    _er_f[82] = ((ar_bit_30 == 1) ? ar_x1_120 : ar_got_120);
+                    float ar_x0_121 = _er_f[70];
+                    float ar_x1_121 = _er_f[86];
+                    float ar_send_121 = ((ar_bit_30 == 1) ? ar_x0_121 : ar_x1_121);
+                    float ar_got_121 = __shfl_xor_sync(0xFFFFFFFF, ar_send_121, 4);
+                    _er_f[70] = ((ar_bit_30 == 1) ? ar_got_121 : ar_x0_121);
+                    _er_f[86] = ((ar_bit_30 == 1) ? ar_x1_121 : ar_got_121);
+                    float ar_x0_122 = _er_f[74];
+                    float ar_x1_122 = _er_f[90];
+                    float ar_send_122 = ((ar_bit_30 == 1) ? ar_x0_122 : ar_x1_122);
+                    float ar_got_122 = __shfl_xor_sync(0xFFFFFFFF, ar_send_122, 4);
+                    _er_f[74] = ((ar_bit_30 == 1) ? ar_got_122 : ar_x0_122);
+                    _er_f[90] = ((ar_bit_30 == 1) ? ar_x1_122 : ar_got_122);
+                    float ar_x0_123 = _er_f[78];
+                    float ar_x1_123 = _er_f[94];
+                    float ar_send_123 = ((ar_bit_30 == 1) ? ar_x0_123 : ar_x1_123);
+                    float ar_got_123 = __shfl_xor_sync(0xFFFFFFFF, ar_send_123, 4);
+                    _er_f[78] = ((ar_bit_30 == 1) ? ar_got_123 : ar_x0_123);
+                    _er_f[94] = ((ar_bit_30 == 1) ? ar_x1_123 : ar_got_123);
+                    int ar_bit_31 = lane >> 1 & 1;
+                    float ar_x0_124 = _er_f[66];
+                    float ar_x1_124 = _er_f[74];
+                    float ar_send_124 = ((ar_bit_31 == 1) ? ar_x0_124 : ar_x1_124);
+                    float ar_got_124 = __shfl_xor_sync(0xFFFFFFFF, ar_send_124, 2);
+                    _er_f[66] = ((ar_bit_31 == 1) ? ar_got_124 : ar_x0_124);
+                    _er_f[74] = ((ar_bit_31 == 1) ? ar_x1_124 : ar_got_124);
+                    float ar_x0_125 = _er_f[70];
+                    float ar_x1_125 = _er_f[78];
+                    float ar_send_125 = ((ar_bit_31 == 1) ? ar_x0_125 : ar_x1_125);
+                    float ar_got_125 = __shfl_xor_sync(0xFFFFFFFF, ar_send_125, 2);
+                    _er_f[70] = ((ar_bit_31 == 1) ? ar_got_125 : ar_x0_125);
+                    _er_f[78] = ((ar_bit_31 == 1) ? ar_x1_125 : ar_got_125);
+                    float ar_x0_126 = _er_f[82];
+                    float ar_x1_126 = _er_f[90];
+                    float ar_send_126 = ((ar_bit_31 == 1) ? ar_x0_126 : ar_x1_126);
+                    float ar_got_126 = __shfl_xor_sync(0xFFFFFFFF, ar_send_126, 2);
+                    _er_f[82] = ((ar_bit_31 == 1) ? ar_got_126 : ar_x0_126);
+                    _er_f[90] = ((ar_bit_31 == 1) ? ar_x1_126 : ar_got_126);
+                    float ar_x0_127 = _er_f[86];
+                    float ar_x1_127 = _er_f[94];
+                    float ar_send_127 = ((ar_bit_31 == 1) ? ar_x0_127 : ar_x1_127);
+                    float ar_got_127 = __shfl_xor_sync(0xFFFFFFFF, ar_send_127, 2);
+                    _er_f[86] = ((ar_bit_31 == 1) ? ar_got_127 : ar_x0_127);
+                    _er_f[94] = ((ar_bit_31 == 1) ? ar_x1_127 : ar_got_127);
+                    int ar_bit_32 = lane & 1;
+                    float ar_x0_128 = _er_f[66];
+                    float ar_x1_128 = _er_f[70];
+                    float ar_send_128 = ((ar_bit_32 == 1) ? ar_x0_128 : ar_x1_128);
+                    float ar_got_128 = __shfl_xor_sync(0xFFFFFFFF, ar_send_128, 1);
+                    _er_f[66] = ((ar_bit_32 == 1) ? ar_got_128 : ar_x0_128);
+                    _er_f[70] = ((ar_bit_32 == 1) ? ar_x1_128 : ar_got_128);
+                    float ar_x0_129 = _er_f[74];
+                    float ar_x1_129 = _er_f[78];
+                    float ar_send_129 = ((ar_bit_32 == 1) ? ar_x0_129 : ar_x1_129);
+                    float ar_got_129 = __shfl_xor_sync(0xFFFFFFFF, ar_send_129, 1);
+                    _er_f[74] = ((ar_bit_32 == 1) ? ar_got_129 : ar_x0_129);
+                    _er_f[78] = ((ar_bit_32 == 1) ? ar_x1_129 : ar_got_129);
+                    float ar_x0_130 = _er_f[82];
+                    float ar_x1_130 = _er_f[86];
+                    float ar_send_130 = ((ar_bit_32 == 1) ? ar_x0_130 : ar_x1_130);
+                    float ar_got_130 = __shfl_xor_sync(0xFFFFFFFF, ar_send_130, 1);
+                    _er_f[82] = ((ar_bit_32 == 1) ? ar_got_130 : ar_x0_130);
+                    _er_f[86] = ((ar_bit_32 == 1) ? ar_x1_130 : ar_got_130);
+                    float ar_x0_131 = _er_f[90];
+                    float ar_x1_131 = _er_f[94];
+                    float ar_send_131 = ((ar_bit_32 == 1) ? ar_x0_131 : ar_x1_131);
+                    float ar_got_131 = __shfl_xor_sync(0xFFFFFFFF, ar_send_131, 1);
+                    _er_f[90] = ((ar_bit_32 == 1) ? ar_got_131 : ar_x0_131);
+                    _er_f[94] = ((ar_bit_32 == 1) ? ar_x1_131 : ar_got_131);
+                    int ar_bit_33 = lane >> 2 & 1;
+                    float ar_x0_132 = _er_f[67];
+                    float ar_x1_132 = _er_f[83];
+                    float ar_send_132 = ((ar_bit_33 == 1) ? ar_x0_132 : ar_x1_132);
+                    float ar_got_132 = __shfl_xor_sync(0xFFFFFFFF, ar_send_132, 4);
+                    _er_f[67] = ((ar_bit_33 == 1) ? ar_got_132 : ar_x0_132);
+                    _er_f[83] = ((ar_bit_33 == 1) ? ar_x1_132 : ar_got_132);
+                    float ar_x0_133 = _er_f[71];
+                    float ar_x1_133 = _er_f[87];
+                    float ar_send_133 = ((ar_bit_33 == 1) ? ar_x0_133 : ar_x1_133);
+                    float ar_got_133 = __shfl_xor_sync(0xFFFFFFFF, ar_send_133, 4);
+                    _er_f[71] = ((ar_bit_33 == 1) ? ar_got_133 : ar_x0_133);
+                    _er_f[87] = ((ar_bit_33 == 1) ? ar_x1_133 : ar_got_133);
+                    float ar_x0_134 = _er_f[75];
+                    float ar_x1_134 = _er_f[91];
+                    float ar_send_134 = ((ar_bit_33 == 1) ? ar_x0_134 : ar_x1_134);
+                    float ar_got_134 = __shfl_xor_sync(0xFFFFFFFF, ar_send_134, 4);
+                    _er_f[75] = ((ar_bit_33 == 1) ? ar_got_134 : ar_x0_134);
+                    _er_f[91] = ((ar_bit_33 == 1) ? ar_x1_134 : ar_got_134);
+                    float ar_x0_135 = _er_f[79];
+                    float ar_x1_135 = _er_f[95];
+                    float ar_send_135 = ((ar_bit_33 == 1) ? ar_x0_135 : ar_x1_135);
+                    float ar_got_135 = __shfl_xor_sync(0xFFFFFFFF, ar_send_135, 4);
+                    _er_f[79] = ((ar_bit_33 == 1) ? ar_got_135 : ar_x0_135);
+                    _er_f[95] = ((ar_bit_33 == 1) ? ar_x1_135 : ar_got_135);
+                    int ar_bit_34 = lane >> 1 & 1;
+                    float ar_x0_136 = _er_f[67];
+                    float ar_x1_136 = _er_f[75];
+                    float ar_send_136 = ((ar_bit_34 == 1) ? ar_x0_136 : ar_x1_136);
+                    float ar_got_136 = __shfl_xor_sync(0xFFFFFFFF, ar_send_136, 2);
+                    _er_f[67] = ((ar_bit_34 == 1) ? ar_got_136 : ar_x0_136);
+                    _er_f[75] = ((ar_bit_34 == 1) ? ar_x1_136 : ar_got_136);
+                    float ar_x0_137 = _er_f[71];
+                    float ar_x1_137 = _er_f[79];
+                    float ar_send_137 = ((ar_bit_34 == 1) ? ar_x0_137 : ar_x1_137);
+                    float ar_got_137 = __shfl_xor_sync(0xFFFFFFFF, ar_send_137, 2);
+                    _er_f[71] = ((ar_bit_34 == 1) ? ar_got_137 : ar_x0_137);
+                    _er_f[79] = ((ar_bit_34 == 1) ? ar_x1_137 : ar_got_137);
+                    float ar_x0_138 = _er_f[83];
+                    float ar_x1_138 = _er_f[91];
+                    float ar_send_138 = ((ar_bit_34 == 1) ? ar_x0_138 : ar_x1_138);
+                    float ar_got_138 = __shfl_xor_sync(0xFFFFFFFF, ar_send_138, 2);
+                    _er_f[83] = ((ar_bit_34 == 1) ? ar_got_138 : ar_x0_138);
+                    _er_f[91] = ((ar_bit_34 == 1) ? ar_x1_138 : ar_got_138);
+                    float ar_x0_139 = _er_f[87];
+                    float ar_x1_139 = _er_f[95];
+                    float ar_send_139 = ((ar_bit_34 == 1) ? ar_x0_139 : ar_x1_139);
+                    float ar_got_139 = __shfl_xor_sync(0xFFFFFFFF, ar_send_139, 2);
+                    _er_f[87] = ((ar_bit_34 == 1) ? ar_got_139 : ar_x0_139);
+                    _er_f[95] = ((ar_bit_34 == 1) ? ar_x1_139 : ar_got_139);
+                    int ar_bit_35 = lane & 1;
+                    float ar_x0_140 = _er_f[67];
+                    float ar_x1_140 = _er_f[71];
+                    float ar_send_140 = ((ar_bit_35 == 1) ? ar_x0_140 : ar_x1_140);
+                    float ar_got_140 = __shfl_xor_sync(0xFFFFFFFF, ar_send_140, 1);
+                    _er_f[67] = ((ar_bit_35 == 1) ? ar_got_140 : ar_x0_140);
+                    _er_f[71] = ((ar_bit_35 == 1) ? ar_x1_140 : ar_got_140);
+                    float ar_x0_141 = _er_f[75];
+                    float ar_x1_141 = _er_f[79];
+                    float ar_send_141 = ((ar_bit_35 == 1) ? ar_x0_141 : ar_x1_141);
+                    float ar_got_141 = __shfl_xor_sync(0xFFFFFFFF, ar_send_141, 1);
+                    _er_f[75] = ((ar_bit_35 == 1) ? ar_got_141 : ar_x0_141);
+                    _er_f[79] = ((ar_bit_35 == 1) ? ar_x1_141 : ar_got_141);
+                    float ar_x0_142 = _er_f[83];
+                    float ar_x1_142 = _er_f[87];
+                    float ar_send_142 = ((ar_bit_35 == 1) ? ar_x0_142 : ar_x1_142);
+                    float ar_got_142 = __shfl_xor_sync(0xFFFFFFFF, ar_send_142, 1);
+                    _er_f[83] = ((ar_bit_35 == 1) ? ar_got_142 : ar_x0_142);
+                    _er_f[87] = ((ar_bit_35 == 1) ? ar_x1_142 : ar_got_142);
+                    float ar_x0_143 = _er_f[91];
+                    float ar_x1_143 = _er_f[95];
+                    float ar_send_143 = ((ar_bit_35 == 1) ? ar_x0_143 : ar_x1_143);
+                    float ar_got_143 = __shfl_xor_sync(0xFFFFFFFF, ar_send_143, 1);
+                    _er_f[91] = ((ar_bit_35 == 1) ? ar_got_143 : ar_x0_143);
+                    _er_f[95] = ((ar_bit_35 == 1) ? ar_x1_143 : ar_got_143);
+                    int ar_ri_2 = er_at2 + 64;
+                    asm("" : "+r"(ar_ri_2));
+                    {
+                        float4 _v4 = make_float4(_er_f[64 + 0], _er_f[64 + 1], _er_f[64 + 2], _er_f[64 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    ar_ri_2 = ar_ri_2 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[68 + 0], _er_f[68 + 1], _er_f[68 + 2], _er_f[68 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    ar_ri_2 = ar_ri_2 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[72 + 0], _er_f[72 + 1], _er_f[72 + 2], _er_f[72 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    ar_ri_2 = ar_ri_2 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[76 + 0], _er_f[76 + 1], _er_f[76 + 2], _er_f[76 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    ar_ri_2 = ar_ri_2 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[80 + 0], _er_f[80 + 1], _er_f[80 + 2], _er_f[80 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    ar_ri_2 = ar_ri_2 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[84 + 0], _er_f[84 + 1], _er_f[84 + 2], _er_f[84 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    ar_ri_2 = ar_ri_2 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[88 + 0], _er_f[88 + 1], _er_f[88 + 2], _er_f[88 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    ar_ri_2 = ar_ri_2 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[92 + 0], _er_f[92 + 1], _er_f[92 + 2], _er_f[92 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_2) = _v4;
+                    }
+                    int ar_bit_36 = lane >> 2 & 1;
+                    float ar_x0_144 = _er_f[96];
+                    float ar_x1_144 = _er_f[112];
+                    float ar_send_144 = ((ar_bit_36 == 1) ? ar_x0_144 : ar_x1_144);
+                    float ar_got_144 = __shfl_xor_sync(0xFFFFFFFF, ar_send_144, 4);
+                    _er_f[96] = ((ar_bit_36 == 1) ? ar_got_144 : ar_x0_144);
+                    _er_f[112] = ((ar_bit_36 == 1) ? ar_x1_144 : ar_got_144);
+                    float ar_x0_145 = _er_f[100];
+                    float ar_x1_145 = _er_f[116];
+                    float ar_send_145 = ((ar_bit_36 == 1) ? ar_x0_145 : ar_x1_145);
+                    float ar_got_145 = __shfl_xor_sync(0xFFFFFFFF, ar_send_145, 4);
+                    _er_f[100] = ((ar_bit_36 == 1) ? ar_got_145 : ar_x0_145);
+                    _er_f[116] = ((ar_bit_36 == 1) ? ar_x1_145 : ar_got_145);
+                    float ar_x0_146 = _er_f[104];
+                    float ar_x1_146 = _er_f[120];
+                    float ar_send_146 = ((ar_bit_36 == 1) ? ar_x0_146 : ar_x1_146);
+                    float ar_got_146 = __shfl_xor_sync(0xFFFFFFFF, ar_send_146, 4);
+                    _er_f[104] = ((ar_bit_36 == 1) ? ar_got_146 : ar_x0_146);
+                    _er_f[120] = ((ar_bit_36 == 1) ? ar_x1_146 : ar_got_146);
+                    float ar_x0_147 = _er_f[108];
+                    float ar_x1_147 = _er_f[124];
+                    float ar_send_147 = ((ar_bit_36 == 1) ? ar_x0_147 : ar_x1_147);
+                    float ar_got_147 = __shfl_xor_sync(0xFFFFFFFF, ar_send_147, 4);
+                    _er_f[108] = ((ar_bit_36 == 1) ? ar_got_147 : ar_x0_147);
+                    _er_f[124] = ((ar_bit_36 == 1) ? ar_x1_147 : ar_got_147);
+                    int ar_bit_37 = lane >> 1 & 1;
+                    float ar_x0_148 = _er_f[96];
+                    float ar_x1_148 = _er_f[104];
+                    float ar_send_148 = ((ar_bit_37 == 1) ? ar_x0_148 : ar_x1_148);
+                    float ar_got_148 = __shfl_xor_sync(0xFFFFFFFF, ar_send_148, 2);
+                    _er_f[96] = ((ar_bit_37 == 1) ? ar_got_148 : ar_x0_148);
+                    _er_f[104] = ((ar_bit_37 == 1) ? ar_x1_148 : ar_got_148);
+                    float ar_x0_149 = _er_f[100];
+                    float ar_x1_149 = _er_f[108];
+                    float ar_send_149 = ((ar_bit_37 == 1) ? ar_x0_149 : ar_x1_149);
+                    float ar_got_149 = __shfl_xor_sync(0xFFFFFFFF, ar_send_149, 2);
+                    _er_f[100] = ((ar_bit_37 == 1) ? ar_got_149 : ar_x0_149);
+                    _er_f[108] = ((ar_bit_37 == 1) ? ar_x1_149 : ar_got_149);
+                    float ar_x0_150 = _er_f[112];
+                    float ar_x1_150 = _er_f[120];
+                    float ar_send_150 = ((ar_bit_37 == 1) ? ar_x0_150 : ar_x1_150);
+                    float ar_got_150 = __shfl_xor_sync(0xFFFFFFFF, ar_send_150, 2);
+                    _er_f[112] = ((ar_bit_37 == 1) ? ar_got_150 : ar_x0_150);
+                    _er_f[120] = ((ar_bit_37 == 1) ? ar_x1_150 : ar_got_150);
+                    float ar_x0_151 = _er_f[116];
+                    float ar_x1_151 = _er_f[124];
+                    float ar_send_151 = ((ar_bit_37 == 1) ? ar_x0_151 : ar_x1_151);
+                    float ar_got_151 = __shfl_xor_sync(0xFFFFFFFF, ar_send_151, 2);
+                    _er_f[116] = ((ar_bit_37 == 1) ? ar_got_151 : ar_x0_151);
+                    _er_f[124] = ((ar_bit_37 == 1) ? ar_x1_151 : ar_got_151);
+                    int ar_bit_38 = lane & 1;
+                    float ar_x0_152 = _er_f[96];
+                    float ar_x1_152 = _er_f[100];
+                    float ar_send_152 = ((ar_bit_38 == 1) ? ar_x0_152 : ar_x1_152);
+                    float ar_got_152 = __shfl_xor_sync(0xFFFFFFFF, ar_send_152, 1);
+                    _er_f[96] = ((ar_bit_38 == 1) ? ar_got_152 : ar_x0_152);
+                    _er_f[100] = ((ar_bit_38 == 1) ? ar_x1_152 : ar_got_152);
+                    float ar_x0_153 = _er_f[104];
+                    float ar_x1_153 = _er_f[108];
+                    float ar_send_153 = ((ar_bit_38 == 1) ? ar_x0_153 : ar_x1_153);
+                    float ar_got_153 = __shfl_xor_sync(0xFFFFFFFF, ar_send_153, 1);
+                    _er_f[104] = ((ar_bit_38 == 1) ? ar_got_153 : ar_x0_153);
+                    _er_f[108] = ((ar_bit_38 == 1) ? ar_x1_153 : ar_got_153);
+                    float ar_x0_154 = _er_f[112];
+                    float ar_x1_154 = _er_f[116];
+                    float ar_send_154 = ((ar_bit_38 == 1) ? ar_x0_154 : ar_x1_154);
+                    float ar_got_154 = __shfl_xor_sync(0xFFFFFFFF, ar_send_154, 1);
+                    _er_f[112] = ((ar_bit_38 == 1) ? ar_got_154 : ar_x0_154);
+                    _er_f[116] = ((ar_bit_38 == 1) ? ar_x1_154 : ar_got_154);
+                    float ar_x0_155 = _er_f[120];
+                    float ar_x1_155 = _er_f[124];
+                    float ar_send_155 = ((ar_bit_38 == 1) ? ar_x0_155 : ar_x1_155);
+                    float ar_got_155 = __shfl_xor_sync(0xFFFFFFFF, ar_send_155, 1);
+                    _er_f[120] = ((ar_bit_38 == 1) ? ar_got_155 : ar_x0_155);
+                    _er_f[124] = ((ar_bit_38 == 1) ? ar_x1_155 : ar_got_155);
+                    int ar_bit_39 = lane >> 2 & 1;
+                    float ar_x0_156 = _er_f[97];
+                    float ar_x1_156 = _er_f[113];
+                    float ar_send_156 = ((ar_bit_39 == 1) ? ar_x0_156 : ar_x1_156);
+                    float ar_got_156 = __shfl_xor_sync(0xFFFFFFFF, ar_send_156, 4);
+                    _er_f[97] = ((ar_bit_39 == 1) ? ar_got_156 : ar_x0_156);
+                    _er_f[113] = ((ar_bit_39 == 1) ? ar_x1_156 : ar_got_156);
+                    float ar_x0_157 = _er_f[101];
+                    float ar_x1_157 = _er_f[117];
+                    float ar_send_157 = ((ar_bit_39 == 1) ? ar_x0_157 : ar_x1_157);
+                    float ar_got_157 = __shfl_xor_sync(0xFFFFFFFF, ar_send_157, 4);
+                    _er_f[101] = ((ar_bit_39 == 1) ? ar_got_157 : ar_x0_157);
+                    _er_f[117] = ((ar_bit_39 == 1) ? ar_x1_157 : ar_got_157);
+                    float ar_x0_158 = _er_f[105];
+                    float ar_x1_158 = _er_f[121];
+                    float ar_send_158 = ((ar_bit_39 == 1) ? ar_x0_158 : ar_x1_158);
+                    float ar_got_158 = __shfl_xor_sync(0xFFFFFFFF, ar_send_158, 4);
+                    _er_f[105] = ((ar_bit_39 == 1) ? ar_got_158 : ar_x0_158);
+                    _er_f[121] = ((ar_bit_39 == 1) ? ar_x1_158 : ar_got_158);
+                    float ar_x0_159 = _er_f[109];
+                    float ar_x1_159 = _er_f[125];
+                    float ar_send_159 = ((ar_bit_39 == 1) ? ar_x0_159 : ar_x1_159);
+                    float ar_got_159 = __shfl_xor_sync(0xFFFFFFFF, ar_send_159, 4);
+                    _er_f[109] = ((ar_bit_39 == 1) ? ar_got_159 : ar_x0_159);
+                    _er_f[125] = ((ar_bit_39 == 1) ? ar_x1_159 : ar_got_159);
+                    int ar_bit_40 = lane >> 1 & 1;
+                    float ar_x0_160 = _er_f[97];
+                    float ar_x1_160 = _er_f[105];
+                    float ar_send_160 = ((ar_bit_40 == 1) ? ar_x0_160 : ar_x1_160);
+                    float ar_got_160 = __shfl_xor_sync(0xFFFFFFFF, ar_send_160, 2);
+                    _er_f[97] = ((ar_bit_40 == 1) ? ar_got_160 : ar_x0_160);
+                    _er_f[105] = ((ar_bit_40 == 1) ? ar_x1_160 : ar_got_160);
+                    float ar_x0_161 = _er_f[101];
+                    float ar_x1_161 = _er_f[109];
+                    float ar_send_161 = ((ar_bit_40 == 1) ? ar_x0_161 : ar_x1_161);
+                    float ar_got_161 = __shfl_xor_sync(0xFFFFFFFF, ar_send_161, 2);
+                    _er_f[101] = ((ar_bit_40 == 1) ? ar_got_161 : ar_x0_161);
+                    _er_f[109] = ((ar_bit_40 == 1) ? ar_x1_161 : ar_got_161);
+                    float ar_x0_162 = _er_f[113];
+                    float ar_x1_162 = _er_f[121];
+                    float ar_send_162 = ((ar_bit_40 == 1) ? ar_x0_162 : ar_x1_162);
+                    float ar_got_162 = __shfl_xor_sync(0xFFFFFFFF, ar_send_162, 2);
+                    _er_f[113] = ((ar_bit_40 == 1) ? ar_got_162 : ar_x0_162);
+                    _er_f[121] = ((ar_bit_40 == 1) ? ar_x1_162 : ar_got_162);
+                    float ar_x0_163 = _er_f[117];
+                    float ar_x1_163 = _er_f[125];
+                    float ar_send_163 = ((ar_bit_40 == 1) ? ar_x0_163 : ar_x1_163);
+                    float ar_got_163 = __shfl_xor_sync(0xFFFFFFFF, ar_send_163, 2);
+                    _er_f[117] = ((ar_bit_40 == 1) ? ar_got_163 : ar_x0_163);
+                    _er_f[125] = ((ar_bit_40 == 1) ? ar_x1_163 : ar_got_163);
+                    int ar_bit_41 = lane & 1;
+                    float ar_x0_164 = _er_f[97];
+                    float ar_x1_164 = _er_f[101];
+                    float ar_send_164 = ((ar_bit_41 == 1) ? ar_x0_164 : ar_x1_164);
+                    float ar_got_164 = __shfl_xor_sync(0xFFFFFFFF, ar_send_164, 1);
+                    _er_f[97] = ((ar_bit_41 == 1) ? ar_got_164 : ar_x0_164);
+                    _er_f[101] = ((ar_bit_41 == 1) ? ar_x1_164 : ar_got_164);
+                    float ar_x0_165 = _er_f[105];
+                    float ar_x1_165 = _er_f[109];
+                    float ar_send_165 = ((ar_bit_41 == 1) ? ar_x0_165 : ar_x1_165);
+                    float ar_got_165 = __shfl_xor_sync(0xFFFFFFFF, ar_send_165, 1);
+                    _er_f[105] = ((ar_bit_41 == 1) ? ar_got_165 : ar_x0_165);
+                    _er_f[109] = ((ar_bit_41 == 1) ? ar_x1_165 : ar_got_165);
+                    float ar_x0_166 = _er_f[113];
+                    float ar_x1_166 = _er_f[117];
+                    float ar_send_166 = ((ar_bit_41 == 1) ? ar_x0_166 : ar_x1_166);
+                    float ar_got_166 = __shfl_xor_sync(0xFFFFFFFF, ar_send_166, 1);
+                    _er_f[113] = ((ar_bit_41 == 1) ? ar_got_166 : ar_x0_166);
+                    _er_f[117] = ((ar_bit_41 == 1) ? ar_x1_166 : ar_got_166);
+                    float ar_x0_167 = _er_f[121];
+                    float ar_x1_167 = _er_f[125];
+                    float ar_send_167 = ((ar_bit_41 == 1) ? ar_x0_167 : ar_x1_167);
+                    float ar_got_167 = __shfl_xor_sync(0xFFFFFFFF, ar_send_167, 1);
+                    _er_f[121] = ((ar_bit_41 == 1) ? ar_got_167 : ar_x0_167);
+                    _er_f[125] = ((ar_bit_41 == 1) ? ar_x1_167 : ar_got_167);
+                    int ar_bit_42 = lane >> 2 & 1;
+                    float ar_x0_168 = _er_f[98];
+                    float ar_x1_168 = _er_f[114];
+                    float ar_send_168 = ((ar_bit_42 == 1) ? ar_x0_168 : ar_x1_168);
+                    float ar_got_168 = __shfl_xor_sync(0xFFFFFFFF, ar_send_168, 4);
+                    _er_f[98] = ((ar_bit_42 == 1) ? ar_got_168 : ar_x0_168);
+                    _er_f[114] = ((ar_bit_42 == 1) ? ar_x1_168 : ar_got_168);
+                    float ar_x0_169 = _er_f[102];
+                    float ar_x1_169 = _er_f[118];
+                    float ar_send_169 = ((ar_bit_42 == 1) ? ar_x0_169 : ar_x1_169);
+                    float ar_got_169 = __shfl_xor_sync(0xFFFFFFFF, ar_send_169, 4);
+                    _er_f[102] = ((ar_bit_42 == 1) ? ar_got_169 : ar_x0_169);
+                    _er_f[118] = ((ar_bit_42 == 1) ? ar_x1_169 : ar_got_169);
+                    float ar_x0_170 = _er_f[106];
+                    float ar_x1_170 = _er_f[122];
+                    float ar_send_170 = ((ar_bit_42 == 1) ? ar_x0_170 : ar_x1_170);
+                    float ar_got_170 = __shfl_xor_sync(0xFFFFFFFF, ar_send_170, 4);
+                    _er_f[106] = ((ar_bit_42 == 1) ? ar_got_170 : ar_x0_170);
+                    _er_f[122] = ((ar_bit_42 == 1) ? ar_x1_170 : ar_got_170);
+                    float ar_x0_171 = _er_f[110];
+                    float ar_x1_171 = _er_f[126];
+                    float ar_send_171 = ((ar_bit_42 == 1) ? ar_x0_171 : ar_x1_171);
+                    float ar_got_171 = __shfl_xor_sync(0xFFFFFFFF, ar_send_171, 4);
+                    _er_f[110] = ((ar_bit_42 == 1) ? ar_got_171 : ar_x0_171);
+                    _er_f[126] = ((ar_bit_42 == 1) ? ar_x1_171 : ar_got_171);
+                    int ar_bit_43 = lane >> 1 & 1;
+                    float ar_x0_172 = _er_f[98];
+                    float ar_x1_172 = _er_f[106];
+                    float ar_send_172 = ((ar_bit_43 == 1) ? ar_x0_172 : ar_x1_172);
+                    float ar_got_172 = __shfl_xor_sync(0xFFFFFFFF, ar_send_172, 2);
+                    _er_f[98] = ((ar_bit_43 == 1) ? ar_got_172 : ar_x0_172);
+                    _er_f[106] = ((ar_bit_43 == 1) ? ar_x1_172 : ar_got_172);
+                    float ar_x0_173 = _er_f[102];
+                    float ar_x1_173 = _er_f[110];
+                    float ar_send_173 = ((ar_bit_43 == 1) ? ar_x0_173 : ar_x1_173);
+                    float ar_got_173 = __shfl_xor_sync(0xFFFFFFFF, ar_send_173, 2);
+                    _er_f[102] = ((ar_bit_43 == 1) ? ar_got_173 : ar_x0_173);
+                    _er_f[110] = ((ar_bit_43 == 1) ? ar_x1_173 : ar_got_173);
+                    float ar_x0_174 = _er_f[114];
+                    float ar_x1_174 = _er_f[122];
+                    float ar_send_174 = ((ar_bit_43 == 1) ? ar_x0_174 : ar_x1_174);
+                    float ar_got_174 = __shfl_xor_sync(0xFFFFFFFF, ar_send_174, 2);
+                    _er_f[114] = ((ar_bit_43 == 1) ? ar_got_174 : ar_x0_174);
+                    _er_f[122] = ((ar_bit_43 == 1) ? ar_x1_174 : ar_got_174);
+                    float ar_x0_175 = _er_f[118];
+                    float ar_x1_175 = _er_f[126];
+                    float ar_send_175 = ((ar_bit_43 == 1) ? ar_x0_175 : ar_x1_175);
+                    float ar_got_175 = __shfl_xor_sync(0xFFFFFFFF, ar_send_175, 2);
+                    _er_f[118] = ((ar_bit_43 == 1) ? ar_got_175 : ar_x0_175);
+                    _er_f[126] = ((ar_bit_43 == 1) ? ar_x1_175 : ar_got_175);
+                    int ar_bit_44 = lane & 1;
+                    float ar_x0_176 = _er_f[98];
+                    float ar_x1_176 = _er_f[102];
+                    float ar_send_176 = ((ar_bit_44 == 1) ? ar_x0_176 : ar_x1_176);
+                    float ar_got_176 = __shfl_xor_sync(0xFFFFFFFF, ar_send_176, 1);
+                    _er_f[98] = ((ar_bit_44 == 1) ? ar_got_176 : ar_x0_176);
+                    _er_f[102] = ((ar_bit_44 == 1) ? ar_x1_176 : ar_got_176);
+                    float ar_x0_177 = _er_f[106];
+                    float ar_x1_177 = _er_f[110];
+                    float ar_send_177 = ((ar_bit_44 == 1) ? ar_x0_177 : ar_x1_177);
+                    float ar_got_177 = __shfl_xor_sync(0xFFFFFFFF, ar_send_177, 1);
+                    _er_f[106] = ((ar_bit_44 == 1) ? ar_got_177 : ar_x0_177);
+                    _er_f[110] = ((ar_bit_44 == 1) ? ar_x1_177 : ar_got_177);
+                    float ar_x0_178 = _er_f[114];
+                    float ar_x1_178 = _er_f[118];
+                    float ar_send_178 = ((ar_bit_44 == 1) ? ar_x0_178 : ar_x1_178);
+                    float ar_got_178 = __shfl_xor_sync(0xFFFFFFFF, ar_send_178, 1);
+                    _er_f[114] = ((ar_bit_44 == 1) ? ar_got_178 : ar_x0_178);
+                    _er_f[118] = ((ar_bit_44 == 1) ? ar_x1_178 : ar_got_178);
+                    float ar_x0_179 = _er_f[122];
+                    float ar_x1_179 = _er_f[126];
+                    float ar_send_179 = ((ar_bit_44 == 1) ? ar_x0_179 : ar_x1_179);
+                    float ar_got_179 = __shfl_xor_sync(0xFFFFFFFF, ar_send_179, 1);
+                    _er_f[122] = ((ar_bit_44 == 1) ? ar_got_179 : ar_x0_179);
+                    _er_f[126] = ((ar_bit_44 == 1) ? ar_x1_179 : ar_got_179);
+                    int ar_bit_45 = lane >> 2 & 1;
+                    float ar_x0_180 = _er_f[99];
+                    float ar_x1_180 = _er_f[115];
+                    float ar_send_180 = ((ar_bit_45 == 1) ? ar_x0_180 : ar_x1_180);
+                    float ar_got_180 = __shfl_xor_sync(0xFFFFFFFF, ar_send_180, 4);
+                    _er_f[99] = ((ar_bit_45 == 1) ? ar_got_180 : ar_x0_180);
+                    _er_f[115] = ((ar_bit_45 == 1) ? ar_x1_180 : ar_got_180);
+                    float ar_x0_181 = _er_f[103];
+                    float ar_x1_181 = _er_f[119];
+                    float ar_send_181 = ((ar_bit_45 == 1) ? ar_x0_181 : ar_x1_181);
+                    float ar_got_181 = __shfl_xor_sync(0xFFFFFFFF, ar_send_181, 4);
+                    _er_f[103] = ((ar_bit_45 == 1) ? ar_got_181 : ar_x0_181);
+                    _er_f[119] = ((ar_bit_45 == 1) ? ar_x1_181 : ar_got_181);
+                    float ar_x0_182 = _er_f[107];
+                    float ar_x1_182 = _er_f[123];
+                    float ar_send_182 = ((ar_bit_45 == 1) ? ar_x0_182 : ar_x1_182);
+                    float ar_got_182 = __shfl_xor_sync(0xFFFFFFFF, ar_send_182, 4);
+                    _er_f[107] = ((ar_bit_45 == 1) ? ar_got_182 : ar_x0_182);
+                    _er_f[123] = ((ar_bit_45 == 1) ? ar_x1_182 : ar_got_182);
+                    float ar_x0_183 = _er_f[111];
+                    float ar_x1_183 = _er_f[127];
+                    float ar_send_183 = ((ar_bit_45 == 1) ? ar_x0_183 : ar_x1_183);
+                    float ar_got_183 = __shfl_xor_sync(0xFFFFFFFF, ar_send_183, 4);
+                    _er_f[111] = ((ar_bit_45 == 1) ? ar_got_183 : ar_x0_183);
+                    _er_f[127] = ((ar_bit_45 == 1) ? ar_x1_183 : ar_got_183);
+                    int ar_bit_46 = lane >> 1 & 1;
+                    float ar_x0_184 = _er_f[99];
+                    float ar_x1_184 = _er_f[107];
+                    float ar_send_184 = ((ar_bit_46 == 1) ? ar_x0_184 : ar_x1_184);
+                    float ar_got_184 = __shfl_xor_sync(0xFFFFFFFF, ar_send_184, 2);
+                    _er_f[99] = ((ar_bit_46 == 1) ? ar_got_184 : ar_x0_184);
+                    _er_f[107] = ((ar_bit_46 == 1) ? ar_x1_184 : ar_got_184);
+                    float ar_x0_185 = _er_f[103];
+                    float ar_x1_185 = _er_f[111];
+                    float ar_send_185 = ((ar_bit_46 == 1) ? ar_x0_185 : ar_x1_185);
+                    float ar_got_185 = __shfl_xor_sync(0xFFFFFFFF, ar_send_185, 2);
+                    _er_f[103] = ((ar_bit_46 == 1) ? ar_got_185 : ar_x0_185);
+                    _er_f[111] = ((ar_bit_46 == 1) ? ar_x1_185 : ar_got_185);
+                    float ar_x0_186 = _er_f[115];
+                    float ar_x1_186 = _er_f[123];
+                    float ar_send_186 = ((ar_bit_46 == 1) ? ar_x0_186 : ar_x1_186);
+                    float ar_got_186 = __shfl_xor_sync(0xFFFFFFFF, ar_send_186, 2);
+                    _er_f[115] = ((ar_bit_46 == 1) ? ar_got_186 : ar_x0_186);
+                    _er_f[123] = ((ar_bit_46 == 1) ? ar_x1_186 : ar_got_186);
+                    float ar_x0_187 = _er_f[119];
+                    float ar_x1_187 = _er_f[127];
+                    float ar_send_187 = ((ar_bit_46 == 1) ? ar_x0_187 : ar_x1_187);
+                    float ar_got_187 = __shfl_xor_sync(0xFFFFFFFF, ar_send_187, 2);
+                    _er_f[119] = ((ar_bit_46 == 1) ? ar_got_187 : ar_x0_187);
+                    _er_f[127] = ((ar_bit_46 == 1) ? ar_x1_187 : ar_got_187);
+                    int ar_bit_47 = lane & 1;
+                    float ar_x0_188 = _er_f[99];
+                    float ar_x1_188 = _er_f[103];
+                    float ar_send_188 = ((ar_bit_47 == 1) ? ar_x0_188 : ar_x1_188);
+                    float ar_got_188 = __shfl_xor_sync(0xFFFFFFFF, ar_send_188, 1);
+                    _er_f[99] = ((ar_bit_47 == 1) ? ar_got_188 : ar_x0_188);
+                    _er_f[103] = ((ar_bit_47 == 1) ? ar_x1_188 : ar_got_188);
+                    float ar_x0_189 = _er_f[107];
+                    float ar_x1_189 = _er_f[111];
+                    float ar_send_189 = ((ar_bit_47 == 1) ? ar_x0_189 : ar_x1_189);
+                    float ar_got_189 = __shfl_xor_sync(0xFFFFFFFF, ar_send_189, 1);
+                    _er_f[107] = ((ar_bit_47 == 1) ? ar_got_189 : ar_x0_189);
+                    _er_f[111] = ((ar_bit_47 == 1) ? ar_x1_189 : ar_got_189);
+                    float ar_x0_190 = _er_f[115];
+                    float ar_x1_190 = _er_f[119];
+                    float ar_send_190 = ((ar_bit_47 == 1) ? ar_x0_190 : ar_x1_190);
+                    float ar_got_190 = __shfl_xor_sync(0xFFFFFFFF, ar_send_190, 1);
+                    _er_f[115] = ((ar_bit_47 == 1) ? ar_got_190 : ar_x0_190);
+                    _er_f[119] = ((ar_bit_47 == 1) ? ar_x1_190 : ar_got_190);
+                    float ar_x0_191 = _er_f[123];
+                    float ar_x1_191 = _er_f[127];
+                    float ar_send_191 = ((ar_bit_47 == 1) ? ar_x0_191 : ar_x1_191);
+                    float ar_got_191 = __shfl_xor_sync(0xFFFFFFFF, ar_send_191, 1);
+                    _er_f[123] = ((ar_bit_47 == 1) ? ar_got_191 : ar_x0_191);
+                    _er_f[127] = ((ar_bit_47 == 1) ? ar_x1_191 : ar_got_191);
+                    int ar_ri_3 = er_at2 + 96;
+                    asm("" : "+r"(ar_ri_3));
+                    {
+                        float4 _v4 = make_float4(_er_f[96 + 0], _er_f[96 + 1], _er_f[96 + 2], _er_f[96 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
+                    ar_ri_3 = ar_ri_3 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[100 + 0], _er_f[100 + 1], _er_f[100 + 2], _er_f[100 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
+                    ar_ri_3 = ar_ri_3 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[104 + 0], _er_f[104 + 1], _er_f[104 + 2], _er_f[104 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
+                    ar_ri_3 = ar_ri_3 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[108 + 0], _er_f[108 + 1], _er_f[108 + 2], _er_f[108 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
+                    ar_ri_3 = ar_ri_3 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[112 + 0], _er_f[112 + 1], _er_f[112 + 2], _er_f[112 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
+                    ar_ri_3 = ar_ri_3 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[116 + 0], _er_f[116 + 1], _er_f[116 + 2], _er_f[116 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
+                    ar_ri_3 = ar_ri_3 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[120 + 0], _er_f[120 + 1], _er_f[120 + 2], _er_f[120 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
+                    ar_ri_3 = ar_ri_3 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[124 + 0], _er_f[124 + 1], _er_f[124 + 2], _er_f[124 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_3) = _v4;
+                    }
                 }
                 asm volatile(
                     "tcgen05.ld.sync.aligned.32x32b.x32.b32"
@@ -6690,219 +7722,1476 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                 asm volatile("tcgen05.wait::ld.sync.aligned;");
                 if (elect_sync()) {
                     asm volatile("tcgen05.fence::before_thread_sync;");
+#else
+                int er_out = (int)e_ue * stride_e + row_n * ldc + col0 + epi_half * 128;
+                {
+                    const unsigned* _raw_stv8_17 = reinterpret_cast<const unsigned*>(_er_packed);
+#endif  // CAKE_WGRAD_OUT
                     asm volatile(
+#if CAKE_WGRAD_OUT == 32
                         "mbarrier.arrive.release.cta.shared::cluster.b64 _, [%0];"
                         :: "r"((epilogue_done_addr) & 0xFEFFFFFF) : "memory");
-                }
-                _phase_mainloop_done ^= 1;
-                {
-                    unsigned _stv8_49_0 = __float_as_uint(_er_f[0 + 0]);
-                    unsigned _stv8_49_1 = __float_as_uint(_er_f[0 + 1]);
-                    unsigned _stv8_49_2 = __float_as_uint(_er_f[0 + 2]);
-                    unsigned _stv8_49_3 = __float_as_uint(_er_f[0 + 3]);
-                    unsigned _stv8_49_4 = __float_as_uint(_er_f[0 + 4]);
-                    unsigned _stv8_49_5 = __float_as_uint(_er_f[0 + 5]);
-                    unsigned _stv8_49_6 = __float_as_uint(_er_f[0 + 6]);
-                    unsigned _stv8_49_7 = __float_as_uint(_er_f[0 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 256) + (0))), "r"(_stv8_49_0), "r"(_stv8_49_1), "r"(_stv8_49_2), "r"(_stv8_49_3), "r"(_stv8_49_4), "r"(_stv8_49_5), "r"(_stv8_49_6), "r"(_stv8_49_7) : "memory");
-                }
-                {
-                    unsigned _stv8_50_0 = __float_as_uint(_er_f[8 + 0]);
-                    unsigned _stv8_50_1 = __float_as_uint(_er_f[8 + 1]);
-                    unsigned _stv8_50_2 = __float_as_uint(_er_f[8 + 2]);
-                    unsigned _stv8_50_3 = __float_as_uint(_er_f[8 + 3]);
-                    unsigned _stv8_50_4 = __float_as_uint(_er_f[8 + 4]);
-                    unsigned _stv8_50_5 = __float_as_uint(_er_f[8 + 5]);
-                    unsigned _stv8_50_6 = __float_as_uint(_er_f[8 + 6]);
-                    unsigned _stv8_50_7 = __float_as_uint(_er_f[8 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 264) + (0))), "r"(_stv8_50_0), "r"(_stv8_50_1), "r"(_stv8_50_2), "r"(_stv8_50_3), "r"(_stv8_50_4), "r"(_stv8_50_5), "r"(_stv8_50_6), "r"(_stv8_50_7) : "memory");
-                }
-                {
-                    unsigned _stv8_51_0 = __float_as_uint(_er_f[16 + 0]);
-                    unsigned _stv8_51_1 = __float_as_uint(_er_f[16 + 1]);
-                    unsigned _stv8_51_2 = __float_as_uint(_er_f[16 + 2]);
-                    unsigned _stv8_51_3 = __float_as_uint(_er_f[16 + 3]);
-                    unsigned _stv8_51_4 = __float_as_uint(_er_f[16 + 4]);
-                    unsigned _stv8_51_5 = __float_as_uint(_er_f[16 + 5]);
-                    unsigned _stv8_51_6 = __float_as_uint(_er_f[16 + 6]);
-                    unsigned _stv8_51_7 = __float_as_uint(_er_f[16 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 272) + (0))), "r"(_stv8_51_0), "r"(_stv8_51_1), "r"(_stv8_51_2), "r"(_stv8_51_3), "r"(_stv8_51_4), "r"(_stv8_51_5), "r"(_stv8_51_6), "r"(_stv8_51_7) : "memory");
-                }
-                {
-                    unsigned _stv8_52_0 = __float_as_uint(_er_f[24 + 0]);
-                    unsigned _stv8_52_1 = __float_as_uint(_er_f[24 + 1]);
-                    unsigned _stv8_52_2 = __float_as_uint(_er_f[24 + 2]);
-                    unsigned _stv8_52_3 = __float_as_uint(_er_f[24 + 3]);
-                    unsigned _stv8_52_4 = __float_as_uint(_er_f[24 + 4]);
-                    unsigned _stv8_52_5 = __float_as_uint(_er_f[24 + 5]);
-                    unsigned _stv8_52_6 = __float_as_uint(_er_f[24 + 6]);
-                    unsigned _stv8_52_7 = __float_as_uint(_er_f[24 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 280) + (0))), "r"(_stv8_52_0), "r"(_stv8_52_1), "r"(_stv8_52_2), "r"(_stv8_52_3), "r"(_stv8_52_4), "r"(_stv8_52_5), "r"(_stv8_52_6), "r"(_stv8_52_7) : "memory");
-                }
-                {
-                    unsigned _stv8_53_0 = __float_as_uint(_er_f[32 + 0]);
-                    unsigned _stv8_53_1 = __float_as_uint(_er_f[32 + 1]);
-                    unsigned _stv8_53_2 = __float_as_uint(_er_f[32 + 2]);
-                    unsigned _stv8_53_3 = __float_as_uint(_er_f[32 + 3]);
-                    unsigned _stv8_53_4 = __float_as_uint(_er_f[32 + 4]);
-                    unsigned _stv8_53_5 = __float_as_uint(_er_f[32 + 5]);
-                    unsigned _stv8_53_6 = __float_as_uint(_er_f[32 + 6]);
-                    unsigned _stv8_53_7 = __float_as_uint(_er_f[32 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 288) + (0))), "r"(_stv8_53_0), "r"(_stv8_53_1), "r"(_stv8_53_2), "r"(_stv8_53_3), "r"(_stv8_53_4), "r"(_stv8_53_5), "r"(_stv8_53_6), "r"(_stv8_53_7) : "memory");
-                }
-                {
-                    unsigned _stv8_54_0 = __float_as_uint(_er_f[40 + 0]);
-                    unsigned _stv8_54_1 = __float_as_uint(_er_f[40 + 1]);
-                    unsigned _stv8_54_2 = __float_as_uint(_er_f[40 + 2]);
-                    unsigned _stv8_54_3 = __float_as_uint(_er_f[40 + 3]);
-                    unsigned _stv8_54_4 = __float_as_uint(_er_f[40 + 4]);
-                    unsigned _stv8_54_5 = __float_as_uint(_er_f[40 + 5]);
-                    unsigned _stv8_54_6 = __float_as_uint(_er_f[40 + 6]);
-                    unsigned _stv8_54_7 = __float_as_uint(_er_f[40 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 296) + (0))), "r"(_stv8_54_0), "r"(_stv8_54_1), "r"(_stv8_54_2), "r"(_stv8_54_3), "r"(_stv8_54_4), "r"(_stv8_54_5), "r"(_stv8_54_6), "r"(_stv8_54_7) : "memory");
-                }
-                {
-                    unsigned _stv8_55_0 = __float_as_uint(_er_f[48 + 0]);
-                    unsigned _stv8_55_1 = __float_as_uint(_er_f[48 + 1]);
-                    unsigned _stv8_55_2 = __float_as_uint(_er_f[48 + 2]);
-                    unsigned _stv8_55_3 = __float_as_uint(_er_f[48 + 3]);
-                    unsigned _stv8_55_4 = __float_as_uint(_er_f[48 + 4]);
-                    unsigned _stv8_55_5 = __float_as_uint(_er_f[48 + 5]);
-                    unsigned _stv8_55_6 = __float_as_uint(_er_f[48 + 6]);
-                    unsigned _stv8_55_7 = __float_as_uint(_er_f[48 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 304) + (0))), "r"(_stv8_55_0), "r"(_stv8_55_1), "r"(_stv8_55_2), "r"(_stv8_55_3), "r"(_stv8_55_4), "r"(_stv8_55_5), "r"(_stv8_55_6), "r"(_stv8_55_7) : "memory");
-                }
-                {
-                    unsigned _stv8_56_0 = __float_as_uint(_er_f[56 + 0]);
-                    unsigned _stv8_56_1 = __float_as_uint(_er_f[56 + 1]);
-                    unsigned _stv8_56_2 = __float_as_uint(_er_f[56 + 2]);
-                    unsigned _stv8_56_3 = __float_as_uint(_er_f[56 + 3]);
-                    unsigned _stv8_56_4 = __float_as_uint(_er_f[56 + 4]);
-                    unsigned _stv8_56_5 = __float_as_uint(_er_f[56 + 5]);
-                    unsigned _stv8_56_6 = __float_as_uint(_er_f[56 + 6]);
-                    unsigned _stv8_56_7 = __float_as_uint(_er_f[56 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 312) + (0))), "r"(_stv8_56_0), "r"(_stv8_56_1), "r"(_stv8_56_2), "r"(_stv8_56_3), "r"(_stv8_56_4), "r"(_stv8_56_5), "r"(_stv8_56_6), "r"(_stv8_56_7) : "memory");
-                }
-                {
-                    unsigned _stv8_57_0 = __float_as_uint(_er_f[64 + 0]);
-                    unsigned _stv8_57_1 = __float_as_uint(_er_f[64 + 1]);
-                    unsigned _stv8_57_2 = __float_as_uint(_er_f[64 + 2]);
-                    unsigned _stv8_57_3 = __float_as_uint(_er_f[64 + 3]);
-                    unsigned _stv8_57_4 = __float_as_uint(_er_f[64 + 4]);
-                    unsigned _stv8_57_5 = __float_as_uint(_er_f[64 + 5]);
-                    unsigned _stv8_57_6 = __float_as_uint(_er_f[64 + 6]);
-                    unsigned _stv8_57_7 = __float_as_uint(_er_f[64 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 320) + (0))), "r"(_stv8_57_0), "r"(_stv8_57_1), "r"(_stv8_57_2), "r"(_stv8_57_3), "r"(_stv8_57_4), "r"(_stv8_57_5), "r"(_stv8_57_6), "r"(_stv8_57_7) : "memory");
-                }
-                {
-                    unsigned _stv8_58_0 = __float_as_uint(_er_f[72 + 0]);
-                    unsigned _stv8_58_1 = __float_as_uint(_er_f[72 + 1]);
-                    unsigned _stv8_58_2 = __float_as_uint(_er_f[72 + 2]);
-                    unsigned _stv8_58_3 = __float_as_uint(_er_f[72 + 3]);
-                    unsigned _stv8_58_4 = __float_as_uint(_er_f[72 + 4]);
-                    unsigned _stv8_58_5 = __float_as_uint(_er_f[72 + 5]);
-                    unsigned _stv8_58_6 = __float_as_uint(_er_f[72 + 6]);
-                    unsigned _stv8_58_7 = __float_as_uint(_er_f[72 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 328) + (0))), "r"(_stv8_58_0), "r"(_stv8_58_1), "r"(_stv8_58_2), "r"(_stv8_58_3), "r"(_stv8_58_4), "r"(_stv8_58_5), "r"(_stv8_58_6), "r"(_stv8_58_7) : "memory");
-                }
-                {
-                    unsigned _stv8_59_0 = __float_as_uint(_er_f[80 + 0]);
-                    unsigned _stv8_59_1 = __float_as_uint(_er_f[80 + 1]);
-                    unsigned _stv8_59_2 = __float_as_uint(_er_f[80 + 2]);
-                    unsigned _stv8_59_3 = __float_as_uint(_er_f[80 + 3]);
-                    unsigned _stv8_59_4 = __float_as_uint(_er_f[80 + 4]);
-                    unsigned _stv8_59_5 = __float_as_uint(_er_f[80 + 5]);
-                    unsigned _stv8_59_6 = __float_as_uint(_er_f[80 + 6]);
-                    unsigned _stv8_59_7 = __float_as_uint(_er_f[80 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 336) + (0))), "r"(_stv8_59_0), "r"(_stv8_59_1), "r"(_stv8_59_2), "r"(_stv8_59_3), "r"(_stv8_59_4), "r"(_stv8_59_5), "r"(_stv8_59_6), "r"(_stv8_59_7) : "memory");
-                }
-                {
-                    unsigned _stv8_60_0 = __float_as_uint(_er_f[88 + 0]);
-                    unsigned _stv8_60_1 = __float_as_uint(_er_f[88 + 1]);
-                    unsigned _stv8_60_2 = __float_as_uint(_er_f[88 + 2]);
-                    unsigned _stv8_60_3 = __float_as_uint(_er_f[88 + 3]);
-                    unsigned _stv8_60_4 = __float_as_uint(_er_f[88 + 4]);
-                    unsigned _stv8_60_5 = __float_as_uint(_er_f[88 + 5]);
-                    unsigned _stv8_60_6 = __float_as_uint(_er_f[88 + 6]);
-                    unsigned _stv8_60_7 = __float_as_uint(_er_f[88 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 344) + (0))), "r"(_stv8_60_0), "r"(_stv8_60_1), "r"(_stv8_60_2), "r"(_stv8_60_3), "r"(_stv8_60_4), "r"(_stv8_60_5), "r"(_stv8_60_6), "r"(_stv8_60_7) : "memory");
-                }
-                {
-                    unsigned _stv8_61_0 = __float_as_uint(_er_f[96 + 0]);
-                    unsigned _stv8_61_1 = __float_as_uint(_er_f[96 + 1]);
-                    unsigned _stv8_61_2 = __float_as_uint(_er_f[96 + 2]);
-                    unsigned _stv8_61_3 = __float_as_uint(_er_f[96 + 3]);
-                    unsigned _stv8_61_4 = __float_as_uint(_er_f[96 + 4]);
-                    unsigned _stv8_61_5 = __float_as_uint(_er_f[96 + 5]);
-                    unsigned _stv8_61_6 = __float_as_uint(_er_f[96 + 6]);
-                    unsigned _stv8_61_7 = __float_as_uint(_er_f[96 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 352) + (0))), "r"(_stv8_61_0), "r"(_stv8_61_1), "r"(_stv8_61_2), "r"(_stv8_61_3), "r"(_stv8_61_4), "r"(_stv8_61_5), "r"(_stv8_61_6), "r"(_stv8_61_7) : "memory");
-                }
-                {
-                    unsigned _stv8_62_0 = __float_as_uint(_er_f[104 + 0]);
-                    unsigned _stv8_62_1 = __float_as_uint(_er_f[104 + 1]);
-                    unsigned _stv8_62_2 = __float_as_uint(_er_f[104 + 2]);
-                    unsigned _stv8_62_3 = __float_as_uint(_er_f[104 + 3]);
-                    unsigned _stv8_62_4 = __float_as_uint(_er_f[104 + 4]);
-                    unsigned _stv8_62_5 = __float_as_uint(_er_f[104 + 5]);
-                    unsigned _stv8_62_6 = __float_as_uint(_er_f[104 + 6]);
-                    unsigned _stv8_62_7 = __float_as_uint(_er_f[104 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 360) + (0))), "r"(_stv8_62_0), "r"(_stv8_62_1), "r"(_stv8_62_2), "r"(_stv8_62_3), "r"(_stv8_62_4), "r"(_stv8_62_5), "r"(_stv8_62_6), "r"(_stv8_62_7) : "memory");
-                }
-                {
-                    unsigned _stv8_63_0 = __float_as_uint(_er_f[112 + 0]);
-                    unsigned _stv8_63_1 = __float_as_uint(_er_f[112 + 1]);
-                    unsigned _stv8_63_2 = __float_as_uint(_er_f[112 + 2]);
-                    unsigned _stv8_63_3 = __float_as_uint(_er_f[112 + 3]);
-                    unsigned _stv8_63_4 = __float_as_uint(_er_f[112 + 4]);
-                    unsigned _stv8_63_5 = __float_as_uint(_er_f[112 + 5]);
-                    unsigned _stv8_63_6 = __float_as_uint(_er_f[112 + 6]);
-                    unsigned _stv8_63_7 = __float_as_uint(_er_f[112 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 368) + (0))), "r"(_stv8_63_0), "r"(_stv8_63_1), "r"(_stv8_63_2), "r"(_stv8_63_3), "r"(_stv8_63_4), "r"(_stv8_63_5), "r"(_stv8_63_6), "r"(_stv8_63_7) : "memory");
-                }
-                {
-                    unsigned _stv8_64_0 = __float_as_uint(_er_f[120 + 0]);
-                    unsigned _stv8_64_1 = __float_as_uint(_er_f[120 + 1]);
-                    unsigned _stv8_64_2 = __float_as_uint(_er_f[120 + 2]);
-                    unsigned _stv8_64_3 = __float_as_uint(_er_f[120 + 3]);
-                    unsigned _stv8_64_4 = __float_as_uint(_er_f[120 + 4]);
-                    unsigned _stv8_64_5 = __float_as_uint(_er_f[120 + 5]);
-                    unsigned _stv8_64_6 = __float_as_uint(_er_f[120 + 6]);
-                    unsigned _stv8_64_7 = __float_as_uint(_er_f[120 + 7]);
-                    asm volatile(
-                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
-                        :: "l"((void*)(C + (er_outf + 376) + (0))), "r"(_stv8_64_0), "r"(_stv8_64_1), "r"(_stv8_64_2), "r"(_stv8_64_3), "r"(_stv8_64_4), "r"(_stv8_64_5), "r"(_stv8_64_6), "r"(_stv8_64_7) : "memory");
 #else
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + er_out)), "r"(_raw_stv8_17[0]), "r"(_raw_stv8_17[1]), "r"(_raw_stv8_17[2]), "r"(_raw_stv8_17[3]), "r"(_raw_stv8_17[4]), "r"(_raw_stv8_17[5]), "r"(_raw_stv8_17[6]), "r"(_raw_stv8_17[7]) : "memory");
+#endif  // CAKE_WGRAD_OUT
+                }
+#if CAKE_WGRAD_OUT == 32
+                _phase_mainloop_done ^= 1;
+                if (ac_live == 1) {
+                    int ar_bit_48 = lane >> 2 & 1;
+                    float ar_x0_192 = _er_f[0];
+                    float ar_x1_192 = _er_f[16];
+                    float ar_send_192 = ((ar_bit_48 == 1) ? ar_x0_192 : ar_x1_192);
+                    float ar_got_192 = __shfl_xor_sync(0xFFFFFFFF, ar_send_192, 4);
+                    _er_f[0] = ((ar_bit_48 == 1) ? ar_got_192 : ar_x0_192);
+                    _er_f[16] = ((ar_bit_48 == 1) ? ar_x1_192 : ar_got_192);
+                    float ar_x0_193 = _er_f[4];
+                    float ar_x1_193 = _er_f[20];
+                    float ar_send_193 = ((ar_bit_48 == 1) ? ar_x0_193 : ar_x1_193);
+                    float ar_got_193 = __shfl_xor_sync(0xFFFFFFFF, ar_send_193, 4);
+                    _er_f[4] = ((ar_bit_48 == 1) ? ar_got_193 : ar_x0_193);
+                    _er_f[20] = ((ar_bit_48 == 1) ? ar_x1_193 : ar_got_193);
+                    float ar_x0_194 = _er_f[8];
+                    float ar_x1_194 = _er_f[24];
+                    float ar_send_194 = ((ar_bit_48 == 1) ? ar_x0_194 : ar_x1_194);
+                    float ar_got_194 = __shfl_xor_sync(0xFFFFFFFF, ar_send_194, 4);
+                    _er_f[8] = ((ar_bit_48 == 1) ? ar_got_194 : ar_x0_194);
+                    _er_f[24] = ((ar_bit_48 == 1) ? ar_x1_194 : ar_got_194);
+                    float ar_x0_195 = _er_f[12];
+                    float ar_x1_195 = _er_f[28];
+                    float ar_send_195 = ((ar_bit_48 == 1) ? ar_x0_195 : ar_x1_195);
+                    float ar_got_195 = __shfl_xor_sync(0xFFFFFFFF, ar_send_195, 4);
+                    _er_f[12] = ((ar_bit_48 == 1) ? ar_got_195 : ar_x0_195);
+                    _er_f[28] = ((ar_bit_48 == 1) ? ar_x1_195 : ar_got_195);
+                    int ar_bit_49 = lane >> 1 & 1;
+                    float ar_x0_196 = _er_f[0];
+                    float ar_x1_196 = _er_f[8];
+                    float ar_send_196 = ((ar_bit_49 == 1) ? ar_x0_196 : ar_x1_196);
+                    float ar_got_196 = __shfl_xor_sync(0xFFFFFFFF, ar_send_196, 2);
+                    _er_f[0] = ((ar_bit_49 == 1) ? ar_got_196 : ar_x0_196);
+                    _er_f[8] = ((ar_bit_49 == 1) ? ar_x1_196 : ar_got_196);
+                    float ar_x0_197 = _er_f[4];
+                    float ar_x1_197 = _er_f[12];
+                    float ar_send_197 = ((ar_bit_49 == 1) ? ar_x0_197 : ar_x1_197);
+                    float ar_got_197 = __shfl_xor_sync(0xFFFFFFFF, ar_send_197, 2);
+                    _er_f[4] = ((ar_bit_49 == 1) ? ar_got_197 : ar_x0_197);
+                    _er_f[12] = ((ar_bit_49 == 1) ? ar_x1_197 : ar_got_197);
+                    float ar_x0_198 = _er_f[16];
+                    float ar_x1_198 = _er_f[24];
+                    float ar_send_198 = ((ar_bit_49 == 1) ? ar_x0_198 : ar_x1_198);
+                    float ar_got_198 = __shfl_xor_sync(0xFFFFFFFF, ar_send_198, 2);
+                    _er_f[16] = ((ar_bit_49 == 1) ? ar_got_198 : ar_x0_198);
+                    _er_f[24] = ((ar_bit_49 == 1) ? ar_x1_198 : ar_got_198);
+                    float ar_x0_199 = _er_f[20];
+                    float ar_x1_199 = _er_f[28];
+                    float ar_send_199 = ((ar_bit_49 == 1) ? ar_x0_199 : ar_x1_199);
+                    float ar_got_199 = __shfl_xor_sync(0xFFFFFFFF, ar_send_199, 2);
+                    _er_f[20] = ((ar_bit_49 == 1) ? ar_got_199 : ar_x0_199);
+                    _er_f[28] = ((ar_bit_49 == 1) ? ar_x1_199 : ar_got_199);
+                    int ar_bit_50 = lane & 1;
+                    float ar_x0_200 = _er_f[0];
+                    float ar_x1_200 = _er_f[4];
+                    float ar_send_200 = ((ar_bit_50 == 1) ? ar_x0_200 : ar_x1_200);
+                    float ar_got_200 = __shfl_xor_sync(0xFFFFFFFF, ar_send_200, 1);
+                    _er_f[0] = ((ar_bit_50 == 1) ? ar_got_200 : ar_x0_200);
+                    _er_f[4] = ((ar_bit_50 == 1) ? ar_x1_200 : ar_got_200);
+                    float ar_x0_201 = _er_f[8];
+                    float ar_x1_201 = _er_f[12];
+                    float ar_send_201 = ((ar_bit_50 == 1) ? ar_x0_201 : ar_x1_201);
+                    float ar_got_201 = __shfl_xor_sync(0xFFFFFFFF, ar_send_201, 1);
+                    _er_f[8] = ((ar_bit_50 == 1) ? ar_got_201 : ar_x0_201);
+                    _er_f[12] = ((ar_bit_50 == 1) ? ar_x1_201 : ar_got_201);
+                    float ar_x0_202 = _er_f[16];
+                    float ar_x1_202 = _er_f[20];
+                    float ar_send_202 = ((ar_bit_50 == 1) ? ar_x0_202 : ar_x1_202);
+                    float ar_got_202 = __shfl_xor_sync(0xFFFFFFFF, ar_send_202, 1);
+                    _er_f[16] = ((ar_bit_50 == 1) ? ar_got_202 : ar_x0_202);
+                    _er_f[20] = ((ar_bit_50 == 1) ? ar_x1_202 : ar_got_202);
+                    float ar_x0_203 = _er_f[24];
+                    float ar_x1_203 = _er_f[28];
+                    float ar_send_203 = ((ar_bit_50 == 1) ? ar_x0_203 : ar_x1_203);
+                    float ar_got_203 = __shfl_xor_sync(0xFFFFFFFF, ar_send_203, 1);
+                    _er_f[24] = ((ar_bit_50 == 1) ? ar_got_203 : ar_x0_203);
+                    _er_f[28] = ((ar_bit_50 == 1) ? ar_x1_203 : ar_got_203);
+                    int ar_bit_51 = lane >> 2 & 1;
+                    float ar_x0_204 = _er_f[1];
+                    float ar_x1_204 = _er_f[17];
+                    float ar_send_204 = ((ar_bit_51 == 1) ? ar_x0_204 : ar_x1_204);
+                    float ar_got_204 = __shfl_xor_sync(0xFFFFFFFF, ar_send_204, 4);
+                    _er_f[1] = ((ar_bit_51 == 1) ? ar_got_204 : ar_x0_204);
+                    _er_f[17] = ((ar_bit_51 == 1) ? ar_x1_204 : ar_got_204);
+                    float ar_x0_205 = _er_f[5];
+                    float ar_x1_205 = _er_f[21];
+                    float ar_send_205 = ((ar_bit_51 == 1) ? ar_x0_205 : ar_x1_205);
+                    float ar_got_205 = __shfl_xor_sync(0xFFFFFFFF, ar_send_205, 4);
+                    _er_f[5] = ((ar_bit_51 == 1) ? ar_got_205 : ar_x0_205);
+                    _er_f[21] = ((ar_bit_51 == 1) ? ar_x1_205 : ar_got_205);
+                    float ar_x0_206 = _er_f[9];
+                    float ar_x1_206 = _er_f[25];
+                    float ar_send_206 = ((ar_bit_51 == 1) ? ar_x0_206 : ar_x1_206);
+                    float ar_got_206 = __shfl_xor_sync(0xFFFFFFFF, ar_send_206, 4);
+                    _er_f[9] = ((ar_bit_51 == 1) ? ar_got_206 : ar_x0_206);
+                    _er_f[25] = ((ar_bit_51 == 1) ? ar_x1_206 : ar_got_206);
+                    float ar_x0_207 = _er_f[13];
+                    float ar_x1_207 = _er_f[29];
+                    float ar_send_207 = ((ar_bit_51 == 1) ? ar_x0_207 : ar_x1_207);
+                    float ar_got_207 = __shfl_xor_sync(0xFFFFFFFF, ar_send_207, 4);
+                    _er_f[13] = ((ar_bit_51 == 1) ? ar_got_207 : ar_x0_207);
+                    _er_f[29] = ((ar_bit_51 == 1) ? ar_x1_207 : ar_got_207);
+                    int ar_bit_52 = lane >> 1 & 1;
+                    float ar_x0_208 = _er_f[1];
+                    float ar_x1_208 = _er_f[9];
+                    float ar_send_208 = ((ar_bit_52 == 1) ? ar_x0_208 : ar_x1_208);
+                    float ar_got_208 = __shfl_xor_sync(0xFFFFFFFF, ar_send_208, 2);
+                    _er_f[1] = ((ar_bit_52 == 1) ? ar_got_208 : ar_x0_208);
+                    _er_f[9] = ((ar_bit_52 == 1) ? ar_x1_208 : ar_got_208);
+                    float ar_x0_209 = _er_f[5];
+                    float ar_x1_209 = _er_f[13];
+                    float ar_send_209 = ((ar_bit_52 == 1) ? ar_x0_209 : ar_x1_209);
+                    float ar_got_209 = __shfl_xor_sync(0xFFFFFFFF, ar_send_209, 2);
+                    _er_f[5] = ((ar_bit_52 == 1) ? ar_got_209 : ar_x0_209);
+                    _er_f[13] = ((ar_bit_52 == 1) ? ar_x1_209 : ar_got_209);
+                    float ar_x0_210 = _er_f[17];
+                    float ar_x1_210 = _er_f[25];
+                    float ar_send_210 = ((ar_bit_52 == 1) ? ar_x0_210 : ar_x1_210);
+                    float ar_got_210 = __shfl_xor_sync(0xFFFFFFFF, ar_send_210, 2);
+                    _er_f[17] = ((ar_bit_52 == 1) ? ar_got_210 : ar_x0_210);
+                    _er_f[25] = ((ar_bit_52 == 1) ? ar_x1_210 : ar_got_210);
+                    float ar_x0_211 = _er_f[21];
+                    float ar_x1_211 = _er_f[29];
+                    float ar_send_211 = ((ar_bit_52 == 1) ? ar_x0_211 : ar_x1_211);
+                    float ar_got_211 = __shfl_xor_sync(0xFFFFFFFF, ar_send_211, 2);
+                    _er_f[21] = ((ar_bit_52 == 1) ? ar_got_211 : ar_x0_211);
+                    _er_f[29] = ((ar_bit_52 == 1) ? ar_x1_211 : ar_got_211);
+                    int ar_bit_53 = lane & 1;
+                    float ar_x0_212 = _er_f[1];
+                    float ar_x1_212 = _er_f[5];
+                    float ar_send_212 = ((ar_bit_53 == 1) ? ar_x0_212 : ar_x1_212);
+                    float ar_got_212 = __shfl_xor_sync(0xFFFFFFFF, ar_send_212, 1);
+                    _er_f[1] = ((ar_bit_53 == 1) ? ar_got_212 : ar_x0_212);
+                    _er_f[5] = ((ar_bit_53 == 1) ? ar_x1_212 : ar_got_212);
+                    float ar_x0_213 = _er_f[9];
+                    float ar_x1_213 = _er_f[13];
+                    float ar_send_213 = ((ar_bit_53 == 1) ? ar_x0_213 : ar_x1_213);
+                    float ar_got_213 = __shfl_xor_sync(0xFFFFFFFF, ar_send_213, 1);
+                    _er_f[9] = ((ar_bit_53 == 1) ? ar_got_213 : ar_x0_213);
+                    _er_f[13] = ((ar_bit_53 == 1) ? ar_x1_213 : ar_got_213);
+                    float ar_x0_214 = _er_f[17];
+                    float ar_x1_214 = _er_f[21];
+                    float ar_send_214 = ((ar_bit_53 == 1) ? ar_x0_214 : ar_x1_214);
+                    float ar_got_214 = __shfl_xor_sync(0xFFFFFFFF, ar_send_214, 1);
+                    _er_f[17] = ((ar_bit_53 == 1) ? ar_got_214 : ar_x0_214);
+                    _er_f[21] = ((ar_bit_53 == 1) ? ar_x1_214 : ar_got_214);
+                    float ar_x0_215 = _er_f[25];
+                    float ar_x1_215 = _er_f[29];
+                    float ar_send_215 = ((ar_bit_53 == 1) ? ar_x0_215 : ar_x1_215);
+                    float ar_got_215 = __shfl_xor_sync(0xFFFFFFFF, ar_send_215, 1);
+                    _er_f[25] = ((ar_bit_53 == 1) ? ar_got_215 : ar_x0_215);
+                    _er_f[29] = ((ar_bit_53 == 1) ? ar_x1_215 : ar_got_215);
+                    int ar_bit_54 = lane >> 2 & 1;
+                    float ar_x0_216 = _er_f[2];
+                    float ar_x1_216 = _er_f[18];
+                    float ar_send_216 = ((ar_bit_54 == 1) ? ar_x0_216 : ar_x1_216);
+                    float ar_got_216 = __shfl_xor_sync(0xFFFFFFFF, ar_send_216, 4);
+                    _er_f[2] = ((ar_bit_54 == 1) ? ar_got_216 : ar_x0_216);
+                    _er_f[18] = ((ar_bit_54 == 1) ? ar_x1_216 : ar_got_216);
+                    float ar_x0_217 = _er_f[6];
+                    float ar_x1_217 = _er_f[22];
+                    float ar_send_217 = ((ar_bit_54 == 1) ? ar_x0_217 : ar_x1_217);
+                    float ar_got_217 = __shfl_xor_sync(0xFFFFFFFF, ar_send_217, 4);
+                    _er_f[6] = ((ar_bit_54 == 1) ? ar_got_217 : ar_x0_217);
+                    _er_f[22] = ((ar_bit_54 == 1) ? ar_x1_217 : ar_got_217);
+                    float ar_x0_218 = _er_f[10];
+                    float ar_x1_218 = _er_f[26];
+                    float ar_send_218 = ((ar_bit_54 == 1) ? ar_x0_218 : ar_x1_218);
+                    float ar_got_218 = __shfl_xor_sync(0xFFFFFFFF, ar_send_218, 4);
+                    _er_f[10] = ((ar_bit_54 == 1) ? ar_got_218 : ar_x0_218);
+                    _er_f[26] = ((ar_bit_54 == 1) ? ar_x1_218 : ar_got_218);
+                    float ar_x0_219 = _er_f[14];
+                    float ar_x1_219 = _er_f[30];
+                    float ar_send_219 = ((ar_bit_54 == 1) ? ar_x0_219 : ar_x1_219);
+                    float ar_got_219 = __shfl_xor_sync(0xFFFFFFFF, ar_send_219, 4);
+                    _er_f[14] = ((ar_bit_54 == 1) ? ar_got_219 : ar_x0_219);
+                    _er_f[30] = ((ar_bit_54 == 1) ? ar_x1_219 : ar_got_219);
+                    int ar_bit_55 = lane >> 1 & 1;
+                    float ar_x0_220 = _er_f[2];
+                    float ar_x1_220 = _er_f[10];
+                    float ar_send_220 = ((ar_bit_55 == 1) ? ar_x0_220 : ar_x1_220);
+                    float ar_got_220 = __shfl_xor_sync(0xFFFFFFFF, ar_send_220, 2);
+                    _er_f[2] = ((ar_bit_55 == 1) ? ar_got_220 : ar_x0_220);
+                    _er_f[10] = ((ar_bit_55 == 1) ? ar_x1_220 : ar_got_220);
+                    float ar_x0_221 = _er_f[6];
+                    float ar_x1_221 = _er_f[14];
+                    float ar_send_221 = ((ar_bit_55 == 1) ? ar_x0_221 : ar_x1_221);
+                    float ar_got_221 = __shfl_xor_sync(0xFFFFFFFF, ar_send_221, 2);
+                    _er_f[6] = ((ar_bit_55 == 1) ? ar_got_221 : ar_x0_221);
+                    _er_f[14] = ((ar_bit_55 == 1) ? ar_x1_221 : ar_got_221);
+                    float ar_x0_222 = _er_f[18];
+                    float ar_x1_222 = _er_f[26];
+                    float ar_send_222 = ((ar_bit_55 == 1) ? ar_x0_222 : ar_x1_222);
+                    float ar_got_222 = __shfl_xor_sync(0xFFFFFFFF, ar_send_222, 2);
+                    _er_f[18] = ((ar_bit_55 == 1) ? ar_got_222 : ar_x0_222);
+                    _er_f[26] = ((ar_bit_55 == 1) ? ar_x1_222 : ar_got_222);
+                    float ar_x0_223 = _er_f[22];
+                    float ar_x1_223 = _er_f[30];
+                    float ar_send_223 = ((ar_bit_55 == 1) ? ar_x0_223 : ar_x1_223);
+                    float ar_got_223 = __shfl_xor_sync(0xFFFFFFFF, ar_send_223, 2);
+                    _er_f[22] = ((ar_bit_55 == 1) ? ar_got_223 : ar_x0_223);
+                    _er_f[30] = ((ar_bit_55 == 1) ? ar_x1_223 : ar_got_223);
+                    int ar_bit_56 = lane & 1;
+                    float ar_x0_224 = _er_f[2];
+                    float ar_x1_224 = _er_f[6];
+                    float ar_send_224 = ((ar_bit_56 == 1) ? ar_x0_224 : ar_x1_224);
+                    float ar_got_224 = __shfl_xor_sync(0xFFFFFFFF, ar_send_224, 1);
+                    _er_f[2] = ((ar_bit_56 == 1) ? ar_got_224 : ar_x0_224);
+                    _er_f[6] = ((ar_bit_56 == 1) ? ar_x1_224 : ar_got_224);
+                    float ar_x0_225 = _er_f[10];
+                    float ar_x1_225 = _er_f[14];
+                    float ar_send_225 = ((ar_bit_56 == 1) ? ar_x0_225 : ar_x1_225);
+                    float ar_got_225 = __shfl_xor_sync(0xFFFFFFFF, ar_send_225, 1);
+                    _er_f[10] = ((ar_bit_56 == 1) ? ar_got_225 : ar_x0_225);
+                    _er_f[14] = ((ar_bit_56 == 1) ? ar_x1_225 : ar_got_225);
+                    float ar_x0_226 = _er_f[18];
+                    float ar_x1_226 = _er_f[22];
+                    float ar_send_226 = ((ar_bit_56 == 1) ? ar_x0_226 : ar_x1_226);
+                    float ar_got_226 = __shfl_xor_sync(0xFFFFFFFF, ar_send_226, 1);
+                    _er_f[18] = ((ar_bit_56 == 1) ? ar_got_226 : ar_x0_226);
+                    _er_f[22] = ((ar_bit_56 == 1) ? ar_x1_226 : ar_got_226);
+                    float ar_x0_227 = _er_f[26];
+                    float ar_x1_227 = _er_f[30];
+                    float ar_send_227 = ((ar_bit_56 == 1) ? ar_x0_227 : ar_x1_227);
+                    float ar_got_227 = __shfl_xor_sync(0xFFFFFFFF, ar_send_227, 1);
+                    _er_f[26] = ((ar_bit_56 == 1) ? ar_got_227 : ar_x0_227);
+                    _er_f[30] = ((ar_bit_56 == 1) ? ar_x1_227 : ar_got_227);
+                    int ar_bit_57 = lane >> 2 & 1;
+                    float ar_x0_228 = _er_f[3];
+                    float ar_x1_228 = _er_f[19];
+                    float ar_send_228 = ((ar_bit_57 == 1) ? ar_x0_228 : ar_x1_228);
+                    float ar_got_228 = __shfl_xor_sync(0xFFFFFFFF, ar_send_228, 4);
+                    _er_f[3] = ((ar_bit_57 == 1) ? ar_got_228 : ar_x0_228);
+                    _er_f[19] = ((ar_bit_57 == 1) ? ar_x1_228 : ar_got_228);
+                    float ar_x0_229 = _er_f[7];
+                    float ar_x1_229 = _er_f[23];
+                    float ar_send_229 = ((ar_bit_57 == 1) ? ar_x0_229 : ar_x1_229);
+                    float ar_got_229 = __shfl_xor_sync(0xFFFFFFFF, ar_send_229, 4);
+                    _er_f[7] = ((ar_bit_57 == 1) ? ar_got_229 : ar_x0_229);
+                    _er_f[23] = ((ar_bit_57 == 1) ? ar_x1_229 : ar_got_229);
+                    float ar_x0_230 = _er_f[11];
+                    float ar_x1_230 = _er_f[27];
+                    float ar_send_230 = ((ar_bit_57 == 1) ? ar_x0_230 : ar_x1_230);
+                    float ar_got_230 = __shfl_xor_sync(0xFFFFFFFF, ar_send_230, 4);
+                    _er_f[11] = ((ar_bit_57 == 1) ? ar_got_230 : ar_x0_230);
+                    _er_f[27] = ((ar_bit_57 == 1) ? ar_x1_230 : ar_got_230);
+                    float ar_x0_231 = _er_f[15];
+                    float ar_x1_231 = _er_f[31];
+                    float ar_send_231 = ((ar_bit_57 == 1) ? ar_x0_231 : ar_x1_231);
+                    float ar_got_231 = __shfl_xor_sync(0xFFFFFFFF, ar_send_231, 4);
+                    _er_f[15] = ((ar_bit_57 == 1) ? ar_got_231 : ar_x0_231);
+                    _er_f[31] = ((ar_bit_57 == 1) ? ar_x1_231 : ar_got_231);
+                    int ar_bit_58 = lane >> 1 & 1;
+                    float ar_x0_232 = _er_f[3];
+                    float ar_x1_232 = _er_f[11];
+                    float ar_send_232 = ((ar_bit_58 == 1) ? ar_x0_232 : ar_x1_232);
+                    float ar_got_232 = __shfl_xor_sync(0xFFFFFFFF, ar_send_232, 2);
+                    _er_f[3] = ((ar_bit_58 == 1) ? ar_got_232 : ar_x0_232);
+                    _er_f[11] = ((ar_bit_58 == 1) ? ar_x1_232 : ar_got_232);
+                    float ar_x0_233 = _er_f[7];
+                    float ar_x1_233 = _er_f[15];
+                    float ar_send_233 = ((ar_bit_58 == 1) ? ar_x0_233 : ar_x1_233);
+                    float ar_got_233 = __shfl_xor_sync(0xFFFFFFFF, ar_send_233, 2);
+                    _er_f[7] = ((ar_bit_58 == 1) ? ar_got_233 : ar_x0_233);
+                    _er_f[15] = ((ar_bit_58 == 1) ? ar_x1_233 : ar_got_233);
+                    float ar_x0_234 = _er_f[19];
+                    float ar_x1_234 = _er_f[27];
+                    float ar_send_234 = ((ar_bit_58 == 1) ? ar_x0_234 : ar_x1_234);
+                    float ar_got_234 = __shfl_xor_sync(0xFFFFFFFF, ar_send_234, 2);
+                    _er_f[19] = ((ar_bit_58 == 1) ? ar_got_234 : ar_x0_234);
+                    _er_f[27] = ((ar_bit_58 == 1) ? ar_x1_234 : ar_got_234);
+                    float ar_x0_235 = _er_f[23];
+                    float ar_x1_235 = _er_f[31];
+                    float ar_send_235 = ((ar_bit_58 == 1) ? ar_x0_235 : ar_x1_235);
+                    float ar_got_235 = __shfl_xor_sync(0xFFFFFFFF, ar_send_235, 2);
+                    _er_f[23] = ((ar_bit_58 == 1) ? ar_got_235 : ar_x0_235);
+                    _er_f[31] = ((ar_bit_58 == 1) ? ar_x1_235 : ar_got_235);
+                    int ar_bit_59 = lane & 1;
+                    float ar_x0_236 = _er_f[3];
+                    float ar_x1_236 = _er_f[7];
+                    float ar_send_236 = ((ar_bit_59 == 1) ? ar_x0_236 : ar_x1_236);
+                    float ar_got_236 = __shfl_xor_sync(0xFFFFFFFF, ar_send_236, 1);
+                    _er_f[3] = ((ar_bit_59 == 1) ? ar_got_236 : ar_x0_236);
+                    _er_f[7] = ((ar_bit_59 == 1) ? ar_x1_236 : ar_got_236);
+                    float ar_x0_237 = _er_f[11];
+                    float ar_x1_237 = _er_f[15];
+                    float ar_send_237 = ((ar_bit_59 == 1) ? ar_x0_237 : ar_x1_237);
+                    float ar_got_237 = __shfl_xor_sync(0xFFFFFFFF, ar_send_237, 1);
+                    _er_f[11] = ((ar_bit_59 == 1) ? ar_got_237 : ar_x0_237);
+                    _er_f[15] = ((ar_bit_59 == 1) ? ar_x1_237 : ar_got_237);
+                    float ar_x0_238 = _er_f[19];
+                    float ar_x1_238 = _er_f[23];
+                    float ar_send_238 = ((ar_bit_59 == 1) ? ar_x0_238 : ar_x1_238);
+                    float ar_got_238 = __shfl_xor_sync(0xFFFFFFFF, ar_send_238, 1);
+                    _er_f[19] = ((ar_bit_59 == 1) ? ar_got_238 : ar_x0_238);
+                    _er_f[23] = ((ar_bit_59 == 1) ? ar_x1_238 : ar_got_238);
+                    float ar_x0_239 = _er_f[27];
+                    float ar_x1_239 = _er_f[31];
+                    float ar_send_239 = ((ar_bit_59 == 1) ? ar_x0_239 : ar_x1_239);
+                    float ar_got_239 = __shfl_xor_sync(0xFFFFFFFF, ar_send_239, 1);
+                    _er_f[27] = ((ar_bit_59 == 1) ? ar_got_239 : ar_x0_239);
+                    _er_f[31] = ((ar_bit_59 == 1) ? ar_x1_239 : ar_got_239);
+                    int ar_ri_4 = er_at2 + 256;
+                    asm("" : "+r"(ar_ri_4));
+                    {
+                        float4 _v4 = make_float4(_er_f[0 + 0], _er_f[0 + 1], _er_f[0 + 2], _er_f[0 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    ar_ri_4 = ar_ri_4 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[4 + 0], _er_f[4 + 1], _er_f[4 + 2], _er_f[4 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    ar_ri_4 = ar_ri_4 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[8 + 0], _er_f[8 + 1], _er_f[8 + 2], _er_f[8 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    ar_ri_4 = ar_ri_4 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[12 + 0], _er_f[12 + 1], _er_f[12 + 2], _er_f[12 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    ar_ri_4 = ar_ri_4 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[16 + 0], _er_f[16 + 1], _er_f[16 + 2], _er_f[16 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    ar_ri_4 = ar_ri_4 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[20 + 0], _er_f[20 + 1], _er_f[20 + 2], _er_f[20 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    ar_ri_4 = ar_ri_4 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[24 + 0], _er_f[24 + 1], _er_f[24 + 2], _er_f[24 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    ar_ri_4 = ar_ri_4 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[28 + 0], _er_f[28 + 1], _er_f[28 + 2], _er_f[28 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_4) = _v4;
+                    }
+                    int ar_bit_60 = lane >> 2 & 1;
+                    float ar_x0_240 = _er_f[32];
+                    float ar_x1_240 = _er_f[48];
+                    float ar_send_240 = ((ar_bit_60 == 1) ? ar_x0_240 : ar_x1_240);
+                    float ar_got_240 = __shfl_xor_sync(0xFFFFFFFF, ar_send_240, 4);
+                    _er_f[32] = ((ar_bit_60 == 1) ? ar_got_240 : ar_x0_240);
+                    _er_f[48] = ((ar_bit_60 == 1) ? ar_x1_240 : ar_got_240);
+                    float ar_x0_241 = _er_f[36];
+                    float ar_x1_241 = _er_f[52];
+                    float ar_send_241 = ((ar_bit_60 == 1) ? ar_x0_241 : ar_x1_241);
+                    float ar_got_241 = __shfl_xor_sync(0xFFFFFFFF, ar_send_241, 4);
+                    _er_f[36] = ((ar_bit_60 == 1) ? ar_got_241 : ar_x0_241);
+                    _er_f[52] = ((ar_bit_60 == 1) ? ar_x1_241 : ar_got_241);
+                    float ar_x0_242 = _er_f[40];
+                    float ar_x1_242 = _er_f[56];
+                    float ar_send_242 = ((ar_bit_60 == 1) ? ar_x0_242 : ar_x1_242);
+                    float ar_got_242 = __shfl_xor_sync(0xFFFFFFFF, ar_send_242, 4);
+                    _er_f[40] = ((ar_bit_60 == 1) ? ar_got_242 : ar_x0_242);
+                    _er_f[56] = ((ar_bit_60 == 1) ? ar_x1_242 : ar_got_242);
+                    float ar_x0_243 = _er_f[44];
+                    float ar_x1_243 = _er_f[60];
+                    float ar_send_243 = ((ar_bit_60 == 1) ? ar_x0_243 : ar_x1_243);
+                    float ar_got_243 = __shfl_xor_sync(0xFFFFFFFF, ar_send_243, 4);
+                    _er_f[44] = ((ar_bit_60 == 1) ? ar_got_243 : ar_x0_243);
+                    _er_f[60] = ((ar_bit_60 == 1) ? ar_x1_243 : ar_got_243);
+                    int ar_bit_61 = lane >> 1 & 1;
+                    float ar_x0_244 = _er_f[32];
+                    float ar_x1_244 = _er_f[40];
+                    float ar_send_244 = ((ar_bit_61 == 1) ? ar_x0_244 : ar_x1_244);
+                    float ar_got_244 = __shfl_xor_sync(0xFFFFFFFF, ar_send_244, 2);
+                    _er_f[32] = ((ar_bit_61 == 1) ? ar_got_244 : ar_x0_244);
+                    _er_f[40] = ((ar_bit_61 == 1) ? ar_x1_244 : ar_got_244);
+                    float ar_x0_245 = _er_f[36];
+                    float ar_x1_245 = _er_f[44];
+                    float ar_send_245 = ((ar_bit_61 == 1) ? ar_x0_245 : ar_x1_245);
+                    float ar_got_245 = __shfl_xor_sync(0xFFFFFFFF, ar_send_245, 2);
+                    _er_f[36] = ((ar_bit_61 == 1) ? ar_got_245 : ar_x0_245);
+                    _er_f[44] = ((ar_bit_61 == 1) ? ar_x1_245 : ar_got_245);
+                    float ar_x0_246 = _er_f[48];
+                    float ar_x1_246 = _er_f[56];
+                    float ar_send_246 = ((ar_bit_61 == 1) ? ar_x0_246 : ar_x1_246);
+                    float ar_got_246 = __shfl_xor_sync(0xFFFFFFFF, ar_send_246, 2);
+                    _er_f[48] = ((ar_bit_61 == 1) ? ar_got_246 : ar_x0_246);
+                    _er_f[56] = ((ar_bit_61 == 1) ? ar_x1_246 : ar_got_246);
+                    float ar_x0_247 = _er_f[52];
+                    float ar_x1_247 = _er_f[60];
+                    float ar_send_247 = ((ar_bit_61 == 1) ? ar_x0_247 : ar_x1_247);
+                    float ar_got_247 = __shfl_xor_sync(0xFFFFFFFF, ar_send_247, 2);
+                    _er_f[52] = ((ar_bit_61 == 1) ? ar_got_247 : ar_x0_247);
+                    _er_f[60] = ((ar_bit_61 == 1) ? ar_x1_247 : ar_got_247);
+                    int ar_bit_62 = lane & 1;
+                    float ar_x0_248 = _er_f[32];
+                    float ar_x1_248 = _er_f[36];
+                    float ar_send_248 = ((ar_bit_62 == 1) ? ar_x0_248 : ar_x1_248);
+                    float ar_got_248 = __shfl_xor_sync(0xFFFFFFFF, ar_send_248, 1);
+                    _er_f[32] = ((ar_bit_62 == 1) ? ar_got_248 : ar_x0_248);
+                    _er_f[36] = ((ar_bit_62 == 1) ? ar_x1_248 : ar_got_248);
+                    float ar_x0_249 = _er_f[40];
+                    float ar_x1_249 = _er_f[44];
+                    float ar_send_249 = ((ar_bit_62 == 1) ? ar_x0_249 : ar_x1_249);
+                    float ar_got_249 = __shfl_xor_sync(0xFFFFFFFF, ar_send_249, 1);
+                    _er_f[40] = ((ar_bit_62 == 1) ? ar_got_249 : ar_x0_249);
+                    _er_f[44] = ((ar_bit_62 == 1) ? ar_x1_249 : ar_got_249);
+                    float ar_x0_250 = _er_f[48];
+                    float ar_x1_250 = _er_f[52];
+                    float ar_send_250 = ((ar_bit_62 == 1) ? ar_x0_250 : ar_x1_250);
+                    float ar_got_250 = __shfl_xor_sync(0xFFFFFFFF, ar_send_250, 1);
+                    _er_f[48] = ((ar_bit_62 == 1) ? ar_got_250 : ar_x0_250);
+                    _er_f[52] = ((ar_bit_62 == 1) ? ar_x1_250 : ar_got_250);
+                    float ar_x0_251 = _er_f[56];
+                    float ar_x1_251 = _er_f[60];
+                    float ar_send_251 = ((ar_bit_62 == 1) ? ar_x0_251 : ar_x1_251);
+                    float ar_got_251 = __shfl_xor_sync(0xFFFFFFFF, ar_send_251, 1);
+                    _er_f[56] = ((ar_bit_62 == 1) ? ar_got_251 : ar_x0_251);
+                    _er_f[60] = ((ar_bit_62 == 1) ? ar_x1_251 : ar_got_251);
+                    int ar_bit_63 = lane >> 2 & 1;
+                    float ar_x0_252 = _er_f[33];
+                    float ar_x1_252 = _er_f[49];
+                    float ar_send_252 = ((ar_bit_63 == 1) ? ar_x0_252 : ar_x1_252);
+                    float ar_got_252 = __shfl_xor_sync(0xFFFFFFFF, ar_send_252, 4);
+                    _er_f[33] = ((ar_bit_63 == 1) ? ar_got_252 : ar_x0_252);
+                    _er_f[49] = ((ar_bit_63 == 1) ? ar_x1_252 : ar_got_252);
+                    float ar_x0_253 = _er_f[37];
+                    float ar_x1_253 = _er_f[53];
+                    float ar_send_253 = ((ar_bit_63 == 1) ? ar_x0_253 : ar_x1_253);
+                    float ar_got_253 = __shfl_xor_sync(0xFFFFFFFF, ar_send_253, 4);
+                    _er_f[37] = ((ar_bit_63 == 1) ? ar_got_253 : ar_x0_253);
+                    _er_f[53] = ((ar_bit_63 == 1) ? ar_x1_253 : ar_got_253);
+                    float ar_x0_254 = _er_f[41];
+                    float ar_x1_254 = _er_f[57];
+                    float ar_send_254 = ((ar_bit_63 == 1) ? ar_x0_254 : ar_x1_254);
+                    float ar_got_254 = __shfl_xor_sync(0xFFFFFFFF, ar_send_254, 4);
+                    _er_f[41] = ((ar_bit_63 == 1) ? ar_got_254 : ar_x0_254);
+                    _er_f[57] = ((ar_bit_63 == 1) ? ar_x1_254 : ar_got_254);
+                    float ar_x0_255 = _er_f[45];
+                    float ar_x1_255 = _er_f[61];
+                    float ar_send_255 = ((ar_bit_63 == 1) ? ar_x0_255 : ar_x1_255);
+                    float ar_got_255 = __shfl_xor_sync(0xFFFFFFFF, ar_send_255, 4);
+                    _er_f[45] = ((ar_bit_63 == 1) ? ar_got_255 : ar_x0_255);
+                    _er_f[61] = ((ar_bit_63 == 1) ? ar_x1_255 : ar_got_255);
+                    int ar_bit_64 = lane >> 1 & 1;
+                    float ar_x0_256 = _er_f[33];
+                    float ar_x1_256 = _er_f[41];
+                    float ar_send_256 = ((ar_bit_64 == 1) ? ar_x0_256 : ar_x1_256);
+                    float ar_got_256 = __shfl_xor_sync(0xFFFFFFFF, ar_send_256, 2);
+                    _er_f[33] = ((ar_bit_64 == 1) ? ar_got_256 : ar_x0_256);
+                    _er_f[41] = ((ar_bit_64 == 1) ? ar_x1_256 : ar_got_256);
+                    float ar_x0_257 = _er_f[37];
+                    float ar_x1_257 = _er_f[45];
+                    float ar_send_257 = ((ar_bit_64 == 1) ? ar_x0_257 : ar_x1_257);
+                    float ar_got_257 = __shfl_xor_sync(0xFFFFFFFF, ar_send_257, 2);
+                    _er_f[37] = ((ar_bit_64 == 1) ? ar_got_257 : ar_x0_257);
+                    _er_f[45] = ((ar_bit_64 == 1) ? ar_x1_257 : ar_got_257);
+                    float ar_x0_258 = _er_f[49];
+                    float ar_x1_258 = _er_f[57];
+                    float ar_send_258 = ((ar_bit_64 == 1) ? ar_x0_258 : ar_x1_258);
+                    float ar_got_258 = __shfl_xor_sync(0xFFFFFFFF, ar_send_258, 2);
+                    _er_f[49] = ((ar_bit_64 == 1) ? ar_got_258 : ar_x0_258);
+                    _er_f[57] = ((ar_bit_64 == 1) ? ar_x1_258 : ar_got_258);
+                    float ar_x0_259 = _er_f[53];
+                    float ar_x1_259 = _er_f[61];
+                    float ar_send_259 = ((ar_bit_64 == 1) ? ar_x0_259 : ar_x1_259);
+                    float ar_got_259 = __shfl_xor_sync(0xFFFFFFFF, ar_send_259, 2);
+                    _er_f[53] = ((ar_bit_64 == 1) ? ar_got_259 : ar_x0_259);
+                    _er_f[61] = ((ar_bit_64 == 1) ? ar_x1_259 : ar_got_259);
+                    int ar_bit_65 = lane & 1;
+                    float ar_x0_260 = _er_f[33];
+                    float ar_x1_260 = _er_f[37];
+                    float ar_send_260 = ((ar_bit_65 == 1) ? ar_x0_260 : ar_x1_260);
+                    float ar_got_260 = __shfl_xor_sync(0xFFFFFFFF, ar_send_260, 1);
+                    _er_f[33] = ((ar_bit_65 == 1) ? ar_got_260 : ar_x0_260);
+                    _er_f[37] = ((ar_bit_65 == 1) ? ar_x1_260 : ar_got_260);
+                    float ar_x0_261 = _er_f[41];
+                    float ar_x1_261 = _er_f[45];
+                    float ar_send_261 = ((ar_bit_65 == 1) ? ar_x0_261 : ar_x1_261);
+                    float ar_got_261 = __shfl_xor_sync(0xFFFFFFFF, ar_send_261, 1);
+                    _er_f[41] = ((ar_bit_65 == 1) ? ar_got_261 : ar_x0_261);
+                    _er_f[45] = ((ar_bit_65 == 1) ? ar_x1_261 : ar_got_261);
+                    float ar_x0_262 = _er_f[49];
+                    float ar_x1_262 = _er_f[53];
+                    float ar_send_262 = ((ar_bit_65 == 1) ? ar_x0_262 : ar_x1_262);
+                    float ar_got_262 = __shfl_xor_sync(0xFFFFFFFF, ar_send_262, 1);
+                    _er_f[49] = ((ar_bit_65 == 1) ? ar_got_262 : ar_x0_262);
+                    _er_f[53] = ((ar_bit_65 == 1) ? ar_x1_262 : ar_got_262);
+                    float ar_x0_263 = _er_f[57];
+                    float ar_x1_263 = _er_f[61];
+                    float ar_send_263 = ((ar_bit_65 == 1) ? ar_x0_263 : ar_x1_263);
+                    float ar_got_263 = __shfl_xor_sync(0xFFFFFFFF, ar_send_263, 1);
+                    _er_f[57] = ((ar_bit_65 == 1) ? ar_got_263 : ar_x0_263);
+                    _er_f[61] = ((ar_bit_65 == 1) ? ar_x1_263 : ar_got_263);
+                    int ar_bit_66 = lane >> 2 & 1;
+                    float ar_x0_264 = _er_f[34];
+                    float ar_x1_264 = _er_f[50];
+                    float ar_send_264 = ((ar_bit_66 == 1) ? ar_x0_264 : ar_x1_264);
+                    float ar_got_264 = __shfl_xor_sync(0xFFFFFFFF, ar_send_264, 4);
+                    _er_f[34] = ((ar_bit_66 == 1) ? ar_got_264 : ar_x0_264);
+                    _er_f[50] = ((ar_bit_66 == 1) ? ar_x1_264 : ar_got_264);
+                    float ar_x0_265 = _er_f[38];
+                    float ar_x1_265 = _er_f[54];
+                    float ar_send_265 = ((ar_bit_66 == 1) ? ar_x0_265 : ar_x1_265);
+                    float ar_got_265 = __shfl_xor_sync(0xFFFFFFFF, ar_send_265, 4);
+                    _er_f[38] = ((ar_bit_66 == 1) ? ar_got_265 : ar_x0_265);
+                    _er_f[54] = ((ar_bit_66 == 1) ? ar_x1_265 : ar_got_265);
+                    float ar_x0_266 = _er_f[42];
+                    float ar_x1_266 = _er_f[58];
+                    float ar_send_266 = ((ar_bit_66 == 1) ? ar_x0_266 : ar_x1_266);
+                    float ar_got_266 = __shfl_xor_sync(0xFFFFFFFF, ar_send_266, 4);
+                    _er_f[42] = ((ar_bit_66 == 1) ? ar_got_266 : ar_x0_266);
+                    _er_f[58] = ((ar_bit_66 == 1) ? ar_x1_266 : ar_got_266);
+                    float ar_x0_267 = _er_f[46];
+                    float ar_x1_267 = _er_f[62];
+                    float ar_send_267 = ((ar_bit_66 == 1) ? ar_x0_267 : ar_x1_267);
+                    float ar_got_267 = __shfl_xor_sync(0xFFFFFFFF, ar_send_267, 4);
+                    _er_f[46] = ((ar_bit_66 == 1) ? ar_got_267 : ar_x0_267);
+                    _er_f[62] = ((ar_bit_66 == 1) ? ar_x1_267 : ar_got_267);
+                    int ar_bit_67 = lane >> 1 & 1;
+                    float ar_x0_268 = _er_f[34];
+                    float ar_x1_268 = _er_f[42];
+                    float ar_send_268 = ((ar_bit_67 == 1) ? ar_x0_268 : ar_x1_268);
+                    float ar_got_268 = __shfl_xor_sync(0xFFFFFFFF, ar_send_268, 2);
+                    _er_f[34] = ((ar_bit_67 == 1) ? ar_got_268 : ar_x0_268);
+                    _er_f[42] = ((ar_bit_67 == 1) ? ar_x1_268 : ar_got_268);
+                    float ar_x0_269 = _er_f[38];
+                    float ar_x1_269 = _er_f[46];
+                    float ar_send_269 = ((ar_bit_67 == 1) ? ar_x0_269 : ar_x1_269);
+                    float ar_got_269 = __shfl_xor_sync(0xFFFFFFFF, ar_send_269, 2);
+                    _er_f[38] = ((ar_bit_67 == 1) ? ar_got_269 : ar_x0_269);
+                    _er_f[46] = ((ar_bit_67 == 1) ? ar_x1_269 : ar_got_269);
+                    float ar_x0_270 = _er_f[50];
+                    float ar_x1_270 = _er_f[58];
+                    float ar_send_270 = ((ar_bit_67 == 1) ? ar_x0_270 : ar_x1_270);
+                    float ar_got_270 = __shfl_xor_sync(0xFFFFFFFF, ar_send_270, 2);
+                    _er_f[50] = ((ar_bit_67 == 1) ? ar_got_270 : ar_x0_270);
+                    _er_f[58] = ((ar_bit_67 == 1) ? ar_x1_270 : ar_got_270);
+                    float ar_x0_271 = _er_f[54];
+                    float ar_x1_271 = _er_f[62];
+                    float ar_send_271 = ((ar_bit_67 == 1) ? ar_x0_271 : ar_x1_271);
+                    float ar_got_271 = __shfl_xor_sync(0xFFFFFFFF, ar_send_271, 2);
+                    _er_f[54] = ((ar_bit_67 == 1) ? ar_got_271 : ar_x0_271);
+                    _er_f[62] = ((ar_bit_67 == 1) ? ar_x1_271 : ar_got_271);
+                    int ar_bit_68 = lane & 1;
+                    float ar_x0_272 = _er_f[34];
+                    float ar_x1_272 = _er_f[38];
+                    float ar_send_272 = ((ar_bit_68 == 1) ? ar_x0_272 : ar_x1_272);
+                    float ar_got_272 = __shfl_xor_sync(0xFFFFFFFF, ar_send_272, 1);
+                    _er_f[34] = ((ar_bit_68 == 1) ? ar_got_272 : ar_x0_272);
+                    _er_f[38] = ((ar_bit_68 == 1) ? ar_x1_272 : ar_got_272);
+                    float ar_x0_273 = _er_f[42];
+                    float ar_x1_273 = _er_f[46];
+                    float ar_send_273 = ((ar_bit_68 == 1) ? ar_x0_273 : ar_x1_273);
+                    float ar_got_273 = __shfl_xor_sync(0xFFFFFFFF, ar_send_273, 1);
+                    _er_f[42] = ((ar_bit_68 == 1) ? ar_got_273 : ar_x0_273);
+                    _er_f[46] = ((ar_bit_68 == 1) ? ar_x1_273 : ar_got_273);
+                    float ar_x0_274 = _er_f[50];
+                    float ar_x1_274 = _er_f[54];
+                    float ar_send_274 = ((ar_bit_68 == 1) ? ar_x0_274 : ar_x1_274);
+                    float ar_got_274 = __shfl_xor_sync(0xFFFFFFFF, ar_send_274, 1);
+                    _er_f[50] = ((ar_bit_68 == 1) ? ar_got_274 : ar_x0_274);
+                    _er_f[54] = ((ar_bit_68 == 1) ? ar_x1_274 : ar_got_274);
+                    float ar_x0_275 = _er_f[58];
+                    float ar_x1_275 = _er_f[62];
+                    float ar_send_275 = ((ar_bit_68 == 1) ? ar_x0_275 : ar_x1_275);
+                    float ar_got_275 = __shfl_xor_sync(0xFFFFFFFF, ar_send_275, 1);
+                    _er_f[58] = ((ar_bit_68 == 1) ? ar_got_275 : ar_x0_275);
+                    _er_f[62] = ((ar_bit_68 == 1) ? ar_x1_275 : ar_got_275);
+                    int ar_bit_69 = lane >> 2 & 1;
+                    float ar_x0_276 = _er_f[35];
+                    float ar_x1_276 = _er_f[51];
+                    float ar_send_276 = ((ar_bit_69 == 1) ? ar_x0_276 : ar_x1_276);
+                    float ar_got_276 = __shfl_xor_sync(0xFFFFFFFF, ar_send_276, 4);
+                    _er_f[35] = ((ar_bit_69 == 1) ? ar_got_276 : ar_x0_276);
+                    _er_f[51] = ((ar_bit_69 == 1) ? ar_x1_276 : ar_got_276);
+                    float ar_x0_277 = _er_f[39];
+                    float ar_x1_277 = _er_f[55];
+                    float ar_send_277 = ((ar_bit_69 == 1) ? ar_x0_277 : ar_x1_277);
+                    float ar_got_277 = __shfl_xor_sync(0xFFFFFFFF, ar_send_277, 4);
+                    _er_f[39] = ((ar_bit_69 == 1) ? ar_got_277 : ar_x0_277);
+                    _er_f[55] = ((ar_bit_69 == 1) ? ar_x1_277 : ar_got_277);
+                    float ar_x0_278 = _er_f[43];
+                    float ar_x1_278 = _er_f[59];
+                    float ar_send_278 = ((ar_bit_69 == 1) ? ar_x0_278 : ar_x1_278);
+                    float ar_got_278 = __shfl_xor_sync(0xFFFFFFFF, ar_send_278, 4);
+                    _er_f[43] = ((ar_bit_69 == 1) ? ar_got_278 : ar_x0_278);
+                    _er_f[59] = ((ar_bit_69 == 1) ? ar_x1_278 : ar_got_278);
+                    float ar_x0_279 = _er_f[47];
+                    float ar_x1_279 = _er_f[63];
+                    float ar_send_279 = ((ar_bit_69 == 1) ? ar_x0_279 : ar_x1_279);
+                    float ar_got_279 = __shfl_xor_sync(0xFFFFFFFF, ar_send_279, 4);
+                    _er_f[47] = ((ar_bit_69 == 1) ? ar_got_279 : ar_x0_279);
+                    _er_f[63] = ((ar_bit_69 == 1) ? ar_x1_279 : ar_got_279);
+                    int ar_bit_70 = lane >> 1 & 1;
+                    float ar_x0_280 = _er_f[35];
+                    float ar_x1_280 = _er_f[43];
+                    float ar_send_280 = ((ar_bit_70 == 1) ? ar_x0_280 : ar_x1_280);
+                    float ar_got_280 = __shfl_xor_sync(0xFFFFFFFF, ar_send_280, 2);
+                    _er_f[35] = ((ar_bit_70 == 1) ? ar_got_280 : ar_x0_280);
+                    _er_f[43] = ((ar_bit_70 == 1) ? ar_x1_280 : ar_got_280);
+                    float ar_x0_281 = _er_f[39];
+                    float ar_x1_281 = _er_f[47];
+                    float ar_send_281 = ((ar_bit_70 == 1) ? ar_x0_281 : ar_x1_281);
+                    float ar_got_281 = __shfl_xor_sync(0xFFFFFFFF, ar_send_281, 2);
+                    _er_f[39] = ((ar_bit_70 == 1) ? ar_got_281 : ar_x0_281);
+                    _er_f[47] = ((ar_bit_70 == 1) ? ar_x1_281 : ar_got_281);
+                    float ar_x0_282 = _er_f[51];
+                    float ar_x1_282 = _er_f[59];
+                    float ar_send_282 = ((ar_bit_70 == 1) ? ar_x0_282 : ar_x1_282);
+                    float ar_got_282 = __shfl_xor_sync(0xFFFFFFFF, ar_send_282, 2);
+                    _er_f[51] = ((ar_bit_70 == 1) ? ar_got_282 : ar_x0_282);
+                    _er_f[59] = ((ar_bit_70 == 1) ? ar_x1_282 : ar_got_282);
+                    float ar_x0_283 = _er_f[55];
+                    float ar_x1_283 = _er_f[63];
+                    float ar_send_283 = ((ar_bit_70 == 1) ? ar_x0_283 : ar_x1_283);
+                    float ar_got_283 = __shfl_xor_sync(0xFFFFFFFF, ar_send_283, 2);
+                    _er_f[55] = ((ar_bit_70 == 1) ? ar_got_283 : ar_x0_283);
+                    _er_f[63] = ((ar_bit_70 == 1) ? ar_x1_283 : ar_got_283);
+                    int ar_bit_71 = lane & 1;
+                    float ar_x0_284 = _er_f[35];
+                    float ar_x1_284 = _er_f[39];
+                    float ar_send_284 = ((ar_bit_71 == 1) ? ar_x0_284 : ar_x1_284);
+                    float ar_got_284 = __shfl_xor_sync(0xFFFFFFFF, ar_send_284, 1);
+                    _er_f[35] = ((ar_bit_71 == 1) ? ar_got_284 : ar_x0_284);
+                    _er_f[39] = ((ar_bit_71 == 1) ? ar_x1_284 : ar_got_284);
+                    float ar_x0_285 = _er_f[43];
+                    float ar_x1_285 = _er_f[47];
+                    float ar_send_285 = ((ar_bit_71 == 1) ? ar_x0_285 : ar_x1_285);
+                    float ar_got_285 = __shfl_xor_sync(0xFFFFFFFF, ar_send_285, 1);
+                    _er_f[43] = ((ar_bit_71 == 1) ? ar_got_285 : ar_x0_285);
+                    _er_f[47] = ((ar_bit_71 == 1) ? ar_x1_285 : ar_got_285);
+                    float ar_x0_286 = _er_f[51];
+                    float ar_x1_286 = _er_f[55];
+                    float ar_send_286 = ((ar_bit_71 == 1) ? ar_x0_286 : ar_x1_286);
+                    float ar_got_286 = __shfl_xor_sync(0xFFFFFFFF, ar_send_286, 1);
+                    _er_f[51] = ((ar_bit_71 == 1) ? ar_got_286 : ar_x0_286);
+                    _er_f[55] = ((ar_bit_71 == 1) ? ar_x1_286 : ar_got_286);
+                    float ar_x0_287 = _er_f[59];
+                    float ar_x1_287 = _er_f[63];
+                    float ar_send_287 = ((ar_bit_71 == 1) ? ar_x0_287 : ar_x1_287);
+                    float ar_got_287 = __shfl_xor_sync(0xFFFFFFFF, ar_send_287, 1);
+                    _er_f[59] = ((ar_bit_71 == 1) ? ar_got_287 : ar_x0_287);
+                    _er_f[63] = ((ar_bit_71 == 1) ? ar_x1_287 : ar_got_287);
+                    int ar_ri_5 = er_at2 + 256 + 32;
+                    asm("" : "+r"(ar_ri_5));
+                    {
+                        float4 _v4 = make_float4(_er_f[32 + 0], _er_f[32 + 1], _er_f[32 + 2], _er_f[32 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    ar_ri_5 = ar_ri_5 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[36 + 0], _er_f[36 + 1], _er_f[36 + 2], _er_f[36 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    ar_ri_5 = ar_ri_5 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[40 + 0], _er_f[40 + 1], _er_f[40 + 2], _er_f[40 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    ar_ri_5 = ar_ri_5 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[44 + 0], _er_f[44 + 1], _er_f[44 + 2], _er_f[44 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    ar_ri_5 = ar_ri_5 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[48 + 0], _er_f[48 + 1], _er_f[48 + 2], _er_f[48 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    ar_ri_5 = ar_ri_5 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[52 + 0], _er_f[52 + 1], _er_f[52 + 2], _er_f[52 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    ar_ri_5 = ar_ri_5 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[56 + 0], _er_f[56 + 1], _er_f[56 + 2], _er_f[56 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    ar_ri_5 = ar_ri_5 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[60 + 0], _er_f[60 + 1], _er_f[60 + 2], _er_f[60 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_5) = _v4;
+                    }
+                    int ar_bit_72 = lane >> 2 & 1;
+                    float ar_x0_288 = _er_f[64];
+                    float ar_x1_288 = _er_f[80];
+                    float ar_send_288 = ((ar_bit_72 == 1) ? ar_x0_288 : ar_x1_288);
+                    float ar_got_288 = __shfl_xor_sync(0xFFFFFFFF, ar_send_288, 4);
+                    _er_f[64] = ((ar_bit_72 == 1) ? ar_got_288 : ar_x0_288);
+                    _er_f[80] = ((ar_bit_72 == 1) ? ar_x1_288 : ar_got_288);
+                    float ar_x0_289 = _er_f[68];
+                    float ar_x1_289 = _er_f[84];
+                    float ar_send_289 = ((ar_bit_72 == 1) ? ar_x0_289 : ar_x1_289);
+                    float ar_got_289 = __shfl_xor_sync(0xFFFFFFFF, ar_send_289, 4);
+                    _er_f[68] = ((ar_bit_72 == 1) ? ar_got_289 : ar_x0_289);
+                    _er_f[84] = ((ar_bit_72 == 1) ? ar_x1_289 : ar_got_289);
+                    float ar_x0_290 = _er_f[72];
+                    float ar_x1_290 = _er_f[88];
+                    float ar_send_290 = ((ar_bit_72 == 1) ? ar_x0_290 : ar_x1_290);
+                    float ar_got_290 = __shfl_xor_sync(0xFFFFFFFF, ar_send_290, 4);
+                    _er_f[72] = ((ar_bit_72 == 1) ? ar_got_290 : ar_x0_290);
+                    _er_f[88] = ((ar_bit_72 == 1) ? ar_x1_290 : ar_got_290);
+                    float ar_x0_291 = _er_f[76];
+                    float ar_x1_291 = _er_f[92];
+                    float ar_send_291 = ((ar_bit_72 == 1) ? ar_x0_291 : ar_x1_291);
+                    float ar_got_291 = __shfl_xor_sync(0xFFFFFFFF, ar_send_291, 4);
+                    _er_f[76] = ((ar_bit_72 == 1) ? ar_got_291 : ar_x0_291);
+                    _er_f[92] = ((ar_bit_72 == 1) ? ar_x1_291 : ar_got_291);
+                    int ar_bit_73 = lane >> 1 & 1;
+                    float ar_x0_292 = _er_f[64];
+                    float ar_x1_292 = _er_f[72];
+                    float ar_send_292 = ((ar_bit_73 == 1) ? ar_x0_292 : ar_x1_292);
+                    float ar_got_292 = __shfl_xor_sync(0xFFFFFFFF, ar_send_292, 2);
+                    _er_f[64] = ((ar_bit_73 == 1) ? ar_got_292 : ar_x0_292);
+                    _er_f[72] = ((ar_bit_73 == 1) ? ar_x1_292 : ar_got_292);
+                    float ar_x0_293 = _er_f[68];
+                    float ar_x1_293 = _er_f[76];
+                    float ar_send_293 = ((ar_bit_73 == 1) ? ar_x0_293 : ar_x1_293);
+                    float ar_got_293 = __shfl_xor_sync(0xFFFFFFFF, ar_send_293, 2);
+                    _er_f[68] = ((ar_bit_73 == 1) ? ar_got_293 : ar_x0_293);
+                    _er_f[76] = ((ar_bit_73 == 1) ? ar_x1_293 : ar_got_293);
+                    float ar_x0_294 = _er_f[80];
+                    float ar_x1_294 = _er_f[88];
+                    float ar_send_294 = ((ar_bit_73 == 1) ? ar_x0_294 : ar_x1_294);
+                    float ar_got_294 = __shfl_xor_sync(0xFFFFFFFF, ar_send_294, 2);
+                    _er_f[80] = ((ar_bit_73 == 1) ? ar_got_294 : ar_x0_294);
+                    _er_f[88] = ((ar_bit_73 == 1) ? ar_x1_294 : ar_got_294);
+                    float ar_x0_295 = _er_f[84];
+                    float ar_x1_295 = _er_f[92];
+                    float ar_send_295 = ((ar_bit_73 == 1) ? ar_x0_295 : ar_x1_295);
+                    float ar_got_295 = __shfl_xor_sync(0xFFFFFFFF, ar_send_295, 2);
+                    _er_f[84] = ((ar_bit_73 == 1) ? ar_got_295 : ar_x0_295);
+                    _er_f[92] = ((ar_bit_73 == 1) ? ar_x1_295 : ar_got_295);
+                    int ar_bit_74 = lane & 1;
+                    float ar_x0_296 = _er_f[64];
+                    float ar_x1_296 = _er_f[68];
+                    float ar_send_296 = ((ar_bit_74 == 1) ? ar_x0_296 : ar_x1_296);
+                    float ar_got_296 = __shfl_xor_sync(0xFFFFFFFF, ar_send_296, 1);
+                    _er_f[64] = ((ar_bit_74 == 1) ? ar_got_296 : ar_x0_296);
+                    _er_f[68] = ((ar_bit_74 == 1) ? ar_x1_296 : ar_got_296);
+                    float ar_x0_297 = _er_f[72];
+                    float ar_x1_297 = _er_f[76];
+                    float ar_send_297 = ((ar_bit_74 == 1) ? ar_x0_297 : ar_x1_297);
+                    float ar_got_297 = __shfl_xor_sync(0xFFFFFFFF, ar_send_297, 1);
+                    _er_f[72] = ((ar_bit_74 == 1) ? ar_got_297 : ar_x0_297);
+                    _er_f[76] = ((ar_bit_74 == 1) ? ar_x1_297 : ar_got_297);
+                    float ar_x0_298 = _er_f[80];
+                    float ar_x1_298 = _er_f[84];
+                    float ar_send_298 = ((ar_bit_74 == 1) ? ar_x0_298 : ar_x1_298);
+                    float ar_got_298 = __shfl_xor_sync(0xFFFFFFFF, ar_send_298, 1);
+                    _er_f[80] = ((ar_bit_74 == 1) ? ar_got_298 : ar_x0_298);
+                    _er_f[84] = ((ar_bit_74 == 1) ? ar_x1_298 : ar_got_298);
+                    float ar_x0_299 = _er_f[88];
+                    float ar_x1_299 = _er_f[92];
+                    float ar_send_299 = ((ar_bit_74 == 1) ? ar_x0_299 : ar_x1_299);
+                    float ar_got_299 = __shfl_xor_sync(0xFFFFFFFF, ar_send_299, 1);
+                    _er_f[88] = ((ar_bit_74 == 1) ? ar_got_299 : ar_x0_299);
+                    _er_f[92] = ((ar_bit_74 == 1) ? ar_x1_299 : ar_got_299);
+                    int ar_bit_75 = lane >> 2 & 1;
+                    float ar_x0_300 = _er_f[65];
+                    float ar_x1_300 = _er_f[81];
+                    float ar_send_300 = ((ar_bit_75 == 1) ? ar_x0_300 : ar_x1_300);
+                    float ar_got_300 = __shfl_xor_sync(0xFFFFFFFF, ar_send_300, 4);
+                    _er_f[65] = ((ar_bit_75 == 1) ? ar_got_300 : ar_x0_300);
+                    _er_f[81] = ((ar_bit_75 == 1) ? ar_x1_300 : ar_got_300);
+                    float ar_x0_301 = _er_f[69];
+                    float ar_x1_301 = _er_f[85];
+                    float ar_send_301 = ((ar_bit_75 == 1) ? ar_x0_301 : ar_x1_301);
+                    float ar_got_301 = __shfl_xor_sync(0xFFFFFFFF, ar_send_301, 4);
+                    _er_f[69] = ((ar_bit_75 == 1) ? ar_got_301 : ar_x0_301);
+                    _er_f[85] = ((ar_bit_75 == 1) ? ar_x1_301 : ar_got_301);
+                    float ar_x0_302 = _er_f[73];
+                    float ar_x1_302 = _er_f[89];
+                    float ar_send_302 = ((ar_bit_75 == 1) ? ar_x0_302 : ar_x1_302);
+                    float ar_got_302 = __shfl_xor_sync(0xFFFFFFFF, ar_send_302, 4);
+                    _er_f[73] = ((ar_bit_75 == 1) ? ar_got_302 : ar_x0_302);
+                    _er_f[89] = ((ar_bit_75 == 1) ? ar_x1_302 : ar_got_302);
+                    float ar_x0_303 = _er_f[77];
+                    float ar_x1_303 = _er_f[93];
+                    float ar_send_303 = ((ar_bit_75 == 1) ? ar_x0_303 : ar_x1_303);
+                    float ar_got_303 = __shfl_xor_sync(0xFFFFFFFF, ar_send_303, 4);
+                    _er_f[77] = ((ar_bit_75 == 1) ? ar_got_303 : ar_x0_303);
+                    _er_f[93] = ((ar_bit_75 == 1) ? ar_x1_303 : ar_got_303);
+                    int ar_bit_76 = lane >> 1 & 1;
+                    float ar_x0_304 = _er_f[65];
+                    float ar_x1_304 = _er_f[73];
+                    float ar_send_304 = ((ar_bit_76 == 1) ? ar_x0_304 : ar_x1_304);
+                    float ar_got_304 = __shfl_xor_sync(0xFFFFFFFF, ar_send_304, 2);
+                    _er_f[65] = ((ar_bit_76 == 1) ? ar_got_304 : ar_x0_304);
+                    _er_f[73] = ((ar_bit_76 == 1) ? ar_x1_304 : ar_got_304);
+                    float ar_x0_305 = _er_f[69];
+                    float ar_x1_305 = _er_f[77];
+                    float ar_send_305 = ((ar_bit_76 == 1) ? ar_x0_305 : ar_x1_305);
+                    float ar_got_305 = __shfl_xor_sync(0xFFFFFFFF, ar_send_305, 2);
+                    _er_f[69] = ((ar_bit_76 == 1) ? ar_got_305 : ar_x0_305);
+                    _er_f[77] = ((ar_bit_76 == 1) ? ar_x1_305 : ar_got_305);
+                    float ar_x0_306 = _er_f[81];
+                    float ar_x1_306 = _er_f[89];
+                    float ar_send_306 = ((ar_bit_76 == 1) ? ar_x0_306 : ar_x1_306);
+                    float ar_got_306 = __shfl_xor_sync(0xFFFFFFFF, ar_send_306, 2);
+                    _er_f[81] = ((ar_bit_76 == 1) ? ar_got_306 : ar_x0_306);
+                    _er_f[89] = ((ar_bit_76 == 1) ? ar_x1_306 : ar_got_306);
+                    float ar_x0_307 = _er_f[85];
+                    float ar_x1_307 = _er_f[93];
+                    float ar_send_307 = ((ar_bit_76 == 1) ? ar_x0_307 : ar_x1_307);
+                    float ar_got_307 = __shfl_xor_sync(0xFFFFFFFF, ar_send_307, 2);
+                    _er_f[85] = ((ar_bit_76 == 1) ? ar_got_307 : ar_x0_307);
+                    _er_f[93] = ((ar_bit_76 == 1) ? ar_x1_307 : ar_got_307);
+                    int ar_bit_77 = lane & 1;
+                    float ar_x0_308 = _er_f[65];
+                    float ar_x1_308 = _er_f[69];
+                    float ar_send_308 = ((ar_bit_77 == 1) ? ar_x0_308 : ar_x1_308);
+                    float ar_got_308 = __shfl_xor_sync(0xFFFFFFFF, ar_send_308, 1);
+                    _er_f[65] = ((ar_bit_77 == 1) ? ar_got_308 : ar_x0_308);
+                    _er_f[69] = ((ar_bit_77 == 1) ? ar_x1_308 : ar_got_308);
+                    float ar_x0_309 = _er_f[73];
+                    float ar_x1_309 = _er_f[77];
+                    float ar_send_309 = ((ar_bit_77 == 1) ? ar_x0_309 : ar_x1_309);
+                    float ar_got_309 = __shfl_xor_sync(0xFFFFFFFF, ar_send_309, 1);
+                    _er_f[73] = ((ar_bit_77 == 1) ? ar_got_309 : ar_x0_309);
+                    _er_f[77] = ((ar_bit_77 == 1) ? ar_x1_309 : ar_got_309);
+                    float ar_x0_310 = _er_f[81];
+                    float ar_x1_310 = _er_f[85];
+                    float ar_send_310 = ((ar_bit_77 == 1) ? ar_x0_310 : ar_x1_310);
+                    float ar_got_310 = __shfl_xor_sync(0xFFFFFFFF, ar_send_310, 1);
+                    _er_f[81] = ((ar_bit_77 == 1) ? ar_got_310 : ar_x0_310);
+                    _er_f[85] = ((ar_bit_77 == 1) ? ar_x1_310 : ar_got_310);
+                    float ar_x0_311 = _er_f[89];
+                    float ar_x1_311 = _er_f[93];
+                    float ar_send_311 = ((ar_bit_77 == 1) ? ar_x0_311 : ar_x1_311);
+                    float ar_got_311 = __shfl_xor_sync(0xFFFFFFFF, ar_send_311, 1);
+                    _er_f[89] = ((ar_bit_77 == 1) ? ar_got_311 : ar_x0_311);
+                    _er_f[93] = ((ar_bit_77 == 1) ? ar_x1_311 : ar_got_311);
+                    int ar_bit_78 = lane >> 2 & 1;
+                    float ar_x0_312 = _er_f[66];
+                    float ar_x1_312 = _er_f[82];
+                    float ar_send_312 = ((ar_bit_78 == 1) ? ar_x0_312 : ar_x1_312);
+                    float ar_got_312 = __shfl_xor_sync(0xFFFFFFFF, ar_send_312, 4);
+                    _er_f[66] = ((ar_bit_78 == 1) ? ar_got_312 : ar_x0_312);
+                    _er_f[82] = ((ar_bit_78 == 1) ? ar_x1_312 : ar_got_312);
+                    float ar_x0_313 = _er_f[70];
+                    float ar_x1_313 = _er_f[86];
+                    float ar_send_313 = ((ar_bit_78 == 1) ? ar_x0_313 : ar_x1_313);
+                    float ar_got_313 = __shfl_xor_sync(0xFFFFFFFF, ar_send_313, 4);
+                    _er_f[70] = ((ar_bit_78 == 1) ? ar_got_313 : ar_x0_313);
+                    _er_f[86] = ((ar_bit_78 == 1) ? ar_x1_313 : ar_got_313);
+                    float ar_x0_314 = _er_f[74];
+                    float ar_x1_314 = _er_f[90];
+                    float ar_send_314 = ((ar_bit_78 == 1) ? ar_x0_314 : ar_x1_314);
+                    float ar_got_314 = __shfl_xor_sync(0xFFFFFFFF, ar_send_314, 4);
+                    _er_f[74] = ((ar_bit_78 == 1) ? ar_got_314 : ar_x0_314);
+                    _er_f[90] = ((ar_bit_78 == 1) ? ar_x1_314 : ar_got_314);
+                    float ar_x0_315 = _er_f[78];
+                    float ar_x1_315 = _er_f[94];
+                    float ar_send_315 = ((ar_bit_78 == 1) ? ar_x0_315 : ar_x1_315);
+                    float ar_got_315 = __shfl_xor_sync(0xFFFFFFFF, ar_send_315, 4);
+                    _er_f[78] = ((ar_bit_78 == 1) ? ar_got_315 : ar_x0_315);
+                    _er_f[94] = ((ar_bit_78 == 1) ? ar_x1_315 : ar_got_315);
+                    int ar_bit_79 = lane >> 1 & 1;
+                    float ar_x0_316 = _er_f[66];
+                    float ar_x1_316 = _er_f[74];
+                    float ar_send_316 = ((ar_bit_79 == 1) ? ar_x0_316 : ar_x1_316);
+                    float ar_got_316 = __shfl_xor_sync(0xFFFFFFFF, ar_send_316, 2);
+                    _er_f[66] = ((ar_bit_79 == 1) ? ar_got_316 : ar_x0_316);
+                    _er_f[74] = ((ar_bit_79 == 1) ? ar_x1_316 : ar_got_316);
+                    float ar_x0_317 = _er_f[70];
+                    float ar_x1_317 = _er_f[78];
+                    float ar_send_317 = ((ar_bit_79 == 1) ? ar_x0_317 : ar_x1_317);
+                    float ar_got_317 = __shfl_xor_sync(0xFFFFFFFF, ar_send_317, 2);
+                    _er_f[70] = ((ar_bit_79 == 1) ? ar_got_317 : ar_x0_317);
+                    _er_f[78] = ((ar_bit_79 == 1) ? ar_x1_317 : ar_got_317);
+                    float ar_x0_318 = _er_f[82];
+                    float ar_x1_318 = _er_f[90];
+                    float ar_send_318 = ((ar_bit_79 == 1) ? ar_x0_318 : ar_x1_318);
+                    float ar_got_318 = __shfl_xor_sync(0xFFFFFFFF, ar_send_318, 2);
+                    _er_f[82] = ((ar_bit_79 == 1) ? ar_got_318 : ar_x0_318);
+                    _er_f[90] = ((ar_bit_79 == 1) ? ar_x1_318 : ar_got_318);
+                    float ar_x0_319 = _er_f[86];
+                    float ar_x1_319 = _er_f[94];
+                    float ar_send_319 = ((ar_bit_79 == 1) ? ar_x0_319 : ar_x1_319);
+                    float ar_got_319 = __shfl_xor_sync(0xFFFFFFFF, ar_send_319, 2);
+                    _er_f[86] = ((ar_bit_79 == 1) ? ar_got_319 : ar_x0_319);
+                    _er_f[94] = ((ar_bit_79 == 1) ? ar_x1_319 : ar_got_319);
+                    int ar_bit_80 = lane & 1;
+                    float ar_x0_320 = _er_f[66];
+                    float ar_x1_320 = _er_f[70];
+                    float ar_send_320 = ((ar_bit_80 == 1) ? ar_x0_320 : ar_x1_320);
+                    float ar_got_320 = __shfl_xor_sync(0xFFFFFFFF, ar_send_320, 1);
+                    _er_f[66] = ((ar_bit_80 == 1) ? ar_got_320 : ar_x0_320);
+                    _er_f[70] = ((ar_bit_80 == 1) ? ar_x1_320 : ar_got_320);
+                    float ar_x0_321 = _er_f[74];
+                    float ar_x1_321 = _er_f[78];
+                    float ar_send_321 = ((ar_bit_80 == 1) ? ar_x0_321 : ar_x1_321);
+                    float ar_got_321 = __shfl_xor_sync(0xFFFFFFFF, ar_send_321, 1);
+                    _er_f[74] = ((ar_bit_80 == 1) ? ar_got_321 : ar_x0_321);
+                    _er_f[78] = ((ar_bit_80 == 1) ? ar_x1_321 : ar_got_321);
+                    float ar_x0_322 = _er_f[82];
+                    float ar_x1_322 = _er_f[86];
+                    float ar_send_322 = ((ar_bit_80 == 1) ? ar_x0_322 : ar_x1_322);
+                    float ar_got_322 = __shfl_xor_sync(0xFFFFFFFF, ar_send_322, 1);
+                    _er_f[82] = ((ar_bit_80 == 1) ? ar_got_322 : ar_x0_322);
+                    _er_f[86] = ((ar_bit_80 == 1) ? ar_x1_322 : ar_got_322);
+                    float ar_x0_323 = _er_f[90];
+                    float ar_x1_323 = _er_f[94];
+                    float ar_send_323 = ((ar_bit_80 == 1) ? ar_x0_323 : ar_x1_323);
+                    float ar_got_323 = __shfl_xor_sync(0xFFFFFFFF, ar_send_323, 1);
+                    _er_f[90] = ((ar_bit_80 == 1) ? ar_got_323 : ar_x0_323);
+                    _er_f[94] = ((ar_bit_80 == 1) ? ar_x1_323 : ar_got_323);
+                    int ar_bit_81 = lane >> 2 & 1;
+                    float ar_x0_324 = _er_f[67];
+                    float ar_x1_324 = _er_f[83];
+                    float ar_send_324 = ((ar_bit_81 == 1) ? ar_x0_324 : ar_x1_324);
+                    float ar_got_324 = __shfl_xor_sync(0xFFFFFFFF, ar_send_324, 4);
+                    _er_f[67] = ((ar_bit_81 == 1) ? ar_got_324 : ar_x0_324);
+                    _er_f[83] = ((ar_bit_81 == 1) ? ar_x1_324 : ar_got_324);
+                    float ar_x0_325 = _er_f[71];
+                    float ar_x1_325 = _er_f[87];
+                    float ar_send_325 = ((ar_bit_81 == 1) ? ar_x0_325 : ar_x1_325);
+                    float ar_got_325 = __shfl_xor_sync(0xFFFFFFFF, ar_send_325, 4);
+                    _er_f[71] = ((ar_bit_81 == 1) ? ar_got_325 : ar_x0_325);
+                    _er_f[87] = ((ar_bit_81 == 1) ? ar_x1_325 : ar_got_325);
+                    float ar_x0_326 = _er_f[75];
+                    float ar_x1_326 = _er_f[91];
+                    float ar_send_326 = ((ar_bit_81 == 1) ? ar_x0_326 : ar_x1_326);
+                    float ar_got_326 = __shfl_xor_sync(0xFFFFFFFF, ar_send_326, 4);
+                    _er_f[75] = ((ar_bit_81 == 1) ? ar_got_326 : ar_x0_326);
+                    _er_f[91] = ((ar_bit_81 == 1) ? ar_x1_326 : ar_got_326);
+                    float ar_x0_327 = _er_f[79];
+                    float ar_x1_327 = _er_f[95];
+                    float ar_send_327 = ((ar_bit_81 == 1) ? ar_x0_327 : ar_x1_327);
+                    float ar_got_327 = __shfl_xor_sync(0xFFFFFFFF, ar_send_327, 4);
+                    _er_f[79] = ((ar_bit_81 == 1) ? ar_got_327 : ar_x0_327);
+                    _er_f[95] = ((ar_bit_81 == 1) ? ar_x1_327 : ar_got_327);
+                    int ar_bit_82 = lane >> 1 & 1;
+                    float ar_x0_328 = _er_f[67];
+                    float ar_x1_328 = _er_f[75];
+                    float ar_send_328 = ((ar_bit_82 == 1) ? ar_x0_328 : ar_x1_328);
+                    float ar_got_328 = __shfl_xor_sync(0xFFFFFFFF, ar_send_328, 2);
+                    _er_f[67] = ((ar_bit_82 == 1) ? ar_got_328 : ar_x0_328);
+                    _er_f[75] = ((ar_bit_82 == 1) ? ar_x1_328 : ar_got_328);
+                    float ar_x0_329 = _er_f[71];
+                    float ar_x1_329 = _er_f[79];
+                    float ar_send_329 = ((ar_bit_82 == 1) ? ar_x0_329 : ar_x1_329);
+                    float ar_got_329 = __shfl_xor_sync(0xFFFFFFFF, ar_send_329, 2);
+                    _er_f[71] = ((ar_bit_82 == 1) ? ar_got_329 : ar_x0_329);
+                    _er_f[79] = ((ar_bit_82 == 1) ? ar_x1_329 : ar_got_329);
+                    float ar_x0_330 = _er_f[83];
+                    float ar_x1_330 = _er_f[91];
+                    float ar_send_330 = ((ar_bit_82 == 1) ? ar_x0_330 : ar_x1_330);
+                    float ar_got_330 = __shfl_xor_sync(0xFFFFFFFF, ar_send_330, 2);
+                    _er_f[83] = ((ar_bit_82 == 1) ? ar_got_330 : ar_x0_330);
+                    _er_f[91] = ((ar_bit_82 == 1) ? ar_x1_330 : ar_got_330);
+                    float ar_x0_331 = _er_f[87];
+                    float ar_x1_331 = _er_f[95];
+                    float ar_send_331 = ((ar_bit_82 == 1) ? ar_x0_331 : ar_x1_331);
+                    float ar_got_331 = __shfl_xor_sync(0xFFFFFFFF, ar_send_331, 2);
+                    _er_f[87] = ((ar_bit_82 == 1) ? ar_got_331 : ar_x0_331);
+                    _er_f[95] = ((ar_bit_82 == 1) ? ar_x1_331 : ar_got_331);
+                    int ar_bit_83 = lane & 1;
+                    float ar_x0_332 = _er_f[67];
+                    float ar_x1_332 = _er_f[71];
+                    float ar_send_332 = ((ar_bit_83 == 1) ? ar_x0_332 : ar_x1_332);
+                    float ar_got_332 = __shfl_xor_sync(0xFFFFFFFF, ar_send_332, 1);
+                    _er_f[67] = ((ar_bit_83 == 1) ? ar_got_332 : ar_x0_332);
+                    _er_f[71] = ((ar_bit_83 == 1) ? ar_x1_332 : ar_got_332);
+                    float ar_x0_333 = _er_f[75];
+                    float ar_x1_333 = _er_f[79];
+                    float ar_send_333 = ((ar_bit_83 == 1) ? ar_x0_333 : ar_x1_333);
+                    float ar_got_333 = __shfl_xor_sync(0xFFFFFFFF, ar_send_333, 1);
+                    _er_f[75] = ((ar_bit_83 == 1) ? ar_got_333 : ar_x0_333);
+                    _er_f[79] = ((ar_bit_83 == 1) ? ar_x1_333 : ar_got_333);
+                    float ar_x0_334 = _er_f[83];
+                    float ar_x1_334 = _er_f[87];
+                    float ar_send_334 = ((ar_bit_83 == 1) ? ar_x0_334 : ar_x1_334);
+                    float ar_got_334 = __shfl_xor_sync(0xFFFFFFFF, ar_send_334, 1);
+                    _er_f[83] = ((ar_bit_83 == 1) ? ar_got_334 : ar_x0_334);
+                    _er_f[87] = ((ar_bit_83 == 1) ? ar_x1_334 : ar_got_334);
+                    float ar_x0_335 = _er_f[91];
+                    float ar_x1_335 = _er_f[95];
+                    float ar_send_335 = ((ar_bit_83 == 1) ? ar_x0_335 : ar_x1_335);
+                    float ar_got_335 = __shfl_xor_sync(0xFFFFFFFF, ar_send_335, 1);
+                    _er_f[91] = ((ar_bit_83 == 1) ? ar_got_335 : ar_x0_335);
+                    _er_f[95] = ((ar_bit_83 == 1) ? ar_x1_335 : ar_got_335);
+                    int ar_ri_6 = er_at2 + 256 + 64;
+                    asm("" : "+r"(ar_ri_6));
+                    {
+                        float4 _v4 = make_float4(_er_f[64 + 0], _er_f[64 + 1], _er_f[64 + 2], _er_f[64 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    ar_ri_6 = ar_ri_6 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[68 + 0], _er_f[68 + 1], _er_f[68 + 2], _er_f[68 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    ar_ri_6 = ar_ri_6 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[72 + 0], _er_f[72 + 1], _er_f[72 + 2], _er_f[72 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    ar_ri_6 = ar_ri_6 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[76 + 0], _er_f[76 + 1], _er_f[76 + 2], _er_f[76 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    ar_ri_6 = ar_ri_6 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[80 + 0], _er_f[80 + 1], _er_f[80 + 2], _er_f[80 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    ar_ri_6 = ar_ri_6 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[84 + 0], _er_f[84 + 1], _er_f[84 + 2], _er_f[84 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    ar_ri_6 = ar_ri_6 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[88 + 0], _er_f[88 + 1], _er_f[88 + 2], _er_f[88 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    ar_ri_6 = ar_ri_6 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[92 + 0], _er_f[92 + 1], _er_f[92 + 2], _er_f[92 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_6) = _v4;
+                    }
+                    int ar_bit_84 = lane >> 2 & 1;
+                    float ar_x0_336 = _er_f[96];
+                    float ar_x1_336 = _er_f[112];
+                    float ar_send_336 = ((ar_bit_84 == 1) ? ar_x0_336 : ar_x1_336);
+                    float ar_got_336 = __shfl_xor_sync(0xFFFFFFFF, ar_send_336, 4);
+                    _er_f[96] = ((ar_bit_84 == 1) ? ar_got_336 : ar_x0_336);
+                    _er_f[112] = ((ar_bit_84 == 1) ? ar_x1_336 : ar_got_336);
+                    float ar_x0_337 = _er_f[100];
+                    float ar_x1_337 = _er_f[116];
+                    float ar_send_337 = ((ar_bit_84 == 1) ? ar_x0_337 : ar_x1_337);
+                    float ar_got_337 = __shfl_xor_sync(0xFFFFFFFF, ar_send_337, 4);
+                    _er_f[100] = ((ar_bit_84 == 1) ? ar_got_337 : ar_x0_337);
+                    _er_f[116] = ((ar_bit_84 == 1) ? ar_x1_337 : ar_got_337);
+                    float ar_x0_338 = _er_f[104];
+                    float ar_x1_338 = _er_f[120];
+                    float ar_send_338 = ((ar_bit_84 == 1) ? ar_x0_338 : ar_x1_338);
+                    float ar_got_338 = __shfl_xor_sync(0xFFFFFFFF, ar_send_338, 4);
+                    _er_f[104] = ((ar_bit_84 == 1) ? ar_got_338 : ar_x0_338);
+                    _er_f[120] = ((ar_bit_84 == 1) ? ar_x1_338 : ar_got_338);
+                    float ar_x0_339 = _er_f[108];
+                    float ar_x1_339 = _er_f[124];
+                    float ar_send_339 = ((ar_bit_84 == 1) ? ar_x0_339 : ar_x1_339);
+                    float ar_got_339 = __shfl_xor_sync(0xFFFFFFFF, ar_send_339, 4);
+                    _er_f[108] = ((ar_bit_84 == 1) ? ar_got_339 : ar_x0_339);
+                    _er_f[124] = ((ar_bit_84 == 1) ? ar_x1_339 : ar_got_339);
+                    int ar_bit_85 = lane >> 1 & 1;
+                    float ar_x0_340 = _er_f[96];
+                    float ar_x1_340 = _er_f[104];
+                    float ar_send_340 = ((ar_bit_85 == 1) ? ar_x0_340 : ar_x1_340);
+                    float ar_got_340 = __shfl_xor_sync(0xFFFFFFFF, ar_send_340, 2);
+                    _er_f[96] = ((ar_bit_85 == 1) ? ar_got_340 : ar_x0_340);
+                    _er_f[104] = ((ar_bit_85 == 1) ? ar_x1_340 : ar_got_340);
+                    float ar_x0_341 = _er_f[100];
+                    float ar_x1_341 = _er_f[108];
+                    float ar_send_341 = ((ar_bit_85 == 1) ? ar_x0_341 : ar_x1_341);
+                    float ar_got_341 = __shfl_xor_sync(0xFFFFFFFF, ar_send_341, 2);
+                    _er_f[100] = ((ar_bit_85 == 1) ? ar_got_341 : ar_x0_341);
+                    _er_f[108] = ((ar_bit_85 == 1) ? ar_x1_341 : ar_got_341);
+                    float ar_x0_342 = _er_f[112];
+                    float ar_x1_342 = _er_f[120];
+                    float ar_send_342 = ((ar_bit_85 == 1) ? ar_x0_342 : ar_x1_342);
+                    float ar_got_342 = __shfl_xor_sync(0xFFFFFFFF, ar_send_342, 2);
+                    _er_f[112] = ((ar_bit_85 == 1) ? ar_got_342 : ar_x0_342);
+                    _er_f[120] = ((ar_bit_85 == 1) ? ar_x1_342 : ar_got_342);
+                    float ar_x0_343 = _er_f[116];
+                    float ar_x1_343 = _er_f[124];
+                    float ar_send_343 = ((ar_bit_85 == 1) ? ar_x0_343 : ar_x1_343);
+                    float ar_got_343 = __shfl_xor_sync(0xFFFFFFFF, ar_send_343, 2);
+                    _er_f[116] = ((ar_bit_85 == 1) ? ar_got_343 : ar_x0_343);
+                    _er_f[124] = ((ar_bit_85 == 1) ? ar_x1_343 : ar_got_343);
+                    int ar_bit_86 = lane & 1;
+                    float ar_x0_344 = _er_f[96];
+                    float ar_x1_344 = _er_f[100];
+                    float ar_send_344 = ((ar_bit_86 == 1) ? ar_x0_344 : ar_x1_344);
+                    float ar_got_344 = __shfl_xor_sync(0xFFFFFFFF, ar_send_344, 1);
+                    _er_f[96] = ((ar_bit_86 == 1) ? ar_got_344 : ar_x0_344);
+                    _er_f[100] = ((ar_bit_86 == 1) ? ar_x1_344 : ar_got_344);
+                    float ar_x0_345 = _er_f[104];
+                    float ar_x1_345 = _er_f[108];
+                    float ar_send_345 = ((ar_bit_86 == 1) ? ar_x0_345 : ar_x1_345);
+                    float ar_got_345 = __shfl_xor_sync(0xFFFFFFFF, ar_send_345, 1);
+                    _er_f[104] = ((ar_bit_86 == 1) ? ar_got_345 : ar_x0_345);
+                    _er_f[108] = ((ar_bit_86 == 1) ? ar_x1_345 : ar_got_345);
+                    float ar_x0_346 = _er_f[112];
+                    float ar_x1_346 = _er_f[116];
+                    float ar_send_346 = ((ar_bit_86 == 1) ? ar_x0_346 : ar_x1_346);
+                    float ar_got_346 = __shfl_xor_sync(0xFFFFFFFF, ar_send_346, 1);
+                    _er_f[112] = ((ar_bit_86 == 1) ? ar_got_346 : ar_x0_346);
+                    _er_f[116] = ((ar_bit_86 == 1) ? ar_x1_346 : ar_got_346);
+                    float ar_x0_347 = _er_f[120];
+                    float ar_x1_347 = _er_f[124];
+                    float ar_send_347 = ((ar_bit_86 == 1) ? ar_x0_347 : ar_x1_347);
+                    float ar_got_347 = __shfl_xor_sync(0xFFFFFFFF, ar_send_347, 1);
+                    _er_f[120] = ((ar_bit_86 == 1) ? ar_got_347 : ar_x0_347);
+                    _er_f[124] = ((ar_bit_86 == 1) ? ar_x1_347 : ar_got_347);
+                    int ar_bit_87 = lane >> 2 & 1;
+                    float ar_x0_348 = _er_f[97];
+                    float ar_x1_348 = _er_f[113];
+                    float ar_send_348 = ((ar_bit_87 == 1) ? ar_x0_348 : ar_x1_348);
+                    float ar_got_348 = __shfl_xor_sync(0xFFFFFFFF, ar_send_348, 4);
+                    _er_f[97] = ((ar_bit_87 == 1) ? ar_got_348 : ar_x0_348);
+                    _er_f[113] = ((ar_bit_87 == 1) ? ar_x1_348 : ar_got_348);
+                    float ar_x0_349 = _er_f[101];
+                    float ar_x1_349 = _er_f[117];
+                    float ar_send_349 = ((ar_bit_87 == 1) ? ar_x0_349 : ar_x1_349);
+                    float ar_got_349 = __shfl_xor_sync(0xFFFFFFFF, ar_send_349, 4);
+                    _er_f[101] = ((ar_bit_87 == 1) ? ar_got_349 : ar_x0_349);
+                    _er_f[117] = ((ar_bit_87 == 1) ? ar_x1_349 : ar_got_349);
+                    float ar_x0_350 = _er_f[105];
+                    float ar_x1_350 = _er_f[121];
+                    float ar_send_350 = ((ar_bit_87 == 1) ? ar_x0_350 : ar_x1_350);
+                    float ar_got_350 = __shfl_xor_sync(0xFFFFFFFF, ar_send_350, 4);
+                    _er_f[105] = ((ar_bit_87 == 1) ? ar_got_350 : ar_x0_350);
+                    _er_f[121] = ((ar_bit_87 == 1) ? ar_x1_350 : ar_got_350);
+                    float ar_x0_351 = _er_f[109];
+                    float ar_x1_351 = _er_f[125];
+                    float ar_send_351 = ((ar_bit_87 == 1) ? ar_x0_351 : ar_x1_351);
+                    float ar_got_351 = __shfl_xor_sync(0xFFFFFFFF, ar_send_351, 4);
+                    _er_f[109] = ((ar_bit_87 == 1) ? ar_got_351 : ar_x0_351);
+                    _er_f[125] = ((ar_bit_87 == 1) ? ar_x1_351 : ar_got_351);
+                    int ar_bit_88 = lane >> 1 & 1;
+                    float ar_x0_352 = _er_f[97];
+                    float ar_x1_352 = _er_f[105];
+                    float ar_send_352 = ((ar_bit_88 == 1) ? ar_x0_352 : ar_x1_352);
+                    float ar_got_352 = __shfl_xor_sync(0xFFFFFFFF, ar_send_352, 2);
+                    _er_f[97] = ((ar_bit_88 == 1) ? ar_got_352 : ar_x0_352);
+                    _er_f[105] = ((ar_bit_88 == 1) ? ar_x1_352 : ar_got_352);
+                    float ar_x0_353 = _er_f[101];
+                    float ar_x1_353 = _er_f[109];
+                    float ar_send_353 = ((ar_bit_88 == 1) ? ar_x0_353 : ar_x1_353);
+                    float ar_got_353 = __shfl_xor_sync(0xFFFFFFFF, ar_send_353, 2);
+                    _er_f[101] = ((ar_bit_88 == 1) ? ar_got_353 : ar_x0_353);
+                    _er_f[109] = ((ar_bit_88 == 1) ? ar_x1_353 : ar_got_353);
+                    float ar_x0_354 = _er_f[113];
+                    float ar_x1_354 = _er_f[121];
+                    float ar_send_354 = ((ar_bit_88 == 1) ? ar_x0_354 : ar_x1_354);
+                    float ar_got_354 = __shfl_xor_sync(0xFFFFFFFF, ar_send_354, 2);
+                    _er_f[113] = ((ar_bit_88 == 1) ? ar_got_354 : ar_x0_354);
+                    _er_f[121] = ((ar_bit_88 == 1) ? ar_x1_354 : ar_got_354);
+                    float ar_x0_355 = _er_f[117];
+                    float ar_x1_355 = _er_f[125];
+                    float ar_send_355 = ((ar_bit_88 == 1) ? ar_x0_355 : ar_x1_355);
+                    float ar_got_355 = __shfl_xor_sync(0xFFFFFFFF, ar_send_355, 2);
+                    _er_f[117] = ((ar_bit_88 == 1) ? ar_got_355 : ar_x0_355);
+                    _er_f[125] = ((ar_bit_88 == 1) ? ar_x1_355 : ar_got_355);
+                    int ar_bit_89 = lane & 1;
+                    float ar_x0_356 = _er_f[97];
+                    float ar_x1_356 = _er_f[101];
+                    float ar_send_356 = ((ar_bit_89 == 1) ? ar_x0_356 : ar_x1_356);
+                    float ar_got_356 = __shfl_xor_sync(0xFFFFFFFF, ar_send_356, 1);
+                    _er_f[97] = ((ar_bit_89 == 1) ? ar_got_356 : ar_x0_356);
+                    _er_f[101] = ((ar_bit_89 == 1) ? ar_x1_356 : ar_got_356);
+                    float ar_x0_357 = _er_f[105];
+                    float ar_x1_357 = _er_f[109];
+                    float ar_send_357 = ((ar_bit_89 == 1) ? ar_x0_357 : ar_x1_357);
+                    float ar_got_357 = __shfl_xor_sync(0xFFFFFFFF, ar_send_357, 1);
+                    _er_f[105] = ((ar_bit_89 == 1) ? ar_got_357 : ar_x0_357);
+                    _er_f[109] = ((ar_bit_89 == 1) ? ar_x1_357 : ar_got_357);
+                    float ar_x0_358 = _er_f[113];
+                    float ar_x1_358 = _er_f[117];
+                    float ar_send_358 = ((ar_bit_89 == 1) ? ar_x0_358 : ar_x1_358);
+                    float ar_got_358 = __shfl_xor_sync(0xFFFFFFFF, ar_send_358, 1);
+                    _er_f[113] = ((ar_bit_89 == 1) ? ar_got_358 : ar_x0_358);
+                    _er_f[117] = ((ar_bit_89 == 1) ? ar_x1_358 : ar_got_358);
+                    float ar_x0_359 = _er_f[121];
+                    float ar_x1_359 = _er_f[125];
+                    float ar_send_359 = ((ar_bit_89 == 1) ? ar_x0_359 : ar_x1_359);
+                    float ar_got_359 = __shfl_xor_sync(0xFFFFFFFF, ar_send_359, 1);
+                    _er_f[121] = ((ar_bit_89 == 1) ? ar_got_359 : ar_x0_359);
+                    _er_f[125] = ((ar_bit_89 == 1) ? ar_x1_359 : ar_got_359);
+                    int ar_bit_90 = lane >> 2 & 1;
+                    float ar_x0_360 = _er_f[98];
+                    float ar_x1_360 = _er_f[114];
+                    float ar_send_360 = ((ar_bit_90 == 1) ? ar_x0_360 : ar_x1_360);
+                    float ar_got_360 = __shfl_xor_sync(0xFFFFFFFF, ar_send_360, 4);
+                    _er_f[98] = ((ar_bit_90 == 1) ? ar_got_360 : ar_x0_360);
+                    _er_f[114] = ((ar_bit_90 == 1) ? ar_x1_360 : ar_got_360);
+                    float ar_x0_361 = _er_f[102];
+                    float ar_x1_361 = _er_f[118];
+                    float ar_send_361 = ((ar_bit_90 == 1) ? ar_x0_361 : ar_x1_361);
+                    float ar_got_361 = __shfl_xor_sync(0xFFFFFFFF, ar_send_361, 4);
+                    _er_f[102] = ((ar_bit_90 == 1) ? ar_got_361 : ar_x0_361);
+                    _er_f[118] = ((ar_bit_90 == 1) ? ar_x1_361 : ar_got_361);
+                    float ar_x0_362 = _er_f[106];
+                    float ar_x1_362 = _er_f[122];
+                    float ar_send_362 = ((ar_bit_90 == 1) ? ar_x0_362 : ar_x1_362);
+                    float ar_got_362 = __shfl_xor_sync(0xFFFFFFFF, ar_send_362, 4);
+                    _er_f[106] = ((ar_bit_90 == 1) ? ar_got_362 : ar_x0_362);
+                    _er_f[122] = ((ar_bit_90 == 1) ? ar_x1_362 : ar_got_362);
+                    float ar_x0_363 = _er_f[110];
+                    float ar_x1_363 = _er_f[126];
+                    float ar_send_363 = ((ar_bit_90 == 1) ? ar_x0_363 : ar_x1_363);
+                    float ar_got_363 = __shfl_xor_sync(0xFFFFFFFF, ar_send_363, 4);
+                    _er_f[110] = ((ar_bit_90 == 1) ? ar_got_363 : ar_x0_363);
+                    _er_f[126] = ((ar_bit_90 == 1) ? ar_x1_363 : ar_got_363);
+                    int ar_bit_91 = lane >> 1 & 1;
+                    float ar_x0_364 = _er_f[98];
+                    float ar_x1_364 = _er_f[106];
+                    float ar_send_364 = ((ar_bit_91 == 1) ? ar_x0_364 : ar_x1_364);
+                    float ar_got_364 = __shfl_xor_sync(0xFFFFFFFF, ar_send_364, 2);
+                    _er_f[98] = ((ar_bit_91 == 1) ? ar_got_364 : ar_x0_364);
+                    _er_f[106] = ((ar_bit_91 == 1) ? ar_x1_364 : ar_got_364);
+                    float ar_x0_365 = _er_f[102];
+                    float ar_x1_365 = _er_f[110];
+                    float ar_send_365 = ((ar_bit_91 == 1) ? ar_x0_365 : ar_x1_365);
+                    float ar_got_365 = __shfl_xor_sync(0xFFFFFFFF, ar_send_365, 2);
+                    _er_f[102] = ((ar_bit_91 == 1) ? ar_got_365 : ar_x0_365);
+                    _er_f[110] = ((ar_bit_91 == 1) ? ar_x1_365 : ar_got_365);
+                    float ar_x0_366 = _er_f[114];
+                    float ar_x1_366 = _er_f[122];
+                    float ar_send_366 = ((ar_bit_91 == 1) ? ar_x0_366 : ar_x1_366);
+                    float ar_got_366 = __shfl_xor_sync(0xFFFFFFFF, ar_send_366, 2);
+                    _er_f[114] = ((ar_bit_91 == 1) ? ar_got_366 : ar_x0_366);
+                    _er_f[122] = ((ar_bit_91 == 1) ? ar_x1_366 : ar_got_366);
+                    float ar_x0_367 = _er_f[118];
+                    float ar_x1_367 = _er_f[126];
+                    float ar_send_367 = ((ar_bit_91 == 1) ? ar_x0_367 : ar_x1_367);
+                    float ar_got_367 = __shfl_xor_sync(0xFFFFFFFF, ar_send_367, 2);
+                    _er_f[118] = ((ar_bit_91 == 1) ? ar_got_367 : ar_x0_367);
+                    _er_f[126] = ((ar_bit_91 == 1) ? ar_x1_367 : ar_got_367);
+                    int ar_bit_92 = lane & 1;
+                    float ar_x0_368 = _er_f[98];
+                    float ar_x1_368 = _er_f[102];
+                    float ar_send_368 = ((ar_bit_92 == 1) ? ar_x0_368 : ar_x1_368);
+                    float ar_got_368 = __shfl_xor_sync(0xFFFFFFFF, ar_send_368, 1);
+                    _er_f[98] = ((ar_bit_92 == 1) ? ar_got_368 : ar_x0_368);
+                    _er_f[102] = ((ar_bit_92 == 1) ? ar_x1_368 : ar_got_368);
+                    float ar_x0_369 = _er_f[106];
+                    float ar_x1_369 = _er_f[110];
+                    float ar_send_369 = ((ar_bit_92 == 1) ? ar_x0_369 : ar_x1_369);
+                    float ar_got_369 = __shfl_xor_sync(0xFFFFFFFF, ar_send_369, 1);
+                    _er_f[106] = ((ar_bit_92 == 1) ? ar_got_369 : ar_x0_369);
+                    _er_f[110] = ((ar_bit_92 == 1) ? ar_x1_369 : ar_got_369);
+                    float ar_x0_370 = _er_f[114];
+                    float ar_x1_370 = _er_f[118];
+                    float ar_send_370 = ((ar_bit_92 == 1) ? ar_x0_370 : ar_x1_370);
+                    float ar_got_370 = __shfl_xor_sync(0xFFFFFFFF, ar_send_370, 1);
+                    _er_f[114] = ((ar_bit_92 == 1) ? ar_got_370 : ar_x0_370);
+                    _er_f[118] = ((ar_bit_92 == 1) ? ar_x1_370 : ar_got_370);
+                    float ar_x0_371 = _er_f[122];
+                    float ar_x1_371 = _er_f[126];
+                    float ar_send_371 = ((ar_bit_92 == 1) ? ar_x0_371 : ar_x1_371);
+                    float ar_got_371 = __shfl_xor_sync(0xFFFFFFFF, ar_send_371, 1);
+                    _er_f[122] = ((ar_bit_92 == 1) ? ar_got_371 : ar_x0_371);
+                    _er_f[126] = ((ar_bit_92 == 1) ? ar_x1_371 : ar_got_371);
+                    int ar_bit_93 = lane >> 2 & 1;
+                    float ar_x0_372 = _er_f[99];
+                    float ar_x1_372 = _er_f[115];
+                    float ar_send_372 = ((ar_bit_93 == 1) ? ar_x0_372 : ar_x1_372);
+                    float ar_got_372 = __shfl_xor_sync(0xFFFFFFFF, ar_send_372, 4);
+                    _er_f[99] = ((ar_bit_93 == 1) ? ar_got_372 : ar_x0_372);
+                    _er_f[115] = ((ar_bit_93 == 1) ? ar_x1_372 : ar_got_372);
+                    float ar_x0_373 = _er_f[103];
+                    float ar_x1_373 = _er_f[119];
+                    float ar_send_373 = ((ar_bit_93 == 1) ? ar_x0_373 : ar_x1_373);
+                    float ar_got_373 = __shfl_xor_sync(0xFFFFFFFF, ar_send_373, 4);
+                    _er_f[103] = ((ar_bit_93 == 1) ? ar_got_373 : ar_x0_373);
+                    _er_f[119] = ((ar_bit_93 == 1) ? ar_x1_373 : ar_got_373);
+                    float ar_x0_374 = _er_f[107];
+                    float ar_x1_374 = _er_f[123];
+                    float ar_send_374 = ((ar_bit_93 == 1) ? ar_x0_374 : ar_x1_374);
+                    float ar_got_374 = __shfl_xor_sync(0xFFFFFFFF, ar_send_374, 4);
+                    _er_f[107] = ((ar_bit_93 == 1) ? ar_got_374 : ar_x0_374);
+                    _er_f[123] = ((ar_bit_93 == 1) ? ar_x1_374 : ar_got_374);
+                    float ar_x0_375 = _er_f[111];
+                    float ar_x1_375 = _er_f[127];
+                    float ar_send_375 = ((ar_bit_93 == 1) ? ar_x0_375 : ar_x1_375);
+                    float ar_got_375 = __shfl_xor_sync(0xFFFFFFFF, ar_send_375, 4);
+                    _er_f[111] = ((ar_bit_93 == 1) ? ar_got_375 : ar_x0_375);
+                    _er_f[127] = ((ar_bit_93 == 1) ? ar_x1_375 : ar_got_375);
+                    int ar_bit_94 = lane >> 1 & 1;
+                    float ar_x0_376 = _er_f[99];
+                    float ar_x1_376 = _er_f[107];
+                    float ar_send_376 = ((ar_bit_94 == 1) ? ar_x0_376 : ar_x1_376);
+                    float ar_got_376 = __shfl_xor_sync(0xFFFFFFFF, ar_send_376, 2);
+                    _er_f[99] = ((ar_bit_94 == 1) ? ar_got_376 : ar_x0_376);
+                    _er_f[107] = ((ar_bit_94 == 1) ? ar_x1_376 : ar_got_376);
+                    float ar_x0_377 = _er_f[103];
+                    float ar_x1_377 = _er_f[111];
+                    float ar_send_377 = ((ar_bit_94 == 1) ? ar_x0_377 : ar_x1_377);
+                    float ar_got_377 = __shfl_xor_sync(0xFFFFFFFF, ar_send_377, 2);
+                    _er_f[103] = ((ar_bit_94 == 1) ? ar_got_377 : ar_x0_377);
+                    _er_f[111] = ((ar_bit_94 == 1) ? ar_x1_377 : ar_got_377);
+                    float ar_x0_378 = _er_f[115];
+                    float ar_x1_378 = _er_f[123];
+                    float ar_send_378 = ((ar_bit_94 == 1) ? ar_x0_378 : ar_x1_378);
+                    float ar_got_378 = __shfl_xor_sync(0xFFFFFFFF, ar_send_378, 2);
+                    _er_f[115] = ((ar_bit_94 == 1) ? ar_got_378 : ar_x0_378);
+                    _er_f[123] = ((ar_bit_94 == 1) ? ar_x1_378 : ar_got_378);
+                    float ar_x0_379 = _er_f[119];
+                    float ar_x1_379 = _er_f[127];
+                    float ar_send_379 = ((ar_bit_94 == 1) ? ar_x0_379 : ar_x1_379);
+                    float ar_got_379 = __shfl_xor_sync(0xFFFFFFFF, ar_send_379, 2);
+                    _er_f[119] = ((ar_bit_94 == 1) ? ar_got_379 : ar_x0_379);
+                    _er_f[127] = ((ar_bit_94 == 1) ? ar_x1_379 : ar_got_379);
+                    int ar_bit_95 = lane & 1;
+                    float ar_x0_380 = _er_f[99];
+                    float ar_x1_380 = _er_f[103];
+                    float ar_send_380 = ((ar_bit_95 == 1) ? ar_x0_380 : ar_x1_380);
+                    float ar_got_380 = __shfl_xor_sync(0xFFFFFFFF, ar_send_380, 1);
+                    _er_f[99] = ((ar_bit_95 == 1) ? ar_got_380 : ar_x0_380);
+                    _er_f[103] = ((ar_bit_95 == 1) ? ar_x1_380 : ar_got_380);
+                    float ar_x0_381 = _er_f[107];
+                    float ar_x1_381 = _er_f[111];
+                    float ar_send_381 = ((ar_bit_95 == 1) ? ar_x0_381 : ar_x1_381);
+                    float ar_got_381 = __shfl_xor_sync(0xFFFFFFFF, ar_send_381, 1);
+                    _er_f[107] = ((ar_bit_95 == 1) ? ar_got_381 : ar_x0_381);
+                    _er_f[111] = ((ar_bit_95 == 1) ? ar_x1_381 : ar_got_381);
+                    float ar_x0_382 = _er_f[115];
+                    float ar_x1_382 = _er_f[119];
+                    float ar_send_382 = ((ar_bit_95 == 1) ? ar_x0_382 : ar_x1_382);
+                    float ar_got_382 = __shfl_xor_sync(0xFFFFFFFF, ar_send_382, 1);
+                    _er_f[115] = ((ar_bit_95 == 1) ? ar_got_382 : ar_x0_382);
+                    _er_f[119] = ((ar_bit_95 == 1) ? ar_x1_382 : ar_got_382);
+                    float ar_x0_383 = _er_f[123];
+                    float ar_x1_383 = _er_f[127];
+                    float ar_send_383 = ((ar_bit_95 == 1) ? ar_x0_383 : ar_x1_383);
+                    float ar_got_383 = __shfl_xor_sync(0xFFFFFFFF, ar_send_383, 1);
+                    _er_f[123] = ((ar_bit_95 == 1) ? ar_got_383 : ar_x0_383);
+                    _er_f[127] = ((ar_bit_95 == 1) ? ar_x1_383 : ar_got_383);
+                    int ar_ri_7 = er_at2 + 256 + 96;
+                    asm("" : "+r"(ar_ri_7));
+                    {
+                        float4 _v4 = make_float4(_er_f[96 + 0], _er_f[96 + 1], _er_f[96 + 2], _er_f[96 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+                    ar_ri_7 = ar_ri_7 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[100 + 0], _er_f[100 + 1], _er_f[100 + 2], _er_f[100 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+                    ar_ri_7 = ar_ri_7 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[104 + 0], _er_f[104 + 1], _er_f[104 + 2], _er_f[104 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+                    ar_ri_7 = ar_ri_7 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[108 + 0], _er_f[108 + 1], _er_f[108 + 2], _er_f[108 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+                    ar_ri_7 = ar_ri_7 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[112 + 0], _er_f[112 + 1], _er_f[112 + 2], _er_f[112 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+                    ar_ri_7 = ar_ri_7 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[116 + 0], _er_f[116 + 1], _er_f[116 + 2], _er_f[116 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+                    ar_ri_7 = ar_ri_7 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[120 + 0], _er_f[120 + 1], _er_f[120 + 2], _er_f[120 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+                    ar_ri_7 = ar_ri_7 + ldc;
+                    {
+                        float4 _v4 = make_float4(_er_f[124 + 0], _er_f[124 + 1], _er_f[124 + 2], _er_f[124 + 3]);
+                        *reinterpret_cast<float4*>(C + ar_ri_7) = _v4;
+                    }
+#else
+                {
+                    const unsigned* _raw_stv8_18 = reinterpret_cast<const unsigned*>(_er_packed + (64));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 256))), "r"(_raw_stv8_18[0]), "r"(_raw_stv8_18[1]), "r"(_raw_stv8_18[2]), "r"(_raw_stv8_18[3]), "r"(_raw_stv8_18[4]), "r"(_raw_stv8_18[5]), "r"(_raw_stv8_18[6]), "r"(_raw_stv8_18[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_19 = reinterpret_cast<const unsigned*>(_er_packed + (8));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 16))), "r"(_raw_stv8_19[0]), "r"(_raw_stv8_19[1]), "r"(_raw_stv8_19[2]), "r"(_raw_stv8_19[3]), "r"(_raw_stv8_19[4]), "r"(_raw_stv8_19[5]), "r"(_raw_stv8_19[6]), "r"(_raw_stv8_19[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_20 = reinterpret_cast<const unsigned*>(_er_packed + (72));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 272))), "r"(_raw_stv8_20[0]), "r"(_raw_stv8_20[1]), "r"(_raw_stv8_20[2]), "r"(_raw_stv8_20[3]), "r"(_raw_stv8_20[4]), "r"(_raw_stv8_20[5]), "r"(_raw_stv8_20[6]), "r"(_raw_stv8_20[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_21 = reinterpret_cast<const unsigned*>(_er_packed + (16));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 32))), "r"(_raw_stv8_21[0]), "r"(_raw_stv8_21[1]), "r"(_raw_stv8_21[2]), "r"(_raw_stv8_21[3]), "r"(_raw_stv8_21[4]), "r"(_raw_stv8_21[5]), "r"(_raw_stv8_21[6]), "r"(_raw_stv8_21[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_22 = reinterpret_cast<const unsigned*>(_er_packed + (80));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 288))), "r"(_raw_stv8_22[0]), "r"(_raw_stv8_22[1]), "r"(_raw_stv8_22[2]), "r"(_raw_stv8_22[3]), "r"(_raw_stv8_22[4]), "r"(_raw_stv8_22[5]), "r"(_raw_stv8_22[6]), "r"(_raw_stv8_22[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_23 = reinterpret_cast<const unsigned*>(_er_packed + (24));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 48))), "r"(_raw_stv8_23[0]), "r"(_raw_stv8_23[1]), "r"(_raw_stv8_23[2]), "r"(_raw_stv8_23[3]), "r"(_raw_stv8_23[4]), "r"(_raw_stv8_23[5]), "r"(_raw_stv8_23[6]), "r"(_raw_stv8_23[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_24 = reinterpret_cast<const unsigned*>(_er_packed + (88));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 304))), "r"(_raw_stv8_24[0]), "r"(_raw_stv8_24[1]), "r"(_raw_stv8_24[2]), "r"(_raw_stv8_24[3]), "r"(_raw_stv8_24[4]), "r"(_raw_stv8_24[5]), "r"(_raw_stv8_24[6]), "r"(_raw_stv8_24[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_25 = reinterpret_cast<const unsigned*>(_er_packed + (32));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 64))), "r"(_raw_stv8_25[0]), "r"(_raw_stv8_25[1]), "r"(_raw_stv8_25[2]), "r"(_raw_stv8_25[3]), "r"(_raw_stv8_25[4]), "r"(_raw_stv8_25[5]), "r"(_raw_stv8_25[6]), "r"(_raw_stv8_25[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_26 = reinterpret_cast<const unsigned*>(_er_packed + (96));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 320))), "r"(_raw_stv8_26[0]), "r"(_raw_stv8_26[1]), "r"(_raw_stv8_26[2]), "r"(_raw_stv8_26[3]), "r"(_raw_stv8_26[4]), "r"(_raw_stv8_26[5]), "r"(_raw_stv8_26[6]), "r"(_raw_stv8_26[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_27 = reinterpret_cast<const unsigned*>(_er_packed + (40));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 80))), "r"(_raw_stv8_27[0]), "r"(_raw_stv8_27[1]), "r"(_raw_stv8_27[2]), "r"(_raw_stv8_27[3]), "r"(_raw_stv8_27[4]), "r"(_raw_stv8_27[5]), "r"(_raw_stv8_27[6]), "r"(_raw_stv8_27[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_28 = reinterpret_cast<const unsigned*>(_er_packed + (104));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 336))), "r"(_raw_stv8_28[0]), "r"(_raw_stv8_28[1]), "r"(_raw_stv8_28[2]), "r"(_raw_stv8_28[3]), "r"(_raw_stv8_28[4]), "r"(_raw_stv8_28[5]), "r"(_raw_stv8_28[6]), "r"(_raw_stv8_28[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_29 = reinterpret_cast<const unsigned*>(_er_packed + (48));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 96))), "r"(_raw_stv8_29[0]), "r"(_raw_stv8_29[1]), "r"(_raw_stv8_29[2]), "r"(_raw_stv8_29[3]), "r"(_raw_stv8_29[4]), "r"(_raw_stv8_29[5]), "r"(_raw_stv8_29[6]), "r"(_raw_stv8_29[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_30 = reinterpret_cast<const unsigned*>(_er_packed + (112));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 352))), "r"(_raw_stv8_30[0]), "r"(_raw_stv8_30[1]), "r"(_raw_stv8_30[2]), "r"(_raw_stv8_30[3]), "r"(_raw_stv8_30[4]), "r"(_raw_stv8_30[5]), "r"(_raw_stv8_30[6]), "r"(_raw_stv8_30[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_31 = reinterpret_cast<const unsigned*>(_er_packed + (56));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                        :: "l"((void*)(C + (er_out + 112))), "r"(_raw_stv8_31[0]), "r"(_raw_stv8_31[1]), "r"(_raw_stv8_31[2]), "r"(_raw_stv8_31[3]), "r"(_raw_stv8_31[4]), "r"(_raw_stv8_31[5]), "r"(_raw_stv8_31[6]), "r"(_raw_stv8_31[7]) : "memory");
+                }
+                {
+                    const unsigned* _raw_stv8_32 = reinterpret_cast<const unsigned*>(_er_packed + (120));
+                    asm volatile(
+                        "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
                         :: "l"((void*)(C + (er_out + 368))), "r"(_raw_stv8_32[0]), "r"(_raw_stv8_32[1]), "r"(_raw_stv8_32[2]), "r"(_raw_stv8_32[3]), "r"(_raw_stv8_32[4]), "r"(_raw_stv8_32[5]), "r"(_raw_stv8_32[6]), "r"(_raw_stv8_32[7]) : "memory");
 #endif  // CAKE_WGRAD_OUT
                 }
@@ -6980,9 +9269,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd = lane & 1;
+                            float ar_lo_0 = _er_tload[0];
+                            float ar_hi_0 = _er_tload[4];
+                            float ar_send_384 = ((ar_odd == 0) ? ar_hi_0 : ar_lo_0);
+                            float ar_got_384 = __shfl_xor_sync(0xFFFFFFFF, ar_send_384, 1);
+                            _er_tload[0] = ((ar_odd == 0) ? ar_lo_0 : ar_got_384);
+                            _er_tload[4] = ((ar_odd == 0) ? ar_got_384 : ar_hi_0);
+                            float ar_lo_1 = _er_tload[1];
+                            float ar_hi_1 = _er_tload[5];
+                            float ar_send_385 = ((ar_odd == 0) ? ar_hi_1 : ar_lo_1);
+                            float ar_got_385 = __shfl_xor_sync(0xFFFFFFFF, ar_send_385, 1);
+                            _er_tload[1] = ((ar_odd == 0) ? ar_lo_1 : ar_got_385);
+                            _er_tload[5] = ((ar_odd == 0) ? ar_got_385 : ar_hi_1);
+                            float ar_lo_2 = _er_tload[2];
+                            float ar_hi_2 = _er_tload[6];
+                            float ar_send_386 = ((ar_odd == 0) ? ar_hi_2 : ar_lo_2);
+                            float ar_got_386 = __shfl_xor_sync(0xFFFFFFFF, ar_send_386, 1);
+                            _er_tload[2] = ((ar_odd == 0) ? ar_lo_2 : ar_got_386);
+                            _er_tload[6] = ((ar_odd == 0) ? ar_got_386 : ar_hi_2);
+                            float ar_lo_3 = _er_tload[3];
+                            float ar_hi_3 = _er_tload[7];
+                            float ar_send_387 = ((ar_odd == 0) ? ar_hi_3 : ar_lo_3);
+                            float ar_got_387 = __shfl_xor_sync(0xFFFFFFFF, ar_send_387, 1);
+                            _er_tload[3] = ((ar_odd == 0) ? ar_lo_3 : ar_got_387);
+                            _er_tload[7] = ((ar_odd == 0) ? ar_got_387 : ar_hi_3);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_a)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_a) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7028,15 +9342,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_a + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_a + ldc) = _v4;
                             }
+                            float ar_lo_4 = _er_tload[8];
+                            float ar_hi_4 = _er_tload[12];
+                            float ar_send_388 = ((ar_odd == 0) ? ar_hi_4 : ar_lo_4);
+                            float ar_got_388 = __shfl_xor_sync(0xFFFFFFFF, ar_send_388, 1);
+                            _er_tload[8] = ((ar_odd == 0) ? ar_lo_4 : ar_got_388);
+                            _er_tload[12] = ((ar_odd == 0) ? ar_got_388 : ar_hi_4);
+                            float ar_lo_5 = _er_tload[9];
+                            float ar_hi_5 = _er_tload[13];
+                            float ar_send_389 = ((ar_odd == 0) ? ar_hi_5 : ar_lo_5);
+                            float ar_got_389 = __shfl_xor_sync(0xFFFFFFFF, ar_send_389, 1);
+                            _er_tload[9] = ((ar_odd == 0) ? ar_lo_5 : ar_got_389);
+                            _er_tload[13] = ((ar_odd == 0) ? ar_got_389 : ar_hi_5);
+                            float ar_lo_6 = _er_tload[10];
+                            float ar_hi_6 = _er_tload[14];
+                            float ar_send_390 = ((ar_odd == 0) ? ar_hi_6 : ar_lo_6);
+                            float ar_got_390 = __shfl_xor_sync(0xFFFFFFFF, ar_send_390, 1);
+                            _er_tload[10] = ((ar_odd == 0) ? ar_lo_6 : ar_got_390);
+                            _er_tload[14] = ((ar_odd == 0) ? ar_got_390 : ar_hi_6);
+                            float ar_lo_7 = _er_tload[11];
+                            float ar_hi_7 = _er_tload[15];
+                            float ar_send_391 = ((ar_odd == 0) ? ar_hi_7 : ar_lo_7);
+                            float ar_got_391 = __shfl_xor_sync(0xFFFFFFFF, ar_send_391, 1);
+                            _er_tload[11] = ((ar_odd == 0) ? ar_lo_7 : ar_got_391);
+                            _er_tload[15] = ((ar_odd == 0) ? ar_got_391 : ar_hi_7);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_a + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_a + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_a + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_a + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_33 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7067,9 +9405,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_1 = lane & 1;
+                            float ar_lo_8 = _er_tload[0];
+                            float ar_hi_8 = _er_tload[4];
+                            float ar_send_392 = ((ar_odd_1 == 0) ? ar_hi_8 : ar_lo_8);
+                            float ar_got_392 = __shfl_xor_sync(0xFFFFFFFF, ar_send_392, 1);
+                            _er_tload[0] = ((ar_odd_1 == 0) ? ar_lo_8 : ar_got_392);
+                            _er_tload[4] = ((ar_odd_1 == 0) ? ar_got_392 : ar_hi_8);
+                            float ar_lo_9 = _er_tload[1];
+                            float ar_hi_9 = _er_tload[5];
+                            float ar_send_393 = ((ar_odd_1 == 0) ? ar_hi_9 : ar_lo_9);
+                            float ar_got_393 = __shfl_xor_sync(0xFFFFFFFF, ar_send_393, 1);
+                            _er_tload[1] = ((ar_odd_1 == 0) ? ar_lo_9 : ar_got_393);
+                            _er_tload[5] = ((ar_odd_1 == 0) ? ar_got_393 : ar_hi_9);
+                            float ar_lo_10 = _er_tload[2];
+                            float ar_hi_10 = _er_tload[6];
+                            float ar_send_394 = ((ar_odd_1 == 0) ? ar_hi_10 : ar_lo_10);
+                            float ar_got_394 = __shfl_xor_sync(0xFFFFFFFF, ar_send_394, 1);
+                            _er_tload[2] = ((ar_odd_1 == 0) ? ar_lo_10 : ar_got_394);
+                            _er_tload[6] = ((ar_odd_1 == 0) ? ar_got_394 : ar_hi_10);
+                            float ar_lo_11 = _er_tload[3];
+                            float ar_hi_11 = _er_tload[7];
+                            float ar_send_395 = ((ar_odd_1 == 0) ? ar_hi_11 : ar_lo_11);
+                            float ar_got_395 = __shfl_xor_sync(0xFFFFFFFF, ar_send_395, 1);
+                            _er_tload[3] = ((ar_odd_1 == 0) ? ar_lo_11 : ar_got_395);
+                            _er_tload[7] = ((ar_odd_1 == 0) ? ar_got_395 : ar_hi_11);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 16))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 16)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7115,15 +9478,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 16) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 16) + ldc) = _v4;
                             }
+                            float ar_lo_12 = _er_tload[8];
+                            float ar_hi_12 = _er_tload[12];
+                            float ar_send_396 = ((ar_odd_1 == 0) ? ar_hi_12 : ar_lo_12);
+                            float ar_got_396 = __shfl_xor_sync(0xFFFFFFFF, ar_send_396, 1);
+                            _er_tload[8] = ((ar_odd_1 == 0) ? ar_lo_12 : ar_got_396);
+                            _er_tload[12] = ((ar_odd_1 == 0) ? ar_got_396 : ar_hi_12);
+                            float ar_lo_13 = _er_tload[9];
+                            float ar_hi_13 = _er_tload[13];
+                            float ar_send_397 = ((ar_odd_1 == 0) ? ar_hi_13 : ar_lo_13);
+                            float ar_got_397 = __shfl_xor_sync(0xFFFFFFFF, ar_send_397, 1);
+                            _er_tload[9] = ((ar_odd_1 == 0) ? ar_lo_13 : ar_got_397);
+                            _er_tload[13] = ((ar_odd_1 == 0) ? ar_got_397 : ar_hi_13);
+                            float ar_lo_14 = _er_tload[10];
+                            float ar_hi_14 = _er_tload[14];
+                            float ar_send_398 = ((ar_odd_1 == 0) ? ar_hi_14 : ar_lo_14);
+                            float ar_got_398 = __shfl_xor_sync(0xFFFFFFFF, ar_send_398, 1);
+                            _er_tload[10] = ((ar_odd_1 == 0) ? ar_lo_14 : ar_got_398);
+                            _er_tload[14] = ((ar_odd_1 == 0) ? ar_got_398 : ar_hi_14);
+                            float ar_lo_15 = _er_tload[11];
+                            float ar_hi_15 = _er_tload[15];
+                            float ar_send_399 = ((ar_odd_1 == 0) ? ar_hi_15 : ar_lo_15);
+                            float ar_got_399 = __shfl_xor_sync(0xFFFFFFFF, ar_send_399, 1);
+                            _er_tload[11] = ((ar_odd_1 == 0) ? ar_lo_15 : ar_got_399);
+                            _er_tload[15] = ((ar_odd_1 == 0) ? ar_got_399 : ar_hi_15);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 16) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 16) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 16) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 16) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_34 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7154,9 +9541,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_2 = lane & 1;
+                            float ar_lo_16 = _er_tload[0];
+                            float ar_hi_16 = _er_tload[4];
+                            float ar_send_400 = ((ar_odd_2 == 0) ? ar_hi_16 : ar_lo_16);
+                            float ar_got_400 = __shfl_xor_sync(0xFFFFFFFF, ar_send_400, 1);
+                            _er_tload[0] = ((ar_odd_2 == 0) ? ar_lo_16 : ar_got_400);
+                            _er_tload[4] = ((ar_odd_2 == 0) ? ar_got_400 : ar_hi_16);
+                            float ar_lo_17 = _er_tload[1];
+                            float ar_hi_17 = _er_tload[5];
+                            float ar_send_401 = ((ar_odd_2 == 0) ? ar_hi_17 : ar_lo_17);
+                            float ar_got_401 = __shfl_xor_sync(0xFFFFFFFF, ar_send_401, 1);
+                            _er_tload[1] = ((ar_odd_2 == 0) ? ar_lo_17 : ar_got_401);
+                            _er_tload[5] = ((ar_odd_2 == 0) ? ar_got_401 : ar_hi_17);
+                            float ar_lo_18 = _er_tload[2];
+                            float ar_hi_18 = _er_tload[6];
+                            float ar_send_402 = ((ar_odd_2 == 0) ? ar_hi_18 : ar_lo_18);
+                            float ar_got_402 = __shfl_xor_sync(0xFFFFFFFF, ar_send_402, 1);
+                            _er_tload[2] = ((ar_odd_2 == 0) ? ar_lo_18 : ar_got_402);
+                            _er_tload[6] = ((ar_odd_2 == 0) ? ar_got_402 : ar_hi_18);
+                            float ar_lo_19 = _er_tload[3];
+                            float ar_hi_19 = _er_tload[7];
+                            float ar_send_403 = ((ar_odd_2 == 0) ? ar_hi_19 : ar_lo_19);
+                            float ar_got_403 = __shfl_xor_sync(0xFFFFFFFF, ar_send_403, 1);
+                            _er_tload[3] = ((ar_odd_2 == 0) ? ar_lo_19 : ar_got_403);
+                            _er_tload[7] = ((ar_odd_2 == 0) ? ar_got_403 : ar_hi_19);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 32))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 32)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7202,15 +9614,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 32) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 32) + ldc) = _v4;
                             }
+                            float ar_lo_20 = _er_tload[8];
+                            float ar_hi_20 = _er_tload[12];
+                            float ar_send_404 = ((ar_odd_2 == 0) ? ar_hi_20 : ar_lo_20);
+                            float ar_got_404 = __shfl_xor_sync(0xFFFFFFFF, ar_send_404, 1);
+                            _er_tload[8] = ((ar_odd_2 == 0) ? ar_lo_20 : ar_got_404);
+                            _er_tload[12] = ((ar_odd_2 == 0) ? ar_got_404 : ar_hi_20);
+                            float ar_lo_21 = _er_tload[9];
+                            float ar_hi_21 = _er_tload[13];
+                            float ar_send_405 = ((ar_odd_2 == 0) ? ar_hi_21 : ar_lo_21);
+                            float ar_got_405 = __shfl_xor_sync(0xFFFFFFFF, ar_send_405, 1);
+                            _er_tload[9] = ((ar_odd_2 == 0) ? ar_lo_21 : ar_got_405);
+                            _er_tload[13] = ((ar_odd_2 == 0) ? ar_got_405 : ar_hi_21);
+                            float ar_lo_22 = _er_tload[10];
+                            float ar_hi_22 = _er_tload[14];
+                            float ar_send_406 = ((ar_odd_2 == 0) ? ar_hi_22 : ar_lo_22);
+                            float ar_got_406 = __shfl_xor_sync(0xFFFFFFFF, ar_send_406, 1);
+                            _er_tload[10] = ((ar_odd_2 == 0) ? ar_lo_22 : ar_got_406);
+                            _er_tload[14] = ((ar_odd_2 == 0) ? ar_got_406 : ar_hi_22);
+                            float ar_lo_23 = _er_tload[11];
+                            float ar_hi_23 = _er_tload[15];
+                            float ar_send_407 = ((ar_odd_2 == 0) ? ar_hi_23 : ar_lo_23);
+                            float ar_got_407 = __shfl_xor_sync(0xFFFFFFFF, ar_send_407, 1);
+                            _er_tload[11] = ((ar_odd_2 == 0) ? ar_lo_23 : ar_got_407);
+                            _er_tload[15] = ((ar_odd_2 == 0) ? ar_got_407 : ar_hi_23);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 32) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 32) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 32) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 32) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_35 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7241,9 +9677,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_3 = lane & 1;
+                            float ar_lo_24 = _er_tload[0];
+                            float ar_hi_24 = _er_tload[4];
+                            float ar_send_408 = ((ar_odd_3 == 0) ? ar_hi_24 : ar_lo_24);
+                            float ar_got_408 = __shfl_xor_sync(0xFFFFFFFF, ar_send_408, 1);
+                            _er_tload[0] = ((ar_odd_3 == 0) ? ar_lo_24 : ar_got_408);
+                            _er_tload[4] = ((ar_odd_3 == 0) ? ar_got_408 : ar_hi_24);
+                            float ar_lo_25 = _er_tload[1];
+                            float ar_hi_25 = _er_tload[5];
+                            float ar_send_409 = ((ar_odd_3 == 0) ? ar_hi_25 : ar_lo_25);
+                            float ar_got_409 = __shfl_xor_sync(0xFFFFFFFF, ar_send_409, 1);
+                            _er_tload[1] = ((ar_odd_3 == 0) ? ar_lo_25 : ar_got_409);
+                            _er_tload[5] = ((ar_odd_3 == 0) ? ar_got_409 : ar_hi_25);
+                            float ar_lo_26 = _er_tload[2];
+                            float ar_hi_26 = _er_tload[6];
+                            float ar_send_410 = ((ar_odd_3 == 0) ? ar_hi_26 : ar_lo_26);
+                            float ar_got_410 = __shfl_xor_sync(0xFFFFFFFF, ar_send_410, 1);
+                            _er_tload[2] = ((ar_odd_3 == 0) ? ar_lo_26 : ar_got_410);
+                            _er_tload[6] = ((ar_odd_3 == 0) ? ar_got_410 : ar_hi_26);
+                            float ar_lo_27 = _er_tload[3];
+                            float ar_hi_27 = _er_tload[7];
+                            float ar_send_411 = ((ar_odd_3 == 0) ? ar_hi_27 : ar_lo_27);
+                            float ar_got_411 = __shfl_xor_sync(0xFFFFFFFF, ar_send_411, 1);
+                            _er_tload[3] = ((ar_odd_3 == 0) ? ar_lo_27 : ar_got_411);
+                            _er_tload[7] = ((ar_odd_3 == 0) ? ar_got_411 : ar_hi_27);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 48))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 48)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7289,15 +9750,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 48) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 48) + ldc) = _v4;
                             }
+                            float ar_lo_28 = _er_tload[8];
+                            float ar_hi_28 = _er_tload[12];
+                            float ar_send_412 = ((ar_odd_3 == 0) ? ar_hi_28 : ar_lo_28);
+                            float ar_got_412 = __shfl_xor_sync(0xFFFFFFFF, ar_send_412, 1);
+                            _er_tload[8] = ((ar_odd_3 == 0) ? ar_lo_28 : ar_got_412);
+                            _er_tload[12] = ((ar_odd_3 == 0) ? ar_got_412 : ar_hi_28);
+                            float ar_lo_29 = _er_tload[9];
+                            float ar_hi_29 = _er_tload[13];
+                            float ar_send_413 = ((ar_odd_3 == 0) ? ar_hi_29 : ar_lo_29);
+                            float ar_got_413 = __shfl_xor_sync(0xFFFFFFFF, ar_send_413, 1);
+                            _er_tload[9] = ((ar_odd_3 == 0) ? ar_lo_29 : ar_got_413);
+                            _er_tload[13] = ((ar_odd_3 == 0) ? ar_got_413 : ar_hi_29);
+                            float ar_lo_30 = _er_tload[10];
+                            float ar_hi_30 = _er_tload[14];
+                            float ar_send_414 = ((ar_odd_3 == 0) ? ar_hi_30 : ar_lo_30);
+                            float ar_got_414 = __shfl_xor_sync(0xFFFFFFFF, ar_send_414, 1);
+                            _er_tload[10] = ((ar_odd_3 == 0) ? ar_lo_30 : ar_got_414);
+                            _er_tload[14] = ((ar_odd_3 == 0) ? ar_got_414 : ar_hi_30);
+                            float ar_lo_31 = _er_tload[11];
+                            float ar_hi_31 = _er_tload[15];
+                            float ar_send_415 = ((ar_odd_3 == 0) ? ar_hi_31 : ar_lo_31);
+                            float ar_got_415 = __shfl_xor_sync(0xFFFFFFFF, ar_send_415, 1);
+                            _er_tload[11] = ((ar_odd_3 == 0) ? ar_lo_31 : ar_got_415);
+                            _er_tload[15] = ((ar_odd_3 == 0) ? ar_got_415 : ar_hi_31);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 48) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 48) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 48) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 48) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_36 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7328,9 +9813,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_4 = lane & 1;
+                            float ar_lo_32 = _er_tload[0];
+                            float ar_hi_32 = _er_tload[4];
+                            float ar_send_416 = ((ar_odd_4 == 0) ? ar_hi_32 : ar_lo_32);
+                            float ar_got_416 = __shfl_xor_sync(0xFFFFFFFF, ar_send_416, 1);
+                            _er_tload[0] = ((ar_odd_4 == 0) ? ar_lo_32 : ar_got_416);
+                            _er_tload[4] = ((ar_odd_4 == 0) ? ar_got_416 : ar_hi_32);
+                            float ar_lo_33 = _er_tload[1];
+                            float ar_hi_33 = _er_tload[5];
+                            float ar_send_417 = ((ar_odd_4 == 0) ? ar_hi_33 : ar_lo_33);
+                            float ar_got_417 = __shfl_xor_sync(0xFFFFFFFF, ar_send_417, 1);
+                            _er_tload[1] = ((ar_odd_4 == 0) ? ar_lo_33 : ar_got_417);
+                            _er_tload[5] = ((ar_odd_4 == 0) ? ar_got_417 : ar_hi_33);
+                            float ar_lo_34 = _er_tload[2];
+                            float ar_hi_34 = _er_tload[6];
+                            float ar_send_418 = ((ar_odd_4 == 0) ? ar_hi_34 : ar_lo_34);
+                            float ar_got_418 = __shfl_xor_sync(0xFFFFFFFF, ar_send_418, 1);
+                            _er_tload[2] = ((ar_odd_4 == 0) ? ar_lo_34 : ar_got_418);
+                            _er_tload[6] = ((ar_odd_4 == 0) ? ar_got_418 : ar_hi_34);
+                            float ar_lo_35 = _er_tload[3];
+                            float ar_hi_35 = _er_tload[7];
+                            float ar_send_419 = ((ar_odd_4 == 0) ? ar_hi_35 : ar_lo_35);
+                            float ar_got_419 = __shfl_xor_sync(0xFFFFFFFF, ar_send_419, 1);
+                            _er_tload[3] = ((ar_odd_4 == 0) ? ar_lo_35 : ar_got_419);
+                            _er_tload[7] = ((ar_odd_4 == 0) ? ar_got_419 : ar_hi_35);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 64))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 64)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7376,15 +9886,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 64) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 64) + ldc) = _v4;
                             }
+                            float ar_lo_36 = _er_tload[8];
+                            float ar_hi_36 = _er_tload[12];
+                            float ar_send_420 = ((ar_odd_4 == 0) ? ar_hi_36 : ar_lo_36);
+                            float ar_got_420 = __shfl_xor_sync(0xFFFFFFFF, ar_send_420, 1);
+                            _er_tload[8] = ((ar_odd_4 == 0) ? ar_lo_36 : ar_got_420);
+                            _er_tload[12] = ((ar_odd_4 == 0) ? ar_got_420 : ar_hi_36);
+                            float ar_lo_37 = _er_tload[9];
+                            float ar_hi_37 = _er_tload[13];
+                            float ar_send_421 = ((ar_odd_4 == 0) ? ar_hi_37 : ar_lo_37);
+                            float ar_got_421 = __shfl_xor_sync(0xFFFFFFFF, ar_send_421, 1);
+                            _er_tload[9] = ((ar_odd_4 == 0) ? ar_lo_37 : ar_got_421);
+                            _er_tload[13] = ((ar_odd_4 == 0) ? ar_got_421 : ar_hi_37);
+                            float ar_lo_38 = _er_tload[10];
+                            float ar_hi_38 = _er_tload[14];
+                            float ar_send_422 = ((ar_odd_4 == 0) ? ar_hi_38 : ar_lo_38);
+                            float ar_got_422 = __shfl_xor_sync(0xFFFFFFFF, ar_send_422, 1);
+                            _er_tload[10] = ((ar_odd_4 == 0) ? ar_lo_38 : ar_got_422);
+                            _er_tload[14] = ((ar_odd_4 == 0) ? ar_got_422 : ar_hi_38);
+                            float ar_lo_39 = _er_tload[11];
+                            float ar_hi_39 = _er_tload[15];
+                            float ar_send_423 = ((ar_odd_4 == 0) ? ar_hi_39 : ar_lo_39);
+                            float ar_got_423 = __shfl_xor_sync(0xFFFFFFFF, ar_send_423, 1);
+                            _er_tload[11] = ((ar_odd_4 == 0) ? ar_lo_39 : ar_got_423);
+                            _er_tload[15] = ((ar_odd_4 == 0) ? ar_got_423 : ar_hi_39);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 64) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 64) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 64) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 64) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_37 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7415,9 +9949,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_5 = lane & 1;
+                            float ar_lo_40 = _er_tload[0];
+                            float ar_hi_40 = _er_tload[4];
+                            float ar_send_424 = ((ar_odd_5 == 0) ? ar_hi_40 : ar_lo_40);
+                            float ar_got_424 = __shfl_xor_sync(0xFFFFFFFF, ar_send_424, 1);
+                            _er_tload[0] = ((ar_odd_5 == 0) ? ar_lo_40 : ar_got_424);
+                            _er_tload[4] = ((ar_odd_5 == 0) ? ar_got_424 : ar_hi_40);
+                            float ar_lo_41 = _er_tload[1];
+                            float ar_hi_41 = _er_tload[5];
+                            float ar_send_425 = ((ar_odd_5 == 0) ? ar_hi_41 : ar_lo_41);
+                            float ar_got_425 = __shfl_xor_sync(0xFFFFFFFF, ar_send_425, 1);
+                            _er_tload[1] = ((ar_odd_5 == 0) ? ar_lo_41 : ar_got_425);
+                            _er_tload[5] = ((ar_odd_5 == 0) ? ar_got_425 : ar_hi_41);
+                            float ar_lo_42 = _er_tload[2];
+                            float ar_hi_42 = _er_tload[6];
+                            float ar_send_426 = ((ar_odd_5 == 0) ? ar_hi_42 : ar_lo_42);
+                            float ar_got_426 = __shfl_xor_sync(0xFFFFFFFF, ar_send_426, 1);
+                            _er_tload[2] = ((ar_odd_5 == 0) ? ar_lo_42 : ar_got_426);
+                            _er_tload[6] = ((ar_odd_5 == 0) ? ar_got_426 : ar_hi_42);
+                            float ar_lo_43 = _er_tload[3];
+                            float ar_hi_43 = _er_tload[7];
+                            float ar_send_427 = ((ar_odd_5 == 0) ? ar_hi_43 : ar_lo_43);
+                            float ar_got_427 = __shfl_xor_sync(0xFFFFFFFF, ar_send_427, 1);
+                            _er_tload[3] = ((ar_odd_5 == 0) ? ar_lo_43 : ar_got_427);
+                            _er_tload[7] = ((ar_odd_5 == 0) ? ar_got_427 : ar_hi_43);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 80))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 80)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7463,15 +10022,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 80) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 80) + ldc) = _v4;
                             }
+                            float ar_lo_44 = _er_tload[8];
+                            float ar_hi_44 = _er_tload[12];
+                            float ar_send_428 = ((ar_odd_5 == 0) ? ar_hi_44 : ar_lo_44);
+                            float ar_got_428 = __shfl_xor_sync(0xFFFFFFFF, ar_send_428, 1);
+                            _er_tload[8] = ((ar_odd_5 == 0) ? ar_lo_44 : ar_got_428);
+                            _er_tload[12] = ((ar_odd_5 == 0) ? ar_got_428 : ar_hi_44);
+                            float ar_lo_45 = _er_tload[9];
+                            float ar_hi_45 = _er_tload[13];
+                            float ar_send_429 = ((ar_odd_5 == 0) ? ar_hi_45 : ar_lo_45);
+                            float ar_got_429 = __shfl_xor_sync(0xFFFFFFFF, ar_send_429, 1);
+                            _er_tload[9] = ((ar_odd_5 == 0) ? ar_lo_45 : ar_got_429);
+                            _er_tload[13] = ((ar_odd_5 == 0) ? ar_got_429 : ar_hi_45);
+                            float ar_lo_46 = _er_tload[10];
+                            float ar_hi_46 = _er_tload[14];
+                            float ar_send_430 = ((ar_odd_5 == 0) ? ar_hi_46 : ar_lo_46);
+                            float ar_got_430 = __shfl_xor_sync(0xFFFFFFFF, ar_send_430, 1);
+                            _er_tload[10] = ((ar_odd_5 == 0) ? ar_lo_46 : ar_got_430);
+                            _er_tload[14] = ((ar_odd_5 == 0) ? ar_got_430 : ar_hi_46);
+                            float ar_lo_47 = _er_tload[11];
+                            float ar_hi_47 = _er_tload[15];
+                            float ar_send_431 = ((ar_odd_5 == 0) ? ar_hi_47 : ar_lo_47);
+                            float ar_got_431 = __shfl_xor_sync(0xFFFFFFFF, ar_send_431, 1);
+                            _er_tload[11] = ((ar_odd_5 == 0) ? ar_lo_47 : ar_got_431);
+                            _er_tload[15] = ((ar_odd_5 == 0) ? ar_got_431 : ar_hi_47);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 80) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 80) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 80) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 80) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_38 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7502,9 +10085,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_6 = lane & 1;
+                            float ar_lo_48 = _er_tload[0];
+                            float ar_hi_48 = _er_tload[4];
+                            float ar_send_432 = ((ar_odd_6 == 0) ? ar_hi_48 : ar_lo_48);
+                            float ar_got_432 = __shfl_xor_sync(0xFFFFFFFF, ar_send_432, 1);
+                            _er_tload[0] = ((ar_odd_6 == 0) ? ar_lo_48 : ar_got_432);
+                            _er_tload[4] = ((ar_odd_6 == 0) ? ar_got_432 : ar_hi_48);
+                            float ar_lo_49 = _er_tload[1];
+                            float ar_hi_49 = _er_tload[5];
+                            float ar_send_433 = ((ar_odd_6 == 0) ? ar_hi_49 : ar_lo_49);
+                            float ar_got_433 = __shfl_xor_sync(0xFFFFFFFF, ar_send_433, 1);
+                            _er_tload[1] = ((ar_odd_6 == 0) ? ar_lo_49 : ar_got_433);
+                            _er_tload[5] = ((ar_odd_6 == 0) ? ar_got_433 : ar_hi_49);
+                            float ar_lo_50 = _er_tload[2];
+                            float ar_hi_50 = _er_tload[6];
+                            float ar_send_434 = ((ar_odd_6 == 0) ? ar_hi_50 : ar_lo_50);
+                            float ar_got_434 = __shfl_xor_sync(0xFFFFFFFF, ar_send_434, 1);
+                            _er_tload[2] = ((ar_odd_6 == 0) ? ar_lo_50 : ar_got_434);
+                            _er_tload[6] = ((ar_odd_6 == 0) ? ar_got_434 : ar_hi_50);
+                            float ar_lo_51 = _er_tload[3];
+                            float ar_hi_51 = _er_tload[7];
+                            float ar_send_435 = ((ar_odd_6 == 0) ? ar_hi_51 : ar_lo_51);
+                            float ar_got_435 = __shfl_xor_sync(0xFFFFFFFF, ar_send_435, 1);
+                            _er_tload[3] = ((ar_odd_6 == 0) ? ar_lo_51 : ar_got_435);
+                            _er_tload[7] = ((ar_odd_6 == 0) ? ar_got_435 : ar_hi_51);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 96))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 96)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7550,15 +10158,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 96) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 96) + ldc) = _v4;
                             }
+                            float ar_lo_52 = _er_tload[8];
+                            float ar_hi_52 = _er_tload[12];
+                            float ar_send_436 = ((ar_odd_6 == 0) ? ar_hi_52 : ar_lo_52);
+                            float ar_got_436 = __shfl_xor_sync(0xFFFFFFFF, ar_send_436, 1);
+                            _er_tload[8] = ((ar_odd_6 == 0) ? ar_lo_52 : ar_got_436);
+                            _er_tload[12] = ((ar_odd_6 == 0) ? ar_got_436 : ar_hi_52);
+                            float ar_lo_53 = _er_tload[9];
+                            float ar_hi_53 = _er_tload[13];
+                            float ar_send_437 = ((ar_odd_6 == 0) ? ar_hi_53 : ar_lo_53);
+                            float ar_got_437 = __shfl_xor_sync(0xFFFFFFFF, ar_send_437, 1);
+                            _er_tload[9] = ((ar_odd_6 == 0) ? ar_lo_53 : ar_got_437);
+                            _er_tload[13] = ((ar_odd_6 == 0) ? ar_got_437 : ar_hi_53);
+                            float ar_lo_54 = _er_tload[10];
+                            float ar_hi_54 = _er_tload[14];
+                            float ar_send_438 = ((ar_odd_6 == 0) ? ar_hi_54 : ar_lo_54);
+                            float ar_got_438 = __shfl_xor_sync(0xFFFFFFFF, ar_send_438, 1);
+                            _er_tload[10] = ((ar_odd_6 == 0) ? ar_lo_54 : ar_got_438);
+                            _er_tload[14] = ((ar_odd_6 == 0) ? ar_got_438 : ar_hi_54);
+                            float ar_lo_55 = _er_tload[11];
+                            float ar_hi_55 = _er_tload[15];
+                            float ar_send_439 = ((ar_odd_6 == 0) ? ar_hi_55 : ar_lo_55);
+                            float ar_got_439 = __shfl_xor_sync(0xFFFFFFFF, ar_send_439, 1);
+                            _er_tload[11] = ((ar_odd_6 == 0) ? ar_lo_55 : ar_got_439);
+                            _er_tload[15] = ((ar_odd_6 == 0) ? ar_got_439 : ar_hi_55);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 96) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 96) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 96) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 96) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_39 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7589,9 +10221,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_7 = lane & 1;
+                            float ar_lo_56 = _er_tload[0];
+                            float ar_hi_56 = _er_tload[4];
+                            float ar_send_440 = ((ar_odd_7 == 0) ? ar_hi_56 : ar_lo_56);
+                            float ar_got_440 = __shfl_xor_sync(0xFFFFFFFF, ar_send_440, 1);
+                            _er_tload[0] = ((ar_odd_7 == 0) ? ar_lo_56 : ar_got_440);
+                            _er_tload[4] = ((ar_odd_7 == 0) ? ar_got_440 : ar_hi_56);
+                            float ar_lo_57 = _er_tload[1];
+                            float ar_hi_57 = _er_tload[5];
+                            float ar_send_441 = ((ar_odd_7 == 0) ? ar_hi_57 : ar_lo_57);
+                            float ar_got_441 = __shfl_xor_sync(0xFFFFFFFF, ar_send_441, 1);
+                            _er_tload[1] = ((ar_odd_7 == 0) ? ar_lo_57 : ar_got_441);
+                            _er_tload[5] = ((ar_odd_7 == 0) ? ar_got_441 : ar_hi_57);
+                            float ar_lo_58 = _er_tload[2];
+                            float ar_hi_58 = _er_tload[6];
+                            float ar_send_442 = ((ar_odd_7 == 0) ? ar_hi_58 : ar_lo_58);
+                            float ar_got_442 = __shfl_xor_sync(0xFFFFFFFF, ar_send_442, 1);
+                            _er_tload[2] = ((ar_odd_7 == 0) ? ar_lo_58 : ar_got_442);
+                            _er_tload[6] = ((ar_odd_7 == 0) ? ar_got_442 : ar_hi_58);
+                            float ar_lo_59 = _er_tload[3];
+                            float ar_hi_59 = _er_tload[7];
+                            float ar_send_443 = ((ar_odd_7 == 0) ? ar_hi_59 : ar_lo_59);
+                            float ar_got_443 = __shfl_xor_sync(0xFFFFFFFF, ar_send_443, 1);
+                            _er_tload[3] = ((ar_odd_7 == 0) ? ar_lo_59 : ar_got_443);
+                            _er_tload[7] = ((ar_odd_7 == 0) ? ar_got_443 : ar_hi_59);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 112))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 112)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7637,15 +10294,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 112) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 112) + ldc) = _v4;
                             }
+                            float ar_lo_60 = _er_tload[8];
+                            float ar_hi_60 = _er_tload[12];
+                            float ar_send_444 = ((ar_odd_7 == 0) ? ar_hi_60 : ar_lo_60);
+                            float ar_got_444 = __shfl_xor_sync(0xFFFFFFFF, ar_send_444, 1);
+                            _er_tload[8] = ((ar_odd_7 == 0) ? ar_lo_60 : ar_got_444);
+                            _er_tload[12] = ((ar_odd_7 == 0) ? ar_got_444 : ar_hi_60);
+                            float ar_lo_61 = _er_tload[9];
+                            float ar_hi_61 = _er_tload[13];
+                            float ar_send_445 = ((ar_odd_7 == 0) ? ar_hi_61 : ar_lo_61);
+                            float ar_got_445 = __shfl_xor_sync(0xFFFFFFFF, ar_send_445, 1);
+                            _er_tload[9] = ((ar_odd_7 == 0) ? ar_lo_61 : ar_got_445);
+                            _er_tload[13] = ((ar_odd_7 == 0) ? ar_got_445 : ar_hi_61);
+                            float ar_lo_62 = _er_tload[10];
+                            float ar_hi_62 = _er_tload[14];
+                            float ar_send_446 = ((ar_odd_7 == 0) ? ar_hi_62 : ar_lo_62);
+                            float ar_got_446 = __shfl_xor_sync(0xFFFFFFFF, ar_send_446, 1);
+                            _er_tload[10] = ((ar_odd_7 == 0) ? ar_lo_62 : ar_got_446);
+                            _er_tload[14] = ((ar_odd_7 == 0) ? ar_got_446 : ar_hi_62);
+                            float ar_lo_63 = _er_tload[11];
+                            float ar_hi_63 = _er_tload[15];
+                            float ar_send_447 = ((ar_odd_7 == 0) ? ar_hi_63 : ar_lo_63);
+                            float ar_got_447 = __shfl_xor_sync(0xFFFFFFFF, ar_send_447, 1);
+                            _er_tload[11] = ((ar_odd_7 == 0) ? ar_lo_63 : ar_got_447);
+                            _er_tload[15] = ((ar_odd_7 == 0) ? ar_got_447 : ar_hi_63);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 112) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 112) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_a + 112) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_a + 112) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_40 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7682,9 +10363,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_8 = lane & 1;
+                            float ar_lo_64 = _er_tload[0];
+                            float ar_hi_64 = _er_tload[4];
+                            float ar_send_448 = ((ar_odd_8 == 0) ? ar_hi_64 : ar_lo_64);
+                            float ar_got_448 = __shfl_xor_sync(0xFFFFFFFF, ar_send_448, 1);
+                            _er_tload[0] = ((ar_odd_8 == 0) ? ar_lo_64 : ar_got_448);
+                            _er_tload[4] = ((ar_odd_8 == 0) ? ar_got_448 : ar_hi_64);
+                            float ar_lo_65 = _er_tload[1];
+                            float ar_hi_65 = _er_tload[5];
+                            float ar_send_449 = ((ar_odd_8 == 0) ? ar_hi_65 : ar_lo_65);
+                            float ar_got_449 = __shfl_xor_sync(0xFFFFFFFF, ar_send_449, 1);
+                            _er_tload[1] = ((ar_odd_8 == 0) ? ar_lo_65 : ar_got_449);
+                            _er_tload[5] = ((ar_odd_8 == 0) ? ar_got_449 : ar_hi_65);
+                            float ar_lo_66 = _er_tload[2];
+                            float ar_hi_66 = _er_tload[6];
+                            float ar_send_450 = ((ar_odd_8 == 0) ? ar_hi_66 : ar_lo_66);
+                            float ar_got_450 = __shfl_xor_sync(0xFFFFFFFF, ar_send_450, 1);
+                            _er_tload[2] = ((ar_odd_8 == 0) ? ar_lo_66 : ar_got_450);
+                            _er_tload[6] = ((ar_odd_8 == 0) ? ar_got_450 : ar_hi_66);
+                            float ar_lo_67 = _er_tload[3];
+                            float ar_hi_67 = _er_tload[7];
+                            float ar_send_451 = ((ar_odd_8 == 0) ? ar_hi_67 : ar_lo_67);
+                            float ar_got_451 = __shfl_xor_sync(0xFFFFFFFF, ar_send_451, 1);
+                            _er_tload[3] = ((ar_odd_8 == 0) ? ar_lo_67 : ar_got_451);
+                            _er_tload[7] = ((ar_odd_8 == 0) ? ar_got_451 : ar_hi_67);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_b)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_b) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7730,15 +10436,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_b + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_b + ldc) = _v4;
                             }
+                            float ar_lo_68 = _er_tload[8];
+                            float ar_hi_68 = _er_tload[12];
+                            float ar_send_452 = ((ar_odd_8 == 0) ? ar_hi_68 : ar_lo_68);
+                            float ar_got_452 = __shfl_xor_sync(0xFFFFFFFF, ar_send_452, 1);
+                            _er_tload[8] = ((ar_odd_8 == 0) ? ar_lo_68 : ar_got_452);
+                            _er_tload[12] = ((ar_odd_8 == 0) ? ar_got_452 : ar_hi_68);
+                            float ar_lo_69 = _er_tload[9];
+                            float ar_hi_69 = _er_tload[13];
+                            float ar_send_453 = ((ar_odd_8 == 0) ? ar_hi_69 : ar_lo_69);
+                            float ar_got_453 = __shfl_xor_sync(0xFFFFFFFF, ar_send_453, 1);
+                            _er_tload[9] = ((ar_odd_8 == 0) ? ar_lo_69 : ar_got_453);
+                            _er_tload[13] = ((ar_odd_8 == 0) ? ar_got_453 : ar_hi_69);
+                            float ar_lo_70 = _er_tload[10];
+                            float ar_hi_70 = _er_tload[14];
+                            float ar_send_454 = ((ar_odd_8 == 0) ? ar_hi_70 : ar_lo_70);
+                            float ar_got_454 = __shfl_xor_sync(0xFFFFFFFF, ar_send_454, 1);
+                            _er_tload[10] = ((ar_odd_8 == 0) ? ar_lo_70 : ar_got_454);
+                            _er_tload[14] = ((ar_odd_8 == 0) ? ar_got_454 : ar_hi_70);
+                            float ar_lo_71 = _er_tload[11];
+                            float ar_hi_71 = _er_tload[15];
+                            float ar_send_455 = ((ar_odd_8 == 0) ? ar_hi_71 : ar_lo_71);
+                            float ar_got_455 = __shfl_xor_sync(0xFFFFFFFF, ar_send_455, 1);
+                            _er_tload[11] = ((ar_odd_8 == 0) ? ar_lo_71 : ar_got_455);
+                            _er_tload[15] = ((ar_odd_8 == 0) ? ar_got_455 : ar_hi_71);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_b + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_b + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + er_col_b + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + er_col_b + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_41 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7769,9 +10499,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_9 = lane & 1;
+                            float ar_lo_72 = _er_tload[0];
+                            float ar_hi_72 = _er_tload[4];
+                            float ar_send_456 = ((ar_odd_9 == 0) ? ar_hi_72 : ar_lo_72);
+                            float ar_got_456 = __shfl_xor_sync(0xFFFFFFFF, ar_send_456, 1);
+                            _er_tload[0] = ((ar_odd_9 == 0) ? ar_lo_72 : ar_got_456);
+                            _er_tload[4] = ((ar_odd_9 == 0) ? ar_got_456 : ar_hi_72);
+                            float ar_lo_73 = _er_tload[1];
+                            float ar_hi_73 = _er_tload[5];
+                            float ar_send_457 = ((ar_odd_9 == 0) ? ar_hi_73 : ar_lo_73);
+                            float ar_got_457 = __shfl_xor_sync(0xFFFFFFFF, ar_send_457, 1);
+                            _er_tload[1] = ((ar_odd_9 == 0) ? ar_lo_73 : ar_got_457);
+                            _er_tload[5] = ((ar_odd_9 == 0) ? ar_got_457 : ar_hi_73);
+                            float ar_lo_74 = _er_tload[2];
+                            float ar_hi_74 = _er_tload[6];
+                            float ar_send_458 = ((ar_odd_9 == 0) ? ar_hi_74 : ar_lo_74);
+                            float ar_got_458 = __shfl_xor_sync(0xFFFFFFFF, ar_send_458, 1);
+                            _er_tload[2] = ((ar_odd_9 == 0) ? ar_lo_74 : ar_got_458);
+                            _er_tload[6] = ((ar_odd_9 == 0) ? ar_got_458 : ar_hi_74);
+                            float ar_lo_75 = _er_tload[3];
+                            float ar_hi_75 = _er_tload[7];
+                            float ar_send_459 = ((ar_odd_9 == 0) ? ar_hi_75 : ar_lo_75);
+                            float ar_got_459 = __shfl_xor_sync(0xFFFFFFFF, ar_send_459, 1);
+                            _er_tload[3] = ((ar_odd_9 == 0) ? ar_lo_75 : ar_got_459);
+                            _er_tload[7] = ((ar_odd_9 == 0) ? ar_got_459 : ar_hi_75);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 16))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 16)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7817,15 +10572,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 16) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 16) + ldc) = _v4;
                             }
+                            float ar_lo_76 = _er_tload[8];
+                            float ar_hi_76 = _er_tload[12];
+                            float ar_send_460 = ((ar_odd_9 == 0) ? ar_hi_76 : ar_lo_76);
+                            float ar_got_460 = __shfl_xor_sync(0xFFFFFFFF, ar_send_460, 1);
+                            _er_tload[8] = ((ar_odd_9 == 0) ? ar_lo_76 : ar_got_460);
+                            _er_tload[12] = ((ar_odd_9 == 0) ? ar_got_460 : ar_hi_76);
+                            float ar_lo_77 = _er_tload[9];
+                            float ar_hi_77 = _er_tload[13];
+                            float ar_send_461 = ((ar_odd_9 == 0) ? ar_hi_77 : ar_lo_77);
+                            float ar_got_461 = __shfl_xor_sync(0xFFFFFFFF, ar_send_461, 1);
+                            _er_tload[9] = ((ar_odd_9 == 0) ? ar_lo_77 : ar_got_461);
+                            _er_tload[13] = ((ar_odd_9 == 0) ? ar_got_461 : ar_hi_77);
+                            float ar_lo_78 = _er_tload[10];
+                            float ar_hi_78 = _er_tload[14];
+                            float ar_send_462 = ((ar_odd_9 == 0) ? ar_hi_78 : ar_lo_78);
+                            float ar_got_462 = __shfl_xor_sync(0xFFFFFFFF, ar_send_462, 1);
+                            _er_tload[10] = ((ar_odd_9 == 0) ? ar_lo_78 : ar_got_462);
+                            _er_tload[14] = ((ar_odd_9 == 0) ? ar_got_462 : ar_hi_78);
+                            float ar_lo_79 = _er_tload[11];
+                            float ar_hi_79 = _er_tload[15];
+                            float ar_send_463 = ((ar_odd_9 == 0) ? ar_hi_79 : ar_lo_79);
+                            float ar_got_463 = __shfl_xor_sync(0xFFFFFFFF, ar_send_463, 1);
+                            _er_tload[11] = ((ar_odd_9 == 0) ? ar_lo_79 : ar_got_463);
+                            _er_tload[15] = ((ar_odd_9 == 0) ? ar_got_463 : ar_hi_79);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 16) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 16) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 16) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 16) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_42 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7856,9 +10635,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_10 = lane & 1;
+                            float ar_lo_80 = _er_tload[0];
+                            float ar_hi_80 = _er_tload[4];
+                            float ar_send_464 = ((ar_odd_10 == 0) ? ar_hi_80 : ar_lo_80);
+                            float ar_got_464 = __shfl_xor_sync(0xFFFFFFFF, ar_send_464, 1);
+                            _er_tload[0] = ((ar_odd_10 == 0) ? ar_lo_80 : ar_got_464);
+                            _er_tload[4] = ((ar_odd_10 == 0) ? ar_got_464 : ar_hi_80);
+                            float ar_lo_81 = _er_tload[1];
+                            float ar_hi_81 = _er_tload[5];
+                            float ar_send_465 = ((ar_odd_10 == 0) ? ar_hi_81 : ar_lo_81);
+                            float ar_got_465 = __shfl_xor_sync(0xFFFFFFFF, ar_send_465, 1);
+                            _er_tload[1] = ((ar_odd_10 == 0) ? ar_lo_81 : ar_got_465);
+                            _er_tload[5] = ((ar_odd_10 == 0) ? ar_got_465 : ar_hi_81);
+                            float ar_lo_82 = _er_tload[2];
+                            float ar_hi_82 = _er_tload[6];
+                            float ar_send_466 = ((ar_odd_10 == 0) ? ar_hi_82 : ar_lo_82);
+                            float ar_got_466 = __shfl_xor_sync(0xFFFFFFFF, ar_send_466, 1);
+                            _er_tload[2] = ((ar_odd_10 == 0) ? ar_lo_82 : ar_got_466);
+                            _er_tload[6] = ((ar_odd_10 == 0) ? ar_got_466 : ar_hi_82);
+                            float ar_lo_83 = _er_tload[3];
+                            float ar_hi_83 = _er_tload[7];
+                            float ar_send_467 = ((ar_odd_10 == 0) ? ar_hi_83 : ar_lo_83);
+                            float ar_got_467 = __shfl_xor_sync(0xFFFFFFFF, ar_send_467, 1);
+                            _er_tload[3] = ((ar_odd_10 == 0) ? ar_lo_83 : ar_got_467);
+                            _er_tload[7] = ((ar_odd_10 == 0) ? ar_got_467 : ar_hi_83);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 32))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 32)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7904,15 +10708,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 32) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 32) + ldc) = _v4;
                             }
+                            float ar_lo_84 = _er_tload[8];
+                            float ar_hi_84 = _er_tload[12];
+                            float ar_send_468 = ((ar_odd_10 == 0) ? ar_hi_84 : ar_lo_84);
+                            float ar_got_468 = __shfl_xor_sync(0xFFFFFFFF, ar_send_468, 1);
+                            _er_tload[8] = ((ar_odd_10 == 0) ? ar_lo_84 : ar_got_468);
+                            _er_tload[12] = ((ar_odd_10 == 0) ? ar_got_468 : ar_hi_84);
+                            float ar_lo_85 = _er_tload[9];
+                            float ar_hi_85 = _er_tload[13];
+                            float ar_send_469 = ((ar_odd_10 == 0) ? ar_hi_85 : ar_lo_85);
+                            float ar_got_469 = __shfl_xor_sync(0xFFFFFFFF, ar_send_469, 1);
+                            _er_tload[9] = ((ar_odd_10 == 0) ? ar_lo_85 : ar_got_469);
+                            _er_tload[13] = ((ar_odd_10 == 0) ? ar_got_469 : ar_hi_85);
+                            float ar_lo_86 = _er_tload[10];
+                            float ar_hi_86 = _er_tload[14];
+                            float ar_send_470 = ((ar_odd_10 == 0) ? ar_hi_86 : ar_lo_86);
+                            float ar_got_470 = __shfl_xor_sync(0xFFFFFFFF, ar_send_470, 1);
+                            _er_tload[10] = ((ar_odd_10 == 0) ? ar_lo_86 : ar_got_470);
+                            _er_tload[14] = ((ar_odd_10 == 0) ? ar_got_470 : ar_hi_86);
+                            float ar_lo_87 = _er_tload[11];
+                            float ar_hi_87 = _er_tload[15];
+                            float ar_send_471 = ((ar_odd_10 == 0) ? ar_hi_87 : ar_lo_87);
+                            float ar_got_471 = __shfl_xor_sync(0xFFFFFFFF, ar_send_471, 1);
+                            _er_tload[11] = ((ar_odd_10 == 0) ? ar_lo_87 : ar_got_471);
+                            _er_tload[15] = ((ar_odd_10 == 0) ? ar_got_471 : ar_hi_87);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 32) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 32) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 32) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 32) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_43 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -7943,9 +10771,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_11 = lane & 1;
+                            float ar_lo_88 = _er_tload[0];
+                            float ar_hi_88 = _er_tload[4];
+                            float ar_send_472 = ((ar_odd_11 == 0) ? ar_hi_88 : ar_lo_88);
+                            float ar_got_472 = __shfl_xor_sync(0xFFFFFFFF, ar_send_472, 1);
+                            _er_tload[0] = ((ar_odd_11 == 0) ? ar_lo_88 : ar_got_472);
+                            _er_tload[4] = ((ar_odd_11 == 0) ? ar_got_472 : ar_hi_88);
+                            float ar_lo_89 = _er_tload[1];
+                            float ar_hi_89 = _er_tload[5];
+                            float ar_send_473 = ((ar_odd_11 == 0) ? ar_hi_89 : ar_lo_89);
+                            float ar_got_473 = __shfl_xor_sync(0xFFFFFFFF, ar_send_473, 1);
+                            _er_tload[1] = ((ar_odd_11 == 0) ? ar_lo_89 : ar_got_473);
+                            _er_tload[5] = ((ar_odd_11 == 0) ? ar_got_473 : ar_hi_89);
+                            float ar_lo_90 = _er_tload[2];
+                            float ar_hi_90 = _er_tload[6];
+                            float ar_send_474 = ((ar_odd_11 == 0) ? ar_hi_90 : ar_lo_90);
+                            float ar_got_474 = __shfl_xor_sync(0xFFFFFFFF, ar_send_474, 1);
+                            _er_tload[2] = ((ar_odd_11 == 0) ? ar_lo_90 : ar_got_474);
+                            _er_tload[6] = ((ar_odd_11 == 0) ? ar_got_474 : ar_hi_90);
+                            float ar_lo_91 = _er_tload[3];
+                            float ar_hi_91 = _er_tload[7];
+                            float ar_send_475 = ((ar_odd_11 == 0) ? ar_hi_91 : ar_lo_91);
+                            float ar_got_475 = __shfl_xor_sync(0xFFFFFFFF, ar_send_475, 1);
+                            _er_tload[3] = ((ar_odd_11 == 0) ? ar_lo_91 : ar_got_475);
+                            _er_tload[7] = ((ar_odd_11 == 0) ? ar_got_475 : ar_hi_91);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 48))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 48)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -7991,15 +10844,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 48) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 48) + ldc) = _v4;
                             }
+                            float ar_lo_92 = _er_tload[8];
+                            float ar_hi_92 = _er_tload[12];
+                            float ar_send_476 = ((ar_odd_11 == 0) ? ar_hi_92 : ar_lo_92);
+                            float ar_got_476 = __shfl_xor_sync(0xFFFFFFFF, ar_send_476, 1);
+                            _er_tload[8] = ((ar_odd_11 == 0) ? ar_lo_92 : ar_got_476);
+                            _er_tload[12] = ((ar_odd_11 == 0) ? ar_got_476 : ar_hi_92);
+                            float ar_lo_93 = _er_tload[9];
+                            float ar_hi_93 = _er_tload[13];
+                            float ar_send_477 = ((ar_odd_11 == 0) ? ar_hi_93 : ar_lo_93);
+                            float ar_got_477 = __shfl_xor_sync(0xFFFFFFFF, ar_send_477, 1);
+                            _er_tload[9] = ((ar_odd_11 == 0) ? ar_lo_93 : ar_got_477);
+                            _er_tload[13] = ((ar_odd_11 == 0) ? ar_got_477 : ar_hi_93);
+                            float ar_lo_94 = _er_tload[10];
+                            float ar_hi_94 = _er_tload[14];
+                            float ar_send_478 = ((ar_odd_11 == 0) ? ar_hi_94 : ar_lo_94);
+                            float ar_got_478 = __shfl_xor_sync(0xFFFFFFFF, ar_send_478, 1);
+                            _er_tload[10] = ((ar_odd_11 == 0) ? ar_lo_94 : ar_got_478);
+                            _er_tload[14] = ((ar_odd_11 == 0) ? ar_got_478 : ar_hi_94);
+                            float ar_lo_95 = _er_tload[11];
+                            float ar_hi_95 = _er_tload[15];
+                            float ar_send_479 = ((ar_odd_11 == 0) ? ar_hi_95 : ar_lo_95);
+                            float ar_got_479 = __shfl_xor_sync(0xFFFFFFFF, ar_send_479, 1);
+                            _er_tload[11] = ((ar_odd_11 == 0) ? ar_lo_95 : ar_got_479);
+                            _er_tload[15] = ((ar_odd_11 == 0) ? ar_got_479 : ar_hi_95);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 48) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 48) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 48) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 48) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_44 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -8030,9 +10907,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_12 = lane & 1;
+                            float ar_lo_96 = _er_tload[0];
+                            float ar_hi_96 = _er_tload[4];
+                            float ar_send_480 = ((ar_odd_12 == 0) ? ar_hi_96 : ar_lo_96);
+                            float ar_got_480 = __shfl_xor_sync(0xFFFFFFFF, ar_send_480, 1);
+                            _er_tload[0] = ((ar_odd_12 == 0) ? ar_lo_96 : ar_got_480);
+                            _er_tload[4] = ((ar_odd_12 == 0) ? ar_got_480 : ar_hi_96);
+                            float ar_lo_97 = _er_tload[1];
+                            float ar_hi_97 = _er_tload[5];
+                            float ar_send_481 = ((ar_odd_12 == 0) ? ar_hi_97 : ar_lo_97);
+                            float ar_got_481 = __shfl_xor_sync(0xFFFFFFFF, ar_send_481, 1);
+                            _er_tload[1] = ((ar_odd_12 == 0) ? ar_lo_97 : ar_got_481);
+                            _er_tload[5] = ((ar_odd_12 == 0) ? ar_got_481 : ar_hi_97);
+                            float ar_lo_98 = _er_tload[2];
+                            float ar_hi_98 = _er_tload[6];
+                            float ar_send_482 = ((ar_odd_12 == 0) ? ar_hi_98 : ar_lo_98);
+                            float ar_got_482 = __shfl_xor_sync(0xFFFFFFFF, ar_send_482, 1);
+                            _er_tload[2] = ((ar_odd_12 == 0) ? ar_lo_98 : ar_got_482);
+                            _er_tload[6] = ((ar_odd_12 == 0) ? ar_got_482 : ar_hi_98);
+                            float ar_lo_99 = _er_tload[3];
+                            float ar_hi_99 = _er_tload[7];
+                            float ar_send_483 = ((ar_odd_12 == 0) ? ar_hi_99 : ar_lo_99);
+                            float ar_got_483 = __shfl_xor_sync(0xFFFFFFFF, ar_send_483, 1);
+                            _er_tload[3] = ((ar_odd_12 == 0) ? ar_lo_99 : ar_got_483);
+                            _er_tload[7] = ((ar_odd_12 == 0) ? ar_got_483 : ar_hi_99);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 64))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 64)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -8078,15 +10980,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 64) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 64) + ldc) = _v4;
                             }
+                            float ar_lo_100 = _er_tload[8];
+                            float ar_hi_100 = _er_tload[12];
+                            float ar_send_484 = ((ar_odd_12 == 0) ? ar_hi_100 : ar_lo_100);
+                            float ar_got_484 = __shfl_xor_sync(0xFFFFFFFF, ar_send_484, 1);
+                            _er_tload[8] = ((ar_odd_12 == 0) ? ar_lo_100 : ar_got_484);
+                            _er_tload[12] = ((ar_odd_12 == 0) ? ar_got_484 : ar_hi_100);
+                            float ar_lo_101 = _er_tload[9];
+                            float ar_hi_101 = _er_tload[13];
+                            float ar_send_485 = ((ar_odd_12 == 0) ? ar_hi_101 : ar_lo_101);
+                            float ar_got_485 = __shfl_xor_sync(0xFFFFFFFF, ar_send_485, 1);
+                            _er_tload[9] = ((ar_odd_12 == 0) ? ar_lo_101 : ar_got_485);
+                            _er_tload[13] = ((ar_odd_12 == 0) ? ar_got_485 : ar_hi_101);
+                            float ar_lo_102 = _er_tload[10];
+                            float ar_hi_102 = _er_tload[14];
+                            float ar_send_486 = ((ar_odd_12 == 0) ? ar_hi_102 : ar_lo_102);
+                            float ar_got_486 = __shfl_xor_sync(0xFFFFFFFF, ar_send_486, 1);
+                            _er_tload[10] = ((ar_odd_12 == 0) ? ar_lo_102 : ar_got_486);
+                            _er_tload[14] = ((ar_odd_12 == 0) ? ar_got_486 : ar_hi_102);
+                            float ar_lo_103 = _er_tload[11];
+                            float ar_hi_103 = _er_tload[15];
+                            float ar_send_487 = ((ar_odd_12 == 0) ? ar_hi_103 : ar_lo_103);
+                            float ar_got_487 = __shfl_xor_sync(0xFFFFFFFF, ar_send_487, 1);
+                            _er_tload[11] = ((ar_odd_12 == 0) ? ar_lo_103 : ar_got_487);
+                            _er_tload[15] = ((ar_odd_12 == 0) ? ar_got_487 : ar_hi_103);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 64) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 64) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 64) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 64) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_45 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -8117,9 +11043,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_13 = lane & 1;
+                            float ar_lo_104 = _er_tload[0];
+                            float ar_hi_104 = _er_tload[4];
+                            float ar_send_488 = ((ar_odd_13 == 0) ? ar_hi_104 : ar_lo_104);
+                            float ar_got_488 = __shfl_xor_sync(0xFFFFFFFF, ar_send_488, 1);
+                            _er_tload[0] = ((ar_odd_13 == 0) ? ar_lo_104 : ar_got_488);
+                            _er_tload[4] = ((ar_odd_13 == 0) ? ar_got_488 : ar_hi_104);
+                            float ar_lo_105 = _er_tload[1];
+                            float ar_hi_105 = _er_tload[5];
+                            float ar_send_489 = ((ar_odd_13 == 0) ? ar_hi_105 : ar_lo_105);
+                            float ar_got_489 = __shfl_xor_sync(0xFFFFFFFF, ar_send_489, 1);
+                            _er_tload[1] = ((ar_odd_13 == 0) ? ar_lo_105 : ar_got_489);
+                            _er_tload[5] = ((ar_odd_13 == 0) ? ar_got_489 : ar_hi_105);
+                            float ar_lo_106 = _er_tload[2];
+                            float ar_hi_106 = _er_tload[6];
+                            float ar_send_490 = ((ar_odd_13 == 0) ? ar_hi_106 : ar_lo_106);
+                            float ar_got_490 = __shfl_xor_sync(0xFFFFFFFF, ar_send_490, 1);
+                            _er_tload[2] = ((ar_odd_13 == 0) ? ar_lo_106 : ar_got_490);
+                            _er_tload[6] = ((ar_odd_13 == 0) ? ar_got_490 : ar_hi_106);
+                            float ar_lo_107 = _er_tload[3];
+                            float ar_hi_107 = _er_tload[7];
+                            float ar_send_491 = ((ar_odd_13 == 0) ? ar_hi_107 : ar_lo_107);
+                            float ar_got_491 = __shfl_xor_sync(0xFFFFFFFF, ar_send_491, 1);
+                            _er_tload[3] = ((ar_odd_13 == 0) ? ar_lo_107 : ar_got_491);
+                            _er_tload[7] = ((ar_odd_13 == 0) ? ar_got_491 : ar_hi_107);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 80))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 80)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -8165,15 +11116,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 80) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 80) + ldc) = _v4;
                             }
+                            float ar_lo_108 = _er_tload[8];
+                            float ar_hi_108 = _er_tload[12];
+                            float ar_send_492 = ((ar_odd_13 == 0) ? ar_hi_108 : ar_lo_108);
+                            float ar_got_492 = __shfl_xor_sync(0xFFFFFFFF, ar_send_492, 1);
+                            _er_tload[8] = ((ar_odd_13 == 0) ? ar_lo_108 : ar_got_492);
+                            _er_tload[12] = ((ar_odd_13 == 0) ? ar_got_492 : ar_hi_108);
+                            float ar_lo_109 = _er_tload[9];
+                            float ar_hi_109 = _er_tload[13];
+                            float ar_send_493 = ((ar_odd_13 == 0) ? ar_hi_109 : ar_lo_109);
+                            float ar_got_493 = __shfl_xor_sync(0xFFFFFFFF, ar_send_493, 1);
+                            _er_tload[9] = ((ar_odd_13 == 0) ? ar_lo_109 : ar_got_493);
+                            _er_tload[13] = ((ar_odd_13 == 0) ? ar_got_493 : ar_hi_109);
+                            float ar_lo_110 = _er_tload[10];
+                            float ar_hi_110 = _er_tload[14];
+                            float ar_send_494 = ((ar_odd_13 == 0) ? ar_hi_110 : ar_lo_110);
+                            float ar_got_494 = __shfl_xor_sync(0xFFFFFFFF, ar_send_494, 1);
+                            _er_tload[10] = ((ar_odd_13 == 0) ? ar_lo_110 : ar_got_494);
+                            _er_tload[14] = ((ar_odd_13 == 0) ? ar_got_494 : ar_hi_110);
+                            float ar_lo_111 = _er_tload[11];
+                            float ar_hi_111 = _er_tload[15];
+                            float ar_send_495 = ((ar_odd_13 == 0) ? ar_hi_111 : ar_lo_111);
+                            float ar_got_495 = __shfl_xor_sync(0xFFFFFFFF, ar_send_495, 1);
+                            _er_tload[11] = ((ar_odd_13 == 0) ? ar_lo_111 : ar_got_495);
+                            _er_tload[15] = ((ar_odd_13 == 0) ? ar_got_495 : ar_hi_111);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 80) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 80) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 80) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 80) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_46 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -8204,9 +11179,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_14 = lane & 1;
+                            float ar_lo_112 = _er_tload[0];
+                            float ar_hi_112 = _er_tload[4];
+                            float ar_send_496 = ((ar_odd_14 == 0) ? ar_hi_112 : ar_lo_112);
+                            float ar_got_496 = __shfl_xor_sync(0xFFFFFFFF, ar_send_496, 1);
+                            _er_tload[0] = ((ar_odd_14 == 0) ? ar_lo_112 : ar_got_496);
+                            _er_tload[4] = ((ar_odd_14 == 0) ? ar_got_496 : ar_hi_112);
+                            float ar_lo_113 = _er_tload[1];
+                            float ar_hi_113 = _er_tload[5];
+                            float ar_send_497 = ((ar_odd_14 == 0) ? ar_hi_113 : ar_lo_113);
+                            float ar_got_497 = __shfl_xor_sync(0xFFFFFFFF, ar_send_497, 1);
+                            _er_tload[1] = ((ar_odd_14 == 0) ? ar_lo_113 : ar_got_497);
+                            _er_tload[5] = ((ar_odd_14 == 0) ? ar_got_497 : ar_hi_113);
+                            float ar_lo_114 = _er_tload[2];
+                            float ar_hi_114 = _er_tload[6];
+                            float ar_send_498 = ((ar_odd_14 == 0) ? ar_hi_114 : ar_lo_114);
+                            float ar_got_498 = __shfl_xor_sync(0xFFFFFFFF, ar_send_498, 1);
+                            _er_tload[2] = ((ar_odd_14 == 0) ? ar_lo_114 : ar_got_498);
+                            _er_tload[6] = ((ar_odd_14 == 0) ? ar_got_498 : ar_hi_114);
+                            float ar_lo_115 = _er_tload[3];
+                            float ar_hi_115 = _er_tload[7];
+                            float ar_send_499 = ((ar_odd_14 == 0) ? ar_hi_115 : ar_lo_115);
+                            float ar_got_499 = __shfl_xor_sync(0xFFFFFFFF, ar_send_499, 1);
+                            _er_tload[3] = ((ar_odd_14 == 0) ? ar_lo_115 : ar_got_499);
+                            _er_tload[7] = ((ar_odd_14 == 0) ? ar_got_499 : ar_hi_115);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 96))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 96)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -8252,15 +11252,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 96) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 96) + ldc) = _v4;
                             }
+                            float ar_lo_116 = _er_tload[8];
+                            float ar_hi_116 = _er_tload[12];
+                            float ar_send_500 = ((ar_odd_14 == 0) ? ar_hi_116 : ar_lo_116);
+                            float ar_got_500 = __shfl_xor_sync(0xFFFFFFFF, ar_send_500, 1);
+                            _er_tload[8] = ((ar_odd_14 == 0) ? ar_lo_116 : ar_got_500);
+                            _er_tload[12] = ((ar_odd_14 == 0) ? ar_got_500 : ar_hi_116);
+                            float ar_lo_117 = _er_tload[9];
+                            float ar_hi_117 = _er_tload[13];
+                            float ar_send_501 = ((ar_odd_14 == 0) ? ar_hi_117 : ar_lo_117);
+                            float ar_got_501 = __shfl_xor_sync(0xFFFFFFFF, ar_send_501, 1);
+                            _er_tload[9] = ((ar_odd_14 == 0) ? ar_lo_117 : ar_got_501);
+                            _er_tload[13] = ((ar_odd_14 == 0) ? ar_got_501 : ar_hi_117);
+                            float ar_lo_118 = _er_tload[10];
+                            float ar_hi_118 = _er_tload[14];
+                            float ar_send_502 = ((ar_odd_14 == 0) ? ar_hi_118 : ar_lo_118);
+                            float ar_got_502 = __shfl_xor_sync(0xFFFFFFFF, ar_send_502, 1);
+                            _er_tload[10] = ((ar_odd_14 == 0) ? ar_lo_118 : ar_got_502);
+                            _er_tload[14] = ((ar_odd_14 == 0) ? ar_got_502 : ar_hi_118);
+                            float ar_lo_119 = _er_tload[11];
+                            float ar_hi_119 = _er_tload[15];
+                            float ar_send_503 = ((ar_odd_14 == 0) ? ar_hi_119 : ar_lo_119);
+                            float ar_got_503 = __shfl_xor_sync(0xFFFFFFFF, ar_send_503, 1);
+                            _er_tload[11] = ((ar_odd_14 == 0) ? ar_lo_119 : ar_got_503);
+                            _er_tload[15] = ((ar_odd_14 == 0) ? ar_got_503 : ar_hi_119);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 96) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 96) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 96) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 96) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_47 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -8291,9 +11315,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         asm volatile("tcgen05.wait::ld.sync.aligned;");
                         if (whole_te == 1) {
 #if CAKE_WGRAD_OUT == 32
+                            int ar_odd_15 = lane & 1;
+                            float ar_lo_120 = _er_tload[0];
+                            float ar_hi_120 = _er_tload[4];
+                            float ar_send_504 = ((ar_odd_15 == 0) ? ar_hi_120 : ar_lo_120);
+                            float ar_got_504 = __shfl_xor_sync(0xFFFFFFFF, ar_send_504, 1);
+                            _er_tload[0] = ((ar_odd_15 == 0) ? ar_lo_120 : ar_got_504);
+                            _er_tload[4] = ((ar_odd_15 == 0) ? ar_got_504 : ar_hi_120);
+                            float ar_lo_121 = _er_tload[1];
+                            float ar_hi_121 = _er_tload[5];
+                            float ar_send_505 = ((ar_odd_15 == 0) ? ar_hi_121 : ar_lo_121);
+                            float ar_got_505 = __shfl_xor_sync(0xFFFFFFFF, ar_send_505, 1);
+                            _er_tload[1] = ((ar_odd_15 == 0) ? ar_lo_121 : ar_got_505);
+                            _er_tload[5] = ((ar_odd_15 == 0) ? ar_got_505 : ar_hi_121);
+                            float ar_lo_122 = _er_tload[2];
+                            float ar_hi_122 = _er_tload[6];
+                            float ar_send_506 = ((ar_odd_15 == 0) ? ar_hi_122 : ar_lo_122);
+                            float ar_got_506 = __shfl_xor_sync(0xFFFFFFFF, ar_send_506, 1);
+                            _er_tload[2] = ((ar_odd_15 == 0) ? ar_lo_122 : ar_got_506);
+                            _er_tload[6] = ((ar_odd_15 == 0) ? ar_got_506 : ar_hi_122);
+                            float ar_lo_123 = _er_tload[3];
+                            float ar_hi_123 = _er_tload[7];
+                            float ar_send_507 = ((ar_odd_15 == 0) ? ar_hi_123 : ar_lo_123);
+                            float ar_got_507 = __shfl_xor_sync(0xFFFFFFFF, ar_send_507, 1);
+                            _er_tload[3] = ((ar_odd_15 == 0) ? ar_lo_123 : ar_got_507);
+                            _er_tload[7] = ((ar_odd_15 == 0) ? ar_got_507 : ar_hi_123);
                             {
                                 float4 _v4 = make_float4(_er_tload[0 + 0], _er_tload[0 + 1], _er_tload[0 + 2], _er_tload[0 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 112))) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 112)) = _v4;
 #else
                             #pragma unroll
                             for (int _lp = 0; _lp < 1; _lp++) {
@@ -8339,15 +11388,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             {
 #if CAKE_WGRAD_OUT == 32
                                 float4 _v4 = make_float4(_er_tload[4 + 0], _er_tload[4 + 1], _er_tload[4 + 2], _er_tload[4 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 112) + 4)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 112) + ldc) = _v4;
                             }
+                            float ar_lo_124 = _er_tload[8];
+                            float ar_hi_124 = _er_tload[12];
+                            float ar_send_508 = ((ar_odd_15 == 0) ? ar_hi_124 : ar_lo_124);
+                            float ar_got_508 = __shfl_xor_sync(0xFFFFFFFF, ar_send_508, 1);
+                            _er_tload[8] = ((ar_odd_15 == 0) ? ar_lo_124 : ar_got_508);
+                            _er_tload[12] = ((ar_odd_15 == 0) ? ar_got_508 : ar_hi_124);
+                            float ar_lo_125 = _er_tload[9];
+                            float ar_hi_125 = _er_tload[13];
+                            float ar_send_509 = ((ar_odd_15 == 0) ? ar_hi_125 : ar_lo_125);
+                            float ar_got_509 = __shfl_xor_sync(0xFFFFFFFF, ar_send_509, 1);
+                            _er_tload[9] = ((ar_odd_15 == 0) ? ar_lo_125 : ar_got_509);
+                            _er_tload[13] = ((ar_odd_15 == 0) ? ar_got_509 : ar_hi_125);
+                            float ar_lo_126 = _er_tload[10];
+                            float ar_hi_126 = _er_tload[14];
+                            float ar_send_510 = ((ar_odd_15 == 0) ? ar_hi_126 : ar_lo_126);
+                            float ar_got_510 = __shfl_xor_sync(0xFFFFFFFF, ar_send_510, 1);
+                            _er_tload[10] = ((ar_odd_15 == 0) ? ar_lo_126 : ar_got_510);
+                            _er_tload[14] = ((ar_odd_15 == 0) ? ar_got_510 : ar_hi_126);
+                            float ar_lo_127 = _er_tload[11];
+                            float ar_hi_127 = _er_tload[15];
+                            float ar_send_511 = ((ar_odd_15 == 0) ? ar_hi_127 : ar_lo_127);
+                            float ar_got_511 = __shfl_xor_sync(0xFFFFFFFF, ar_send_511, 1);
+                            _er_tload[11] = ((ar_odd_15 == 0) ? ar_lo_127 : ar_got_511);
+                            _er_tload[15] = ((ar_odd_15 == 0) ? ar_got_511 : ar_hi_127);
                             {
                                 float4 _v4 = make_float4(_er_tload[8 + 0], _er_tload[8 + 1], _er_tload[8 + 2], _er_tload[8 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 112) + 8)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 112) + 8) = _v4;
                             }
                             {
                                 float4 _v4 = make_float4(_er_tload[12 + 0], _er_tload[12 + 1], _er_tload[12 + 2], _er_tload[12 + 3]);
-                                *reinterpret_cast<float4*>((C + (er_out_t + (er_col_b + 112) + 12)) + 0) = _v4;
+                                *reinterpret_cast<float4*>(C + er_out_t + (lane & 1) * (4 - ldc) + (er_col_b + 112) + (8 + ldc)) = _v4;
 #else
                                 const unsigned* _raw_stv8_48 = reinterpret_cast<const unsigned*>(_er_tpack);
                                 asm volatile(
@@ -8391,14 +11464,14 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             unsigned int tl_old = 0;
                             if (lane == 0) {
 #if CAKE_WGRAD_OUT == 32
-                                uint32_t _atomic_fetch_inc_65;
+                                uint32_t _atomic_fetch_inc_33;
 #else
                                 uint32_t _atomic_fetch_inc_49;
 #endif  // CAKE_WGRAD_OUT
                                 asm volatile("atom.acq_rel.gpu.global.inc.u32 %0, [%1], %2;"
 #if CAKE_WGRAD_OUT == 32
-                                    : "=r"(_atomic_fetch_inc_65) : "l"(&tail_tickets[((int)j_u_te * CTA_GROUP + cta_rank) * NUM_EPILOGUE_WARPS + (warp - 2)]), "r"(static_cast<uint32_t>((unsigned int)(tl_count - 1))) : "memory");
-                                tl_old = _atomic_fetch_inc_65;
+                                    : "=r"(_atomic_fetch_inc_33) : "l"(&tail_tickets[((int)j_u_te * CTA_GROUP + cta_rank) * NUM_EPILOGUE_WARPS + (warp - 2)]), "r"(static_cast<uint32_t>((unsigned int)(tl_count - 1))) : "memory");
+                                tl_old = _atomic_fetch_inc_33;
 #else
                                     : "=r"(_atomic_fetch_inc_49) : "l"(&tail_tickets[((int)j_u_te * CTA_GROUP + cta_rank) * NUM_EPILOGUE_WARPS + (warp - 2)]), "r"(static_cast<uint32_t>((unsigned int)(tl_count - 1))) : "memory");
                                 tl_old = _atomic_fetch_inc_49;
@@ -8423,13 +11496,289 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                     int fo_hi_0 = (fo_s_0 + 1) * kb_te / tail_splits;
                                     if (fo_hi_0 > fo_lo_0) {
                                         {
-#if CAKE_WGRAD_OUT == 16
+#if CAKE_WGRAD_OUT == 32
+                                            unsigned _v4_34_0;
+                                            unsigned _v4_34_1;
+                                            unsigned _v4_34_2;
+                                            unsigned _v4_34_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_34_0), "=r"(_v4_34_1), "=r"(_v4_34_2), "=r"(_v4_34_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + tf_col) + (0))) : "memory");
+                                            _rl[0 + 0] = __uint_as_float(_v4_34_0);
+                                            _rl[0 + 1] = __uint_as_float(_v4_34_1);
+                                            _rl[0 + 2] = __uint_as_float(_v4_34_2);
+                                            _rl[0 + 3] = __uint_as_float(_v4_34_3);
+                                        }
+                                        {
+                                            unsigned _v4_35_0;
+                                            unsigned _v4_35_1;
+                                            unsigned _v4_35_2;
+                                            unsigned _v4_35_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_35_0), "=r"(_v4_35_1), "=r"(_v4_35_2), "=r"(_v4_35_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[4 + 0] = __uint_as_float(_v4_35_0);
+                                            _rl[4 + 1] = __uint_as_float(_v4_35_1);
+                                            _rl[4 + 2] = __uint_as_float(_v4_35_2);
+                                            _rl[4 + 3] = __uint_as_float(_v4_35_3);
+                                        }
+                                        {
+                                            unsigned _v4_36_0;
+                                            unsigned _v4_36_1;
+                                            unsigned _v4_36_2;
+                                            unsigned _v4_36_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_36_0), "=r"(_v4_36_1), "=r"(_v4_36_2), "=r"(_v4_36_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 2 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[8 + 0] = __uint_as_float(_v4_36_0);
+                                            _rl[8 + 1] = __uint_as_float(_v4_36_1);
+                                            _rl[8 + 2] = __uint_as_float(_v4_36_2);
+                                            _rl[8 + 3] = __uint_as_float(_v4_36_3);
+                                        }
+                                        {
+                                            unsigned _v4_37_0;
+                                            unsigned _v4_37_1;
+                                            unsigned _v4_37_2;
+                                            unsigned _v4_37_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_37_0), "=r"(_v4_37_1), "=r"(_v4_37_2), "=r"(_v4_37_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 3 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[12 + 0] = __uint_as_float(_v4_37_0);
+                                            _rl[12 + 1] = __uint_as_float(_v4_37_1);
+                                            _rl[12 + 2] = __uint_as_float(_v4_37_2);
+                                            _rl[12 + 3] = __uint_as_float(_v4_37_3);
+                                        }
+                                        {
+                                            unsigned _v4_38_0;
+                                            unsigned _v4_38_1;
+                                            unsigned _v4_38_2;
+                                            unsigned _v4_38_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_38_0), "=r"(_v4_38_1), "=r"(_v4_38_2), "=r"(_v4_38_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 4 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[16 + 0] = __uint_as_float(_v4_38_0);
+                                            _rl[16 + 1] = __uint_as_float(_v4_38_1);
+                                            _rl[16 + 2] = __uint_as_float(_v4_38_2);
+                                            _rl[16 + 3] = __uint_as_float(_v4_38_3);
+                                        }
+                                        {
+                                            unsigned _v4_39_0;
+                                            unsigned _v4_39_1;
+                                            unsigned _v4_39_2;
+                                            unsigned _v4_39_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_39_0), "=r"(_v4_39_1), "=r"(_v4_39_2), "=r"(_v4_39_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 5 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[20 + 0] = __uint_as_float(_v4_39_0);
+                                            _rl[20 + 1] = __uint_as_float(_v4_39_1);
+                                            _rl[20 + 2] = __uint_as_float(_v4_39_2);
+                                            _rl[20 + 3] = __uint_as_float(_v4_39_3);
+                                        }
+                                        {
+                                            unsigned _v4_40_0;
+                                            unsigned _v4_40_1;
+                                            unsigned _v4_40_2;
+                                            unsigned _v4_40_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_40_0), "=r"(_v4_40_1), "=r"(_v4_40_2), "=r"(_v4_40_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 6 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[24 + 0] = __uint_as_float(_v4_40_0);
+                                            _rl[24 + 1] = __uint_as_float(_v4_40_1);
+                                            _rl[24 + 2] = __uint_as_float(_v4_40_2);
+                                            _rl[24 + 3] = __uint_as_float(_v4_40_3);
+                                        }
+                                        {
+                                            unsigned _v4_41_0;
+                                            unsigned _v4_41_1;
+                                            unsigned _v4_41_2;
+                                            unsigned _v4_41_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_41_0), "=r"(_v4_41_1), "=r"(_v4_41_2), "=r"(_v4_41_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 7 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[28 + 0] = __uint_as_float(_v4_41_0);
+                                            _rl[28 + 1] = __uint_as_float(_v4_41_1);
+                                            _rl[28 + 2] = __uint_as_float(_v4_41_2);
+                                            _rl[28 + 3] = __uint_as_float(_v4_41_3);
+                                        }
+                                        {
+                                            unsigned _v4_42_0;
+                                            unsigned _v4_42_1;
+                                            unsigned _v4_42_2;
+                                            unsigned _v4_42_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_42_0), "=r"(_v4_42_1), "=r"(_v4_42_2), "=r"(_v4_42_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 8 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[32 + 0] = __uint_as_float(_v4_42_0);
+                                            _rl[32 + 1] = __uint_as_float(_v4_42_1);
+                                            _rl[32 + 2] = __uint_as_float(_v4_42_2);
+                                            _rl[32 + 3] = __uint_as_float(_v4_42_3);
+                                        }
+                                        {
+                                            unsigned _v4_43_0;
+                                            unsigned _v4_43_1;
+                                            unsigned _v4_43_2;
+                                            unsigned _v4_43_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_43_0), "=r"(_v4_43_1), "=r"(_v4_43_2), "=r"(_v4_43_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 9 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[36 + 0] = __uint_as_float(_v4_43_0);
+                                            _rl[36 + 1] = __uint_as_float(_v4_43_1);
+                                            _rl[36 + 2] = __uint_as_float(_v4_43_2);
+                                            _rl[36 + 3] = __uint_as_float(_v4_43_3);
+                                        }
+                                        {
+                                            unsigned _v4_44_0;
+                                            unsigned _v4_44_1;
+                                            unsigned _v4_44_2;
+                                            unsigned _v4_44_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_44_0), "=r"(_v4_44_1), "=r"(_v4_44_2), "=r"(_v4_44_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 10 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[40 + 0] = __uint_as_float(_v4_44_0);
+                                            _rl[40 + 1] = __uint_as_float(_v4_44_1);
+                                            _rl[40 + 2] = __uint_as_float(_v4_44_2);
+                                            _rl[40 + 3] = __uint_as_float(_v4_44_3);
+                                        }
+                                        {
+                                            unsigned _v4_45_0;
+                                            unsigned _v4_45_1;
+                                            unsigned _v4_45_2;
+                                            unsigned _v4_45_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_45_0), "=r"(_v4_45_1), "=r"(_v4_45_2), "=r"(_v4_45_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 11 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[44 + 0] = __uint_as_float(_v4_45_0);
+                                            _rl[44 + 1] = __uint_as_float(_v4_45_1);
+                                            _rl[44 + 2] = __uint_as_float(_v4_45_2);
+                                            _rl[44 + 3] = __uint_as_float(_v4_45_3);
+                                        }
+                                        {
+                                            unsigned _v4_46_0;
+                                            unsigned _v4_46_1;
+                                            unsigned _v4_46_2;
+                                            unsigned _v4_46_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_46_0), "=r"(_v4_46_1), "=r"(_v4_46_2), "=r"(_v4_46_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 12 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[48 + 0] = __uint_as_float(_v4_46_0);
+                                            _rl[48 + 1] = __uint_as_float(_v4_46_1);
+                                            _rl[48 + 2] = __uint_as_float(_v4_46_2);
+                                            _rl[48 + 3] = __uint_as_float(_v4_46_3);
+                                        }
+                                        {
+                                            unsigned _v4_47_0;
+                                            unsigned _v4_47_1;
+                                            unsigned _v4_47_2;
+                                            unsigned _v4_47_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_47_0), "=r"(_v4_47_1), "=r"(_v4_47_2), "=r"(_v4_47_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 13 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[52 + 0] = __uint_as_float(_v4_47_0);
+                                            _rl[52 + 1] = __uint_as_float(_v4_47_1);
+                                            _rl[52 + 2] = __uint_as_float(_v4_47_2);
+                                            _rl[52 + 3] = __uint_as_float(_v4_47_3);
+                                        }
+                                        {
+                                            unsigned _v4_48_0;
+                                            unsigned _v4_48_1;
+                                            unsigned _v4_48_2;
+                                            unsigned _v4_48_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_48_0), "=r"(_v4_48_1), "=r"(_v4_48_2), "=r"(_v4_48_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 14 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[56 + 0] = __uint_as_float(_v4_48_0);
+                                            _rl[56 + 1] = __uint_as_float(_v4_48_1);
+                                            _rl[56 + 2] = __uint_as_float(_v4_48_2);
+                                            _rl[56 + 3] = __uint_as_float(_v4_48_3);
+                                        }
+                                        {
+                                            unsigned _v4_49_0;
+                                            unsigned _v4_49_1;
+                                            unsigned _v4_49_2;
+                                            unsigned _v4_49_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_49_0), "=r"(_v4_49_1), "=r"(_v4_49_2), "=r"(_v4_49_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 15 * TILE_K + tf_col) + (0))) : "memory");
+                                            _rl[60 + 0] = __uint_as_float(_v4_49_0);
+                                            _rl[60 + 1] = __uint_as_float(_v4_49_1);
+                                            _rl[60 + 2] = __uint_as_float(_v4_49_2);
+                                            _rl[60 + 3] = __uint_as_float(_v4_49_3);
+                                        }
+                                        #pragma unroll
+                                        for (int fo_a_0 = 0; fo_a_0 < 64; fo_a_0++) {
+                                            _rf[fo_a_0] = _rf[fo_a_0] + _rl[fo_a_0];
+                                        }
+                                    }
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[0 + 0], _rf[0 + 1], _rf[0 + 2], _rf[0 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[4 + 0], _rf[4 + 1], _rf[4 + 2], _rf[4 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[8 + 0], _rf[8 + 1], _rf[8 + 2], _rf[8 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 2 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[12 + 0], _rf[12 + 1], _rf[12 + 2], _rf[12 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 3 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[16 + 0], _rf[16 + 1], _rf[16 + 2], _rf[16 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 4 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[20 + 0], _rf[20 + 1], _rf[20 + 2], _rf[20 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 5 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[24 + 0], _rf[24 + 1], _rf[24 + 2], _rf[24 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 6 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[28 + 0], _rf[28 + 1], _rf[28 + 2], _rf[28 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 7 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[32 + 0], _rf[32 + 1], _rf[32 + 2], _rf[32 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 8 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[36 + 0], _rf[36 + 1], _rf[36 + 2], _rf[36 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 9 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[40 + 0], _rf[40 + 1], _rf[40 + 2], _rf[40 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 10 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[44 + 0], _rf[44 + 1], _rf[44 + 2], _rf[44 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 11 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[48 + 0], _rf[48 + 1], _rf[48 + 2], _rf[48 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 12 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[52 + 0], _rf[52 + 1], _rf[52 + 2], _rf[52 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 13 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[56 + 0], _rf[56 + 1], _rf[56 + 2], _rf[56 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 14 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf[60 + 0], _rf[60 + 1], _rf[60 + 2], _rf[60 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 15 * ldc + tf_col)) + 0) = _v4;
+                                }
+                                #pragma unroll
+                                for (int fo_q_1 = 0; fo_q_1 < 64; fo_q_1++) {
+                                    _rf[fo_q_1] = 0.0f;
+                                }
+                                #pragma unroll 1
+                                for (int fo_s_1 = 0; fo_s_1 < tail_splits; fo_s_1++) {
+                                    int fo_lo_1 = fo_s_1 * kb_te / tail_splits;
+                                    int fo_hi_1 = (fo_s_1 + 1) * kb_te / tail_splits;
+                                    if (fo_hi_1 > fo_lo_1) {
+                                        {
+#endif  // CAKE_WGRAD_OUT == 32
                                             unsigned _v4_50_0;
                                             unsigned _v4_50_1;
                                             unsigned _v4_50_2;
                                             unsigned _v4_50_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_50_0), "=r"(_v4_50_1), "=r"(_v4_50_2), "=r"(_v4_50_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 16 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_50_0), "=r"(_v4_50_1), "=r"(_v4_50_2), "=r"(_v4_50_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[0 + 0] = __uint_as_float(_v4_50_0);
                                             _rl[0 + 1] = __uint_as_float(_v4_50_1);
                                             _rl[0 + 2] = __uint_as_float(_v4_50_2);
@@ -8441,7 +11790,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_51_2;
                                             unsigned _v4_51_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_51_0), "=r"(_v4_51_1), "=r"(_v4_51_2), "=r"(_v4_51_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 17 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_51_0), "=r"(_v4_51_1), "=r"(_v4_51_2), "=r"(_v4_51_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[4 + 0] = __uint_as_float(_v4_51_0);
                                             _rl[4 + 1] = __uint_as_float(_v4_51_1);
                                             _rl[4 + 2] = __uint_as_float(_v4_51_2);
@@ -8453,7 +11806,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_52_2;
                                             unsigned _v4_52_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_52_0), "=r"(_v4_52_1), "=r"(_v4_52_2), "=r"(_v4_52_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 18 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_52_0), "=r"(_v4_52_1), "=r"(_v4_52_2), "=r"(_v4_52_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 2 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[8 + 0] = __uint_as_float(_v4_52_0);
                                             _rl[8 + 1] = __uint_as_float(_v4_52_1);
                                             _rl[8 + 2] = __uint_as_float(_v4_52_2);
@@ -8465,7 +11822,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_53_2;
                                             unsigned _v4_53_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_53_0), "=r"(_v4_53_1), "=r"(_v4_53_2), "=r"(_v4_53_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 19 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_53_0), "=r"(_v4_53_1), "=r"(_v4_53_2), "=r"(_v4_53_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 3 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[12 + 0] = __uint_as_float(_v4_53_0);
                                             _rl[12 + 1] = __uint_as_float(_v4_53_1);
                                             _rl[12 + 2] = __uint_as_float(_v4_53_2);
@@ -8477,7 +11838,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_54_2;
                                             unsigned _v4_54_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_54_0), "=r"(_v4_54_1), "=r"(_v4_54_2), "=r"(_v4_54_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 20 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_54_0), "=r"(_v4_54_1), "=r"(_v4_54_2), "=r"(_v4_54_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 4 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[16 + 0] = __uint_as_float(_v4_54_0);
                                             _rl[16 + 1] = __uint_as_float(_v4_54_1);
                                             _rl[16 + 2] = __uint_as_float(_v4_54_2);
@@ -8489,7 +11854,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_55_2;
                                             unsigned _v4_55_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_55_0), "=r"(_v4_55_1), "=r"(_v4_55_2), "=r"(_v4_55_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 21 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_55_0), "=r"(_v4_55_1), "=r"(_v4_55_2), "=r"(_v4_55_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 5 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[20 + 0] = __uint_as_float(_v4_55_0);
                                             _rl[20 + 1] = __uint_as_float(_v4_55_1);
                                             _rl[20 + 2] = __uint_as_float(_v4_55_2);
@@ -8501,7 +11870,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_56_2;
                                             unsigned _v4_56_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_56_0), "=r"(_v4_56_1), "=r"(_v4_56_2), "=r"(_v4_56_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 22 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_56_0), "=r"(_v4_56_1), "=r"(_v4_56_2), "=r"(_v4_56_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 6 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[24 + 0] = __uint_as_float(_v4_56_0);
                                             _rl[24 + 1] = __uint_as_float(_v4_56_1);
                                             _rl[24 + 2] = __uint_as_float(_v4_56_2);
@@ -8513,7 +11886,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_57_2;
                                             unsigned _v4_57_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_57_0), "=r"(_v4_57_1), "=r"(_v4_57_2), "=r"(_v4_57_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 23 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_57_0), "=r"(_v4_57_1), "=r"(_v4_57_2), "=r"(_v4_57_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 7 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[28 + 0] = __uint_as_float(_v4_57_0);
                                             _rl[28 + 1] = __uint_as_float(_v4_57_1);
                                             _rl[28 + 2] = __uint_as_float(_v4_57_2);
@@ -8525,7 +11902,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_58_2;
                                             unsigned _v4_58_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_58_0), "=r"(_v4_58_1), "=r"(_v4_58_2), "=r"(_v4_58_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 24 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_58_0), "=r"(_v4_58_1), "=r"(_v4_58_2), "=r"(_v4_58_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 8 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[32 + 0] = __uint_as_float(_v4_58_0);
                                             _rl[32 + 1] = __uint_as_float(_v4_58_1);
                                             _rl[32 + 2] = __uint_as_float(_v4_58_2);
@@ -8537,7 +11918,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_59_2;
                                             unsigned _v4_59_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_59_0), "=r"(_v4_59_1), "=r"(_v4_59_2), "=r"(_v4_59_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 25 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_59_0), "=r"(_v4_59_1), "=r"(_v4_59_2), "=r"(_v4_59_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 9 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[36 + 0] = __uint_as_float(_v4_59_0);
                                             _rl[36 + 1] = __uint_as_float(_v4_59_1);
                                             _rl[36 + 2] = __uint_as_float(_v4_59_2);
@@ -8549,7 +11934,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_60_2;
                                             unsigned _v4_60_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_60_0), "=r"(_v4_60_1), "=r"(_v4_60_2), "=r"(_v4_60_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 26 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_60_0), "=r"(_v4_60_1), "=r"(_v4_60_2), "=r"(_v4_60_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 10 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[40 + 0] = __uint_as_float(_v4_60_0);
                                             _rl[40 + 1] = __uint_as_float(_v4_60_1);
                                             _rl[40 + 2] = __uint_as_float(_v4_60_2);
@@ -8561,7 +11950,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_61_2;
                                             unsigned _v4_61_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_61_0), "=r"(_v4_61_1), "=r"(_v4_61_2), "=r"(_v4_61_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 27 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_61_0), "=r"(_v4_61_1), "=r"(_v4_61_2), "=r"(_v4_61_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 11 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[44 + 0] = __uint_as_float(_v4_61_0);
                                             _rl[44 + 1] = __uint_as_float(_v4_61_1);
                                             _rl[44 + 2] = __uint_as_float(_v4_61_2);
@@ -8573,7 +11966,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_62_2;
                                             unsigned _v4_62_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_62_0), "=r"(_v4_62_1), "=r"(_v4_62_2), "=r"(_v4_62_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 28 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_62_0), "=r"(_v4_62_1), "=r"(_v4_62_2), "=r"(_v4_62_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 12 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[48 + 0] = __uint_as_float(_v4_62_0);
                                             _rl[48 + 1] = __uint_as_float(_v4_62_1);
                                             _rl[48 + 2] = __uint_as_float(_v4_62_2);
@@ -8585,7 +11982,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_63_2;
                                             unsigned _v4_63_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_63_0), "=r"(_v4_63_1), "=r"(_v4_63_2), "=r"(_v4_63_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 29 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_63_0), "=r"(_v4_63_1), "=r"(_v4_63_2), "=r"(_v4_63_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 13 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[52 + 0] = __uint_as_float(_v4_63_0);
                                             _rl[52 + 1] = __uint_as_float(_v4_63_1);
                                             _rl[52 + 2] = __uint_as_float(_v4_63_2);
@@ -8597,7 +11998,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_64_2;
                                             unsigned _v4_64_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_64_0), "=r"(_v4_64_1), "=r"(_v4_64_2), "=r"(_v4_64_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 30 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_64_0), "=r"(_v4_64_1), "=r"(_v4_64_2), "=r"(_v4_64_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 14 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[56 + 0] = __uint_as_float(_v4_64_0);
                                             _rl[56 + 1] = __uint_as_float(_v4_64_1);
                                             _rl[56 + 2] = __uint_as_float(_v4_64_2);
@@ -8609,11 +12014,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_65_2;
                                             unsigned _v4_65_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_65_0), "=r"(_v4_65_1), "=r"(_v4_65_2), "=r"(_v4_65_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 31 * TILE_K + tf_col) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_65_0), "=r"(_v4_65_1), "=r"(_v4_65_2), "=r"(_v4_65_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 15 * TILE_K + tf_col) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl[60 + 0] = __uint_as_float(_v4_65_0);
                                             _rl[60 + 1] = __uint_as_float(_v4_65_1);
                                             _rl[60 + 2] = __uint_as_float(_v4_65_2);
                                             _rl[60 + 3] = __uint_as_float(_v4_65_3);
+#if CAKE_WGRAD_OUT == 16
                                         }
                                         #pragma unroll
                                         for (int fo_a_0 = 0; fo_a_0 < 64; fo_a_0++) {
@@ -8808,17 +12218,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                     int fo_hi_1 = (fo_s_1 + 1) * kb_te / tail_splits;
                                     if (fo_hi_1 > fo_lo_1) {
                                         {
-#endif  // CAKE_WGRAD_OUT == 16
                                             unsigned _v4_66_0;
                                             unsigned _v4_66_1;
                                             unsigned _v4_66_2;
                                             unsigned _v4_66_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_66_0), "=r"(_v4_66_1), "=r"(_v4_66_2), "=r"(_v4_66_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_66_0), "=r"(_v4_66_1), "=r"(_v4_66_2), "=r"(_v4_66_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 16 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[0 + 0] = __uint_as_float(_v4_66_0);
                                             _rl[0 + 1] = __uint_as_float(_v4_66_1);
                                             _rl[0 + 2] = __uint_as_float(_v4_66_2);
@@ -8830,11 +12235,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_67_2;
                                             unsigned _v4_67_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_67_0), "=r"(_v4_67_1), "=r"(_v4_67_2), "=r"(_v4_67_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_67_0), "=r"(_v4_67_1), "=r"(_v4_67_2), "=r"(_v4_67_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 17 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[4 + 0] = __uint_as_float(_v4_67_0);
                                             _rl[4 + 1] = __uint_as_float(_v4_67_1);
                                             _rl[4 + 2] = __uint_as_float(_v4_67_2);
@@ -8846,11 +12247,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_68_2;
                                             unsigned _v4_68_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_68_0), "=r"(_v4_68_1), "=r"(_v4_68_2), "=r"(_v4_68_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 2 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_68_0), "=r"(_v4_68_1), "=r"(_v4_68_2), "=r"(_v4_68_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 18 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[8 + 0] = __uint_as_float(_v4_68_0);
                                             _rl[8 + 1] = __uint_as_float(_v4_68_1);
                                             _rl[8 + 2] = __uint_as_float(_v4_68_2);
@@ -8862,11 +12259,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_69_2;
                                             unsigned _v4_69_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_69_0), "=r"(_v4_69_1), "=r"(_v4_69_2), "=r"(_v4_69_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 3 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_69_0), "=r"(_v4_69_1), "=r"(_v4_69_2), "=r"(_v4_69_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 19 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[12 + 0] = __uint_as_float(_v4_69_0);
                                             _rl[12 + 1] = __uint_as_float(_v4_69_1);
                                             _rl[12 + 2] = __uint_as_float(_v4_69_2);
@@ -8878,11 +12271,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_70_2;
                                             unsigned _v4_70_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_70_0), "=r"(_v4_70_1), "=r"(_v4_70_2), "=r"(_v4_70_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 4 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_70_0), "=r"(_v4_70_1), "=r"(_v4_70_2), "=r"(_v4_70_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 20 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[16 + 0] = __uint_as_float(_v4_70_0);
                                             _rl[16 + 1] = __uint_as_float(_v4_70_1);
                                             _rl[16 + 2] = __uint_as_float(_v4_70_2);
@@ -8894,11 +12283,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_71_2;
                                             unsigned _v4_71_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_71_0), "=r"(_v4_71_1), "=r"(_v4_71_2), "=r"(_v4_71_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 5 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_71_0), "=r"(_v4_71_1), "=r"(_v4_71_2), "=r"(_v4_71_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 21 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[20 + 0] = __uint_as_float(_v4_71_0);
                                             _rl[20 + 1] = __uint_as_float(_v4_71_1);
                                             _rl[20 + 2] = __uint_as_float(_v4_71_2);
@@ -8910,11 +12295,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_72_2;
                                             unsigned _v4_72_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_72_0), "=r"(_v4_72_1), "=r"(_v4_72_2), "=r"(_v4_72_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 6 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_72_0), "=r"(_v4_72_1), "=r"(_v4_72_2), "=r"(_v4_72_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 22 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[24 + 0] = __uint_as_float(_v4_72_0);
                                             _rl[24 + 1] = __uint_as_float(_v4_72_1);
                                             _rl[24 + 2] = __uint_as_float(_v4_72_2);
@@ -8926,11 +12307,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_73_2;
                                             unsigned _v4_73_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_73_0), "=r"(_v4_73_1), "=r"(_v4_73_2), "=r"(_v4_73_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 7 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_73_0), "=r"(_v4_73_1), "=r"(_v4_73_2), "=r"(_v4_73_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 23 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[28 + 0] = __uint_as_float(_v4_73_0);
                                             _rl[28 + 1] = __uint_as_float(_v4_73_1);
                                             _rl[28 + 2] = __uint_as_float(_v4_73_2);
@@ -8942,11 +12319,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_74_2;
                                             unsigned _v4_74_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_74_0), "=r"(_v4_74_1), "=r"(_v4_74_2), "=r"(_v4_74_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 8 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_74_0), "=r"(_v4_74_1), "=r"(_v4_74_2), "=r"(_v4_74_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 24 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[32 + 0] = __uint_as_float(_v4_74_0);
                                             _rl[32 + 1] = __uint_as_float(_v4_74_1);
                                             _rl[32 + 2] = __uint_as_float(_v4_74_2);
@@ -8958,11 +12331,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_75_2;
                                             unsigned _v4_75_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_75_0), "=r"(_v4_75_1), "=r"(_v4_75_2), "=r"(_v4_75_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 9 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_75_0), "=r"(_v4_75_1), "=r"(_v4_75_2), "=r"(_v4_75_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 25 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[36 + 0] = __uint_as_float(_v4_75_0);
                                             _rl[36 + 1] = __uint_as_float(_v4_75_1);
                                             _rl[36 + 2] = __uint_as_float(_v4_75_2);
@@ -8974,11 +12343,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_76_2;
                                             unsigned _v4_76_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_76_0), "=r"(_v4_76_1), "=r"(_v4_76_2), "=r"(_v4_76_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 10 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_76_0), "=r"(_v4_76_1), "=r"(_v4_76_2), "=r"(_v4_76_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 26 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[40 + 0] = __uint_as_float(_v4_76_0);
                                             _rl[40 + 1] = __uint_as_float(_v4_76_1);
                                             _rl[40 + 2] = __uint_as_float(_v4_76_2);
@@ -8990,11 +12355,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_77_2;
                                             unsigned _v4_77_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_77_0), "=r"(_v4_77_1), "=r"(_v4_77_2), "=r"(_v4_77_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 11 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_77_0), "=r"(_v4_77_1), "=r"(_v4_77_2), "=r"(_v4_77_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 27 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[44 + 0] = __uint_as_float(_v4_77_0);
                                             _rl[44 + 1] = __uint_as_float(_v4_77_1);
                                             _rl[44 + 2] = __uint_as_float(_v4_77_2);
@@ -9006,11 +12367,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_78_2;
                                             unsigned _v4_78_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_78_0), "=r"(_v4_78_1), "=r"(_v4_78_2), "=r"(_v4_78_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 12 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_78_0), "=r"(_v4_78_1), "=r"(_v4_78_2), "=r"(_v4_78_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 28 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[48 + 0] = __uint_as_float(_v4_78_0);
                                             _rl[48 + 1] = __uint_as_float(_v4_78_1);
                                             _rl[48 + 2] = __uint_as_float(_v4_78_2);
@@ -9022,11 +12379,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_79_2;
                                             unsigned _v4_79_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_79_0), "=r"(_v4_79_1), "=r"(_v4_79_2), "=r"(_v4_79_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 13 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_79_0), "=r"(_v4_79_1), "=r"(_v4_79_2), "=r"(_v4_79_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 29 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[52 + 0] = __uint_as_float(_v4_79_0);
                                             _rl[52 + 1] = __uint_as_float(_v4_79_1);
                                             _rl[52 + 2] = __uint_as_float(_v4_79_2);
@@ -9038,11 +12391,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_80_2;
                                             unsigned _v4_80_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_80_0), "=r"(_v4_80_1), "=r"(_v4_80_2), "=r"(_v4_80_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 14 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_80_0), "=r"(_v4_80_1), "=r"(_v4_80_2), "=r"(_v4_80_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 30 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[56 + 0] = __uint_as_float(_v4_80_0);
                                             _rl[56 + 1] = __uint_as_float(_v4_80_1);
                                             _rl[56 + 2] = __uint_as_float(_v4_80_2);
@@ -9054,288 +12403,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_81_2;
                                             unsigned _v4_81_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_81_0), "=r"(_v4_81_1), "=r"(_v4_81_2), "=r"(_v4_81_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_0 * (CLUSTER_M * TILE_K) + 15 * TILE_K + tf_col) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_81_0), "=r"(_v4_81_1), "=r"(_v4_81_2), "=r"(_v4_81_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 31 * TILE_K + tf_col) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl[60 + 0] = __uint_as_float(_v4_81_0);
                                             _rl[60 + 1] = __uint_as_float(_v4_81_1);
                                             _rl[60 + 2] = __uint_as_float(_v4_81_2);
                                             _rl[60 + 3] = __uint_as_float(_v4_81_3);
-#if CAKE_WGRAD_OUT == 32
-                                        }
-                                        #pragma unroll
-                                        for (int fo_a_0 = 0; fo_a_0 < 64; fo_a_0++) {
-                                            _rf[fo_a_0] = _rf[fo_a_0] + _rl[fo_a_0];
-                                        }
-                                    }
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[0 + 0], _rf[0 + 1], _rf[0 + 2], _rf[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[4 + 0], _rf[4 + 1], _rf[4 + 2], _rf[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[8 + 0], _rf[8 + 1], _rf[8 + 2], _rf[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 2 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[12 + 0], _rf[12 + 1], _rf[12 + 2], _rf[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 3 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[16 + 0], _rf[16 + 1], _rf[16 + 2], _rf[16 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 4 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[20 + 0], _rf[20 + 1], _rf[20 + 2], _rf[20 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 5 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[24 + 0], _rf[24 + 1], _rf[24 + 2], _rf[24 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 6 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[28 + 0], _rf[28 + 1], _rf[28 + 2], _rf[28 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 7 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[32 + 0], _rf[32 + 1], _rf[32 + 2], _rf[32 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 8 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[36 + 0], _rf[36 + 1], _rf[36 + 2], _rf[36 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 9 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[40 + 0], _rf[40 + 1], _rf[40 + 2], _rf[40 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 10 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[44 + 0], _rf[44 + 1], _rf[44 + 2], _rf[44 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 11 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[48 + 0], _rf[48 + 1], _rf[48 + 2], _rf[48 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 12 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[52 + 0], _rf[52 + 1], _rf[52 + 2], _rf[52 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 13 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[56 + 0], _rf[56 + 1], _rf[56 + 2], _rf[56 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 14 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf[60 + 0], _rf[60 + 1], _rf[60 + 2], _rf[60 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + epi_half * 128 + 15 * ldc + tf_col)) + 0) = _v4;
-                                }
-                                #pragma unroll
-                                for (int fo_q_1 = 0; fo_q_1 < 64; fo_q_1++) {
-                                    _rf[fo_q_1] = 0.0f;
-                                }
-                                #pragma unroll 1
-                                for (int fo_s_1 = 0; fo_s_1 < tail_splits; fo_s_1++) {
-                                    int fo_lo_1 = fo_s_1 * kb_te / tail_splits;
-                                    int fo_hi_1 = (fo_s_1 + 1) * kb_te / tail_splits;
-                                    if (fo_hi_1 > fo_lo_1) {
-                                        {
-                                            unsigned _v4_82_0;
-                                            unsigned _v4_82_1;
-                                            unsigned _v4_82_2;
-                                            unsigned _v4_82_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_82_0), "=r"(_v4_82_1), "=r"(_v4_82_2), "=r"(_v4_82_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 16 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[0 + 0] = __uint_as_float(_v4_82_0);
-                                            _rl[0 + 1] = __uint_as_float(_v4_82_1);
-                                            _rl[0 + 2] = __uint_as_float(_v4_82_2);
-                                            _rl[0 + 3] = __uint_as_float(_v4_82_3);
-                                        }
-                                        {
-                                            unsigned _v4_83_0;
-                                            unsigned _v4_83_1;
-                                            unsigned _v4_83_2;
-                                            unsigned _v4_83_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_83_0), "=r"(_v4_83_1), "=r"(_v4_83_2), "=r"(_v4_83_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 17 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[4 + 0] = __uint_as_float(_v4_83_0);
-                                            _rl[4 + 1] = __uint_as_float(_v4_83_1);
-                                            _rl[4 + 2] = __uint_as_float(_v4_83_2);
-                                            _rl[4 + 3] = __uint_as_float(_v4_83_3);
-                                        }
-                                        {
-                                            unsigned _v4_84_0;
-                                            unsigned _v4_84_1;
-                                            unsigned _v4_84_2;
-                                            unsigned _v4_84_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_84_0), "=r"(_v4_84_1), "=r"(_v4_84_2), "=r"(_v4_84_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 18 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[8 + 0] = __uint_as_float(_v4_84_0);
-                                            _rl[8 + 1] = __uint_as_float(_v4_84_1);
-                                            _rl[8 + 2] = __uint_as_float(_v4_84_2);
-                                            _rl[8 + 3] = __uint_as_float(_v4_84_3);
-                                        }
-                                        {
-                                            unsigned _v4_85_0;
-                                            unsigned _v4_85_1;
-                                            unsigned _v4_85_2;
-                                            unsigned _v4_85_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_85_0), "=r"(_v4_85_1), "=r"(_v4_85_2), "=r"(_v4_85_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 19 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[12 + 0] = __uint_as_float(_v4_85_0);
-                                            _rl[12 + 1] = __uint_as_float(_v4_85_1);
-                                            _rl[12 + 2] = __uint_as_float(_v4_85_2);
-                                            _rl[12 + 3] = __uint_as_float(_v4_85_3);
-                                        }
-                                        {
-                                            unsigned _v4_86_0;
-                                            unsigned _v4_86_1;
-                                            unsigned _v4_86_2;
-                                            unsigned _v4_86_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_86_0), "=r"(_v4_86_1), "=r"(_v4_86_2), "=r"(_v4_86_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 20 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[16 + 0] = __uint_as_float(_v4_86_0);
-                                            _rl[16 + 1] = __uint_as_float(_v4_86_1);
-                                            _rl[16 + 2] = __uint_as_float(_v4_86_2);
-                                            _rl[16 + 3] = __uint_as_float(_v4_86_3);
-                                        }
-                                        {
-                                            unsigned _v4_87_0;
-                                            unsigned _v4_87_1;
-                                            unsigned _v4_87_2;
-                                            unsigned _v4_87_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_87_0), "=r"(_v4_87_1), "=r"(_v4_87_2), "=r"(_v4_87_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 21 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[20 + 0] = __uint_as_float(_v4_87_0);
-                                            _rl[20 + 1] = __uint_as_float(_v4_87_1);
-                                            _rl[20 + 2] = __uint_as_float(_v4_87_2);
-                                            _rl[20 + 3] = __uint_as_float(_v4_87_3);
-                                        }
-                                        {
-                                            unsigned _v4_88_0;
-                                            unsigned _v4_88_1;
-                                            unsigned _v4_88_2;
-                                            unsigned _v4_88_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_88_0), "=r"(_v4_88_1), "=r"(_v4_88_2), "=r"(_v4_88_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 22 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[24 + 0] = __uint_as_float(_v4_88_0);
-                                            _rl[24 + 1] = __uint_as_float(_v4_88_1);
-                                            _rl[24 + 2] = __uint_as_float(_v4_88_2);
-                                            _rl[24 + 3] = __uint_as_float(_v4_88_3);
-                                        }
-                                        {
-                                            unsigned _v4_89_0;
-                                            unsigned _v4_89_1;
-                                            unsigned _v4_89_2;
-                                            unsigned _v4_89_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_89_0), "=r"(_v4_89_1), "=r"(_v4_89_2), "=r"(_v4_89_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 23 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[28 + 0] = __uint_as_float(_v4_89_0);
-                                            _rl[28 + 1] = __uint_as_float(_v4_89_1);
-                                            _rl[28 + 2] = __uint_as_float(_v4_89_2);
-                                            _rl[28 + 3] = __uint_as_float(_v4_89_3);
-                                        }
-                                        {
-                                            unsigned _v4_90_0;
-                                            unsigned _v4_90_1;
-                                            unsigned _v4_90_2;
-                                            unsigned _v4_90_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_90_0), "=r"(_v4_90_1), "=r"(_v4_90_2), "=r"(_v4_90_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 24 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[32 + 0] = __uint_as_float(_v4_90_0);
-                                            _rl[32 + 1] = __uint_as_float(_v4_90_1);
-                                            _rl[32 + 2] = __uint_as_float(_v4_90_2);
-                                            _rl[32 + 3] = __uint_as_float(_v4_90_3);
-                                        }
-                                        {
-                                            unsigned _v4_91_0;
-                                            unsigned _v4_91_1;
-                                            unsigned _v4_91_2;
-                                            unsigned _v4_91_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_91_0), "=r"(_v4_91_1), "=r"(_v4_91_2), "=r"(_v4_91_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 25 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[36 + 0] = __uint_as_float(_v4_91_0);
-                                            _rl[36 + 1] = __uint_as_float(_v4_91_1);
-                                            _rl[36 + 2] = __uint_as_float(_v4_91_2);
-                                            _rl[36 + 3] = __uint_as_float(_v4_91_3);
-                                        }
-                                        {
-                                            unsigned _v4_92_0;
-                                            unsigned _v4_92_1;
-                                            unsigned _v4_92_2;
-                                            unsigned _v4_92_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_92_0), "=r"(_v4_92_1), "=r"(_v4_92_2), "=r"(_v4_92_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 26 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[40 + 0] = __uint_as_float(_v4_92_0);
-                                            _rl[40 + 1] = __uint_as_float(_v4_92_1);
-                                            _rl[40 + 2] = __uint_as_float(_v4_92_2);
-                                            _rl[40 + 3] = __uint_as_float(_v4_92_3);
-                                        }
-                                        {
-                                            unsigned _v4_93_0;
-                                            unsigned _v4_93_1;
-                                            unsigned _v4_93_2;
-                                            unsigned _v4_93_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_93_0), "=r"(_v4_93_1), "=r"(_v4_93_2), "=r"(_v4_93_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 27 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[44 + 0] = __uint_as_float(_v4_93_0);
-                                            _rl[44 + 1] = __uint_as_float(_v4_93_1);
-                                            _rl[44 + 2] = __uint_as_float(_v4_93_2);
-                                            _rl[44 + 3] = __uint_as_float(_v4_93_3);
-                                        }
-                                        {
-                                            unsigned _v4_94_0;
-                                            unsigned _v4_94_1;
-                                            unsigned _v4_94_2;
-                                            unsigned _v4_94_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_94_0), "=r"(_v4_94_1), "=r"(_v4_94_2), "=r"(_v4_94_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 28 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[48 + 0] = __uint_as_float(_v4_94_0);
-                                            _rl[48 + 1] = __uint_as_float(_v4_94_1);
-                                            _rl[48 + 2] = __uint_as_float(_v4_94_2);
-                                            _rl[48 + 3] = __uint_as_float(_v4_94_3);
-                                        }
-                                        {
-                                            unsigned _v4_95_0;
-                                            unsigned _v4_95_1;
-                                            unsigned _v4_95_2;
-                                            unsigned _v4_95_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_95_0), "=r"(_v4_95_1), "=r"(_v4_95_2), "=r"(_v4_95_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 29 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[52 + 0] = __uint_as_float(_v4_95_0);
-                                            _rl[52 + 1] = __uint_as_float(_v4_95_1);
-                                            _rl[52 + 2] = __uint_as_float(_v4_95_2);
-                                            _rl[52 + 3] = __uint_as_float(_v4_95_3);
-                                        }
-                                        {
-                                            unsigned _v4_96_0;
-                                            unsigned _v4_96_1;
-                                            unsigned _v4_96_2;
-                                            unsigned _v4_96_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_96_0), "=r"(_v4_96_1), "=r"(_v4_96_2), "=r"(_v4_96_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 30 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[56 + 0] = __uint_as_float(_v4_96_0);
-                                            _rl[56 + 1] = __uint_as_float(_v4_96_1);
-                                            _rl[56 + 2] = __uint_as_float(_v4_96_2);
-                                            _rl[56 + 3] = __uint_as_float(_v4_96_3);
-                                        }
-                                        {
-                                            unsigned _v4_97_0;
-                                            unsigned _v4_97_1;
-                                            unsigned _v4_97_2;
-                                            unsigned _v4_97_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_97_0), "=r"(_v4_97_1), "=r"(_v4_97_2), "=r"(_v4_97_3) : "l"((const void*)(tail_sums + (tl_part + epi_half * 128 + fo_s_1 * (CLUSTER_M * TILE_K) + 31 * TILE_K + tf_col) + (0))) : "memory");
-                                            _rl[60 + 0] = __uint_as_float(_v4_97_0);
-                                            _rl[60 + 1] = __uint_as_float(_v4_97_1);
-                                            _rl[60 + 2] = __uint_as_float(_v4_97_2);
-                                            _rl[60 + 3] = __uint_as_float(_v4_97_3);
-#endif  // CAKE_WGRAD_OUT == 32
+#endif  // CAKE_WGRAD_OUT == 16
                                         }
                                         #pragma unroll
                                         for (int fo_a_1 = 0; fo_a_1 < 64; fo_a_1++) {
@@ -9631,13 +12704,289 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                     int fo_hi_2 = (fo_s_2 + 1) * kb_te / tail_splits;
                                     if (fo_hi_2 > fo_lo_2) {
                                         {
-#if CAKE_WGRAD_OUT == 16
+#if CAKE_WGRAD_OUT == 32
+                                            unsigned _v4_66_0;
+                                            unsigned _v4_66_1;
+                                            unsigned _v4_66_2;
+                                            unsigned _v4_66_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_66_0), "=r"(_v4_66_1), "=r"(_v4_66_2), "=r"(_v4_66_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + tf_col_0) + (0))) : "memory");
+                                            _rl_0[0 + 0] = __uint_as_float(_v4_66_0);
+                                            _rl_0[0 + 1] = __uint_as_float(_v4_66_1);
+                                            _rl_0[0 + 2] = __uint_as_float(_v4_66_2);
+                                            _rl_0[0 + 3] = __uint_as_float(_v4_66_3);
+                                        }
+                                        {
+                                            unsigned _v4_67_0;
+                                            unsigned _v4_67_1;
+                                            unsigned _v4_67_2;
+                                            unsigned _v4_67_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_67_0), "=r"(_v4_67_1), "=r"(_v4_67_2), "=r"(_v4_67_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[4 + 0] = __uint_as_float(_v4_67_0);
+                                            _rl_0[4 + 1] = __uint_as_float(_v4_67_1);
+                                            _rl_0[4 + 2] = __uint_as_float(_v4_67_2);
+                                            _rl_0[4 + 3] = __uint_as_float(_v4_67_3);
+                                        }
+                                        {
+                                            unsigned _v4_68_0;
+                                            unsigned _v4_68_1;
+                                            unsigned _v4_68_2;
+                                            unsigned _v4_68_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_68_0), "=r"(_v4_68_1), "=r"(_v4_68_2), "=r"(_v4_68_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 2 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[8 + 0] = __uint_as_float(_v4_68_0);
+                                            _rl_0[8 + 1] = __uint_as_float(_v4_68_1);
+                                            _rl_0[8 + 2] = __uint_as_float(_v4_68_2);
+                                            _rl_0[8 + 3] = __uint_as_float(_v4_68_3);
+                                        }
+                                        {
+                                            unsigned _v4_69_0;
+                                            unsigned _v4_69_1;
+                                            unsigned _v4_69_2;
+                                            unsigned _v4_69_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_69_0), "=r"(_v4_69_1), "=r"(_v4_69_2), "=r"(_v4_69_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 3 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[12 + 0] = __uint_as_float(_v4_69_0);
+                                            _rl_0[12 + 1] = __uint_as_float(_v4_69_1);
+                                            _rl_0[12 + 2] = __uint_as_float(_v4_69_2);
+                                            _rl_0[12 + 3] = __uint_as_float(_v4_69_3);
+                                        }
+                                        {
+                                            unsigned _v4_70_0;
+                                            unsigned _v4_70_1;
+                                            unsigned _v4_70_2;
+                                            unsigned _v4_70_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_70_0), "=r"(_v4_70_1), "=r"(_v4_70_2), "=r"(_v4_70_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 4 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[16 + 0] = __uint_as_float(_v4_70_0);
+                                            _rl_0[16 + 1] = __uint_as_float(_v4_70_1);
+                                            _rl_0[16 + 2] = __uint_as_float(_v4_70_2);
+                                            _rl_0[16 + 3] = __uint_as_float(_v4_70_3);
+                                        }
+                                        {
+                                            unsigned _v4_71_0;
+                                            unsigned _v4_71_1;
+                                            unsigned _v4_71_2;
+                                            unsigned _v4_71_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_71_0), "=r"(_v4_71_1), "=r"(_v4_71_2), "=r"(_v4_71_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 5 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[20 + 0] = __uint_as_float(_v4_71_0);
+                                            _rl_0[20 + 1] = __uint_as_float(_v4_71_1);
+                                            _rl_0[20 + 2] = __uint_as_float(_v4_71_2);
+                                            _rl_0[20 + 3] = __uint_as_float(_v4_71_3);
+                                        }
+                                        {
+                                            unsigned _v4_72_0;
+                                            unsigned _v4_72_1;
+                                            unsigned _v4_72_2;
+                                            unsigned _v4_72_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_72_0), "=r"(_v4_72_1), "=r"(_v4_72_2), "=r"(_v4_72_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 6 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[24 + 0] = __uint_as_float(_v4_72_0);
+                                            _rl_0[24 + 1] = __uint_as_float(_v4_72_1);
+                                            _rl_0[24 + 2] = __uint_as_float(_v4_72_2);
+                                            _rl_0[24 + 3] = __uint_as_float(_v4_72_3);
+                                        }
+                                        {
+                                            unsigned _v4_73_0;
+                                            unsigned _v4_73_1;
+                                            unsigned _v4_73_2;
+                                            unsigned _v4_73_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_73_0), "=r"(_v4_73_1), "=r"(_v4_73_2), "=r"(_v4_73_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 7 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[28 + 0] = __uint_as_float(_v4_73_0);
+                                            _rl_0[28 + 1] = __uint_as_float(_v4_73_1);
+                                            _rl_0[28 + 2] = __uint_as_float(_v4_73_2);
+                                            _rl_0[28 + 3] = __uint_as_float(_v4_73_3);
+                                        }
+                                        {
+                                            unsigned _v4_74_0;
+                                            unsigned _v4_74_1;
+                                            unsigned _v4_74_2;
+                                            unsigned _v4_74_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_74_0), "=r"(_v4_74_1), "=r"(_v4_74_2), "=r"(_v4_74_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 8 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[32 + 0] = __uint_as_float(_v4_74_0);
+                                            _rl_0[32 + 1] = __uint_as_float(_v4_74_1);
+                                            _rl_0[32 + 2] = __uint_as_float(_v4_74_2);
+                                            _rl_0[32 + 3] = __uint_as_float(_v4_74_3);
+                                        }
+                                        {
+                                            unsigned _v4_75_0;
+                                            unsigned _v4_75_1;
+                                            unsigned _v4_75_2;
+                                            unsigned _v4_75_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_75_0), "=r"(_v4_75_1), "=r"(_v4_75_2), "=r"(_v4_75_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 9 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[36 + 0] = __uint_as_float(_v4_75_0);
+                                            _rl_0[36 + 1] = __uint_as_float(_v4_75_1);
+                                            _rl_0[36 + 2] = __uint_as_float(_v4_75_2);
+                                            _rl_0[36 + 3] = __uint_as_float(_v4_75_3);
+                                        }
+                                        {
+                                            unsigned _v4_76_0;
+                                            unsigned _v4_76_1;
+                                            unsigned _v4_76_2;
+                                            unsigned _v4_76_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_76_0), "=r"(_v4_76_1), "=r"(_v4_76_2), "=r"(_v4_76_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 10 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[40 + 0] = __uint_as_float(_v4_76_0);
+                                            _rl_0[40 + 1] = __uint_as_float(_v4_76_1);
+                                            _rl_0[40 + 2] = __uint_as_float(_v4_76_2);
+                                            _rl_0[40 + 3] = __uint_as_float(_v4_76_3);
+                                        }
+                                        {
+                                            unsigned _v4_77_0;
+                                            unsigned _v4_77_1;
+                                            unsigned _v4_77_2;
+                                            unsigned _v4_77_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_77_0), "=r"(_v4_77_1), "=r"(_v4_77_2), "=r"(_v4_77_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 11 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[44 + 0] = __uint_as_float(_v4_77_0);
+                                            _rl_0[44 + 1] = __uint_as_float(_v4_77_1);
+                                            _rl_0[44 + 2] = __uint_as_float(_v4_77_2);
+                                            _rl_0[44 + 3] = __uint_as_float(_v4_77_3);
+                                        }
+                                        {
+                                            unsigned _v4_78_0;
+                                            unsigned _v4_78_1;
+                                            unsigned _v4_78_2;
+                                            unsigned _v4_78_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_78_0), "=r"(_v4_78_1), "=r"(_v4_78_2), "=r"(_v4_78_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 12 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[48 + 0] = __uint_as_float(_v4_78_0);
+                                            _rl_0[48 + 1] = __uint_as_float(_v4_78_1);
+                                            _rl_0[48 + 2] = __uint_as_float(_v4_78_2);
+                                            _rl_0[48 + 3] = __uint_as_float(_v4_78_3);
+                                        }
+                                        {
+                                            unsigned _v4_79_0;
+                                            unsigned _v4_79_1;
+                                            unsigned _v4_79_2;
+                                            unsigned _v4_79_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_79_0), "=r"(_v4_79_1), "=r"(_v4_79_2), "=r"(_v4_79_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 13 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[52 + 0] = __uint_as_float(_v4_79_0);
+                                            _rl_0[52 + 1] = __uint_as_float(_v4_79_1);
+                                            _rl_0[52 + 2] = __uint_as_float(_v4_79_2);
+                                            _rl_0[52 + 3] = __uint_as_float(_v4_79_3);
+                                        }
+                                        {
+                                            unsigned _v4_80_0;
+                                            unsigned _v4_80_1;
+                                            unsigned _v4_80_2;
+                                            unsigned _v4_80_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_80_0), "=r"(_v4_80_1), "=r"(_v4_80_2), "=r"(_v4_80_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 14 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[56 + 0] = __uint_as_float(_v4_80_0);
+                                            _rl_0[56 + 1] = __uint_as_float(_v4_80_1);
+                                            _rl_0[56 + 2] = __uint_as_float(_v4_80_2);
+                                            _rl_0[56 + 3] = __uint_as_float(_v4_80_3);
+                                        }
+                                        {
+                                            unsigned _v4_81_0;
+                                            unsigned _v4_81_1;
+                                            unsigned _v4_81_2;
+                                            unsigned _v4_81_3;
+                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+                                                : "=r"(_v4_81_0), "=r"(_v4_81_1), "=r"(_v4_81_2), "=r"(_v4_81_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 15 * TILE_K + tf_col_0) + (0))) : "memory");
+                                            _rl_0[60 + 0] = __uint_as_float(_v4_81_0);
+                                            _rl_0[60 + 1] = __uint_as_float(_v4_81_1);
+                                            _rl_0[60 + 2] = __uint_as_float(_v4_81_2);
+                                            _rl_0[60 + 3] = __uint_as_float(_v4_81_3);
+                                        }
+                                        #pragma unroll
+                                        for (int fo_a_2 = 0; fo_a_2 < 64; fo_a_2++) {
+                                            _rf_0[fo_a_2] = _rf_0[fo_a_2] + _rl_0[fo_a_2];
+                                        }
+                                    }
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[0 + 0], _rf_0[0 + 1], _rf_0[0 + 2], _rf_0[0 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[4 + 0], _rf_0[4 + 1], _rf_0[4 + 2], _rf_0[4 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[8 + 0], _rf_0[8 + 1], _rf_0[8 + 2], _rf_0[8 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 2 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[12 + 0], _rf_0[12 + 1], _rf_0[12 + 2], _rf_0[12 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 3 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[16 + 0], _rf_0[16 + 1], _rf_0[16 + 2], _rf_0[16 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 4 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[20 + 0], _rf_0[20 + 1], _rf_0[20 + 2], _rf_0[20 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 5 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[24 + 0], _rf_0[24 + 1], _rf_0[24 + 2], _rf_0[24 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 6 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[28 + 0], _rf_0[28 + 1], _rf_0[28 + 2], _rf_0[28 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 7 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[32 + 0], _rf_0[32 + 1], _rf_0[32 + 2], _rf_0[32 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 8 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[36 + 0], _rf_0[36 + 1], _rf_0[36 + 2], _rf_0[36 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 9 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[40 + 0], _rf_0[40 + 1], _rf_0[40 + 2], _rf_0[40 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 10 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[44 + 0], _rf_0[44 + 1], _rf_0[44 + 2], _rf_0[44 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 11 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[48 + 0], _rf_0[48 + 1], _rf_0[48 + 2], _rf_0[48 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 12 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[52 + 0], _rf_0[52 + 1], _rf_0[52 + 2], _rf_0[52 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 13 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[56 + 0], _rf_0[56 + 1], _rf_0[56 + 2], _rf_0[56 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 14 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                {
+                                    float4 _v4 = make_float4(_rf_0[60 + 0], _rf_0[60 + 1], _rf_0[60 + 2], _rf_0[60 + 3]);
+                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 15 * ldc + tf_col_0)) + 0) = _v4;
+                                }
+                                #pragma unroll
+                                for (int fo_q_3 = 0; fo_q_3 < 64; fo_q_3++) {
+                                    _rf_0[fo_q_3] = 0.0f;
+                                }
+                                #pragma unroll 1
+                                for (int fo_s_3 = 0; fo_s_3 < tail_splits; fo_s_3++) {
+                                    int fo_lo_3 = fo_s_3 * kb_te / tail_splits;
+                                    int fo_hi_3 = (fo_s_3 + 1) * kb_te / tail_splits;
+                                    if (fo_hi_3 > fo_lo_3) {
+                                        {
+#endif  // CAKE_WGRAD_OUT == 32
                                             unsigned _v4_82_0;
                                             unsigned _v4_82_1;
                                             unsigned _v4_82_2;
                                             unsigned _v4_82_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_82_0), "=r"(_v4_82_1), "=r"(_v4_82_2), "=r"(_v4_82_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 16 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_82_0), "=r"(_v4_82_1), "=r"(_v4_82_2), "=r"(_v4_82_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[0 + 0] = __uint_as_float(_v4_82_0);
                                             _rl_0[0 + 1] = __uint_as_float(_v4_82_1);
                                             _rl_0[0 + 2] = __uint_as_float(_v4_82_2);
@@ -9649,7 +12998,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_83_2;
                                             unsigned _v4_83_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_83_0), "=r"(_v4_83_1), "=r"(_v4_83_2), "=r"(_v4_83_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 17 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_83_0), "=r"(_v4_83_1), "=r"(_v4_83_2), "=r"(_v4_83_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[4 + 0] = __uint_as_float(_v4_83_0);
                                             _rl_0[4 + 1] = __uint_as_float(_v4_83_1);
                                             _rl_0[4 + 2] = __uint_as_float(_v4_83_2);
@@ -9661,7 +13014,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_84_2;
                                             unsigned _v4_84_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_84_0), "=r"(_v4_84_1), "=r"(_v4_84_2), "=r"(_v4_84_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 18 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_84_0), "=r"(_v4_84_1), "=r"(_v4_84_2), "=r"(_v4_84_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 2 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[8 + 0] = __uint_as_float(_v4_84_0);
                                             _rl_0[8 + 1] = __uint_as_float(_v4_84_1);
                                             _rl_0[8 + 2] = __uint_as_float(_v4_84_2);
@@ -9673,7 +13030,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_85_2;
                                             unsigned _v4_85_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_85_0), "=r"(_v4_85_1), "=r"(_v4_85_2), "=r"(_v4_85_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 19 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_85_0), "=r"(_v4_85_1), "=r"(_v4_85_2), "=r"(_v4_85_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 3 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[12 + 0] = __uint_as_float(_v4_85_0);
                                             _rl_0[12 + 1] = __uint_as_float(_v4_85_1);
                                             _rl_0[12 + 2] = __uint_as_float(_v4_85_2);
@@ -9685,7 +13046,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_86_2;
                                             unsigned _v4_86_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_86_0), "=r"(_v4_86_1), "=r"(_v4_86_2), "=r"(_v4_86_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 20 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_86_0), "=r"(_v4_86_1), "=r"(_v4_86_2), "=r"(_v4_86_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 4 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[16 + 0] = __uint_as_float(_v4_86_0);
                                             _rl_0[16 + 1] = __uint_as_float(_v4_86_1);
                                             _rl_0[16 + 2] = __uint_as_float(_v4_86_2);
@@ -9697,7 +13062,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_87_2;
                                             unsigned _v4_87_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_87_0), "=r"(_v4_87_1), "=r"(_v4_87_2), "=r"(_v4_87_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 21 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_87_0), "=r"(_v4_87_1), "=r"(_v4_87_2), "=r"(_v4_87_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 5 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[20 + 0] = __uint_as_float(_v4_87_0);
                                             _rl_0[20 + 1] = __uint_as_float(_v4_87_1);
                                             _rl_0[20 + 2] = __uint_as_float(_v4_87_2);
@@ -9709,7 +13078,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_88_2;
                                             unsigned _v4_88_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_88_0), "=r"(_v4_88_1), "=r"(_v4_88_2), "=r"(_v4_88_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 22 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_88_0), "=r"(_v4_88_1), "=r"(_v4_88_2), "=r"(_v4_88_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 6 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[24 + 0] = __uint_as_float(_v4_88_0);
                                             _rl_0[24 + 1] = __uint_as_float(_v4_88_1);
                                             _rl_0[24 + 2] = __uint_as_float(_v4_88_2);
@@ -9721,7 +13094,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_89_2;
                                             unsigned _v4_89_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_89_0), "=r"(_v4_89_1), "=r"(_v4_89_2), "=r"(_v4_89_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 23 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_89_0), "=r"(_v4_89_1), "=r"(_v4_89_2), "=r"(_v4_89_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 7 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[28 + 0] = __uint_as_float(_v4_89_0);
                                             _rl_0[28 + 1] = __uint_as_float(_v4_89_1);
                                             _rl_0[28 + 2] = __uint_as_float(_v4_89_2);
@@ -9733,7 +13110,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_90_2;
                                             unsigned _v4_90_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_90_0), "=r"(_v4_90_1), "=r"(_v4_90_2), "=r"(_v4_90_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 24 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_90_0), "=r"(_v4_90_1), "=r"(_v4_90_2), "=r"(_v4_90_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 8 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[32 + 0] = __uint_as_float(_v4_90_0);
                                             _rl_0[32 + 1] = __uint_as_float(_v4_90_1);
                                             _rl_0[32 + 2] = __uint_as_float(_v4_90_2);
@@ -9745,7 +13126,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_91_2;
                                             unsigned _v4_91_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_91_0), "=r"(_v4_91_1), "=r"(_v4_91_2), "=r"(_v4_91_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 25 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_91_0), "=r"(_v4_91_1), "=r"(_v4_91_2), "=r"(_v4_91_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 9 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[36 + 0] = __uint_as_float(_v4_91_0);
                                             _rl_0[36 + 1] = __uint_as_float(_v4_91_1);
                                             _rl_0[36 + 2] = __uint_as_float(_v4_91_2);
@@ -9757,7 +13142,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_92_2;
                                             unsigned _v4_92_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_92_0), "=r"(_v4_92_1), "=r"(_v4_92_2), "=r"(_v4_92_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 26 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_92_0), "=r"(_v4_92_1), "=r"(_v4_92_2), "=r"(_v4_92_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 10 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[40 + 0] = __uint_as_float(_v4_92_0);
                                             _rl_0[40 + 1] = __uint_as_float(_v4_92_1);
                                             _rl_0[40 + 2] = __uint_as_float(_v4_92_2);
@@ -9769,7 +13158,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_93_2;
                                             unsigned _v4_93_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_93_0), "=r"(_v4_93_1), "=r"(_v4_93_2), "=r"(_v4_93_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 27 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_93_0), "=r"(_v4_93_1), "=r"(_v4_93_2), "=r"(_v4_93_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 11 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[44 + 0] = __uint_as_float(_v4_93_0);
                                             _rl_0[44 + 1] = __uint_as_float(_v4_93_1);
                                             _rl_0[44 + 2] = __uint_as_float(_v4_93_2);
@@ -9781,7 +13174,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_94_2;
                                             unsigned _v4_94_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_94_0), "=r"(_v4_94_1), "=r"(_v4_94_2), "=r"(_v4_94_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 28 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_94_0), "=r"(_v4_94_1), "=r"(_v4_94_2), "=r"(_v4_94_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 12 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[48 + 0] = __uint_as_float(_v4_94_0);
                                             _rl_0[48 + 1] = __uint_as_float(_v4_94_1);
                                             _rl_0[48 + 2] = __uint_as_float(_v4_94_2);
@@ -9793,7 +13190,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_95_2;
                                             unsigned _v4_95_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_95_0), "=r"(_v4_95_1), "=r"(_v4_95_2), "=r"(_v4_95_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 29 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_95_0), "=r"(_v4_95_1), "=r"(_v4_95_2), "=r"(_v4_95_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 13 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[52 + 0] = __uint_as_float(_v4_95_0);
                                             _rl_0[52 + 1] = __uint_as_float(_v4_95_1);
                                             _rl_0[52 + 2] = __uint_as_float(_v4_95_2);
@@ -9805,7 +13206,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_96_2;
                                             unsigned _v4_96_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_96_0), "=r"(_v4_96_1), "=r"(_v4_96_2), "=r"(_v4_96_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 30 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_96_0), "=r"(_v4_96_1), "=r"(_v4_96_2), "=r"(_v4_96_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 14 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[56 + 0] = __uint_as_float(_v4_96_0);
                                             _rl_0[56 + 1] = __uint_as_float(_v4_96_1);
                                             _rl_0[56 + 2] = __uint_as_float(_v4_96_2);
@@ -9817,11 +13222,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_97_2;
                                             unsigned _v4_97_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
+#if CAKE_WGRAD_OUT == 32
+                                                : "=r"(_v4_97_0), "=r"(_v4_97_1), "=r"(_v4_97_2), "=r"(_v4_97_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 31 * TILE_K + tf_col_0) + (0))) : "memory");
+#else
                                                 : "=r"(_v4_97_0), "=r"(_v4_97_1), "=r"(_v4_97_2), "=r"(_v4_97_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 15 * TILE_K + tf_col_0) + (0))) : "memory");
+#endif  // CAKE_WGRAD_OUT
                                             _rl_0[60 + 0] = __uint_as_float(_v4_97_0);
                                             _rl_0[60 + 1] = __uint_as_float(_v4_97_1);
                                             _rl_0[60 + 2] = __uint_as_float(_v4_97_2);
                                             _rl_0[60 + 3] = __uint_as_float(_v4_97_3);
+#if CAKE_WGRAD_OUT == 16
                                         }
                                         #pragma unroll
                                         for (int fo_a_2 = 0; fo_a_2 < 64; fo_a_2++) {
@@ -10016,17 +13426,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                     int fo_hi_3 = (fo_s_3 + 1) * kb_te / tail_splits;
                                     if (fo_hi_3 > fo_lo_3) {
                                         {
-#endif  // CAKE_WGRAD_OUT == 16
                                             unsigned _v4_98_0;
                                             unsigned _v4_98_1;
                                             unsigned _v4_98_2;
                                             unsigned _v4_98_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_98_0), "=r"(_v4_98_1), "=r"(_v4_98_2), "=r"(_v4_98_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_98_0), "=r"(_v4_98_1), "=r"(_v4_98_2), "=r"(_v4_98_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 16 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[0 + 0] = __uint_as_float(_v4_98_0);
                                             _rl_0[0 + 1] = __uint_as_float(_v4_98_1);
                                             _rl_0[0 + 2] = __uint_as_float(_v4_98_2);
@@ -10038,11 +13443,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_99_2;
                                             unsigned _v4_99_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_99_0), "=r"(_v4_99_1), "=r"(_v4_99_2), "=r"(_v4_99_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_99_0), "=r"(_v4_99_1), "=r"(_v4_99_2), "=r"(_v4_99_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 17 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[4 + 0] = __uint_as_float(_v4_99_0);
                                             _rl_0[4 + 1] = __uint_as_float(_v4_99_1);
                                             _rl_0[4 + 2] = __uint_as_float(_v4_99_2);
@@ -10054,11 +13455,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_100_2;
                                             unsigned _v4_100_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_100_0), "=r"(_v4_100_1), "=r"(_v4_100_2), "=r"(_v4_100_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 2 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_100_0), "=r"(_v4_100_1), "=r"(_v4_100_2), "=r"(_v4_100_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 18 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[8 + 0] = __uint_as_float(_v4_100_0);
                                             _rl_0[8 + 1] = __uint_as_float(_v4_100_1);
                                             _rl_0[8 + 2] = __uint_as_float(_v4_100_2);
@@ -10070,11 +13467,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_101_2;
                                             unsigned _v4_101_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_101_0), "=r"(_v4_101_1), "=r"(_v4_101_2), "=r"(_v4_101_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 3 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_101_0), "=r"(_v4_101_1), "=r"(_v4_101_2), "=r"(_v4_101_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 19 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[12 + 0] = __uint_as_float(_v4_101_0);
                                             _rl_0[12 + 1] = __uint_as_float(_v4_101_1);
                                             _rl_0[12 + 2] = __uint_as_float(_v4_101_2);
@@ -10086,11 +13479,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_102_2;
                                             unsigned _v4_102_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_102_0), "=r"(_v4_102_1), "=r"(_v4_102_2), "=r"(_v4_102_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 4 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_102_0), "=r"(_v4_102_1), "=r"(_v4_102_2), "=r"(_v4_102_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 20 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[16 + 0] = __uint_as_float(_v4_102_0);
                                             _rl_0[16 + 1] = __uint_as_float(_v4_102_1);
                                             _rl_0[16 + 2] = __uint_as_float(_v4_102_2);
@@ -10102,11 +13491,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_103_2;
                                             unsigned _v4_103_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_103_0), "=r"(_v4_103_1), "=r"(_v4_103_2), "=r"(_v4_103_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 5 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_103_0), "=r"(_v4_103_1), "=r"(_v4_103_2), "=r"(_v4_103_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 21 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[20 + 0] = __uint_as_float(_v4_103_0);
                                             _rl_0[20 + 1] = __uint_as_float(_v4_103_1);
                                             _rl_0[20 + 2] = __uint_as_float(_v4_103_2);
@@ -10118,11 +13503,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_104_2;
                                             unsigned _v4_104_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_104_0), "=r"(_v4_104_1), "=r"(_v4_104_2), "=r"(_v4_104_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 6 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_104_0), "=r"(_v4_104_1), "=r"(_v4_104_2), "=r"(_v4_104_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 22 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[24 + 0] = __uint_as_float(_v4_104_0);
                                             _rl_0[24 + 1] = __uint_as_float(_v4_104_1);
                                             _rl_0[24 + 2] = __uint_as_float(_v4_104_2);
@@ -10134,11 +13515,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_105_2;
                                             unsigned _v4_105_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_105_0), "=r"(_v4_105_1), "=r"(_v4_105_2), "=r"(_v4_105_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 7 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_105_0), "=r"(_v4_105_1), "=r"(_v4_105_2), "=r"(_v4_105_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 23 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[28 + 0] = __uint_as_float(_v4_105_0);
                                             _rl_0[28 + 1] = __uint_as_float(_v4_105_1);
                                             _rl_0[28 + 2] = __uint_as_float(_v4_105_2);
@@ -10150,11 +13527,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_106_2;
                                             unsigned _v4_106_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_106_0), "=r"(_v4_106_1), "=r"(_v4_106_2), "=r"(_v4_106_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 8 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_106_0), "=r"(_v4_106_1), "=r"(_v4_106_2), "=r"(_v4_106_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 24 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[32 + 0] = __uint_as_float(_v4_106_0);
                                             _rl_0[32 + 1] = __uint_as_float(_v4_106_1);
                                             _rl_0[32 + 2] = __uint_as_float(_v4_106_2);
@@ -10166,11 +13539,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_107_2;
                                             unsigned _v4_107_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_107_0), "=r"(_v4_107_1), "=r"(_v4_107_2), "=r"(_v4_107_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 9 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_107_0), "=r"(_v4_107_1), "=r"(_v4_107_2), "=r"(_v4_107_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 25 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[36 + 0] = __uint_as_float(_v4_107_0);
                                             _rl_0[36 + 1] = __uint_as_float(_v4_107_1);
                                             _rl_0[36 + 2] = __uint_as_float(_v4_107_2);
@@ -10182,11 +13551,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_108_2;
                                             unsigned _v4_108_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_108_0), "=r"(_v4_108_1), "=r"(_v4_108_2), "=r"(_v4_108_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 10 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_108_0), "=r"(_v4_108_1), "=r"(_v4_108_2), "=r"(_v4_108_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 26 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[40 + 0] = __uint_as_float(_v4_108_0);
                                             _rl_0[40 + 1] = __uint_as_float(_v4_108_1);
                                             _rl_0[40 + 2] = __uint_as_float(_v4_108_2);
@@ -10198,11 +13563,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_109_2;
                                             unsigned _v4_109_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_109_0), "=r"(_v4_109_1), "=r"(_v4_109_2), "=r"(_v4_109_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 11 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_109_0), "=r"(_v4_109_1), "=r"(_v4_109_2), "=r"(_v4_109_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 27 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[44 + 0] = __uint_as_float(_v4_109_0);
                                             _rl_0[44 + 1] = __uint_as_float(_v4_109_1);
                                             _rl_0[44 + 2] = __uint_as_float(_v4_109_2);
@@ -10214,11 +13575,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_110_2;
                                             unsigned _v4_110_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_110_0), "=r"(_v4_110_1), "=r"(_v4_110_2), "=r"(_v4_110_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 12 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_110_0), "=r"(_v4_110_1), "=r"(_v4_110_2), "=r"(_v4_110_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 28 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[48 + 0] = __uint_as_float(_v4_110_0);
                                             _rl_0[48 + 1] = __uint_as_float(_v4_110_1);
                                             _rl_0[48 + 2] = __uint_as_float(_v4_110_2);
@@ -10230,11 +13587,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_111_2;
                                             unsigned _v4_111_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_111_0), "=r"(_v4_111_1), "=r"(_v4_111_2), "=r"(_v4_111_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 13 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_111_0), "=r"(_v4_111_1), "=r"(_v4_111_2), "=r"(_v4_111_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 29 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[52 + 0] = __uint_as_float(_v4_111_0);
                                             _rl_0[52 + 1] = __uint_as_float(_v4_111_1);
                                             _rl_0[52 + 2] = __uint_as_float(_v4_111_2);
@@ -10246,11 +13599,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_112_2;
                                             unsigned _v4_112_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_112_0), "=r"(_v4_112_1), "=r"(_v4_112_2), "=r"(_v4_112_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 14 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_112_0), "=r"(_v4_112_1), "=r"(_v4_112_2), "=r"(_v4_112_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 30 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[56 + 0] = __uint_as_float(_v4_112_0);
                                             _rl_0[56 + 1] = __uint_as_float(_v4_112_1);
                                             _rl_0[56 + 2] = __uint_as_float(_v4_112_2);
@@ -10262,288 +13611,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                             unsigned _v4_113_2;
                                             unsigned _v4_113_3;
                                             asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-#if CAKE_WGRAD_OUT == 32
-                                                : "=r"(_v4_113_0), "=r"(_v4_113_1), "=r"(_v4_113_2), "=r"(_v4_113_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_2 * (CLUSTER_M * TILE_K) + 15 * TILE_K + tf_col_0) + (0))) : "memory");
-#else
                                                 : "=r"(_v4_113_0), "=r"(_v4_113_1), "=r"(_v4_113_2), "=r"(_v4_113_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 31 * TILE_K + tf_col_0) + (0))) : "memory");
-#endif  // CAKE_WGRAD_OUT
                                             _rl_0[60 + 0] = __uint_as_float(_v4_113_0);
                                             _rl_0[60 + 1] = __uint_as_float(_v4_113_1);
                                             _rl_0[60 + 2] = __uint_as_float(_v4_113_2);
                                             _rl_0[60 + 3] = __uint_as_float(_v4_113_3);
-#if CAKE_WGRAD_OUT == 32
-                                        }
-                                        #pragma unroll
-                                        for (int fo_a_2 = 0; fo_a_2 < 64; fo_a_2++) {
-                                            _rf_0[fo_a_2] = _rf_0[fo_a_2] + _rl_0[fo_a_2];
-                                        }
-                                    }
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[0 + 0], _rf_0[0 + 1], _rf_0[0 + 2], _rf_0[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[4 + 0], _rf_0[4 + 1], _rf_0[4 + 2], _rf_0[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[8 + 0], _rf_0[8 + 1], _rf_0[8 + 2], _rf_0[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 2 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[12 + 0], _rf_0[12 + 1], _rf_0[12 + 2], _rf_0[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 3 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[16 + 0], _rf_0[16 + 1], _rf_0[16 + 2], _rf_0[16 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 4 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[20 + 0], _rf_0[20 + 1], _rf_0[20 + 2], _rf_0[20 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 5 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[24 + 0], _rf_0[24 + 1], _rf_0[24 + 2], _rf_0[24 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 6 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[28 + 0], _rf_0[28 + 1], _rf_0[28 + 2], _rf_0[28 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 7 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[32 + 0], _rf_0[32 + 1], _rf_0[32 + 2], _rf_0[32 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 8 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[36 + 0], _rf_0[36 + 1], _rf_0[36 + 2], _rf_0[36 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 9 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[40 + 0], _rf_0[40 + 1], _rf_0[40 + 2], _rf_0[40 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 10 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[44 + 0], _rf_0[44 + 1], _rf_0[44 + 2], _rf_0[44 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 11 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[48 + 0], _rf_0[48 + 1], _rf_0[48 + 2], _rf_0[48 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 12 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[52 + 0], _rf_0[52 + 1], _rf_0[52 + 2], _rf_0[52 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 13 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[56 + 0], _rf_0[56 + 1], _rf_0[56 + 2], _rf_0[56 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 14 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                {
-                                    float4 _v4 = make_float4(_rf_0[60 + 0], _rf_0[60 + 1], _rf_0[60 + 2], _rf_0[60 + 3]);
-                                    *reinterpret_cast<float4*>((C + (tl_out + (epi_half * 128 + 256) + 15 * ldc + tf_col_0)) + 0) = _v4;
-                                }
-                                #pragma unroll
-                                for (int fo_q_3 = 0; fo_q_3 < 64; fo_q_3++) {
-                                    _rf_0[fo_q_3] = 0.0f;
-                                }
-                                #pragma unroll 1
-                                for (int fo_s_3 = 0; fo_s_3 < tail_splits; fo_s_3++) {
-                                    int fo_lo_3 = fo_s_3 * kb_te / tail_splits;
-                                    int fo_hi_3 = (fo_s_3 + 1) * kb_te / tail_splits;
-                                    if (fo_hi_3 > fo_lo_3) {
-                                        {
-                                            unsigned _v4_114_0;
-                                            unsigned _v4_114_1;
-                                            unsigned _v4_114_2;
-                                            unsigned _v4_114_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_114_0), "=r"(_v4_114_1), "=r"(_v4_114_2), "=r"(_v4_114_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 16 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[0 + 0] = __uint_as_float(_v4_114_0);
-                                            _rl_0[0 + 1] = __uint_as_float(_v4_114_1);
-                                            _rl_0[0 + 2] = __uint_as_float(_v4_114_2);
-                                            _rl_0[0 + 3] = __uint_as_float(_v4_114_3);
-                                        }
-                                        {
-                                            unsigned _v4_115_0;
-                                            unsigned _v4_115_1;
-                                            unsigned _v4_115_2;
-                                            unsigned _v4_115_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_115_0), "=r"(_v4_115_1), "=r"(_v4_115_2), "=r"(_v4_115_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 17 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[4 + 0] = __uint_as_float(_v4_115_0);
-                                            _rl_0[4 + 1] = __uint_as_float(_v4_115_1);
-                                            _rl_0[4 + 2] = __uint_as_float(_v4_115_2);
-                                            _rl_0[4 + 3] = __uint_as_float(_v4_115_3);
-                                        }
-                                        {
-                                            unsigned _v4_116_0;
-                                            unsigned _v4_116_1;
-                                            unsigned _v4_116_2;
-                                            unsigned _v4_116_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_116_0), "=r"(_v4_116_1), "=r"(_v4_116_2), "=r"(_v4_116_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 18 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[8 + 0] = __uint_as_float(_v4_116_0);
-                                            _rl_0[8 + 1] = __uint_as_float(_v4_116_1);
-                                            _rl_0[8 + 2] = __uint_as_float(_v4_116_2);
-                                            _rl_0[8 + 3] = __uint_as_float(_v4_116_3);
-                                        }
-                                        {
-                                            unsigned _v4_117_0;
-                                            unsigned _v4_117_1;
-                                            unsigned _v4_117_2;
-                                            unsigned _v4_117_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_117_0), "=r"(_v4_117_1), "=r"(_v4_117_2), "=r"(_v4_117_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 19 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[12 + 0] = __uint_as_float(_v4_117_0);
-                                            _rl_0[12 + 1] = __uint_as_float(_v4_117_1);
-                                            _rl_0[12 + 2] = __uint_as_float(_v4_117_2);
-                                            _rl_0[12 + 3] = __uint_as_float(_v4_117_3);
-                                        }
-                                        {
-                                            unsigned _v4_118_0;
-                                            unsigned _v4_118_1;
-                                            unsigned _v4_118_2;
-                                            unsigned _v4_118_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_118_0), "=r"(_v4_118_1), "=r"(_v4_118_2), "=r"(_v4_118_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 20 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[16 + 0] = __uint_as_float(_v4_118_0);
-                                            _rl_0[16 + 1] = __uint_as_float(_v4_118_1);
-                                            _rl_0[16 + 2] = __uint_as_float(_v4_118_2);
-                                            _rl_0[16 + 3] = __uint_as_float(_v4_118_3);
-                                        }
-                                        {
-                                            unsigned _v4_119_0;
-                                            unsigned _v4_119_1;
-                                            unsigned _v4_119_2;
-                                            unsigned _v4_119_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_119_0), "=r"(_v4_119_1), "=r"(_v4_119_2), "=r"(_v4_119_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 21 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[20 + 0] = __uint_as_float(_v4_119_0);
-                                            _rl_0[20 + 1] = __uint_as_float(_v4_119_1);
-                                            _rl_0[20 + 2] = __uint_as_float(_v4_119_2);
-                                            _rl_0[20 + 3] = __uint_as_float(_v4_119_3);
-                                        }
-                                        {
-                                            unsigned _v4_120_0;
-                                            unsigned _v4_120_1;
-                                            unsigned _v4_120_2;
-                                            unsigned _v4_120_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_120_0), "=r"(_v4_120_1), "=r"(_v4_120_2), "=r"(_v4_120_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 22 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[24 + 0] = __uint_as_float(_v4_120_0);
-                                            _rl_0[24 + 1] = __uint_as_float(_v4_120_1);
-                                            _rl_0[24 + 2] = __uint_as_float(_v4_120_2);
-                                            _rl_0[24 + 3] = __uint_as_float(_v4_120_3);
-                                        }
-                                        {
-                                            unsigned _v4_121_0;
-                                            unsigned _v4_121_1;
-                                            unsigned _v4_121_2;
-                                            unsigned _v4_121_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_121_0), "=r"(_v4_121_1), "=r"(_v4_121_2), "=r"(_v4_121_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 23 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[28 + 0] = __uint_as_float(_v4_121_0);
-                                            _rl_0[28 + 1] = __uint_as_float(_v4_121_1);
-                                            _rl_0[28 + 2] = __uint_as_float(_v4_121_2);
-                                            _rl_0[28 + 3] = __uint_as_float(_v4_121_3);
-                                        }
-                                        {
-                                            unsigned _v4_122_0;
-                                            unsigned _v4_122_1;
-                                            unsigned _v4_122_2;
-                                            unsigned _v4_122_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_122_0), "=r"(_v4_122_1), "=r"(_v4_122_2), "=r"(_v4_122_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 24 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[32 + 0] = __uint_as_float(_v4_122_0);
-                                            _rl_0[32 + 1] = __uint_as_float(_v4_122_1);
-                                            _rl_0[32 + 2] = __uint_as_float(_v4_122_2);
-                                            _rl_0[32 + 3] = __uint_as_float(_v4_122_3);
-                                        }
-                                        {
-                                            unsigned _v4_123_0;
-                                            unsigned _v4_123_1;
-                                            unsigned _v4_123_2;
-                                            unsigned _v4_123_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_123_0), "=r"(_v4_123_1), "=r"(_v4_123_2), "=r"(_v4_123_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 25 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[36 + 0] = __uint_as_float(_v4_123_0);
-                                            _rl_0[36 + 1] = __uint_as_float(_v4_123_1);
-                                            _rl_0[36 + 2] = __uint_as_float(_v4_123_2);
-                                            _rl_0[36 + 3] = __uint_as_float(_v4_123_3);
-                                        }
-                                        {
-                                            unsigned _v4_124_0;
-                                            unsigned _v4_124_1;
-                                            unsigned _v4_124_2;
-                                            unsigned _v4_124_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_124_0), "=r"(_v4_124_1), "=r"(_v4_124_2), "=r"(_v4_124_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 26 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[40 + 0] = __uint_as_float(_v4_124_0);
-                                            _rl_0[40 + 1] = __uint_as_float(_v4_124_1);
-                                            _rl_0[40 + 2] = __uint_as_float(_v4_124_2);
-                                            _rl_0[40 + 3] = __uint_as_float(_v4_124_3);
-                                        }
-                                        {
-                                            unsigned _v4_125_0;
-                                            unsigned _v4_125_1;
-                                            unsigned _v4_125_2;
-                                            unsigned _v4_125_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_125_0), "=r"(_v4_125_1), "=r"(_v4_125_2), "=r"(_v4_125_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 27 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[44 + 0] = __uint_as_float(_v4_125_0);
-                                            _rl_0[44 + 1] = __uint_as_float(_v4_125_1);
-                                            _rl_0[44 + 2] = __uint_as_float(_v4_125_2);
-                                            _rl_0[44 + 3] = __uint_as_float(_v4_125_3);
-                                        }
-                                        {
-                                            unsigned _v4_126_0;
-                                            unsigned _v4_126_1;
-                                            unsigned _v4_126_2;
-                                            unsigned _v4_126_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_126_0), "=r"(_v4_126_1), "=r"(_v4_126_2), "=r"(_v4_126_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 28 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[48 + 0] = __uint_as_float(_v4_126_0);
-                                            _rl_0[48 + 1] = __uint_as_float(_v4_126_1);
-                                            _rl_0[48 + 2] = __uint_as_float(_v4_126_2);
-                                            _rl_0[48 + 3] = __uint_as_float(_v4_126_3);
-                                        }
-                                        {
-                                            unsigned _v4_127_0;
-                                            unsigned _v4_127_1;
-                                            unsigned _v4_127_2;
-                                            unsigned _v4_127_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_127_0), "=r"(_v4_127_1), "=r"(_v4_127_2), "=r"(_v4_127_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 29 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[52 + 0] = __uint_as_float(_v4_127_0);
-                                            _rl_0[52 + 1] = __uint_as_float(_v4_127_1);
-                                            _rl_0[52 + 2] = __uint_as_float(_v4_127_2);
-                                            _rl_0[52 + 3] = __uint_as_float(_v4_127_3);
-                                        }
-                                        {
-                                            unsigned _v4_128_0;
-                                            unsigned _v4_128_1;
-                                            unsigned _v4_128_2;
-                                            unsigned _v4_128_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_128_0), "=r"(_v4_128_1), "=r"(_v4_128_2), "=r"(_v4_128_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 30 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[56 + 0] = __uint_as_float(_v4_128_0);
-                                            _rl_0[56 + 1] = __uint_as_float(_v4_128_1);
-                                            _rl_0[56 + 2] = __uint_as_float(_v4_128_2);
-                                            _rl_0[56 + 3] = __uint_as_float(_v4_128_3);
-                                        }
-                                        {
-                                            unsigned _v4_129_0;
-                                            unsigned _v4_129_1;
-                                            unsigned _v4_129_2;
-                                            unsigned _v4_129_3;
-                                            asm volatile("ld.global.cg.v4.b32 {%0, %1, %2, %3}, [%4];"
-                                                : "=r"(_v4_129_0), "=r"(_v4_129_1), "=r"(_v4_129_2), "=r"(_v4_129_3) : "l"((const void*)(tail_sums + (tl_part + (epi_half * 128 + 256) + fo_s_3 * (CLUSTER_M * TILE_K) + 31 * TILE_K + tf_col_0) + (0))) : "memory");
-                                            _rl_0[60 + 0] = __uint_as_float(_v4_129_0);
-                                            _rl_0[60 + 1] = __uint_as_float(_v4_129_1);
-                                            _rl_0[60 + 2] = __uint_as_float(_v4_129_2);
-                                            _rl_0[60 + 3] = __uint_as_float(_v4_129_3);
-#endif  // CAKE_WGRAD_OUT == 32
+#endif  // CAKE_WGRAD_OUT == 16
                                         }
                                         #pragma unroll
                                         for (int fo_a_3 = 0; fo_a_3 < 64; fo_a_3++) {
@@ -10888,9 +13961,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_16 = lane & 1;
+                                float ar_lo_128 = _er_tload_1[0];
+                                float ar_hi_128 = _er_tload_1[4];
+                                float ar_send_512 = ((ar_odd_16 == 0) ? ar_hi_128 : ar_lo_128);
+                                float ar_got_512 = __shfl_xor_sync(0xFFFFFFFF, ar_send_512, 1);
+                                _er_tload_1[0] = ((ar_odd_16 == 0) ? ar_lo_128 : ar_got_512);
+                                _er_tload_1[4] = ((ar_odd_16 == 0) ? ar_got_512 : ar_hi_128);
+                                float ar_lo_129 = _er_tload_1[1];
+                                float ar_hi_129 = _er_tload_1[5];
+                                float ar_send_513 = ((ar_odd_16 == 0) ? ar_hi_129 : ar_lo_129);
+                                float ar_got_513 = __shfl_xor_sync(0xFFFFFFFF, ar_send_513, 1);
+                                _er_tload_1[1] = ((ar_odd_16 == 0) ? ar_lo_129 : ar_got_513);
+                                _er_tload_1[5] = ((ar_odd_16 == 0) ? ar_got_513 : ar_hi_129);
+                                float ar_lo_130 = _er_tload_1[2];
+                                float ar_hi_130 = _er_tload_1[6];
+                                float ar_send_514 = ((ar_odd_16 == 0) ? ar_hi_130 : ar_lo_130);
+                                float ar_got_514 = __shfl_xor_sync(0xFFFFFFFF, ar_send_514, 1);
+                                _er_tload_1[2] = ((ar_odd_16 == 0) ? ar_lo_130 : ar_got_514);
+                                _er_tload_1[6] = ((ar_odd_16 == 0) ? ar_got_514 : ar_hi_130);
+                                float ar_lo_131 = _er_tload_1[3];
+                                float ar_hi_131 = _er_tload_1[7];
+                                float ar_send_515 = ((ar_odd_16 == 0) ? ar_hi_131 : ar_lo_131);
+                                float ar_got_515 = __shfl_xor_sync(0xFFFFFFFF, ar_send_515, 1);
+                                _er_tload_1[3] = ((ar_odd_16 == 0) ? ar_lo_131 : ar_got_515);
+                                _er_tload_1[7] = ((ar_odd_16 == 0) ? ar_got_515 : ar_hi_131);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_a_1)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_a_1) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -10936,15 +14034,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_a_1 + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_a_1 + ldc) = _v4;
                                 }
+                                float ar_lo_132 = _er_tload_1[8];
+                                float ar_hi_132 = _er_tload_1[12];
+                                float ar_send_516 = ((ar_odd_16 == 0) ? ar_hi_132 : ar_lo_132);
+                                float ar_got_516 = __shfl_xor_sync(0xFFFFFFFF, ar_send_516, 1);
+                                _er_tload_1[8] = ((ar_odd_16 == 0) ? ar_lo_132 : ar_got_516);
+                                _er_tload_1[12] = ((ar_odd_16 == 0) ? ar_got_516 : ar_hi_132);
+                                float ar_lo_133 = _er_tload_1[9];
+                                float ar_hi_133 = _er_tload_1[13];
+                                float ar_send_517 = ((ar_odd_16 == 0) ? ar_hi_133 : ar_lo_133);
+                                float ar_got_517 = __shfl_xor_sync(0xFFFFFFFF, ar_send_517, 1);
+                                _er_tload_1[9] = ((ar_odd_16 == 0) ? ar_lo_133 : ar_got_517);
+                                _er_tload_1[13] = ((ar_odd_16 == 0) ? ar_got_517 : ar_hi_133);
+                                float ar_lo_134 = _er_tload_1[10];
+                                float ar_hi_134 = _er_tload_1[14];
+                                float ar_send_518 = ((ar_odd_16 == 0) ? ar_hi_134 : ar_lo_134);
+                                float ar_got_518 = __shfl_xor_sync(0xFFFFFFFF, ar_send_518, 1);
+                                _er_tload_1[10] = ((ar_odd_16 == 0) ? ar_lo_134 : ar_got_518);
+                                _er_tload_1[14] = ((ar_odd_16 == 0) ? ar_got_518 : ar_hi_134);
+                                float ar_lo_135 = _er_tload_1[11];
+                                float ar_hi_135 = _er_tload_1[15];
+                                float ar_send_519 = ((ar_odd_16 == 0) ? ar_hi_135 : ar_lo_135);
+                                float ar_got_519 = __shfl_xor_sync(0xFFFFFFFF, ar_send_519, 1);
+                                _er_tload_1[11] = ((ar_odd_16 == 0) ? ar_lo_135 : ar_got_519);
+                                _er_tload_1[15] = ((ar_odd_16 == 0) ? ar_got_519 : ar_hi_135);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_a_1 + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_a_1 + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_a_1 + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_a_1 + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_114 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -10975,9 +14097,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_17 = lane & 1;
+                                float ar_lo_136 = _er_tload_1[0];
+                                float ar_hi_136 = _er_tload_1[4];
+                                float ar_send_520 = ((ar_odd_17 == 0) ? ar_hi_136 : ar_lo_136);
+                                float ar_got_520 = __shfl_xor_sync(0xFFFFFFFF, ar_send_520, 1);
+                                _er_tload_1[0] = ((ar_odd_17 == 0) ? ar_lo_136 : ar_got_520);
+                                _er_tload_1[4] = ((ar_odd_17 == 0) ? ar_got_520 : ar_hi_136);
+                                float ar_lo_137 = _er_tload_1[1];
+                                float ar_hi_137 = _er_tload_1[5];
+                                float ar_send_521 = ((ar_odd_17 == 0) ? ar_hi_137 : ar_lo_137);
+                                float ar_got_521 = __shfl_xor_sync(0xFFFFFFFF, ar_send_521, 1);
+                                _er_tload_1[1] = ((ar_odd_17 == 0) ? ar_lo_137 : ar_got_521);
+                                _er_tload_1[5] = ((ar_odd_17 == 0) ? ar_got_521 : ar_hi_137);
+                                float ar_lo_138 = _er_tload_1[2];
+                                float ar_hi_138 = _er_tload_1[6];
+                                float ar_send_522 = ((ar_odd_17 == 0) ? ar_hi_138 : ar_lo_138);
+                                float ar_got_522 = __shfl_xor_sync(0xFFFFFFFF, ar_send_522, 1);
+                                _er_tload_1[2] = ((ar_odd_17 == 0) ? ar_lo_138 : ar_got_522);
+                                _er_tload_1[6] = ((ar_odd_17 == 0) ? ar_got_522 : ar_hi_138);
+                                float ar_lo_139 = _er_tload_1[3];
+                                float ar_hi_139 = _er_tload_1[7];
+                                float ar_send_523 = ((ar_odd_17 == 0) ? ar_hi_139 : ar_lo_139);
+                                float ar_got_523 = __shfl_xor_sync(0xFFFFFFFF, ar_send_523, 1);
+                                _er_tload_1[3] = ((ar_odd_17 == 0) ? ar_lo_139 : ar_got_523);
+                                _er_tload_1[7] = ((ar_odd_17 == 0) ? ar_got_523 : ar_hi_139);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 16))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 16)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11023,15 +14170,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 16) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 16) + ldc) = _v4;
                                 }
+                                float ar_lo_140 = _er_tload_1[8];
+                                float ar_hi_140 = _er_tload_1[12];
+                                float ar_send_524 = ((ar_odd_17 == 0) ? ar_hi_140 : ar_lo_140);
+                                float ar_got_524 = __shfl_xor_sync(0xFFFFFFFF, ar_send_524, 1);
+                                _er_tload_1[8] = ((ar_odd_17 == 0) ? ar_lo_140 : ar_got_524);
+                                _er_tload_1[12] = ((ar_odd_17 == 0) ? ar_got_524 : ar_hi_140);
+                                float ar_lo_141 = _er_tload_1[9];
+                                float ar_hi_141 = _er_tload_1[13];
+                                float ar_send_525 = ((ar_odd_17 == 0) ? ar_hi_141 : ar_lo_141);
+                                float ar_got_525 = __shfl_xor_sync(0xFFFFFFFF, ar_send_525, 1);
+                                _er_tload_1[9] = ((ar_odd_17 == 0) ? ar_lo_141 : ar_got_525);
+                                _er_tload_1[13] = ((ar_odd_17 == 0) ? ar_got_525 : ar_hi_141);
+                                float ar_lo_142 = _er_tload_1[10];
+                                float ar_hi_142 = _er_tload_1[14];
+                                float ar_send_526 = ((ar_odd_17 == 0) ? ar_hi_142 : ar_lo_142);
+                                float ar_got_526 = __shfl_xor_sync(0xFFFFFFFF, ar_send_526, 1);
+                                _er_tload_1[10] = ((ar_odd_17 == 0) ? ar_lo_142 : ar_got_526);
+                                _er_tload_1[14] = ((ar_odd_17 == 0) ? ar_got_526 : ar_hi_142);
+                                float ar_lo_143 = _er_tload_1[11];
+                                float ar_hi_143 = _er_tload_1[15];
+                                float ar_send_527 = ((ar_odd_17 == 0) ? ar_hi_143 : ar_lo_143);
+                                float ar_got_527 = __shfl_xor_sync(0xFFFFFFFF, ar_send_527, 1);
+                                _er_tload_1[11] = ((ar_odd_17 == 0) ? ar_lo_143 : ar_got_527);
+                                _er_tload_1[15] = ((ar_odd_17 == 0) ? ar_got_527 : ar_hi_143);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 16) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 16) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 16) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 16) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_115 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11062,9 +14233,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_18 = lane & 1;
+                                float ar_lo_144 = _er_tload_1[0];
+                                float ar_hi_144 = _er_tload_1[4];
+                                float ar_send_528 = ((ar_odd_18 == 0) ? ar_hi_144 : ar_lo_144);
+                                float ar_got_528 = __shfl_xor_sync(0xFFFFFFFF, ar_send_528, 1);
+                                _er_tload_1[0] = ((ar_odd_18 == 0) ? ar_lo_144 : ar_got_528);
+                                _er_tload_1[4] = ((ar_odd_18 == 0) ? ar_got_528 : ar_hi_144);
+                                float ar_lo_145 = _er_tload_1[1];
+                                float ar_hi_145 = _er_tload_1[5];
+                                float ar_send_529 = ((ar_odd_18 == 0) ? ar_hi_145 : ar_lo_145);
+                                float ar_got_529 = __shfl_xor_sync(0xFFFFFFFF, ar_send_529, 1);
+                                _er_tload_1[1] = ((ar_odd_18 == 0) ? ar_lo_145 : ar_got_529);
+                                _er_tload_1[5] = ((ar_odd_18 == 0) ? ar_got_529 : ar_hi_145);
+                                float ar_lo_146 = _er_tload_1[2];
+                                float ar_hi_146 = _er_tload_1[6];
+                                float ar_send_530 = ((ar_odd_18 == 0) ? ar_hi_146 : ar_lo_146);
+                                float ar_got_530 = __shfl_xor_sync(0xFFFFFFFF, ar_send_530, 1);
+                                _er_tload_1[2] = ((ar_odd_18 == 0) ? ar_lo_146 : ar_got_530);
+                                _er_tload_1[6] = ((ar_odd_18 == 0) ? ar_got_530 : ar_hi_146);
+                                float ar_lo_147 = _er_tload_1[3];
+                                float ar_hi_147 = _er_tload_1[7];
+                                float ar_send_531 = ((ar_odd_18 == 0) ? ar_hi_147 : ar_lo_147);
+                                float ar_got_531 = __shfl_xor_sync(0xFFFFFFFF, ar_send_531, 1);
+                                _er_tload_1[3] = ((ar_odd_18 == 0) ? ar_lo_147 : ar_got_531);
+                                _er_tload_1[7] = ((ar_odd_18 == 0) ? ar_got_531 : ar_hi_147);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 32))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 32)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11110,15 +14306,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 32) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 32) + ldc) = _v4;
                                 }
+                                float ar_lo_148 = _er_tload_1[8];
+                                float ar_hi_148 = _er_tload_1[12];
+                                float ar_send_532 = ((ar_odd_18 == 0) ? ar_hi_148 : ar_lo_148);
+                                float ar_got_532 = __shfl_xor_sync(0xFFFFFFFF, ar_send_532, 1);
+                                _er_tload_1[8] = ((ar_odd_18 == 0) ? ar_lo_148 : ar_got_532);
+                                _er_tload_1[12] = ((ar_odd_18 == 0) ? ar_got_532 : ar_hi_148);
+                                float ar_lo_149 = _er_tload_1[9];
+                                float ar_hi_149 = _er_tload_1[13];
+                                float ar_send_533 = ((ar_odd_18 == 0) ? ar_hi_149 : ar_lo_149);
+                                float ar_got_533 = __shfl_xor_sync(0xFFFFFFFF, ar_send_533, 1);
+                                _er_tload_1[9] = ((ar_odd_18 == 0) ? ar_lo_149 : ar_got_533);
+                                _er_tload_1[13] = ((ar_odd_18 == 0) ? ar_got_533 : ar_hi_149);
+                                float ar_lo_150 = _er_tload_1[10];
+                                float ar_hi_150 = _er_tload_1[14];
+                                float ar_send_534 = ((ar_odd_18 == 0) ? ar_hi_150 : ar_lo_150);
+                                float ar_got_534 = __shfl_xor_sync(0xFFFFFFFF, ar_send_534, 1);
+                                _er_tload_1[10] = ((ar_odd_18 == 0) ? ar_lo_150 : ar_got_534);
+                                _er_tload_1[14] = ((ar_odd_18 == 0) ? ar_got_534 : ar_hi_150);
+                                float ar_lo_151 = _er_tload_1[11];
+                                float ar_hi_151 = _er_tload_1[15];
+                                float ar_send_535 = ((ar_odd_18 == 0) ? ar_hi_151 : ar_lo_151);
+                                float ar_got_535 = __shfl_xor_sync(0xFFFFFFFF, ar_send_535, 1);
+                                _er_tload_1[11] = ((ar_odd_18 == 0) ? ar_lo_151 : ar_got_535);
+                                _er_tload_1[15] = ((ar_odd_18 == 0) ? ar_got_535 : ar_hi_151);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 32) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 32) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 32) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 32) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_116 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11149,9 +14369,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_19 = lane & 1;
+                                float ar_lo_152 = _er_tload_1[0];
+                                float ar_hi_152 = _er_tload_1[4];
+                                float ar_send_536 = ((ar_odd_19 == 0) ? ar_hi_152 : ar_lo_152);
+                                float ar_got_536 = __shfl_xor_sync(0xFFFFFFFF, ar_send_536, 1);
+                                _er_tload_1[0] = ((ar_odd_19 == 0) ? ar_lo_152 : ar_got_536);
+                                _er_tload_1[4] = ((ar_odd_19 == 0) ? ar_got_536 : ar_hi_152);
+                                float ar_lo_153 = _er_tload_1[1];
+                                float ar_hi_153 = _er_tload_1[5];
+                                float ar_send_537 = ((ar_odd_19 == 0) ? ar_hi_153 : ar_lo_153);
+                                float ar_got_537 = __shfl_xor_sync(0xFFFFFFFF, ar_send_537, 1);
+                                _er_tload_1[1] = ((ar_odd_19 == 0) ? ar_lo_153 : ar_got_537);
+                                _er_tload_1[5] = ((ar_odd_19 == 0) ? ar_got_537 : ar_hi_153);
+                                float ar_lo_154 = _er_tload_1[2];
+                                float ar_hi_154 = _er_tload_1[6];
+                                float ar_send_538 = ((ar_odd_19 == 0) ? ar_hi_154 : ar_lo_154);
+                                float ar_got_538 = __shfl_xor_sync(0xFFFFFFFF, ar_send_538, 1);
+                                _er_tload_1[2] = ((ar_odd_19 == 0) ? ar_lo_154 : ar_got_538);
+                                _er_tload_1[6] = ((ar_odd_19 == 0) ? ar_got_538 : ar_hi_154);
+                                float ar_lo_155 = _er_tload_1[3];
+                                float ar_hi_155 = _er_tload_1[7];
+                                float ar_send_539 = ((ar_odd_19 == 0) ? ar_hi_155 : ar_lo_155);
+                                float ar_got_539 = __shfl_xor_sync(0xFFFFFFFF, ar_send_539, 1);
+                                _er_tload_1[3] = ((ar_odd_19 == 0) ? ar_lo_155 : ar_got_539);
+                                _er_tload_1[7] = ((ar_odd_19 == 0) ? ar_got_539 : ar_hi_155);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 48))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 48)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11197,15 +14442,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 48) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 48) + ldc) = _v4;
                                 }
+                                float ar_lo_156 = _er_tload_1[8];
+                                float ar_hi_156 = _er_tload_1[12];
+                                float ar_send_540 = ((ar_odd_19 == 0) ? ar_hi_156 : ar_lo_156);
+                                float ar_got_540 = __shfl_xor_sync(0xFFFFFFFF, ar_send_540, 1);
+                                _er_tload_1[8] = ((ar_odd_19 == 0) ? ar_lo_156 : ar_got_540);
+                                _er_tload_1[12] = ((ar_odd_19 == 0) ? ar_got_540 : ar_hi_156);
+                                float ar_lo_157 = _er_tload_1[9];
+                                float ar_hi_157 = _er_tload_1[13];
+                                float ar_send_541 = ((ar_odd_19 == 0) ? ar_hi_157 : ar_lo_157);
+                                float ar_got_541 = __shfl_xor_sync(0xFFFFFFFF, ar_send_541, 1);
+                                _er_tload_1[9] = ((ar_odd_19 == 0) ? ar_lo_157 : ar_got_541);
+                                _er_tload_1[13] = ((ar_odd_19 == 0) ? ar_got_541 : ar_hi_157);
+                                float ar_lo_158 = _er_tload_1[10];
+                                float ar_hi_158 = _er_tload_1[14];
+                                float ar_send_542 = ((ar_odd_19 == 0) ? ar_hi_158 : ar_lo_158);
+                                float ar_got_542 = __shfl_xor_sync(0xFFFFFFFF, ar_send_542, 1);
+                                _er_tload_1[10] = ((ar_odd_19 == 0) ? ar_lo_158 : ar_got_542);
+                                _er_tload_1[14] = ((ar_odd_19 == 0) ? ar_got_542 : ar_hi_158);
+                                float ar_lo_159 = _er_tload_1[11];
+                                float ar_hi_159 = _er_tload_1[15];
+                                float ar_send_543 = ((ar_odd_19 == 0) ? ar_hi_159 : ar_lo_159);
+                                float ar_got_543 = __shfl_xor_sync(0xFFFFFFFF, ar_send_543, 1);
+                                _er_tload_1[11] = ((ar_odd_19 == 0) ? ar_lo_159 : ar_got_543);
+                                _er_tload_1[15] = ((ar_odd_19 == 0) ? ar_got_543 : ar_hi_159);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 48) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 48) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 48) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 48) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_117 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11236,9 +14505,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_20 = lane & 1;
+                                float ar_lo_160 = _er_tload_1[0];
+                                float ar_hi_160 = _er_tload_1[4];
+                                float ar_send_544 = ((ar_odd_20 == 0) ? ar_hi_160 : ar_lo_160);
+                                float ar_got_544 = __shfl_xor_sync(0xFFFFFFFF, ar_send_544, 1);
+                                _er_tload_1[0] = ((ar_odd_20 == 0) ? ar_lo_160 : ar_got_544);
+                                _er_tload_1[4] = ((ar_odd_20 == 0) ? ar_got_544 : ar_hi_160);
+                                float ar_lo_161 = _er_tload_1[1];
+                                float ar_hi_161 = _er_tload_1[5];
+                                float ar_send_545 = ((ar_odd_20 == 0) ? ar_hi_161 : ar_lo_161);
+                                float ar_got_545 = __shfl_xor_sync(0xFFFFFFFF, ar_send_545, 1);
+                                _er_tload_1[1] = ((ar_odd_20 == 0) ? ar_lo_161 : ar_got_545);
+                                _er_tload_1[5] = ((ar_odd_20 == 0) ? ar_got_545 : ar_hi_161);
+                                float ar_lo_162 = _er_tload_1[2];
+                                float ar_hi_162 = _er_tload_1[6];
+                                float ar_send_546 = ((ar_odd_20 == 0) ? ar_hi_162 : ar_lo_162);
+                                float ar_got_546 = __shfl_xor_sync(0xFFFFFFFF, ar_send_546, 1);
+                                _er_tload_1[2] = ((ar_odd_20 == 0) ? ar_lo_162 : ar_got_546);
+                                _er_tload_1[6] = ((ar_odd_20 == 0) ? ar_got_546 : ar_hi_162);
+                                float ar_lo_163 = _er_tload_1[3];
+                                float ar_hi_163 = _er_tload_1[7];
+                                float ar_send_547 = ((ar_odd_20 == 0) ? ar_hi_163 : ar_lo_163);
+                                float ar_got_547 = __shfl_xor_sync(0xFFFFFFFF, ar_send_547, 1);
+                                _er_tload_1[3] = ((ar_odd_20 == 0) ? ar_lo_163 : ar_got_547);
+                                _er_tload_1[7] = ((ar_odd_20 == 0) ? ar_got_547 : ar_hi_163);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 64))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 64)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11284,15 +14578,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 64) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 64) + ldc) = _v4;
                                 }
+                                float ar_lo_164 = _er_tload_1[8];
+                                float ar_hi_164 = _er_tload_1[12];
+                                float ar_send_548 = ((ar_odd_20 == 0) ? ar_hi_164 : ar_lo_164);
+                                float ar_got_548 = __shfl_xor_sync(0xFFFFFFFF, ar_send_548, 1);
+                                _er_tload_1[8] = ((ar_odd_20 == 0) ? ar_lo_164 : ar_got_548);
+                                _er_tload_1[12] = ((ar_odd_20 == 0) ? ar_got_548 : ar_hi_164);
+                                float ar_lo_165 = _er_tload_1[9];
+                                float ar_hi_165 = _er_tload_1[13];
+                                float ar_send_549 = ((ar_odd_20 == 0) ? ar_hi_165 : ar_lo_165);
+                                float ar_got_549 = __shfl_xor_sync(0xFFFFFFFF, ar_send_549, 1);
+                                _er_tload_1[9] = ((ar_odd_20 == 0) ? ar_lo_165 : ar_got_549);
+                                _er_tload_1[13] = ((ar_odd_20 == 0) ? ar_got_549 : ar_hi_165);
+                                float ar_lo_166 = _er_tload_1[10];
+                                float ar_hi_166 = _er_tload_1[14];
+                                float ar_send_550 = ((ar_odd_20 == 0) ? ar_hi_166 : ar_lo_166);
+                                float ar_got_550 = __shfl_xor_sync(0xFFFFFFFF, ar_send_550, 1);
+                                _er_tload_1[10] = ((ar_odd_20 == 0) ? ar_lo_166 : ar_got_550);
+                                _er_tload_1[14] = ((ar_odd_20 == 0) ? ar_got_550 : ar_hi_166);
+                                float ar_lo_167 = _er_tload_1[11];
+                                float ar_hi_167 = _er_tload_1[15];
+                                float ar_send_551 = ((ar_odd_20 == 0) ? ar_hi_167 : ar_lo_167);
+                                float ar_got_551 = __shfl_xor_sync(0xFFFFFFFF, ar_send_551, 1);
+                                _er_tload_1[11] = ((ar_odd_20 == 0) ? ar_lo_167 : ar_got_551);
+                                _er_tload_1[15] = ((ar_odd_20 == 0) ? ar_got_551 : ar_hi_167);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 64) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 64) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 64) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 64) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_118 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11323,9 +14641,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_21 = lane & 1;
+                                float ar_lo_168 = _er_tload_1[0];
+                                float ar_hi_168 = _er_tload_1[4];
+                                float ar_send_552 = ((ar_odd_21 == 0) ? ar_hi_168 : ar_lo_168);
+                                float ar_got_552 = __shfl_xor_sync(0xFFFFFFFF, ar_send_552, 1);
+                                _er_tload_1[0] = ((ar_odd_21 == 0) ? ar_lo_168 : ar_got_552);
+                                _er_tload_1[4] = ((ar_odd_21 == 0) ? ar_got_552 : ar_hi_168);
+                                float ar_lo_169 = _er_tload_1[1];
+                                float ar_hi_169 = _er_tload_1[5];
+                                float ar_send_553 = ((ar_odd_21 == 0) ? ar_hi_169 : ar_lo_169);
+                                float ar_got_553 = __shfl_xor_sync(0xFFFFFFFF, ar_send_553, 1);
+                                _er_tload_1[1] = ((ar_odd_21 == 0) ? ar_lo_169 : ar_got_553);
+                                _er_tload_1[5] = ((ar_odd_21 == 0) ? ar_got_553 : ar_hi_169);
+                                float ar_lo_170 = _er_tload_1[2];
+                                float ar_hi_170 = _er_tload_1[6];
+                                float ar_send_554 = ((ar_odd_21 == 0) ? ar_hi_170 : ar_lo_170);
+                                float ar_got_554 = __shfl_xor_sync(0xFFFFFFFF, ar_send_554, 1);
+                                _er_tload_1[2] = ((ar_odd_21 == 0) ? ar_lo_170 : ar_got_554);
+                                _er_tload_1[6] = ((ar_odd_21 == 0) ? ar_got_554 : ar_hi_170);
+                                float ar_lo_171 = _er_tload_1[3];
+                                float ar_hi_171 = _er_tload_1[7];
+                                float ar_send_555 = ((ar_odd_21 == 0) ? ar_hi_171 : ar_lo_171);
+                                float ar_got_555 = __shfl_xor_sync(0xFFFFFFFF, ar_send_555, 1);
+                                _er_tload_1[3] = ((ar_odd_21 == 0) ? ar_lo_171 : ar_got_555);
+                                _er_tload_1[7] = ((ar_odd_21 == 0) ? ar_got_555 : ar_hi_171);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 80))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 80)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11371,15 +14714,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 80) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 80) + ldc) = _v4;
                                 }
+                                float ar_lo_172 = _er_tload_1[8];
+                                float ar_hi_172 = _er_tload_1[12];
+                                float ar_send_556 = ((ar_odd_21 == 0) ? ar_hi_172 : ar_lo_172);
+                                float ar_got_556 = __shfl_xor_sync(0xFFFFFFFF, ar_send_556, 1);
+                                _er_tload_1[8] = ((ar_odd_21 == 0) ? ar_lo_172 : ar_got_556);
+                                _er_tload_1[12] = ((ar_odd_21 == 0) ? ar_got_556 : ar_hi_172);
+                                float ar_lo_173 = _er_tload_1[9];
+                                float ar_hi_173 = _er_tload_1[13];
+                                float ar_send_557 = ((ar_odd_21 == 0) ? ar_hi_173 : ar_lo_173);
+                                float ar_got_557 = __shfl_xor_sync(0xFFFFFFFF, ar_send_557, 1);
+                                _er_tload_1[9] = ((ar_odd_21 == 0) ? ar_lo_173 : ar_got_557);
+                                _er_tload_1[13] = ((ar_odd_21 == 0) ? ar_got_557 : ar_hi_173);
+                                float ar_lo_174 = _er_tload_1[10];
+                                float ar_hi_174 = _er_tload_1[14];
+                                float ar_send_558 = ((ar_odd_21 == 0) ? ar_hi_174 : ar_lo_174);
+                                float ar_got_558 = __shfl_xor_sync(0xFFFFFFFF, ar_send_558, 1);
+                                _er_tload_1[10] = ((ar_odd_21 == 0) ? ar_lo_174 : ar_got_558);
+                                _er_tload_1[14] = ((ar_odd_21 == 0) ? ar_got_558 : ar_hi_174);
+                                float ar_lo_175 = _er_tload_1[11];
+                                float ar_hi_175 = _er_tload_1[15];
+                                float ar_send_559 = ((ar_odd_21 == 0) ? ar_hi_175 : ar_lo_175);
+                                float ar_got_559 = __shfl_xor_sync(0xFFFFFFFF, ar_send_559, 1);
+                                _er_tload_1[11] = ((ar_odd_21 == 0) ? ar_lo_175 : ar_got_559);
+                                _er_tload_1[15] = ((ar_odd_21 == 0) ? ar_got_559 : ar_hi_175);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 80) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 80) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 80) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 80) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_119 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11410,9 +14777,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_22 = lane & 1;
+                                float ar_lo_176 = _er_tload_1[0];
+                                float ar_hi_176 = _er_tload_1[4];
+                                float ar_send_560 = ((ar_odd_22 == 0) ? ar_hi_176 : ar_lo_176);
+                                float ar_got_560 = __shfl_xor_sync(0xFFFFFFFF, ar_send_560, 1);
+                                _er_tload_1[0] = ((ar_odd_22 == 0) ? ar_lo_176 : ar_got_560);
+                                _er_tload_1[4] = ((ar_odd_22 == 0) ? ar_got_560 : ar_hi_176);
+                                float ar_lo_177 = _er_tload_1[1];
+                                float ar_hi_177 = _er_tload_1[5];
+                                float ar_send_561 = ((ar_odd_22 == 0) ? ar_hi_177 : ar_lo_177);
+                                float ar_got_561 = __shfl_xor_sync(0xFFFFFFFF, ar_send_561, 1);
+                                _er_tload_1[1] = ((ar_odd_22 == 0) ? ar_lo_177 : ar_got_561);
+                                _er_tload_1[5] = ((ar_odd_22 == 0) ? ar_got_561 : ar_hi_177);
+                                float ar_lo_178 = _er_tload_1[2];
+                                float ar_hi_178 = _er_tload_1[6];
+                                float ar_send_562 = ((ar_odd_22 == 0) ? ar_hi_178 : ar_lo_178);
+                                float ar_got_562 = __shfl_xor_sync(0xFFFFFFFF, ar_send_562, 1);
+                                _er_tload_1[2] = ((ar_odd_22 == 0) ? ar_lo_178 : ar_got_562);
+                                _er_tload_1[6] = ((ar_odd_22 == 0) ? ar_got_562 : ar_hi_178);
+                                float ar_lo_179 = _er_tload_1[3];
+                                float ar_hi_179 = _er_tload_1[7];
+                                float ar_send_563 = ((ar_odd_22 == 0) ? ar_hi_179 : ar_lo_179);
+                                float ar_got_563 = __shfl_xor_sync(0xFFFFFFFF, ar_send_563, 1);
+                                _er_tload_1[3] = ((ar_odd_22 == 0) ? ar_lo_179 : ar_got_563);
+                                _er_tload_1[7] = ((ar_odd_22 == 0) ? ar_got_563 : ar_hi_179);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 96))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 96)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11458,15 +14850,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 96) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 96) + ldc) = _v4;
                                 }
+                                float ar_lo_180 = _er_tload_1[8];
+                                float ar_hi_180 = _er_tload_1[12];
+                                float ar_send_564 = ((ar_odd_22 == 0) ? ar_hi_180 : ar_lo_180);
+                                float ar_got_564 = __shfl_xor_sync(0xFFFFFFFF, ar_send_564, 1);
+                                _er_tload_1[8] = ((ar_odd_22 == 0) ? ar_lo_180 : ar_got_564);
+                                _er_tload_1[12] = ((ar_odd_22 == 0) ? ar_got_564 : ar_hi_180);
+                                float ar_lo_181 = _er_tload_1[9];
+                                float ar_hi_181 = _er_tload_1[13];
+                                float ar_send_565 = ((ar_odd_22 == 0) ? ar_hi_181 : ar_lo_181);
+                                float ar_got_565 = __shfl_xor_sync(0xFFFFFFFF, ar_send_565, 1);
+                                _er_tload_1[9] = ((ar_odd_22 == 0) ? ar_lo_181 : ar_got_565);
+                                _er_tload_1[13] = ((ar_odd_22 == 0) ? ar_got_565 : ar_hi_181);
+                                float ar_lo_182 = _er_tload_1[10];
+                                float ar_hi_182 = _er_tload_1[14];
+                                float ar_send_566 = ((ar_odd_22 == 0) ? ar_hi_182 : ar_lo_182);
+                                float ar_got_566 = __shfl_xor_sync(0xFFFFFFFF, ar_send_566, 1);
+                                _er_tload_1[10] = ((ar_odd_22 == 0) ? ar_lo_182 : ar_got_566);
+                                _er_tload_1[14] = ((ar_odd_22 == 0) ? ar_got_566 : ar_hi_182);
+                                float ar_lo_183 = _er_tload_1[11];
+                                float ar_hi_183 = _er_tload_1[15];
+                                float ar_send_567 = ((ar_odd_22 == 0) ? ar_hi_183 : ar_lo_183);
+                                float ar_got_567 = __shfl_xor_sync(0xFFFFFFFF, ar_send_567, 1);
+                                _er_tload_1[11] = ((ar_odd_22 == 0) ? ar_lo_183 : ar_got_567);
+                                _er_tload_1[15] = ((ar_odd_22 == 0) ? ar_got_567 : ar_hi_183);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 96) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 96) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 96) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 96) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_120 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11497,9 +14913,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_23 = lane & 1;
+                                float ar_lo_184 = _er_tload_1[0];
+                                float ar_hi_184 = _er_tload_1[4];
+                                float ar_send_568 = ((ar_odd_23 == 0) ? ar_hi_184 : ar_lo_184);
+                                float ar_got_568 = __shfl_xor_sync(0xFFFFFFFF, ar_send_568, 1);
+                                _er_tload_1[0] = ((ar_odd_23 == 0) ? ar_lo_184 : ar_got_568);
+                                _er_tload_1[4] = ((ar_odd_23 == 0) ? ar_got_568 : ar_hi_184);
+                                float ar_lo_185 = _er_tload_1[1];
+                                float ar_hi_185 = _er_tload_1[5];
+                                float ar_send_569 = ((ar_odd_23 == 0) ? ar_hi_185 : ar_lo_185);
+                                float ar_got_569 = __shfl_xor_sync(0xFFFFFFFF, ar_send_569, 1);
+                                _er_tload_1[1] = ((ar_odd_23 == 0) ? ar_lo_185 : ar_got_569);
+                                _er_tload_1[5] = ((ar_odd_23 == 0) ? ar_got_569 : ar_hi_185);
+                                float ar_lo_186 = _er_tload_1[2];
+                                float ar_hi_186 = _er_tload_1[6];
+                                float ar_send_570 = ((ar_odd_23 == 0) ? ar_hi_186 : ar_lo_186);
+                                float ar_got_570 = __shfl_xor_sync(0xFFFFFFFF, ar_send_570, 1);
+                                _er_tload_1[2] = ((ar_odd_23 == 0) ? ar_lo_186 : ar_got_570);
+                                _er_tload_1[6] = ((ar_odd_23 == 0) ? ar_got_570 : ar_hi_186);
+                                float ar_lo_187 = _er_tload_1[3];
+                                float ar_hi_187 = _er_tload_1[7];
+                                float ar_send_571 = ((ar_odd_23 == 0) ? ar_hi_187 : ar_lo_187);
+                                float ar_got_571 = __shfl_xor_sync(0xFFFFFFFF, ar_send_571, 1);
+                                _er_tload_1[3] = ((ar_odd_23 == 0) ? ar_lo_187 : ar_got_571);
+                                _er_tload_1[7] = ((ar_odd_23 == 0) ? ar_got_571 : ar_hi_187);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 112))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 112)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11545,15 +14986,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 112) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 112) + ldc) = _v4;
                                 }
+                                float ar_lo_188 = _er_tload_1[8];
+                                float ar_hi_188 = _er_tload_1[12];
+                                float ar_send_572 = ((ar_odd_23 == 0) ? ar_hi_188 : ar_lo_188);
+                                float ar_got_572 = __shfl_xor_sync(0xFFFFFFFF, ar_send_572, 1);
+                                _er_tload_1[8] = ((ar_odd_23 == 0) ? ar_lo_188 : ar_got_572);
+                                _er_tload_1[12] = ((ar_odd_23 == 0) ? ar_got_572 : ar_hi_188);
+                                float ar_lo_189 = _er_tload_1[9];
+                                float ar_hi_189 = _er_tload_1[13];
+                                float ar_send_573 = ((ar_odd_23 == 0) ? ar_hi_189 : ar_lo_189);
+                                float ar_got_573 = __shfl_xor_sync(0xFFFFFFFF, ar_send_573, 1);
+                                _er_tload_1[9] = ((ar_odd_23 == 0) ? ar_lo_189 : ar_got_573);
+                                _er_tload_1[13] = ((ar_odd_23 == 0) ? ar_got_573 : ar_hi_189);
+                                float ar_lo_190 = _er_tload_1[10];
+                                float ar_hi_190 = _er_tload_1[14];
+                                float ar_send_574 = ((ar_odd_23 == 0) ? ar_hi_190 : ar_lo_190);
+                                float ar_got_574 = __shfl_xor_sync(0xFFFFFFFF, ar_send_574, 1);
+                                _er_tload_1[10] = ((ar_odd_23 == 0) ? ar_lo_190 : ar_got_574);
+                                _er_tload_1[14] = ((ar_odd_23 == 0) ? ar_got_574 : ar_hi_190);
+                                float ar_lo_191 = _er_tload_1[11];
+                                float ar_hi_191 = _er_tload_1[15];
+                                float ar_send_575 = ((ar_odd_23 == 0) ? ar_hi_191 : ar_lo_191);
+                                float ar_got_575 = __shfl_xor_sync(0xFFFFFFFF, ar_send_575, 1);
+                                _er_tload_1[11] = ((ar_odd_23 == 0) ? ar_lo_191 : ar_got_575);
+                                _er_tload_1[15] = ((ar_odd_23 == 0) ? ar_got_575 : ar_hi_191);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 112) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 112) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_a_1 + 112) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_a_1 + 112) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_121 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11592,9 +15057,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_24 = lane & 1;
+                                float ar_lo_192 = _er_tload_1[0];
+                                float ar_hi_192 = _er_tload_1[4];
+                                float ar_send_576 = ((ar_odd_24 == 0) ? ar_hi_192 : ar_lo_192);
+                                float ar_got_576 = __shfl_xor_sync(0xFFFFFFFF, ar_send_576, 1);
+                                _er_tload_1[0] = ((ar_odd_24 == 0) ? ar_lo_192 : ar_got_576);
+                                _er_tload_1[4] = ((ar_odd_24 == 0) ? ar_got_576 : ar_hi_192);
+                                float ar_lo_193 = _er_tload_1[1];
+                                float ar_hi_193 = _er_tload_1[5];
+                                float ar_send_577 = ((ar_odd_24 == 0) ? ar_hi_193 : ar_lo_193);
+                                float ar_got_577 = __shfl_xor_sync(0xFFFFFFFF, ar_send_577, 1);
+                                _er_tload_1[1] = ((ar_odd_24 == 0) ? ar_lo_193 : ar_got_577);
+                                _er_tload_1[5] = ((ar_odd_24 == 0) ? ar_got_577 : ar_hi_193);
+                                float ar_lo_194 = _er_tload_1[2];
+                                float ar_hi_194 = _er_tload_1[6];
+                                float ar_send_578 = ((ar_odd_24 == 0) ? ar_hi_194 : ar_lo_194);
+                                float ar_got_578 = __shfl_xor_sync(0xFFFFFFFF, ar_send_578, 1);
+                                _er_tload_1[2] = ((ar_odd_24 == 0) ? ar_lo_194 : ar_got_578);
+                                _er_tload_1[6] = ((ar_odd_24 == 0) ? ar_got_578 : ar_hi_194);
+                                float ar_lo_195 = _er_tload_1[3];
+                                float ar_hi_195 = _er_tload_1[7];
+                                float ar_send_579 = ((ar_odd_24 == 0) ? ar_hi_195 : ar_lo_195);
+                                float ar_got_579 = __shfl_xor_sync(0xFFFFFFFF, ar_send_579, 1);
+                                _er_tload_1[3] = ((ar_odd_24 == 0) ? ar_lo_195 : ar_got_579);
+                                _er_tload_1[7] = ((ar_odd_24 == 0) ? ar_got_579 : ar_hi_195);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_b_1)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_b_1) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11640,15 +15130,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_b_1 + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_b_1 + ldc) = _v4;
                                 }
+                                float ar_lo_196 = _er_tload_1[8];
+                                float ar_hi_196 = _er_tload_1[12];
+                                float ar_send_580 = ((ar_odd_24 == 0) ? ar_hi_196 : ar_lo_196);
+                                float ar_got_580 = __shfl_xor_sync(0xFFFFFFFF, ar_send_580, 1);
+                                _er_tload_1[8] = ((ar_odd_24 == 0) ? ar_lo_196 : ar_got_580);
+                                _er_tload_1[12] = ((ar_odd_24 == 0) ? ar_got_580 : ar_hi_196);
+                                float ar_lo_197 = _er_tload_1[9];
+                                float ar_hi_197 = _er_tload_1[13];
+                                float ar_send_581 = ((ar_odd_24 == 0) ? ar_hi_197 : ar_lo_197);
+                                float ar_got_581 = __shfl_xor_sync(0xFFFFFFFF, ar_send_581, 1);
+                                _er_tload_1[9] = ((ar_odd_24 == 0) ? ar_lo_197 : ar_got_581);
+                                _er_tload_1[13] = ((ar_odd_24 == 0) ? ar_got_581 : ar_hi_197);
+                                float ar_lo_198 = _er_tload_1[10];
+                                float ar_hi_198 = _er_tload_1[14];
+                                float ar_send_582 = ((ar_odd_24 == 0) ? ar_hi_198 : ar_lo_198);
+                                float ar_got_582 = __shfl_xor_sync(0xFFFFFFFF, ar_send_582, 1);
+                                _er_tload_1[10] = ((ar_odd_24 == 0) ? ar_lo_198 : ar_got_582);
+                                _er_tload_1[14] = ((ar_odd_24 == 0) ? ar_got_582 : ar_hi_198);
+                                float ar_lo_199 = _er_tload_1[11];
+                                float ar_hi_199 = _er_tload_1[15];
+                                float ar_send_583 = ((ar_odd_24 == 0) ? ar_hi_199 : ar_lo_199);
+                                float ar_got_583 = __shfl_xor_sync(0xFFFFFFFF, ar_send_583, 1);
+                                _er_tload_1[11] = ((ar_odd_24 == 0) ? ar_lo_199 : ar_got_583);
+                                _er_tload_1[15] = ((ar_odd_24 == 0) ? ar_got_583 : ar_hi_199);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_b_1 + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_b_1 + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + er_col_b_1 + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + er_col_b_1 + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_122 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11679,9 +15193,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_25 = lane & 1;
+                                float ar_lo_200 = _er_tload_1[0];
+                                float ar_hi_200 = _er_tload_1[4];
+                                float ar_send_584 = ((ar_odd_25 == 0) ? ar_hi_200 : ar_lo_200);
+                                float ar_got_584 = __shfl_xor_sync(0xFFFFFFFF, ar_send_584, 1);
+                                _er_tload_1[0] = ((ar_odd_25 == 0) ? ar_lo_200 : ar_got_584);
+                                _er_tload_1[4] = ((ar_odd_25 == 0) ? ar_got_584 : ar_hi_200);
+                                float ar_lo_201 = _er_tload_1[1];
+                                float ar_hi_201 = _er_tload_1[5];
+                                float ar_send_585 = ((ar_odd_25 == 0) ? ar_hi_201 : ar_lo_201);
+                                float ar_got_585 = __shfl_xor_sync(0xFFFFFFFF, ar_send_585, 1);
+                                _er_tload_1[1] = ((ar_odd_25 == 0) ? ar_lo_201 : ar_got_585);
+                                _er_tload_1[5] = ((ar_odd_25 == 0) ? ar_got_585 : ar_hi_201);
+                                float ar_lo_202 = _er_tload_1[2];
+                                float ar_hi_202 = _er_tload_1[6];
+                                float ar_send_586 = ((ar_odd_25 == 0) ? ar_hi_202 : ar_lo_202);
+                                float ar_got_586 = __shfl_xor_sync(0xFFFFFFFF, ar_send_586, 1);
+                                _er_tload_1[2] = ((ar_odd_25 == 0) ? ar_lo_202 : ar_got_586);
+                                _er_tload_1[6] = ((ar_odd_25 == 0) ? ar_got_586 : ar_hi_202);
+                                float ar_lo_203 = _er_tload_1[3];
+                                float ar_hi_203 = _er_tload_1[7];
+                                float ar_send_587 = ((ar_odd_25 == 0) ? ar_hi_203 : ar_lo_203);
+                                float ar_got_587 = __shfl_xor_sync(0xFFFFFFFF, ar_send_587, 1);
+                                _er_tload_1[3] = ((ar_odd_25 == 0) ? ar_lo_203 : ar_got_587);
+                                _er_tload_1[7] = ((ar_odd_25 == 0) ? ar_got_587 : ar_hi_203);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 16))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 16)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11727,15 +15266,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 16) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 16) + ldc) = _v4;
                                 }
+                                float ar_lo_204 = _er_tload_1[8];
+                                float ar_hi_204 = _er_tload_1[12];
+                                float ar_send_588 = ((ar_odd_25 == 0) ? ar_hi_204 : ar_lo_204);
+                                float ar_got_588 = __shfl_xor_sync(0xFFFFFFFF, ar_send_588, 1);
+                                _er_tload_1[8] = ((ar_odd_25 == 0) ? ar_lo_204 : ar_got_588);
+                                _er_tload_1[12] = ((ar_odd_25 == 0) ? ar_got_588 : ar_hi_204);
+                                float ar_lo_205 = _er_tload_1[9];
+                                float ar_hi_205 = _er_tload_1[13];
+                                float ar_send_589 = ((ar_odd_25 == 0) ? ar_hi_205 : ar_lo_205);
+                                float ar_got_589 = __shfl_xor_sync(0xFFFFFFFF, ar_send_589, 1);
+                                _er_tload_1[9] = ((ar_odd_25 == 0) ? ar_lo_205 : ar_got_589);
+                                _er_tload_1[13] = ((ar_odd_25 == 0) ? ar_got_589 : ar_hi_205);
+                                float ar_lo_206 = _er_tload_1[10];
+                                float ar_hi_206 = _er_tload_1[14];
+                                float ar_send_590 = ((ar_odd_25 == 0) ? ar_hi_206 : ar_lo_206);
+                                float ar_got_590 = __shfl_xor_sync(0xFFFFFFFF, ar_send_590, 1);
+                                _er_tload_1[10] = ((ar_odd_25 == 0) ? ar_lo_206 : ar_got_590);
+                                _er_tload_1[14] = ((ar_odd_25 == 0) ? ar_got_590 : ar_hi_206);
+                                float ar_lo_207 = _er_tload_1[11];
+                                float ar_hi_207 = _er_tload_1[15];
+                                float ar_send_591 = ((ar_odd_25 == 0) ? ar_hi_207 : ar_lo_207);
+                                float ar_got_591 = __shfl_xor_sync(0xFFFFFFFF, ar_send_591, 1);
+                                _er_tload_1[11] = ((ar_odd_25 == 0) ? ar_lo_207 : ar_got_591);
+                                _er_tload_1[15] = ((ar_odd_25 == 0) ? ar_got_591 : ar_hi_207);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 16) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 16) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 16) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 16) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_123 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11766,9 +15329,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_26 = lane & 1;
+                                float ar_lo_208 = _er_tload_1[0];
+                                float ar_hi_208 = _er_tload_1[4];
+                                float ar_send_592 = ((ar_odd_26 == 0) ? ar_hi_208 : ar_lo_208);
+                                float ar_got_592 = __shfl_xor_sync(0xFFFFFFFF, ar_send_592, 1);
+                                _er_tload_1[0] = ((ar_odd_26 == 0) ? ar_lo_208 : ar_got_592);
+                                _er_tload_1[4] = ((ar_odd_26 == 0) ? ar_got_592 : ar_hi_208);
+                                float ar_lo_209 = _er_tload_1[1];
+                                float ar_hi_209 = _er_tload_1[5];
+                                float ar_send_593 = ((ar_odd_26 == 0) ? ar_hi_209 : ar_lo_209);
+                                float ar_got_593 = __shfl_xor_sync(0xFFFFFFFF, ar_send_593, 1);
+                                _er_tload_1[1] = ((ar_odd_26 == 0) ? ar_lo_209 : ar_got_593);
+                                _er_tload_1[5] = ((ar_odd_26 == 0) ? ar_got_593 : ar_hi_209);
+                                float ar_lo_210 = _er_tload_1[2];
+                                float ar_hi_210 = _er_tload_1[6];
+                                float ar_send_594 = ((ar_odd_26 == 0) ? ar_hi_210 : ar_lo_210);
+                                float ar_got_594 = __shfl_xor_sync(0xFFFFFFFF, ar_send_594, 1);
+                                _er_tload_1[2] = ((ar_odd_26 == 0) ? ar_lo_210 : ar_got_594);
+                                _er_tload_1[6] = ((ar_odd_26 == 0) ? ar_got_594 : ar_hi_210);
+                                float ar_lo_211 = _er_tload_1[3];
+                                float ar_hi_211 = _er_tload_1[7];
+                                float ar_send_595 = ((ar_odd_26 == 0) ? ar_hi_211 : ar_lo_211);
+                                float ar_got_595 = __shfl_xor_sync(0xFFFFFFFF, ar_send_595, 1);
+                                _er_tload_1[3] = ((ar_odd_26 == 0) ? ar_lo_211 : ar_got_595);
+                                _er_tload_1[7] = ((ar_odd_26 == 0) ? ar_got_595 : ar_hi_211);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 32))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 32)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11814,15 +15402,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 32) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 32) + ldc) = _v4;
                                 }
+                                float ar_lo_212 = _er_tload_1[8];
+                                float ar_hi_212 = _er_tload_1[12];
+                                float ar_send_596 = ((ar_odd_26 == 0) ? ar_hi_212 : ar_lo_212);
+                                float ar_got_596 = __shfl_xor_sync(0xFFFFFFFF, ar_send_596, 1);
+                                _er_tload_1[8] = ((ar_odd_26 == 0) ? ar_lo_212 : ar_got_596);
+                                _er_tload_1[12] = ((ar_odd_26 == 0) ? ar_got_596 : ar_hi_212);
+                                float ar_lo_213 = _er_tload_1[9];
+                                float ar_hi_213 = _er_tload_1[13];
+                                float ar_send_597 = ((ar_odd_26 == 0) ? ar_hi_213 : ar_lo_213);
+                                float ar_got_597 = __shfl_xor_sync(0xFFFFFFFF, ar_send_597, 1);
+                                _er_tload_1[9] = ((ar_odd_26 == 0) ? ar_lo_213 : ar_got_597);
+                                _er_tload_1[13] = ((ar_odd_26 == 0) ? ar_got_597 : ar_hi_213);
+                                float ar_lo_214 = _er_tload_1[10];
+                                float ar_hi_214 = _er_tload_1[14];
+                                float ar_send_598 = ((ar_odd_26 == 0) ? ar_hi_214 : ar_lo_214);
+                                float ar_got_598 = __shfl_xor_sync(0xFFFFFFFF, ar_send_598, 1);
+                                _er_tload_1[10] = ((ar_odd_26 == 0) ? ar_lo_214 : ar_got_598);
+                                _er_tload_1[14] = ((ar_odd_26 == 0) ? ar_got_598 : ar_hi_214);
+                                float ar_lo_215 = _er_tload_1[11];
+                                float ar_hi_215 = _er_tload_1[15];
+                                float ar_send_599 = ((ar_odd_26 == 0) ? ar_hi_215 : ar_lo_215);
+                                float ar_got_599 = __shfl_xor_sync(0xFFFFFFFF, ar_send_599, 1);
+                                _er_tload_1[11] = ((ar_odd_26 == 0) ? ar_lo_215 : ar_got_599);
+                                _er_tload_1[15] = ((ar_odd_26 == 0) ? ar_got_599 : ar_hi_215);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 32) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 32) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 32) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 32) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_124 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11853,9 +15465,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_27 = lane & 1;
+                                float ar_lo_216 = _er_tload_1[0];
+                                float ar_hi_216 = _er_tload_1[4];
+                                float ar_send_600 = ((ar_odd_27 == 0) ? ar_hi_216 : ar_lo_216);
+                                float ar_got_600 = __shfl_xor_sync(0xFFFFFFFF, ar_send_600, 1);
+                                _er_tload_1[0] = ((ar_odd_27 == 0) ? ar_lo_216 : ar_got_600);
+                                _er_tload_1[4] = ((ar_odd_27 == 0) ? ar_got_600 : ar_hi_216);
+                                float ar_lo_217 = _er_tload_1[1];
+                                float ar_hi_217 = _er_tload_1[5];
+                                float ar_send_601 = ((ar_odd_27 == 0) ? ar_hi_217 : ar_lo_217);
+                                float ar_got_601 = __shfl_xor_sync(0xFFFFFFFF, ar_send_601, 1);
+                                _er_tload_1[1] = ((ar_odd_27 == 0) ? ar_lo_217 : ar_got_601);
+                                _er_tload_1[5] = ((ar_odd_27 == 0) ? ar_got_601 : ar_hi_217);
+                                float ar_lo_218 = _er_tload_1[2];
+                                float ar_hi_218 = _er_tload_1[6];
+                                float ar_send_602 = ((ar_odd_27 == 0) ? ar_hi_218 : ar_lo_218);
+                                float ar_got_602 = __shfl_xor_sync(0xFFFFFFFF, ar_send_602, 1);
+                                _er_tload_1[2] = ((ar_odd_27 == 0) ? ar_lo_218 : ar_got_602);
+                                _er_tload_1[6] = ((ar_odd_27 == 0) ? ar_got_602 : ar_hi_218);
+                                float ar_lo_219 = _er_tload_1[3];
+                                float ar_hi_219 = _er_tload_1[7];
+                                float ar_send_603 = ((ar_odd_27 == 0) ? ar_hi_219 : ar_lo_219);
+                                float ar_got_603 = __shfl_xor_sync(0xFFFFFFFF, ar_send_603, 1);
+                                _er_tload_1[3] = ((ar_odd_27 == 0) ? ar_lo_219 : ar_got_603);
+                                _er_tload_1[7] = ((ar_odd_27 == 0) ? ar_got_603 : ar_hi_219);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 48))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 48)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11901,15 +15538,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 48) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 48) + ldc) = _v4;
                                 }
+                                float ar_lo_220 = _er_tload_1[8];
+                                float ar_hi_220 = _er_tload_1[12];
+                                float ar_send_604 = ((ar_odd_27 == 0) ? ar_hi_220 : ar_lo_220);
+                                float ar_got_604 = __shfl_xor_sync(0xFFFFFFFF, ar_send_604, 1);
+                                _er_tload_1[8] = ((ar_odd_27 == 0) ? ar_lo_220 : ar_got_604);
+                                _er_tload_1[12] = ((ar_odd_27 == 0) ? ar_got_604 : ar_hi_220);
+                                float ar_lo_221 = _er_tload_1[9];
+                                float ar_hi_221 = _er_tload_1[13];
+                                float ar_send_605 = ((ar_odd_27 == 0) ? ar_hi_221 : ar_lo_221);
+                                float ar_got_605 = __shfl_xor_sync(0xFFFFFFFF, ar_send_605, 1);
+                                _er_tload_1[9] = ((ar_odd_27 == 0) ? ar_lo_221 : ar_got_605);
+                                _er_tload_1[13] = ((ar_odd_27 == 0) ? ar_got_605 : ar_hi_221);
+                                float ar_lo_222 = _er_tload_1[10];
+                                float ar_hi_222 = _er_tload_1[14];
+                                float ar_send_606 = ((ar_odd_27 == 0) ? ar_hi_222 : ar_lo_222);
+                                float ar_got_606 = __shfl_xor_sync(0xFFFFFFFF, ar_send_606, 1);
+                                _er_tload_1[10] = ((ar_odd_27 == 0) ? ar_lo_222 : ar_got_606);
+                                _er_tload_1[14] = ((ar_odd_27 == 0) ? ar_got_606 : ar_hi_222);
+                                float ar_lo_223 = _er_tload_1[11];
+                                float ar_hi_223 = _er_tload_1[15];
+                                float ar_send_607 = ((ar_odd_27 == 0) ? ar_hi_223 : ar_lo_223);
+                                float ar_got_607 = __shfl_xor_sync(0xFFFFFFFF, ar_send_607, 1);
+                                _er_tload_1[11] = ((ar_odd_27 == 0) ? ar_lo_223 : ar_got_607);
+                                _er_tload_1[15] = ((ar_odd_27 == 0) ? ar_got_607 : ar_hi_223);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 48) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 48) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 48) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 48) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_125 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -11940,9 +15601,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_28 = lane & 1;
+                                float ar_lo_224 = _er_tload_1[0];
+                                float ar_hi_224 = _er_tload_1[4];
+                                float ar_send_608 = ((ar_odd_28 == 0) ? ar_hi_224 : ar_lo_224);
+                                float ar_got_608 = __shfl_xor_sync(0xFFFFFFFF, ar_send_608, 1);
+                                _er_tload_1[0] = ((ar_odd_28 == 0) ? ar_lo_224 : ar_got_608);
+                                _er_tload_1[4] = ((ar_odd_28 == 0) ? ar_got_608 : ar_hi_224);
+                                float ar_lo_225 = _er_tload_1[1];
+                                float ar_hi_225 = _er_tload_1[5];
+                                float ar_send_609 = ((ar_odd_28 == 0) ? ar_hi_225 : ar_lo_225);
+                                float ar_got_609 = __shfl_xor_sync(0xFFFFFFFF, ar_send_609, 1);
+                                _er_tload_1[1] = ((ar_odd_28 == 0) ? ar_lo_225 : ar_got_609);
+                                _er_tload_1[5] = ((ar_odd_28 == 0) ? ar_got_609 : ar_hi_225);
+                                float ar_lo_226 = _er_tload_1[2];
+                                float ar_hi_226 = _er_tload_1[6];
+                                float ar_send_610 = ((ar_odd_28 == 0) ? ar_hi_226 : ar_lo_226);
+                                float ar_got_610 = __shfl_xor_sync(0xFFFFFFFF, ar_send_610, 1);
+                                _er_tload_1[2] = ((ar_odd_28 == 0) ? ar_lo_226 : ar_got_610);
+                                _er_tload_1[6] = ((ar_odd_28 == 0) ? ar_got_610 : ar_hi_226);
+                                float ar_lo_227 = _er_tload_1[3];
+                                float ar_hi_227 = _er_tload_1[7];
+                                float ar_send_611 = ((ar_odd_28 == 0) ? ar_hi_227 : ar_lo_227);
+                                float ar_got_611 = __shfl_xor_sync(0xFFFFFFFF, ar_send_611, 1);
+                                _er_tload_1[3] = ((ar_odd_28 == 0) ? ar_lo_227 : ar_got_611);
+                                _er_tload_1[7] = ((ar_odd_28 == 0) ? ar_got_611 : ar_hi_227);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 64))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 64)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -11988,15 +15674,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 64) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 64) + ldc) = _v4;
                                 }
+                                float ar_lo_228 = _er_tload_1[8];
+                                float ar_hi_228 = _er_tload_1[12];
+                                float ar_send_612 = ((ar_odd_28 == 0) ? ar_hi_228 : ar_lo_228);
+                                float ar_got_612 = __shfl_xor_sync(0xFFFFFFFF, ar_send_612, 1);
+                                _er_tload_1[8] = ((ar_odd_28 == 0) ? ar_lo_228 : ar_got_612);
+                                _er_tload_1[12] = ((ar_odd_28 == 0) ? ar_got_612 : ar_hi_228);
+                                float ar_lo_229 = _er_tload_1[9];
+                                float ar_hi_229 = _er_tload_1[13];
+                                float ar_send_613 = ((ar_odd_28 == 0) ? ar_hi_229 : ar_lo_229);
+                                float ar_got_613 = __shfl_xor_sync(0xFFFFFFFF, ar_send_613, 1);
+                                _er_tload_1[9] = ((ar_odd_28 == 0) ? ar_lo_229 : ar_got_613);
+                                _er_tload_1[13] = ((ar_odd_28 == 0) ? ar_got_613 : ar_hi_229);
+                                float ar_lo_230 = _er_tload_1[10];
+                                float ar_hi_230 = _er_tload_1[14];
+                                float ar_send_614 = ((ar_odd_28 == 0) ? ar_hi_230 : ar_lo_230);
+                                float ar_got_614 = __shfl_xor_sync(0xFFFFFFFF, ar_send_614, 1);
+                                _er_tload_1[10] = ((ar_odd_28 == 0) ? ar_lo_230 : ar_got_614);
+                                _er_tload_1[14] = ((ar_odd_28 == 0) ? ar_got_614 : ar_hi_230);
+                                float ar_lo_231 = _er_tload_1[11];
+                                float ar_hi_231 = _er_tload_1[15];
+                                float ar_send_615 = ((ar_odd_28 == 0) ? ar_hi_231 : ar_lo_231);
+                                float ar_got_615 = __shfl_xor_sync(0xFFFFFFFF, ar_send_615, 1);
+                                _er_tload_1[11] = ((ar_odd_28 == 0) ? ar_lo_231 : ar_got_615);
+                                _er_tload_1[15] = ((ar_odd_28 == 0) ? ar_got_615 : ar_hi_231);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 64) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 64) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 64) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 64) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_126 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -12027,9 +15737,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_29 = lane & 1;
+                                float ar_lo_232 = _er_tload_1[0];
+                                float ar_hi_232 = _er_tload_1[4];
+                                float ar_send_616 = ((ar_odd_29 == 0) ? ar_hi_232 : ar_lo_232);
+                                float ar_got_616 = __shfl_xor_sync(0xFFFFFFFF, ar_send_616, 1);
+                                _er_tload_1[0] = ((ar_odd_29 == 0) ? ar_lo_232 : ar_got_616);
+                                _er_tload_1[4] = ((ar_odd_29 == 0) ? ar_got_616 : ar_hi_232);
+                                float ar_lo_233 = _er_tload_1[1];
+                                float ar_hi_233 = _er_tload_1[5];
+                                float ar_send_617 = ((ar_odd_29 == 0) ? ar_hi_233 : ar_lo_233);
+                                float ar_got_617 = __shfl_xor_sync(0xFFFFFFFF, ar_send_617, 1);
+                                _er_tload_1[1] = ((ar_odd_29 == 0) ? ar_lo_233 : ar_got_617);
+                                _er_tload_1[5] = ((ar_odd_29 == 0) ? ar_got_617 : ar_hi_233);
+                                float ar_lo_234 = _er_tload_1[2];
+                                float ar_hi_234 = _er_tload_1[6];
+                                float ar_send_618 = ((ar_odd_29 == 0) ? ar_hi_234 : ar_lo_234);
+                                float ar_got_618 = __shfl_xor_sync(0xFFFFFFFF, ar_send_618, 1);
+                                _er_tload_1[2] = ((ar_odd_29 == 0) ? ar_lo_234 : ar_got_618);
+                                _er_tload_1[6] = ((ar_odd_29 == 0) ? ar_got_618 : ar_hi_234);
+                                float ar_lo_235 = _er_tload_1[3];
+                                float ar_hi_235 = _er_tload_1[7];
+                                float ar_send_619 = ((ar_odd_29 == 0) ? ar_hi_235 : ar_lo_235);
+                                float ar_got_619 = __shfl_xor_sync(0xFFFFFFFF, ar_send_619, 1);
+                                _er_tload_1[3] = ((ar_odd_29 == 0) ? ar_lo_235 : ar_got_619);
+                                _er_tload_1[7] = ((ar_odd_29 == 0) ? ar_got_619 : ar_hi_235);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 80))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 80)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -12075,15 +15810,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 80) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 80) + ldc) = _v4;
                                 }
+                                float ar_lo_236 = _er_tload_1[8];
+                                float ar_hi_236 = _er_tload_1[12];
+                                float ar_send_620 = ((ar_odd_29 == 0) ? ar_hi_236 : ar_lo_236);
+                                float ar_got_620 = __shfl_xor_sync(0xFFFFFFFF, ar_send_620, 1);
+                                _er_tload_1[8] = ((ar_odd_29 == 0) ? ar_lo_236 : ar_got_620);
+                                _er_tload_1[12] = ((ar_odd_29 == 0) ? ar_got_620 : ar_hi_236);
+                                float ar_lo_237 = _er_tload_1[9];
+                                float ar_hi_237 = _er_tload_1[13];
+                                float ar_send_621 = ((ar_odd_29 == 0) ? ar_hi_237 : ar_lo_237);
+                                float ar_got_621 = __shfl_xor_sync(0xFFFFFFFF, ar_send_621, 1);
+                                _er_tload_1[9] = ((ar_odd_29 == 0) ? ar_lo_237 : ar_got_621);
+                                _er_tload_1[13] = ((ar_odd_29 == 0) ? ar_got_621 : ar_hi_237);
+                                float ar_lo_238 = _er_tload_1[10];
+                                float ar_hi_238 = _er_tload_1[14];
+                                float ar_send_622 = ((ar_odd_29 == 0) ? ar_hi_238 : ar_lo_238);
+                                float ar_got_622 = __shfl_xor_sync(0xFFFFFFFF, ar_send_622, 1);
+                                _er_tload_1[10] = ((ar_odd_29 == 0) ? ar_lo_238 : ar_got_622);
+                                _er_tload_1[14] = ((ar_odd_29 == 0) ? ar_got_622 : ar_hi_238);
+                                float ar_lo_239 = _er_tload_1[11];
+                                float ar_hi_239 = _er_tload_1[15];
+                                float ar_send_623 = ((ar_odd_29 == 0) ? ar_hi_239 : ar_lo_239);
+                                float ar_got_623 = __shfl_xor_sync(0xFFFFFFFF, ar_send_623, 1);
+                                _er_tload_1[11] = ((ar_odd_29 == 0) ? ar_lo_239 : ar_got_623);
+                                _er_tload_1[15] = ((ar_odd_29 == 0) ? ar_got_623 : ar_hi_239);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 80) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 80) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 80) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 80) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_127 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -12114,9 +15873,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_30 = lane & 1;
+                                float ar_lo_240 = _er_tload_1[0];
+                                float ar_hi_240 = _er_tload_1[4];
+                                float ar_send_624 = ((ar_odd_30 == 0) ? ar_hi_240 : ar_lo_240);
+                                float ar_got_624 = __shfl_xor_sync(0xFFFFFFFF, ar_send_624, 1);
+                                _er_tload_1[0] = ((ar_odd_30 == 0) ? ar_lo_240 : ar_got_624);
+                                _er_tload_1[4] = ((ar_odd_30 == 0) ? ar_got_624 : ar_hi_240);
+                                float ar_lo_241 = _er_tload_1[1];
+                                float ar_hi_241 = _er_tload_1[5];
+                                float ar_send_625 = ((ar_odd_30 == 0) ? ar_hi_241 : ar_lo_241);
+                                float ar_got_625 = __shfl_xor_sync(0xFFFFFFFF, ar_send_625, 1);
+                                _er_tload_1[1] = ((ar_odd_30 == 0) ? ar_lo_241 : ar_got_625);
+                                _er_tload_1[5] = ((ar_odd_30 == 0) ? ar_got_625 : ar_hi_241);
+                                float ar_lo_242 = _er_tload_1[2];
+                                float ar_hi_242 = _er_tload_1[6];
+                                float ar_send_626 = ((ar_odd_30 == 0) ? ar_hi_242 : ar_lo_242);
+                                float ar_got_626 = __shfl_xor_sync(0xFFFFFFFF, ar_send_626, 1);
+                                _er_tload_1[2] = ((ar_odd_30 == 0) ? ar_lo_242 : ar_got_626);
+                                _er_tload_1[6] = ((ar_odd_30 == 0) ? ar_got_626 : ar_hi_242);
+                                float ar_lo_243 = _er_tload_1[3];
+                                float ar_hi_243 = _er_tload_1[7];
+                                float ar_send_627 = ((ar_odd_30 == 0) ? ar_hi_243 : ar_lo_243);
+                                float ar_got_627 = __shfl_xor_sync(0xFFFFFFFF, ar_send_627, 1);
+                                _er_tload_1[3] = ((ar_odd_30 == 0) ? ar_lo_243 : ar_got_627);
+                                _er_tload_1[7] = ((ar_odd_30 == 0) ? ar_got_627 : ar_hi_243);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 96))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 96)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -12162,15 +15946,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 96) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 96) + ldc) = _v4;
                                 }
+                                float ar_lo_244 = _er_tload_1[8];
+                                float ar_hi_244 = _er_tload_1[12];
+                                float ar_send_628 = ((ar_odd_30 == 0) ? ar_hi_244 : ar_lo_244);
+                                float ar_got_628 = __shfl_xor_sync(0xFFFFFFFF, ar_send_628, 1);
+                                _er_tload_1[8] = ((ar_odd_30 == 0) ? ar_lo_244 : ar_got_628);
+                                _er_tload_1[12] = ((ar_odd_30 == 0) ? ar_got_628 : ar_hi_244);
+                                float ar_lo_245 = _er_tload_1[9];
+                                float ar_hi_245 = _er_tload_1[13];
+                                float ar_send_629 = ((ar_odd_30 == 0) ? ar_hi_245 : ar_lo_245);
+                                float ar_got_629 = __shfl_xor_sync(0xFFFFFFFF, ar_send_629, 1);
+                                _er_tload_1[9] = ((ar_odd_30 == 0) ? ar_lo_245 : ar_got_629);
+                                _er_tload_1[13] = ((ar_odd_30 == 0) ? ar_got_629 : ar_hi_245);
+                                float ar_lo_246 = _er_tload_1[10];
+                                float ar_hi_246 = _er_tload_1[14];
+                                float ar_send_630 = ((ar_odd_30 == 0) ? ar_hi_246 : ar_lo_246);
+                                float ar_got_630 = __shfl_xor_sync(0xFFFFFFFF, ar_send_630, 1);
+                                _er_tload_1[10] = ((ar_odd_30 == 0) ? ar_lo_246 : ar_got_630);
+                                _er_tload_1[14] = ((ar_odd_30 == 0) ? ar_got_630 : ar_hi_246);
+                                float ar_lo_247 = _er_tload_1[11];
+                                float ar_hi_247 = _er_tload_1[15];
+                                float ar_send_631 = ((ar_odd_30 == 0) ? ar_hi_247 : ar_lo_247);
+                                float ar_got_631 = __shfl_xor_sync(0xFFFFFFFF, ar_send_631, 1);
+                                _er_tload_1[11] = ((ar_odd_30 == 0) ? ar_lo_247 : ar_got_631);
+                                _er_tload_1[15] = ((ar_odd_30 == 0) ? ar_got_631 : ar_hi_247);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 96) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 96) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 96) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 96) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_128 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
@@ -12201,9 +16009,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                             asm volatile("tcgen05.wait::ld.sync.aligned;");
                             if (whole_te_1 == 1) {
 #if CAKE_WGRAD_OUT == 32
+                                int ar_odd_31 = lane & 1;
+                                float ar_lo_248 = _er_tload_1[0];
+                                float ar_hi_248 = _er_tload_1[4];
+                                float ar_send_632 = ((ar_odd_31 == 0) ? ar_hi_248 : ar_lo_248);
+                                float ar_got_632 = __shfl_xor_sync(0xFFFFFFFF, ar_send_632, 1);
+                                _er_tload_1[0] = ((ar_odd_31 == 0) ? ar_lo_248 : ar_got_632);
+                                _er_tload_1[4] = ((ar_odd_31 == 0) ? ar_got_632 : ar_hi_248);
+                                float ar_lo_249 = _er_tload_1[1];
+                                float ar_hi_249 = _er_tload_1[5];
+                                float ar_send_633 = ((ar_odd_31 == 0) ? ar_hi_249 : ar_lo_249);
+                                float ar_got_633 = __shfl_xor_sync(0xFFFFFFFF, ar_send_633, 1);
+                                _er_tload_1[1] = ((ar_odd_31 == 0) ? ar_lo_249 : ar_got_633);
+                                _er_tload_1[5] = ((ar_odd_31 == 0) ? ar_got_633 : ar_hi_249);
+                                float ar_lo_250 = _er_tload_1[2];
+                                float ar_hi_250 = _er_tload_1[6];
+                                float ar_send_634 = ((ar_odd_31 == 0) ? ar_hi_250 : ar_lo_250);
+                                float ar_got_634 = __shfl_xor_sync(0xFFFFFFFF, ar_send_634, 1);
+                                _er_tload_1[2] = ((ar_odd_31 == 0) ? ar_lo_250 : ar_got_634);
+                                _er_tload_1[6] = ((ar_odd_31 == 0) ? ar_got_634 : ar_hi_250);
+                                float ar_lo_251 = _er_tload_1[3];
+                                float ar_hi_251 = _er_tload_1[7];
+                                float ar_send_635 = ((ar_odd_31 == 0) ? ar_hi_251 : ar_lo_251);
+                                float ar_got_635 = __shfl_xor_sync(0xFFFFFFFF, ar_send_635, 1);
+                                _er_tload_1[3] = ((ar_odd_31 == 0) ? ar_lo_251 : ar_got_635);
+                                _er_tload_1[7] = ((ar_odd_31 == 0) ? ar_got_635 : ar_hi_251);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[0 + 0], _er_tload_1[0 + 1], _er_tload_1[0 + 2], _er_tload_1[0 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 112))) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 112)) = _v4;
 #else
                                 #pragma unroll
                                 for (int _lp = 0; _lp < 1; _lp++) {
@@ -12249,15 +16082,39 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                 {
 #if CAKE_WGRAD_OUT == 32
                                     float4 _v4 = make_float4(_er_tload_1[4 + 0], _er_tload_1[4 + 1], _er_tload_1[4 + 2], _er_tload_1[4 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 112) + 4)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 112) + ldc) = _v4;
                                 }
+                                float ar_lo_252 = _er_tload_1[8];
+                                float ar_hi_252 = _er_tload_1[12];
+                                float ar_send_636 = ((ar_odd_31 == 0) ? ar_hi_252 : ar_lo_252);
+                                float ar_got_636 = __shfl_xor_sync(0xFFFFFFFF, ar_send_636, 1);
+                                _er_tload_1[8] = ((ar_odd_31 == 0) ? ar_lo_252 : ar_got_636);
+                                _er_tload_1[12] = ((ar_odd_31 == 0) ? ar_got_636 : ar_hi_252);
+                                float ar_lo_253 = _er_tload_1[9];
+                                float ar_hi_253 = _er_tload_1[13];
+                                float ar_send_637 = ((ar_odd_31 == 0) ? ar_hi_253 : ar_lo_253);
+                                float ar_got_637 = __shfl_xor_sync(0xFFFFFFFF, ar_send_637, 1);
+                                _er_tload_1[9] = ((ar_odd_31 == 0) ? ar_lo_253 : ar_got_637);
+                                _er_tload_1[13] = ((ar_odd_31 == 0) ? ar_got_637 : ar_hi_253);
+                                float ar_lo_254 = _er_tload_1[10];
+                                float ar_hi_254 = _er_tload_1[14];
+                                float ar_send_638 = ((ar_odd_31 == 0) ? ar_hi_254 : ar_lo_254);
+                                float ar_got_638 = __shfl_xor_sync(0xFFFFFFFF, ar_send_638, 1);
+                                _er_tload_1[10] = ((ar_odd_31 == 0) ? ar_lo_254 : ar_got_638);
+                                _er_tload_1[14] = ((ar_odd_31 == 0) ? ar_got_638 : ar_hi_254);
+                                float ar_lo_255 = _er_tload_1[11];
+                                float ar_hi_255 = _er_tload_1[15];
+                                float ar_send_639 = ((ar_odd_31 == 0) ? ar_hi_255 : ar_lo_255);
+                                float ar_got_639 = __shfl_xor_sync(0xFFFFFFFF, ar_send_639, 1);
+                                _er_tload_1[11] = ((ar_odd_31 == 0) ? ar_lo_255 : ar_got_639);
+                                _er_tload_1[15] = ((ar_odd_31 == 0) ? ar_got_639 : ar_hi_255);
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[8 + 0], _er_tload_1[8 + 1], _er_tload_1[8 + 2], _er_tload_1[8 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 112) + 8)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 112) + 8) = _v4;
                                 }
                                 {
                                     float4 _v4 = make_float4(_er_tload_1[12 + 0], _er_tload_1[12 + 1], _er_tload_1[12 + 2], _er_tload_1[12 + 3]);
-                                    *reinterpret_cast<float4*>((C + (er_out_t_1 + (er_col_b_1 + 112) + 12)) + 0) = _v4;
+                                    *reinterpret_cast<float4*>(C + er_out_t_1 + (lane & 1) * (4 - ldc) + (er_col_b_1 + 112) + (8 + ldc)) = _v4;
 #else
                                     const unsigned* _raw_stv8_129 = reinterpret_cast<const unsigned*>(_er_tpack_1);
                                     asm volatile(
