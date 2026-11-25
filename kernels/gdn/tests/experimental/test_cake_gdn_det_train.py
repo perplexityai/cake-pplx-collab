@@ -11114,7 +11114,8 @@ def _pv_call(inputs, seq_lens, heads, kind, device, seed) -> dict:
 
 def test_grads_of_fills_the_zeros_of_autograd_and_reads_the_final_state_grad() -> None:
     # no device: an output without a gradient comes back as the zeros that autograd's fill made before (its shape,
-    # dtype and device, +0.0), and only a gradient that autograd gave the final state counts, zeros included
+    # dtype and device, +0.0), and only a gradient that autograd gave the final state counts, zeros included; a call
+    # without a final state sets no zero_fill (autograd fills its zeros) and takes do and dht as autograd gives them
     cpu = torch.device("cpu")
     o_shape, state_shape = (1, 5, 4, HEAD_DIM), (2, 4, HEAD_DIM, HEAD_DIM)
     with_state = types.SimpleNamespace(
@@ -11130,6 +11131,8 @@ def test_grads_of_fills_the_zeros_of_autograd_and_reads_the_final_state_grad() -
     assert not do.view(torch.int16).any() and not dht.view(torch.int32).any()
     given = torch.ones(o_shape, dtype=torch.bfloat16)
     do, dht, grad = cake_chain._grads_of(without_state, given, None)
+    assert do is given and dht is None and not grad
+    do, dht, grad = cake_chain._grads_of(types.SimpleNamespace(), given, None)
     assert do is given and dht is None and not grad
     zeros = torch.zeros(state_shape)
     do, dht, grad = cake_chain._grads_of(with_state, given, zeros)

@@ -5952,11 +5952,13 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
     if output.dtype != q.dtype:
         output = output.to(q.dtype)
     final_state = fwd["final_state"] if output_final_state else None
-    # autograd passes None for an output that receives no gradient (:func:`_grads_of`), which tells a final state
-    # without a gradient apart from a zero one; the zeros autograd would fill in: their shapes, dtypes and device
-    ctx.set_materialize_grads(False)
-    ctx.zero_fill = (output.shape, output.dtype, output.device,
-                     None if final_state is None else (final_state.shape, final_state.dtype))  # fmt: skip
+    if output_final_state:
+        # autograd passes None for an output that receives no gradient (:func:`_grads_of`), which tells a final state
+        # without a gradient apart from a zero one; the zeros autograd would fill in: their shapes, dtypes and device.
+        # A call without a final state keeps autograd's zero fill and sets no zero_fill (its backward is 0.2.8's)
+        ctx.set_materialize_grads(False)
+        ctx.zero_fill = (output.shape, output.dtype, output.device,
+                         None if final_state is None else (final_state.shape, final_state.dtype))  # fmt: skip
     return output, final_state
 
 
@@ -5965,8 +5967,12 @@ def _grads_of(ctx, do, dht):
     state a gradient (the forward turned autograd's zero fill off, so ``dht`` is None for a final state that receives
     none, also when the caller asked for it), and ``do`` / ``dht`` are the gradients with the zeros that autograd
     would fill in for an output without one, the chain's 0.2.8 inputs and bits (:data:`PV_TF32` runs the pv_tf32
-    programs only with ``final_state_grad``)."""
-    o_shape, o_dtype, device, state = ctx.zero_fill
+    programs only with ``final_state_grad``).  A call without a final state (no ``zero_fill``: the forward kept
+    autograd's zero fill) has no final-state gradient and takes ``do`` / ``dht`` as autograd gives them."""
+    zero_fill = getattr(ctx, "zero_fill", None)
+    if zero_fill is None:
+        return do, dht, False
+    o_shape, o_dtype, device, state = zero_fill
     final_state_grad = dht is not None
     if do is None:
         do = torch.zeros(o_shape, dtype=o_dtype, device=device)
@@ -6114,9 +6120,12 @@ class CakeGDNDetPackedFunction(torch.autograd.Function):
             seq_len, num_heads, dim = q_shape[1], q_shape[2], q_shape[3]
             width = ctx.row_shape[-1]
             strides = (seq_len * width, width, dim, 1)
-            # on the output's device (do is None when the output receives no gradient, :func:`_grads_of`)
+            # on the output's device (do is None when the output receives no gradient, :func:`_grads_of`; never
+            # for a call without a final state, which sets no zero_fill)
             d_row = torch.empty(
-                ctx.row_shape, dtype=torch.bfloat16, device=ctx.zero_fill[2]
+                ctx.row_shape,
+                dtype=torch.bfloat16,
+                device=ctx.zero_fill[2] if do is None else do.device,
             )
             views = (
                 d_row.as_strided(q_shape, strides, 0),
