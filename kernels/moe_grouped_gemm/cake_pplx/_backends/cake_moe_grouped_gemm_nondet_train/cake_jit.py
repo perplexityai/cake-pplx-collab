@@ -2146,6 +2146,10 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
     ],
     # The u32 words of the queue walk's tile counters (``queue_sched``).
     "queue_sched_words": 2,
+    # The architectures where a forward or data gradient whose output span passes ``int32_elems``
+    # elements launches its stage once per row chunk that fits (``cake_backend``, wide outputs); on the
+    # others such a call is refused.
+    "wide_rows_archs": ["sm_100a", "sm_103a", "sm_107a"],
     "int32_elems": 2147483647,
 }
 
