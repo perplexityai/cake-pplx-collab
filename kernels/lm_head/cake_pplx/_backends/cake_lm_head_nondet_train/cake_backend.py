@@ -3741,12 +3741,21 @@ def _small_call_rows(
 # the per-call buffers of the call run on the host before the staging, and the GPU waits for none of them between the
 # staging and the first GEMM.  The only reader of a staged tensor ahead of that launch, a temperature check, runs the
 # staging first (:func:`_resolve_temperature`).  The small-call entries hold the stage inside :func:`_small_call_scope`.
-_SMALL_STAGE = threading.local()
+# Every other call reads ``ops`` once per launch context and finds ``None``: no call into the staging.
+class _SmallStage(threading.local):
+    """The calling thread's pending small-call staging, ``ops`` (``None``: nothing pending).  The class attribute is
+    every thread's value until the thread stages, so reading ``ops`` finds it with no lookup miss (reading a missing
+    attribute of a bare ``threading.local`` raises and clears an ``AttributeError`` each time)."""
+
+    ops: Optional[Callable[[], None]] = None
+
+
+_SMALL_STAGE = _SmallStage()
 
 
 def _run_small_stage() -> None:
     """Run the calling thread's pending small-call staging (:data:`_SMALL_STAGE`), if any, once."""
-    ops = getattr(_SMALL_STAGE, "ops", None)
+    ops = _SMALL_STAGE.ops
     if ops is not None:
         _SMALL_STAGE.ops = None
         ops()
@@ -4193,7 +4202,8 @@ def _resolve_temperature(
                     f"a per-token temperature must be on X's device {device}, got {temperature.device}"
                 )
             # a small call's staged temperature is read here, ahead of the call's first launch: its staging first
-            _run_small_stage()
+            if _SMALL_STAGE.ops is not None:
+                _run_small_stage()
             tau = temperature.contiguous()
             if int(T) > 0:
                 # NaN fails ``> 0``, +inf fails ``< inf``
@@ -6208,7 +6218,8 @@ def _ffi_stream_context(index: int):
     program's launch: a pending small-call staging (:data:`_SMALL_STAGE`) runs first, on torch's current stream."""
     import tvm_ffi
 
-    _run_small_stage()
+    if _SMALL_STAGE.ops is not None:
+        _run_small_stage()
 
     device = _FFI_DEVICES.get(index)
     if device is None:
@@ -16164,55 +16175,66 @@ def cake_lm_head_nondet_train_logprob(
     forward's valid-row index (no count, no host synchronization) and recomputes under the same values."""
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
-    T = int(X.shape[0]) if X.ndim else 0
     rows = _small_call_rows(X, labels, backend, chunk_size, compact_rows, logprob=True)
-    with _small_call_scope() if rows else contextlib.nullcontext():
-        if rows:
-            # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted (the staging runs right
-            # before the call's first launch, _small_call_scope); cut back to T rows below
-            X, labels, _, _, _ = _SmallCallStage.apply(
-                X, labels, rows, None, None, None
-            )
-            compact_rows = False
-        if (
-            _SMALL_T_KEEP["on"]
-            and backend == "cake"
-            and X.ndim == 2
-            and 0 < int(X.shape[0]) <= SMALL_T_KEEP_MAX_ROWS
-            and torch.is_grad_enabled()
-            and (X.requires_grad or W.requires_grad)
-        ):
-            # a small call where a backward can follow: the kept logits (set_small_t_keep)
-            logp = CakeLMHeadNondetLogprobKeepFunction.apply(
-                X,
+    if rows:
+        # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted (the staging runs right before the
+        # call's first launch, _small_call_scope); cut back to T rows.  Any other call enters no scope.
+        T = int(X.shape[0])
+        with _small_call_scope():
+            Xs, lab, _, _, _ = _SmallCallStage.apply(X, labels, rows, None, None, None)
+            logp = cake_lm_head_nondet_train_logprob(
+                Xs,
                 W,
-                labels,
-                int(chunk_size),
-                compact_rows,
-                fuse_dw_cast,
-                dx_finalize,
-                dw_stream,
-                hidden_count,
-                gemm_tuning,
-                logprob_dz,
+                lab,
+                chunk_size=chunk_size,
+                backend=backend,
+                compact_rows=False,
+                fuse_dw_cast=fuse_dw_cast,
+                dx_finalize=dx_finalize,
+                dw_stream=dw_stream,
+                hidden_count=hidden_count,
+                gemm_tuning=gemm_tuning,
+                logprob_dz=logprob_dz,
+                logprob_lbl=logprob_lbl,
             )
-        else:
-            logp = CakeLMHeadNondetLogprobFunction.apply(
-                X,
-                W,
-                labels,
-                int(chunk_size),
-                backend,
-                compact_rows,
-                fuse_dw_cast,
-                dx_finalize,
-                dw_stream,
-                hidden_count,
-                gemm_tuning,
-                logprob_dz,
-                logprob_lbl,
-            )
-    return logp[:T] if rows > T else logp
+        return logp[:T] if rows > T else logp
+    if (
+        _SMALL_T_KEEP["on"]
+        and backend == "cake"
+        and X.ndim == 2
+        and 0 < int(X.shape[0]) <= SMALL_T_KEEP_MAX_ROWS
+        and torch.is_grad_enabled()
+        and (X.requires_grad or W.requires_grad)
+    ):
+        # a small call where a backward can follow: the kept logits (set_small_t_keep)
+        return CakeLMHeadNondetLogprobKeepFunction.apply(
+            X,
+            W,
+            labels,
+            int(chunk_size),
+            compact_rows,
+            fuse_dw_cast,
+            dx_finalize,
+            dw_stream,
+            hidden_count,
+            gemm_tuning,
+            logprob_dz,
+        )
+    return CakeLMHeadNondetLogprobFunction.apply(
+        X,
+        W,
+        labels,
+        int(chunk_size),
+        backend,
+        compact_rows,
+        fuse_dw_cast,
+        dx_finalize,
+        dw_stream,
+        hidden_count,
+        gemm_tuning,
+        logprob_dz,
+        logprob_lbl,
+    )
 
 
 def cake_lm_head_nondet_train_logprob_temperature(
