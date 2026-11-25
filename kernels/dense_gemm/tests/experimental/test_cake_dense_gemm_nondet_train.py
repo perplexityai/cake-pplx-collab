@@ -1306,6 +1306,7 @@ def test_k1_det_0326_generic_call_follows_the_det_entry(monkeypatch):
     every token count.  Where it swaps since that version alone the plan is the deterministic weight-gradient plan,
     served as planned (no fallback), with the transposed store; every other plan is that of the deterministic generic
     call of version 0.3.25.  This is a plan check: it asserts no bits."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
     _register_k1(monkeypatch, "sm_107a")
     tokens = (
         1, 16, 64, 65, 128, 129, 192, 256, 320, 384, 512, 640, 768, 896, 959, 960, 3072, 3073, 3328, 3584, 3585, 3840,
@@ -16742,7 +16743,7 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
         assert routed == default, (K, N, T, routed.template, default.template)
 
 
-def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
+def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5(monkeypatch):
     """The FP32 rows of the deterministic package's 212-SM ``sm_107a`` token ranges (its ``ROW_RULE_RANGES_BY_SM``,
     version 0.3.5, with the ranges of version 0.3.8), as this package runs them on a 212-SM ``sm_107a`` part: no row of
     this package's tables (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K,
@@ -16752,6 +16753,7 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
     test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7; the sm_100a and sm_103a parts of that table (version
     0.3.8): test_k1_rows_follow_the_deterministic_ranges_of_0_3_8 (their raster ranges of versions 0.3.9 - 0.3.11:
     the raster tests)."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
     bf16, f32 = torch.bfloat16, torch.float32
     arch, sms = "sm_107a", 212
     l2 = K1_DGRAD_PARTS[(arch, sms)]
@@ -16979,6 +16981,7 @@ def test_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch):
     the o_proj weight gradient at T 12288 its three-way K split (``DET_212_F32_WGRAD_038_SPLIT``).  The checks read
     the ranges of version 0.3.8 (``_det_tables_038``; the raster groups of versions 0.3.9 - 0.3.11:
     ``test_k1_rows_follow_the_deterministic_raster_ranges_of_0_3_9``, ``..._of_0_3_10`` and ``..._of_0_3_11``)."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
     bf16, f32 = torch.bfloat16, torch.float32
     prefix = det_backend._TEMPLATE_PREFIX
     _det_tables_038(monkeypatch)

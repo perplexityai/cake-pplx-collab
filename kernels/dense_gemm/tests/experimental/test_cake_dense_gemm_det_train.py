@@ -4881,7 +4881,8 @@ def _views(family, row, op, out_dtype, T, device="cpu"):
 @pytest.mark.parametrize(
     "T", [2049, 1001]
 )  # K = T above / at or below the TMA-store epilogue bound
-def test_projection_rows_plan_like_the_cake_launcher(sm_count, T):
+def test_projection_rows_plan_like_the_cake_launcher(monkeypatch, sm_count, T):
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     for row, (K, N) in PROJECTION_ROWS.items():
         for op in ("fwd", "dgrad", "wgrad"):
             for out_dtype in ("bf16", "f32") if op != "fwd" else ("bf16",):
@@ -5677,9 +5678,10 @@ def test_ht_program_with_forced_stream_k_matches_fp64_reference(record_property)
 
 
 @pytest.mark.parametrize("pairs", [74, 106])  # 148 SMs (B200) / 212 SMs (R200)
-def test_sk_parts_rule(pairs):
+def test_sk_parts_rule(monkeypatch, pairs):
     # Cake round 4 (L20): a measured ``sk_parts = p`` row rule splits every tail tile p ways when the units
     # fit the CTA pairs and keep SK_MIN_ITERS K steps each; otherwise the row keeps the ``auto`` policy.
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     assert sk_parts_plan(24, 254, pairs, 3) == (True, 72)
     assert sk_parts_plan(24, 254, pairs, 2) == (True, 48)
     assert stream_k_plan(24, 254, pairs, *sk_parts_plan(24, 254, pairs, 3)) == (
@@ -13517,7 +13519,7 @@ SM107A_212_TRANCHE_TIERS = {
 # fmt: on
 
 
-def test_sm107a_212_tranche_floor_table():
+def test_sm107a_212_tranche_floor_table(monkeypatch):
     # the sm_107a tiers are the tranche's and, since version 0.3.22, the tiers of the five BF16 weight gradients of the
     # 64-row exact split (the T 8193 floors of version 0.3.22, test_sm107a_0322_wgrad_rule_tables; the tiers of version
     # 0.3.23, test_sm107a_0323_wgrad_tables; the tiers of version 0.3.25 with the 64-row whole tiles,
@@ -13525,6 +13527,7 @@ def test_sm107a_212_tranche_floor_table():
     # 5120 -> 64 / 128 weight gradients of sm_100a (test_sm100a_5120_wgrad_long_token_rule), the 4096 x 4096 weight
     # gradients of sm_100a and sm_103a (test_wave_yield_plans_the_synchronised_tail_on_148_sms) and the K-major
     # forward / input-gradient rows of sm_100a and sm_103a of version 0.3.7 (test_k_major_tier_and_range_tables)
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     assert {
         key: tiers
         for key, tiers in cake_backend.ROW_RULE_MIN_T.items()
@@ -14121,7 +14124,7 @@ def test_sm100a_5120_wgrad_long_token_rule():
                 assert plan.iters_per_unit > cake_backend.K1_PROMOTE_MIN_SEGMENT, where
 
 
-def test_sm107a_212_f32_range_table():
+def test_sm107a_212_f32_range_table(monkeypatch):
     """``ROW_RULE_RANGES_BY_SM`` holds the 212-SM sm_107a part and, since version 0.3.8, the 148- and 152-SM sm_103a
     parts and the 152-SM sm_100a part (``DGRAD_F32_PART_RANGES``, test_dgrad_f32_part_range_tables; since version 0.3.11
     with more ranges on the 152-SM sm_100a part, ``RASTER_0311_RANGES``, test_raster_0311_tables), and since
@@ -14140,6 +14143,7 @@ def test_sm107a_212_f32_range_table():
     version 0.3.22 the table also holds the 216-SM sm_107a part (BF16 weight-gradient ranges: indexer_hw since version
     0.3.22, 6144 -> 48 since version 0.3.23), and since version 0.3.23 the 212-SM part a BF16 weight-gradient range of
     4096 -> 16 (``SM107A_0323_RANGES``, test_sm107a_0323_wgrad_tables), which the BF16 check below leaves out."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     table = cake_backend.ROW_RULE_RANGES_BY_SM
     assert set(table) == {
         ("sm_107a", 212),
@@ -15869,6 +15873,7 @@ def test_dgrad_f32_part_range_tables(monkeypatch):
     part's ranges).  The two 152-SM sm_103a keys version 0.3.9 changed and the four 152-SM sm_100a keys version 0.3.11
     changed are put back first (``_tables_038``; ``test_raster_039_tables`` and ``test_raster_0311_tables`` check
     them)."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     _tables_038(monkeypatch)
     assert {
         part for part in cake_backend.ROW_RULE_RANGES_BY_SM if part[0] in ("sm_100a", "sm_103a")
@@ -16094,6 +16099,7 @@ def test_routing_038_changes_exactly_the_measured_plans(monkeypatch):
     0.3.7, the other rows) is the plan of version 0.3.7.  The current side reads the tables of version 0.3.8
     (``_tables_038``; versions 0.3.9 - 0.3.11: ``test_routing_039_changes_exactly_the_raster_plans``,
     ``test_routing_0310_...`` and ``test_routing_0311_...``)."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     _tables_038(monkeypatch)
     changed = {}
     for op, d_in, d_out, out_dtype, token_counts in ROUTING_038_SWEEP:
@@ -23579,6 +23585,7 @@ def test_sm107a_0325_wgrad_tables(monkeypatch):
     test_sm107a_212_tranche_floor_table).  The FP32 keys of the five rows keep their tables of version 0.3.24: in
     ``ROW_RULES`` indexer_hw its three-way 128-row rule and the others none, and no token tier or part range; the
     generic call's swap floors are those of version 0.3.24 (the 6144 -> 576 entry alone)."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     assert {key: ROW_RULES[key] for key in SM107A_0322_WGRAD_ROWS} == SM107A_0323_WGRAD_RULES
     assert {
         key: tiers for key, tiers in cake_backend.ROW_RULE_MIN_T.items() if key in SM107A_0322_WGRAD_ROWS
@@ -23642,13 +23649,14 @@ def test_sm107a_0325_wgrad_tables(monkeypatch):
     assert cake_backend._SINGLE_WGRAD_SWAP_MIN_K == {("sm_107a", 576, 6144, False): 6144}
 
 
-def test_sm107a_0325_rule_by_token_count():
+def test_sm107a_0325_rule_by_token_count(monkeypatch):
     """``row_rule`` (and ``_measured_row_rule``) of each key of version 0.3.25 on the 208-, 212-, 216- and 224-SM parts
     and without an SM count is ``_sm107a_0325_rule_at`` over the architecture defaults at ``SM107A_0325_SWEEP_TOKENS``
     (those of version 0.3.23 and the edges and midpoints of the bands); the rule differs from version 0.3.24
     (``_sm107a_0325_changed``) exactly inside the key's band; the FP32 key of each row has its rule of version 0.3.24
     at every token count on every part (indexer_hw its three-way 128-row rule, the others none: the values
     test_sm107a_0325_wgrad_tables pins)."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     assert not set(_SM107A_0325_ADDED_SWEEP) & set(SM107A_0323_SWEEP_TOKENS)
     assert len(SM107A_0325_SWEEP_TOKENS) == len(SM107A_0323_SWEEP_TOKENS) + len(_SM107A_0325_ADDED_SWEEP)
     parts = (None, *SM107A_0323_SM_COUNTS)
@@ -23694,6 +23702,7 @@ def test_sm107a_0325_tiers_plan_the_64_row_whole_tiles(monkeypatch, key):
     ``SM107A_0325_T1_TWIN`` (chunks of 64 K blocks) where a tile holds more than 64 K blocks; outside the band the plan
     is the plan of version 0.3.24 (``_tables_0324``).  The plans are classed by their program, and the counts of each
     class are those of the bands."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     _rule, d_in, d_out, _before = SM107A_0322_WGRAD_ROWS[key]
     lo, hi = SM107A_0325_BANDS[key]
     assert {SM107A_0325_T1_PROGRAM, SM107A_0325_T1_TWIN} <= _registered("sm_107a")
@@ -23848,6 +23857,7 @@ def test_sm107a_0325_measured_cells_plan_the_arm(monkeypatch):
     the version keeps (``SM107A_0325_KEPT_CELLS``) the default plan is the plan of version 0.3.24, and at each
     diagnostic case inside a band (``SM107A_0325_DIAGNOSTIC_CELLS``, T 1023) it is the rule's plan, as at the measured
     cells.  The three lists hold every measured case of each class (``SM107A_0325_MEASURED_CASES``)."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     prefix = "dense_proj_det_gemm_"
     checked = {}
     for sm_count, rows in SM107A_0325_MEASURED_PLANS.items():
@@ -24077,6 +24087,7 @@ def test_sm107a_0325_same_bits_premise(monkeypatch):
     64-row split before (an even ``k_blocks``, no promoted chunks before) exactly where ``_sm107a_0325_same_bits``
     holds; where the plan does not change the plans are equal.  The counts of the premise cells per part are those of
     the model."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     premise, want, differ = {}, {}, 0
     for key, (_rule, d_in, d_out, _before) in SM107A_0322_WGRAD_ROWS.items():
         for sm_count in SM107A_0323_SM_COUNTS:
@@ -24552,6 +24563,7 @@ def test_routing_0326_changes_exactly_the_generic_follow_cells(monkeypatch):
     (``_rows_plan``) on ``SM107A_0326_DEFAULT_PROGRAM`` with the transposed store.  Every other plan (every
     weight-gradient plan, sm_100a and sm_103a, the FP32 outputs, the other rows and token counts) is the plan of version
     0.3.25.  The counts of the changed cells per row and part are those of the model at the sweep's token counts."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     assert {part for part in ROUTING_038_CLASSES if part[0] == "sm_107a"} == {
         ("sm_107a", sm_count) for sm_count in SM107A_0323_SM_COUNTS
     }
@@ -24609,7 +24621,7 @@ def test_routing_0326_changes_exactly_the_generic_follow_cells(monkeypatch):
     }, changed
 
 
-def test_sm107a_0326_follow_cells_plan_the_entry_default_plan():
+def test_sm107a_0326_follow_cells_plan_the_entry_default_plan(monkeypatch):
     """The premise of the generic call's bits: at every cell where it follows the weight-gradient entry since this
     version (``_sm107a_0326_follows``) among the rows of ``SM107A_0322_WGRAD_ROWS`` at ``SM107A_0326_SWEEP_TOKENS`` on
     the 208-, 212-, 216- and 224-SM parts (a 126-MiB L2), the default generic plan (with the registry fallback) is
@@ -24620,6 +24632,7 @@ def test_sm107a_0326_follow_cells_plan_the_entry_default_plan():
     (4096 -> 16 at T 3073 - 4095) the tiles form one partial wave and take the two-way K split of ``stream_k_plan``'s
     ``"auto"`` policy (``ceil(k_blocks / 2)`` K blocks per unit).  The counts of the cells of each kind are those of
     the model."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     seen = {"whole": 0, "split": 0}
     want = {"whole": 0, "split": 0}
     for key, (_rule, d_in, d_out, _before) in SM107A_0322_WGRAD_ROWS.items():
@@ -24698,6 +24711,7 @@ def test_gpu_0326_generic_call_follows_the_wgrad_entry(case, monkeypatch, record
     elsewhere its plan is the direct plan of version 0.3.25 (``_tables_0325``).  Its output is judged against the FP64
     oracle beside the naive BF16 tier over the draws, and it returns the same bits on three more launches into NaN.
     Another architecture skips."""
+    _tables_0326(monkeypatch)  # the tables of version 0.3.26: version 0.3.27 is checked below
     d_in, d_out, T = case
     if not _device_supported():
         pytest.skip(
