@@ -8255,7 +8255,8 @@ def prepare_lm_head_det_loss(
         t["x_c"] = carve(
             "x_c", torch.bfloat16, (max(rows, plan.a_rows), H)
         )  # the chunk's valid X rows, gathered per chunk
-    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches)
+    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches) -- except the
+    # gather buffer's when the padded index is bound (``t["row_index_a"]``): its gather writes them
     _bind_a_extents(plan, t, rows, zero=not template_only)
     # O(T) row vectors and the loss cell are separate allocations: a caller (or the autograd graph) keeping
     # ``loss`` / ``logp`` / ``lse`` alive must not pin the vocabulary workspace.
@@ -8734,7 +8735,8 @@ def prepare_lm_head_det_loss_temperature(
         t["x_c"] = carve(
             "x_c", torch.bfloat16, (max(rows, plan.a_rows), H)
         )  # the chunk's valid X rows, gathered per chunk
-    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches)
+    # the padded A operands: their rows past the chunk zeroed once, here (a template never launches) -- except the
+    # gather buffer's when the padded index is bound (``t["row_index_a"]``): its gather writes them
     _bind_a_extents(plan, t, rows, zero=not template_only)
     # O(T) row vectors and the loss cell are separate allocations: a caller (or the autograd graph) keeping
     # ``loss`` / ``logp`` / ``lse`` alive must not pin the vocabulary workspace.
