@@ -9464,7 +9464,7 @@ def _fwd_plan_case(case, device, monkeypatch) -> tuple:
             _small_device(monkeypatch, device, STREAM_CASES[heads])
     if (
         form == "packed"
-        and _device_tail(heads, beta_dtype) not in cake_chain.F32X_TAILS
+        and _device_tail(heads, beta_dtype, seq_lens) not in cake_chain.F32X_TAILS
     ):
         pytest.skip(f"a packed row takes the views route on {_current_arch()}")
     batch = 1 if seq_lens else 2
