@@ -17624,7 +17624,7 @@ def test_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(monkeypatch):
     }, counts
 
 
-def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
+def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch, record_property):
     """On a 148- or 152-SM ``sm_103a`` or ``sm_100a`` part or a 212-SM ``sm_107a`` part: the rows of the ranges version
     0.3.8 of the deterministic package added, through this package's entry points.  On ``sm_103a`` and ``sm_100a`` the
     FP32 input gradient of each range row at both ends of each of the part's ranges of the row binds the deterministic
@@ -17640,6 +17640,7 @@ def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
     ``test_gpu_k1_rows_follow_the_deterministic_128_column_programs``, and their cells of version 0.3.14:
     ``test_gpu_k1_rows_follow_the_deterministic_tile_cells_of_0_3_14``, and of version 0.3.15:
     ``test_gpu_k1_rows_follow_the_deterministic_tile_cells_of_0_3_15``).  Another part skips."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
     device, arch, sms = _part_or_skip()
     ranges = (
         {
