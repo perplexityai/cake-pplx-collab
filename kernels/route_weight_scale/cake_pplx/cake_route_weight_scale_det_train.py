@@ -33,7 +33,7 @@ product is formed: the backward reads ``x`` and ``dy`` once and writes ``dx``
 and ``dw`` once.  ``dw`` does not divide by ``w``: a zero-weight row gets
 signed zeros in ``y`` and ``dx`` and keeps its ``dw``.  Nothing is FP64.
 
-``rows`` is a run-time value (``0 <= rows < 2**31 - 256``; ``rows = 0``
+``rows`` is a run-time value (``0 <= rows < 2**29``; ``rows = 0``
 returns empty outputs and launches nothing), and so are the row strides: one
 library per program and architecture serves every call, with no
 recompilation.  Row offsets are 64-bit, so one call may span more than 2^31
@@ -74,9 +74,9 @@ host; every kernel runs on the current torch stream of the operands' device.
 Every argument is checked before a call allocates an output, so a call refused
 for its arguments allocates and launches nothing.  Workspace: none; a call
 allocates only the outputs it is not given.  A program's library loads (and,
-without a prebuilt one, JIT-builds) at its first launch.  The forward at
-``H = 4096`` and the backward at both widths pick a program and a grid by the
-row count (the same bits), so before capturing a CUDA graph, run an eager call
+without a prebuilt one, JIT-builds) at its first launch.  The forward and
+the backward at both widths pick a program and a grid by the row count (the
+same bits), so before capturing a CUDA graph, run an eager call
 of each stage, width and row count the graph captures (or build every library
 of the architecture with the backend's ``specs_for_arch``).  This module imports its backend package on
 first use and reads no environment variable.
@@ -174,7 +174,7 @@ def cake_route_weight_scale_det_train_forward(
         A non-tensor operand.
     ValueError
         An operand of another dtype, shape or layout; an operand off CUDA or off ``x``'s device;
-        ``rows >= 2**31 - 256``.
+        ``rows >= 2**29``.
     RuntimeError
         A device other than SM100 (``sm_100a``) or SM103 (``sm_103a``), also with ``rows = 0``;
         a local CUDA toolkit below the library's floor when the call JIT-builds it.

@@ -18,12 +18,13 @@ Backend suite of the Cake deterministic route-weight row scaling training packag
 ``cake_pplx.cake_route_weight_scale_det_train``): ``y = bf16(w x)``, ``dx = bf16(w dy)`` and the FP32
 ``dw = sum over c of dy x``, ``H`` 4096 and 3584, on SM100 and SM103.
 
-Without a device: the registry (six records, ``<stage>_h<width>``, ``fwd_h4096_t32`` and ``bwd_h3584_warp``, each
-delivered for the two architectures, its launch facts, its rows per CTA and its argument plan in the order the host
-passes it; literal tables the exporter reads), the route table (bands of row counts from 1 in increasing order, each
-naming a record of its stage and width and a grid cap) and the record and cap of each call, the launch grid
-(``nblocks = ceil(rows / rows_per_cta)`` CTAs, at most ``2**31 - nblocks``, and with a cap at most that many CTAs per
-SM), the refusal of a record that takes its parameters in another order, the capability map, the operand checks
+Without a device: the registry (eight records, ``<stage>_h<width>``, ``fwd_h4096_t32``, ``fwd_h4096_flat``,
+``fwd_h3584_flat`` and ``bwd_h3584_warp``, each delivered for the two architectures, its launch facts, its rows (or
+elements) per CTA and its argument plan in the order the host passes it; literal tables the exporter reads), the route
+table (bands of row counts from 1 in increasing order, each naming a record of its stage and width and a grid cap) and
+the record and cap of each call, the launch grid (``nblocks = ceil(rows / rows_per_cta)`` CTAs, or ``ceil(rows * H /
+elements_per_cta)`` for a flat record, at most ``2**31 - nblocks``, and with a cap at most that many CTAs per SM), the
+refusal of a record that takes its parameters in another order, the capability map, the operand checks
 (dtype, shape, width, strides, alignment, ``w`` and ``dw`` layout, CPU tensors), the build manifest (every record's
 library, the recorded source digests) and no environment read outside the JIT shim.
 
@@ -92,7 +93,16 @@ ARCHES = ("sm_100a", "sm_103a")
 ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
 WIDTHS = (4096, 3584)
 STAGES = ("fwd", "bwd")
-RECORDS = ("fwd_h4096", "fwd_h4096_t32", "fwd_h3584", "bwd_h4096", "bwd_h3584", "bwd_h3584_warp")
+RECORDS = (
+    "fwd_h4096",
+    "fwd_h4096_t32",
+    "fwd_h3584",
+    "fwd_h4096_flat",
+    "fwd_h3584_flat",
+    "bwd_h4096",
+    "bwd_h3584",
+    "bwd_h3584_warp",
+)
 PARAMETERS = {
     "fwd": ["x", "w", "y", "rows", "x_stride", "y_stride"],
     "bwd": ["x", "dy", "w", "dx", "dw", "rows", "x_stride", "dy_stride", "dx_stride"],
@@ -100,7 +110,9 @@ PARAMETERS = {
 LAUNCH = {"block": (128, 1, 1), "cluster": (1, 1, 1), "cooperative": False, "dynamic_smem_bytes": 0, "use_pdl": False}
 # Each record's launch facts: ``LAUNCH``, with a CTA of 32 threads for ``fwd_h4096_t32``.
 LAUNCHES = {name: dict(LAUNCH, block=(32, 1, 1) if name == "fwd_h4096_t32" else (128, 1, 1)) for name in RECORDS}
-# The rows one CTA of each record owns.
+# The elements one CTA of each flat record owns.
+ELEMENTS_PER_CTA = {"fwd_h4096_flat": 2048, "fwd_h3584_flat": 2048}
+# The rows one CTA of each other record owns.
 ROWS_PER_CTA = {
     "fwd_h4096": 4,
     "fwd_h4096_t32": 1,
@@ -112,7 +124,7 @@ ROWS_PER_CTA = {
 # Row counts of the bit tests: 1 to 8 (one partial block of 4 rows and two), odd counts, and counts past a block.
 ROW_COUNTS = (1, 2, 3, 4, 5, 7, 8, 129, 1000, 4097, 65537)
 # The first row of every band of the route table, over all stages and widths: calls at these row counts take every
-# band, so every record.
+# band, so every routed record (no band takes fwd_h4096; the full-grid checks launch it).
 BAND_FIRST_ROWS = tuple(sorted({first for bands in cake_jit.ROUTES.values() for first, _, _ in bands}))
 # The issue's largest row count: at H 4096 more than 2^31 elements.
 MAX_ISSUE_ROWS = 1_048_576
@@ -228,8 +240,11 @@ def test_registry_records_are_well_formed() -> None:
     libraries = set()
     for name, record in cake_jit.MODULES.items():
         stage, width = record["stage"], record["width"]
-        assert name in (f"{stage}_h{width}", f"{stage}_h{width}_t32", f"{stage}_h{width}_warp"), name
-        assert record["rows_per_cta"] == ROWS_PER_CTA[name], name
+        assert name in (f"{stage}_h{width}", f"{stage}_h{width}_t32", f"{stage}_h{width}_flat", f"{stage}_h{width}_warp")
+        if name in ELEMENTS_PER_CTA:
+            assert record["elements_per_cta"] == ELEMENTS_PER_CTA[name] and "rows_per_cta" not in record, name
+        else:
+            assert record["rows_per_cta"] == ROWS_PER_CTA[name] and "elements_per_cta" not in record, name
         assert list(record["arches"]) == list(ARCHES), name
         assert record["ffi_entry"] == "run", name
         assert dict(record["launch"]) == LAUNCHES[name], name
@@ -264,7 +279,7 @@ def test_routes_cover_every_stage_and_width_in_bands() -> None:
                 record = cake_jit.MODULES[name]
                 assert (record["stage"], record["width"]) == (stage, width), (key, name)
                 assert isinstance(cap, int) and not isinstance(cap, bool) and cap >= 0, (key, cap)
-                assert cap == 0 or record["rows_per_cta"] == 1, (key, name, cap)
+                assert cap == 0 or record.get("rows_per_cta") == 1, (key, name, cap)
             for index, (first, name, cap) in enumerate(bands):
                 if first > 1:
                     assert cake_jit.route(stage, width, first - 1) == bands[index - 1][1:], (key, first - 1)
@@ -306,10 +321,15 @@ def test_registry_is_a_literal_table() -> None:
 
 @pytestmark_cpu
 def test_grid_is_one_cta_per_block_of_the_records_rows() -> None:
-    """One CTA per block of the record's ``rows_per_cta`` rows, at most ``2**31 - nblocks`` CTAs: the programs stride
-    over the blocks with a 32-bit counter.  With a cap, at most ``ctas_per_sm`` CTAs per SM (a persistent grid)."""
+    """One CTA per block of the record's ``rows_per_cta`` rows (a flat record: per chunk of its ``elements_per_cta``
+    elements), at most ``2**31 - nblocks`` CTAs: the programs stride over the blocks with a 32-bit counter.  With a cap,
+    at most ``ctas_per_sm`` CTAs per SM (a persistent grid)."""
     for name in RECORDS:
-        if ROWS_PER_CTA[name] == 4:
+        if name in ELEMENTS_PER_CTA:
+            width = cake_jit.MODULES[name]["width"]
+            rows_list = (1, 3, 4, 5, 8, 4097, MAX_ISSUE_ROWS, cake_jit.MAX_ROWS - 1)
+            cases = tuple((rows, -(-rows * width // 2048)) for rows in rows_list)
+        elif ROWS_PER_CTA[name] == 4:
             cases = ((1, 1), (3, 1), (4, 1), (5, 2), (8, 2), (4097, 1025), (MAX_ISSUE_ROWS, MAX_ISSUE_ROWS // 4))
         else:
             cases = tuple((rows, rows) for rows in (1, 3, 4, 5, 8, 4097, MAX_ISSUE_ROWS))
@@ -321,7 +341,12 @@ def test_grid_is_one_cta_per_block_of_the_records_rows() -> None:
     assert cake_jit.grid(2**30, "bwd_h4096") == (2**30, 1, 1)
     assert cake_jit.grid(2**30 + 1, "bwd_h4096") == (2**30 - 1, 1, 1)
     assert cake_jit.grid(2**31 - 256, "bwd_h4096") == (256, 1, 1)
-    assert cake_jit.grid(cake_jit.MAX_ROWS - 1, "fwd_h4096") == (2**29 - 64, 1, 1)
+    assert cake_jit.grid(cake_jit.MAX_ROWS - 1, "fwd_h4096") == (2**27, 1, 1)
+    # A flat record's blocks stay below 2**30 up to MAX_ROWS: 2 * rows at H = 4096, 7 * rows / 4 at H = 3584.
+    assert cake_jit.grid(cake_jit.MAX_ROWS - 1, "fwd_h4096_flat") == (2**30 - 2, 1, 1)
+    assert cake_jit.grid(cake_jit.MAX_ROWS - 1, "fwd_h3584_flat") == (7 * 2**27 - 1, 1, 1)
+    assert cake_jit.grid(1, "fwd_h3584_flat") == (2, 1, 1)
+    assert cake_jit.grid(4, "fwd_h3584_flat") == (7, 1, 1)
     # A cap of 8 CTAs per SM on 148 SMs: 1184 CTAs at most; below it, one CTA per block.
     assert cake_jit.grid(100, "bwd_h4096", 8, 148) == (100, 1, 1)
     assert cake_jit.grid(4097, "bwd_h4096", 8, 148) == (1184, 1, 1)
@@ -762,9 +787,12 @@ def test_one_library_per_record_serves_every_row_count(device, monkeypatch) -> N
     caps, and one row count inside every band with a cap (:func:`_band_rows`): there each stage gives the bits of its
     ``<stage>_h<width>`` record launched directly on the full grid over the same rows, and the contract's bits."""
     for width in WIDTHS:
-        for rows in (4, *BAND_FIRST_ROWS):  # every band of every route, so every record
+        for rows in (4, *BAND_FIRST_ROWS):  # every band of every route, so every routed record
             x, dy, w = make_inputs(rows, width, seed=15, device=device)
             _step(x, dy, w)
+    arch = pkg.device_arch(device.index)
+    for name in cake_jit.MODULES:  # no band takes fwd_h4096: only _full_grid launches it
+        pkg._entry(name, arch)
     loaded = pkg.load.cache_info().currsize
     cake_build = cake_package("cake_route_weight_scale_det_train", "cake_build")
 
