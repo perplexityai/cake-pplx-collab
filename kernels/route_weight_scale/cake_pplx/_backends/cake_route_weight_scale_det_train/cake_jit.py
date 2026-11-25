@@ -14,8 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Registry of the Cake route-weight row scaling training kernels of a routed MoE
-expert (SM100 / SM103), deterministic.  The sm_107a builds follow once they
-run on an SM107 device.
+expert (SM100 / SM103 / SM107), deterministic.
 
 ``MODULES`` has eight records.  Four, keyed ``<stage>_h<width>``, are the
 programs of one stage and width each (no band of :data:`ROUTES` takes
@@ -102,8 +101,8 @@ from __future__ import annotations
 
 from typing import Any
 
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 PACKAGE = "cake_pplx._backends.cake_route_weight_scale_det_train"
 LIBRARY_PREFIX = "cake_route_weight_scale_det_train"
 MANIFEST = "build.json"
@@ -142,7 +141,7 @@ ROUTES: dict[str, tuple[tuple[int, str, int], ...]] = {
 MODULES: dict[str, dict[str, Any]] = {
     # The forward, H = 4096: a CTA of 128 threads owns 4 rows, one warp a row.
     "fwd_h4096": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_bd43b17800f7121c6434",
@@ -161,7 +160,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # The forward, H = 4096, for few rows: a CTA of 32 threads owns one row, with the instructions of fwd_h4096 (the
     # same bits).  The host takes it in its band of ROUTES.
     "fwd_h4096_t32": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_edfd720e5f7640b79cf4",
@@ -179,7 +178,7 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # The forward, H = 3584: a CTA of 128 threads owns 4 rows, one warp a row.
     "fwd_h3584": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_40ea8f7288b169790f4c",
@@ -199,7 +198,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # elements of the row-major index (torch.compile's elementwise schedule), with the per-element instructions of
     # fwd_h4096 (the same bits).  The host takes it in its band of ROUTES.
     "fwd_h4096_flat": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "elements_per_cta": 2048,
         "ffi_entry": "run",
@@ -219,7 +218,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # elements of the row-major index (torch.compile's elementwise schedule), with the per-element instructions of
     # fwd_h3584 (the same bits).  The host takes it in its band of ROUTES.
     "fwd_h3584_flat": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "elements_per_cta": 2048,
         "ffi_entry": "run",
@@ -238,7 +237,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # The backward, H = 4096: dx and dw in one pass over x and dy; a CTA of 4 warps owns one row, each warp sums 4
     # loads of each lane and warp 0 joins the four subtrees through shared memory.
     "bwd_h4096": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "dy"], ["buffer", "w"], ["buffer", "dx"], ["buffer", "dw"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "dy_stride"], ["parameter", "dx_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_fdcbf1098d5f29c13f73",
@@ -257,7 +256,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # The backward, H = 3584: dx and dw in one pass over x and dy; a CTA of 4 warps owns one row, the warps sum 4, 4,
     # 4 and 2 loads of each lane and warp 0 joins the four subtrees through shared memory.
     "bwd_h3584": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "dy"], ["buffer", "w"], ["buffer", "dx"], ["buffer", "dw"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "dy_stride"], ["parameter", "dx_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_af754e6499762a11f5c9",
@@ -276,7 +275,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # The backward, H = 3584, one warp a row: a CTA of 128 threads owns 4 rows, each lane sums its 14 loads in the
     # order of the dw tree (the same bits as bwd_h3584).  The host takes it in its band of ROUTES.
     "bwd_h3584_warp": {
-        "arches": ["sm_100a", "sm_103a"],
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "dy"], ["buffer", "w"], ["buffer", "dx"], ["buffer", "dw"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "dy_stride"], ["parameter", "dx_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_route_weight_scale_det_train_0f7ee9ed09647f3c9653",

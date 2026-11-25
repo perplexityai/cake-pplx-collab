@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake route-weight row scaling of a routed MoE expert, training forward /
-backward, hidden size ``H`` 4096 or 3584 (SM100 / SM103),
+backward, hidden size ``H`` 4096 or 3584 (SM100 / SM103 / SM107),
 deterministic.
 
 After the down projection, each received token copy (row ``r < rows``) is
@@ -135,7 +135,7 @@ def is_cake_route_weight_scale_det_train_supported(device: torch.device) -> bool
     Returns
     -------
     bool
-        ``True`` for a CUDA device of compute capability (10, 0) or (10, 3).
+        ``True`` for a CUDA device of compute capability (10, 0), (10, 3) or (10, 7).
     """
 
     return _backend().is_cake_route_weight_scale_det_train_supported(device)
@@ -176,7 +176,8 @@ def cake_route_weight_scale_det_train_forward(
         An operand of another dtype, shape or layout; an operand off CUDA or off ``x``'s device;
         ``rows >= 2**29``.
     RuntimeError
-        A device other than SM100 (``sm_100a``) or SM103 (``sm_103a``), also with ``rows = 0``;
+        A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``), also with
+        ``rows = 0``;
         a local CUDA toolkit below the library's floor when the call JIT-builds it.
 
     Notes

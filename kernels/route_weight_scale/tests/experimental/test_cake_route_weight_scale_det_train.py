@@ -16,10 +16,10 @@ limitations under the License.
 Backend suite of the Cake deterministic route-weight row scaling training package
 (``cake_pplx._backends.cake_route_weight_scale_det_train``, the backend of
 ``cake_pplx.cake_route_weight_scale_det_train``): ``y = bf16(w x)``, ``dx = bf16(w dy)`` and the FP32
-``dw = sum over c of dy x``, ``H`` 4096 and 3584, on SM100 and SM103.
+``dw = sum over c of dy x``, ``H`` 4096 and 3584, on SM100, SM103 and SM107.
 
 Without a device: the registry (eight records, ``<stage>_h<width>``, ``fwd_h4096_t32``, ``fwd_h4096_flat``,
-``fwd_h3584_flat`` and ``bwd_h3584_warp``, each delivered for the two architectures, its launch facts, its rows (or
+``fwd_h3584_flat`` and ``bwd_h3584_warp``, each delivered for the three architectures, its launch facts, its rows (or
 elements) per CTA and its argument plan in the order the host passes it; literal tables the exporter reads), the route
 table (bands of row counts from 1 in increasing order, each naming a record of its stage and width and a grid cap) and
 the record and cap of each call, the launch grid (``nblocks = ceil(rows / rows_per_cta)`` CTAs, or ``ceil(rows * H /
@@ -28,7 +28,7 @@ refusal of a record that takes its parameters in another order, the capability m
 (dtype, shape, width, strides, alignment, ``w`` and ``dw`` layout, CPU tensors), the build manifest (every record's
 library, the recorded source digests) and no environment read outside the JIT shim.
 
-On SM100 / SM103, the contract of issue #259, each without a tolerance where the contract is exact:
+On SM100 / SM103 / SM107, the contract of issue #259, each without a tolerance where the contract is exact:
 
 * ``y`` and ``dx`` equal ``(w[:, None] * x.float()).bfloat16()`` and ``(w[:, None] * dy.float()).bfloat16()`` bit for
   bit, and ``dw`` equals the stated summation order (:func:`tree_row_sum`) bit for bit, at row counts 1 to 65537,
@@ -89,8 +89,8 @@ backward = pkg.cake_route_weight_scale_det_train_backward
 route_weight_scale = pkg.cake_route_weight_scale_det
 
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 WIDTHS = (4096, 3584)
 STAGES = ("fwd", "bwd")
 RECORDS = (
@@ -375,18 +375,18 @@ def test_a_record_that_takes_another_order_is_refused(monkeypatch) -> None:
 
 
 @pytestmark_cpu
-def test_capabilities_map_to_the_two_architectures(monkeypatch) -> None:
+def test_capabilities_map_to_the_three_architectures(monkeypatch) -> None:
     for capability, arch in ARCH_BY_CAPABILITY.items():
         assert pkg.arch_for_capability(capability) == arch
-    for capability in ((9, 0), (10, 1), (10, 7), (11, 0), (12, 0), (12, 1)):
+    for capability in ((9, 0), (10, 1), (11, 0), (12, 0), (12, 1)):
         assert pkg.arch_for_capability(capability) is None, capability
-    assert tuple(pkg.SUPPORTED_COMPUTE_CAPABILITIES) == ((10, 0), (10, 3))
+    assert tuple(pkg.SUPPORTED_COMPUTE_CAPABILITIES) == ((10, 0), (10, 3), (10, 7))
     assert pkg.is_cake_route_weight_scale_det_train_supported(torch.device("cpu")) is False
     clear = pkg._arch_of_index.cache_clear
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (12, 0))
     clear()
     try:
-        with pytest.raises(RuntimeError, match="sm_100a.*sm_103a"):
+        with pytest.raises(RuntimeError, match="sm_100a.*sm_103a.*sm_107a"):
             pkg.device_arch(0)
     finally:
         monkeypatch.undo()
@@ -471,7 +471,7 @@ def test_manifest_covers_every_record_and_its_sources() -> None:
     wanted = {f"{record['library']}_{arch}" for record in cake_jit.MODULES.values() for arch in record["arches"]}
     assert set(entries) == wanted
     assert len(entries) == len(RECORDS) * len(ARCHES)
-    pattern = r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[03]a"
+    pattern = r"cake_route_weight_scale_det_train_[0-9a-f]{20}_sm_10[037]a"
     for name, entry in entries.items():
         assert re.fullmatch(pattern, name), name
         assert entry["arch"] in ARCHES and name.endswith("_" + entry["arch"]), name
@@ -571,7 +571,7 @@ def test_only_the_jit_shim_reads_environment_variables() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On SM100 / SM103: the exact contract
+# On SM100 / SM103 / SM107: the exact contract
 
 
 def test_the_records_load(device) -> None:
