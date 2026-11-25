@@ -681,6 +681,119 @@ def test_head_window_item_order(monkeypatch, arch):
                 assert compact["num_tokens"] == min(16, T - base)
 
 
+@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
+def test_head_window_key_pass_rule(monkeypatch, arch):
+    """The key passes of a head-window backward: the record's rule of the architecture with the overrides of
+    ``HEAD_WINDOW_KEY_PASS_RULES`` -- on sm_103a no tail rows, so the issue's context-parallel rows (T = 16,380,
+    S = 524,160 / 1,048,320, top-k 2048) plan one pass where the 64-head rule plans three --, every other row and
+    architecture as at 64 heads, a forced count and a multi-segment row unchanged.  The override holds above 64 heads
+    where the single-pass head-window build of the binding's accumulation ships
+    (:func:`head_window_key_passes_rule`; never at 64 heads or on the two-window bridge), and both planners pass it:
+    ``_plan`` and ``dsa_train_workspace_size`` (its size is the one-pass head-window layout on sm_103a, the three-pass
+    64-head layout at 64 heads)."""
+    assert cake_backend.HEAD_WINDOW_KEY_PASS_RULES == {"sm_103a": {"tail_rows": 0}}
+    record = cake_jit.record()
+    stages = tuple(cake_jit.registered_stages())
+    assert set(KEY_PASS_STAGES) <= set(stages)
+    rows = (
+        (16380, 16380, 1),
+        (16380, 524160, 1),
+        (16380, 1048320, 1),
+        (16380, 16380, 4),
+        (16380, 524160, 4),
+        (4096, 65536, 1),
+        (4096, 131072, 1),
+        (4096, 1048320, 1),
+        (8448, 131072, 1),
+        (32768, 131072, 1),
+        (65536, 1048320, 1),
+    )
+    for T, S, seg in rows:
+        kw = {"num_segments": seg, "arch": arch}
+        base = cake_backend.plan_key_passes(record, stages, T, S, TOPK, **kw)
+        hw = cake_backend.plan_key_passes(
+            record, stages, T, S, TOPK, head_windows=True, **kw
+        )
+        tail_only = arch == "sm_103a" and seg == 1 and T > 4224 and 2 * T <= S
+        assert hw == (1 if tail_only else base), (arch, T, S, seg, base, hw)
+        for forced in (1, 2, 3):
+            assert (
+                cake_backend.plan_key_passes(
+                    record, stages, T, S, TOPK, forced, head_windows=True, **kw
+                )
+                == forced
+            )
+    if arch == "sm_103a":
+        for S in (524160, 1048320):
+            assert (
+                cake_backend.plan_key_passes(record, stages, 16380, S, TOPK, arch=arch)
+                == 3
+            )
+            assert (
+                cake_backend.plan_key_passes(
+                    record, stages, 16380, S, TOPK, arch=arch, head_windows=True
+                )
+                == 1
+            )
+    h = hl.HostLaunches(
+        monkeypatch,
+        cake_backend,
+        cake_jit,
+        cake_launch,
+        arch,
+        simulate=False,
+        head_windows=arch != "sm_107a",
+    )
+    for heads in (64, 96, 128):
+        for direct in (False, True):
+            want = heads != 64 and arch != "sm_107a"
+            assert cake_backend.head_window_key_passes_rule(heads, arch, direct) == want
+    with monkeypatch.context() as m:  # the two-window bridge
+        m.setattr(cake_backend, "head_window_stage", lambda stage, arch: None)
+        for direct in (False, True):
+            assert not cake_backend.head_window_key_passes_rule(96, arch, direct)
+    if arch == "sm_107a":
+        return
+    seen = []
+    real = cake_backend.plan_key_passes
+
+    def recorded(*args, **kwargs):
+        seen.append(bool(kwargs.get("head_windows", False)))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "plan_key_passes", recorded)
+    for heads in (64, 96):
+        inp = hl.host_inputs(40, 96, 16, heads)
+        h.bind(inp.q_latent, inp.q_rope, inp.dout)
+        seen.clear()
+        hl.run_case(h, cake_backend, {"entry": "backward"}, inp)
+        assert seen and set(seen) == {heads != 64}, (heads, seen)
+    T, S = 16380, 524160
+    for heads in (64, 96, 128):
+        seen.clear()
+        size = cake_backend.dsa_train_workspace_size(
+            T, S, TOPK, num_heads=heads, dkv_acc=True, dout_copy=False
+        )
+        assert seen == [heads != 64]
+        passes = 3 if (arch == "sm_103a" and heads == 64) else 1
+        items = 1 if heads == 64 else cake_backend.HEAD_WINDOW_ITEMS
+        policy = cake_backend.KeyPassPolicy.from_record(record)
+        layout = cake_backend.workspace_layout(
+            T,
+            S,
+            TOPK,
+            backward=True,
+            key_passes=passes,
+            dkv_direct=True,
+            token_chunk=policy.token_chunk(TOPK, items),
+            num_heads=heads,
+            dout_copy=False,
+            fused_forward=heads != 64,
+            fused_backward=heads != 64,
+        )
+        assert size == layout["total"], (arch, heads, size, layout["total"])
+
+
 def _hw_plan_tensors(plan, inp):
     """The call tensors ``t`` of a head-window backward plan over ``inp`` (host, the shapes its contract wants)."""
     T, H = inp.total_q, inp.heads

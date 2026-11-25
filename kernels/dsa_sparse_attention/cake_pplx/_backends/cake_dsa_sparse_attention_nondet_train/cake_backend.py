@@ -261,6 +261,19 @@ def head_window_token_order(token_base: int, token_step: int) -> None:
         )
 
 
+def head_window_key_passes_rule(
+    num_heads: int, arch: Optional[str], dkv_direct: bool = False
+) -> bool:
+    """Whether a backward over ``num_heads`` query heads on ``arch`` plans its key passes with the head-window
+    overrides (``HEAD_WINDOW_KEY_PASS_RULES``): above 64 heads where the program ships the single-pass head-window
+    main build of the binding's accumulation (``bwd_main_hw``, or ``bwd_main_natural_hw`` with ``dkv_direct``), the
+    build a one-pass plan runs; ``False`` at 64 heads and on the two-window bridge."""
+    if int(num_heads) == NUM_HEADS:
+        return False
+    stage = "bwd_main_natural" if dkv_direct else "bwd_main"
+    return head_window_stage(stage, arch) is not None
+
+
 # The NoPE program scores ``q . kv`` over the 512 shared latent dimensions with
 # an explicit scale; the model this program serves fixes it at 1/16 (exact in
 # every floating-point format), not ``1 / sqrt(512)``.
@@ -329,8 +342,10 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # ``token_chunk_multiple`` whose 2 x 147,456 + 4 * topk + 4 B per token fit the
 # same budget (2176 tokens at top-k 2048), its workspace grows by min(T, chunk)
 # * (2 x 147,456 + 4 * topk + 4) bytes, and its pass count is planned as at 64
-# heads (the one-chunk test reads the 64-head chunk, so a call plans the
-# passes the two-window bridge planned).  The passes split the whole key row
+# heads (the one-chunk test reads the 64-head chunk) under the rule of the
+# architecture with the head-window overrides of
+# ``HEAD_WINDOW_KEY_PASS_RULES`` applied (see there: no tail-row passes on
+# ``sm_103a``).  The passes split the whole key row
 # ``[0, S)`` into equal ranges,
 # which matches an index row whose keys spread over the whole row (one
 # document); in a packed multi-segment row every token's keys lie inside its
@@ -367,6 +382,19 @@ KEY_PASS_RULE_FIELDS = (
     "tail_cap",
 )
 _R1_RULE: dict[str, int] = dict.fromkeys(KEY_PASS_RULE_FIELDS, 0)
+# The key-pass rule fields a head-window backward above 64 heads (``head_window_plan``) plans with instead of the
+# record's rule of the architecture, per architecture (fields of ``KEY_PASS_RULE_FIELDS``; an architecture without an
+# entry plans with the record's rule).  ``sm_103a``: no tail-row passes.  The record's tail rule (three passes on the
+# ``2 T <= S`` rows of more than one token chunk and 131,072 or more keys) was measured on the 64-head program.  On
+# GB300 the head-window build's single pass is 15-20 % faster than those three passes on every tail row timed (top-k
+# 2048, 96 and 128 heads: T = 16,380 with S = 147,420 to 1,048,320, T = 8,448 and 4,352 with S = 131,072; backward
+# 39.5 / 40.5 ms against 45.6 / 46.8 ms at 96 heads and S = 524,160 / 1,048,320); two or three forced passes over any
+# token chunk stay 5-15 % slower than one at S = 524,160 / 1,048,320.  [est] The three passes keep each pass's FP32 dKV
+# accumulator slice (S / 3 x 2,304 B) nearer the L2 budget; with head windows the extra launches, the FP32 dQ-partial
+# round trip and the compaction of every pass cost more than that locality gains, also where the slice is close to the
+# 100 MiB budget (113 MB at S = 147,420).  One-chunk rows keep the record's rule; the 64-head plans and the two-window
+# bridge are unchanged.
+HEAD_WINDOW_KEY_PASS_RULES: dict[str, dict[str, int]] = {"sm_103a": {"tail_rows": 0}}
 
 
 @dataclass(frozen=True)
@@ -459,9 +487,12 @@ class KeyPassPolicy:
         *,
         num_segments: int = 1,
         arch: Optional[str] = None,
+        head_windows: bool = False,
     ) -> int:
         """Passes of a binding under the rule of ``arch`` (see the comment above
-        ``KEY_PASS_STAGES``): 1 for a multi-segment key row, a formula of 1, a
+        ``KEY_PASS_STAGES``; with ``head_windows``, a head-window backward above
+        64 heads, the rule with the ``HEAD_WINDOW_KEY_PASS_RULES`` fields of
+        ``arch`` in place of its own): 1 for a multi-segment key row, a formula of 1, a
         row that is neither one chunk nor (with ``tail_rows``) ``2 T <= S``, or
         fewer keys than the row's floor (``min_kv`` for a one-chunk row,
         ``tail_min_kv`` for a tail row of more than one chunk); else
@@ -478,6 +509,8 @@ class KeyPassPolicy:
         if formula == 1:
             return 1
         rule = self.rule_for(arch)
+        if head_windows:
+            rule.update(HEAD_WINDOW_KEY_PASS_RULES.get(arch, {}))
         one_chunk = self.token_chunk(topk) >= T
         tail = bool(rule["tail_rows"]) and 2 * T <= S
         if not (one_chunk or tail):
@@ -506,6 +539,7 @@ def plan_key_passes(
     num_segments: int = 1,
     arch: Optional[str] = None,
     program: str = cake_jit.PROGRAM,
+    head_windows: bool = False,
 ) -> int:
     """Number of key-range passes of one backward binding.
 
@@ -516,7 +550,10 @@ def plan_key_passes(
     comment above ``KEY_PASS_STAGES``): the policy plans one pass for more
     than one segment.  ``arch`` selects the record's per-target rule (``None``:
     the R1 rule).  ``program`` names the pass stages (``KEY_PASS_STAGES`` of the
-    RoPE program, their ``nope_`` forms of the NoPE program).
+    RoPE program, their ``nope_`` forms of the NoPE program).  ``head_windows``:
+    the backward runs the head-window builds above 64 heads
+    (:func:`head_window_key_passes_rule`), whose policy takes the head-window
+    overrides of ``arch`` (``HEAD_WINDOW_KEY_PASS_RULES``).
     """
     pass_stages = _program_stages(KEY_PASS_STAGES, program)
     multi_pass = all(stage in stages for stage in pass_stages)
@@ -542,7 +579,12 @@ def plan_key_passes(
     if policy is None:
         return 1
     return policy.passes(
-        num_queries, num_kv, topk, num_segments=num_segments, arch=arch
+        num_queries,
+        num_kv,
+        topk,
+        num_segments=num_segments,
+        arch=arch,
+        head_windows=head_windows,
     )
 
 
@@ -1698,6 +1740,7 @@ def dsa_train_workspace_size(
             key_passes,
             num_segments=num_segments,
             arch=arch,
+            head_windows=head_window_key_passes_rule(num_heads, arch, direct),
         )
         if backward
         else 1
@@ -2631,6 +2674,7 @@ def _plan(
             key_passes,
             num_segments=num_segments,
             arch=arch,
+            head_windows=head_window_key_passes_rule(H, arch, direct),
         )
         if backward
         else 1
