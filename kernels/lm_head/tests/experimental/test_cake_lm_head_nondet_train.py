@@ -18460,7 +18460,9 @@ def test_device_unstaged_call_enters_no_staging(glm_weight, entry, monkeypatch):
     """A call that stages nothing (T 300: above the small-call rows; compacted, ignored rows) enters none of the
     small-call staging -- no scope, no stage, and no ``_run_small_stage`` from its launch contexts, forward or backward,
     on a binding miss and a hit: each launch context finds nothing pending and goes on.  A small call (T 5 staged to
-    16 rows) on the same thread enters its scope and its stage once, and its staging runs once, while pending."""
+    16 rows) on the same thread enters its scope and its stage once, and its staging runs once, while pending, in its
+    first launch context (the temperature entry: its temperature check, ahead of any launch context) -- not at the
+    scope's end, which then finds nothing pending."""
     if entry == "temperature":
         _require_tau_program()
 
@@ -18482,7 +18484,10 @@ def test_device_unstaged_call_enters_no_staging(glm_weight, entry, monkeypatch):
     stream_context = cake_backend._ffi_stream_context
 
     def run_spy():
-        calls.append(("run", cake_backend._SMALL_STAGE.ops is not None))
+        # pending or not, the caller (a launch context, the temperature check or the scope's end) and the launch
+        # contexts entered by then
+        pending = cake_backend._SMALL_STAGE.ops is not None
+        calls.append(("run", pending, sys._getframe(1).f_code.co_name, len(contexts)))
         return run_stage()
 
     def scope_spy():
@@ -18511,9 +18516,15 @@ def test_device_unstaged_call_enters_no_staging(glm_weight, entry, monkeypatch):
             assert contexts, entry  # the launch contexts ran (and checked)
             assert calls == [], (entry, calls)
             assert out["dX"] is not None and out["dW"] is not None
+        contexts.clear()
         _run(small, 4096, entry=kind, backend="cake")
-    assert calls[:2] == [("scope",), ("apply", 16)], calls
-    assert [c for c in calls if c[0] != "run" or c[1]][2:] == [("run", True)], calls
+    assert contexts, entry
+    if entry == "temperature":
+        first = ("run", True, "_resolve_temperature", 0)
+    else:
+        first = ("run", True, "_ffi_stream_context", 1)
+    assert calls[:3] == [("scope",), ("apply", 16), first], calls
+    assert [c[:3] for c in calls[3:]] == [("run", False, "_small_call_scope")], calls
     assert cake_backend._SMALL_STAGE.ops is None
 
 
