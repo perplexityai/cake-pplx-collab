@@ -1580,6 +1580,19 @@ def _on_device(stages: list[str]) -> list[str]:
     return [named.get(stage, stage) for stage in stages]
 
 
+def _pv_twins(arch: str, heads, beta_dtype, tail: str | None = None) -> dict[str, str]:
+    """The stages that a backward with a final-state gradient launches on ``arch`` in place of the tcgen05 adjoint scan
+    (:func:`cake_chain.dhu_tc2_stage`) and the tail of ``heads`` (``tail``: a pinned form; dbeta in ``beta_dtype``) on a
+    route of that scan: stage -> its pv_tf32 twin (:func:`cake_chain.pv_tf32_stages`, under PV_TF32 as it is set when
+    called); empty where the route has no pv_tf32 pair."""
+    form = cake_chain.tail_form(*heads, tail, arch=arch)
+    bf16 = "_bf16" if beta_dtype == torch.bfloat16 else ""
+    base = "dqkwg" if form == "unfused" else form + bf16
+    scan = cake_chain.dhu_tc2_stage(arch)
+    pv = cake_chain.pv_tf32_stages(arch, scan, base)
+    return {} if pv is None else dict(zip((scan, base), pv, strict=True))
+
+
 @pytest.mark.parametrize("save_state", [True, False], ids=["saved", "recompute"])
 @pytest.mark.parametrize("lpt", [True, False], ids=["lpt", "caller-order"])
 @pytest.mark.parametrize("heads", sorted(STREAM_CASES), ids=["g2", "g3"])
@@ -1599,11 +1612,13 @@ def test_two_streams_match_one_stream(
     launches = _record_streams(monkeypatch)
     # the side stream: wy_tc and fwd_ho of the forward's group A, dhu_tc2 of the adjoint's group B (beside the fused
     # tail of a value-head group of two, and beside the group of three's cluster tail on the architectures of
-    # SERIAL_G3_R_FORM)
+    # SERIAL_G3_R_FORM); every call has a final-state gradient, so dhu_tc2 is its pv_tf32 twin (:func:`_pv_twins`)
+    twins = _pv_twins(arch, heads, torch.bfloat16)
     expected = _on_device(
         ["wy_tc", "fwd_ho"]
         + (["dhu_tc2"] if heads[1] == 2 * heads[0] or g3_r_form else [])
     )
+    expected = [twins.get(stage, stage) for stage in expected]
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=s)
@@ -1654,7 +1669,9 @@ def test_split_r_form_naive_tier_verdict(
     assert not kept  # a pinned table is not kept for the form, it takes it
     main = torch.cuda.current_stream(device).cuda_stream
     launches = _record_streams(monkeypatch)
+    # every call has a final-state gradient: dhu_tc2 is its pv_tf32 twin (:func:`_pv_twins`)
     tc2 = _on_device(["dhu_tc2"])[0]
+    tc2 = _pv_twins(arch, heads, torch.bfloat16, SPLIT_R_PINS["tail"]).get(tc2, tc2)
 
     def forms(inputs, h0, dht, j):
         runs = {"streams2": [], "streams1": []}
@@ -3282,7 +3299,9 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     heads, beta_dtype, device, monkeypatch, record_property
 ) -> None:
     # the same plan with the FP32 dv_local adjoint (dhu_tc2_dvl32 rounds dv2 once): both passes are judged.  The
-    # pre-scan keeps its BF16 dv_local tile (dhu_pre_dvl_r64k1)
+    # pre-scan keeps its BF16 dv_local tile (dhu_pre_dvl_r64k1).  Every call has a final-state gradient: pass 2 runs on
+    # dhu_tc2_dvl32 with PV_TF32 off ("tc"), and with it on ("tc_pv", judged too) on its pv_tf32 twin beside the
+    # pv_tf32 tail (:func:`_pv_twins`); the register pass 2 has no pv_tf32 pair
     arch = cake_backend.device_arch(cake_chain._device_index(device))
     if arch not in cake_chain.DVL32_ARCHS:
         pytest.skip(f"{arch} runs the adjoint without the FP32 dv_local values")
@@ -3292,21 +3311,29 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     assert cake_chain.sdt_prescan(arch) == cake_chain.SDT_PRESCAN
     tc_stages = (cake_chain.SDT_PRESCAN, "dhu_tc2_dvl32")
     reg_stages = ("dv_local", "dhu_pre_r64k1", "dhu_r64k1")
+    twins = _pv_twins(arch, heads, beta_dtype)
+    assert twins, arch
+    pv_stages = (cake_chain.SDT_PRESCAN, *twins.values())
+    # arm -> (its dhu_scan pin, the stages it launches, the stages it does not launch)
+    arms = {
+        "tc": ("tc", tc_stages, reg_stages),
+        "reg": ("reg", reg_stages, tc_stages),
+        "tc_pv": ("tc", pv_stages, (*reg_stages, *twins)),
+    }
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=s)
         h0, dht = _states(seq_lens, heads[1], device, s + 6)
         runs = {}
-        for scan in ("tc", "reg"):
+        for arm, (scan, want, other) in arms.items():
             launches.clear()
-            runs[scan] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht,
-                              scan_config=(64, 1), segment_chunks=6, dhu_scan=scan)  # fmt: skip
+            with monkeypatch.context() as m:
+                m.setattr(cake_chain, "PV_TF32", arm == "tc_pv")
+                runs[arm] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht,
+                                 scan_config=(64, 1), segment_chunks=6, dhu_scan=scan)  # fmt: skip
             stages = [stage for stage, _stream in launches]
             assert "stitch" in stages, stages
-            want, other = (
-                (tc_stages, reg_stages) if scan == "tc" else (reg_stages, tc_stages)
-            )
-            assert all(x in stages for x in want) and not any(x in stages for x in other), (scan, stages)  # fmt: skip
+            assert all(x in stages for x in want) and not any(x in stages for x in other), (arm, stages)  # fmt: skip
         oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
         return _judged(runs, oracle, STATE_OUTPUTS)
 
@@ -5413,6 +5440,20 @@ def _split_device(monkeypatch, device, *, split: bool, chain: str | None = None)
     return arch
 
 
+def _assert_pv_split_route(stages, twins: dict[str, str], arch: str) -> None:
+    """``stages``: the launches of one call with a final-state gradient planned on the adjoint split, PV_TF32 on.  The
+    call runs its table's split route on the tcgen05 pass 2 instead (cake_chain._pv_tf32_split_route): the pre-scan,
+    one stitch after the forward and the pv_tf32 scan and tail (``twins``: :func:`_pv_twins`), and none of the split's
+    forms, M-share's walk, the register pass 2 or the scan and tail that the pv_tf32 ones replace."""
+    assert twins, arch
+    assert _adjoint_walk(stages) == ["stitch"], stages
+    assert {cake_chain.sdt_prescan(arch), *twins.values()} <= set(stages), stages
+    never = {*_SPLIT_STAGES, *cake_chain.M_SHARE_STAGES, *twins}
+    assert not never & set(stages), stages
+    register = ("dv_local", "dhu_r", "dhu_pre_r")
+    assert not [stage for stage in stages if stage.startswith(register)], stages
+
+
 @pytest.mark.parametrize(
     "lpt, states, chain",
     [
@@ -5433,10 +5474,14 @@ def _split_device(monkeypatch, device, *, split: bool, chain: str | None = None)
 def test_adjoint_split_matches_the_fp64_recurrence_and_the_serial_walk(
     lpt, states, chain, device, monkeypatch, record_property
 ) -> None:
-    # the split (three runs per draw, the worst judged) and the serial walk on the same small device, each judged
+    # the split (three runs per draw, the worst judged) and the serial walk on the same small device, each judged.  A
+    # call with a final-state gradient takes the split with PV_TF32 off; with it on (the arm "split_pv", judged too) it
+    # runs its table's split route on the pv_tf32 programs (:func:`_assert_pv_split_route`)
     seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
     index = cake_chain._device_index(device)
     names = STATE_OUTPUTS if states else OUTPUT_NAMES
+    twins = _pv_twins(cake_backend.device_arch(index), heads, torch.bfloat16)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=s)
@@ -5496,6 +5541,14 @@ def test_adjoint_split_matches_the_fp64_recurrence_and_the_serial_walk(
                 else:
                     assert not set(stages) & {"dhu_tc2_dvl32_modes", "dhu_tc2_dvl32_gm"}, stages  # fmt: skip
                 runs["split" if split else "serial"] = got
+        if states:
+            with monkeypatch.context() as m:
+                arch = _split_device(m, device, split=True, chain=chain)
+                m.setattr(cake_chain, "PV_TF32", True)
+                launches = _record_streams(m)
+                runs["split_pv"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht,
+                                        lpt=lpt)  # fmt: skip
+                _assert_pv_split_route([stage for stage, _ in launches], twins, arch)
         oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
         return _judged(runs, oracle, names)
 
@@ -5508,11 +5561,15 @@ def test_adjoint_split_end_adjoints_naive_tier_verdict(
     # the end adjoints of the split's pieces composed by the stitch (M x + B with hi / lo BF16 operand pairs: about 16
     # bits per piece boundary, from the third piece on), by piece_chain (the same maps and flags in FP32 FFMA), and by
     # the stitch without the summaries' warm-up bound (warmup_log2 -1e30): each judged on every output, dh0 included
-    # (3, 6 and 1 pieces of 4 chunks)
+    # (3, 6 and 1 pieces of 4 chunks).  Every call has a final-state gradient: those run with PV_TF32 off; with it on
+    # (the arm "split_pv", judged too) the call runs its table's split route on the pv_tf32 programs
+    # (:func:`_assert_pv_split_route`)
     seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
     index = cake_chain._device_index(device)
     pieces = [((n + 63) // 64 + 3) // 4 for n in seq_lens]  # (3, 6, 1)
     assert max(pieces) >= 3, pieces
+    twins = _pv_twins(cake_backend.device_arch(index), heads, torch.bfloat16)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=s)
@@ -5534,6 +5591,12 @@ def test_adjoint_split_end_adjoints_naive_tier_verdict(
                 launches = _record_streams(m)
                 runs[label] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, **pins)  # fmt: skip
                 assert chain in [stage for stage, _ in launches], (chain, launches)
+        with monkeypatch.context() as m:
+            arch = _split_device(m, device, split=True)
+            m.setattr(cake_chain, "PV_TF32", True)
+            launches = _record_streams(m)
+            runs["split_pv"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+            _assert_pv_split_route([stage for stage, _ in launches], twins, arch)
         oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
         return _judged(runs, oracle, STATE_OUTPUTS)
 
@@ -5603,11 +5666,15 @@ def test_adjoint_split_one_wave_naive_tier_verdict(
     # every piece of the split layout fits the small device in one wave (10 pieces x 4 value heads = 40 SMs): with
     # the one-wave route the summaries, the stitch and one walk of every piece run on the caller's stream (the last
     # pieces start from the stitch's copy of dht, or zeros).  Two runs of the one-wave route and two of the
-    # two-stream route per draw, each route judged by its worst
+    # two-stream route per draw, each route judged by its worst.  A call with a final-state gradient takes the split
+    # with PV_TF32 off; with it on (the arm "one_wave_pv", judged too) the call planned on the one-wave split runs its
+    # table's split route on the pv_tf32 programs (:func:`_assert_pv_split_route`)
     seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
     index = cake_chain._device_index(device)
     names = STATE_OUTPUTS if states else OUTPUT_NAMES
     main = torch.cuda.current_stream(device).cuda_stream
+    twins = _pv_twins(cake_backend.device_arch(index), heads, torch.bfloat16)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def forms(inputs, h0, dht, j):
         runs = {}
@@ -5638,6 +5705,15 @@ def test_adjoint_split_one_wave_naive_tier_verdict(
                 }
                 assert (split_streams == {main}) is one_wave, split_streams
                 runs["one_wave" if one_wave else "two_streams"] = got
+        if states:
+            with monkeypatch.context() as m:
+                arch = _split_device(m, device, split=True)
+                m.setattr(cake_chain, "ONE_WAVE_SPLIT_ARCHS", frozenset({arch}))
+                m.setattr(cake_chain, "PV_TF32", True)
+                launches = _record_streams(m)
+                runs["one_wave_pv"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht,
+                                           lpt=lpt)  # fmt: skip
+                _assert_pv_split_route([stage for stage, _ in launches], twins, arch)
         return runs
 
     _judge_forms(record_property, 7031, seq_lens, heads, device, forms, names=names, states=states)  # fmt: skip
@@ -5674,13 +5750,17 @@ def test_one_wave_table_route_on_a_one_stream_row(
     # caller's stream); a device outside the set keeps the piece table, wave 1 on one stream, also after its layout was
     # cached with the device in the set (the layout cache keys on the set).  Two runs of the one-wave route per draw
     # (judged by the worst) and the serial walk on the SPLIT_SMS device of _split_device are judged with an initial
-    # state and a final-state gradient
+    # state and a final-state gradient, with PV_TF32 off; with it on (the arm "one_wave_table_pv", judged too) the call
+    # planned on the one-wave table runs that table's split route on the pv_tf32 programs
+    # (:func:`_assert_pv_split_route`)
     seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
     index = cake_chain._device_index(device)
     chunks = cake_plan.chunk_counts(seq_lens)
     main = torch.cuda.current_stream(device).cuda_stream
     cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
     options = cake_chain.make_options()
+    twins = _pv_twins(cake_backend.device_arch(index), heads, torch.bfloat16)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def planned():
         meta = cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1], options,
@@ -5734,6 +5814,13 @@ def test_one_wave_table_route_on_a_one_stream_row(
         with monkeypatch.context() as m:
             _split_device(m, device, split=False)
             runs["serial"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+        with monkeypatch.context() as m:
+            arch = _one_wave_table_device(m, device)
+            m.setattr(cake_chain, "PV_TF32", True)
+            launches = _record_streams(m)
+            runs["one_wave_table_pv"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True,
+                                             dht=dht)  # fmt: skip
+            _assert_pv_split_route([stage for stage, _ in launches], twins, arch)
         return runs
 
     _judge_forms(record_property, 7041, seq_lens, heads, device, forms, names=STATE_OUTPUTS, states=True)  # fmt: skip
@@ -5744,10 +5831,12 @@ def test_planned_routes_plain_and_checkpointed_naive_tier_verdict(
 ) -> None:
     # the one-wave table's route, plain and under non-reentrant activation checkpointing (the forward recomputed for
     # the backward, one route in both passes): two runs of each per draw (judged by the worst) are judged with an
-    # initial state and a final-state gradient
+    # initial state and a final-state gradient, with PV_TF32 off; with it on (one run of each, "plain_pv" and
+    # "ckpt_pv", judged too) the call runs the table's split route on the pv_tf32 programs
+    # (:func:`_assert_pv_split_route`)
     seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
     index = cake_chain._device_index(device)
-    _one_wave_table_device(monkeypatch, device)
+    arch = _one_wave_table_device(monkeypatch, device)
     cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
     meta = cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1], cake_chain.make_options(),
                                   heads[1] // heads[0])  # fmt: skip
@@ -5755,15 +5844,23 @@ def test_planned_routes_plain_and_checkpointed_naive_tier_verdict(
     assert split is not None and split.one_wave, split
     assert meta.bwd_segments.segment_len == 5, meta.bwd_segments
     stages = _record_launches(monkeypatch)
+    twins = _pv_twins(arch, heads, torch.bfloat16)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def forms(inputs, h0, dht, j):
         runs = {}
         for ckpt in (False, True):
+            arm = "ckpt" if ckpt else "plain"
             stages.clear()
-            runs["ckpt" if ckpt else "plain"] = [
+            runs[arm] = [
                 _run_rows(inputs, seq_lens, h0, dht, ckpt=ckpt) for _ in range(2)
             ]
             assert "dhu_tc2_dvl32_gm" in stages and "dv_local" not in stages, (ckpt, stages)  # fmt: skip
+            stages.clear()
+            with monkeypatch.context() as m:
+                m.setattr(cake_chain, "PV_TF32", True)
+                runs[arm + "_pv"] = _run_rows(inputs, seq_lens, h0, dht, ckpt=ckpt)
+            _assert_pv_split_route(stages, twins, arch)
         return runs
 
     _judge_forms(record_property, 7061, seq_lens, heads, device, forms, names=STATE_OUTPUTS, states=True)  # fmt: skip
@@ -7699,11 +7796,15 @@ def test_m_share_matches_the_fp64_recurrence(
     case, device, monkeypatch, record_property
 ) -> None:
     # the backward on the forward's maps (wave 1 without the summary, the stitch's transpose_m build): o, the final
-    # state and every gradient (the initial state's too) are judged
-    _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
+    # state and every gradient (the initial state's too) are judged.  The call has a final-state gradient: it takes
+    # M-share with PV_TF32 off; with it on (the arm "pv", judged too) the M-share forward is followed by the table's
+    # split route on the pv_tf32 programs (:func:`_assert_pv_split_route`)
+    arch = _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
     heads, seq_lens = FWD_SPLIT_JUDGE_CASES[case]
     assert _m_share_meta(device, heads, seq_lens).m_share
     stages = _record_launches(monkeypatch)
+    twins = _pv_twins(arch, heads, torch.float32)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
@@ -7720,8 +7821,18 @@ def test_m_share_matches_the_fp64_recurrence(
             "stitch_mt",
             "dhu_tc2_dvl32_modes",
         ], walk
+        stages.clear()
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "PV_TF32", True)
+            pv = _run(
+                inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht
+            )
+        assert _forward_stages(stages) == _split_stages(FWD_SPLIT_JUDGE_MIN_PIECE), (
+            stages
+        )
+        _assert_pv_split_route(stages, twins, arch)
         oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
-        return _judged({"": got}, oracle, STATE_OUTPUTS)
+        return _judged({"": got, "pv": pv}, oracle, STATE_OUTPUTS)
 
     _judge(record_property, 441, draw)
 
@@ -7732,10 +7843,14 @@ def test_m_share_and_the_summary_naive_tier_verdict(
     case, states, device, monkeypatch, record_property
 ) -> None:
     # M-share and the same split backward on the adjoint's own maps (dhu_tc2_dvl32_gm and the plain stitch), both
-    # judged
-    _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
+    # judged.  A call with a final-state gradient takes both with PV_TF32 off; with it on (the arm "pv", judged too)
+    # the M-share forward is followed by the table's split route on the pv_tf32 programs
+    # (:func:`_assert_pv_split_route`)
+    arch = _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
     heads, seq_lens = FWD_SPLIT_JUDGE_CASES[case]
     names = STATE_OUTPUTS if states else OUTPUT_NAMES
+    twins = _pv_twins(arch, heads, torch.float32)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
@@ -7758,8 +7873,15 @@ def test_m_share_and_the_summary_naive_tier_verdict(
             "stitch",
             "dhu_tc2_dvl32_modes",
         ], walk
+        runs = {"m_share": got, "summary": want}
+        if states:
+            with monkeypatch.context() as m:
+                m.setattr(cake_chain, "PV_TF32", True)
+                pv_stages = _record_launches(m)
+                runs["pv"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+            _assert_pv_split_route(pv_stages, twins, arch)
         oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
-        return _judged({"m_share": got, "summary": want}, oracle, names)
+        return _judged(runs, oracle, names)
 
     _judge(record_property, 443, draw)
 
@@ -7769,9 +7891,13 @@ def test_m_share_runs_naive_tier_verdict(
     case, device, monkeypatch, record_property
 ) -> None:
     # M-share run after run (the second run on, the recorded backward plan; the worst of three judged), on one stream,
-    # and with wave 1 as one launch (M_SHARE_ONE_LAUNCH), each judged with an initial state and a final-state gradient
-    _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
+    # and with wave 1 as one launch (M_SHARE_ONE_LAUNCH), each judged with an initial state and a final-state gradient,
+    # with PV_TF32 off; with it on (the arm "pv", judged too) the M-share forward is followed by the table's split route
+    # on the pv_tf32 programs (:func:`_assert_pv_split_route`)
+    arch = _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
     heads, seq_lens = FWD_SPLIT_JUDGE_CASES[case]
+    twins = _pv_twins(arch, heads, torch.float32)
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
 
     def forms(inputs, h0, dht, j):
         kwargs = {"initial_state": h0, "output_final_state": True, "dht": dht}
@@ -7785,6 +7911,11 @@ def test_m_share_runs_naive_tier_verdict(
             runs["one_launch"] = _run(inputs, seq_lens, **kwargs)
         walk = _adjoint_walk(stages)
         assert walk == ["dhu_tc2_dvl32_modes", "stitch_mt", "dhu_tc2_dvl32_modes"], walk
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "PV_TF32", True)
+            pv_stages = _record_launches(m)
+            runs["pv"] = _run(inputs, seq_lens, **kwargs)
+        _assert_pv_split_route(pv_stages, twins, arch)
         return runs
 
     _judge_forms(record_property, 445, seq_lens, heads, device, forms, beta_dtype=torch.float32, names=STATE_OUTPUTS,
