@@ -74,7 +74,8 @@ share of samples with a power-cap / slowdown clock event reason, the energy over
 
 Memory accounting per arm and row (torch allocator, bytes): ``fwd_workspace`` (peak of the forward above what it
 leaves allocated), ``out_lse`` (the returned ``out`` and ``lse``), ``retained`` (what the forward keeps alive for the
-backward besides ``out`` and ``lse``), ``glue_retained`` (the part of ``retained`` made by the arm's input glue: the
+backward besides ``out`` and ``lse``; the retained state of the API reference's table counts ``lse`` too, i.e.
+``retained`` plus the ``lse`` bytes of ``out_lse``, ``4 H`` per token), ``glue_retained`` (the part of ``retained`` made by the arm's input glue: the
 frontend's packed ``q`` and ``kv`` copies in the split layout), ``bwd_workspace`` (peak of the backward above the
 gradients it returns) and ``grads`` (``dq`` plus the FP32 accumulator).
 

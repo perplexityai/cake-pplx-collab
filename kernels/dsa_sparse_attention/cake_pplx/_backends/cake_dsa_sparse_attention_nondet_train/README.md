@@ -683,7 +683,8 @@ change:
   caller lengths also keeps the derived `topk_length` (4 B); the packed entry
   (`varlen_topk = K_slots`) keeps its compacted rows `indices`
   (`4 * K_slots` B) and their counts (4 B) on both of its routes.  The returned
-  `out` (`H` KiB) is the call's output and is not counted.  Under
+  `out` (`H` KiB) is the call's output and is not counted (the autograd node
+  saves it too, so it lives until the backward).  Under
   `torch.utils.checkpoint(..., use_reentrant=False)` nothing is retained.
 * Not served above 64 heads: the deterministic package, the NoPE program and
   its sink form (`ValueError`; the deterministic and NoPE query checks name
