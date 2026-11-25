@@ -147,8 +147,8 @@ TOKENS = (
 # alike: each route's programs evaluate SiLU' at the unrounded FP32 preactivation with either taps dtype).  The
 # forward routes' keys (C 512 to 1024) run the route's static program, the deterministic package's at the same rows,
 # over the measured token counts where it was not slower than the dynamic program; a direct range of
-# :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends, and a pair direct range of
-# :data:`PAIR_ROWS_OF_RECORD` runs ahead of both where it covers them.
+# :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends (where the key has one), and a pair direct
+# range of :data:`PAIR_ROWS_OF_RECORD` runs ahead of both where it covers them.
 FALLBACK_ROWS_OF_RECORD = {
     "sm_100a": {
         ("bwd", 520, 608): (1, 24575),
@@ -205,10 +205,8 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd_dt", 520, 568): (1, 16384),
         ("bwd_dt", 576, 640): (1, 24576),
         ("bwd_dt", 648, 1016): (1, 16384),
-        ("fwd", 512, 512): (1, 2048),
         ("fwd", 520, 520): (1, 8192),
         ("fwd", 528, 568): (1, 4096),
-        ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
@@ -217,7 +215,6 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd", 776, 824): (1, 4096),
         ("fwd", 832, 832): (1, 8192),
         ("fwd", 840, 896): (1, 4096),
-        ("fwd", 904, 952): (1, 2048),
         ("fwd", 960, 1024): (1, 24576),
         ("fwd_bias", 512, 512): (1, 24576),
         ("fwd_bias", 520, 520): (1, 12288),
@@ -257,7 +254,6 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
-        ("fwd", 768, 768): (1, 2048),
         ("fwd", 776, 824): (1, 32768),
         ("fwd", 832, 832): (1, 4096),
         ("fwd", 840, 888): (1, 8192),
@@ -315,10 +311,12 @@ FALLBACK_REPLACES_OF_RECORD = {
 }
 # The rows where a forward route runs its direct program (a build of the deterministic direct program; each CTA takes
 # the next token blocks of its channel tile, no ``work``): arch -> (route, C_lo, C_hi) -> (S_lo, S_hi, program), every
-# multiple of 8 from C_lo to C_hi.  Each range starts above the key's static range of :data:`FALLBACK_ROWS_OF_RECORD`
-# (or at the token count from which the direct program beat the dynamic one) and ends at the last measured token
-# count where it was not slower than the dynamic program, eager and CUDA Graph replay; the deterministic package
-# keeps the same rows.  A :data:`PAIR_ROWS_OF_RECORD` range runs ahead of the part of a range it covers.
+# multiple of 8 from C_lo to C_hi.  Each range but the four below starts above the key's static range of
+# :data:`FALLBACK_ROWS_OF_RECORD` (or at the token count from which the direct program beat the dynamic one) and ends
+# at the last measured token count where it was not slower than the dynamic program, eager and CUDA Graph replay; the
+# deterministic package keeps the same rows.  A :data:`PAIR_ROWS_OF_RECORD` range runs ahead of the part of a range it
+# covers.  The ranges of sm_103a ``fwd`` C 512, 576-632 and 904-952 and sm_107a ``fwd`` C 768 start at S 2049, where
+# their static range S 1-2048 ended; that static range lies inside the pair direct range, and 0.2.16 removed it.
 DIRECT_ROWS_OF_RECORD = {
     "sm_100a": {
         ("fwd", 520, 544): (
@@ -740,61 +738,81 @@ DIRECT_CTAS_PER_SM = {"fwd": 4, "fwd_dt": 4, "fwd_bias": 3}
 # The rows where a forward route runs its pair direct program (a build of the deterministic pair direct program: the
 # direct program with each thread on a pair of channels, geometry ``vec`` 2; no ``work``): arch -> (route, C_lo, C_hi)
 # -> (S_lo, S_hi, program), the keys of one architecture and forward route disjoint in C and together C 512 to 1024
-# (one key, two on sm_100a ``fwd_dt``).  A pair range runs ahead of the static and the direct ranges it covers; the
-# deterministic package keeps the same rows.
+# (one key, two on sm_100a ``fwd_dt``, three on sm_103a ``fwd_bias`` and sm_107a ``fwd``).  A pair range runs ahead of
+# the static and the direct ranges it covers; the deterministic package keeps the same rows.
 PAIR_ROWS_OF_RECORD = {
     "sm_100a": {
         ("fwd", 512, 1024): (
-            64,
+            1,
             3072,
             "cake_causal_conv1d_train_d0b237e92b28348315d0",
         ),
         ("fwd_dt", 512, 640): (
-            64,
+            1,
             1536,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_dt", 648, 1024): (
-            64,
+            1,
             1024,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_bias", 512, 1024): (
-            128,
+            1,
             1536,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
     },
     "sm_103a": {
         ("fwd", 512, 1024): (
-            64,
+            1,
             3072,
             "cake_causal_conv1d_train_d0b237e92b28348315d0",
         ),
         ("fwd_dt", 512, 1024): (
-            32,
+            1,
             1792,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
-        ("fwd_bias", 512, 1024): (
+        ("fwd_bias", 512, 712): (
+            1,
+            1536,
+            "cake_causal_conv1d_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 720, 768): (
             16,
+            1536,
+            "cake_causal_conv1d_train_6cc04dd65e493836b918",
+        ),
+        ("fwd_bias", 776, 1024): (
+            1,
             1536,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
     },
     "sm_107a": {
-        ("fwd", 512, 1024): (
-            64,
+        ("fwd", 512, 512): (
+            1,
+            2560,
+            "cake_causal_conv1d_train_d0b237e92b28348315d0",
+        ),
+        ("fwd", 520, 736): (
+            4,
+            2560,
+            "cake_causal_conv1d_train_d0b237e92b28348315d0",
+        ),
+        ("fwd", 744, 1024): (
+            1,
             2560,
             "cake_causal_conv1d_train_d0b237e92b28348315d0",
         ),
         ("fwd_dt", 512, 1024): (
-            16,
+            1,
             1792,
             "cake_causal_conv1d_train_96bf2b8aa1132598f130",
         ),
         ("fwd_bias", 512, 1024): (
-            16,
+            1,
             1792,
             "cake_causal_conv1d_train_6cc04dd65e493836b918",
         ),
