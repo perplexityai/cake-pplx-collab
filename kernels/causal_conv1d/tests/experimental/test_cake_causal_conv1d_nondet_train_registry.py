@@ -878,9 +878,23 @@ BACKWARD_DIRECT_PROGRAMS = {
 # point with a slower cell timed again in fresh processes, a key runs to the last timed S before the first point where
 # its training step or checkpointed step ran slower.  C 640 stops at S 2561 (S 3072, 3073 and 4096 on bwd and S 3072
 # and 3073 on bwd_bias ran slower in both runs), so the bwd_bias key there leaves C 520-632 and 648-832 at S 1000-2048.
+# The keys sm_100a bwd (840, 888) and bwd_dt (624, 632), (744, 760), (776, 792), (808, 824), (840, 856), (872, 888),
+# (904, 952), and sm_103a bwd (904, 952) and bwd_dt (648, 664), (680, 696), (776, 792), (840, 856), (904, 952) were
+# measured on their own: sm_100a C 840, 856, 872 and 888 (bwd) and 632, 744, 784, 816, 848, 856, 880 and 928 (bwd_dt),
+# sm_103a C 928 (bwd) and 656, 688, 784, 848, 856 and 928 (bwd_dt), each at S 1, 128, 512, 1000, 2048 and 4096 (every
+# storage of the route; the backward, the training step and the checkpointed step, eager and under CUDA Graph; five
+# runs each, the points with a faster or slower cell measured again on another node; B200 and GB200 for sm_100a, GB300
+# for sm_103a).  No cell inside a key ran slower than the programs the other tables pick beyond the spread of a copy of
+# them, as measured or normalised by the deterministic program timed in the same process.  A measured token count is
+# inside a key only where the direct backward ran faster than those programs beyond that spread, eager and under CUDA
+# Graph, on every storage and GPU measured there, and the run on the other node, where there was one, did not
+# contradict it; at S 1000 the normalised backward was faster too.  A key holds S 1000 and ends at measured token
+# counts.  None holds S 4096: the training step and the checkpointed step ran slower there at C 840-888 on B200 and at
+# C 928.  On sm_100a, C 872-952 were measured on B200 only.
 BACKWARD_DIRECT_ROWS_OF_RECORD = {
     "sm_100a": {
         ("bwd", 512, 832): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 840, 888): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 896, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 616): (
@@ -888,8 +902,18 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 624, 632): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 640, 736): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 744, 760): (
+            128,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
@@ -898,9 +922,19 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 776, 792): (
+            128,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 800, 800): (
             1,
             2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 808, 824): (
+            128,
+            1000,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 832, 832): (
@@ -908,14 +942,29 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 840, 856): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 864, 864): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 872, 888): (
+            128,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 896, 896): (
             1,
             4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 904, 952): (
+            128,
+            1000,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 960, 1016): (
@@ -946,6 +995,7 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
     },
     "sm_103a": {
         ("bwd", 512, 896): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 904, 952): (128, 1000, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 960, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
         ("bwd_dt", 512, 640): (
@@ -953,8 +1003,18 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 648, 664): (
+            512,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 672, 672): (
             1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 680, 696): (
+            512,
             2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
@@ -963,14 +1023,29 @@ BACKWARD_DIRECT_ROWS_OF_RECORD = {
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 776, 792): (
+            128,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 800, 832): (
             128,
             4096,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
+        ("bwd_dt", 840, 856): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
         ("bwd_dt", 864, 896): (
             1,
             4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 904, 952): (
+            128,
+            2048,
             "cake_causal_conv1d_train_6a1e78e37349abd841ff",
         ),
         ("bwd_dt", 960, 1016): (
@@ -5532,8 +5607,42 @@ def test_kcp_is_unchanged_by_the_backward_direct_rows(arch, fake_device) -> None
 
     kcp = cake_package(KEY, "kcp")
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
-    channels = (504, 512, 576, 640, 768, 1024, 1032, 2048)
-    tokens = (1, 2, 1000, 2048, 2049, 2561, 2562, 4096, 4097, 65536)
+    channels = (
+        504,
+        512,
+        576,
+        632,
+        640,
+        656,
+        688,
+        760,
+        768,
+        776,
+        856,
+        888,
+        904,
+        952,
+        1024,
+        1032,
+        2048,
+    )
+    tokens = (
+        1,
+        2,
+        127,
+        128,
+        511,
+        512,
+        1000,
+        1001,
+        2048,
+        2049,
+        2561,
+        2562,
+        4096,
+        4097,
+        65536,
+    )
 
     def read() -> dict:
         out = {}
