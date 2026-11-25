@@ -173,8 +173,9 @@ forwards that change no value (each gives the bits of `fwd_pipe` on
 `fwd_keep_pipe` and `fwd_keep_pipe_packed` load `x` and `z` with the L2's
 default policy in place of `evict_first`, `fwd_layout_pipe` warms rows of any
 layout in L2 by their layout (the deterministic package's per-layout prefetch
-walk), and `fwd_layout_keep_pipe` does both (`fwd_keep_pipe` and
-`fwd_layout_keep_pipe` on `sm_100a` and `sm_107a` only).  Packed rows run
+walk), and `fwd_layout_keep_pipe` does both (`fwd_keep_pipe` on `sm_100a`
+only, `fwd_keep_pipe_packed` on `sm_107a` only, `fwd_layout_keep_pipe` on
+`sm_100a` and `sm_107a` only).  Packed rows run
 `fwd_keep_pipe` on `sm_100a` from 37 to 85 rows per SM (an `x` or `z`
 broadcast over more than one token keeps `fwd_pipe`) and
 `fwd_keep_pipe_packed` on `sm_107a` past 8192, where 0.2.16 ran `fwd_pipe`

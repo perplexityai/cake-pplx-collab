@@ -177,8 +177,9 @@ of ``fwd_pipe_packed`` on sm_107a): ``fwd_keep_pipe`` and
 ``fwd_keep_pipe_packed`` load ``x`` and ``z`` with the L2's default policy in
 place of ``evict_first``, ``fwd_layout_pipe`` warms rows of any layout in L2
 by their layout (the deterministic package's per-layout prefetch walk), and
-``fwd_layout_keep_pipe`` does both (``fwd_keep_pipe`` and
-``fwd_layout_keep_pipe`` on sm_100a and sm_107a only).  Packed rows run
+``fwd_layout_keep_pipe`` does both (``fwd_keep_pipe`` on sm_100a only,
+``fwd_keep_pipe_packed`` on sm_107a only, ``fwd_layout_keep_pipe`` on sm_100a
+and sm_107a only).  Packed rows run
 ``fwd_keep_pipe`` on sm_100a from 37 to 85 rows per SM (an ``x`` or ``z``
 broadcast over more than one token keeps ``fwd_pipe``) and
 ``fwd_keep_pipe_packed`` on sm_107a past 8192, where 0.2.16 ran ``fwd_pipe``
@@ -551,8 +552,10 @@ Host design (the input layout rules are the deterministic package's):
   next block in L2 with one bulk prefetch per tensor where ``dy``, ``x`` and
   ``z`` hold packed rows (head stride 128 and token stride ``H * 128``; other
   layouts keep the per-thread prefetches); on sm_107a the claimed backward
-  warms the block two ahead.  A small-row backward is one cluster of 16 CTAs
-  (``cake_jit.backward_ctas`` 16) scheduled together on the SMs of one GPC,
+  warms the block two ahead.  A small-row backward but the solo backward is
+  one cluster of 16 CTAs (``cake_jit.backward_ctas`` 16) scheduled together
+  on the SMs of one GPC (the solo backward is one CTA of 256 threads,
+  ``cake_jit.backward_ctas`` 1),
   team ``q`` of the exact tiny backward's CTA ``r`` running the 8-row block
   ``r + 16 q``, CTA ``r`` of the short backward the 16-row blocks ``r``,
   ``r + 16``, ....  A strided program without the weight gradient

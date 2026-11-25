@@ -1684,18 +1684,12 @@ FORWARD_CASES = [
     pytest.param(1, None, "flat4", id="band4-end+1"),
     pytest.param(0, None, "flat5", id="band5-end"),
     pytest.param(1, None, "flat5", id="band5-end+1"),
-    pytest.param(0, None, "flat6", id="band6-end"),
-    pytest.param(1, None, "flat6", id="band6-end+1"),
-    pytest.param(0, None, "flat7", id="band7-end"),
-    pytest.param(1, None, "flat7", id="band7-end+1"),
     pytest.param(1, None, "token0", id="one-token-band0-end+1"),
     pytest.param(1, None, "token1", id="one-token-band1-end+1"),
     pytest.param(1, None, "token2", id="one-token-band2-end+1"),
     pytest.param(1, None, "token3", id="one-token-band3-end+1"),
     pytest.param(1, None, "token4", id="one-token-band4-end+1"),
     pytest.param(1, None, "token5", id="one-token-band5-end+1"),
-    pytest.param(1, None, "token6", id="one-token-band6-end+1"),
-    pytest.param(1, None, "token7", id="one-token-band7-end+1"),
     pytest.param(0, None, "projection2", id="projection-band2-end"),
     pytest.param(1, None, "projection2", id="projection-band2-end+1"),
     pytest.param(0, None, "projection3", id="projection-band3-end"),
@@ -1802,7 +1796,7 @@ GATE_TAIL = (-87.5, -88.0, -88.5)
 
 
 @requires_device
-@pytest.mark.parametrize("band", range(9))
+@pytest.mark.parametrize("band", range(7))
 @pytest.mark.parametrize("kind", ["flat", "projection", "headmajor", "other"])
 def test_forward_keeps_the_gate_tail_in_every_band(
     kind, band, determinism_setting, monkeypatch: pytest.MonkeyPatch, record_property

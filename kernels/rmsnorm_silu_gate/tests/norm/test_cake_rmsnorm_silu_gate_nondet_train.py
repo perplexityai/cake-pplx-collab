@@ -3361,8 +3361,9 @@ STRIDED_FORWARD_BANDS = {
 # head run STRIDED_FORWARD_BANDS), as FORWARD_BANDS: the pipelined forwards
 # with the per-layout L2 prefetch walk, ``fwd_layout_pipe`` and
 # ``fwd_layout_keep_pipe`` (``x`` and ``z`` loaded with the L2's default
-# policy; on sm_100a and sm_107a), in the place of the extra-long and the
-# plain forward of STRIDED_FORWARD_BANDS.
+# policy; on sm_100a and sm_107a), in the place of parts of the extra-long
+# and the plain forward of STRIDED_FORWARD_BANDS on sm_100a and sm_103a, and
+# of parts of its mid and plain forward on sm_107a.
 PROJECTION_FORWARD_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -5326,7 +5327,9 @@ def test_new_pipelined_forward_records_keep_their_base_grid_rule():
     rows not read as packed of a program of rows of any layout (400 rows per
     SM); none takes a workspace, and its grid is its base's at the rows of
     ``PIPE_FORWARD_GRIDS`` and ``STRIDED_PIPE_FORWARD_GRIDS`` (rows read as
-    packed or not)."""
+    packed or not, but on sm_107a ``fwd_layout_pipe`` and
+    ``fwd_layout_keep_pipe`` on rows read as packed only: their cut of other
+    rows is not their base's)."""
     for role, bases in NEW_PIPE_BASES.items():
         for arch in loader.ARCHES:
             name = loader.ROUTES[arch].get(role)
