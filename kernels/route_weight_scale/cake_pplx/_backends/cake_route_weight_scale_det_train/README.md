@@ -1,4 +1,4 @@
-# Cake route-weight row scaling (BF16 x FP32 route weight, SM100 / SM103)
+# Cake route-weight row scaling (BF16 x FP32 route weight, SM100 / SM103 / SM107)
 
 Backend of `cake_pplx.cake_route_weight_scale_det_train`: the route-weight row
 scaling of a routed MoE expert in training.  After the down projection, each
@@ -10,8 +10,8 @@ synchronization.
 
 The facade `cake_pplx.cake_route_weight_scale_det_train` is the API; this
 backend package is experimental (no compatibility guarantee for its internal
-names).  SM100 (B200 / GB200) and SM103 (B300 / GB300) are the supported
-architectures; another device, SM107 (R200) included, raises `RuntimeError`.  Each library
+names).  SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the
+supported architectures; another device raises `RuntimeError`.  Each library
 is loaded prebuilt from `aot/` when a builder compiled it and JIT-built from the
 sources and flags `build.json` records otherwise.  Only the JIT shim
 (`_cake_pplx_jit.py`) reads environment variables, and only to build or find a
@@ -47,7 +47,7 @@ dx, dw = cake_route_weight_scale_det_train_backward(x, dy, w, dx=dx_buffer[:rows
 | Workspace | 0 bytes: the forward allocates only `y`, the backward only `dx` and `dw` (none when passed in) |
 | Retained state | The autograd function saves `x` and `w` only |
 | Empty input | `rows = 0`: empty outputs, no launch, no library load |
-| Programs | Eight records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h4096_t32`, `fwd_h3584`, `fwd_h4096_flat`, `fwd_h3584_flat`, `bwd_h4096`, `bwd_h3584`, `bwd_h3584_warp`, each built for the two architectures |
+| Programs | Eight records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h4096_t32`, `fwd_h3584`, `fwd_h4096_flat`, `fwd_h3584_flat`, `bwd_h4096`, `bwd_h3584`, `bwd_h3584_warp`, each built for the three architectures |
 | Minimum CUDA | The `min_cuda` of each library in `build.json`; an older local toolkit raises `RuntimeError` when the library is built |
 
 A violation of the operand rules is a `ValueError` (a non-tensor operand a
@@ -132,5 +132,4 @@ The call never reads torch's deterministic-algorithms setting and never alerts.
 - `H` 4096 and 3584 only.
 - BF16 `x` / `dy` / `y` / `dx` and FP32 `w` / `dw` only.
 - Operands of another layout are refused, not copied.
-- No build for any architecture other than SM100 and SM103; the SM107 build
-  follows once it runs on an SM107 device.
+- No build for any architecture other than SM100, SM103 and SM107.
