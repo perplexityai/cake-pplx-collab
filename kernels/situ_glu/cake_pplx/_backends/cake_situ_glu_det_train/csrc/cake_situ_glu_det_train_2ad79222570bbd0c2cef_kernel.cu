@@ -145,7 +145,7 @@ __device__ __forceinline__ float2 cake_bf16x2_to_f32x2(__nv_bfloat162 v) {
 extern "C" {
 
 __global__ __launch_bounds__(128) void
-kernel_cake_situ_glu_det_train_795723884647477adbd7(__nv_bfloat16* __restrict__ gate, __nv_bfloat16* __restrict__ up, __nv_bfloat16* __restrict__ dh, __nv_bfloat16* __restrict__ d_gate, __nv_bfloat16* __restrict__ d_up, int rows, int width, long long gate_stride, long long up_stride, long long dh_stride, long long d_gate_stride, long long d_up_stride, float beta, float lb)
+kernel_cake_situ_glu_det_train_2ad79222570bbd0c2cef(__nv_bfloat16* __restrict__ gate, __nv_bfloat16* __restrict__ up, __nv_bfloat16* __restrict__ dh, __nv_bfloat16* __restrict__ d_gate, __nv_bfloat16* __restrict__ d_up, int rows, int width, long long gate_stride, long long up_stride, long long dh_stride, long long d_gate_stride, long long d_up_stride, float beta, float lb)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -160,8 +160,8 @@ kernel_cake_situ_glu_det_train_795723884647477adbd7(__nv_bfloat16* __restrict__ 
     // === Task calls (declaration order) ===
     int lane_1 = tid & 31;
     int warp_1 = tid >> 5;
-    int part = warp_1 & 1;
-    int sub = warp_1 >> 1;
+    int part = warp_1 & 3;
+    int sub = warp_1 >> 2;
     int nseg = width >> 8;
     float k1 = -2.88539f / beta;
     float k2 = -2.88539f / lb;
@@ -173,7 +173,7 @@ kernel_cake_situ_glu_det_train_795723884647477adbd7(__nv_bfloat16* __restrict__ 
     float sdb = beta * 0.99999905f;
     float sdl = lb * 0.99999905f;
     #pragma unroll 1
-    for (int first = bid * 2; first < rows; first += num_bids * 2) {
+    for (int first = bid; first < rows; first += num_bids) {
         int row = first + sub;
         int limit = ((row < rows) ? nseg : 0);
         int _min_0 = ((row) < (rows - 1) ? (row) : (rows - 1));
@@ -184,7 +184,7 @@ kernel_cake_situ_glu_det_train_795723884647477adbd7(__nv_bfloat16* __restrict__ 
         long long dgoff = at * d_gate_stride;
         long long duoff = at * d_up_stride;
         #pragma unroll 1
-        for (int s0 = part; s0 < nseg; s0 += 2) {
+        for (int s0 = part; s0 < nseg; s0 += 4) {
             unsigned int gw[4];
             unsigned int uw[4];
             unsigned int dw[4];
