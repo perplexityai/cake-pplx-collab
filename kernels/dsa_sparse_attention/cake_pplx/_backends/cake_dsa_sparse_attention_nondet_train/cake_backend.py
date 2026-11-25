@@ -25,7 +25,9 @@ limitations under the License.
 #   token in one launch per stage (``HEAD_WINDOW_STAGES``), or -- where the
 #   program does not ship those builds -- the 64-head kernels on two windows of
 #   the heads, ``W1 = [H - 64, H)`` and then ``W0 = [0, 64)`` (see the comment
-#   above ``SUPPORTED_HEADS``).  The NoPE program serves 64 heads.
+#   above ``SUPPORTED_HEADS``).  Its forward runs, where the program ships it,
+#   the single-pass forward instead: every head of a token in one 2-CTA
+#   cluster (``SINGLE_PASS_STAGES``).  The NoPE program serves 64 heads.
 # * Forward writes ``out [T, 64, 512]`` BF16, ``lse [T, 64]`` FP32 (natural
 #   log over the valid keys; ``-inf`` for a fully masked row, whose ``out`` is
 #   zero) and, with ``with_o_lo=True`` (the default), the BF16 output residual
@@ -119,7 +121,7 @@ D_QK = D_LATENT + D_ROPE
 # Query heads of the RoPE form.  Every kernel of the program computes ``NUM_HEADS`` (64) query heads of a token per
 # work item (``HEAD_WINDOW``).  A call with ``H = q_latent.shape[1]`` heads in ``SUPPORTED_HEADS`` covers them with
 # 64-head windows: ``H = 64`` is one window, today's plan unchanged.  ``H = 96`` and ``128`` take one of two plans per
-# phase (forward, backward):
+# phase (forward, backward), and the forward the single-pass forward where it ships (third item below):
 #
 # * The head-window plan, where the program ships the head-window builds of the phase's stage for the device's
 #   architecture (``HEAD_WINDOW_STAGES``, :func:`head_window_stage`): one launch of the stage over ``2 T`` work items,
@@ -143,6 +145,18 @@ D_QK = D_LATENT + D_ROPE
 #   - a call without query rows (``T = 0``) returns its empty outputs before any plan (no launch), as at 64 heads:
 #     the head-window launches always cover at least one token.
 #
+# * The single-pass forward (0.9.0), where the program ships it for the device's architecture (``SINGLE_PASS_STAGES``,
+#   :func:`single_pass_stage`; ``sm_100a`` / ``sm_103a``), replaces the head-window forward (and the bridge's): one
+#   launch of ``fwd_h128`` (``fwd_h128_no_olo`` under ``with_o_lo=False``) computes every query head of a token in one
+#   ``(2, 1, 1)`` cluster -- 128 rows split over the pair's two CTAs, the rows past ``H`` zero-filled by the query
+#   loads and never stored -- and writes ``out``, ``lse`` and ``o_lo`` at ``t * H + h`` directly, like the head-window
+#   forward (no window scratch, no copy).  Its arguments are its own: ``num_queries = T`` tokens (not items),
+#   ``num_heads = H``, ``k_rope`` a tensor map (no window selector, no ``k_rope`` stride / offset scalars).  Its grid
+#   is persistent, ``2 * max(1, min(T, SMs // 2))`` CTAs (:func:`single_pass_grid`): cluster ``c`` of ``C`` runs the
+#   tokens ``c, c + C, ...`` in a fixed per-token order, and with ``derive_length`` stores each token's derived
+#   length.  Its ``out`` / ``lse`` / ``o_lo`` are not the 64-head windows' bits (another kernel); the naive BF16 tier
+#   judges them.  The backward plans are unchanged.
+#
 # * The two-window bridge (0.7.0), where the program lacks the phase's head-window build: the 64-head kernels on head
 #   windows (``head_windows``), ``W1 = [H - 64, H)`` first and then ``W0 = [0, 64)`` (96: ``[32, 96)`` then
 #   ``[0, 64)``; 128: ``[64, 128)`` then ``[0, 64)``).  The window's query, ``out``, ``dout`` and ``dq`` operands are
@@ -164,8 +178,10 @@ D_QK = D_LATENT + D_ROPE
 # ``hs``; another layout is copied once into the workspace and every backward stage reads the copy).  Per head, the
 # numerics are those of the 64-head program on the bridge's windows: the head-window builds give every head the same
 # 32-row rescale groups as the bridge, so ``out``, ``lse``, ``o_lo`` and ``dq`` keep the bridge's bits; ``dK`` / ``dV``
-# add the same terms with FP32 atomics in another order.  The deterministic package and the NoPE program serve 64
-# heads only; on ``sm_107a`` the windows are not yet served (64 heads only).
+# add the same terms with FP32 atomics in another order.  The single-pass forward is another kernel: its ``out``,
+# ``lse`` and ``o_lo`` (and so the backward's ``delta`` and ``dq``) are its own bits, run-to-run identical.  The
+# deterministic package and the NoPE program serve 64 heads only; on ``sm_107a`` the windows are not yet served (64
+# heads only).
 SUPPORTED_HEADS = (64, 96, 128)
 HEAD_WINDOW = NUM_HEADS
 # The architectures whose stages serve the head windows of ``H > 64`` (``sm_107a``: 64 heads only for now).
@@ -188,6 +204,18 @@ _HEAD_WINDOW_BUILDS = frozenset(HEAD_WINDOW_STAGES.values())
 # The work items per token of a head-window launch (both windows) and its ``wsel`` (-1: both windows of every token).
 HEAD_WINDOW_ITEMS = 2
 HEAD_WINDOW_BOTH = -1
+# The single-pass forward builds (see the comment above ``SUPPORTED_HEADS``), keyed as the registry's
+# ``cake_jit.SINGLE_PASS_STAGES``: the head-window forward -> the build that runs in its place.  They take their own
+# arguments (``num_queries = T``, ``num_heads = H``, no ``wsel``) and the persistent grid of :func:`single_pass_grid`,
+# a multiple of their ``(2, 1, 1)`` cluster.  A plan runs one only where the registry carries it for the device's
+# architecture with its generated launcher (:func:`single_pass_stage`); else the head-window forward or the bridge.
+SINGLE_PASS_STAGES = {
+    "fwd_hw": "fwd_h128",
+    "fwd_hw_no_olo": "fwd_h128_no_olo",
+}
+_SINGLE_PASS_BUILDS = frozenset(SINGLE_PASS_STAGES.values())
+# CTAs per token cluster of a single-pass forward launch.
+SINGLE_PASS_CLUSTER = 2
 
 
 def head_windows(num_heads: int) -> tuple[int, ...]:
@@ -223,6 +251,33 @@ def head_window_stage(stage: str, arch: Optional[str]) -> Optional[str]:
     return hw
 
 
+def single_pass_stage(stage: str, arch: Optional[str]) -> Optional[str]:
+    """The single-pass forward build (``SINGLE_PASS_STAGES``) that runs the RoPE program's forward ``stage`` (``fwd``
+    or ``fwd_no_olo``) over more than 64 query heads on ``arch``, or ``None`` when there is none: ``arch`` is outside
+    ``WINDOW_ARCHES``, or the registry does not register the build (a record entry among the record's stages,
+    shipping for ``arch``) with its generated launcher and grid (``cake_launch``).  It does not need the head-window
+    forward it replaces to ship."""
+    hw = HEAD_WINDOW_STAGES.get(stage)
+    single = SINGLE_PASS_STAGES.get(hw) if hw is not None else None
+    if single is None or arch not in WINDOW_ARCHES:
+        return None
+    if single not in cake_jit.record() or single not in cake_jit.registered_stages():
+        return None
+    if arch not in cake_jit.stage_arches(single):
+        return None
+    if single not in cake_launch.LAUNCH or single not in cake_launch.GRID:
+        return None
+    return single
+
+
+def single_pass_grid(num_queries: int, sm_count: int) -> tuple[int, int, int]:
+    """Grid of a single-pass forward launch over ``num_queries`` tokens on a device of ``sm_count`` SMs: one resident
+    ``(2, 1, 1)`` cluster per SM pair, at most one per token and at least one (``2 * max(1, min(T, sm_count //
+    2))`` CTAs); cluster ``c`` of ``C`` runs the tokens ``c, c + C, ...``.  The host never launches zero tokens."""
+    pairs = int(sm_count) // SINGLE_PASS_CLUSTER
+    return (SINGLE_PASS_CLUSTER * max(1, min(int(num_queries), pairs)), 1, 1)
+
+
 def head_window_plan(
     num_heads: int,
     arch: Optional[str],
@@ -232,14 +287,16 @@ def head_window_plan(
     key_passes: int = 1,
     dkv_direct: bool = False,
 ) -> tuple[Optional[str], Optional[str]]:
-    """``(forward, main)``: the head-window stages a call over ``num_heads`` query heads runs on ``arch`` -- its
-    forward stage (``fwd_hw`` or, without ``o_lo``, ``fwd_hw_no_olo``) and, for a backward, its main stage (the
-    head-window build of ``bwd_main``, ``bwd_main_natural``, ``bwd_main_pass`` or ``bwd_main_pass_natural`` by
-    ``key_passes`` and ``dkv_direct``) -- each ``None`` where that phase runs the two-window bridge (and both ``None``
-    at 64 heads)."""
+    """``(forward, main)``: the stages a call over ``num_heads`` query heads runs on ``arch`` in place of the
+    two-window bridge -- its forward stage (the single-pass forward ``fwd_h128`` where it ships, else the head-window
+    forward ``fwd_hw``; without ``o_lo`` their twins ``fwd_h128_no_olo`` / ``fwd_hw_no_olo``) and, for a backward, its
+    main stage (the head-window build of ``bwd_main``, ``bwd_main_natural``, ``bwd_main_pass`` or
+    ``bwd_main_pass_natural`` by ``key_passes`` and ``dkv_direct``) -- each ``None`` where that phase runs the
+    two-window bridge (and both ``None`` at 64 heads)."""
     if int(num_heads) == NUM_HEADS:
         return None, None
-    forward = head_window_stage("fwd" if with_o_lo else "fwd_no_olo", arch)
+    stage = "fwd" if with_o_lo else "fwd_no_olo"
+    forward = single_pass_stage(stage, arch) or head_window_stage(stage, arch)
     if not backward:
         return forward, None
     main = "bwd_main_pass" if int(key_passes) > 1 else "bwd_main"
@@ -2489,12 +2546,14 @@ class _Plan:
     head_windows: tuple[int, ...] = ()
     dout_copy: bool = False
     # Above 64 heads: the forward / the backward runs the head-window builds (``HEAD_WINDOW_STAGES``; one launch per
-    # stage over the ``2 T`` items, the ``[T, H]`` tensors addressed directly) instead of the two-window bridge.
+    # stage over the ``2 T`` items, the ``[T, H]`` tensors addressed directly) instead of the two-window bridge; the
+    # forward's may be the single-pass forward (``SINGLE_PASS_STAGES``: one launch over the ``T`` tokens).
     fused_forward: bool = False
     fused_backward: bool = False
     # Head-window stage -> the launch values that replace the bound values for it: ``num_queries`` (the item count
     # ``2 T``), ``num_heads``, ``wsel`` and, for a main stage, the item-space ``token_base`` / ``token_step`` (the
-    # pass overrides of a key-pass build count its first token and its tokens in items, :func:`_key_values`).
+    # pass overrides of a key-pass build count its first token and its tokens in items, :func:`_key_values`); a
+    # single-pass forward's: ``num_queries = T`` and ``num_heads``.
     stage_values: dict = field(default_factory=dict, repr=False)
 
     def launch_keys(self) -> tuple:
@@ -2806,16 +2865,27 @@ def _plan(
     if not with_o_lo:
         fwd, delta = cake_jit.NO_OLO_STAGES[fwd], cake_jit.NO_OLO_STAGES[delta]
     # the head-window stages' own launch values (:func:`_key_values`): the 2 T items, the head count, both windows,
-    # and for the main stage the item-space token order (the pass overrides set a key-pass build's first item)
+    # and for the main stage the item-space token order (the pass overrides set a key-pass build's first item); the
+    # single-pass forward's: its T tokens and the head count, launched over its persistent grid
     items = HEAD_WINDOW_ITEMS * num_queries
     stage_values: dict[str, dict[str, int]] = {}
     item_scalars = dict(scalars, num_queries=items)
-    if fused_forward:
+    if fused_forward and hw_forward in _SINGLE_PASS_BUILDS:
+        fwd = hw_forward
+        stage_values[fwd] = dict(num_queries=num_queries, num_heads=H)
+        fwd_entry = _stage_entry(
+            fwd,
+            arch,
+            scalars,
+            grid=single_pass_grid(num_queries, _sm_count(_device_index(device))),
+        )
+    elif fused_forward:
         fwd = hw_forward
         stage_values[fwd] = dict(num_queries=items, num_heads=H, wsel=HEAD_WINDOW_BOTH)
-    entries: dict[Any, _StageEntry] = {
-        fwd: _stage_entry(fwd, arch, item_scalars if fused_forward else scalars)
-    }
+        fwd_entry = _stage_entry(fwd, arch, item_scalars)
+    else:
+        fwd_entry = _stage_entry(fwd, arch, scalars)
+    entries: dict[Any, _StageEntry] = {fwd: fwd_entry}
     backward_order: list = []
     if backward:
         # the natural-layout variants of the main stage replace the permuted ones on a direct binding
@@ -2934,7 +3004,8 @@ def _window_order(
     """``(forward keys, backward keys)`` of a plan over ``num_heads > 64`` heads from the plan's forward stage ``fwd``
     and its ``backward_order`` (see the comment above ``SUPPORTED_HEADS``):
 
-    * forward: a head-window forward (``fused_forward``: ``fwd`` is its head-window stage) runs as it is, one launch;
+    * forward: a head-window or single-pass forward (``fused_forward``: ``fwd`` is that stage) runs as it is, one
+      launch;
       on the bridge, per window in launch order (``W1`` then ``W0``), the window launch and its ``"fwd_copy"``;
     * backward: the ``"dout_copy"`` (``dout_copy`` only), the delta stage once over the ``T * H`` rows, then on a
       head-window backward (``fused_backward``: its main stages are the head-window builds) the main launches as
@@ -2985,8 +3056,9 @@ def _check_head_window_operands(plan: _Plan, t: dict[str, torch.Tensor]) -> None
     the ``T`` tokens -- ``q_latent`` / ``q_rope`` / ``out`` / ``dout`` (or its dense copy) / ``dq_latent`` /
     ``dq_rope`` ``[T, H, *]``, and ``lse`` / ``delta`` ``[T, H]`` and (with ``o_lo``) ``o_lo [T, H, 512]``
     contiguous --, and each head-window stage receives ``num_queries = 2 T`` items over both windows (``wsel =
-    -1``) of ``H`` heads.  Validation and the output checks establish all of it on every route; this states it where
-    the launch values are bound."""
+    -1``) of ``H`` heads; a single-pass forward (the same operands; its query maps likewise carry ``H`` heads)
+    receives ``num_queries = T`` tokens of ``H`` heads.  Validation and the output checks establish all of it on every
+    route; this states it where the launch values are bound."""
     T, H = int(plan.num_queries), int(plan.num_heads)
 
     def heads(name: str, last: int) -> None:
@@ -3018,6 +3090,12 @@ def _check_head_window_operands(plan: _Plan, t: dict[str, torch.Tensor]) -> None
         heads("dq_rope", D_ROPE)
         rows("delta", (T, H))
     for stage, own in plan.stage_values.items():
+        if stage in _SINGLE_PASS_BUILDS:
+            if (own["num_queries"], own["num_heads"], own.get("wsel")) != (T, H, None):
+                raise ValueError(
+                    f"{stage}: a single-pass forward launch runs {T} tokens of {H} heads, got {own}"
+                )
+            continue
         if (own["num_queries"], own["num_heads"], own["wsel"]) != (
             HEAD_WINDOW_ITEMS * T,
             H,
@@ -3220,7 +3298,9 @@ class DSATrainRunner:
     A binding over ``H > 64`` query heads (``num_heads``) runs, per phase,
     the head-window builds where the program ships them for the device's
     architecture (``HEAD_WINDOW_STAGES``: ``forward_stages`` is the one
-    head-window forward, e.g. ``("fwd_hw",)``; ``backward_order`` the
+    head-window forward, e.g. ``("fwd_hw",)``, or where the program ships it
+    the single-pass forward, ``("fwd_h128",)`` (``SINGLE_PASS_STAGES``);
+    ``backward_order`` the
     ``"dout_copy"`` :class:`HeadStep` when the binding's ``dout`` needs it, the
     delta over the ``T * H`` rows, the head-window main stage -- keyed like the
     64-head plan's, ``bwd_main_hw`` or per token chunk and pass

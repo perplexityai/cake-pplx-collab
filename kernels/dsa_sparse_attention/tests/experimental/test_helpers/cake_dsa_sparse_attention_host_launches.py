@@ -49,6 +49,14 @@ first token, ``2 x`` its tokens).  ``HostLaunches(head_windows=True)`` registers
 generated launch tables the export renders for them), ``head_windows=False`` hides them (every call above 64 heads
 plans the two-window bridge), and the default leaves the registry as it is.
 
+The single-pass forward builds (``fwd_h128``, ``fwd_h128_no_olo``: the package's ``SINGLE_PASS_STAGES``) run in place
+of the head-window forward: one launch over the ``T`` tokens (``num_queries = T``, ``num_heads = H``, no ``wsel``)
+with the caller's whole ``[T, H, *]`` query operands and ``k_rope`` itself, on the persistent grid of
+``cake_backend.single_pass_grid`` over :data:`SM_COUNT` SMs; the stand-in writes every head as the head-window
+forward's does.  ``HostLaunches(single_pass=True)`` registers them for ``sm_100a`` / ``sm_103a`` where the registry
+does not (:func:`register_single_pass_builds`); the default (``False``) hides them, so the head-window tests see the
+head-window forward (``fwd_hw``); ``None`` leaves the registry as it is.  ``head_windows=False`` hides them too.
+
 :func:`check_forward` and :func:`check_backward` hold a call's outputs and launches to the two-window bridge contract
 of the package: one window for 64 heads, ``[H - 64, H)`` then ``[0, 64)`` for 96 and 128 heads (the heads both windows
 cover come from the later one), one delta launch over ``T * H`` rows, the window statistics (``lse = +inf``,
@@ -56,7 +64,9 @@ cover come from the later one), one delta launch over ``T * H`` rows, the window
 head adds once per key pass, and one cast (none on a direct binding).  :func:`check_forward_hw` and
 :func:`check_backward_hw` hold them to the head-window contract: one forward launch over the ``2 T`` items, one delta
 launch, the main build over the ``2 T`` items (per token chunk and pass on a multi-pass backward), every query head's
-outputs and ``dq`` its own, every live head added once per pass, one cast.
+outputs and ``dq`` its own, every live head added once per pass, one cast.  :func:`check_forward_sp` holds a call's
+forward to the single-pass contract: one launch of the single-pass build over the ``T`` tokens on its persistent
+grid, every query head's outputs its own.
 
 :func:`capture_h64_cases` records the launches of :data:`H64_CASES` (64 heads) in the form of the golden file
 ``cake_dsa_sparse_attention_h64_launches.json``: per case, every stage launch (stage, grid and every argument its
@@ -138,6 +148,140 @@ HEAD_WINDOW_LIBRARIES = {
 }
 #: The arguments a head-window build takes beyond its 64-head stage's (before the grid).
 HEAD_WINDOW_ARGS = ("num_heads", "wsel")
+#: The single-pass forward builds (the package's ``SINGLE_PASS_STAGES``: keyed by the head-window forward each one
+#: replaces), the library stems they ship under, their launch leaves and their own kernel argument list.
+SINGLE_PASS_STAGES = {"fwd_hw": "fwd_h128", "fwd_hw_no_olo": "fwd_h128_no_olo"}
+SINGLE_PASS_LIBRARIES = {
+    "fwd_h128": "cake_dsa_h64_train_adfe34021dbfb2cffe71",
+    "fwd_h128_no_olo": "cake_dsa_h64_train_16ec3e9236b227e0d8c9",
+}
+SINGLE_PASS_LAUNCH = {
+    "block": [512, 1, 1],
+    "cluster": [2, 1, 1],
+    "cooperative": False,
+    "dynamic_smem_bytes": 215808,
+    "use_pdl": True,
+}
+SINGLE_PASS_ARGS = (
+    "q_latent",
+    "q_rope",
+    "kv_latent",
+    "k_rope",
+    "out",
+    "o_lo",
+    "lse",
+    "indices",
+    "topk_length",
+    "num_queries",
+    "num_heads",
+    "num_kv",
+    "topk",
+    "idx_stride",
+    "indices_offset",
+    "has_topk_length",
+    "derive_length",
+    "scale_log2",
+    "grid_x",
+    "grid_y",
+    "grid_z",
+)
+#: The SMs of the stand-in device the single-pass forward's persistent grid is planned for (B200: 148).
+SM_COUNT = 148
+
+
+def is_single_pass(stage: str) -> bool:
+    """Whether ``stage`` is a single-pass forward build (``fwd_h128``, ``fwd_h128_no_olo``)."""
+    return stage in SINGLE_PASS_LIBRARIES
+
+
+def single_pass_grid(num_queries: int, sm_count: int = SM_COUNT) -> tuple:
+    """The persistent grid of a single-pass forward launch: one ``(2, 1, 1)`` cluster per SM pair, at most one per
+    token, at least one (the package's ``cake_backend.single_pass_grid``, spelled here)."""
+    return (2 * max(1, min(int(num_queries), int(sm_count) // 2)), 1, 1)
+
+
+def _single_pass_launcher(run, values, grid):
+    """The generated launcher of the single-pass builds (one for both), as the export renders it."""
+    run(*(values[name] for name in SINGLE_PASS_ARGS[:-3]), grid[0], grid[1], grid[2])
+
+
+def _single_pass_grid_rule(num_queries, num_kv, topk):
+    """The generated grid rule of the single-pass builds: one cluster per token."""
+    return (max(1, num_queries) * 2, 1, 1)
+
+
+def register_single_pass_builds(
+    monkeypatch, jit, launch, arches: Optional[list] = None
+) -> tuple:
+    """Register the single-pass forward builds of the RoPE program for ``arches`` (default ``sm_100a`` / ``sm_103a``)
+    where the registry lacks them, as the export registers them: per build a record entry (its library stem,
+    ``ffi_entry``, ``arches`` and :data:`SINGLE_PASS_LAUNCH`) after the record's other stages, the build appended to
+    the record's ``stages`` and to the program's ``STAGES_OF`` order, and the generated launch tables' entries (one
+    launcher and grid rule for both, :data:`SINGLE_PASS_ARGS`).  An entry the registry already carries is left as it
+    is.  Returns the builds whose record entry this call registered."""
+    record = jit.record(jit.PROGRAM)
+    builds = list(SINGLE_PASS_LIBRARIES)
+    missing = [b for b in builds if b not in record]
+    if missing:
+        new_record = copy.deepcopy(record)
+        for b in missing:
+            new_record[b] = dict(
+                library=SINGLE_PASS_LIBRARIES[b],
+                ffi_entry="run",
+                arches=list(arches or HEAD_WINDOW_ARCHES),
+                launch=copy.deepcopy(SINGLE_PASS_LAUNCH),
+            )
+        new_record["stages"] = list(record["stages"]) + [
+            b for b in builds if b not in record["stages"]
+        ]
+        modules = dict(jit.MODULES)
+        modules[jit.PROGRAM] = new_record
+        monkeypatch.setattr(jit, "MODULES", modules)
+        order = jit.STAGES_OF[jit.PROGRAM]
+        stages_of = dict(jit.STAGES_OF)
+        stages_of[jit.PROGRAM] = tuple(order) + tuple(
+            b for b in builds if b not in order
+        )
+        monkeypatch.setattr(jit, "STAGES_OF", stages_of)
+    tables = dict(
+        LAUNCH=_single_pass_launcher,
+        GRID=_single_pass_grid_rule,
+        STAGE_ARGS=list(SINGLE_PASS_ARGS),
+    )
+    for name, value in tables.items():
+        table = dict(getattr(launch, name))
+        added = [b for b in builds if b not in table]
+        for b in added:
+            table[b] = copy.copy(value) if name == "STAGE_ARGS" else value
+        if added:
+            monkeypatch.setattr(launch, name, table)
+    return tuple(missing)
+
+
+def strip_single_pass_builds(monkeypatch, jit, launch) -> tuple:
+    """Remove the single-pass forward builds from the registry for this test (record entries, the record's
+    ``stages``, the ``STAGES_OF`` order and the generated launch tables), as :func:`strip_head_window_builds` does
+    for the head-window builds.  Returns the builds removed."""
+    builds = set(SINGLE_PASS_LIBRARIES)
+    record = jit.record(jit.PROGRAM)
+    found = tuple(b for b in SINGLE_PASS_LIBRARIES if b in record)
+    new_record = {key: value for key, value in record.items() if key not in builds}
+    if "stages" in record:
+        new_record["stages"] = [s for s in record["stages"] if s not in builds]
+    modules = dict(jit.MODULES)
+    modules[jit.PROGRAM] = new_record
+    monkeypatch.setattr(jit, "MODULES", modules)
+    stages_of = dict(jit.STAGES_OF)
+    stages_of[jit.PROGRAM] = tuple(s for s in stages_of[jit.PROGRAM] if s not in builds)
+    monkeypatch.setattr(jit, "STAGES_OF", stages_of)
+    for name in ("LAUNCH", "GRID", "STAGE_ARGS"):
+        table = {
+            key: value
+            for key, value in getattr(launch, name).items()
+            if key not in builds
+        }
+        monkeypatch.setattr(launch, name, table)
+    return found
 
 
 def head_window_order(order: tuple) -> tuple:
@@ -242,6 +386,8 @@ class Launch:
     snap: dict = field(default_factory=dict, repr=False)
     #: a head-window build's launch (its operands the caller's whole tensors)
     hw: bool = False
+    #: a single-pass forward build's launch (its operands the caller's whole tensors, ``T`` tokens)
+    sp: bool = False
 
 
 def _flat(t: torch.Tensor, numel: int, offset: int = 0) -> torch.Tensor:
@@ -257,8 +403,11 @@ class HostLaunches:
     record's policy to that many tokens (``token_chunk_multiple`` and the scratch budget of exactly that chunk at
     every top-k width up to ``chunk_topk``).  ``simulate=False`` records without simulating.  ``head_windows``:
     ``True`` registers the head-window builds where the registry lacks them (:func:`register_head_window_builds`),
-    ``False`` hides every head-window build (the package's ``head_window_stage`` finds none: the two-window bridge),
-    ``None`` (the default) keeps the registry."""
+    ``False`` hides every head-window build (the package's ``head_window_stage`` finds none: the two-window bridge;
+    the single-pass forward is hidden too), ``None`` (the default) keeps the registry.  ``single_pass``: ``True``
+    registers the single-pass forward builds where the registry lacks them (:func:`register_single_pass_builds`) and
+    plans their persistent grid over :data:`SM_COUNT` SMs, ``False`` (the default) hides them (the package's
+    ``single_pass_stage`` finds none: the head-window forward or the bridge), ``None`` keeps the registry."""
 
     def __init__(
         self,
@@ -272,6 +421,7 @@ class HostLaunches:
         chunk_topk: int = 64,
         simulate: bool = True,
         head_windows: Optional[bool] = None,
+        single_pass: Optional[bool] = False,
     ):
         self.backend, self.jit, self.launch = backend, jit, launch
         self.monkeypatch = monkeypatch
@@ -288,6 +438,13 @@ class HostLaunches:
             register_head_window_builds(monkeypatch, jit, launch)
         elif head_windows is False:
             monkeypatch.setattr(backend, "head_window_stage", lambda stage, arch: None)
+            single_pass = False
+        if single_pass:
+            register_single_pass_builds(monkeypatch, jit, launch)
+        elif single_pass is False and hasattr(backend, "single_pass_stage"):
+            monkeypatch.setattr(backend, "single_pass_stage", lambda stage, arch: None)
+        if hasattr(backend, "_sm_count"):
+            monkeypatch.setattr(backend, "_sm_count", lambda device_index: SM_COUNT)
         cpu = torch.device("cpu")
         real_alloc = backend._alloc
         real_entry_cls = backend._StageEntry
@@ -395,9 +552,17 @@ class HostLaunches:
     def _launcher(self, run, values, grid) -> None:
         stage = str(run)
         kind = family(stage)
-        rec = Launch(stage, tuple(grid), dict(values), hw=is_head_window(stage))
+        rec = Launch(
+            stage,
+            tuple(grid),
+            dict(values),
+            hw=is_head_window(stage),
+            sp=is_single_pass(stage),
+        )
         if rec.hw:
             self._whole_operands(rec, values)
+        elif rec.sp:
+            self._single_pass_operands(rec, values)
         elif kind in ("fwd", "main", "main_pass"):
             rec.window = self._window(values["q_latent"])
             self._same_heads(
@@ -411,6 +576,8 @@ class HostLaunches:
             with torch.no_grad():
                 if rec.hw:
                     getattr(self, f"_sim_{kind}_hw")(rec, values)
+                elif rec.sp:
+                    self._sim_fwd_sp(rec, values)
                 else:
                     getattr(self, f"_sim_{kind}")(rec, values)
 
@@ -429,6 +596,28 @@ class HostLaunches:
             () if family(rec.stage) == "fwd" else ("dout",)
         )
         for name in names:
+            src = getattr(self, name)
+            if src is None:
+                continue
+            got = values[name]
+            assert tuple(got.shape) == tuple(src.shape) and torch.equal(got, src), (
+                f"{rec.stage}: the {name} operand is not the caller's whole {name}"
+            )
+
+    def _single_pass_operands(self, rec: "Launch", values: dict) -> None:
+        """A single-pass forward launch receives the caller's whole ``q_latent`` / ``q_rope`` and ``num_queries = T``
+        tokens of ``num_heads = H`` heads (no window selector), on its persistent grid."""
+        q = values["q_latent"]
+        T, H = int(q.shape[0]), int(q.shape[1])
+        assert int(values["num_heads"]) == H, (rec.stage, values["num_heads"])
+        assert int(values["num_queries"]) == T, (rec.stage, values["num_queries"])
+        assert "wsel" not in values, (
+            rec.stage,
+            "a single-pass launch takes no window selector",
+        )
+        assert tuple(rec.grid) == single_pass_grid(T), (rec.stage, rec.grid)
+        assert rec.grid[0] % 2 == 0, rec.grid
+        for name in ("q_latent", "q_rope"):
             src = getattr(self, name)
             if src is None:
                 continue
@@ -540,6 +729,16 @@ class HostLaunches:
         q, qr = v["q_latent"], v["q_rope"]
         T, H = int(q.shape[0]), int(q.shape[1])
         assert tuple(rec.grid) == (max(1, 2 * T), 1, 1), rec.grid
+        v["out"].copy_(q)
+        if v["o_lo"].numel():
+            o_lo = _flat(v["o_lo"], T * H * D_LATENT).view(T, H, D_LATENT)
+            o_lo.copy_(-q)
+            o_lo[..., 0] = TAG * (rec.ordinal + 1)
+        _flat(v["lse"], T * H).view(T, H).copy_(qr[..., 0].float() + TAG * rec.ordinal)
+
+    def _sim_fwd_sp(self, rec: Launch, v: dict) -> None:
+        q, qr = v["q_latent"], v["q_rope"]
+        T, H = int(q.shape[0]), int(q.shape[1])
         v["out"].copy_(q)
         if v["o_lo"].numel():
             o_lo = _flat(v["o_lo"], T * H * D_LATENT).view(T, H, D_LATENT)
@@ -883,6 +1082,56 @@ def check_forward_hw(
         H,
         -1,
     )
+    assert same_tensor(v["out"], out) and same_tensor(v["lse"], lse), (
+        "the forward writes the call's [T, H] outputs directly"
+    )
+    if with_o_lo:
+        assert same_tensor(v["o_lo"], o_lo)
+    else:
+        assert o_lo is None and v["o_lo"].numel() == 0
+    assert torch.equal(out, inp.q_latent), (
+        "out: a query head holds another head's result"
+    )
+    want = inp.q_rope[..., 0].float() + TAG * rec.ordinal
+    assert torch.equal(lse, want), "lse: a query head holds another head's result"
+    if with_o_lo:
+        want_o_lo = -inp.q_latent
+        want_o_lo[..., 0] = TAG * (rec.ordinal + 1)
+        assert torch.equal(o_lo, want_o_lo), (
+            "o_lo: a query head holds another head's result"
+        )
+
+
+def check_forward_sp(
+    launches: list[Launch],
+    inp: HostInputs,
+    out,
+    lse,
+    o_lo,
+    *,
+    with_o_lo: bool,
+    k_rope=None,
+) -> None:
+    """The forward launches of one call above 64 heads and its outputs under the single-pass contract (module
+    docstring): one launch of the single-pass build (``fwd_h128``, ``fwd_h128_no_olo`` under ``with_o_lo=False``)
+    over the ``T`` tokens on its persistent grid (:func:`single_pass_grid`), ``num_heads = H`` and no window
+    selector, ``k_rope`` the caller's own (a tensor map, not a pointer with a stride), every query head's ``out`` /
+    ``lse`` / ``o_lo`` written by it into the call's ``[T, H]`` tensors."""
+    H, T = inp.heads, inp.total_q
+    assert H != WINDOW
+    fwd = [rec for rec in launches if family(rec.stage) == "fwd"]
+    assert [rec.stage for rec in fwd] == [
+        "fwd_h128" if with_o_lo else "fwd_h128_no_olo"
+    ], [rec.stage for rec in fwd]
+    (rec,) = fwd
+    assert rec.sp and not rec.hw and rec.grid == single_pass_grid(T), rec.grid
+    v = rec.values
+    assert (int(v["num_queries"]), int(v["num_heads"])) == (T, H)
+    assert "wsel" not in v
+    if k_rope is not None:
+        assert same_tensor(v["k_rope"], k_rope), (
+            "the single-pass forward reads the caller's k_rope"
+        )
     assert same_tensor(v["out"], out) and same_tensor(v["lse"], lse), (
         "the forward writes the call's [T, H] outputs directly"
     )
@@ -1253,10 +1502,11 @@ def capture_case(
     name: str,
     arch: str,
     head_windows: Optional[bool] = None,
+    single_pass: Optional[bool] = False,
 ) -> dict:
-    """The golden record of one 64-head case on ``arch``: ``{"launches": ..., "allocs": ...}`` (``head_windows`` as
-    in :class:`HostLaunches`: a 64-head call plans the same launches whether or not the head-window builds are
-    registered)."""
+    """The golden record of one 64-head case on ``arch``: ``{"launches": ..., "allocs": ...}`` (``head_windows`` and
+    ``single_pass`` as in :class:`HostLaunches`: a 64-head call plans the same launches whether or not the head-window
+    and single-pass builds are registered)."""
     case = H64_CASES[name]
     h = HostLaunches(
         monkeypatch,
@@ -1267,6 +1517,7 @@ def capture_case(
         token_chunk=case.get("token_chunk"),
         simulate=False,
         head_windows=head_windows,
+        single_pass=single_pass,
     )
     roles = run_case(h, backend, case)
     ordered = [(role, roles.get(role)) for role in _ROLE_ORDER]
