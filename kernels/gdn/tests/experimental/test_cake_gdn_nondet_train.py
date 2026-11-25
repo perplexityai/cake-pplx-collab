@@ -4310,13 +4310,13 @@ def test_checkpoint_matches_and_retains_no_bytes(device, record_property) -> Non
     torch.cuda.synchronize()
     requested_after, blocks_after = _allocator_bytes(device)
     # requested bytes: the block count (memory_allocated) may exceed the output without a retained tensor, since the
-    # caching allocator hands out an unsplit cached block when its remainder is below the split threshold (1 MiB)
+    # caching allocator hands out an unsplit cached block when its remainder is at most the split threshold (1 MiB)
     retained = requested_after - requested - o.untyped_storage().nbytes()
     unsplit = blocks_after - blocks - _storage_bytes(o)
     assert retained == 0, (
         f"a checkpointed forward retains {retained} requested bytes beyond its output (blocks +{unsplit})"
     )
-    assert unsplit < 2**20, unsplit
+    assert unsplit <= 2**20, unsplit
     del o
 
     def draw(j, s):
