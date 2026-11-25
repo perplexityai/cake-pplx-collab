@@ -1397,7 +1397,7 @@ def workspace_layout(
     ``dout_copy`` (a ``dout`` whose token stride is not ``H`` head strides,
     :func:`_dout_rows_dense`), the dense ``dout`` copy ``[T, H, 512]`` BF16.
     The dQ partials stay 64 heads per token (the windows reuse them).  A
-    64-head layout is the layout of the first release, region for region.
+    64-head layout is the layout of 0.6.1, region for region.
     """
     windows = int(num_heads) != NUM_HEADS
     if windows:
@@ -2262,7 +2262,7 @@ class _Plan:
     # (``cake_jit.NO_OLO_STAGES``); the kernels' ``o_lo`` operand is the zero-size placeholder (:func:`_o_lo_operand`).
     with_o_lo: bool = True
     # The query head count H of the RoPE call and, above 64 heads, the first head of each 64-head window in launch
-    # order (``head_windows``; empty on a 64-head plan, whose launches are the first release's); ``dout_copy``: the
+    # order (``head_windows``; empty on a 64-head plan, whose launches are 0.6.1's); ``dout_copy``: the
     # multi-window backward copies ``dout`` into its dense workspace copy first (:func:`_dout_rows_dense`).
     num_heads: int = NUM_HEADS
     head_windows: tuple[int, ...] = ()
@@ -2358,7 +2358,7 @@ def _plan(
     """Validate one geometry and resolve its plan (no allocation, no launch).  ``dkv_direct`` / ``check_dst_map``
     as in :func:`prepare_dsa_train`.  ``with_o_lo=False`` plans the ``with_o_lo=False`` twins of the forward and the
     delta stage (:func:`_require_no_olo_stages`).  A call over ``H > 64`` query heads plans the head windows of the
-    comment above ``SUPPORTED_HEADS`` (:func:`_window_order`); a 64-head plan is the first release's, launch for
+    comment above ``SUPPORTED_HEADS`` (:func:`_window_order`); a 64-head plan is 0.6.1's, launch for
     launch."""
     if derive_topk_length and topk_length is None:
         raise ValueError(
@@ -3683,7 +3683,7 @@ def _check_empty_window_arch(q_latent: torch.Tensor) -> None:
     """The architecture rule of :func:`_check_window_arch` for a call without query rows: a CUDA ``q_latent`` of more
     than 64 heads on an architecture outside ``WINDOW_ARCHES`` raises ``NotImplementedError`` as a call with query
     rows does (a host-side query: no launch, no synchronization).  64 heads and host tensors are not checked: those
-    calls keep the device-free empty path of the first release."""
+    calls keep the device-free empty path of 0.6.1."""
     H = num_query_heads(q_latent)
     if H != NUM_HEADS and q_latent.is_cuda:
         _check_window_arch(H, arch_for(q_latent.device))

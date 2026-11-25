@@ -610,8 +610,8 @@ pass stages serves the single pass only.
 The rope form takes `H = q_latent.shape[1]` query heads, `H` in 64, 96 and 128
 (`cake_backend.SUPPORTED_HEADS`).  Every kernel of the program serves exactly
 64 heads of a token: its tensor maps take 64-head boxes and its `lse`, `o_lo`
-and `delta` addresses use the literal 64.  `H = 64` runs the first release's
-plan, launch for launch.  `H = 96` and `128` run the same stages on two
+and `delta` addresses use the literal 64.  `H = 64` runs the plan of 0.6.1
+(the 64-head release), launch for launch.  `H = 96` and `128` run the same stages on two
 64-head windows, `W1` first and then `W0`, with no kernel, build or launcher
 change:
 

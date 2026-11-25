@@ -488,7 +488,7 @@ def test_every_rope_plan_carries_dout_copy(monkeypatch, heads, with_o_lo):
 @pytest.mark.parametrize("heads", (64, 96, 128))
 def test_workspace_and_retained_accounting_heads(monkeypatch, heads):
     """The per-call scratch (workspace) and the state a step keeps from its forward to its backward (retained) are
-    reported apart.  Workspace: a 64-head layout is the first release's, region for region; above 64 heads the
+    reported apart.  Workspace: a 64-head layout is 0.6.1's, region for region; above 64 heads the
     forward adds ``fwd_lse`` ``[T, 64]`` FP32 and (``with_o_lo``) ``fwd_o_lo`` ``[T, 64, 512]`` BF16, the backward
     ``delta`` ``[T, H]`` FP32, ``window_lse`` / ``window_delta`` ``[2, T, 64]`` FP32 and (a ``dout`` that is not
     dense over its rows) ``dout_copy`` ``[T, H, 512]`` BF16, the dQ partials staying 64 heads per token; every
