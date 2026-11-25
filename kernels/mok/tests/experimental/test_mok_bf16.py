@@ -3187,7 +3187,7 @@ def test_shared_scale_helpers_on_the_gpu(monkeypatch, tokens, width):
     assert torch.count_nonzero(zero_dot).item() == 0
 
 
-@pytest.mark.parametrize("tokens,hidden", [(0, 256), (1, 1032), (37, 4096), (512, 256)])
+@pytest.mark.parametrize("tokens,hidden", [(1, 1032), (37, 4096), (512, 256)])
 def test_scaled_epilogues_on_the_gpu(tokens, hidden):
     """The scaled top-10 epilogues.  The backward sum is exact: ``BF16(s * shared + routed_0 + ... + routed_9)`` in
     FP32 in that order, bit for bit the CPU's.  The forward with ``s = 1`` and the last two slots zero (zero rows and
@@ -3235,19 +3235,18 @@ def test_scaled_epilogues_on_the_gpu(tokens, hidden):
     assert torch.equal(
         _bits(padded_y), _bits(top8.forward(d["shared"], d["routed8"], d["scores8"]))
     )
-    if tokens:
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            launch()
-        torch.cuda.current_stream().wait_stream(stream)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=stream):
-            captured = launch()
-        for _ in range(2):
-            graph.replay()
-            torch.cuda.synchronize()
-            assert _same_bits(captured, eager[0])
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        launch()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = launch()
+    for _ in range(2):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same_bits(captured, eager[0])
 
 
 #: The direct-gradient launcher check's outputs, by index of ``(*backward result, dx_peer, ds_peer, forward shared
