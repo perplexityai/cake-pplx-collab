@@ -841,9 +841,10 @@ def dw_cast_tma_rule(num_chunks: int, rows_last: int, arch: Optional[str]) -> bo
 # element once.  Bitwise the same ``dX``.
 # The scatter's fold program (:data:`DX_FINALIZE_FOLD_STAGE`) also folds the FP32 label residuals of the compact rows
 # ``[fold_lo, fold_hi)`` before its scale (:func:`cast_fold_rows`): the one-slice chunks of those rows launch no
-# fold-alone slab sum.  The same ``fma`` and predicate as the slab sum's fold and an exact FP32 store / load between
-# them, so the same ``dX`` bits.  A call that folds no row launches ``scale_cast_scatter_bf16``, which reads no fold
-# operand.
+# fold-alone slab sum, and the vocabulary-major backward of a compacted call folds every row there instead of in a
+# slab sum after its last block (:func:`_backward_logprob_vm`).  The same ``fma`` and predicate as the slab sum's fold
+# and an exact FP32 store / load between them, so the same ``dX`` bits.  A call that folds no row launches
+# ``scale_cast_scatter_bf16``, which reads no fold operand.
 DX_FINALIZE_STAGES = ("scale_cast_scatter_bf16",)
 DX_FINALIZE_FOLD_STAGE = "scale_cast_scatter_fold_bf16"
 # The flat dX cast's fold program: an uncompacted plan's cast (:func:`cast_fold_rows`) folds the rows
@@ -11473,8 +11474,9 @@ def scale_cast_scatter(
     output element is written exactly once.  ``T_v == 0`` (every row ignored) is one zero fill: the kernel reads a
     candidate compact row for every output row and would have none.
 
-    ``fold`` (:func:`cast_fold_operands`; the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label
-    residuals no slab sum folded (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
+    ``fold`` (:func:`cast_fold_operands`, or every row of a vocabulary-major backward, :func:`_backward_logprob_vm`;
+    the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label residuals no slab sum folded
+    (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
     such a row's ``acc``, folds ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a
     nonzero residual -- the fold-alone slab sum's arithmetic and predicate -- and then scales and rounds it: the bits
     of the slab sum's FP32 store cast as before.  ``None`` or an empty range: no row folds, and the program without a
@@ -11599,8 +11601,9 @@ def finalize_dx(
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
     (zero fill + ``index_copy_``).  All three produce the same bits.  ``scan`` (the zero-gradient row skip,
     :func:`zero_dlogp_partition`): the inclusive int32 scan of the rows ``acc`` holds, already formed (``row_valid``
-    is then not read): the accumulator's rows past the scan's count are never read and those output rows are zeros.  ``fold`` (:func:`cast_fold_operands`): the scatter cast
-    folds the label residuals of the rows no slab sum folded (:func:`scale_cast_scatter`); only the scatter takes it."""
+    is then not read): the accumulator's rows past the scan's count are never read and those output rows are zeros.  ``fold`` (:func:`cast_fold_operands`; every row
+    of a vocabulary-major backward): the scatter cast folds the label residuals of the rows no slab sum folded
+    (:func:`scale_cast_scatter`); only the scatter takes it."""
     if fold is not None and int(fold["hi"]) > int(fold["lo"]):
         if row_index is None or (scan is None and row_valid is None):
             raise ValueError("only the compact scatter cast folds label residuals")
