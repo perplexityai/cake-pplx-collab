@@ -172,10 +172,11 @@ of any layout in L2 by their layout, and one does both.  Packed rows run the
 first on SM100 from 37 to 85 rows per SM and on SM107 past 8192 (0.2.16 ran
 the pipelined forward there, the same bits; an ``x`` or ``z`` broadcast over
 more than one token keeps it).  A gate of more than one head sliced from a
-wider projection with packed ``x``, and on SM107 head-major ``x`` and ``z``,
-take bands of their own that run the other two (0.2.16 ran the forwards of
-other layouts there, so ``y`` can differ there in its last bits); other
-layouts, such a gate of one head among them, keep the programs of 0.2.16.
+wider projection with packed ``x`` takes bands of its own that run the other
+two, and on SM107 head-major ``x`` and ``z`` take bands of their own that run
+the last of them up to 100 rows per SM (0.2.16 ran the forwards of other
+layouts there, so ``y`` can differ there in its last bits); other layouts,
+such a gate of one head among them, keep the programs of 0.2.16.
 The deterministic package is that of 0.2.16.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
@@ -204,9 +205,10 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   from a wider projection with packed ``x`` and, on SM107, head-major ``x`` and
   ``z`` have bands of their own, which run pipelined forwards that warm rows of
   any layout in L2 by their layout (the projection's past 650 rows per SM on
-  SM100 and 699 on SM103 and past 59 on SM107, the head-major ones from 60 to
-  120 and from 443 to 1000 rows per SM) and the 8-thread forward past their
-  last pipelined band (on SM107 the projection's has none).  An ``x`` or ``z``
+  SM100 and 699 on SM103 and past 59 on SM107 but from 301 to 442, the
+  head-major one from 60 to 100 rows per SM) and the 8-thread forward past the
+  projection's last pipelined band (on SM107 it has none); past 100 rows per
+  SM head-major rows run the bands of other layouts.  An ``x`` or ``z``
   broadcast over more than one token (token stride 0) counts as packed rows,
   but where the band of packed rows runs a forward that reads rows at their
   linear offsets (the 32- and 16-thread forwards of packed rows, and on SM107

@@ -3382,7 +3382,8 @@ PROJECTION_FORWARD_BANDS = {
     ),
     "sm_107a": (
         (59, "fwd_short"),
-        (442, "fwd_layout_keep_pipe"),
+        (300, "fwd_layout_keep_pipe"),
+        (442, "fwd_mid"),
         (2999, "fwd_layout_pipe"),
         (None, "fwd_layout_keep_pipe"),
     ),
@@ -3390,13 +3391,13 @@ PROJECTION_FORWARD_BANDS = {
 # The forward bands of head-major rows (``x`` and ``z`` of token stride 128
 # and head stride ``T * 128``: ``forward_layout`` gives HEAD_MAJOR_LAYOUT), by
 # architecture; an architecture without an entry (sm_100a, sm_103a) runs
-# STRIDED_FORWARD_BANDS.
+# STRIDED_FORWARD_BANDS.  On sm_107a ``fwd_layout_keep_pipe`` runs up to 100
+# rows per SM; past it the bands of STRIDED_FORWARD_BANDS.
 HEAD_MAJOR_FORWARD_BANDS = {
     "sm_107a": (
         (59, "fwd_short"),
-        (120, "fwd_layout_keep_pipe"),
-        (442, "fwd_mid"),
-        (1000, "fwd_layout_pipe"),
+        (100, "fwd_layout_keep_pipe"),
+        (480, "fwd_mid"),
         (None, "fwd"),
     ),
 }
@@ -3928,7 +3929,12 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
             (
                 (59 * sm_count, "fwd_short"),
                 (59 * sm_count + 1, "fwd_layout_keep_pipe"),
-                (442 * sm_count, "fwd_layout_keep_pipe"),
+                (100 * sm_count, "fwd_layout_keep_pipe"),
+                (300 * sm_count, "fwd_layout_keep_pipe"),
+                (300 * sm_count + 1, "fwd_mid"),
+                (309 * sm_count, "fwd_mid"),
+                (332 * sm_count, "fwd_mid"),
+                (442 * sm_count, "fwd_mid"),
                 (442 * sm_count + 1, "fwd_layout_pipe"),
                 (2999 * sm_count, "fwd_layout_pipe"),
                 (2999 * sm_count + 1, "fwd_layout_keep_pipe"),
@@ -3941,11 +3947,14 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
             (
                 (59 * sm_count, "fwd_short"),
                 (59 * sm_count + 1, "fwd_layout_keep_pipe"),
-                (120 * sm_count, "fwd_layout_keep_pipe"),
-                (120 * sm_count + 1, "fwd_mid"),
+                (100 * sm_count, "fwd_layout_keep_pipe"),
+                (100 * sm_count + 1, "fwd_mid"),
+                (120 * sm_count, "fwd_mid"),
                 (442 * sm_count, "fwd_mid"),
-                (442 * sm_count + 1, "fwd_layout_pipe"),
-                (1000 * sm_count, "fwd_layout_pipe"),
+                (442 * sm_count + 1, "fwd_mid"),
+                (480 * sm_count, "fwd_mid"),
+                (480 * sm_count + 1, "fwd"),
+                (1000 * sm_count, "fwd"),
                 (1000 * sm_count + 1, "fwd"),
                 (2**31 - 1, "fwd"),
             ),
@@ -3960,6 +3969,15 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
             # the same rows of packed x and z run FORWARD_BANDS
             got = loader.module_for_rows(arch, "fwd", rows, sm_count, layout=layout)
             assert got == _tier_module(arch, "fwd", rows, sm_count), (arch, rows)
+    # head-major rows on sm_107a past 100 rows per SM run the programs of
+    # STRIDED_FORWARD_BANDS
+    for rows in (101, 120, 442, 443, 480, 481, 1000, 1001):
+        rows *= sm_count
+        got = loader.module_for_rows(
+            "sm_107a", "fwd", rows, sm_count, packed=False, layout=HEAD_MAJOR_LAYOUT
+        )
+        want = loader.module_for_rows("sm_107a", "fwd", rows, sm_count, packed=False)
+        assert got == want, rows
     for arch in ("sm_100a", "sm_103a"):
         # no table of head-major rows: STRIDED_FORWARD_BANDS
         for last, _ in STRIDED_FORWARD_BANDS[arch][:-1]:

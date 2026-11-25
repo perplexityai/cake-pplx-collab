@@ -991,8 +991,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # "packed_rows": 0, "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz":
     # 1, "split_gate": 1, "split_layout_prefetch": 1, "store_width": 128,
     # "sum_pairs": 1, "threads": 128, "w_late": 1}); the grid rule of a program
-    # of rows of any layout; PROJECTION_FORWARD_BANDS and
-    # HEAD_MAJOR_FORWARD_BANDS give it its rows.
+    # of rows of any layout; PROJECTION_FORWARD_BANDS gives it its rows.
     "cake_rmsnorm_silu_gate_train_0a7f917d9c7922f9c2d2": {
         "arches": [
             "sm_107a",
@@ -3580,10 +3579,13 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # ``fwd_layout_keep_pipe``'s checkpointed step 0.2 to 0.5 % slower on sm_100a
 # from 4000 rows per SM and 0.2 to 0.7 % slower on sm_103a from 2500 to 6445
 # (16 and 48 heads), so its sm_100a band ends at 3000, a measured point, and
-# sm_103a runs the plain forward past 2000.  A cut lies between a measured
-# point of its band and one of the next (sm_100a 650: between 443 and 700;
-# sm_103a 699 keeps 699.8 rows per SM of 48 heads out); past the last pipelined
-# band the plain forward runs, as in ``STRIDED_FORWARD_BANDS``.  Host plan
+# sm_103a runs the plain forward past 2000; on sm_107a (driver 620.70) it found
+# its checkpointed step 1.1 to 1.9 % slower from 309 to 332 rows per SM, so
+# its first sm_107a band ends at 300, a measured point, and the mid forward
+# runs from 301 to 442, as in 0.2.16.  A cut lies between a measured point of
+# its band and one of the next (sm_100a 650: between 443 and 700; sm_103a 699
+# keeps 699.8 rows per SM of 48 heads out); past the last pipelined band the
+# plain forward runs, as in ``STRIDED_FORWARD_BANDS``.  Host plan
 # only, as the other tables.
 PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
@@ -3604,7 +3606,8 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     ),
     "sm_107a": (
         (59, "fwd_short"),
-        (442, "fwd_layout_keep_pipe"),
+        (300, "fwd_layout_keep_pipe"),
+        (442, "fwd_mid"),
         (2999, "fwd_layout_pipe"),
         (None, "fwd_layout_keep_pipe"),
     ),
@@ -3618,17 +3621,19 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # made the step faster) runs ``STRIDED_FORWARD_BANDS``.  On sm_107a version
 # 0.2.17's measurement (as ``PROJECTION_FORWARD_BANDS``; 16 and 48 heads) found
 # ``fwd_layout_keep_pipe`` at 100 rows per SM 9 to 10 % faster alone and the
-# step 3 to 4 % faster than the mid forward of ``STRIDED_FORWARD_BANDS``, and
-# ``fwd_layout_pipe`` from 443 to 1000 every op at the deterministic package's
-# time; the mid forward runs between them (the 120 cut lies below the crossings
-# at 129 to 133 rows per SM) and the plain forward past 1000, where both were
-# slower than it in the step.  Host plan only, as the other tables.
+# step 3 to 4 % faster than the mid forward of ``STRIDED_FORWARD_BANDS``.  The
+# release measurement of 0.2.17 against 0.2.16 (driver 620.70) found its
+# checkpointed step 0.9 to 1.3 % slower at 120 rows per SM, and that of
+# ``fwd_layout_pipe`` 0.6 to 3.9 % slower from 442 to 1000, so
+# ``fwd_layout_keep_pipe`` runs up to 100 rows per SM, a measured point, and
+# past it head-major rows run the bands of ``STRIDED_FORWARD_BANDS`` (the mid
+# forward up to 480, the plain forward past it), the programs of 0.2.16.  Host
+# plan only, as the other tables.
 HEAD_MAJOR_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_107a": (
         (59, "fwd_short"),
-        (120, "fwd_layout_keep_pipe"),
-        (442, "fwd_mid"),
-        (1000, "fwd_layout_pipe"),
+        (100, "fwd_layout_keep_pipe"),
+        (480, "fwd_mid"),
         (None, "fwd"),
     ),
 }

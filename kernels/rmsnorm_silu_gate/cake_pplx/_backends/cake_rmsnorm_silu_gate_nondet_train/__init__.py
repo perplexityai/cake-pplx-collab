@@ -186,9 +186,10 @@ and ``fwd_pipe_packed``, the same bits.  Rows that are not packed are classed
 (``cake_jit.forward_layout``): a gate of more than one head sliced from a
 wider projection with packed ``x`` runs ``cake_jit.PROJECTION_FORWARD_BANDS``
 and head-major ``x`` and ``z`` on sm_107a ``cake_jit.HEAD_MAJOR_FORWARD_BANDS``,
-whose bands run ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` where 0.2.16
-ran the forwards of ``cake_jit.STRIDED_FORWARD_BANDS``, so ``y`` can differ
-there in its last bits; other layouts, such a gate of one head among them,
+whose bands run ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` (head-major
+rows ``fwd_layout_keep_pipe`` only, up to 100 rows per SM) where 0.2.16 ran
+the forwards of ``cake_jit.STRIDED_FORWARD_BANDS``, so ``y`` can differ there
+in its last bits; other layouts, such a gate of one head among them,
 keep the programs of 0.2.16.  ``cake_jit.module_for_rows``
 takes the class (keyword ``layout``).  The deterministic package is that of
 0.2.16.
@@ -479,11 +480,11 @@ Host design (the input layout rules are the deterministic package's):
   to 650, ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 3000
   and the plain forward past it; on sm_103a the mid forward up to 250, the
   extra-long forward up to 699, ``fwd_layout_pipe`` up to 2000 and the plain
-  forward past it; on sm_107a
-  ``fwd_layout_keep_pipe`` up to 442, ``fwd_layout_pipe`` up to 2999 and
+  forward past it; on sm_107a ``fwd_layout_keep_pipe`` up to 300, the mid
+  forward up to 442, ``fwd_layout_pipe`` up to 2999 and
   ``fwd_layout_keep_pipe`` past it.  For head-major rows on sm_107a:
-  ``fwd_layout_keep_pipe`` up to 120, the mid forward up to 442,
-  ``fwd_layout_pipe`` up to 1000 and the plain forward past it.  For other
+  ``fwd_layout_keep_pipe`` up to 100, the mid forward up to 480 and the plain
+  forward past it.  For other
   layouts (such a gate of one head, and head-major rows on sm_100a and
   sm_103a): on sm_100a the mid
   forward up to 140, the long forward up to 400, the extra-long forward up to

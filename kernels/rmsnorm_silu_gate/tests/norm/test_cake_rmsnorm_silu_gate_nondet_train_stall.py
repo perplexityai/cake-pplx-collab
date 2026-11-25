@@ -71,11 +71,11 @@ extra-long forward up to 650, ``fwd_layout_pipe`` up to 2000,
 ``fwd_layout_keep_pipe`` up to 3000 and the plain forward past it; on SM103
 the mid forward up to 250, the extra-long forward up to 699,
 ``fwd_layout_pipe`` up to 2000 and the plain forward past it; on SM107
-``fwd_layout_keep_pipe`` up to 442, ``fwd_layout_pipe`` up to 2999 and
-``fwd_layout_keep_pipe`` past it.  Head-major rows on SM107 run
-``fwd_layout_keep_pipe`` up to 120 rows per SM,
-the mid forward up to 442, ``fwd_layout_pipe`` up to 1000 and the plain
-forward past it.  The rows of ``STRIDED_FORWARD_BANDS`` on SM100 run the mid
+``fwd_layout_keep_pipe`` up to 300, the mid forward up to 442,
+``fwd_layout_pipe`` up to 2999 and ``fwd_layout_keep_pipe`` past it.
+Head-major rows on SM107 run ``fwd_layout_keep_pipe`` up to 100 rows per SM,
+the mid forward up to 480 and the plain forward past it.  The rows of
+``STRIDED_FORWARD_BANDS`` on SM100 run the mid
 forward up to 140 rows per SM, the long forward up to 400, the extra-long
 forward up to 700 and the plain forward past it; on SM103 the mid forward up
 to 250, the extra-long forward up to 700 and the plain forward past it; on
@@ -243,11 +243,11 @@ mid forward 1 block of 16 rows on SM100 (packed rows, projection rows and
 the rows of ``STRIDED_FORWARD_BANDS``), on SM103 1 and 2 (in its first band
 of packed rows, projection rows and the rows of ``STRIDED_FORWARD_BANDS``)
 and 63 and 85 (in its second band of packed rows), on SM107 1 (packed rows),
-1 and 5 (the rows of ``STRIDED_FORWARD_BANDS``) and 2 and 4 (head-major
-rows); the long forward 2 and 4 blocks of 32 rows on SM100 (every layout);
-the extra-long forward on SM100 5 (packed rows), 5 and 6 (projection rows)
-and 5 and 7 (the rows of ``STRIDED_FORWARD_BANDS``), on SM103 3 and 6
-(packed rows) and 3 and 7 (projection rows and the rows of
+1 and 5 (the rows of ``STRIDED_FORWARD_BANDS``), 4 (projection rows) and 2
+and 5 (head-major rows); the long forward 2 and 4 blocks of 32 rows on SM100
+(every layout); the extra-long forward on SM100 5 (packed rows), 5 and 6
+(projection rows) and 5 and 7 (the rows of ``STRIDED_FORWARD_BANDS``), on
+SM103 3 and 6 (packed rows) and 3 and 7 (projection rows and the rows of
 ``STRIDED_FORWARD_BANDS``), on SM107 2 (packed rows).  The pipelined
 forwards (``fwd_pipe``, ``fwd_keep_pipe``, ``fwd_layout_pipe``,
 ``fwd_layout_keep_pipe``, ``fwd_pipe_packed`` and ``fwd_keep_pipe_packed``,
@@ -284,11 +284,12 @@ bands of the pipelined forwards of SM100 and SM103; four times the fewest
 whole waves (2304 rows per SM) runs in the band of ``fwd_layout_keep_pipe``
 on SM100 (on SM103 past the band of ``fwd_layout_pipe``, which holds its
 first and last rows only); on SM107 the most whole blocks below the cut and
-the cut run in the first band of ``fwd_layout_keep_pipe`` (60 to 442 rows
-per SM), the fewest whole waves and four times that in the band of
-``fwd_layout_pipe`` (443 to 2999), and of head-major rows the fewest whole
-waves in the band of ``fwd_layout_pipe`` (443 to 1000).  On broadcast rows
-busy and alone are each ``_held_mean`` of ``HELD_RUNS`` samples, not a
+the cut run in the mid forward's band (301 to 442 rows per SM), so the first
+band of ``fwd_layout_keep_pipe`` (60 to 300) holds its first and last rows
+only, and the fewest whole waves and four times that run in the band of
+``fwd_layout_pipe`` (443 to 2999); the band of ``fwd_layout_keep_pipe`` of
+head-major rows (60 to 100) holds its first and last rows only.  On broadcast
+rows busy and alone are each ``_held_mean`` of ``HELD_RUNS`` samples, not a
 median of seven (``HELD_MEAN_FORWARD_LAYOUTS``): such a call reads one token
 and writes only ``y``, a few microseconds near its cut, where beside one
 held SM the bound is less than one step of the event timer (about 1
@@ -1476,13 +1477,13 @@ def test_repeatable_backward_long_role_slows_in_proportion_to_the_sms_held(
 # rows of STRIDED_FORWARD_BANDS), on SM103 1 and 2 (in its first band of
 # packed rows and in its band of projection rows and of the rows of
 # STRIDED_FORWARD_BANDS) and 63 and 85 (in its second band of packed rows),
-# on SM107 1 (packed rows), 1 and 5 (the rows of STRIDED_FORWARD_BANDS) and 2
-# and 4 (head-major rows); the long forward 2 and 4 on SM100 (every layout);
-# the extra-long forward on SM100 5 (packed rows), 5 and 6 (projection rows)
-# and 5 and 7 (the rows of STRIDED_FORWARD_BANDS), on SM103 3 and 6 (packed
-# rows) and 3 and 7 (projection rows and the rows of STRIDED_FORWARD_BANDS),
-# and on SM107 2 (packed rows).  A probe outside the band skips, and so does a
-# last probe that is the band's first.
+# on SM107 1 (packed rows), 1 and 5 (the rows of STRIDED_FORWARD_BANDS), 4
+# (projection rows) and 2 and 5 (head-major rows); the long forward 2 and 4 on
+# SM100 (every layout); the extra-long forward on SM100 5 (packed rows), 5 and
+# 6 (projection rows) and 5 and 7 (the rows of STRIDED_FORWARD_BANDS), on SM103
+# 3 and 6 (packed rows) and 3 and 7 (projection rows and the rows of
+# STRIDED_FORWARD_BANDS), and on SM107 2 (packed rows).  A probe outside the
+# band skips, and so does a last probe that is the band's first.
 FORWARD_EDGES = ("band_first", "first", "last", "band_last")
 FORWARD_LAYOUTS = ("packed", "both_sliced", "projection", "head_major")
 # The class of the rows of each layout of ``_inputs`` (with more than one
@@ -1802,13 +1803,14 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # whole waves.  On projection rows "last" runs in the band of
 # ``fwd_layout_keep_pipe`` on sm_100a (2001 to 3000); the bands of
 # ``fwd_layout_pipe`` (sm_100a 651 to 2000, sm_103a 700 to 2000) lie past the
-# cut and hold their first and last rows only; on sm_107a "below" and
-# "cut" in the first band of ``fwd_layout_keep_pipe`` (60 to 442), "first" and
-# "last" in the band of ``fwd_layout_pipe`` (443 to 2999), and its second band
-# of ``fwd_layout_keep_pipe`` (from 3000) holds its first rows only.  On
-# head-major rows (sm_107a) "first" runs in the band of ``fwd_layout_pipe``
-# (443 to 1000), and the band of ``fwd_layout_keep_pipe`` (60 to 120) holds
-# its first and last rows only.  A probe outside the band skips.
+# cut and hold their first and last rows only; on sm_107a "below" and "cut"
+# lie in the mid forward's band (301 to 442), so the first band of
+# ``fwd_layout_keep_pipe`` (60 to 300) holds its first and last rows only,
+# "first" and "last" run in the band of ``fwd_layout_pipe`` (443 to 2999), and
+# the second band of ``fwd_layout_keep_pipe`` (from 3000) holds its first rows
+# only.  On head-major rows (sm_107a) the band of ``fwd_layout_keep_pipe`` (60
+# to 100) holds its first and last rows only, and no band runs
+# ``fwd_layout_pipe``.  A probe outside the band skips.
 PIPELINED_FORWARD_EDGES = ("band_first", "band_last", "below", "first", "last", "cut")
 PIPELINED_FORWARD_LAYOUTS = (*FORWARD_LAYOUTS, "broadcast")
 # The pipelined forwards and the role of the deterministic package's program
