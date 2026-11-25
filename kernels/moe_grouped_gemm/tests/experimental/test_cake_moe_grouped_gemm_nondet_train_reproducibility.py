@@ -138,11 +138,12 @@ OWN_CONSTANTS = frozenset(
 QUEUE_STAGES = frozenset({cb.QUEUE_STAGE, cb.QUEUE_STAGE + cb.ACC_SUFFIX})
 # Data-gradient cases of the evict-first rule (at least every architecture's
 # ``dgrad_evict_first_min_rows`` rows per group on average,
-# ``K >= dgrad_evict_first_min_k``): (label, sizes, N, K),
+# ``K >= dgrad_evict_first_min_k``, ``N`` over every architecture's
+# ``dgrad_evict_first_skip_max_n``): (label, sizes, N, K),
 # over group sizes off every tile multiple, with a one-row group (the second and
 # third) and an empty group (the third).
 EF_CASES = (
-    ("e2_long", (16390, 16500), 64, 4096),
+    ("e2_long", (16390, 16500), 1088, 4096),
     ("one_row_off_tile", (1, 16383, 16385, 32767), 1088, 4608),
     ("empty_one_row", (0, 49151, 1, 16384), 4096, 6144),
 )
@@ -718,6 +719,7 @@ def test_dgrad_evict_first_gives_the_bits_of_the_plain_tiles(
         int(v) for v in c["dgrad_evict_first_min_rows"].values()
     ), label
     assert k >= int(c["dgrad_evict_first_min_k"]), label
+    assert n > max(c["dgrad_evict_first_skip_max_n"].values(), default=0), label
     assert k % int(c["wide_block_n"]) == 0, label
     assert any(size % 128 for size in sizes), label
     a, b, offs = _inputs(case, device)
@@ -729,13 +731,13 @@ def test_dgrad_evict_first_gives_the_bits_of_the_plain_tiles(
     )
     ef = (
         wide
-        and cb.dgrad_evict_first(k, arch, sum_m, groups, c)
+        and cb.dgrad_evict_first(k, arch, sum_m, groups, c, n=n)
         and cake_jit.stage_served(name, "main_wide_ef", arch)
     )
     ts33 = (
         wide
         and not ef
-        and cb.dgrad_wide_ts33(k, arch, sum_m, groups, c)
+        and cb.dgrad_wide_ts33(k, arch, sum_m, groups, c, n=n)
         and cake_jit.stage_served(name, "main_wide_ts33", arch)
     )
     assert ef == (arch in c["dgrad_evict_first_archs"]), arch

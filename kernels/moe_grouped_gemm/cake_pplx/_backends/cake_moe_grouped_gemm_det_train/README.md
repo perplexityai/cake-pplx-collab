@@ -413,8 +413,12 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   program on `sm_100a`; on `sm_107a` the A-collector program, which also
   splits two head and two tail k steps of an item around the release of the
   accumulator's two halves instead of four and three, so fewer of an item's k
-  steps pay the split). Every element still accumulates its k steps in order,
-  so its output is bitwise that of `main_wide`.
+  steps pay the split). A data gradient whose reduction `N` (`w.shape[1]`) is
+  at most the architecture's `dgrad_evict_first_skip_max_n` (1024 on
+  `sm_100a`, as in the gate/up projection of a model with a 1024-wide expert
+  intermediate) keeps `main_wide`: there the plain wide tile was faster or level
+  (timed at `N` 64 to 1024). Every element still accumulates its k steps in
+  order, so its output is bitwise that of `main_wide`.
 - `fwd` / `dgrad` 3 / 3 head / tail twin (`fwd_wide_ts33` /
   `dgrad_wide_ts33`): where the evict-first twin does not apply, the wide tile
   is the route's `main_wide_ts33` stage, the same program with three head and
@@ -422,13 +426,22 @@ constants delivered with the generated programs (`HOST_PLAN_CONSTANTS`):
   two halves instead of four and three (the A-collector program on
   `sm_103a`). `dgrad` takes it on the architectures listed in
   `dgrad_wide_ts33_archs` when the groups average at least the architecture's
-  `dgrad_wide_ts33_min_rows` rows (`sum_m // E`) and `dX` has at least
-  `dgrad_wide_ts33_min_k` columns (`K`); `fwd` on those listed in
-  `fwd_wide_ts33_archs` when the reduction `K` is at most `fwd_wide_ts33_max_k`
-  and the groups average at most `fwd_wide_ts33_max_rows` rows (the down
-  projection over many experts). Every
-  element still accumulates its k steps in order, so its output is bitwise
-  that of `main_wide`.
+  `dgrad_wide_ts33_min_rows` rows (`sum_m // E`; from
+  `dgrad_wide_ts33_short_n_min_rows` rows, 1024 on `sm_103a`, when the
+  reduction `N` is from the architecture's `dgrad_wide_ts33_short_n_min` to
+  its `dgrad_wide_ts33_short_n`, 512 to 1024 on `sm_103a`) and `dX` has at
+  least `dgrad_wide_ts33_min_k` columns (`K`); `fwd` on those listed in
+  `fwd_wide_ts33_archs` when the reduction `K` is at most
+  `fwd_wide_ts33_max_k` and the groups average at most
+  `fwd_wide_ts33_max_rows` rows (the down projection over many experts), or
+  when `K` is from the architecture's `fwd_wide_ts33_short_k_min` to its
+  `fwd_wide_ts33_short_k` (512 to 1024 on `sm_103a`) at any rows per group.
+  On `sm_103a` the twin was faster or level at every timed shape with 8 to 16
+  k steps per item (a reduction of 512 to 1024) and slower with 4 (a
+  reduction of 256), so a shorter reduction keeps `dgrad_wide_ts33_min_rows`
+  and the `fwd_wide_ts33_max_k` / `fwd_wide_ts33_max_rows` rule. Every element
+  still accumulates its k steps in order, so its output is bitwise that of
+  `main_wide`.
 - `fwd` last-wave-halves evict-first twin (`fwd_lwh_ef`): on the architectures
   listed in `fwd_lwh_ef_archs`, when the reduction `K` (the columns of `x`) is
   at most `fwd_lwh_ef_max_k`, as in the down projection, the wide tile is the
@@ -603,7 +616,7 @@ fused one.
 | feature | sm_100a | sm_103a | sm_107a |
 | --- | --- | --- | --- |
 | `wgrad` k512 half-release stages | `main_halves` (planned walk), `main_wave_halves` (wave period 8), `main_halves_queue` (queue walk) | `main_halves` (planned walk), `main_wave_halves` (wave period 8), `main_halves_queue` (queue walk) | `main_halves`, `main_halves_k256t` |
-| `fwd` / `dgrad` L2 evict-first twin launched (`main_wide_ef`) | `fwd` (`K >= 6144`); `dgrad` (`K >= 4096`, `sum_m // E >= 4096`) | `fwd` (`K >= 6144`) | `fwd` (`K <= 2048`); `dgrad` (`K >= 4096`, `sum_m // E >= 16384`) |
+| `fwd` / `dgrad` L2 evict-first twin launched (`main_wide_ef`) | `fwd` (`K >= 6144`); `dgrad` (`K >= 4096`, `N > 1024`, `sum_m // E >= 4096`) | `fwd` (`K >= 6144`) | `fwd` (`K <= 2048`); `dgrad` (`K >= 4096`, `sum_m // E >= 16384`) |
 | `wgrad` accumulate, fused (`_acc` builds, fp32 `out` only) | `main_halves`, `main_wave_halves`, `main_halves_queue`, `tail_reduce` | `main_halves`, `main_wave_halves`, `main_halves_queue`, `tail_reduce` | `main_halves`, `main_halves_k256t`, `tail_reduce` |
 | `wgrad` accumulate, composed | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main` / `main_wave`; misaligned `out`; `_acc` library not loadable | bf16 `out`; k256 tile; `main`; misaligned `out`; `_acc` library not loadable |
 | CUDA toolkit floor (`min_cuda`) | 12.8 | 12.9 | 13.5 |
