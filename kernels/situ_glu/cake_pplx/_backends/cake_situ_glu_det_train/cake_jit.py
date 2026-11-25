@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Registry of the Cake SiTU-GLU training forward and backward kernels
-(SM100 / SM103), deterministic.
+(SM100 / SM103 / SM107), deterministic.
 
 Every record of ``MODULES`` is one exported program: a CUDA device translation
 unit plus a tvm-ffi binding, compiled once per architecture.  A record is keyed

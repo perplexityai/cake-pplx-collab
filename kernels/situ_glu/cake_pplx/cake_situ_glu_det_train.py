@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Cake SiTU-GLU training forward / backward of an MLP, at any width ``I`` that
-is a multiple of 256 (SM100 / SM103), deterministic.
+is a multiple of 256 (SM100 / SM103 / SM107), deterministic.
 
 Per row ``r < R`` and column ``c < I``, from the BF16 gate ``g`` and up ``u``
 (two ``[R, I]`` tensors, or one ``[R, 2I]`` tensor with the gate in columns
@@ -140,7 +140,7 @@ def is_cake_situ_glu_det_train_supported(device: torch.device) -> bool:
     Returns
     -------
     bool
-        ``True`` for a CUDA device of compute capability (10, 0) or (10, 3).
+        ``True`` for a CUDA device of compute capability (10, 0), (10, 3) or (10, 7).
     """
 
     return _backend().is_cake_situ_glu_det_train_supported(device)
@@ -189,7 +189,7 @@ def cake_situ_glu_det_train_forward(
         An operand off CUDA, off the gate's device, of another dtype or shape; a width that is not a positive multiple
         of 256; a non-finite or non-positive ``beta`` or ``lb``; ``R > 2**30``; an ``out`` of another layout.
     RuntimeError
-        A device other than SM100 (``sm_100a``) or SM103 (``sm_103a``), also with ``R = 0``.
+        A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``), also with ``R = 0``.
 
     Notes
     -----

@@ -1,15 +1,15 @@
-# Deterministic SiTU-GLU training backend (SM100 / SM103)
+# Deterministic SiTU-GLU training backend (SM100 / SM103 / SM107)
 
 Backend of `cake_pplx.cake_situ_glu_det_train`: the SiTU-GLU activation of an MLP in training, forward and backward,
 at any width `I` that is a positive multiple of 256 (the widths 3072, 6144 and 33,792 among them).  The math is FP32
 on the BF16 inputs, with one BF16 rounding of each output.  The activation is unweighted.
 
-The facade `cake_pplx.cake_situ_glu_det_train` is a stable API.  This backend package is experimental, and its
-internal names may change.  The facade imports the backend on first use.  The supported architectures are SM100
-(B200 / GB200) and SM103 (B300 / GB300).  Another device raises `RuntimeError`.  The package loads its libraries
-prebuilt from `aot/` when a builder compiled them.  Otherwise the package JIT-builds them from the sources and flags
-that `build.json` records.  No environment variable changes a call; every control is an argument.  A JIT build (no
-prebuilt `aot/` library) reads the JIT variables listed in the repository README, section JIT build and cache.
+The facade `cake_pplx.cake_situ_glu_det_train` is a stable API.  This backend package is experimental, and its internal
+names may change.  The facade imports the backend on first use.  The supported architectures are SM100 (B200 / GB200),
+SM103 (B300 / GB300) and SM107 (Rubin).  Another device raises `RuntimeError`.  The package loads its libraries prebuilt
+from `aot/` when a builder compiled them.  Otherwise the package JIT-builds them from the sources and flags that
+`build.json` records.  No environment variable changes a call; every control is an argument.  A JIT build (no prebuilt
+`aot/` library) reads the JIT variables listed in the repository README, section JIT build and cache.
 
 ## Usage
 
@@ -61,17 +61,17 @@ and 25.0.  They must be positive and finite in FP32, with `2.88539 / beta`, `2.8
 ## Programs
 
 Two programs, one for `fwd` and one for `bwd` (`cake_jit.MODULES`, keyed by program name; `cake_jit.PROGRAM_OF` maps a
-stage to its program), each delivered for `sm_100a` and `sm_103a` and compiled with the exact `-gencode` flag of each
-(`build.json`).  Each is one kernel.  A row is `I / 256` segments of 256 columns, and a warp owns a segment: lane `l`
-loads 8 BF16 values at column `256 s + 8 l`, so each load of a warp is contiguous.  A CTA has 128 threads (four
+stage to its program), each delivered for `sm_100a`, `sm_103a` and `sm_107a` and compiled with the exact `-gencode` flag
+of each (`build.json`).  Each is one kernel.  A row is `I / 256` segments of 256 columns, and a warp owns a segment:
+lane `l` loads 8 BF16 values at column `256 s + 8 l`, so each load of a warp is contiguous.  A CTA has 128 threads (four
 warps).  In the forward its four warps own one row and take the row's segments in turn, three segments per warp and
-pass.  In the backward two warps own each of its two rows, six segments per warp and pass.  Each warp issues the
-loads of its segments before it computes and stores them; a segment past the row's last one reloads the last segment
-and stores nothing, and a row past the last one stores nothing.  The grid is one CTA per block of rows
-(`cake_jit.ROWS_PER_CTA`, `cake_jit.grid`), and the CTAs stride over the blocks, so any smaller grid would also be
-correct.  Row offsets are 64-bit.  No program uses shared
-memory, a workspace, a cooperative launch or programmatic dependent launch.  The row count, the width, `beta`, `lb`
-and the strides are launch arguments, so one library per program and architecture serves every call.
+pass.  In the backward two warps own each of its two rows, one segment per warp and pass.  Each warp issues the loads of
+its segments before it computes and stores them; a segment past the row's last one reloads the last segment and stores
+nothing, and a row past the last one stores nothing.  The grid is one CTA per block of rows (`cake_jit.ROWS_PER_CTA`,
+`cake_jit.grid`), and the CTAs stride over the blocks, so any smaller grid would also be correct.  Row offsets are
+64-bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The row
+count, the width, `beta`, `lb` and the strides are launch arguments, so one library per program and architecture serves
+every call.
 
 ## Numerics
 
@@ -79,10 +79,17 @@ and the strides are launch arguments, so one library per program and architectur
   `W = 2^(-2 |u| log2(e) / lb)`, all in `[0, 1]` so that no exponential overflows: `tanh(|g| / beta) = (1 - E) /
   (1 + E)`, `sigmoid(g) = 1 / (1 + P)` for `g >= 0` and `P / (1 + P)` for `g < 0`, and `1 - tanh^2 = 4 E / (1 + E)^2`
   (no cancellation); the up takes the same forms with `W`.
-- `1 - E` and `1 - W` keep an absolute error of a few `2^-24`.  `h` and `d_up` scale with `1 - E`, and `h` and
-  `d_gate` with `1 - W`, so their relative error can pass the BF16 rounding where `|g|` is below about `3e-5 beta` or
-  `|u|` below about `3e-5 lb`; below about `2^-26 beta` (`2^-26 lb`), `E` (`W`) rounds to 1 and those outputs are 0.
-  `g = 0` gives `E = 1` exactly, so `g = 0` or `u = 0` gives `h = 0` exactly.
+- The approximate exponential is within 2 ulps of the rounded result, so `1 - E` and `1 - W` taken from `E` and `W`
+  keep an absolute error of a few `2^-24`.  The forward takes them that way.  `h` scales with both, so its relative
+  error can pass the BF16 rounding where `|g|` is below about `3e-5 beta` or `|u|` below about `3e-5 lb`; below about
+  `2^-26 beta` (`2^-26 lb`), `E` (`W`) rounds to 1 and `h` is 0.  `g = 0` gives `E = 1` exactly, so `g = 0` or
+  `u = 0` gives `h = 0` exactly.
+- The backward takes `beta (1 - E)` as the larger of two lower bounds, without a branch.  With `y = 2 |g| / beta`,
+  the first is `|g| (2 - 2 |g| / beta) = beta (y - y^2 / 2)`, below the exact value by under `beta y^3 / 6`; the
+  second is `beta (1 - 2^-20) - beta E`, below it by more than the error of `E`.  The larger is within `2^-13` of the
+  exact value, relative to it, for every `g`, and `g = 0` gives 0 exactly.  `lb (1 - W)` takes the same form with
+  `|u|` and `lb`.  So `d_gate` and `d_up` keep their accuracy for tiny gates and ups, subnormal ones included; the
+  tests judge them with `|g|` down to `2^-60 beta` and `|u|` down to `2^-60 lb`.
 - `beta = 4` takes `P = E E`; any other `beta` takes `P` from its own exponential.  The choice is the same for every
   element of a call.
 - The exponentials are the approximate base-2 exponential.  `E` and `W` flush below `2^-126`, only where
@@ -117,7 +124,6 @@ CTAs to reorder.  It has no KCP module: rows are independent, with no sequence d
 
 ## Limitations
 
-- `sm_107a` (Rubin) is not delivered yet.
 - No double backward (`create_graph`); not tested under `torch.compile` or `torch.jit.trace`.  No FP8 or FP4 output.
 - The library builds on first use; before capturing a CUDA graph, run one eager call (or build the libraries with
   `specs_for_arch`).

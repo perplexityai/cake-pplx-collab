@@ -75,8 +75,8 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 
 | Item | Requirement |
 |---|---|
-| GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. situ_glu supports `sm_100a` and `sm_103a` only; its `sm_107a` libraries are not delivered yet. |
-| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for act_qdq, lm_head and for some dsa_sparse_attention, gated_kv_compression, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for act_qdq, causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_gate, engram_lookup, fmha, gated_kv_compression, gdn, gqa, kda, lm_head, mhc, mhc_head, moe_grouped_gemm, mok, rmsnorm and rmsnorm_silu_gate). Some moe_grouped_gemm libraries (its FP32 accumulate builds) need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built; on those two architectures below 13.4, a moe_grouped_gemm FP32 accumulate call takes its composed route instead. |
+| GPU | Compute capability 10.0, 10.3 or 10.7 (`sm_100a`, `sm_103a`, `sm_107a`). Some families limit shapes per architecture; see docs/API.md. |
+| CUDA toolkit | `nvcc` must be available at run time, because kernels compile on first use. Each library in `build.json` sets its own minimum: 12.8 for `sm_100a` (12.9 for act_qdq, lm_head and for some dsa_sparse_attention, gated_kv_compression, kda and rmsnorm_silu_gate libraries), 12.9 for `sm_103a` and 13.4 for `sm_107a` (13.5 for act_qdq, causal_conv1d, clamped_swiglu, dense_gemm, dsa_indexer, dsa_sparse_attention, engram_gate, engram_lookup, fmha, gated_kv_compression, gdn, gqa, kda, lm_head, mhc, mhc_head, moe_grouped_gemm, mok, rmsnorm, rmsnorm_silu_gate and situ_glu). Some moe_grouped_gemm libraries (its FP32 accumulate builds) need 13.4 on `sm_100a` and `sm_103a` too. An older toolkit raises `RuntimeError` when that library is built; on those two architectures below 13.4, a moe_grouped_gemm FP32 accumulate call takes its composed route instead. |
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
@@ -118,7 +118,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 | engram_lookup | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | act_qdq | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | clamped_swiglu | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
-| situ_glu | Validated on NVIDIA B200 (`sm_100a`) and GB300 (`sm_103a`); no `sm_107a` libraries yet |
+| situ_glu | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | dsa_sparse_attention | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | kda | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | gated_kv_compression | GPU suites and benchmark run on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5, against the acceptance criteria of issue #76 |

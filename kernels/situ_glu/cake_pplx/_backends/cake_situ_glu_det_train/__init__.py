@@ -14,9 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Backend of :mod:`cake_pplx.cake_situ_glu_det_train`: the Cake SiTU-GLU
-activation of an MLP in training, forward and backward (SM100 / SM103), as one
-self-contained package (host API bodies, the ``cake_jit`` registry, the pinned
-``cake_build`` loader and the generated CUDA sources under ``csrc/``).  The
+activation of an MLP in training, forward and backward (SM100 / SM103 /
+SM107), as one self-contained package (host API bodies, the ``cake_jit``
+registry, the pinned ``cake_build`` loader and the generated CUDA sources under
+``csrc/``).  The
 ``@cake_api``-decorated entry points and the user-facing documentation live in
 :mod:`cake_pplx.cake_situ_glu_det_train`; import that module.
 
@@ -67,15 +68,20 @@ Host design (every control is an argument; no environment variable):
   ``W = 2^(-2 |u| log2(e) / lb)``, all in ``[0, 1]`` so that no exponential
   overflows: ``tanh(|g| / beta) = (1 - E) / (1 + E)``, ``sigmoid(g) =
   1 / (1 + P)`` for ``g >= 0`` and ``P / (1 + P)`` for ``g < 0``, and
-  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  ``1 - E`` and
-  ``1 - W`` keep an absolute error of a few ``2^-24``.  ``h`` and ``d_up``
-  scale with ``1 - E``, and ``h`` and ``d_gate`` with ``1 - W``, so their
-  relative error can pass the BF16 rounding where ``|g|`` is below about
-  ``3e-5 beta`` or ``|u|`` below about ``3e-5 lb``; below about
-  ``2^-26 beta`` (``2^-26 lb``), ``E`` (``W``) rounds to 1 and those outputs
-  are 0.  ``g = 0`` gives ``E = 1`` exactly, so ``g = 0`` or ``u = 0`` gives
-  ``h = 0`` exactly.  ``beta = 4`` takes ``P = E E``; any other ``beta`` takes
-  ``P`` from its own exponential, the same choice for every element of a call.
+  ``1 - tanh^2 = 4 E / (1 + E)^2`` (no cancellation).  The forward takes
+  ``1 - E`` and ``1 - W`` from ``E`` and ``W``, with an absolute error of a
+  few ``2^-24``.  ``h`` scales with both, so its relative error can pass the
+  BF16 rounding where ``|g|`` is below about ``3e-5 beta`` or ``|u|`` below
+  about ``3e-5 lb``; below about ``2^-26 beta`` (``2^-26 lb``), ``E``
+  (``W``) rounds to 1 and ``h`` is 0.  ``g = 0`` gives ``E = 1`` exactly, so
+  ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly.  The backward takes
+  ``beta (1 - E)`` as the larger of ``|g| (2 - 2 |g| / beta)`` and
+  ``beta (1 - 2^-20) - beta E``, two lower bounds, without a branch: within
+  ``2^-13`` of the exact value, relative to it, for every ``g``, and 0 for
+  ``g = 0``.  ``lb (1 - W)`` takes the same form with ``|u|`` and ``lb``.  So
+  ``d_gate`` and ``d_up`` keep their accuracy for tiny gates and ups.
+  ``beta = 4`` takes ``P = E E``; any other ``beta`` takes ``P`` from its own
+  exponential, the same choice for every element of a call.
   The exponentials are the approximate base-2 exponential.  ``E`` and ``W``
   flush below ``2^-126``, only where ``|g| > 43.67 beta`` or
   ``|u| > 43.67 lb``.  ``h`` takes them only as ``1 - E``, ``1 + E``,

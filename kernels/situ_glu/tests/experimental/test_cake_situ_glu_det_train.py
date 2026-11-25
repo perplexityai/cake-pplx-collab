@@ -15,20 +15,22 @@ limitations under the License.
 
 Backend suite of the Cake deterministic SiTU-GLU training package (``cake_pplx._backends.cake_situ_glu_det_train``,
 the backend of ``cake_pplx.cake_situ_glu_det_train``): ``h = bf16(beta tanh(g / beta) sigmoid(g) lb tanh(u / lb))`` and
-its gradients ``d_gate`` and ``d_up``, at any width that is a multiple of 256, on SM100 and SM103.
+its gradients ``d_gate`` and ``d_up``, at any width that is a multiple of 256, on SM100, SM103 and SM107.
 
-Without a device: the registry (one program per stage, every record delivered for the two architectures and for no
+Without a device: the registry (one program per stage, every record delivered for the three architectures and for no
 other, the launch facts, the argument plans), the launch grid, the build manifest (every record's library, the
 recorded source digests), the capability map, the ``beta`` and ``lb`` keywords and their defaults, the refusal of CPU
 tensors and no environment read outside the JIT shim.
 
-On SM100 / SM103, every training output (``h``, ``d_gate`` and ``d_up``) judged against the naive BF16 tier
+On SM100 / SM103 / SM107, every training output (``h``, ``d_gate`` and ``d_up``) judged against the naive BF16 tier
 (``tests/cake/test_helpers/cake_naive.py``: the error against an FP64 oracle of the same inputs over 32 independent
 draws, in the L2 and the max norm, median and largest, beside the error of the same operation in BF16,
 :mod:`tests.cake.test_helpers.situ_glu_reference`) over row counts 1 to 4097, widths 256 to 33,792 (one segment,
 partial passes of the CTA's warps, both sides of a full pass, and the issue's widths), the merged, two-tensor, sliced
 and copied layouts, saturated, deep negative, small and wide values, zero gates and ups, every BF16 gate and scalars
-other than the model's.  The kernels have no row-count boundary: one program per stage, one CTA per block of rows.
+other than the model's; and ``d_gate`` and ``d_up`` over tiny gates or ups, one magnitude band a case, down to
+``2^-60 beta`` and ``2^-60 lb``.  The kernels have no row-count boundary: one program per stage, one CTA per block of
+rows.
 Beside the judge, exact facts of the contract (no tolerance): ``g = 0`` or ``u = 0`` gives ``h = 0`` exactly (and
 ``d_up = 0`` at ``g = 0``, ``d_gate = 0`` at ``u = 0``); saturated inputs give finite outputs with the oracle's signs
 outside the flushed range; ``R = 0`` returns empty outputs and launches nothing; one library per stage serves every row
@@ -81,8 +83,8 @@ situ_glu = pkg.cake_situ_glu_det
 
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
-ARCHES = ("sm_100a", "sm_103a")
-ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a"}
+ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 STAGES = ("fwd", "bwd")
 # The kernel parameters of each stage, in launch order (the kernels' signatures).
 PARAMETERS = {
@@ -330,27 +332,27 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
     for name, record in cake_jit.MODULES.items():
         for arch in ARCHES:
             assert pkg.library_name(name, arch) == f"{record['library']}_{arch}"
-        for arch in ("sm_90a", "sm_107a", "sm_110a", "sm_120a"):
+        for arch in ("sm_90a", "sm_110a", "sm_120a"):
             with pytest.raises(RuntimeError):
                 pkg.library_name(name, arch)
 
 
-def test_capabilities_map_to_the_two_architectures(monkeypatch) -> None:
-    """(10, 0) and (10, 3) map to ``sm_100a`` and ``sm_103a``; any other capability (SM107 included) is no target, and
-    a device of one is a ``RuntimeError`` naming the delivered architectures."""
+def test_capabilities_map_to_the_three_architectures(monkeypatch) -> None:
+    """(10, 0), (10, 3) and (10, 7) map to ``sm_100a``, ``sm_103a`` and ``sm_107a``; any other capability is no target,
+    and a device of one is a ``RuntimeError`` naming the delivered architectures."""
     assert tuple(pkg.ARCHES) == ARCHES
-    assert tuple(pkg.SUPPORTED_COMPUTE_CAPABILITIES) == ((10, 0), (10, 3))
+    assert tuple(pkg.SUPPORTED_COMPUTE_CAPABILITIES) == ((10, 0), (10, 3), (10, 7))
     assert pkg.WIDTH_MULTIPLE == 256
     for capability, arch in ARCH_BY_CAPABILITY.items():
         assert pkg.arch_for_capability(capability) == arch
-    for capability in ((9, 0), (10, 1), (10, 7), (11, 0), (12, 0), (12, 1)):
+    for capability in ((9, 0), (10, 1), (11, 0), (12, 0), (12, 1)):
         assert pkg.arch_for_capability(capability) is None, capability
-    for capability, want in (((10, 3), "sm_103a"), ((10, 7), None)):
+    for capability, want in (((10, 7), "sm_107a"), ((9, 0), None)):
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None, c=capability: c)
         pkg._arch_of_index.cache_clear()
         try:
             if want is None:
-                with pytest.raises(RuntimeError, match="sm_100a.*sm_103a"):
+                with pytest.raises(RuntimeError, match="sm_100a.*sm_103a.*sm_107a"):
                     pkg.device_arch(0)
             else:
                 assert pkg.device_arch(0) == want
@@ -504,7 +506,7 @@ def test_the_package_reads_no_environment_variable() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On SM100 / SM103: accuracy, judged against the naive BF16 tier
+# On SM100 / SM103 / SM107: accuracy, judged against the naive BF16 tier
 
 
 def test_the_records_load(device) -> None:

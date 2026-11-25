@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Tests of the public surface of the Cake SiTU-GLU training kernels (SM100 / SM103): the
+Tests of the public surface of the Cake SiTU-GLU training kernels (SM100 / SM103 / SM107): the
 ``cake_pplx.cake_situ_glu_det_train`` facade.  The facade's entry points are pass-throughs to
 ``cake_pplx._backends.cake_situ_glu_det_train``: the same signatures (``beta`` and ``lb`` keywords with the defaults
 4.0 and 25.0 everywhere) and the same bits as the backend; its autograd class and constants are the backend's
@@ -47,7 +47,7 @@ from cake_pplx.cake_situ_glu_det_train import (
 WIDTH = 3072
 requires_device = pytest.mark.skipif(
     not torch.cuda.is_available() or not is_cake_situ_glu_det_train_supported(torch.device("cuda")),
-    reason="Cake SiTU-GLU training needs an SM100 / SM103 GPU",
+    reason="Cake SiTU-GLU training needs an SM100 / SM103 / SM107 GPU",
 )
 ENTRY_NAMES = (
     "cake_situ_glu_det",
@@ -131,7 +131,7 @@ def test_scalars_are_keywords_with_the_model_defaults_everywhere() -> None:
 
 def test_lazy_objects_are_the_backends() -> None:
     assert facade.CakeSiTUGLUDetFunction is CakeSiTUGLUDetFunction is backend.CakeSiTUGLUDetFunction
-    assert facade.ARCHES is backend.ARCHES == ("sm_100a", "sm_103a")
+    assert facade.ARCHES is backend.ARCHES == ("sm_100a", "sm_103a", "sm_107a")
     assert facade.SUPPORTED_COMPUTE_CAPABILITIES is backend.SUPPORTED_COMPUTE_CAPABILITIES
     assert facade.WIDTH_MULTIPLE == backend.WIDTH_MULTIPLE == 256
     assert sorted(dir(facade)) == dir(facade)
