@@ -21,14 +21,14 @@ translation unit plus a tvm-ffi binding, compiled once per architecture.  A
 record is keyed by its route: the format (``fp4_e4m3_g16``,
 ``mxfp4_e8m0_g32`` or ``mxfp8_e8m0_g32``), with the suffix ``_scales`` for
 the build that also stores the FP32 scale of each group, and the suffix
-``_small``, ``_wide``, ``_large`` or ``_domain`` for the route's small, wide,
-large or interleaved-domain build.  The host plan of a record is ``format``,
-``scale_out``, ``group`` (the elements of one scale group), ``arches``,
-``ffi_entry``, ``grid_rule``; for a ranged record (small, wide, large or
-interleaved-domain) only, ``vectors``: per architecture and kind of call
-(``out_of_place`` or ``in_place``), the inclusive ``n_vecs`` range its route
-runs it for, or ``None`` for no size; and for an interleaved-domain record
-only, ``counters`` (its claim workspace, below).
+``_small``, ``_wide``, ``_large``, ``_mid`` or ``_domain`` for the route's
+small, wide, large, mid or interleaved-domain build.  The host plan of a record
+is ``format``, ``scale_out``, ``group`` (the elements of one scale group),
+``arches``, ``ffi_entry``, ``grid_rule``; for a ranged record (small, wide,
+large, mid or interleaved-domain) only, ``vectors``: per architecture and kind
+of call (``out_of_place`` or ``in_place``), the inclusive ``n_vecs`` range its
+route runs it for, or ``None`` for no size; and for an interleaved-domain
+record only, ``counters`` (its claim workspace, below).
 The derived leaves (``library``, ``kernel_symbol``,
 ``launch`` and ``arg_plan``) are written from the rendered program each time
 the package is generated; ``library`` is the program identity
@@ -80,12 +80,25 @@ measured up to 16 % slower, and in place at 16,777,216 vectors 1.2 % slower
 than the wide program with a clean L2.  Out of place it measured from 0.5 %
 slower to 0.7 % faster for MXFP4 and no faster for MXFP8 without the scales,
 and FP4 measured slower at some sizes in both kinds of call, so those have
-no large range.  Every other call runs the main record
-(:func:`selected_module`).  Every program gives the same bytes.  ``n_vecs``
-is a run-time scalar, so a library serves every shape; a call builds or loads
-only its own program's library on first use.  Build every library of the
-architecture (:func:`specs_for_arch`) before a CUDA graph capture, to keep the
-JIT out of the capture.
+no large range.  The mid program, MXFP4 and MXFP8 with and without the
+scales on SM107 only, is the same kernel with CTAs of 64 threads, eight
+vectors each (tiles of 512 vectors), 16 CTAs per SM and the main program's
+grid rule; it keeps each vector in packed BF16 pairs, so it fits in 64
+registers per thread.  A call runs it in both kinds of call from 868,353
+vectors, past one wave of the main program's CTAs on a VR200 (212 SMs), to
+1,736,704, one wave of its own; MXFP4's range starts at 933,888.  On three
+VR200 GPUs with L2 flushed before each call, eager calls of the kernel
+measured 2.4 to 14 % faster than the main program at each size measured from
+868,353 to 1,736,704 vectors (every 32,768; the median over the GPUs), and
+from 7 % slower to 2.4 % faster outside that range.  Replayed in a CUDA graph,
+some MXFP4 calls measured up to 2 % slower than with the main program below
+933,888 vectors, and MXFP8 calls at 868,416 vectors from 0.8 % slower to
+1.1 % faster.  Every other call runs the main
+record (:func:`selected_module`).  Every program gives the same bytes.
+``n_vecs`` is a run-time scalar, so a library serves every shape; a call
+builds or loads only its own program's library on first use.  Build every
+library of the architecture (:func:`specs_for_arch`) before a CUDA graph
+capture, to keep the JIT out of the capture.
 
 The interleaved-domain records (``<route>_domain``, SM107 only) are not on any
 route of ``ROUTES``: ``DOMAIN_ROUTES`` names one per route, and only a call
@@ -595,6 +608,122 @@ MODULES: dict[str, dict[str, Any]] = {
             "sm_103a": {"in_place": (4194304, 2147481600), "out_of_place": (8388608, 2147481600)},
         },
     },
+    # The mid build of MXFP4 without the scales, SM107 only: 64-thread CTAs,
+    # eight vectors per thread, for the n_vecs of its ``vectors``.
+    "mxfp4_e8m0_g32_mid": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp4_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_5ddb470d9d818fe82b6b",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_5ddb470d9d818fe82b6b",
+        "scale_out": False,
+        "vectors": {
+            "sm_107a": {"in_place": (933888, 1736704), "out_of_place": (933888, 1736704)},
+        },
+    },
+    # The mid build of MXFP4 with the scales, SM107 only: 64-thread CTAs,
+    # eight vectors per thread, for the n_vecs of its ``vectors``.
+    "mxfp4_e8m0_g32_scales_mid": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp4_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_9f47fc0fe25e824b0f73",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_9f47fc0fe25e824b0f73",
+        "scale_out": True,
+        "vectors": {
+            "sm_107a": {"in_place": (933888, 1736704), "out_of_place": (933888, 1736704)},
+        },
+    },
+    # The mid build of MXFP8 without the scales, SM107 only: 64-thread CTAs,
+    # eight vectors per thread, for the n_vecs of its ``vectors``.
+    "mxfp8_e8m0_g32_mid": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp8_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_46ee6195467c78a3c8e3",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_46ee6195467c78a3c8e3",
+        "scale_out": False,
+        "vectors": {
+            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
+        },
+    },
+    # The mid build of MXFP8 with the scales, SM107 only: 64-thread CTAs,
+    # eight vectors per thread, for the n_vecs of its ``vectors``.
+    "mxfp8_e8m0_g32_scales_mid": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp8_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_bdc991febcca0ecf2cf6",
+        "launch": {
+            "block": (64, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_bdc991febcca0ecf2cf6",
+        "scale_out": True,
+        "vectors": {
+            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
+        },
+    },
     # The interleaved-domain build of each route, SM107 only (``DOMAIN_ROUTES``):
     # tiles of 128 threads (1,024 vectors), one tile an item, over memory whose
     # 2 MB chunks alternate between the two dies, each CTA claiming items of
@@ -766,10 +895,10 @@ MODULES: dict[str, dict[str, Any]] = {
 }
 
 # Per architecture, the records of each route: its main record and its ranged
-# records (its small record and, on SM100 and SM103, MXFP8's wide record and
-# the large record of MXFP4 and MXFP8), which a call runs for the ``n_vecs``
-# of their disjoint ``vectors`` ranges for the call's kind
-# (:func:`selected_module`).
+# records (its small record; on SM100 and SM103, MXFP8's wide record and the
+# large record of MXFP4 and MXFP8; on SM107, the mid record of MXFP4 and
+# MXFP8), which a call runs for the ``n_vecs`` of their disjoint ``vectors``
+# ranges for the call's kind (:func:`selected_module`).
 ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_100a": {
         "fp4_e4m3_g16": ["fp4_e4m3_g16", "fp4_e4m3_g16_small"],
@@ -806,10 +935,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_107a": {
         "fp4_e4m3_g16": ["fp4_e4m3_g16", "fp4_e4m3_g16_small"],
         "fp4_e4m3_g16_scales": ["fp4_e4m3_g16_scales", "fp4_e4m3_g16_scales_small"],
-        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32", "mxfp4_e8m0_g32_small"],
-        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales", "mxfp4_e8m0_g32_scales_small"],
-        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_small"],
-        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales", "mxfp8_e8m0_g32_scales_small"],
+        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32", "mxfp4_e8m0_g32_small", "mxfp4_e8m0_g32_mid"],
+        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales", "mxfp4_e8m0_g32_scales_small", "mxfp4_e8m0_g32_scales_mid"],
+        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_small", "mxfp8_e8m0_g32_mid"],
+        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales", "mxfp8_e8m0_g32_scales_small", "mxfp8_e8m0_g32_scales_mid"],
     },
 }
 
@@ -882,8 +1011,8 @@ ALIGNMENT_BYTES = 16
 INT32_MAX = 2**31 - 1
 # ``n_vecs`` is a signed 32-bit kernel argument, and the kernel forms
 # ``n_vecs + 255`` (its tile count on SM107, ``+ 127`` on SM100 / SM103) and
-# its vector indices below that in signed 32 bits.  A small or wide program
-# forms ``n_vecs + 511``, a large one ``n_vecs + 2047`` and an
+# its vector indices below that in signed 32 bits.  A small, wide or mid
+# program forms ``n_vecs + 511``, a large one ``n_vecs + 2047`` and an
 # interleaved-domain one ``n_vecs + 1023``; a call runs each only inside its
 # ``vectors`` range.
 MAX_VECTORS = INT32_MAX - 255
@@ -926,7 +1055,8 @@ def selected_module(
     in place (the output is the input) or out of place.
 
     A route lists one main record and its ranged records (the records with
-    ``vectors``: a small record, and a wide or a large one or both).  The call
+    ``vectors``: a small record, and on some routes a wide, a large or a mid
+    one, or a wide and a large one).  The call
     runs the ranged record whose inclusive ``vectors[arch]`` range for the
     call's kind (``"in_place"`` or ``"out_of_place"``; ``None`` is no size)
     holds ``n_vecs``, and the main record when none does.

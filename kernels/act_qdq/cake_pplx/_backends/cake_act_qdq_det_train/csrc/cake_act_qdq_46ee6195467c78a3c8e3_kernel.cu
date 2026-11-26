@@ -1,0 +1,178 @@
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+typedef signed char        int8_t;
+typedef unsigned char      uint8_t;
+typedef unsigned short     uint16_t;
+typedef unsigned int       uint32_t;
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
+typedef unsigned long long uint64_t;
+#else
+typedef unsigned long      uint64_t;
+#endif
+static_assert(sizeof(uint64_t) == 8, "Cake requires an LP64 CUDA host ABI");
+typedef signed int         int32_t;
+typedef short int          int16_t;
+struct __align__(64) CakeTensorMap64 { uint64_t opaque[16]; };
+static_assert(sizeof(CakeTensorMap64) == 128, "64-aligned tensor-map ABI size");
+static_assert(alignof(CakeTensorMap64) == 64, "64-aligned tensor-map ABI alignment");
+
+#if defined(__CUDACC_RTC__)
+typedef struct __align__(128) { uint64_t opaque[16]; } CUtensorMap;
+#else
+#include <cuda.h>
+#endif
+
+static_assert(sizeof(CUtensorMap) == 128, "CUtensorMap CUDA ABI must be 128 bytes");
+#include <cuda_bf16.h>
+#include <cuda_fp8.h>
+
+__device__ __forceinline__ int make_warp_uniform(int x) {
+    int result;
+    asm volatile("shfl.sync.idx.b32 %0, %1, 0, 0x1F, 0xFFFFFFFF;"
+                 : "=r"(result) : "r"(x));
+    return result;
+}
+
+#define LAUNCH_MIN_BLOCKS 16
+
+__device__ __forceinline__ uint32_t cvt_bf16x2_e4m3x2(uint16_t src) {
+    uint32_t dst;
+#if defined(__CUDACC_VER_MAJOR__) && (__CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    asm("cvt.rn.bf16x2.e4m3x2 %0, %1;" : "=r"(dst) : "h"(src));
+#else
+    uint32_t _f16x2;
+    asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(_f16x2) : "h"(src));
+    uint16_t _h0 = (uint16_t)(_f16x2 & 0xFFFFu);
+    uint16_t _h1 = (uint16_t)((_f16x2 >> 16) & 0xFFFFu);
+    float _f0;
+    float _f1;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(_f0) : "h"(_h0));
+    asm("cvt.f32.f16 %0, %1;" : "=f"(_f1) : "h"(_h1));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(dst) : "f"(_f1), "f"(_f0));
+#endif
+    return dst;
+}
+
+__device__ __forceinline__ uint32_t cvt_bf16x2_e4m3x2_scaled(uint32_t src, uint16_t scale) {
+    uint32_t dst;
+#if defined(__CUDACC_VER_MAJOR__) && (__CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    asm("cvt.rn.bf16x2.e4m3x2.scaled::n2::ue8m0 %0, %1, %2;" : "=r"(dst) : "h"((uint16_t)src), "h"(scale));
+#else
+    uint32_t _scale;
+    asm("cvt.rn.bf16x2.ue8m0x2 %0, %1;" : "=r"(_scale) : "h"(scale));
+    asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(dst) : "r"(cvt_bf16x2_e4m3x2(src)), "r"(_scale));
+#endif
+    return dst;
+}
+
+#include <math_constants.h>
+
+extern "C" {
+
+__global__ __launch_bounds__(64, LAUNCH_MIN_BLOCKS) void
+kernel_cake_act_qdq_46ee6195467c78a3c8e3(const __nv_bfloat16* x, __nv_bfloat16* y, int n_vecs)
+{
+    const int tid = threadIdx.x;
+    const int warp = make_warp_uniform(tid / 32);
+    const int lane = tid % 32;
+
+
+    const int bid = blockIdx.x;
+    const int num_bids = gridDim.x;
+
+    const int cta_rank = 0;
+
+    // === Task calls (declaration order) ===
+    int tiles = n_vecs + 511 >> 9;
+    int last = n_vecs - 1;
+    #pragma unroll 1
+    for (int c = bid; c < tiles; c += num_bids) {
+        unsigned int w[32];
+        #pragma unroll
+        for (int r = 0; r < 8; r++) {
+            int i = c * 512 + r * 64 + tid;
+            int ci = ((i < n_vecs) ? i : last);
+            {
+                const uint4* _vptr_0 = reinterpret_cast<const uint4*>(x + (long long)ci * 8ll + 0);
+                uint4* _vdst_0 = reinterpret_cast<uint4*>(&w[r * 4]);
+                #pragma unroll
+                for (int _blk = 0; _blk < 1; _blk++) {
+                    asm volatile("ld.global.L2::cache_hint.v4.b32 {%0, %1, %2, %3}, [%4], %5;"
+                        : "=r"(_vdst_0[_blk].x), "=r"(_vdst_0[_blk].y), "=r"(_vdst_0[_blk].z), "=r"(_vdst_0[_blk].w) : "l"((const void*)(_vptr_0 + _blk)), "l"(0x12F0000000000000ULL) : "memory");
+                }
+            }
+        }
+        #pragma unroll
+        for (int r_1 = 0; r_1 < 8; r_1++) {
+            int i_1 = c * 512 + r_1 * 64 + tid;
+            unsigned int pair_abs[4];
+            #pragma unroll
+            for (int p = 0; p < 4; p++) {
+                uint32_t abs_word;
+                asm("abs.bf16x2 %0, %1;" : "=r"(abs_word) : "r"(w[r_1 * 4 + p]));
+                pair_abs[p] = abs_word;
+            }
+            uint32_t max01;
+            asm("max.bf16x2 %0, %1, %2;" : "=r"(max01) : "r"(pair_abs[0]), "r"(pair_abs[1]));
+            uint32_t max23;
+            asm("max.bf16x2 %0, %1, %2;" : "=r"(max23) : "r"(pair_abs[2]), "r"(pair_abs[3]));
+            uint32_t max_word;
+            asm("max.bf16x2 %0, %1, %2;" : "=r"(max_word) : "r"(max01), "r"(max23));
+            float amax = fmaxf(__uint_as_float(max_word << 16), __uint_as_float(max_word & 4294901760u));
+            float _shfl_xor_sync_1 = __shfl_xor_sync(0xFFFFFFFF, amax, 1);
+            amax = fmaxf(amax, _shfl_xor_sync_1);
+            float _shfl_xor_sync_2 = __shfl_xor_sync(0xFFFFFFFF, amax, 2);
+            amax = fmaxf(amax, _shfl_xor_sync_2);
+            int amax_i = 0;
+            amax_i = reinterpret_cast<int*>(&amax)[0];
+            int biased = (amax_i >> 23) - 8 + (((amax_i & 8388607) > 6291456) ? 1 : 0);
+            int scale_byte = ((biased > 105) ? biased : 105);
+            float scale = 0.0f;
+            int _bit_cast_src_3 = scale_byte << 23;
+            scale = reinterpret_cast<float*>(&_bit_cast_src_3)[0];
+            int inv_bits = 254 - scale_byte << 23;
+            unsigned int inv_pair = (unsigned int)(inv_bits | inv_bits >> 16);
+            uint16_t scale_pair = (uint16_t)(scale_byte << 8 | scale_byte);
+            unsigned int out[4];
+            #pragma unroll
+            for (int p_1 = 0; p_1 < 4; p_1++) {
+                uint32_t quot;
+                asm volatile("mul.rn.bf16x2 %0, %1, %2;" : "=r"(quot) : "r"(w[r_1 * 4 + p_1]), "r"(inv_pair));
+                uint16_t codes = 0;
+                uint16_t _cvt_satfinite_e4m3x2_bf16x2_4;
+                #if !defined(CAKE_CVT_SATFINITE_E4M3X2_BF16X2_FALLBACK) && defined(__CUDACC_VER_MAJOR__) && (__CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 1)) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+                asm("cvt.rn.satfinite.e4m3x2.bf16x2 %0, %1;" : "=h"(_cvt_satfinite_e4m3x2_bf16x2_4) : "r"(quot));
+                #else
+                {
+                const uint32_t _bf16x2 = (uint32_t)(quot);
+                const float _lo = __uint_as_float(_bf16x2 << 16);
+                const float _hi = __uint_as_float(_bf16x2 & 0xFFFF0000u);
+                asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(_cvt_satfinite_e4m3x2_bf16x2_4) : "f"(_hi), "f"(_lo));
+                }
+                #endif
+                codes = _cvt_satfinite_e4m3x2_bf16x2_4;
+                unsigned int y_pair = 0;
+                uint32_t _cvt_bf16x2_e4m3x2_5 = cvt_bf16x2_e4m3x2_scaled(codes, scale_pair);
+                y_pair = _cvt_bf16x2_e4m3x2_5;
+                out[p_1] = y_pair;
+            }
+            asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %5, 0; @p_ st.global.v4.b32 [%0], {%1, %2, %3, %4}; }" :: "l"(y + (long long)i_1 * 8ll), "r"(out[(0) + 0]), "r"(out[(0) + 1]), "r"(out[(0) + 2]), "r"(out[(0) + 3]), "r"((unsigned int)(i_1 < n_vecs)) : "memory");
+        }
+    }
+}
+
+} // extern "C"

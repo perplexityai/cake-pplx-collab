@@ -25,10 +25,11 @@ locality domain), chunk ``k`` in die ``k & 1``, and returns a torch tensor
 over it without a copy.  The range is registered by device, so :func:`place`
 finds a tensor's offset in its chunk and the die of that chunk from its
 address alone, with no driver call.  The plain programs run over such memory
-at about the speed of default memory: out-of-place calls of 131,072 to
-4,194,304 vectors ran at 0.95-1.03x of it in the package benchmark on VR200,
-the slowest for buffers of one chunk, which lie wholly in die 0; in-place
-calls and larger ones were not measured.  The driver maps this memory, and the
+at about the speed of default memory: with the programs of act_qdq 0.1.6,
+out-of-place calls of 131,072 to 4,194,304 vectors ran at 0.95-1.03x of it in
+the package benchmark on VR200, the slowest for buffers of one chunk, which lie
+wholly in die 0; in-place calls, larger ones and the mid program were not
+measured.  The driver maps this memory, and the
 4 MB of claim counters below, outside torch's caching allocator, so
 ``torch.cuda.memory_allocated`` and the other ``torch.cuda.memory_*`` counters
 do not count it.

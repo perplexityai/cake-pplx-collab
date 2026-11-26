@@ -58,21 +58,23 @@ outputs of the right shapes.
 
 ## Programs
 
-The package has twenty-three programs: per format, with and without the scale output, a main program, a small one and
+The package has twenty-seven programs: per format, with and without the scale output, a main program, a small one and
 an interleaved-domain one; a wide program for MXFP8 without the scale output; and per MXFP4 and MXFP8 format, with and
-without the scale output, a large program.  The wide and the large programs are built for `sm_100a` and `sm_103a`, the
-interleaved-domain programs for `sm_107a` ("Locality domains" below), every other program for `sm_100a`, `sm_103a` and
-`sm_107a`, each with the exact `-gencode` flag of the architecture, so `build.json` lists 52 libraries.  With
-`locality="off"`, a call runs one program of its route (`cake_jit.selected_module(arch, format, scale_out=..., n_vecs=...,
-in_place=...)`): the small, the wide or the large program when `n_vecs` lies in its `vectors` range for the call's kind,
-and the main program otherwise.  The small program's range out of place is 65,537 to 524,288 on `sm_100a` and `sm_103a`
+without the scale output, a large program and a mid one.  The wide and the large programs are built for `sm_100a` and
+`sm_103a`, the interleaved-domain ("Locality domains" below) and the mid programs for `sm_107a`, every other program for
+`sm_100a`, `sm_103a` and `sm_107a`, each with the exact `-gencode` flag of the architecture, so `build.json` lists 56
+libraries.  With `locality="off"`, a call runs one program of its route (`cake_jit.selected_module(arch, format,
+scale_out=..., n_vecs=..., in_place=...)`): the small, the wide, the large or the mid program when `n_vecs` lies in its
+`vectors` range for the call's kind, and the main program otherwise.  The small program's range out of place is 65,537 to 524,288 on `sm_100a` and `sm_103a`
 (to 131,072 for MXFP8 without the scale output) and 1 to 262,144 on `sm_107a`; in place it is 1 to 262,144 on `sm_107a`,
 and `sm_100a` and `sm_103a` have none, since the small program measured no faster there in place.  The wide program's
 range starts above the main and small programs' sizes: out of place from 131,073 vectors to 2,147,483,136 (2^31 - 512,
 since it forms `n_vecs + 511`; the main program runs above that), and in place from 262,145 to 33,554,431, below the
 large program's range.  The large program's range holds the largest sizes: in place from 4,194,304 vectors (from
 33,554,432 for MXFP8 without the scale output) and out of place from 8,388,608 for MXFP8 with the scale output only, all
-to 2,147,481,600 (2^31 - 2048, since it forms `n_vecs + 2047`; the main program runs above that).
+to 2,147,481,600 (2^31 - 2048, since it forms `n_vecs + 2047`; the main program runs above that).  The mid program's
+range, in both kinds of call on `sm_107a`, is 868,353 to 1,736,704 vectors for MXFP8 and 933,888 to 1,736,704 for
+MXFP4, above the small program's range.
 
 A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
 threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
@@ -95,11 +97,22 @@ written), it measured faster than the program it replaces in every state inside 
 ranges its tiles of 2,048 vectors leave SMs idle, and it measured up to 16 % slower; in place at 16,777,216 vectors it
 measured 1.2 % slower than the wide program with a clean L2.  Out of place it measured from 0.5 % slower to 0.7 % faster
 for MXFP4 and no faster for MXFP8 without the scale output, and FP4 measured slower at some sizes in both kinds of call,
-so those have no large range.  Every program gives the same bytes at every size.  Neither the last dimension, nor the
-rank, nor the row count enters the kernel, so a new shape never rebuilds a library.  A call builds or loads only the
-library of its own program, so build every library of the architecture before a CUDA graph capture: call
-`build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output
-and program (size range and kind of call) that the capture uses.
+so those have no large range.  The mid program is the same kernel with 64-thread CTAs that take 8 vectors per thread
+(tiles of 512 vectors), 16 CTAs per SM and the main program's grid rule.  It keeps each vector in packed BF16 pairs, as
+the interleaved-domain MXFP4 and MXFP8 programs do ("Locality domains" below), so it fits in 64 registers per thread.
+On a VR200 (212 SMs) the main program needs a second wave of CTAs from 868,353 vectors, and the mid program fits in one
+wave up to 1,736,704.  On three VR200 GPUs with L2 flushed before each call, eager calls of the kernel measured faster
+than the main program at every size measured in that range (every 32,768 vectors), in both kinds of call and on every
+GPU: by 2.4 to 14 % in the median over the GPUs.  Outside that range they measured from 7 % slower to 2.4 % faster.
+Replayed in a CUDA graph, some MXFP4 calls measured up to 2 % slower than with the main program from 868,368 to 917,504
+vectors, and every call within 0.2 % of it or faster at each size measured from 933,888, so MXFP4's range starts there.
+In a CUDA graph at 868,416 vectors, MXFP8 calls measured from 0.8 % slower to 1.1 % faster, within the 0.8 % slower to
+2.4 % faster that unchanged programs measured across the same final A/B.  Every program gives the same bytes at every
+size.
+Neither the last dimension, nor the rank, nor the row count enters the kernel, so a new shape never rebuilds a library.
+A call builds or loads only the library of its own program, so build every library of the architecture before a CUDA
+graph capture: call `build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each
+format, scale output and program (size range and kind of call) that the capture uses.
 
 ## Locality domains (`sm_107a`)
 
@@ -129,9 +142,9 @@ program ran 1.11-1.30x as fast as the `"off"` program on the package benchmark's
 each run at least 1.09x), and 1.09-1.31x in back-to-back calls, eager or in a CUDA graph.  For MXFP8
 `[16384, 8, 4096]` without scales, an eager call took 162.5-162.6 µs on the `"off"` program and 124.4-124.7 µs on the
 domain program (GPU time, 2 GPUs).  A call that falls back runs the `"off"` program on the helper's memory: on the
-benchmark's fallback rows (out of place, 131,072 to 4,194,304 vectors) it ran 0.95-1.03x as fast as on default memory
-(GPU time), the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls and larger ones on
-the helper's memory were not measured.
+benchmark's fallback rows (out of place, 131,072 to 4,194,304 vectors) the programs of act_qdq 0.1.6 ran 0.95-1.03x as
+fast as on default memory (GPU time), the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls,
+larger ones and the mid program on the helper's memory were not measured.
 
 The claim counters are one unsigned 32-bit word per die (`cake_domain`; the record's `counters` field), each in its own
 die's memory.  The helper's first call on a device maps one 2 MB chunk in each die for them (4 MB, kept for the
@@ -180,11 +193,11 @@ below give the rule's outputs:
 - **E8M0 quotient.**  `s` is a power of two, so `x * 2^-k` and the IEEE quotient `x / s` are the same correctly
   rounded number.  The kernels keep subnormals (no flush to zero), so the product equals the quotient bit for bit.
   A pair of elements takes this multiply, and the E4M3-scaled steps below, in packed two-lane FP32 arithmetic; each
-  lane rounds as it would alone.  The `sm_107a` interleaved-domain programs of MXFP4 and MXFP8 instead take one BF16x2
-  multiply of each BF16 pair by `2^-k`: BF16 has FP32's exponent range, so that product is the quotient from `2^-126`
-  up, and a smaller quotient lies below the smallest E2M1 and E4M3 midpoints (`0.25` and `2^-10`) and converts to a
-  signed zero either way.  Their BF16-pair conversions to E2M1 and E4M3 round each half as the FP32 conversion rounds
-  its widened value.
+  lane rounds as it would alone.  The `sm_107a` interleaved-domain and mid programs of MXFP4 and MXFP8 instead take
+  one BF16x2 multiply of each BF16 pair by `2^-k`: BF16 has FP32's exponent range, so that product is the quotient
+  from `2^-126` up, and a smaller quotient lies below the smallest E2M1 and E4M3 midpoints (`0.25` and `2^-10`) and
+  converts to a signed zero either way.  Their BF16-pair conversions to E2M1 and E4M3 round each half as the FP32
+  conversion rounds its widened value.
 - **E4M3 scale.**  The `sm_107a` programs multiply `max(amax, 6 * 2^-9)` by `RN(1/6)`, the FP32 value nearest
   `1/6`, which is `1/6` times `1 + 2^-25`; the `sm_100a` and `sm_103a` programs divide it by 6 (an IEEE
   round-to-nearest division).  Either FP32 result is within `2^-23` (relative) of the exact quotient
@@ -208,12 +221,12 @@ below give the rule's outputs:
 - **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by `s`.
   `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant bits, so the
   BF16 product `q * s` is exact, down to the MXFP4 subnormal `2^-127`, which the multiply keeps.  The `sm_107a`
-  interleaved-domain programs of MXFP4 and MXFP8 convert each pair of codes and scale both by `s` in one UE8M0-scaled
-  conversion, rounded once to BF16: the same exact product.  The `sm_107a` main programs of `mxfp8_e8m0_g32`, with and
-  without the scale output, decode each pair to two FP16 values instead and multiply each by `s` in FP32; that product
-  has at most 8 significant bits, so it and its BF16 rounding are exact too.  Above the BF16 range the product is
-  `±inf`, as the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120`
-  (MXFP4) becomes `±inf`, although `x` is finite.
+  interleaved-domain and mid programs of MXFP4 and MXFP8 convert each pair of codes and scale both by `s` in one
+  UE8M0-scaled conversion, rounded once to BF16: the same exact product.  The `sm_107a` main programs of
+  `mxfp8_e8m0_g32`, with and without the scale output, decode each pair to two FP16 values instead and multiply each by
+  `s` in FP32; that product has at most 8 significant bits, so it and its BF16 rounding are exact too.  Above the BF16
+  range the product is `±inf`, as the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8) or
+  `|x| >= 224 * 2^120` (MXFP4) becomes `±inf`, although `x` is finite.
 
 The programs are compiled with IEEE division and square root and without flush to zero (`--prec-div=true`,
 `--prec-sqrt=true`, `--ftz=false`, no `--use_fast_math`), as `build.json` records.
