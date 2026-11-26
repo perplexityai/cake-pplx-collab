@@ -884,8 +884,8 @@ INT32_MAX = 2**31 - 1
 # ``n_vecs + 255`` (its tile count on SM107, ``+ 127`` on SM100 / SM103) and
 # its vector indices below that in signed 32 bits.  A small or wide program
 # forms ``n_vecs + 511``, a large one ``n_vecs + 2047`` and an
-# interleaved-domain one ``n_vecs + 1023`` (FP4) or ``n_vecs + 511`` (MXFP4,
-# MXFP8); a call runs each only inside its ``vectors`` range.
+# interleaved-domain one ``n_vecs + 1023``; a call runs each only inside its
+# ``vectors`` range.
 MAX_VECTORS = INT32_MAX - 255
 
 

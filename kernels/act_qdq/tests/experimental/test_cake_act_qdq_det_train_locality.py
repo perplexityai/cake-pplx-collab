@@ -1039,8 +1039,8 @@ RULE_INPUTS = {
     "sweep": lambda fmt: reference.sweep_input(fmt),
     "wide": lambda fmt: reference.randn_input((33, 8, 512), fmt, lo=120, hi=120, seed=31),
 }
-# Byte offsets of those inputs in memory that alternates dies: 3 FP4 tiles (6 MXFP4 or MXFP8 tiles) before the end of
-# a die-0 chunk (a longer input reaches die 1), and inside the first tile of a die-1 chunk.
+# Byte offsets of those inputs in memory that alternates dies: 3 tiles (of every format) before the end of a die-0
+# chunk (a longer input reaches die 1), and inside the first tile of a die-1 chunk.
 RULE_OFFSETS = (CHUNK - 3 * TILE_BYTES + 16, CHUNK + 16)
 
 
