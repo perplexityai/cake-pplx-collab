@@ -24,7 +24,8 @@ row and rank:
   checkpoints, ``retain_graph`` (exactly twice); ``y`` is also bitwise the single-rank zero-history convolution;
 - the ``torch.distributed`` collectives and the waits on their work handles, per phase (original forward /
   recompute / backward): multi 1/0/1 direct, 1/1/1 plain checkpoint, 1/0/1 with a handle, against 3/0/3, 3/3/3 and
-  3/0/3 for three single calls;
+  3/0/3 for three single calls; the single calls' eager forward exchanges are waiting collectives (``async_op=False``,
+  no work handle), so their waits are 0/0/3 in every form;
 - the multi handle retains exactly the n history pools (``nbytes`` and the allocator's bytes after the forward);
 - the two-launch forward (knobs ``fwd_main`` x ``fwd_overlap``, the same on every rank): ``LAST_CALL["fwd_multi"]``
   names the form the rank ran and every tensor's ``y`` / ``hist`` are bitwise the one-launch single call's;
@@ -309,12 +310,15 @@ def _run_rank(rank: int, W: int, row, port: int, result_dir, local_id: int) -> d
         for i in range(n)
         for t in ("dx", "dw")
     )
-    for t in ("calls", "waits"):
+    # The single call's eager forward exchange is a waiting collective (``async_op=False``, ``kcp._fwd_sync``): it
+    # returns no work handle, so a single forward exchange counts one call and no wait; the backward's are waited, and
+    # so are the multi entry's exchanges in every phase.
+    for t, f in (("calls", 1), ("waits", 0)):
         # positive control: n exchanges per direction for the single calls
         flags[f"single_counts_{t}"] = (
-            cs_direct[t] == table(n, 0, n)
-            and cs_plain[t] == table(n, n, n)
-            and cs_handle[t] == table(n, 0, n)
+            cs_direct[t] == table(n * f, 0, n)
+            and cs_plain[t] == table(n * f, n * f, n)
+            and cs_handle[t] == table(n * f, 0, n)
         )
         flags[f"multi_counts_{t}"] = (
             cm_direct[t] == table(1, 0, 1)

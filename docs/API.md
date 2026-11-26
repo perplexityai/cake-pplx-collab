@@ -254,7 +254,7 @@ Other public names:
 
 ### `cake_pplx.cake_causal_conv1d_det_train_kcp`
 
-Supports FP32 taps only, with no bias. `dweight` is this rank's fixed-order FP32 partial. It is summed in plain FP32 words and is bitwise reproducible run to run. There is no `dweight_sum` keyword, so there is no FP32 (hi, lo) pair opt-in. Reducing `dweight` across ranks is the caller's job. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py).
+Supports FP32 taps only, with no bias. `dweight` is this rank's fixed-order FP32 partial. It is summed in plain FP32 words and is bitwise reproducible run to run. There is no `dweight_sum` keyword, so there is no FP32 (hi, lo) pair opt-in. Reducing `dweight` across ranks is the caller's job. From 0.2.20, when the single call's history rows to send are one run of consecutive rows of `x_local`, the forward halo exchange sends that slice of `x_local` instead of a gathered copy, except in a CUDA Graph capture of a call with `C x S` of at least 8192 x 16384 on sm_100a and sm_103a, which keeps the gathered copy; eagerly and outside a CUDA Graph capture, it is a waiting collective (`async_op=False`), so no work handle is waited before the forward's programs. `y` and the saved history rows keep their bits. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_det_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -282,7 +282,7 @@ Other public names:
 
 ### `cake_pplx.cake_causal_conv1d_nondet_train_kcp`
 
-The backward overlaps the halo exchange: the main program runs before the wait, without a cooperative grid. It adds FP32 `dweight` into zeroed accumulators with unordered reductions, and a tail-row program writes `dx` for the last rows of each fragment. The nondet package makes no bit promise. Under deterministic algorithms the backward raises `RuntimeError` before any exchange (`UserWarning` with `warn_only`). Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py).
+The backward overlaps the halo exchange: the main program runs before the wait, without a cooperative grid. It adds FP32 `dweight` into zeroed accumulators with unordered reductions, and a tail-row program writes `dx` for the last rows of each fragment. The nondet package makes no bit promise. Under deterministic algorithms the backward raises `RuntimeError` before any exchange (`UserWarning` with `warn_only`). From 0.2.20 the single call's forward halo exchange sends the slice and waits as the det package's does (above); its CUDA Graph captures send the slice at every size. Source: [`kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py`](../kernels/causal_conv1d/cake_pplx/cake_causal_conv1d_nondet_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|

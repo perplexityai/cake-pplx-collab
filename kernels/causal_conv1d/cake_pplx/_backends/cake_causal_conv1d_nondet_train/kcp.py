@@ -108,9 +108,19 @@ forward overlaps; ``MULTI_FWD_MAIN_ARCHS`` and ``MULTI_FWD_OVERLAP_ARCHS`` are t
 first tensor only (the other tensors take the waiting form after the wait).  The sets are the deterministic
 package's (the same programs; their comment): every architecture's single call runs the single-rank main program
 after the wait, and so does the multi entry on sm_100a and sm_103a; on sm_107a the multi entry overlaps.  The
-exchange, its wait and the collectives are the same in every form.  The private test knobs ``fwd_main`` and
+exchanged rows and the collectives are the same in every form; outside a CUDA Graph capture the single call's
+waiting form issues its exchange as a waiting collective (below).  The private test knobs ``fwd_main`` and
 ``fwd_overlap`` (``None`` shipped = the architecture sets, ``0`` = off, ``1`` = on) select the forms for the A/B
 record, and ``LAST_CALL["fwd"]`` / ``LAST_CALL["fwd_multi"]`` record the form a call took (:func:`_fwd_record`).
+
+Forward exchange of the single call (the shipped host path): when more than one rank exchanges and the rank's send
+rows (the halo plan's ``hist_index``) are one ascending run of consecutive local rows, the send buffer is that slice
+of ``x`` (:func:`_send_slice`; the same rows in the same order, no gather copy).  In the waiting form outside a CUDA
+Graph capture the exchange is issued with ``async_op=False`` (:func:`_fwd_sync`): the caller's stream is ordered
+after it when the call returns (recent torch runs the collective on that stream itself), so there is no work handle
+to wait and no event between the streams before the forward's first program; the overlapped form and a capture keep
+the asynchronous exchange and its wait.  The previous host path and the multi entry keep the gather and the
+asynchronous exchange.  The received rows and the programs are the same, so ``y`` and ``hist`` keep their bits.
 
 Numerics: ``y`` and ``hist`` are the det KCP forward's bits; ``dx`` is the det
 KCP backward's bits on both backward forms (same per-thread FP32 steps, same
@@ -142,7 +152,8 @@ context and the shapes of the call, never a tensor's contents; it holds at most
 ``HOST_CACHE_MAX = 64`` contexts (the oldest dropped) and
 :func:`cake_causal_conv1d_nondet_train_kcp_host_cache_clear` empties it; ``_FFI_DEVICES`` caches the FFI device per
 device index.  The operand checks, the gather, the exchange, its wait and the
-kernel launches run as before with the same arguments, so no bit changes; a
+kernel launches run as before with the same arguments (but the single call's
+forward exchange, above), so no bit changes; a
 replayed graph (``graph="replay"``) contains no host work.  The trimmed path
 and the multi path issue an overlapped backward's head programs and exchange
 from the side stream (above); the previous host path keeps every launch on the
@@ -343,13 +354,15 @@ def _exchange(
     ctx: Any,
     agree: tuple[str, tuple[int, ...], bool],
     recv: Optional[torch.Tensor] = None,
+    sync: bool = False,
 ) -> tuple[torch.Tensor, Optional[Any]]:
     """One ``all_to_all_single`` of ``send`` (rows in destination-rank order) into ``recv`` (a ``[recv_rows, C]``
     tensor; ``None`` = a fresh one), issued asynchronously on the current stream; with one rank the send buffer is
     the received pool (no collective).
     ``agree`` = ``(phase, channels, multi)`` of the call: the first exchange of a (context, phase) runs the
     rank-agreement check first (:func:`_agree`).  Returns ``(recv, work)``; the caller waits ``work`` at the first
-    consumer."""
+    consumer.  ``sync``: issued with ``async_op=False`` instead, so the current stream is ordered after the collective
+    when this returns; ``work`` is then ``None`` (:func:`_fwd_sync`)."""
 
     if int(ctx.world_size) == 1:
         return send, None
@@ -364,9 +377,9 @@ def _exchange(
         output_split_sizes=list(recv_splits),
         input_split_sizes=list(send_splits),
         group=ctx.group,
-        async_op=True,
+        async_op=not sync,
     )
-    return recv, work
+    return recv, (None if sync else work)
 
 
 def _launch_with_grid(
@@ -566,7 +579,7 @@ def _agree(
 # it a call with a handle raises): -1 outside the autograd engine (an original forward), the running graph task
 # inside a backward (torch's checkpoint recompute, reentrant or not).  Rules of a call with a handle:
 #   * no "conv" entry -> an original forward (also one inside an outer checkpoint's recompute, nested regions):
-#     gather + exchange as always, then store ``hist`` (no copy) and its metadata;
+#     the forward exchange as always (gather or slice), then store ``hist`` (no copy) and its metadata;
 #   * an entry inside the backward -> the recompute: bind the stored ``hist``, validate it against the call, issue
 #     no collective; the entry stays (``retain_graph`` / a second backward replays it again);
 #   * an entry outside the backward -> raise (a handle reused across micro-steps or for a second convolution).
@@ -735,8 +748,8 @@ def _handle_hist(
 # :func:`cake_causal_conv1d_nondet_train_kcp_forward` / :func:`cake_causal_conv1d_nondet_train_kcp_backward` run their
 # first call of a validity key (kind, the context object, its world size, and the shape / stride / dtype / data pointer
 # of every operand and caller-owned output) eagerly, capture the second call into a ``torch.cuda.CUDAGraph`` (replayed
-# once) and replay the graph on every later call of the key: the halo gather, the ``all_to_all_single``, its wait and
-# the kernels with the same arguments in the same order (``y`` / ``hist`` / ``dx`` bitwise the eager result; ``dweight``
+# once) and replay the graph on every later call of the key: the send rows (gathered, or the slice of ``x``), the ``all_to_all_single``,
+# its wait and the kernels with the same arguments in the same order (``y`` / ``hist`` / ``dx`` bitwise the eager result; ``dweight``
 # summed in plain FP32 words, as the eager call, in an unordered cross-CTA order) and no host work between them.  Any other key
 # runs eagerly (silent fallback); a rank without tokens is never captured.  A replayed call returns the graph's static
 # tensors (detached): the next replay of the key overwrites them, so a framework must keep its inputs pointer-stable and
@@ -1682,8 +1695,8 @@ def _fwd_host(
     """The trimmed forward's operand checks, output and host-cache entry: ``(S, C, x_flat, w, y, entry)``.  The entry
     is cached per ``(ctx, S, C, device, cu_seqlens_local_cpu, sr, overlap)`` (:func:`_fwd_form` of the device's
     architecture, of the multi entry's sets with ``multi``; both kept in the entry): the validated ``cu`` /
-    ``hist_index`` / ``hist_row_off`` tables, the halo splits, the main program's record, its plan scalars, grid and
-    counter words, the loaded module with its argument plan."""
+    ``hist_index`` / ``hist_row_off`` tables, the halo splits, the send slice (:func:`_send_slice`), the main
+    program's record, its plan scalars, grid and counter words, the loaded module with its argument plan."""
 
     S, C, x_flat = _tokens(x, "x_local", device=device)
     w = _weight(weight, C, device=device)
@@ -1704,13 +1717,15 @@ def _fwd_host(
     if not e:
         cu, n_frag = _context(ctx, device=device, T_r=S)
         halo = ctx.halo
+        hist_index = _require_tensor(
+            ctx.halo_tables["hist_index"], "ctx.halo_tables['hist_index']"
+        )
         # filled into the entry at the end, so a call that raises below (C too wide for the grid) leaves it empty
         fresh: dict[str, Any] = dict(
             cu=cu,
             n_frag=n_frag,
-            hist_index=_require_tensor(
-                ctx.halo_tables["hist_index"], "ctx.halo_tables['hist_index']"
-            ),
+            hist_index=hist_index,
+            send_slice=_send_slice(ctx, hist_index, S),
             recv_rows=int(halo.n_hist_rows),
             send_splits=tuple(halo.fwd_send_rows),
             recv_splits=tuple(halo.fwd_recv_rows),
@@ -1754,8 +1769,41 @@ def _fwd_host(
     return S, C, x_flat, w, y, e
 
 
-def _fwd_gather(x_flat: torch.Tensor, C: int, e: dict[str, Any]) -> torch.Tensor:
-    """The forward's send rows: the context's ``hist_index`` rows of ``x_flat`` in destination-rank order."""
+def _send_slice(
+    ctx: Any, hist_index: torch.Tensor, S: int
+) -> Optional[tuple[int, int]]:
+    """The forward's send rows as one slice ``(start, stop)`` of the rank's ``S`` local rows, or ``None`` (they are
+    gathered): a slice when more than one rank exchanges and the halo plan's host ``hist_index`` (the rows of the
+    device table ``hist_index``, in destination-rank order) is one ascending run of consecutive rows
+    ``start .. stop - 1`` as long as that table, with ``stop <= S`` -- e.g. the last rows of a rank of the contiguous
+    layout, which go to the next rank.  Host integers only."""
+    rows = tuple(getattr(ctx.halo, "hist_index", None) or ())
+    if int(ctx.world_size) == 1 or not rows or len(rows) != hist_index.numel():
+        return None
+    start = int(rows[0])
+    if start < 0 or start + len(rows) > S:
+        return None
+    if any(int(r) != start + k for k, r in enumerate(rows)):
+        return None
+    return start, start + len(rows)
+
+
+def _fwd_sync(e: dict[str, Any]) -> bool:
+    """Whether the single call's forward exchange is issued with ``async_op=False`` (:func:`_exchange` ``sync``): in
+    the waiting form (the entry's ``overlap`` off), where the forward's first program comes after the exchange's wait,
+    outside a CUDA Graph capture (a capture keeps the asynchronous exchange and its wait)."""
+    return not e["overlap"] and not torch.cuda.is_current_stream_capturing()
+
+
+def _fwd_gather(
+    x_flat: torch.Tensor, C: int, e: dict[str, Any], *, view: bool = False
+) -> torch.Tensor:
+    """The forward's send rows: the context's ``hist_index`` rows of ``x_flat`` in destination-rank order.  With
+    ``view`` (the single call's trimmed path) and a send slice in the entry (:func:`_send_slice`), the slice of
+    ``x_flat`` that holds those rows in that order (no copy); else their gather."""
+    if view and e.get("send_slice") is not None:
+        start, stop = e["send_slice"]
+        return x_flat[start:stop]
     hist_index = e["hist_index"]
     return (
         x_flat.index_select(0, hist_index)
@@ -1924,17 +1972,20 @@ def _kcp_forward_trim(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Trimmed host path: :func:`_kcp_forward` with the context-derived host work cached per ``(ctx, S, C, device,
     cu_seqlens_local_cpu, sr, overlap)`` (:func:`_fwd_host`).  The operand checks, the gather, the exchange, the wait
-    and the launches are the untrimmed call's, in the same order on the same stream."""
+    and the launches are the untrimmed call's, in the same order on the same stream, but for the forward exchange:
+    its send rows are a slice of ``x`` where they are one (:func:`_send_slice`), and in the waiting form outside a
+    capture it is issued with ``async_op=False`` (:func:`_fwd_sync`), with no work to wait."""
 
     S, C, x_flat, w, y, e = _fwd_host(x, weight, ctx, out=out, device=device)
     if _hist is None:
         hist, work = _exchange(
-            _fwd_gather(x_flat, C, e),
+            _fwd_gather(x_flat, C, e, view=True),
             recv_rows=e["recv_rows"],
             send_splits=e["send_splits"],
             recv_splits=e["recv_splits"],
             ctx=ctx,
             agree=("fwd", (C,), False),
+            sync=_fwd_sync(e),
         )
     else:
         hist, work = _hist, None
