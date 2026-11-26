@@ -96,8 +96,8 @@ void Run(TensorView a_x, TensorView a_y, TensorView a_scales, TensorView a_count
   check_same_device(a_counters1, a_x, "counters1", "x");
   TVM_FFI_CHECK((a_n_vecs >= 1LL), ValueError)
       << KERNEL_NAME << ": requires (n_vecs >= 1)";
-  TVM_FFI_CHECK((a_n_vecs <= 2147483136LL), ValueError)
-      << KERNEL_NAME << ": requires (n_vecs <= 2147483136)";
+  TVM_FFI_CHECK((a_n_vecs <= 2147482624LL), ValueError)
+      << KERNEL_NAME << ": requires (n_vecs <= 2147482624)";
   TVM_FFI_CHECK((a_first_tile >= 0LL), ValueError)
       << KERNEL_NAME << ": requires (first_tile >= 0)";
   TVM_FFI_CHECK((a_first_tile < CheckedShl(1LL, a_chunk_tile_shift)), ValueError)

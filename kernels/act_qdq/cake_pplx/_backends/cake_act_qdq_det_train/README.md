@@ -109,26 +109,29 @@ the dies every 4 KB, so about half of the bytes each SM reads come from the othe
 (`cuMemCreate` in a locality domain), chunk `k` in die `k & 1`, and returns a torch tensor over it without a copy.  It
 registers the range, so a call finds a tensor's chunk offset and die from its address alone, with no driver call.
 
-The interleaved-domain program of a route (`cake_jit.DOMAIN_ROUTES`) has its own tiles of 128 threads: 1,024 vectors
-for FP4 (8 each) and 512 for MXFP4 and MXFP8 (4 each).  A chunk holds 128 or 256 tiles, and an item is one tile.  Each
-CTA reads its die at each claim, takes its next item from its own die's counter, and takes the other die's items once
-its own are taken.  The items a CTA runs depend only on its claims, so any grid gives the same bytes; the host launches
-one CTA per item, at most 7 (FP4) or 8 (MXFP4, MXFP8) per SM.  A call with `locality="domain"` runs it when all of these
-hold (`cake_jit.domain_route`): the device is `sm_107a`; the call is out of place with an `out` buffer; `x` and `out`
-lie in memory from the helper at the same offset in their chunks and in chunks of the same die; and `numel / 8` is in
-the record's `vectors` range (8,388,608 to 2,147,482,624 vectors for FP4, to 2,147,483,136 for MXFP4 and MXFP8).
-Every other call runs the `"off"` program, with the same bytes, and never raises for its placement.
+The interleaved-domain program of a route (`cake_jit.DOMAIN_ROUTES`) has its own tiles of 128 threads, 1,024 vectors (8
+each).  Its MXFP4 and MXFP8 programs keep each vector in packed BF16 pairs: the group maximum of the absolute values in
+BF16, one BF16 multiply by the inverse power-of-two scale, and BF16-pair quantize and UE8M0-scaled dequantize
+conversions, each giving its FP32 step's result ("Numerics" below), so the bytes are those of the FP32 steps.  A chunk
+holds 128 tiles, and an item is one tile.  Each CTA reads its die at each claim, takes its next item from its own die's
+counter, and takes the other die's items once its own are taken.  The items a CTA runs depend only on its claims, so any
+grid gives the same bytes; the host launches one CTA per item, at most 7 (FP4) or 8 (MXFP4, MXFP8) per SM.  A call with
+`locality="domain"` runs it when all of these hold (`cake_jit.domain_route`): the device is `sm_107a`; the call is out
+of place with an `out` buffer; `x` and `out` lie in memory from the helper at the same offset in their chunks and in
+chunks of the same die; and `numel / 8` is in the record's `vectors` range (8,388,608 to 2,147,482,624 vectors).  Every
+other call runs the `"off"` program, with the same bytes, and never raises for its placement.
 `cake_act_qdq_det_train_domain_plan` returns the route, the reason (`"placed"`, or the first of `"empty"`, `"arch"`,
 `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"` and `"die_parity"` that holds), the
 program, `first_tile`, `first_die` and the grid, without a launch.  An in-place call runs the `"off"` program: the
 interleaved-domain records define no in-place range (`vectors[arch]["in_place"]` is `None`).  On VR200, the domain
-program ran 1.05-1.13x as fast as the `"off"` program on the package benchmark's out-of-place MXFP4 and MXFP8 rows from
-8,388,608 vectors, and 1.10-1.21x on FP4 `[131072, 512]` and `[1048576, 512]` (GPU time, median of 20 runs on 4 GPUs,
-each run at least 1.05x; MXFP8 `[16384, 8, 4096]`: 162.5 µs off, 144.2 µs domain), and 1.05-1.21x in back-to-back calls,
-eager or in a CUDA graph.  A call that falls back runs the `"off"` program on the helper's memory: on the benchmark's
-fallback rows (out of place, 131,072 to 4,194,304 vectors) it ran 0.95-1.03x as fast as on default memory (GPU time),
-the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls and larger ones on the helper's memory
-were not measured.
+program ran 1.11-1.30x as fast as the `"off"` program on the package benchmark's out-of-place MXFP4 and MXFP8 rows from
+8,388,608 vectors, and 1.10-1.23x on FP4 `[131072, 512]` and `[1048576, 512]` (GPU time, median of 15 runs on 3 GPUs,
+each run at least 1.09x), and 1.09-1.31x in back-to-back calls, eager or in a CUDA graph.  For MXFP8
+`[16384, 8, 4096]` without scales, an eager call took 162.5-162.6 µs on the `"off"` program and 124.4-124.7 µs on the
+domain program (GPU time, 2 GPUs).  A call that falls back runs the `"off"` program on the helper's memory: on the
+benchmark's fallback rows (out of place, 131,072 to 4,194,304 vectors) it ran 0.95-1.03x as fast as on default memory
+(GPU time), the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls and larger ones on
+the helper's memory were not measured.
 
 The claim counters are one unsigned 32-bit word per die (`cake_domain`; the record's `counters` field), each in its own
 die's memory.  The helper's first call on a device maps one 2 MB chunk in each die for them (4 MB, kept for the
@@ -177,7 +180,11 @@ below give the rule's outputs:
 - **E8M0 quotient.**  `s` is a power of two, so `x * 2^-k` and the IEEE quotient `x / s` are the same correctly
   rounded number.  The kernels keep subnormals (no flush to zero), so the product equals the quotient bit for bit.
   A pair of elements takes this multiply, and the E4M3-scaled steps below, in packed two-lane FP32 arithmetic; each
-  lane rounds as it would alone.
+  lane rounds as it would alone.  The `sm_107a` interleaved-domain programs of MXFP4 and MXFP8 instead take one BF16x2
+  multiply of each BF16 pair by `2^-k`: BF16 has FP32's exponent range, so that product is the quotient from `2^-126`
+  up, and a smaller quotient lies below the smallest E2M1 and E4M3 midpoints (`0.25` and `2^-10`) and converts to a
+  signed zero either way.  Their BF16-pair conversions to E2M1 and E4M3 round each half as the FP32 conversion rounds
+  its widened value.
 - **E4M3 scale.**  The `sm_107a` programs multiply `max(amax, 6 * 2^-9)` by `RN(1/6)`, the FP32 value nearest
   `1/6`, which is `1/6` times `1 + 2^-25`; the `sm_100a` and `sm_103a` programs divide it by 6 (an IEEE
   round-to-nearest division).  Either FP32 result is within `2^-23` (relative) of the exact quotient
@@ -198,13 +205,15 @@ below give the rule's outputs:
   is at least `2^-9` (relative) away from every E2M1 midpoint that it does not equal, so `u` rounds to the E2M1 value
   of the exact quotient.  A zero `x` keeps its sign.
 - **Clamp.**  The saturating element conversion is the rule's clamp: a `|u|` above `Q` converts to `Q`.
-- **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by
-  `s`.  `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant
-  bits, so the BF16 product `q * s` is exact, down to the MXFP4 subnormal `2^-127`, which the multiply keeps.  The
-  `sm_107a` main programs of `mxfp8_e8m0_g32`, with and without the scale output, decode each pair to two FP16 values
-  instead and multiply each by `s` in FP32; that product has at most 8 significant bits, so it and its BF16 rounding
-  are exact too.  Above the BF16 range the product is `±inf`, as the rule's own BF16 rounding gives: an element with
-  `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120` (MXFP4) becomes `±inf`, although `x` is finite.
+- **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by `s`.
+  `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant bits, so the
+  BF16 product `q * s` is exact, down to the MXFP4 subnormal `2^-127`, which the multiply keeps.  The `sm_107a`
+  interleaved-domain programs of MXFP4 and MXFP8 convert each pair of codes and scale both by `s` in one UE8M0-scaled
+  conversion, rounded once to BF16: the same exact product.  The `sm_107a` main programs of `mxfp8_e8m0_g32`, with and
+  without the scale output, decode each pair to two FP16 values instead and multiply each by `s` in FP32; that product
+  has at most 8 significant bits, so it and its BF16 rounding are exact too.  Above the BF16 range the product is
+  `±inf`, as the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120`
+  (MXFP4) becomes `±inf`, although `x` is finite.
 
 The programs are compiled with IEEE division and square root and without flush to zero (`--prec-div=true`,
 `--prec-sqrt=true`, `--ftz=false`, no `--use_fast_math`), as `build.json` records.
