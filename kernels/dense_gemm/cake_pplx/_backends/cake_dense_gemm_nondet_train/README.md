@@ -1630,8 +1630,15 @@ entry where that call swaps or, on the `sm_103a` row below, plans the same direc
 FP32 outputs of these thirteen rows at 128 to 4096 tokens (`4096 -> 16`: 128 to 3072); on the 152-SM `sm_103a` part the
 FP32 `4096 -> 12288` weight gradient runs the 224-column whole tiles at 512 to 4096 tokens.  A row and token count
 where this package runs its own program (`K1_SPLIT_RULES`) keeps it.  This package's post-ship A/B against its version
-0.3.26: [[TBD0327_NDGEN_AB]].  Against version 0.3.26 its bits change where the deterministic package's do.  Every
-other row, architecture and SM count plans as in version 0.3.26.
+0.3.26: medians of version 0.3.26 over version 0.3.27 of 1.070 to 1.717 (eager launches) and 1.077 to 1.710 (CUDA graph
+replays) at the 449 timed changed cells of the weight-gradient entry and 1.070 to 1.684 and 1.062 to 1.694 at the 264
+of the generic call on the 212-SM part, and 1.081 to 1.677 and 1.076 to 1.674 at 168 and 1.087 to 1.674 and 1.080 to
+1.680 at 109 on the 216-SM part, observed in A/Bs that did not complete (on the 212-SM part cells whose plan is the
+same in both versions read up to 13 % (eager) and 14 % (CUDA graph) apart in either direction in their paired
+comparison, the most at T 4097, in the first timing and again in the one re-time, so the control check fixed in advance
+left the result unjudged; on the 216-SM part the A/B was stopped part way, before any control cell was timed); not
+judged, and no changed cell was slower.  Against version 0.3.26 its bits change where the deterministic package's do.
+Every other row, architecture and SM count plans as in version 0.3.26.
 
 ## Helpers of this package
 

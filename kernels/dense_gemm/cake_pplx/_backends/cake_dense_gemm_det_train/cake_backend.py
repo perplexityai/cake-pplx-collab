@@ -1940,26 +1940,34 @@ ROW_RULES: dict[tuple, dict] = {
     #      the 208- and 224-SM parts keep the FP32 plans of version 0.3.26.  Below T 128 and above these bands every row
     #      plans as in version 0.3.26.
     #      Measured before shipping in this package on VR200 (212 SMs) and one R200 board (216 SMs;
-    #      [[TBD0327_R216_NOTE]]) against the plan of version 0.3.26 (the plan of version 0.3.25 at these cells) and a
-    #      second prepared copy of it, cold L2, eager launches and CUDA graph replays, 21 paired rounds per cell and
-    #      mode, at T 128, 256, 512, 768 and 959 (the five BF16 rows of version 0.3.25) and at T 128, 256, 512, 768,
-    #      960, 1024, 1536, 2048, 3072, 3584 and 4096 (the other BF16 rows and every FP32 output):
-    #      at every measured token count of each band (254 cells per part) the new plan was faster than the plan of
-    #      version 0.3.26 beyond the A/A band in both modes on both parts, with one bit pattern run to run and within
-    #      the naive BF16 tier on five seeds; medians of that plan over the new one were 1.071 to 1.701 / 1.064 to
-    #      1.694 (eager / CUDA graph) on the 212-SM part and 1.100 to 1.675 / 1.105 to 1.694 on the 216-SM part.  The
-    #      FP32 band of 4096 -> 16 ends at T 3072: at T 3584 the new plan was flat on the 212-SM part (paired medians
-    #      0.992 / 0.994 against the second copy of the plan before, within the A/A band; not timed on the 216-SM
-    #      part), and T 4096, faster on both parts, is a single measured point above it; T 3073 - 4096 keep the plan of
-    #      version 0.3.26 there.  Post-ship medians of the plan before over the new plan at the timed changed cells:
-    #      [[TBD0327_AB_212]] on the 212-SM part and [[TBD0327_AB_216]] on the 216-SM part.
-    #      Against version 0.3.26 the bits are the same where both plans sum each tile's K in one chain (at the
-    #      measured cells T 128 - 960: the plan before ran whole 128-row tiles there) and differ where the plan before
-    #      split each tile's K in two (at the measured cells from T 1024 on) ([[TBD0327_BITS]]); run-to-run bits stay
-    #      identical.  The unbatched generic call of the BF16 rows and of the four FP32 rows keyed here in the swapped
-    #      orientation (4096 -> 128, 5120 -> 128, 8192 -> 128 and indexer_hw) swaps at every token count of these bands
-    #      (``_single_wgrad_swap``: the rule is not empty) and runs these plans; that of the nine other FP32 rows keeps
-    #      its direct plan of version 0.3.26 (no token-free key in either orientation) ----
+    #      its memory clock held 3186 MHz under load, below its 4752 MHz maximum, before and after shipping) against the
+    #      plan of version 0.3.26 (the plan of version 0.3.25 at these cells) and a second prepared copy of it, cold L2,
+    #      eager launches and CUDA graph replays, 21 paired rounds per cell and mode, at T 128, 256, 512, 768 and 959
+    #      (the five BF16 rows of version 0.3.25) and at T 128, 256, 512, 768, 960, 1024, 1536, 2048, 3072, 3584 and
+    #      4096 (the other BF16 rows and every FP32 output): at every measured token count of each band (254 cells per
+    #      part) the new plan was faster than the plan of version 0.3.26 beyond the A/A band in both modes on both
+    #      parts, with one bit pattern run to run and within the naive BF16 tier on five seeds; medians of that plan
+    #      over the new one were 1.071 to 1.701 / 1.064 to 1.694 (eager / CUDA graph) on the 212-SM part and 1.100 to
+    #      1.675 / 1.105 to 1.694 on the 216-SM part.  The FP32 band of 4096 -> 16 ends at T 3072: at T 3584 the new
+    #      plan was flat on the 212-SM part (paired medians 0.992 / 0.994 against the second copy of the plan before,
+    #      within the A/A band; not timed on the 216-SM part), and T 4096, faster on both parts, is a single measured
+    #      point above it; T 3073 - 4096 keep the plan of version 0.3.26 there.  Post-ship medians of the plan before
+    #      over the new plan at the timed changed cells: 1.070 to 1.715 / 1.064 to 1.709 (eager / CUDA graph; 482 cells,
+    #      observed in an A/B that did not complete: cells whose plan is the same in both versions read up to 13 %
+    #      (eager) and 14 % (CUDA graph) apart in either direction in their paired comparison, the most at T 4097, in
+    #      the first timing and again in the one re-time, so the control check fixed in advance left the result
+    #      unjudged; none of these cells was slower) on the 212-SM part and 1.087 to 1.644 / 1.082 to 1.651 (189 of its
+    #      534 cells, observed in an A/B that was stopped part way, before any control cell was timed, so not judged;
+    #      none was slower) on the 216-SM part.  Against version 0.3.26 the bits are the same where both plans sum each
+    #      tile's K in one chain (at the measured cells T 128 - 960: the plan before ran whole 128-row tiles there) and
+    #      differ where the plan before split each tile's K in two (at the measured cells from T 1024 on) (post-ship
+    #      A/B: the same at 234 of the 234 timed changed cells at T 128 - 960 and different at 248 of the 248 from T 961
+    #      on, on the 212-SM part; the same at 124 of the 124 timed changed cells at T 128 - 960 and different at 65 of
+    #      the 65 from T 961 on, on the 216-SM part); run-to-run bits stay identical.  The unbatched generic call of the
+    #      BF16 rows and of the four FP32 rows keyed here in the swapped orientation (4096 -> 128, 5120 -> 128, 8192 ->
+    #      128 and indexer_hw) swaps at every token count of these bands (``_single_wgrad_swap``: the rule is not empty)
+    #      and runs these plans; that of the nine other FP32 rows keeps its direct plan of version 0.3.26 (no token-free
+    #      key in either orientation) ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 96, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 48, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},
@@ -3231,8 +3239,9 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         # medians of that plan over the new one 1.107 / 1.106, 1.134 / 1.135, 1.125 / 1.125, 1.178 / 1.188 and
         # 1.052 / 1.052 (eager / CUDA graph).  From T 8192 on (measured to T 32768) it was slower, 0.920 to 0.981.  The
         # bits are those of the plan before at the measured T 512 - 1984 (whole tiles in both plans) and differ at
-        # T 2048 and 4096 (the plan before splits the tail's K there).  Post-ship: [[TBD0327_N224_AB_152]].  The
-        # generic call plans the same direct key (no swap) and runs this plan
+        # T 2048 and 4096 (the plan before splits the tail's K there).  Post-ship: medians of the plan before over the
+        # new plan of 1.064 to 1.154 (eager) and 1.066 to 1.155 (CUDA graph) at the 9 timed changed cells, each faster
+        # beyond the A/A band.  The generic call plans the same direct key (no swap) and runs this plan
         ('sm_103a', True, True, True, False, False, 4096, None, 12288): ((512, 4096, {"block_n": 224, "epi": 'reg', "f32_v8": True, "store_ef": True, "pro": 15}),),
     },
     ("sm_100a", 152): {
