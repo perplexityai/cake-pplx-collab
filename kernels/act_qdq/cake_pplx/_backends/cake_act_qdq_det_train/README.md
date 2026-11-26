@@ -125,11 +125,12 @@ other call runs the `"off"` program, with the same bytes, and never raises for i
 program, `first_tile`, `first_die` and the grid, without a launch.  An in-place call runs the `"off"` program: the
 interleaved-domain records define no in-place range (`vectors[arch]["in_place"]` is `None`).  On VR200, the domain
 program ran 1.11-1.30x as fast as the `"off"` program on the package benchmark's out-of-place MXFP4 and MXFP8 rows from
-8,388,608 vectors, and 1.10-1.24x on FP4 `[131072, 512]` and `[1048576, 512]` (GPU time, median of 15 runs on 3 GPUs,
-each run at least 1.09x; MXFP8 `[16384, 8, 4096]`: 162.5-162.6 µs off, 124.5-124.8 µs domain), and 1.09-1.31x in
-back-to-back calls, eager or in a CUDA graph.  A call that falls back runs the `"off"` program on the helper's memory:
-on the benchmark's fallback rows (out of place, 131,072 to 4,194,304 vectors) it ran 0.95-1.03x as fast as on default
-memory (GPU time), the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls and larger ones on
+8,388,608 vectors, and 1.10-1.23x on FP4 `[131072, 512]` and `[1048576, 512]` (GPU time, median of 15 runs on 3 GPUs,
+each run at least 1.09x), and 1.09-1.31x in back-to-back calls, eager or in a CUDA graph.  For MXFP8
+`[16384, 8, 4096]` without scales, an eager call took 162.5-162.6 µs on the `"off"` program and 124.4-124.7 µs on the
+domain program (GPU time, 2 GPUs).  A call that falls back runs the `"off"` program on the helper's memory: on the
+benchmark's fallback rows (out of place, 131,072 to 4,194,304 vectors) it ran 0.95-1.03x as fast as on default memory
+(GPU time), the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls and larger ones on
 the helper's memory were not measured.
 
 The claim counters are one unsigned 32-bit word per die (`cake_domain`; the record's `counters` field), each in its own
