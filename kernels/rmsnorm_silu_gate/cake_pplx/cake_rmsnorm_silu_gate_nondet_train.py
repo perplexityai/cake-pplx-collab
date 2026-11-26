@@ -203,8 +203,7 @@ pipelined forward runs in the place of 0.2.17's program, ``y`` can differ from
 gradient do not change.
 Measured against 0.2.17 on the same GPU (a gate sliced from a projection,
 ``x`` and ``z`` both sliced), neither the forward nor the checkpointed
-training step was slower beyond noise in the moved bands, nor the forward than
-the deterministic package's.
+training step was slower beyond noise in the moved bands.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

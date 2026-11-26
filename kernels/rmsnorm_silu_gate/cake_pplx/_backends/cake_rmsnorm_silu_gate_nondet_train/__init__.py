@@ -226,10 +226,9 @@ rows).  ``dx``, ``dz`` and the weight gradient do not change.  Measured
 against 0.2.17 on the same GPU (B200, GB300; a gate of 1, 16, 48 or 64
 heads sliced from a projection, ``x`` and ``z`` of 16 and 48 heads both
 sliced), neither the forward nor the
-checkpointed training step was slower beyond noise in the moved bands, nor
-the forward than the deterministic package's (the comments of
-``cake_jit.PROJECTION_FORWARD_BANDS`` and ``cake_jit.SLICED_FORWARD_BANDS``
-give the measurement).
+checkpointed training step was slower beyond noise in the moved bands (the
+comments of ``cake_jit.PROJECTION_FORWARD_BANDS`` and
+``cake_jit.SLICED_FORWARD_BANDS`` give the measurement).
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

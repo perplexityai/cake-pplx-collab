@@ -3607,9 +3607,8 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # and 48 heads with ``z`` sliced from one ``4 * H * 128`` wide), it took at
 # 600 to 650 rows per SM on B200 0.9047 to 0.9237 of the extra-long forward's
 # time alone and 0.9690 to 0.9948 of the checkpointed step's (either weight
-# gradient), and at 630 to 699 on GB300 0.8989 to 0.9208 and 0.9702 to 0.9937,
-# its forward not slower than the deterministic package's beyond noise; below
-# those points the step was slower (B200: 1.0190 to 1.0297 of 0.2.17's time at
+# gradient), and at 630 to 699 on GB300 0.8989 to 0.9208 and 0.9702 to 0.9937;
+# below those points the step was slower (B200: 1.0190 to 1.0297 of 0.2.17's time at
 # 560 rows per SM, 1.0041 for 64 heads in one run at 580; GB300: 1.0081 to
 # 1.0085 for 48 and 64 heads at 600, more below), so each cut lies just below
 # the first point where every form passed (whose 64 heads, 599.78 rows per SM
@@ -3686,16 +3685,15 @@ HEAD_MAJOR_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # 800, 1000, 1250 and 1500 rows per SM, it took 0.9427 to 0.9885 of the plain
 # forward's time alone on B200 and 0.9320 to 0.9646 on GB300, and 0.9536 to
 # 0.9985 of the checkpointed step's (either weight gradient) on B200 and 0.9514
-# to 0.9857 on GB300, its forward not slower than the deterministic package's
-# beyond noise; at 2000 rows per SM the step of a gate of one head took 1.0132
-# to 1.0147 of 0.2.17's time on B200 and 1.0047 to 1.0051 on GB300, so the band
-# ends at 1500, a measured point.  Rows of 1 to 3 heads with both inputs past
-# the row keep 0.2.17's programs (``STRIDED_FORWARD_BANDS``): measured against
-# 0.2.17 on the same GPU (B200, GB300; two runs) at 701, 1000 and 1500 rows per
-# SM, the forward or the checkpointed step with ``fwd_layout_pipe`` was slower
-# for ``x`` and ``z`` both sliced of one head and for padded rows of one and of
-# two heads, and neither was slower for either form of 4, 8 and 16 heads, so
-# the class takes them from 4 heads, a measured point.  The other rows of
+# to 0.9857 on GB300; at 2000 rows per SM the step of a gate of one head took
+# 1.0132 to 1.0147 of 0.2.17's time on B200 and 1.0047 to 1.0051 on GB300, so
+# the band ends at 1500, a measured point.  Rows of 1 to 3 heads with both inputs
+# past the row keep 0.2.17's programs (``STRIDED_FORWARD_BANDS``): measured
+# against 0.2.17 on the same GPU (B200, GB300; two runs) at 701, 1000 and 1500
+# rows per SM, the forward or the checkpointed step with ``fwd_layout_pipe`` was
+# slower for ``x`` and ``z`` both sliced of one head and for padded rows of one
+# and of two heads, and neither was slower for either form of 4, 8 and 16 heads,
+# so the class takes them from 4 heads, a measured point.  The other rows of
 # ``STRIDED_FORWARD_BANDS`` keep 0.2.17's programs (its comment).  Host plan
 # only, as the other tables.
 SLICED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {

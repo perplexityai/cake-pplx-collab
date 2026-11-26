@@ -576,10 +576,9 @@ from projections `2 * H * 128 + 16` elements wide, 16 and 48 heads, and a gate
 of one head sliced from such a projection) at 701, 800, 1000, 1250 and 1500
 rows per SM, it took 0.9427 .. 0.9885 of the plain forward's time alone on
 B200 and 0.9320 .. 0.9646 on GB300, and 0.9536 .. 0.9985 of the checkpointed
-step's (either weight gradient) on B200 and 0.9514 .. 0.9857 on GB300, its
-forward not slower than the deterministic package's beyond noise; at 2000 rows
-per SM the step of a gate of one head took 1.0132 .. 1.0147 of 0.2.17's time
-on B200 and 1.0047 .. 1.0051 on GB300, so the band ends at 1500.  Both
+step's (either weight gradient) on B200 and 0.9514 .. 0.9857 on GB300; at 2000
+rows per SM the step of a gate of one head took 1.0132 .. 1.0147 of 0.2.17's
+time on B200 and 1.0047 .. 1.0051 on GB300, so the band ends at 1500.  Both
 inputs past the row take the class from 4 heads (`SLICED_MIN_HEADS`): measured
 against 0.2.17 on the same GPU (B200, GB300; two runs) at 701, 1000 and 1500
 rows per SM, the forward or the checkpointed step with `fwd_layout_pipe` was
@@ -632,8 +631,7 @@ a projection `2 * H * 128 + 16` elements wide, and 48 heads with `z` sliced
 from one `4 * H * 128` wide), it took at 600 to 650 rows per SM on B200
 0.9047 .. 0.9237 of the extra-long forward's time alone and 0.9690 .. 0.9948
 of the checkpointed step's (either weight gradient), and at 630 to 699 on
-GB300 0.8989 .. 0.9208 and 0.9702 .. 0.9937, its forward not slower than the
-deterministic package's beyond noise; below those points the step was
+GB300 0.8989 .. 0.9208 and 0.9702 .. 0.9937; below those points the step was
 slower (B200: 1.0190 .. 1.0297 of 0.2.17's time at 560 rows per SM, 1.0041
 for 64 heads in one run at 580; GB300: 1.0081 .. 1.0085 for 48 and 64 heads
 at 600, more below), so each cut lies just below the first point where every
