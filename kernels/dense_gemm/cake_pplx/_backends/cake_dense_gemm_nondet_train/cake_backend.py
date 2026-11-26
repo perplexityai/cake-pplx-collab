@@ -3356,7 +3356,8 @@ ROUTER_RULES: dict[
     # The deterministic plan of the measurements above is that package's six splits.  From 16129 to 16384 tokens on
     # 148- and 152-SM sm_100a / sm_103a parts it plans nine splits at hidden 5120 and three at hidden 6144 with 256
     # experts (its ROUTER_SPLIT_RULES, router_splits); since its version 0.3.28 also eight splits at hidden 4096 with
-    # 512 experts at 32736 tokens on 148-SM sm_100a and 152-SM sm_103a parts.  The 152-SM head/tail windows at and next to those token counts were measured
+    # 512 experts at 32736 tokens on 148-SM sm_100a and 152-SM sm_103a parts (since its version 0.3.29 also on
+    # 152-SM sm_100a parts).  The 152-SM head/tail windows at and next to those token counts were measured
     # again on two parts against the plan the row runs without them (the rule's count from 16129 to 16384 tokens, six
     # elsewhere), alone, in the backward pass and in the checkpointed step, in eager launches and in CUDA graphs.  A
     # token count stays in a window where, on both parts, the partition was faster alone in every run (a one-sided
@@ -7830,8 +7831,8 @@ def cake_dense_gemm_nondet_train_router_wgrad(
     runs the deterministic program at that package's split count of the row -- its ``router_splits``: six; nine at
     hidden 5120 and three at hidden 6144 with 256 experts from 16129 to 16384 tokens on 148- and 152-SM ``sm_100a`` /
     ``sm_103a`` parts, eight at hidden 4096 with 512 experts at 32736 tokens on 148-SM ``sm_100a`` and 152-SM
-    ``sm_103a`` parts, its ``ROUTER_SPLIT_RULES`` -- through this package's binding of it without planning the row here,
-    :func:`_launch_cached_splitk_k2`)."""
+    ``sm_103a`` parts (since its version 0.3.29 also on 152-SM ``sm_100a`` parts), its ``ROUTER_SPLIT_RULES`` --
+    through this package's binding of it without planning the row here, :func:`_launch_cached_splitk_k2`)."""
     if out is None:
         out = torch.empty(G.shape[1], X.shape[1], device=G.device, dtype=torch.float32)
     if _k2_entry("wgrad", G, X, out, splits, enable_pdl) is not None:

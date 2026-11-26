@@ -253,11 +253,13 @@ ROUTER_SPLITS = {"kk": 4, "kn": 1, "nn_t": 6}
 # 0.3.28 the key holds N: at N = 512 and H 4096 (T 32736) the forward runs one split and the weight gradient eight on
 # B200 (148-SM sm_100a) and GB300 (152-SM sm_103a), and at N = 896 and H 7168 (T 16380) the forward runs one split on
 # GB300; each window is the one measured token count, where the count was faster than the default one in eager
-# launches and CUDA graph replays (21 paired rounds; paired medians 1.10 to 1.17).  Each count is timed for the whole
-# router launch (the BF16x3 split, the program and the sum of the partials); other SM counts, N and token counts keep
-# the default.  A single split stores the forward's 16-byte vectors straight into ``out``, so there ``out`` must start
-# at a 16-byte aligned address (the planner refuses another).  A different split count is a different K partition:
-# its outputs are bit-exact run to run but not bitwise equal to the default count's.
+# launches and CUDA graph replays (21 paired rounds; paired medians 1.10 to 1.17).  Version 0.3.29 adds the same counts
+# on GB200 (152-SM sm_100a) at N = 512 and H 4096 (T 32736): the forward runs one split and the weight gradient eight
+# (paired medians 1.135 and 1.090).  Each count is timed for the whole router launch (the BF16x3 split, the program and
+# the sum of the partials); other SM counts, N and token counts keep the default.  A single split stores the forward's
+# 16-byte vectors straight into ``out``, so there ``out`` must start at a 16-byte aligned address (the planner refuses
+# another).  A different split count is a different K partition: its outputs are bit-exact run to run but not bitwise
+# equal to the default count's.
 ROUTER_SPLIT_RULES: dict[
     tuple[str, int, str, int, int], tuple[tuple[int, int, int], ...]
 ] = {
@@ -265,6 +267,8 @@ ROUTER_SPLIT_RULES: dict[
     ("sm_100a", 148, "nn_t", 4096, 512): ((32736, 32736, 8),),
     ("sm_100a", 148, "nn_t", 5120, 256): ((16129, 16384, 9),),
     ("sm_100a", 148, "nn_t", 6144, 256): ((16129, 16384, 3),),
+    ("sm_100a", 152, "kk", 4096, 512): ((32736, 32736, 1),),
+    ("sm_100a", 152, "nn_t", 4096, 512): ((32736, 32736, 8),),
     ("sm_100a", 152, "nn_t", 5120, 256): ((16129, 16384, 9),),
     ("sm_100a", 152, "nn_t", 6144, 256): ((16129, 16384, 3),),
     ("sm_103a", 148, "nn_t", 5120, 256): ((16129, 16384, 9),),
@@ -2673,6 +2677,13 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # median in the comment, with one bit pattern run to run and within the naive BF16 tier on five seeds.  The batched
 # keys (96-head MLA projections) hold no head count or head stride, so they apply at every head count above one; only
 # 96 heads were measured.  Every other part, token count and row keeps the plan of version 0.3.27.
+# Version 0.3.29 adds a 152-SM sm_100a part (GB200) of 33 exact keys: forwards, input gradients and weight gradients
+# (BF16 and FP32 outputs) at T 16380, 32736 and 32768, each named with its measured program in the comment above it;
+# each rule is the full knob set that names that program, as in version 0.3.28.  Each was measured on one part of the SM
+# count against the plan of version 0.3.28 in 21 paired rounds with cold L2, in eager launches and CUDA graph replays:
+# faster beyond the A/A band in both, the paired median in the comment, with one bit pattern run to run and within the
+# naive BF16 tier on five seeds.  Its batched keys (96-head MLA projections) apply at every head count above one; only
+# 96 heads were measured.  Every other part, token count and row keeps the plan of version 0.3.28.
 # fmt: off
 _SM100A_148_DGRAD_F32 = {"block_n": 128, "epi": 'tma', "slots": 2, "stages": 4, "cta1": True}
 ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
@@ -3016,6 +3027,272 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
             "store_ef": False, "store_hint": "none", "stt": False, "sw": 0,
         },
         # 96-head MLA 128 -> 512 weight gradient + 512 -> 128 weight gradient, FP32 output, T 16380: nn_n128_hen_f32_t_pro15, paired median 1.040 / 1.052
+        ('sm_100a', True, True, True, True, True, 128, 16380, 512): {
+            "b_swz": 128, "batch_group": 0, "block_n": 128, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("evict_first", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+    },
+    ("sm_100a", 152): {
+        # 4096 -> 512 forward, BF16 output, T 32736: kk_n256_ht_cg_pro15, paired median 1.106
+        ('sm_100a', False, False, False, False, False, 512, 4096, 32736): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 4096 -> 512 forward, BF16 output, T 32768: kk_n256_ht_cg_pro15, paired median 1.113
+        ('sm_100a', False, False, False, False, False, 512, 4096, 32768): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 7168 -> 896 forward, BF16 output, T 16380: kk_n256_ht_cg_pro15, paired median 1.099
+        ('sm_100a', False, False, False, False, False, 896, 7168, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 7168 -> 1536 forward, BF16 output, T 16380: kk_n256_ht_cg_pro15, paired median 1.081
+        ('sm_100a', False, False, False, False, False, 1536, 7168, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 8192 -> 4096 forward, BF16 output, T 32736: kk_n256_m256_ht_cg_or_pro7, paired median 1.046
+        ('sm_100a', False, False, False, False, False, 4096, 8192, 32736): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": True, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 8192 -> 4096 forward, BF16 output, T 32768: kk_n256_m256_ht_cg_or_pro7, paired median 1.044
+        ('sm_100a', False, False, False, False, False, 4096, 8192, 32768): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": True, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 128 -> 12288 forward, BF16 output, T 16380: kk_n256_m256_ov_ht_tma1_cg_pro7, paired median 1.437
+        ('sm_100a', False, False, False, False, False, 12288, 128, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 256,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": True, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 512 -> 24576 forward, BF16 output, T 16380: kk_n256_q_pro7, paired median 1.089
+        ('sm_100a', False, False, False, False, False, 24576, 512, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": True,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 128 -> 12288 input gradient, BF16 output, T 16380: kn_n128_tma1_w8relf, paired median 1.109
+        ('sm_100a', False, True, False, False, False, 128, 12288, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_k": 64, "block_n": 128, "cgrp": False, "cta1": False,
+            "cta_rows": 128, "epi": "tma", "f32_v8": False, "form": "w8relf", "hints": ("none", "none"),
+            "htail": False, "lw": False, "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0,
+            "pro": 0, "quad_store": False, "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1,
+            "store_ef": False, "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 7168 -> 96 input gradient, BF16 output, T 16380: kn_n256_tma1_w8relf, paired median 1.149
+        ('sm_100a', False, True, False, False, False, 7168, 96, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "tma", "f32_v8": False, "form": "w8relf", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 0, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 7168 -> 128 input gradient, BF16 output, T 16380: kn_n256_tma1_w8relf, paired median 1.163
+        ('sm_100a', False, True, False, False, False, 7168, 128, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "tma", "f32_v8": False, "form": "w8relf", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 0, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 7168 -> 576 input gradient, BF16 output, T 16380: kn_n256_tma1_w8relf, paired median 1.070
+        ('sm_100a', False, True, False, False, False, 7168, 576, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "tma", "f32_v8": False, "form": "w8relf", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 0, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 7168 -> 896 input gradient, BF16 output, T 16380: kn_n256_tma1_w8r, paired median 1.057
+        ('sm_100a', False, True, False, False, False, 7168, 896, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "tma", "f32_v8": False, "form": "w8r", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 0, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 128 -> 12288 weight gradient, BF16 output, T 16380: nn_n160_m256_bz64_hne_cg_pro15, paired median 1.107
+        ('sm_100a', True, True, False, False, False, 128, 16380, 12288): {
+            "b_swz": 64, "batch_group": 0, "block_n": 160, "cgrp": True, "cta1": False, "cta_rows": 256, "epi": "reg",
+            "f32_v8": False, "form": "", "hints": ("none", "evict_first"), "htail": False, "lw": False, "mg": False,
+            "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False, "sh": 0,
+            "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none", "stt": False,
+            "sw": 0,
+        },
+        # 512 -> 24576 weight gradient, BF16 output, T 16380: nn_n256_sks_sb2_pro7, paired median 1.214
+        ('sm_100a', True, True, False, False, False, 512, 16380, 24576): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 7168 -> 1536 weight gradient, BF16 output, T 16380: nn_n160_m256_bz64_hne_pro15, paired median 1.372
+        ('sm_100a', True, True, False, False, False, 7168, 16380, 1536): {
+            "b_swz": 64, "batch_group": 0, "block_n": 160, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "evict_first"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 8192 -> 4096 weight gradient, BF16 output, T 32736: nn_n256_m256_sks_sb2_pro7, paired median 1.081
+        ('sm_100a', True, True, False, False, False, 8192, 32736, 4096): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 8192 -> 4096 weight gradient, BF16 output, T 32768: nn_n256_m256_sks_sb2_pro7, paired median 1.074
+        ('sm_100a', True, True, False, False, False, 8192, 32768, 4096): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 7168 -> 576 weight gradient, BF16 output, T 16380: nn_n192_m256_t_tma1_pro7, paired median 1.226
+        ('sm_100a', True, True, False, True, False, 576, 16380, 7168): {
+            "b_swz": 128, "batch_group": 0, "block_n": 192, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 7168 -> 2112 weight gradient, BF16 output, T 16380: nn_n256_m64_hen_t_pro15, paired median 1.228
+        ('sm_100a', True, True, False, True, False, 2112, 16380, 7168): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 64,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("evict_first", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 96-head MLA 128 -> 512 weight gradient + 512 -> 128 weight gradient, BF16 output, T 16380: nn_n128_hen_t_pro15, paired median 1.063 / 1.062
+        ('sm_100a', True, True, False, True, True, 128, 16380, 512): {
+            "b_swz": 128, "batch_group": 0, "block_n": 128, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("evict_first", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 128 -> 12288 weight gradient, FP32 output, T 16380: nn_n160_m256_bz64_hne_f32_v8_ef_pro15, paired median 1.203
+        ('sm_100a', True, True, True, False, False, 128, 16380, 12288): {
+            "b_swz": 64, "batch_group": 0, "block_n": 160, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": True, "form": "", "hints": ("none", "evict_first"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": True, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 512 -> 24576 weight gradient, FP32 output, T 16380: nn_n256_f32_v8_ef_sks_sb2_pro7, paired median 1.213
+        ('sm_100a', True, True, True, False, False, 512, 16380, 24576): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": True, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": True, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 1024 -> 4096 weight gradient, FP32 output, T 32736: nn_n256_f32_tma1_cg_pro15, paired median 1.062
+        ('sm_100a', True, True, True, False, False, 1024, 32736, 4096): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 1024 -> 4096 weight gradient, FP32 output, T 32768: nn_n256_f32_tma1_cg_pro15, paired median 1.068
+        ('sm_100a', True, True, True, False, False, 1024, 32768, 4096): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 4096 -> 8192 weight gradient, FP32 output, T 32736: nn_n256_m256_f32_tma1_sks_sb3_pro7, paired median 1.082
+        ('sm_100a', True, True, True, False, False, 4096, 32736, 8192): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 4096 -> 8192 weight gradient, FP32 output, T 32768: nn_n256_m256_f32_tma1_sks_sb3_pro7, paired median 1.070
+        ('sm_100a', True, True, True, False, False, 4096, 32768, 8192): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 7168 -> 896 weight gradient, FP32 output, T 16380: nn_n256_f32_v8_ef_sks_sb2_pro7, paired median 1.047
+        ('sm_100a', True, True, True, False, False, 7168, 16380, 896): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": True, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": True, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 7168 -> 1536 weight gradient, FP32 output, T 16380: nn_n256_f32_v8_ef_sks_sb2_pro7, paired median 1.355
+        ('sm_100a', True, True, True, False, False, 7168, 16380, 1536): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": True, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": True, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 8192 -> 4096 weight gradient, FP32 output, T 32768: nn_n256_m256_f32_tma1_sks_sb3_pro7, paired median 1.080
+        ('sm_100a', True, True, True, False, False, 8192, 32768, 4096): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        # 7168 -> 576 weight gradient, FP32 output, T 16380: nn_n256_m64_hen_f32_t_pro15, paired median 1.038
+        ('sm_100a', True, True, True, True, False, 576, 16380, 7168): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 64,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("evict_first", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 7168 -> 2112 weight gradient, FP32 output, T 16380: nn_n256_m64_hen_f32_t_pro15, paired median 1.228
+        ('sm_100a', True, True, True, True, False, 2112, 16380, 7168): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 64,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("evict_first", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        # 96-head MLA 128 -> 512 weight gradient + 512 -> 128 weight gradient, FP32 output, T 16380: nn_n128_hen_f32_t_pro15, paired median 1.050 / 1.060
         ('sm_100a', True, True, True, True, True, 128, 16380, 512): {
             "b_swz": 128, "batch_group": 0, "block_n": 128, "cgrp": False, "cta1": False, "cta_rows": 128,
             "epi": "reg", "f32_v8": False, "form": "", "hints": ("evict_first", "none"), "htail": False, "lw": False,
