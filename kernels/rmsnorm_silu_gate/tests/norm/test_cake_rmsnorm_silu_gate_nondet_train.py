@@ -3442,8 +3442,9 @@ PROJECTION_LAYOUT = "projection"
 HEAD_MAJOR_LAYOUT = "head_major"
 SLICED_LAYOUT = "sliced"
 # The fewest heads of SLICED_LAYOUT rows whose ``x`` and ``z`` are both past the
-# row (both sliced or padded; measured slower at 1 and 2 heads); rows with one
-# input of packed rows are SLICED_LAYOUT at any number of heads.
+# row (both sliced or padded; measured slower at 1 and 2 heads); rows with
+# packed ``z`` are SLICED_LAYOUT at any number of heads, rows with packed ``x``
+# at one head only (more heads: PROJECTION_LAYOUT).
 SLICED_MIN_HEADS = 4
 # The table of each class of ``forward_layout``.
 LAYOUT_FORWARD_BANDS = {
