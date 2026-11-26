@@ -81,11 +81,11 @@ domain_empty = pkg.cake_act_qdq_det_train_domain_empty
 FORMATS = reference.FORMATS
 KINDS = tuple(loader.KINDS)
 ARCH = "sm_107a"
-# The chunk of the memory that alternates dies; the bytes of the largest tile of the interleaved-domain programs
-# (FP4's), a whole number of every program's tiles; and the bytes of each format's tile.
+# The chunk of the memory that alternates dies; the bytes of the tile of the interleaved-domain programs, a whole
+# number of every program's tiles; and the bytes of each format's tile.
 CHUNK = 2097152
 TILE_BYTES = 1024 * 16
-DOMAIN_TILE_BYTES = {"fp4_e4m3_g16": 1024 * 16, "mxfp4_e8m0_g32": 512 * 16, "mxfp8_e8m0_g32": 512 * 16}
+DOMAIN_TILE_BYTES = {"fp4_e4m3_g16": 1024 * 16, "mxfp4_e8m0_g32": 1024 * 16, "mxfp8_e8m0_g32": 1024 * 16}
 BF16 = 2
 # The width of the inputs of the size tests: 12 vectors a row, so a size just above a bound ends inside a tile.
 WIDTH = 96
@@ -240,13 +240,13 @@ def _kernel_item(slot: int, first_die: int, shift: int, batch_shift: int) -> tup
 @pytest.mark.cpu_only
 @pytest.mark.parametrize(
     ("name", "tile", "chunk_tile_shift", "ctas_per_sm"),
-    (("fp4_e4m3_g16_domain", 1024, 7, 7), ("mxfp8_e8m0_g32_domain", 512, 8, 8)),
+    (("fp4_e4m3_g16_domain", 1024, 7, 7), ("mxfp8_e8m0_g32_domain", 1024, 7, 8)),
     ids=("fp4", "mx"),
 )
 def test_domain_launch_covers_every_tile(name: str, tile: int, chunk_tile_shift: int, ctas_per_sm: int) -> None:
-    """``domain_launch``: the first tile rounds down, the chunk holds the format's tiles (FP4: 128 of 16,384 bytes;
-    MXFP4 and MXFP8: 256 of 8,192 bytes), an item is one of them, and the grid is one CTA per item of the chunks that
-    hold the input, at most 7 (FP4) or 8 (MXFP4, MXFP8) a SM.  Every tile of the input lies in an item below its
+    """``domain_launch``: the first tile rounds down, the chunk holds the format's tiles (128 of 16,384 bytes), an item
+    is one of them, and the grid is one CTA per item of the chunks that hold the input, at most 7 (FP4) or 8 (MXFP4,
+    MXFP8) a SM.  Every tile of the input lies in an item below its
     die's item count, as the kernel decodes the item back to its slots."""
     record = loader.MODULES[name]
     tile_bytes = DOMAIN_TILE_BYTES[record["format"]]

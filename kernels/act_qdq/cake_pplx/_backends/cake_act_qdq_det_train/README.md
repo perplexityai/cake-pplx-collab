@@ -109,14 +109,16 @@ the dies every 4 KB, so about half of the bytes each SM reads come from the othe
 (`cuMemCreate` in a locality domain), chunk `k` in die `k & 1`, and returns a torch tensor over it without a copy.  It
 registers the range, so a call finds a tensor's chunk offset and die from its address alone, with no driver call.
 
-The interleaved-domain program of a route (`cake_jit.DOMAIN_ROUTES`) has its own tiles of 128 threads: 1,024 vectors
-for FP4 (8 each) and 512 for MXFP4 and MXFP8 (4 each).  A chunk holds 128 or 256 tiles, and an item is one tile.  Each
-CTA reads its die at each claim, takes its next item from its own die's counter, and takes the other die's items once
-its own are taken.  The items a CTA runs depend only on its claims, so any grid gives the same bytes; the host launches
-one CTA per item, at most 7 (FP4) or 8 (MXFP4, MXFP8) per SM.  A call with `locality="domain"` runs it when all of these
-hold (`cake_jit.domain_route`): the device is `sm_107a`; the call is out of place with an `out` buffer; `x` and `out`
-lie in memory from the helper at the same offset in their chunks and in chunks of the same die; and `numel / 8` is in
-the record's `vectors` range (8,388,608 to 2,147,482,624 vectors for FP4, to 2,147,483,136 for MXFP4 and MXFP8).
+The interleaved-domain program of a route (`cake_jit.DOMAIN_ROUTES`) has its own tiles of 128 threads, 1,024 vectors (8
+each).  Its MXFP4 and MXFP8 programs keep each vector in packed BF16 pairs: the group maximum of the absolute values in
+BF16, one BF16 multiply by the inverse power-of-two scale, and BF16-pair quantize and UE8M0-scaled dequantize
+conversions, each exact, so the bytes are those of the FP32 steps.  A chunk holds 128 tiles, and an item is one
+tile.  Each CTA reads its die at each claim, takes its next item from its own die's counter, and takes the other die's
+items once its own are taken.  The items a CTA runs depend only on its claims, so any grid gives the same bytes; the
+host launches one CTA per item, at most 7 (FP4) or 8 (MXFP4, MXFP8) per SM.  A call with `locality="domain"` runs it
+when all of these hold (`cake_jit.domain_route`): the device is `sm_107a`; the call is out of place with an `out`
+buffer; `x` and `out` lie in memory from the helper at the same offset in their chunks and in chunks of the same die;
+and `numel / 8` is in the record's `vectors` range (8,388,608 to 2,147,482,624 vectors).
 Every other call runs the `"off"` program, with the same bytes, and never raises for its placement.
 `cake_act_qdq_det_train_domain_plan` returns the route, the reason (`"placed"`, or the first of `"empty"`, `"arch"`,
 `"in_place"`, `"no_out"`, `"size"`, `"x_memory"`, `"out_memory"`, `"chunk_offset"` and `"die_parity"` that holds), the

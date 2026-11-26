@@ -87,20 +87,19 @@ only its own program's library on first use.  Build every library of the
 architecture (:func:`specs_for_arch`) before a CUDA graph capture, to keep the
 JIT out of the capture.
 
-The interleaved-domain records (``<route>_domain``, SM107 only) are not on
-any route of ``ROUTES``: ``DOMAIN_ROUTES`` names one per route, and only a
-call with ``locality="domain"`` runs it, out of place, when
-:func:`domain_route` finds ``x`` and ``y`` in memory whose chunks of
-``grid_rule["chunk_bytes"]`` alternate between the two dies (chunk ``k`` of a
-buffer in die ``k & 1``), at the same offset in their chunks and in chunks of
-the same die, and ``n_vecs`` in the record's ``vectors`` range.  Such a
-program takes its own tiles of 128 threads, 1,024 vectors for FP4 (8 a
-thread) and 512 for MXFP4 and MXFP8 (4 a thread), and each CTA claims its
-next item, ``2^batch_shift`` tiles of one chunk (one tile), from its own die's
-counter first and then from the other die's; the record's ``counters`` field
-gives the claim workspace: ``words`` words a die of ``dtype`` ``"uint32"``,
-which every launch leaves zero (``rearm`` ``"kernel"``), so a workspace is
-zeroed once, when it is made.  Its grid is the ``domain_items`` rule of
+The interleaved-domain records (``<route>_domain``, SM107 only) are not on any
+route of ``ROUTES``: ``DOMAIN_ROUTES`` names one per route, and only a call
+with ``locality="domain"`` runs it, out of place, when :func:`domain_route`
+finds ``x`` and ``y`` in memory whose chunks of ``grid_rule["chunk_bytes"]``
+alternate between the two dies (chunk ``k`` of a buffer in die ``k & 1``), at
+the same offset in their chunks and in chunks of the same die, and ``n_vecs``
+in the record's ``vectors`` range.  Such a program takes its own tiles of 128
+threads, 1,024 vectors (8 a thread), and each CTA claims its next item,
+``2^batch_shift`` tiles of one chunk (one tile), from its own die's counter
+first and then from the other die's; the record's ``counters`` field gives the
+claim workspace: ``words`` words a die of ``dtype`` ``"uint32"``, which every
+launch leaves zero (``rearm`` ``"kernel"``), so a workspace is zeroed once,
+when it is made.  Its grid is the ``domain_items`` rule of
 :func:`domain_launch`; any grid of at least one CTA gives the same bytes.
 Every domain program gives the bytes of the plain program of its route.
 """
@@ -597,12 +596,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
     },
     # The interleaved-domain build of each route, SM107 only (``DOMAIN_ROUTES``):
-    # tiles of 128 threads (1,024 vectors for FP4, 512 for MXFP4 and MXFP8),
-    # one tile an item, over memory whose 2 MB chunks alternate between the two
-    # dies, each CTA claiming items of its own die's chunks first, out of
-    # place, for the n_vecs of its ``vectors``; a call with
-    # ``locality="domain"`` runs it when :func:`domain_route` places ``x`` and
-    # ``y`` in such memory.
+    # tiles of 128 threads (1,024 vectors), one tile an item, over memory whose
+    # 2 MB chunks alternate between the two dies, each CTA claiming items of
+    # its own die's chunks first, out of place, for the n_vecs of its
+    # ``vectors``; a call with ``locality="domain"`` runs it when
+    # :func:`domain_route` places ``x`` and ``y`` in such memory.
     "fp4_e4m3_g16_domain": {
         "arches": ["sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "n_vecs"], ["parameter", "first_tile"], ["parameter", "first_die"], ["parameter", "chunk_tile_shift"], ["parameter", "batch_shift"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
@@ -668,7 +666,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "chunk_bytes": 2097152,
             "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 512},
+            "tile_vectors": {"sm_107a": 1024},
             "vector_elements": 8,
         },
         "group": 32,
@@ -682,7 +680,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_3fcef995964af95f49e7",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147482624)}},
     },
     "mxfp4_e8m0_g32_scales_domain": {
         "arches": ["sm_107a"],
@@ -695,7 +693,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "chunk_bytes": 2097152,
             "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 512},
+            "tile_vectors": {"sm_107a": 1024},
             "vector_elements": 8,
         },
         "group": 32,
@@ -709,7 +707,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_db936c037a2c98a5db5c",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147482624)}},
     },
     "mxfp8_e8m0_g32_domain": {
         "arches": ["sm_107a"],
@@ -722,7 +720,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "chunk_bytes": 2097152,
             "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 512},
+            "tile_vectors": {"sm_107a": 1024},
             "vector_elements": 8,
         },
         "group": 32,
@@ -736,7 +734,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_c3252edeaabce416eab7",
         "scale_out": False,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147482624)}},
     },
     "mxfp8_e8m0_g32_scales_domain": {
         "arches": ["sm_107a"],
@@ -749,7 +747,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "chunk_bytes": 2097152,
             "ctas_per_sm": {"sm_107a": 8},
             "kind": "domain_items",
-            "tile_vectors": {"sm_107a": 512},
+            "tile_vectors": {"sm_107a": 1024},
             "vector_elements": 8,
         },
         "group": 32,
@@ -763,7 +761,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_48c0dbfaea5f3b9c07f7",
         "scale_out": True,
-        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147483136)}},
+        "vectors": {"sm_107a": {"in_place": None, "out_of_place": (8388608, 2147482624)}},
     },
 }
 
