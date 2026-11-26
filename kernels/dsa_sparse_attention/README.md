@@ -5,9 +5,10 @@ Cake `dsa_sparse_attention` training kernels. Public modules:
 - `cake_pplx.cake_dsa_sparse_attention_det_train`
 - `cake_pplx.cake_dsa_sparse_attention_nondet_train`
 
-The nondet rope form takes 64, 96 or 128 query heads (96 and 128 on `sm_100a` and `sm_103a`); the det module and
-the NoPE form take 64. At 96 and 128 heads the call runs, where the package ships them for the device, the head-window
-builds: one launch per stage over both 64-head windows, `[0, 64)` and `[64, 128)`, of every token (the heads past `H`
+The rope forms of both modules take 64, 96 or 128 query heads (96 and 128 on `sm_100a` and `sm_103a`); the NoPE form
+takes 64. In the det module, 96 and 128 heads run the single-pass forward and the det head-window backward builds (both
+64-head windows of every token in one launch), and every output repeats bit for bit as at 64 heads. In the nondet
+module, at 96 and 128 heads the call runs, where the package ships them for the device, the head-window builds: one launch per stage over both 64-head windows, `[0, 64)` and `[64, 128)`, of every token (the heads past `H`
 are padding), writing the `[T, H]` outputs directly; where the package ships it, the forward runs the single-pass
 forward instead: one 2-CTA cluster per token over all its heads. Where the package ships neither, the call runs the
 64-head kernels on two head windows, `[H-64, H)` and then `[0, 64)`; this costs more than one native launch: at 96

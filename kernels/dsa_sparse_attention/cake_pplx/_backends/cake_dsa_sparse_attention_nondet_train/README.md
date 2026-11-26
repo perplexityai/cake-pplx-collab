@@ -856,10 +856,11 @@ The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
   `torch.utils.checkpoint(..., use_reentrant=False)` nothing is retained.
 * A call without query rows (`T = 0`) returns its empty outputs and zero key
   gradients before any plan: nothing launches.
-* Not served above 64 heads: the deterministic package, the NoPE program and
-  its sink form (`ValueError`; the deterministic and NoPE query checks name
-  the rope form, the sink check says the sink form serves 64 query heads
-  only).  On `sm_107a` an eager, autograd or step call with more than 64
+* Not served above 64 heads: the NoPE program and its sink form
+  (`ValueError`; the NoPE query check names the rope form, the sink check
+  says the sink form serves 64 query heads only).  The deterministic
+  package's rope form serves 96 and 128 heads on `sm_100a` / `sm_103a` from
+  0.11.0, with its own builds.  On `sm_107a` an eager, autograd or step call with more than 64
   heads raises `NotImplementedError` before any kernel of the package
   launches -- also without query rows, on a CUDA tensor -- and so does
   `prepare_dsa_train`, until the window stages are validated there (a

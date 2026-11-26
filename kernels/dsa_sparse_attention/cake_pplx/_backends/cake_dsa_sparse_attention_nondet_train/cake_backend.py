@@ -180,8 +180,8 @@ D_QK = D_LATENT + D_ROPE
 # 32-row rescale groups as the bridge, so ``out``, ``lse``, ``o_lo`` and ``dq`` keep the bridge's bits; ``dK`` / ``dV``
 # add the same terms with FP32 atomics in another order.  The single-pass forward is another kernel: its ``out``,
 # ``lse`` and ``o_lo`` (and so the backward's ``delta`` and ``dq``) are its own bits, run-to-run identical.  The
-# deterministic package and the NoPE program serve 64 heads only; on ``sm_107a`` the windows are not yet served (64
-# heads only).
+# NoPE program serves 64 heads only (the deterministic package's RoPE form serves 96 and 128 with its own builds); on
+# ``sm_107a`` the windows are not yet served (64 heads only).
 SUPPORTED_HEADS = (64, 96, 128)
 HEAD_WINDOW = NUM_HEADS
 # The architectures whose stages serve the head windows of ``H > 64`` (``sm_107a``: 64 heads only for now).

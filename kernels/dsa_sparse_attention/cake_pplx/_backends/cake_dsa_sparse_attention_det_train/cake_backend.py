@@ -30,6 +30,12 @@ limitations under the License.
 #   with a caller-owned ``dkv_acc``, adds them into that packed FP32 buffer
 #   (optional destination-row map ``dkv_dst_map``) and returns ``None`` for
 #   both.  dK / dV accumulate as integers (see "Deterministic dK / dV" below).
+# * Query heads: the RoPE entries take ``H = q_latent.shape[1]`` heads, ``H`` in
+#   ``SUPPORTED_HEADS`` (64, 96, 128); every ``64`` in a head shape of the RoPE
+#   entries stands for ``H``.  96 and 128 heads run on ``sm_100a`` / ``sm_103a``
+#   (``HEAD_COUNT_ARCHES``), where the record ships the head-count builds; on
+#   ``sm_107a`` another ``H`` than 64 raises ``NotImplementedError``, and the NoPE
+#   program serves 64 heads (see "Query heads" below).
 # * Strided inputs are consumed in place: the query operands and ``dout``
 #   reach the kernels through TMA descriptors encoded from the tensor's own
 #   head and token strides (the delta stage takes the same strides as
@@ -123,6 +129,35 @@ limitations under the License.
 # duplicate destination rows.  The order of the two roundings (``rni`` per
 # contribution, the fold) is fixed per element.
 #
+# Query heads.  Every kernel of the program computes 64 query heads (``NUM_HEADS``) of a token per work item.  A
+# RoPE call over ``H`` = 96 or 128 heads runs the head-count builds of ``cake_jit.HEAD_COUNT_STAGES`` in place of
+# five stages; a 64-head call launches what it launched before (the same stages, grids and arguments):
+#
+# * ``fwd_h128`` in place of ``fwd``: the non-deterministic package's single-pass forward, every head of a token in
+#   one ``(2, 1, 1)`` cluster, ``out`` / ``lse`` / ``o_lo`` written at ``t * H + h`` (``num_queries = T`` tokens,
+#   ``num_heads = H``), on the persistent grid of :func:`single_pass_grid`.  It adds nothing with atomics, so its
+#   outputs repeat bit for bit; they are not the 64-head forward's bits (another kernel).
+# * ``bwd_delta_heads`` in place of ``bwd_delta``: ``delta [T, H]`` (row ``t * H + h``, each row the 64-head
+#   build's bits for that row) and the bound terms ``qstat [T, 4]`` over the token's ``H`` heads, one CTA of 16
+#   warps per token.
+# * ``bwd_main_hw`` / ``bwd_redo_hw`` / ``bwd_main_pass_hw`` in place of ``bwd_main`` / ``bwd_redo`` /
+#   ``bwd_main_pass``: the main kernel's head-window builds run both 64-head windows ``W0 = [0, 64)`` and
+#   ``W1 = [64, 128)`` of every token in one launch over ``2 T`` work items (item ``i`` is window ``i & 1`` of token
+#   ``i >> 1``; window selector ``wsel = -1``, ``HEAD_WINDOW_BOTH``).  The rows past ``H`` load zeros, store
+#   nothing and read ``lse = +inf``, ``delta = 0``, so they add exactly 0; ``lse`` / ``delta`` are read at
+#   ``t * H + h``.  ``token_base`` / ``token_step`` count items (descending from ``2 T - 1`` where
+#   :func:`token_order` descends).  The main and pass launches take one CTA per item (the generated grid over
+#   ``2 T``), the redo the persistent :func:`redo_launch_grid` over the ``2 T`` items.  A (token, key) pair adds one
+#   contribution per window and the builds skip the counter below half the 64-head threshold, so the overflow
+#   counters certify the int32 range as at 64 heads.  A key-range-pass backward compacts every token's keys per
+#   pass as at 64 heads (token space) and keeps one dQ partial block (36,864 FP32) per item, ``2 T`` blocks; its
+#   token chunk counts ``HEAD_WINDOW_ITEMS`` blocks per token (:func:`plan_key_passes`).
+# * The key norms, the row bound and its grid (over ``T * topk`` pair slots: the pack27 rule reads ``T``), the redo
+#   preparation, the fold and the compaction run unchanged over the ``T`` tokens.
+#
+# The accumulator is an integer sum whatever the grid and the window order, so dK / dV repeat bit for bit as at 64
+# heads.  The storage plan below scales with ``H``: ``o_lo`` and dQ hold ``H`` KiB per token, ``delta`` ``4 H`` B.
+#
 # Storage.  The accumulator region of one backward -- per destination row the
 # int32 accumulator (576 columns; 512 for NoPE; the row-bound words live in the
 # row until the grid stage reads them), 32 B of overflow counters, the grid
@@ -162,6 +197,15 @@ from . import cake_jit, cake_launch
 from .cake_jit import FORWARD_STAGES
 
 NUM_HEADS = 64
+# Query heads of the RoPE program (see "Query heads" above): 64, and 96 / 128 on ``HEAD_COUNT_ARCHES`` where the
+# record ships the head-count builds (``cake_jit.HEAD_COUNT_STAGES``).  The NoPE program serves 64.
+SUPPORTED_HEADS = (64, 96, 128)
+HEAD_COUNT_ARCHES = ("sm_100a", "sm_103a")
+# The work items per token of a head-window launch (both 64-head windows) and its window selector (-1: both).
+HEAD_WINDOW_ITEMS = 2
+HEAD_WINDOW_BOTH = -1
+# CTAs per token cluster of the single-pass forward (``fwd_h128``).
+SINGLE_PASS_CLUSTER = 2
 D_LATENT = 512
 D_ROPE = 64
 D_QK = D_LATENT + D_ROPE
@@ -213,7 +257,7 @@ COUNTER_BYTES_PER_ROW = 32
 QSTAT_WORDS = 4  # FP32 per-query bound terms of bwd_delta (a_lat, b_lat, a_rope, b_rope; NoPE uses the first two)
 # The stages whose ``sm_scale`` only scales those bound terms: they take its magnitude, so a negative softmax_scale
 # cannot cancel them into a bound below the gradient (the gradient stages keep the signed scale).
-BOUND_SCALE_STAGES = frozenset({"bwd_delta", "nope_bwd_delta"})
+BOUND_SCALE_STAGES = frozenset({"bwd_delta", "bwd_delta_heads", "nope_bwd_delta"})
 GLOBAL_WORDS = 16  # u32 words of the backward's global state (maxima, the flagged-row count); bwd_delta zeroes them
 REDO_WORD = 8  # the global word that counts the rows the redo preparation flags (the redo's ``redo_count``)
 # the global word that counts the rows with a non-finite contribution
@@ -252,7 +296,9 @@ def _check_key_passes(key_passes: Optional[int], num_kv: int) -> None:
 # The pass count is the non-deterministic package's policy (the record's ``key_pass_policy``, :class:`KeyPassPolicy`;
 # the NoPE record's never plans a second pass), with one difference: every pass runs all T tokens in one launch
 # (``token_base = 0``), so a row the policy would run in several token chunks (T above
-# :meth:`KeyPassPolicy.token_chunk`) takes one pass.  ``key_passes`` overrides it.
+# :meth:`KeyPassPolicy.token_chunk`) takes one pass.  ``key_passes`` overrides it.  A backward over more than 64
+# heads keeps one dQ partial block per (token, window) item, ``HEAD_WINDOW_ITEMS`` per token: its token chunk is the
+# chunk of that many blocks per token (2176 tokens at top-k 2048, 4224 at 64 heads).
 # one FP32 dQ / dQ_rope partial row (147,456 B)
 DQ_PARTIAL_BYTES_PER_TOKEN = NUM_HEADS * D_QK * 4
 # The NoPE program carries no rope part: one FP32 dQ partial row is 64 x 512 x 4 B (131,072 B); its record states the
@@ -342,9 +388,13 @@ class KeyPassPolicy:
     def formula_passes(self, num_kv: int) -> int:
         return max(1, -(-int(num_kv) * self.key_bytes // self.l2_budget_bytes))
 
-    def token_chunk(self, topk: int) -> int:
-        """Tokens whose pass scratch (dQ partial, key scratch, pass count) fits the workspace budget."""
-        per_token = self.dq_partial_bytes_per_token + 4 * int(topk) + 4
+    def token_chunk(self, topk: int, items_per_token: int = 1) -> int:
+        """Tokens whose pass scratch (dQ partial, key scratch, pass count) fits the workspace budget.
+        ``items_per_token`` is the main stage's work items per token, each with its own dQ partial block: 1, or
+        ``HEAD_WINDOW_ITEMS`` (2) above 64 heads (the key scratch and the count stay one per token)."""
+        per_token = (
+            int(items_per_token) * self.dq_partial_bytes_per_token + 4 * int(topk) + 4
+        )
         m = self.token_chunk_multiple
         return max(m, (self.workspace_budget_bytes // per_token) // m * m)
 
@@ -394,12 +444,14 @@ def plan_key_passes(
     num_segments: int = 1,
     arch: Optional[str] = None,
     program: str = cake_jit.PROGRAM,
+    items_per_token: int = 1,
 ) -> int:
     """Key-range passes of one backward of ``program``.  ``key_passes`` (validated by :func:`_check_key_passes`)
     overrides the policy; a program without the pass stages (``cake_jit.KEY_PASS_STAGES_OF[program]`` in ``stages``)
     serves one pass only.  Otherwise the record's policy (:meth:`KeyPassPolicy.passes`) decides for a row whose pass
-    scratch fits one token chunk (``T`` within :meth:`KeyPassPolicy.token_chunk`); a longer row, or a record without a
-    policy, takes one pass."""
+    scratch fits one token chunk (``T`` within :meth:`KeyPassPolicy.token_chunk` of ``items_per_token`` dQ partial
+    blocks per token: ``HEAD_WINDOW_ITEMS`` above 64 heads); a longer row, or a record without a policy, takes one
+    pass."""
     pass_stages = cake_jit.KEY_PASS_STAGES_OF[program]
     multi_pass = all(stage in stages for stage in pass_stages)
     if key_passes is not None:
@@ -415,7 +467,7 @@ def plan_key_passes(
     if not multi_pass:
         return 1
     policy = KeyPassPolicy.from_record(record)
-    if policy is None or int(num_queries) > policy.token_chunk(topk):
+    if policy is None or int(num_queries) > policy.token_chunk(topk, items_per_token):
         return 1
     return policy.passes(
         num_queries, num_kv, topk, num_segments=num_segments, arch=arch
@@ -552,20 +604,23 @@ def _program_stages(names: tuple[str, ...], program: str) -> tuple[str, ...]:
 # ---------------------------------------------------------------------------
 
 
-# Query head counts the non-deterministic package's RoPE form serves beyond 64; this package serves 64 heads only.
-_NONDET_ONLY_HEADS = (96, 128)
-
-
-def _check_head_tensor(t: torch.Tensor, name: str, last: int) -> None:
-    """``[T, 64, last]`` BF16 with a unit channel stride, TMA-admissible head and token strides and base address."""
-    if t.ndim == 3 and int(t.shape[1]) in _NONDET_ONLY_HEADS and t.shape[2] == last:
+def _check_head_tensor(
+    t: torch.Tensor,
+    name: str,
+    last: int,
+    heads: Union[int, tuple[int, ...]] = NUM_HEADS,
+) -> None:
+    """``[T, H, last]`` BF16 with a unit channel stride, TMA-admissible head and token strides and base address;
+    ``H`` is ``heads`` (an int) or one of ``heads`` (a tuple: the RoPE program's ``SUPPORTED_HEADS``)."""
+    allowed = (int(heads),) if isinstance(heads, int) else tuple(heads)
+    if t.ndim != 3 or int(t.shape[1]) not in allowed or t.shape[2] != last:
+        if len(allowed) == 1:
+            raise ValueError(f"{name} must be a BF16 [T, {allowed[0]}, {last}] tensor")
+        shapes = ", ".join(f"[T, {h}, {last}]" for h in allowed)
         raise ValueError(
-            f"{name} must be a BF16 [T, {NUM_HEADS}, {last}] tensor: the deterministic package serves "
-            f"{NUM_HEADS} query heads only, got {int(t.shape[1])} ({_NONDET_ONLY_HEADS} heads are served by the "
-            "non-deterministic package's RoPE form, cake_pplx.cake_dsa_sparse_attention_nondet_train)"
+            f"{name} must be a BF16 [T, H, {last}] tensor with H in {allowed} query heads ({shapes}), "
+            f"got shape {tuple(t.shape)}"
         )
-    if t.ndim != 3 or t.shape[1] != NUM_HEADS or t.shape[2] != last:
-        raise ValueError(f"{name} must be a BF16 [T, {NUM_HEADS}, {last}] tensor")
     if t.dtype != torch.bfloat16:
         raise ValueError(f"{name} must be bfloat16")
     if t.stride(2) != 1:
@@ -576,8 +631,8 @@ def _check_head_tensor(t: torch.Tensor, name: str, last: int) -> None:
     if head < last or head % TMA_STRIDE_ELEMENTS:
         raise ValueError(
             f"{name} head stride must be >= {last} elements and a multiple of {TMA_STRIDE_ELEMENTS} elements "
-            f"(16 bytes: TMA descriptor stride), got {head}; slices of a packed [T, {NUM_HEADS}, {D_QK}] query "
-            f"or of the [T, {NUM_HEADS}, 256] pre-absorption query are admitted"
+            f"(16 bytes: TMA descriptor stride), got {head}; slices of a packed [T, {int(t.shape[1])}, {D_QK}] "
+            f"query or of the [T, {int(t.shape[1])}, 256] pre-absorption query are admitted"
         )
     if token <= 0 or token % TMA_STRIDE_ELEMENTS:
         raise ValueError(
@@ -616,9 +671,10 @@ def _check_key_tensor(t: torch.Tensor, name: str, last: int) -> None:
 
 
 def _dout_admissible(dout: torch.Tensor) -> bool:
-    """Whether the backward kernels can read ``dout`` in place (:func:`_check_head_tensor` as a predicate)."""
+    """Whether the backward kernels can read ``dout`` in place (:func:`_check_head_tensor` as a predicate, at any of
+    the ``SUPPORTED_HEADS``; the head count itself is checked against ``q_latent`` by the validation)."""
     try:
-        _check_head_tensor(dout, "dout", D_LATENT)
+        _check_head_tensor(dout, "dout", D_LATENT, SUPPORTED_HEADS)
     except ValueError:
         return False
     return True
@@ -666,10 +722,14 @@ def validate_dsa_train_inputs(
     dense array or a strided view such as the head-major ``[512, T * 512, 1]``
     layout is consumed in place (the main stage reads it through a
     stride-carrying tensor map, the delta stage through the strides it
-    receives).
+    receives).  The head count ``H = q_latent.shape[1]`` is one of
+    ``SUPPORTED_HEADS`` (64, 96, 128); ``q_rope`` and ``dout`` have the same
+    ``H`` (:func:`num_query_heads` reads it).  The architecture rule of
+    ``H > 64`` is checked where the device is known (:func:`_check_head_arch`).
     """
-    _check_head_tensor(q_latent, "q_latent", D_LATENT)
-    _check_head_tensor(q_rope, "q_rope", D_ROPE)
+    _check_head_tensor(q_latent, "q_latent", D_LATENT, SUPPORTED_HEADS)
+    heads = int(q_latent.shape[1])
+    _check_head_tensor(q_rope, "q_rope", D_ROPE, heads)
     _check_key_tensor(kv_latent, "kv_latent", D_LATENT)
     _check_key_tensor(k_rope, "k_rope", D_ROPE)
     num_queries = int(q_latent.shape[0])
@@ -703,10 +763,94 @@ def validate_dsa_train_inputs(
     ):
         raise ValueError("topk_length must be a contiguous int32 [T] tensor")
     if dout is not None:
-        _check_head_tensor(dout, "dout", D_LATENT)
+        _check_head_tensor(dout, "dout", D_LATENT, heads)
         if int(dout.shape[0]) != num_queries:
             raise ValueError("dout must have T rows")
     return num_queries, num_kv, topk
+
+
+def num_query_heads(q_latent: torch.Tensor) -> int:
+    """The query head count ``H`` of a validated RoPE call (``q_latent.shape[1]``)."""
+    return int(q_latent.shape[1])
+
+
+def _check_head_arch(num_heads: int, arch: Optional[str]) -> None:
+    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``HEAD_COUNT_ARCHES`` (``sm_107a`` serves 64
+    query heads until its head-count builds are validated)."""
+    if int(num_heads) != NUM_HEADS and arch not in HEAD_COUNT_ARCHES:
+        raise NotImplementedError(
+            f"{int(num_heads)} query heads are served on {list(HEAD_COUNT_ARCHES)}; "
+            f"{arch if arch is not None else 'this device'} serves {NUM_HEADS} query heads only"
+        )
+
+
+def head_count_stage(stage: str, arch: Optional[str]) -> Optional[str]:
+    """The head-count build (``cake_jit.HEAD_COUNT_STAGES``) that runs the RoPE program's ``stage`` over more than 64
+    query heads on ``arch``, or ``None`` when there is none: ``stage`` has no such build, ``arch`` is outside
+    ``HEAD_COUNT_ARCHES``, or the registry does not register the build (a record entry among the record's stages,
+    shipping for ``arch``) with its generated launcher and grid (``cake_launch``)."""
+    build = cake_jit.HEAD_COUNT_STAGES.get(stage)
+    if build is None or arch not in HEAD_COUNT_ARCHES:
+        return None
+    if build not in cake_jit.record() or build not in cake_jit.registered_stages():
+        return None
+    if arch not in cake_jit.stage_arches(build):
+        return None
+    if build not in cake_launch.LAUNCH or build not in cake_launch.GRID:
+        return None
+    return build
+
+
+def head_count_stages(
+    num_heads: int, arch: Optional[str], *, backward: bool
+) -> dict[str, str]:
+    """``stage -> build``: the head-count builds a call over ``num_heads`` query heads runs on ``arch`` in place of
+    the 64-head stages (see "Query heads" above).  Empty at 64 heads.  Above 64: the forward's and, with
+    ``backward``, the delta, main and redo stages' builds, plus the key-range pass's where it ships (without it the
+    backward takes one pass); ``NotImplementedError`` on an architecture outside ``HEAD_COUNT_ARCHES``
+    (:func:`_check_head_arch`) or when the registry lacks one of the needed builds."""
+    if int(num_heads) == NUM_HEADS:
+        return {}
+    _check_head_arch(num_heads, arch)
+    needed = ("fwd",) + (("bwd_delta", "bwd_main", "bwd_redo") if backward else ())
+    swap: dict[str, str] = {}
+    for stage in needed:
+        build = head_count_stage(stage, arch)
+        if build is None:
+            raise NotImplementedError(
+                f"{int(num_heads)} query heads need the build {cake_jit.HEAD_COUNT_STAGES[stage]!r} of the "
+                f"registered DSA training program for {arch}, which this checkout does not register"
+            )
+        swap[stage] = build
+    if backward:
+        build = head_count_stage("bwd_main_pass", arch)
+        if build is not None:
+            swap["bwd_main_pass"] = build
+    return swap
+
+
+def _pass_stages(stages: tuple[str, ...], swap: dict[str, str]) -> tuple[str, ...]:
+    """The registered ``stages`` a backward plans its key-range passes from (:func:`plan_key_passes`): all of them at
+    64 heads; above 64 heads (a non-empty head-count ``swap``) without the pass build of the main stage when its
+    head-count build does not ship (one pass)."""
+    if not swap or "bwd_main_pass" in swap:
+        return stages
+    return tuple(stage for stage in stages if stage != "bwd_main_pass")
+
+
+def _check_nope_heads(q_latent: Any) -> None:
+    """The NoPE program serves 64 query heads: a 96- or 128-head ``q_latent`` gets an error naming the RoPE form."""
+    if (
+        isinstance(q_latent, torch.Tensor)
+        and q_latent.ndim == 3
+        and int(q_latent.shape[1]) != NUM_HEADS
+        and int(q_latent.shape[1]) in SUPPORTED_HEADS
+    ):
+        raise ValueError(
+            f"q_latent must be a BF16 [T, {NUM_HEADS}, {D_LATENT}] tensor: the NoPE program serves "
+            f"{NUM_HEADS} query heads only, got {int(q_latent.shape[1])} ({SUPPORTED_HEADS[1:]} heads are served by "
+            "the RoPE form)"
+        )
 
 
 def validate_dsa_nope_inputs(
@@ -735,8 +879,10 @@ def validate_dsa_nope_inputs(
     the head-major ``[512, T * 512, 1]`` layout is consumed in place (the main stage reads it through a
     stride-carrying tensor map, the delta stage through the strides it receives).  ``S == 0`` is rejected;
     ``T == 0`` only without ``allow_empty_queries`` (the eager entries return empty results for it).  Device
-    placement is checked by the callers, so this runs on host tensors.
+    placement is checked by the callers, so this runs on host tensors.  96 and
+    128 heads are refused (:func:`_check_nope_heads`; the RoPE form serves them).
     """
+    _check_nope_heads(q_latent)
     _check_head_tensor(q_latent, "q_latent", D_LATENT)
     _check_key_tensor(kv_latent, "kv_latent", D_LATENT)
     num_queries = int(q_latent.shape[0])
@@ -1013,18 +1159,20 @@ def accumulator_region_layout(
     return _layout_of(sizes)
 
 
-def dq_scratch_layout(num_queries: int, num_kv: int) -> Optional[dict]:
+def dq_scratch_layout(
+    num_queries: int, num_kv: int, num_heads: int = NUM_HEADS
+) -> Optional[dict]:
     """Byte ``(offset, size)`` of the per-query bound terms ``qstat`` (``[T, 4]`` FP32) and the key norms ``knorm``
-    (``[S]`` FP32) in the storage of ``dq_latent`` (the NoPE ``dq``; BF16, 64 KiB per query token), plus
-    ``"total"``; ``None`` when they do not fit it (``S`` above about ``16380 T``).  ``bwd_delta`` writes ``qstat``,
-    ``bwd_norm`` ``knorm``; ``bwd_norm`` and ``bwd_bound`` read them; the main stage then writes every element of
-    dQ (each token's CTA stores its dQ rows), so neither needs storage of its own."""
+    (``[S]`` FP32) in the storage of ``dq_latent`` (the NoPE ``dq``; BF16, ``num_heads`` KiB per query token: 64
+    KiB at 64 heads), plus ``"total"``; ``None`` when they do not fit it (``S`` above about ``16380 T`` at 64
+    heads).  ``bwd_delta`` writes ``qstat``, ``bwd_norm`` ``knorm``; ``bwd_norm`` and ``bwd_bound`` read them; the
+    main stage then writes every element of dQ (each work item's CTA stores its dQ rows, every head of the call), so
+    neither needs storage of its own."""
     layout = _layout_of(
         [("qstat", int(num_queries) * QSTAT_WORDS * 4), ("knorm", int(num_kv) * 4)]
     )
-    return (
-        layout if layout["total"] <= int(num_queries) * O_LO_BYTES_PER_TOKEN else None
-    )
+    capacity = int(num_queries) * int(num_heads) * D_LATENT * 2
+    return layout if layout["total"] <= capacity else None
 
 
 def redo_lists_fit(num_kv: int, num_dst: int, *, dkv_fp32: bool = False) -> bool:
@@ -1036,30 +1184,34 @@ def redo_lists_fit(num_kv: int, num_dst: int, *, dkv_fp32: bool = False) -> bool
 
 
 def output_scratch_layout(
-    num_queries: int, num_dst: int, *, delta: bool = True
+    num_queries: int, num_dst: int, *, delta: bool = True, num_heads: int = NUM_HEADS
 ) -> dict:
     """Byte ``(offset, size)`` of the backward scratch at the front of a fresh RoPE dK/dV output (``dkv_latent`` or
     ``dkv_latent_fp32``), plus ``"total"``: the redo marks and the redo list (``[num_dst]`` int32 each) and, with
-    ``delta``, ``delta`` (``[T, 64]`` FP32).  ``bwd_delta`` writes ``delta`` (it reads neither output), the redo is
+    ``delta``, ``delta`` (``[T, H]`` FP32, ``H = num_heads``).  ``bwd_delta`` writes ``delta`` (it reads neither output), the redo is
     the last reader of all three, and the fold, the one stage that writes the output, runs after it.  The global
     words stay in the workspace: they are read after the backward (the flagged-row and non-finite counts)."""
     R = int(num_dst)
     sizes = [("redo_mark", R * 4), ("redo_rows", R * 4)]
     if delta:
-        sizes.append(("delta", int(num_queries) * NUM_HEADS * 4))
+        sizes.append(("delta", int(num_queries) * int(num_heads) * 4))
     return _layout_of(sizes)
 
 
 def delta_fits_output(
-    num_queries: int, num_kv: int, num_dst: int, *, dkv_fp32: bool = False
+    num_queries: int,
+    num_kv: int,
+    num_dst: int,
+    *,
+    dkv_fp32: bool = False,
+    num_heads: int = NUM_HEADS,
 ) -> bool:
     """Whether the redo lists and ``delta`` (:func:`output_scratch_layout`) fit the front of a fresh RoPE dK/dV
-    output (``[num_kv, 512]``, BF16 or FP32): ``2 * align(R * 4) + align(T * 256) <= num_kv * 1024`` (BF16), so the
+    output (``[num_kv, 512]``, BF16 or FP32): ``2 * align(R * 4) + align(T * 4 H) <= num_kv * 1024`` (BF16), so the
     workspace or the per-call allocation does not hold ``delta``."""
     row_bytes = D_LATENT * (4 if dkv_fp32 else 2)
-    return (
-        output_scratch_layout(num_queries, num_dst)["total"] <= int(num_kv) * row_bytes
-    )
+    layout = output_scratch_layout(num_queries, num_dst, num_heads=num_heads)
+    return layout["total"] <= int(num_kv) * row_bytes
 
 
 def carve_fits(
@@ -1071,9 +1223,11 @@ def carve_fits(
     accumulator: bool = True,
     knorm: bool = True,
     redo: bool = True,
+    num_heads: int = NUM_HEADS,
 ) -> bool:
     """Whether the accumulator region (:func:`accumulator_region_layout` with the same ``accumulator`` / ``knorm`` /
-    ``redo``) fits the storage of ``o_lo`` (``num_queries * 64 KiB``).  With every part: ``align(R * 2304) +
+    ``redo``) fits the storage of ``o_lo`` (``num_queries * num_heads`` KiB: ``T * 64 KiB`` at 64 heads; the
+    inequalities below are those of 64 heads).  With every part: ``align(R * 2304) +
     align(R * 32) + align(R * 8) + 3 * align(R * 4) + align(S * 4) <= 65536 * T`` for RoPE (with 256-byte
     alignment), ``align(R * 2048) + align(R * 32) + 4 * align(R * 4) + align(S * 4) <= 65536 * T`` for NoPE;
     without the accumulator (a fresh NoPE ``dkv``) only the per-row words and the key norms count, and the key
@@ -1087,7 +1241,7 @@ def carve_fits(
         knorm=knorm,
         redo=redo,
     )
-    return region["total"] <= int(num_queries) * O_LO_BYTES_PER_TOKEN
+    return region["total"] <= int(num_queries) * int(num_heads) * D_LATENT * 2
 
 
 def workspace_layout(
@@ -1106,6 +1260,7 @@ def workspace_layout(
     key_passes: int = 1,
     per_call: bool = False,
     sink: bool = False,
+    num_heads: int = NUM_HEADS,
 ) -> dict:
     """Byte ``(offset, size)`` of every workspace region of a prepared runner plus ``"total"``.
 
@@ -1120,11 +1275,13 @@ def workspace_layout(
     redo lists with ``redo_in_output``) unless the runner carves it from ``o_lo`` (``region=False``).  A NoPE
     backward with a sink (``sink``) adds the sink-gradient stage's scratch: ``dsink_partial``, one FP32 partial per
     (token chunk, head) (:func:`nope_dsink_partial_rows` rows of 256 B), and ``dsink_ticket``, its 32-bit completion
-    counter (zero-filled by the host before every backward)."""
+    counter (zero-filled by the host before every backward).  ``num_heads`` is the binding's query head count ``H``:
+    ``delta`` is ``[T, H]``, and above 64 heads the key-range-pass scratch holds ``HEAD_WINDOW_ITEMS`` dQ partial
+    blocks per token (one per (token, window) item)."""
     sizes = [] if per_call else [("topk_length", int(num_queries) * 4)]
     if backward:
         if not delta_in_output:
-            sizes.append(("delta", int(num_queries) * NUM_HEADS * 4))
+            sizes.append(("delta", int(num_queries) * int(num_heads) * 4))
         if not dq_scratch:
             sizes.append(("qstat", int(num_queries) * QSTAT_WORDS * 4))
         sizes.append(("globals", GLOBAL_WORDS * 4))
@@ -1135,8 +1292,9 @@ def workspace_layout(
             ]
         if int(key_passes) > 1:
             T = int(num_queries)
+            items = HEAD_WINDOW_ITEMS if int(num_heads) != NUM_HEADS else 1
             sizes += [
-                ("dq_partial", T * dq_partial_bytes(program)),
+                ("dq_partial", items * T * dq_partial_bytes(program)),
                 ("key_scratch", T * int(topk) * 4),
                 ("pass_counts", T * 4),
             ]
@@ -1216,6 +1374,7 @@ def _storage(
     o_lo_scratch: bool,
     dq_scratch: bool = False,
     redo_in_output: bool = False,
+    num_heads: int = NUM_HEADS,
 ) -> str:
     """Where the accumulator region of a backward lives: ``"o_lo"`` when the call consumes ``o_lo`` and the region
     fits it (:func:`carve_fits`), else ``"workspace"`` (a workspace region of a prepared runner, one allocation per
@@ -1228,6 +1387,7 @@ def _storage(
         accumulator=accumulator,
         knorm=not dq_scratch,
         redo=not redo_in_output,
+        num_heads=num_heads,
     ):
         return "o_lo"
     return "workspace"
@@ -1246,6 +1406,7 @@ def dsa_train_workspace_size(
     dkv_direct: Optional[bool] = None,
     num_dst: Optional[int] = None,
     o_lo_scratch: bool = False,
+    num_heads: int = NUM_HEADS,
 ) -> int:
     """Workspace bytes :func:`prepare_dsa_train` needs for ``(T, S, topk)`` on ``device``.
 
@@ -1256,28 +1417,37 @@ def dsa_train_workspace_size(
     size assumes ``dq_latent`` and ``dkv_latent`` start 16-byte aligned (any the runner allocates); a caller's output
     that does not needs the larger layout of :func:`prepare_dsa_train`'s plan.  ``key_passes`` and ``num_segments``
     select the key-range passes as there (:func:`plan_key_passes`; their scratch is part of the workspace);
-    ``dkv_direct`` is accepted for parity with the non-deterministic package."""
+    ``dkv_direct`` is accepted for parity with the non-deterministic package.  ``num_heads`` is the binding's query
+    head count ``H`` (64, 96 or 128; above 64 on ``HEAD_COUNT_ARCHES`` only, :func:`head_count_stages`)."""
     _module_name, record = record_for(device)
     _check_key_passes(key_passes, num_kv)
     _check_dkv_direct(dkv_direct)
+    H = int(num_heads)
+    if H not in SUPPORTED_HEADS:
+        raise ValueError(f"num_heads must be one of {SUPPORTED_HEADS}, got {num_heads}")
+    arch = arch_for(device)
+    swap = head_count_stages(H, arch, backward=backward)
     passes = (
         plan_key_passes(
             record,
-            cake_jit.registered_stages(),
+            _pass_stages(cake_jit.registered_stages(), swap),
             num_queries,
             num_kv,
             topk,
             key_passes,
             num_segments=num_segments,
-            arch=arch_for(device),
+            arch=arch,
+            items_per_token=HEAD_WINDOW_ITEMS if swap else 1,
         )
         if backward
         else 1
     )
     R = int(num_kv) if num_dst is None else int(num_dst)
-    dq_scratch = dq_scratch_layout(num_queries, num_kv) is not None
+    dq_scratch = dq_scratch_layout(num_queries, num_kv, H) is not None
     redo_in_output = not dkv_acc and redo_lists_fit(num_kv, R)
-    delta_in_output = redo_in_output and delta_fits_output(num_queries, num_kv, R)
+    delta_in_output = redo_in_output and delta_fits_output(
+        num_queries, num_kv, R, num_heads=H
+    )
     storage = _storage(
         num_queries,
         num_kv,
@@ -1287,6 +1457,7 @@ def dsa_train_workspace_size(
         o_lo_scratch=o_lo_scratch,
         dq_scratch=dq_scratch,
         redo_in_output=redo_in_output,
+        num_heads=H,
     )
     return int(
         workspace_layout(
@@ -1300,6 +1471,7 @@ def dsa_train_workspace_size(
             redo_in_output=redo_in_output,
             delta_in_output=delta_in_output,
             key_passes=passes,
+            num_heads=H,
         )["total"]
     )
 
@@ -1685,15 +1857,32 @@ def redo_launch_grid(num_queries: int, sm_count: int) -> int:
     return max(1, min(int(num_queries), int(sm_count)))
 
 
+def single_pass_grid(num_queries: int, sm_count: int) -> tuple[int, int, int]:
+    """Grid of a single-pass forward launch (``fwd_h128``) over ``num_queries`` tokens on a device of ``sm_count``
+    SMs, the non-deterministic package's: one resident ``(2, 1, 1)`` cluster per SM pair, at most one per token and
+    at least one (``2 * max(1, min(T, sm_count // 2))`` CTAs); cluster ``c`` of ``C`` runs the tokens ``c, c + C,
+    ...`` in a fixed per-token order, so every grid gives the same bits."""
+    pairs = int(sm_count) // SINGLE_PASS_CLUSTER
+    return (SINGLE_PASS_CLUSTER * max(1, min(int(num_queries), pairs)), 1, 1)
+
+
 # The RoPE backward stages launched with a persistent grid instead of the generated rule (one CTA per token), and
-# their grid ``rule(num_queries, num_kv, sm_count)``.
+# their grid ``rule(num_queries, num_kv, sm_count)``.  The head-window redo walks ``HEAD_WINDOW_ITEMS`` items per
+# token.
 PERSISTENT_GRIDS: dict[str, Callable[[int, int, int], int]] = {
     "bwd_redo": lambda num_queries, num_kv, sm_count: redo_launch_grid(
         num_queries, sm_count
     ),
+    "bwd_redo_hw": lambda num_queries, num_kv, sm_count: redo_launch_grid(
+        HEAD_WINDOW_ITEMS * num_queries, sm_count
+    ),
     # the listed fold (accumulate mode): one CTA per SM walks the redo list (any grid gives the same bits)
     "bwd_fold_list": lambda num_queries, num_kv, sm_count: max(1, int(sm_count)),
 }
+
+
+# The head-window stages whose generated grid rule runs over the ``2 T`` work items (one CTA per item).
+ITEM_GRID_STAGES = frozenset({"bwd_main_hw", "bwd_main_pass_hw"})
 
 
 def accumulate_stages(stages, program: str, accumulate: bool) -> list:
@@ -1833,6 +2022,8 @@ class _Plan:
     fresh_dkv: bool = False
     # NoPE: the call has a trainable per-head sink (the forward's sink build; the backward's sink-gradient stage).
     sink: bool = False
+    # The binding's query head count ``H`` (``SUPPORTED_HEADS``; the NoPE program: 64).
+    num_heads: int = NUM_HEADS
 
     def launch_keys(self) -> tuple:
         return tuple(self.forward_stages) + self.backward_order
@@ -2020,6 +2211,9 @@ def _plan(
     module_name, record = record_for(device)
     arch = arch_for(device)
     stages = cake_jit.registered_stages()
+    H = num_query_heads(q_latent)
+    # above 64 heads: the head-count builds of this architecture (NotImplementedError on sm_107a or without them)
+    swap = head_count_stages(H, arch, backward=backward)
     if backward and not generated_program_available(device, backward=True):
         raise NotImplementedError(
             f"the registered DSA training program {module_name!r} does not register every backward stage "
@@ -2027,23 +2221,21 @@ def _plan(
         )
     if softmax_scale is None:
         softmax_scale = default_softmax_scale()
+    _check_output(outputs.get("out"), "out", (num_queries, H, D_LATENT), torch.bfloat16)
+    _check_output(outputs.get("lse"), "lse", (num_queries, H), torch.float32)
     _check_output(
-        outputs.get("out"), "out", (num_queries, NUM_HEADS, D_LATENT), torch.bfloat16
-    )
-    _check_output(outputs.get("lse"), "lse", (num_queries, NUM_HEADS), torch.float32)
-    _check_output(
-        outputs.get("o_lo"), "o_lo", (num_queries, NUM_HEADS, D_LATENT), torch.bfloat16
+        outputs.get("o_lo"), "o_lo", (num_queries, H, D_LATENT), torch.bfloat16
     )
     _check_output(
         outputs.get("dq_latent"),
         "dq_latent",
-        (num_queries, NUM_HEADS, D_LATENT),
+        (num_queries, H, D_LATENT),
         torch.bfloat16,
     )
     _check_output(
         outputs.get("dq_rope"),
         "dq_rope",
-        (num_queries, NUM_HEADS, D_ROPE),
+        (num_queries, H, D_ROPE),
         torch.bfloat16,
     )
     dkv_dtype = torch.float32 if dkv_fp32 else torch.bfloat16
@@ -2057,7 +2249,7 @@ def _plan(
     # the bound terms and key norms in dQ, the redo lists in the fresh dK/dV output (both dead storage there)
     dq_scratch = (
         backward
-        and dq_scratch_layout(num_queries, num_kv) is not None
+        and dq_scratch_layout(num_queries, num_kv, H) is not None
         and _starts_aligned(outputs.get("dq_latent"))
     )
     redo_in_output = (
@@ -2067,7 +2259,7 @@ def _plan(
         and _starts_aligned(outputs.get("dkv_latent"))
     )
     delta_in_output = redo_in_output and delta_fits_output(
-        num_queries, num_kv, num_dst, dkv_fp32=dkv_fp32
+        num_queries, num_kv, num_dst, dkv_fp32=dkv_fp32, num_heads=H
     )
     storage = (
         _storage(
@@ -2079,6 +2271,7 @@ def _plan(
             o_lo_scratch=o_lo_scratch,
             dq_scratch=dq_scratch,
             redo_in_output=redo_in_output,
+            num_heads=H,
         )
         if backward
         else "workspace"
@@ -2095,13 +2288,14 @@ def _plan(
     passes = (
         plan_key_passes(
             record,
-            stages,
+            _pass_stages(stages, swap),
             num_queries,
             num_kv,
             topk,
             key_passes,
             num_segments=num_segments,
             arch=arch,
+            items_per_token=HEAD_WINDOW_ITEMS if swap else 1,
         )
         if backward
         else 1
@@ -2119,6 +2313,7 @@ def _plan(
             delta_in_output=delta_in_output,
             key_passes=passes,
             per_call=per_call,
+            num_heads=H,
         )
         for per_call in (False, True)
     )
@@ -2149,8 +2344,12 @@ def _plan(
         sm_scale=scale,
         scale_log2=scale * LOG2E,
         derive_length=int(derive_length),
-        **token_order(T, arch, passes == 1, "rope"),  # the main launches' token order
+        # the main launches' token order: in work items (two per token, both windows) above 64 heads
+        **token_order(HEAD_WINDOW_ITEMS * T if swap else T, arch, passes == 1, "rope"),
     )
+    if swap:
+        # the head-count builds: the call's head count, both windows of every token (the forward takes no wsel)
+        constants.update(num_heads=H, wsel=HEAD_WINDOW_BOTH)
     if backward:
         # main / redo of one launch: dq_mode 0, the dQ partial unread (a placeholder of its dtype at bind time);
         # bwd_compact runs every token of the row in each pass
@@ -2172,7 +2371,17 @@ def _plan(
                 kv_latent=kv_latent,
             )
         )
-    entries: dict[str, _StageEntry] = {"fwd": _stage_entry("fwd", arch, scalars)}
+    sm_count = _sm_count(_device_index(device)) if swap or backward else 0
+    forward_stages = (swap["fwd"],) if swap else FORWARD_STAGES
+    entries: dict[str, _StageEntry] = {
+        stage: _stage_entry(
+            stage,
+            arch,
+            scalars,
+            grid=single_pass_grid(T, sm_count) if swap else None,
+        )
+        for stage in forward_stages
+    }
     backward_order: tuple = ()
     pass_overrides: tuple[dict[str, int], ...] = ()
     if backward:
@@ -2192,15 +2401,28 @@ def _plan(
                 for index in range(passes)
                 for stage in cake_jit.KEY_PASS_STAGES
             ]
+        if swap:
+            # above 64 heads: the head-count builds in place of the delta, main, redo and pass stages
+            stage_list = [
+                (swap.get(key[0], key[0]), key[1])
+                if isinstance(key, tuple)
+                else swap.get(key, key)
+                for key in stage_list
+            ]
         backward_order = _pack27_order(tuple(stage_list), cake_jit.PROGRAM, T, topk)
-        sm_count = _sm_count(_device_index(device))
         for key in backward_order:
             stage = key[0] if isinstance(key, tuple) else key
             if stage in entries:
                 continue
             rule = PERSISTENT_GRIDS.get(stage)
             grid = (rule(T, S, sm_count), 1, 1) if rule is not None else None
-            entries[stage] = _stage_entry(stage, arch, scalars, grid=grid)
+            # the head-window main and pass builds: one CTA per work item, the generated rule over 2 T items
+            stage_scalars = (
+                dict(scalars, num_queries=HEAD_WINDOW_ITEMS * T)
+                if stage in ITEM_GRID_STAGES
+                else scalars
+            )
+            entries[stage] = _stage_entry(stage, arch, stage_scalars, grid=grid)
     return _Plan(
         module_name=module_name,
         arch=arch,
@@ -2230,6 +2452,8 @@ def _plan(
         pass_overrides=pass_overrides,
         call_layout=call_layout,
         fold_mode=fold_mode,
+        forward_stages=forward_stages,
+        num_heads=H,
     )
 
 
@@ -2291,7 +2515,7 @@ def _carve_moved(plan: _Plan, t: dict[str, torch.Tensor]) -> None:
         return
     if plan.dq_scratch:
         dq = t["dq_latent"].view(-1).view(torch.uint8)
-        layout = dq_scratch_layout(plan.num_queries, plan.num_kv)
+        layout = dq_scratch_layout(plan.num_queries, plan.num_kv, plan.num_heads)
         assert layout is not None and dq.data_ptr() % 16 == 0
         t["qstat"] = _carve(
             dq, layout, "qstat", torch.float32, (plan.num_queries, QSTAT_WORDS)
@@ -2302,12 +2526,14 @@ def _carve_moved(plan: _Plan, t: dict[str, torch.Tensor]) -> None:
         flat = out.view(-1).view(torch.uint8)
         assert flat.data_ptr() % 16 == 0
         R = plan.num_dst
-        layout = output_scratch_layout(plan.num_queries, R, delta=plan.delta_in_output)
+        layout = output_scratch_layout(
+            plan.num_queries, R, delta=plan.delta_in_output, num_heads=plan.num_heads
+        )
         t["redo_mark"] = _carve(flat, layout, "redo_mark", torch.int32, (R,))
         t["redo_rows"] = _carve(flat, layout, "redo_rows", torch.int32, (R,))
         if plan.delta_in_output:
             t["delta"] = _carve(
-                flat, layout, "delta", torch.float32, (plan.num_queries, NUM_HEADS)
+                flat, layout, "delta", torch.float32, (plan.num_queries, plan.num_heads)
             )
 
 
@@ -2350,7 +2576,7 @@ def _scratch(
         ),
     )
     if "delta" in layout:
-        t["delta"] = _carve(flat, layout, "delta", torch.float32, (T, NUM_HEADS))
+        t["delta"] = _carve(flat, layout, "delta", torch.float32, (T, plan.num_heads))
     if "qstat" in layout:
         t["qstat"] = _carve(flat, layout, "qstat", torch.float32, (T, QSTAT_WORDS))
     if "dsink_partial" in layout:
@@ -2363,12 +2589,14 @@ def _scratch(
         )
         t["dsink_ticket"] = _carve(flat, layout, "dsink_ticket", torch.int32, (1,))
     if "dq_partial" in layout:
+        # one block per work item: two per token (both windows) above 64 heads
+        items = HEAD_WINDOW_ITEMS if plan.num_heads != NUM_HEADS else 1
         t["dq_partial"] = _carve(
             flat,
             layout,
             "dq_partial",
             torch.float32,
-            (T, dq_partial_bytes(plan.program) // 4),
+            (items * T, dq_partial_bytes(plan.program) // 4),
         )
         t["key_scratch"] = _carve(
             flat, layout, "key_scratch", torch.int32, (T, plan.topk)
@@ -2558,6 +2786,9 @@ class DSATrainRunner:
     storage: str = "workspace"
     # Host flag of an ``"o_lo"`` runner: ``o_lo`` holds the residual of the last ``forward()``.
     o_lo_fresh: bool = field(default=False, repr=False)
+    # The binding's query head count ``H`` (``SUPPORTED_HEADS``); above 64 heads ``forward_stages`` is
+    # ``("fwd_h128",)`` and the backward launches the head-count builds (see "Query heads" above).
+    num_heads: int = NUM_HEADS
 
     @property
     def out(self) -> torch.Tensor:
@@ -2772,13 +3003,13 @@ def prepare_dsa_train(
         o_lo_scratch=o_lo_scratch,
     )
     device = q_latent.device
-    num_queries = plan.num_queries
+    num_queries, H = plan.num_queries, plan.num_heads
 
     def fresh(shape, dtype):
         return _alloc(shape, dtype, device)
 
     if o_lo is None:
-        o_lo = fresh((num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
+        o_lo = fresh((num_queries, H, D_LATENT), torch.bfloat16)
     flat, layout = _workspace_flat(plan, workspace_buffer, o_lo, device)
     t: dict[str, torch.Tensor] = dict(
         q_latent=q_latent,
@@ -2794,13 +3025,9 @@ def prepare_dsa_train(
         topk_length.fill_(plan.topk)
     t["topk_length"] = topk_length
     t["out"] = (
-        out
-        if out is not None
-        else fresh((num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
+        out if out is not None else fresh((num_queries, H, D_LATENT), torch.bfloat16)
     )
-    t["lse"] = (
-        lse if lse is not None else fresh((num_queries, NUM_HEADS), torch.float32)
-    )
+    t["lse"] = lse if lse is not None else fresh((num_queries, H), torch.float32)
     t["o_lo"] = o_lo
     if backward:
         t["dout"] = dout
@@ -2808,12 +3035,12 @@ def prepare_dsa_train(
         t["dq_latent"] = (
             dq_latent
             if dq_latent is not None
-            else fresh((num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
+            else fresh((num_queries, H, D_LATENT), torch.bfloat16)
         )
         t["dq_rope"] = (
             dq_rope
             if dq_rope is not None
-            else fresh((num_queries, NUM_HEADS, D_ROPE), torch.bfloat16)
+            else fresh((num_queries, H, D_ROPE), torch.bfloat16)
         )
         if plan.accumulate_dkv:
             t["dkv_acc"], _row_stride = _check_dkv_acc(
@@ -2840,8 +3067,10 @@ def prepare_dsa_train(
         key_passes=plan.key_passes,
         backward_order=plan.backward_order,
         accumulate_dkv=plan.accumulate_dkv,
+        forward_stages=plan.forward_stages,
         num_dst=plan.num_dst,
         storage=_bound_storage(plan, o_lo),
+        num_heads=H,
     )
 
 
@@ -2982,11 +3211,11 @@ class _Binding:
     ):
         """``(out, lse, o_lo)``: fresh tensors, or the ``into`` triple the forward writes again (the replay of a
         consumed ``o_lo``, see :class:`CakeDSASparseAttentionDetFunction`)."""
-        T, device = self.plan.num_queries, q_latent.device
+        T, H, device = self.plan.num_queries, self.plan.num_heads, q_latent.device
         if into is None:
-            out = _alloc((T, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-            lse = _alloc((T, NUM_HEADS), torch.float32, device)
-            o_lo = _alloc((T, NUM_HEADS, D_LATENT), torch.bfloat16, device)
+            out = _alloc((T, H, D_LATENT), torch.bfloat16, device)
+            lse = _alloc((T, H), torch.float32, device)
+            o_lo = _alloc((T, H, D_LATENT), torch.bfloat16, device)
         else:
             out, lse, o_lo = into
         t = dict(
@@ -3000,7 +3229,7 @@ class _Binding:
             lse=lse,
             o_lo=o_lo,
         )
-        self._run(_bound_values(self.plan, t), FORWARD_STAGES)
+        self._run(_bound_values(self.plan, t), self.plan.forward_stages)
         return out, lse, o_lo
 
     def backward(
@@ -3020,7 +3249,7 @@ class _Binding:
         check_dst_map=False,
     ):
         plan = self.plan
-        T, device = plan.num_queries, q_latent.device
+        T, H, device = plan.num_queries, plan.num_heads, q_latent.device
 
         def fresh(shape, dtype):
             return _alloc(shape, dtype, device)
@@ -3036,8 +3265,8 @@ class _Binding:
             lse=lse,
             o_lo=o_lo,
             dout=dout,
-            dq_latent=fresh((T, NUM_HEADS, D_LATENT), torch.bfloat16),
-            dq_rope=fresh((T, NUM_HEADS, D_ROPE), torch.bfloat16),
+            dq_latent=fresh((T, H, D_LATENT), torch.bfloat16),
+            dq_rope=fresh((T, H, D_ROPE), torch.bfloat16),
         )
         # One per-call allocation of the per-call layout (delta, the global words, qstat unless it lives in dQ and,
         # unless the plan carves o_lo, the accumulator region); nothing is filled here: the stages zero what they
@@ -3159,7 +3388,8 @@ def _no_query_rows(q_latent: torch.Tensor) -> bool:
 def _empty_forward(
     q_latent, q_rope, kv_latent, k_rope, indices, topk_length
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(out, lse, o_lo)`` of a call without query rows: validated, empty, neither bound nor launched."""
+    """``(out, lse, o_lo)`` of a call without query rows: validated, empty, neither bound nor launched (a CUDA call
+    over more than 64 heads checks the architecture rule, :func:`_check_empty_heads`)."""
     validate_dsa_train_inputs(
         q_latent,
         q_rope,
@@ -3169,10 +3399,20 @@ def _empty_forward(
         topk_length,
         allow_empty_queries=True,
     )
+    H = _check_empty_heads(q_latent)
     device = q_latent.device
-    out = _alloc((0, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-    lse = _alloc((0, NUM_HEADS), torch.float32, device)
-    return out, lse, _alloc((0, NUM_HEADS, D_LATENT), torch.bfloat16, device)
+    out = _alloc((0, H, D_LATENT), torch.bfloat16, device)
+    lse = _alloc((0, H), torch.float32, device)
+    return out, lse, _alloc((0, H, D_LATENT), torch.bfloat16, device)
+
+
+def _check_empty_heads(q_latent: torch.Tensor) -> int:
+    """The head count of a validated call without query rows; a CUDA ``q_latent`` of more than 64 heads on an
+    architecture outside ``HEAD_COUNT_ARCHES`` raises as a call with rows would (:func:`_check_head_arch`)."""
+    H = num_query_heads(q_latent)
+    if H != NUM_HEADS and q_latent.is_cuda:
+        _check_head_arch(H, arch_for(q_latent.device))
+    return H
 
 
 def _empty_backward(
@@ -3203,12 +3443,13 @@ def _empty_backward(
         dout=dout,
         allow_empty_queries=True,
     )
-    _check_output(out, "out", (0, NUM_HEADS, D_LATENT), torch.bfloat16)
-    _check_output(o_lo, "o_lo", (0, NUM_HEADS, D_LATENT), torch.bfloat16)
-    _check_output(lse, "lse", (0, NUM_HEADS), torch.float32)
+    H = _check_empty_heads(q_latent)
+    _check_output(out, "out", (0, H, D_LATENT), torch.bfloat16)
+    _check_output(o_lo, "o_lo", (0, H, D_LATENT), torch.bfloat16)
+    _check_output(lse, "lse", (0, H), torch.float32)
     device, num_kv = q_latent.device, int(kv_latent.shape[0])
-    dq_latent = _alloc((0, NUM_HEADS, D_LATENT), torch.bfloat16, device)
-    dq_rope = _alloc((0, NUM_HEADS, D_ROPE), torch.bfloat16, device)
+    dq_latent = _alloc((0, H, D_LATENT), torch.bfloat16, device)
+    dq_rope = _alloc((0, H, D_ROPE), torch.bfloat16, device)
     if dkv_acc is not None:
         # nothing to accumulate; the buffer and the map are validated all the same
         _check_dkv_acc(dkv_acc, dkv_dst_map, num_kv, check_dst_map=check_dst_map)
@@ -3286,10 +3527,10 @@ def forward(
     )
     into = None
     if all(given):
-        num_queries = binding.plan.num_queries
-        _check_output(out, "out", (num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
-        _check_output(lse, "lse", (num_queries, NUM_HEADS), torch.float32)
-        _check_output(o_lo, "o_lo", (num_queries, NUM_HEADS, D_LATENT), torch.bfloat16)
+        num_queries, H = binding.plan.num_queries, binding.plan.num_heads
+        _check_output(out, "out", (num_queries, H, D_LATENT), torch.bfloat16)
+        _check_output(lse, "lse", (num_queries, H), torch.float32)
+        _check_output(o_lo, "o_lo", (num_queries, H, D_LATENT), torch.bfloat16)
         into = (out, lse, o_lo)
     return binding.forward(
         q_latent, q_rope, kv_latent, k_rope, indices, topk_length, into=into

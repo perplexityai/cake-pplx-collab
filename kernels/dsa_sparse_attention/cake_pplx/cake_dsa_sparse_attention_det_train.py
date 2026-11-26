@@ -13,10 +13,20 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-Cake DeepSeek Sparse Attention (top-k sparse MLA, absorbed queries, 64 query
-heads) training forward and backward on SM100 / SM103 / SM107, the
-deterministic package: the stable entry points over the backend package
+Cake DeepSeek Sparse Attention (top-k sparse MLA, absorbed queries) training
+forward and backward on SM100 / SM103 / SM107, the deterministic package: the
+stable entry points over the backend package
 ``cake_pplx._backends.cake_dsa_sparse_attention_det_train``.
+
+Query heads: the rope entries take ``H = q_latent.shape[1]`` heads, ``H`` in
+64, 96 and 128 (96 and 128 on SM100 / SM103; SM107 serves 64 and raises
+``NotImplementedError`` for another ``H``); every head tensor below written
+``[T, 64, ...]`` is ``[T, H, ...]`` for them.  The kernels compute 64 heads of
+a token per work item: above 64 heads the forward runs the single-pass forward
+(every head of a token in one 2-CTA cluster) and the backward the head-window
+builds (both 64-head windows ``[0, 64)`` and ``[64, 128)`` of every token in
+one launch, the heads past ``H`` padding).  Their outputs repeat bit for bit
+like the 64-head ones.  The NoPE entries take 64 heads.
 
 Numerical mode: the module name chooses the package, and no entry point takes a
 mode keyword.  Every output repeats bit for bit for the same inputs, device
@@ -229,8 +239,9 @@ def cake_dsa_sparse_attention_det(
     num_segments: int = 1,
 ):
     r"""Differentiable top-k sparse MLA attention with absorbed queries (DeepSeek
-    Sparse Attention) for training, 64 query heads, SM100 / SM103 / SM107 only;
-    every output repeats bit for bit.
+    Sparse Attention) for training, ``H`` query heads (64 on SM100 / SM103 /
+    SM107; 96 or 128 on SM100 / SM103), SM100 / SM103 / SM107 only; every
+    output repeats bit for bit.
 
     ``O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent``
     over the keys a row's ``indices`` select (K = V = the latent).
@@ -246,13 +257,15 @@ def cake_dsa_sparse_attention_det(
     Parameters
     ----------
     q_latent : torch.Tensor
-        BF16 ``[T, 64, 512]`` absorbed query latents; contiguous or a view of
-        a packed ``[T, 64, 576]`` query (head stride 576).
+        BF16 ``[T, H, 512]`` absorbed query latents, ``H`` in 64, 96 or 128
+        (the call's head count); contiguous or a view of a packed ``[T, H,
+        576]`` query (head stride 576).  Another ``H`` raises ``ValueError``;
+        96 or 128 heads on SM107 raise ``NotImplementedError``.
     q_rope : torch.Tensor
-        BF16 ``[T, 64, 64]`` query rope part; contiguous, a view of the packed
-        ``[T, 64, 576]`` query, or the ``192:256`` channel slice of the
-        pre-absorption ``[T, 64, 256]`` query (head stride 256, token stride
-        16384, storage offset 192 elements).
+        BF16 ``[T, H, 64]`` query rope part; contiguous, a view of the packed
+        ``[T, H, 576]`` query, or the ``192:256`` channel slice of the
+        pre-absorption ``[T, H, 256]`` query (head stride 256, token stride
+        ``H * 256``, storage offset 192 elements).
     kv_latent : torch.Tensor
         BF16 ``[S, 512]`` key/value latent (shared K = V); columns ``0:512`` of
         a packed ``[S, 576]`` or ``[S, 704]`` row (a 128-channel indexer key
@@ -270,7 +283,7 @@ def cake_dsa_sparse_attention_det(
     softmax_scale : Optional[float]
         Defaults to ``576 ** -0.5``.
     return_lse : bool
-        Also return the natural-log logsumexp ``[T, 64]`` FP32 of the scaled
+        Also return the natural-log logsumexp ``[T, H]`` FP32 of the scaled
         scores over the valid keys (``-inf`` for fully masked rows).
     key_passes : Optional[int]
         Validated as in the non-deterministic package (``None`` or
@@ -329,7 +342,7 @@ def cake_dsa_sparse_attention_det(
     Returns
     -------
     out : torch.Tensor
-        BF16 ``[T, 64, 512]``; zero for fully masked rows.
+        BF16 ``[T, H, 512]``; zero for fully masked rows.
     lse : torch.Tensor
         Only with ``return_lse=True``.
 
@@ -341,7 +354,8 @@ def cake_dsa_sparse_attention_det(
     gradient element is then formed with one more rounding (and, with
     ``dkv_acc``, one FP32 addition).  The backward reuses the storage of the
     saved ``o_lo`` as its integer accumulator when it fits (``S_dst`` up to
-    about ``27.7 T`` rows) and allocates it otherwise; a second backward
+    about ``27.7 T`` rows at 64 heads, ``H / 64`` times that above) and
+    allocates it otherwise; a second backward
     through the same graph (``retain_graph=True``) first recomputes the
     forward into the saved tensors.  The kernels apply no positional mask: the
     index rows define the key set.
@@ -741,8 +755,8 @@ def cake_dsa_sparse_attention_det_train_forward(
     o_lo)``.
 
     The inputs are those of :func:`cake_dsa_sparse_attention_det`. ``out`` is
-    BF16 ``[T, 64, 512]`` (zero for a fully masked row), ``lse`` FP32 ``[T,
-    64]`` and ``o_lo`` BF16 ``[T, 64, 512]``, the rounding residual of ``out``
+    BF16 ``[T, H, 512]`` (zero for a fully masked row), ``lse`` FP32 ``[T,
+    H]`` and ``o_lo`` BF16 ``[T, H, 512]``, the rounding residual of ``out``
     (``out + o_lo`` is the output before its BF16 rounding). Pass the three
     unchanged to :func:`cake_dsa_sparse_attention_det_train_backward`. Every
     output repeats bit for bit and is that of the autograd entry's forward on
@@ -788,8 +802,9 @@ def cake_dsa_sparse_attention_det_train_backward(
 
     ``out``, ``o_lo`` and ``lse`` are the outputs of
     :func:`cake_dsa_sparse_attention_det_train_forward` on the same inputs and
-    ``topk_length`` / ``softmax_scale``; ``dout`` is the BF16 ``[T, 64, 512]``
-    gradient of ``out``. The call leaves ``o_lo`` unchanged. ``dq_latent`` /
+    ``topk_length`` / ``softmax_scale``; ``dout`` is the BF16 ``[T, H, 512]``
+    gradient of ``out`` (any layout under the rules of ``q_latent`` is read in
+    place). The call leaves ``o_lo`` unchanged. ``dq_latent`` /
     ``dq_rope`` are BF16. ``dkv_latent`` / ``dk_rope`` are BF16 in the layout
     of ``kv_latent`` / ``k_rope``, or FP32 with ``dkv_fp32=True``. With a
     tensor ``dkv_acc`` (FP32 ``[S_dst, >= 576]``) the call adds ``dK + dV``
