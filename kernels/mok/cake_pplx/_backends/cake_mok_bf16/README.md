@@ -828,13 +828,14 @@ across communication-SM splits and under CUDA Graph replay.
   gradients), macro batch 32,768, three rounds of 0.4.0, this package and a
   second 0.4.0 process interleaved on the same GPUs, order reversed in every
   second round, eager, slowest rank's median of 20 timed repetitions, median
-  over the lines; change = this package / main - 1; band = the largest relative
-  spread of the lines of either side; 'faster' = the line ranges do not overlap
-  and the change is beyond the band, 'noise' otherwise. Forward = schedule and
-  forward without context; checkpointed step = schedule, forward without
-  context, context recompute and backward. The two 0.4.0 processes differ by at
-  most 0.4 % on every row except the context recompute (at most 3.3 %, 0.8 ms).
-  On GB200, B200 and B300 this package launches the same splits as 0.4.0.
+  over the lines (main: the 6 lines of both 0.4.0 processes); change = this
+  package / main - 1; band = the largest relative spread of the lines of either
+  side; 'faster' = the line ranges do not overlap and the change is beyond the
+  band, 'noise' otherwise. Forward = schedule and forward without context;
+  checkpointed step = schedule, forward without context, context recompute and
+  backward. The two 0.4.0 processes differ by at most 0.32 % on every row
+  except the context recompute (at most 3.3 % of a 0.8 ms launch). On GB200,
+  B200 and B300 this package launches the same splits as 0.4.0.
 
   | routing | tokens per rank | operation | main (ms) | this package (ms) | change |
   | --- | --- | --- | --- | --- | --- |

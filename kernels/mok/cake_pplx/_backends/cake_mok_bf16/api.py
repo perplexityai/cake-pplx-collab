@@ -166,9 +166,9 @@ _FACTORY_COMM_SMS = (40, 40)
 # step faster but its backward slower, the faster forward leaving the GPU at a
 # lower SM clock under its power limit (48 / 48, 32,768 tokens per rank,
 # uniform: checkpointed step 41.97 -> 38.90 ms, backward 26.17 -> 27.14 ms).
-# B200 ((10, 0), 148 SMs) keeps 40 / 40 (48 / 40 measured within the spread of
-# identical arms) and GB200 ((10, 0), 152 SMs) keeps 40 / 40 (no other count
-# measured).
+# B200 ((10, 0), 148 SMs) keeps 40 / 40 (48 / 40 measured: checkpointed step
+# within 0.7 % of 40 / 40) and GB200 ((10, 0), 152 SMs) keeps 40 / 40 (no other
+# count measured).
 # Absolute times against the previous version: backend README, "Fixed split
 # per launch shape".
 SHAPE_COMM_SMS = {
