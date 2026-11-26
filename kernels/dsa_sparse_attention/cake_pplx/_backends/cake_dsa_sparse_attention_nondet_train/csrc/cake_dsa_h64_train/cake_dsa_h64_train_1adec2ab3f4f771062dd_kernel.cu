@@ -1743,6 +1743,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
         // ---- Role: mma ----
         if (warp == 16) {
             { // mma_main
+#if DKV_NATURAL == 0
+                int item_1 = token_base + token_step * blockIdx.x;
+                int item_token_1 = ((wsel < 0) ? item_1 >> 1 : item_1);
+                int item_head_1 = ((wsel < 0) ? (item_1 & 1) * 64 : wsel * 64);
+                int real_heads = num_heads - item_head_1;
+#endif
                 mbarrier_wait_hint(blocks_ready_addr, 0, 10000000);
                 int blocks_3 = blocks_word[0];
                 mbarrier_wait_hint(qdo_full_addr, 0, 10000000);
@@ -1996,9 +2002,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_4), "r"(_smem_desc_lo_5), "r"((tmem_tmem + (64))), "r"(0) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_6 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_7 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_6 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_7 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2017,9 +2030,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_6), "r"(_smem_desc_lo_7), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_8 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_9 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_8 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_9 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2038,9 +2059,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_8), "r"(_smem_desc_lo_9), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_10 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_11 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_10 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_11 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2059,6 +2088,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_10), "r"(_smem_desc_lo_11), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         int _smem_desc_lo_12 = ((((qdo_mn_addr + 2048) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_13 = (((p_k_addr) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
@@ -2080,9 +2112,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_12), "r"(_smem_desc_lo_13), "r"((tmem_tmem + (128))), "r"(0) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_14 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_15 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_14 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_15 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2101,9 +2140,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_14), "r"(_smem_desc_lo_15), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_16 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_17 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_16 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_17 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2122,9 +2169,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_16), "r"(_smem_desc_lo_17), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_18 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_19 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_18 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_19 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2143,6 +2198,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_18), "r"(_smem_desc_lo_19), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         int _parity_ds_full = (int)((unsigned int)i_3 % 2);
                         mbarrier_wait_hint(ds_full_addr, _parity_ds_full, 10000000);
                         asm volatile("tcgen05.fence::after_thread_sync;");
@@ -2344,9 +2402,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_24), "r"(_smem_desc_lo_25), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_26 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_27 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_26 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_27 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2365,9 +2430,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_26), "r"(_smem_desc_lo_27), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_28 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_29 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_28 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_29 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2386,9 +2459,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_28), "r"(_smem_desc_lo_29), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_30 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_31 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_30 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_31 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2407,6 +2488,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_30), "r"(_smem_desc_lo_31), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         int _smem_desc_lo_32 = ((((qdo_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_33 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
@@ -2428,9 +2512,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_32), "r"(_smem_desc_lo_33), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_34 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_35 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_34 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_35 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2449,9 +2540,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_34), "r"(_smem_desc_lo_35), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_36 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_37 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_36 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_37 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2470,9 +2569,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_36), "r"(_smem_desc_lo_37), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_38 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_39 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_38 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_39 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2491,6 +2598,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_38), "r"(_smem_desc_lo_39), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         tcgen05_commit(dkv_a_full_addr);
                         int _smem_desc_lo_40 = (((qr_mn_addr) >> 4) & 0x3FFF) | 0x2000000;
                         int _smem_desc_lo_41 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
@@ -2553,9 +2663,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_42), "r"(_smem_desc_lo_43), "r"((tmem_tmem + (64))), "r"(0) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_44 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_45 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_44 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_45 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2574,9 +2691,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_44), "r"(_smem_desc_lo_45), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_46 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_47 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_46 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_47 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2595,9 +2720,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_46), "r"(_smem_desc_lo_47), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_48 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_49 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_48 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_49 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2616,6 +2749,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_48), "r"(_smem_desc_lo_49), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         int _smem_desc_lo_50 = ((((qdo_mn_addr + 2048) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_51 = (((p_k_addr) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
@@ -2637,9 +2773,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_50), "r"(_smem_desc_lo_51), "r"((tmem_tmem + (128))), "r"(0) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_52 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_53 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_52 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_53 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2658,9 +2801,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_52), "r"(_smem_desc_lo_53), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_54 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_55 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_54 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_55 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2679,9 +2830,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_54), "r"(_smem_desc_lo_55), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_56 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_57 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_56 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_57 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2700,6 +2859,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_56), "r"(_smem_desc_lo_57), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         tcgen05_commit(p_free_addr);
                         int _smem_desc_lo_58 = ((((qdo_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_59 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
@@ -2722,9 +2884,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_58), "r"(_smem_desc_lo_59), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_60 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_61 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_60 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_61 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2743,9 +2912,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_60), "r"(_smem_desc_lo_61), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_62 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_63 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_62 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_63 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2764,9 +2941,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_62), "r"(_smem_desc_lo_63), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_64 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_65 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_64 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_65 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2785,6 +2970,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_64), "r"(_smem_desc_lo_65), "r"((tmem_tmem + (64))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         int _smem_desc_lo_66 = ((((qdo_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_67 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
@@ -2806,9 +2994,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_66), "r"(_smem_desc_lo_67), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_68 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_69 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        if (real_heads > 16) {
+                            int _smem_desc_lo_68 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_69 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2827,9 +3022,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_68), "r"(_smem_desc_lo_69), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_70 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_71 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 32) {
+                            int _smem_desc_lo_70 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_71 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2848,9 +3051,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_70), "r"(_smem_desc_lo_71), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 1
                         int _smem_desc_lo_72 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_73 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
                         asm volatile(
+#else
+                        }
+                        if (real_heads > 48) {
+                            int _smem_desc_lo_72 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_73 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+                            asm volatile(
+#endif
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
                         ".reg .b32 adhi, bdhi, alo, blo, id;\n\t"
@@ -2869,6 +3080,9 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p0;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_72), "r"(_smem_desc_lo_73), "r"((tmem_tmem + (128))), "r"(1) : "memory");
+#if DKV_NATURAL == 0
+                        }
+#endif
                         tcgen05_commit(dkv_b_full_addr);
                         tcgen05_commit(ds_free_addr);
                         if (blocks_3 > i_3 + 1) {
@@ -3103,44 +3317,90 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
         // ---- Role: load ----
         } else if (warp == 17) {
             { // load_main
+#if DKV_NATURAL == 1
                 int item_1 = token_base + token_step * blockIdx.x;
                 int item_token_1 = ((wsel < 0) ? item_1 >> 1 : item_1);
                 int item_head_1 = ((wsel < 0) ? (item_1 & 1) * 64 : wsel * 64);
+#else
+                int item_2 = token_base + token_step * blockIdx.x;
+                int item_token_2 = ((wsel < 0) ? item_2 >> 1 : item_2);
+                int item_head_2 = ((wsel < 0) ? (item_2 & 1) * 64 : wsel * 64);
+#endif
                 int lane_0_2 = lane;
                 if (elect_sync()) {
                     #pragma unroll 1
                     for (int c = 0; c < 8; c++) {
                         unsigned int dst_0 = (unsigned int)(16384 * c);
+#if DKV_NATURAL == 1
                         tma_4d_gmem2smem(qdo_k_addr + dst_0, (&q_latent), 0, item_head_1, c, item_token_1, qdo_full_addr);
                         tma_4d_gmem2smem(qdo_k_addr + (dst_0 + 2048), (&dout), 0, item_head_1, c, item_token_1, qdo_full_addr);
+#else
+                        tma_4d_gmem2smem(qdo_k_addr + dst_0, (&q_latent), 0, item_head_2, c, item_token_2, qdo_full_addr);
+                        tma_4d_gmem2smem(qdo_k_addr + (dst_0 + 2048), (&dout), 0, item_head_2, c, item_token_2, qdo_full_addr);
+#endif
                         unsigned int dst_1 = (unsigned int)(16384 * c + 4096);
+#if DKV_NATURAL == 1
                         tma_4d_gmem2smem(qdo_k_addr + dst_1, (&q_latent), 0, item_head_1 + 16, c, item_token_1, qdo_full_addr);
                         tma_4d_gmem2smem(qdo_k_addr + (dst_1 + 2048), (&dout), 0, item_head_1 + 16, c, item_token_1, qdo_full_addr);
+#else
+                        tma_4d_gmem2smem(qdo_k_addr + dst_1, (&q_latent), 0, item_head_2 + 16, c, item_token_2, qdo_full_addr);
+                        tma_4d_gmem2smem(qdo_k_addr + (dst_1 + 2048), (&dout), 0, item_head_2 + 16, c, item_token_2, qdo_full_addr);
+#endif
                         unsigned int dst_2 = (unsigned int)(16384 * c + 8192);
+#if DKV_NATURAL == 1
                         tma_4d_gmem2smem(qdo_k_addr + dst_2, (&q_latent), 0, item_head_1 + 32, c, item_token_1, qdo_full_addr);
                         tma_4d_gmem2smem(qdo_k_addr + (dst_2 + 2048), (&dout), 0, item_head_1 + 32, c, item_token_1, qdo_full_addr);
+#else
+                        tma_4d_gmem2smem(qdo_k_addr + dst_2, (&q_latent), 0, item_head_2 + 32, c, item_token_2, qdo_full_addr);
+                        tma_4d_gmem2smem(qdo_k_addr + (dst_2 + 2048), (&dout), 0, item_head_2 + 32, c, item_token_2, qdo_full_addr);
+#endif
                         unsigned int dst_3 = (unsigned int)(16384 * c + 12288);
+#if DKV_NATURAL == 1
                         tma_4d_gmem2smem(qdo_k_addr + dst_3, (&q_latent), 0, item_head_1 + 48, c, item_token_1, qdo_full_addr);
                         tma_4d_gmem2smem(qdo_k_addr + (dst_3 + 2048), (&dout), 0, item_head_1 + 48, c, item_token_1, qdo_full_addr);
+#else
+                        tma_4d_gmem2smem(qdo_k_addr + dst_3, (&q_latent), 0, item_head_2 + 48, c, item_token_2, qdo_full_addr);
+                        tma_4d_gmem2smem(qdo_k_addr + (dst_3 + 2048), (&dout), 0, item_head_2 + 48, c, item_token_2, qdo_full_addr);
+#endif
                     }
+#if DKV_NATURAL == 1
                     tma_4d_gmem2smem(qr_k_addr, (&q_rope), 0, item_head_1, 0, item_token_1, qdo_full_addr);
+#else
+                    tma_4d_gmem2smem(qr_k_addr, (&q_rope), 0, item_head_2, 0, item_token_2, qdo_full_addr);
+#endif
                     mbarrier_arrive_expect_tx(qdo_full_addr, 139264);
                 }
+#if DKV_NATURAL == 1
                 int srow_0 = item_head_1 + lane_0_2;
+#else
+                int srow_0 = item_head_2 + lane_0_2;
+#endif
                 float srow_lse_0 = CUDART_INF_F;
                 float srow_delta_0 = 0.0f;
                 if (srow_0 < num_heads) {
+#if DKV_NATURAL == 1
                     long long sidx_0 = (long long)item_token_1 * (long long)num_heads + (long long)srow_0;
+#else
+                    long long sidx_0 = (long long)item_token_2 * (long long)num_heads + (long long)srow_0;
+#endif
                     srow_lse_0 = lse[sidx_0] * 1.442695f;
                     srow_delta_0 = delta[sidx_0];
                 }
                 stats[lane_0_2] = srow_lse_0;
                 stats[64 + lane_0_2] = srow_delta_0;
+#if DKV_NATURAL == 1
                 int srow_2 = item_head_1 + 32 + lane_0_2;
+#else
+                int srow_2 = item_head_2 + 32 + lane_0_2;
+#endif
                 float srow_lse_1 = CUDART_INF_F;
                 float srow_delta_1 = 0.0f;
                 if (srow_2 < num_heads) {
+#if DKV_NATURAL == 1
                     long long sidx_1 = (long long)item_token_1 * (long long)num_heads + (long long)srow_2;
+#else
+                    long long sidx_1 = (long long)item_token_2 * (long long)num_heads + (long long)srow_2;
+#endif
                     srow_lse_1 = lse[sidx_1] * 1.442695f;
                     srow_delta_1 = delta[sidx_1];
                 }
@@ -3152,17 +3412,31 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
         // ---- Role: metadata ----
         } else if (warp == 18) {
             { // metadata_main
+#if DKV_NATURAL == 1
                 int item_2 = token_base + token_step * blockIdx.x;
                 int item_token_2 = ((wsel < 0) ? item_2 >> 1 : item_2);
                 int item_head_2 = ((wsel < 0) ? (item_2 & 1) * 64 : wsel * 64);
+#else
+                int item_3 = token_base + token_step * blockIdx.x;
+                int item_token_3 = ((wsel < 0) ? item_3 >> 1 : item_3);
+                int item_head_3 = ((wsel < 0) ? (item_3 & 1) * 64 : wsel * 64);
+#endif
                 int lane_0_3 = lane;
                 int active = topk;
                 if (has_topk_length != 0) {
+#if DKV_NATURAL == 1
                     int _max_1 = ((topk_length[item_token_2]) > (0) ? (topk_length[item_token_2]) : (0));
+#else
+                    int _max_1 = ((topk_length[item_token_3]) > (0) ? (topk_length[item_token_3]) : (0));
+#endif
                     int _min_0 = ((_max_1) < (topk) ? (_max_1) : (topk));
                     active = _min_0;
                 }
+#if DKV_NATURAL == 1
                 long long row_base = (long long)indices_offset + (long long)item_token_2 * (long long)idx_stride;
+#else
+                long long row_base = (long long)indices_offset + (long long)item_token_3 * (long long)idx_stride;
+#endif
                 int aligned4 = (int)(((idx_stride | indices_offset) & 3) == 0);
                 int last_valid = -1;
                 for (int blk = (active + 127) / 128 - 1; blk >= 0; blk--) {
