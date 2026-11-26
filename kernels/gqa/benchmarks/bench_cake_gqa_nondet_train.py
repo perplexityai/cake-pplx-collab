@@ -8,7 +8,8 @@ FlashAttention arm (``flash_attn.cute``, when installed) returns BF16 window gra
 destinations and adds them with ``index_add_`` (the issue's packed-CP adapter), so initialization counts on both
 sides.  Both arms see identical generated inputs; the arms alternate within each repetition and the median of the
 repetitions is reported, per stage and per step, with the workspace bytes (the scratch a workspace keeps plus the
-backward's per-call dS^T chunk and FP32 window gradients at the workspace budget, ``--budget-gib``, default 16).
+backward's per-call dS^T chunk and FP32 window gradients at the workspace budget, ``--budget-gib``, default the
+package's: 16 GiB, raised to ranges of 72 key blocks, at most 40 GiB, when one KV head does not fit).
 
 Layouts are context-parallel zigzag packs: each document is cut into ``2 CP`` chunks; rank ``r`` holds chunks ``r``
 and ``2 CP - 1 - r``, and a chunk's key window is the document's prefix up to the chunk's end (bottom-right causal).
@@ -297,7 +298,7 @@ def main() -> int:
         "--budget-gib",
         type=float,
         default=None,
-        help="dS^T workspace budget of the Cake backward in GiB (default: the package's, 16)",
+        help="dS^T workspace budget of the Cake backward in GiB (default: the package's, 16 with its one-wave floor)",
     )
     parser.add_argument(
         "--host-boundaries",

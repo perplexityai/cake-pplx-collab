@@ -308,7 +308,7 @@ def cake_gqa_det_train_workspace_bytes(
     num_heads_kv: Optional[int] = None,
     max_seqlen_k: Optional[int] = None,
     row_map: bool = False,
-    budget_bytes: int = cake_jit.DEFAULT_WORKSPACE_BUDGET,
+    budget_bytes: int | None = None,
     cu_seqlens_q_host: Optional[HostBoundaries] = None,
     cu_seqlens_k_host: Optional[HostBoundaries] = None,
 ) -> int:
@@ -318,7 +318,11 @@ def cake_gqa_det_train_workspace_bytes(
     ``num_heads_kv`` given the dS^T chunk of ``budget_bytes`` (:func:`.cake_jit.chunk_plan`; exact with the host
     boundaries ``cu_seqlens_q_host`` / ``cu_seqlens_k_host``, else a bound) and with ``row_map`` also the two FP32
     window gradients ``[T_k, H_kv, 256]``.  Without ``total_k`` / ``num_heads_kv`` the result is the scratch alone:
-    ``total_k`` and ``num_heads_kv`` go together, and ``row_map`` needs both."""
+    ``total_k`` and ``num_heads_kv`` go together, and ``row_map`` needs both.
+
+    ``budget_bytes=None`` is the default budget: 16 GiB, raised when one KV head does not fit so that a key-block
+    range holds 72 key blocks (:data:`.cake_jit.WAVE_KEY_BLOCKS`; every key block when there are fewer), at most
+    40 GiB."""
     if (total_k is None) != (num_heads_kv is None):
         raise ValueError(
             "total_k and num_heads_kv go together: give both to include the dS^T chunk, or neither"
@@ -338,7 +342,7 @@ def cake_gqa_det_train_workspace_bytes(
             num_heads_kv=int(num_heads_kv),
             num_segments=int(num_segments),
             max_seqlen_k=max_seqlen_k,
-            budget_bytes=int(budget_bytes),
+            budget_bytes=None if budget_bytes is None else int(budget_bytes),
             seqlens=None
             if host is None
             else cake_jit.host_seqlens(
@@ -357,20 +361,23 @@ class CakeGQADetWorkspace:
     It holds the forward's tile counter (one ``uint32``, zeroed once; every launch leaves it zero) and the backward
     scratch, grown to the largest shape seen and never shrunk.  The dS^T workspace and the row-map window gradients
     come from PyTorch's caching allocator for each backward call and are freed when it returns, so between calls
-    their memory serves other tensors.  ``budget_bytes`` bounds the dS^T workspace of one backward call (default
-    :data:`.cake_jit.DEFAULT_WORKSPACE_BUDGET`, 16 GiB): a call whose dS^T exceeds it runs in chunks (KV heads first,
-    then key-block ranges); the smallest chunk, one KV head and two key blocks, runs even when it exceeds the budget.
-    The chunks depend on the shape, ``max_seqlen_k``, the budget and the host boundaries a call passes (given or not)
-    only, so one budget gives the same bits on every run; a different budget may round dQ differently.  One workspace
-    serves one stream at a time: two launches running concurrently on different streams need two workspaces.
-    Autograd keeps only a weak reference to it, so a checkpointed forward retains nothing through it.
+    their memory serves other tensors.  ``budget_bytes`` bounds the dS^T workspace of one backward call: a call whose
+    dS^T exceeds it runs in chunks (KV heads first, then key-block ranges); the smallest chunk, one KV head and two
+    key blocks, runs even when it exceeds the budget.  ``None`` (kept as ``None``) is the default budget,
+    :data:`.cake_jit.DEFAULT_WORKSPACE_BUDGET` (16 GiB), raised when one KV head does not fit so that a key-block
+    range holds 72 key blocks (:data:`.cake_jit.WAVE_KEY_BLOCKS`; every key block when there are fewer), at most
+    :data:`.cake_jit.DEFAULT_WORKSPACE_CAP` (40 GiB); a given budget is a hard bound, 16 GiB included.  The chunks
+    depend on the shape, ``max_seqlen_k``, the budget and the host boundaries a call passes (given or not) only, so
+    one budget gives the same bits on every run; a different budget may round dQ differently.  One workspace serves
+    one stream at a time: two launches running concurrently on different streams need two workspaces.  Autograd
+    keeps only a weak reference to it, so a checkpointed forward retains nothing through it.
     """
 
     def __init__(
         self,
         device: Union[torch.device, str, int, None] = None,
         *,
-        budget_bytes: int = cake_jit.DEFAULT_WORKSPACE_BUDGET,
+        budget_bytes: int | None = None,
     ) -> None:
         if device is None:
             resolved = torch.device("cuda", torch.cuda.current_device())
@@ -382,10 +389,10 @@ class CakeGQADetWorkspace:
             raise ValueError(f"a workspace lives on a CUDA device, not {resolved}")
         if resolved.index is None:
             resolved = torch.device("cuda", torch.cuda.current_device())
-        if int(budget_bytes) <= 0:
+        if budget_bytes is not None and int(budget_bytes) <= 0:
             raise ValueError(f"budget_bytes must be positive, got {budget_bytes}")
         self.device = resolved
-        self.budget_bytes = int(budget_bytes)
+        self.budget_bytes = None if budget_bytes is None else int(budget_bytes)
         self._counter: Optional[torch.Tensor] = None
         self._scratch: Optional[torch.Tensor] = None
         self._views: Optional[tuple[tuple[int, int, int], tuple[torch.Tensor, ...]]] = (
@@ -1215,7 +1222,7 @@ class CakeGQADetFunction(torch.autograd.Function):
     ) -> tuple[Optional[torch.Tensor], ...]:
         q, k, v, out, lse, cu_seqlens_q, cu_seqlens_k = ctx.saved_tensors
         workspace = None if ctx.workspace_ref is None else ctx.workspace_ref()
-        if workspace is None and ctx.budget_bytes is not None:
+        if workspace is None and ctx.workspace_ref is not None:
             # The caller dropped its workspace after the forward: one for this call with its budget keeps the bits.
             workspace = CakeGQADetWorkspace(q.device, budget_bytes=ctx.budget_bytes)
         if dout is None:

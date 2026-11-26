@@ -18,8 +18,8 @@ packed-varlen GQA training attention (head dimension 256).
 
 Without a device: no entry point is an experimental API (no ``ExperimentalWarning``), importing the module imports no
 backend, the re-exported classes and types are the backend's objects (resolved on first access), the module reads no
-environment variable, every keyword of an entry point is the backend's keyword of the same name (the workspace
-budget's ``None`` standing for the backend's 16 GiB default), every entry point takes the parameters of the
+environment variable, every keyword of an entry point is the backend's keyword of the same name and default (the
+workspace budget's ``None`` is the backend's default budget too), every entry point takes the parameters of the
 non-deterministic package's entry of the same role, the extras of ``cake_gqa_det_train_workspace_bytes`` are
 keyword-only, and every entry point forwards every argument, ``budget_bytes`` included, to the backend unchanged.
 On SM100 / SM103 / SM107: the entry points return the backend's results bit for bit, the workspace helpers, and
@@ -127,13 +127,15 @@ def test_the_module_reads_no_environment_variable() -> None:
 
 
 def test_keywords_match_the_backend() -> None:
-    """Every facade parameter is the backend's of the same name, kind and default; the one exception is the
-    workspace budget, whose facade default ``None`` stands for the backend default
-    (``cake_jit.DEFAULT_WORKSPACE_BUDGET``, 16 GiB)."""
+    """Every facade parameter is the backend's of the same name, kind and default; the workspace budget's default is
+    ``None`` on both sides, the default budget (``cake_jit.DEFAULT_WORKSPACE_BUDGET``, 16 GiB, with its one-wave floor
+    of ``cake_jit.WAVE_KEY_BLOCKS``, 72 key blocks, up to ``cake_jit.DEFAULT_WORKSPACE_CAP``, 40 GiB)."""
     cake_backend = _backend()
     from cake_pplx._backends.cake_gqa_det_train import cake_jit
 
     assert cake_jit.DEFAULT_WORKSPACE_BUDGET == 16 << 30
+    assert cake_jit.DEFAULT_WORKSPACE_CAP == 40 << 30
+    assert cake_jit.WAVE_KEY_BLOCKS == 72
     pairs = [
         (
             facade,
@@ -157,7 +159,7 @@ def test_keywords_match_the_backend() -> None:
             assert param.kind == theirs[name].kind, (facade, name)
             if name == "budget_bytes":
                 assert param.default is None, facade
-                assert theirs[name].default == cake_jit.DEFAULT_WORKSPACE_BUDGET, facade
+                assert theirs[name].default is None, facade
             elif param.default is not inspect.Parameter.empty:
                 assert param.default == theirs[name].default, (facade, name)
 
@@ -262,16 +264,18 @@ def test_the_facade_forwards_every_argument(monkeypatch) -> None:
 
 
 def test_the_workspace_budget_reaches_the_backend() -> None:
-    """Through the real backend, host arithmetic only: the facade's workspace carries the budget it is given (the
-    16 GiB default otherwise) and ``cake_gqa_det_train_workspace_bytes`` equals the backend's for every keyword."""
+    """Through the real backend, host arithmetic only: the facade's workspace carries the budget it is given, 16 GiB
+    included (``None``, the default budget, otherwise), and ``cake_gqa_det_train_workspace_bytes`` equals the
+    backend's for every keyword."""
     cake_backend = _backend()
-    from cake_pplx._backends.cake_gqa_det_train import cake_jit
 
     ws = api.cake_gqa_det_train_workspace("cuda:0", budget_bytes=3 << 20)
     assert isinstance(ws, api.CakeGQADetWorkspace) and ws.budget_bytes == 3 << 20
     assert ws.nbytes == 0
     default = api.cake_gqa_det_train_workspace("cuda:0")
-    assert default.budget_bytes == cake_jit.DEFAULT_WORKSPACE_BUDGET
+    assert default.budget_bytes is None
+    given = api.cake_gqa_det_train_workspace("cuda:0", budget_bytes=16 << 30)
+    assert given.budget_bytes == 16 << 30
     with pytest.raises(ValueError, match="budget_bytes"):
         api.cake_gqa_det_train_workspace("cuda:0", budget_bytes=0)
     for kwargs in (
@@ -280,6 +284,7 @@ def test_the_workspace_budget_reaches_the_backend() -> None:
         dict(total_k=52310, num_heads_kv=4, max_seqlen_k=9000, row_map=True),
         dict(total_k=52310, num_heads_kv=4, max_seqlen_k=9000, budget_bytes=1 << 26),
         dict(total_k=52310, num_heads_kv=4, budget_bytes=1),
+        {"total_k": 52310, "num_heads_kv": 4, "budget_bytes": 16 << 30},
     ):
         assert api.cake_gqa_det_train_workspace_bytes(
             30193, 24, 12, **kwargs
@@ -289,7 +294,14 @@ def test_the_workspace_budget_reaches_the_backend() -> None:
     assert api.cake_gqa_det_train_workspace_bytes(
         30193, 24, 12, total_k=52310, num_heads_kv=4, budget_bytes=1
     ) < api.cake_gqa_det_train_workspace_bytes(
+        30193, 24, 12, total_k=52310, num_heads_kv=4, budget_bytes=16 << 30
+    )
+    # One KV head of this call does not fit 16 GiB, but a 16 GiB range holds more than WAVE_KEY_BLOCKS key blocks:
+    # the default budget plans as a given 16 GiB.
+    assert api.cake_gqa_det_train_workspace_bytes(
         30193, 24, 12, total_k=52310, num_heads_kv=4
+    ) == api.cake_gqa_det_train_workspace_bytes(
+        30193, 24, 12, total_k=52310, num_heads_kv=4, budget_bytes=16 << 30
     )
 
 

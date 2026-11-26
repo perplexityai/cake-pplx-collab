@@ -84,8 +84,8 @@ The main kernel stores dS^T as one 32 KiB BF16 tile (128 keys x 128 packed
 rows) per (head pair, key block, Q tile of 64 rows).  A chunk covers `h` KV
 heads and `n` key blocks and holds
 `h * (H_q / H_kv / 2) * n * floor((T_q + 63 B) / 64)` tiles plus one zero
-tile.  The workspace's `budget_bytes` (default 16 GiB,
-`cake_gqa_nondet_train_workspace(device, budget_bytes=...)`) bounds a chunk:
+tile.  The workspace's `budget_bytes`
+(`cake_gqa_nondet_train_workspace(device, budget_bytes=...)`) bounds a chunk:
 all KV heads and key blocks in one chunk when they fit, else as many KV heads
 as fit, else one KV head and the widest even key-block range that fits; at
 least one KV head and two key blocks, even past the budget.  Each chunk runs
@@ -96,14 +96,30 @@ tile's last chunk writes its BF16 dQ instead).  The chunks come from host values
 inside a chunk is computed on the device from `cu_seqlens` (`bwd_plan`).  The budget can
 move the rounding of the outputs, not their accuracy.
 
+The default budget (`budget_bytes=None`) is 16 GiB with a one-wave floor.  The
+main kernel runs one CTA pair (one 2-CTA cluster) per key block of its range,
+so a range of fewer key blocks than the device runs clusters at once (one
+wave) leaves SMs idle.  When one KV head does not fit 16 GiB and a range would
+hold fewer than `min(key_blocks, 72)` key blocks, each range holds that many,
+up to a 40 GiB chunk.  The floor, 72 key blocks (`WAVE_KEY_BLOCKS`), is the
+same on every device: one wave on the GPUs this package targets has 74-108
+clusters.  With 32 query and 2 KV heads this changes the long
+context-parallel ranks only: the backward of a CP8 rank of a 1,048,320-token
+document (131,040 query and 1,113,840 key tokens, `max_seqlen_k` given) runs
+228 chunks of up to 72 key blocks with a 36.0 GiB chunk instead of 546 chunks
+of 30 key blocks with a 15.0 GiB chunk.  A given `budget_bytes`, 16 GiB
+included, stays a hard bound.
+
 A caller that holds the boundaries on the host can pass them as
 `cu_seqlens_q_host` / `cu_seqlens_k_host` (lists or 1-D CPU tensors, both or
 neither; to `cake_gqa_nondet`, the backward and
 `cake_gqa_nondet_train_workspace_bytes`).  The plan then counts each key
 block's exact tiles (the numbering `bwd_plan` computes) instead of the bound
 above, takes the key blocks from the longest key segment, and cuts them into
-the widest even ranges that fit the budget; every range uses one stride, the
-tile count of the fullest range.  The long layouts run in fewer chunks
+the widest even ranges that fit the budget (the default budget's one-wave
+floor counts the exact tiles too: a range can take `min(key_blocks, 72)` key
+blocks from any even block); every range uses one stride, the tile count of
+the fullest range.  The long layouts run in fewer chunks
 (main-kernel and dQ launches with 24 query and 4 KV heads at the default
 budget: 12 to 8 on a CP8 zigzag rank of 300k tokens with 16 segments, 16 to 8
 on issue row 3, 8 to 2 on issue row 1) and with a dS^T workspace of the exact
@@ -168,11 +184,12 @@ chunk's tiles plus one) and, in the row-map form, two FP32 window gradients
 scratch stays allocated between calls.  The per-call peak is the dS^T chunk
 plus, in the row-map form, 2 KiB of windows per key and KV head.  The chunk
 holds every tile when they fit in the budget and stays within the budget
-otherwise.  With 24 query heads and 4 KV heads, 16461 query and 24693 key
-tokens take 6.9 GB + 0.2 GB in one chunk; 32388 query and 275373 key tokens
-take 17.1 GB + 2.3 GB in 16 chunks under the 16 GiB default.  A smaller
-`budget_bytes` lowers the peak; each extra key-block chunk then re-reads the
-FP32 dQ accumulator once and rewrites it for the Q tiles it does not finish.
+otherwise (the default budget with its one-wave floor: at most 40 GiB).  With
+24 query heads and 4 KV heads, 16461 query and 24693 key tokens take 6.9 GB +
+0.2 GB in one chunk; 32388 query and 275373 key tokens take 17.1 GB + 2.3 GB
+in 16 chunks under the default budget.  A smaller `budget_bytes` lowers the
+peak; each extra key-block chunk then re-reads the FP32 dQ accumulator once
+and rewrites it for the Q tiles it does not finish.
 `cake_gqa_nondet_train_workspace_bytes(T_q, H_q, B, total_k=, num_heads_kv=,
 max_seqlen_k=, row_map=, budget_bytes=)` returns the scratch plus, when the
 key sizes are given, the per-call buffers.  With torch's deterministic mode

@@ -162,7 +162,8 @@ def cake_gqa_nondet(
     workspace : optional
         A workspace of :func:`cake_gqa_nondet_train_workspace`, reused across calls and shapes (grown, never
         shrunk; one stream at a time); autograd holds it by weak reference.  Its ``budget_bytes`` bounds the
-        backward's dS^T workspace.  ``None``: the device's per-stream default workspace (16 GiB budget).
+        backward's dS^T workspace.  ``None``: the device's per-stream default workspace (the default budget of
+        :func:`cake_gqa_nondet_train_workspace`).
     return_lse : bool
         Also return the FP32 natural-log LSE ``[H_q, T_q]`` (no gradient flows through it).
     cu_seqlens_q_host, cu_seqlens_k_host : sequence of int or torch.Tensor, optional
@@ -319,11 +320,12 @@ def cake_gqa_nondet_train_backward(
 
     Notes
     -----
-    dS^T goes to a workspace chunk (allocated per call, at most the workspace's ``budget_bytes`` above the minimum
-    chunk), dK / dV are summed by the CTA pair that owns their key block, dQ is a GEMM over the workspace, and the
-    row-map destinations are folded in window order; nothing adds with atomics.  The budget and the host boundaries
-    can move the rounding of the outputs, not their accuracy; the package does not promise that the outputs repeat
-    bit for bit.  No PyTorch determinism alert is raised.
+    dS^T goes to a workspace chunk (allocated per call, within the workspace's budget unless it is the minimum
+    chunk; the default budget holds up to 40 GiB under its one-wave floor), dK / dV are summed by the CTA pair that
+    owns their key block, dQ is a GEMM over the workspace, and the row-map destinations are folded in window order;
+    nothing adds with atomics.  The budget and the host boundaries can move the rounding of the outputs, not their
+    accuracy; the package does not promise that the outputs repeat bit for bit.  No PyTorch determinism alert is
+    raised.
     """
     return _pkg().cake_gqa_nondet_train_backward(
         q,
@@ -367,9 +369,12 @@ def cake_gqa_nondet_train_workspace(
     device : torch.device, str or int, optional
         The CUDA device; ``None`` is the current device.
     budget_bytes : int, optional
-        The bound of one backward call's dS^T workspace; ``None`` is 16 GiB.  A call whose dS^T exceeds it runs in
-        chunks (at least one KV head and two key blocks per chunk, even past the budget).  The budget can move the
-        rounding of the outputs, not their accuracy.
+        The bound of one backward call's dS^T workspace.  A call whose dS^T exceeds it runs in chunks (at least one
+        KV head and two key blocks per chunk, even past the budget).  ``None`` is the default budget: 16 GiB, raised
+        when one KV head's key range does not fit it so that a key-block chunk holds 72 key blocks (every key block
+        when there are fewer; one wave on the GPUs this package targets has 74-108 clusters), at most 40 GiB.  A given
+        budget, 16 GiB included, is a hard bound.  The budget can move the rounding of the outputs, not their
+        accuracy.
 
     Returns
     -------
