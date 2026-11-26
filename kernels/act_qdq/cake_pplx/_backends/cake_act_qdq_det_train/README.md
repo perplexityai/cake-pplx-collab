@@ -58,21 +58,22 @@ outputs of the right shapes.
 
 ## Programs
 
-The package has twenty-three programs: per format, with and without the scale output, a main program, a small one and
+The package has twenty-seven programs: per format, with and without the scale output, a main program, a small one and
 an interleaved-domain one; a wide program for MXFP8 without the scale output; and per MXFP4 and MXFP8 format, with and
-without the scale output, a large program.  The wide and the large programs are built for `sm_100a` and `sm_103a`, the
-interleaved-domain programs for `sm_107a` ("Locality domains" below), every other program for `sm_100a`, `sm_103a` and
-`sm_107a`, each with the exact `-gencode` flag of the architecture, so `build.json` lists 52 libraries.  With
-`locality="off"`, a call runs one program of its route (`cake_jit.selected_module(arch, format, scale_out=..., n_vecs=...,
-in_place=...)`): the small, the wide or the large program when `n_vecs` lies in its `vectors` range for the call's kind,
-and the main program otherwise.  The small program's range out of place is 65,537 to 524,288 on `sm_100a` and `sm_103a`
+without the scale output, a large program and a mid one.  The wide and the large programs are built for `sm_100a` and
+`sm_103a`, the interleaved-domain ("Locality domains" below) and the mid programs for `sm_107a`, every other program for
+`sm_100a`, `sm_103a` and `sm_107a`, each with the exact `-gencode` flag of the architecture, so `build.json` lists 56
+libraries.  With `locality="off"`, a call runs one program of its route (`cake_jit.selected_module(arch, format,
+scale_out=..., n_vecs=..., in_place=...)`): the small, the wide, the large or the mid program when `n_vecs` lies in its
+`vectors` range for the call's kind, and the main program otherwise.  The small program's range out of place is 65,537 to 524,288 on `sm_100a` and `sm_103a`
 (to 131,072 for MXFP8 without the scale output) and 1 to 262,144 on `sm_107a`; in place it is 1 to 262,144 on `sm_107a`,
 and `sm_100a` and `sm_103a` have none, since the small program measured no faster there in place.  The wide program's
 range starts above the main and small programs' sizes: out of place from 131,073 vectors to 2,147,483,136 (2^31 - 512,
 since it forms `n_vecs + 511`; the main program runs above that), and in place from 262,145 to 33,554,431, below the
 large program's range.  The large program's range holds the largest sizes: in place from 4,194,304 vectors (from
 33,554,432 for MXFP8 without the scale output) and out of place from 8,388,608 for MXFP8 with the scale output only, all
-to 2,147,481,600 (2^31 - 2048, since it forms `n_vecs + 2047`; the main program runs above that).
+to 2,147,481,600 (2^31 - 2048, since it forms `n_vecs + 2047`; the main program runs above that).  The mid program's
+range, in both kinds of call, is 868,353 to 1,736,704 vectors on `sm_107a`, above the small program's range.
 
 A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
 threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
@@ -95,7 +96,13 @@ written), it measured faster than the program it replaces in every state inside 
 ranges its tiles of 2,048 vectors leave SMs idle, and it measured up to 16 % slower; in place at 16,777,216 vectors it
 measured 1.2 % slower than the wide program with a clean L2.  Out of place it measured from 0.5 % slower to 0.7 % faster
 for MXFP4 and no faster for MXFP8 without the scale output, and FP4 measured slower at some sizes in both kinds of call,
-so those have no large range.  Every program gives the same bytes at every size.  Neither the last dimension, nor the
+so those have no large range.  The mid program is the same kernel with 64-thread CTAs that take 8 vectors per thread
+(tiles of 512 vectors), 16 CTAs per SM and the main program's grid rule.  It keeps each vector in packed BF16 pairs, as
+the interleaved-domain MXFP4 and MXFP8 programs do ("Locality domains" below), so it fits in 64 registers per thread.
+On a VR200 (212 SMs) the main program needs a second wave of CTAs from 868,353 vectors, and the mid program fits in one
+wave up to 1,736,704.  On three VR200 GPUs with L2 flushed before each call, it measured faster than the main program at
+every size of its range, in both kinds of call and on every GPU: by 2.4 to 14 % in the median over the GPUs.  Outside
+that range it measured from 7 % slower to 2.4 % faster.  Every program gives the same bytes at every size.  Neither the last dimension, nor the
 rank, nor the row count enters the kernel, so a new shape never rebuilds a library.  A call builds or loads only the
 library of its own program, so build every library of the architecture before a CUDA graph capture: call
 `build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output

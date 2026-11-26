@@ -26,8 +26,8 @@ rows, widths 16 to 4096, a width of 96; each released call site at 8192
 rows).  Each runs out of place and in place,
 with and without the scale output, and every program also runs directly on
 grids of 1 and 3 CTAs.  Calls on each side of each bound of the small, the
-wide and the large programs' size ranges (each bound up to 33,554,432
-vectors) run the program their route names there, and every program of the
+wide, the large and the mid programs' size ranges (each bound up to
+33,554,432 vectors) run the program their route names there, and every program of the
 route gives the rule's bits on those inputs.  The suite also checks:
 out-of-place calls leave ``x`` unchanged; caller ``out`` and ``scales``
 buffers; five repeated calls bit for bit; argument validation; no launch for
@@ -96,10 +96,18 @@ LARGE_VECTORS = {
         ("mxfp8_e8m0_g32_scales", 4194304, (8388608, LARGE_LAST)),
     )
 }
+# The mid program of each MXFP4 and MXFP8 route, on sm_107a only: on a VR200, from past one wave of the main program's
+# CTAs to one wave of its own.
+MID_VECTORS = {
+    kind: {"sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)}}
+    for kind in ("mxfp4_e8m0_g32", "mxfp4_e8m0_g32_scales", "mxfp8_e8m0_g32", "mxfp8_e8m0_g32_scales")
+}
 # Per route, its ranged programs in the route's order (name suffix -> vectors): the small program of every route, the
-# wide one, below which that route's small range ends on sm_100a and sm_103a, and the large one.
+# wide one, below which that route's small range ends on sm_100a and sm_103a, the large one and the mid one.
 RANGED = {
-    kind: {"_small": SMALL_VECTORS} | ({"_large": LARGE_VECTORS[kind]} if kind in LARGE_VECTORS else {})
+    kind: {"_small": SMALL_VECTORS}
+    | ({"_large": LARGE_VECTORS[kind]} if kind in LARGE_VECTORS else {})
+    | ({"_mid": MID_VECTORS[kind]} if kind in MID_VECTORS else {})
     for kind in (f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))
 } | {
     WIDE_ROUTE: {
@@ -110,10 +118,11 @@ RANGED = {
         },
         "_wide": WIDE_VECTORS,
         "_large": LARGE_VECTORS[WIDE_ROUTE],
+        "_mid": MID_VECTORS[WIDE_ROUTE],
     }
 }
 CALLS = ("out_of_place", "in_place")
-# The grid rules of the main, the small, the wide and the large programs.
+# The grid rules of the main, the small, the wide, the large and the mid programs.
 MAIN_RULE = {
     "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
     "kind": "tiles",
@@ -140,6 +149,13 @@ LARGE_RULE = {
     "kind": "tiles",
     "persist_waves": 0,
     "tile_vectors": {"sm_100a": 2048, "sm_103a": 2048},
+    "vector_elements": 8,
+}
+MID_RULE = {
+    "ctas_per_sm": {"sm_107a": 16},
+    "kind": "tiles",
+    "persist_waves": 2.5,
+    "tile_vectors": {"sm_107a": 512},
     "vector_elements": 8,
 }
 # The largest n_vecs the size-boundary test launches at, where the large range of MXFP8 without the scales begins in
@@ -799,8 +815,25 @@ def test_routes_select_a_program_by_size(monkeypatch) -> None:
     ):
         got = loader.selected_module("sm_100a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=n_vecs, in_place=in_place)
         assert got == want, (n_vecs, in_place)
-    got = loader.selected_module("sm_107a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=1 << 20, in_place=False)
-    assert got == "mxfp8_e8m0_g32"
+    # MXFP4 and MXFP8 on sm_107a: the mid program between its range's bounds, the main program on each side of them
+    for kind, mid in MID_VECTORS.items():
+        fmt, scale_out = kind.removesuffix("_scales"), kind.endswith("_scales")
+        for call in CALLS:
+            span = mid["sm_107a"][call]
+            if span is None:
+                continue
+            for n_vecs, want in ((span[0] - 1, kind), (span[0], kind + "_mid"), (span[1], kind + "_mid")):
+                got = loader.selected_module(
+                    "sm_107a", fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=call == "in_place"
+                )
+                assert got == want, (kind, call, n_vecs)
+            got = loader.selected_module(
+                "sm_107a", fmt, scale_out=scale_out, n_vecs=span[1] + 1, in_place=call == "in_place"
+            )
+            assert got == kind, (kind, call, span[1] + 1)
+    # FP4 has no mid program
+    got = loader.selected_module("sm_107a", "fp4_e4m3_g16", scale_out=False, n_vecs=1 << 20, in_place=False)
+    assert got == "fp4_e4m3_g16"
     # the large programs on sm_103a: in place from 4,194,304 vectors for MXFP4 and for MXFP8 with the scales, out of
     # place for MXFP8 with the scales only, from 8,388,608; FP4 and sm_107a have none
     for fmt, scale_out, n_vecs, in_place, want in (
@@ -836,6 +869,9 @@ def test_routes_select_a_program_by_size(monkeypatch) -> None:
     monkeypatch.setitem(loader.ROUTES["sm_107a"], "mxfp4_e8m0_g32", ["mxfp4_e8m0_g32", "mxfp4_e8m0_g32_large"])
     with pytest.raises(RuntimeError, match="does not serve that route"):
         loader.selected_module("sm_107a", "mxfp4_e8m0_g32", scale_out=False, n_vecs=1, in_place=False)
+    monkeypatch.setitem(loader.ROUTES["sm_103a"], "mxfp8_e8m0_g32", ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_mid"])
+    with pytest.raises(RuntimeError, match="does not serve that route"):
+        loader.selected_module("sm_103a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=1, in_place=False)
     # two ranges that hold one size are a registry error
     small = loader.MODULES["mxfp8_e8m0_g32_small"]
     monkeypatch.setitem(
@@ -885,6 +921,19 @@ def test_launch_grid() -> None:
                 assert loader.launch_grid(large, n_vecs=n_vecs, sm_count=148, arch=arch) == (-(-n_vecs // 2048), 1, 1)
         with pytest.raises(ValueError, match="no tile for sm_107a"):
             loader.launch_grid(large, n_vecs=1, sm_count=148, arch="sm_107a")
+    # the mid programs: tiles of 512 vectors and 16 CTAs per SM, which walk the tiles up to 2.5 waves of them and
+    # launch one CTA per tile past that
+    for kind in MID_VECTORS:
+        mid = loader.MODULES[kind + "_mid"]
+        resident = 16 * 212
+        assert loader.launch_grid(mid, n_vecs=512, sm_count=212, arch="sm_107a") == (1, 1, 1), kind
+        assert loader.launch_grid(mid, n_vecs=513, sm_count=212, arch="sm_107a") == (2, 1, 1), kind
+        for n_vecs in (resident * 512, 5 * resident * 512 // 2):
+            assert loader.launch_grid(mid, n_vecs=n_vecs, sm_count=212, arch="sm_107a") == (resident, 1, 1), kind
+        past = 5 * resident * 512 // 2 + 1
+        assert loader.launch_grid(mid, n_vecs=past, sm_count=212, arch="sm_107a") == (-(-past // 512), 1, 1), kind
+        with pytest.raises(ValueError, match="no tile for sm_100a"):
+            loader.launch_grid(mid, n_vecs=1, sm_count=148, arch="sm_100a")
 
 
 @pytest.mark.cpu_only
@@ -910,9 +959,10 @@ def test_registry_records_reference_the_build_manifest() -> None:
         kind = loader.route_name(record["format"], scale_out=record["scale_out"])
         suffix = name.removeprefix(kind)
         small, wide, large, domain = suffix == "_small", suffix == "_wide", suffix == "_large", suffix == "_domain"
+        mid = suffix == "_mid"
         assert suffix in ("", *RANGED[kind], "_domain"), name
-        assert ("vectors" in record) == (small or wide or large or domain), name
-        if small or wide or large:
+        assert ("vectors" in record) == (small or wide or large or mid or domain), name
+        if small or wide or large or mid:
             assert record["vectors"] == RANGED[kind][suffix], name
         if domain:
             assert record["vectors"] == DOMAIN_VECTORS[kind], name
@@ -922,10 +972,10 @@ def test_registry_records_reference_the_build_manifest() -> None:
             assert record["counters"] == {"dtype": "uint32", "rearm": "kernel", "words": 1}, name
         assert re.fullmatch(r"cake_act_qdq_[0-9a-f]{20}", record["library"]), name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
-        arches = ("sm_107a",) if domain else ("sm_100a", "sm_103a") if wide or large else loader.ARCHES
+        arches = ("sm_107a",) if domain or mid else ("sm_100a", "sm_103a") if wide or large else loader.ARCHES
         assert tuple(record["arches"]) == arches, name
         assert record["ffi_entry"] == "run", name
-        rule = SMALL_RULE if small else WIDE_RULE if wide else LARGE_RULE if large else MAIN_RULE
+        rule = SMALL_RULE if small else WIDE_RULE if wide else LARGE_RULE if large else MID_RULE if mid else MAIN_RULE
         if domain:
             rule = DOMAIN_RULE[record["format"]]
         assert record["grid_rule"] == rule, name

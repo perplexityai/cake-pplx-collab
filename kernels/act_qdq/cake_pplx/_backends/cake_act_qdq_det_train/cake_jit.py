@@ -80,7 +80,16 @@ measured up to 16 % slower, and in place at 16,777,216 vectors 1.2 % slower
 than the wide program with a clean L2.  Out of place it measured from 0.5 %
 slower to 0.7 % faster for MXFP4 and no faster for MXFP8 without the scales,
 and FP4 measured slower at some sizes in both kinds of call, so those have
-no large range.  Every other call runs the main record
+no large range.  The mid program, MXFP4 and MXFP8 with and without the
+scales on SM107 only, is the same kernel with CTAs of 64 threads, eight
+vectors each (tiles of 512 vectors), 16 CTAs per SM and the main program's
+grid rule; it keeps each vector in packed BF16 pairs, so it fits in 64
+registers per thread.  A call runs it in both kinds of call from 868,353
+vectors, past one wave of the main program's CTAs on a VR200 (212 SMs), to
+1,736,704, one wave of its own.  On three VR200 GPUs with L2 flushed before
+each call, it measured 2.4 to 14 % faster than the main program there (the
+median over the GPUs), and from 7 % slower to 2.4 % faster outside that
+range.  Every other call runs the main record
 (:func:`selected_module`).  Every program gives the same bytes.  ``n_vecs``
 is a run-time scalar, so a library serves every shape; a call builds or loads
 only its own program's library on first use.  Build every library of the
@@ -621,7 +630,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_act_qdq_5ddb470d9d818fe82b6b",
         "scale_out": False,
         "vectors": {
-            "sm_107a": {"in_place": (868353, 2170880), "out_of_place": (868353, 2170880)},
+            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
         },
     },
     # The mid build of MXFP4 with the scales, SM107 only: 64-thread CTAs,
@@ -650,7 +659,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_act_qdq_9f47fc0fe25e824b0f73",
         "scale_out": True,
         "vectors": {
-            "sm_107a": {"in_place": (868353, 2170880), "out_of_place": (868353, 2170880)},
+            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
         },
     },
     # The mid build of MXFP8 without the scales, SM107 only: 64-thread CTAs,
@@ -679,7 +688,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_act_qdq_46ee6195467c78a3c8e3",
         "scale_out": False,
         "vectors": {
-            "sm_107a": {"in_place": (868353, 2170880), "out_of_place": (868353, 2170880)},
+            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
         },
     },
     # The mid build of MXFP8 with the scales, SM107 only: 64-thread CTAs,
@@ -708,7 +717,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_act_qdq_bdc991febcca0ecf2cf6",
         "scale_out": True,
         "vectors": {
-            "sm_107a": {"in_place": (868353, 2170880), "out_of_place": (868353, 2170880)},
+            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
         },
     },
     # The interleaved-domain build of each route, SM107 only (``DOMAIN_ROUTES``):
