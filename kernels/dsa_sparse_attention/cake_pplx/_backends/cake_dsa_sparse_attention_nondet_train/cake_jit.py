@@ -726,10 +726,10 @@ STAGES_OF = {
     for program, order in _DEFAULT_STAGES_OF.items()
 }
 # The RoPE program's head-window builds: calls over 64 < H <= 128 query heads run them (the forwards on sm_100a /
-# sm_103a, the main backward builds also on sm_107a) in place of their 64-head stage -- one launch over the 2 T (token, window) items of both 64-head windows, the arguments of the
-# 64-head stage plus the head count ``num_heads`` and the window selector ``wsel`` (``cake_backend.HEAD_WINDOW_STAGES``
-# names the same pairs; the delta, compaction and cast stages serve every head count).  They close the program's
-# order, in the order of their 64-head stages.
+# sm_103a, the main backward builds also on sm_107a) in place of their 64-head stage -- one launch over the 2 T (token,
+# window) items of both 64-head windows, the arguments of the 64-head stage plus the head count ``num_heads`` and the
+# window selector ``wsel`` (``cake_backend.HEAD_WINDOW_STAGES`` names the same pairs; the delta, compaction and cast
+# stages serve every head count).  They close the program's order, in the order of their 64-head stages.
 HEAD_WINDOW_STAGES = {
     "fwd": "fwd_hw",
     "fwd_no_olo": "fwd_hw_no_olo",
@@ -742,8 +742,8 @@ STAGES_OF[PROGRAM] += tuple(
     HEAD_WINDOW_STAGES[s] for s in STAGES_OF[PROGRAM] if s in HEAD_WINDOW_STAGES
 )
 # The RoPE program's single-pass forward over 96 or 128 query heads: calls over 64 < H <= 128 query heads run it on
-# sm_100a / sm_103a / sm_107a in place of the head-window forward -- one (2, 1, 1) cluster per token, with its own kernel's
-# arguments (``num_heads``; ``k_rope`` a tensor map) -- and its ``with_o_lo=False`` build in place of
+# sm_100a / sm_103a / sm_107a in place of the head-window forward -- one (2, 1, 1) cluster per token, with its own
+# kernel's arguments (``num_heads``; ``k_rope`` a tensor map) -- and its ``with_o_lo=False`` build in place of
 # ``fwd_hw_no_olo``.  They close the program's order.
 SINGLE_PASS_STAGES = {
     "fwd_hw": "fwd_h128",

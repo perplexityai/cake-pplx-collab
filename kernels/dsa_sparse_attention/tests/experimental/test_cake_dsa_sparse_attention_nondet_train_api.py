@@ -3202,16 +3202,20 @@ def test_public_entries_refuse_other_head_counts(heads, monkeypatch):
 
 @pytest.mark.parametrize("heads", (96, 128))
 def test_public_entries_run_the_bridge_on_sm107a(monkeypatch, heads):
-    """On ``sm_107a`` (host, the architecture stood in) every public entry serves a ``heads``-head call through the
-    two-window bridge: the flat and packed (its torch index route) autograd entries and the step forward / backward
-    pair launch the 64-head stages on ``[H - 64, H)`` and then ``[0, 64)`` (no head-window or single-pass build), and
-    return outputs and gradients of the call's shapes; without query rows they return empty outputs and launch
-    nothing."""
+    """On ``sm_107a`` (host, the architecture stood in) with the head-window and single-pass builds hidden (a registry
+    that does not ship them there) every public entry serves a ``heads``-head call through the two-window bridge: the
+    flat and packed (its torch index route) autograd entries and the step forward / backward pair launch the 64-head
+    stages on ``[H - 64, H)`` and then ``[0, 64)`` (no head-window or single-pass build), and return outputs and
+    gradients of the call's shapes; without query rows they return empty outputs and launch nothing.  The plan of the
+    shipped registry there (the single-pass forward and the head-window backward):
+    ``test_cake_dsa_sparse_attention_nondet_train_heads.py``."""
     from tests.experimental.test_helpers import (
         cake_dsa_sparse_attention_host_launches as hl,
     )
 
-    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
+    h = hl.HostLaunches(
+        monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a", head_windows=False
+    )
     monkeypatch.setattr(
         cake_backend, "nope_index_prep_available", lambda device=None: False
     )
@@ -3269,7 +3273,7 @@ def test_public_entries_at_more_heads(with_o_lo, heads, record_property):
     """At ``heads`` query heads and scale ``192**-0.5``, on a packed batch of two causal documents: the flat
     autograd entry on the global rows, the varlen autograd entry on the document-relative rows and the step forward
     / backward pair -- ``out``, ``lse`` (step), ``o_lo`` (step) and every gradient of each judged on the same
-    draw (on ``sm_107a`` through the two-window bridge)."""
+    draw (on ``sm_107a`` through the single-pass forward and the head-window backward)."""
     _require_program(backward=True)
 
     def case(s, j):

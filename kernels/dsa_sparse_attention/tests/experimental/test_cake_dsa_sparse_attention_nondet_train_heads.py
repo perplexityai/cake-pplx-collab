@@ -33,11 +33,11 @@ and the bridge's windows, their order, the window statistics and the accumulator
 retained state of the autograd entry, validation and the calls without query rows.  The bridge's copy steps run
 through wide views of their operands and must copy the bytes a plain copy does (on the CPU, and on the CUDA device
 when there is one).  Device tests judge every floating output
-against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_100a / sm_103a / sm_107a (sm_107a runs
-96 and 128 heads on the two-window bridge); a call with no valid key in any row has no accuracy to judge and
-equals the oracle exactly instead (:func:`test_naive_tier_heads`).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the
-T = 16380 case (:func:`test_large_t_heads`), which a default run skips: the GPU validation of this form sets it and
-reports that case on its own.
+against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_100a / sm_103a / sm_107a (sm_107a runs 96
+and 128 heads on the single-pass forward and the head-window backward); a call with no valid key in any row has no
+accuracy to judge and equals the oracle exactly instead (:func:`test_naive_tier_heads`).
+``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the T = 16380 case (:func:`test_large_t_heads`), which a default run skips:
+the GPU validation of this form sets it and reports that case on its own.
 """
 
 import dataclasses
@@ -122,16 +122,16 @@ def test_h64_plan_is_unchanged(monkeypatch, name, arch):
         assert got == want, f"launch {i} ({got[0]}): {got} != {want}"
 
 
-_HW_H64_CASES = [(n, a) for n, a in hl.h64_case_names() if a != "sm_107a"]
+_HW_H64_CASES = list(hl.h64_case_names())
 
 
 @pytest.mark.parametrize(
     "name, arch", _HW_H64_CASES, ids=[f"{n}@{a}" for n, a in _HW_H64_CASES]
 )
 def test_h64_plan_is_unchanged_with_head_window_builds(monkeypatch, name, arch):
-    """With the head-window builds registered (``hl.register_head_window_builds``, as the export registers them for
-    sm_100a / sm_103a), a 64-head call still launches exactly the golden capture of the same case: the builds serve
-    only calls over more than 64 heads."""
+    """With the head-window builds registered (``hl.register_head_window_builds``, as the export registers them: the
+    forward builds for sm_100a / sm_103a, the main backward builds for sm_107a too), a 64-head call still launches
+    exactly the golden capture of the same case: the builds serve only calls over more than 64 heads."""
     golden = json.loads(hl.GOLDEN.read_text())[f"{name}@{arch}"]
     found = json.loads(
         json.dumps(
@@ -146,7 +146,10 @@ def test_h64_plan_is_unchanged_with_head_window_builds(monkeypatch, name, arch):
             )
         )
     )
-    assert cake_backend.head_window_stage("fwd", arch) == "fwd_hw"
+    assert cake_backend.head_window_stage("fwd", arch) == (
+        "fwd_hw" if arch in cake_backend.WINDOW_ARCHES else None
+    )
+    assert cake_backend.head_window_stage("bwd_main", arch) == "bwd_main_hw"
     assert found == golden
 
 
@@ -386,7 +389,7 @@ def _bridge_forward_keys(heads: int, stage: str) -> tuple:
     return tuple(keys)
 
 
-#: The architectures of :func:`test_sm107a_runs_the_bridge_whatever_the_registry_declares`'s registry.
+#: The architectures of :func:`test_sm107a_plans_each_phase_whatever_the_registry_declares`'s registry.
 ALL_ARCHES = ["sm_100a", "sm_103a", "sm_107a"]
 
 
@@ -406,18 +409,23 @@ def _declare_builds_for_every_arch(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("heads", (96, 128))
-@pytest.mark.parametrize("name", list(HOST_CASES))
-def test_sm107a_runs_the_bridge_whatever_the_registry_declares(
-    monkeypatch, name, heads
-):
-    """On sm_107a a call over 96 or 128 heads runs the two-window bridge in both phases even where the registry
-    declares the head-window and single-pass builds for sm_107a (``WINDOW_ARCHES`` leaves it out): every
-    :func:`head_window_plan` is ``(None, None)`` and the launches of the host case, simulated through the package's own
-    stage selection, are the bridge's (:func:`test_head_window_launches`) -- no build launch."""
+def test_sm107a_plans_each_phase_whatever_the_registry_declares(monkeypatch, heads):
+    """On sm_107a a call over 96 or 128 heads plans each phase by that phase's architectures, also where the
+    registry declares every head-window and single-pass build for sm_107a: the forward runs the single-pass forward
+    (``SINGLE_PASS_ARCHES``) and never the head-window forward (``WINDOW_ARCHES`` leaves sm_107a out), the backward the
+    head-window main build of its key passes and direct path (``BACKWARD_WINDOW_ARCHES``); with the single-pass
+    forward hidden, the forward runs the two-window bridge and the backward still its head-window build.  The
+    launches of these plans: :func:`test_head_window_build_launches` and :func:`test_head_window_fallbacks`."""
     _declare_builds_for_every_arch(monkeypatch)
     assert "sm_107a" in cake_backend.HEAD_ARCHES
     assert "sm_107a" not in cake_backend.WINDOW_ARCHES
+    assert "sm_107a" in cake_backend.BACKWARD_WINDOW_ARCHES
+    assert "sm_107a" in cake_backend.SINGLE_PASS_ARCHES
     for with_o_lo in (True, False):
+        stage = "fwd" if with_o_lo else "fwd_no_olo"
+        single = "fwd_h128" if with_o_lo else "fwd_h128_no_olo"
+        assert cake_backend.head_window_stage(stage, "sm_107a") is None
+        assert cake_backend.single_pass_stage(stage, "sm_107a") == single
         for kw in (
             {"backward": False},
             {"backward": True},
@@ -425,40 +433,46 @@ def test_sm107a_runs_the_bridge_whatever_the_registry_declares(
             {"backward": True, "key_passes": 2},
             {"backward": True, "key_passes": 2, "dkv_direct": True},
         ):
+            main = None
+            if kw["backward"]:
+                main = (
+                    "bwd_main"
+                    + ("_pass" if kw.get("key_passes", 1) > 1 else "")
+                    + ("_natural" if kw.get("dkv_direct") else "")
+                    + "_hw"
+                )
             plan = cake_backend.head_window_plan(
                 heads, "sm_107a", with_o_lo=with_o_lo, **kw
             )
-            assert plan == (None, None), (with_o_lo, kw, plan)
-    case = HOST_CASES[name]
-    h = hl.HostLaunches(
-        monkeypatch,
-        cake_backend,
-        cake_jit,
-        cake_launch,
-        "sm_107a",
-        token_chunk=case.get("token_chunk"),
-        head_windows=None,
-        single_pass=None,
-    )
-    _check_bridge_case(h, case, _host_case_inputs(case, heads))
+            assert plan == (single, main), (with_o_lo, kw, plan)
+            with monkeypatch.context() as m:
+                m.setattr(cake_backend, "single_pass_stage", lambda stage, arch: None)
+                plan = cake_backend.head_window_plan(
+                    heads, "sm_107a", with_o_lo=with_o_lo, **kw
+                )
+                assert plan == (None, main), (with_o_lo, kw, plan)
 
 
 @pytest.mark.parametrize("forward", ("head_window", "single_pass"))
 @pytest.mark.parametrize("heads", (96, 128))
-@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a"))
+@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
 @pytest.mark.parametrize("name", list(HOST_CASES))
 def test_head_window_build_launches(monkeypatch, name, arch, heads, forward):
-    """The head-window plan (the builds registered for sm_100a / sm_103a, ``hl.register_head_window_builds``): the
+    """The head-window plan (the builds registered for sm_100a / sm_103a, ``hl.register_head_window_builds``, and the
+    registry's main backward and single-pass forward builds for sm_107a; sm_107a has no head-window forward, so it
+    runs with ``forward="single_pass"`` only): the
     launches of one host case at ``heads`` query heads, simulated (``hl``): the forward is one launch of ``fwd_hw``
     (``fwd_hw_no_olo`` without ``o_lo``) over the ``2 T`` items or -- with the single-pass forward builds registered
     as well (``forward="single_pass"``, ``hl.register_single_pass_builds``) -- one launch of ``fwd_h128``
     (``fwd_h128_no_olo``) over the ``T`` tokens on its persistent grid, writing every query head's ``out`` / ``lse`` /
     ``o_lo`` in the call's ``[T, H]`` tensors; the backward runs the ``"dout_copy"`` aside, one delta launch over the
     ``T * H`` rows, then the main stage's head-window build -- one launch over the ``2 T`` items (descending from
-    item ``2 T - 1`` on sm_103a), or per token chunk and pass a compaction over the chunk's tokens and the pass
-    build over its items (item-space first item ``2 * token_base``) --, reading the call's ``lse`` and the delta's
+    item ``2 T - 1`` on sm_103a / sm_107a), or per token chunk and pass a compaction over the chunk's tokens and the
+    pass build over its items (item-space first item ``2 * token_base``) --, reading the call's ``lse`` and the delta's
     rows, every query head adding once per pass into one accumulator, then one cast (none when direct); every
     query head's ``dq`` is its own.  No window launch, window scratch or window statistics."""
+    if arch == "sm_107a" and forward == "head_window":
+        pytest.skip("sm_107a has no head-window forward (WINDOW_ARCHES)")
     case = HOST_CASES[name]
     h = hl.HostLaunches(
         monkeypatch,
@@ -591,6 +605,7 @@ HEAD_WINDOW_REGISTRATIONS = {
         (),
     ),
     "sm_100a_only": (None, ["sm_100a"], ()),
+    "all_arches": (None, ["sm_100a", "sm_103a", "sm_107a"], ()),
     "no_launcher": (None, None, ("LAUNCH",)),
     "no_grid": (None, None, ("GRID",)),
     "not_in_order": (None, None, ("STAGES_OF",)),
@@ -602,9 +617,11 @@ HEAD_WINDOW_REGISTRATIONS = {
 def test_head_window_fallbacks(monkeypatch, registration, arch):
     """A phase whose head-window build the registry does not register for the architecture runs the two-window
     bridge, the other phase its head-window build where registered: builds of the forward only, of the backward
-    only, builds shipping for sm_100a only (sm_103a: the bridge), a build without its generated launcher or grid
-    (``cake_launch``), and a record entry outside the program's ``STAGES_OF`` order (not a registered stage); on
-    sm_107a, outside ``WINDOW_ARCHES``, every registration runs the bridge in both phases.  The
+    only, builds shipping for sm_100a only (sm_103a: the bridge), builds declared for all three architectures, a
+    build without its generated launcher or grid (``cake_launch``), and a record entry outside the program's
+    ``STAGES_OF`` order (not a registered stage); on sm_107a the forward runs the bridge (no head-window forward
+    there: ``WINDOW_ARCHES``) and the backward its head-window build where the registration declares sm_107a
+    (``BACKWARD_WINDOW_ARCHES``).  The
     host case (a prepared runner over 96 heads, two forced key passes over token chunks, a head-major ``dout``) is
     simulated through either plan per phase; the workspace is the mixed plan's, as ``dsa_train_workspace_size``
     reports it."""
@@ -629,10 +646,17 @@ def test_head_window_fallbacks(monkeypatch, registration, arch):
             if not hl.is_head_window(stage)
         }
         monkeypatch.setattr(cake_launch, name, table)
-    served = arch in cake_backend.WINDOW_ARCHES and (arches is None or arch in arches)
-    registered = served and not hidden
-    fused_forward = registered and (builds is None or "fwd_hw" in builds)
-    fused_backward = registered and (builds is None or "bwd_main_pass_hw" in builds)
+    declared = arch in (arches or hl.HEAD_WINDOW_ARCHES) and not hidden
+    fused_forward = (
+        declared
+        and arch in cake_backend.WINDOW_ARCHES
+        and (builds is None or "fwd_hw" in builds)
+    )
+    fused_backward = (
+        declared
+        and arch in cake_backend.BACKWARD_WINDOW_ARCHES
+        and (builds is None or "bwd_main_pass_hw" in builds)
+    )
     assert cake_backend.head_window_plan(96, arch, backward=True, key_passes=2) == (
         "fwd_hw" if fused_forward else None,
         "bwd_main_pass_hw" if fused_backward else None,
@@ -698,9 +722,9 @@ def test_head_window_plan_selection(monkeypatch, heads):
     """:func:`head_window_plan` by registration, architecture and head count: without the builds registered every
     phase runs the bridge; registered (sm_100a / sm_103a), a call over more than 64 heads runs ``fwd_hw`` /
     ``fwd_hw_no_olo`` and the main stage's build by key passes and the direct path (``bwd_main_hw``,
-    ``bwd_main_natural_hw``, ``bwd_main_pass_hw``, ``bwd_main_pass_natural_hw``); a 64-head call never, sm_107a
-    never (even with builds registered for it), and the stages without a build (``bwd_delta``, ``bwd_compact``,
-    ``bwd_cast``) have none."""
+    ``bwd_main_natural_hw``, ``bwd_main_pass_hw``, ``bwd_main_pass_natural_hw``), on sm_107a (builds registered for
+    it too) the main stage's build and never the head-window forward (``WINDOW_ARCHES``); a 64-head call never, and
+    the stages without a build (``bwd_delta``, ``bwd_compact``, ``bwd_cast``) have none."""
     arches = ("sm_100a", "sm_103a", "sm_107a")
     plans = [
         dict(backward=False),
@@ -727,7 +751,8 @@ def test_head_window_plan_selection(monkeypatch, heads):
     for stage in ("bwd_delta", "bwd_compact", "bwd_cast", "fwd_scan"):
         assert cake_backend.head_window_stage(stage, "sm_100a") is None
     for arch in arches:
-        served = heads != 64 and arch != "sm_107a"
+        served = heads != 64
+        forward_served = served and arch != "sm_107a"
         for with_o_lo in (True, False):
             for kw in plans:
                 forward, main = cake_backend.head_window_plan(
@@ -736,7 +761,11 @@ def test_head_window_plan_selection(monkeypatch, heads):
                 if not served:
                     assert (forward, main) == (None, None), (arch, kw)
                     continue
-                assert forward == ("fwd_hw" if with_o_lo else "fwd_hw_no_olo")
+                assert forward == (
+                    ("fwd_hw" if with_o_lo else "fwd_hw_no_olo")
+                    if forward_served
+                    else None
+                ), (arch, kw, forward)
                 if not kw["backward"]:
                     assert main is None
                     continue
@@ -751,10 +780,11 @@ def test_head_window_plan_selection(monkeypatch, heads):
 @pytest.mark.parametrize("heads", (64, 96, 128))
 def test_single_pass_plan_selection(monkeypatch, heads):
     """The forward :func:`head_window_plan` picks with the single-pass forward builds registered
-    (``hl.register_single_pass_builds``; declared for sm_107a too in this test): above 64 heads on sm_100a / sm_103a
-    the single-pass build (``fwd_h128``, ``fwd_h128_no_olo`` without ``o_lo``) in place of ``fwd_hw`` /
-    ``fwd_hw_no_olo`` -- with or without the head-window builds registered --, and the backward's main stage as
-    before; a 64-head call never, sm_107a never; :func:`single_pass_stage` maps only the two forward stages."""
+    (``hl.register_single_pass_builds``; declared for sm_107a too in this test): above 64 heads on sm_100a / sm_103a /
+    sm_107a the single-pass build (``fwd_h128``, ``fwd_h128_no_olo`` without ``o_lo``) in place of ``fwd_hw`` /
+    ``fwd_hw_no_olo`` -- with or without the head-window builds registered (``hl.register_head_window_builds``:
+    sm_100a / sm_103a, so on sm_107a the backward runs the bridge) --, and the backward's main stage as before; a
+    64-head call never; :func:`single_pass_stage` maps only the two forward stages."""
     plans = [
         dict(backward=False),
         dict(backward=True),
@@ -772,13 +802,11 @@ def test_single_pass_plan_selection(monkeypatch, heads):
         if registered:
             hl.register_head_window_builds(monkeypatch, cake_jit, cake_launch)
         for arch in ("sm_100a", "sm_103a", "sm_107a"):
-            served = heads != 64 and arch != "sm_107a"
+            served = heads != 64
             for with_o_lo in (True, False):
                 single = "fwd_h128" if with_o_lo else "fwd_h128_no_olo"
                 stage = "fwd" if with_o_lo else "fwd_no_olo"
-                assert cake_backend.single_pass_stage(stage, arch) == (
-                    single if arch != "sm_107a" else None
-                )
+                assert cake_backend.single_pass_stage(stage, arch) == single
                 for kw in plans:
                     forward, main = cake_backend.head_window_plan(
                         heads, arch, with_o_lo=with_o_lo, **kw
@@ -787,7 +815,7 @@ def test_single_pass_plan_selection(monkeypatch, heads):
                         assert (forward, main) == (None, None), (arch, kw)
                         continue
                     assert forward == single, (arch, kw, forward)
-                    if not kw["backward"] or not registered:
+                    if not kw["backward"] or not registered or arch == "sm_107a":
                         assert main is None, (arch, kw, main)
                     else:
                         want = (
@@ -989,14 +1017,18 @@ def test_head_window_item_order(monkeypatch, arch):
 @pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
 def test_head_window_key_pass_rule(monkeypatch, arch):
     """The key passes of a head-window backward: the record's rule of the architecture with the overrides of
-    ``HEAD_WINDOW_KEY_PASS_RULES`` -- on sm_103a no tail rows, so the issue's context-parallel rows (T = 16,380,
-    S = 524,160 / 1,048,320, top-k 2048) plan one pass where the 64-head rule plans three --, every other row and
-    architecture as at 64 heads, a forced count and a multi-segment row unchanged.  The override holds above 64 heads
-    where the single-pass head-window build of the binding's accumulation ships
-    (:func:`head_window_key_passes_rule`; never at 64 heads or on the two-window bridge), and both planners pass it:
-    ``_plan`` and ``dsa_train_workspace_size`` (its size is the one-pass head-window layout on sm_103a, the three-pass
-    64-head layout at 64 heads)."""
-    assert cake_backend.HEAD_WINDOW_KEY_PASS_RULES == {"sm_103a": {"tail_rows": 0}}
+    ``HEAD_WINDOW_KEY_PASS_RULES`` -- on sm_103a and sm_107a no tail rows, so the issue's context-parallel rows
+    (T = 16,380, S = 524,160 / 1,048,320, top-k 2048) plan one pass where the 64-head rule plans three (sm_103a) or
+    two (sm_107a) --, every other row and architecture as at 64 heads, a forced count and a multi-segment row
+    unchanged.  The override holds above 64 heads where the single-pass head-window build of the binding's
+    accumulation ships (:func:`head_window_key_passes_rule`; never at 64 heads or on the two-window bridge), and both
+    planners pass it: ``_plan`` and ``dsa_train_workspace_size`` (its size is the one-pass head-window layout above 64
+    heads, the three-pass (sm_103a) or two-pass (sm_107a) 64-head layout at 64 heads).  On sm_107a with the
+    head-window builds hidden, the bridge keeps the record's rule (:func:`_bridge_key_pass_rule_sm107a`)."""
+    assert cake_backend.HEAD_WINDOW_KEY_PASS_RULES == {
+        "sm_103a": {"tail_rows": 0},
+        "sm_107a": {"tail_rows": 0},
+    }
     record = cake_jit.record()
     stages = tuple(cake_jit.registered_stages())
     assert set(KEY_PASS_STAGES) <= set(stages)
@@ -1019,7 +1051,9 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
         hw = cake_backend.plan_key_passes(
             record, stages, T, S, TOPK, head_windows=True, **kw
         )
-        tail_only = arch == "sm_103a" and seg == 1 and T > 4224 and 2 * T <= S
+        tail_only = (
+            arch in ("sm_103a", "sm_107a") and seg == 1 and T > 4224 and 2 * T <= S
+        )
         assert hw == (1 if tail_only else base), (arch, T, S, seg, base, hw)
         for forced in (1, 2, 3):
             assert (
@@ -1028,38 +1062,35 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
                 )
                 == forced
             )
-    if arch == "sm_103a":
+    if arch in ("sm_103a", "sm_107a"):
         for S in (524160, 1048320):
-            assert (
-                cake_backend.plan_key_passes(record, stages, 16380, S, TOPK, arch=arch)
-                == 3
-            )
+            assert cake_backend.plan_key_passes(
+                record, stages, 16380, S, TOPK, arch=arch
+            ) == (3 if arch == "sm_103a" else 2)
             assert (
                 cake_backend.plan_key_passes(
                     record, stages, 16380, S, TOPK, arch=arch, head_windows=True
                 )
                 == 1
             )
-    h = hl.HostLaunches(
+    h = hl.HostLaunches(  # the registry's single-pass forward: sm_107a has no head-window forward
         monkeypatch,
         cake_backend,
         cake_jit,
         cake_launch,
         arch,
         simulate=False,
-        head_windows=arch != "sm_107a",
+        head_windows=True,
+        single_pass=None,
     )
     for heads in (64, 96, 128):
         for direct in (False, True):
-            want = heads != 64 and arch != "sm_107a"
+            want = heads != 64
             assert cake_backend.head_window_key_passes_rule(heads, arch, direct) == want
     with monkeypatch.context() as m:  # the two-window bridge
         m.setattr(cake_backend, "head_window_stage", lambda stage, arch: None)
         for direct in (False, True):
             assert not cake_backend.head_window_key_passes_rule(96, arch, direct)
-    if arch == "sm_107a":
-        _bridge_key_pass_rule_sm107a(monkeypatch, h, record, stages)
-        return
     seen = []
     real = cake_backend.plan_key_passes
 
@@ -1081,16 +1112,19 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
             T, S, TOPK, num_heads=heads, dkv_acc=True, dout_copy=False
         )
         assert seen == [heads != 64]
-        passes = 3 if (arch == "sm_103a" and heads == 64) else 1
+        passes = {"sm_103a": 3, "sm_107a": 2}.get(arch, 1) if heads == 64 else 1
         items = 1 if heads == 64 else cake_backend.HEAD_WINDOW_ITEMS
         policy = cake_backend.KeyPassPolicy.from_record(record)
+        direct = cake_backend.plan_dkv_direct(
+            record, stages, T, S, TOPK, accumulate=True, arch=arch
+        )
         layout = cake_backend.workspace_layout(
             T,
             S,
             TOPK,
             backward=True,
             key_passes=passes,
-            dkv_direct=True,
+            dkv_direct=direct,
             token_chunk=policy.token_chunk(TOPK, items),
             num_heads=heads,
             dout_copy=False,
@@ -1098,13 +1132,26 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
             fused_backward=heads != 64,
         )
         assert size == layout["total"], (arch, heads, size, layout["total"])
+    # sm_107a with the head-window builds hidden: the bridge keeps the record's rule
+    if arch == "sm_107a":
+        with monkeypatch.context() as m:
+            hb = hl.HostLaunches(
+                m,
+                cake_backend,
+                cake_jit,
+                cake_launch,
+                arch,
+                simulate=False,
+                head_windows=False,
+            )
+            _bridge_key_pass_rule_sm107a(m, hb, record, stages)
 
 
 def _bridge_key_pass_rule_sm107a(monkeypatch, h, record, stages):
-    """sm_107a above 64 heads (the two-window bridge): both planners pass the record's 64-head key-pass rule (no
-    head-window override), and the workspace size of the issue's context-parallel rows (T = 16,380, S = 524,160 /
-    1,048,320, top-k 2048) is the bridge's layout with the record's passes (two, from 131,072 keys) over 64-head
-    token chunks and the record's direct rule."""
+    """sm_107a above 64 heads on the two-window bridge (the head-window builds hidden): both planners pass the record's
+    64-head key-pass rule (no head-window override), and the workspace size of the issue's context-parallel rows
+    (T = 16,380, S = 524,160 / 1,048,320, top-k 2048) is the bridge's layout with the record's passes (two, from
+    131,072 keys) over 64-head token chunks and the record's direct rule."""
     seen = []
     real = cake_backend.plan_key_passes
 
@@ -1339,15 +1386,17 @@ def test_head_window_workspace(monkeypatch, heads):
 def test_head_window_builds_zero_rows_and_sm107a(monkeypatch, arch, heads):
     """With the head-window and single-pass builds registered (and, for this test, declared for sm_107a too): a call
     without query rows returns its empty outputs without planning or launching on every architecture; on sm_107a a
-    call with rows plans the two-window bridge in both phases -- the builds serve sm_100a / sm_103a only
-    (``WINDOW_ARCHES``) --: ``prepare_dsa_train`` binds window launches and copy steps over the bridge's workspace
-    (window scratch and statistics), which ``dsa_train_workspace_size`` reports."""
+    call with rows plans the single-pass forward and the head-window backward -- never the head-window forward
+    (``WINDOW_ARCHES``) --: ``prepare_dsa_train`` binds the single-pass forward launch and the backward's main build,
+    no window launch, copy step, window scratch or statistics, over the workspace ``dsa_train_workspace_size``
+    reports."""
     _declare_builds_for_every_arch(monkeypatch)
     h = hl.HostLaunches(
         monkeypatch, cake_backend, cake_jit, cake_launch, arch, single_pass=None
     )
     assert cake_backend.head_window_stage("fwd", "sm_107a") is None
-    assert cake_backend.single_pass_stage("fwd", "sm_107a") is None
+    assert cake_backend.head_window_stage("bwd_main", "sm_107a") == "bwd_main_hw"
+    assert cake_backend.single_pass_stage("fwd", "sm_107a") == "fwd_h128"
     real_plan = cake_backend._plan
 
     def refuse(*args, **kwargs):
@@ -1378,15 +1427,21 @@ def test_head_window_builds_zero_rows_and_sm107a(monkeypatch, arch, heads):
     h.bind(inp.q_latent, inp.q_rope, inp.dout)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
     runner = prepare_dsa_train(*args, dout=inp.dout)
-    assert tuple(runner.forward_stages) == _bridge_forward_keys(heads, "fwd")
+    assert tuple(runner.forward_stages) == ("fwd_h128",)
+    assert not any(
+        isinstance(key, (cake_backend.WindowLaunch, cake_backend.HeadStep))
+        for key in runner.backward_order
+    ), runner.backward_order
     assert any(
-        isinstance(key, cake_backend.WindowLaunch) for key in runner.backward_order
-    )
-    assert {"fwd_lse", "fwd_o_lo", "window_lse", "window_delta"} <= set(runner.layout)
+        (key if isinstance(key, str) else key[0]).endswith("_hw")
+        for key in runner.backward_order
+    ), runner.backward_order
+    gone = {"fwd_lse", "fwd_o_lo", "window_lse", "window_delta"}
+    assert not gone & set(runner.layout)
     assert runner.workspace.numel() == cake_backend.dsa_train_workspace_size(
         8, 64, 16, num_heads=heads, dout_copy=False
     )
-    assert not any(rec.hw or rec.sp for rec in h.launches)
+    assert not any(rec.window is not None for rec in h.launches)
 
 
 def _saved_by(call):
@@ -1543,12 +1598,14 @@ def test_every_rope_plan_carries_dout_copy(monkeypatch, heads, with_o_lo, arch):
     ``True`` exactly for a backward over more than 64 heads whose ``dout`` is not dense over its rows (the
     head-major view).  The plan's three uses of it agree: the ``"dout_copy"`` step is in its backward order, its
     workspace layout has the ``dout_copy`` region, and the delta reads at the head stride 512 of the copy (else at
-    the ``dout``'s own) with the virtual token stride of 64 heads above 64 heads.  On sm_107a every plan over 64 heads
-    is the two-window bridge's."""
+    the ``dout``'s own) with the virtual token stride of 64 heads above 64 heads.  On sm_107a (the harness hides the
+    single-pass forward) every plan over 64 heads runs the bridge's forward and the head-window backward."""
     found = _dout_copy_case(monkeypatch, heads, with_o_lo, head_windows=None, arch=arch)
     if arch == "sm_107a":
         for entry, layout, _, made in found:
-            assert not made.fused_forward and not made.fused_backward, (entry, layout)
+            assert not made.fused_forward, (entry, layout)
+            fused = made.backward and heads != 64
+            assert made.fused_backward == fused, (entry, layout)
 
 
 @pytest.mark.parametrize("heads", (96, 128))
@@ -1892,11 +1949,14 @@ def test_zero_query_rows_of_a_cuda_call_check_the_architecture(
 
 def test_more_heads_need_a_head_arch():
     """The architecture rule above 64 heads (host): ``HEAD_ARCHES`` (sm_100a, sm_103a, sm_107a) serve 96 and 128
-    heads, ``WINDOW_ARCHES`` (sm_100a, sm_103a) the head-window and single-pass builds; another architecture (or no
-    supported device, ``None``) is refused with ``NotImplementedError`` naming ``HEAD_ARCHES``, before any plan; 64
-    heads are never refused by this rule."""
+    heads, ``WINDOW_ARCHES`` (sm_100a, sm_103a) the head-window forward builds, ``BACKWARD_WINDOW_ARCHES`` and
+    ``SINGLE_PASS_ARCHES`` (all three) the head-window main backward and single-pass forward builds; another
+    architecture (or no supported device, ``None``) is refused with ``NotImplementedError`` naming ``HEAD_ARCHES``,
+    before any plan; 64 heads are never refused by this rule."""
     assert cake_backend.HEAD_ARCHES == ("sm_100a", "sm_103a", "sm_107a")
     assert cake_backend.WINDOW_ARCHES == ("sm_100a", "sm_103a")
+    assert cake_backend.BACKWARD_WINDOW_ARCHES == ("sm_100a", "sm_103a", "sm_107a")
+    assert cake_backend.SINGLE_PASS_ARCHES == ("sm_100a", "sm_103a", "sm_107a")
     assert set(cake_backend.HEAD_ARCHES) == set(SUPPORTED_COMPUTE_CAPABILITIES.values())
     for heads in (64, 96, 128):
         for arch in cake_backend.HEAD_ARCHES:
@@ -1984,13 +2044,16 @@ def test_nope_forms_reject_more_heads_and_det_rope_validates_them(heads):
 
 @pytest.mark.parametrize("heads", (96, 128))
 def test_sm107a_plans_the_bridge(monkeypatch, heads):
-    """On sm_107a a 96- or 128-head call runs the two-window bridge (host, the architecture stood in): the flat and
+    """On sm_107a with the head-window and single-pass builds hidden (a registry that does not ship them there) a
+    96- or 128-head call runs the two-window bridge (host, the architecture stood in): the flat and
     packed (varlen, its torch index route) autograd entries launch the 64-head stages on ``W1 = [H - 64, H)`` and
     then ``W0 = [0, 64)`` in both phases (no head-window or single-pass build, one delta launch) and return
     gradients of the inputs' shapes; ``dsa_train_workspace_size`` is the bridge's layout; 64 heads launch as
     before.  The eager entries and the runner: :func:`test_head_window_launches`; the
     public step entries: ``test_cake_dsa_sparse_attention_nondet_train_api.py``."""
-    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
+    h = hl.HostLaunches(
+        monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a", head_windows=False
+    )
     monkeypatch.setattr(
         cake_backend, "nope_index_prep_available", lambda device=None: False
     )
@@ -2205,7 +2268,8 @@ def test_wide_copy_takes_the_widest_view_both_operands_allow(device):
 
 
 # ---------------------------------------------------------------------------
-# Device tests (64, 96 and 128 heads on every architecture; sm_107a above 64 on the two-window bridge)
+# Device tests (64, 96 and 128 heads on every architecture; sm_107a above 64 on the single-pass forward and the
+# head-window backward)
 # ---------------------------------------------------------------------------
 
 
@@ -2217,7 +2281,7 @@ def _device_supported() -> bool:
 
 def _require_heads(heads: int, *, backward: bool = False) -> None:
     """A device and a registered program that serve ``heads`` query heads (skip otherwise): 64, 96 and 128 heads on
-    every supported architecture (sm_107a runs 96 and 128 on the two-window bridge)."""
+    every supported architecture (sm_107a runs 96 and 128 on the single-pass forward and the head-window backward)."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     if not generated_program_available(torch.device("cuda"), backward=backward):
@@ -3046,8 +3110,10 @@ def _same_per_head_outputs(found: dict, bridge: dict) -> None:
 def test_head_window_builds_match_the_bridge(
     with_o_lo, heads, monkeypatch, record_property
 ):
-    """Where the program ships the head-window builds for the device (sm_100a / sm_103a; skip where it does not), a
-    call over ``heads`` query heads runs them (the forward one head-window launch, the backward the main stage's
+    """Where the program ships the head-window main backward builds for the device (sm_100a / sm_103a / sm_107a;
+    skip where it does not), a call over ``heads`` query heads runs them (the forward one head-window launch where
+    that ships -- on sm_107a, which has no head-window forward, both arms run the bridge's forward, so the test holds
+    the head-window backward against the bridge's on the same saved forward outputs --, the backward the main stage's
     build, no window launch), and its per-head outputs equal bit for bit the two-window bridge's on the same inputs
     (every head's rows go through the same 64-head kernel either way): ``out``, ``lse``, ``o_lo`` and ``dq`` of the
     eager forward, of the eager backward at one key pass (permuted accumulation and, into ``dkv_acc``, the
@@ -3063,9 +3129,9 @@ def test_head_window_builds_match_the_bridge(
     forward, main = cake_backend.head_window_plan(
         heads, arch, with_o_lo=with_o_lo, backward=True
     )
-    if forward is None or main is None:
+    if main is None:
         pytest.skip(
-            "the registered program ships no head-window builds for this device"
+            "the registered program ships no head-window backward builds for this device"
         )
     head_window_stage = cake_backend.head_window_stage
 
@@ -3115,16 +3181,19 @@ def test_head_window_builds_match_the_bridge(
             runs["runner"] = _rope_outputs(
                 (prepared.out, prepared.lse, prepared.o_lo), grads
             )
-            windowed = any(
+            fwd_windowed = any(
                 isinstance(key, cake_backend.WindowLaunch)
-                for key in (*prepared.forward_stages, *prepared.backward_order)
+                for key in prepared.forward_stages
             )
-            assert windowed == bridge, (
-                prepared.forward_stages,
-                prepared.backward_order,
+            bwd_windowed = any(
+                isinstance(key, cake_backend.WindowLaunch)
+                for key in prepared.backward_order
             )
+            assert fwd_windowed == (bridge or forward is None), prepared.forward_stages
+            assert bwd_windowed == bridge, prepared.backward_order
             if not bridge:
-                assert tuple(prepared.forward_stages) == (forward,)
+                if forward is not None:
+                    assert tuple(prepared.forward_stages) == (forward,)
                 assert main in prepared.backward_order
         torch.cuda.synchronize()
         return runs, prepared
@@ -3153,7 +3222,8 @@ def test_head_window_builds_match_the_bridge(
 
 @pytest.mark.parametrize("heads", (96,) + REDUCED_HEADS)
 def test_single_pass_forward_through_the_loader(heads, monkeypatch, record_property):
-    """Where the program ships the single-pass forward for the device (sm_100a / sm_103a; skip where it does not), the
+    """Where the program ships the single-pass forward for the device (sm_100a / sm_103a / sm_107a; skip where it
+    does not), the
     forward of a call over ``heads`` query heads is one launch of it through the package's loader -- the stage's
     module, its generated launcher and the persistent grid :func:`cake_backend.single_pass_grid` over the device's
     SMs -- for T = 1, a T below the device's cluster count and one above it, with and without ``o_lo``:
@@ -3297,25 +3367,27 @@ def test_single_pass_forward_through_the_loader(heads, monkeypatch, record_prope
 
 
 @pytest.mark.parametrize("heads", (96,) + REDUCED_HEADS)
-def test_sm107a_device_runs_the_bridge(heads):
-    """On an sm_107a device a call over ``heads`` query heads runs the two-window bridge in both phases (skip on
-    another device): :func:`head_window_plan` is ``(None, None)``, a prepared runner's forward is the two window
-    launches of the 64-head forward (``W1`` then ``W0``) and its backward window launches; the runner's ``out`` /
-    ``lse`` / ``o_lo`` and ``dq`` equal the eager forward's and backward's bit for bit (the same launches), and repeat
-    bit for bit run to run.  Accuracy: the judged tests of this file, which run the bridge there."""
+def test_sm107a_device_runs_the_registry_builds(heads):
+    """On an sm_107a device a call over ``heads`` query heads runs the single-pass forward and the head-window main
+    backward the registry ships there (skip on another device): :func:`head_window_plan` is ``(fwd_h128 /
+    fwd_h128_no_olo, the main build of the key passes)``, a prepared runner's forward is the one single-pass launch and
+    its backward has the head-window main build and no window launch; the runner's ``out`` / ``lse`` / ``o_lo`` and
+    ``dq`` equal the eager forward's and backward's bit for bit (the same launches), and repeat bit for bit run to
+    run.  Accuracy: the judged tests of this file, which run these builds there."""
     _require_heads(heads, backward=True)
     arch = cake_backend.arch_for(torch.device("cuda"))
     if arch != "sm_107a":
         pytest.skip("an sm_107a device")
     for with_o_lo in (True, False):
-        for kw in (
-            {"backward": False},
-            {"backward": True},
-            {"backward": True, "key_passes": 2},
+        single = "fwd_h128" if with_o_lo else "fwd_h128_no_olo"
+        for kw, main in (
+            ({"backward": False}, None),
+            ({"backward": True}, "bwd_main_hw"),
+            ({"backward": True, "key_passes": 2}, "bwd_main_pass_hw"),
         ):
             assert cake_backend.head_window_plan(
                 heads, arch, with_o_lo=with_o_lo, **kw
-            ) == (None, None)
+            ) == (single, main)
     inp = make_inputs([300], [2048], seed=SEED + 9990 + heads, topk=512, heads=heads)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
     cake_backend.BINDING_CACHE._entries.clear()
@@ -3332,12 +3404,14 @@ def test_sm107a_device_runs_the_bridge(heads):
 
     first, second = eager(), eager()
     prepared = prepare_dsa_train(*args, dout=inp.dout, key_passes=1, **lengths)
-    assert tuple(prepared.forward_stages) == _bridge_forward_keys(heads, "fwd")
-    assert [
-        key.head0
+    assert tuple(prepared.forward_stages) == ("fwd_h128",)
+    assert not any(
+        isinstance(key, cake_backend.WindowLaunch) for key in prepared.backward_order
+    ), prepared.backward_order
+    assert any(
+        str(key) in ("bwd_main_hw", "bwd_main_natural_hw")
         for key in prepared.backward_order
-        if isinstance(key, cake_backend.WindowLaunch)
-    ] == [heads - 64, 0], prepared.backward_order
+    ), prepared.backward_order
     dql, dqr = prepared.step()[:2]
     torch.cuda.synchronize()
     runner = {

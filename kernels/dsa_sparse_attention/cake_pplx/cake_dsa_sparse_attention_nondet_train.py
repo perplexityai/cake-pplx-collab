@@ -22,14 +22,15 @@ Query heads: the rope entries take ``H = q_latent.shape[1]`` heads, ``H`` in
 64, 96 and 128 (SM100 / SM103 / SM107); every head tensor below written
 ``[T, 64, ...]`` is ``[T, H, ...]`` for them.  The kernels compute 64 heads of
 a token per work item: 96 and 128 heads run, where the program ships them for
-the device (SM100 / SM103), the head-window builds -- one launch per stage over
-both 64-head windows ``[0, 64)`` and ``[64, 128)`` of every token, the heads
-past ``H`` padding -- and otherwise (always on SM107) the two-window bridge:
-the 64-head kernels on ``[H - 64, H)`` and then ``[0, 64)``, with the heads
-``[H - 64, 64)`` both windows cover taken from the second (see the backend
-README).  Their forward runs, where the program ships it (SM100 / SM103), the
-single-pass forward instead: every head of a token in one 2-CTA cluster.  The
-NoPE entries take 64 heads.
+the device (the forward builds on SM100 / SM103, the backward builds on all
+three), the head-window builds -- one launch per stage over both 64-head
+windows ``[0, 64)`` and ``[64, 128)`` of every token, the heads past ``H``
+padding -- and otherwise the two-window bridge: the 64-head kernels on
+``[H - 64, H)`` and then ``[0, 64)``, with the heads ``[H - 64, 64)`` both
+windows cover taken from the second (see the backend README).  Their forward
+runs, where the program ships it (SM100 / SM103 / SM107), the single-pass
+forward instead: every head of a token in one 2-CTA cluster.  The NoPE entries
+take 64 heads.
 
 Numerical mode: the module name chooses the package, and no entry point takes a
 determinism keyword; ``with_o_lo`` chooses whether the forward writes ``o_lo``

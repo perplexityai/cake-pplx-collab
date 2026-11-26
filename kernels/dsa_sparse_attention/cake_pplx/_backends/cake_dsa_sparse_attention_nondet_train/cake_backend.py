@@ -145,20 +145,25 @@ D_QK = D_LATENT + D_ROPE
 #   - a call without query rows (``T = 0``) returns its empty outputs before any plan (no launch), as at 64 heads:
 #     the head-window launches always cover at least one token.
 #
-# * The single-pass forward (0.9.0), where the program ships it for the device's architecture (``SINGLE_PASS_STAGES``,
-#   :func:`single_pass_stage`; ``sm_100a`` / ``sm_103a``), replaces the head-window forward (and the bridge's): one
-#   launch of ``fwd_h128`` (``fwd_h128_no_olo`` under ``with_o_lo=False``) computes every query head of a token in one
-#   ``(2, 1, 1)`` cluster -- 128 rows split over the pair's two CTAs, the rows past ``H`` zero-filled by the query
-#   loads and never stored -- and writes ``out``, ``lse`` and ``o_lo`` at ``t * H + h`` directly, like the head-window
-#   forward (no window scratch, no copy).  Its arguments are its own: ``num_queries = T`` tokens (not items),
-#   ``num_heads = H``, ``k_rope`` a tensor map (no window selector, no ``k_rope`` stride / offset scalars).  Its grid
-#   is persistent, ``2 * max(1, min(T, SMs // 2))`` CTAs (:func:`single_pass_grid`): cluster ``c`` of ``C`` runs the
-#   tokens ``c, c + C, ...`` in a fixed per-token order, and with ``derive_length`` stores each token's derived
-#   length.  Its ``out`` / ``lse`` / ``o_lo`` are not the 64-head windows' bits (another kernel); the naive BF16 tier
-#   judges them.  The backward plans are unchanged.
+# * The single-pass forward (0.9.0; ``sm_107a`` from 0.12.0), where the program ships it for the device's architecture
+#   (``SINGLE_PASS_STAGES``, :func:`single_pass_stage`; ``SINGLE_PASS_ARCHES``), replaces the head-window forward
+#   (and the bridge's): one launch of ``fwd_h128`` (``fwd_h128_no_olo`` under ``with_o_lo=False``) computes every query
+#   head of a token in one ``(2, 1, 1)`` cluster -- 128 rows split over the pair's two CTAs, the rows past ``H``
+#   zero-filled by the query loads and never stored -- and writes ``out``, ``lse`` and ``o_lo`` at ``t * H + h``
+#   directly, like the head-window forward (no window scratch, no copy).  Its arguments are its own: ``num_queries = T``
+#   tokens (not items), ``num_heads = H``, ``k_rope`` a tensor map (no window selector, no ``k_rope`` stride / offset
+#   scalars).  Its grid is persistent, ``2 * max(1, min(T, SMs // 2))`` CTAs (:func:`single_pass_grid`): cluster ``c``
+#   of ``C`` runs the tokens ``c, c + C, ...`` in a fixed per-token order, and with ``derive_length`` stores each
+#   token's derived length.  Its ``out`` / ``lse`` / ``o_lo`` are not the 64-head windows' bits (another kernel); the
+#   naive BF16 tier judges them.  The backward plans are unchanged.
 #
-# * The two-window bridge (0.7.0), where the program lacks the phase's head-window build (and on every phase on
-#   ``sm_107a``): the 64-head kernels on head windows (``head_windows``), ``W1 = [H - 64, H)`` first and then
+# * The head-window plan is chosen per phase: its forward builds ship on ``WINDOW_ARCHES`` (``sm_100a`` / ``sm_103a``),
+#   its main backward builds on ``BACKWARD_WINDOW_ARCHES`` (``sm_107a`` too, from 0.12.0).  On ``sm_107a`` a call over
+#   96 or 128 heads therefore runs the single-pass forward and the head-window backward: the backward reads the
+#   ``[T, H]`` ``out`` / ``lse`` / ``o_lo`` the single-pass forward writes, as on ``sm_100a`` / ``sm_103a``.
+#
+# * The two-window bridge (0.7.0), where the program lacks the phase's head-window build (on ``sm_107a`` before
+#   0.12.0, both phases): the 64-head kernels on head windows (``head_windows``), ``W1 = [H - 64, H)`` first and then
 #   ``W0 = [0, 64)`` (96: ``[32, 96)`` then ``[0, 64)``; 128: ``[64, 128)`` then ``[0, 64)``).  The window's query,
 #   ``out``, ``dout`` and ``dq`` operands are head slices of the caller's tensors (the tensor maps carry the strides);
 #   its ``lse`` / ``o_lo`` / stats operands are contiguous ``[T, 64]`` scratch:
@@ -181,17 +186,23 @@ D_QK = D_LATENT + D_ROPE
 # add the same terms with FP32 atomics in another order.  The single-pass forward is another kernel: its ``out``,
 # ``lse`` and ``o_lo`` (and so the backward's ``delta`` and ``dq``) are its own bits, run-to-run identical.  The
 # NoPE program serves 64 heads only (the deterministic package's RoPE form serves 96 and 128 with its own builds).  On
-# ``sm_107a`` (in ``HEAD_ARCHES``, not in ``WINDOW_ARCHES``) a call over 96 or 128 heads runs the two-window bridge in
-# both phases, on the 64-head stages that ship there (the forward's scanner-warp build ``fwd_scan``): no head-window or
-# single-pass build is planned there.
+# ``sm_107a`` (in ``HEAD_ARCHES``, ``SINGLE_PASS_ARCHES`` and ``BACKWARD_WINDOW_ARCHES``, not in ``WINDOW_ARCHES``) a
+# call over 96 or 128 heads runs the single-pass forward and the head-window main backward where the registry ships
+# them for ``sm_107a``; a phase whose build it does not ship there runs the two-window bridge on the 64-head stages
+# that ship there (the forward's scanner-warp build ``fwd_scan``).  The head-window forward is never planned there.
 SUPPORTED_HEADS = (64, 96, 128)
 HEAD_WINDOW = NUM_HEADS
-# The architectures that serve ``H > 64`` (:func:`_check_window_arch`): ``sm_100a`` / ``sm_103a`` with the
-# head-window and single-pass builds where the program ships them, ``sm_107a`` on the two-window bridge.
+# The architectures that serve ``H > 64`` (:func:`_check_window_arch`), each with the head-window and single-pass
+# builds where the program ships them for it and the two-window bridge elsewhere.
 HEAD_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-# The architectures whose stages serve the head windows of ``H > 64``: the head-window and single-pass builds
-# (``sm_107a`` runs the two-window bridge).
+# The architectures whose head-window forward builds (``fwd_hw``, ``fwd_hw_no_olo``) serve ``H > 64``: the kernels have
+# no head-window forward for ``sm_107a`` (its forward is the single-pass build), so a registry declaring one there does
+# not plan it.
 WINDOW_ARCHES = ("sm_100a", "sm_103a")
+# The architectures whose head-window main backward builds (``bwd_main*_hw``) serve ``H > 64``.
+BACKWARD_WINDOW_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+# The architectures whose single-pass forward builds (``fwd_h128``, ``fwd_h128_no_olo``) serve ``H > 64``.
+SINGLE_PASS_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 # The head-window builds (see the comment above ``SUPPORTED_HEADS``): stage -> its head-window stage.  The forward
 # builds (and their ``with_o_lo=False`` twins) and the four main backward forms (permuted / natural-layout
 # accumulation, single pass / key-range passes) of the RoPE program; the delta, compaction and cast stages serve both
@@ -207,6 +218,9 @@ HEAD_WINDOW_STAGES = {
     "bwd_main_pass_natural": "bwd_main_pass_natural_hw",
 }
 _HEAD_WINDOW_BUILDS = frozenset(HEAD_WINDOW_STAGES.values())
+# The forward stages of ``HEAD_WINDOW_STAGES`` (gated by ``WINDOW_ARCHES``; the main backward stages by
+# ``BACKWARD_WINDOW_ARCHES``).
+_FORWARD_WINDOW_STAGES = frozenset(("fwd", "fwd_no_olo"))
 # The work items per token of a head-window launch (both windows) and its ``wsel`` (-1: both windows of every token).
 HEAD_WINDOW_ITEMS = 2
 HEAD_WINDOW_BOTH = -1
@@ -241,12 +255,16 @@ def window_owned_heads(num_heads: int, head0: int) -> tuple[int, int]:
 
 def head_window_stage(stage: str, arch: Optional[str]) -> Optional[str]:
     """The head-window build of the RoPE program's ``stage`` (``HEAD_WINDOW_STAGES``) that serves ``arch``, or
-    ``None`` when there is none: ``stage`` has no head-window build, ``arch`` is outside ``WINDOW_ARCHES``, or the
+    ``None`` when there is none: ``stage`` has no head-window build, ``arch`` is outside the phase's architectures
+    (``WINDOW_ARCHES`` for the forward stages, ``BACKWARD_WINDOW_ARCHES`` for the main backward stages), or the
     registry does not register the build (a record entry among the record's stages, shipping for ``arch``) with its
     generated launcher and grid (``cake_launch``).  ``None`` plans the two-window bridge for that phase (see the
     comment above ``SUPPORTED_HEADS``)."""
     hw = HEAD_WINDOW_STAGES.get(stage)
-    if hw is None or arch not in WINDOW_ARCHES:
+    arches = (
+        WINDOW_ARCHES if stage in _FORWARD_WINDOW_STAGES else BACKWARD_WINDOW_ARCHES
+    )
+    if hw is None or arch not in arches:
         return None
     if hw not in cake_jit.record() or hw not in cake_jit.registered_stages():
         return None
@@ -260,12 +278,12 @@ def head_window_stage(stage: str, arch: Optional[str]) -> Optional[str]:
 def single_pass_stage(stage: str, arch: Optional[str]) -> Optional[str]:
     """The single-pass forward build (``SINGLE_PASS_STAGES``) that runs the RoPE program's forward ``stage`` (``fwd``
     or ``fwd_no_olo``) over more than 64 query heads on ``arch``, or ``None`` when there is none: ``arch`` is outside
-    ``WINDOW_ARCHES``, or the registry does not register the build (a record entry among the record's stages,
+    ``SINGLE_PASS_ARCHES``, or the registry does not register the build (a record entry among the record's stages,
     shipping for ``arch``) with its generated launcher and grid (``cake_launch``).  It does not need the head-window
     forward it replaces to ship."""
     hw = HEAD_WINDOW_STAGES.get(stage)
     single = SINGLE_PASS_STAGES.get(hw) if hw is not None else None
-    if single is None or arch not in WINDOW_ARCHES:
+    if single is None or arch not in SINGLE_PASS_ARCHES:
         return None
     if single not in cake_jit.record() or single not in cake_jit.registered_stages():
         return None
@@ -408,7 +426,7 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # heads (the one-chunk test reads the 64-head chunk) under the rule of the
 # architecture with the head-window overrides of
 # ``HEAD_WINDOW_KEY_PASS_RULES`` applied (see there: no tail-row passes on
-# ``sm_103a``).  The passes split the whole key row
+# ``sm_103a`` and ``sm_107a``).  The passes split the whole key row
 # ``[0, S)`` into equal ranges,
 # which matches an index row whose keys spread over the whole row (one
 # document); in a packed multi-segment row every token's keys lie inside its
@@ -455,9 +473,16 @@ _R1_RULE: dict[str, int] = dict.fromkeys(KEY_PASS_RULE_FIELDS, 0)
 # token chunk stay 5-15 % slower than one at S = 524,160 / 1,048,320.  [est] The three passes keep each pass's FP32 dKV
 # accumulator slice (S / 3 x 2,304 B) nearer the L2 budget; with head windows the extra launches, the FP32 dQ-partial
 # round trip and the compaction of every pass cost more than that locality gains, also where the slice is close to the
-# 100 MiB budget (113 MB at S = 147,420).  One-chunk rows keep the record's rule; the 64-head plans and the two-window
-# bridge are unchanged.
-HEAD_WINDOW_KEY_PASS_RULES: dict[str, dict[str, int]] = {"sm_103a": {"tail_rows": 0}}
+# 100 MiB budget (113 MB at S = 147,420).  ``sm_107a``: no tail-row passes either.  Its record rule plans two fixed
+# passes on the tail rows from 131,072 keys; on VR200 the head-window build's single pass beats the two passes of the
+# key-range-pass build by 10-12 % on the main-stage kernels at T = 16,380, S = 524,160 / 1,048,320 (96 and 128 heads,
+# top-k 2048; every round of eight).  The single-pass plan runs ``bwd_main_natural_hw`` where the two-pass plan ran
+# ``bwd_main_pass_natural_hw``, so ``dq`` takes the one-pass FP32 summation order (the naive BF16 tier judges it).
+# One-chunk rows keep the record's rule; the 64-head plans and the two-window bridge are unchanged.
+HEAD_WINDOW_KEY_PASS_RULES: dict[str, dict[str, int]] = {
+    "sm_103a": {"tail_rows": 0},
+    "sm_107a": {"tail_rows": 0},
+}
 
 
 @dataclass(frozen=True)
@@ -1309,8 +1334,8 @@ def num_query_heads(q_latent: torch.Tensor) -> int:
 
 
 def _check_window_arch(num_heads: int, arch: Optional[str]) -> None:
-    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``HEAD_ARCHES`` (``sm_107a`` is in it and
-    runs the two-window bridge; :func:`head_window_plan` chooses the plan)."""
+    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``HEAD_ARCHES`` (:func:`head_window_plan`
+    chooses the plan per phase)."""
     if int(num_heads) != NUM_HEADS and arch not in HEAD_ARCHES:
         raise NotImplementedError(
             f"{int(num_heads)} query heads are served on {list(HEAD_ARCHES)}; "
