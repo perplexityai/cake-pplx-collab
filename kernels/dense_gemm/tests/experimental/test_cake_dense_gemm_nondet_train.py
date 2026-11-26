@@ -1160,14 +1160,24 @@ def _det_tables_0326(m):
 def _det_tables_0327(m):
     """Put the deterministic package's tables of version 0.3.27 back (``m``: a monkeypatch context; applying it again
     in a nested context changes nothing): no key of :data:`DET_0328_PART_KEYS` in its 148-SM ``sm_100a`` part rules, no
-    152-SM ``sm_103a`` part rules and no router split count of :data:`DET_ROUTER_0328_RULES`.  Its version 0.3.28
-    changes nothing else."""
+    152-SM ``sm_103a`` part rules and no router split count of :data:`DET_ROUTER_0328_RULES`, on its tables of version
+    0.3.28 (:func:`_det_tables_0328`).  Its version 0.3.28 changes nothing else."""
+    _det_tables_0328(m)
     part = det_backend.ROW_RULES_BY_SM.get(("sm_100a", 148))
     if part is not None:
         for key in DET_0328_PART_KEYS[("sm_100a", 148)]:
             m.delitem(part, key, raising=False)
     m.delitem(det_backend.ROW_RULES_BY_SM, ("sm_103a", 152), raising=False)
     for key in DET_ROUTER_0328_RULES:
+        m.delitem(det_backend.ROUTER_SPLIT_RULES, key, raising=False)
+
+
+def _det_tables_0328(m):
+    """Put the deterministic package's tables of version 0.3.28 back (``m``: a monkeypatch context; applying it again
+    in a nested context changes nothing): no 152-SM ``sm_100a`` part rules (:data:`DET_0329_PART_KEYS`) and no router
+    split count of :data:`DET_ROUTER_0329_RULES`.  Its version 0.3.29 changes nothing else."""
+    m.delitem(det_backend.ROW_RULES_BY_SM, ("sm_100a", 152), raising=False)
+    for key in DET_ROUTER_0329_RULES:
         m.delitem(det_backend.ROUTER_SPLIT_RULES, key, raising=False)
 
 
@@ -23571,4 +23581,311 @@ def test_gpu_router_0328_rows(key, record_property):
         torch.cuda.synchronize()  # nothing was launched: the context stays healthy
         assert bool(storage.isnan().all()), key
     print(f"ROUTER_0328 nondet {what}: the deterministic program at {count} splits")
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Version 0.3.29 of the deterministic package: exact keys of a new 152-SM sm_100a part (GB200) at T 16380, 32736 and
+# 32768, and the GB200 router split counts at 512 experts
+# ---------------------------------------------------------------------------
+
+# The constants of that version, generated from its measurements and its planner (never typed by hand):
+# ``DET_0329_PART_KEYS`` (part -> its keys of the version), ``DET_ROUTER_0329_RULES`` / ``DET_ROUTER_0329_DEFAULTS``
+# (its router split counts of the version and the default count of each row) and ``DET_0329_ROWS`` (the measured rows
+# of the keys: part, key, op, output dtype, T and view; a view is ``("proj", d_in, d_out)`` or ``("mla", heads, d_in,
+# d_out, head stride, weight layout)``).
+# fmt: off
+DET_0329_PART_KEYS = {
+    ("sm_100a", 152): (
+        ("sm_100a", False, False, False, False, False, 512, 4096, 32736),
+        ("sm_100a", False, False, False, False, False, 512, 4096, 32768),
+        ("sm_100a", False, False, False, False, False, 896, 7168, 16380),
+        ("sm_100a", False, False, False, False, False, 1536, 7168, 16380),
+        ("sm_100a", False, False, False, False, False, 2048, 4096, 32736),
+        ("sm_100a", False, False, False, False, False, 4096, 8192, 32736),
+        ("sm_100a", False, False, False, False, False, 4096, 8192, 32768),
+        ("sm_100a", False, False, False, False, False, 12288, 128, 16380),
+        ("sm_100a", False, False, False, False, False, 24576, 512, 16380),
+        ("sm_100a", False, True, False, False, False, 128, 12288, 16380),
+        ("sm_100a", False, True, False, False, False, 4096, 16384, 32768),
+        ("sm_100a", False, True, False, False, False, 7168, 96, 16380),
+        ("sm_100a", False, True, False, False, False, 7168, 128, 16380),
+        ("sm_100a", False, True, False, False, False, 7168, 576, 16380),
+        ("sm_100a", False, True, False, False, False, 7168, 896, 16380),
+        ("sm_100a", True, True, False, False, False, 128, 16380, 12288),
+        ("sm_100a", True, True, False, False, False, 512, 16380, 24576),
+        ("sm_100a", True, True, False, False, False, 3584, 16380, 7168),
+        ("sm_100a", True, True, False, False, False, 7168, 16380, 1536),
+        ("sm_100a", True, True, False, False, False, 7168, 16380, 3584),
+        ("sm_100a", True, True, False, False, False, 8192, 32736, 4096),
+        ("sm_100a", True, True, False, False, False, 8192, 32768, 4096),
+        ("sm_100a", True, True, False, True, False, 576, 16380, 7168),
+        ("sm_100a", True, True, False, True, False, 2112, 16380, 7168),
+        ("sm_100a", True, True, False, True, True, 128, 16380, 512),
+        ("sm_100a", True, True, True, False, False, 128, 16380, 12288),
+        ("sm_100a", True, True, True, False, False, 512, 16380, 24576),
+        ("sm_100a", True, True, True, False, False, 1024, 32736, 4096),
+        ("sm_100a", True, True, True, False, False, 1024, 32768, 4096),
+        ("sm_100a", True, True, True, False, False, 4096, 32736, 8192),
+        ("sm_100a", True, True, True, False, False, 4096, 32768, 8192),
+        ("sm_100a", True, True, True, False, False, 7168, 16380, 896),
+        ("sm_100a", True, True, True, False, False, 7168, 16380, 1536),
+        ("sm_100a", True, True, True, False, False, 8192, 32768, 4096),
+        ("sm_100a", True, True, True, True, False, 576, 16380, 7168),
+        ("sm_100a", True, True, True, True, False, 2112, 16380, 7168),
+        ("sm_100a", True, True, True, True, True, 128, 16380, 512),
+    ),
+}
+DET_ROUTER_0329_RULES = {
+    ("sm_100a", 152, "kk", 4096, 512): ((32736, 32736, 1),),
+    ("sm_100a", 152, "nn_t", 4096, 512): ((32736, 32736, 8),),
+}
+DET_ROUTER_0329_DEFAULTS = {("sm_100a", 152, "kk", 4096, 512): 4, ("sm_100a", 152, "nn_t", 4096, 512): 6}
+DET_0329_ROWS = (
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 512, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 512)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 512, 4096, 32768), "fwd", "bf16", 32768, ("proj", 4096, 512)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 896, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 1536, 7168, 16380), "fwd", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 2048, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 2048)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 4096, 8192, 32736), "fwd", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 4096, 8192, 32768), "fwd", "bf16", 32768, ("proj", 8192, 4096)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 12288, 128, 16380), "fwd", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 152), ("sm_100a", False, False, False, False, False, 24576, 512, 16380), "fwd", "bf16", 16380, ("proj", 512, 24576)),
+    (("sm_100a", 152), ("sm_100a", False, True, False, False, False, 128, 12288, 16380), "dgrad", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 152), ("sm_100a", False, True, False, False, False, 4096, 16384, 32768), "dgrad", "bf16", 32768, ("proj", 4096, 16384)),
+    (("sm_100a", 152), ("sm_100a", False, True, False, False, False, 7168, 96, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 96)),
+    (("sm_100a", 152), ("sm_100a", False, True, False, False, False, 7168, 128, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 128)),
+    (("sm_100a", 152), ("sm_100a", False, True, False, False, False, 7168, 576, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_100a", 152), ("sm_100a", False, True, False, False, False, 7168, 896, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 896)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, False, False, 128, 16380, 12288), "wgrad", "bf16", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, False, False, 512, 16380, 24576), "wgrad", "bf16", 16380, ("proj", 512, 24576)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, False, False, 3584, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 3584, 7168)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, False, False, 7168, 16380, 1536), "wgrad", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, False, False, 7168, 16380, 3584), "wgrad", "bf16", 16380, ("proj", 7168, 3584)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, False, False, 8192, 32736, 4096), "wgrad", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, False, False, 8192, 32768, 4096), "wgrad", "bf16", 32768, ("proj", 8192, 4096)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, True, False, 576, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 7168, 576)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, True, False, 2112, 16380, 7168), "wgrad", "bf16", 16380, ("proj", 7168, 2112)),
+    (("sm_100a", 152), ("sm_100a", True, True, False, True, True, 128, 16380, 512), "wgrad", "bf16", 16380, ("mla", 96, 128, 512, 192, "in_out")),
+    (("sm_100a", 152), ("sm_100a", True, True, False, True, True, 128, 16380, 512), "wgrad", "bf16", 16380, ("mla", 96, 512, 128, 512, "out_in")),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 128, 16380, 12288), "wgrad", "f32", 16380, ("proj", 128, 12288)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 512, 16380, 24576), "wgrad", "f32", 16380, ("proj", 512, 24576)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 1024, 32736, 4096), "wgrad", "f32", 32736, ("proj", 1024, 4096)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 1024, 32768, 4096), "wgrad", "f32", 32768, ("proj", 1024, 4096)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 4096, 32736, 8192), "wgrad", "f32", 32736, ("proj", 4096, 8192)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 4096, 32768, 8192), "wgrad", "f32", 32768, ("proj", 4096, 8192)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 7168, 16380, 896), "wgrad", "f32", 16380, ("proj", 7168, 896)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 7168, 16380, 1536), "wgrad", "f32", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, False, False, 8192, 32768, 4096), "wgrad", "f32", 32768, ("proj", 8192, 4096)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, True, False, 576, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 576)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, True, False, 2112, 16380, 7168), "wgrad", "f32", 16380, ("proj", 7168, 2112)),
+    (("sm_100a", 152), ("sm_100a", True, True, True, True, True, 128, 16380, 512), "wgrad", "f32", 16380, ("mla", 96, 128, 512, 192, "in_out")),
+    (("sm_100a", 152), ("sm_100a", True, True, True, True, True, 128, 16380, 512), "wgrad", "f32", 16380, ("mla", 96, 512, 128, 512, "out_in")),
+)
+# fmt: on
+
+
+def test_router_0329_rows_run_the_deterministic_count(monkeypatch):
+    """The router rows of the deterministic package's version 0.3.29 (:data:`DET_ROUTER_0329_RULES`, 512 experts on the
+    152-SM ``sm_100a`` part) at their token count: this package has no partition, no ``"det_s<n>"`` count
+    (:func:`router_det_splits`, :func:`_k2_det_splits`) and no SIMT window there, so its plan (CPU views, an ``out``
+    that reports a CUDA device, the device facts patched to the part) is the deterministic package's plan at that
+    package's count of the row; with its tables of version 0.3.28 (:func:`_det_tables_0328`) the default count of the
+    row (:data:`DET_ROUTER_0329_DEFAULTS`).  On the forward row of one split an ``out`` 4 bytes past a 16-byte boundary
+    is refused by this package's plan (``splits`` omitted) with the deterministic package's message; with its tables
+    of version 0.3.28 the same ``out`` plans the default count."""
+    refused = 0
+    for key, ((T, _hi, count),) in DET_ROUTER_0329_RULES.items():
+        arch, sm_count, layout, H, N = key
+        default = DET_ROUTER_0329_DEFAULTS[key]
+        assert default == det_backend.ROUTER_SPLITS[layout] != count, key
+        with monkeypatch.context() as m:
+            _cpu_k2_launches(m, arch)
+            facts = det_backend.DeviceFacts(index=0, arch=arch, sm_count=sm_count, l2_bytes=126 << 20)
+            m.setattr(det_backend, "device_facts", lambda device=None, facts=facts: facts)
+            M, K = (T, H) if layout == "kk" else (H, T)
+            kw = dict(arch=arch, sm_count=sm_count, M=M, N=N, K=K)
+            assert cake_backend.router_partition(layout, **kw) is None, key
+            assert cake_backend.router_det_splits(layout, **kw) is None, key
+            assert cake_backend.router_simt(layout, **kw) is None, key
+            assert det_backend.router_splits(layout, M, N, K, arch, sm_count) == count, key
+            X, W, G = torch.empty(T, H), torch.empty(N, H), torch.empty(T, N)
+            if layout == "kk":
+                A, B, rows, cols = X, W.t(), T, N
+            else:
+                A, B, rows, cols = G.t(), X, N, H
+            assert cake_backend._k2_det_splits(A, B, arch, sm_count) is None, key
+            out = torch.empty(rows, cols).as_subclass(_ReportsCuda)
+            plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
+            assert isinstance(plan, tuple) and plan[0].splits == count, key
+            with monkeypatch.context() as old:
+                _det_tables_0328(old)
+                assert det_backend.router_splits(layout, M, N, K, arch, sm_count) == default, key
+                plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
+                assert isinstance(plan, tuple) and plan[0].splits == default, key
+            if count != 1:
+                continue
+            assert layout == "kk", key
+            storage = torch.empty(rows * cols + 4)
+            base = (-storage.data_ptr() % 16) // 4
+            shifted = storage[base + 1 : base + 1 + rows * cols].view(rows, cols).as_subclass(_ReportsCuda)
+            assert shifted.data_ptr() % 16 == 4
+            with pytest.raises(ValueError, match="16-byte aligned") as det_refused:
+                det_backend.cake_dense_gemm_det_train_router_plan(A, B, shifted)
+            with pytest.raises(ValueError, match=re.escape(str(det_refused.value))):
+                cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, shifted)
+            with monkeypatch.context() as old:
+                _det_tables_0328(old)
+                plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, shifted)
+                assert isinstance(plan, tuple) and plan[0].splits == default, key
+            refused += 1
+    assert refused == 1, refused
+
+
+def test_k1_det_0329_rows_follow_the_det_tables(monkeypatch):
+    """The measured rows of the deterministic package's version 0.3.29 (:data:`DET_0329_ROWS`) on their part, as the
+    call of the row and, for a projection's weight gradient, as the unbatched generic call ``G.T @ X``, with the K1
+    programs registered on the architecture: where this package keeps the call on the deterministic program (a layout
+    routed ``"det"``, or :func:`plan_atomic_gemm` returns no plan) its plan is the deterministic package's, field for
+    field, with either version of its tables (:func:`_det_tables_0328`); where it runs its own program the plan is the
+    plan of :func:`plan_atomic_gemm` and the plan with the tables of version 0.3.28.  The deterministic plan differs
+    from its plan of version 0.3.28 exactly where it reads the row's key (every call of the row; the generic call where
+    it plans that key).  The counts of the cells of each kind are printed; this is a plan check: it asserts no
+    bits."""
+    _register_k1(monkeypatch, "sm_100a")
+
+    def plans(A, B, out, transposed, arch, sm_count):
+        """``(keeps, det, nd)``: whether this package keeps the call on the deterministic program, the deterministic
+        planner's plan and this package's."""
+        kw = dict(sm_count=sm_count, l2_bytes=126 << 20, transposed_out=transposed, arch=arch)
+        det = det_backend.cake_dense_gemm_det_train_projection_plan(A, B, out, **kw)
+        assert isinstance(det, tuple) and len(det) == 4, type(det)
+        nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(A, B, out, **kw)
+        own = None
+        if cake_backend.ROUTES[cake_backend._k1_layout(A, B)] != "det":
+            own, *_ = cake_backend.plan_atomic_gemm(
+                A, B, out, transposed_out=transposed, arch=arch, sm_count=sm_count
+            )
+        if own is None:
+            assert isinstance(nd, tuple) and len(nd) == 4, type(nd)
+            return True, det[0], nd[0]
+        assert isinstance(nd, cake_backend.CakeDenseGemmNondetProjectionPlan), type(nd)
+        assert nd == own, (nd, own)
+        return False, det[0], nd
+
+    seen = {}
+    cells = 0
+    for part, key, op, out_dtype, T, view in DET_0329_ROWS:
+        arch, sm_count = part
+        assert key in DET_0329_PART_KEYS[part], (part, key)
+        for call, A, B, out, transposed in _views_0328(arch, op, out_dtype, T, view):
+            where = (call, part, key, op, out_dtype, T, view)
+            keeps, det, nd = plans(A, B, out, transposed, arch, sm_count)
+            with monkeypatch.context() as m:
+                _det_tables_0328(m)
+                old_keeps, old_det, old_nd = plans(A, B, out, transposed, arch, sm_count)
+            assert keeps == old_keeps, where
+            reads = _det_key_0328(old_det, arch) == key
+            assert _det_key_0328(det, arch) == _det_key_0328(old_det, arch), where
+            assert (det != old_det) == reads, (where, det.template, old_det.template)
+            assert reads or call == "generic", where
+            if keeps:
+                assert nd == det, (where, nd.template, det.template)
+                assert old_nd == old_det, (where, old_nd.template, old_det.template)
+                kind = "det, changed" if reads else "det"
+            else:
+                assert nd == old_nd, (where, nd.template, old_nd.template)
+                kind = "own program"
+            seen[(call, kind)] = seen.get((call, kind), 0) + 1
+            cells += 1
+    print(f"K1_DET_0329 {seen}")
+    generic = sum((op, view[0]) == ("wgrad", "proj") for _part, _key, op, _dtype, _T, view in DET_0329_ROWS)
+    assert cells == sum(seen.values()) == len(DET_0329_ROWS) + generic, seen
+    assert seen.get(("entry", "det, changed")), seen
+
+
+@pytest.mark.parametrize(
+    "key", sorted(DET_ROUTER_0329_RULES), ids=lambda k: f"{k[0]}-{k[1]}-{k[2]}-H{k[3]}-N{k[4]}"
+)
+def test_gpu_router_0329_rows(key, record_property):
+    """A router row of the deterministic package's version 0.3.29 (:data:`DET_ROUTER_0329_RULES`) on its part (another
+    device skips), at its token count: this package's forward (``kk``) or weight gradient (``nn_t``) without a split
+    count runs the deterministic program at that package's count of the row through this package's binding
+    (``_K2_SPLITK_CACHE``; no plan in ``_K2_ATOMIC_CACHE``); its output meets the naive BF16 tier against FP64
+    (:func:`judge_gemm`, two calls into a NaN-filled ``out`` on the first draw), and three more calls into NaN on the
+    last draw return the same bits.  On the forward row of one split an ``out`` 4 bytes past a 16-byte boundary is
+    refused by this package's plan, prepared launch, router entry and forward entry with the deterministic package's
+    message before anything is launched, and that NaN-filled storage is unchanged."""
+    device, arch = _atomic_device_or_skip()
+    sm_count = det_backend.device_facts(device).sm_count
+    rule_arch, sms, layout, hidden, experts = key
+    if (arch, sm_count) != (rule_arch, sms):
+        pytest.skip(f"a row of the {sms}-SM {rule_arch} part alone; this device is {arch} with {sm_count} SMs")
+    ((T, _hi, count),) = DET_ROUTER_0329_RULES[key]
+    op = "fwd" if layout == "kk" else "wgrad"
+    M, K = (T, hidden) if layout == "kk" else (hidden, T)
+    kw = dict(arch=arch, sm_count=sm_count, M=M, N=experts, K=K)
+    assert cake_backend.router_partition(layout, **kw) is None, key
+    assert cake_backend.router_simt(layout, **kw) is None, key
+    assert cake_backend.router_det_splits(layout, **kw) is None, key
+    X, W, G = _router_inputs_0328(T, device, SEED + 129, hidden, experts)
+    if op == "fwd":
+        A, B, rows, cols = X, W.t(), T, experts
+    else:
+        A, B, rows, cols = G.t(), X, experts, hidden
+    out = torch.empty(rows, cols, device=device)
+    plan = cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, out)
+    assert isinstance(plan, tuple) and plan[0].splits == count, key
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+
+    def call(o):
+        if op == "fwd":
+            return cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, o)
+        return cake_backend.cake_dense_gemm_nondet_train_router_wgrad(G, X, o)
+
+    what = f"{op} {hidden}x{experts} T {T}"
+
+    def launch(v):
+        assert call(out) is out, what
+        torch.cuda.synchronize()
+        return v.outs
+
+    judge_gemm(
+        record_property,
+        seed=SEED + 129,
+        draw=_router_draw_0328(X, W, G, {what: out}),
+        launch=launch,
+        product=_n3_router_product({what: op}),
+        launches=2,
+        poison=_n3_outs,
+    )
+    (entry,) = cake_backend._K2_SPLITK_CACHE.values()
+    assert entry.plan.splits == count, key
+    assert all(e.plan is None for e in cake_backend._K2_ATOMIC_CACHE.values()), key
+    first = out.clone()
+    for _ in range(3):
+        nan_fill([out])
+        call(out)
+        torch.cuda.synchronize()
+        assert torch.equal(out.view(torch.int32), first.view(torch.int32)), key
+    if count == 1:
+        assert op == "fwd", key
+        storage = torch.full((rows * cols + 4,), float("nan"), device=device)
+        base = (-storage.data_ptr() % 16) // 4
+        shifted = storage[base + 1 : base + 1 + rows * cols].view(rows, cols)
+        assert shifted.data_ptr() % 16 == 4
+        with pytest.raises(ValueError, match="16-byte aligned") as refused:
+            det_backend.cake_dense_gemm_det_train_router_plan(A, B, shifted)
+        message = re.escape(str(refused.value))
+        for refuse in (
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router_plan(A, B, shifted),
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router_prepare(A, B, shifted),
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router(A, B, shifted),
+            lambda: cake_backend.cake_dense_gemm_nondet_train_router_forward(X, W, shifted),
+        ):
+            with pytest.raises(ValueError, match=message):
+                refuse()
+        torch.cuda.synchronize()  # nothing was launched: the context stays healthy
+        assert bool(storage.isnan().all()), key
+    print(f"ROUTER_0329 nondet {what}: the deterministic program at {count} splits")
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
