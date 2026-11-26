@@ -220,6 +220,49 @@ associate a row's sum of squares differently; where measured, by at most one
 BF16 ulp for a gate sliced from a projection, and the same bits on whole-token
 rows).  `dx`, `dz` and `dw` do not change.  The measurement behind the new
 bands is under "Programs and routes".
+Version 0.2.19 changes no program, only forward tables and the classes of
+rows that are not packed (the bands of packed rows, of head-major rows, of
+`cake_jit.STRIDED_FORWARD_BANDS` and the backward's are those of 0.2.18).
+`cake_jit.forward_layout` gives whole-token rows of more than one head a class
+of their own (`cake_jit.SLICED_HEADS_LAYOUT`; `cake_jit.SLICED_LAYOUT` keeps
+the rows of one head) and four layouts of no class in 0.2.18 classes of their
+own: `x` and `z` both sliced from wider tensors of 2 or 3 heads
+(`cake_jit.SLICED_FEW_LAYOUT`: both token strides at least twice `H * 128`;
+padded rows of 2 or 3 heads keep no class), `x` of one head broadcast over the
+heads beside packed `z` (`cake_jit.BCASTH_LAYOUT`), head-major `x` beside `z`
+sliced from a wider tensor (`cake_jit.MIXED_LAYOUT`) and `x` and `z` of one
+padded head stride with the heads of a token adjacent
+(`cake_jit.PADH_LAYOUT`).  Each class runs its table of
+`cake_jit.LAYOUT_FORWARD_BANDS` where it has one for the architecture, else
+`cake_jit.STRIDED_FORWARD_BANDS`.  What moved, in rows per SM (every other
+call runs the program of 0.2.18):
+
+| architecture | class | 0.2.18 | 0.2.19 |
+| --- | --- | --- | --- |
+| `sm_100a` | whole-token rows of one head (`SLICED_LAYOUT`) | `xlong` up to 700, `layout_pipe` 701-1500 | `xlong` up to 599, `layout_pipe` 600-1500 |
+| `sm_100a` | whole-token rows of more heads (`SLICED_HEADS_LAYOUT`) | `xlong` up to 700, `layout_pipe` 701-1500, `fwd` past it | `xlong` up to 599, `layout_pipe` 600-2000, `fwd` past it |
+| `sm_100a` | `x` broadcast over the heads (`BCASTH_LAYOUT`) | `fwd` past 700 | `fwd` 701-999, `layout_pipe` 1000-1500, `fwd` past it |
+| `sm_103a` | gate of more than one head sliced from a projection (`PROJECTION_LAYOUT`) | `xlong` up to 629, `layout_pipe` 630-2000 | `xlong` up to 619, `layout_pipe` 620-2000 |
+| `sm_103a` | whole-token rows of one head | `xlong` up to 700, `layout_pipe` 701-1500 | `xlong` up to 599, `layout_pipe` 600-1500 |
+| `sm_103a` | whole-token rows of more heads | `xlong` up to 700, `layout_pipe` 701-1500, `fwd` past it | `xlong` up to 649, `layout_pipe` 650-1750, `fwd` past it |
+| `sm_103a` | `x` and `z` both sliced, 2 or 3 heads (`SLICED_FEW_LAYOUT`); `x` broadcast over the heads; head-major `x` beside a sliced `z` (`MIXED_LAYOUT`); padded heads (`PADH_LAYOUT`) | `fwd` past 700 | `layout_pipe` 701-1500, `fwd` past it |
+| `sm_107a` | whole-token rows of more heads; head-major `x` beside a sliced `z` | `fwd` past 480 | `fwd` 481-649, `layout_pipe` 650-1000, `fwd` past it |
+| `sm_107a` | `x` broadcast over the heads | `fwd` past 480 | `fwd` 481-649, `layout_pipe` 650-1500, `fwd` past it |
+
+Why: measured against 0.2.18 on the same GPU (B200, GB300, and VR200 on two
+nodes with drivers 620.70.06 and 620.43; CUDA Graph replays, CUPTI, cold L2,
+two runs), a band moved only where at every measured point, in both runs, the
+forward was faster than 0.2.18's, no op (the forward, the backward and the
+checkpointed step of either weight gradient) was slower beyond noise and the
+forward was no slower than the deterministic package's.  The points, forms and
+first failing points are under "Programs and routes".  `y` bits: where
+`fwd_layout_pipe` runs in the place of the plain forward on `sm_100a` and
+`sm_103a`, `y` was the same bits where compared; in the place of the
+extra-long forward `y` can differ in the last bits of a few elements (the
+programs associate a row's sum of squares differently); on `sm_107a`, `y` of
+`fwd_layout_pipe` against the plain forward's is not yet compared
+[PLACEHOLDER-SM107A-Y-BITS].  `dx`, `dz` and `dw` do not change (no backward
+changes).
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -442,8 +485,8 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | --- | --- | --- |
 | `fwd_tiny` | forward of packed rows, 128 threads, 16 lanes a row, one CTA per 8-row block (not persistent), the short forward's arithmetic and bits | its band of `FORWARD_BANDS` (packed rows), but not the rows of `FORWARD_TINY_GAP` |
 | `fwd_l32_tiny` (`sm_100a`, `sm_103a`) | the tiny forward with 32 lanes a row (two lanes to each group of 8 elements, each lane the outputs of its 4), 128 threads, one CTA per 4-row block (not persistent), the tiny forward's sum of squares, so the short forward's bits | its band of `FORWARD_BANDS` (packed rows) |
-| `fwd_short` | forward, 256 threads, 16 lanes a row, one CTA per 16-row block (not persistent) | its bands of `PROJECTION_FORWARD_BANDS`, `HEAD_MAJOR_FORWARD_BANDS`, `SLICED_FORWARD_BANDS` and `STRIDED_FORWARD_BANDS` (rows that are not packed); on `sm_107a` packed rows of 17 to 32 rows (`FORWARD_TINY_GAP`) |
-| `fwd` | plain forward, 64 threads, 8 lanes a row, one CTA per 8-row block (not persistent) | the call role; its bands of `PROJECTION_FORWARD_BANDS`, `HEAD_MAJOR_FORWARD_BANDS`, `SLICED_FORWARD_BANDS` and `STRIDED_FORWARD_BANDS` (rows that are not packed, past the persistent forwards' bands) |
+| `fwd_short` | forward, 256 threads, 16 lanes a row, one CTA per 16-row block (not persistent) | its bands of `STRIDED_FORWARD_BANDS` and of the class tables of `LAYOUT_FORWARD_BANDS` (rows that are not packed); on `sm_107a` packed rows of 17 to 32 rows (`FORWARD_TINY_GAP`) |
+| `fwd` | plain forward, 64 threads, 8 lanes a row, one CTA per 8-row block (not persistent) | the call role; its bands of `STRIDED_FORWARD_BANDS` and of the class tables of `LAYOUT_FORWARD_BANDS` (rows that are not packed: past the persistent forwards' bands, and on `sm_100a` and `sm_107a` some bands below a pipelined one) |
 | `fwd_mid` | whole waves of 6 CTAs per SM (as many waves as the rows need), each CTA at most 2 blocks of 16 rows | its forward bands |
 | `fwd_long` | whole waves of 3 CTAs per SM (as many waves as the rows need), each CTA at most 6 blocks of 32 rows | its forward bands (`sm_100a`) |
 | `fwd_xlong` | the long forward's grid, also prefetching the next block with one bulk prefetch | its forward bands |
@@ -451,7 +494,7 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | `fwd_pipe_packed` (`sm_107a`) | the pipelined forward of packed rows (the deterministic package's packed-rows program on `sm_107a` with a gate that does not flush: the pipelined forward's schedule with four sum chains, `rsqrt.approx.ftz` and one 32-byte store a lane; one CTA per 16-row block below 8192 rows per SM, whole waves from there) | its band of `FORWARD_BANDS` (packed rows, fewer than `PACKED_ROWS`) |
 | `fwd_keep_pipe` (`sm_100a`) | `fwd_pipe` with `x` and `z` loaded with the L2's default policy in place of `evict_first` (its build and `"xz_evict_first": 0`): its grid, cuts and L2 prefetches, so its bits | its band of `FORWARD_BANDS` (packed rows; an `x` or `z` broadcast over more than one token runs `fwd_pipe` there) |
 | `fwd_keep_pipe_packed` (`sm_107a`) | `fwd_pipe_packed` with `x` and `z` loaded with the L2's default policy in place of `evict_first` (its build and `"xz_evict_first": 0`): its grid, so its bits | its band of `FORWARD_BANDS` (packed rows past 8192 rows per SM, fewer than `PACKED_ROWS`) |
-| `fwd_layout_pipe` | the pipelined forward of rows of any layout with the deterministic package's per-layout L2 prefetch walk (`"split_layout_prefetch": 1`): on `sm_100a` and `sm_103a` `fwd_pipe`'s build, on `sm_107a` the deterministic package's forward of rows of any layout (four sum chains, `rsqrt.approx.ftz`), each with the gate that does not flush; it warms the CTA's next block and the first block of the CTA a wave later in L2, `x` and `z` each by its own layout (as the deterministic package's forward of 0.2.15), `x` and `z` loaded with the L2 `evict_first` policy; `fwd_pipe`'s cuts (on rows the kernel reads as packed 8192 on `sm_100a` and `sm_107a` and 5600 on `sm_103a`, on other rows 500 on `sm_100a` and 400 on `sm_103a` and `sm_107a`); the bits of `fwd_pipe`, on `sm_107a` of `fwd_pipe_packed` | its bands of `PROJECTION_FORWARD_BANDS` and `SLICED_FORWARD_BANDS` |
+| `fwd_layout_pipe` | the pipelined forward of rows of any layout with the deterministic package's per-layout L2 prefetch walk (`"split_layout_prefetch": 1`): on `sm_100a` and `sm_103a` `fwd_pipe`'s build, on `sm_107a` the deterministic package's forward of rows of any layout (four sum chains, `rsqrt.approx.ftz`), each with the gate that does not flush; it warms the CTA's next block and the first block of the CTA a wave later in L2, `x` and `z` each by its own layout (as the deterministic package's forward of 0.2.15), `x` and `z` loaded with the L2 `evict_first` policy; `fwd_pipe`'s cuts (on rows the kernel reads as packed 8192 on `sm_100a` and `sm_107a` and 5600 on `sm_103a`, on other rows 500 on `sm_100a` and 400 on `sm_103a` and `sm_107a`); the bits of `fwd_pipe`, on `sm_107a` of `fwd_pipe_packed` | its bands of `PROJECTION_FORWARD_BANDS`, `SLICED_FORWARD_BANDS`, `SLICED_HEADS_FORWARD_BANDS`, `SLICED_FEW_FORWARD_BANDS`, `BCASTH_FORWARD_BANDS`, `MIXED_FORWARD_BANDS` and `PADH_FORWARD_BANDS` |
 | `fwd_layout_keep_pipe` (`sm_100a`, `sm_107a`) | `fwd_layout_pipe` with `x` and `z` loaded with the L2's default policy in place of `evict_first` (its build and `"xz_evict_first": 0`): its grid, cuts and L2 prefetches, so its bits | its bands of `PROJECTION_FORWARD_BANDS` and `HEAD_MAJOR_FORWARD_BANDS` |
 | `bwd_bf16_solo` | solo backward (a BF16 weight gradient; every architecture): the repeatable backward `bwd_bf16_rep` built for one CTA (its build with `"cluster": 1`), the deterministic package's solo program under this package's name: one CTA of 256 threads, 16 lanes a row, that runs the call's one 16-row block as the repeatable backward runs a block and adds its FP32 column words exactly into its own fixed-point digits, rounding each column's sum once; no ticket, no claim and no workspace word (its workspace parameters unread); `bwd_bf16_rep`'s `dx`, `dz` and `dw` bits | the rows of its band (at most 16) of a call that computes the weight gradient |
 | `bwd_bf16_short` | short backward (a BF16 weight gradient; every architecture): one cluster of 16 CTAs of 256 threads, 16 lanes a row, CTA `r` running the 16-row blocks `r`, `r + 16`, ... with the row-claims backward's row arithmetic; CTA `r` adds every CTA's FP32 partials of the columns `8r` .. `8r + 7` in rank order in FP32 (a fixed order), no workspace | the rows of its band (at most 256) |
@@ -527,18 +570,30 @@ rows; otherwise the table of the rows' class (`forward_layout`):
 and `z` the gate columns of a wider projection (head stride 128, a token
 stride past `H * 128`), `HEAD_MAJOR_FORWARD_BANDS` where `x` and `z` are
 head-major (token stride 128, head stride `T * 128`: a `[H, T, 128]` tensor
-viewed as `[T, H, 128]`) on `sm_107a`, `SLICED_FORWARD_BANDS` where the rows
-are whole tokens of wider tensors (head stride 128, both token strides at
-least `H * 128` and one past it; at any number of heads where `z`'s is
-`H * 128` (packed `z`): `x` sliced beside packed `z`; at one head where `x`'s
-is `H * 128` (packed `x`; more heads take `PROJECTION_FORWARD_BANDS`, above): a
-gate of one head; from `SLICED_MIN_HEADS` (4) heads where both are past it: `x`
-and `z` both sliced, padded rows) on `sm_100a` and `sm_103a`, and
-`STRIDED_FORWARD_BANDS` for every other layout (a broadcast over heads, or
-over tokens beside rows that are not packed, another head stride, padded
-head-major planes, a mixed layout, both token strides past the row of 1 to 3
-heads, head-major rows on `sm_100a` and `sm_103a`, whole-token rows on
-`sm_107a`) and for packed rows from
+viewed as `[T, H, 128]`) on `sm_107a`; where the rows are whole tokens of
+wider tensors (head stride 128, both token strides at least `H * 128` and one
+past it; at any number of heads where `z`'s is `H * 128` (packed `z`): `x`
+sliced beside packed `z`; at one head where `x`'s is `H * 128` (packed `x`;
+more heads take `PROJECTION_FORWARD_BANDS`, above): a gate of one head; from
+`SLICED_MIN_HEADS` (4) heads where both are past it: `x` and `z` both sliced,
+padded rows) `SLICED_FORWARD_BANDS` for one head on `sm_100a` and `sm_103a`
+and `SLICED_HEADS_FORWARD_BANDS` for more heads on every architecture;
+`SLICED_FEW_FORWARD_BANDS` where `x` and `z` of 2 or 3 heads are both sliced
+from tensors at least twice the row wide (both token strides at least
+`2 * H * 128`) on `sm_103a`; `BCASTH_FORWARD_BANDS` where `x` of one head is
+broadcast over more heads (head stride 0, token stride 128) beside packed `z`
+on every architecture; `MIXED_FORWARD_BANDS` where head-major `x` (token
+stride 128, head stride `T * 128`) lies beside `z` of head stride 128 and a
+token stride past `H * 128` on `sm_103a` and `sm_107a`; `PADH_FORWARD_BANDS`
+where `x` and `z` of more than one head have one head stride past 128 and token
+strides `H` times it (padded heads) on `sm_103a`; and `STRIDED_FORWARD_BANDS`
+for every other layout (a broadcast over tokens beside rows that are not
+packed, another head stride, padded head-major planes, both token strides past
+the row of one head or of padded rows of 2 or 3 heads) and for a class on an
+architecture its table has no entry for (head-major rows on `sm_100a` and
+`sm_103a`, whole-token rows of one head on `sm_107a`, `SLICED_FEW_LAYOUT` on
+`sm_100a` and `sm_107a`, `MIXED_LAYOUT` on `sm_100a`, `PADH_LAYOUT` on
+`sm_100a` and `sm_107a`) and for packed rows from
 `PACKED_ROWS` on.  An `x` or `z` broadcast over more than one token (token
 stride 0) counts as packed rows, but where its band of packed rows runs a
 program that reads the rows at their linear offsets (a tiny forward, or on
@@ -570,9 +625,10 @@ measured there (from 1000 rows per SM on `sm_100a` and `sm_103a`, from 520 on
 `sm_107a`; with the pipelined forward's grid of 0.2.13) it was the fastest
 forward alone and made the step 1 % .. 6 % faster; no band of
 `STRIDED_FORWARD_BANDS` runs a pipelined forward.
-Whole-token rows (`SLICED_FORWARD_BANDS`, version 0.2.18; 0.2.17 ran them in
-`STRIDED_FORWARD_BANDS`) run `fwd_layout_pipe` from 701 to 1500 rows per SM on
-`sm_100a` and `sm_103a`, where 0.2.17 ran the plain forward: measured against
+Whole-token rows (`SLICED_FORWARD_BANDS` in version 0.2.18, of any number of
+heads; 0.2.17 ran them in `STRIDED_FORWARD_BANDS`) ran `fwd_layout_pipe` from
+701 to 1500 rows per SM on `sm_100a` and `sm_103a` in 0.2.18, where 0.2.17 ran
+the plain forward: measured against
 0.2.17 (CUDA Graph replays, CUPTI, cold L2, two runs; `x` and `z` both sliced
 from projections `2 * H * 128 + 16` elements wide, 16 and 48 heads, and a gate
 of one head sliced from such a projection) at 701, 800, 1000, 1250 and 1500
@@ -586,13 +642,64 @@ against 0.2.17 on the same GPU (B200, GB300; two runs) at 701, 1000 and 1500
 rows per SM, the forward or the checkpointed step with `fwd_layout_pipe` was
 slower for `x` and `z` both sliced of one head and for padded rows of one and
 of two heads, and neither was slower for either form of 4, 8 and 16 heads, so
-such rows of 1 to 3 heads keep the plain forward there.  Measured
+0.2.18 kept the plain forward there for such rows of 1 to 3 heads.  Measured
 against 0.2.17 on the same GPU (B200, GB300), the forward or the checkpointed
 step of other rows of `STRIDED_FORWARD_BANDS` was slower with
 `fwd_layout_pipe` there (`x` broadcast over tokens beside `z` sliced from a
 projection, `x` broadcast over heads, head stride 144, padded head-major
-planes, `x` head-major beside `z` sliced from a projection), so they keep the
-plain forward.
+planes, `x` head-major beside `z` sliced from a projection), so 0.2.18 kept
+the plain forward for them.
+Version 0.2.19 moves the bands of these rows by a measurement against 0.2.18
+on the same GPU (CUDA Graph replays, CUPTI, cold L2, two runs; B200, GB300,
+and VR200 on two nodes with drivers 620.70.06 and 620.43).  A point passes
+where, in both runs, `fwd_layout_pipe` made the forward faster than 0.2.18's,
+no op (the forward, the backward and the checkpointed step of either weight
+gradient) slower than 0.2.18's beyond noise, and the forward no slower than
+the deterministic package's; a band moves only over points that all pass.
+
+* Whole-token rows of one head (`SLICED_FORWARD_BANDS`: a gate of one head
+  sliced from a projection, `x` of one head sliced beside packed `z`) passed
+  at 600, 650 and 700 rows per SM on B200 and GB300 (600 the lowest point
+  measured), so `fwd_layout_pipe` runs from 600 (0.2.18: 701) on `sm_100a`
+  and `sm_103a`.
+* Whole-token rows of more heads (`SLICED_HEADS_FORWARD_BANDS`: `x` and `z`
+  both sliced of 16 and 48 heads, padded rows of 16 heads and `x` sliced
+  beside packed `z` of 16 heads, and past 700 rows per SM and on `sm_107a`
+  also 4 heads of the first two forms and 2 heads of the last): on B200 every
+  form passed at 600, 650, 700, 1600, 1750 and 2000 rows per SM, so
+  `fwd_layout_pipe` runs from 600 to 2000 (0.2.18's measurement found the
+  step of `x` and `z` both sliced slower at 2500); on GB300 every form passed
+  at 650, 700, 1600 and 1750, and padded rows of 16 heads failed at 600 in
+  both runs, so it runs from 650 to 1750 (0.2.18's measurement found the step
+  slower at 2000); on VR200 every form passed at 650 and 1000 on both nodes,
+  and at 1500 `x` and `z` both sliced of 4 heads, padded rows of 4 heads and
+  `x` sliced of 2 heads failed on at least one node, so it runs from 650 to
+  1000.
+* `x` and `z` both sliced from projections `2 * H * 128 + 16` elements wide,
+  2 and 3 heads (`SLICED_FEW_FORWARD_BANDS`): both passed at 701, 1000 and
+  1500 rows per SM on GB300, so `sm_103a` runs `fwd_layout_pipe` from 701 to
+  1500; on B200 2 heads failed at 1000 and 1500, so `sm_100a` keeps 0.2.18's
+  programs; VR200 was not measured.
+* `x` of one head broadcast over 16 heads beside packed `z`
+  (`BCASTH_FORWARD_BANDS`): on B200 it passed at 1000, 1250 and 1500 rows per
+  SM, and at 850, 900 and 950 the checkpointed step of either weight gradient
+  was slower than 0.2.18's in both runs, so `fwd_layout_pipe` runs from 1000
+  to 1500; on GB300 it passed at 701, 850, 1000, 1250 and 1500, so it runs
+  from 701 to 1500; on VR200 it passed at 650, 1000 and 1500 on both nodes,
+  so it runs from 650 to 1500.
+* Head-major `x` beside `z` sliced from a wider projection, 16 heads
+  (`MIXED_FORWARD_BANDS`): on GB300 it passed at 701, 850, 1000, 1250 and
+  1500 rows per SM, so `fwd_layout_pipe` runs from 701 to 1500; on VR200 it
+  passed at 650 and 1000 on both nodes, and at 1500 an op was slower than
+  0.2.18's on the 620.70.06 node, so it runs from 650 to 1000; `sm_100a`
+  keeps 0.2.18's programs (0.2.18's measurement found it slower there).
+* 16 heads of head stride 144 (`PADH_FORWARD_BANDS`): on GB300 it passed at
+  701, 850, 1000, 1250 and 1500 rows per SM, so `fwd_layout_pipe` runs from
+  701 to 1500; `sm_100a` keeps 0.2.18's programs (0.2.18's measurement found it
+  slower there) and `sm_107a` was not measured.
+* On `sm_107a` rows per SM from 481 to 649 were not measured: the classes
+  that run `fwd_layout_pipe` there keep 0.2.18's plain forward below 650.
+
 Version 0.2.17's pipelined
 forwards with `x` and `z` loaded with the L2's default policy
 (`fwd_keep_pipe`, `fwd_keep_pipe_packed`), measured with its grids (CUDA Graph
@@ -638,7 +745,11 @@ slower (B200: 1.0190 .. 1.0297 of 0.2.17's time at 560 rows per SM, 1.0041
 for 64 heads in one run at 580; GB300: 1.0081 .. 1.0085 for 48 and 64 heads
 at 600, more below), so each cut lies just below the first point where every
 form passed (whose 64 heads, 599.78 rows per SM on 148 SMs and 629.89 on 152,
-run `fwd_layout_pipe`).
+run `fwd_layout_pipe`).  Version 0.2.19 ends that band at 619 rows per SM on
+`sm_103a` (629 in 0.2.18): measured against 0.2.18 on GB300 as above (the same
+forms), every form passed from 619.79 to 628.95 rows per SM, while 64 heads
+failed at 609.68 and 16 and 48 heads at 600, so the cut lies just below the
+first point where every form passed.
 On `sm_107a` head-major rows ran `fwd_layout_keep_pipe` at 100 rows per SM
 9 % .. 10 % faster alone than the mid forward and made the step 3 % .. 4 %
 faster; the release measurement of 0.2.17 against 0.2.16 (driver 620.70)
@@ -656,11 +767,18 @@ Graph replays of back-to-back calls run it up to about 1.5 % slower than the
 tiny forward, and at 12 on `sm_103a`, past which, with the rows in L2, it is
 slower.  The bands:
 
-| architecture | packed rows (rows per SM) | gate of more than one head sliced from a projection (rows per SM) | head-major rows (rows per SM) | whole-token rows (rows per SM) | other layouts (rows per SM) |
-| --- | --- | --- | --- | --- | --- |
-| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `keep_pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, 2001-3000 `layout_keep_pipe`, past 3000 `fwd` | as other layouts | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` |
-| `sm_103a` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-629 `xlong`, 630-2000 `layout_pipe`, past 2000 `fwd` | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` |
-| `sm_107a` | 1-65 `tiny` (but 17-32 rows `short`), 66-175 `mid`, 176-280 `xlong`, 281-8192 `pipe_packed`, past 8192 `keep_pipe_packed` | 1-59 `short`, 60-300 `layout_keep_pipe`, 301-442 `mid`, 443-2999 `layout_pipe`, past 2999 `layout_keep_pipe` | 1-59 `short`, 60-100 `layout_keep_pipe`, 101-480 `mid`, past 480 `fwd` | as other layouts | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
+| class (rows per SM) | `sm_100a` | `sm_103a` | `sm_107a` |
+| --- | --- | --- | --- |
+| packed rows (`FORWARD_BANDS`) | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `keep_pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-65 `tiny` (but 17-32 rows `short`), 66-175 `mid`, 176-280 `xlong`, 281-8192 `pipe_packed`, past 8192 `keep_pipe_packed` |
+| gate of more than one head sliced from a projection (`PROJECTION_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, 2001-3000 `layout_keep_pipe`, past 3000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-619 `xlong`, 620-2000 `layout_pipe`, past 2000 `fwd` | 1-59 `short`, 60-300 `layout_keep_pipe`, 301-442 `mid`, 443-2999 `layout_pipe`, past 2999 `layout_keep_pipe` |
+| head-major rows (`HEAD_MAJOR_FORWARD_BANDS`) | as other layouts | as other layouts | 1-59 `short`, 60-100 `layout_keep_pipe`, 101-480 `mid`, past 480 `fwd` |
+| whole-token rows of one head (`SLICED_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-599 `xlong`, 600-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
+| whole-token rows of more heads (`SLICED_HEADS_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, past 2000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-649 `xlong`, 650-1750 `layout_pipe`, past 1750 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1000 `layout_pipe`, past 1000 `fwd` |
+| `x` and `z` both sliced, 2 or 3 heads (`SLICED_FEW_FORWARD_BANDS`) | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
+| `x` broadcast over the heads (`BCASTH_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-999 `fwd`, 1000-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1500 `layout_pipe`, past 1500 `fwd` |
+| head-major `x` beside a sliced `z` (`MIXED_FORWARD_BANDS`) | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1000 `layout_pipe`, past 1000 `fwd` |
+| padded heads (`PADH_FORWARD_BANDS`) | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
+| other layouts (`STRIDED_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
 
 The backward bands (`BACKWARD_BANDS`, in order: a call of `rows` rows on a
 device of `SMs` SMs runs the first band it fits, a small-row band while
@@ -911,8 +1029,10 @@ captured call.  With none ready, the graph zero-fills a workspace of its own.
 * `cake_jit.py` -- the `MODULES` registry (one record per program; the
   exporter writes the derived fields), `ROUTES`, the row-count routing
   (`FORWARD_BANDS`, `PROJECTION_FORWARD_BANDS`, `HEAD_MAJOR_FORWARD_BANDS`,
-  `SLICED_FORWARD_BANDS`, `STRIDED_FORWARD_BANDS`, `forward_layout`,
-  `SLICED_MIN_HEADS`, `BACKWARD_BANDS`,
+  `SLICED_FORWARD_BANDS`, `SLICED_HEADS_FORWARD_BANDS`,
+  `SLICED_FEW_FORWARD_BANDS`, `BCASTH_FORWARD_BANDS`, `MIXED_FORWARD_BANDS`,
+  `PADH_FORWARD_BANDS`, `LAYOUT_FORWARD_BANDS`, `STRIDED_FORWARD_BANDS`,
+  `forward_layout`, `SLICED_MIN_HEADS`, `BACKWARD_BANDS`,
   `module_for_rows`; without the weight gradient `NODW_STRIDED_ROWS_PER_SM`,
   `PACKED_SMALL_ROWS_PER_SM`, `nodw_module` and the plans it reads,
   `_NODW_PLANS`, read once at import), the backward's chunks and grid (`backward_chunks`,
@@ -955,15 +1075,16 @@ each captured call takes its own reserve workspace); the JIT fallback of
   fused band, no alert elsewhere).
 * `tests/norm/test_cake_rmsnorm_silu_gate_nondet_train_api.py` -- the public
   module: no mode keyword, the alerts, the facade and the backend, the
-  workspace refusals, the forward's host plan against 0.2.17's tables and
+  workspace refusals, the forward's host plan against 0.2.18's tables and
   classes, by class and by input form (the module differs only in the bands
-  0.2.18 moved; no device needed), and each output judged against the
+  0.2.19 moved; no device needed), and each output judged against the
   PyTorch BF16 naive
   implementation around the forward's bands (packed rows, a gate sliced from
-  a projection, head-major rows and whole-token rows) and the backward's bands
+  a projection, head-major rows, whole-token rows of one head and of 4 heads)
+  and the backward's bands
   and on the paths of the public module; no comparison with the deterministic
   package.
 * `tests/norm/test_cake_rmsnorm_silu_gate_nondet_train_stall.py` -- the speed
   beside kernels resident on other streams (packed rows, a gate sliced from a
-  projection, head-major rows and `x` and `z` both sliced).
+  projection, head-major rows and `x` and `z` both sliced of 48 heads).
 * `benchmarks/bench_cake_rmsnorm_silu_gate_nondet_train.py` -- timing.
