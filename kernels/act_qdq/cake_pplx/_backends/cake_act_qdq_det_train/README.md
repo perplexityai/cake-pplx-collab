@@ -190,11 +190,11 @@ below give the rule's outputs:
 - **E8M0 quotient.**  `s` is a power of two, so `x * 2^-k` and the IEEE quotient `x / s` are the same correctly
   rounded number.  The kernels keep subnormals (no flush to zero), so the product equals the quotient bit for bit.
   A pair of elements takes this multiply, and the E4M3-scaled steps below, in packed two-lane FP32 arithmetic; each
-  lane rounds as it would alone.  The `sm_107a` interleaved-domain programs of MXFP4 and MXFP8 instead take one BF16x2
-  multiply of each BF16 pair by `2^-k`: BF16 has FP32's exponent range, so that product is the quotient from `2^-126`
-  up, and a smaller quotient lies below the smallest E2M1 and E4M3 midpoints (`0.25` and `2^-10`) and converts to a
-  signed zero either way.  Their BF16-pair conversions to E2M1 and E4M3 round each half as the FP32 conversion rounds
-  its widened value.
+  lane rounds as it would alone.  The `sm_107a` interleaved-domain and mid programs of MXFP4 and MXFP8 instead take
+  one BF16x2 multiply of each BF16 pair by `2^-k`: BF16 has FP32's exponent range, so that product is the quotient
+  from `2^-126` up, and a smaller quotient lies below the smallest E2M1 and E4M3 midpoints (`0.25` and `2^-10`) and
+  converts to a signed zero either way.  Their BF16-pair conversions to E2M1 and E4M3 round each half as the FP32
+  conversion rounds its widened value.
 - **E4M3 scale.**  The `sm_107a` programs multiply `max(amax, 6 * 2^-9)` by `RN(1/6)`, the FP32 value nearest
   `1/6`, which is `1/6` times `1 + 2^-25`; the `sm_100a` and `sm_103a` programs divide it by 6 (an IEEE
   round-to-nearest division).  Either FP32 result is within `2^-23` (relative) of the exact quotient
@@ -218,12 +218,12 @@ below give the rule's outputs:
 - **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by `s`.
   `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant bits, so the
   BF16 product `q * s` is exact, down to the MXFP4 subnormal `2^-127`, which the multiply keeps.  The `sm_107a`
-  interleaved-domain programs of MXFP4 and MXFP8 convert each pair of codes and scale both by `s` in one UE8M0-scaled
-  conversion, rounded once to BF16: the same exact product.  The `sm_107a` main programs of `mxfp8_e8m0_g32`, with and
-  without the scale output, decode each pair to two FP16 values instead and multiply each by `s` in FP32; that product
-  has at most 8 significant bits, so it and its BF16 rounding are exact too.  Above the BF16 range the product is
-  `±inf`, as the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120`
-  (MXFP4) becomes `±inf`, although `x` is finite.
+  interleaved-domain and mid programs of MXFP4 and MXFP8 convert each pair of codes and scale both by `s` in one
+  UE8M0-scaled conversion, rounded once to BF16: the same exact product.  The `sm_107a` main programs of
+  `mxfp8_e8m0_g32`, with and without the scale output, decode each pair to two FP16 values instead and multiply each by
+  `s` in FP32; that product has at most 8 significant bits, so it and its BF16 rounding are exact too.  Above the BF16
+  range the product is `±inf`, as the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8) or
+  `|x| >= 224 * 2^120` (MXFP4) becomes `±inf`, although `x` is finite.
 
 The programs are compiled with IEEE division and square root and without flush to zero (`--prec-div=true`,
 `--prec-sqrt=true`, `--ftz=false`, no `--use_fast_math`), as `build.json` records.

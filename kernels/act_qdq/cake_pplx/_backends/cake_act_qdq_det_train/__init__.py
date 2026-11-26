@@ -42,8 +42,10 @@ Host design (every switch is a keyword; no environment variable):
   (1024-thread CTAs, tiles of 2,048 vectors) at the largest sizes (in place
   from 4,194,304 vectors, from 33,554,432 for MXFP8 without the scales, and
   out of place from 8,388,608 for MXFP8 with the scales only, all to
-  2,147,481,600); else the main program (64-thread CTAs, tiles of 128
-  vectors, 256 on sm_107a).  The grid is the ``tiles`` rule of
+  2,147,481,600); for MXFP4 and MXFP8 on sm_107a, the mid program (64-thread
+  CTAs, tiles of 512 vectors) in both kinds of call from 868,353 vectors
+  (933,888 for MXFP4) to 1,736,704; else the main program (64-thread CTAs,
+  tiles of 128 vectors, 256 on sm_107a).  The grid is the ``tiles`` rule of
   ``cake_jit.launch_grid``: one CTA per tile once the tiles pass 2.5 waves of
   resident CTAs (32 per SM, 16 on sm_107a; 8 and 4 for the small program),
   else the resident CTAs, at most one per tile, walk the tiles; the wide and
