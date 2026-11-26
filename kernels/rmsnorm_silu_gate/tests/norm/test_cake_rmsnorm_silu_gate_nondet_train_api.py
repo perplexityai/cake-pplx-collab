@@ -91,10 +91,10 @@ checks:
   the gate columns of a wider projection), ``HEAD_MAJOR_FORWARD_BANDS``
   bands (head-major rows; ``STRIDED_FORWARD_BANDS`` where the architecture
   has no such table) and ``SLICED_FORWARD_BANDS`` bands (``x`` and ``z`` both
-  sliced from wider projections, whole-token rows; ``STRIDED_FORWARD_BANDS``
-  where the architecture has no such table), each call's table that of its
-  rows' class (``forward_layout``), the forward of ``x``
-  or ``z`` broadcast over more than one token (token stride 0: the band of
+  sliced from wider projections of 4 heads, whole-token rows;
+  ``STRIDED_FORWARD_BANDS`` where the architecture has no such table), each
+  call's table that of its rows' class (``forward_layout``), the forward of
+  ``x`` or ``z`` broadcast over more than one token (token stride 0: the band of
   other layouts where the band of packed rows runs a program that reads them
   at their linear offsets, ``fwd_pipe`` where it runs ``fwd_keep_pipe``,
   else the program of packed rows with the token stride 0) and the
@@ -1627,15 +1627,16 @@ def _made_class(tokens: int, heads: int, layout: str) -> tuple[bool, str | None]
 # The band kinds of ``FORWARD_CASES``: ``(heads, layout)`` of their inputs
 # (``suite.make``'s layout; ``None`` heads: one token of the rows as heads)
 # and ``(packed, layout)`` of their rows, whose table (:func:`_forward_table`)
-# holds the band; ``other``: ``x`` and ``z`` both sliced, whole-token rows
-# (``SLICED_FORWARD_BANDS`` where the architecture has it, else
-# ``STRIDED_FORWARD_BANDS``).
+# holds the band; ``other``: ``x`` and ``z`` both sliced of
+# ``SLICED_MIN_HEADS`` heads, whole-token rows (``SLICED_FORWARD_BANDS`` where
+# the architecture has it, else ``STRIDED_FORWARD_BANDS``; of fewer heads such
+# rows take no class).
 FORWARD_KINDS = {
     "flat": (1, "flat", True, None),
     "token": (None, "contiguous", True, None),
     "projection": (4, "projection", False, loader.PROJECTION_LAYOUT),
     "headmajor": (4, "head_major", False, loader.HEAD_MAJOR_LAYOUT),
-    "other": (1, "both_sliced", False, loader.SLICED_LAYOUT),
+    "other": (loader.SLICED_MIN_HEADS, "both_sliced", False, loader.SLICED_LAYOUT),
 }
 
 
@@ -1815,21 +1816,51 @@ def _form_strides(form: str, tokens: int, heads: int) -> tuple[int, int, int, in
     return x[0], x[1], z[0], z[1]
 
 
-# The class ``forward_layout`` gives each form of :func:`_form_strides` of 16
-# heads and of one head: "packed" for rows the host reads as packed (no class).
+# The heads of the forms of ``FORM_CLASSES``: 16, ``SLICED_MIN_HEADS`` and
+# fewer.
+FORM_HEADS = (16, 4, 3, 2, 1)
+# The class ``forward_layout`` gives each form of :func:`_form_strides` of each
+# of ``FORM_HEADS`` heads: "packed" for rows the host reads as packed (no
+# class).  ``x`` and ``z`` both sliced and padded rows (both token strides past
+# the row) are whole-token rows from 4 heads only; padded heads of one head
+# (token strides 144) take no class.
 FORM_CLASSES = {
-    "projection": (loader.PROJECTION_LAYOUT, loader.SLICED_LAYOUT),
-    "projw4": (loader.PROJECTION_LAYOUT, loader.SLICED_LAYOUT),
-    "both_sliced": (loader.SLICED_LAYOUT, loader.SLICED_LAYOUT),
-    "padded": (loader.SLICED_LAYOUT, loader.SLICED_LAYOUT),
-    "x_sliced": (loader.SLICED_LAYOUT, loader.SLICED_LAYOUT),
-    "head_major": (loader.HEAD_MAJOR_LAYOUT, "packed"),
-    "padded_heads": (None, loader.SLICED_LAYOUT),
-    "padded_head_major": (None, "packed"),
-    "mixed": (None, loader.SLICED_LAYOUT),
-    "x_broadcast_heads": (None, "packed"),
-    "x_broadcast_projection": (None, None),
-    "z_broadcast_x_sliced": (None, None),
+    "projection": (
+        loader.PROJECTION_LAYOUT,
+        loader.PROJECTION_LAYOUT,
+        loader.PROJECTION_LAYOUT,
+        loader.PROJECTION_LAYOUT,
+        loader.SLICED_LAYOUT,
+    ),
+    "projw4": (
+        loader.PROJECTION_LAYOUT,
+        loader.PROJECTION_LAYOUT,
+        loader.PROJECTION_LAYOUT,
+        loader.PROJECTION_LAYOUT,
+        loader.SLICED_LAYOUT,
+    ),
+    "both_sliced": (loader.SLICED_LAYOUT, loader.SLICED_LAYOUT, None, None, None),
+    "padded": (loader.SLICED_LAYOUT, loader.SLICED_LAYOUT, None, None, None),
+    "x_sliced": (
+        loader.SLICED_LAYOUT,
+        loader.SLICED_LAYOUT,
+        loader.SLICED_LAYOUT,
+        loader.SLICED_LAYOUT,
+        loader.SLICED_LAYOUT,
+    ),
+    "head_major": (
+        loader.HEAD_MAJOR_LAYOUT,
+        loader.HEAD_MAJOR_LAYOUT,
+        loader.HEAD_MAJOR_LAYOUT,
+        loader.HEAD_MAJOR_LAYOUT,
+        "packed",
+    ),
+    "padded_heads": (None, None, None, None, None),
+    "padded_head_major": (None, None, None, None, "packed"),
+    "mixed": (None, None, None, None, loader.SLICED_LAYOUT),
+    "x_broadcast_heads": (None, None, None, None, "packed"),
+    "x_broadcast_projection": (None, None, None, None, None),
+    "z_broadcast_x_sliced": (None, None, None, None, None),
 }
 
 
@@ -1837,23 +1868,25 @@ FORM_CLASSES = {
 def test_forward_plan_of_every_form_differs_from_0_2_17_only_in_the_moved_bands(
     sm_count: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Host plan only, no device: for every form of ``FORM_CLASSES`` of 16
-    heads and of one head, at the whole tokens of every whole rows per SM up
-    to 3200 and of every cut of either version's tables and a row either
-    side, the host's packed-rows test and ``forward_layout`` give the form's
-    class, and ``module_for_rows`` of that class gives the module version
-    0.2.17 gives (its tables put back, :func:`_put_back_0_2_17_tables`, and
-    its class, :func:`_forward_layout_0_2_17`) but where 0.2.18 moved it
+    """Host plan only, no device: for every form of ``FORM_CLASSES`` of each
+    of ``FORM_HEADS`` heads (16, 4, 3, 2 and 1), at the whole tokens of every
+    whole rows per SM up to 3200 and of every cut of either version's tables
+    and a row either side, the host's packed-rows test and ``forward_layout``
+    give the form's class, and ``module_for_rows`` of that class gives the
+    module version 0.2.17 gives (its tables put back,
+    :func:`_put_back_0_2_17_tables`, and its class,
+    :func:`_forward_layout_0_2_17`) but where 0.2.18 moved it
     (``suite.V0218_MOVED_BANDS``): a gate of more than one head sliced from a
-    projection and whole-token rows (a gate of one head, ``x`` and ``z``
-    both sliced, padded rows, ``x`` sliced beside packed ``z``, padded heads
-    and a head-major ``x`` beside such a gate of one head) on sm_100a and
-    sm_103a, each of which moves; broadcasts, padded heads of 16 heads,
-    padded head-major planes, mixed layouts, head-major rows and sm_107a
-    run what 0.2.17 ran."""
+    projection and whole-token rows (a gate of one head, ``x`` sliced beside
+    packed ``z``, a head-major ``x`` beside such a gate of one head, and from
+    4 heads ``x`` and ``z`` both sliced and padded rows) on sm_100a and
+    sm_103a, each of which moves; ``x`` and ``z`` both sliced and padded rows
+    of 1 to 3 heads, broadcasts, padded heads, padded head-major planes,
+    mixed layouts of more than one head, head-major rows and sm_107a run
+    what 0.2.17 ran."""
     cases = []
     for form, classes in FORM_CLASSES.items():
-        for heads, cls in zip((16, 1), classes, strict=True):
+        for heads, cls in zip(FORM_HEADS, classes, strict=True):
             for arch in loader.ARCHES:
                 rows = {k * sm_count for k in range(1, 3201)}
                 tables = [loader.STRIDED_FORWARD_BANDS[arch]]
@@ -1912,7 +1945,7 @@ def test_forward_plan_of_every_form_differs_from_0_2_17_only_in_the_moved_bands(
     want_moved = {
         (arch, form, heads)
         for form, classes in FORM_CLASSES.items()
-        for heads, cls in zip((16, 1), classes, strict=True)
+        for heads, cls in zip(FORM_HEADS, classes, strict=True)
         for arch in ("sm_100a", "sm_103a")
         if cls in (loader.PROJECTION_LAYOUT, loader.SLICED_LAYOUT)
     }
@@ -1923,16 +1956,16 @@ def test_forward_plan_of_every_form_differs_from_0_2_17_only_in_the_moved_bands(
 # heads, layout); ``heads=None`` takes, with ``end`` the last row of band ``i``
 # of a ``FORWARD_KINDS`` kind (``last * SMs``), ``end // h + tokens`` tokens of
 # ``h`` heads: of one head for ``flat<i>`` (the architecture's
-# ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor) and ``other<i>``
-# (its ``SLICED_FORWARD_BANDS`` where the architecture has one, else
-# ``STRIDED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from wider
-# projections, whole-token rows), of 4 heads for ``projection<i>`` (its
-# ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns of a wider projection, a
-# class of more than one head) and ``headmajor<i>`` (its
-# ``HEAD_MAJOR_FORWARD_BANDS``; 4 divides 148, 152 and 212, so ``end`` is whole
-# tokens there); ``token<i>`` takes one token of ``end + 1`` heads (packed rows
-# whose token stride is passed as 0); skipped where the architecture has no
-# such band with an end.
+# ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor), of 4 heads for
+# ``other<i>`` (its ``SLICED_FORWARD_BANDS`` where the architecture has one,
+# else ``STRIDED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from wider
+# projections, whole-token rows from ``SLICED_MIN_HEADS`` heads),
+# ``projection<i>`` (its ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns
+# of a wider projection, a class of more than one head) and ``headmajor<i>``
+# (its ``HEAD_MAJOR_FORWARD_BANDS``; 4 divides 148, 152 and 212, so ``end`` is
+# whole tokens there); ``token<i>`` takes one token of ``end + 1`` heads
+# (packed rows whose token stride is passed as 0); skipped where the
+# architecture has no such band with an end.
 FORWARD_CASES = [
     pytest.param(1, 48, "contiguous", id="1x48"),
     pytest.param(16, 1, "contiguous", id="16x1"),
@@ -2093,15 +2126,16 @@ def test_forward_keeps_the_gate_tail_in_every_band(
 ) -> None:
     """At the first whole tokens of every forward band of each class's table
     (``FORWARD_KINDS``: ``FORWARD_BANDS`` of packed rows,
-    ``PROJECTION_FORWARD_BANDS`` and ``HEAD_MAJOR_FORWARD_BANDS`` of 4 heads,
-    and ``SLICED_FORWARD_BANDS`` (``STRIDED_FORWARD_BANDS`` where the
-    architecture has none) of ``x`` and ``z`` both sliced from wider
-    projections, whole-token rows), with every ``z`` in :data:`GATE_TAIL`, the
-    inputs are of the kind's class (:func:`_forward_class`), the forward
-    launches the band's module (``module_for_rows``' module for that class)
-    and, on the inputs of every draw of ``judge`` (``x`` and ``w`` of the
-    draw), ``y`` is judged against the naive implementation: no forward
-    program flushes the gate to 0 where FP32 keeps it."""
+    ``PROJECTION_FORWARD_BANDS``, ``HEAD_MAJOR_FORWARD_BANDS`` and
+    ``SLICED_FORWARD_BANDS`` (``STRIDED_FORWARD_BANDS`` where the
+    architecture has none) of 4 heads, the last of ``x`` and ``z`` both
+    sliced from wider projections, whole-token rows), with every ``z`` in
+    :data:`GATE_TAIL`, the inputs are of the kind's class
+    (:func:`_forward_class`), the forward launches the band's module
+    (``module_for_rows``' module for that class) and, on the inputs of every
+    draw of ``judge`` (``x`` and ``w`` of the draw), ``y`` is judged against
+    the naive implementation: no forward program flushes the gate to 0 where
+    FP32 keeps it."""
     sms = _sm_count()
     arch = loader.device_arch(torch.cuda.current_device())
     heads, layout, packed, layout_class = FORWARD_KINDS[kind]
@@ -3529,10 +3563,9 @@ def test_launch_placeholder_converts_a_legacy_dlpack_capsule(monkeypatch) -> Non
 # of either weight gradient.
 # The one-head inputs take one row past the start of each one's band
 # (``_start_rows``); a module that no band of this device runs (a forward
-# module: no ``STRIDED_FORWARD_BANDS`` band, the table of other layouts; the
-# one-head layout whose rows do not follow one another is of the whole-token
-# class, whose ``SLICED_FORWARD_BANDS`` run the same modules as
-# ``STRIDED_FORWARD_BANDS`` up to 700 rows per SM) skips.
+# module: no ``STRIDED_FORWARD_BANDS`` band, the table of the one-head layout
+# whose rows do not follow one another, a class of no table of its own)
+# skips.
 ONE_HEAD_ROUTES = [
     pytest.param("fwd", "fwd_mid", id="fwd_mid"),
     pytest.param("fwd", "fwd_xlong", id="fwd_xlong"),

@@ -201,13 +201,18 @@ projection runs ``fwd_layout_pipe`` from 600 rows per SM on sm_100a and
 from 630 on sm_103a (``cake_jit.PROJECTION_FORWARD_BANDS``; 0.2.17 ran the
 extra-long forward up to 650 and 699).  Rows that are whole tokens of wider
 tensors are a class of their own (``cake_jit.SLICED_LAYOUT``: head strides
-128 and both token strides at least ``H * 128``, such as ``x`` and ``z``
-both sliced, padded rows, a gate of one head sliced from a projection, or
-``x`` sliced beside packed ``z``), whose table
+128, both token strides at least ``H * 128`` and one past it, and either
+one input of packed rows at any number of heads, such as ``x`` sliced
+beside packed ``z`` or a gate of one head sliced from a projection, or both
+inputs past the row from ``cake_jit.SLICED_MIN_HEADS`` (4) heads, such as
+``x`` and ``z`` both sliced or padded rows), whose table
 (``cake_jit.SLICED_FORWARD_BANDS``) runs ``fwd_layout_pipe`` from 701 to
 1500 rows per SM on sm_100a and sm_103a, where 0.2.17 ran the plain
 forward; on sm_107a they run ``cake_jit.STRIDED_FORWARD_BANDS`` as in
-0.2.17.  Other layouts (``x`` or ``z`` broadcast over tokens or heads, a
+0.2.17.  Rows of 1 to 3 heads with both inputs past the row (``x`` and
+``z`` both sliced, padded rows) keep 0.2.17's programs (measured slower at
+1 and 2 heads: ``x`` and ``z`` both sliced of one head, padded rows of one
+and of two).  Other layouts (``x`` or ``z`` broadcast over tokens or heads, a
 head stride other than 128, padded head-major planes, a mixed layout) and
 head-major rows keep 0.2.17's programs (the pipelined forward was measured
 slower with ``x`` broadcast over tokens beside ``z`` sliced from a
@@ -457,7 +462,8 @@ Host design (the input layout rules are the deterministic package's):
   ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major
   on an architecture with such a table (sm_107a),
   ``cake_jit.SLICED_FORWARD_BANDS`` where the rows are whole tokens of wider
-  tensors on an architecture with such a table (sm_100a, sm_103a), else
+  tensors (one input of packed rows, or both past the row from 4 heads) on
+  an architecture with such a table (sm_100a, sm_103a), else
   ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
   than one token counts as packed rows, but runs the band of other layouts
   where its band of packed rows runs a program that reads them at their linear

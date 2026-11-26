@@ -196,13 +196,18 @@ are those of 0.2.17).  A gate of more than one head sliced from a wider
 projection runs `fwd_layout_pipe` from 600 rows per SM on `sm_100a` and from
 630 on `sm_103a` (`cake_jit.PROJECTION_FORWARD_BANDS`; 0.2.17 ran the
 extra-long forward up to 650 and 699).  Rows that are whole tokens of wider
-tensors are a class of their own (`cake_jit.SLICED_LAYOUT`: head strides 128
-and both token strides at least `H * 128`, such as `x` and `z` both sliced,
-padded rows, a gate of one head sliced from a projection, or `x` sliced beside
-packed `z`), whose table (`cake_jit.SLICED_FORWARD_BANDS`) runs
+tensors are a class of their own (`cake_jit.SLICED_LAYOUT`: head strides 128,
+both token strides at least `H * 128` and one past it, and either one input of
+packed rows at any number of heads, such as `x` sliced beside packed `z` or a
+gate of one head sliced from a projection, or both inputs past the row from
+`cake_jit.SLICED_MIN_HEADS` (4) heads, such as `x` and `z` both sliced or
+padded rows), whose table (`cake_jit.SLICED_FORWARD_BANDS`) runs
 `fwd_layout_pipe` from 701 to 1500 rows per SM on `sm_100a` and `sm_103a`,
 where 0.2.17 ran the plain forward; on `sm_107a` they run
-`cake_jit.STRIDED_FORWARD_BANDS` as in 0.2.17.  Other layouts (`x` or `z`
+`cake_jit.STRIDED_FORWARD_BANDS` as in 0.2.17.  Rows of 1 to 3 heads with both
+inputs past the row (`x` and `z` both sliced, padded rows) keep 0.2.17's
+programs (measured slower at 1 and 2 heads: `x` and `z` both sliced of one
+head, padded rows of one and of two).  Other layouts (`x` or `z`
 broadcast over tokens or heads, a head stride other than 128, padded
 head-major planes, a mixed layout) and head-major rows keep 0.2.17's programs
 (the pipelined forward was measured slower with `x` broadcast over tokens
@@ -523,12 +528,15 @@ stride past `H * 128`), `HEAD_MAJOR_FORWARD_BANDS` where `x` and `z` are
 head-major (token stride 128, head stride `T * 128`: a `[H, T, 128]` tensor
 viewed as `[T, H, 128]`) on `sm_107a`, `SLICED_FORWARD_BANDS` where the rows
 are whole tokens of wider tensors (head stride 128, both token strides at
-least `H * 128`: `x` and `z` both sliced, padded rows, such a gate of one
-head, `x` sliced beside packed `z`) on `sm_100a` and `sm_103a`, and
+least `H * 128` and one past it; at any number of heads where the other is
+`H * 128`, one input of packed rows: `x` sliced beside packed `z`, such a gate
+of one head; from `SLICED_MIN_HEADS` (4) heads where both are past it: `x` and
+`z` both sliced, padded rows) on `sm_100a` and `sm_103a`, and
 `STRIDED_FORWARD_BANDS` for every other layout (a broadcast over heads, or
 over tokens beside rows that are not packed, another head stride, padded
-head-major planes, a mixed layout, head-major rows on `sm_100a` and `sm_103a`,
-whole-token rows on `sm_107a`) and for packed rows from
+head-major planes, a mixed layout, both token strides past the row of 1 to 3
+heads, head-major rows on `sm_100a` and `sm_103a`, whole-token rows on
+`sm_107a`) and for packed rows from
 `PACKED_ROWS` on.  An `x` or `z` broadcast over more than one token (token
 stride 0) counts as packed rows, but where its band of packed rows runs a
 program that reads the rows at their linear offsets (a tiny forward, or on
@@ -571,7 +579,13 @@ B200 and 0.9320 .. 0.9646 on GB300, and 0.9536 .. 0.9985 of the checkpointed
 step's (either weight gradient) on B200 and 0.9514 .. 0.9857 on GB300, its
 forward not slower than the deterministic package's beyond noise; at 2000 rows
 per SM the step of a gate of one head took 1.0132 .. 1.0147 of 0.2.17's time
-on B200 and 1.0047 .. 1.0051 on GB300, so the band ends at 1500.  Measured
+on B200 and 1.0047 .. 1.0051 on GB300, so the band ends at 1500.  Both
+inputs past the row take the class from 4 heads (`SLICED_MIN_HEADS`): measured
+against 0.2.17 on the same GPU (B200, GB300; two runs) at 701, 1000 and 1500
+rows per SM, the forward or the checkpointed step with `fwd_layout_pipe` was
+slower for `x` and `z` both sliced of one head and for padded rows of one and
+of two heads, and neither was slower for either form of 4, 8 and 16 heads, so
+such rows of 1 to 3 heads keep the plain forward there.  Measured
 against 0.2.17 on the same GPU (B200, GB300), the forward or the checkpointed
 step of other rows of `STRIDED_FORWARD_BANDS` was slower with
 `fwd_layout_pipe` there (`x` broadcast over tokens beside `z` sliced from a
@@ -898,7 +912,7 @@ captured call.  With none ready, the graph zero-fills a workspace of its own.
   exporter writes the derived fields), `ROUTES`, the row-count routing
   (`FORWARD_BANDS`, `PROJECTION_FORWARD_BANDS`, `HEAD_MAJOR_FORWARD_BANDS`,
   `SLICED_FORWARD_BANDS`, `STRIDED_FORWARD_BANDS`, `forward_layout`,
-  `BACKWARD_BANDS`,
+  `SLICED_MIN_HEADS`, `BACKWARD_BANDS`,
   `module_for_rows`; without the weight gradient `NODW_STRIDED_ROWS_PER_SM`,
   `PACKED_SMALL_ROWS_PER_SM`, `nodw_module` and the plans it reads,
   `_NODW_PLANS`, read once at import), the backward's chunks and grid (`backward_chunks`,

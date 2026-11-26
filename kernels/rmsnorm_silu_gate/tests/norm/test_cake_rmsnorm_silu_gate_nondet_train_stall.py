@@ -24,10 +24,11 @@ the rows' class (``forward_layout``): ``PROJECTION_FORWARD_BANDS`` where
 ``x`` holds packed rows of more than one head and ``z`` the gate columns of
 a wider projection, ``HEAD_MAJOR_FORWARD_BANDS`` for head-major rows on
 SM107, ``SLICED_FORWARD_BANDS`` for whole-token rows on SM100 and SM103
-(``x`` and ``z`` both sliced from wider projections, such a gate of one
-head), and ``STRIDED_FORWARD_BANDS`` for other rows (whole-token rows on
-SM107, head-major rows on SM100 and SM103, and a broadcast over tokens that
-its band of packed rows does not run, below).  The plain forward
+(``x`` and ``z`` both sliced from wider projections of at least 4 heads,
+such a gate of one head), and ``STRIDED_FORWARD_BANDS`` for other rows
+(whole-token rows on SM107, head-major rows on SM100 and SM103, and a
+broadcast over tokens that its band of packed rows does not run, below).
+The plain forward
 launches a grid of independent
 CTAs, one 64-thread CTA per block of 8 rows.  Packed rows up to 4 rows per SM
 on SM100 and 12 on SM103 run the 32-lane tiny forward, one 128-thread CTA per
@@ -435,7 +436,8 @@ def _inputs(tokens: int, layout: str = "packed", heads: int = H):
     (the class ``PROJECTION_LAYOUT`` with more than one head); with
     ``layout="both_sliced"`` ``x`` and ``z`` the first and the second
     ``heads * 128`` columns of one wider projection (whole-token rows, the
-    class ``SLICED_LAYOUT``); with ``layout="head_major"`` ``x`` and ``z`` of
+    class ``SLICED_LAYOUT``, from ``SLICED_MIN_HEADS`` heads; of fewer no
+    class); with ``layout="head_major"`` ``x`` and ``z`` of
     ``[heads, tokens, 128]`` tensors viewed as ``[tokens, heads, 128]`` (the
     class ``HEAD_MAJOR_LAYOUT``), whose rows are not packed (with more than one
     token, and head-major with more than one head); with ``layout="broadcast"``
@@ -1499,8 +1501,9 @@ def test_repeatable_backward_long_role_slows_in_proportion_to_the_sms_held(
 FORWARD_EDGES = ("band_first", "first", "last", "band_last")
 FORWARD_LAYOUTS = ("packed", "both_sliced", "projection", "head_major")
 # The class of the rows of each layout of ``_inputs`` (with more than one
-# token, and head-major with more than one head) as the host routes them:
-# "packed" for packed rows, else ``forward_layout``'s class.
+# token, head-major with more than one head and both-sliced with at least
+# SLICED_MIN_HEADS: ``H``, or 4 at "cut") as the host routes them: "packed"
+# for packed rows, else ``forward_layout``'s class.
 FORWARD_LAYOUT_CLASSES = {
     "packed": "packed",
     "broadcast": "packed",
@@ -1783,8 +1786,9 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # deterministic package's own test, the most whole blocks per slot below the
 # cut ("below"), the fewest whole waves at or above it ("first") and four times
 # that ("last"), and at the cut itself ("cut": tokens of one head, of 4 heads
-# of projection and head-major rows, so that the rows are exactly the cut times
-# the SMs, the first row count of whole waves).  The cut is the record's
+# of projection, head-major and both-sliced rows, so that the rows are exactly
+# the cut times the SMs, the first row count of whole waves).  The cut is the
+# record's
 # ``persistent_from_rows_per_sm`` of the architecture on packed rows and, on
 # rows the kernel does not read as packed (``broadcast``: ``x`` and ``z`` one
 # token broadcast over the others, in the bands of packed rows as such a call
@@ -1846,10 +1850,12 @@ _PIPELINED_COUNTERPARTS = {
     "fwd_keep_pipe_packed": "fwd_packed",
 }
 # Heads of the tokens of the "cut" probe: one, but 4 for head-major rows,
-# whose one-head rows are packed, and for projection rows, whose one-head rows
+# whose one-head rows are packed, for projection rows, whose one-head rows
 # are whole-token rows (SLICED_FORWARD_BANDS where the architecture has it,
-# else STRIDED_FORWARD_BANDS; 4 divides 148, 152 and 212 SMs).
-_CUT_HEADS = {"head_major": 4, "projection": 4}
+# else STRIDED_FORWARD_BANDS), and for ``x`` and ``z`` both sliced, whose rows
+# of fewer than SLICED_MIN_HEADS (4) heads are of no class (4 divides 148, 152
+# and 212 SMs).
+_CUT_HEADS = {"head_major": 4, "projection": 4, "both_sliced": 4}
 
 
 def _pipelined_cases() -> list:

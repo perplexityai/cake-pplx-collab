@@ -183,10 +183,16 @@ gate of more than one head sliced from a wider projection runs the pipelined
 forward that warms rows by their layout from 600 rows per SM on SM100 and from
 630 on SM103 (0.2.17 ran the extra-long forward up to 650 and 699).  Rows that
 are whole tokens of wider tensors (head strides 128, both token strides at
-least ``H * 128``: ``x`` and ``z`` both sliced, padded rows, a gate of one
-head sliced from a projection, ``x`` sliced beside packed ``z``) take bands of
-their own there, which run it from 701 to 1500 rows per SM (0.2.17 ran the
-8-thread forward).  Other layouts (``x`` or ``z`` broadcast over tokens or
+least ``H * 128`` and one past it, and either one input of packed rows at any
+number of heads, such as ``x`` sliced beside packed ``z`` or a gate of one head
+sliced from a projection, or both inputs past the row from 4 heads, such as
+``x`` and ``z`` both sliced or padded rows) take bands of their own there,
+which run it from 701 to 1500 rows per SM (0.2.17 ran the 8-thread forward).
+Rows of 1 to 3 heads with both inputs past the row (``x`` and ``z`` both
+sliced, padded rows) keep 0.2.17's programs (measured slower at 1 and 2
+heads: ``x`` and ``z`` both sliced of one head, padded rows of one and of
+two).
+Other layouts (``x`` or ``z`` broadcast over tokens or
 heads, a head stride other than 128, padded head-major planes, a mixed layout)
 and head-major ``x`` and ``z`` keep 0.2.17's programs (the pipelined forward
 was measured slower with ``x`` broadcast over tokens beside ``z`` sliced from a
@@ -225,8 +231,9 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   a row and one CTA per 8-row block.  Rows that are not packed take the bands
   of their class: a gate of more than one head sliced from a wider projection
   with packed ``x``, on SM107 head-major ``x`` and ``z``, and on SM100 and
-  SM103 rows that are whole tokens of wider tensors (``x`` and ``z`` both
-  sliced, padded rows, a gate of one head) have bands of their own, which run
+  SM103 rows that are whole tokens of wider tensors (``x`` sliced beside
+  packed ``z``, a gate of one head, and from 4 heads ``x`` and ``z`` both
+  sliced or padded rows) have bands of their own, which run
   pipelined forwards that warm rows of any layout in L2 by their layout (the
   projection's past 599 rows per SM on SM100 and 629 on SM103 and past 59 on
   SM107 but from 301 to 442, the head-major one from 60 to 100 rows per SM,
@@ -556,8 +563,9 @@ def cake_rmsnorm_silu_gate_nondet_train_forward(
     SM103) a forward of one CTA per 8-row block; a gate of more than one head
     sliced from a wider projection with packed ``x``, on SM107 head-major
     ``x`` and ``z``, and on SM100 / SM103 rows that are whole tokens of wider
-    tensors (``x`` and ``z`` both sliced, padded rows, a gate of one head)
-    take bands of their own, with pipelined forwards that warm rows of any
+    tensors (``x`` sliced beside packed ``z``, a gate of one head, and from 4
+    heads ``x`` and ``z`` both sliced or padded rows) take bands of their
+    own, with pipelined forwards that warm rows of any
     layout in L2; the programs
     associate a row's sum of squares differently (the row count, the SM count
     and the layout pick the program), so ``y``'s bits can differ between bands.
