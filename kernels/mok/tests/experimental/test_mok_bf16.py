@@ -1873,6 +1873,142 @@ def test_comm_split_follows_the_routed_precision():
     assert split(None, fixed, None, True) == (20, 24)
 
 
+@pytest.mark.parametrize(
+    "capability,sm_count,precision,ep_size,expected",
+    [
+        ((10, 3), 152, "bf16", 8, {(4096, 1024, 10): (56, 48)}),  # GB300 EP8
+        ((10, 3), 148, "bf16", 8, None),  # B300 keeps its COMM_SMS row
+        ((10, 3), 152, "mxfp8", 8, None),  # no MXFP8 shape row
+        ((10, 3), 148, "mxfp8", 8, None),
+        ((10, 3), 152, "bf16", 4, None),  # other group sizes keep COMM_SMS
+        ((10, 3), 152, "bf16", 16, None),
+        ((10, 3), 148, "bf16", 4, None),
+        ((10, 3), 160, "bf16", 8, None),  # other SM count
+        ((10, 0), 148, "bf16", 8, None),  # B200 keeps the factory split
+        ((10, 0), 152, "bf16", 8, None),  # GB200 keeps the factory split
+        ((10, 7), 212, "bf16", 8, None),
+        ((10, 7), 212, "mxfp8", 8, None),
+    ],
+)
+def test_shape_comm_sms_auto_follows_the_device_and_group(
+    monkeypatch, capability, sm_count, precision, ep_size, expected
+):
+    """Host-only: the shape rows of ``"auto"`` resolve through the per-device,
+    per-precision, per-group-size table; everywhere else there is none
+    (``None``) and every launch keeps the COMM_SMS row or the factory split."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda device=None: capability
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    assert api.resolve_shape_comm_sms(precision, ep_size) == expected
+
+
+def test_shape_comm_sms_rows_are_the_measured_table(monkeypatch):
+    """Host-only: the shape rows are the shipped table (a change here is a
+    shipping change), the resolver returns a new dict and rejects malformed
+    arguments."""
+    from types import SimpleNamespace
+
+    assert api.SHAPE_COMM_SMS == {
+        (10, 3): {152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}}},
+    }
+    with pytest.raises(ValueError, match="precision must be one of"):
+        api.resolve_shape_comm_sms("fp8", 8)
+    with pytest.raises(ValueError, match="ep_size must be a positive"):
+        api.resolve_shape_comm_sms("bf16", 0)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (10, 3))
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=152),
+    )
+    rows = api.resolve_shape_comm_sms("bf16", 8)
+    rows[(4096, 1024, 10)] = (2, 2)
+    assert api.resolve_shape_comm_sms("bf16", 8) == {(4096, 1024, 10): (56, 48)}
+
+
+@pytest.mark.parametrize(
+    "capability,sm_count,ep_size,expected",
+    [
+        ((10, 3), 152, 8, (("bf16", 4096, 1024, 10, 56, 48),)),  # GB300 EP8
+        ((10, 3), 148, 8, None),  # B300
+        ((10, 3), 152, 4, None),
+        ((10, 0), 148, 8, None),  # B200
+        ((10, 0), 152, 8, None),  # GB200
+        ((10, 7), 212, 8, None),
+    ],
+)
+def test_comm_sms_auto_sets_the_shape_rows(
+    monkeypatch, capability, sm_count, ep_size, expected
+):
+    """Host-only: ``"auto"`` puts the device's shape rows of every routed
+    precision into ``MoKConfig.shape_comm_sms`` (``None`` without a row) and
+    keeps the per-precision rows; integer counts leave it ``None``."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda device=None: capability
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: ep_size)
+    monkeypatch.setattr(
+        backend, "create_source_workspace", lambda config, group, **kwargs: "workspace"
+    )
+    kwargs = dict(
+        group=None, device=None, num_local_tokens=512, hidden_size=4096, topk=10
+    )
+    for precision in ("bf16", "mxfp8"):
+        config, _ = api.create_mok_bf16_workspace(precision=precision, **kwargs)
+        assert config.shape_comm_sms == expected
+        assert config.bf16_comm_sms == (
+            api.resolve_comm_sms("bf16", ep_size) or (40, 40)
+        )
+    config, _ = api.create_mok_bf16_workspace(
+        fwd_num_comm_sms=24, bwd_num_comm_sms=28, **kwargs
+    )
+    assert config.shape_comm_sms is None
+
+
+def test_comm_split_follows_the_launch_shape():
+    """Host-only: without an imbalance split, a launch whose routed precision,
+    workspace hidden width and top-k and routed intermediate width match a row
+    of ``shape_comm_sms`` takes that row; any other launch (another width,
+    top-k or precision, or no width given) keeps the routed-precision row."""
+    from types import SimpleNamespace
+
+    split = backend.MoKFunctional._comm_split
+    assert MoKConfig().shape_comm_sms is None
+    rows = MoKConfig(
+        fwd_num_comm_sms=20,
+        bwd_num_comm_sms=24,
+        bf16_comm_sms=(20, 24),
+        mxfp8_comm_sms=(44, 36),
+        shape_comm_sms=(("bf16", 4096, 1024, 10, 56, 48),),
+    )
+    ws = SimpleNamespace(hidden_size=4096, topk=10)
+    assert split(None, rows, ws, False, 1024) == (56, 48)
+    assert split(None, rows, ws, False, 2048) == (20, 24)
+    assert split(None, rows, ws, False) == (20, 24)
+    assert split(None, rows, ws, True, 1024) == (44, 36)
+    assert split(None, rows, SimpleNamespace(hidden_size=4096, topk=8), False, 1024) == (20, 24)
+    assert split(None, rows, SimpleNamespace(hidden_size=6144, topk=10), False, 1024) == (20, 24)
+    fixed = MoKConfig(fwd_num_comm_sms=40, bwd_num_comm_sms=40)
+    assert split(None, fixed, ws, False, 1024) == (40, 40)
+
+
 def test_routed_precision_splits_are_validated():
     """``bf16_comm_sms`` / ``mxfp8_comm_sms`` must each be ``None`` or a
     (forward, backward) tuple of positive, even counts that leave compute SMs;
@@ -1892,6 +2028,13 @@ def test_routed_precision_splits_are_validated():
         ("mxfp8_comm_sms", (15, 40)),
         ("mxfp8_comm_sms", (40, sms)),
         ("mxfp8_comm_sms", (40, 0)),
+        ("shape_comm_sms", [("bf16", 4096, 1024, 10, 56, 48)]),
+        ("shape_comm_sms", (["bf16", 4096, 1024, 10, 56, 48],)),
+        ("shape_comm_sms", (("bf16", 4096, 1024, 10, 56),)),
+        ("shape_comm_sms", (("fp8", 4096, 1024, 10, 56, 48),)),
+        ("shape_comm_sms", (("bf16", 4096, 0, 10, 56, 48),)),
+        ("shape_comm_sms", (("bf16", 4096, 1024, 10, 55, 48),)),
+        ("shape_comm_sms", (("bf16", 4096, 1024, 10, 56, sms),)),
     ):
         config = MoKConfig(fwd_num_comm_sms=8, bwd_num_comm_sms=8, **{name: bad})
         with pytest.raises(ValueError, match=name):

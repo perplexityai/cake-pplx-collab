@@ -140,6 +140,41 @@ COMM_SMS = {
 }
 _FACTORY_COMM_SMS = (40, 40)
 
+# Fixed (forward, backward) split per launch shape for ``"auto"``: keyed like
+# COMM_SMS (device compute capability, SM count, routed precision, EP group
+# size), then by the launch's shape (hidden width H, routed intermediate width
+# I, top-k). A forward or backward launch whose shape has a row takes its
+# count instead of the COMM_SMS row or the factory split; every other launch,
+# and every context recompute launch, keeps those. The split never changes a
+# bit of any output, only time.
+#
+# GB300 ((10, 3), 152 SMs) BF16 EP8 56 / 48 for H 4096 / I 1024 / top-k 10
+# (the 512-expert layout (8, 64)). Its COMM_SMS row (20 / 24) was chosen at
+# I 2048 and top-k 8, where a routed row carries twice the expert GEMM work per
+# byte it moves; at I 1024 the forward and backward wait on communication with
+# that few SMs. Chosen by the checkpointed training step (schedule,
+# context-free forward, context recompute, backward) from forward / backward
+# counts measured on two 4-GPU trays of one NVLink domain, EP8, 32,768 tokens
+# per rank, uniform routing and with rank 0's experts at 1.75x the mean routed
+# rows, two rounds interleaved with the old row, the slowest rank's median.
+# Checkpointed step, uniform / 1.75x (ms): 20 / 24 46.24 / 72.74, 48 / 48
+# 33.91 / 53.72, 56 / 40 34.23 / 54.31, 56 / 48 33.49 / 53.59, 64 / 48
+# 33.81 / 53.54. The context recompute launch keeps the COMM_SMS row: it
+# rebuilds one macro batch, which slows as the forward count grows (0.818 ms at
+# 20, 0.862 ms at 56). B300 ((10, 3), 148 SMs) keeps 24 / 40: every forward
+# count measured above 24 (40 to 56, backward 40 or 48) made the checkpointed
+# step faster but its backward slower, the faster forward leaving the GPU at a
+# lower SM clock under its power limit (48 / 48, 32,768 tokens per rank,
+# uniform: checkpointed step 41.97 -> 38.90 ms, backward 26.17 -> 27.14 ms).
+# B200 ((10, 0), 148 SMs) keeps 40 / 40 (48 / 40 measured: checkpointed step
+# within 0.7 % of 40 / 40) and GB200 ((10, 0), 152 SMs) keeps 40 / 40 (no other
+# count measured).
+# Absolute times against the previous version: backend README, "Fixed split
+# per launch shape".
+SHAPE_COMM_SMS = {
+    (10, 3): {152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}}},
+}
+
 # Per-launch source split of the router-weight-before-down BF16 forward
 # (``MoKConfig.source_split_comm_sms``): the forward communication-SM count of a
 # rank whose source rows exceed ``SOURCE_SPLIT_THRESHOLD`` times the mean source
@@ -217,6 +252,36 @@ def resolve_comm_sms(precision, ep_size, device=None):
     return (
         COMM_SMS.get(capability, {}).get(sm_count, {}).get(precision, {}).get(ep_size)
     )
+
+
+def resolve_shape_comm_sms(precision, ep_size, device=None):
+    """Fixed (forward, backward) splits per launch shape measured for
+    ``precision`` (``"bf16"`` or ``"mxfp8"``) at EP group size ``ep_size`` on
+    ``device`` (:data:`SHAPE_COMM_SMS`), as a new ``{(hidden, intermediate,
+    topk): (forward, backward)}`` dict, or ``None`` when the device (compute
+    capability and SM count), precision or group size has no shape row (every
+    shape keeps the :func:`resolve_comm_sms` row or the factory split).
+    """
+    import torch
+
+    if precision not in MOK_PRECISIONS:
+        raise ValueError(
+            f"precision must be one of {MOK_PRECISIONS}, got {precision!r}"
+        )
+    ep_size = int(ep_size)
+    if ep_size < 1:
+        raise ValueError(f"ep_size must be a positive group size, got {ep_size}")
+    if device is None:
+        device = torch.cuda.current_device()
+    capability = tuple(torch.cuda.get_device_capability(device))
+    sm_count = int(torch.cuda.get_device_properties(device).multi_processor_count)
+    rows = (
+        SHAPE_COMM_SMS.get(capability, {})
+        .get(sm_count, {})
+        .get(precision, {})
+        .get(ep_size)
+    )
+    return dict(rows) if rows else None
 
 
 def resolve_imbalance_threshold(precision, device=None):
@@ -402,11 +467,18 @@ def create_mok_bf16_workspace(
     Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
     factory split 40 / 40 where there is no row, whatever ``precision`` the
     workspace was created with (``MoKConfig.bf16_comm_sms`` /
-    ``mxfp8_comm_sms``; the returned ``fwd_num_comm_sms`` /
-    ``bwd_num_comm_sms`` hold the row of ``precision``; on such a config a
-    ``dataclasses.replace`` of ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` alone
-    changes no launch: create the workspace with integers, or replace
-    ``bf16_comm_sms`` / ``mxfp8_comm_sms`` too). A pair of integers sets the
+    ``mxfp8_comm_sms``), except a forward or backward launch whose shape (the
+    workspace's ``hidden_size`` and ``topk``, the routed intermediate width)
+    has a measured row of the device, routed precision and group size, which
+    takes that row's count (:func:`resolve_shape_comm_sms`,
+    :data:`SHAPE_COMM_SMS`, ``MoKConfig.shape_comm_sms``; BF16 H 4096 / I 1024
+    / top-k 10 at EP8, the 512-expert layout (8, 64): GB300 56 / 48; a
+    context recompute launch keeps the row above). The returned
+    ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` hold the row of ``precision``;
+    on such a config a ``dataclasses.replace`` of ``fwd_num_comm_sms`` /
+    ``bwd_num_comm_sms`` alone changes no launch: create the workspace with
+    integers, or replace ``bf16_comm_sms`` / ``mxfp8_comm_sms`` and
+    ``shape_comm_sms`` too. A pair of integers sets the
     fixed split of every launch of both routed precisions; on a device with an
     imbalance row the imbalance split still replaces it under skew unless
     ``imbalance_comm_sms=None``. The split changes time only, never an output
@@ -478,6 +550,7 @@ def create_mok_bf16_workspace(
     if isinstance(source_split_comm_sms, str) and source_split_comm_sms != "auto":
         raise ValueError('source_split_comm_sms must be "auto", None or a count')
     routed_comm_sms = {}
+    shape_comm_sms = None
     if all(auto):
         import torch.distributed as dist
 
@@ -487,6 +560,16 @@ def create_mok_bf16_workspace(
             for routed in MOK_PRECISIONS
         }
         fwd_num_comm_sms, bwd_num_comm_sms = routed_comm_sms[precision]
+        shape_comm_sms = (
+            tuple(
+                (routed, *shape, *split)
+                for routed in MOK_PRECISIONS
+                for shape, split in sorted(
+                    (resolve_shape_comm_sms(routed, ep_size, device) or {}).items()
+                )
+            )
+            or None
+        )
     if isinstance(imbalance_comm_sms, str):
         imbalance_comm_sms = resolve_imbalance_comm_sms(precision, device)
     if isinstance(imbalance_threshold, str):
@@ -513,6 +596,7 @@ def create_mok_bf16_workspace(
         source_split_threshold=source_split_threshold,
         bf16_comm_sms=routed_comm_sms.get("bf16"),
         mxfp8_comm_sms=routed_comm_sms.get("mxfp8"),
+        shape_comm_sms=shape_comm_sms,
     )
     return config, create_source_workspace(
         config,
