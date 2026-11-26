@@ -1957,17 +1957,17 @@ ROW_RULES: dict[tuple, dict] = {
     #      (eager) and 14 % (CUDA graph) apart in either direction in their paired comparison, the most at T 4097, in
     #      the first timing and again in the one re-time, so the control check fixed in advance left the result
     #      unjudged; none of these cells was slower) on the 212-SM part and 1.087 to 1.644 / 1.082 to 1.651 (189 of its
-    #      534 cells, observed in an A/B that was stopped part way, before any control cell was timed, so not judged;
-    #      none was slower) on the 216-SM part.  Against version 0.3.26 the bits are the same where both plans sum each
-    #      tile's K in one chain (at the measured cells T 128 - 960: the plan before ran whole 128-row tiles there) and
-    #      differ where the plan before split each tile's K in two (at the measured cells from T 1024 on) (post-ship
-    #      A/B: the same at 234 of the 234 timed changed cells at T 128 - 960 and different at 248 of the 248 from T 961
-    #      on, on the 212-SM part; the same at 124 of the 124 timed changed cells at T 128 - 960 and different at 65 of
-    #      the 65 from T 961 on, on the 216-SM part); run-to-run bits stay identical.  The unbatched generic call of the
-    #      BF16 rows and of the four FP32 rows keyed here in the swapped orientation (4096 -> 128, 5120 -> 128, 8192 ->
-    #      128 and indexer_hw) swaps at every token count of these bands (``_single_wgrad_swap``: the rule is not empty)
-    #      and runs these plans; that of the nine other FP32 rows keeps its direct plan of version 0.3.26 (no token-free
-    #      key in either orientation) ----
+    #      482 changed cells, observed in an A/B that was stopped part way, before any control cell was timed, so not
+    #      judged; none was slower) on the 216-SM part.  Against version 0.3.26 the bits are the same where both plans
+    #      sum each tile's K in one chain (at the measured cells T 128 - 960: the plan before ran whole 128-row tiles
+    #      there) and differ where the plan before split each tile's K in two (at the measured cells from T 1024 on)
+    #      (post-ship A/B: the same at 234 of the 234 timed changed cells at T 128 - 960 and different at 248 of the 248
+    #      from T 961 on, on the 212-SM part; the same at 124 of the 124 timed changed cells at T 128 - 960 and
+    #      different at 65 of the 65 from T 961 on, on the 216-SM part); run-to-run bits stay identical.  The unbatched
+    #      generic call of the BF16 rows and of the four FP32 rows keyed here in the swapped orientation (4096 -> 128,
+    #      5120 -> 128, 8192 -> 128 and indexer_hw) swaps at every token count of these bands (``_single_wgrad_swap``:
+    #      the rule is not empty) and runs these plans; that of the nine other FP32 rows keeps its direct plan of
+    #      version 0.3.26 (no token-free key in either orientation) ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 96, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 48, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},
