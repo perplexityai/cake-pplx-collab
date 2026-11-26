@@ -104,11 +104,11 @@ On a VR200 (212 SMs) the main program needs a second wave of CTAs from 868,353 v
 wave up to 1,736,704.  On three VR200 GPUs with L2 flushed before each call, the kernel measured faster than the main
 program at every size of that range, in both kinds of call and on every GPU: by 2.4 to 14 % in the median over the GPUs.
 Outside that range it measured from 7 % slower to 2.4 % faster.  Replayed in a CUDA graph, some MXFP4 calls measured up
-to 2 % slower than with the main program from 868,368 to 917,504 vectors, and every call 1.2 % faster or more at each
-size measured from 933,888, so MXFP4's range starts there.  Every program gives the same bytes at every size.  Neither
-the last dimension, nor the rank, nor the row count enters the kernel, so a new shape never rebuilds a library.  A call
-builds or loads only the library of its own program, so build every library of the architecture before a CUDA graph
-capture: call `build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each
+to 2 % slower than with the main program from 868,368 to 917,504 vectors, and every call within 0.2 % of it or faster at
+each size measured from 933,888, so MXFP4's range starts there.  Every program gives the same bytes at every size.
+Neither the last dimension, nor the rank, nor the row count enters the kernel, so a new shape never rebuilds a library.
+A call builds or loads only the library of its own program, so build every library of the architecture before a CUDA
+graph capture: call `build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each
 format, scale output and program (size range and kind of call) that the capture uses.
 
 ## Locality domains (`sm_107a`)
