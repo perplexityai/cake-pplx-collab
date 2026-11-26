@@ -893,10 +893,10 @@ MODULES: dict[str, dict[str, Any]] = {
 }
 
 # Per architecture, the records of each route: its main record and its ranged
-# records (its small record and, on SM100 and SM103, MXFP8's wide record and
-# the large record of MXFP4 and MXFP8), which a call runs for the ``n_vecs``
-# of their disjoint ``vectors`` ranges for the call's kind
-# (:func:`selected_module`).
+# records (its small record; on SM100 and SM103, MXFP8's wide record and the
+# large record of MXFP4 and MXFP8; on SM107, the mid record of MXFP4 and
+# MXFP8), which a call runs for the ``n_vecs`` of their disjoint ``vectors``
+# ranges for the call's kind (:func:`selected_module`).
 ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_100a": {
         "fp4_e4m3_g16": ["fp4_e4m3_g16", "fp4_e4m3_g16_small"],
@@ -1009,8 +1009,8 @@ ALIGNMENT_BYTES = 16
 INT32_MAX = 2**31 - 1
 # ``n_vecs`` is a signed 32-bit kernel argument, and the kernel forms
 # ``n_vecs + 255`` (its tile count on SM107, ``+ 127`` on SM100 / SM103) and
-# its vector indices below that in signed 32 bits.  A small or wide program
-# forms ``n_vecs + 511``, a large one ``n_vecs + 2047`` and an
+# its vector indices below that in signed 32 bits.  A small, wide or mid
+# program forms ``n_vecs + 511``, a large one ``n_vecs + 2047`` and an
 # interleaved-domain one ``n_vecs + 1023``; a call runs each only inside its
 # ``vectors`` range.
 MAX_VECTORS = INT32_MAX - 255

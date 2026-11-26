@@ -139,9 +139,9 @@ program ran 1.11-1.30x as fast as the `"off"` program on the package benchmark's
 each run at least 1.09x), and 1.09-1.31x in back-to-back calls, eager or in a CUDA graph.  For MXFP8
 `[16384, 8, 4096]` without scales, an eager call took 162.5-162.6 µs on the `"off"` program and 124.4-124.7 µs on the
 domain program (GPU time, 2 GPUs).  A call that falls back runs the `"off"` program on the helper's memory: on the
-benchmark's fallback rows (out of place, 131,072 to 4,194,304 vectors) it ran 0.95-1.03x as fast as on default memory
-(GPU time), the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls and larger ones on
-the helper's memory were not measured.
+benchmark's fallback rows (out of place, 131,072 to 4,194,304 vectors) the programs of act_qdq 0.1.6 ran 0.95-1.03x as
+fast as on default memory (GPU time), the slowest for buffers of one chunk, which lie wholly in die 0; in-place calls,
+larger ones and the mid program on the helper's memory were not measured.
 
 The claim counters are one unsigned 32-bit word per die (`cake_domain`; the record's `counters` field), each in its own
 die's memory.  The helper's first call on a device maps one 2 MB chunk in each die for them (4 MB, kept for the

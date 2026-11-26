@@ -197,10 +197,11 @@ def cake_act_qdq_det_train_domain_empty(
     each die, kept for the process), zeroes them and synchronizes once.
     Allocate the buffers once, before any CUDA graph capture, and reuse
     them.  A capture begun with ``cudaStreamBeginCapture`` on a stream that is
-    not torch's current stream is not detected.  The ``"off"`` programs run on
-    this memory at 0.95-1.03x of their speed on default memory for
-    out-of-place calls of 131,072 to 4,194,304 vectors (GPU time, VR200
-    package benchmark); in-place calls and larger ones were not measured.
+    not torch's current stream is not detected.  The ``"off"`` programs of
+    act_qdq 0.1.6 ran on this memory at 0.95-1.03x of their speed on default
+    memory for out-of-place calls of 131,072 to 4,194,304 vectors (GPU time,
+    VR200 package benchmark); in-place calls, larger ones and the mid program
+    were not measured.
     Needs cuda-python (the ``locality`` extra).
 
     Parameters
