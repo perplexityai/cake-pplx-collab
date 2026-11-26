@@ -243,6 +243,8 @@ class MoKFunctional:
     router_weight_gradient = "quotient"
     shared_expert = "unscaled"
     activation = "swiglu"
+    mxfp8_transposed = "source"
+    requantized = False
     group = None
     shared_scale_kernels = None
 
@@ -258,6 +260,7 @@ class MoKFunctional:
         router_weight_gradient="quotient",
         shared_expert="unscaled",
         activation="swiglu",
+        mxfp8_transposed="source",
     ):
         """``clamped_swiglu`` selects which SwiGLU variant is compiled now.
 
@@ -314,6 +317,21 @@ class MoKFunctional:
         ``activation="situ_glu"`` and ``shared_expert="none"``. The type of
         each mode is checked with the other types (``TypeError``), its value
         after them (``ValueError``).
+
+        ``mxfp8_transposed`` (:data:`MXFP8_TRANSPOSED_MODES`) selects the
+        token-direction MXFP8 copies of the routed activations that the routed
+        weight gradients read. ``"source"`` (default) quantizes the BF16 ``x``
+        and SwiGLU activation ``h`` along the token dimension. ``"requantized"``
+        quantizes the BF16 dequantized values of the feature-direction copies
+        the forward GEMMs read: ``x_t = Q_tok(DQ(Q_feat(x)))`` and
+        ``h_t = Q_tok(DQ(Q_feat(h)))``, in the forward, in
+        ``recompute_forward_context`` and in the backward's replay of later
+        macro batches; every other output and saved tensor keeps the
+        ``"source"`` bits. It runs MXFP8 routed weights only, with
+        ``"after_down"`` outside the :data:`MODE_GROUPS` groups, on sm_100a
+        and sm_103a (raised here otherwise), and compiles the MXFP8 kernels of
+        the SwiGLU variant now instead of the BF16 ones; a call with BF16
+        routed weights raises.
         """
         group = check_configuration(
             ep,
@@ -325,6 +343,7 @@ class MoKFunctional:
             router_weight_gradient=router_weight_gradient,
             shared_expert=shared_expert,
             activation=activation,
+            mxfp8_transposed=mxfp8_transposed,
         )
         if (ep, local_experts) not in SCHEDULER_LAYOUTS or topk not in (
             *EPILOGUE_TOPKS,
@@ -341,11 +360,15 @@ class MoKFunctional:
             activation,
             group,
         )
+        self.mxfp8_transposed = mxfp8_transposed
+        self.requantized = mxfp8_transposed == "requantized"
         clamped_swiglu = clamped_swiglu or activation == "clamped_swiglu"
         self.device = torch.device("cuda", torch.cuda.current_device())
         from .jit import target_arch
 
-        check_target(router_weight_position, target_arch(self.device), group)
+        check_target(
+            router_weight_position, target_arch(self.device), group, mxfp8_transposed
+        )
         self.communication = MoKCommunication()
         self.scheduler = MoKScheduler(ep, local_experts)
         self.fp32_wgrad = fp32_wgrad
@@ -363,7 +386,7 @@ class MoKFunctional:
         # Validated weight sets (LRU, ``_weight_key`` per weight): one entry
         # per MoE layer and operation, no reference to any weight.
         self._validated = {}
-        self._kernels(1.0 if clamped_swiglu else None)
+        self._kernels(1.0 if clamped_swiglu else None, self.requantized)
         scaled = shared_expert == "scaled"
         self.epilogues = MoKEpilogues(
             topk,
@@ -373,10 +396,17 @@ class MoKFunctional:
         self.shared_scale_kernels = MoKSharedScale() if scaled else None
 
     def _check_variant(self, swiglu_limit, mxfp8):
-        """The per-call refusals of ``router_weight_position="before_down"``
-        and of a :data:`MODE_GROUPS` group, before any copy, barrier or launch:
-        plain SwiGLU and MXFP8 routed weights run with ``"after_down"`` only,
-        and a group runs its activation with BF16 routed weights only."""
+        """The per-call refusals of ``router_weight_position="before_down"``,
+        of a :data:`MODE_GROUPS` group and of ``mxfp8_transposed="requantized"``,
+        before any copy, barrier or launch: plain SwiGLU and MXFP8 routed
+        weights run with ``"after_down"`` only, a group runs its activation
+        with BF16 routed weights only, and ``"requantized"`` runs MXFP8 routed
+        weights only."""
+        if self.requantized and not mxfp8:
+            raise ValueError(
+                "mxfp8_transposed='requantized' runs MXFP8 routed weights only: pass "
+                "MXFP8 tuples (quantize_mok_mxfp8_weights) and prepare(..., mxfp8=True)"
+            )
         if self.group is not None:
             group = MODE_GROUPS[self.group]
             description = group.description
@@ -439,8 +469,14 @@ class MoKFunctional:
                 if mxfp8
                 else (MoKForward, MoKBackward)
             )
-            self._forward_kernels[key] = forward(key[1])
-            self._backward_kernels[key] = backward(key[1], self.fp32_wgrad)
+            if mxfp8:
+                self._forward_kernels[key] = forward(key[1], self.requantized)
+                self._backward_kernels[key] = backward(
+                    key[1], self.fp32_wgrad, self.requantized
+                )
+            else:
+                self._forward_kernels[key] = forward(key[1])
+                self._backward_kernels[key] = backward(key[1], self.fp32_wgrad)
         return self._forward_kernels[key], self._backward_kernels[key]
 
     def _context_free_forward_kernel(self, swiglu_limit, mxfp8=False):
@@ -477,9 +513,12 @@ class MoKFunctional:
                 )
             elif self.activation == "situ_glu":
                 self._recompute_kernels[key] = MoKRecompute(False, situ_glu=True)
+            elif mxfp8:
+                self._recompute_kernels[key] = MoKRecomputeMXFP8(
+                    key[1], self.requantized
+                )
             else:
-                recompute = MoKRecomputeMXFP8 if mxfp8 else MoKRecompute
-                self._recompute_kernels[key] = recompute(key[1])
+                self._recompute_kernels[key] = MoKRecompute(key[1])
         return self._recompute_kernels[key]
 
     def prepare(self, swiglu_limit=None, mxfp8=False, *, save_context=True):
@@ -487,6 +526,8 @@ class MoKFunctional:
 
         ``save_context=False`` also compiles the context-free forward that
         ``forward(..., save_context=False)`` runs (BF16 routed experts only).
+        With ``mxfp8_transposed="requantized"`` only ``mxfp8=True`` is a
+        variant.
         """
         if type(save_context) is not bool:
             raise TypeError("save_context must be a boolean")

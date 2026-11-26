@@ -24,6 +24,11 @@ Workers of the multi-GPU MoK tests (``test_mok_distributed.py``): each runs in e
 * :func:`training_features`: clamped SwiGLU, context-only recompute (also called with router weights, which the
   ``"after_down"`` recompute checks and does not read) and the context-free forward, FP32 weight-gradient
   accumulation and native MXFP8 routed experts over unequal ranks.
+* :func:`requantized_training`: the MXFP8 token-direction activation copies requantized from the forward's copies
+  (``mxfp8_transposed="requantized"``) over unequal ranks, plain and clamped SwiGLU with recompute, BF16 and FP32
+  weight gradients: repeatability, graph replay, recompute and every output but the routed weight gradients equal to
+  the default adapter's on the same inputs (not judged here: the outputs it changes are judged at one GPU, in
+  ``test_mok_accuracy.py``).
 * :func:`source_capacity`, :func:`backward_scratch`: the adapter's source-length guards, the schedule's expert
   layout, context ownership and the backward's scratch lifetime.
 * :func:`before_down_training`: the router weight before the down projection (``router_weight_position=
@@ -728,6 +733,136 @@ def training_features():
             fp32_wgrad=fp32_wgrad,
         )  # fmt: skip
         records.append(record)
+        del saved_context
+        torch.cuda.synchronize()
+        dist.barrier()
+    return records
+
+
+#: The cases of :func:`requantized_training`.
+REQUANTIZED_CASES = (
+    dict(name="mxfp8-requantized"),
+    dict(name="mxfp8-requantized-fp32-wgrad", fp32_wgrad=True),
+    dict(
+        name="mxfp8-requantized-clamped-recompute",
+        swiglu_limit=MXFP8_LIMIT,
+        recompute=True,
+    ),
+)
+#: The outputs ``mxfp8_transposed="requantized"`` changes: the routed weight gradients.
+REQUANTIZED_CHANGES = ("dw_routed_gate", "dw_routed_up", "dw_routed_down")
+
+
+def requantized_training():
+    """``mxfp8_transposed="requantized"`` over unequal ranks (several macrobatches per rank, so the backward replays):
+    the adapter refuses BF16 routed weights before any launch; per case (:data:`REQUANTIZED_CASES`) five eager launches
+    and five graph replays give the same bytes, the checkpointed step (recompute) the saved-context step's bytes, and
+    every output but :data:`REQUANTIZED_CHANGES` the default adapter's bytes on the same inputs.  Returns per case the
+    routed weight gradients that differ from the default adapter's on this rank."""
+    _exact_matmul()
+    device = torch.device("cuda", torch.cuda.current_device())
+    rank, ep = dist.get_rank(), dist.get_world_size()
+    local_experts, topk = LAYOUTS[ep]
+    hidden, intermediate = 512, 256
+    counts = ([513, 0, 1031, 256] * ep)[:ep] if ep > 1 else [1031]
+    shared, _, routed = _weights(ep, local_experts, hidden, intermediate, device)
+    weights = (*shared, *routed)
+    mxfp8_weights = quantize_mok_mxfp8_weights(*routed)
+    config, workspace = create_mok_bf16_workspace(
+        group=dist.group.WORLD,
+        device=device,
+        num_local_tokens=counts[rank],
+        hidden_size=hidden,
+        topk=topk,
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=256,
+        macrobatch_size=768,
+        schedule_capacity_multiplier=1.0,
+    )
+    torch.manual_seed(8291)
+    data = _random_data(counts, hidden, topk, ep * local_experts, device)
+    start = sum(counts[:rank])
+    section = slice(start, start + counts[rank])
+    x, ids, scores, dy = (
+        data[k][section].clone() for k in ("x", "expert_ids", "scores", "d_output")
+    )
+    records = []
+    for case in REQUANTIZED_CASES:
+        limit = case.get("swiglu_limit")
+        fp32_wgrad = case.get("fp32_wgrad", False)
+        adapters = {
+            mode: prepare_mok_bf16(
+                ep_size=ep,
+                local_experts=local_experts,
+                topk=topk,
+                clamped_swiglu=limit is not None,
+                fp32_wgrad=fp32_wgrad,
+                mxfp8_transposed=mode,
+            )  # fmt: skip
+            for mode in api.MXFP8_TRANSPOSED_MODES
+        }
+        for functional in adapters.values():
+            functional.prepare(limit, True)
+            functional.prepare_recompute(limit, True)
+        requantized = adapters["requantized"]
+        with pytest.raises(ValueError, match="runs MXFP8 routed weights only"):
+            requantized.prepare(limit)
+
+        def iteration(mode, recompute=False, mxfp8=True):
+            accumulators = (
+                [torch.zeros(w.shape, device=device) for w in weights]
+                if fp32_wgrad
+                else None
+            )
+            return TrainingIteration(
+                config, workspace, x, ids, scores, dy, weights, functional=adapters[mode], swiglu_limit=limit,
+                mxfp8_weights=mxfp8_weights if mxfp8 else None, recompute=recompute, accumulators=accumulators,
+            )  # fmt: skip
+
+        if case is REQUANTIZED_CASES[0]:
+            with pytest.raises(ValueError, match="runs MXFP8 routed weights only"):
+                iteration("requantized", mxfp8=False).run()
+            dist.barrier()
+        default = _snapshot(iteration("source").run())
+        saved_context = iteration("requantized")
+        outputs = _snapshot(saved_context.run())
+        _contract(outputs, counts[rank], hidden, topk)
+        again = [_snapshot(saved_context.run()) for _ in range(REPEATS - 1)]
+        assert all(_same(outputs, other) for other in again), (
+            rank,
+            case["name"],
+            "eager repeat",
+        )
+        dist.barrier()
+        saved_context.capture()
+        replays = [_snapshot(saved_context.run()) for _ in range(REPEATS)]
+        assert all(_same(outputs, other) for other in replays), (
+            rank,
+            case["name"],
+            "graph replay",
+        )
+        dist.barrier()
+        if case.get("recompute"):
+            checkpointed = _snapshot(iteration("requantized", recompute=True).run())
+            differs = [
+                n
+                for n, a, b in zip(RESULT_NAMES, outputs, checkpointed, strict=True)
+                if not torch.equal(a, b)
+            ]
+            assert not differs, (rank, case["name"], "recompute", differs)
+        differs = [
+            n
+            for n, a, b in zip(RESULT_NAMES, outputs, default, strict=True)
+            if not torch.equal(a, b)
+        ]
+        assert set(differs) <= set(REQUANTIZED_CHANGES), (
+            rank,
+            case["name"],
+            "against the default adapter",
+            differs,
+        )
+        records.append(dict(case=case["name"], counts=counts, routed_dw_differ=differs))
         del saved_context
         torch.cuda.synchronize()
         dist.barrier()

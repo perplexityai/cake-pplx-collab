@@ -49,6 +49,8 @@ RE_EXPORTS = (
     "IMBALANCE_THRESHOLDS",
     "MODE_GROUPS",
     "MOK_PRECISIONS",
+    "MXFP8_TRANSPOSED_MODES",
+    "MXFP8_WEIGHT_BLOCKS",
     "ROUTER_WEIGHT_GRADIENTS",
     "ROUTER_WEIGHT_POSITIONS",
     "SHARED_EXPERT_MODES",
@@ -115,6 +117,39 @@ def test_argument_errors_of_the_package_surface_unchanged():
         mok.resolve_imbalance_threshold("fp8")
 
 
+def test_quantize_blocks_default_to_1x32():
+    """``quantize_mok_mxfp8_weights`` takes the weights positionally and ``blocks`` as a keyword only, defaulting to
+    ``"1x32"`` (the earlier bytes), the first of :data:`MXFP8_WEIGHT_BLOCKS`."""
+    parameters = inspect.signature(mok.quantize_mok_mxfp8_weights).parameters
+    assert list(parameters) == ["gate", "up", "down", "blocks"]
+    assert parameters["blocks"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert mok.MXFP8_WEIGHT_BLOCKS == ("1x32", "32x32")
+    assert parameters["blocks"].default == mok.MXFP8_WEIGHT_BLOCKS[0]
+
+
+@pytest.mark.parametrize(
+    "blocks,error",
+    [
+        (None, TypeError),
+        (32, TypeError),
+        (b"32x32", TypeError),
+        (("32", "32"), TypeError),
+        ("32X32", ValueError),
+        ("16x16", ValueError),
+        ("", ValueError),
+    ],
+    ids=["none", "int", "bytes", "tuple", "upper", "16x16", "empty"],
+)
+def test_quantize_refuses_unknown_blocks(blocks, error):
+    """A ``blocks`` that is not a ``str`` raises ``TypeError`` and an unknown one ``ValueError``, naming the block
+    shapes, before any tensor is read (the weights here are not tensors; no GPU needed); a positional fourth argument
+    raises ``TypeError``."""
+    with pytest.raises(error, match=r"blocks must be one of \('1x32', '32x32'\)"):
+        mok.quantize_mok_mxfp8_weights(None, None, None, blocks=blocks)
+    with pytest.raises(TypeError):
+        mok.quantize_mok_mxfp8_weights(None, None, None, "32x32")
+
+
 @pytest.mark.parametrize(
     "position,ep,experts,topk,clamped,fp32,error,match",
     [
@@ -178,13 +213,14 @@ PREPARE_DEFAULTS = dict(
     router_weight_gradient="quotient",
     shared_expert="unscaled",
     activation="swiglu",
+    mxfp8_transposed="source",
 )
 
 
 def test_prepare_defaults_keep_the_existing_behavior():
     """``prepare_mok_bf16`` keeps every earlier keyword and default, and each explicit mode defaults to the earlier
-    behavior: the quotient router-weight gradient, the unscaled shared expert and SwiGLU (the first value of each
-    mode table)."""
+    behavior: the quotient router-weight gradient, the unscaled shared expert, SwiGLU and the MXFP8 token-direction
+    activation copies quantized from the BF16 source (the first value of each mode table)."""
     parameters = inspect.signature(mok.prepare_mok_bf16).parameters
     assert {name: p.default for name, p in parameters.items()} == PREPARE_DEFAULTS
     assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters.values())
@@ -192,6 +228,7 @@ def test_prepare_defaults_keep_the_existing_behavior():
     assert mok.SHARED_EXPERT_MODES == ("unscaled", "scaled", "none")
     assert mok.ACTIVATIONS == ("swiglu", "clamped_swiglu", "situ_glu")
     assert mok.ROUTER_WEIGHT_POSITIONS == ("after_down", "before_down")
+    assert mok.MXFP8_TRANSPOSED_MODES == ("source", "requantized")
 
 
 GROUP = dict(router_weight_gradient="direct", shared_expert="scaled", activation="swiglu")
@@ -246,3 +283,80 @@ def test_prepare_refuses_unsupported_modes(ep, experts, topk, clamped, fp32, mod
             fp32_wgrad=fp32,
             **modes,
         )
+
+
+#: ``prepare_mok_bf16`` calls with an ``mxfp8_transposed`` mode the package refuses:
+#: ``(position, ep, experts, topk, clamped, fp32, modes, error, match)`` by id.
+# fmt: off
+MXFP8_TRANSPOSED_REFUSALS = {
+    "type-int": ("after_down", 16, 16, 8, False, False, dict(mxfp8_transposed=1), TypeError, "mxfp8_transposed must be one of"),
+    "type-none": ("after_down", 16, 16, 8, False, False, dict(mxfp8_transposed=None), TypeError, "mxfp8_transposed must be one of"),
+    "type-bytes-before-down": ("before_down", 64, 6, 6, True, True, dict(mxfp8_transposed=b"source"), TypeError, "mxfp8_transposed must be one of"),
+    "ep-type-first": ("after_down", 16.0, 16, 8, False, False, dict(mxfp8_transposed="fp8"), TypeError, "ep_size must be an int"),
+    "value": ("after_down", 16, 16, 8, False, False, dict(mxfp8_transposed="fp8"), ValueError, "mxfp8_transposed must be one of"),
+    "value-case": ("after_down", 16, 16, 8, False, False, dict(mxfp8_transposed="Requantized"), ValueError, "mxfp8_transposed must be one of"),
+    "before-down": ("before_down", 64, 6, 6, True, True, dict(mxfp8_transposed="requantized"), ValueError, "router_weight_position='after_down'; got 'before_down'"),
+    "512-group": ("after_down", 8, 64, 10, False, True, dict(GROUP, mxfp8_transposed="requantized"), ValueError, "takes BF16 routed weights"),
+    "896-group": ("after_down", 64, 14, 16, False, True, dict(GROUP, shared_expert="none", activation="situ_glu", mxfp8_transposed="requantized"), ValueError, "takes BF16 routed weights"),
+    "512-layout": ("after_down", 8, 32, 10, False, True, dict(GROUP, mxfp8_transposed="requantized"), ValueError, "512 routed experts at top-k 10"),
+}
+# fmt: on
+
+
+@pytest.mark.parametrize(
+    "position,ep,experts,topk,clamped,fp32,modes,error,match",
+    list(MXFP8_TRANSPOSED_REFUSALS.values()),
+    ids=list(MXFP8_TRANSPOSED_REFUSALS),
+)
+def test_prepare_refuses_unsupported_mxfp8_transposed(
+    position, ep, experts, topk, clamped, fp32, modes, error, match
+):
+    """``prepare_mok_bf16`` refuses an ``mxfp8_transposed`` mode it has no kernels for before any device work (no GPU
+    needed): a mode that is not a ``str`` raises ``TypeError`` (after the integer types, with the other modes), an
+    unknown mode ``ValueError``; ``"requantized"`` applies to MXFP8 routed weights, which run with ``"after_down"``
+    outside the :data:`MODE_GROUPS` groups: with ``"before_down"`` or a group's configuration it raises
+    ``ValueError``."""
+    with pytest.raises(error, match=match):
+        mok.prepare_mok_bf16(
+            ep_size=ep,
+            local_experts=experts,
+            topk=topk,
+            clamped_swiglu=clamped,
+            fp32_wgrad=fp32,
+            router_weight_position=position,
+            **modes,
+        )
+
+
+def test_prepare_requantized_runs_mxfp8_routed_weights_only():
+    """``mxfp8_transposed="requantized"`` on a target with its kernels compiles the MXFP8 programs at construction and
+    refuses the BF16 routed-weight variants (``prepare`` and ``prepare_recompute`` without ``mxfp8``) with
+    ``ValueError`` before any launch; on any other target the construction raises ``ValueError`` naming it."""
+    if not torch.cuda.is_available():
+        pytest.skip("The adapter resolves the current CUDA device")
+    from cake_pplx._backends.cake_mok_bf16 import _kernels, jit
+
+    arch = jit.target_arch()
+    kwargs = dict(ep_size=1, local_experts=4, topk=2, mxfp8_transposed="requantized")
+    if arch not in _kernels.MXFP8_REQUANTIZED_TARGETS:
+        with pytest.raises(
+            ValueError, match=f"mxfp8_transposed='requantized' has no {arch} build"
+        ):
+            mok.prepare_mok_bf16(**kwargs)
+        return
+    functional = mok.prepare_mok_bf16(**kwargs)
+    assert functional.mxfp8_transposed == "requantized"
+    forward, backward = functional._kernels(None, True)
+    assert forward.qdq_transposed and backward.qdq_transposed
+    assert functional._recompute_kernel(None, True).qdq_transposed
+    for call in (
+        lambda: functional.prepare(None),
+        lambda: functional.prepare(0.75, False),
+        lambda: functional.prepare_recompute(None),
+    ):
+        with pytest.raises(ValueError, match="runs MXFP8 routed weights only"):
+            call()
+    default = mok.prepare_mok_bf16(ep_size=1, local_experts=4, topk=2)
+    assert default.mxfp8_transposed == "source"
+    forward, backward = default._kernels(None, True)
+    assert not forward.qdq_transposed and not backward.qdq_transposed

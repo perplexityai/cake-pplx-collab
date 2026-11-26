@@ -43,6 +43,14 @@ measured on the same draws and reported (``ALT`` lines), never judged.  The know
 architectures where they miss the tier: the MXFP8 score gradient of every MXFP8 case, and routed weight gradients of
 the two BF16 cases whose routed experts cross a macrobatch boundary (:data:`STRADDLE_GAPS`).
 
+The fused MXFP8 training cases also run with the requantized programs (``mxfp8_transposed="requantized"``, sm_100a and
+sm_103a): the outputs they change are judged, the routed weight gradients and the saved activation against the oracle
+and naive implementation with the same token-direction copies, and ``x``'s requantized codes and scales exactly;
+every other output is the default programs' bytes (``test_mok_mxfp8.py``), so its judgment is the default case's.
+The checkpointed MXFP8 step on ``blocks="32x32"`` routed weights (:data:`MXFP8_32X32_CASES`: hidden 6144 with 32 local
+experts, plain; hidden 4096 with 36 local experts, clamped) is judged on every output but the score gradient, and with
+the requantized programs on the outputs they change.
+
 Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
 """
 
@@ -65,6 +73,7 @@ from tests.experimental._mok_one_gpu import (
     one_rank_multiplier,
 )
 from tests.experimental._mok_reference import (
+    mxfp8_dequantize,
     mxfp8_quantize,
     production_inputs,
     rand,
@@ -75,6 +84,7 @@ from tests.experimental._mok_reference import (
 )
 
 kernels = cake_package("cake_mok_bf16", "_kernels")
+api = cake_package("cake_mok_bf16", "api")
 backend = cake_package("cake_mok_bf16", "backend")
 jit = cake_package("cake_mok_bf16", "jit")
 workspace_module = cake_package("cake_mok_bf16", "workspace")
@@ -327,11 +337,23 @@ def _mxfp8_case(
     mini=256,
     comm=4,
     seed=7000,
+    requantized=False,
+    blocks=None,
+    checkpointed=False,
 ):
+    """The fused MXFP8 training case.  The routed weights are the test reference's recipe (``mxfp8_quantize``), or with
+    ``blocks`` those of ``quantize_mok_mxfp8_weights(..., blocks=blocks)``; the oracle and the naive implementation
+    read the stored pairs either way.  ``requantized`` runs the requantized programs and judges
+    :data:`REQUANTIZED_OUTPUTS` only.  ``checkpointed``: the backward reads the context of the context-only recompute,
+    which equals the forward's bit for bit (the resident macrobatch's rows), and the first draw's step runs twice with
+    the same bytes."""
     hidden, intermediate, macro = geometry
     clamped = swiglu_limit is not None
-    forward = kernels.MoKForwardMXFP8(clamped)
-    backward = kernels.MoKBackwardMXFP8(clamped, fp32_wgrad)
+    forward = kernels.MoKForwardMXFP8(clamped, requantized)
+    backward = kernels.MoKBackwardMXFP8(clamped, fp32_wgrad, requantized)
+    recompute = None
+    if checkpointed:
+        recompute = kernels.MoKRecomputeMXFP8(clamped, requantized)
     options = dict(device="cuda", dtype=torch.bfloat16)
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
@@ -349,56 +371,89 @@ def _mxfp8_case(
         dy = randn(tokens, hidden, **options) * 0.125
         shared, routed = _weights(experts, hidden, intermediate, options)
         scores = _scores(tokens, topk)
-        q = [mxfp8_quantize(w) for w in routed]
-        fwd_w = [(qq[0], qq[1]) for qq in q]
-        bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+        if blocks is None:
+            q = [mxfp8_quantize(w) for w in routed]
+            fwd_w = [(qq[0], qq[1]) for qq in q]
+            bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+        else:
+            fwd_w, bwd_w = api.quantize_mok_mxfp8_weights(*routed, blocks=blocks)
         combine = torch.zeros(tokens * topk, hidden, **options)
         dx_peer = torch.zeros(tokens * topk, hidden, **options)
         ds_peer = torch.zeros_like(scores)
         initial = accumulators = None
         if fp32_wgrad:
             initial, accumulators = _accumulators(shared, routed)
-        values = forward(
-            x, [x.data_ptr()], combine, [combine.data_ptr()],
-            shared[0], fwd_w[0], shared[1], fwd_w[1], shared[2], fwd_w[2],
-            *schedule, topk, swiglu_limit, comm, macro, mini,
-        )  # fmt: skip
-        torch.cuda.synchronize()
-        (x_t, x_sc_t), _, (gate_q, gate_sc), _, (up_q, up_sc), _, (h_t, h_sc_t), y_shared, _ = values
         r = resident
-        saved = dict(
-            gate_saved=naive.dequantized((gate_q[:r], gate_sc[: r // 128])),
-            up_saved=naive.dequantized((up_q[:r], up_sc[: r // 128])),
-            hidden_saved=naive.dequantized((h_t[:, :r], h_sc_t[:, : r // 128]), transposed=True),
-        )
-        # Copies: the backward reuses the context ring for the later macrobatches, and a slice that spans the whole ring
-        # is a view of it.
-        x_codes = x_t[:, :r].clone().view(torch.uint8)
-        x_scales = x_sc_t[:, : r // 128].clone().view(torch.uint8)
-        result = backward(
-            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
-            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
-            shared[0], bwd_w[0], shared[1], bwd_w[1], shared[2], bwd_w[2],
-            *values[:7], x, [x.data_ptr()], *schedule,
-            topk, swiglu_limit, comm, macro, mini,
-            weight_grad_accumulators=accumulators,
-        )  # fmt: skip
-        torch.cuda.synchronize()
-        outputs = dict(
-            y_route=combine,
-            y_shared=y_shared,
-            dx_route=dx_peer,
-            d_scores=ds_peer,
-            dx_shared=result[0],
-            **_weight_outputs(result, initial),
-            **saved,
-            x_codes=x_codes,
-            x_scales=x_scales,
-        )
-        # The recipe's x codes and scales of the resident macrobatch (schedule order, padding rows zero).
+
+        def step():
+            values = forward(
+                x, [x.data_ptr()], combine, [combine.data_ptr()],
+                shared[0], fwd_w[0], shared[1], fwd_w[1], shared[2], fwd_w[2],
+                *schedule, topk, swiglu_limit, comm, macro, mini,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            (x_t, x_sc_t), _, (gate_q, gate_sc), _, (up_q, up_sc), _, (h_t, h_sc_t), y_shared, _ = values
+            saved = dict(
+                gate_saved=naive.dequantized((gate_q[:r], gate_sc[: r // 128])),
+                up_saved=naive.dequantized((up_q[:r], up_sc[: r // 128])),
+                hidden_saved=naive.dequantized((h_t[:, :r], h_sc_t[:, : r // 128]), transposed=True),
+            )
+            # Copies: the backward reuses the context ring for the later macrobatches, and a slice that spans the whole
+            # ring is a view of it.
+            x_codes = x_t[:, :r].clone().view(torch.uint8)
+            x_scales = x_sc_t[:, : r // 128].clone().view(torch.uint8)
+            context = values[:7]
+            if checkpointed:
+                kept = [piece.clone() for piece in _resident_context(values, r)]
+                context = recompute(
+                    x, [x.data_ptr()], shared[0], fwd_w[0], shared[1], fwd_w[1],
+                    *schedule, topk, swiglu_limit, comm, macro, mini,
+                )[:7]  # fmt: skip
+                torch.cuda.synchronize()
+                rebuilt = _resident_context(context, r)
+                assert all(torch.equal(a, b) for a, b in zip(kept, rebuilt, strict=True))
+            result = backward(
+                dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+                scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+                shared[0], bwd_w[0], shared[1], bwd_w[1], shared[2], bwd_w[2],
+                *context, x, [x.data_ptr()], *schedule,
+                topk, swiglu_limit, comm, macro, mini,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return dict(
+                y_route=combine,
+                y_shared=y_shared,
+                dx_route=dx_peer,
+                d_scores=ds_peer,
+                dx_shared=result[0],
+                **_weight_outputs(result, initial),
+                **saved,
+                x_codes=x_codes,
+                x_scales=x_scales,
+            )
+
+        outputs = step()
+        if checkpointed and j == 0:
+            first = {name: value.clone() for name, value in outputs.items()}
+            for buffer in (combine, dx_peer, ds_peer):
+                buffer.zero_()
+            for accumulator, start in zip(accumulators or (), initial or (), strict=True):
+                accumulator.copy_(start)
+            again = step()
+            assert all(torch.equal(first[name], again[name]) for name in first)
+            outputs = first
+        if requantized:
+            outputs = {name: outputs[name] for name in REQUANTIZED_OUTPUTS}
+        # The recipe's x codes and scales of the resident macrobatch (schedule order, padding rows zero); requantized:
+        # the token-direction copy of the forward's copy dequantized.
         valid = slab_routes >= 0
         source = torch.where(valid[:, None], x[slab_routes.clamp(min=0).long() // topk], torch.zeros_like(x[:1]))
-        _, _, xq_t, xs_t = mxfp8_quantize(source)
+        if requantized:
+            xq, xs = mxfp8_quantize(source, transposed=False)[:2]
+            _, _, xq_t, xs_t = mxfp8_quantize(mxfp8_dequantize(xq, xs), normal=False)
+        else:
+            _, _, xq_t, xs_t = mxfp8_quantize(source)
         exact = dict(
             x_codes=xq_t.view(torch.uint8)[:, :r],
             x_scales=xs_t.view(hidden // 128, actual // 128, 32, 16)[:, : r // 128],
@@ -410,7 +465,7 @@ def _mxfp8_case(
         for dtype in (naive.ORACLE, naive.NAIVE):
             rr = naive.routed(
                 x_routes, dy_routes, flat, segments, routed, swiglu_limit, dtype,
-                mx=mx, macro=None if fp32_wgrad else macro,
+                mx=mx, macro=None if fp32_wgrad else macro, requantized=requantized,
             )  # fmt: skip
             sh = naive.shared(x, dy, shared, swiglu_limit, dtype)
             v = _reference_values(rr, sh)
@@ -423,7 +478,9 @@ def _mxfp8_case(
                 v.update(
                     gate_saved=naive.qdq(gate),
                     up_saved=naive.qdq(up),
-                    hidden_saved=naive.qdq(hid, transposed=True),
+                    hidden_saved=naive.qdq(
+                        naive.qdq(hid) if requantized else hid, transposed=True
+                    ),
                 )
             refs[dtype] = (rr, v)
         oracle = refs[naive.ORACLE][1]
@@ -431,7 +488,14 @@ def _mxfp8_case(
         if not fp32_wgrad:
             for i, name in enumerate(("dw_routed_gate", "dw_routed_up", "dw_routed_down")):
                 alt.add(name, j, outputs[name], oracle[name], {"bf16": r_naive["alt_dw"][i]})
-        alt.add("d_scores", j, outputs["d_scores"], oracle["d_scores"], {"bf16": r_naive["alt_d_scores"].view(tokens, topk)})
+        if not requantized:
+            alt.add(
+                "d_scores",
+                j,
+                outputs["d_scores"],
+                oracle["d_scores"],
+                {"bf16": r_naive["alt_d_scores"].view(tokens, topk)},
+            )
         return outputs, oracle
 
     judge, failures = judge_case(
@@ -444,8 +508,31 @@ def _mxfp8_case(
     return judge, alt, failures
 
 
+def _resident_context(context, rows):
+    """The saved-context pieces of the resident macrobatch's ``rows`` (the forward's and the recompute's alike): the
+    E4M3 codes and scales of ``x_t`` and ``h_t`` (``[features, tokens]``) and of the gate and up values, and the
+    context's other three entries."""
+    pieces = []
+    for index, transposed in ((0, True), (2, False), (4, False), (6, True)):
+        data, scales = context[index]
+        if transposed:
+            pieces += [data[:, :rows], scales[:, : rows // 128]]
+        else:
+            pieces += [data[:rows], scales[: rows // 128]]
+    return pieces + [context[index] for index in (1, 3, 5)]
+
+
 #: The known-gap outputs of every MXFP8 case.
 MXFP8_GAPS = ("d_scores",)
+#: The outputs of an MXFP8 case judged with the requantized programs: those they change.
+REQUANTIZED_OUTPUTS = (
+    "dw_routed_gate",
+    "dw_routed_up",
+    "dw_routed_down",
+    "hidden_saved",
+    "x_codes",
+    "x_scales",
+)
 
 
 def _mxfp8_cases(function, cases):
@@ -492,6 +579,89 @@ def test_mxfp8_training_fp32_wgrad_accuracy(record_property, swiglu_limit, geome
 def test_mxfp8_training_local_experts_accuracy(record_property, experts, part):
     """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""
     _mxfp8(record_property, part, swiglu_limit=0.75, geometry=(512, 256, 2048), experts=experts, topk=8)
+
+
+def _mxfp8_requantized(record_property, **kwargs):
+    """Judge :data:`REQUANTIZED_OUTPUTS` of an MXFP8 case with the requantized programs; skip on a target without
+    them."""
+    require_gpu()
+    arch = jit.target_arch()
+    if arch not in kernels.MXFP8_REQUANTIZED_TARGETS:
+        pytest.skip(f"The requantized MXFP8 programs have no {arch} build")
+    run = gaps.judged(
+        ("mxfp8-requantized", *sorted(kwargs.items())),
+        lambda: _mxfp8_case(**kwargs, requantized=True),
+    )
+    _check(record_property, gaps.OUTPUTS, run)
+
+
+@pytest.mark.parametrize(
+    "geometry,swiglu_limit",
+    [values for _, values in MXFP8_CASES],
+    ids=[case for case, _ in MXFP8_CASES],
+)
+def test_mxfp8_requantized_training_accuracy(record_property, swiglu_limit, geometry):
+    _mxfp8_requantized(record_property, swiglu_limit=swiglu_limit, geometry=geometry)
+
+
+@pytest.mark.parametrize(
+    "geometry,swiglu_limit",
+    [values for _, values in MXFP8_CASES],
+    ids=[case for case, _ in MXFP8_CASES],
+)
+def test_mxfp8_requantized_training_fp32_wgrad_accuracy(
+    record_property, swiglu_limit, geometry
+):
+    _mxfp8_requantized(
+        record_property, swiglu_limit=swiglu_limit, geometry=geometry, fp32_wgrad=True
+    )
+
+
+@pytest.mark.parametrize("experts", [36, 9], ids=["local36", "local9"])
+def test_mxfp8_requantized_training_local_experts_accuracy(record_property, experts):
+    """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""
+    _mxfp8_requantized(
+        record_property,
+        swiglu_limit=0.75,
+        geometry=(512, 256, 2048),
+        experts=experts,
+        topk=8,
+    )
+
+
+#: ``(id, keywords)`` of the MXFP8 cases on ``blocks="32x32"`` routed weights at the requested model shapes: hidden
+#: 6144 with 256 routed experts (32 local experts: the (8, 32) layout) and plain SwiGLU; hidden 4096 with 288 routed
+#: experts (36 local experts: the (8, 36) layout) and clamped SwiGLU.  Intermediate 2048, top-8, FP32 weight
+#: gradients; 2048-row macrobatches (four and five per step, so the backward replays the later ones).
+MXFP8_32X32_CASES = (
+    ("h6144-i2048-local32-plain", dict(swiglu_limit=None, geometry=(6144, 2048, 2048), experts=32)),
+    ("h4096-i2048-local36-clamped", dict(swiglu_limit=0.75, geometry=(4096, 2048, 2048), experts=36)),
+)
+
+
+@pytest.mark.parametrize("case", [c for _, c in MXFP8_32X32_CASES], ids=[i for i, _ in MXFP8_32X32_CASES])
+def test_mxfp8_32x32_weights_accuracy(record_property, case):
+    """The fused MXFP8 training step on ``quantize_mok_mxfp8_weights(..., blocks="32x32")`` routed weights, the BF16
+    shared expert and FP32 weight-gradient accumulators, checkpointed: forward, the context-only recompute (equal to
+    the forward's context bit for bit) and the backward from the recomputed context, which replays the later
+    macrobatches; the first draw's step repeats bit for bit.  Every output is judged against the oracle on the same
+    stored weights, beside the naive implementation, as in the main items of the other MXFP8 cases (their score
+    gradient, a known gap of every single-GPU MXFP8 case, is judged in items of its own there and not here)."""
+    require_gpu()
+    kwargs = dict(case, topk=8, fp32_wgrad=True, blocks="32x32", checkpointed=True)
+    run = gaps.judged(("mxfp8", *sorted(kwargs.items())), lambda: _mxfp8_case(**kwargs))
+    _check(record_property, gaps.OUTPUTS, run, MXFP8_GAPS)
+
+
+@pytest.mark.parametrize("case", [c for _, c in MXFP8_32X32_CASES], ids=[i for i, _ in MXFP8_32X32_CASES])
+def test_mxfp8_requantized_32x32_weights_accuracy(record_property, case):
+    """Both options together: the requantized programs on ``blocks="32x32"`` routed weights in the checkpointed
+    training step of :func:`test_mxfp8_32x32_weights_accuracy` (same cases, FP32 weight gradients, the backward
+    replaying the later macrobatches).  :data:`REQUANTIZED_OUTPUTS` are judged as in :func:`_mxfp8_requantized`; every
+    other output is the default programs' bytes on the same weights (``test_mok_mxfp8.py``), judged by
+    :func:`test_mxfp8_32x32_weights_accuracy`."""
+    extra = {"topk": 8, "fp32_wgrad": True, "blocks": "32x32", "checkpointed": True}
+    _mxfp8_requantized(record_property, **case, **extra)
 
 
 @pytest.mark.parametrize("topk", [2, 8])

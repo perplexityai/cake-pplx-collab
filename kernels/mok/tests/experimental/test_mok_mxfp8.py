@@ -19,9 +19,18 @@ Single-GPU native MXFP8 MoK checks: the recipe's stored codes, contracts and det
 The MoK recipe in schedule order: x, the SwiGLU activation, the score-scaled dY and d_gate/d_up are MXFP8 (32-element
 blocks along K), routed weights are caller-prequantized, GEMMs accumulate in FP32 on dequantized operands, and the
 shared expert stays BF16.  Here: the weight quantizer writes the recipe's bytes (every chunking of its PyTorch path
-the same bytes), the forward stores ``x``'s codes and scales exactly as the recipe does, every output is finite, and
-reruns, recompute and the mixed forward programs repeat bit for bit.  The accuracy of every floating output (and of
-the stored E4M3 gate, up and activation values) against the float64 oracle is judged in ``test_mok_accuracy.py``.
+the same bytes; with ``blocks="32x32"`` one byte per 32 x 32 block and the transposed pairs the forward pairs' codes
+transposed), the forward stores ``x``'s codes and scales exactly as the recipe does, every output is finite, and
+reruns, recompute and the mixed forward programs repeat bit for bit, on either block shape of the routed weights.  The
+accuracy of every floating output (and of the stored E4M3 gate, up and activation values) against the float64 oracle
+is judged in ``test_mok_accuracy.py``.
+
+The requantized programs (``qdq_transposed=True``, ``mxfp8_transposed="requantized"``; sm_100a and sm_103a): the
+token-direction copies of x and of the activation are exactly the recipe's copies of the launch's own
+feature-direction copies dequantized (the forward, the recompute and the backward's replay, which writes the bytes a
+resident macrobatch keeps; for x and for the activation each, the default programs' copies are not on at least one
+case), every other output and saved tensor is the default programs' bytes on the same inputs (also on 32 x 32 routed
+weights), and reruns and recompute repeat bit for bit.
 
 Backend suite: the package is imported only through
 :func:`tests.cake.test_helpers.cake_package.cake_package`; the :mod:`cake_pplx.cake_mok_det_train`
@@ -34,6 +43,7 @@ import torch
 from tests.experimental._mok_reference import (
     mxfp8_dequantize as dequantize,
     mxfp8_quantize as quantize,
+    mxfp8_quantize_32x32 as quantize_32x32,
     rand,
     randn,
     randn_like,
@@ -126,6 +136,66 @@ def _flat(value):
     return [t for v in value for t in (_flat(v) if isinstance(v, tuple) else [v])]
 
 
+class _LaunchSpy:
+    """Stands in for a prepared kernel: launches the kernel it wraps and keeps each launch's keywords (the tensors
+    themselves, so their contents after the launch can be read)."""
+
+    def __init__(self, module):
+        self.module, self.calls = module, []
+
+    def launch(self, *, grid, **kwargs):
+        self.module.launch(grid=grid, **kwargs)
+        self.calls.append(kwargs)
+
+
+def _require_requantized():
+    """Skip on a target without the requantized programs, after checking that their launchers refuse it."""
+    require_gpu()
+    arch = jit.target_arch()
+    if arch not in kernels.MXFP8_REQUANTIZED_TARGETS:
+        for make in (
+            lambda: MoKForwardMXFP8(False, True),
+            lambda: MoKRecomputeMXFP8(False, True),
+            lambda: MoKBackwardMXFP8(False, False, True),
+        ):
+            with pytest.raises(ValueError, match=f"no {arch} build"):
+                make()
+        pytest.skip(f"The requantized MXFP8 programs have no {arch} build")
+
+
+def _requantized(data, scales):
+    """``Q_tok(DQ(data, scales))``: the recipe's token-direction copy (codes as bytes, scale tiles) of the values that
+    a stored feature-direction copy (``[rows, K]`` codes, ``[rows / 128, K / 128, 32, 16]`` scale tiles) stands for."""
+    rows, cols = data.shape
+    values = dequantize(
+        data.contiguous().view(torch.float8_e4m3fn), scales.contiguous()
+    )
+    _, _, data_t, scales_t = quantize(values, normal=False)
+    return data_t.view(torch.uint8), scales_t.view(cols // 128, rows // 128, 32, 16)
+
+
+def _relation_misses(copies, rows):
+    """The names of ``copies`` (``name: ((codes, scales), (codes_t, scales_t))``, feature-direction then
+    token-direction) whose token-direction copy is not :func:`_requantized` of the feature-direction copy over the
+    first ``rows`` rows."""
+    misses = []
+    for name, ((data, scales), (data_t, scales_t)) in copies.items():
+        want, want_scales = _requantized(data[:rows], scales[: rows // 128])
+        got, got_scales = data_t[:, :rows].view(torch.uint8), scales_t[:, : rows // 128]
+        if not (torch.equal(got, want) and torch.equal(got_scales, want_scales)):
+            misses.append(name)
+    return misses
+
+
+def _source_rows(x, s, topk, start, stop):
+    """The BF16 source rows of schedule rows ``start`` .. ``stop`` (padding rows zero), as the kernels quantize them."""
+    rows = s["schedule"][start:stop]
+    valid = rows >= 0
+    source = torch.zeros(stop - start, x.shape[1], device=x.device, dtype=x.dtype)
+    source[valid] = x[rows[valid].long() // topk]
+    return source
+
+
 @pytest.mark.parametrize("experts_per_chunk", [1, 2, 3])
 def test_weight_quantizer_chunks_are_bitwise(monkeypatch, experts_per_chunk):
     """The quantizer's PyTorch path writes the per-matrix reference's bytes, NaN / infinity / zero blocks included,
@@ -161,6 +231,104 @@ def test_weight_quantizer_chunks_are_bitwise(monkeypatch, experts_per_chunk):
     for a, b in pairs:
         assert a.shape == b.shape and a.dtype == b.dtype
         assert torch.equal(a.view(torch.uint8), b.view(torch.uint8))
+
+
+def _bytes_equal(a, b):
+    return (
+        a.shape == b.shape
+        and a.dtype == b.dtype
+        and torch.equal(a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8))
+    )
+
+
+def _untiled(scales, rows, cols):
+    """The UE8M0 bytes ``[E, rows, cols / 32]`` of tile-layout scales ``[E * rows / 128, cols / 128, 32, 16]``."""
+    tiles = scales.reshape(-1, rows // 128, cols // 128, 32, 4, 4).permute(0, 1, 4, 3, 2, 5)
+    return tiles.reshape(-1, rows, cols // 32)
+
+
+def _32x32_inputs(experts):
+    """Routed weights whose 32 x 32 blocks differ from their 32-element rows and columns: gate rows scaled by 2**-4 to
+    2**3 within each block (an all-zero block, a x1e4 block, a NaN and an infinity), down columns scaled the same
+    way."""
+    torch.manual_seed(37)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    steps = (2.0 ** torch.arange(-4, 4, device="cuda")).repeat_interleave(4).repeat(8)
+    gate = randn(experts, 256, 512, **options) * steps.bfloat16()[:, None]
+    gate[0, 64:96, 128:160] = 0
+    gate[1, 32:64, :32] *= 1e4
+    gate[2, 9, 40] = float("nan")
+    gate[1, 100, 300] = -float("inf")
+    up = randn_like(gate) * 1e-3
+    down = randn(experts, 512, 256, **options) * steps.bfloat16()
+    return gate, up, down
+
+
+def test_32x32_weights_match_the_recipe():
+    """``blocks="32x32"``, per weight (gate, up, down): each byte of ``scales`` and ``scales_t`` is the recipe's byte of
+    its 32 x 32 block's largest magnitude (:func:`tests.experimental._mok_reference.mxfp8_quantize_32x32`), carried by
+    each of the block's 32 rows (``scales``) or 32 columns (``scales_t``); ``data`` is the recipe's E4M3 conversion
+    with those bytes and ``data_t`` is ``data`` transposed, byte for byte; the transposed pair dequantizes to the
+    transpose of the forward pair's values, bit for bit (zero, x1e4, NaN and infinity blocks included).  Gate and up
+    share the forward pair with ``backward_weights``.  Each weight's forward and transposed scales differ from the
+    ``"1x32"`` ones (not vacuous)."""
+    require_gpu()
+    weights = _32x32_inputs(3)
+    forward_w, backward_w = quantize_mok_mxfp8_weights(*weights, blocks="32x32")
+    forward_d, backward_d = quantize_mok_mxfp8_weights(*weights)
+    for fwd, bwd in zip(forward_w[:2], backward_w[:2], strict=True):
+        assert fwd[0] is bwd[0] and fwd[1] is bwd[1]
+    stored = (backward_w[0], backward_w[1], (*forward_w[2], *backward_w[2]))
+    default = (backward_d[0], backward_d[1], (*forward_d[2], *backward_d[2]))
+    for weight, (data, scales, data_t, scales_t), old in zip(weights, stored, default, strict=True):
+        _, rows, cols = weight.shape
+        ref_data, ref_scales, ref_data_t, ref_scales_t, byte = quantize_32x32(weight)
+        assert _bytes_equal(_untiled(scales, rows, cols), byte.repeat_interleave(32, dim=1))
+        assert _bytes_equal(_untiled(scales_t, cols, rows), byte.transpose(1, 2).repeat_interleave(32, dim=1))
+        assert _bytes_equal(scales, ref_scales) and _bytes_equal(scales_t, ref_scales_t)
+        assert _bytes_equal(data, ref_data) and _bytes_equal(data_t, ref_data_t)
+        assert _bytes_equal(data_t, data.transpose(1, 2))
+        values, values_t = dequantize(data, scales), dequantize(data_t, scales_t)
+        assert _bytes_equal(values_t, values.transpose(1, 2))
+        assert not _bytes_equal(scales, old[1]) and not _bytes_equal(scales_t, old[3])
+
+
+@pytest.mark.parametrize("experts_per_chunk", [1, 2, 3])
+def test_32x32_weight_quantizer_chunks_are_bitwise(monkeypatch, experts_per_chunk):
+    """With ``blocks="32x32"`` every chunking of the experts (1, 2 or 3 per chunk of 5) writes the bytes of one chunk,
+    all 16 tensors."""
+    require_gpu()
+    weights = _32x32_inputs(5)
+    whole = quantize_mok_mxfp8_weights(*weights, blocks="32x32")
+    counts = []
+    square_chunk = mxfp8._square_chunk
+
+    def recorded(part):
+        counts.append(part.shape[0])
+        return square_chunk(part)
+
+    monkeypatch.setattr(mxfp8, "_square_chunk", recorded)
+    monkeypatch.setattr(mxfp8, "_CHUNK_BYTES", experts_per_chunk * 256 * 512 * 4)
+    chunked = quantize_mok_mxfp8_weights(*weights, blocks="32x32")
+    assert max(counts) == experts_per_chunk and sum(counts) == 3 * 5
+    pairs = list(zip(_flat(whole), _flat(chunked), strict=True))
+    assert len(pairs) == 16
+    assert all(_bytes_equal(a, b) for a, b in pairs)
+
+
+def test_1x32_blocks_are_the_default():
+    """``blocks="1x32"`` writes the bytes of the call without the keyword, all 16 tensors."""
+    require_gpu()
+    weights = _32x32_inputs(3)
+    pairs = list(
+        zip(
+            _flat(quantize_mok_mxfp8_weights(*weights)),
+            _flat(quantize_mok_mxfp8_weights(*weights, blocks="1x32")),
+            strict=True,
+        )
+    )
+    assert len(pairs) == 16
+    assert all(_bytes_equal(a, b) for a, b in pairs)
 
 
 @pytest.mark.parametrize("comm", [4, 16])
@@ -256,6 +424,97 @@ def test_mxfp8_forward(swiglu_limit, hidden, intermediate, macro):
         assert _same(first, again)
 
 
+#: ``(hidden, intermediate, macro)`` of the requantized forward cases.
+REQUANTIZED_FORWARD_CASES = [(512, 256, 768), (512, 512, 768), (512, 256, 1536)]
+
+
+def _requantized_forward_launch(forward, swiglu_limit, hidden, intermediate, macro):
+    """One launch of ``forward`` (its module a :class:`_LaunchSpy`) on the inputs of the requantized forward cases:
+    the copies (``name: ((codes, scales), (codes_t, scales_t))``, feature-direction then token-direction, of ``x`` and
+    of the activation), the tensors the requantized programs keep and the ones they change (clones), over the rows the
+    ring keeps, and that row count."""
+    tokens, topk, mini, comm = 512, 2, 256, 4
+    x, _, shared, routed, _, s = _setup(
+        hidden, intermediate, 5197 + hidden + intermediate
+    )
+    routed_q = [quantize(w, transposed=False)[:2] for w in routed]
+    r = min(s["actual"], macro)
+    combine = torch.zeros(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16)
+    values = forward(
+        x, [x.data_ptr()], combine, [combine.data_ptr()],
+        shared[0], routed_q[0], shared[1], routed_q[1], shared[2], routed_q[2],
+        s["peers"], s["schedule"], s["num_tokens"], s["counts"],
+        topk, swiglu_limit, comm, macro, mini,
+    )  # fmt: skip
+    torch.cuda.synchronize()
+    k = forward.module.calls[-1]
+    (
+        (x_t, x_sc_t),
+        gate_shared,
+        (gate_q, gate_sc),
+        up_shared,
+        (up_q, up_sc),
+        hidden_shared,
+        (h_t, h_sc_t),
+    ) = values[:7]
+    copies = {
+        "x": ((k["x_q"], k["x_sc"]), (x_t, x_sc_t)),
+        "h": ((k["hidden_q"], k["hidden_sc"]), (h_t, h_sc_t)),
+    }
+    same = [combine, values[7], gate_shared, up_shared, hidden_shared, gate_q[:r], gate_sc[: r // 128],
+            up_q[:r], up_sc[: r // 128], k["x_q"][:r], k["x_sc"][: r // 128], k["hidden_q"][:r],
+            k["hidden_sc"][: r // 128]]  # fmt: skip
+    changed = [x_t[:, :r], x_sc_t[:, : r // 128], h_t[:, :r], h_sc_t[:, : r // 128]]
+    return copies, [t.clone() for t in same], [t.clone() for t in changed], r
+
+
+def _spied_forward(clamped, qdq):
+    forward = MoKForwardMXFP8(clamped, qdq)
+    forward.module = _LaunchSpy(forward.module)
+    return forward
+
+
+@LIMITS
+@pytest.mark.parametrize("hidden,intermediate,macro", REQUANTIZED_FORWARD_CASES)
+def test_mxfp8_requantized_forward(swiglu_limit, hidden, intermediate, macro):
+    """The requantized forward against the default one on the same inputs, over the rows the ring keeps: ``x_q`` and
+    ``x_sc`` are the recipe's; ``x_t``, ``h_t`` and their scales are exactly the recipe's token-direction copies of
+    the launch's own ``x_q`` and ``hidden_q`` dequantized; ``combine``, ``y_shared``, the shared context, the stored
+    gate and up and ``x_q`` / ``hidden_q`` with their scales are the default forward's bytes; reruns are bitwise."""
+    _require_requantized()
+    clamped = swiglu_limit is not None
+    case = (swiglu_limit, hidden, intermediate, macro)
+    forwards = {qdq: _spied_forward(clamped, qdq) for qdq in (False, True)}
+    _, default_same, _, _ = _requantized_forward_launch(forwards[False], *case)
+    copies, same, changed, r = _requantized_forward_launch(forwards[True], *case)
+    assert all(torch.isfinite(value).all().item() for value in same[:5])
+    x, _, _, _, _, s = _setup(hidden, intermediate, 5197 + hidden + intermediate)
+    xq, xs = quantize(_source_rows(x, s, 2, 0, s["actual"]), transposed=False)[:2]
+    assert torch.equal(copies["x"][0][0][:r], xq.view(torch.uint8)[:r])
+    assert torch.equal(copies["x"][0][1][: r // 128], xs[: r // 128])
+    assert _relation_misses(copies, r) == []
+    for index, (a, b) in enumerate(zip(same, default_same, strict=True)):
+        assert torch.equal(a.view(torch.uint8), b.view(torch.uint8)), index
+    for _ in range(REPEATS - 1):
+        _, again, again_changed, _ = _requantized_forward_launch(forwards[True], *case)
+        assert _same(same + changed, again + again_changed)
+
+
+@LIMITS
+@pytest.mark.parametrize("copy", ["x", "h"])
+def test_mxfp8_requantized_forward_is_not_vacuous(swiglu_limit, copy):
+    """The relation :func:`test_mxfp8_requantized_forward` checks tells the programs apart for each copy on its own:
+    over :data:`REQUANTIZED_FORWARD_CASES`, the default forward's token-direction copy of ``copy`` (``x`` or the
+    activation ``h``) is not the requantized copy of the launch's own feature-direction copy on at least one case."""
+    _require_requantized()
+    misses = {}
+    for case in REQUANTIZED_FORWARD_CASES:
+        forward = _spied_forward(swiglu_limit is not None, False)
+        copies, _, _, r = _requantized_forward_launch(forward, swiglu_limit, *case)
+        misses[case] = _relation_misses(copies, r)
+    assert any(copy in names for names in misses.values()), misses
+
+
 def _mxfp8_training(
     swiglu_limit,
     hidden,
@@ -266,12 +525,22 @@ def _mxfp8_training(
     experts=4,
     topk=2,
     fp32_wgrad=False,
+    qdq_transposed=False,
+    replay=None,
+    blocks=None,
 ):
     """Contract and repeatability of the fused MXFP8 forward + backward: every returned gradient finite, and
     ``repeat`` more launches on the same inputs give the same bytes.  ``fp32_wgrad`` adds every weight gradient into
-    nonzero FP32 starting accumulators.  Returns the gradients of the first launch."""
-    forward = MoKForwardMXFP8(swiglu_limit is not None)
-    backward = MoKBackwardMXFP8(swiglu_limit is not None, fp32_wgrad)
+    nonzero FP32 starting accumulators; ``qdq_transposed`` runs the requantized programs.  The routed weights are the
+    recipe's (``quantize``), or with ``blocks`` those of ``quantize_mok_mxfp8_weights(..., blocks=blocks)``.  Returns
+    the gradients of the first launch.  With a list ``replay`` the first launch's backward is watched: for the last
+    macrobatch it replays (none with one macrobatch: ``None`` is appended), its ``x_q`` must be the recipe's copy of
+    that macrobatch's source rows, and the names of its token-direction copies that are not :func:`_requantized` of
+    its own ``x_q`` / ``h_q`` are appended."""
+    forward = MoKForwardMXFP8(swiglu_limit is not None, qdq_transposed)
+    backward = MoKBackwardMXFP8(swiglu_limit is not None, fp32_wgrad, qdq_transposed)
+    if replay is not None:
+        backward.module = _LaunchSpy(backward.module)
     tokens, mini, comm = 512, 256, 4
     x, dy, shared, routed, scores, s = _setup(
         hidden,
@@ -280,9 +549,12 @@ def _mxfp8_training(
         experts=experts,
         topk=topk,
     )
-    q = [quantize(w) for w in routed]
-    fwd_w = [(qq[0], qq[1]) for qq in q]
-    bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+    if blocks is None:
+        q = [quantize(w) for w in routed]
+        fwd_w = [(qq[0], qq[1]) for qq in q]
+        bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+    else:
+        fwd_w, bwd_w = quantize_mok_mxfp8_weights(*routed, blocks=blocks)
     options = dict(device="cuda", dtype=torch.bfloat16)
     combine = torch.zeros(tokens * topk, hidden, **options)
     dx_peer = torch.zeros(tokens * topk, hidden, **options)
@@ -318,6 +590,22 @@ def _mxfp8_training(
         return tuple(t.clone() for t in (combine, values[7], dx_peer, ds_peer, result[0], *result[9:]))
 
     first = run()
+    if replay is not None:
+        last = -(-s["actual"] // macro) - 1
+        if last == 0:
+            replay.append(None)
+        else:
+            k, rows = backward.module.calls[-1], s["actual"] - last * macro
+            xq, xs = quantize(
+                _source_rows(x, s, topk, last * macro, s["actual"]), transposed=False
+            )[:2]
+            assert torch.equal(k["x_q"][:rows], xq.view(torch.uint8))
+            assert torch.equal(k["x_sc"][: rows // 128], xs)
+            copies = {
+                "x": ((k["x_q"], k["x_sc"]), (k["x_t"], k["x_sc_t"])),
+                "h": ((k["h_q_store"], k["h_sc_store"]), (k["h_t"], k["h_sc_t"])),
+            }
+            replay.append(_relation_misses(copies, rows))
     assert all(torch.isfinite(value).all().item() for value in first)
     for _ in range(repeat):
         again = run()
@@ -349,11 +637,168 @@ def test_mxfp8_training_fp32_wgrad(swiglu_limit, hidden, intermediate, macro):
     _mxfp8_training(swiglu_limit, hidden, intermediate, macro, seed=7000, fp32_wgrad=True)
 
 
+@LIMITS
+@pytest.mark.parametrize("fp32_wgrad", [False, True], ids=["bf16-wgrad", "fp32-wgrad"])
+def test_mxfp8_training_32x32_weights(swiglu_limit, fp32_wgrad):
+    """Fused MXFP8 forward + backward on ``blocks="32x32"`` routed weights, which the kernels read as ordinary MXFP8
+    operands: finite, reruns bitwise over several macrobatches.  The routed output differs from the ``"1x32"``
+    weights' (the kernels read the 32 x 32 bytes) and the BF16 shared expert's output is the same bytes."""
+    require_gpu()
+    shape = (swiglu_limit, 512, 256, 768)
+    square = _mxfp8_training(*shape, seed=7000, fp32_wgrad=fp32_wgrad, blocks="32x32")
+    rows = _mxfp8_training(*shape, seed=7000, repeat=0, fp32_wgrad=fp32_wgrad, blocks="1x32")
+    assert not torch.equal(square[0], rows[0])
+    assert _bytes_equal(square[1], rows[1])
+
+
 @pytest.mark.parametrize("experts", [36, 9], ids=["ep8-local36", "ep32-local9"])
 def test_mxfp8_training_local_experts(experts):
     """288 routed experts at EP8 / EP32 (36 or 9 local experts), top-8, clamped: finite, reruns bitwise."""
     require_gpu()
     _mxfp8_training(0.75, 512, 256, 2048, seed=7000, experts=experts, topk=8)
+
+
+#: The positions of the routed weight gradients in :func:`_mxfp8_training`'s result: the outputs the requantized
+#: copies change (``combine``, ``y_shared``, ``dx``, the score gradient, the shared ``dx`` and the shared weight
+#: gradients keep the default programs' bytes).
+ROUTED_WEIGHT_GRADIENTS = (6, 8, 10)
+
+
+def _requantized_training(*args, **kwargs):
+    """:func:`_mxfp8_training` of the requantized programs (finite, reruns bitwise) against the default programs on
+    the same inputs: every result but the routed weight gradients the same bytes; the replayed token-direction copies
+    of the requantized backward the requantized copies of its own ``x_q`` / ``h_q``."""
+    replays = []
+    requantized = _mxfp8_training(*args, **kwargs, qdq_transposed=True, replay=replays)
+    default = _mxfp8_training(*args, **kwargs, repeat=0)
+    for index, (a, b) in enumerate(zip(requantized, default, strict=True)):
+        if index not in ROUTED_WEIGHT_GRADIENTS:
+            assert torch.equal(a, b), index
+    assert replays[0] in (None, [])
+
+
+#: ``(hidden, intermediate, macro)`` of the requantized training cases.
+REQUANTIZED_TRAINING_CASES = [(512, 256, 768), (512, 512, 1536), (512, 256, 512)]
+#: The requantized training cases whose backward replays a macrobatch, ``(hidden, intermediate, macro, experts,
+#: topk)``: several macrobatches of four local experts, and 36 or 9 local experts of 288 at top-8.
+REPLAY_CASES = [
+    (512, 256, 768, 4, 2),
+    (512, 256, 512, 4, 2),
+    (512, 256, 2048, 36, 8),
+    (512, 256, 2048, 9, 8),
+]
+
+
+@LIMITS
+@pytest.mark.parametrize("fp32_wgrad", [False, True], ids=["bf16-wgrad", "fp32-wgrad"])
+@pytest.mark.parametrize("hidden,intermediate,macro", REQUANTIZED_TRAINING_CASES)
+def test_mxfp8_requantized_training(
+    swiglu_limit, fp32_wgrad, hidden, intermediate, macro
+):
+    """Requantized MXFP8 forward+backward (:func:`_requantized_training`), BF16 and FP32 weight gradients, one and
+    several macrobatches (accuracy: ``test_mok_accuracy.py``)."""
+    _require_requantized()
+    _requantized_training(
+        swiglu_limit, hidden, intermediate, macro, seed=7000, fp32_wgrad=fp32_wgrad
+    )
+
+
+@pytest.mark.parametrize("experts", [36, 9], ids=["ep8-local36", "ep32-local9"])
+def test_mxfp8_requantized_training_local_experts(experts):
+    """288 routed experts at EP8 / EP32 (36 or 9 local experts), top-8, clamped (:func:`_requantized_training`)."""
+    _require_requantized()
+    _requantized_training(0.75, 512, 256, 2048, seed=7000, experts=experts, topk=8)
+
+
+@LIMITS
+@pytest.mark.parametrize("fp32_wgrad", [False, True], ids=["bf16-wgrad", "fp32-wgrad"])
+def test_mxfp8_requantized_training_32x32_weights(swiglu_limit, fp32_wgrad):
+    """Both options together: :func:`_requantized_training` on ``blocks="32x32"`` routed weights, several
+    macrobatches (the backward replays the later ones), BF16 and FP32 weight gradients."""
+    _require_requantized()
+    shape = (swiglu_limit, 512, 256, 768)
+    _requantized_training(*shape, seed=7000, fp32_wgrad=fp32_wgrad, blocks="32x32")
+
+
+@LIMITS
+@pytest.mark.parametrize("copy", ["x", "h"])
+def test_mxfp8_requantized_replay_is_not_vacuous(swiglu_limit, copy):
+    """The replay relation :func:`_requantized_training` checks tells the programs apart for each copy on its own:
+    over :data:`REPLAY_CASES` (the inputs of the requantized training cases), the default backward's replayed
+    token-direction copy of ``copy`` (``x`` or the activation ``h``) is not the requantized copy of its own
+    feature-direction copy on at least one case."""
+    _require_requantized()
+    misses = {}
+    for case in REPLAY_CASES:
+        hidden, intermediate, macro, experts, topk = case
+        replay = []
+        args = (swiglu_limit, hidden, intermediate, macro, 7000, 0, experts, topk)
+        _mxfp8_training(*args, replay=replay)
+        assert replay[0] is not None, case
+        misses[case] = replay[0]
+    assert any(copy in names for names in misses.values()), misses
+
+
+@LIMITS
+@pytest.mark.parametrize("macro", [512, 768])
+def test_mxfp8_requantized_replay_matches_resident(swiglu_limit, macro):
+    """A replayed macrobatch uses a resident macrobatch's token-direction copies: the requantized backward's replay of
+    the last of several macrobatches writes the bytes of ``x_t``, ``h_t`` and their scales that the requantized
+    forward keeps for the same schedule rows when every row is resident (one macrobatch)."""
+    _require_requantized()
+    clamped = swiglu_limit is not None
+    tokens, hidden, intermediate, topk = 512, 512, 256, 2
+    mini, comm, resident = 256, 4, 1536
+    x, dy, shared, routed, scores, s = _setup(hidden, intermediate, 4409)
+    actual = s["actual"]
+    last = -(-actual // macro) - 1
+    start, rows = last * macro, actual - last * macro
+    assert last >= 1 and actual <= resident
+    q = [quantize(w) for w in routed]
+    fwd_w = [(qq[0], qq[1]) for qq in q]
+    bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    forward = MoKForwardMXFP8(clamped, True)
+    backward = MoKBackwardMXFP8(clamped, False, True)
+    backward.module = _LaunchSpy(backward.module)
+
+    def run_forward(rows_per_macrobatch):
+        combine = torch.zeros(
+            tokens * topk, hidden, device="cuda", dtype=torch.bfloat16
+        )
+        values = forward(
+            x, [x.data_ptr()], combine, [combine.data_ptr()],
+            shared[0], fwd_w[0], shared[1], fwd_w[1], shared[2], fwd_w[2],
+            *schedule, topk, swiglu_limit, comm, rows_per_macrobatch, mini,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        return values
+
+    whole = run_forward(resident)
+    columns = slice(start, start + rows)
+    tiles = slice(start // 128, (start + rows) // 128)
+    want = {
+        name: (whole[index][0][:, columns].clone(), whole[index][1][:, tiles].clone())
+        for name, index in (("x", 0), ("h", 6))
+    }
+    saved = run_forward(macro)
+    dx_peer = torch.zeros(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16)
+    ds_peer = torch.zeros_like(scores)
+    backward(
+        dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+        scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+        shared[0], bwd_w[0], shared[1], bwd_w[1], shared[2], bwd_w[2],
+        *saved[:7], x, [x.data_ptr()], *schedule,
+        topk, swiglu_limit, comm, macro, mini,
+    )  # fmt: skip
+    torch.cuda.synchronize()
+    k = backward.module.calls[-1]
+    got = {"x": (k["x_t"], k["x_sc_t"]), "h": (k["h_t"], k["h_sc_t"])}
+    for name, (data, scales) in got.items():
+        want_data, want_scales = want[name]
+        got_data = data[:, :rows].view(torch.uint8)
+        assert torch.equal(got_data, want_data.view(torch.uint8)), name
+        assert torch.equal(scales[:, : rows // 128], want_scales), name
 
 
 class _LaunchRecorder:
@@ -582,19 +1027,20 @@ def test_mxfp8_launchers_accept_a_precomputed_layout(swiglu_limit):
         assert all(torch.equal(a, b) for a, b in zip(first, again, strict=True))
 
 
-@LIMITS
-@pytest.mark.parametrize("macro", [768, 4096], ids=["replay", "resident"])
-def test_mxfp8_recompute_context(swiglu_limit, macro):
-    """MXFP8 context-only recompute equals the saved context; backward is bitwise."""
-    require_gpu()
+def _recompute_context(swiglu_limit, macro, blocks=None):
+    """MXFP8 context-only recompute equals the saved context; backward from either is bitwise.  The routed weights are
+    the recipe's (``quantize``), or with ``blocks`` those of ``quantize_mok_mxfp8_weights(..., blocks=blocks)``."""
     clamped = swiglu_limit is not None
     forward, recompute = MoKForwardMXFP8(clamped), MoKRecomputeMXFP8(clamped)
     backward = MoKBackwardMXFP8(clamped)
     tokens, hidden, intermediate, topk, mini, comm = 512, 512, 256, 2, 256, 4
     x, dy, shared, routed, scores, s = _setup(hidden, intermediate, 811)
-    q = [quantize(w) for w in routed]
-    fwd_w = [(qq[0], qq[1]) for qq in q]
-    bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+    if blocks is None:
+        q = [quantize(w) for w in routed]
+        fwd_w = [(qq[0], qq[1]) for qq in q]
+        bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+    else:
+        fwd_w, bwd_w = quantize_mok_mxfp8_weights(*routed, blocks=blocks)
     schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
     combine = torch.zeros(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16)
     saved = forward(
@@ -634,6 +1080,108 @@ def test_mxfp8_recompute_context(swiglu_limit, macro):
 
     for a, b in zip(gradients(saved), gradients(rebuilt), strict=True):
         assert torch.equal(a, b)
+
+
+@LIMITS
+@pytest.mark.parametrize("macro", [768, 4096], ids=["replay", "resident"])
+def test_mxfp8_recompute_context(swiglu_limit, macro):
+    """MXFP8 context-only recompute equals the saved context; backward is bitwise."""
+    require_gpu()
+    _recompute_context(swiglu_limit, macro)
+
+
+@LIMITS
+def test_mxfp8_recompute_context_32x32_weights(swiglu_limit):
+    """On ``blocks="32x32"`` routed weights, with the backward replaying the later macrobatches: the context-only
+    recompute equals the saved context and backward from either is bitwise."""
+    require_gpu()
+    _recompute_context(swiglu_limit, 768, blocks="32x32")
+
+
+@LIMITS
+@pytest.mark.parametrize("macro", [768, 4096], ids=["replay", "resident"])
+def test_mxfp8_requantized_recompute_context(swiglu_limit, macro):
+    """The requantized recompute rebuilds the requantized forward's context bit for bit (its token-direction copies
+    the requantized ones of its own ``x_q`` / ``hidden_q``), and the requantized backward from either context writes
+    the same gradients."""
+    _require_requantized()
+    clamped = swiglu_limit is not None
+    forward, recompute = (
+        MoKForwardMXFP8(clamped, True),
+        MoKRecomputeMXFP8(clamped, True),
+    )
+    backward = MoKBackwardMXFP8(clamped, False, True)
+    recompute.module = _LaunchSpy(recompute.module)
+    tokens, hidden, intermediate, topk, mini, comm = 512, 512, 256, 2, 256, 4
+    x, dy, shared, routed, scores, s = _setup(hidden, intermediate, 811)
+    q = [quantize(w) for w in routed]
+    fwd_w = [(qq[0], qq[1]) for qq in q]
+    bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    combine = torch.zeros(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16)
+    saved = forward(
+        x, [x.data_ptr()], combine, [combine.data_ptr()],
+        shared[0], fwd_w[0], shared[1], fwd_w[1], shared[2], fwd_w[2],
+        *schedule, topk, swiglu_limit, comm, macro, mini,
+    )  # fmt: skip
+    rebuilt = recompute(
+        x, [x.data_ptr()], shared[0], fwd_w[0], shared[1], fwd_w[1],
+        *schedule, topk, swiglu_limit, comm, macro, mini,
+    )  # fmt: skip
+    torch.cuda.synchronize()
+    rows = min(s["actual"], macro)
+    k = recompute.module.calls[-1]
+    copies = {
+        "x": ((k["x_q"], k["x_sc"]), rebuilt[0]),
+        "h": ((k["hidden_q_store"], k["hidden_sc_store"]), rebuilt[6]),
+    }
+    assert _relation_misses(copies, rows) == []
+    for index, transposed in ((0, True), (2, False), (4, False), (6, True)):
+        (a, a_sc), (b, b_sc) = saved[index], rebuilt[index]
+        if transposed:  # [features, tokens] data, [feature tiles, token tiles] scales
+            assert torch.equal(a[:, :rows], b[:, :rows]), index
+            assert torch.equal(a_sc[:, : rows // 128], b_sc[:, : rows // 128]), index
+        else:
+            assert torch.equal(a[:rows], b[:rows]), index
+            assert torch.equal(a_sc[: rows // 128], b_sc[: rows // 128]), index
+    for index in (1, 3, 5):
+        assert torch.equal(saved[index], rebuilt[index]), index
+
+    def gradients(context):
+        dx_peer = torch.zeros(
+            tokens * topk, hidden, device="cuda", dtype=torch.bfloat16
+        )
+        ds_peer = torch.zeros_like(scores)
+        values = backward(
+            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+            shared[0], bwd_w[0], shared[1], bwd_w[1], shared[2], bwd_w[2],
+            *context[:7], x, [x.data_ptr()], *schedule,
+            topk, swiglu_limit, comm, macro, mini,
+        )  # fmt: skip
+        return (dx_peer, ds_peer, values[0], *values[9:])
+
+    for a, b in zip(gradients(saved), gradients(rebuilt), strict=True):
+        assert torch.equal(a, b)
+
+
+def test_mxfp8_requantized_launcher_arguments():
+    """``qdq_transposed`` is a ``bool`` (``TypeError`` otherwise, before any kernel is loaded) and loads the ``_qdq``
+    program of the launcher's variant; ``False`` loads the default one."""
+    for make in (
+        lambda flag: MoKForwardMXFP8(False, flag),
+        lambda flag: MoKRecomputeMXFP8(False, flag),
+        lambda flag: MoKBackwardMXFP8(False, False, flag),
+    ):
+        for flag in (1, "requantized", None):
+            with pytest.raises(TypeError, match="qdq_transposed must be a boolean"):
+                make(flag)
+    assert kernels._role("forward_mxfp8", True, qdq=True) == "forward_mxfp8_clamped_qdq"
+    assert (
+        kernels._role("backward_mxfp8", True, True, qdq=True)
+        == "backward_mxfp8_clamped_fp32_qdq"
+    )
+    assert kernels._role("recompute_mxfp8", False) == "recompute_mxfp8"
 
 
 backend = cake_package("cake_mok_bf16", "backend")
