@@ -10780,9 +10780,11 @@ def test_the_pool_replay_check_sees_what_a_plan_holds(device, monkeypatch) -> No
 
 def test_the_record_credit_is_spent_and_earned(device, monkeypatch) -> None:
     # a record credit of one recording, earned back by two replays (PAYBACK 2): layout A records at its second call and
-    # spends it, so layout B's second call builds no key and runs the general path; after one replay of A it still has
-    # no credit, after A's second replay B's next call records, and B replays from then on.  Every call has the bits of
-    # its layout's general path (FWD_PLAN off)
+    # spends it, so layout B's calls, while the credit holds less than one recording and B has no plan, run the general
+    # path without a call of the record gate: each adds its share to the credit, none makes an entry or counts among
+    # B's forwards.  After one replay of A the credit still holds no recording; after A's second replay it does, B's
+    # next call is the first the gate counts, the one after records, and B replays from then on.  Every call has the
+    # bits of its layout's general path (FWD_PLAN off)
     heads = (2, 6)
     layouts = {"A": (300, 77, 640, 17), "B": (301, 76, 640, 17)}
     inputs = _inputs(layouts["A"], heads, torch.bfloat16, device, seed=7217)
@@ -10793,12 +10795,19 @@ def test_the_record_credit_is_spent_and_earned(device, monkeypatch) -> None:
     monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", True)
     recordings, keys = _counted_plan_steps(monkeypatch)
     replays = _counted_forward_replays(monkeypatch)
-    # (the layout called, then the recordings, plan keys built and replays so far)
-    steps = (("A", 0, 0, 0), ("A", 1, 1, 0), ("B", 1, 1, 0), ("B", 1, 1, 0), ("A", 1, 2, 1), ("B", 1, 2, 1),
-             ("A", 1, 3, 2), ("B", 2, 4, 2), ("B", 2, 5, 3))  # fmt: skip
+    gated, gate = [], cake_chain._fwd_gate
+    monkeypatch.setattr(cake_chain, "_fwd_gate", lambda meta, tape: gated.append(meta) or gate(meta, tape))  # fmt: skip
+    # (the layout called, then the recordings, plan keys built, replays, calls of the gate and gate entries so far, and
+    # the credit in its units: a recording 2 x TRICKLE, a gated call 2, a replay TRICKLE, at most one recording)
+    t = cake_chain.FWD_PLAN_TRICKLE
+    steps = (("A", 0, 0, 0, 1, 1, 2 * t), ("A", 1, 1, 0, 2, 1, 0), ("B", 1, 1, 0, 2, 1, 2), ("B", 1, 1, 0, 2, 1, 4),
+             ("A", 1, 2, 1, 3, 1, t + 6), ("B", 1, 2, 1, 3, 1, t + 8), ("A", 1, 3, 2, 4, 1, 2 * t),
+             ("B", 1, 3, 2, 5, 2, 2 * t), ("B", 2, 4, 2, 6, 2, 0), ("B", 2, 5, 3, 7, 2, t + 2))  # fmt: skip
     for i, (name, *want) in enumerate(steps):
         _assert_bitwise(_run(inputs, layouts[name]), general[name], OUTPUT_NAMES)
-        assert [len(recordings), len(keys), len(replays)] == want, (i, name)
+        counted = (recordings, keys, replays, gated, cake_chain._FWD_SEEN)
+        got = [*map(len, counted), cake_chain._FWD_CREDIT]
+        assert got == want, (i, name, got)
     plans = list(cake_chain._FWD_PLANS.values())
     assert len(plans) == 2 and all(p.ops is not None for p in plans), plans
 

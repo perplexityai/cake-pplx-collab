@@ -3982,14 +3982,18 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
 # ``FWD_PLAN = False`` keeps every forward on the general path.
 FWD_PLAN = True
 # The record gate (``FWD_PLAN_GATE``; it picks among the three paths, which give the same bits, by host time only): a
-# forward builds its plan key only from the ``FWD_PLAN_REPEAT``-th forward of its layout in its tape mode, and records
-# only while the record credit holds one recording.  Each replay adds ``1 / FWD_PLAN_PAYBACK`` recording to the
-# credit, each gated call ``1 / FWD_PLAN_TRICKLE``, a recording takes one, and the credit starts at and holds at most
-# ``FWD_PLAN_BUDGET``.  So for any sequence of calls of one thread, recordings <= BUDGET + replays / PAYBACK + calls /
-# TRICKLE, and with PAYBACK at least the host time of a recording over the host time a replay saves, the recordings
-# cost no more host time than the replays save (the additions take no lock: an addition of one thread that overlaps
-# the spend of another can undo that spend, one recording more per such overlap).  A layout used once never builds a
-# key.  A key whose calls cannot be planned keeps its layout and tape mode on the general path without a key; the
+# forward builds its plan key only from the ``FWD_PLAN_REPEAT``-th forward of its layout in its tape mode that the gate
+# counts, and records only while the record credit holds one recording.  Each replay adds ``1 / FWD_PLAN_PAYBACK``
+# recording to the credit, each gated call ``1 / FWD_PLAN_TRICKLE``, a recording takes one, and the credit starts at
+# and holds at most ``FWD_PLAN_BUDGET``.  So for any sequence of calls of one thread, recordings <= BUDGET + replays /
+# PAYBACK + calls / TRICKLE, and with PAYBACK at least the host time of a recording over the host time a replay saves,
+# the recordings cost no more host time than the replays save (the additions take no lock: an addition of one thread
+# that overlaps the spend of another can undo that spend, one recording more per such overlap).  While the credit holds
+# less than one recording, a gated call of a layout with no plan kept on it (:data:`_PLAN_KEYS`) adds its share and
+# takes the general path in :func:`_function_forward` without calling :func:`_fwd_gate` (it could neither replay nor
+# record, and the gate's call, its code and entries cold in the caches, takes a few us of host time): such a call
+# makes no entry and does not count toward its layout's ``FWD_PLAN_REPEAT`` forwards.  A layout used once never builds
+# a key.  A key whose calls cannot be planned keeps its layout and tape mode on the general path without a key; the
 # gate's entry is the layout and tape mode's, which all their call classes share.  ``FWD_PLAN_GATE = False``: every
 # key records at its first call.
 FWD_PLAN_GATE = True
@@ -4234,7 +4238,8 @@ def _fwd_gate(meta: ChunkMeta, tape: bool):
     record), else ``None``: an early forward of the layout in that mode, a layout and mode whose key cannot be planned,
     or no plan yet and less credit than one recording.  Each call adds its share to the credit.  A first sighting of a
     layout and mode (a fresh layout) makes its entry and nothing else: one probe and one insert of :data:`_FWD_SEEN`
-    (and one eviction once it is full), no lock and no plan key."""
+    (and one eviction once it is full), no lock and no plan key.  :func:`_function_forward` calls it only when the
+    credit with the call's share holds one recording or the layout has a plan kept on it (:data:`FWD_PLAN_GATE`)."""
     global _FWD_CREDIT
     full = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
     credit = _FWD_CREDIT + FWD_PLAN_PAYBACK
@@ -5742,9 +5747,10 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
     or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields.  A call that has a plan key
     (a layout of the host table cache with ``host_cache``: a plan's steps take the pooled workspaces of its stream)
     and that the record gate lets build it (:data:`FWD_PLAN_GATE`: from the ``FWD_PLAN_REPEAT``-th forward of the
-    layout in its tape mode, while the layout has a plan or the record credit holds a recording) replays the key's
-    plan or records it (:func:`_planned_forward`); any other runs the general path (:func:`_train_forward` through
-    :data:`_DIRECT`)."""
+    layout in its tape mode that the gate counts, while the layout has a plan or the record credit holds a recording)
+    replays the key's plan or records it (:func:`_planned_forward`); any other runs the general path
+    (:func:`_train_forward` through :data:`_DIRECT`)."""
+    global _FWD_CREDIT
     batch, seq_len, num_heads, key_dim = q.shape
     num_v_heads = v.shape[2]
     index = _tensor_index(q)
@@ -5768,13 +5774,24 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
     # gate lets the call build its key (:func:`_fwd_gate`; an early forward of the layout in its tape mode builds none).
     # A host q runs the general path, which pools nothing and refuses it at the first launch (the key's layouts do not
     # name the device: such a call must not replay a plan of device inputs)
-    if (
+    planned = (
         FWD_PLAN
         and options.host_cache
         and (cu_seqlens is None or cu_seqlens_cpu is not None)
         and q.is_cuda
-        and (not FWD_PLAN_GATE or (seen := _fwd_gate(meta, tape)) is not None)
-    ):
+    )
+    if planned and FWD_PLAN_GATE:
+        # with less credit than one recording (with this call's share) and no plan kept on the layout, the gate could
+        # only send the call to the general path: add the call's share here and skip the gate's call (its host time,
+        # cold in the caches of such a call, is a few us).  The call makes no entry and is not counted among the
+        # layout's forwards (FWD_PLAN_GATE)
+        credit = _FWD_CREDIT + FWD_PLAN_PAYBACK
+        if credit < FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE and id(meta) not in _PLAN_KEYS:
+            _FWD_CREDIT = credit
+            planned = False
+        else:
+            planned = (seen := _fwd_gate(meta, tape)) is not None
+    if planned:
         fwd = _planned_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, use_qk_l2norm_in_kernel,
                                options, meta, arch, index, num_heads, num_v_heads, tape, seen)  # fmt: skip
     else:

@@ -326,8 +326,11 @@ one, beyond a budget of `FWD_PLAN_BUDGET` recordings and one more per
 `FWD_PLAN_TRICKLE` calls; with `FWD_PLAN_PAYBACK` at least the host time of a
 recording over the host time a replay saves, the recordings cost no more host
 time than the replays save (for the calls of one thread: calls of two threads
-that overlap can add one recording each time).  A layout used once is never
-recorded.  A record holds the call's steps: its allocations, its takes of the
+that overlap can add one recording each time).  A call of a layout with no
+record, made while the credit holds less than one recording, runs the general
+path at once and does not count among its layout's forwards.  A layout used
+once is never recorded.  A record holds the call's steps: its allocations, its
+takes of the
 stream's pooled workspaces, the PyTorch operations it runs between its launches
 (input copies and casts, the split forward's index fills, selects and
 copies), its launches, its stream switches and the event records and waits
