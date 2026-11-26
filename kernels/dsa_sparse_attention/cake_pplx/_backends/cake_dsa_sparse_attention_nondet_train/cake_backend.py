@@ -157,11 +157,11 @@ D_QK = D_LATENT + D_ROPE
 #   length.  Its ``out`` / ``lse`` / ``o_lo`` are not the 64-head windows' bits (another kernel); the naive BF16 tier
 #   judges them.  The backward plans are unchanged.
 #
-# * The two-window bridge (0.7.0), where the program lacks the phase's head-window build: the 64-head kernels on head
-#   windows (``head_windows``), ``W1 = [H - 64, H)`` first and then ``W0 = [0, 64)`` (96: ``[32, 96)`` then
-#   ``[0, 64)``; 128: ``[64, 128)`` then ``[0, 64)``).  The window's query, ``out``, ``dout`` and ``dq`` operands are
-#   head slices of the caller's tensors (the tensor maps carry the strides); its ``lse`` / ``o_lo`` / stats operands
-#   are contiguous ``[T, 64]`` scratch:
+# * The two-window bridge (0.7.0), where the program lacks the phase's head-window build (and on every phase on
+#   ``sm_107a``): the 64-head kernels on head windows (``head_windows``), ``W1 = [H - 64, H)`` first and then
+#   ``W0 = [0, 64)`` (96: ``[32, 96)`` then ``[0, 64)``; 128: ``[64, 128)`` then ``[0, 64)``).  The window's query,
+#   ``out``, ``dout`` and ``dq`` operands are head slices of the caller's tensors (the tensor maps carry the strides);
+#   its ``lse`` / ``o_lo`` / stats operands are contiguous ``[T, 64]`` scratch:
 #
 #   - forward: each window writes ``out[:, window]`` in place and its ``lse`` / ``o_lo`` into one scratch, from which
 #     a device copy moves the heads the window owns into the ``[T, H]`` outputs -- ``[64, H)`` for ``W1``, ``[0, 64)``
@@ -180,11 +180,17 @@ D_QK = D_LATENT + D_ROPE
 # 32-row rescale groups as the bridge, so ``out``, ``lse``, ``o_lo`` and ``dq`` keep the bridge's bits; ``dK`` / ``dV``
 # add the same terms with FP32 atomics in another order.  The single-pass forward is another kernel: its ``out``,
 # ``lse`` and ``o_lo`` (and so the backward's ``delta`` and ``dq``) are its own bits, run-to-run identical.  The
-# NoPE program serves 64 heads only (the deterministic package's RoPE form serves 96 and 128 with its own builds); on
-# ``sm_107a`` the windows are not yet served (64 heads only).
+# NoPE program serves 64 heads only (the deterministic package's RoPE form serves 96 and 128 with its own builds).  On
+# ``sm_107a`` (in ``HEAD_ARCHES``, not in ``WINDOW_ARCHES``) a call over 96 or 128 heads runs the two-window bridge in
+# both phases, on the 64-head stages that ship there (the forward's scanner-warp build ``fwd_scan``): no head-window or
+# single-pass build is planned there.
 SUPPORTED_HEADS = (64, 96, 128)
 HEAD_WINDOW = NUM_HEADS
-# The architectures whose stages serve the head windows of ``H > 64`` (``sm_107a``: 64 heads only for now).
+# The architectures that serve ``H > 64`` (:func:`_check_window_arch`): ``sm_100a`` / ``sm_103a`` with the
+# head-window and single-pass builds where the program ships them, ``sm_107a`` on the two-window bridge.
+HEAD_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+# The architectures whose stages serve the head windows of ``H > 64``: the head-window and single-pass builds
+# (``sm_107a`` runs the two-window bridge).
 WINDOW_ARCHES = ("sm_100a", "sm_103a")
 # The head-window builds (see the comment above ``SUPPORTED_HEADS``): stage -> its head-window stage.  The forward
 # builds (and their ``with_o_lo=False`` twins) and the four main backward forms (permuted / natural-layout
@@ -1303,11 +1309,11 @@ def num_query_heads(q_latent: torch.Tensor) -> int:
 
 
 def _check_window_arch(num_heads: int, arch: Optional[str]) -> None:
-    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``WINDOW_ARCHES`` (``sm_107a`` serves 64
-    query heads until its window stages are validated)."""
-    if int(num_heads) != NUM_HEADS and arch not in WINDOW_ARCHES:
+    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``HEAD_ARCHES`` (``sm_107a`` is in it and
+    runs the two-window bridge; :func:`head_window_plan` chooses the plan)."""
+    if int(num_heads) != NUM_HEADS and arch not in HEAD_ARCHES:
         raise NotImplementedError(
-            f"{int(num_heads)} query heads are served on {list(WINDOW_ARCHES)}; "
+            f"{int(num_heads)} query heads are served on {list(HEAD_ARCHES)}; "
             f"{arch if arch is not None else 'this device'} serves {NUM_HEADS} query heads only"
         )
 
@@ -4132,7 +4138,7 @@ def _no_query_rows(q_latent: torch.Tensor) -> bool:
 
 def _check_empty_window_arch(q_latent: torch.Tensor) -> None:
     """The architecture rule of :func:`_check_window_arch` for a call without query rows: a CUDA ``q_latent`` of more
-    than 64 heads on an architecture outside ``WINDOW_ARCHES`` raises ``NotImplementedError`` as a call with query
+    than 64 heads on an architecture outside ``HEAD_ARCHES`` raises ``NotImplementedError`` as a call with query
     rows does (a host-side query: no launch, no synchronization).  64 heads and host tensors are not checked: those
     calls keep the device-free empty path of 0.6.1."""
     H = num_query_heads(q_latent)

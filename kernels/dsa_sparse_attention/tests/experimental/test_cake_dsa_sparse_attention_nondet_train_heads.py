@@ -31,8 +31,8 @@ Host tests (CPU, no device): the launches of the eager entries and the prepared 
 chunks, workspace, operands and fallbacks: the harness registers the builds where the package's registry lacks them)
 and the bridge's windows, their order, the window statistics and the accumulator at 64, 96 and 128 heads -- plus the
 retained state of the autograd entry, validation and the calls without query rows.  Device tests judge every floating output
-against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_100a / sm_103a (96 and 128 heads ship
-there first; sm_107a runs the 64-head cases); a call with no valid key in any row has no accuracy to judge and
+against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_100a / sm_103a / sm_107a (sm_107a runs
+96 and 128 heads on the two-window bridge); a call with no valid key in any row has no accuracy to judge and
 equals the oracle exactly instead (:func:`test_naive_tier_heads`).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the
 T = 16380 case (:func:`test_large_t_heads`), which a default run skips: the GPU validation of this form sets it and
 reports that case on its own.
@@ -286,10 +286,11 @@ def _check_dout_operand(launches, inp):
 
 
 @pytest.mark.parametrize("heads", (64, 96, 128))
-@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a"))
+@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
 @pytest.mark.parametrize("name", list(HOST_CASES))
 def test_head_window_launches(monkeypatch, name, arch, heads):
-    """The two-window bridge (the plan of a program without the head-window builds; the harness hides them): the
+    """The two-window bridge (the plan of a program without the head-window builds, the harness hides them, and of
+    every call over 64 heads on sm_107a, with its key-pass, direct and token-order rules): the
     launches of one host case at ``heads`` query heads, simulated (``hl``): the forward runs the windows
     ``[H - 64, H)`` then ``[0, 64)`` (one window at 64 heads) and every query head's ``out`` / ``lse`` / ``o_lo`` is
     its own, the heads both windows cover from the later one; the backward runs one delta launch over the ``T * H``
@@ -307,8 +308,14 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
         token_chunk=case.get("token_chunk"),
         head_windows=False,
     )
-    inp = _host_case_inputs(case, heads)
+    _check_bridge_case(h, case, _host_case_inputs(case, heads))
+
+
+def _check_bridge_case(h, case, inp):
+    """Run host case ``case`` under ``h`` and check its launches as the two-window bridge's
+    (:func:`test_head_window_launches`)."""
     roles = hl.run_case(h, cake_backend, case, inp)
+    assert not any(rec.hw or rec.sp for rec in h.launches)
     with_o_lo = case.get("with_o_lo", True)
     entry = case["entry"]
     passes = case.get("key_passes") or 1
@@ -363,6 +370,75 @@ def test_head_window_launches(monkeypatch, name, arch, heads):
     )
     _check_dout_operand(launches, inp)
     _check_dkv(case, roles, total, direct=direct)
+
+
+def _bridge_forward_keys(heads: int, stage: str) -> tuple:
+    """The forward keys of a bridge plan over ``heads`` query heads: per window, ``W1`` then ``W0``, the window
+    launch of the 64-head forward ``stage`` and its ``"fwd_copy"`` step."""
+    keys = []
+    for head0 in (heads - 64, 0):
+        keys += [
+            cake_backend.WindowLaunch("fwd", head0, stage),
+            cake_backend.HeadStep("fwd_copy", head0),
+        ]
+    return tuple(keys)
+
+
+#: The architectures of :func:`test_sm107a_runs_the_bridge_whatever_the_registry_declares`'s registry.
+ALL_ARCHES = ["sm_100a", "sm_103a", "sm_107a"]
+
+
+def _declare_builds_for_every_arch(monkeypatch) -> None:
+    """The head-window and single-pass builds registered for sm_100a, sm_103a and sm_107a (the shipped entries
+    stripped first, so the declaration for sm_107a takes effect)."""
+    hl.strip_single_pass_builds(monkeypatch, cake_jit, cake_launch)
+    hl.strip_head_window_builds(monkeypatch, cake_jit, cake_launch)
+    hl.register_head_window_builds(
+        monkeypatch, cake_jit, cake_launch, arches=ALL_ARCHES
+    )
+    hl.register_single_pass_builds(
+        monkeypatch, cake_jit, cake_launch, arches=ALL_ARCHES
+    )
+    for build in ("fwd_hw", "bwd_main_hw", "bwd_main_pass_natural_hw", "fwd_h128"):
+        assert "sm_107a" in cake_jit.stage_arches(build), build
+
+
+@pytest.mark.parametrize("heads", (96, 128))
+@pytest.mark.parametrize("name", list(HOST_CASES))
+def test_sm107a_runs_the_bridge_whatever_the_registry_declares(
+    monkeypatch, name, heads
+):
+    """On sm_107a a call over 96 or 128 heads runs the two-window bridge in both phases even where the registry
+    declares the head-window and single-pass builds for sm_107a (``WINDOW_ARCHES`` leaves it out): every
+    :func:`head_window_plan` is ``(None, None)`` and the launches of the host case, simulated through the package's own
+    stage selection, are the bridge's (:func:`test_head_window_launches`) -- no build launch."""
+    _declare_builds_for_every_arch(monkeypatch)
+    assert "sm_107a" in cake_backend.HEAD_ARCHES
+    assert "sm_107a" not in cake_backend.WINDOW_ARCHES
+    for with_o_lo in (True, False):
+        for kw in (
+            {"backward": False},
+            {"backward": True},
+            {"backward": True, "dkv_direct": True},
+            {"backward": True, "key_passes": 2},
+            {"backward": True, "key_passes": 2, "dkv_direct": True},
+        ):
+            plan = cake_backend.head_window_plan(
+                heads, "sm_107a", with_o_lo=with_o_lo, **kw
+            )
+            assert plan == (None, None), (with_o_lo, kw, plan)
+    case = HOST_CASES[name]
+    h = hl.HostLaunches(
+        monkeypatch,
+        cake_backend,
+        cake_jit,
+        cake_launch,
+        "sm_107a",
+        token_chunk=case.get("token_chunk"),
+        head_windows=None,
+        single_pass=None,
+    )
+    _check_bridge_case(h, case, _host_case_inputs(case, heads))
 
 
 @pytest.mark.parametrize("forward", ("head_window", "single_pass"))
@@ -519,13 +595,14 @@ HEAD_WINDOW_REGISTRATIONS = {
 }
 
 
-@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a"))
+@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
 @pytest.mark.parametrize("registration", list(HEAD_WINDOW_REGISTRATIONS))
 def test_head_window_fallbacks(monkeypatch, registration, arch):
     """A phase whose head-window build the registry does not register for the architecture runs the two-window
     bridge, the other phase its head-window build where registered: builds of the forward only, of the backward
     only, builds shipping for sm_100a only (sm_103a: the bridge), a build without its generated launcher or grid
-    (``cake_launch``), and a record entry outside the program's ``STAGES_OF`` order (not a registered stage).  The
+    (``cake_launch``), and a record entry outside the program's ``STAGES_OF`` order (not a registered stage); on
+    sm_107a, outside ``WINDOW_ARCHES``, every registration runs the bridge in both phases.  The
     host case (a prepared runner over 96 heads, two forced key passes over token chunks, a head-major ``dout``) is
     simulated through either plan per phase; the workspace is the mixed plan's, as ``dsa_train_workspace_size``
     reports it."""
@@ -550,7 +627,7 @@ def test_head_window_fallbacks(monkeypatch, registration, arch):
             if not hl.is_head_window(stage)
         }
         monkeypatch.setattr(cake_launch, name, table)
-    served = arches is None or arch in arches
+    served = arch in cake_backend.WINDOW_ARCHES and (arches is None or arch in arches)
     registered = served and not hidden
     fused_forward = registered and (builds is None or "fwd_hw" in builds)
     fused_backward = registered and (builds is None or "bwd_main_pass_hw" in builds)
@@ -979,6 +1056,7 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
         for direct in (False, True):
             assert not cake_backend.head_window_key_passes_rule(96, arch, direct)
     if arch == "sm_107a":
+        _bridge_key_pass_rule_sm107a(monkeypatch, h, record, stages)
         return
     seen = []
     real = cake_backend.plan_key_passes
@@ -1018,6 +1096,56 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
             fused_backward=heads != 64,
         )
         assert size == layout["total"], (arch, heads, size, layout["total"])
+
+
+def _bridge_key_pass_rule_sm107a(monkeypatch, h, record, stages):
+    """sm_107a above 64 heads (the two-window bridge): both planners pass the record's 64-head key-pass rule (no
+    head-window override), and the workspace size of the issue's context-parallel rows (T = 16,380, S = 524,160 /
+    1,048,320, top-k 2048) is the bridge's layout with the record's passes (two, from 131,072 keys) over 64-head
+    token chunks and the record's direct rule."""
+    seen = []
+    real = cake_backend.plan_key_passes
+
+    def recorded(*args, **kwargs):
+        seen.append(bool(kwargs.get("head_windows", False)))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "plan_key_passes", recorded)
+    for heads in (64, 96):
+        inp = hl.host_inputs(40, 96, 16, heads)
+        h.bind(inp.q_latent, inp.q_rope, inp.dout)
+        seen.clear()
+        hl.run_case(h, cake_backend, {"entry": "backward"}, inp)
+        assert seen and set(seen) == {False}, (heads, seen)
+    policy = cake_backend.KeyPassPolicy.from_record(record)
+    for S in (524160, 1048320):
+        T = 16380
+        passes = real(record, stages, T, S, TOPK, arch="sm_107a")
+        assert passes == 2, (S, passes)
+        direct = cake_backend.plan_dkv_direct(
+            record, stages, T, S, TOPK, accumulate=True, arch="sm_107a"
+        )
+        for heads in (96, 128):
+            seen.clear()
+            size = cake_backend.dsa_train_workspace_size(
+                T, S, TOPK, num_heads=heads, dkv_acc=True, dout_copy=False
+            )
+            assert seen == [False], (S, heads, seen)
+            layout = cake_backend.workspace_layout(
+                T,
+                S,
+                TOPK,
+                backward=True,
+                key_passes=passes,
+                dkv_direct=direct,
+                token_chunk=policy.token_chunk(TOPK, 1),
+                num_heads=heads,
+                dout_copy=False,
+                fused_forward=False,
+                fused_backward=False,
+            )
+            assert size == layout["total"], (S, heads, size, layout["total"])
+            assert "window_lse" in layout and "fwd_lse" in layout, sorted(layout)
 
 
 def _hw_plan_tensors(plan, inp):
@@ -1207,20 +1335,17 @@ def test_head_window_workspace(monkeypatch, heads):
 @pytest.mark.parametrize("heads", (96, 128))
 @pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
 def test_head_window_builds_zero_rows_and_sm107a(monkeypatch, arch, heads):
-    """With the head-window builds registered (and, for this test, declared for sm_107a too): a call without query
-    rows returns its empty outputs without planning or launching on every architecture that serves its head count
-    (sm_107a refuses it as a call with rows); on sm_107a a call with rows is refused (``NotImplementedError``) by the
-    eager entries, ``prepare_dsa_train`` and the workspace size -- the head-window builds serve sm_100a / sm_103a
-    only -- and nothing launches."""
-    hl.register_head_window_builds(
-        monkeypatch,
-        cake_jit,
-        cake_launch,
-        arches=["sm_100a", "sm_103a", "sm_107a"],
+    """With the head-window and single-pass builds registered (and, for this test, declared for sm_107a too): a call
+    without query rows returns its empty outputs without planning or launching on every architecture; on sm_107a a
+    call with rows plans the two-window bridge in both phases -- the builds serve sm_100a / sm_103a only
+    (``WINDOW_ARCHES``) --: ``prepare_dsa_train`` binds window launches and copy steps over the bridge's workspace
+    (window scratch and statistics), which ``dsa_train_workspace_size`` reports."""
+    _declare_builds_for_every_arch(monkeypatch)
+    h = hl.HostLaunches(
+        monkeypatch, cake_backend, cake_jit, cake_launch, arch, single_pass=None
     )
-    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, arch)
     assert cake_backend.head_window_stage("fwd", "sm_107a") is None
-    refused = "sm_107a serves 64 query heads only"
+    assert cake_backend.single_pass_stage("fwd", "sm_107a") is None
     real_plan = cake_backend._plan
 
     def refuse(*args, **kwargs):
@@ -1230,23 +1355,19 @@ def test_head_window_builds_zero_rows_and_sm107a(monkeypatch, arch, heads):
     empty = hl.host_inputs(0, 16, 5, heads)
     args = (empty.q_latent, empty.q_rope, empty.kv_latent, empty.k_rope, empty.indices)
     dout = torch.zeros(0, heads, D_LATENT, dtype=torch.bfloat16)
-    if arch == "sm_107a":
-        with pytest.raises(NotImplementedError, match=refused):
-            cake_backend.forward(*args)
-    else:
-        out, lse, o_lo = cake_backend.forward(*args)
-        assert tuple(out.shape) == (0, heads, D_LATENT) and tuple(lse.shape) == (
-            0,
-            heads,
-        )
-        grads = cake_backend.backward(*args, out, o_lo, lse, dout)
-        assert [tuple(g.shape) for g in grads] == [
-            (0, heads, D_LATENT),
-            (0, heads, D_ROPE),
-            (16, D_LATENT),
-            (16, D_ROPE),
-        ]
-        assert not grads[2].any() and not grads[3].any()
+    out, lse, o_lo = cake_backend.forward(*args)
+    assert tuple(out.shape) == (0, heads, D_LATENT) and tuple(lse.shape) == (
+        0,
+        heads,
+    )
+    grads = cake_backend.backward(*args, out, o_lo, lse, dout)
+    assert [tuple(g.shape) for g in grads] == [
+        (0, heads, D_LATENT),
+        (0, heads, D_ROPE),
+        (16, D_LATENT),
+        (16, D_ROPE),
+    ]
+    assert not grads[2].any() and not grads[3].any()
     assert not h.launches
     if arch != "sm_107a":
         return
@@ -1254,15 +1375,16 @@ def test_head_window_builds_zero_rows_and_sm107a(monkeypatch, arch, heads):
     inp = hl.host_inputs(8, 64, 16, heads)
     h.bind(inp.q_latent, inp.q_rope, inp.dout)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.forward(*args)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.backward(*args, inp.q_latent, -inp.q_latent, inp.lse, inp.dout)
-    with pytest.raises(NotImplementedError, match=refused):
-        prepare_dsa_train(*args, dout=inp.dout)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.dsa_train_workspace_size(8, 64, 16, num_heads=heads)
-    assert not h.launches
+    runner = prepare_dsa_train(*args, dout=inp.dout)
+    assert tuple(runner.forward_stages) == _bridge_forward_keys(heads, "fwd")
+    assert any(
+        isinstance(key, cake_backend.WindowLaunch) for key in runner.backward_order
+    )
+    assert {"fwd_lse", "fwd_o_lo", "window_lse", "window_delta"} <= set(runner.layout)
+    assert runner.workspace.numel() == cake_backend.dsa_train_workspace_size(
+        8, 64, 16, num_heads=heads, dout_copy=False
+    )
+    assert not any(rec.hw or rec.sp for rec in h.launches)
 
 
 def _saved_by(call):
@@ -1408,9 +1530,10 @@ def _autograd_entry_case(monkeypatch, heads, with_o_lo, *, head_windows):
 DOUT_LAYOUTS = ("dense", "head_major", "packed")
 
 
+@pytest.mark.parametrize("arch", ("sm_100a", "sm_107a"))
 @pytest.mark.parametrize("heads", (64, 96, 128))
 @pytest.mark.parametrize("with_o_lo", (True, False))
-def test_every_rope_plan_carries_dout_copy(monkeypatch, heads, with_o_lo):
+def test_every_rope_plan_carries_dout_copy(monkeypatch, heads, with_o_lo, arch):
     """Every plan the backend builds for the rope form carries ``dout_copy`` (host): the eager forward and backward,
     a prepared runner and the flat and packed (varlen) autograd entries at ``heads`` query heads, each with every
     ``dout`` layout of :data:`DOUT_LAYOUTS` (the autograd entries get it from ``autograd.grad``).  The bound values
@@ -1418,8 +1541,12 @@ def test_every_rope_plan_carries_dout_copy(monkeypatch, heads, with_o_lo):
     ``True`` exactly for a backward over more than 64 heads whose ``dout`` is not dense over its rows (the
     head-major view).  The plan's three uses of it agree: the ``"dout_copy"`` step is in its backward order, its
     workspace layout has the ``dout_copy`` region, and the delta reads at the head stride 512 of the copy (else at
-    the ``dout``'s own) with the virtual token stride of 64 heads above 64 heads."""
-    _dout_copy_case(monkeypatch, heads, with_o_lo, head_windows=None)
+    the ``dout``'s own) with the virtual token stride of 64 heads above 64 heads.  On sm_107a every plan over 64 heads
+    is the two-window bridge's."""
+    found = _dout_copy_case(monkeypatch, heads, with_o_lo, head_windows=None, arch=arch)
+    if arch == "sm_107a":
+        for entry, layout, _, made in found:
+            assert not made.fused_forward and not made.fused_backward, (entry, layout)
 
 
 @pytest.mark.parametrize("heads", (96, 128))
@@ -1438,14 +1565,14 @@ def test_every_rope_plan_carries_dout_copy_with_head_window_builds(
         )
 
 
-def _dout_copy_case(monkeypatch, heads, with_o_lo, *, head_windows):
+def _dout_copy_case(monkeypatch, heads, with_o_lo, *, head_windows, arch="sm_100a"):
     assert "dout_copy" in {f.name for f in dataclasses.fields(cake_backend._Plan)}
     h = hl.HostLaunches(
         monkeypatch,
         cake_backend,
         cake_jit,
         cake_launch,
-        "sm_100a",
+        arch,
         head_windows=head_windows,
     )
     real_plan = cake_backend._plan
@@ -1733,10 +1860,9 @@ def test_zero_query_rows_at_more_heads_return_empty_outputs_without_launching(
 def test_zero_query_rows_of_a_cuda_call_check_the_architecture(
     monkeypatch, arch, heads
 ):
-    """``T == 0`` on a CUDA call (host, the architecture and the device stood in): on ``sm_107a`` a call over more
-    than 64 heads is refused with the ``NotImplementedError`` of a call with query rows, by the eager forward and
-    backward alike; 64 heads there and every head count on ``sm_100a`` / ``sm_103a`` return the empty outputs.
-    Either way nothing is planned, loaded or launched."""
+    """``T == 0`` on a CUDA call (host, the architecture and the device stood in): every head count on ``sm_100a`` /
+    ``sm_103a`` / ``sm_107a`` returns the empty outputs (an architecture outside ``HEAD_ARCHES`` refuses more than
+    64 heads: :func:`test_more_heads_need_a_head_arch`).  Nothing is planned, loaded or launched."""
     h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, arch)
 
     def refuse(*args, **kwargs):
@@ -1748,26 +1874,40 @@ def test_zero_query_rows_of_a_cuda_call_check_the_architecture(
     inp = hl.host_inputs(0, 16, 5, heads)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
     dout = torch.zeros(0, heads, D_LATENT, dtype=torch.bfloat16)
-    if heads != 64 and arch == "sm_107a":
-        refused = "sm_107a serves 64 query heads only"
-        with pytest.raises(NotImplementedError, match=refused):
-            cake_backend.forward(*args)
-        lse = torch.zeros(0, heads, dtype=torch.float32)
-        with pytest.raises(NotImplementedError, match=refused):
-            cake_backend.backward(*args, dout, dout, lse, dout)
-    else:
-        out, lse, o_lo = cake_backend.forward(*args)
-        assert tuple(out.shape) == tuple(o_lo.shape) == (0, heads, D_LATENT)
-        assert tuple(lse.shape) == (0, heads)
-        grads = cake_backend.backward(*args, out, o_lo, lse, dout)
-        assert [tuple(g.shape) for g in grads] == [
-            (0, heads, D_LATENT),
-            (0, heads, D_ROPE),
-            (16, D_LATENT),
-            (16, D_ROPE),
-        ]
-        assert not grads[2].any() and not grads[3].any()
+    out, lse, o_lo = cake_backend.forward(*args)
+    assert tuple(out.shape) == tuple(o_lo.shape) == (0, heads, D_LATENT)
+    assert tuple(lse.shape) == (0, heads)
+    grads = cake_backend.backward(*args, out, o_lo, lse, dout)
+    assert [tuple(g.shape) for g in grads] == [
+        (0, heads, D_LATENT),
+        (0, heads, D_ROPE),
+        (16, D_LATENT),
+        (16, D_ROPE),
+    ]
+    assert not grads[2].any() and not grads[3].any()
     assert not h.launches
+
+
+def test_more_heads_need_a_head_arch():
+    """The architecture rule above 64 heads (host): ``HEAD_ARCHES`` (sm_100a, sm_103a, sm_107a) serve 96 and 128
+    heads, ``WINDOW_ARCHES`` (sm_100a, sm_103a) the head-window and single-pass builds; another architecture (or no
+    supported device, ``None``) is refused with ``NotImplementedError`` naming ``HEAD_ARCHES``, before any plan; 64
+    heads are never refused by this rule."""
+    assert cake_backend.HEAD_ARCHES == ("sm_100a", "sm_103a", "sm_107a")
+    assert cake_backend.WINDOW_ARCHES == ("sm_100a", "sm_103a")
+    assert set(cake_backend.HEAD_ARCHES) == set(SUPPORTED_COMPUTE_CAPABILITIES.values())
+    for heads in (64, 96, 128):
+        for arch in cake_backend.HEAD_ARCHES:
+            cake_backend._check_window_arch(heads, arch)
+        for arch in ("sm_90a", "sm_120a", None):
+            if heads == 64:
+                cake_backend._check_window_arch(heads, arch)
+                continue
+            with pytest.raises(
+                NotImplementedError, match="serves 64 query heads only"
+            ) as err:
+                cake_backend._check_window_arch(heads, arch)
+            assert "'sm_107a'" in str(err.value), str(err.value)
 
 
 def _validate(q_heads, *, rope_heads=None, dout_heads=None, packed=False):
@@ -1841,37 +1981,64 @@ def test_nope_forms_reject_more_heads_and_det_rope_validates_them(heads):
 
 
 @pytest.mark.parametrize("heads", (96, 128))
-def test_sm107a_refuses_more_than_64_heads(monkeypatch, heads):
-    """On sm_107a the windows do not ship yet: a 96- or 128-head call is refused before any kernel of the package
-    launches (host, the architecture stood in) -- the eager forward and backward, the flat and packed (varlen, its
-    torch index route) autograd entries, ``prepare_dsa_train`` and the workspace size; 64 heads launch as before.
-    The public step entries: ``test_cake_dsa_sparse_attention_nondet_train_api.py``."""
+def test_sm107a_plans_the_bridge(monkeypatch, heads):
+    """On sm_107a a 96- or 128-head call runs the two-window bridge (host, the architecture stood in): the flat and
+    packed (varlen, its torch index route) autograd entries launch the 64-head stages on ``W1 = [H - 64, H)`` and
+    then ``W0 = [0, 64)`` in both phases (no head-window or single-pass build, one delta launch) and return
+    gradients of the inputs' shapes; ``dsa_train_workspace_size`` is the bridge's layout; 64 heads launch as
+    before.  The eager entries and the runner: :func:`test_head_window_launches`; the
+    public step entries: ``test_cake_dsa_sparse_attention_nondet_train_api.py``."""
     h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
     monkeypatch.setattr(
         cake_backend, "nope_index_prep_available", lambda device=None: False
     )
-    inp = hl.host_inputs(8, 64, 16, heads)
-    h.bind(inp.q_latent, inp.q_rope, inp.dout)
+    T, S, K = 8, 64, 16
+    inp = hl.host_inputs(T, S, K, heads)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
-    refused = "sm_107a serves 64 query heads only"
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.forward(*args)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.backward(*args, inp.q_latent, -inp.q_latent, inp.lse, inp.dout)
-    leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.cake_dsa_sparse_attention_nondet(*leaves, inp.indices)
-    cu_q = torch.tensor([0, 3, 8], dtype=torch.int32)
-    cu_k = torch.tensor([0, 24, 64], dtype=torch.int32)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.cake_dsa_sparse_attention_nondet_varlen(
-            *leaves, inp.indices % 24, cu_q, cu_k, causal=True
+    cu_q = torch.tensor([0, 3, T], dtype=torch.int32)
+    cu_k = torch.tensor([0, 24, S], dtype=torch.int32)
+    for entry in ("flat", "varlen"):
+        cake_backend.BINDING_CACHE._entries.clear()
+        leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
+        h.bind(leaves[0], leaves[1], inp.dout)
+        mark = h.mark()
+        if entry == "flat":
+            out = cake_backend.cake_dsa_sparse_attention_nondet(*leaves, inp.indices)
+        else:
+            out = cake_backend.cake_dsa_sparse_attention_nondet_varlen(
+                *leaves, inp.indices % 24, cu_q, cu_k, causal=True
+            )
+        grads = torch.autograd.grad(out, leaves, inp.dout)
+        assert [tuple(g.shape) for g in grads] == [tuple(t.shape) for t in leaves]
+        launches = h.launches[mark:]
+        assert launches and not any(rec.hw or rec.sp for rec in launches), entry
+        fwd = [rec.window for rec in launches if hl.family(rec.stage) == "fwd"]
+        assert fwd == [heads - 64, 0], (entry, fwd)
+        main = [
+            rec.window
+            for rec in launches
+            if hl.family(rec.stage) in ("main", "main_pass")
+        ]
+        assert main == [heads - 64, 0], (entry, main)
+        assert sum(hl.family(rec.stage) == "delta" for rec in launches) == 1, entry
+    for dout_copy in (False, True):
+        size = cake_backend.dsa_train_workspace_size(
+            T, S, K, num_heads=heads, dout_copy=dout_copy
         )
-    with pytest.raises(NotImplementedError, match=refused):
-        prepare_dsa_train(*args, dout=inp.dout)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.dsa_train_workspace_size(8, 64, 16, num_heads=heads)
-    assert not h.launches
+        layout = cake_backend.workspace_layout(
+            T,
+            S,
+            K,
+            backward=True,
+            key_passes=1,
+            dkv_direct=False,
+            num_heads=heads,
+            dout_copy=dout_copy,
+            fused_forward=False,
+            fused_backward=False,
+        )
+        assert size == layout["total"], (dout_copy, size, layout["total"])
+    h.launches.clear()
     small = hl.host_inputs(8, 64, 16, 64)
     h.bind(small.q_latent, small.q_rope, small.dout)
     out, lse, o_lo = cake_backend.forward(
@@ -1881,7 +2048,7 @@ def test_sm107a_refuses_more_than_64_heads(monkeypatch, heads):
 
 
 # ---------------------------------------------------------------------------
-# Device tests (sm_100a / sm_103a at 96 and 128 heads; every architecture at 64)
+# Device tests (64, 96 and 128 heads on every architecture; sm_107a above 64 on the two-window bridge)
 # ---------------------------------------------------------------------------
 
 
@@ -1892,14 +2059,12 @@ def _device_supported() -> bool:
 
 
 def _require_heads(heads: int, *, backward: bool = False) -> None:
-    """A device and a registered program that serve ``heads`` query heads (skip otherwise): 64 heads on every
-    supported architecture, 96 and 128 on sm_100a / sm_103a."""
+    """A device and a registered program that serve ``heads`` query heads (skip otherwise): 64, 96 and 128 heads on
+    every supported architecture (sm_107a runs 96 and 128 on the two-window bridge)."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     if not generated_program_available(torch.device("cuda"), backward=backward):
         pytest.skip("generated DSA training program not registered for this device")
-    if heads != 64 and cake_backend.arch_for(torch.device("cuda")) == "sm_107a":
-        pytest.skip("96 and 128 query heads ship on sm_100a / sm_103a; sm_107a follows")
 
 
 def _require_key_passes_and_direct() -> None:
@@ -2974,16 +3139,59 @@ def test_single_pass_forward_through_the_loader(heads, monkeypatch, record_prope
     nv.judge_draws(record_property, case, seed=SEED + 9950 + heads)
 
 
-def test_sm107a_device_refuses_more_than_64_heads():
-    """On an sm_107a device a 96-head call is refused before any launch (the windows ship on sm_100a / sm_103a
-    first)."""
-    if (
-        not _device_supported()
-        or cake_backend.arch_for(torch.device("cuda")) != "sm_107a"
-    ):
+@pytest.mark.parametrize("heads", (96,) + REDUCED_HEADS)
+def test_sm107a_device_runs_the_bridge(heads):
+    """On an sm_107a device a call over ``heads`` query heads runs the two-window bridge in both phases (skip on
+    another device): :func:`head_window_plan` is ``(None, None)``, a prepared runner's forward is the two window
+    launches of the 64-head forward (``W1`` then ``W0``) and its backward window launches; the runner's ``out`` /
+    ``lse`` / ``o_lo`` and ``dq`` equal the eager forward's and backward's bit for bit (the same launches), and repeat
+    bit for bit run to run.  Accuracy: the judged tests of this file, which run the bridge there."""
+    _require_heads(heads, backward=True)
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    if arch != "sm_107a":
         pytest.skip("an sm_107a device")
-    inp = make_inputs([64], [512], seed=SEED, topk=128, heads=96)
-    with pytest.raises(NotImplementedError, match="sm_107a serves 64 query heads only"):
-        cake_backend.forward(
-            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global
+    for with_o_lo in (True, False):
+        for kw in (
+            {"backward": False},
+            {"backward": True},
+            {"backward": True, "key_passes": 2},
+        ):
+            assert cake_backend.head_window_plan(
+                heads, arch, with_o_lo=with_o_lo, **kw
+            ) == (None, None)
+    inp = make_inputs([300], [2048], seed=SEED + 9990 + heads, topk=512, heads=heads)
+    args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+    cake_backend.BINDING_CACHE._entries.clear()
+
+    lengths = {"topk_length": inp.topk_length, "softmax_scale": SCALE}
+
+    def eager():
+        out, lse, o_lo = cake_backend.forward(*args, **lengths)
+        dql, dqr, _, _ = cake_backend.backward(
+            *args, out, o_lo, lse, inp.dout, key_passes=1, **lengths
+        )
+        torch.cuda.synchronize()
+        return {"out": out, "lse": lse, "o_lo": o_lo, "dq_latent": dql, "dq_rope": dqr}
+
+    first, second = eager(), eager()
+    prepared = prepare_dsa_train(*args, dout=inp.dout, key_passes=1, **lengths)
+    assert tuple(prepared.forward_stages) == _bridge_forward_keys(heads, "fwd")
+    assert [
+        key.head0
+        for key in prepared.backward_order
+        if isinstance(key, cake_backend.WindowLaunch)
+    ] == [heads - 64, 0], prepared.backward_order
+    dql, dqr = prepared.step()[:2]
+    torch.cuda.synchronize()
+    runner = {
+        "out": prepared.out,
+        "lse": prepared.lse,
+        "o_lo": prepared.o_lo,
+        "dq_latent": dql,
+        "dq_rope": dqr,
+    }
+    for name, want in first.items():
+        assert torch.equal(second[name], want), f"{name} is not run-to-run bitwise"
+        assert torch.equal(runner[name], want), (
+            f"the runner's {name} differs from the eager call's"
         )

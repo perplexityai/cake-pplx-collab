@@ -5,11 +5,11 @@ non-deterministic package of the DeepSeek Sparse Attention training kernels
 (top-k sparse MLA with absorbed queries; GLM-5.2 geometry: 64 heads, 512
 latent + 64 rope query/key dimensions, 512 value dimensions, top-k 2048).
 The kernels are native 64-query-head programs; the rope form also serves 96
-and 128 query heads on `sm_100a` and `sm_103a`, through head-window builds
+and 128 query heads: on `sm_100a` and `sm_103a` through head-window builds
 that run both 64-head windows of every token in one launch, or else on two
 64-head windows of the 64-head kernels, and its forward there through the
-single-pass forward, every head of a token in one 2-CTA cluster (see "Query
-heads above 64 (head windows)").
+single-pass forward, every head of a token in one 2-CTA cluster; on `sm_107a`
+on the two 64-head windows (see "Query heads above 64 (head windows)").
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_nondet_train` are
 stable APIs; this backend package is experimental (no compatibility guarantee
@@ -99,8 +99,8 @@ out = cake_dsa_sparse_attention_nondet_varlen(
 ```
 
 * `q_latent [T, H, 512]`, `q_rope [T, H, 64]` BF16, `H` = 64, 96 or 128 query
-  heads (96 and 128 on `sm_100a` / `sm_103a`, see "Query heads above 64 (head
-  windows)"; another `H` raises `ValueError`); `kv_latent [S, 512]` (K = V)
+  heads (see "Query heads above 64 (head windows)"; another `H` raises
+  `ValueError`); `kv_latent [S, 512]` (K = V)
   and `k_rope [S, 64]` BF16.  Strided views are consumed in place -- see
   "Packed and strided inputs" below.
 * `indices [T, topk]` int32 (any row stride) hold **global** key rows; `-1` or `>= S` marks an
@@ -489,9 +489,7 @@ token chunk and pass, `bwd_cast`)
 -- plus the two fills of the FP32 dK/dV accumulators; a direct binding (see
 "Direct accumulation from the main stage") launches the natural-layout variant
 of the main stage instead and has neither the fills nor the cast.  A call without query rows
-(`T == 0`) returns empty outputs and zero gradients without launching (on
-`sm_107a` a call over more than 64 heads on CUDA tensors raises
-`NotImplementedError` instead, see "Query heads above 64 (head windows)");
+(`T == 0`) returns empty outputs and zero gradients without launching;
 `S == 0` is rejected.
 
 Host cost through the autograd wrapper: the `Function.backward` runs on
@@ -638,7 +636,9 @@ takes a build only where the registry carries it for the architecture, among
 the record's stages and the program's stage order, with its generated launcher
 and grid (`cake_backend.single_pass_stage`, `cake_backend.head_window_stage`);
 the builds ship for `sm_100a` and `sm_103a`.  A partial registry mixes the plans
-per phase.
+per phase.  On `sm_107a` (`cake_backend.HEAD_ARCHES` without
+`cake_backend.WINDOW_ARCHES`) both phases run the two-window bridge, whatever
+builds the registry declares for it.
 
 ### Single-pass forward
 
@@ -860,12 +860,17 @@ The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
   (`ValueError`; the NoPE query check names the rope form, the sink check
   says the sink form serves 64 query heads only).  The deterministic
   package's rope form serves 96 and 128 heads on `sm_100a` / `sm_103a` from
-  0.11.0, with its own builds.  On `sm_107a` an eager, autograd or step call with more than 64
-  heads raises `NotImplementedError` before any kernel of the package
-  launches -- also without query rows, on a CUDA tensor -- and so does
-  `prepare_dsa_train`, until the window stages are validated there (a
-  prepared runner refuses `T = 0` with `ValueError` at every head count).
-  This holds whatever builds the registry declares for `sm_107a`.
+  0.11.0, with its own builds.  An architecture outside
+  `cake_backend.HEAD_ARCHES` raises `NotImplementedError` for more than 64
+  heads before any kernel of the package launches (also without query rows,
+  on a CUDA tensor).  A prepared runner refuses `T = 0` with `ValueError` at
+  every head count.
+* On `sm_107a` every phase runs the two-window bridge on the 64-head stages
+  that ship there (the forward on `fwd_scan` / `fwd_scan_no_olo`), with the
+  `sm_107a` key-pass rule (two passes from 131,072 keys), direct-accumulation
+  rule and single-pass descending token order of the 64-head plan, all
+  calibrated at 64 heads.  This holds whatever builds the registry declares
+  for `sm_107a`.
 
 ## NoPE (zero-rope) program
 
@@ -1314,8 +1319,8 @@ and `bwd_delta_no_olo` (see "Without the output residual").  The rope form
 serves 96 and 128 query heads on `sm_100a` and `sm_103a`, through the
 head-window builds (`fwd_hw`, `fwd_hw_no_olo` and the four `bwd_main*_hw`
 builds, for those two architectures) where the record carries them and else
-through the two-window bridge; `sm_107a` serves 64 heads until its window
-stages are validated (see "Query heads above 64 (head windows)").
+through the two-window bridge; on `sm_107a` it serves them through the
+two-window bridge (see "Query heads above 64 (head windows)").
 
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
 only this package; skips without a registered program or a compute capability

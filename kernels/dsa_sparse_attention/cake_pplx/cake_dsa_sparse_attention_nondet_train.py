@@ -19,13 +19,13 @@ the stable entry points over the backend package
 ``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train``.
 
 Query heads: the rope entries take ``H = q_latent.shape[1]`` heads, ``H`` in
-64, 96 and 128 (96 and 128 on SM100 / SM103; SM107 serves 64); every head
-tensor below written ``[T, 64, ...]`` is ``[T, H, ...]`` for them.  The kernels
-compute 64 heads of a token per work item: 96 and 128 heads run, where the
-program ships them for the device, the head-window builds -- one launch per
-stage over both 64-head windows ``[0, 64)`` and ``[64, 128)`` of every token,
-the heads past ``H`` padding -- and otherwise the two-window bridge: the
-64-head kernels on ``[H - 64, H)`` and then ``[0, 64)``, with the heads
+64, 96 and 128 (SM100 / SM103 / SM107); every head tensor below written
+``[T, 64, ...]`` is ``[T, H, ...]`` for them.  The kernels compute 64 heads of
+a token per work item: 96 and 128 heads run, where the program ships them for
+the device (SM100 / SM103), the head-window builds -- one launch per stage over
+both 64-head windows ``[0, 64)`` and ``[64, 128)`` of every token, the heads
+past ``H`` padding -- and otherwise (always on SM107) the two-window bridge:
+the 64-head kernels on ``[H - 64, H)`` and then ``[0, 64)``, with the heads
 ``[H - 64, 64)`` both windows cover taken from the second (see the backend
 README).  Their forward runs, where the program ships it (SM100 / SM103), the
 single-pass forward instead: every head of a token in one 2-CTA cluster.  The
@@ -106,9 +106,7 @@ empty ``out`` / ``lse`` / ``o_lo`` (``None`` for ``o_lo`` with
 ``dq``, a zero FP32 ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a
 sink, a zero ``dsink``; the rope step backward returns empty ``dq_latent`` /
 ``dq_rope`` and zero ``dkv_latent`` / ``dk_rope``, FP32 with ``dkv_fp32=True``
-and BF16 otherwise (``None`` with a tensor ``dkv_acc``).  On SM107 a rope call
-over 96 or 128 heads on CUDA tensors raises ``NotImplementedError`` instead,
-as a call with query rows does.
+and BF16 otherwise (``None`` with a tensor ``dkv_acc``).
 
 Their autograd Functions, ``CakeDSASparseAttentionNondetFunction`` (both rope
 entries), ``CakeDSASparseAttentionNondetNopeFunction`` and
@@ -294,8 +292,8 @@ def cake_dsa_sparse_attention_nondet(
     with_o_lo: bool = True,
 ):
     r"""Differentiable top-k sparse MLA attention with absorbed queries (DeepSeek
-    Sparse Attention) for training, ``H`` query heads (64 on SM100 / SM103 /
-    SM107; 96 or 128 on SM100 / SM103), SM100 / SM103 / SM107 only.
+    Sparse Attention) for training, ``H`` query heads (64, 96 or 128), SM100 /
+    SM103 / SM107 only.
 
     ``O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent``
     over the keys a row's ``indices`` select (K = V = the latent).
@@ -316,8 +314,7 @@ def cake_dsa_sparse_attention_nondet(
     q_latent : torch.Tensor
         BF16 ``[T, H, 512]`` absorbed query latents, ``H`` in 64, 96 or 128
         (the call's head count); contiguous or a view of a packed ``[T, H,
-        576]`` query (head stride 576).  Another ``H`` raises ``ValueError``;
-        96 or 128 heads on SM107 raise ``NotImplementedError``.
+        576]`` query (head stride 576).  Another ``H`` raises ``ValueError``.
     q_rope : torch.Tensor
         BF16 ``[T, H, 64]`` query rope part; contiguous, a view of the packed
         ``[T, H, 576]`` query, or the ``192:256`` channel slice of the
@@ -1020,9 +1017,7 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     ``out``, ``lse`` and ``o_lo`` of a head come from one forward kernel launch
     (with 96 or 128 heads, the single-pass or the head-window forward, or on
     the two-window bridge the launch of the window that delivers the head). A
-    call without query rows returns empty outputs without launching (on SM107
-    a call over 96 or 128 heads on CUDA tensors raises ``NotImplementedError``
-    instead).
+    call without query rows returns empty outputs without launching.
 
     ``with_o_lo`` (``bool``, default ``True``): with ``True`` the forward also
     writes ``o_lo`` as above and the step backward forms ``delta =
