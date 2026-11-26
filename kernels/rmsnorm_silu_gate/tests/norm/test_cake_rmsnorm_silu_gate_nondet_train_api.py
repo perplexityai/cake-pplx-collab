@@ -90,8 +90,9 @@ checks:
   and of ``FORWARD_TINY_GAP``), ``PROJECTION_FORWARD_BANDS`` bands (``z``
   the gate columns of a wider projection), ``HEAD_MAJOR_FORWARD_BANDS``
   bands (head-major rows; ``STRIDED_FORWARD_BANDS`` where the architecture
-  has no such table) and ``SLICED_FORWARD_BANDS`` bands (``x`` and ``z`` both
-  sliced from wider projections of 4 heads, whole-token rows;
+  has no such table) and ``SLICED_FORWARD_BANDS`` bands (whole-token rows:
+  ``x`` and ``z`` both sliced from wider projections of 4 heads, and a gate
+  of one head sliced from a projection beside packed ``x``;
   ``STRIDED_FORWARD_BANDS`` where the architecture has no such table), each
   call's table that of its rows' class (``forward_layout``), the forward of
   ``x`` or ``z`` broadcast over more than one token (token stride 0: the band of
@@ -1630,13 +1631,17 @@ def _made_class(tokens: int, heads: int, layout: str) -> tuple[bool, str | None]
 # holds the band; ``other``: ``x`` and ``z`` both sliced of
 # ``SLICED_MIN_HEADS`` heads, whole-token rows (``SLICED_FORWARD_BANDS`` where
 # the architecture has it, else ``STRIDED_FORWARD_BANDS``; of fewer heads such
-# rows take no class).
+# rows take no class); ``gate``: a gate of one head sliced from a projection
+# beside packed ``x``, whole-token rows of one head (the same tables).  The
+# kind of a band layout is the kind whose name begins it, so no kind's name
+# begins another's band layouts.
 FORWARD_KINDS = {
     "flat": (1, "flat", True, None),
     "token": (None, "contiguous", True, None),
     "projection": (4, "projection", False, loader.PROJECTION_LAYOUT),
     "headmajor": (4, "head_major", False, loader.HEAD_MAJOR_LAYOUT),
     "other": (loader.SLICED_MIN_HEADS, "both_sliced", False, loader.SLICED_LAYOUT),
+    "gate": (1, "projection", False, loader.SLICED_LAYOUT),
 }
 
 
@@ -1956,10 +1961,12 @@ def test_forward_plan_of_every_form_differs_from_0_2_17_only_in_the_moved_bands(
 # heads, layout); ``heads=None`` takes, with ``end`` the last row of band ``i``
 # of a ``FORWARD_KINDS`` kind (``last * SMs``), ``end // h + tokens`` tokens of
 # ``h`` heads: of one head for ``flat<i>`` (the architecture's
-# ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor), of 4 heads for
-# ``other<i>`` (its ``SLICED_FORWARD_BANDS`` where the architecture has one,
-# else ``STRIDED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from wider
-# projections, whole-token rows from ``SLICED_MIN_HEADS`` heads),
+# ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor) and ``gate<i>``
+# (its ``SLICED_FORWARD_BANDS`` where the architecture has one, else
+# ``STRIDED_FORWARD_BANDS``; ``z`` the gate columns of a wider projection
+# beside packed ``x``, whole-token rows), of 4 heads for ``other<i>`` (the
+# same tables; ``x`` and ``z`` both sliced from wider projections,
+# whole-token rows from ``SLICED_MIN_HEADS`` heads),
 # ``projection<i>`` (its ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns
 # of a wider projection, a class of more than one head) and ``headmajor<i>``
 # (its ``HEAD_MAJOR_FORWARD_BANDS``; 4 divides 148, 152 and 212, so ``end`` is
@@ -2029,6 +2036,12 @@ FORWARD_CASES = [
     pytest.param(1, None, "other3", id="other-band3-end+1"),
     pytest.param(0, None, "other4", id="other-band4-end"),
     pytest.param(1, None, "other4", id="other-band4-end+1"),
+    pytest.param(0, None, "gate2", id="gate-band2-end"),
+    pytest.param(1, None, "gate2", id="gate-band2-end+1"),
+    pytest.param(0, None, "gate3", id="gate-band3-end"),
+    pytest.param(1, None, "gate3", id="gate-band3-end+1"),
+    pytest.param(0, None, "gate4", id="gate-band4-end"),
+    pytest.param(1, None, "gate4", id="gate-band4-end+1"),
     pytest.param(7685, 48, "contiguous", id="7685x48"),
     pytest.param(7685, 48, "projection", id="7685x48-projection"),
     pytest.param(7685, 48, "head_major", id="7685x48-head_major"),
@@ -2120,7 +2133,7 @@ GATE_TAIL = (-87.5, -88.0, -88.5)
 
 @requires_device
 @pytest.mark.parametrize("band", range(7))
-@pytest.mark.parametrize("kind", ["flat", "projection", "headmajor", "other"])
+@pytest.mark.parametrize("kind", ["flat", "projection", "headmajor", "other", "gate"])
 def test_forward_keeps_the_gate_tail_in_every_band(
     kind, band, determinism_setting, monkeypatch: pytest.MonkeyPatch, record_property
 ) -> None:
@@ -2129,7 +2142,9 @@ def test_forward_keeps_the_gate_tail_in_every_band(
     ``PROJECTION_FORWARD_BANDS``, ``HEAD_MAJOR_FORWARD_BANDS`` and
     ``SLICED_FORWARD_BANDS`` (``STRIDED_FORWARD_BANDS`` where the
     architecture has none) of 4 heads, the last of ``x`` and ``z`` both
-    sliced from wider projections, whole-token rows), with every ``z`` in
+    sliced from wider projections, whole-token rows, and the last of one
+    head too, a gate sliced from a projection beside packed ``x``,
+    whole-token rows), with every ``z`` in
     :data:`GATE_TAIL`, the inputs are of the kind's class
     (:func:`_forward_class`), the forward launches the band's module
     (``module_for_rows``' module for that class) and, on the inputs of every

@@ -270,9 +270,10 @@ blocks of
 fewest whole waves from there and four times that: on packed rows 85, 86
 and 344 on SM100 and SM107 and 58, 60 and 240 on SM103; on rows not read as
 packed 5, 6 and 24 on SM100 and 4, 6 and 24 on SM103 and SM107) and at the
-cut itself, tokens of one head (of 4 heads for projection and head-major
-rows) whose rows are exactly the cut times the SMs (the first row count of
-whole waves).  On packed rows the probes around the cut run in the band of
+cut itself, tokens of one head (of 4 heads for projection, head-major and
+both-sliced rows) whose rows are exactly the cut times the SMs (the first
+row count of whole waves).  On packed rows the probes around the cut run in
+the band of
 ``fwd_pipe`` on SM100 (from 521 rows per SM, with no end since version
 0.2.17; until then it ended at 6500, past which the mid forward ran and no
 probe around the cut ran on SM100), in the first and the second band of
