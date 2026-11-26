@@ -144,6 +144,7 @@ import gc
 import inspect
 import math
 import warnings
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3926,7 +3927,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         for arch, (lo, hi) in by_arch.items():
             bands = LAYOUT_FORWARD_BANDS[layout][arch]
             assert bands[-1] == (None, "fwd"), (layout, arch)
-            for left, right in zip(bands, bands[1:]):
+            for left, right in pairwise(bands):
                 assert left[1] != right[1], (layout, arch, left, right)
             for per_sm in range(1, 2 * hi + 2):
                 want = (
