@@ -72,8 +72,13 @@ hold row ``n`` at element ``128 n``, fewer than ``PACKED_ROWS`` rows) by
 ``FORWARD_BANDS``, of rows that are not packed by the table of their class
 (:func:`forward_layout`): the gate columns of a wider projection, of more than
 one head, by ``PROJECTION_FORWARD_BANDS``, head-major rows by
-``HEAD_MAJOR_FORWARD_BANDS`` and whole-token rows of wider tensors by
-``SLICED_FORWARD_BANDS``, each where an architecture has one, other layouts by
+``HEAD_MAJOR_FORWARD_BANDS``, whole-token rows of wider tensors by
+``SLICED_FORWARD_BANDS`` (one head) and ``SLICED_HEADS_FORWARD_BANDS`` (more
+heads), ``x`` and ``z`` both sliced of 2 or 3 heads by
+``SLICED_FEW_FORWARD_BANDS``, ``x`` of one head broadcast over the heads by
+``BCASTH_FORWARD_BANDS``, head-major ``x`` beside a sliced ``z`` by
+``MIXED_FORWARD_BANDS`` and padded heads by ``PADH_FORWARD_BANDS``, each where
+an architecture has one, other layouts by
 ``STRIDED_FORWARD_BANDS``; bands of rows per SM (the tiny forwards, which read
 packed rows only, the short forward, the mid, long and extra-long forwards, the
 pipelined forwards and the forward of the call role, each where the
@@ -3506,17 +3511,19 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     ),
 }
 
-# The forward bands of a call whose rows are neither packed nor of a layout with
-# a table of its own (``forward_layout`` gives None: ``x`` or ``z`` broadcast
-# over heads, or over tokens beside rows that are not packed, a head stride
-# other than 128, a mixed layout or padded head-major planes, and rows of head
-# stride 128 with both token strides past the row and fewer than
-# ``SLICED_MIN_HEADS`` heads; head-major rows on an architecture without
-# ``HEAD_MAJOR_FORWARD_BANDS``, sm_100a and sm_103a; whole-token rows,
-# ``SLICED_LAYOUT``, on an architecture without
-# ``SLICED_FORWARD_BANDS``, sm_107a; a broadcast over tokens that its band of
-# packed rows does not run, below), or of packed rows from ``PACKED_ROWS`` on,
-# as ``FORWARD_BANDS`` (the tiny forwards read packed rows only).  The cuts
+# The forward bands of a call whose rows are neither packed nor of a class with
+# a table of its own on the architecture (``forward_layout`` gives None: a
+# layout of no class, as ``x`` or ``z`` broadcast over tokens beside rows that
+# are not packed, padded head-major planes, head strides other than 128 but
+# those of ``HEAD_MAJOR_LAYOUT``, ``BCASTH_LAYOUT``, ``MIXED_LAYOUT`` and
+# ``PADH_LAYOUT``, and rows of head stride 128 with both token strides past the
+# row of one head, or of 2 or 3 heads with a token stride below twice the row,
+# as padded rows; or a class without a table for the architecture:
+# ``HEAD_MAJOR_LAYOUT`` on sm_100a and sm_103a, ``SLICED_LAYOUT`` on sm_107a,
+# ``SLICED_FEW_LAYOUT`` on sm_100a and sm_107a, ``MIXED_LAYOUT`` on sm_100a,
+# ``PADH_LAYOUT`` on sm_100a and sm_107a; a broadcast over tokens that its band
+# of packed rows does not run, below), or of packed rows from ``PACKED_ROWS``
+# on, as ``FORWARD_BANDS`` (the tiny forwards read packed rows only).  The cuts
 # follow the checkpointed training step as ``FORWARD_BANDS`` do, except the
 # short forward's end: 12 rows per SM on sm_100a and sm_103a, where its grid of
 # one 16-row block a CTA has at most as many CTAs as the SMs less 16 (from 64
@@ -3530,18 +3537,21 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # pipelined forward's one-CTA-per-block grid of 0.2.13).  No band of this table
 # runs a pipelined forward, which made the step slower at every rows per SM
 # measured (with its grid of 0.2.13; on sm_103a 3 to 7 % slower than the mid
-# forward from 13 to 100 rows per SM); the bands of
-# ``PROJECTION_FORWARD_BANDS``, ``HEAD_MAJOR_FORWARD_BANDS`` and
-# ``SLICED_FORWARD_BANDS`` run those with the per-layout L2 prefetch walk.
+# forward from 13 to 100 rows per SM); the bands of the class tables of
+# ``LAYOUT_FORWARD_BANDS`` run those with the per-layout L2 prefetch walk.
 # Version 0.2.18's measurement against 0.2.17 on the same GPU (B200, GB300)
 # found the forward or the checkpointed step of rows of this table slower with
 # ``fwd_layout_pipe`` from 701 to 1500 rows per SM than with the plain forward
 # (``x`` broadcast over tokens beside ``z`` sliced from a projection, ``x``
 # broadcast over heads, head stride 144, padded head-major planes, ``x``
 # head-major beside ``z`` sliced from a projection, ``x`` and ``z`` both sliced
-# from projections of one head, padded rows of one and of two heads), so these
-# rows keep 0.2.17's programs; only whole-token rows run it there
-# (``SLICED_FORWARD_BANDS``).
+# from projections of one head, padded rows of one and of two heads), so 0.2.18
+# kept 0.2.17's programs for every row of this table.  Version 0.2.19 measured
+# some of these layouts against 0.2.18 again and gives them classes of their own
+# (``SLICED_FEW_LAYOUT``, ``BCASTH_LAYOUT``, ``MIXED_LAYOUT``, ``PADH_LAYOUT``),
+# which run ``fwd_layout_pipe`` only in bands where every measured point passed
+# (the comments of their tables); every row that stays here keeps 0.2.18's
+# program.
 STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3612,8 +3622,15 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # 560 rows per SM, 1.0041 for 64 heads in one run at 580; GB300: 1.0081 to
 # 1.0085 for 48 and 64 heads at 600, more below), so each cut lies just below
 # the first point where every form passed (whose 64 heads, 599.78 rows per SM
-# on 148 SMs and 629.89 on 152, run ``fwd_layout_pipe``).  Past the last
-# pipelined band the plain forward runs.  Host plan only, as the other tables.
+# on 148 SMs and 629.89 on 152, run ``fwd_layout_pipe``).  Version 0.2.19 ends
+# the sm_103a band at 619 rows per SM (629 in 0.2.18): measured against 0.2.18
+# on GB300 (CUDA Graph replays, CUPTI, cold L2, two runs; the same forms), every
+# form passed from 619.79 to 628.95 rows per SM (in both runs the forward faster
+# than 0.2.18's, no op slower than 0.2.18's beyond noise and the forward no
+# slower than the deterministic package's), while 64 heads failed at 609.68 and
+# 16 and 48 heads at 600, so the cut lies just below the first point where every
+# form passed.  Past the last pipelined band the plain forward runs.  Host plan
+# only, as the other tables.
 PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3627,7 +3644,7 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
-        (629, "fwd_xlong"),
+        (619, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3665,43 +3682,154 @@ HEAD_MAJOR_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     ),
 }
 
-# The forward bands of a call of whole-token rows (``forward_layout`` gives
-# ``SLICED_LAYOUT``: ``x`` and ``z`` of head stride 128 and token strides of at
-# least ``H * 128``, one of them past it, and not ``PROJECTION_LAYOUT``; at any
-# number of heads where the other input holds packed rows, its token stride
-# ``H * 128``, as ``x`` sliced beside packed ``z`` or a gate of one head sliced
-# from a projection, and where both inputs lie past the row from
-# ``SLICED_MIN_HEADS`` heads, as ``x`` and ``z`` both sliced from wider
-# projections or padded rows), by architecture, by rows per SM as
+# The forward bands of a call of whole-token rows of one head
+# (``forward_layout`` gives ``SLICED_LAYOUT``: ``x`` and ``z`` of head stride
+# 128 and token strides of at least 128, one of them past it and the other
+# 128, as a gate of one head sliced from a projection beside packed ``x`` or
+# ``x`` of one head sliced beside packed ``z``; such rows of more heads are
+# ``SLICED_HEADS_LAYOUT``, below), by architecture, by rows per SM as
 # ``FORWARD_BANDS``; an architecture without a table here (sm_107a) runs
-# ``STRIDED_FORWARD_BANDS``.  These rows ran
-# ``STRIDED_FORWARD_BANDS`` until version 0.2.17; version 0.2.18 runs that table
-# on sm_100a and sm_103a but ``fwd_layout_pipe`` (the pipelined forward with the
-# per-layout L2 prefetch walk, which warms rows of head stride 128 one range a
-# token) from 701 to 1500 rows per SM, where 0.2.17 ran the plain forward:
-# measured against 0.2.17 (CUDA Graph replays, CUPTI, cold L2, two runs; ``x``
-# and ``z`` both sliced from projections ``2 * H * 128 + 16`` elements wide, 16
-# and 48 heads, and a gate of one head sliced from such a projection) at 701,
-# 800, 1000, 1250 and 1500 rows per SM, it took 0.9427 to 0.9885 of the plain
-# forward's time alone on B200 and 0.9320 to 0.9646 on GB300, and 0.9536 to
-# 0.9985 of the checkpointed step's (either weight gradient) on B200 and 0.9514
-# to 0.9857 on GB300; at 2000 rows per SM the step of a gate of one head took
-# 1.0132 to 1.0147 of 0.2.17's time on B200 and 1.0047 to 1.0051 on GB300, so
-# the band ends at 1500, a measured point.  Rows of 1 to 3 heads with both inputs
-# past the row keep 0.2.17's programs (``STRIDED_FORWARD_BANDS``): measured
-# against 0.2.17 on the same GPU (B200, GB300; two runs) at 701, 1000 and 1500
-# rows per SM, the forward or the checkpointed step with ``fwd_layout_pipe`` was
-# slower for ``x`` and ``z`` both sliced of one head and for padded rows of one
-# and of two heads, and neither was slower for either form of 4, 8 and 16 heads,
-# so the class takes them from 4 heads, a measured point.  The other rows of
-# ``STRIDED_FORWARD_BANDS`` keep 0.2.17's programs (its comment).  Host plan
-# only, as the other tables.
+# ``STRIDED_FORWARD_BANDS``.  These rows ran ``STRIDED_FORWARD_BANDS`` until
+# version 0.2.17; version 0.2.18 ran that table (then for whole-token rows of
+# any number of heads) on sm_100a and sm_103a but ``fwd_layout_pipe`` (the
+# pipelined forward with the per-layout L2 prefetch walk, which warms rows of
+# head stride 128 one range a token) from 701 to 1500 rows per SM, where 0.2.17
+# ran the plain forward: measured against 0.2.17 (CUDA Graph replays, CUPTI,
+# cold L2, two runs; ``x`` and ``z`` both sliced from projections
+# ``2 * H * 128 + 16`` elements wide, 16 and 48 heads, and a gate of one head
+# sliced from such a projection) at 701, 800, 1000, 1250 and 1500 rows per SM,
+# it took 0.9427 to 0.9885 of the plain forward's time alone on B200 and 0.9320
+# to 0.9646 on GB300, and 0.9536 to 0.9985 of the checkpointed step's (either
+# weight gradient) on B200 and 0.9514 to 0.9857 on GB300; at 2000 rows per SM
+# the step of a gate of one head took 1.0132 to 1.0147 of 0.2.17's time on B200
+# and 1.0047 to 1.0051 on GB300, so the band ends at 1500, a measured point.
+# Version 0.2.19 runs ``fwd_layout_pipe`` from 600 rows per SM, where 0.2.18
+# ran the extra-long forward up to 700.  Its measurement against 0.2.18 on the
+# same GPU (CUDA Graph replays, CUPTI, cold L2, two runs) passes a point where
+# in both runs the forward is faster than 0.2.18's, no op (the forward, the
+# backward and the checkpointed step of either weight gradient) is slower than
+# 0.2.18's beyond noise, and the forward is not slower than the deterministic
+# package's: on B200 and GB300 a gate of one head sliced from a projection and
+# ``x`` of one head sliced beside packed ``z`` passed at 600, 650 and 700 rows
+# per SM (600 the lowest point measured), so the extra-long forward's band
+# ends at 599.  Host plan only, as the other tables.
 SLICED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
+        (599, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
+        (599, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+}
+
+# The forward bands of a call of whole-token rows of more than one head
+# (``forward_layout`` gives ``SLICED_HEADS_LAYOUT``: ``x`` and ``z`` of head
+# stride 128 and token strides of at least ``H * 128``, one of them past it,
+# not ``PROJECTION_LAYOUT``, and either the other ``H * 128``, as ``x`` sliced
+# beside packed ``z``, or at least ``SLICED_MIN_HEADS`` heads, as ``x`` and
+# ``z`` both sliced from wider projections or padded rows), by architecture,
+# by rows per SM as ``FORWARD_BANDS``.  Version 0.2.18 ran these rows by
+# ``SLICED_FORWARD_BANDS`` on sm_100a and sm_103a and by
+# ``STRIDED_FORWARD_BANDS`` on sm_107a.  Both inputs past the row take the
+# class from 4 heads: measured against 0.2.17 on the same GPU (B200, GB300; two
+# runs) at 701, 1000 and 1500 rows per SM, the forward or the checkpointed step
+# with ``fwd_layout_pipe`` was slower for ``x`` and ``z`` both sliced of one
+# head and for padded rows of one and of two heads, and neither was slower for
+# either form of 4, 8 and 16 heads (2 and 3 heads sliced from projections:
+# ``SLICED_FEW_LAYOUT``).  Version 0.2.19 moves the cuts of
+# ``fwd_layout_pipe`` by its measurement against 0.2.18 (the comment of
+# ``SLICED_FORWARD_BANDS``; ``x`` and ``z`` both sliced of 16 and 48 heads,
+# padded rows of 16 heads and ``x`` sliced beside packed ``z`` of 16 heads, and
+# past 700 rows per SM and on sm_107a also 4 heads of the first two forms and 2
+# heads of the last).  On sm_100a every form passed at 600, 650, 700, 1600,
+# 1750 and 2000 rows per SM, so it runs from 600 to 2000 (0.2.18: 701 to 1500;
+# 0.2.18's measurement found the step of ``x`` and ``z`` both sliced slower at
+# 2500).  On sm_103a every form passed at 650, 700, 1600 and 1750, and padded
+# rows of 16 heads failed at 600 in both runs, so it runs from 650 to 1750
+# (0.2.18's measurement found the step slower at 2000).  On sm_107a (two VR200
+# nodes, drivers 620.70.06 and 620.43) every form passed at 650 and 1000 on
+# both, and at 1500 ``x`` and ``z`` both sliced of 4 heads, padded rows of 4
+# heads and ``x`` sliced of 2 heads failed on at least one, so it runs from 650
+# to 1000; rows per SM from 481 to 649 were not measured and run the plain
+# forward, as in 0.2.18.  Host plan only, as the other tables.
+SLICED_HEADS_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
+    "sm_100a": (
+        (12, "fwd_short"),
+        (140, "fwd_mid"),
+        (400, "fwd_long"),
+        (599, "fwd_xlong"),
+        (2000, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
+        (649, "fwd_xlong"),
+        (1750, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+    "sm_107a": (
+        (59, "fwd_short"),
+        (480, "fwd_mid"),
+        (649, "fwd"),
+        (1000, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+}
+
+# The forward bands of a call of ``x`` and ``z`` both sliced from wider
+# tensors, of 2 or 3 heads (``forward_layout`` gives ``SLICED_FEW_LAYOUT``:
+# head strides 128, both token strides at least twice ``H * 128``; padded rows
+# of 2 or 3 heads, token strides ``H * 128 + 16``, take no class), by
+# architecture, by rows per SM as ``FORWARD_BANDS``; an architecture without a
+# table here (sm_100a, sm_107a) runs ``STRIDED_FORWARD_BANDS``, as 0.2.18 ran
+# these rows everywhere.  Measured against 0.2.18 (the comment of
+# ``SLICED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from projections
+# ``2 * H * 128 + 16`` elements wide, 2 and 3 heads) at 701, 1000 and 1500 rows
+# per SM, ``fwd_layout_pipe`` passed for both head counts on GB300, so sm_103a
+# runs it from 701 to 1500; on B200 2 heads failed at 1000 and 1500, so
+# sm_100a keeps 0.2.18's programs; sm_107a was not measured.  Host plan only,
+# as the other tables.
+SLICED_FEW_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
         (700, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+}
+
+# The forward bands of a call of ``x`` of one head broadcast over more than one
+# head beside packed ``z`` (``forward_layout`` gives ``BCASTH_LAYOUT``: ``x`` of
+# head stride 0 and token stride 128, ``z`` of head stride 128 and token stride
+# ``H * 128``), by architecture, by rows per SM as ``FORWARD_BANDS``.  Version
+# 0.2.18 ran these rows by ``STRIDED_FORWARD_BANDS``.  Measured against 0.2.18
+# (the comment of ``SLICED_FORWARD_BANDS``; 16 heads): on sm_100a
+# ``fwd_layout_pipe`` passed at 1000, 1250 and 1500 rows per SM, and at 850, 900
+# and 950 the checkpointed step of either weight gradient was slower than
+# 0.2.18's in both runs, so it runs from 1000 to 1500 and the plain forward runs
+# from 701 to 999, as in 0.2.18; on sm_103a it passed at 701, 850, 1000, 1250
+# and 1500, so it runs from 701 to 1500; on sm_107a (two VR200 nodes, drivers
+# 620.70.06 and 620.43) it passed at 650, 1000 and 1500 on both, so it
+# runs from 650 to 1500 (rows per SM from 481 to 649 were not measured and run
+# the plain forward, as in 0.2.18).  Host plan only, as the other tables.
+BCASTH_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
+    "sm_100a": (
+        (12, "fwd_short"),
+        (140, "fwd_mid"),
+        (400, "fwd_long"),
+        (700, "fwd_xlong"),
+        (999, "fwd"),
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3712,19 +3840,92 @@ SLICED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
+    "sm_107a": (
+        (59, "fwd_short"),
+        (480, "fwd_mid"),
+        (649, "fwd"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+}
+
+# The forward bands of a call of head-major ``x`` beside ``z`` of head stride
+# 128 sliced from a wider tensor (``forward_layout`` gives ``MIXED_LAYOUT``:
+# more than one head, ``x`` of token stride 128 and head stride ``T * 128``,
+# ``z`` of head stride 128 and a token stride past ``H * 128``), by
+# architecture, by rows per SM as ``FORWARD_BANDS``; an architecture without a
+# table here (sm_100a) runs ``STRIDED_FORWARD_BANDS``, as 0.2.18 ran these rows
+# everywhere.  Measured against 0.2.18 (the comment of
+# ``SLICED_FORWARD_BANDS``; 16 heads, ``z`` sliced from a wider projection): on
+# sm_103a ``fwd_layout_pipe`` passed at 701, 850, 1000, 1250 and 1500 rows per
+# SM, so it runs from 701 to 1500; on sm_107a (two VR200 nodes, drivers
+# 620.70.06 and 620.43) it passed at 650 and 1000 on both, and at 1500 an op
+# was slower than 0.2.18's on the 620.70.06 node, so it runs from 650 to 1000
+# (rows per SM from 481 to 649 were not measured and run the plain forward, as
+# in 0.2.18); on sm_100a 0.2.18's measurement found the forward or the step
+# with it slower.  Host plan only, as the other tables.
+MIXED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
+        (700, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+    "sm_107a": (
+        (59, "fwd_short"),
+        (480, "fwd_mid"),
+        (649, "fwd"),
+        (1000, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
+}
+
+# The forward bands of a call of ``x`` and ``z`` of one padded head stride
+# (``forward_layout`` gives ``PADH_LAYOUT``: more than one head, both head
+# strides equal and past 128, the heads of a token adjacent, token strides
+# ``H`` times the head stride, as ``[T, H, 128 + pad]`` tensors cut to 128
+# columns), by architecture, by rows per SM as ``FORWARD_BANDS``; an
+# architecture without a table here (sm_100a, sm_107a) runs
+# ``STRIDED_FORWARD_BANDS``, as 0.2.18 ran these rows everywhere.  Measured
+# against 0.2.18 (the comment of ``SLICED_FORWARD_BANDS``; 16 heads of head
+# stride 144): on sm_103a ``fwd_layout_pipe`` passed at 701, 850, 1000, 1250
+# and 1500 rows per SM, so it runs from 701 to 1500; on sm_100a 0.2.18's
+# measurement found the forward or the step with it slower; sm_107a was not
+# measured.  Host plan only, as the other tables.
+PADH_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
+    "sm_103a": (
+        (12, "fwd_short"),
+        (250, "fwd_mid"),
+        (700, "fwd_xlong"),
+        (1500, "fwd_layout_pipe"),
+        (None, "fwd"),
+    ),
 }
 
 # The classes of rows that are not packed with a table of their own
-# (:func:`forward_layout`), and each class's table.
+# (:func:`forward_layout`), and each class's table; a class runs
+# ``STRIDED_FORWARD_BANDS`` on an architecture its table has no entry for.
 PROJECTION_LAYOUT = "projection"
 HEAD_MAJOR_LAYOUT = "head_major"
 SLICED_LAYOUT = "sliced"
+SLICED_HEADS_LAYOUT = "sliced_heads"
+SLICED_FEW_LAYOUT = "sliced_few"
+BCASTH_LAYOUT = "bcasth"
+MIXED_LAYOUT = "mixed"
+PADH_LAYOUT = "padh"
 LAYOUT_FORWARD_BANDS: dict[str, dict[str, tuple[tuple[int | None, str], ...]]] = {
     PROJECTION_LAYOUT: PROJECTION_FORWARD_BANDS,
     HEAD_MAJOR_LAYOUT: HEAD_MAJOR_FORWARD_BANDS,
     SLICED_LAYOUT: SLICED_FORWARD_BANDS,
+    SLICED_HEADS_LAYOUT: SLICED_HEADS_FORWARD_BANDS,
+    SLICED_FEW_LAYOUT: SLICED_FEW_FORWARD_BANDS,
+    BCASTH_LAYOUT: BCASTH_FORWARD_BANDS,
+    MIXED_LAYOUT: MIXED_FORWARD_BANDS,
+    PADH_LAYOUT: PADH_FORWARD_BANDS,
 }
-# x, z both past the row: SLICED_LAYOUT from 4 heads (measured slower at 1, 2).
+# x, z both past the row: SLICED_HEADS_LAYOUT from 4 heads (measured slower at
+# 1, 2; 2 and 3 heads sliced from projections: SLICED_FEW_LAYOUT).
 SLICED_MIN_HEADS = 4
 # Packed rows ``lo < rows <= hi`` (a count of rows, whatever the SMs) that
 # run the module of ``role`` in the place of their ``FORWARD_BANDS`` band, by
@@ -3968,11 +4169,10 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 # ``fwd_layout_keep_pipe`` on sm_100a, ``fwd_pipe_packed``,
 # ``fwd_keep_pipe_packed``, ``fwd_layout_pipe`` and ``fwd_layout_keep_pipe`` on
 # sm_107a) in the rows of their bands of ``FORWARD_BANDS``,
-# ``STRIDED_FORWARD_BANDS``, ``PROJECTION_FORWARD_BANDS``,
-# ``HEAD_MAJOR_FORWARD_BANDS`` and ``SLICED_FORWARD_BANDS``; a backward role
-# (its own module, the static backward, where an architecture routes
-# one: ``bwd_bf16`` on sm_107a, which no band runs; ``bwd_f32`` on sm_100a
-# and sm_103a, in a band of rows per SM), its small-row roles
+# ``STRIDED_FORWARD_BANDS`` and the class tables of ``LAYOUT_FORWARD_BANDS``;
+# a backward role (its own module, the static backward, where an architecture
+# routes one: ``bwd_bf16`` on sm_107a, which no band runs; ``bwd_f32`` on
+# sm_100a and sm_103a, in a band of rows per SM), its small-row roles
 # (``BAND_ROLES``), its fused and repeatable roles
 # (``<role>_fused``, ``<role>_rep``: ``bwd_bf16_fused``, ``bwd_bf16_rep``
 # and ``bwd_f32_rep``, every architecture) and the repeatable roles' long
@@ -4083,7 +4283,10 @@ def routes_every_call(arch: str) -> bool:
     """Whether ``arch`` routes a module for every call of every role: every
     band of the forward's ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` and
     the class tables of ``LAYOUT_FORWARD_BANDS`` (``PROJECTION_FORWARD_BANDS``,
-    ``HEAD_MAJOR_FORWARD_BANDS``, ``SLICED_FORWARD_BANDS``) and of each
+    ``HEAD_MAJOR_FORWARD_BANDS``, ``SLICED_FORWARD_BANDS``,
+    ``SLICED_HEADS_FORWARD_BANDS``, ``SLICED_FEW_FORWARD_BANDS``,
+    ``BCASTH_FORWARD_BANDS``, ``MIXED_FORWARD_BANDS``,
+    ``PADH_FORWARD_BANDS``) and of each
     backward role's ``BACKWARD_BANDS`` names a role ``ROUTES[arch]``
     routes, a role whose bands do not end with a ``None`` band routes its
     own module (:func:`module_for_rows` falls back to it past the bands), and
@@ -4390,18 +4593,28 @@ def forward_layout(
     of more than one head and ``z`` the gate columns of a wider projection
     (head strides 128, ``x``'s token stride ``heads * 128`` and ``z``'s past
     it), ``HEAD_MAJOR_LAYOUT`` where ``x`` and ``z`` are head-major (token
-    strides 128, head strides ``tokens * 128``), ``SLICED_LAYOUT`` where the
-    rows are whole tokens of wider tensors (head strides 128, both token
-    strides at least ``heads * 128`` and one past it) and either the other
-    token stride is ``heads * 128`` (one input holds packed rows, at any
-    number of heads: ``x`` sliced beside packed ``z``, such a gate of one
-    head) or there are at least ``SLICED_MIN_HEADS`` heads (``x`` and ``z``
-    both sliced, padded rows), else ``None`` (a broadcast over tokens or
-    heads, another head stride, a mixed layout, both token strides past the
-    row with fewer than ``SLICED_MIN_HEADS`` heads, packed rows).
-    :func:`module_for_rows` takes it as ``layout``; the host classes a call
-    of packed rows before (the tables of packed rows) and passes no
-    class."""
+    strides 128, head strides ``tokens * 128``); where the rows are whole
+    tokens of wider tensors (head strides 128, both token strides at least
+    ``heads * 128`` and one past it) and either the other token stride is
+    ``heads * 128`` (one input holds packed rows: ``x`` sliced beside packed
+    ``z``, such a gate of one head) or there are at least
+    ``SLICED_MIN_HEADS`` heads (``x`` and ``z`` both sliced, padded rows),
+    ``SLICED_LAYOUT`` of one head and ``SLICED_HEADS_LAYOUT`` of more;
+    ``SLICED_FEW_LAYOUT`` where such rows of 2 or 3 heads have both token
+    strides past the row, each at least twice it (``x`` and ``z`` both
+    sliced from wider projections; padded rows of 2 or 3 heads take no
+    class); and, of more than one head, ``BCASTH_LAYOUT`` where ``x`` of one
+    head is broadcast over the heads (head stride 0, token stride 128)
+    beside packed ``z``, ``MIXED_LAYOUT`` where ``x`` is head-major (token
+    stride 128, head stride ``tokens * 128``) beside ``z`` of head stride 128
+    and a token stride past the row, and ``PADH_LAYOUT`` where ``x`` and
+    ``z`` have one head stride past 128 with the heads of a token adjacent
+    (token strides ``heads`` times it); else ``None`` (a broadcast over
+    tokens beside rows that are not packed, another head stride, padded
+    head-major planes, both token strides past the row of one head or of
+    padded rows of 2 or 3 heads, packed rows).  :func:`module_for_rows`
+    takes it as ``layout``; the host classes a call of packed rows before
+    (the tables of packed rows) and passes no class."""
 
     row = heads * HEAD_DIM
     if (
@@ -4422,9 +4635,31 @@ def forward_layout(
         and x_tok >= row
         and z_tok >= row
         and (x_tok > row or z_tok > row)
-        and (x_tok == row or z_tok == row or heads >= SLICED_MIN_HEADS)
     ):
-        return SLICED_LAYOUT
+        if x_tok == row or z_tok == row or heads >= SLICED_MIN_HEADS:
+            # whole-token rows: one head and more heads take their own tables
+            return SLICED_HEADS_LAYOUT if heads > 1 else SLICED_LAYOUT
+        if heads > 1 and x_tok >= 2 * row and z_tok >= 2 * row:
+            # x and z both sliced from tensors at least twice the row wide, 2
+            # or 3 heads (padded rows of 2 or 3 heads, token stride row + 16,
+            # take no class)
+            return SLICED_FEW_LAYOUT
+        return None
+    if heads > 1:
+        if x_head == 0 and x_tok == HEAD_DIM and z_head == HEAD_DIM and z_tok == row:
+            # x of one head broadcast over the heads beside packed z
+            return BCASTH_LAYOUT
+        if x_tok == HEAD_DIM and x_head == plane and z_head == HEAD_DIM and z_tok > row:
+            # head-major x beside z sliced from a wider tensor
+            return MIXED_LAYOUT
+        if (
+            x_head == z_head
+            and x_head > HEAD_DIM
+            and x_tok == heads * x_head
+            and z_tok == heads * z_head
+        ):
+            # x and z of one padded head stride, the heads of a token adjacent
+            return PADH_LAYOUT
     return None
 
 
@@ -4750,6 +4985,8 @@ __all__ = [
     "ARCH_BY_CAPABILITY",
     "BACKWARD_BANDS",
     "BAND_ROLES",
+    "BCASTH_FORWARD_BANDS",
+    "BCASTH_LAYOUT",
     "FORWARD_BANDS",
     "FORWARD_TINY_GAP",
     "GRID_KINDS",
@@ -4761,6 +4998,8 @@ __all__ = [
     "LONG",
     "LONG_BACKWARD_ROWS_PER_SM",
     "LONG_BACKWARD_STRIDED_ROWS_PER_SM",
+    "MIXED_FORWARD_BANDS",
+    "MIXED_LAYOUT",
     "MODULES",
     "NODW",
     "NODW_ROLES",
@@ -4769,11 +5008,17 @@ __all__ = [
     "PACKED_ROWS",
     "PACKED_SMALL_ROLE",
     "PACKED_SMALL_ROWS_PER_SM",
+    "PADH_FORWARD_BANDS",
+    "PADH_LAYOUT",
     "PROJECTION_FORWARD_BANDS",
     "PROJECTION_LAYOUT",
     "ROLES",
     "ROUTES",
+    "SLICED_FEW_FORWARD_BANDS",
+    "SLICED_FEW_LAYOUT",
     "SLICED_FORWARD_BANDS",
+    "SLICED_HEADS_FORWARD_BANDS",
+    "SLICED_HEADS_LAYOUT",
     "SLICED_LAYOUT",
     "SLICED_MIN_HEADS",
     "SMALL",
