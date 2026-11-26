@@ -79,114 +79,369 @@ kernel_cake_lm_head_loss_aee298db0b852a88517a(float* __restrict__ PU, float* __r
     const int cta_rank = 0;
 
     // Prologue
-    float* ebuf = reinterpret_cast<float*>(smem_raw + 0);
-    const int ebuf_addr = smem + 0;
-    float* stat = reinterpret_cast<float*>(smem_raw + 4096);
-    const int stat_addr = smem + 4096;
+    float* stg = reinterpret_cast<float*>(smem_raw + 0);
+    const int stg_addr = smem + 0;
+    float* ebuf = reinterpret_cast<float*>(smem_raw + 32768);
+    const int ebuf_addr = smem + 32768;
+    float* stat = reinterpret_cast<float*>(smem_raw + 36864);
+    const int stat_addr = smem + 36864;
 
     // === Task calls (declaration order) ===
     float d = __fdiv_rn(-1.0f, loss_div);
+    int tiles = H / 32;
+    int tc = bid / tiles;
+    int h0 = bid % tiles * 32;
+    int live = 0;
+    if (with_u != 0) {
+        if (tc < T) {
+            live = 1;
+        }
+    }
+    long long yu = -1ll;
+    if (live == 1) {
+        if (warp == 7) {
+            yu = labels[tc];
+        }
+    }
+    int q = tid / 8;
+    int c4 = tid % 8;
+    float buf[32] = {0};
+    if (live == 1) {
+        if (q < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)(q * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[0 + 0] = _v4.x;
+                buf[0 + 1] = _v4.y;
+                buf[0 + 2] = _v4.z;
+                buf[0 + 3] = _v4.w;
+            }
+        }
+        if (q + 32 < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)((q + 32) * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[4 + 0] = _v4.x;
+                buf[4 + 1] = _v4.y;
+                buf[4 + 2] = _v4.z;
+                buf[4 + 3] = _v4.w;
+            }
+        }
+        if (q + 64 < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)((q + 64) * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[8 + 0] = _v4.x;
+                buf[8 + 1] = _v4.y;
+                buf[8 + 2] = _v4.z;
+                buf[8 + 3] = _v4.w;
+            }
+        }
+        if (q + 96 < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)((q + 96) * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[12 + 0] = _v4.x;
+                buf[12 + 1] = _v4.y;
+                buf[12 + 2] = _v4.z;
+                buf[12 + 3] = _v4.w;
+            }
+        }
+        if (q + 128 < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)((q + 128) * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[16 + 0] = _v4.x;
+                buf[16 + 1] = _v4.y;
+                buf[16 + 2] = _v4.z;
+                buf[16 + 3] = _v4.w;
+            }
+        }
+        if (q + 160 < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)((q + 160) * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[20 + 0] = _v4.x;
+                buf[20 + 1] = _v4.y;
+                buf[20 + 2] = _v4.z;
+                buf[20 + 3] = _v4.w;
+            }
+        }
+        if (q + 192 < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)((q + 192) * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[24 + 0] = _v4.x;
+                buf[24 + 1] = _v4.y;
+                buf[24 + 2] = _v4.z;
+                buf[24 + 3] = _v4.w;
+            }
+        }
+        if (q + 224 < parts) {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(PU + ((unsigned long long)((q + 224) * T + tc) * (unsigned long long)H + (unsigned long long)(h0 + 4 * c4)) + 0);
+                buf[28 + 0] = _v4.x;
+                buf[28 + 1] = _v4.y;
+                buf[28 + 2] = _v4.z;
+                buf[28 + 3] = _v4.w;
+            }
+        }
+    }
+    float wy = 0.0f;
+    if (live == 1) {
+        if (warp == 7) {
+            if (yu >= 0ll) {
+                if (yu < (long long)V) {
+                    wy = (float)W[(unsigned long long)yu * (unsigned long long)H + (unsigned long long)(h0 + lane)];
+                }
+            }
+        }
+    }
+    float zv[4] = {0};
+    float ok[4] = {0};
+    if (bid == 0) {
+        if (warp == 6) {
+            if (lane == 0) {
+                #pragma unroll
+                for (int t = 0; t < 4; t++) {
+                    if (t < T) {
+                        long long yl = labels[t];
+                        LAB[t] = yl;
+                        if (yl >= 0ll) {
+                            long long yc = yl;
+                            if (yc >= (long long)V) {
+                                yc = (long long)(V - 1);
+                            }
+                            zv[t] = (float)Z[(unsigned long long)t * (unsigned long long)V + (unsigned long long)yc];
+                            ok[t] = 1.0f;
+                        }
+                    }
+                }
+            }
+        }
+    }
     if (warp < T) {
         int tw = warp;
-        float mx = -CUDART_INF_F;
-        #pragma unroll 1
-        for (int g = lane; g < parts; g += 32) {
-            mx = max_noftz(mx, PMS[(g * T + tw) * 2]);
+        float pm[8] = {0};
+        float ps[8] = {0};
+        if (lane < parts) {
+            pm[0] = PMS[(lane * T + tw) * 2];
+            ps[0] = PMS[(lane * T + tw) * 2 + 1];
         }
-        float _warp_reduce_0 = mx;
+        if (lane + 32 < parts) {
+            pm[1] = PMS[((lane + 32) * T + tw) * 2];
+            ps[1] = PMS[((lane + 32) * T + tw) * 2 + 1];
+        }
+        if (lane + 64 < parts) {
+            pm[2] = PMS[((lane + 64) * T + tw) * 2];
+            ps[2] = PMS[((lane + 64) * T + tw) * 2 + 1];
+        }
+        if (lane + 96 < parts) {
+            pm[3] = PMS[((lane + 96) * T + tw) * 2];
+            ps[3] = PMS[((lane + 96) * T + tw) * 2 + 1];
+        }
+        if (lane + 128 < parts) {
+            pm[4] = PMS[((lane + 128) * T + tw) * 2];
+            ps[4] = PMS[((lane + 128) * T + tw) * 2 + 1];
+        }
+        if (lane + 160 < parts) {
+            pm[5] = PMS[((lane + 160) * T + tw) * 2];
+            ps[5] = PMS[((lane + 160) * T + tw) * 2 + 1];
+        }
+        if (lane + 192 < parts) {
+            pm[6] = PMS[((lane + 192) * T + tw) * 2];
+            ps[6] = PMS[((lane + 192) * T + tw) * 2 + 1];
+        }
+        if (lane + 224 < parts) {
+            pm[7] = PMS[((lane + 224) * T + tw) * 2];
+            ps[7] = PMS[((lane + 224) * T + tw) * 2 + 1];
+        }
+        float mx = -CUDART_INF_F;
+        if (lane < parts) {
+            mx = max_noftz(mx, pm[0]);
+        }
+        if (lane + 32 < parts) {
+            mx = max_noftz(mx, pm[1]);
+        }
+        if (lane + 64 < parts) {
+            mx = max_noftz(mx, pm[2]);
+        }
+        if (lane + 96 < parts) {
+            mx = max_noftz(mx, pm[3]);
+        }
+        if (lane + 128 < parts) {
+            mx = max_noftz(mx, pm[4]);
+        }
+        if (lane + 160 < parts) {
+            mx = max_noftz(mx, pm[5]);
+        }
+        if (lane + 192 < parts) {
+            mx = max_noftz(mx, pm[6]);
+        }
+        if (lane + 224 < parts) {
+            mx = max_noftz(mx, pm[7]);
+        }
+        float _warp_reduce_8 = mx;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1)
-            _warp_reduce_0 = max_noftz(_warp_reduce_0, __shfl_xor_sync(0xFFFFFFFF, _warp_reduce_0, offset));
-        mx = _warp_reduce_0;
+            _warp_reduce_8 = max_noftz(_warp_reduce_8, __shfl_xor_sync(0xFFFFFFFF, _warp_reduce_8, offset));
+        mx = _warp_reduce_8;
         float part = 0.0f;
-        #pragma unroll 1
-        for (int g_1 = lane; g_1 < parts; g_1 += 32) {
-            float mg = PMS[(g_1 * T + tw) * 2];
-            float e = 0.0f;
-            if (mg != -CUDART_INF_F) {
-                float _exp_1 = expf(mg - mx);
-                e = _exp_1;
+        if (lane < parts) {
+            float e_0 = 0.0f;
+            if (pm[0] != -CUDART_INF_F) {
+                float _exp_9 = expf(pm[0] - mx);
+                e_0 = _exp_9;
             }
-            ebuf[tw * 256 + g_1] = e;
-            part = __fmaf_rn(PMS[(g_1 * T + tw) * 2 + 1], e, part);
+            ebuf[tw * 256 + lane] = e_0;
+            part = __fmaf_rn(ps[0], e_0, part);
         }
-        float _shfl_xor_sync_2 = __shfl_xor_sync(0xFFFFFFFF, part, 16);
-        part = part + _shfl_xor_sync_2;
-        float _shfl_xor_sync_3 = __shfl_xor_sync(0xFFFFFFFF, part, 8);
-        part = part + _shfl_xor_sync_3;
-        float _shfl_xor_sync_4 = __shfl_xor_sync(0xFFFFFFFF, part, 4);
-        part = part + _shfl_xor_sync_4;
-        float _shfl_xor_sync_5 = __shfl_xor_sync(0xFFFFFFFF, part, 2);
-        part = part + _shfl_xor_sync_5;
-        float _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, part, 1);
-        part = part + _shfl_xor_sync_6;
+        if (lane + 32 < parts) {
+            float e_1 = 0.0f;
+            if (pm[1] != -CUDART_INF_F) {
+                float _exp_10 = expf(pm[1] - mx);
+                e_1 = _exp_10;
+            }
+            ebuf[tw * 256 + lane + 32] = e_1;
+            part = __fmaf_rn(ps[1], e_1, part);
+        }
+        if (lane + 64 < parts) {
+            float e_2 = 0.0f;
+            if (pm[2] != -CUDART_INF_F) {
+                float _exp_11 = expf(pm[2] - mx);
+                e_2 = _exp_11;
+            }
+            ebuf[tw * 256 + lane + 64] = e_2;
+            part = __fmaf_rn(ps[2], e_2, part);
+        }
+        if (lane + 96 < parts) {
+            float e_3 = 0.0f;
+            if (pm[3] != -CUDART_INF_F) {
+                float _exp_12 = expf(pm[3] - mx);
+                e_3 = _exp_12;
+            }
+            ebuf[tw * 256 + lane + 96] = e_3;
+            part = __fmaf_rn(ps[3], e_3, part);
+        }
+        if (lane + 128 < parts) {
+            float e_4 = 0.0f;
+            if (pm[4] != -CUDART_INF_F) {
+                float _exp_13 = expf(pm[4] - mx);
+                e_4 = _exp_13;
+            }
+            ebuf[tw * 256 + lane + 128] = e_4;
+            part = __fmaf_rn(ps[4], e_4, part);
+        }
+        if (lane + 160 < parts) {
+            float e_5 = 0.0f;
+            if (pm[5] != -CUDART_INF_F) {
+                float _exp_14 = expf(pm[5] - mx);
+                e_5 = _exp_14;
+            }
+            ebuf[tw * 256 + lane + 160] = e_5;
+            part = __fmaf_rn(ps[5], e_5, part);
+        }
+        if (lane + 192 < parts) {
+            float e_6 = 0.0f;
+            if (pm[6] != -CUDART_INF_F) {
+                float _exp_15 = expf(pm[6] - mx);
+                e_6 = _exp_15;
+            }
+            ebuf[tw * 256 + lane + 192] = e_6;
+            part = __fmaf_rn(ps[6], e_6, part);
+        }
+        if (lane + 224 < parts) {
+            float e_7 = 0.0f;
+            if (pm[7] != -CUDART_INF_F) {
+                float _exp_16 = expf(pm[7] - mx);
+                e_7 = _exp_16;
+            }
+            ebuf[tw * 256 + lane + 224] = e_7;
+            part = __fmaf_rn(ps[7], e_7, part);
+        }
+        float _shfl_xor_sync_17 = __shfl_xor_sync(0xFFFFFFFF, part, 16);
+        part = part + _shfl_xor_sync_17;
+        float _shfl_xor_sync_18 = __shfl_xor_sync(0xFFFFFFFF, part, 8);
+        part = part + _shfl_xor_sync_18;
+        float _shfl_xor_sync_19 = __shfl_xor_sync(0xFFFFFFFF, part, 4);
+        part = part + _shfl_xor_sync_19;
+        float _shfl_xor_sync_20 = __shfl_xor_sync(0xFFFFFFFF, part, 2);
+        part = part + _shfl_xor_sync_20;
+        float _shfl_xor_sync_21 = __shfl_xor_sync(0xFFFFFFFF, part, 1);
+        part = part + _shfl_xor_sync_21;
         if (lane == 0) {
             stat[2 * tw] = mx;
             stat[2 * tw + 1] = part;
         }
     }
-    __syncthreads();
-    if (with_u != 0) {
-        int h = blockIdx.x * 256 + tid;
-        #pragma unroll
-        for (int t = 0; t < 4; t++) {
-            if (t < T) {
-                long long y = labels[t];
-                float out = 0.0f;
-                if (y >= 0ll) {
-                    float acc = 0.0f;
-                    #pragma unroll 4
-                    for (int g_2 = 0; g_2 < parts; g_2++) {
-                        acc = __fmaf_rn(PU[(unsigned long long)(g_2 * T + t) * (unsigned long long)H + (unsigned long long)h], ebuf[t * 256 + g_2], acc);
-                    }
-                    float wy = 0.0f;
-                    if (y < (long long)V) {
-                        wy = (float)W[(unsigned long long)y * (unsigned long long)H + (unsigned long long)h];
-                    }
-                    float _fdiv_7 = __fdiv_rn(acc, stat[2 * t + 1]);
-                    out = d * (wy - _fdiv_7);
-                }
-                DXA[(unsigned long long)t * (unsigned long long)H + (unsigned long long)h] = out;
-            }
+    if (live == 1) {
+        if (q < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)((q * 32 + 4 * c4) * 4)), "f"(buf[0]), "f"(buf[1]), "f"(buf[2]), "f"(buf[3]) : "memory");
+        }
+        if (q + 32 < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)(((q + 32) * 32 + 4 * c4) * 4)), "f"(buf[4]), "f"(buf[5]), "f"(buf[6]), "f"(buf[7]) : "memory");
+        }
+        if (q + 64 < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)(((q + 64) * 32 + 4 * c4) * 4)), "f"(buf[8]), "f"(buf[9]), "f"(buf[10]), "f"(buf[11]) : "memory");
+        }
+        if (q + 96 < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)(((q + 96) * 32 + 4 * c4) * 4)), "f"(buf[12]), "f"(buf[13]), "f"(buf[14]), "f"(buf[15]) : "memory");
+        }
+        if (q + 128 < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)(((q + 128) * 32 + 4 * c4) * 4)), "f"(buf[16]), "f"(buf[17]), "f"(buf[18]), "f"(buf[19]) : "memory");
+        }
+        if (q + 160 < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)(((q + 160) * 32 + 4 * c4) * 4)), "f"(buf[20]), "f"(buf[21]), "f"(buf[22]), "f"(buf[23]) : "memory");
+        }
+        if (q + 192 < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)(((q + 192) * 32 + 4 * c4) * 4)), "f"(buf[24]), "f"(buf[25]), "f"(buf[26]), "f"(buf[27]) : "memory");
+        }
+        if (q + 224 < parts) {
+            asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(stg_addr + (unsigned int)(((q + 224) * 32 + 4 * c4) * 4)), "f"(buf[28]), "f"(buf[29]), "f"(buf[30]), "f"(buf[31]) : "memory");
         }
     }
-    if (blockIdx.x == 0) {
-        if (tid == 0) {
-            float terms[4];
-            #pragma unroll
-            for (int t_1 = 0; t_1 < 4; t_1++) {
-                terms[t_1] = 0.0f;
-                if (t_1 < T) {
-                    long long yl = labels[t_1];
-                    float _log_8 = logf(stat[2 * t_1 + 1]);
-                    float lse = stat[2 * t_1] + _log_8;
-                    float logp = 0.0f;
-                    float dt = 0.0f;
-                    if (yl >= 0ll) {
-                        long long yc = yl;
-                        if (yc >= (long long)V) {
-                            yc = (long long)(V - 1);
-                        }
-                        logp = (float)Z[(unsigned long long)t_1 * (unsigned long long)V + (unsigned long long)yc] - lse;
-                        dt = d;
-                    }
-                    ROWS[2 * t_1] = lse;
-                    ROWS[2 * t_1 + 1] = dt;
-                    LOGP[t_1] = logp;
-                    LAB[t_1] = yl;
-                    terms[t_1] = logp;
+    __syncthreads();
+    if (live == 1) {
+        if (warp == 7) {
+            float out = 0.0f;
+            if (yu >= 0ll) {
+                float acc = 0.0f;
+                #pragma unroll 8
+                for (int g = 0; g < parts; g++) {
+                    acc = __fmaf_rn(stg[g * 32 + lane], ebuf[tc * 256 + g], acc);
                 }
+                float _fdiv_22 = __fdiv_rn(acc, stat[2 * tc + 1]);
+                out = d * (wy - _fdiv_22);
             }
-            float s02;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(s02) : "f"(terms[0]), "f"(terms[2]));
-            float s13;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(s13) : "f"(terms[1]), "f"(terms[3]));
-            float _add_9;
-            asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_9) : "f"(s02), "f"(s13));
-            float fin = __fdiv_rn(_add_9, loss_div);
-            float _sub_10;
-            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_10) : "f"(0.0f), "f"(fin));
-            LOSS[0] = _sub_10;
+            DXA[(unsigned long long)tc * (unsigned long long)H + (unsigned long long)(h0 + lane)] = out;
+        }
+    }
+    if (bid == 0) {
+        if (warp == 6) {
+            if (lane == 0) {
+                float terms[4];
+                #pragma unroll
+                for (int t_1 = 0; t_1 < 4; t_1++) {
+                    terms[t_1] = 0.0f;
+                    if (t_1 < T) {
+                        float _log_23 = logf(stat[2 * t_1 + 1]);
+                        float lse = stat[2 * t_1] + _log_23;
+                        float logp = 0.0f;
+                        float dt = 0.0f;
+                        if (ok[t_1] != 0.0f) {
+                            logp = zv[t_1] - lse;
+                            dt = d;
+                        }
+                        ROWS[2 * t_1] = lse;
+                        ROWS[2 * t_1 + 1] = dt;
+                        LOGP[t_1] = logp;
+                        terms[t_1] = logp;
+                    }
+                }
+                float s02;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(s02) : "f"(terms[0]), "f"(terms[2]));
+                float s13;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(s13) : "f"(terms[1]), "f"(terms[3]));
+                float _add_24;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_24) : "f"(s02), "f"(s13));
+                float fin = __fdiv_rn(_add_24, loss_div);
+                float _sub_25;
+                asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_25) : "f"(0.0f), "f"(fin));
+                LOSS[0] = _sub_25;
+            }
         }
     }
 }

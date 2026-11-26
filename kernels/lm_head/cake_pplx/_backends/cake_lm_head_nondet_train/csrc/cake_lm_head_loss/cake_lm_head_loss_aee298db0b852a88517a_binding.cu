@@ -143,7 +143,7 @@ void Run(TensorView a_PU, TensorView a_PMS, TensorView a_W, TensorView a_Z, Tens
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(256, 1, 1);
-  config.dynamicSmemBytes = 4224;
+  config.dynamicSmemBytes = 36992;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_lm_head_loss_aee298db0b852a88517a), kernel_args),
             "cudaLaunchKernelExC");
