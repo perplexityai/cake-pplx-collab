@@ -2764,10 +2764,10 @@ def test_mode_values_and_mode_types_are_refused():
 
 def test_situ_parameters_are_checked():
     """Host only: the per-call SiTU-GLU scalars are finite positive Python numbers whose FP32 values are positive and
-    give finite FP32 kernel constants ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``: ``TypeError`` for a
-    ``bool``, a string or a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value, a value past the
-    FP32 range or rounding to 0 there, and a pair whose constants are past the FP32 range.  The check returns the FP32
-    values."""
+    give finite FP32 kernel constants ``2.88539 / beta`` and ``2.88539 / lb`` and a finite FP32 ``beta lb`` (above about
+    ``2^129`` the kernels' ``kk``, about ``8.33 / (beta lb)``, is subnormal): ``TypeError`` for a ``bool``, a string or
+    a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value, a value past the FP32 range or rounding
+    to 0 there, and a pair whose constants or product are past the FP32 range.  The check returns the FP32 values."""
     assert kernels.check_situ_parameters(4.0, 25.0) == (4.0, 25.0)
     assert kernels.check_situ_parameters(4, 25) == (4.0, 25.0)
     assert kernels.check_situ_parameters(0.1, 3.0) == (
@@ -2798,10 +2798,10 @@ def test_situ_parameters_are_checked():
 
 
 def test_situ_parameters_refuse_a_product_under_the_bound():
-    """Host only: ``situ_beta * situ_lb`` of the FP32 values is at least ``2^-119`` (``SITU_BETA_LB_MIN``; under
-    about ``2^-119.94`` the kernels' hidden value would be 0).  A product of exactly ``2^-119`` passes, also from a
-    value that FP32 rounds up to it; one FP32 step down in either scalar, and ``1e-20`` with ``1e-17``, raise
-    ``ValueError``."""
+    """Host only: ``situ_beta * situ_lb`` of the FP32 values is at least ``2^-119`` (``SITU_BETA_LB_MIN``; under about
+    ``2^-119.94`` the kernels' hidden value of tiny gates and ups would be 0).  A product of exactly ``2^-119`` passes,
+    also from a value that FP32 rounds up to it; one FP32 step down in either scalar, and ``1e-20`` with ``1e-17``,
+    raise ``ValueError``."""
     assert kernels.SITU_BETA_LB_MIN == 2.0**-119
     under = "situ_beta \\* situ_lb is under 2\\^-119"
     # One FP32 ulp under a power of two (exact in FP32).

@@ -346,12 +346,14 @@ def check_situ_parameters(situ_beta, situ_lb):
     """Per-call SiTU-GLU scalars: ``situ_beta`` and ``situ_lb`` are finite
     positive Python numbers (a ``bool`` is refused) whose FP32 values (the
     kernels') are positive, with the constants the kernels form from them,
-    ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``, finite in FP32
-    (past it they would be infinite in the kernels and give NaN), and with
-    ``beta lb`` at least :data:`SITU_BETA_LB_MIN`, ``2^-119`` (about
-    ``1.5e-36``; under about ``2^-119.94`` the kernels' hidden value would be
-    0). ``TypeError`` for another type, ``ValueError`` for another value.
-    Returns the FP32 values."""
+    ``2.88539 / beta`` and ``2.88539 / lb``, finite in FP32 (past it they
+    would be infinite in the kernels and give NaN), with ``beta lb`` finite in
+    FP32 (above about ``2^129`` the kernels' ``kk``, about
+    ``8.33 / (beta lb)``, is subnormal and gives an infinite or NaN hidden
+    value), and with ``beta lb`` at least :data:`SITU_BETA_LB_MIN`,
+    ``2^-119`` (about ``1.5e-36``; under about ``2^-119.94`` the kernels'
+    hidden value of tiny gates and ups would be 0). ``TypeError`` for another
+    type, ``ValueError`` for another value. Returns the FP32 values."""
     for name, value in (("situ_beta", situ_beta), ("situ_lb", situ_lb)):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(
@@ -383,7 +385,8 @@ def check_situ_parameters(situ_beta, situ_lb):
     if beta32 * lb32 < SITU_BETA_LB_MIN:
         raise ValueError(
             f"situ_beta * situ_lb is under 2^-119, about 1.5e-36 (situ_beta "
-            f"{beta32!r}, situ_lb {lb32!r}): the kernels' hidden value would be 0"
+            f"{beta32!r}, situ_lb {lb32!r}): the kernels' hidden value of tiny "
+            "gates and ups would be 0"
         )
     return beta32, lb32
 

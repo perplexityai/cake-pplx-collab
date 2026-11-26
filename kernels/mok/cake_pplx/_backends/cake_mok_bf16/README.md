@@ -362,11 +362,17 @@ value (forward, recompute and the backward's replay) uses the smaller of
 `|x| (1 + E)` and `s (1 + 2^-21) - s E`, the backward's gradient terms the
 larger of `|x| (2 - 2 |x| / s)` and `s (1 - 2^-20) - s E`. They keep their
 accuracy for gate and up values far below `beta` and `lb`; 0.4.0 lost it
-there and gave zero below about `2^-26 s`. The hidden value takes both bounds
-scaled by `2 log2(e) / s` and puts `beta lb` back in its reciprocal, which
-needs `situ_beta * situ_lb` of at least `2^-119` (about `1.5e-36`): below
-about `2^-119.9` that reciprocal flushes to zero and the hidden value is 0.
-The adapter refuses a smaller product with `ValueError`
+there and gave zero below about `2^-26 s`. For `situ_beta * situ_lb` up to
+about `2^16` this holds down to the smallest BF16 values. Above that, the
+hidden value of the smallest gate and up values loses accuracy. The hidden
+value is 0 where `2 log2(e) |x| / s`, the product of the two scaled bounds,
+or a negative gate's `exp(gate)` rounds to 0 in FP32 (at most `2^-150`),
+which for a hidden value in the BF16 normal range needs `situ_beta * situ_lb`
+above about `2^24`. The hidden value takes both bounds scaled by
+`2 log2(e) / s` and puts `beta lb` back in its reciprocal, which needs
+`situ_beta * situ_lb` of at least `2^-119` (about `1.5e-36`): below about
+`2^-119.9` that reciprocal flushes to zero and the hidden value of tiny gates
+and ups is 0. The adapter refuses a smaller product with `ValueError`
 (`check_situ_parameters`, `SITU_BETA_LB_MIN`).
 
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
