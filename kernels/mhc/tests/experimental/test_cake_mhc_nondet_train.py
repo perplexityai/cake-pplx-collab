@@ -45,8 +45,10 @@ deterministic package or one of its launches with another bit for bit.  This
 module checks:
 
 * every output against the oracle over 32 inputs at the token counts 1 ...
-  32768 (hidden 5120 and 7168 on a representative subset: small, a middle one
-  and large ones where the token-owner grid reaches its per-SM bound), each
+  32768 (hidden 5120 and 7168 on a representative subset: small, a middle one,
+  large ones where the token-owner grid reaches its per-SM bound and token
+  counts at the R200 board's order cells, on that board also both sides of
+  its cell's last band edge at 7168, 131072 / 131073), each
   draw's backward launched REPEATS times, alternating the default workspace
   with fresh outputs and a caller workspace (bytes past the zero prefix 0xFF)
   with NaN-filled outputs, one launch with ``B=None``; the saturated-sigmoid
@@ -177,6 +179,15 @@ T_ACCURACY = (
     32768,
 )
 T_ACCURACY_NEW = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 32768)
+# Judged after T_ACCURACY_NEW at its size, on every device: token counts of the R200 board's (212 SMs) order cells, at
+# 5120 the tile 8001..8064 (at 8064), which keeps the chunk order, both sides of that tile (8000 / 8065) and both
+# sides of the cell's first chunk / slab edge (9280 / 9281), at 7168 both sides of the chunk / slab edge.
+T_ACCURACY_CELL = {5120: (8000, 8064, 8065, 9280, 9281), 7168: (13568, 13569)}
+# Both sides of the slab / chunk edge of that board's cell at 7168, judged on that board alone (the board key
+# R200_CELL_CAP_BOARD; skipped on every other device): the float64 oracle of the judge grows with the token count (at
+# 7168 and 147456 tokens it runs out of the 278.5 GiB of one R200 device).
+T_ACCURACY_CELL_CAP = (131072, 131073)
+R200_CELL_CAP_BOARD = ("sm_107a", 212, 7168)
 # The 19 benchmark token counts of the performance tables.
 T_BENCH = (1024, 1536, 2048, 2304, 2560, 3072, 3584, 4096, 8192, 14928, 15288, 15566, 15590, 16114, 16132, 16164,
            16263, 32768, 65536)  # fmt: skip
@@ -331,13 +342,14 @@ def _require_lpt(hidden: int, order: str = "chunk") -> int:
     return hidden
 
 
-def _hidden_cases(Ts: tuple, new_Ts: tuple) -> list:
-    """``(hidden, T)`` parameters: the token counts ``Ts`` at hidden 4096, ``new_Ts`` at 5120 and 7168 (each case
-    skipped where the architecture has no route of its size)."""
+def _hidden_cases(Ts: tuple, new_Ts: tuple, cell_Ts: dict | None = None) -> list:
+    """``(hidden, T)`` parameters: the token counts ``Ts`` at hidden 4096, ``new_Ts`` at 5120 and 7168 and after them
+    the size's ``cell_Ts`` (where given; each case skipped where the architecture has no route of its size)."""
+    cell_Ts = cell_Ts or {}
     return [
         pytest.param(hidden, T, id=f"H{hidden}-{T}")
         for hidden in HIDDEN_SIZES
-        for T in (Ts if hidden == HIDDEN else new_Ts)
+        for T in (Ts if hidden == HIDDEN else new_Ts + cell_Ts.get(hidden, ()))
     ]
 
 
@@ -654,7 +666,9 @@ def _assert_cancellation_inputs(i: dict, expected: dict, label: str) -> None:
 # Accuracy against the FP64 oracle, judged against the naive tier
 
 
-@pytest.mark.parametrize(("hidden", "T"), _hidden_cases(T_ACCURACY, T_ACCURACY_NEW))
+@pytest.mark.parametrize(
+    ("hidden", "T"), _hidden_cases(T_ACCURACY, T_ACCURACY_NEW, T_ACCURACY_CELL)
+)
 def test_nondeterministic_backward_matches_fp64(
     hidden: int, T: int, record_property
 ) -> None:
@@ -662,6 +676,23 @@ def test_nondeterministic_backward_matches_fp64(
     workspace with fresh outputs and a poisoned caller workspace with NaN outputs, one launch with ``B=None``) judged
     against the naive BF16 tier over 32 inputs; the caller workspace's zero prefix is zero after every launch."""
     _require_hidden(hidden)
+    _judge_nd(
+        lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED
+    )
+
+
+@pytest.mark.parametrize("T", T_ACCURACY_CELL_CAP)
+def test_r200_cell_cap_matches_fp64(T: int, record_property) -> None:
+    """Both sides of the last band edge of the R200 board's (212 SMs) order cell at 7168 (the slab order to 131072
+    tokens, the chunk order above), judged as :func:`test_nondeterministic_backward_matches_fp64` judges each case, on
+    a device whose board key ``(arch, SM count, hidden)`` is exactly :data:`R200_CELL_CAP_BOARD`; skipped on every
+    other device.  Elsewhere both token counts run one order (the slab order on sm_100a and sm_103a, GB300's cell
+    included; the chunk order on the other sm_107a boards), so they are no band edge there, and the judge's float64
+    oracle grows with the token count."""
+    hidden = _require_hidden(7168)
+    board = (_arch(), _sm_count(), hidden)
+    if board != R200_CELL_CAP_BOARD:
+        pytest.skip(f"{board} is not the board {R200_CELL_CAP_BOARD} of the cell")
     _judge_nd(
         lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED
     )
@@ -1028,7 +1059,8 @@ def test_deterministic_algorithms_launch_the_fold(
     deterministic_algorithms, monkeypatch, hidden: int
 ) -> None:
     """The column slab's form follows PyTorch's deterministic algorithms call by call, by launch trace (every FFI
-    entry the route plans call is recorded under its record's name; fresh plan caches).  At 2049 and 16263 tokens,
+    entry the route plans call is recorded under its record's name; fresh plan caches).  At 2049, 16263 and 40960
+    tokens (40960: a "slab" band of the R200 board's cell at every hidden size),
     ``backward_finish`` with the mode off launches its ``bwd_finish`` selection of record -- the token-owner record,
     the atomic fn split and the column slab's record (``bwd_slab_atomic_program``; on an architecture whose
     ``BWD_SLAB_DFN`` form is ``"red"``, SM107, the reduction form ``cake_mhc_train_bwd_slab_red__*``) -- and under
@@ -1064,7 +1096,7 @@ def test_deterministic_algorithms_launch_the_fold(
     monkeypatch.setattr(
         loader, "load", lambda name, record_arch: _Traced(name, load(name, record_arch))
     )
-    for T in (2049, 16263):
+    for T in (2049, 16263, 40960):
         i = _make_inputs(T, hidden=hidden, seed=SEED + 90)
         prep = _forward(i)
         ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device(), hidden=hidden)
@@ -1291,10 +1323,11 @@ def test_policy_prepare_node_runs_its_backward(
 # accumulate
 
 
-@pytest.mark.parametrize(("hidden", "T"), _hidden_cases((1000, 4096), (4096,)))
+@pytest.mark.parametrize(("hidden", "T"), _hidden_cases((1000, 4096), (4096, 40960)))
 def test_accumulate_four_times(hidden: int, T: int, record_property) -> None:
     """Four consecutive ``accumulate=True`` passes on four input sets into caller buffers that start from non-zero
-    values: the returned tensors are the caller's buffers; ``dfn``, ``dscale``, ``dbase`` after the four passes are
+    values (at 5120 and 7168 also at 40960 tokens, a "slab" band of the R200 board's cell at both sizes): the returned
+    tensors are the caller's buffers; ``dfn``, ``dscale``, ``dbase`` after the four passes are
     judged against the naive BF16 tier over 32 draws of the four-fold chain (the oracle: the carried-in values plus
     the four FP64 gradients; the tier: the carried-in values in BF16 plus the four BF16 gradients, added in BF16)."""
     _require_hidden(hidden)

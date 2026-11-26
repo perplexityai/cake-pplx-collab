@@ -107,17 +107,24 @@ records per size under the deterministic suffix ``__h<H>``: the fn split
 ``cake_mhc_train_fn_split_atomic__tv128_t128_dep__h<H>`` (sm_107a: the
 128-thread split of the size, launched as ``_dep`` -- every CTA waits for the
 token-owner pass as its last instruction; no ``_dep1`` form of these sizes is
-built), the column slab ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` (every
-architecture), its reduction form ``cake_mhc_train_bwd_slab_red__dynr__h<H>``
-(sm_107a) and ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` (sm_100a,
-sm_103a; no slab-order form of these sizes is built for sm_107a).  The
+built), the column slab ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` and
+its slab-fastest copy ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` (every
+architecture), and their reduction forms
+``cake_mhc_train_bwd_slab_red__dynr__h<H>`` and
+``cake_mhc_train_bwd_slab_red__dynr_os__h<H>`` (sm_107a).  The
 column slab runs ``dynr`` in the ``"chunk"`` band of
 ``BWD_SLAB_ORDER`` and ``dynr_os`` in the ``"slab"`` band above it (on the
 152-SM board at 7168 in the bands of its cell of ``BWD_SLAB_ORDER_OVERRIDES``:
 ``"slab"`` also on 47 of the 48 token-count segments in 33793..63091 whose
 column-slab chunk count is at least 19; 34817..35264 keeps ``"chunk"``); on
 sm_107a ``BWD_SLAB_ORDER`` names ``"chunk"`` at every token count of these
-sizes, so the size's ``dynr`` form runs alone (its reduction record
+sizes, and only the cells of the 212-SM board in ``BWD_SLAB_ORDER_OVERRIDES``
+name ``"slab"``: at 7168 on 13569..131072 tokens, at 5120 on the token-count
+bands from 8065 up to 262144 whose column-slab chunk count (:func:`k7_chunks`
+at 212 SMs) is at least 21.  There that board runs ``dynr_os__h<H>`` (its
+reduction record ``cake_mhc_train_bwd_slab_red__dynr_os__h<H>``, under
+``torch.use_deterministic_algorithms(True)`` its fold record); everywhere else
+on sm_107a the size's ``dynr`` form runs (its reduction record
 ``cake_mhc_train_bwd_slab_red__dynr__h<H>``, under
 ``torch.use_deterministic_algorithms(True)`` its fold record).
 
@@ -231,8 +238,8 @@ The hidden sizes 5120 and 7168 are the deterministic package's (libraries
 architecture under the same rule as hidden 4096: the deterministic ``__h<H>``
 records but the backward fn split, the column slab and the reduction, and a
 ``bwd_finish`` of the deterministic token-owner records, the atomic fn split
-``__h<H>`` and the column slab ``dynr__h<H>``, (sm_100a, sm_103a)
-``dynr_os__h<H>`` and (sm_107a) the reduction form ``dynr__h<H>`` of the
+``__h<H>`` and the column slab ``dynr__h<H>`` and ``dynr_os__h<H>``, and
+(sm_107a) the reduction forms ``dynr__h<H>`` and ``dynr_os__h<H>`` of the
 ``cake_mhc_train_bwd_slab_red`` records.
 Every rule takes the hidden size as its last argument and reads its tables
 through ``_tab`` as the deterministic registry's do (``H_TABLES`` spells every
@@ -6142,6 +6149,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -6213,6 +6221,81 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": {
             "kind": "program",
             "program": "dynr_os",
+            "rule": "bwd_slab_atomic_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_slab_red__dynr_os__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dY"],
+            ["buffer", "dU"],
+            ["buffer", "dzp"],
+            ["buffer", "fnTp"],
+            ["buffer", "dX"],
+            ["buffer", "tokp"],
+            ["buffer", "dfn"],
+            ["buffer", "param_partial"],
+            ["buffer", "dscale"],
+            ["buffer", "dbase"],
+            ["parameter", "T"],
+            ["parameter", "P"],
+            ["parameter", "rpc"],
+            ["parameter", "chunks"],
+            ["parameter", "accumulate"],
+            ["buffer", "ticket"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k7_chunks",
+            "kind": "slab_chunks",
+            "slabs": 80,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_bwd_slab_red__dynr_os__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_slab_red__dynr_os__h5120",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 228480,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_bwd_slab_red__dynr_os__h5120",
+        "logical": {
+            "P": "parts",
+            "T": "rows",
+            "X": "x_flat",
+            "accumulate": "accumulate",
+            "chunks": "param_rows",
+            "dU": "du",
+            "dX": "dx_flat",
+            "dY": "dy_flat",
+            "dbase": "dbase",
+            "dfn": "dfn",
+            "dscale": "dscale",
+            "dzp": "dzp_rows",
+            "fnTp": "fnTp",
+            "param_partial": "param_partial",
+            "rpc": "rows_per_chunk",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_slab",
+        "select_rule": {
+            "kind": "program",
+            "program": "dynr_os_red",
             "rule": "bwd_slab_atomic_program",
         },
         "workspace_rule": {
@@ -7510,6 +7593,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
+            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "X"],
@@ -7581,6 +7665,81 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": {
             "kind": "program",
             "program": "dynr_os",
+            "rule": "bwd_slab_atomic_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_slab_red__dynr_os__h7168": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dY"],
+            ["buffer", "dU"],
+            ["buffer", "dzp"],
+            ["buffer", "fnTp"],
+            ["buffer", "dX"],
+            ["buffer", "tokp"],
+            ["buffer", "dfn"],
+            ["buffer", "param_partial"],
+            ["buffer", "dscale"],
+            ["buffer", "dbase"],
+            ["parameter", "T"],
+            ["parameter", "P"],
+            ["parameter", "rpc"],
+            ["parameter", "chunks"],
+            ["parameter", "accumulate"],
+            ["buffer", "ticket"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k7_chunks",
+            "kind": "slab_chunks",
+            "slabs": 112,
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_bwd_slab_red__dynr_os__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_slab_red__dynr_os__h7168",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 228480,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_bwd_slab_red__dynr_os__h7168",
+        "logical": {
+            "P": "parts",
+            "T": "rows",
+            "X": "x_flat",
+            "accumulate": "accumulate",
+            "chunks": "param_rows",
+            "dU": "du",
+            "dX": "dx_flat",
+            "dY": "dy_flat",
+            "dbase": "dbase",
+            "dfn": "dfn",
+            "dscale": "dscale",
+            "dzp": "dzp_rows",
+            "fnTp": "fnTp",
+            "param_partial": "param_partial",
+            "rpc": "rows_per_chunk",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_slab",
+        "select_rule": {
+            "kind": "program",
+            "program": "dynr_os_red",
             "rule": "bwd_slab_atomic_program",
         },
         "workspace_rule": {
@@ -10071,19 +10230,17 @@ MODULES: dict[str, dict[str, Any]] = {
 # sm_107a the ``_dep1`` form, whose last CTA alone waits) and the column
 # slab's fold
 # forms (``dynr`` and its slab-fastest copy ``dynr_os``: one per call by
-# ``bwd_slab_atomic_program``; no final-reduction record): both at hidden 4096 on
-# every architecture and at hidden 5120 and 7168 (``__h<H>``) on sm_100a and
-# sm_103a (``dynr__h<H>`` alone on sm_107a).  On sm_107a each fold record is
-# followed by its reduction form (``cake_mhc_train_bwd_slab_red__*``:
+# ``bwd_slab_atomic_program``; no final-reduction record): both at every hidden
+# size (``__h<H>`` at 5120 and 7168) on every architecture.  On sm_107a each
+# fold record is followed by its reduction form (``cake_mhc_train_bwd_slab_red__*``:
 # ``BWD_SLAB_DFN``), which a call with ``accumulation="fp32"`` (the default)
 # selects outside ``torch.use_deterministic_algorithms(True)``.  On
 # sm_107a the ``_os`` copies run only on the boards whose cell of
-# ``BWD_SLAB_ORDER_OVERRIDES`` names ``"slab"`` (212 SMs); its other boards
-# select ``dynr`` / ``dynr_red`` alone.
+# ``BWD_SLAB_ORDER_OVERRIDES`` names ``"slab"`` (212 SMs, at every hidden size);
+# its other boards select ``dynr`` / ``dynr_red`` alone.
 # The launch order is the route order.  A record ships for the architectures of
-# its ``arches`` (the sm_103a-only forms for sm_103a alone, the ``dynr_os__h<H>``
-# column slabs for sm_100a and sm_103a); the device code is folded over those
-# architectures.
+# its ``arches`` (the sm_103a-only forms for sm_103a alone); the device code is
+# folded over those architectures.
 ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_100a": {
         "bwd_finish_h4096": [
@@ -10521,6 +10678,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
             "cake_mhc_train_bwd_slab_fold__dynr__h5120",
             "cake_mhc_train_bwd_slab_red__dynr__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr_os__h5120",
+            "cake_mhc_train_bwd_slab_red__dynr_os__h5120",
         ],
         "bwd_prepare_h5120": [
             "cake_mhc_train_bwd_prepare__t160__h5120",
@@ -10562,6 +10721,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr__h7168",
             "cake_mhc_train_bwd_slab_red__dynr__h7168",
+            "cake_mhc_train_bwd_slab_fold__dynr_os__h7168",
+            "cake_mhc_train_bwd_slab_red__dynr_os__h7168",
         ],
         "bwd_prepare_h7168": [
             "cake_mhc_train_bwd_prepare__t224__h7168",
@@ -10603,6 +10764,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
             "cake_mhc_train_bwd_slab_fold__dynr__h5120",
             "cake_mhc_train_bwd_slab_red__dynr__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr_os__h5120",
+            "cake_mhc_train_bwd_slab_red__dynr_os__h5120",
         ],
         "collapse_backward_h5120": [
             "cake_mhc_train_collapse_bwd__vjpwa_sp4_mb4__h5120",
@@ -11312,8 +11475,8 @@ BWD_SLAB_LPT_HIDDEN = {
 # from 1877 and slower at none, -853..-935 us in sum per run; its slab arm also ran a banded two-size calibration, which
 # picks another geometry at 9 counts, where the slab order under the chunk arm's (0.5, 0.97) reads faster in both runs
 # as well. The 208- and 216-SM boards are not measured, so they keep the chunk order; the 212-SM board's slab order from
-# 1877 tokens is BWD_SLAB_ORDER_OVERRIDES's. At 5120 / 7168 sm_107a has only the chunk-order record dynr__h<H> (no slab
-# order is measured or built there), so its cell is "chunk".
+# 1877 tokens is BWD_SLAB_ORDER_OVERRIDES's. At 5120 / 7168 the entry of sm_107a is "chunk" too: the slab order there
+# runs on the 212-SM board alone, by its cells of BWD_SLAB_ORDER_OVERRIDES.
 # sm_100a (GB200, 152 SMs): at 4096 from 2048 (95 counts) no count is slower in both of 2 runs and only 2670 in one
 # (backward +0.6 us), backward / checkpointed step -1381..-1820 us in sum per run; below it no count is faster in either
 # run (backward +1.7..+1.8 us, checkpointed step -0.4..-0.9 us in sum). At 5120 the slab order is faster at 96 of the
@@ -11352,8 +11515,8 @@ BWD_SLAB_ORDER = {
 # pass the device's, so the selection, the launch grid and the route plans follow it); every other board and a call
 # without an SM count read the tables above. A key names its hidden size: a cell of every size would apply a 4096
 # calibration at 5120 and 7168, where None routes no lpt__h<H> record. The SM count stands for the board: every sm_107a
-# device with 212 SMs reads the cells of ("sm_107a", 212, 4096) below, every sm_103a device with 152 SMs the order cell
-# of ("sm_103a", 152, 7168).
+# device with 212 SMs reads the cells of ("sm_107a", 212, <hidden>) below, every sm_103a device with 152 SMs the order
+# cell of ("sm_103a", 152, 7168).
 # sm_107a with 212 SMs (R200) at hidden 4096, by the package-level A/B of BWD_SLAB_ORDER (2 runs, 16 replay groups x 30
 # replays, each after a 512 MiB L2 flush, backward and checkpointed-step graphs, 103 token counts in 256..65592): the
 # slab arm (the slab order, with (0.5, 0.985) to 33600 tokens, (0.5, 0.98) to 34368 and (0.5, 0.97) above, at every
@@ -11396,11 +11559,167 @@ BWD_SLAB_ORDER = {
 # 56128, is the slab order faster on both graphs; it reads beyond its null controls on one graph alone at 49152, the
 # backward on the second node, and at 47605, the checkpointed step on the first). From 63092 the cell's last band is the
 # table's "slab" band. The 148-SM sm_103a board (B300) is not measured and keeps BWD_SLAB_ORDER.
+# sm_107a with 212 SMs (R200) at hidden 5120 and 7168: order cells alone (BWD_SLAB_LPT_HIDDEN routes no lpt__h<H> record
+# there, so the cells move dynr__h<H> to dynr_os__h<H>: the reduction record dynr_os_red by default, the fold record
+# dynr_os under torch.use_deterministic_algorithms(True), and nothing else). At 7168 the cell runs the slab order on
+# 13569..131072 tokens and the chunk order below and above. At 5120 it runs the slab order on each 64-token tile from
+# 8065 whose column-slab chunk count (k7_chunks at 212 SMs and hidden 5120; constant inside a tile) is at least 21, up
+# to 262144 tokens, and the chunk order on the other tiles and above 262144 tokens: one band per run of tiles of one
+# order. By a package-level A/B of these cells against the chunk order (the package otherwise the same; CUPTI GPU-busy
+# time of eager calls, the median of 8 groups of 32, and of CUDA-graph replays over 12 captures; 4 ABBA rounds per GPU
+# with an in-process null control) on two node classes, HBM at 4752 and at 3186 MHz, the time ratio chunk / slab of the
+# step is 1.0114..1.0212 at 7168 and 16384 tokens, 1.0234..1.0302 at 7168 and 65536 and 1.0060..1.0178 at 5120 and 65536
+# (checkpointed step 1.0060..1.0155, 1.0153..1.0216 and 1.0041..1.0120; every measured run, both classes); under
+# torch.use_deterministic_algorithms(True) (the fold records) every measured row reads faster too. The slower class cuts
+# the cells. On the 3186-MHz class the slab order reads slower on the first tile of chunk count 21 at 5120, 8001..8064
+# (backward 0.9902..0.9974 at 8001 on each of 4 GPUs; step / checkpointed step down to 0.9984 / 0.9986 in graphs), and
+# on the first slab tile at 7168 (backward 0.9971..0.9983 at 13441; step / checkpointed step down to 0.9981 on
+# 13441..13505, eager); it reads 0.9980..1.0012 at 13568 and faster from 13569 (backward 1.0132..1.0256 at 13569). The
+# 4752-MHz class reads both tiles faster (backward 1.0085 at 8001, 1.0109 at 13441). Above 131072 tokens the 7168 cell
+# keeps the chunk order: there the package's accuracy judge (FP64 oracle, 32 draws) runs out of the 278.5 GiB of one
+# device at 147456 tokens, while at 5120 it passes at 196608. The 208- and 216-SM boards are not measured and keep the
+# chunk order at both sizes.
 # Pure literals, outside H_TABLES (as BWD_SLAB_ORDER).
 BWD_SLAB_ORDER_OVERRIDES: dict[
     tuple[str, int, int], tuple[tuple[int | None, str], ...]
 ] = {
     ("sm_107a", 212, 4096): ((1876, "chunk"), (None, "slab")),
+    ("sm_107a", 212, 5120): (
+        (9280, "chunk"),
+        (9408, "slab"),
+        (10880, "chunk"),
+        (11136, "slab"),
+        (11840, "chunk"),
+        (12096, "slab"),
+        (12800, "chunk"),
+        (12992, "slab"),
+        (13312, "chunk"),
+        (13440, "slab"),
+        (14400, "chunk"),
+        (14784, "slab"),
+        (15808, "chunk"),
+        (16128, "slab"),
+        (16640, "chunk"),
+        (16704, "slab"),
+        (17600, "chunk"),
+        (17664, "slab"),
+        (18304, "chunk"),
+        (18816, "slab"),
+        (19968, "chunk"),
+        (20416, "slab"),
+        (20800, "chunk"),
+        (21504, "slab"),
+        (21888, "chunk"),
+        (22272, "slab"),
+        (22464, "chunk"),
+        (22848, "slab"),
+        (24128, "chunk"),
+        (24192, "slab"),
+        (24960, "chunk"),
+        (25536, "slab"),
+        (25792, "chunk"),
+        (25984, "slab"),
+        (26624, "chunk"),
+        (26880, "slab"),
+        (27456, "chunk"),
+        (28224, "slab"),
+        (29120, "chunk"),
+        (29696, "slab"),
+        (30784, "chunk"),
+        (31552, "slab"),
+        (31616, "chunk"),
+        (32256, "slab"),
+        (33280, "chunk"),
+        (33600, "slab"),
+        (34112, "chunk"),
+        (35264, "slab"),
+        (35776, "chunk"),
+        (36288, "slab"),
+        (36608, "chunk"),
+        (37120, "slab"),
+        (37440, "chunk"),
+        (37632, "slab"),
+        (38272, "chunk"),
+        (38976, "slab"),
+        (39936, "chunk"),
+        (41664, "slab"),
+        (42432, "chunk"),
+        (43008, "slab"),
+        (44096, "chunk"),
+        (44544, "slab"),
+        (44928, "chunk"),
+        (45696, "slab"),
+        (45760, "chunk"),
+        (46400, "slab"),
+        (46592, "chunk"),
+        (47040, "slab"),
+        (47424, "chunk"),
+        (48384, "slab"),
+        (49088, "chunk"),
+        (50112, "slab"),
+        (50752, "chunk"),
+        (51072, "slab"),
+        (51584, "chunk"),
+        (52416, "slab"),
+        (53248, "chunk"),
+        (53824, "slab"),
+        (54080, "chunk"),
+        (55680, "slab"),
+        (55744, "chunk"),
+        (56448, "slab"),
+        (56576, "chunk"),
+        (57792, "slab"),
+        (58240, "chunk"),
+        (59392, "slab"),
+        (59904, "chunk"),
+        (60480, "slab"),
+        (60736, "chunk"),
+        (61824, "slab"),
+        (62400, "chunk"),
+        (63168, "slab"),
+        (64064, "chunk"),
+        (67200, "slab"),
+        (67392, "chunk"),
+        (68672, "slab"),
+        (69056, "chunk"),
+        (70528, "slab"),
+        (70720, "chunk"),
+        (71232, "slab"),
+        (71552, "chunk"),
+        (72576, "slab"),
+        (73216, "chunk"),
+        (77952, "slab"),
+        (78208, "chunk"),
+        (79808, "slab"),
+        (79872, "chunk"),
+        (80640, "slab"),
+        (80704, "chunk"),
+        (81984, "slab"),
+        (82368, "chunk"),
+        (83520, "slab"),
+        (84032, "chunk"),
+        (91392, "slab"),
+        (91520, "chunk"),
+        (92800, "slab"),
+        (93184, "chunk"),
+        (96768, "slab"),
+        (97344, "chunk"),
+        (102144, "slab"),
+        (102336, "chunk"),
+        (103936, "slab"),
+        (104000, "chunk"),
+        (106176, "slab"),
+        (106496, "chunk"),
+        (115584, "slab"),
+        (115648, "chunk"),
+        (116928, "slab"),
+        (117312, "chunk"),
+        (126336, "slab"),
+        (126464, "chunk"),
+        (262144, "slab"),
+        (None, "chunk"),
+    ),
+    ("sm_107a", 212, 7168): ((13568, "chunk"), (131072, "slab"), (None, "chunk")),
     ("sm_103a", 152, 7168): (
         (33792, "chunk"),
         (34048, "slab"),
@@ -12698,8 +13017,8 @@ def selected_modules(
     count: on sm_103a at 5120 / 7168, whose route holds the ``dynr__h<H>`` and
     ``dynr_os__h<H>`` records, the rule names one of these at every token
     count, and on sm_107a, whose route holds each fold record beside its
-    reduction record (``dynr`` / ``dynr_red``, at 4096 also ``dynr_os`` /
-    ``dynr_os_red``), it names the reduction form unless ``deterministic_algorithms``
+    reduction record (``dynr`` / ``dynr_red`` and ``dynr_os`` / ``dynr_os_red``
+    at every hidden size), it names the reduction form unless ``deterministic_algorithms``
     and ``dynr_os`` / ``dynr_os_red`` only on the boards whose cell of
     ``BWD_SLAB_ORDER_OVERRIDES`` names ``"slab"``; the fn split of
     ``bwd_finish`` is one record per architecture and hidden size).  A route

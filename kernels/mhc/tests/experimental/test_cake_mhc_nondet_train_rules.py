@@ -37,15 +37,15 @@ deterministic registry's records, routes and record scalars of this package's
   ``cake_mhc_train_bwd_slab_fold__dynr_os`` on all three; at 5120
   and 7168 ``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>`` on sm_100a /
   sm_103a, ``cake_mhc_train_fn_split_atomic__tv128_t128_dep__h<H>`` on sm_107a,
-  ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` on all three and
-  ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` on sm_100a / sm_103a (no
+  ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` and
+  ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` on all three (no
   two-size record, ``lpt`` / ``lpt_os``: no two-size calibration of record); the
   two-word column slab ``cake_mhc_train_bwd_slab_fold__dynr_pair`` (hidden 4096,
   all three; in no route: only ``accumulation="fp32x2"`` selects it, beside the
   copied two-word records of the mapping pass and the token owner); on sm_107a
   the reduction forms of the column slab (``BWD_SLAB_DFN``):
-  ``cake_mhc_train_bwd_slab_red__dynr``, ``__dynr_os``, ``__dynr__h5120`` and
-  ``__dynr__h7168``, each its fold record without the slots, the arrival counts
+  ``cake_mhc_train_bwd_slab_red__dynr``, ``__dynr_os``, ``__dynr__h<H>`` and
+  ``__dynr_os__h<H>``, each its fold record without the slots, the arrival counts
   and ``prow``, under its own name and program key (``<program>_red``).  Their
   records keep the launch, grid and roles of the deterministic records they
   replace (the fn splits with the static PDL attribute: they follow the
@@ -61,8 +61,7 @@ deterministic registry's records, routes and record scalars of this package's
   forms inside ``BWD_ROW_BANDS``, the run-time-count record at another Sinkhorn
   count), the atomic fn split of the architecture and size, the column slab's
   forms (one per call by ``bwd_slab_atomic_program``: ``dynr`` and
-  ``dynr_os`` at hidden 4096 on every architecture and at 5120 and 7168 on
-  sm_100a and sm_103a, ``dynr`` at 5120 and 7168 on sm_107a; on sm_107a each
+  ``dynr_os`` at every hidden size on every architecture; on sm_107a each
   fold record followed by its reduction form, which a call with the default
   ``accumulation="fp32"`` selects outside
   ``torch.use_deterministic_algorithms(True)``), no final
@@ -93,11 +92,13 @@ deterministic registry's records, routes and record scalars of this package's
   ``lpt_chunks``, ``bwd_slab_order``, ``bwd_slab_atomic_program``,
   ``slab_plan``): its geometries, its token-count bands (the unit order of
   record, and the banded calibration form under a test table), its board cells
-  (those of record: the order cells of sm_107a with 212 SMs at 4096 and of sm_103a
-  with 152 SMs at 7168, whose ``"slab"`` bands below 63092 hold column-slab
-  chunk counts of at least 19; the exact key ``(arch, SM count, hidden)`` under
-  a test table; every other board, the 212-SM board to 1876 tokens and the
-  152-SM board outside those ``"slab"`` bands, selecting and planning as
+  (those of record: the order cells of sm_107a with 212 SMs at every hidden
+  size, whose ``"slab"`` bands at 5120 hold column-slab chunk counts of at least
+  21, and of sm_103a with 152 SMs at 7168, whose ``"slab"`` bands below 63092
+  hold column-slab chunk counts of at least 19; the exact key ``(arch, SM count,
+  hidden)`` under a test table; every other board, the 212-SM board outside the
+  ``"slab"`` bands of its cells and the 152-SM board outside those of its cell,
+  selecting and planning as
   without them, also in the route plans) and
   its selection at every hidden size (no table of record calibrates an
   architecture, so every call runs the one-size chunks of ``k7_chunks``, the
@@ -200,8 +201,8 @@ OWN = {
     # (lpt, lpt_os) ships: no two-size calibration of record is other than None (LPT_OF_RECORD), so no table can name
     # one.
     "cake_mhc_train_bwd_slab_fold__dynr_os": ("sm_100a", "sm_103a", "sm_107a"),
-    "cake_mhc_train_bwd_slab_fold__dynr_os__h5120": ("sm_100a", "sm_103a"),
-    "cake_mhc_train_bwd_slab_fold__dynr_os__h7168": ("sm_100a", "sm_103a"),
+    "cake_mhc_train_bwd_slab_fold__dynr_os__h5120": ("sm_100a", "sm_103a", "sm_107a"),
+    "cake_mhc_train_bwd_slab_fold__dynr_os__h7168": ("sm_100a", "sm_103a", "sm_107a"),
     # The reduction forms of the column slab (BWD_SLAB_DFN "red": dfn added with relaxed reductions, no slots, no
     # arrival counts, no prow), on the architectures whose form of record is "red" (DFN_FORM): copies of the fold
     # records dynr / dynr_os of each size the architecture routes under their own names and program keys
@@ -210,6 +211,8 @@ OWN = {
     "cake_mhc_train_bwd_slab_red__dynr_os": ("sm_107a",),
     "cake_mhc_train_bwd_slab_red__dynr__h5120": ("sm_107a",),
     "cake_mhc_train_bwd_slab_red__dynr__h7168": ("sm_107a",),
+    "cake_mhc_train_bwd_slab_red__dynr_os__h5120": ("sm_107a",),
+    "cake_mhc_train_bwd_slab_red__dynr_os__h7168": ("sm_107a",),
 }
 # The (architecture, hidden size) pairs whose atomic fn split is the "dep1" form (only the last CTA waits for the
 # token-owner pass); the "dep" form elsewhere.
@@ -254,7 +257,7 @@ ZERO_PREFIX_BYTES = 768
 # The column slab's tables of record: the unit order per hidden size and architecture (BWD_SLAB_ORDER: on sm_100a
 # "chunk" to 2047 / 5108 tokens at hidden 4096 / 7168 and "slab" above, "slab" at every token count at 5120; on
 # sm_103a "chunk" to 13278 / 28825 / 63091 tokens at hidden 4096 / 5120 / 7168 and "slab" above; "chunk" at every size
-# on sm_107a, which routes neither 5120 nor 7168) and the two-size calibration at hidden 4096 (BWD_SLAB_LPT: one
+# on sm_107a, whose board cells hold its slab order) and the two-size calibration at hidden 4096 (BWD_SLAB_LPT: one
 # (o_tiles, keep) or None per architecture: None on every one, so every call runs the deterministic one-size chunks of
 # k7_chunks and dfn's per-chunk sums are the deterministic column slab's); the board cells of record replace both on
 # their board alone (below).
@@ -278,12 +281,151 @@ ORDER = {
 LPT_OF_RECORD = {"sm_100a": None, "sm_103a": None, "sm_107a": None}
 # The board cells of record (BWD_SLAB_ORDER_OVERRIDES / BWD_SLAB_LPT_OVERRIDES, keyed (arch, SM count, hidden)): R200
 # with 212 SMs at hidden 4096 keeps the chunk order to 1876 tokens, then runs the slab order (no calibration cell: the
-# two-size schedule is calibrated nowhere); GB300 (sm_103a with 152 SMs) at hidden 7168 has an
+# two-size schedule is calibrated nowhere), at 7168 the slab order on 13569..131072 tokens and the chunk order below and
+# above, at 5120 the slab order on the 64-token tiles from 8065 up to 262144 tokens whose column-slab chunk count is at
+# least 21 (R200_CELL_MIN_P; R200_CELL_KEEP_5120 keeps the chunk order) and the chunk order elsewhere (order cells
+# alone: no lpt record of these sizes there); GB300 (sm_103a with 152 SMs) at hidden 7168 has an
 # order cell alone (no lpt record of the size there): the chunk order to 33792 tokens, then the slab order on 47 of the
 # 48 token-count segments in 33793..63091 whose column-slab chunk count is at least 19 (GB300_CELL_MIN_P; GB300_CELL_TIE
 # keeps the chunk order), its last band from 62465 running into the table's slab band from 63092.
 ORDER_OVERRIDES = {
     ("sm_107a", 212, 4096): ((1876, "chunk"), (None, "slab")),
+    ("sm_107a", 212, 5120): (
+        (9280, "chunk"),
+        (9408, "slab"),
+        (10880, "chunk"),
+        (11136, "slab"),
+        (11840, "chunk"),
+        (12096, "slab"),
+        (12800, "chunk"),
+        (12992, "slab"),
+        (13312, "chunk"),
+        (13440, "slab"),
+        (14400, "chunk"),
+        (14784, "slab"),
+        (15808, "chunk"),
+        (16128, "slab"),
+        (16640, "chunk"),
+        (16704, "slab"),
+        (17600, "chunk"),
+        (17664, "slab"),
+        (18304, "chunk"),
+        (18816, "slab"),
+        (19968, "chunk"),
+        (20416, "slab"),
+        (20800, "chunk"),
+        (21504, "slab"),
+        (21888, "chunk"),
+        (22272, "slab"),
+        (22464, "chunk"),
+        (22848, "slab"),
+        (24128, "chunk"),
+        (24192, "slab"),
+        (24960, "chunk"),
+        (25536, "slab"),
+        (25792, "chunk"),
+        (25984, "slab"),
+        (26624, "chunk"),
+        (26880, "slab"),
+        (27456, "chunk"),
+        (28224, "slab"),
+        (29120, "chunk"),
+        (29696, "slab"),
+        (30784, "chunk"),
+        (31552, "slab"),
+        (31616, "chunk"),
+        (32256, "slab"),
+        (33280, "chunk"),
+        (33600, "slab"),
+        (34112, "chunk"),
+        (35264, "slab"),
+        (35776, "chunk"),
+        (36288, "slab"),
+        (36608, "chunk"),
+        (37120, "slab"),
+        (37440, "chunk"),
+        (37632, "slab"),
+        (38272, "chunk"),
+        (38976, "slab"),
+        (39936, "chunk"),
+        (41664, "slab"),
+        (42432, "chunk"),
+        (43008, "slab"),
+        (44096, "chunk"),
+        (44544, "slab"),
+        (44928, "chunk"),
+        (45696, "slab"),
+        (45760, "chunk"),
+        (46400, "slab"),
+        (46592, "chunk"),
+        (47040, "slab"),
+        (47424, "chunk"),
+        (48384, "slab"),
+        (49088, "chunk"),
+        (50112, "slab"),
+        (50752, "chunk"),
+        (51072, "slab"),
+        (51584, "chunk"),
+        (52416, "slab"),
+        (53248, "chunk"),
+        (53824, "slab"),
+        (54080, "chunk"),
+        (55680, "slab"),
+        (55744, "chunk"),
+        (56448, "slab"),
+        (56576, "chunk"),
+        (57792, "slab"),
+        (58240, "chunk"),
+        (59392, "slab"),
+        (59904, "chunk"),
+        (60480, "slab"),
+        (60736, "chunk"),
+        (61824, "slab"),
+        (62400, "chunk"),
+        (63168, "slab"),
+        (64064, "chunk"),
+        (67200, "slab"),
+        (67392, "chunk"),
+        (68672, "slab"),
+        (69056, "chunk"),
+        (70528, "slab"),
+        (70720, "chunk"),
+        (71232, "slab"),
+        (71552, "chunk"),
+        (72576, "slab"),
+        (73216, "chunk"),
+        (77952, "slab"),
+        (78208, "chunk"),
+        (79808, "slab"),
+        (79872, "chunk"),
+        (80640, "slab"),
+        (80704, "chunk"),
+        (81984, "slab"),
+        (82368, "chunk"),
+        (83520, "slab"),
+        (84032, "chunk"),
+        (91392, "slab"),
+        (91520, "chunk"),
+        (92800, "slab"),
+        (93184, "chunk"),
+        (96768, "slab"),
+        (97344, "chunk"),
+        (102144, "slab"),
+        (102336, "chunk"),
+        (103936, "slab"),
+        (104000, "chunk"),
+        (106176, "slab"),
+        (106496, "chunk"),
+        (115584, "slab"),
+        (115648, "chunk"),
+        (116928, "slab"),
+        (117312, "chunk"),
+        (126336, "slab"),
+        (126464, "chunk"),
+        (262144, "slab"),
+        (None, "chunk"),
+    ),
+    ("sm_107a", 212, 7168): ((13568, "chunk"), (131072, "slab"), (None, "chunk")),
     ("sm_103a", 152, 7168): (
         (33792, "chunk"),
         (34048, "slab"),
@@ -358,9 +500,25 @@ GB300_CELL_SLAB_T = 18355
 GB300_CELL_MIN_P = 19
 # The one segment of chunk count 19 in GB300_CELL_SPAN that keeps the chunk order (it read a tie on the second node).
 GB300_CELL_TIE = (34817, 35264)
+# The R200 order cells at 5120 and 7168 (sm_107a with 212 SMs; BWD_SLAB_ORDER of sm_107a names "chunk" at every token
+# count of these sizes): at 7168 the chunk order to R200_CELL_EDGE_7168 tokens, the slab order to R200_CELL_SPAN_7168
+# and the chunk order above; at 5120 the slab order exactly on the token counts up to R200_CELL_SPAN_5120 whose
+# column-slab chunk count (k7_chunks at 212 SMs and hidden 5120) is at least R200_CELL_MIN_P but those of
+# R200_CELL_KEEP_5120, one band per run of 64-token tiles of one order, and the chunk order above. R200_CELL_SLAB_BOTH
+# is a token count in a "slab" band of both cells.
+R200_CELL_5120 = ("sm_107a", 212, 5120)
+R200_CELL_7168 = ("sm_107a", 212, 7168)
+R200_CELL_EDGE_7168 = 13568
+R200_CELL_SPAN_7168 = 131072
+R200_CELL_SPAN_5120 = 262144
+R200_CELL_MIN_P = 21
+# The first run of 64-token tiles of chunk count R200_CELL_MIN_P at 5120, which keeps the chunk order (the slab order
+# read slower there on one of the two node classes measured).
+R200_CELL_KEEP_5120 = (8001, 8064)
+R200_CELL_SLAB_BOTH = 40960
 # The boards the column slab's board cells are checked on: the boards of record (the deterministic package's
 # RULES_BOARDS, shared with it: 208 and 216 SMs on sm_107a; GB300, the board of the order cell at 7168, is one) and
-# R200 with 212 SMs, the board of the cells of record at 4096.
+# R200 with 212 SMs, the board of the cells of record at every hidden size.
 SLAB_BOARDS = (*det.RULES_BOARDS, ("sm_107a", 212))
 # Both sides of every band edge of the board cells of record, and of the table band the GB300 cell runs into.
 OVERRIDE_EDGES = tuple(
@@ -1013,7 +1171,7 @@ def test_own_records_keep_the_deterministic_launch() -> None:
                 "select_rule": {**reference["select_rule"], "program": program},
             }, name
             assert record["arg_plan"][-5] == ["buffer", "ticket"], name
-    assert reds == len([n for n in OWN if "_bwd_slab_red__" in n]) == 4, reds
+    assert reds == len([n for n in OWN if "_bwd_slab_red__" in n]) == 6, reds
 
 
 @pytest.mark.cpu_only
@@ -2993,6 +3151,55 @@ def test_gb300_cell_follows_the_chunk_count() -> None:
     assert slab_t == GB300_CELL_SLAB_T, slab_t
 
 
+@pytest.mark.cpu_only
+def test_r200_cells_follow_the_chunk_count() -> None:
+    """The shipped R200 order cells at 5120 and 7168 (``BWD_SLAB_ORDER_OVERRIDES`` of sm_107a with 212 SMs) hold the
+    rule they were cut by.  The size's ``BWD_SLAB_ORDER`` entry of sm_107a is ``"chunk"`` at every token count, so the
+    cells' ``"slab"`` bands are where they change the column slab, and :data:`R200_CELL_SLAB_BOTH` lies in one at both
+    sizes.  At 7168 the cell is the chunk order to :data:`R200_CELL_EDGE_7168` tokens, the slab order to
+    :data:`R200_CELL_SPAN_7168` and the chunk order above.  At 5120, over every token count to
+    :data:`R200_CELL_SPAN_5120` and one above: each band edge is a 64-token tile edge, each token count in a
+    ``"slab"`` band has a column-slab chunk count ``P`` (``k7_chunks`` at 212 SMs and hidden 5120: the chunks
+    ``slab_plan`` and the launch grid read) of at least :data:`R200_CELL_MIN_P`, each one in a ``"chunk"`` band up to
+    the span's end has less but those of :data:`R200_CELL_KEEP_5120` (the whole first run of such chunk counts), and
+    the cell names the chunk order above the span -- a change of ``k7_chunks`` or of the cell that moves the chunk
+    count under the bands fails here, not on a device."""
+    for key in (R200_CELL_5120, R200_CELL_7168):
+        arch, sm, hidden = key
+        assert nd.BWD_SLAB_ORDER[hidden][arch] == ((None, "chunk"),), key
+        cell = nd.BWD_SLAB_ORDER_OVERRIDES[key]
+        assert _band_at(R200_CELL_SLAB_BOTH, cell) == "slab", key
+    assert nd.BWD_SLAB_ORDER_OVERRIDES[R200_CELL_7168] == (
+        (R200_CELL_EDGE_7168, "chunk"),
+        (R200_CELL_SPAN_7168, "slab"),
+        (None, "chunk"),
+    )
+    arch, sm, hidden = R200_CELL_5120
+    cell = nd.BWD_SLAB_ORDER_OVERRIDES[R200_CELL_5120]
+    edges = [t_upper for t_upper, _order in cell[:-1]]
+    assert edges == sorted(set(edges)) and all(t % 64 == 0 for t in edges), edges
+    assert edges[-1] <= R200_CELL_SPAN_5120 and cell[-1] == (None, "chunk"), cell
+    keep_lo, keep_hi = R200_CELL_KEEP_5120
+    slab_t, chunk_t, kept_t, previous = 0, 0, 0, 0
+    for t_upper, order in cell:
+        upper = R200_CELL_SPAN_5120 + 1 if t_upper is None else t_upper
+        for T in range(previous + 1, upper + 1):
+            P = nd.k7_chunks(T, sm, hidden=hidden)[0]
+            kept = keep_lo <= T <= keep_hi
+            if order == "slab":
+                assert P >= R200_CELL_MIN_P and not kept, (T, P, t_upper)
+                slab_t += 1
+            elif kept:
+                assert P >= R200_CELL_MIN_P, (T, P, t_upper)
+                kept_t += 1
+            elif T <= R200_CELL_SPAN_5120:
+                assert P < R200_CELL_MIN_P, (T, P, t_upper)
+                chunk_t += 1
+        previous = upper
+    assert slab_t and chunk_t and kept_t == keep_hi - keep_lo + 1, (slab_t, kept_t)
+    assert slab_t + chunk_t + kept_t == R200_CELL_SPAN_5120, (slab_t, chunk_t, kept_t)
+
+
 # A test table for the lookup of the board cells, which reads the cells of the exact key (arch, SM count, hidden
 # size) alone: the cells of sm_107a with 212 SMs at 4096 differ from the tables at every token count of
 # SLAB_PRECEDENCE_T, and the keys with None (no SM count; every hidden size) match no call.
@@ -3098,8 +3305,8 @@ def test_slab_override_lookup(monkeypatch) -> None:
 def _cell_changes(arch: str, sm: int, hidden: int, T: int) -> bool:
     """Whether the board cells of record change the column slab of the board ``(arch, sm)`` at ``hidden`` and ``T``:
     where the board's order cell names another order than the size's ``BWD_SLAB_ORDER`` -- on R200 with 212 SMs at
-    4096 from 1877 tokens (its calibration cell differs from the table there alone), on GB300 at 7168 in the cell's
-    ``"slab"`` bands in :data:`GB300_CELL_SPAN`."""
+    4096 from 1877 tokens (its calibration cell differs from the table there alone), at 5120 and 7168 in the cells'
+    ``"slab"`` bands, on GB300 at 7168 in the cell's ``"slab"`` bands in :data:`GB300_CELL_SPAN`."""
     key = (arch, sm, hidden)
     return key in ORDER_OVERRIDES and _band_at(T, ORDER_OVERRIDES[key]) != _band_at(
         T, ORDER[hidden][arch]
@@ -3117,11 +3324,12 @@ def test_slab_overrides_change_only_their_board(
     runs into (:data:`OVERRIDE_EDGES`: 33792 / 33793 and 63091 / 63092 among them), ``bwd_slab_atomic_program``,
     ``slab_plan``, the ``bwd_finish`` selection and its column-slab launch's per-call PDL argument on every path equal
     their values with both tables of board cells emptied -- except on sm_107a with 212 SMs at hidden 4096 from 1877
-    tokens and on sm_103a with 152 SMs at hidden 7168 in the ``"slab"`` bands of its cell up to 63091
-    (:func:`_cell_changes`).  There the program is the ``_os`` copy of a form where the tables name a chunk-order
-    form, the selection holds its record as its one column slab after the same token owner and fn split, and the PDL
-    argument is unchanged.  On every board each value is also its value with the board's cells (where it has them)
-    written into ``BWD_SLAB_ORDER`` / ``BWD_SLAB_LPT`` instead: a cell is the table entry of its board."""
+    tokens and at 5120 and 7168 in the ``"slab"`` bands of its cells, and on sm_103a with 152 SMs at hidden 7168 in
+    the ``"slab"`` bands of its cell up to 63091 (:func:`_cell_changes`).  There the program is the ``_os`` copy of a
+    form where the tables name a chunk-order form, the selection holds its record as its one column slab after the
+    same token owner and fn split, and the PDL argument is unchanged.  On every board each value is also its value
+    with the board's cells (where it has them) written into ``BWD_SLAB_ORDER`` / ``BWD_SLAB_LPT`` instead: a cell is
+    the table entry of its board."""
     token_counts = sorted({*T_VALUES, *LPT_SWEEP, *OVERRIDE_EDGES})
 
     def column_slab() -> dict:
@@ -3176,7 +3384,15 @@ def test_slab_overrides_change_only_their_board(
         changed.add((hidden, T))
     assert bool(changed) == bool(own), (own, changed)
     if (arch, sm) == ("sm_107a", 212):
-        assert changed == {(HIDDEN, T) for T in token_counts if T > 1876}, changed
+        assert changed == (
+            {(HIDDEN, T) for T in token_counts if T > 1876}
+            | {
+                (key[2], T)
+                for key in (R200_CELL_5120, R200_CELL_7168)
+                for T in token_counts
+                if _band_at(T, ORDER_OVERRIDES[key]) == "slab"
+            }
+        ), changed
     if (arch, sm) == GB300_CELL[:2]:
         (lo, hi), cell = GB300_CELL_SPAN, ORDER_OVERRIDES[GB300_CELL]
         assert changed == {
@@ -3427,7 +3643,7 @@ def test_slab_dfn_form_of_record(monkeypatch) -> None:
     red_arches = {arch for arch, form in DFN_FORM.items() if form == "red"}
     assert red_arches == {"sm_107a"}
     reds = {name for name in nd.MODULES if name.startswith(RED)}
-    assert reds == {name for name in OWN if name.startswith(RED)} and len(reds) == 4
+    assert reds == {name for name in OWN if name.startswith(RED)} and len(reds) == 6
     for name in reds:
         assert set(nd.MODULES[name]["arches"]) == red_arches, name
     pairs = 0
@@ -3440,8 +3656,8 @@ def test_slab_dfn_form_of_record(monkeypatch) -> None:
                     pairs += 1
                 elif name.startswith(SLAB) and arch in red_arches:
                     assert route[i + 1] == name.replace(SLAB, RED, 1), (arch, key, name)
-    # sm_107a: bwd_finish at 4096 (dynr, dynr_os), 5120, 7168; bwd_finish_handoff at 5120
-    assert pairs == 5, pairs
+    # sm_107a: bwd_finish at 4096, 5120 and 7168 and bwd_finish_handoff at 5120, each (dynr, dynr_os)
+    assert pairs == 8, pairs
     for form in ("fold", "fifo"):
         with pytest.MonkeyPatch.context() as patch:
             patch.setitem(nd.BWD_SLAB_DFN, "sm_107a", form)
@@ -3551,7 +3767,8 @@ def test_route_plans_key_on_the_deterministic_algorithms(
     monkeypatch, arch: str, sm: int
 ) -> None:
     """The route plans of the backward (the device's SM count, architecture and module loader replaced: nothing is
-    built or launched) at every hidden size of the board's architecture, at 1, 1877, 2049 and 16263 tokens: the plan
+    built or launched) at every hidden size of the board's architecture, at 1, 1877, 2049, 16263 and
+    :data:`R200_CELL_SLAB_BOTH` tokens (on R200 with 212 SMs a ``"slab"`` band of each of its cells): the plan
     of a call under ``torch.use_deterministic_algorithms(True)`` launches the fold record of the column slab, which
     binds ``prow`` (and the workspace's ``dfn_slot`` / ``slab_cnt``) to the rows the token owner writes
     (:func:`_fold_plan`: ``prow`` 1 and ``param_rows`` the group count inside ``BWD_ROW_BANDS``, else ``prow`` 0 and
@@ -3559,7 +3776,7 @@ def test_route_plans_key_on_the_deterministic_algorithms(
     record (on sm_107a the reduction form, which binds neither), and every other launch binds the same values in both.
     The plans live side by side: ``_FAST_ROUTES`` and ``_PLANS`` hold one entry per flag, and asking again returns the
     cached plan of each flag."""
-    token_counts = (1, 1877, 2049, 16263)
+    token_counts = (1, 1877, 2049, 16263, R200_CELL_SLAB_BOTH)
     for hidden in _arch_sizes(arch):
         default = _route_plan_launches(monkeypatch, arch, hidden, sm, token_counts)
         under = _route_plan_launches(monkeypatch, arch, hidden, sm, token_counts, True)
