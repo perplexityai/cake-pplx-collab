@@ -926,7 +926,9 @@ MODULES: dict[str, dict[str, Any]] = {
     # "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz": 0, "split_gate": 1,
     # "split_layout_prefetch": 1, "store_width": 128, "sum_pairs": 0,
     # "threads": 128, "w_late": 0}); fwd_pipe's grid rule;
-    # PROJECTION_FORWARD_BANDS and SLICED_FORWARD_BANDS give it its rows.
+    # PROJECTION_FORWARD_BANDS, SLICED_FORWARD_BANDS, SLICED_HEADS_FORWARD_BANDS,
+    # SLICED_FEW_FORWARD_BANDS, BCASTH_FORWARD_BANDS, MIXED_FORWARD_BANDS and
+    # PADH_FORWARD_BANDS give it its rows.
     "cake_rmsnorm_silu_gate_train_f99efa1083ef8ff2189a": {
         "arches": [
             "sm_100a",
@@ -997,7 +999,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # "packed_rows": 0, "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz":
     # 1, "split_gate": 1, "split_layout_prefetch": 1, "store_width": 128,
     # "sum_pairs": 1, "threads": 128, "w_late": 1}); the grid rule of a program
-    # of rows of any layout; PROJECTION_FORWARD_BANDS gives it its rows.
+    # of rows of any layout; PROJECTION_FORWARD_BANDS, SLICED_HEADS_FORWARD_BANDS,
+    # BCASTH_FORWARD_BANDS and MIXED_FORWARD_BANDS give it its rows.
     "cake_rmsnorm_silu_gate_train_0a7f917d9c7922f9c2d2": {
         "arches": [
             "sm_107a",
