@@ -2968,8 +2968,13 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 # ``gemm_logits_mcnt``     the logits GEMMs (with / without the statistics)
 # ``gemm_logits_nostats_mcnt``  whose valid-row bound is read from device
 #                          memory: chunk 0's GEMM of the hidden valid-row count
-#                          path, its stores bounded by min(count, M) while M is
-#                          the buffer extent min(chunk, T).
+#                          path at M = the buffer extent min(chunk, T); only the
+#                          work items of the 256-row pairs below n = min(count,
+#                          M) run (a later item: no K step, no store).  The
+#                          rows below n get z and the statistics; the z rows
+#                          from n to the end of its 256-row pair hold +0 on
+#                          sm_103a / sm_107a (TMA store) and are not written on
+#                          sm_100a; the later rows are not written.
 # ``gemm_logits_lbl_tau``  the temperature forms of the log-probability entry
 # ``gemm_logits_dz_tau``   (a per-token FP32 ``temperature[row0 + r]``, the
 # ``gemm_logits_mcnt_tau`` compact row like ``labels`` / ``lse``): each BF16-

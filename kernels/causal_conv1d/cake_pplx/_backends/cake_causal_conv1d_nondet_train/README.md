@@ -38,7 +38,10 @@ sum is unordered.
   forward delivers the history rows into the history pool `hist`
   (`[n_hist_rows, C]` BF16, saved for the backward). The backward delivers
   the derivatives of the first tokens as `dpre_tail` (`[n_tail_rows, C]`
-  FP32). With one rank no collective is issued.
+  FP32). With one rank no collective is issued. The single call sends its
+  history rows as a slice of `x_local` when they are consecutive rows, and
+  outside a CUDA Graph capture its forward exchange is a waiting collective
+  (`async_op=False`).
 - **Devices:** sm_100a (B200 / GB200), sm_103a (B300 / GB300) and sm_107a
   (R200). Another device raises `RuntimeError`.
 - **Libraries:** load prebuilt from `aot/` when present; otherwise they are
@@ -135,9 +138,10 @@ The order depends on the entry and the architecture:
 - Multi call on sm_100a and sm_103a: every tensor runs both programs after the wait.
 
 The sets are the deterministic package's (`kcp.FWD_MAIN_ARCHS`, `kcp.MULTI_FWD_MAIN_ARCHS`, `kcp.FWD_OVERLAP_ARCHS`
-and `kcp.MULTI_FWD_OVERLAP_ARCHS`), measured there against the one-launch forward. The exchange, its wait and the
-collectives are the same in every form. Every forward launch is on the caller's stream. With one rank no collective
-is issued.
+and `kcp.MULTI_FWD_OVERLAP_ARCHS`), measured there against the one-launch forward. The exchanged rows and the
+collectives are the same in every form; outside a CUDA Graph capture the single call issues its exchange as a waiting
+collective (`async_op=False`), so it has no work to wait. Every forward launch is on the caller's stream. With one
+rank no collective is issued.
 
 Outside `kcp.FWD_MAIN_ARCHS` (for the multi entry, `kcp.MULTI_FWD_MAIN_ARCHS`) the main program would be the
 `kcp_fwd` program: after the wait, the one-launch forward with the context's history table and no history-row

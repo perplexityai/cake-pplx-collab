@@ -47,12 +47,14 @@ _PACKAGE_NAMES = (
     "MOK_PRECISIONS",
     "ROUTER_WEIGHT_GRADIENTS",
     "ROUTER_WEIGHT_POSITIONS",
+    "SHAPE_COMM_SMS",
     "SHARED_EXPERT_MODES",
     "SOURCE_SPLIT_COMM_SMS",
     "SOURCE_SPLIT_THRESHOLD",
     "resolve_comm_sms",
     "resolve_imbalance_comm_sms",
     "resolve_imbalance_threshold",
+    "resolve_shape_comm_sms",
     "resolve_source_split_comm_sms",
 )
 
@@ -228,11 +230,18 @@ def create_mok_bf16_workspace(
     Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
     factory split 40 / 40 where there is no row, whatever ``precision`` the
     workspace was created with (``MoKConfig.bf16_comm_sms`` /
-    ``mxfp8_comm_sms``; the returned ``fwd_num_comm_sms`` /
-    ``bwd_num_comm_sms`` hold the row of ``precision``; on such a config a
-    ``dataclasses.replace`` of ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` alone
-    changes no launch: create the workspace with integers, or replace
-    ``bf16_comm_sms`` / ``mxfp8_comm_sms`` too). A pair of integers sets the
+    ``mxfp8_comm_sms``), except a forward or backward launch whose shape (the
+    workspace's ``hidden_size`` and ``topk``, the routed intermediate width)
+    has a measured row of the device, routed precision and group size, which
+    takes that row's count (:func:`resolve_shape_comm_sms`,
+    :data:`SHAPE_COMM_SMS`, ``MoKConfig.shape_comm_sms``; BF16 H 4096 / I 1024
+    / top-k 10 at EP8, the 512-expert layout (8, 64): GB300 56 / 48; a
+    context recompute launch keeps the row above). The returned
+    ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` hold the row of ``precision``;
+    on such a config a ``dataclasses.replace`` of ``fwd_num_comm_sms`` /
+    ``bwd_num_comm_sms`` alone changes no launch: create the workspace with
+    integers, or replace ``bf16_comm_sms`` / ``mxfp8_comm_sms`` and
+    ``shape_comm_sms`` too. A pair of integers sets the
     fixed split of every launch of both routed precisions; on a device with an
     imbalance row the imbalance split still replaces it under skew unless
     ``imbalance_comm_sms=None``. The split changes time only, never an output

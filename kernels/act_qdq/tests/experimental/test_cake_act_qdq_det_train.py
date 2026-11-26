@@ -146,11 +146,11 @@ LARGE_RULE = {
 # place: a range bound above it (the last of the wide and the large ranges) is checked by the registry tests only.
 BOUNDARY_LIMIT = 33554432
 # The interleaved-domain program of each route, on sm_107a only and out of place only (``cake_jit.DOMAIN_ROUTES``):
-# its tile per format (128 threads, 8 vectors each for FP4 and 4 for MXFP4 and MXFP8) and its CTAs per SM; its
+# its tile per format (128 threads, 8 vectors each) and its CTAs per SM; its
 # inclusive n_vecs range, from the first size it runs (per route) to the last n_vecs whose tile count
 # (n_vecs + tile - 1) fits in signed 32 bits; its grid rule (one tile an item); and its kernel parameters besides the
 # grid.
-DOMAIN_TILE = {"fp4_e4m3_g16": 1024, "mxfp4_e8m0_g32": 512, "mxfp8_e8m0_g32": 512}
+DOMAIN_TILE = {"fp4_e4m3_g16": 1024, "mxfp4_e8m0_g32": 1024, "mxfp8_e8m0_g32": 1024}
 DOMAIN_CTAS_PER_SM = {"fp4_e4m3_g16": 7, "mxfp4_e8m0_g32": 8, "mxfp8_e8m0_g32": 8}
 DOMAIN_LAST = {fmt: 2**31 - tile for fmt, tile in DOMAIN_TILE.items()}
 DOMAIN_FIRST = {kind: 8388608 for kind in (f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))}

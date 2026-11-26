@@ -21,8 +21,9 @@ and the FP32 route-weight gradient ``d_weight = sum dh a``, intermediate width 2
 Without a device: the registry (per stage a small-R program on every architecture, a fine program with one window
 ``[0, hi]`` of rows per SM on every architecture, for ``fwd`` and ``bwd`` a large-R program with its windows of rows
 per SM on some and for ``bwd`` a relay program with its windows; the unweighted backward ``bwd_unweighted`` with no
-weight, weight flag or weight gradient; each record delivered for its architectures and for no other, the launch facts,
-the argument plans), the route of a launch by its rows per SM (1 row, one row below, at and above each edge of the
+weight, weight flag or weight gradient; on SM107 the locality-domain twin of ``fwd``, which the route by rows never
+runs; each record delivered for its architectures and for no other, the launch facts, the argument
+plans), the route of a launch by its rows per SM (1 row, one row below, at and above each edge of the
 windows and the most rows, on the SM counts of the delivered GPUs: the fine, the small-R, the large-R and the relay
 program each running the row counts its windows hold, and the route of 0.1.9's code for the same records on an
 architecture without a relay record; with synthetic windows of the large-R and the relay record of ``bwd``, the same;
@@ -148,10 +149,13 @@ ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"
 STAGES = ("fwd", "bwd", "bwd_unweighted")
 # The stages with a large-R program on some architecture (``bwd_unweighted`` has none).
 WINDOWED = ("fwd", "bwd")
-# Each stage's small-R role (the stage itself), its large-R role, its fine role and its relay role.
+# Each stage's small-R role (the stage itself), its large-R role, its fine role, its relay role and its
+# locality-domain role (a twin that ``locality="domain"`` runs, never the row-count route; see
+# ``test_cake_clamped_swiglu_det_train_locality.py``).
 LARGE = "_large"
 FINE = "_fine"
 RELAY = "_relay"
+DOMAIN = "_domain"
 # The suffixes of a stage's windowed roles, whose programs run in their windows above the fine window.
 WINDOWED_ROLES = (LARGE, RELAY)
 ROLES = (
@@ -159,14 +163,17 @@ ROLES = (
     "fwd_large",
     "fwd_fine",
     "fwd_relay",
+    "fwd_domain",
     "bwd",
     "bwd_large",
     "bwd_fine",
     "bwd_relay",
+    "bwd_domain",
     "bwd_unweighted",
     "bwd_unweighted_large",
     "bwd_unweighted_fine",
     "bwd_unweighted_relay",
+    "bwd_unweighted_domain",
 )
 # The SM counts of the delivered GPUs the routes are checked on.
 SM_COUNTS = (148, 152, 212)
@@ -182,7 +189,7 @@ WINDOWS = {
     "bwd_unweighted_fine": {"sm_100a": [[0, 4]], "sm_103a": [[0, 4]], "sm_107a": [[0, 2]]},
 }
 LANE_LAYOUT = {"lanes": 32, "rows_per_thread": 1, "width_bits": 128}
-# The build facts of each role with records: the lane layout, in ``bwd_unweighted`` and ``bwd_relay`` 3 tasks a row (a warp per (row, run)) and in a fine role 9 tasks a row (one load of each input a task).
+# The build facts of each role with records: the lane layout, in ``bwd_unweighted`` and ``bwd_relay`` 3 tasks a row (a warp per (row, run)) and in a fine role 9 tasks a row (one load of each input a task); the forward's twin keeps the forward's.
 BUILDS = {
     "fwd": LANE_LAYOUT,
     "fwd_large": LANE_LAYOUT,
@@ -193,6 +200,7 @@ BUILDS = {
     "bwd_relay": {**LANE_LAYOUT, "tasks_per_row": 3},
     "bwd_unweighted": {**LANE_LAYOUT, "tasks_per_row": 3},
     "bwd_unweighted_fine": {**LANE_LAYOUT, "tasks_per_row": 9},
+    "fwd_domain": LANE_LAYOUT,
 }
 # The program a forced launch runs: the small-R, the large-R or the fine program of its stage and, when a record
 # ships one, its relay program (:func:`_force`).
@@ -238,6 +246,25 @@ PARAMETERS = {
     ),
 }
 BUFFERS = {"gate", "up", "w", "h", "dh", "d_gate", "d_up", "d_weight"}
+# The parameters of the forward's locality-domain twin (the backward stages have none): the forward's kernel
+# parameters, the claim counters of both dies (buffers), the placement and geometry scalars, the SM table (by value),
+# then the column offset.
+COLUMN_OFFSETS = ("up_col", "d_up_col")
+TWIN_PARAMETERS = {
+    stage: (
+        *(key for key in PARAMETERS[stage] if key not in COLUMN_OFFSETS),
+        "counters0",
+        "counters1",
+        "first_slot",
+        "first_die",
+        "chunk_shift",
+        "item_rows",
+        "sm_table",
+        *(key for key in PARAMETERS[stage] if key in COLUMN_OFFSETS),
+    )
+    for stage in ("fwd",)
+}
+TWIN_KINDS = {"counters0": "buffer", "counters1": "buffer", "sm_table": "param_array"}
 L = 10.0
 
 # The judged cases: row counts 1 to 4097, every layout, weighted and unweighted, the data kinds and three limits.
@@ -751,7 +778,7 @@ def test_registry_records_are_well_formed() -> None:
     assert cake_jit.WIDTH == WIDTH == 2304
     assert cake_jit.PACKAGE == "cake_pplx._backends.cake_clamped_swiglu_det_train"
     assert tuple(cake_jit.ROLES) == ROLES and cake_jit.LARGE == LARGE and cake_jit.FINE == FINE
-    assert cake_jit.RELAY == RELAY and tuple(cake_jit.WINDOWED) == WINDOWED_ROLES
+    assert cake_jit.RELAY == RELAY and tuple(cake_jit.WINDOWED) == WINDOWED_ROLES and cake_jit.DOMAIN == DOMAIN
     # Records keyed by their program names (their libraries), each in one role of its stage.  A role's records serve
     # disjoint architectures: the stage's role every architecture, its large-R, relay and fine roles some (or none),
     # each large-R, relay or fine record with the windows of rows per SM in which it runs on each of its architectures
@@ -760,7 +787,8 @@ def test_registry_records_are_well_formed() -> None:
     for name, record in cake_jit.MODULES.items():
         role = record["role"]
         assert role in ROLES, name
-        assert record["stage"] == role.removesuffix(LARGE).removesuffix(FINE).removesuffix(RELAY), name
+        stage = role.removesuffix(LARGE).removesuffix(FINE).removesuffix(RELAY).removesuffix(DOMAIN)
+        assert record["stage"] == stage, name
         arches = list(record["arches"])
         assert arches and arches == [arch for arch in ARCHES if arch in arches], name
         for arch in arches:
@@ -805,6 +833,8 @@ def test_registry_records_are_well_formed() -> None:
         assert cake_jit.cta_tasks(name) == (per_cta, build.get("tasks_per_row", 1)), name
         # a relay program runs one row a CTA (its kernel's grid is one CTA per row)
         assert not record["role"].endswith(RELAY) or cake_jit.cta_tasks(name) == (3, 3), name
+        # only the forward has a twin
+        assert not record["role"].endswith(DOMAIN) or record["role"] == "fwd" + DOMAIN, name
     # The BF16 stride and alignment rule is one load of the widest build: 8 values and 16 bytes for 128-bit loads.
     widest = max(build["width_bits"] for build in cake_jit.BUILD_OF.values())
     assert cake_jit.VECTOR_ELEMENTS == widest // 16 and cake_jit.ALIGNMENT_BYTES == widest // 8
@@ -824,13 +854,17 @@ def test_the_windows_and_the_lane_layout_are_the_measured_ones() -> None:
 
 def test_argument_plans_are_the_kernel_parameters_then_the_column_offsets() -> None:
     """Each record takes its kernel's parameters in order (tensors as buffers, scalars as parameters), then the
-    column offsets of ``up`` (and ``d_up``) as parameters, then the grid; the host names every one of them."""
+    column offsets of ``up`` (and ``d_up``) as parameters, then the grid; the host names every one of them.  A twin
+    takes its base program's kernel parameters, the claim counters (buffers), the placement scalars and the SM table
+    (by value, a ``param_array``) before the column offsets."""
     for name, record in cake_jit.MODULES.items():
-        assert pkg.parameters(name) == PARAMETERS[record["stage"]], name
+        twin = record["role"].endswith(DOMAIN)
+        assert pkg.parameters(name) == (TWIN_PARAMETERS if twin else PARAMETERS)[record["stage"]], name
         for kind, key in record["arg_plan"]:
             if kind == "grid":
                 continue
-            assert kind == ("buffer" if key in BUFFERS else "parameter"), (name, kind, key)
+            want = TWIN_KINDS.get(key, "buffer" if key in BUFFERS else "parameter") if twin else None
+            assert kind == (want or ("buffer" if key in BUFFERS else "parameter")), (name, kind, key)
         assert [key for kind, key in record["arg_plan"] if kind == "grid"] == ["grid_x", "grid_y", "grid_z"]
 
 
@@ -841,7 +875,11 @@ def test_grid_is_one_cta_per_block_of_tasks() -> None:
     (``cake_jit.MAX_GRID``) at the most rows (a count only for ``bwd_fine``, which takes at most ``2**30`` rows on its
     grid of ``R`` CTAs)."""
     assert cake_jit.MAX_GRID == 2**31 - 1
-    for name in cake_jit.MODULES:
+    for name, record in cake_jit.MODULES.items():
+        if record["role"].endswith(DOMAIN):
+            with pytest.raises(ValueError, match="twin"):  # a twin's grid is cake_jit.domain_grid's
+                cake_jit.grid(name, 1)
+            continue
         per_cta, per_row = cake_jit.cta_tasks(name)
         for rows in (1, 2, per_cta - 1, per_cta, per_cta + 1, 129, 4097, 98304, 196608, cake_jit.MAX_ROWS - 1):
             if rows >= 1:
@@ -1551,11 +1589,45 @@ JIT_SHIM_ENVIRONMENT_VARIABLES = frozenset(
 )
 
 
-def _environment_reads(tree: ast.AST) -> tuple[set[str], list[int]]:
+def _bound_once_string_constants(tree: ast.AST) -> dict[str, str]:
+    """The module-level names ``tree`` binds exactly once, by a plain ``NAME = "literal"`` statement of its body, and
+    nowhere else (no other assignment, loop or ``with`` target, ``global``, argument, import, definition or
+    ``except ... as``), each with its string."""
+    bound: dict[str, int] = {}
+    for node in ast.walk(tree):
+        found: list[str] = []
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            found = [node.id]
+        elif isinstance(node, ast.arg):
+            found = [node.arg]
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            found = list(node.names)
+        elif isinstance(node, ast.alias):
+            found = [(node.asname or node.name).split(".")[0]]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler)) and node.name:
+            found = [node.name]
+        for name in found:
+            bound[name] = bound.get(name, 0) + 1
+    return {
+        statement.targets[0].id: statement.value.value
+        for statement in getattr(tree, "body", [])
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and isinstance(statement.value, ast.Constant)
+        and isinstance(statement.value.value, str)
+        and bound.get(statement.targets[0].id) == 1
+    }
+
+
+def _environment_reads(tree: ast.AST, lines: dict[str, list[int]] | None = None) -> tuple[set[str], list[int]]:
     """``(names, unresolved)``: the variable names ``tree`` reads through ``os.environ.get(...)``,
-    ``os.environ[...]``, ``... in os.environ`` or ``os.getenv(...)`` -- a string literal, or a loop variable over a
-    tuple / list of string literals -- and the lines of every other ``environ`` / ``getenv`` use."""
+    ``os.environ[...]``, ``... in os.environ`` or ``os.getenv(...)`` -- a string literal, a loop variable over a
+    tuple / list of string literals, or a module-level name bound once, to a string literal
+    (:func:`_bound_once_string_constants`) -- and the lines of every other ``environ`` / ``getenv`` use.  ``lines``,
+    when given, receives each name's reading lines."""
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    constants = _bound_once_string_constants(tree)
 
     def keys(expr: ast.AST, at: ast.AST) -> set[str] | None:
         if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
@@ -1572,6 +1644,8 @@ def _environment_reads(tree: ast.AST) -> tuple[set[str], list[int]]:
                 ):
                     return {e.value for e in node.iter.elts}
                 node = parents.get(node)
+            if expr.id in constants:
+                return {constants[expr.id]}
         return None
 
     names: set[str] = set()
@@ -1601,22 +1675,71 @@ def _environment_reads(tree: ast.AST) -> tuple[set[str], list[int]]:
             unresolved.append(node.lineno)
         else:
             names |= found
+            if lines is not None:
+                for name in found:
+                    lines.setdefault(name, []).append(node.lineno)
     return names, unresolved
+
+
+# The variables the shared locality runtime (``cake_locality.py``, shipped for the SM table of the locality-domain
+# twins) reads: the routing switch of its ``sm_table``, which this package never calls, and the JIT cache directory
+# its probe's build writes to (the JIT shim's own variable).
+LOCALITY_RUNTIME_ENVIRONMENT_VARIABLES = frozenset({"CAKE_PPLX_LOCALITY", "CAKE_PPLX_CACHE_DIR"})
+
+
+def _calls_locality_sm_table(tree: ast.AST) -> list[int]:
+    """The lines of every ``cake_locality.sm_table`` reference in ``tree`` and of every import of ``sm_table`` from
+    ``cake_locality``."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "sm_table"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "cake_locality"
+        )
+        or (
+            isinstance(node, ast.ImportFrom)
+            and (node.module or "").split(".")[-1] == "cake_locality"
+            and any(alias.name == "sm_table" for alias in node.names)
+        )
+    ]
 
 
 def test_only_the_jit_shim_reads_environment_variables() -> None:
     """No module of the package reads an environment variable, except the JIT shim (``_cake_pplx_jit.py``), which
-    reads exactly :data:`JIT_SHIM_ENVIRONMENT_VARIABLES`, each by a literal name."""
+    reads exactly :data:`JIT_SHIM_ENVIRONMENT_VARIABLES`, each by a literal name, and the shared locality runtime
+    (``cake_locality.py``, when shipped), which reads at most :data:`LOCALITY_RUNTIME_ENVIRONMENT_VARIABLES`: its
+    routing switch only in its ``sm_table``, which no module of the package references (the package takes its SM
+    table from ``probe_table``, which reads no switch), and the JIT cache directory of its probe's build.  So no
+    environment variable changes a call."""
     offenders = []
     shim = None
     for path in sorted(PACKAGE_DIR.glob("*.py")):
-        names, unresolved = _environment_reads(ast.parse(path.read_text()))
+        tree = ast.parse(path.read_text())
+        reads: dict[str, list[int]] = {}
+        names, unresolved = _environment_reads(tree, reads)
         if path.name == "_cake_pplx_jit.py":
             shim = names
             offenders += [f"{path.name}:{line} (variable not resolved)" for line in unresolved]
+        elif path.name == "cake_locality.py":
+            offenders += [f"{path.name}:{line} (variable not resolved)" for line in unresolved]
+            offenders += [f"{path.name}: {name}" for name in sorted(names - LOCALITY_RUNTIME_ENVIRONMENT_VARIABLES)]
+            spans = [
+                (node.lineno, node.end_lineno)
+                for node in getattr(tree, "body", [])
+                if isinstance(node, ast.FunctionDef) and node.name == "sm_table"
+            ]
+            offenders += [
+                f"{path.name}:{line} (CAKE_PPLX_LOCALITY outside sm_table)"
+                for line in reads.get("CAKE_PPLX_LOCALITY", [])
+                if not any(first <= line <= (last or first) for first, last in spans)
+            ]
         else:
             offenders += [f"{path.name}:{line}" for line in unresolved]
             offenders += [f"{path.name}: {name}" for name in sorted(names)]
+            offenders += [f"{path.name}:{line} (cake_locality.sm_table)" for line in _calls_locality_sm_table(tree)]
     assert not offenders, offenders
     assert shim == JIT_SHIM_ENVIRONMENT_VARIABLES, (
         sorted(shim - JIT_SHIM_ENVIRONMENT_VARIABLES) if shim is not None else "no _cake_pplx_jit.py",

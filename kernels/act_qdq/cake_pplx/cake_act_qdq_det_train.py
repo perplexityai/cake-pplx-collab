@@ -52,15 +52,13 @@ Usage::
     cake_act_qdq_det_train_forward(x, format="mxfp4_e8m0_g32", out=x)  # in place
 
 On an R200 (SM107), ``locality="domain"`` runs a program whose CTAs work on
-their own die's memory, for an out-of-place call of 8,388,608 to
-2,147,482,624 vectors for FP4 (``numel / 8``), to 2,147,483,136 for MXFP4
-and MXFP8, whose input and output lie in memory from
+their own die's memory, for an out-of-place call of 8,388,608 to 2,147,482,624
+vectors (``numel / 8``), whose input and output lie in memory from
 :func:`cake_act_qdq_det_train_domain_empty` (2 MB chunks that alternate
-between the two dies), at the same offset in their chunks and in chunks of
-the same die.  Every other call runs the default program;
-the bytes are the same either way, and
-:func:`cake_act_qdq_det_train_domain_plan` reports which program a call
-runs::
+between the two dies), at the same offset in their chunks and in chunks of the
+same die.  Every other call runs the default program; the bytes are the same
+either way, and :func:`cake_act_qdq_det_train_domain_plan` reports which
+program a call runs::
 
     o = torch.randn(16384, 8, 4096, device="cuda", dtype=torch.bfloat16)
     x = cake_act_qdq_det_train_domain_empty(o.shape)

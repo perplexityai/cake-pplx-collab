@@ -3696,10 +3696,21 @@ def test_nope_stage_names_and_registry_accessors():
         "bwd_main_pass_natural_hw",
         "fwd_hw_no_olo",
     ), head_window_tail
+    # the single-pass forward builds over 96 / 128 heads (``cake_backend.SINGLE_PASS_STAGES``, keyed by the
+    # head-window forward they replace) close it after the head-window builds, where the registry registers them
+    single_pass_tail = tuple(
+        cake_backend.SINGLE_PASS_STAGES[s]
+        for s in head_window_tail
+        if s in cake_backend.SINGLE_PASS_STAGES
+    )
+    assert single_pass_tail == ("fwd_h128", "fwd_h128_no_olo"), single_pass_tail
     assert cake_jit.STAGES_OF[cake_jit.PROGRAM] in (
         rope_order,
         rope_order + head_window_tail,
+        rope_order + head_window_tail + single_pass_tail,
     ), cake_jit.STAGES_OF[cake_jit.PROGRAM]
+    if hasattr(cake_jit, "SINGLE_PASS_STAGES"):
+        assert cake_jit.SINGLE_PASS_STAGES == cake_backend.SINGLE_PASS_STAGES
     assert set(cake_jit.STAGES_OF) == {cake_jit.PROGRAM, NOPE_PROGRAM}
     assert {NOPE_PROGRAM: cake_jit.STAGES_OF[NOPE_PROGRAM]} == {
         NOPE_PROGRAM: cake_jit.NOPE_STAGES
@@ -12018,7 +12029,8 @@ def test_no_olo_twins_are_registered(program):
     delta twins of both records name one library (as the default deltas do); a forward twin's scanner-warp build is
     the twin of the default's, so the same architecture picks the scanner build in both modes; ``build.json`` names
     every twin library for every architecture it ships for.  The RoPE program's head-window builds, where the
-    registry carries them, close its order after the twins (:func:`test_head_window_builds_are_registered`)."""
+    registry carries them, close its order after the twins (:func:`test_head_window_builds_are_registered`), and its
+    single-pass forward builds after those (:func:`test_single_pass_forward_builds_are_registered`)."""
     record = cake_jit.record(program)
     defaults = _STAGES_0_5_0[program]
     twins = tuple(
@@ -12027,6 +12039,7 @@ def test_no_olo_twins_are_registered(program):
     assert len(twins) == (3 if program == cake_jit.PROGRAM else 5)
     head_window = (
         set(cake_backend.HEAD_WINDOW_STAGES.values())
+        | set(cake_backend.SINGLE_PASS_STAGES.values())
         if program == cake_jit.PROGRAM
         else set()
     )
@@ -12089,10 +12102,14 @@ def test_head_window_builds_are_registered():
     assert sorted(found) == sorted(builds.values()), (
         "a partial head-window registration"
     )
-    order = cake_jit.STAGES_OF[cake_jit.PROGRAM]
+    # the single-pass forward builds, where registered, follow the head-window builds
+    # (:func:`test_single_pass_forward_builds_are_registered`)
+    single = set(cake_backend.SINGLE_PASS_STAGES.values())
+    order = tuple(s for s in cake_jit.STAGES_OF[cake_jit.PROGRAM] if s not in single)
     tail = tuple(builds[s] for s in order if s in builds)
     assert order[-len(tail) :] == tail
-    assert tuple(record["stages"][-len(tail) :]) == tail
+    listed = tuple(s for s in record["stages"] if s not in single)
+    assert listed[-len(tail) :] == tail
     assert set(tail) <= set(cake_jit.registered_stages())
     libraries = {e["name"]: e for e in cake_build.manifest()["libraries"]}
     missing = []
@@ -12118,6 +12135,112 @@ def test_head_window_builds_are_registered():
             assert libraries[name]["arch"] == arch
             assert libraries[name]["entry"] == record[hw]["ffi_entry"]
     assert not missing, f"build.json lacks {missing}"
+
+
+#: The single-pass forward's kernel arguments (``cake_launch.STAGE_ARGS``): the head-window forward's without the
+#: ``k_rope`` stride / offset scalars and the window selector (``k_rope`` is a tensor map), then the grid.
+SINGLE_PASS_ARGS = (
+    "q_latent",
+    "q_rope",
+    "kv_latent",
+    "k_rope",
+    "out",
+    "o_lo",
+    "lse",
+    "indices",
+    "topk_length",
+    "num_queries",
+    "num_heads",
+    "num_kv",
+    "topk",
+    "idx_stride",
+    "indices_offset",
+    "has_topk_length",
+    "derive_length",
+    "scale_log2",
+    "grid_x",
+    "grid_y",
+    "grid_z",
+)
+
+
+@pytest.mark.cpu_only
+def test_single_pass_forward_builds_are_registered():
+    """The RoPE program's single-pass forward builds (``cake_backend.SINGLE_PASS_STAGES``, the registry's
+    ``cake_jit.SINGLE_PASS_STAGES``; skip where the registry carries none): both or neither; each a record entry
+    among the record's ``stages`` after the head-window builds, closing the program's ``STAGES_OF`` order (the
+    default build, then its ``with_o_lo=False`` twin); shipping for ``sm_100a`` / ``sm_103a`` only with FFI entry
+    ``run`` and a library of its own (``build.json`` names it for both architectures); a ``(2, 1, 1)`` cluster of
+    512-thread CTAs with programmatic dependent launch and the same launch leaves in both builds, while every other
+    stage of the program keeps cluster ``(1, 1, 1)``; one generated launcher and grid for both, the grid one cluster
+    per token (``(2 max(1, T), 1, 1)``; the backend launches its persistent grid instead,
+    :func:`cake_backend.single_pass_grid`), and the argument list :data:`SINGLE_PASS_ARGS`."""
+    record = cake_jit.record()
+    builds = cake_backend.SINGLE_PASS_STAGES
+    found = [s for s in builds.values() if s in record]
+    if not found:
+        pytest.skip("the registry carries no single-pass forward builds")
+    assert sorted(found) == sorted(builds.values()), (
+        "a partial single-pass registration"
+    )
+    assert cake_jit.SINGLE_PASS_STAGES == builds
+    order = cake_jit.STAGES_OF[cake_jit.PROGRAM]
+    tail = ("fwd_h128", "fwd_h128_no_olo")
+    assert order[-2:] == tail and tuple(record["stages"][-2:]) == tail
+    assert set(tail) <= set(cake_jit.registered_stages())
+    libraries = {e["name"]: e for e in cake_build.manifest()["libraries"]}
+    missing = []
+    launch = record["fwd_h128"]["launch"]
+    assert launch["cluster"] == [2, 1, 1] and launch["block"] == [512, 1, 1]
+    assert launch["use_pdl"] and not launch["cooperative"]
+    assert record["fwd_h128_no_olo"]["launch"] == launch
+    assert record["fwd_h128"]["library"] != record["fwd_h128_no_olo"]["library"]
+    for stage in cake_jit.registered_stages():
+        if stage not in tail:
+            assert record[stage]["launch"]["cluster"] == [1, 1, 1], stage
+    for stage in tail:
+        assert cake_jit.stage_arches(stage) == ("sm_100a", "sm_103a"), stage
+        assert record[stage]["ffi_entry"] == "run", stage
+        assert cake_launch.LAUNCH[stage] is cake_launch.LAUNCH["fwd_h128"], stage
+        assert tuple(cake_launch.STAGE_ARGS[stage]) == SINGLE_PASS_ARGS, stage
+        for T in (0, 1, 2, 3, 16380):
+            assert cake_launch.GRID[stage](T, 4096, 2048) == (2 * max(1, T), 1, 1)
+        values = {name: object() for name in SINGLE_PASS_ARGS[:-3]}
+        got = _Recorder()
+        cake_launch.LAUNCH[stage](got, values, (8, 1, 1))
+        assert got.calls == [
+            tuple(values[name] for name in SINGLE_PASS_ARGS[:-3]) + (8, 1, 1)
+        ], stage
+        for arch in cake_jit.stage_arches(stage):
+            name = f"{record[stage]['library']}_{arch}"
+            if name not in libraries:
+                missing.append(name)
+                continue
+            assert libraries[name]["arch"] == arch
+            assert libraries[name]["entry"] == record[stage]["ffi_entry"]
+    assert not missing, f"build.json lacks {missing}"
+
+
+@pytest.mark.cpu_only
+def test_single_pass_grid_is_persistent_and_even():
+    """:func:`cake_backend.single_pass_grid`: one ``(2, 1, 1)`` cluster per SM pair, at most one per token, at least
+    one -- always a multiple of the cluster shape (the stage's binding and :func:`cake_backend._stage_entry` refuse
+    any other grid)."""
+    for T, sms, want in (
+        (0, 148, 2),
+        (1, 148, 2),
+        (3, 148, 6),
+        (74, 148, 148),
+        (75, 148, 148),
+        (16380, 148, 148),
+        (16380, 152, 152),
+        (100, 152, 152),
+        (5, 3, 2),
+    ):
+        grid = cake_backend.single_pass_grid(T, sms)
+        assert (
+            grid == (want, 1, 1) and grid[0] % cake_backend.SINGLE_PASS_CLUSTER == 0
+        ), (T, sms, grid)
 
 
 @pytest.mark.cpu_only

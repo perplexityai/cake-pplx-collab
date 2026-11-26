@@ -543,6 +543,93 @@ def test_host_trim_ffi_device_and_cpu_refusal(monkeypatch) -> None:
     conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
 
 
+@pytest.mark.cpu_only
+def test_forward_send_slice_and_waiting_exchange(monkeypatch) -> None:
+    """The single call's forward exchange (trimmed host path): the send rows are a slice of ``x`` when more than one
+    rank exchanges and the halo plan's host ``hist_index`` is one ascending run of consecutive rows inside the rank's
+    rows, as long as the device table (``_send_slice``); the slice holds the gather's rows in the gather's order; the
+    waiting form outside a CUDA Graph capture issues the collective with ``async_op=False`` and gets no work handle,
+    the overlapped form and a capture keep ``async_op=True`` and the handle (``_fwd_sync``, ``_exchange``).  No kernel
+    runs here."""
+
+    def ctx_of(rows, world=2):
+        halo = types.SimpleNamespace(hist_index=tuple(rows))
+        return types.SimpleNamespace(world_size=world, halo=halo)
+
+    def table(rows):
+        return torch.tensor(rows, dtype=torch.int64)
+
+    S = 10
+    cases = (
+        ((7, 8, 9), (7, 10)),  # a contiguous rank's last rows, to the next rank
+        ((0,), (0, 1)),
+        ((4, 5, 6, 7, 8, 9), (4, 10)),
+        ((9, 9), None),  # one row to two ranks
+        ((7, 9), None),  # a gap
+        ((9, 8, 7), None),  # descending
+        ((8, 9, 10), None),  # past the rank's rows
+        ((), None),  # nothing to send
+    )
+    for rows, want in cases:
+        assert conv_kcp._send_slice(ctx_of(rows), table(rows), S) == want, rows
+    one_rank = ctx_of((7, 8, 9), world=1)
+    assert conv_kcp._send_slice(one_rank, table((7, 8, 9)), S) is None
+    assert conv_kcp._send_slice(ctx_of((7, 8, 9)), table((7, 8)), S) is None
+    no_plan = types.SimpleNamespace(world_size=2, halo=types.SimpleNamespace())
+    assert conv_kcp._send_slice(no_plan, table((7,)), S) is None
+
+    x = torch.arange(S * 8, dtype=torch.float32).view(S, 8).to(torch.bfloat16)
+    e = {"hist_index": table((7, 8, 9)), "send_slice": (7, 10)}
+    view = conv_kcp._fwd_gather(x, 8, e, view=True)
+    gathered = conv_kcp._fwd_gather(x, 8, e)
+    assert view.data_ptr() == x[7].data_ptr() and view.is_contiguous()
+    assert gathered.data_ptr() != view.data_ptr() and torch.equal(view, gathered)
+    e_none = {"hist_index": table((9, 7)), "send_slice": None}
+    assert torch.equal(conv_kcp._fwd_gather(x, 8, e_none, view=True), x[[9, 7]])
+    empty = conv_kcp._fwd_gather(x, 8, {"hist_index": table(())}, view=True)
+    assert empty.shape == (0, 8)
+
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    assert conv_kcp._fwd_sync({"overlap": False}) is True
+    assert conv_kcp._fwd_sync({"overlap": True}) is False
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    assert conv_kcp._fwd_sync({"overlap": False}) is False
+
+    issued: list[bool] = []
+
+    class _Work:
+        def wait(self) -> None:
+            pass
+
+    def all_to_all_single(
+        out,
+        inp,
+        output_split_sizes=None,
+        input_split_sizes=None,
+        group=None,
+        async_op=False,
+    ):
+        issued.append(async_op)
+        out.copy_(inp)
+        return _Work() if async_op else None
+
+    monkeypatch.setattr(conv_kcp.dist, "all_to_all_single", all_to_all_single)
+    monkeypatch.setattr(conv_kcp, "_agree", lambda *args, **kwargs: None)
+    ctx = types.SimpleNamespace(world_size=2, group=None)
+    kw = dict(
+        recv_rows=3,
+        send_splits=(0, 3),
+        recv_splits=(3, 0),
+        ctx=ctx,
+        agree=("fwd", (8,), False),
+    )
+    recv, work = conv_kcp._exchange(view, sync=True, **kw)
+    assert work is None and issued == [False] and torch.equal(recv, gathered)
+    recv, work = conv_kcp._exchange(view, **kw)
+    assert isinstance(work, _Work) and issued == [False, True]
+    assert torch.equal(recv, gathered)
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # Recompute handle: the handle object, the phase helper and the entry rules (no kernel runs).
 

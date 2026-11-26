@@ -23,7 +23,10 @@ fragment that reads its history from three predecessor ranks).  Per row and rank
   checkpoint and of the direct pass are bitwise equal;
 - the ``torch.distributed`` collectives issued (and the waits on their work handles) are counted per phase by
   test-local shims: the original forward and the backward issue one halo exchange each (positive control, > 0),
-  the plain checkpoint's recompute issues one more, the recompute with a handle issues none;
+  the plain checkpoint's recompute issues one more, the recompute with a handle issues none; only the backward's
+  exchange is waited (the single call's eager forward exchange is a waiting collective, ``async_op=False``);
+- that forward exchange is issued with ``sync`` and sends the slice of ``x`` that holds its send rows where they are
+  one run of rows (``kcp._send_slice``; every sending rank of the contiguous layout), else their gather;
 - ``retain_graph`` + a second backward replays the entry again (no collective) and accumulates exactly twice;
 - nested checkpoints: a handle created outside the outer region makes both recomputes communication-free; a handle
   created inside the outer region is empty in the outer recompute, which then exchanges once (still bitwise);
@@ -482,20 +485,50 @@ def _run_rank(
     flags["handle_eq_direct"] = eq(withh, direct)
     flags["reentrant_plain_eq_direct"] = eq(plain_re, direct)
     flags["reentrant_handle_eq_direct"] = eq(withh_re, direct)
-    for t in ("calls", "waits"):
-        # positive control: one halo exchange (and its wait) in the forward and one in the backward on every rank
+    # The single call's eager forward exchange is a waiting collective (``async_op=False``, ``kcp._fwd_sync``): it
+    # returns no work handle, so a forward exchange counts one call and no wait; the backward's is waited.
+    for t, f in (("calls", 1), ("waits", 0)):
+        # positive control: one halo exchange in the forward and one in the backward on every rank
         flags[f"positive_control_{t}"] = c_direct[t] == {
-            "orig": 1,
+            "orig": f,
             "recompute": 0,
             "bwd": 1,
-        } and c_plain[t] == {"orig": 1, "recompute": 1, "bwd": 1}
-        flags[f"handle_counts_{t}"] = c_h[t] == {"orig": 1, "recompute": 0, "bwd": 1}
+        } and c_plain[t] == {"orig": f, "recompute": f, "bwd": 1}
+        flags[f"handle_counts_{t}"] = c_h[t] == {"orig": f, "recompute": 0, "bwd": 1}
         # reentrant: the recompute runs inside the backward (no context_fn): plain = exchange + recompute exchange
         flags[f"reentrant_counts_{t}"] = c_plain_re[t] == {
-            "orig": 1,
+            "orig": f,
             "recompute": 0,
-            "bwd": 2,
-        } and c_h_re[t] == {"orig": 1, "recompute": 0, "bwd": 1}
+            "bwd": 1 + f,
+        } and c_h_re[t] == {"orig": f, "recompute": 0, "bwd": 1}
+    # The forward exchange of the single call (eager, the waiting form): issued with ``sync``, its send buffer the
+    # slice of ``x`` holding the send rows where they are one run of rows (``kcp._send_slice``; on every sending rank
+    # of the contiguous layout), else their gather.
+    seen: list[dict] = []
+    exchange = conv_kcp._exchange
+
+    def recording(send, **kw):
+        same = send.untyped_storage().data_ptr() == x.untyped_storage().data_ptr()
+        seen.append({"sync": kw.get("sync"), "view": bool(send.numel()) and same})
+        return exchange(send, **kw)
+
+    conv_kcp._exchange = recording
+    try:
+        conv_kcp.cake_causal_conv1d_det_train_kcp_forward(x, w, ctx)
+    finally:
+        conv_kcp._exchange = exchange
+    torch.cuda.synchronize(device)
+    send_slice = conv_kcp._send_slice(
+        ctx, ctx.halo_tables["hist_index"], int(x.shape[0])
+    )
+    sends = int(sum(ctx.halo.fwd_send_rows))
+    info["fwd_exchange"] = {"seen": seen, "send_slice": send_slice, "send_rows": sends}
+    flags["fwd_exchange_sync"] = len(seen) == 1 and seen[0]["sync"] is True
+    flags["fwd_send_slice"] = (
+        len(seen) == 1
+        and seen[0]["view"] == (send_slice is not None)
+        and (layout != "contiguous" or sends == 0 or send_slice is not None)
+    )
     flags["handle_bytes"] = (
         hd.nbytes() == n_hist * C * 2 == hd_re.nbytes()
         and hd.entries["conv"]["hist"].shape == (n_hist, C)

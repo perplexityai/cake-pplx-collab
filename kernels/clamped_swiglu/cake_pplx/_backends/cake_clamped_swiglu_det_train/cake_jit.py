@@ -89,6 +89,31 @@ tensor).  Every kernel takes the row count, the limit, every BF16 row stride
 arguments, so one library per program and architecture serves every row
 count routed to it and both layouts.  The host launches nothing for
 ``rows == 0``.
+
+A stage may also have a locality-domain role, the stage's name +
+:data:`DOMAIN`: at most one program on an architecture, on ``sm_107a`` only,
+its *twin*.  Only ``fwd`` has one (``fwd_domain``); ``bwd`` and
+``bwd_unweighted`` have none.  :func:`route` and :func:`fine` never pick it:
+only a call with ``locality="domain"`` runs it, where the host finds its
+operands in memory whose chunks alternate between the two dies of an R200
+(the backend's ``cake_domain``).  A twin reads row ``r`` of each operand at
+slot ``first_slot + 9 r`` of chunks of ``2^chunk_shift`` slots (a slot is
+512 bytes of a ``[R, 2304]`` tensor, 1,024 bytes of a merged ``[R, 4608]``
+one; a row is 9 slots), chunk ``k`` in die ``first_die ^ (k & 1)``.  Its
+CTAs claim items of at most ``item_rows`` rows of one chunk, their own die's
+first, with one 32-bit counter in each die (``counters0``, ``counters1``),
+and read their die from the SM table passed by value (``sm_table``).  The
+record's ``grid_rule`` (kind :data:`DOMAIN_GRID_KIND`) gives the slots of a
+row, ``chunk_shift``, its largest value, the most rows, ``item_rows`` and,
+per architecture, the CTAs per SM; its ``counters`` give the claim workspace
+(``words`` words a die, which every launch leaves zero); its
+``first_rows_per_sm`` gives, per architecture and route class
+(:data:`DOMAIN_CLASSES`), the rows per SM from which the twin runs, or None
+where it never does.  :func:`domain_items` counts each die's items as the
+kernel does, :func:`domain_item_rows` decodes one claim to its rows and
+:func:`domain_grid` is the launch grid.  A twin runs each row through its
+base program's instructions, so it stores the bits of the stage's other
+programs for every input, grid and placement.
 """
 
 from __future__ import annotations
@@ -107,11 +132,14 @@ STAGES = ("fwd", "bwd", "bwd_unweighted")
 LARGE = "_large"
 FINE = "_fine"
 RELAY = "_relay"
+# The suffix of a stage's locality-domain role: its twin, run only by a ``locality="domain"`` call (never routed by
+# row count).
+DOMAIN = "_domain"
 # The suffixes of a stage's windowed roles: their programs run in their windows of rows per SM above the fine window.
 WINDOWED = (LARGE, RELAY)
-# The roles of the records: each stage's small-R role (the stage itself), its large-R role, its fine role and its relay
-# role.
-ROLES = tuple(stage + suffix for stage in STAGES for suffix in ("", LARGE, FINE, RELAY))
+# The roles of the records: each stage's small-R role (the stage itself), its large-R role, its fine role, its relay
+# role and its locality-domain role.
+ROLES = tuple(stage + suffix for stage in STAGES for suffix in ("", LARGE, FINE, RELAY, DOMAIN))
 
 MODULES: dict[str, dict[str, Any]] = {
     # The forward for small R: h = bf16(w * silu(min(g, L)) * clamp(u, -L, L)), 128 threads, 32 lanes a row, one row
@@ -309,6 +337,35 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_unweighted_fine",
         "stage": "bwd_unweighted",
     },
+    # The forward's locality-domain twin on SM107: the large-R forward's build (128 threads, stores as computed) at 5
+    # CTAs an SM, each CTA claiming items of 4 rows from its die's half of the rows.
+    "cake_clamped_swiglu_det_train_fbdbdca9a77e038ca415": {
+        "arches": ["sm_107a"],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["buffer", "counters0"], ["buffer", "counters1"], ["parameter", "first_slot"], ["parameter", "first_die"], ["parameter", "chunk_shift"], ["parameter", "item_rows"], ["param_array", "sm_table"], ["parameter", "up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "counters": {"dtype": "uint32", "rearm": "kernel", "words": 1},
+        "ffi_entry": "run",
+        "first_rows_per_sm": {"sm_107a": {"anchor": 128, "homed": 112}},
+        "grid_rule": {
+            "chunk_shift": 12,
+            "ctas_per_sm": {"sm_107a": 5},
+            "item_rows": 4,
+            "kind": "domain_rows",
+            "max_chunk_shift": 27,
+            "max_rows": 134217728,
+            "row_slots": 9,
+        },
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_fbdbdca9a77e038ca415",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_clamped_swiglu_det_train_fbdbdca9a77e038ca415",
+        "role": "fwd_domain",
+        "stage": "fwd",
+    },
 }
 
 
@@ -350,6 +407,9 @@ BUILD_OF: dict[str, dict[str, int]] = {
     "bwd_relay": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 3},
     "bwd_unweighted": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 3},
     "bwd_unweighted_fine": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 9},
+    # The forward's twin keeps the forward's lane layout and loads (a row a warp).  Its grid is not ``cta_tasks``'s:
+    # it is :func:`domain_grid`'s.
+    "fwd_domain": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
 }
 
 # The kernels load ``width_bits`` at a time: every BF16 row stride is a multiple of one load (8 BF16 values for
@@ -520,5 +580,180 @@ def grid(name: str, rows: int) -> tuple[int, int, int]:
     (:func:`fine`), so the package's launches pass the uncapped count."""
     if rows < 1:
         raise ValueError(f"a launch needs at least one row, got {rows}")
+    if MODULES[name]["role"].endswith(DOMAIN):
+        raise ValueError(f"{name} is a locality-domain twin: its grid is domain_grid's")
     per_cta, per_row = cta_tasks(name)
     return (min(-(-rows * per_row // per_cta), MAX_GRID), 1, 1)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# The locality-domain twin (sm_107a; only ``fwd`` has one): the host's facts of a twin, the item decode and the grid.
+
+# The grid rule of a twin (``record["grid_rule"]["kind"]``).
+DOMAIN_GRID_KIND = "domain_rows"
+# The claim workspace of a twin (``record["counters"]``): its word type and who re-arms it to zero (``"kernel"``: every
+# launch leaves it zero, so the host zeroes it once, when it makes it).
+COUNTER_DTYPE = "uint32"
+COUNTER_REARM = "kernel"
+# The slots of a row: 2304 BF16 elements are 9 slots of 512 bytes, and a merged row of 4608 9 slots of 1,024 bytes.
+DOMAIN_ROW_SLOTS = 9
+# The bounds a twin's ``kernel_requires`` states: at most 2^27 rows, ``chunk_shift`` at most 27 and ``item_rows`` at
+# most 1024, so no slot, row or item index leaves 32 bits.  A call of more rows runs its stage's other programs.
+DOMAIN_MAX_ROWS = 2**27
+DOMAIN_MAX_ITEM_ROWS = 1024
+# The route classes of a twin's call: ``homed``, every BF16 operand (inputs, ``dh`` and outputs) in the anchor's row
+# frame; ``anchor``, the anchor (the merged input or the gate) in its frame and some other BF16 operand not.  The class
+# picks the twin's first rows per SM only: the twin stores the same bits in either.
+DOMAIN_CLASSES = ("homed", "anchor")
+# The reasons of a ``locality="domain"`` call, in the order the host checks them: ``"placed"`` for the twin, any other
+# for the program the call runs with ``locality="off"`` (the same bits).
+DOMAIN_REASONS = (
+    "placed",
+    "arch",
+    "size",
+    "sm_table",
+    "input_memory",
+    "input_layout",
+    "overlap",
+    "input_phase",
+    "out_memory",
+    "no_out",
+)
+
+
+def domain_program(stage: str, arch: str) -> str | None:
+    """The twin of ``stage`` on ``arch`` (its locality-domain role's program), or None.  A twin whose ``grid_rule``,
+    ``counters`` or ``first_rows_per_sm`` is outside the vocabulary is a registry error (``RuntimeError`` naming
+    it)."""
+    name = PROGRAM_OF[stage + DOMAIN].get(arch)
+    if name is not None:
+        domain_rule(name, arch)
+    return name
+
+
+def domain_rule(name: str, arch: str) -> tuple[int, int, int]:
+    """``(chunk_shift, item_rows, ctas_per_sm)`` of twin ``name`` on ``arch``, its record checked: grid rule kind
+    :data:`DOMAIN_GRID_KIND` with :data:`DOMAIN_ROW_SLOTS` slots a row, ``0 <= chunk_shift <= max_chunk_shift <= 27``,
+    ``max_rows`` :data:`DOMAIN_MAX_ROWS`, ``1 <= item_rows <= 1024`` and, per architecture of the record, at least one
+    CTA an SM (``ctas_per_sm[arch]``, the build's resident CTAs); a claim workspace of at least one ``uint32`` word a
+    die that the kernel re-arms; and, per architecture of the record, a first row count per SM (an integer of at least
+    1, or None) for each route class.  Anything else, or an ``arch`` the record does not ship, is a ``RuntimeError``
+    naming the record."""
+    record = MODULES[name]
+    rule = record.get("grid_rule") or {}
+    counters = record.get("counters") or {}
+    firsts = record.get("first_rows_per_sm") or {}
+    try:
+        shift, top, most, rows = (int(rule[key]) for key in ("chunk_shift", "max_chunk_shift", "max_rows", "item_rows"))
+        per_arch = rule["ctas_per_sm"]
+        ctas = per_arch[arch]
+        ok = (
+            rule["kind"] == DOMAIN_GRID_KIND
+            and int(rule["row_slots"]) == DOMAIN_ROW_SLOTS
+            and 0 <= shift <= top <= 27
+            and most == DOMAIN_MAX_ROWS
+            and 1 <= rows <= DOMAIN_MAX_ITEM_ROWS
+            and set(per_arch) == set(record["arches"])
+            and all(type(value) is int and value >= 1 for value in per_arch.values())
+            and counters["dtype"] == COUNTER_DTYPE
+            and counters["rearm"] == COUNTER_REARM
+            and int(counters["words"]) >= 1
+            and set(firsts) == set(record["arches"])
+            and all(
+                set(row) == set(DOMAIN_CLASSES)
+                and all(value is None or (type(value) is int and value >= 1) for value in row.values())
+                for row in firsts.values()
+            )
+        )
+    except (KeyError, TypeError, ValueError, AttributeError):
+        ok = False
+    if not ok:
+        raise RuntimeError(
+            f"{name}: the locality-domain record's grid_rule {rule!r}, counters {counters!r} or first_rows_per_sm "
+            f"{firsts!r} is outside the vocabulary (on {arch})"
+        )
+    return shift, rows, ctas
+
+
+def _first_rows() -> dict[str, dict[str, dict[str, int | None]]]:
+    """Stage -> architecture -> route class -> the first rows per SM of the stage's twin (None: never), from the
+    twin's record (``first_rows_per_sm``)."""
+    table: dict[str, dict[str, dict[str, int | None]]] = {}
+    for record in MODULES.values():
+        if record["role"].endswith(DOMAIN):
+            for arch, row in record.get("first_rows_per_sm", {}).items():
+                table.setdefault(record["stage"], {})[arch] = {klass: row.get(klass) for klass in DOMAIN_CLASSES}
+    return table
+
+
+# Stage -> architecture -> route class -> the rows per SM from which a ``locality="domain"`` call of that class runs the
+# stage's twin (a call of ``rows >= value * sm_count`` rows), or None where it never does; read from the twin's record
+# (not a literal, so the exporter's reader skips it).  The values are the measured first row counts at which the twin
+# on memory that alternates dies runs faster than the stage's other programs on the same memory.
+DOMAIN_FIRST_ROWS_PER_SM: dict[str, dict[str, dict[str, int | None]]] = _first_rows()
+
+
+def _chunk_row(chunk: int, first_slot: int, chunk_shift: int) -> int:
+    """The first row whose first slot lies in chunk ``chunk`` or later."""
+    return max(((chunk << chunk_shift) - first_slot + DOMAIN_ROW_SLOTS - 1) // DOMAIN_ROW_SLOTS, 0)
+
+
+def domain_chunk_items(chunk_shift: int, item_rows: int) -> int:
+    """``P``: the items of a whole chunk, ``ceil(ceil(2^chunk_shift / 9) / item_rows)``."""
+    most = ((1 << chunk_shift) + DOMAIN_ROW_SLOTS - 1) // DOMAIN_ROW_SLOTS
+    return (most + item_rows - 1) // item_rows
+
+
+def domain_items(rows: int, first_slot: int, first_die: int, chunk_shift: int, item_rows: int) -> tuple[int, int]:
+    """``(items0, items1)``: the items a twin's dies hold for ``rows >= 1`` rows whose row ``r`` starts at slot
+    ``first_slot + 9 r`` of chunks of ``2^chunk_shift`` slots, chunk ``k`` in die ``first_die ^ (k & 1)``.  A die's
+    chunks are ``k = die ^ first_die``, then every second one; it holds ``P`` items of each of them but its last
+    (:func:`domain_chunk_items`), then the items its last chunk's rows need, ``item_rows`` rows an item.  The kernel's
+    count, in Python integers."""
+    last = (first_slot + DOMAIN_ROW_SLOTS * (rows - 1)) >> chunk_shift
+    per_chunk = domain_chunk_items(chunk_shift, item_rows)
+    counts = []
+    for start in (first_die, first_die ^ 1):
+        chunks = (last + 2 - start) >> 1
+        if chunks == 0:
+            counts.append(0)
+            continue
+        final = start + 2 * (chunks - 1)
+        first = _chunk_row(final, first_slot, chunk_shift)
+        end = min(_chunk_row(final + 1, first_slot, chunk_shift), rows)
+        counts.append((chunks - 1) * per_chunk + (end - first + item_rows - 1) // item_rows)
+    return counts[0], counts[1]
+
+
+def domain_item_rows(
+    word: int, rows: int, first_slot: int, first_die: int, chunk_shift: int, item_rows: int
+) -> tuple[int, int]:
+    """The rows ``[lo, hi)`` of claim word ``item * 2 + die`` (item ``item`` of die ``die``, :func:`domain_items`),
+    as the kernel decodes it: item ``j`` of the die's ``pair``-th chunk (``item = pair * P + j``).  ``lo >= hi`` for an
+    item past its chunk's rows."""
+    per_chunk = domain_chunk_items(chunk_shift, item_rows)
+    item = word >> 1
+    pair = item // per_chunk
+    chunk = ((word & 1) ^ first_die) + 2 * pair
+    lo = _chunk_row(chunk, first_slot, chunk_shift) + (item - pair * per_chunk) * item_rows
+    bound = min(_chunk_row(chunk + 1, first_slot, chunk_shift), rows)
+    return lo, min(lo + item_rows, bound)
+
+
+def domain_grid(
+    name: str, arch: str, rows: int, first_slot: int, first_die: int, sm_count: int
+) -> tuple[int, int, int]:
+    """The launch grid of twin ``name`` on ``arch`` for ``1 <= rows <= DOMAIN_MAX_ROWS`` rows from slot ``first_slot``
+    of a die ``first_die`` chunk on a device of ``sm_count`` SMs: ``min(items0 + items1, ctas_per_sm * sm_count)``
+    CTAs, at least one (:func:`domain_items` at the record's ``chunk_shift`` and ``item_rows``; ``ctas_per_sm`` the
+    record's for ``arch``).  Any grid of at least one CTA gives the same bits; this one keeps the walk's limit, a die's
+    items plus the grid less one, below ``2**31``."""
+    if not 1 <= rows <= DOMAIN_MAX_ROWS:
+        raise ValueError(f"a locality-domain launch takes 1 to {DOMAIN_MAX_ROWS} rows, got {rows}")
+    chunk_shift, item_rows, ctas = domain_rule(name, arch)
+    if not 0 <= first_slot < 1 << chunk_shift or first_die not in (0, 1):
+        raise ValueError(
+            f"first_slot {first_slot} or first_die {first_die} is outside a chunk of 2^{chunk_shift} slots"
+        )
+    items0, items1 = domain_items(rows, first_slot, first_die, chunk_shift, item_rows)
+    return (max(1, min(items0 + items1, ctas * int(sm_count))), 1, 1)

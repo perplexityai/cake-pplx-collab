@@ -42,7 +42,7 @@ the free, the free deferred past a capture, the refusal during capture, and
 with two SM107s both during a capture on the other device), the route's bytes
 against the ``"off"`` route for every format with and without the scales (and
 a caller's scales buffer), out of place above the route's first size and at
-offsets inside a chunk, every domain program against the FP64 rule on any grid
+offsets inside a chunk, also on inputs with NaN and infinities, every domain program against the FP64 rule on any grid
 and on the plain programs' rule inputs (edge rows, every finite BF16 under
 every scale, group scales from 2^-120 to 2^120), each plain reason, the claim
 counters left zero, a launch that raises, two streams at once, each die's
@@ -81,11 +81,11 @@ domain_empty = pkg.cake_act_qdq_det_train_domain_empty
 FORMATS = reference.FORMATS
 KINDS = tuple(loader.KINDS)
 ARCH = "sm_107a"
-# The chunk of the memory that alternates dies; the bytes of the largest tile of the interleaved-domain programs
-# (FP4's), a whole number of every program's tiles; and the bytes of each format's tile.
+# The chunk of the memory that alternates dies; the bytes of the tile of the interleaved-domain programs, a whole
+# number of every program's tiles; and the bytes of each format's tile.
 CHUNK = 2097152
 TILE_BYTES = 1024 * 16
-DOMAIN_TILE_BYTES = {"fp4_e4m3_g16": 1024 * 16, "mxfp4_e8m0_g32": 512 * 16, "mxfp8_e8m0_g32": 512 * 16}
+DOMAIN_TILE_BYTES = {"fp4_e4m3_g16": 1024 * 16, "mxfp4_e8m0_g32": 1024 * 16, "mxfp8_e8m0_g32": 1024 * 16}
 BF16 = 2
 # The width of the inputs of the size tests: 12 vectors a row, so a size just above a bound ends inside a tile.
 WIDTH = 96
@@ -240,13 +240,13 @@ def _kernel_item(slot: int, first_die: int, shift: int, batch_shift: int) -> tup
 @pytest.mark.cpu_only
 @pytest.mark.parametrize(
     ("name", "tile", "chunk_tile_shift", "ctas_per_sm"),
-    (("fp4_e4m3_g16_domain", 1024, 7, 7), ("mxfp8_e8m0_g32_domain", 512, 8, 8)),
+    (("fp4_e4m3_g16_domain", 1024, 7, 7), ("mxfp8_e8m0_g32_domain", 1024, 7, 8)),
     ids=("fp4", "mx"),
 )
 def test_domain_launch_covers_every_tile(name: str, tile: int, chunk_tile_shift: int, ctas_per_sm: int) -> None:
-    """``domain_launch``: the first tile rounds down, the chunk holds the format's tiles (FP4: 128 of 16,384 bytes;
-    MXFP4 and MXFP8: 256 of 8,192 bytes), an item is one of them, and the grid is one CTA per item of the chunks that
-    hold the input, at most 7 (FP4) or 8 (MXFP4, MXFP8) a SM.  Every tile of the input lies in an item below its
+    """``domain_launch``: the first tile rounds down, the chunk holds the format's tiles (128 of 16,384 bytes), an item
+    is one of them, and the grid is one CTA per item of the chunks that hold the input, at most 7 (FP4) or 8 (MXFP4,
+    MXFP8) a SM.  Every tile of the input lies in an item below its
     die's item count, as the kernel decodes the item back to its slots."""
     record = loader.MODULES[name]
     tile_bytes = DOMAIN_TILE_BYTES[record["format"]]
@@ -984,6 +984,63 @@ def test_domain_route_gives_the_off_bytes(big, fmt: str, scale_out: bool, offset
     _assert_same(f"{kind} offset={offset} x after the call", x, x0)
 
 
+# BF16 bits: a quiet NaN, the NaN of the smallest payload, +inf, 2^24 (above every element of ``randn_input``'s groups)
+# and the sign bit, as int16.
+NAN, NAN_LOW, INF, BIG, NEG = 0x7FC0, 0x7F81, 0x7F80, 0x4B80, -0x8000
+
+
+def _non_finite_input(x0: torch.Tensor, fmt: str) -> torch.Tensor:
+    """``x0`` with NaN and infinities in eight of every ten groups, each in the group's first vector (8 elements, the
+    four BF16 pairs of one thread) unless stated: its even elements NaN and its odd ones 2^24, so one half of the
+    thread's pairs is all NaN beside the group's largest number; its odd elements -NaN and its even ones -2^24; the
+    whole vector NaN of the smallest payload; the whole group NaN, of both signs; one NaN; one +inf; its even elements
+    -inf and its odd ones NaN; the even elements of every vector of the group NaN."""
+    x = x0.clone()
+    groups = x.view(torch.int16).view(-1, reference.GROUP[fmt])
+    pattern = torch.arange(groups.shape[0], device=x.device) % 10
+
+    def at(k: int) -> torch.Tensor:
+        return (pattern == k).nonzero().view(-1)
+
+    groups[at(0), 0:8:2] = NAN
+    groups[at(0), 1:8:2] = BIG
+    groups[at(1), 1:8:2] = NEG | NAN
+    groups[at(1), 0:8:2] = NEG | BIG
+    groups[at(2), 0:8] = NAN_LOW
+    groups[at(3), 0::2] = NAN
+    groups[at(3), 1::2] = NEG | NAN_LOW
+    groups[at(4), 3] = NAN
+    groups[at(5), 2] = INF
+    groups[at(6), 0:8:2] = NEG | INF
+    groups[at(6), 1:8:2] = NAN
+    groups[at(7), 0::2] = NAN
+    return x
+
+
+@pytest.mark.parametrize("scale_out", (False, True), ids=("y", "y_scales"))
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_domain_route_gives_the_off_bytes_on_non_finite_inputs(big, fmt: str, scale_out: bool, monkeypatch) -> None:
+    """Non-finite inputs are outside the rule, but the route still gives the ``"off"`` route's bytes (and scales) for
+    them: the inputs of :func:`_non_finite_input`, out of place just above the route's first size, in a die-1
+    chunk."""
+    kind = loader.route_name(fmt, scale_out=scale_out)
+    x0 = _non_finite_input(big.input(fmt), fmt)
+    x, y = big.view(big.x_buf, OFFSETS[1]), big.view(big.y_buf, OFFSETS[1])
+    x.copy_(x0)
+    y.fill_(float("nan"))
+    launched = _spy(monkeypatch)
+    result = forward(x, format=fmt, out=y, return_scales=scale_out, locality="domain")
+    assert launched == [_domain_name(kind)], launched
+    monkeypatch.undo()
+    want = forward(x0, format=fmt, return_scales=scale_out)
+    y_got, s_got = result if scale_out else (result, None)
+    y_want, s_want = want if scale_out else (want, None)
+    _assert_same(f"{kind} y", y_got, y_want)
+    if scale_out:
+        _assert_same(f"{kind} scales", s_got, s_want)
+    _assert_same(f"{kind} x after the call", x, x0)
+
+
 @pytest.mark.parametrize("fmt", FORMATS)
 def test_every_domain_program_runs_on_any_grid(r200, fmt: str) -> None:
     """Every interleaved-domain program, launched directly on grids of 1 and 3 CTAs and on the host's grid, gives
@@ -1039,8 +1096,8 @@ RULE_INPUTS = {
     "sweep": lambda fmt: reference.sweep_input(fmt),
     "wide": lambda fmt: reference.randn_input((33, 8, 512), fmt, lo=120, hi=120, seed=31),
 }
-# Byte offsets of those inputs in memory that alternates dies: 3 FP4 tiles (6 MXFP4 or MXFP8 tiles) before the end of
-# a die-0 chunk (a longer input reaches die 1), and inside the first tile of a die-1 chunk.
+# Byte offsets of those inputs in memory that alternates dies: 3 tiles (of every format) before the end of a die-0
+# chunk (a longer input reaches die 1), and inside the first tile of a die-1 chunk.
 RULE_OFFSETS = (CHUNK - 3 * TILE_BYTES + 16, CHUNK + 16)
 
 

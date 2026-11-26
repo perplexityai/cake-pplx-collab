@@ -244,7 +244,7 @@ digits of the program name.
 | `bwd_h1024` | (8, 1536] | 89fa3e96 | column task | - | - |
 | `bwd_h1024` | (1536, 2048] | 0c581a13 | plain | row-strided slots | 4830a91c (chain, column-split) |
 | `bwd_h1024` | (2048, 4095] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
-| `bwd_h1024` | (4095, inf) | 4572a519 | plain | row-strided slots, 1 SMs left out | 176f79f9 (chain) |
+| `bwd_h1024` | (4095, inf) | 4572a519 | plain | row-strided slots, 1 SMs left out | 3b5dc80e (chain) |
 | `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
 | `bwd_h128` | (1024, 2047] | 401a018c | column task | - | - |
 | `bwd_h128` | (2047, 65536] | d197bcc3 | plain | row-strided slots | 096e5efb (chain, column-split) |
@@ -253,15 +253,15 @@ digits of the program name.
 | `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
 | `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
 | `bwd_h1280` | (512, 6143] | 12bbedff | plain | row-strided slots | 849ee5d8 (chain, column-split) |
-| `bwd_h1280` | (6143, 32767] | 3f26352e | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
-| `bwd_h1280` | (32767, inf) | 7ac3bb64 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
+| `bwd_h1280` | (6143, 32767] | b1339aac | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
+| `bwd_h1280` | (32767, inf) | f8cb729b | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
 | `bwd_w32_h1280` | (0, 1] | 103805d9 | column task | - | - |
 | `bwd_w32_h1280` | (1, 128] | 8d8ef930 | column task | - | - |
 | `bwd_w32_h1280` | (128, 512] | e476d0b2 | column task | - | - |
 | `bwd_w32_h1280` | (512, 4096] | 80956d25 | plain | row-strided slots | 849ee5d8 (chain, column-split) |
 | `bwd_w32_h1280` | (4096, 6143] | c66b8cbd | plain | row-strided slots | 382c8727 (chain, column-split) |
-| `bwd_w32_h1280` | (6143, 32767] | b1a35315 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
-| `bwd_w32_h1280` | (32767, inf) | 7a4606b0 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
+| `bwd_w32_h1280` | (6143, 32767] | de2f75d4 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
+| `bwd_w32_h1280` | (32767, inf) | fdb7fdce | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
 | `bwd_h1536` | (0, 1] | c3b1b46a | column task | - | - |
 | `bwd_h1536` | (1, 576] | 1207b056 | column task | - | - |
 | `bwd_h1536` | (576, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 628248fe (tree) |

@@ -3354,8 +3354,9 @@ ROUTER_RULES: dict[
     # 7 % slower than that plan when a kernel holding 16 SMs on another stream started during it (the kernel takes SMs
     # the head spans wait for), at 6144 it left the backward pass no faster.
     # The deterministic plan of the measurements above is that package's six splits.  From 16129 to 16384 tokens on
-    # 148- and 152-SM sm_100a / sm_103a parts it plans nine splits at hidden 5120 and three at hidden 6144 (its
-    # ROUTER_SPLIT_RULES, router_splits).  The 152-SM head/tail windows at and next to those token counts were measured
+    # 148- and 152-SM sm_100a / sm_103a parts it plans nine splits at hidden 5120 and three at hidden 6144 with 256
+    # experts (its ROUTER_SPLIT_RULES, router_splits); since its version 0.3.28 also eight splits at hidden 4096 with
+    # 512 experts at 32736 tokens on 148-SM sm_100a and 152-SM sm_103a parts.  The 152-SM head/tail windows at and next to those token counts were measured
     # again on two parts against the plan the row runs without them (the rule's count from 16129 to 16384 tokens, six
     # elsewhere), alone, in the backward pass and in the checkpointed step, in eager launches and in CUDA graphs.  A
     # token count stays in a window where, on both parts, the partition was faster alone in every run (a one-sided
@@ -3601,7 +3602,8 @@ ROUTER_FORWARD_MAX_SPLITS = 2
 #: The deterministic package's default split count of the router weight gradient (its ``ROUTER_SPLITS["nn_t"]``):
 #: the plan the ``"waves"`` partition is measured against, and the count of :func:`router_waves` without one.
 #: :func:`router_partition` passes the count that package plans for the row (its ``router_splits``), which differs
-#: from this one only on the rows of its ``ROUTER_SPLIT_RULES``; none of them meets a ``"waves"`` window.
+#: from this one only on the rows of its ``ROUTER_SPLIT_RULES``; none of them meets a ``"waves"`` window (the rows of
+#: 512 and 896 experts there, since its version 0.3.28, have no verdict in the router tables of this package).
 ROUTER_DET_WGRAD_SPLITS = 6
 #: The ``"waves"`` partition: about this many K blocks (32 elements each) of one tile per unit ...
 ROUTER_WAVE_K_BLOCKS = 68
@@ -5460,7 +5462,8 @@ _K2_KSUM_TICKETS_ARG = _Arg("ksum_tickets")
 PARTIALS_SUM_TEMPLATE = cake_jit.TEMPLATE_PREFIXES[5]
 #: The split counts the partial sum serves (its kernel requires two to eight).  The deterministic router planner issues
 #: four for the forward and six for the weight gradient, except on the rows of its ``ROUTER_SPLIT_RULES``: three
-#: (served) and nine (``torch.sum``) for the weight gradient.
+#: (served) and nine (``torch.sum``) for the weight gradient, and since its version 0.3.28 eight (served) for the weight
+#: gradient and one (no partial sum) for the forward.
 PARTIALS_SUM_SPLITS = range(2, 9)
 #: Threads per CTA of the partial sum and the ``out`` columns each thread sums (a flat grid over the rows' column
 #: quads).
@@ -7825,8 +7828,9 @@ def cake_dense_gemm_nondet_train_router_wgrad(
     transposed store; ``splits`` defaults to the partition of the row's verdict in :data:`ROUTER_RULES` or, on a part
     with a table of its own, in :data:`ROUTER_RULES_BY_SM` (:func:`router_partition`; a row or token count without one
     runs the deterministic program at that package's split count of the row -- its ``router_splits``: six; nine at
-    hidden 5120 and three at hidden 6144 from 16129 to 16384 tokens on 148- and 152-SM ``sm_100a`` / ``sm_103a``
-    parts, its ``ROUTER_SPLIT_RULES`` -- through this package's binding of it without planning the row here,
+    hidden 5120 and three at hidden 6144 with 256 experts from 16129 to 16384 tokens on 148- and 152-SM ``sm_100a`` /
+    ``sm_103a`` parts, eight at hidden 4096 with 512 experts at 32736 tokens on 148-SM ``sm_100a`` and 152-SM
+    ``sm_103a`` parts, its ``ROUTER_SPLIT_RULES`` -- through this package's binding of it without planning the row here,
     :func:`_launch_cached_splitk_k2`)."""
     if out is None:
         out = torch.empty(G.shape[1], X.shape[1], device=G.device, dtype=torch.float32)

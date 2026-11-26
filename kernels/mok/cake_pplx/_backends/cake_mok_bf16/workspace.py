@@ -80,6 +80,18 @@ class MoKConfig:
     # output bit.
     bf16_comm_sms: tuple[int, int] | None = None
     mxfp8_comm_sms: tuple[int, int] | None = None
+    # Fixed split per launch shape: ``(precision, hidden, intermediate, topk,
+    # forward, backward)`` rows. A forward or backward launch whose routed
+    # precision (``"bf16"`` or ``"mxfp8"``), workspace hidden width and top-k
+    # and routed intermediate width match a row uses its forward or backward
+    # count instead of ``bf16_comm_sms`` / ``mxfp8_comm_sms`` (or
+    # ``fwd_num_comm_sms`` / ``bwd_num_comm_sms``); every other launch, and
+    # every context recompute launch, keeps those. The facade's
+    # ``"auto"`` sets the measured rows of the device and EP group size;
+    # integer counts leave it ``None``. The imbalance split above replaces a
+    # row while the load is skewed. The split changes time only, never an
+    # output bit.
+    shape_comm_sms: tuple[tuple[str, int, int, int, int, int], ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -10381,8 +10381,9 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
     ``dW`` -- and ``dX`` wherever the call runs one dX slice per chunk (pinned or by the rule; else the same products
     through the K-sliced reduction, its slab summed in slice order: finite, judged by
     :func:`test_device_logprob_keep_meets_the_naive_tier`) -- over one-, two- and many-chunk calls, compacted and
-    uncompacted calls, every row valid, the hidden valid-row count on and off, the dW side stream, the unfused dW
-    cast and dX finalize, labels at and beyond the last vocabulary column and an ``X`` with a padded leading stride;
+    uncompacted calls, every row valid, the hidden valid-row count on and off (and with chunk 0's count below its
+    rows), the dW side stream, the unfused dW cast and dX finalize, labels at and beyond the last vocabulary column
+    and an ``X`` with a padded leading stride;
     the kept bindings are their own (``_KeptBinding``, keys ending in ``"keep"``) and the kept backward bindings
     launch no logits GEMM; with one trainable input (a frozen ``X``: no ``dX``; a frozen ``W``: no ``dW`` and no
     chunk row gather) the kept path gives the default path's gradient."""
@@ -10400,6 +10401,8 @@ def test_device_logprob_keep_is_bitwise(logprob_chunk_loop, glm_weight, chunked_
         (8700, 4096, 0.05, dict(hidden_count=False), 0, False),
         (8700, 4096, 0.0, {}, 0, False),
         (3100, 1024, 0.5, dict(dw_stream=True), 0, False),
+        # the hidden count with chunk 0's count (310) below its 1024 rows: two of the GEMM's four row pairs run no work
+        (3100, 1024, 0.9, {}, 0, False),
         (1500, 4096, 0.05, {}, 8, False),
         (2500, 2048, 0.05, dict(compact_rows=False), 0, True),
         (5000, 2048, 0.05, dict(fuse_dw_cast=False, dx_finalize=False), 0, True),

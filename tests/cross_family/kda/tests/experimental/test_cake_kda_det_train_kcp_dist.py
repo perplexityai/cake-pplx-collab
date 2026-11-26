@@ -1778,7 +1778,9 @@ def _run_rank_ckpt(
 
     # the same layer with cake_causal_conv1d_det_kcp_multi (the q / k / v convolutions in one call, one halo exchange
     # per direction) and ONE handle for the convolutions and KDA: bitwise the three single calls, two halo
-    # collectives (and waits) fewer in every phase that exchanges halos, the same retained bytes
+    # collectives fewer in every phase that exchanges halos, the same retained bytes.  Waits: the single calls' eager
+    # forward exchanges are waiting collectives (``async_op=False``, no work handle) and the multi entry's forward
+    # exchange is waited, so the forward phases count one wait more and the backward two fewer
     def layer_multi(xq, xk, xv, wq, wk, wv, g_, b_, w_, h):
         T = xq.shape[0]
         qq, kk, vv = conv_kcp.cake_causal_conv1d_det_kcp_multi(
@@ -1839,14 +1841,16 @@ def _run_rank_ckpt(
     flags["layer_multi_bitwise"] = (
         eq(lm_direct, l_direct) and eq(lm_plain, l_direct) and eq(lm_handle, l_direct)
     )
+    # (forward phases, backward): multi minus the three single calls
+    delta = {"calls": (-2, -2), "waits": (1, -2)}
     flags["layer_multi_counts"] = all(
-        lmd[t]["orig"] == ld[t]["orig"] - 2
-        and lmp[t]["orig"] == lp[t]["orig"] - 2
-        and lmp[t]["recompute"] == lp[t]["recompute"] - 2
-        and lmp[t]["bwd"] == lp[t]["bwd"] - 2
-        and lmh[t]["orig"] == lp[t]["orig"] - 2
+        lmd[t]["orig"] == ld[t]["orig"] + delta[t][0]
+        and lmp[t]["orig"] == lp[t]["orig"] + delta[t][0]
+        and lmp[t]["recompute"] == lp[t]["recompute"] + delta[t][0]
+        and lmp[t]["bwd"] == lp[t]["bwd"] + delta[t][1]
+        and lmh[t]["orig"] == lp[t]["orig"] + delta[t][0]
         and lmh[t]["recompute"] == 0
-        and lmh[t]["bwd"] == lp[t]["bwd"] - 2
+        and lmh[t]["bwd"] == lp[t]["bwd"] + delta[t][1]
         for t in ("calls", "waits")
     )
     flags["layer_multi_nbytes"] = (
