@@ -10732,8 +10732,9 @@ class ForwardResult(_TemperatureResultState, _ProblemResultState):
     x_idx: Optional[torch.Tensor] = None
     # the explicit GEMM knobs the forward ran with (``{}`` = none); the deferred weight gradient's GEMM takes its knobs
     gemm_tuning: Optional[dict] = None
-    # a one-pass call's kept state (:func:`_one_pass_forward`): ``(Z, ROWS, LAB, need_dx, need_dw)``, the operands of
-    # :func:`_one_pass_backward` (``None`` for the chunked path)
+    # a one-pass call's kept state (:func:`_one_pass_forward`): ``(Z, ROWS, LAB, DXA, T, V, need_dx, need_dw)`` -- the
+    # flat kept logits, row results and dX accumulator (``None`` without dX), the labels, the row and vocabulary
+    # counts -- the operands of :func:`_one_pass_backward` (``None`` for the chunked path)
     one_pass: Optional[tuple] = None
 
     def backward(self, grad=None, *, grad_weight_dtype=torch.bfloat16, backend=None):
@@ -14634,7 +14635,7 @@ def _loss_backward_split(ctx, grad_loss):
     inputs = None
     one_pass = getattr(state, "one_pass", None)
     if one_pass is not None:
-        return _one_pass_backward(one_pass, state.x_last, state.dx_acc, grad_loss)
+        return _one_pass_backward(one_pass, state.x_last, grad_loss)
     if ctx.num_rows == 0 or (
         state.row_index is not None and state.row_index.numel() == 0
     ):
@@ -14709,9 +14710,26 @@ ONE_PASS_DX_THREADS = 256
 ONE_PASS_MAX_PARTS = 256
 ONE_PASS_ROWS_DEFAULT = frozenset({1})
 _ONE_PASS = {"rows": ONE_PASS_ROWS_DEFAULT}
-# Per device index: ``(module_name, record, rows)`` -- the record and the row counts whose one-pass programs it
-# registers (every forward form of the count, the merge and the backward).
-_ONE_PASS_RECORDS: dict[int, tuple[str, dict[str, Any], frozenset]] = {}
+# Per device index: ``(module_name, record, rows, geometry)`` -- the record, the row counts whose one-pass programs it
+# registers (every forward form of the count, the merge and the backward) and, when it registers any, its geometry
+# (:meth:`Geometry.from_record`, its binding profile checked by :func:`record_abi`; ``None`` otherwise), derived once.
+_ONE_PASS_RECORDS: dict[
+    int, tuple[str, dict[str, Any], frozenset, Optional[Geometry]]
+] = {}
+# Per ``(device index, V)``: ``(parts, rpc)`` of the one-pass forward -- its CTAs (at most one per SM and
+# ``ONE_PASS_MAX_PARTS``) and the vocabulary rows of each.
+_ONE_PASS_PARTS: dict[tuple[int, int], tuple[int, int]] = {}
+
+
+class _OnePassStream(threading.local):
+    """Whether the calling thread's one-pass forward holds one tvm-ffi stream context around its two launches
+    (:func:`_one_pass_forward`): :func:`_one_pass_launch` then launches in it instead of entering its own.  The class
+    attribute is every thread's value until the thread sets it (as :class:`_SmallStage`)."""
+
+    held: bool = False
+
+
+_ONE_PASS_STREAM = _OnePassStream()
 
 
 def one_pass_rows() -> frozenset:
@@ -14737,20 +14755,29 @@ def set_one_pass_rows(rows) -> frozenset:
     return previous
 
 
-def _one_pass_record(index: int) -> tuple[str, dict[str, Any], frozenset]:
-    """``(module_name, record, rows)`` of CUDA device ``index`` (resolved once per device): its record and the row
-    counts whose forward forms, merge and backward it registers (empty without those programs)."""
+def _one_pass_record(
+    index: int,
+) -> tuple[str, dict[str, Any], frozenset, Optional[Geometry]]:
+    """``(module_name, record, rows, geometry)`` of CUDA device ``index`` (resolved once per device): its record, the
+    row counts whose forward forms, merge and backward it registers (empty without those programs) and, with any, the
+    record's geometry, its binding profile checked (:func:`record_abi`; ``None`` without)."""
     entry = _ONE_PASS_RECORDS.get(index)
     if entry is None:
         module_name, record = record_for(torch.device("cuda", index))
         rows: frozenset = frozenset()
+        geometry = None
         if ONE_PASS_COMBINE_STAGE in record and ONE_PASS_DW_STAGE in record:
             rows = frozenset(
                 t
                 for t, stages in ONE_PASS_FWD_STAGES.items()
                 if all(stage in record for stage in stages)
             )
-        entry = _ONE_PASS_RECORDS.setdefault(index, (module_name, record, rows))
+        if rows:
+            record_abi(record)
+            geometry = Geometry.from_record(record)
+        entry = _ONE_PASS_RECORDS.setdefault(
+            index, (module_name, record, rows, geometry)
+        )
     return entry
 
 
@@ -14811,12 +14838,17 @@ def _one_pass_call(
             return False
     except (TypeError, ValueError):
         return False
-    if arch_for(X.device) is None:
-        return False
-    index = (
-        X.device.index if X.device.index is not None else torch.cuda.current_device()
+    device = X.device
+    index = int(
+        device.index if device.index is not None else torch.cuda.current_device()
     )
-    return T in _one_pass_record(int(index))[2]
+    # a resolved record implies a supported architecture (record_for): no capability query then
+    entry = _ONE_PASS_RECORDS.get(index)
+    if entry is None:
+        if arch_for(device) is None:
+            return False
+        entry = _one_pass_record(index)
+    return T in entry[2]
 
 
 def _x_span(X: torch.Tensor, ldx: int) -> torch.Tensor:
@@ -14827,13 +14859,25 @@ def _x_span(X: torch.Tensor, ldx: int) -> torch.Tensor:
 
 
 def _one_pass_launch(module_name, record, stage, values, device, index) -> None:
-    """One eager launch of a one-pass program (the remembered templated launch of its form, :func:`_eager_launch`)."""
-    full: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    full.update({name: 0 for name in COMMON_SCALARS})
+    """One eager launch of a one-pass program (the remembered templated launch of its form, :func:`_eager_launch`), in
+    the stream context its forward holds (:data:`_ONE_PASS_STREAM`) or else in its own."""
+    full: dict[str, Any] = dict(_EAGER_BASE)
     full.update(values)
-    launch, arguments = _eager_launch(
-        record, module_name, stage, full, device, Geometry.from_record(record)
+    # the record's geometry, derived once (_one_pass_record)
+    entry = _ONE_PASS_RECORDS.get(index)
+    geometry = (
+        entry[3]
+        if entry is not None and entry[1] is record and entry[3] is not None
+        else Geometry.from_record(record)
     )
+    launch, arguments = _eager_launch(
+        record, module_name, stage, full, device, geometry
+    )
+    if _ONE_PASS_STREAM.held:
+        if launch.prepare is not None:
+            launch.prepare(*arguments)
+        launch.entry(*arguments)
+        return
     with _ffi_stream_context(index):
         if launch.prepare is not None:
             launch.prepare(*arguments)
@@ -14857,14 +14901,15 @@ def _one_pass_forward(
     **_switches,
 ) -> ForwardResult:
     """The loss entry's forward of a one-pass call (:func:`_one_pass_call`): ``loss``, ``logp`` and, with ``need_dx``,
-    the FP32 ``dx_acc [T, H]``; the backward's operands ride on the result as ``one_pass`` (the kept logits, the row
-    results, the labels) and ``x_last`` (``X``, when ``need_dw``).  The chunked path's switches do not apply."""
+    the FP32 ``dx_acc [T, H]``; the backward's operands ride on the result as ``one_pass`` (the flat kept logits, row
+    results and dX accumulator, the labels, ``T`` and ``V``) and ``x_last`` (``X``, when ``need_dw``).  The chunked
+    path's switches do not apply."""
     device = X.device
     index = int(
         device.index if device.index is not None else torch.cuda.current_device()
     )
-    module_name, record, _rows = _one_pass_record(index)
-    record_abi(record)
+    # the record's binding profile is checked and its geometry derived once (_one_pass_record)
+    module_name, record, _rows, geometry = _one_pass_record(index)
     problem = validate_lm_head_inputs(
         X,
         W,
@@ -14875,13 +14920,16 @@ def _one_pass_forward(
         loss_weights=loss_weights,
         chunk_size=chunk_size,
         grad_weight_dtype=grad_weight_dtype,
-        geometry=Geometry.from_record(record),
+        geometry=geometry,
     )
     T, H, V = problem.num_rows, problem.hidden, problem.vocab
-    sms = int(torch.cuda.get_device_properties(device).multi_processor_count)
-    parts = min(sms, ONE_PASS_MAX_PARTS, V)
-    rpc = -(-V // parts)
-    parts = -(-V // rpc)
+    split = _ONE_PASS_PARTS.get((index, V))
+    if split is None:
+        sms = int(torch.cuda.get_device_properties(device).multi_processor_count)
+        parts = min(sms, ONE_PASS_MAX_PARTS, V)
+        rpc = -(-V // parts)
+        split = _ONE_PASS_PARTS.setdefault((index, V), (-(-V // rpc), rpc))
+    parts, rpc = split
     ldx = int(X.stride(0)) if T > 1 else H
     # the kept state (logits, row results, labels, dX accumulator) in one allocation, the partials in another
     kept = [
@@ -14903,12 +14951,14 @@ def _one_pass_forward(
         start, nbytes = offsets[name]
         return block[start : start + nbytes].view(dtype)
 
-    Z = view("z", torch.bfloat16).view(T, V)
-    ROWS = view("rows", torch.float32).view(T, 2)
+    # the programs' operands are flat: the kept logits [T * V], row results [2 T] and dX accumulator [T * H] as the
+    # block's views (the backward reads them as they are); the result's dx_acc is the accumulator's [T, H]
+    Z = view("z", torch.bfloat16)
+    ROWS = view("rows", torch.float32)
     LOGP = view("logp", torch.float32)
     LOSS = view("loss", torch.float32)
     LAB = view("lab", torch.int64)
-    DXA = view("dxa", torch.float32).view(T, H) if need_dx else None
+    DXA = view("dxa", torch.float32) if need_dx else None
     o_pu = _align(8 * parts * T)
     scratch = torch.empty(
         (o_pu + (4 * parts * T * H if need_dx else 0)) // 4,
@@ -14918,14 +14968,12 @@ def _one_pass_forward(
     PMS = scratch[: 2 * parts * T]
     PU = scratch[o_pu // 4 :] if need_dx else None
     fwd, fwd_nodx = ONE_PASS_FWD_STAGES[T]
-    flat = dict(
-        W=W.reshape(-1), Z=Z.reshape(-1), DXA=None if DXA is None else DXA.reshape(-1)
-    )
+    W_flat = W.view(-1)  # W is contiguous (validated above)
     values: dict[str, Any] = dict(
-        W=flat["W"],
+        W=W_flat,
         X=_x_span(X, ldx),
         labels=labels,
-        Z=flat["Z"],
+        Z=Z,
         PMS=PMS,
         V=V,
         ldx=ldx,
@@ -14934,62 +14982,73 @@ def _one_pass_forward(
     )
     if need_dx:
         values["PU"] = PU
-    _one_pass_launch(
-        module_name, record, fwd if need_dx else fwd_nodx, values, device, index
-    )
-    _one_pass_launch(
-        module_name,
-        record,
-        ONE_PASS_COMBINE_STAGE,
-        dict(
-            PU=PU if need_dx else PMS,
-            PMS=PMS,
-            W=flat["W"],
-            Z=flat["Z"],
-            labels=labels,
-            DXA=flat["DXA"] if need_dx else LOGP,
-            ROWS=ROWS.reshape(-1),
-            LOGP=LOGP,
-            LOSS=LOSS,
-            LAB=LAB,
-            parts=parts,
-            T=T,
-            V=V,
-            H=H,
-            with_u=int(need_dx),
-            loss_div=float(problem.loss_div),
-        ),
-        device,
-        index,
-    )
+    # both launches in one stream context (torch's current stream; a pending small-call staging runs first)
+    with _ffi_stream_context(index):
+        _ONE_PASS_STREAM.held = True
+        try:
+            _one_pass_launch(
+                module_name, record, fwd if need_dx else fwd_nodx, values, device, index
+            )
+            _one_pass_launch(
+                module_name,
+                record,
+                ONE_PASS_COMBINE_STAGE,
+                dict(
+                    PU=PU if need_dx else PMS,
+                    PMS=PMS,
+                    W=W_flat,
+                    Z=Z,
+                    labels=labels,
+                    DXA=DXA if need_dx else LOGP,
+                    ROWS=ROWS,
+                    LOGP=LOGP,
+                    LOSS=LOSS,
+                    LAB=LAB,
+                    parts=parts,
+                    T=T,
+                    V=V,
+                    H=H,
+                    with_u=int(need_dx),
+                    loss_div=float(problem.loss_div),
+                ),
+                device,
+                index,
+            )
+        finally:
+            _ONE_PASS_STREAM.held = False
     return ForwardResult(
         loss=LOSS.view(()),
         logp=LOGP,
-        dx_acc=DXA,
+        dx_acc=None if DXA is None else DXA.view(T, H),
         backend="cake",
         num_rows=T,
         x_last=X if need_dw else None,
-        one_pass=(Z, ROWS, LAB, bool(need_dx), bool(need_dw)),
+        one_pass=(Z, ROWS, LAB, DXA, T, V, bool(need_dx), bool(need_dw)),
     )
 
 
-def _one_pass_backward(one_pass, x, dx_acc, grad):
-    """``(dX, dW)`` of a one-pass forward (``one_pass`` its kept state, ``x`` the call's ``X`` when ``W`` is trainable,
-    ``dx_acc`` its FP32 input-gradient accumulator when ``X`` is): one launch of ``one_pass_dw`` writes both, each
+def _one_pass_backward(one_pass, x, grad):
+    """``(dX, dW)`` of a one-pass forward (``one_pass`` its kept state, with the flat FP32 input-gradient accumulator
+    when ``X`` is trainable; ``x`` the call's ``X`` when ``W`` is): one launch of ``one_pass_dw`` writes both, each
     ``None`` when the forward did not form it.  ``grad`` is the upstream scalar (``None`` = 1)."""
-    Z, ROWS, LAB, need_dx, need_dw = one_pass
-    T, V = int(Z.shape[0]), int(Z.shape[1])
+    Z, ROWS, LAB, DXA, T, V, need_dx, need_dw = one_pass
     device = Z.device
     index = int(
         device.index if device.index is not None else torch.cuda.current_device()
     )
-    module_name, record, _rows = _one_pass_record(index)
+    module_name, record, _rows, _geometry = _one_pass_record(index)
     H = ONE_PASS_HIDDEN
-    g = (
-        _unit_scale(device)
-        if grad is None
-        else grad.detach().reshape(1).to(device=device, dtype=torch.float32)
-    )
+    if grad is None:
+        g = _unit_scale(device)
+    elif (
+        grad.dtype == torch.float32
+        and grad.device == device
+        and grad.is_contiguous()
+        and not grad.requires_grad
+    ):
+        g = grad.view(1)  # already an FP32 scalar on the device: the same one-element view as below
+    else:
+        g = grad.detach().reshape(1).to(device=device, dtype=torch.float32)
     DW = torch.empty((V, H), dtype=torch.bfloat16, device=device) if need_dw else None
     DX = torch.empty((T, H), dtype=torch.bfloat16, device=device) if need_dx else None
     if not need_dw and not need_dx:
@@ -15002,14 +15061,14 @@ def _one_pass_backward(one_pass, x, dx_acc, grad):
         record,
         ONE_PASS_DW_STAGE,
         dict(
-            Z=Z.reshape(-1),
-            ROWS=ROWS.reshape(-1),
+            Z=Z,
+            ROWS=ROWS,
             LAB=LAB,
-            X=_x_span(x, ldx) if need_dw else Z.reshape(-1),
-            DXA=dx_acc.reshape(-1) if need_dx else ROWS.reshape(-1),
+            X=_x_span(x, ldx) if need_dw else Z,
+            DXA=DXA if need_dx else ROWS,
             grad=g,
-            DW=(DW if need_dw else DX).reshape(-1),
-            DX=(DX if need_dx else DW).reshape(-1),
+            DW=(DW if need_dw else DX).view(-1),
+            DX=(DX if need_dx else DW).view(-1),
             V=V,
             T=T,
             ldx=ldx,
@@ -15254,7 +15313,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
         saved = ctx.saved_tensors
         dz_last, x_last, x_src, x_idx = saved[:4]
         if ctx.one_pass is not None:
-            dx, dw = _one_pass_backward(ctx.one_pass, x_last, ctx.dx_acc, grad_loss)
+            dx, dw = _one_pass_backward(ctx.one_pass, x_last, grad_loss)
             return (dx, dw) + none[2:]
         # a fold's dX first (:func:`_fold_finalize`, with the saved head: a backward that frees the graph drops the fold
         # operands before the weight gradient's buffers exist), then the rest of :func:`backward_loss`: the same
