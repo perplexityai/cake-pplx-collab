@@ -223,11 +223,7 @@ kernel_cake_act_qdq_3fcef995964af95f49e7(const __nv_bfloat16* x, __nv_bfloat16* 
                 asm("max.bf16x2 %0, %1, %2;" : "=r"(max23) : "r"(pair_abs[2]), "r"(pair_abs[3]));
                 uint32_t max_word;
                 asm("max.bf16x2 %0, %1, %2;" : "=r"(max_word) : "r"(max01), "r"(max23));
-                unsigned int max_hi = max_word >> 16;
-                unsigned int max_lo = max_word & 65535;
-                int amax_bits = (int)(((max_hi > max_lo) ? max_hi : max_lo) << 16);
-                float amax = 0.0f;
-                amax = reinterpret_cast<float*>(&amax_bits)[0];
+                float amax = fmaxf(__uint_as_float(max_word << 16), __uint_as_float(max_word & 4294901760u));
                 float _shfl_xor_sync_6 = __shfl_xor_sync(0xFFFFFFFF, amax, 1);
                 amax = fmaxf(amax, _shfl_xor_sync_6);
                 float _shfl_xor_sync_7 = __shfl_xor_sync(0xFFFFFFFF, amax, 2);
