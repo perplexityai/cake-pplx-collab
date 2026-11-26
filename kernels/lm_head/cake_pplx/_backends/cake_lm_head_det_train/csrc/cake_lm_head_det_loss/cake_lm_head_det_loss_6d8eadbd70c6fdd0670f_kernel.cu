@@ -381,6 +381,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
             unsigned int load_stage = 0;
             unsigned int ld_cluster_id = bid / 2;
             unsigned int ld_num_clusters = num_bids / 2;
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
+            int wr_cnt = WS[0];
+            int wr_lim = ((wr_cnt < M) ? wr_cnt : M);
+            int ld_mt = (wr_lim + 256 - 1) / 256 * 2;
+            int ld_items = ld_mt / 2 * (ldc / 256) * k_slices;
+#endif  // (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
             unsigned int load_clc_stage = 0;
             unsigned int load_thr_stage = 0;
             unsigned int ld_tile = ld_cluster_id;
@@ -404,15 +410,26 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     int ld_pair_bid = ld_item_i * 2 + cta_rank;
                     int group = ld_pair_bid / (group_m * (ldc / 256));
                     int first_m = group * group_m;
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
+                    int remaining = ld_mt - first_m;
+#else
                     int remaining = m_tiles - first_m;
+#endif  // CAKE_LOGITS_MCNT, CAKE_LOGITS_NOSTATS_MCNT
                     int group_size = ((remaining >= group_m) ? group_m : remaining);
                     int local = ld_pair_bid % (group_m * (ldc / 256));
                     int bid_m = first_m + local % group_size;
                     int bid_n = local / group_size;
                     int ld_off_m = bid_m * 128;
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
+                    int ld_wsteps = ((ld_item_i < ld_mt / 2 * (ldc / 256) * k_slices) ? k_iters : 0);
+#endif  // (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
                     int ld_off_n = bid_n * 256 + cta_rank * 128;
                     #pragma unroll 1
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
+                    for (int ld_k = 0; ld_k < ld_wsteps; ld_k++) {
+#else
                     for (int ld_k = 0; ld_k < k_iters; ld_k++) {
+#endif  // CAKE_LOGITS_MCNT, CAKE_LOGITS_NOSTATS_MCNT
                         mbarrier_wait_cluster_hint(mma_done_addr + (load_stage) * 8, _phase_mma_done, 10000000);
 #if !CAKE_LOGITS_SM103
 #if CAKE_ARRIVE_FIRST
@@ -510,6 +527,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
             unsigned int mma_epi_stage = 0;
             unsigned int mma_cluster_id = bid / 2;
             unsigned int mma_num_clusters = num_bids / 2;
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
+            int wr_cnt_1 = WS[0];
+            int wr_lim_1 = ((wr_cnt_1 < M) ? wr_cnt_1 : M);
+            int mm_mt = (wr_lim_1 + 256 - 1) / 256 * 2;
+            int mm_items = mm_mt / 2 * (ldc / 256) * k_slices;
+#endif  // (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
             unsigned int mma_clc_stage = 0;
             unsigned int mm_tile = mma_cluster_id;
             unsigned int _phase_epilogue_done = 1;
@@ -524,7 +547,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     #pragma unroll 1
                     for (int mm_kc = 0; mm_kc < 1; mm_kc++) {
                         mbarrier_wait_cluster_hint(epilogue_done_addr + (mma_epi_stage) * 8, _phase_epilogue_done, 10000000);
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
+                        int mm_wsteps = ((mm_item_i < mm_mt / 2 * (ldc / 256) * k_slices) ? k_iters : 0);
+                        int mm_steps = ((mm_kc < 0) ? 1 : mm_wsteps);
+#else
                         int mm_steps = ((mm_kc < 0) ? 1 : k_iters);
+#endif  // CAKE_LOGITS_MCNT, CAKE_LOGITS_NOSTATS_MCNT
                         #pragma unroll 1
                         for (int mm_k = 0; mm_k < mm_steps; mm_k++) {
                             mbarrier_wait_cluster_hint(tma_full_addr + (mma_tma_stage) * 8, _phase_tma_full, 10000000);
@@ -690,6 +718,18 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                 int ep_slice = ep_item_i / (m_tiles / 2 * (ldc / 256));
                 int ep_pair_item = ep_item_i % (m_tiles / 2 * (ldc / 256));
                 int ep_pair_bid = ep_item_i * 2 + cta_rank;
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT)
+                int wt_group = ep_pair_bid / (group_m * (ldc / 256));
+                int wt_first_m = wt_group * group_m;
+                int wt_rem = (m_lim + 256 - 1) / 256 * 2 - wt_first_m;
+                int wt_size = ((wt_rem >= group_m) ? group_m : ((wt_first_m < (m_lim + 256 - 1) / 256 * 2) ? wt_rem : group_m));
+                int wt_local = ep_pair_bid % (group_m * (ldc / 256));
+                int wt_m = wt_first_m + wt_local % wt_size;
+                int wt_n = wt_local / wt_size;
+                int wt_live = ((wt_first_m < (m_lim + 256 - 1) / 256 * 2) ? 1 : 0) * ((wt_n < ldc / 256) ? 1 : 0);
+                int global_row = (wt_m * 128 + local_row) * wt_live + M * (1 - wt_live);
+                int ep_off_n = wt_n * 256;
+#else
                 int group_1 = ep_pair_bid / (group_m * (ldc / 256));
                 int first_m_1 = group_1 * group_m;
                 int remaining_1 = m_tiles - first_m_1;
@@ -699,6 +739,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                 int bid_n_1 = local_1 / group_size_1;
                 int global_row = bid_m_1 * 128 + local_row;
                 int ep_off_n = bid_n_1 * 256;
+#endif  // CAKE_LOGITS_MCNT, CAKE_LOGITS_NOSTATS_MCNT
                 unsigned long long row_out = (unsigned long long)global_row * (unsigned long long)ldc + (unsigned long long)ep_off_n;
                 #pragma unroll 1
                 for (int ep_kc = 0; ep_kc < 1; ep_kc++) {
@@ -708,13 +749,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     float psum = 0.0f;
                     mbarrier_wait_cluster_hint(mainloop_done_addr + (epi_stage) * 8, _phase_mainloop_done, 10000000);
                     asm volatile("tcgen05.fence::after_thread_sync;");
-#if CAKE_LOGITS_SM103
+#if (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103)
+                    unsigned int epi_store_stage = 0;
+                    int ep_row0 = wt_m * 128;
+#elif !CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103
                     unsigned int epi_store_stage = 0;
                     int ep_row0 = bid_m_1 * 128;
-#endif  // CAKE_LOGITS_SM103
+#endif  // CAKE_LOGITS_MCNT, CAKE_LOGITS_NOSTATS_MCNT, CAKE_LOGITS_SM103
                     #pragma unroll 1
 #if CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS && !CAKE_LOGITS_NOSTATS_MCNT && !CAKE_LOGITS_SM103
-                    for (int n_chunk = 0; n_chunk < 16; n_chunk++) {
+                    for (int n_chunk = 0; n_chunk < 16 * wt_live; n_chunk++) {
                         int col = n_chunk * 16;
                         float _tmem_load_0[16];
                         tmem_ld_x16(&_tmem_load_0[0], lane_addr + col);
@@ -844,8 +888,15 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                         "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
                                         :: "l"((void*)(C + (row_out + (unsigned long long)(col + h * 16)))), "r"(_raw_stv8_0[0]), "r"(_raw_stv8_0[1]), "r"(_raw_stv8_0[2]), "r"(_raw_stv8_0[3]), "r"(_raw_stv8_0[4]), "r"(_raw_stv8_0[5]), "r"(_raw_stv8_0[6]), "r"(_raw_stv8_0[7]) : "memory");
                                 }
+#elif (!CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS && CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103) || (CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS && !CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103)
+                    for (int box = 0; box < 4 * wt_live; box++) {
+                        int stage_row = epi_store_stage * 128 + (unsigned int)local_row;
+                        int z_staging = smem_epi_addr + epi_store_stage * 16384;
+                        if (warp == 2) {
+                            if (elect_sync()) {
+                                asm volatile("cp.async.bulk.wait_group.read 1;");
 #elif !CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS && CAKE_LOGITS_NOSTATS_MCNT && !CAKE_LOGITS_SM103
-                    for (int n_chunk = 0; n_chunk < 16; n_chunk++) {
+                    for (int n_chunk = 0; n_chunk < 16 * wt_live; n_chunk++) {
                         int col = n_chunk * 16;
                         float _tmem_load_0[16];
                         tmem_ld_x16(&_tmem_load_0[0], lane_addr + col);
@@ -900,7 +951,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                                         "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
                                         :: "l"((void*)(C + (row_out + (unsigned long long)(col + h * 16)))), "r"(_raw_stv8_0[0]), "r"(_raw_stv8_0[1]), "r"(_raw_stv8_0[2]), "r"(_raw_stv8_0[3]), "r"(_raw_stv8_0[4]), "r"(_raw_stv8_0[5]), "r"(_raw_stv8_0[6]), "r"(_raw_stv8_0[7]) : "memory");
                                 }
-#elif CAKE_LOGITS_SM103
+#elif (!CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS && !CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103) || (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS && !CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103)
                     for (int box = 0; box < 4; box++) {
                         int stage_row = epi_store_stage * 128 + (unsigned int)local_row;
                         int z_staging = smem_epi_addr + epi_store_stage * 16384;
@@ -1037,13 +1088,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         if (epi_store_stage == 2) { epi_store_stage = 0; }
                     }
                     if (global_row < m_lim) {
-                        unsigned long long st_off_t = ((unsigned long long)global_row * (unsigned long long)(ldc / 256) + (unsigned long long)bid_n_1) * 2ull;
+                        unsigned long long st_off_t = ((unsigned long long)global_row * (unsigned long long)(ldc / 256) + (unsigned long long)wt_n) * 2ull;
                         STATS_OUT[st_off_t] = pmax;
                         STATS_OUT[st_off_t + 1ull] = psum;
 #elif CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS && !CAKE_LOGITS_NOSTATS_MCNT && !CAKE_LOGITS_SM103
                     }
                     if (global_row < m_lim) {
-                        unsigned long long st_off = ((unsigned long long)global_row * (unsigned long long)(ldc / 256) + (unsigned long long)bid_n_1) * 2ull;
+                        unsigned long long st_off = ((unsigned long long)global_row * (unsigned long long)(ldc / 256) + (unsigned long long)wt_n) * 2ull;
                         STATS_OUT[st_off] = pmax;
                         STATS_OUT[st_off + 1ull] = psum;
 #elif (!CAKE_LOGITS_MCNT && !CAKE_LOGITS_NOSTATS && CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103) || (!CAKE_LOGITS_MCNT && CAKE_LOGITS_NOSTATS && !CAKE_LOGITS_NOSTATS_MCNT && CAKE_LOGITS_SM103)
