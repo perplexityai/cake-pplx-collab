@@ -117,7 +117,7 @@ __device__ __forceinline__ void cp_async_bulk_gmem2smem(
 extern "C" {
 
 __global__ __launch_bounds__(1024, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_det_train_3f26352ef0f1d5e47ecd(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+kernel_cake_rmsnorm_train_b1339aac23ed13dedce9(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -352,49 +352,52 @@ kernel_cake_rmsnorm_det_train_3f26352ef0f1d5e47ecd(__nv_bfloat16* __restrict__ g
                     tile = tile + n_chunks;
                     k += 1;
                 }
+                float pq[8];
                 asm volatile("barrier.sync 1, 800;" ::: "memory");
                 if ((unsigned int)(gi - 1) < 2) {
                     {
-                        uint32_t _addr_2 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8) * 4));
+                        uint32_t _addr_2 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_2), "f"(acc[0]) : "memory");
                     }
                     {
-                        uint32_t _addr_3 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8 + 1) * 4));
+                        uint32_t _addr_3 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024 + 128) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_3), "f"(acc[1]) : "memory");
                     }
                     {
-                        uint32_t _addr_4 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8 + 2) * 4));
+                        uint32_t _addr_4 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024 + 256) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_4), "f"(acc[2]) : "memory");
                     }
                     {
-                        uint32_t _addr_5 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8 + 3) * 4));
+                        uint32_t _addr_5 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024 + 384) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_5), "f"(acc[3]) : "memory");
                     }
                     {
-                        uint32_t _addr_6 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8 + 4) * 4));
+                        uint32_t _addr_6 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024 + 512) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_6), "f"(acc[4]) : "memory");
                     }
                     {
-                        uint32_t _addr_7 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8 + 5) * 4));
+                        uint32_t _addr_7 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024 + 640) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_7), "f"(acc[5]) : "memory");
                     }
                     {
-                        uint32_t _addr_8 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8 + 6) * 4));
+                        uint32_t _addr_8 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024 + 768) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_8), "f"(acc[6]) : "memory");
                     }
                     {
-                        uint32_t _addr_9 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 1280 + (0 + t) * 8 + 7) * 4));
+                        uint32_t _addr_9 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 1) * 5 + wg) * 1024 + 896) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_9), "f"(acc[7]) : "memory");
                     }
                 }
                 asm volatile("barrier.sync 1, 800;" ::: "memory");
                 if (gi == 0) {
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[0])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 3]))
-                        : "r"(fold_addr + (unsigned int)((0 + t) * 8 * 4)));
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[4])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 3]))
-                        : "r"(fold_addr + (unsigned int)(((0 + t) * 8 + 4) * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[0])) : "r"(fold_addr + (unsigned int)(wg * 1024) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[1])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 128) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[2])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 256) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[3])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 384) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[4])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 512) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[5])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 640) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[6])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 768) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[7])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 896) + (unsigned int)(lane * 4)));
                     acc[0] = acc[0] + part[0];
                     acc[1] = acc[1] + part[1];
                     acc[2] = acc[2] + part[2];
@@ -403,12 +406,14 @@ kernel_cake_rmsnorm_det_train_3f26352ef0f1d5e47ecd(__nv_bfloat16* __restrict__ g
                     acc[5] = acc[5] + part[5];
                     acc[6] = acc[6] + part[6];
                     acc[7] = acc[7] + part[7];
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[0])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 3]))
-                        : "r"(fold_addr + (unsigned int)((1280 + (0 + t) * 8) * 4)));
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[4])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 3]))
-                        : "r"(fold_addr + (unsigned int)((1280 + (0 + t) * 8 + 4) * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[0])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[1])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 128) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[2])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 256) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[3])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 384) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[4])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 512) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[5])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 640) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[6])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 768) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[7])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 896) + (unsigned int)(lane * 4)));
                     acc[0] = acc[0] + part[0];
                     acc[1] = acc[1] + part[1];
                     acc[2] = acc[2] + part[2];
@@ -421,77 +426,86 @@ kernel_cake_rmsnorm_det_train_3f26352ef0f1d5e47ecd(__nv_bfloat16* __restrict__ g
                 asm volatile("barrier.sync 1, 800;" ::: "memory");
                 if (gi > 2) {
                     {
-                        uint32_t _addr_10 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8) * 4));
+                        uint32_t _addr_10 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_10), "f"(acc[0]) : "memory");
                     }
                     {
-                        uint32_t _addr_11 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8 + 1) * 4));
+                        uint32_t _addr_11 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024 + 128) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_11), "f"(acc[1]) : "memory");
                     }
                     {
-                        uint32_t _addr_12 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8 + 2) * 4));
+                        uint32_t _addr_12 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024 + 256) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_12), "f"(acc[2]) : "memory");
                     }
                     {
-                        uint32_t _addr_13 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8 + 3) * 4));
+                        uint32_t _addr_13 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024 + 384) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_13), "f"(acc[3]) : "memory");
                     }
                     {
-                        uint32_t _addr_14 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8 + 4) * 4));
+                        uint32_t _addr_14 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024 + 512) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_14), "f"(acc[4]) : "memory");
                     }
                     {
-                        uint32_t _addr_15 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8 + 5) * 4));
+                        uint32_t _addr_15 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024 + 640) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_15), "f"(acc[5]) : "memory");
                     }
                     {
-                        uint32_t _addr_16 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8 + 6) * 4));
+                        uint32_t _addr_16 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024 + 768) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_16), "f"(acc[6]) : "memory");
                     }
                     {
-                        uint32_t _addr_17 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 1280 + (0 + t) * 8 + 7) * 4));
+                        uint32_t _addr_17 = static_cast<uint32_t>(fold_addr + (unsigned int)(((gi - 3) * 5 + wg) * 1024 + 896) + (unsigned int)(lane * 4));
                         asm volatile("st.shared.f32 [%0], %1;" :: "r"(_addr_17), "f"(acc[7]) : "memory");
                     }
                 }
                 asm volatile("barrier.sync 1, 800;" ::: "memory");
                 if (gi == 0) {
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[0])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 3]))
-                        : "r"(fold_addr + (unsigned int)((0 + t) * 8 * 4)));
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[4])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 3]))
-                        : "r"(fold_addr + (unsigned int)(((0 + t) * 8 + 4) * 4)));
-                    acc[0] = acc[0] + part[0];
-                    acc[1] = acc[1] + part[1];
-                    acc[2] = acc[2] + part[2];
-                    acc[3] = acc[3] + part[3];
-                    acc[4] = acc[4] + part[4];
-                    acc[5] = acc[5] + part[5];
-                    acc[6] = acc[6] + part[6];
-                    acc[7] = acc[7] + part[7];
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[0])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(0) + 3]))
-                        : "r"(fold_addr + (unsigned int)((1280 + (0 + t) * 8) * 4)));
-                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                        : "=r"(*reinterpret_cast<uint32_t*>(&part[4])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&part[(4) + 3]))
-                        : "r"(fold_addr + (unsigned int)((1280 + (0 + t) * 8 + 4) * 4)));
-                    acc[0] = acc[0] + part[0];
-                    acc[1] = acc[1] + part[1];
-                    acc[2] = acc[2] + part[2];
-                    acc[3] = acc[3] + part[3];
-                    acc[4] = acc[4] + part[4];
-                    acc[5] = acc[5] + part[5];
-                    acc[6] = acc[6] + part[6];
-                    acc[7] = acc[7] + part[7];
-                    unsigned long long pbase = (unsigned long long)slot * 1280ull;
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8))) = acc[0];
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8 + 1))) = acc[1];
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8 + 2))) = acc[2];
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8 + 3))) = acc[3];
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8 + 4))) = acc[4];
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8 + 5))) = acc[5];
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8 + 6))) = acc[6];
-                    *(reinterpret_cast<float*>(partial) + (pbase + (unsigned long long)((0 + t) * 8 + 7))) = acc[7];
+                    unsigned long long pbase_0 = (unsigned long long)slot * 1280ull;
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[0])) : "r"(fold_addr + (unsigned int)(wg * 1024) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[1])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 128) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[2])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 256) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[3])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 384) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[4])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 512) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[5])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 640) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[6])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 768) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[7])) : "r"(fold_addr + (unsigned int)(wg * 1024 + 896) + (unsigned int)(lane * 4)));
+                    pq[0] = acc[0] + part[0];
+                    pq[1] = acc[1] + part[1];
+                    pq[2] = acc[2] + part[2];
+                    pq[3] = acc[3] + part[3];
+                    pq[4] = acc[4] + part[4];
+                    pq[5] = acc[5] + part[5];
+                    pq[6] = acc[6] + part[6];
+                    pq[7] = acc[7] + part[7];
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[0])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[1])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 128) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[2])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 256) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[3])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 384) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[4])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 512) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[5])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 640) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[6])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 768) + (unsigned int)(lane * 4)));
+                    asm volatile("ld.shared.b32 %0, [%1];" : "=r"(*reinterpret_cast<uint32_t*>(&part[7])) : "r"(fold_addr + (unsigned int)((5 + wg) * 1024 + 896) + (unsigned int)(lane * 4)));
+                    pq[0] = pq[0] + part[0];
+                    pq[1] = pq[1] + part[1];
+                    pq[2] = pq[2] + part[2];
+                    pq[3] = pq[3] + part[3];
+                    pq[4] = pq[4] + part[4];
+                    pq[5] = pq[5] + part[5];
+                    pq[6] = pq[6] + part[6];
+                    pq[7] = pq[7] + part[7];
+                    {
+                        unsigned _stv8_18_0 = __float_as_uint(pq[0 + 0]);
+                        unsigned _stv8_18_1 = __float_as_uint(pq[0 + 1]);
+                        unsigned _stv8_18_2 = __float_as_uint(pq[0 + 2]);
+                        unsigned _stv8_18_3 = __float_as_uint(pq[0 + 3]);
+                        unsigned _stv8_18_4 = __float_as_uint(pq[0 + 4]);
+                        unsigned _stv8_18_5 = __float_as_uint(pq[0 + 5]);
+                        unsigned _stv8_18_6 = __float_as_uint(pq[0 + 6]);
+                        unsigned _stv8_18_7 = __float_as_uint(pq[0 + 7]);
+                        asm volatile(
+                            "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
+                            :: "l"((void*)(partial + (pbase_0 + (unsigned long long)((0 + t) * 8)))), "r"(_stv8_18_0), "r"(_stv8_18_1), "r"(_stv8_18_2), "r"(_stv8_18_3), "r"(_stv8_18_4), "r"(_stv8_18_5), "r"(_stv8_18_6), "r"(_stv8_18_7) : "memory");
+                    }
                 }
                 slot = slot + (int)num_bids;
             }
