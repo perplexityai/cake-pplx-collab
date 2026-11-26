@@ -1517,12 +1517,14 @@ _SINGLE_WGRAD_SWAP_MIN_K = {
 #: part is empty (the weight-gradient entry then plans with the architecture defaults alone), by ``(arch, M, N,
 #: out_f32)`` of the generic call (see :func:`_single_wgrad_swap`; an entry of ``_SINGLE_WGRAD_SWAP_MIN_K`` still
 #: applies).  Since version 0.3.26 the four sm_107a bf16 weight gradients of version 0.3.22 (4096 -> 16 / 96,
-#: 6144 -> 48 / 64) follow the entry from T 1 on: below T 960 on every sm_107a part and, off the 212-SM part,
-#: 4096 -> 16 at T 3073 - 4095, where the entry runs ``dense_proj_det_gemm_nn_n128_t_pro7`` (whole 128-row tiles
-#: below T 960, a two-way K split at T 3073 - 4095).  Timed against version 0.3.25 (the direct plan) on sm_107a,
-#: medians of 21 paired rounds with L2 flushed; speedup of the entry's plan over the direct plan at the shipped
-#: cells: 1.19 - 2.15 (eager), 1.19 - 2.13 (CUDA graph) on the 212-SM part, 1.20 - 2.49 (eager), 1.21 - 2.70 (CUDA
-#: graph) on the 216-SM part.
+#: 6144 -> 48 / 64) follow the entry from T 1 on: below T 960 on every sm_107a part (below T 128 since version 0.3.27,
+#: whose ``ROW_RULE_MIN_T`` tiers give these rows a rule from T 128 on) and, off the 212-SM part, 4096 -> 16 at
+#: T 3073 - 4095, where the entry runs ``dense_proj_det_gemm_nn_n128_t_pro7`` (whole 128-row tiles below T 960 in
+#: version 0.3.26, below T 128 since version 0.3.27; a two-way K split at T 3073 - 4095).  Timed against version 0.3.25
+#: (the direct plan) on sm_107a, medians of 21 paired rounds with L2 flushed; speedup of the entry's plan over the
+#: direct plan at the timed changed cells (15 token counts per row below T 960; on the 216-SM part also 4096 -> 16 at
+#: T 3073, 3328, 3584, 3840, 4095): 1.19 - 2.15 (eager), 1.19 - 2.13 (CUDA graph) on the 212-SM part, 1.20 - 2.49
+#: (eager), 1.21 - 2.70 (CUDA graph) on the 216-SM part.
 _SINGLE_WGRAD_FOLLOW_MIN_K = {
     ("sm_107a", 16, 4096, False): 1,
     ("sm_107a", 96, 4096, False): 1,
@@ -1730,10 +1732,11 @@ ROW_RULES: dict[tuple, dict] = {
     ('sm_107a', True, True, False, False, False, 6144, None, 2048): {"sk_sync": True, "sk_sync_m": 26, "sk_slab": 2},
     # the indexer_hw BF16 weight gradient: since version 0.3.22 the 64-row exact two-way split of the tail tiles (one of
     # the five rows of that version, below), with the L2 hint ``('evict_first', 'none')`` since version 0.3.23; its
-    # ``ROW_RULE_MIN_T`` tiers keep the rule it had before, ``{"block_n": 128, "sk_exact": 3}``, below T 960 (T 2048 in
-    # versions 0.3.23 - 0.3.24, T 8193 in version 0.3.22) and, since version 0.3.25, plan the 64-row whole tiles at
-    # T 960 - 3584 (the split from T 3585 on); the 216-SM part plans the whole tiles at T 960 - 3584, the split at
-    # T 3585 - 15360 and that rule from T 15361 on (``ROW_RULE_RANGES_BY_SM``)
+    # ``ROW_RULE_MIN_T`` tiers keep the rule it had before, ``{"block_n": 128, "sk_exact": 3}``, below T 128 (T 960 in
+    # versions 0.3.25 - 0.3.26, T 2048 in versions 0.3.23 - 0.3.24, T 8193 in version 0.3.22) and, since version
+    # 0.3.25, plan the 64-row whole tiles at T 128 - 3584 (T 960 - 3584 in versions 0.3.25 - 0.3.26; the split from
+    # T 3585 on); the 216-SM part plans the whole tiles at T 128 - 3584 (T 960 - 3584 in versions 0.3.25 - 0.3.26), the
+    # split at T 3585 - 15360 and that rule from T 15361 on (``ROW_RULE_RANGES_BY_SM``)
     ('sm_107a', True, True, False, True, False, 32, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 128, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15},
     ('sm_107a', True, True, False, True, False, 576, None, 6144): {"group_m": 8, "hints": ('evict_first', 'evict_first'), "b_swz": 64, "sk_sync": True, "sk_sync_m": 38, "stt": True, "pro": 15},
@@ -1917,6 +1920,54 @@ ROW_RULES: dict[tuple, dict] = {
     #      and 4096 -> 16 at T 3073 - 4095 off the 212-SM part), and there runs the
     #      weight-gradient entry's plan of the architecture defaults alone, ``dense_proj_det_gemm_nn_n128_t_pro7``
     #      (whole 128-row tiles below T 960, a two-way K split at T 3073 - 4095), and its bits ----
+    # ---- version 0.3.27: these rules do not change.  Thirteen sm_107a weight gradients plan whole 128 x 128 pair tiles
+    #      of 64-row CTAs without a K split from T 128 on, the rule of version 0.3.25 ``{"block_n": 128, "cta_rows":
+    #      64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}``:
+    #      * the five BF16 rows of version 0.3.25 (4096 -> 16, 4096 -> 96, 6144 -> 48, 6144 -> 64 and indexer_hw
+    #        6144 -> 32) at T 128 - 959: the first bound of their ``ROW_RULE_MIN_T`` tiers moves from T 960 to T 128, so
+    #        the rule runs at T 128 - 3072, 128 - 3584 (4096 -> 96, 6144 -> 48, indexer_hw) and 128 - 5120, one band
+    #        with that of version 0.3.25 (the 216-SM indexer_hw range starts at T 128: ``ROW_RULE_RANGES_BY_SM``);
+    #      * the BF16 rows 4096 -> 32 / 48 / 64 / 128, 5120 -> 48 / 64 / 128 and 8192 -> 128 at T 128 - 4096 (new
+    #        ``ROW_RULE_MIN_T`` keys: below T 128 and from T 4097 on the row's rule above, as before);
+    #      * the FP32 outputs of the same thirteen rows at T 128 - 4096 (4096 -> 16: T 128 - 3072) on the 212- and
+    #        216-SM parts alone (``ROW_RULE_RANGES_BY_SM``: nine of these rows have no token-free (ragged) key here, and
+    #        such a key would change the orientation of their generic call), where the rule names the FP32 program
+    #        ``dense_proj_det_gemm_nn_n128_m64_hen_f32_t_pro15``.
+    #      The BF16 program is ``dense_proj_det_gemm_nn_n128_m64_hen_t_pro15``.  At the token counts this version adds
+    #      (T 128 - 959 on the five rows of version 0.3.25, T 128 - 4096 on the others) a tile holds at most 64 K blocks
+    #      (no promoted chunk), and the 32 to 64 pair tiles of a row run in one wave.  The BF16 tiers apply on every
+    #      sm_107a part (the 208- and 224-SM parts are not measured, as for every sm_107a tier since version 0.3.22);
+    #      the 208- and 224-SM parts keep the FP32 plans of version 0.3.26.  Below T 128 and above these bands every row
+    #      plans as in version 0.3.26.
+    #      Measured before shipping in this package on VR200 (212 SMs) and one R200 board (216 SMs;
+    #      its memory clock held 3186 MHz under load, below its 4752 MHz maximum, before and after shipping) against the
+    #      plan of version 0.3.26 (the plan of version 0.3.25 at these cells) and a second prepared copy of it, cold L2,
+    #      eager launches and CUDA graph replays, 21 paired rounds per cell and mode, at T 128, 256, 512, 768 and 959
+    #      (the five BF16 rows of version 0.3.25) and at T 128, 256, 512, 768, 960, 1024, 1536, 2048, 3072, 3584 and
+    #      4096 (the other BF16 rows and every FP32 output): at every measured token count of each band (254 cells per
+    #      part) the new plan was faster than the plan of version 0.3.26 beyond the A/A band in both modes on both
+    #      parts, with one bit pattern run to run and within the naive BF16 tier on five seeds; medians of that plan
+    #      over the new one were 1.071 to 1.701 / 1.064 to 1.694 (eager / CUDA graph) on the 212-SM part and 1.100 to
+    #      1.675 / 1.105 to 1.694 on the 216-SM part.  The FP32 band of 4096 -> 16 ends at T 3072: at T 3584 the new
+    #      plan was flat on the 212-SM part (paired medians 0.992 / 0.994 against the second copy of the plan before,
+    #      within the A/A band; not timed on the 216-SM part), and T 4096, faster on both parts, is a single measured
+    #      point above it; T 3073 - 4096 keep the plan of version 0.3.26 there.  Post-ship medians of the plan before
+    #      over the new plan at the timed changed cells: 1.070 to 1.715 / 1.064 to 1.709 (eager / CUDA graph; 482 cells,
+    #      observed in an A/B that did not complete: cells whose plan is the same in both versions read up to 13 %
+    #      (eager) and 14 % (CUDA graph) apart in either direction in their paired comparison, the most at T 4097, in
+    #      the first timing and again in the one re-time, so the control check fixed in advance left the result
+    #      unjudged; none of these cells was slower) on the 212-SM part and 1.087 to 1.644 / 1.082 to 1.651 (189 of its
+    #      482 changed cells, observed in an A/B that was stopped part way, before any control cell was timed, so not
+    #      judged; none was slower) on the 216-SM part.  Against version 0.3.26 the bits are the same where both plans
+    #      sum each tile's K in one chain (at the measured cells T 128 - 960: the plan before ran whole 128-row tiles
+    #      there) and differ where the plan before split each tile's K in two (at the measured cells from T 1024 on)
+    #      (post-ship A/B: the same at 234 of the 234 timed changed cells at T 128 - 960 and different at 248 of the 248
+    #      from T 961 on, on the 212-SM part; the same at 124 of the 124 timed changed cells at T 128 - 960 and
+    #      different at 65 of the 65 from T 961 on, on the 216-SM part); run-to-run bits stay identical.  The unbatched
+    #      generic call of the BF16 rows and of the four FP32 rows keyed here in the swapped orientation (4096 -> 128,
+    #      5120 -> 128, 8192 -> 128 and indexer_hw) swaps at every token count of these bands (``_single_wgrad_swap``:
+    #      the rule is not empty) and runs these plans; that of the nine other FP32 rows keeps its direct plan of
+    #      version 0.3.26 (no token-free key in either orientation) ----
     ('sm_107a', True, True, False, True, False, 16, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 96, None, 4096): {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_107a', True, True, False, True, False, 48, None, 6144): {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')},
@@ -2425,7 +2476,12 @@ RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 # over the tier 1.038 to 1.361 / 1.043 to 1.354, eager / CUDA graph, on the 212-SM part and 1.028 to 1.362 / 1.031 to
 # 1.369 on the 216-SM part); the post-ship A/B on the 212-SM part did not find it faster in every entry at T 4096 on
 # those three rows, whose bands end at T 3584 (``ROW_RULES``, version 0.3.25).
-# Below T 960 the rows plan as before.  The sm_100a
+# Below T 960 the rows plan as before.  Version 0.3.27 moves the first bound of these five keys from T 960 to T 128,
+# so the whole 64-row tiles run from T 128 on (one band with that of version 0.3.25), and adds tiers to eight more
+# sm_107a BF16 weight-gradient keys (4096 -> 32 / 48 / 64 / 128, 5120 -> 48 / 64 / 128 and 8192 -> 128): the key's
+# rule below T 128, the whole 64-row tiles at T 128 - 4096 and the key's rule from T 4097 on; each was faster than the
+# plan of version 0.3.26 at every measured token count of its band on both measured sm_107a parts (``ROW_RULES``,
+# version 0.3.27).  Below T 128 these thirteen rows plan as before.  The sm_100a
 # 5120 -> 64 / 128 bf16 weight-gradient keys floor the rule's synchronised split at T 32768.  On B200 and GB200 (148 and
 # 152 SMs) that split was 1 to 3 % slower at T 16231 and faster at T 32768 (1.04 to 1.06 times), 65535 and 131072.  Its
 # margin of 16 K steps makes the main parts 264 K blocks long at T 32768, so they run the promoted twin, within the
@@ -2491,17 +2547,28 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # 5120 -> 5120 weight gradient: slower at 2, flat at 18, faster at 1 of the 21 measured T 1 - 8192; faster at the
     # 10 from 16129 on
     ('sm_107a', True, True, False, False, False, 5120, None, 5120): ((16129, {}),),
-    # version 0.3.25 (0.3.23 - 0.3.24: floors 4096 / 7169 / 1024 / 1024 / 2048, the two-way split of 4096 -> 16 at
-    # T 1024 - 2048; 0.3.22: T 8193), the five BF16 weight gradients of the 64-row exact split (``ROW_RULES``): below
-    # T 960 the plan before (no rule; indexer_hw 6144 -> 32 the three-way 128-row rule), then the 64-row whole tiles
-    # without a K split as a middle tier (4096 -> 16 at T 960 - 3072, then the plan before at T 3073 - 4095 and its
-    # rule from T 4096; 4096 -> 96 at T 960 - 3584, then the two-way split at T 3585 - 7168 and its rule from T 7169;
-    # 6144 -> 48 and indexer_hw at T 960 - 3584 and 6144 -> 64 at T 960 - 5120, then their rule)
-    ('sm_107a', True, True, False, True, False, 16, None, 4096): ((960, {}), (3073, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}), (4096, {})),
-    ('sm_107a', True, True, False, True, False, 96, None, 4096): ((960, {}), (3585, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}), (7169, {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')})),
-    ('sm_107a', True, True, False, True, False, 48, None, 6144): ((960, {}), (3585, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
-    ('sm_107a', True, True, False, True, False, 64, None, 6144): ((960, {}), (5121, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
-    ('sm_107a', True, True, False, True, False, 32, None, 6144): ((960, {"block_n": 128, "sk_exact": 3}), (3585, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    # version 0.3.27 (0.3.25 - 0.3.26: first bound T 960; 0.3.23 - 0.3.24: floors 4096 / 7169 / 1024 / 1024 / 2048, the
+    # two-way split of 4096 -> 16 at T 1024 - 2048; 0.3.22: T 8193), the five BF16 weight gradients of the 64-row exact
+    # split (``ROW_RULES``): below T 128 the plan before (no rule; indexer_hw 6144 -> 32 the three-way 128-row rule),
+    # then the 64-row whole tiles without a K split as a middle tier (version 0.3.25 from T 960, version 0.3.27 from
+    # T 128: 4096 -> 16 at T 128 - 3072, then the plan before at T 3073 - 4095 and its rule from T 4096; 4096 -> 96 at
+    # T 128 - 3584, then the two-way split at T 3585 - 7168 and its rule from T 7169; 6144 -> 48 and indexer_hw at
+    # T 128 - 3584 and 6144 -> 64 at T 128 - 5120, then their rule)
+    ('sm_107a', True, True, False, True, False, 16, None, 4096): ((128, {}), (3073, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}), (4096, {})),
+    ('sm_107a', True, True, False, True, False, 96, None, 4096): ((128, {}), (3585, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}), (7169, {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 48, None, 6144): ((128, {}), (3585, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 64, None, 6144): ((128, {}), (5121, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 32, None, 6144): ((128, {"block_n": 128, "sk_exact": 3}), (3585, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    # version 0.3.27, eight more BF16 weight gradients of sm_107a: their rule (``ROW_RULES``) below T 128, the 64-row
+    # whole tiles without a K split at T 128 - 4096, their rule from T 4097 on
+    ('sm_107a', True, True, False, True, False, 32, None, 4096): ((128, {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 48, None, 4096): ((128, {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 64, None, 4096): ((128, {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 128, None, 4096): ((128, {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 48, None, 5120): ((128, {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 64, None, 5120): ((128, {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 128, None, 5120): ((128, {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
+    ('sm_107a', True, True, False, True, False, 128, None, 8192): ((128, {"block_n": 128, "sk_sync": True}), (4097, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')})),
     # 5120 -> 64 / 128 weight gradient: the 64-row program below T 32768
     ('sm_100a', True, True, False, True, False, 64, None, 5120): ((32768, {"cta_rows": 64, "pro": 15}),),
     ('sm_100a', True, True, False, True, False, 128, None, 5120): ((32768, {"cta_rows": 64, "pro": 15}),),
@@ -3011,17 +3078,40 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         # version since 0.3.24; off this part it follows the weight-gradient entry at T 3073 - 4095 since version 0.3.26
         # (``_SINGLE_WGRAD_FOLLOW_MIN_K``)
         ('sm_107a', True, True, False, True, False, 16, None, 4096): ((3073, 4095, {"block_n": 128, "cta_rows": 64, "sk_exact": 3, "pro": 15, "hints": ('evict_first', 'none')}),),
+        # version 0.3.27: the FP32 outputs of the thirteen weight gradients of version 0.3.27 (``ROW_RULES``; the BF16
+        # outputs plan their ``ROW_RULE_MIN_T`` tiers) plan the 64-row whole tiles without a K split at T 128 - 4096
+        # (4096 -> 16: T 128 - 3072) on this part and on the 216-SM part, the FP32 program
+        # ``dense_proj_det_gemm_nn_n128_m64_hen_f32_t_pro15`` (the plan of version 0.3.26: ``..._nn_n128_f32_t_pro7``,
+        # whole 128-row tiles up to 15 K blocks and a two-way K split from 16 on).  Nine of these rows have no
+        # token-free (ragged) ``ROW_RULES`` key (such a key would change the orientation of their generic call), so
+        # these ranges hold the band on the two measured parts alone; the 208- and 224-SM parts keep the plan of
+        # version 0.3.26
+        ('sm_107a', True, True, True, True, False, 16, None, 4096): ((128, 3072, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 32, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 48, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 64, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 96, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 128, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 48, None, 5120): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 64, None, 5120): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 128, None, 5120): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 32, None, 6144): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 48, None, 6144): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 64, None, 6144): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 128, None, 8192): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
     },
     # The 216-SM part (version 0.3.23).
-    # - The indexer_hw BF16 weight gradient plans the 64-row whole tiles at T 960 - 3584 (version 0.3.25, its
-    #   ``ROW_RULE_MIN_T`` middle tier, here as a range: either start, T 960 or 1024, gives the same plan on this part;
-    #   T 960 makes the range state the whole band) and its 64-row exact two-way split (``ROW_RULES``) at
+    # - The indexer_hw BF16 weight gradient plans the 64-row whole tiles at T 128 - 3584 (versions 0.3.25 - 0.3.26:
+    #   T 960 - 3584; its ``ROW_RULE_MIN_T`` middle tier, here as a range: in version 0.3.25 either start, T 960 or
+    #   1024, gave the same plan on this part, and T 960 made the range state the whole band; since version 0.3.27 the
+    #   tier and the range both start at T 128) and its 64-row exact two-way split (``ROW_RULES``) at
     #   T 3585 - 15360 (T 1024 - 15360 in versions 0.3.23 - 0.3.24).  There the split measured faster than its plan of
     #   version 0.3.21 at every measured token count (T 1024 - 8192 and 8193 - 15360, medians of that plan over the
     #   split 1.03 to 1.33 at T 8193 - 15360 before shipping; post-ship 1.018 to 1.332 / 1.018 to 1.374 (eager / CUDA
     #   graph) at the timed T 1024 - 15360), and the whole tiles faster than the plan of version 0.3.24 at every
     #   measured token count of T 960 - 3584 before shipping (version 0.3.25, ``ROW_RULES``, where the post-ship A/B
-    #   on the 212-SM part ends the band at T 3584 on every sm_107a part).  From T 15361 on it keeps its
+    #   on the 212-SM part ends the band at T 3584 on every sm_107a part), and at every measured token count of
+    #   T 128 - 959 before shipping (version 0.3.27, ``ROW_RULES``).  From T 15361 on it keeps its
     #   plan of version 0.3.21, the tier rule ``{"block_n": 128, "sk_exact": 3}``: the split measured slower at T 16171,
     #   16172, 32768 and 65536.  The unmeasured T 15361 - 16170, between the last measured win and the first measured
     #   loss, keep that rule too.
@@ -3036,10 +3126,26 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
     #   version 0.3.24; from T 8193 on in version 0.3.23), and since version 0.3.26 at every token count (from T 1
     #   on, ``_SINGLE_WGRAD_FOLLOW_MIN_K``).
     # - The other three rows of version 0.3.22 plan their tiers on this part.
-    # - Deleting this table puts the tiers back on this part; the tests that pin the table change with it.
+    # - The FP32 outputs of the thirteen weight gradients of version 0.3.27 plan the 64-row whole tiles at
+    #   T 128 - 4096 (4096 -> 16: T 128 - 3072), as on the 212-SM part (``ROW_RULES``, version 0.3.27).
+    # - Deleting this table puts the tiers back on this part (and the FP32 plans of version 0.3.26 on those thirteen
+    #   rows); the tests that pin the table change with it.
     ("sm_107a", 216): {
-        ('sm_107a', True, True, False, True, False, 32, None, 6144): ((960, 3584, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}), (3585, 15360, {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')}), (15361, 2**31 - 1, {"block_n": 128, "sk_exact": 3})),
+        ('sm_107a', True, True, False, True, False, 32, None, 6144): ((128, 3584, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}), (3585, 15360, {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ('evict_first', 'none')}), (15361, 2**31 - 1, {"block_n": 128, "sk_exact": 3})),
         ('sm_107a', True, True, False, True, False, 48, None, 6144): ((65536, 131072, {"block_n": 128, "sk_exact": 4}),),
+        ('sm_107a', True, True, True, True, False, 16, None, 4096): ((128, 3072, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 32, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 48, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 64, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 96, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 128, None, 4096): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 48, None, 5120): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 64, None, 5120): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 128, None, 5120): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 32, None, 6144): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 48, None, 6144): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 64, None, 6144): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
+        ('sm_107a', True, True, True, True, False, 128, None, 8192): ((128, 4096, {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ('evict_first', 'none')}),),
     },
     ("sm_103a", 148): {
         **{
@@ -3120,6 +3226,23 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
                 (6144, 128, 16172, 16384),
             )
         },
+        # version 0.3.27: the FP32 4096 -> 12288 weight gradient (the direct key: M 12288 output rows over N 4096
+        # columns) plans the 224-column program with the FP32 v8 evict-first register epilogue on whole tiles at
+        # T 512 - 4096, ``dense_proj_det_gemm_nn_n224_f32_v8_ef_pro15`` (the program of the sm_103a FP32 4096 -> 1024
+        # rule; 912 pair tiles, 12 whole waves on 76 pairs, no K split), in place of its ``ROW_RULES`` rule (256-row
+        # tiles with a four-way K split of the tail, ``dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7``), which the
+        # other sm_103a parts and the other token counts keep.  Measured before shipping in this package on one GB300
+        # node (152 SMs) against the plan of version 0.3.26 (the plan of version 0.3.25 at this key) and a second
+        # prepared copy of it, cold L2, eager launches and CUDA graph replays, 21 paired rounds per cell and mode, at
+        # T 512, 1024, 1984, 2048 and 4096: faster beyond the
+        # A/A band in both modes at each, with one bit pattern run to run and within the naive BF16 tier on five seeds;
+        # medians of that plan over the new one 1.107 / 1.106, 1.134 / 1.135, 1.125 / 1.125, 1.178 / 1.188 and
+        # 1.052 / 1.052 (eager / CUDA graph).  From T 8192 on (measured to T 32768) it was slower, 0.920 to 0.981.  The
+        # bits are those of the plan before at the measured T 512 - 1984 (whole tiles in both plans) and differ at
+        # T 2048 and 4096 (the plan before splits the tail's K there).  Post-ship: medians of the plan before over the
+        # new plan of 1.064 to 1.154 (eager) and 1.066 to 1.155 (CUDA graph) at the 9 timed changed cells, each faster
+        # beyond the A/A band.  The generic call plans the same direct key (no swap) and runs this plan
+        ('sm_103a', True, True, True, False, False, 4096, None, 12288): ((512, 4096, {"block_n": 224, "epi": 'reg', "f32_v8": True, "store_ef": True, "pro": 15}),),
     },
     ("sm_100a", 152): {
         **{

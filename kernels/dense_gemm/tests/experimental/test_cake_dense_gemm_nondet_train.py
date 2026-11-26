@@ -1121,10 +1121,47 @@ def _det_tables_0324(m):
     )
 
 
+def _det_tables_0326(m):
+    """Put the deterministic package's tables of version 0.3.26 back (``m``: a monkeypatch context): the token tiers of
+    the rows of :data:`DET_0322_WGRAD_ROWS` from 960 tokens (its version 0.3.27: from 128), no token tiers of the eight
+    other BF16 rows of :data:`DET_0327_ROWS`, the 216-SM indexer_hw range from 960 tokens, no 212- / 216-SM ranges of
+    the FP32 rows of :data:`DET_0327_ROWS` and no 152-SM ``sm_103a`` range of the FP32 ``4096 -> 12288`` weight
+    gradient.  Its version 0.3.27 changes nothing else."""
+    t1 = {"block_n": 128, "cta_rows": 64, "sk": False, "pro": 15, "hints": ("evict_first", "none")}
+    x2 = {"block_n": 128, "cta_rows": 64, "sk_exact": 2, "pro": 15, "hints": ("evict_first", "none")}
+    tier = {"block_n": 128, "sk_exact": 3}
+
+    def key(d_in, d_out, f32=False):
+        return ("sm_107a", True, True, f32, True, False, d_out, None, d_in)
+
+    for d_in, d_out in DET_0327_ROWS:
+        if (d_in, d_out) not in DET_0322_WGRAD_ROWS:
+            m.delitem(det_backend.ROW_RULE_MIN_T, key(d_in, d_out), raising=False)
+    for k, tiers in {
+        key(4096, 16): ((960, {}), (3073, t1), (4096, {})),
+        key(4096, 96): ((960, {}), (3585, t1), (7169, x2)),
+        key(6144, 48): ((960, {}), (3585, t1)),
+        key(6144, 64): ((960, {}), (5121, t1)),
+        key(6144, 32): ((960, tier), (3585, t1)),
+    }.items():
+        m.setitem(det_backend.ROW_RULE_MIN_T, k, tiers)
+    m.setitem(
+        det_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 216)],
+        key(6144, 32),
+        ((960, 3584, t1), (3585, 15360, x2), (15361, 2**31 - 1, tier)),
+    )
+    for sm_count in (212, 216):
+        for d_in, d_out in DET_0327_ROWS:
+            m.delitem(det_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", sm_count)], key(d_in, d_out, True), raising=False)
+    m.delitem(det_backend.ROW_RULE_RANGES_BY_SM[("sm_103a", 152)], DET_0327_N224_KEY, raising=False)
+
+
 def _det_tables_0325(m):
-    """Put the deterministic package's generic-call swap of version 0.3.25 back (``m``: a monkeypatch context): no
-    follow floor (its ``_SINGLE_WGRAD_FOLLOW_MIN_K`` empty), so its generic call swaps only where the swapped key's
-    measured rule is not empty.  Its version 0.3.26 changes nothing else."""
+    """Put the deterministic package's generic-call swap of version 0.3.25 back (``m``: a monkeypatch context), on its
+    tables of version 0.3.26 (:func:`_det_tables_0326`): no follow floor (its ``_SINGLE_WGRAD_FOLLOW_MIN_K`` empty), so
+    its generic call swaps only where the swapped key's measured rule is not empty.  Its version 0.3.26 changes nothing
+    else."""
+    _det_tables_0326(m)
     for key in list(det_backend._SINGLE_WGRAD_FOLLOW_MIN_K):
         m.delitem(det_backend._SINGLE_WGRAD_FOLLOW_MIN_K, key)
 
@@ -1269,6 +1306,7 @@ def test_k1_det_0326_generic_call_follows_the_det_entry(monkeypatch):
     every token count.  Where it swaps since that version alone the plan is the deterministic weight-gradient plan,
     served as planned (no fallback), with the transposed store; every other plan is that of the deterministic generic
     call of version 0.3.25.  This is a plan check: it asserts no bits."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked below
     _register_k1(monkeypatch, "sm_107a")
     tokens = (
         1, 16, 64, 65, 128, 129, 192, 256, 320, 384, 512, 640, 768, 896, 959, 960, 3072, 3073, 3328, 3584, 3585, 3840,
@@ -1343,6 +1381,112 @@ def test_k1_det_0326_generic_call_follows_the_det_entry(monkeypatch):
     print(f"K1_DET_0326 generic {seen}")
     assert seen == want, (seen, want)
     assert set(seen["flipped"]) == set(DET_0326_FOLLOW_MIN_K), seen
+
+
+#: The rows of the deterministic package's version 0.3.27 (d_in, d_out): the rows of :data:`DET_0322_WGRAD_ROWS` and
+#: eight more BF16 weight gradients, each with a BF16 and an FP32 output; the FP32 rows its ``ROW_RULES`` keys in the
+#: swapped orientation (its generic call of the nine other FP32 rows keeps the direct plan); the key of its FP32
+#: ``4096 -> 12288`` weight gradient of ``sm_103a`` (the direct orientation).
+DET_0327_ROWS = (
+    (4096, 16), (4096, 32), (4096, 48), (4096, 64), (4096, 96), (4096, 128), (5120, 48), (5120, 64), (5120, 128),
+    (6144, 32), (6144, 48), (6144, 64), (8192, 128),
+)  # fmt: skip
+DET_0327_F32_KEYED = ((4096, 128), (5120, 128), (6144, 32), (8192, 128))
+DET_0327_N224_KEY = ("sm_103a", True, True, True, False, False, 4096, None, 12288)
+
+
+def _det_0327_changed(arch, sm_count, d_in, d_out, out_dtype, T, generic):
+    """Whether the deterministic package's version 0.3.27 changes its plan of the weight gradient (``generic`` false:
+    the orientation of its ``wgrad_views``) or of the unbatched generic call ``G.T @ X`` (``generic`` true) of the row
+    at ``T`` tokens on the part against its version 0.3.26 (:func:`_det_tables_0326`): the BF16 rows on every
+    ``sm_107a`` part at 128 - 4096 tokens (the rows of :data:`DET_0322_WGRAD_ROWS` at 128 - 959), the FP32 rows on the
+    212- and 216-SM parts at 128 - 4096 tokens (``4096 -> 16`` at 128 - 3072; the generic call of the FP32 rows of
+    :data:`DET_0327_F32_KEYED` alone), and the FP32 ``4096 -> 12288`` row on the 152-SM ``sm_103a`` part at 512 - 4096
+    tokens (both calls)."""
+    if arch == "sm_103a":
+        return (sm_count, d_in, d_out, out_dtype) == (152, 4096, 12288, "f32") and 512 <= T <= 4096
+    if arch != "sm_107a" or (d_in, d_out) not in DET_0327_ROWS:
+        return False
+    if out_dtype == "bf16":
+        return 128 <= T <= (959 if (d_in, d_out) in DET_0322_WGRAD_ROWS else 4096)
+    if sm_count not in (212, 216) or (generic and (d_in, d_out) not in DET_0327_F32_KEYED):
+        return False
+    return 128 <= T <= (3072 if (d_in, d_out) == (4096, 16) else 4096)
+
+
+def test_k1_det_0327_wgrad_rows_follow_the_det_tables(monkeypatch):
+    """The rows of :data:`DET_0327_ROWS` with a BF16 and an FP32 output on every ``sm_107a`` part (208, 212, 216 and
+    224 SMs) at 127, 128, 959, 960, 1024, 3072, 3073, 4096 and 4097 tokens, and the FP32 ``4096 -> 12288`` weight
+    gradient on the 152-SM ``sm_103a`` part at 511, 512, 4096 and 4097 tokens, in the orientation of the deterministic
+    package's ``wgrad_views`` and as the unbatched generic call ``G.T @ X``, with the K1 programs registered on both
+    architectures: :func:`plan_atomic_gemm` routes each call as with the deterministic tables of version 0.3.26
+    (:func:`_det_tables_0326`; it reads none of them).  Where it keeps the call on the deterministic program this
+    package's plan is the deterministic package's, field for field, with either version of its tables; where it runs
+    this package's program the plan is the plan of :func:`plan_atomic_gemm` and the plan with the deterministic tables
+    of version 0.3.26.  The deterministic plan differs from its plan of version 0.3.26 exactly where
+    :func:`_det_0327_changed` holds.  The counts of the cells of each kind are printed, and each kind (the
+    deterministic program with an unchanged and with a changed plan, this package's program) occurs for both calls;
+    this is a plan check: it asserts no bits."""
+    _register_k1(monkeypatch, "sm_107a")
+    _register_k1(monkeypatch, "sm_103a")
+    cells = [
+        ("sm_107a", sm_count, d_in, d_out, out_dtype, T)
+        for d_in, d_out in DET_0327_ROWS
+        for out_dtype in ("bf16", "f32")
+        for sm_count in (208, 212, 216, 224)
+        for T in (127, 128, 959, 960, 1024, 3072, 3073, 4096, 4097)
+    ]
+    cells += [("sm_103a", 152, 4096, 12288, "f32", T) for T in (511, 512, 4096, 4097)]
+
+    def plans(A, B, out, transposed, arch, sm_count):
+        """``(keeps, det, nd)``: whether :func:`plan_atomic_gemm` keeps the call on the deterministic program, the
+        deterministic planner's plan and this package's.  Both operands of both calls are MN-major, so this package
+        routes the call to its own planner (``k1_nn``), and its plan entry returns the deterministic planner's
+        ``(plan, a_desc, b_desc, out3)`` where :func:`plan_atomic_gemm` keeps the call, else this package's plan,
+        the plan of :func:`plan_atomic_gemm`."""
+        assert cake_backend._k1_layout(A, B) == "k1_nn" and cake_backend.ROUTES["k1_nn"] == "atomic"
+        kw = dict(sm_count=sm_count, l2_bytes=126 << 20, transposed_out=transposed, arch=arch)
+        own, *_ = cake_backend.plan_atomic_gemm(A, B, out, transposed_out=transposed, arch=arch, sm_count=sm_count)
+        det = det_backend.cake_dense_gemm_det_train_projection_plan(A, B, out, **kw)
+        assert isinstance(det, tuple) and len(det) == 4, type(det)
+        nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(A, B, out, **kw)
+        if own is None:
+            assert isinstance(nd, tuple) and len(nd) == 4, type(nd)
+            return True, det[0], nd[0]
+        assert isinstance(nd, cake_backend.CakeDenseGemmNondetProjectionPlan), type(nd)
+        assert nd == own, (nd, own)
+        return False, det[0], nd
+
+    seen = {}
+    det_changed = {}
+    for arch, sm_count, d_in, d_out, out_dtype, T in cells:
+        G = torch.empty(T, d_out, dtype=torch.bfloat16)
+        X = torch.empty(T, d_in, dtype=torch.bfloat16)
+        out = torch.empty(d_out, d_in, dtype=torch.float32 if out_dtype == "f32" else torch.bfloat16)
+        entry = det_backend.wgrad_views(G, X, arch=arch, out_f32=out_dtype == "f32")
+        for call, (A, B, transposed) in (("entry", entry), ("generic", (G.t(), X, False))):
+            where = (call, arch, sm_count, d_in, d_out, out_dtype, T)
+            keeps, det, nd = plans(A, B, out, transposed, arch, sm_count)
+            with monkeypatch.context() as m:
+                _det_tables_0326(m)
+                old_keeps, old_det, old_nd = plans(A, B, out, transposed, arch, sm_count)
+            assert keeps == old_keeps, where
+            changed = _det_0327_changed(arch, sm_count, d_in, d_out, out_dtype, T, call == "generic")
+            assert (det != old_det) == changed, (where, det.template, old_det.template)
+            if keeps:
+                assert nd == det, (where, nd.template, det.template)
+                assert old_nd == old_det, (where, old_nd.template, old_det.template)
+                kind = "det, changed" if changed else "det"
+            else:
+                assert nd == old_nd, (where, nd.template, old_nd.template)
+                kind = "own program"
+            seen[(call, kind)] = seen.get((call, kind), 0) + 1
+            det_changed[(call, changed)] = det_changed.get((call, changed), 0) + 1
+    print(f"K1_DET_0327 {seen}, changed deterministic plans {det_changed}")
+    assert sum(seen.values()) == 2 * len(cells) == 2 * (13 * 2 * 4 * 9 + 4), seen
+    for call in ("entry", "generic"):
+        for kind in ("det", "det, changed", "own program"):
+            assert seen.get((call, kind)), (call, kind, seen)
 
 
 def test_k1_excluded_token_counts(no_k1_chains):
@@ -16616,7 +16760,7 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
         assert routed == default, (K, N, T, routed.template, default.template)
 
 
-def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
+def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5(monkeypatch):
     """The FP32 rows of the deterministic package's 212-SM ``sm_107a`` token ranges (its ``ROW_RULE_RANGES_BY_SM``,
     version 0.3.5, with the ranges of version 0.3.8), as this package runs them on a 212-SM ``sm_107a`` part: no row of
     this package's tables (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K,
@@ -16626,6 +16770,7 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
     test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7; the sm_100a and sm_103a parts of that table (version
     0.3.8): test_k1_rows_follow_the_deterministic_ranges_of_0_3_8 (their raster ranges of versions 0.3.9 - 0.3.11:
     the raster tests)."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked above
     bf16, f32 = torch.bfloat16, torch.float32
     arch, sms = "sm_107a", 212
     l2 = K1_DGRAD_PARTS[(arch, sms)]
@@ -16853,6 +16998,7 @@ def test_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch):
     the o_proj weight gradient at T 12288 its three-way K split (``DET_212_F32_WGRAD_038_SPLIT``).  The checks read
     the ranges of version 0.3.8 (``_det_tables_038``; the raster groups of versions 0.3.9 - 0.3.11:
     ``test_k1_rows_follow_the_deterministic_raster_ranges_of_0_3_9``, ``..._of_0_3_10`` and ``..._of_0_3_11``)."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked above
     bf16, f32 = torch.bfloat16, torch.float32
     prefix = det_backend._TEMPLATE_PREFIX
     _det_tables_038(monkeypatch)
@@ -17478,14 +17624,15 @@ def test_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(monkeypatch):
     }, counts
 
 
-def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
+def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch, record_property):
     """On a 148- or 152-SM ``sm_103a`` or ``sm_100a`` part or a 212-SM ``sm_107a`` part: the rows of the ranges version
     0.3.8 of the deterministic package added, through this package's entry points.  On ``sm_103a`` and ``sm_100a`` the
     FP32 input gradient of each range row at both ends of each of the part's ranges of the row binds the deterministic
     package's single-CTA program ``kn_n128_f32_tma2_s4_c1``; on the 212-SM ``sm_107a`` part each FP32
     weight gradient of ``DET_212_F32_WGRAD_038`` binds the deterministic plan (no plan of this package's split tables),
     the range's program.  Each meets the naive BF16 tier against FP64 over the draws, the first draw launched
-    ``1 + RERUNS`` times into NaN-poisoned outputs.  The ranges are the deterministic package's current ones: on 152-SM
+    ``1 + RERUNS`` times into NaN-poisoned outputs.  The ranges are those of the deterministic package's version 0.3.26
+    (:func:`_det_tables_0326`; version 0.3.27: ``test_k1_det_0327_wgrad_rows_follow_the_det_tables``): on 152-SM
     ``sm_103a`` parts also the raster ranges of version 0.3.9 (``DET_DGRAD_RASTER_039``), on 148-SM parts those of
     version 0.3.10 (``DET_DGRAD_RASTER_0310``; the 148-SM ``sm_100a`` part has no other range), on 152-SM ``sm_100a``
     parts those of version 0.3.11 (``DET_DGRAD_RASTER_0311``); its FP32 ranges alone (the BF16 start-path ranges of
@@ -17494,6 +17641,7 @@ def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
     ``test_gpu_k1_rows_follow_the_deterministic_128_column_programs``, and their cells of version 0.3.14:
     ``test_gpu_k1_rows_follow_the_deterministic_tile_cells_of_0_3_14``, and of version 0.3.15:
     ``test_gpu_k1_rows_follow_the_deterministic_tile_cells_of_0_3_15``).  Another part skips."""
+    _det_tables_0326(monkeypatch)  # the deterministic tables of version 0.3.26: version 0.3.27 is checked above
     device, arch, sms = _part_or_skip()
     ranges = (
         {
