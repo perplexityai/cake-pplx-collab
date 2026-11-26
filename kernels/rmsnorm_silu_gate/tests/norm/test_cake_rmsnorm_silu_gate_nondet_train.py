@@ -3914,6 +3914,14 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     assert set(BCASTH_FORWARD_BANDS) == set(loader.ARCHES)
     assert set(MIXED_FORWARD_BANDS) == {"sm_103a", "sm_107a"}
     assert set(PADH_FORWARD_BANDS) == {"sm_103a"}
+    # the classes 0.2.19 added: every class with a table but 0.2.18's three,
+    # and every class of a moved band but 0.2.18's two whose bands moved
+    new_classes = set(V0219_NEW_CLASSES)
+    assert len(new_classes) == len(V0219_NEW_CLASSES) == 5
+    old_classes = {PROJECTION_LAYOUT, HEAD_MAJOR_LAYOUT, SLICED_LAYOUT}
+    assert set(LAYOUT_FORWARD_BANDS) - old_classes == new_classes
+    moved_classes = {layout for _, layout in V0219_MOVED_BANDS}
+    assert moved_classes - {PROJECTION_LAYOUT, SLICED_LAYOUT} == new_classes
 
     # every class table 0.2.19 changed or added but PROJECTION_FORWARD_BANDS
     # runs, at every number of rows per SM, the module of STRIDED_FORWARD_BANDS

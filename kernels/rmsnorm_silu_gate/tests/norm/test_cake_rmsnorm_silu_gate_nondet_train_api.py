@@ -1951,7 +1951,9 @@ def test_forward_plan_of_every_form_differs_from_0_2_18_only_in_the_moved_bands(
     of ``FORM_HEADS`` heads (16, 4, 3, 2 and 1), at the whole tokens of every
     whole rows per SM up to 3200 and of every cut of either version's tables
     and a row either side, the host's packed-rows test and ``forward_layout``
-    give the form's class, and ``module_for_rows`` of that class gives the
+    give the form's class (a class 0.2.19 added, ``suite.V0219_NEW_CLASSES``,
+    where 0.2.18 gave its whole-token class or none), and
+    ``module_for_rows`` of that class gives the
     module version 0.2.18 gives (its tables put back,
     :func:`_put_back_0_2_18_tables`, and its class,
     :func:`_forward_layout_0_2_18`) but where 0.2.19 moved it
@@ -1998,6 +2000,11 @@ def test_forward_plan_of_every_form_differs_from_0_2_18_only_in_the_moved_bands(
                     if packed:
                         continue
                     old_cls = _forward_layout_0_2_18(tokens, heads, *strides)
+                    if cls in suite.V0219_NEW_CLASSES:
+                        # a class 0.2.19 added: 0.2.18's whole-token class
+                        # (more than one head) or no class
+                        want_old = (loader.SLICED_LAYOUT, None)
+                        assert old_cls in want_old, (form, heads, tokens, old_cls)
                     cases.append((arch, form, heads, tokens * heads, cls, old_cls))
     assert cases, sm_count
 
