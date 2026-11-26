@@ -20,6 +20,7 @@ consecutive K elements share a UE8M0 byte ``round_up(max(amax * 0.002232142857,
 1e-12))`` saturated to 254, data is E4M3 ``x * 2**(127 - byte)`` (round to
 nearest even, saturating), and 128 x 128 scale tiles store byte
 ``(row % 32) * 16 + (row // 32) * 4 + k_block`` as ``[R/128, K/128, 32, 16]``.
+:func:`mxfp8_quantize_32x32` is the same recipe with one byte per 32 x 32 block.
 
 Random inputs are drawn through :func:`randn`, :func:`randn_like`,
 :func:`rand`, :func:`randint`, :func:`normal_` and :func:`uniform_`, so every
@@ -188,6 +189,27 @@ def mxfp8_quantize(x, normal=True, transposed=True):
         data, byte = _quantize_rows(x.transpose(-1, -2).contiguous())
         out[2], out[3] = data, _scale_tiles(byte)
     return tuple(out)
+
+
+def mxfp8_quantize_32x32(x):
+    """``(fp8, scales, fp8_t, scales_t, byte)`` of a BF16 ``[..., R, K]`` tensor with one UE8M0 byte per 32 x 32 block:
+    ``byte`` ``[..., R/32, K/32]`` is the recipe's byte of the block's largest magnitude and every element of the block
+    is E4M3 ``x * 2**(127 - byte)``; ``fp8_t`` is ``fp8`` transposed, and the tiles repeat each block's byte for its 32
+    rows (``scales``) or its 32 columns (``scales_t``)."""
+    *lead, rows, cols = x.shape
+    blocks = x.float().reshape(*lead, rows // 32, 32, cols // 32, 32)
+    amax = blocks.abs().amax(dim=(-3, -1))
+    scale = torch.clamp(
+        amax * torch.tensor(0.002232142857, dtype=torch.float32, device=x.device),
+        min=1e-12,
+    )
+    byte = _e8m0_round_up(scale)
+    inverse = ((254 - byte.to(torch.int32)) << 23).view(torch.float32)
+    data = (blocks * inverse[..., :, None, :, None]).clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+    data = data.reshape(*lead, rows, cols)
+    rows_byte = byte.repeat_interleave(32, dim=-2)
+    cols_byte = byte.transpose(-1, -2).repeat_interleave(32, dim=-2)
+    return data, _scale_tiles(rows_byte), data.transpose(-1, -2).contiguous(), _scale_tiles(cols_byte), byte
 
 
 def mxfp8_dequantize(data, scales):

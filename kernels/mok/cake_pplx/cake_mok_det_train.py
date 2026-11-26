@@ -45,6 +45,8 @@ _PACKAGE_NAMES = (
     "IMBALANCE_THRESHOLDS",
     "MODE_GROUPS",
     "MOK_PRECISIONS",
+    "MXFP8_TRANSPOSED_MODES",
+    "MXFP8_WEIGHT_BLOCKS",
     "ROUTER_WEIGHT_GRADIENTS",
     "ROUTER_WEIGHT_POSITIONS",
     "SHAPE_COMM_SMS",
@@ -83,6 +85,7 @@ def prepare_mok_bf16(
     router_weight_gradient="quotient",
     shared_expert="unscaled",
     activation="swiglu",
+    mxfp8_transposed="source",
 ):
     """Prepare the explicit Cake MoK training backend.
 
@@ -166,6 +169,30 @@ def prepare_mok_bf16(
     remain runtime values subject to the documented alignment constraints.
     The backend provides the MoE layer only, with no full-model or optimizer
     integration.
+
+    ``mxfp8_transposed`` (one of :data:`MXFP8_TRANSPOSED_MODES`) selects the
+    token-direction MXFP8 copies of the routed activations that the routed
+    weight gradients read (MXFP8 routed experts only). ``"source"`` (default)
+    is the behavior above, every bit: ``x_t = Q_tok(x)`` and
+    ``h_t = Q_tok(h)``, the BF16 routed input and SwiGLU activation quantized
+    along the token dimension.
+    ``"requantized"`` quantizes the BF16 dequantized values of the
+    feature-direction copies that the forward GEMMs read,
+    ``x_t = Q_tok(DQ(Q_feat(x)))`` and ``h_t = Q_tok(DQ(Q_feat(h)))`` with
+    ``DQ(code, byte) = code * 2**(byte - 127)``, wherever the kernels build
+    them (the forward, ``recompute_forward_context`` and the backward's replay
+    of later macro batches; plain and clamped SwiGLU; BF16 and FP32
+    weight-gradient accumulation), with the recipe's round to nearest. The
+    forward outputs, the feature-direction copies, the stored E4M3 gate and
+    up and every other saved tensor keep the ``"source"`` bits; only the
+    routed weight gradients read other operands. ``"requantized"`` runs MXFP8
+    routed weights only (a call with BF16 routed weights raises), with
+    ``"after_down"`` outside the :data:`MODE_GROUPS` groups, on sm_100a and
+    sm_103a; it compiles the MXFP8 kernels of the SwiGLU variant at
+    construction (call ``prepare(swiglu_limit, mxfp8=True)`` for the other
+    variant before CUDA Graph capture). A mode that is not a ``str`` raises
+    ``TypeError`` with the other types; an unknown one, or one with another
+    configuration or device, ``ValueError``, before any kernel is loaded.
     """
     from ._backends.cake_mok_bf16 import api as _api
 
@@ -179,6 +206,7 @@ def prepare_mok_bf16(
         router_weight_gradient=router_weight_gradient,
         shared_expert=shared_expert,
         activation=activation,
+        mxfp8_transposed=mxfp8_transposed,
     )
 
 
@@ -305,7 +333,7 @@ def create_mok_bf16_workspace(
 
 
 @cake_api
-def quantize_mok_mxfp8_weights(gate, up, down):
+def quantize_mok_mxfp8_weights(gate, up, down, *, blocks="1x32"):
     """Prequantize BF16 routed expert weights for native MXFP8 MoK training.
 
     ``gate``/``up`` are ``[E_local, I, H]`` and ``down`` is ``[E_local, H, I]``
@@ -316,6 +344,14 @@ def quantize_mok_mxfp8_weights(gate, up, down):
     ``forward`` (and its first two entries to ``recompute_forward_context``)
     and ``backward_weights`` to ``backward``. Requantize after every weight
     update; weight gradients are returned in BF16 (or FP32 accumulators).
+    ``blocks`` (one of :data:`MXFP8_WEIGHT_BLOCKS`) selects the elements that
+    share a scale byte: ``"1x32"`` (default) 32 consecutive elements along each
+    layout's reduction dimension; ``"32x32"`` each 32 x 32 block of a weight,
+    with the recipe's byte of the block's largest magnitude, so that each
+    transposed pair holds the forward pair's codes transposed and both
+    dequantize to the same values (the tiles repeat a block's byte for its 32
+    rows or columns). A ``blocks`` that is not a ``str`` raises ``TypeError``
+    and an unknown one ``ValueError``, before any tensor is read.
     """
     from ._backends.cake_mok_bf16 import api as _api
 
@@ -323,4 +359,5 @@ def quantize_mok_mxfp8_weights(gate, up, down):
         gate,
         up,
         down,
+        blocks=blocks,
     )

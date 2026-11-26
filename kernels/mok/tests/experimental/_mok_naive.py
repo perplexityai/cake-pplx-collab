@@ -297,6 +297,7 @@ def routed(
     weight_before_down=False,
     activation=None,
     direct=False,
+    requantized=False,
 ):
     """The routed experts on per-route inputs (``x_routes``, ``dy_routes``: ``[routes, hidden]`` BF16, the source row
     of each route; ``s_routes``: ``[routes]`` FP32), in ``dtype`` (:data:`ORACLE` or :data:`NAIVE`).
@@ -314,7 +315,14 @@ def routed(
     BF16 routed weights only.
 
     ``activation``: SiTU-GLU in place of SwiGLU (:func:`_activation`; BF16 routed weights, ``"after_down"``).
-    ``direct``: the naive ``alt_d_scores_direct`` (:data:`ALTERNATIVE`) beside ``alt_d_scores``."""
+    ``direct``: the naive ``alt_d_scores_direct`` (:data:`ALTERNATIVE`) beside ``alt_d_scores``.
+
+    ``requantized``: the MXFP8 token-direction copies of x and of the activation are taken from the forward's
+    copies (:func:`_mx_expert`); with ``mx`` only."""
+    if requantized and mx is None:
+        raise ValueError(
+            "The requantized token-direction copies have MXFP8 routed weights only"
+        )
     if weight_before_down and mx is not None:
         raise ValueError("The router weight before the down projection has no MXFP8 form")
     if activation is not None and (mx is not None or weight_before_down):
@@ -373,7 +381,15 @@ def routed(
                 hidden_value, dh = out["hidden"], out["dh"]
                 d_gate, d_up, x_t = out["d_gate"], out["d_up"], x.to(dtype)
             else:
-                y, dx, dws, extra = _mx_expert(x, dys, [w[e] for w in fwd], [w[e] for w in bwd], limit, dtype)
+                y, dx, dws, extra = _mx_expert(
+                    x,
+                    dys,
+                    [w[e] for w in fwd],
+                    [w[e] for w in bwd],
+                    limit,
+                    dtype,
+                    requantized,
+                )
                 hidden_value, dh = extra["hidden_ds"], extra["dh"]
                 d_gate, d_up, x_t = extra["d_gate_t"], extra["d_up_t"], extra["x_t"]
                 mx_rows.append((seg.offset, routes, extra["rows"]))
@@ -423,15 +439,19 @@ def routed(
     return result
 
 
-def _mx_expert(x, dys, fwd, bwd, limit, dtype):
+def _mx_expert(x, dys, fwd, bwd, limit, dtype, requantized=False):
     """One MXFP8 routed expert on its padded segment (rows in schedule order): forward and backward in ``dtype``.
 
     ``fwd``: the dequantized forward weights ``(gate, up, down)`` (blocks along K); ``bwd``: the dequantized backward
     weights in the same orientation (gate and up quantized along the intermediate dimension, down along hidden),
     FP32 values.  ``extra["y_e"]`` is the expert's output the score gradient reads: the SwiGLU of the gate and up the
-    backward reads, quantized along K in the naive implementation, by the backward's ``Wd``."""
+    backward reads, quantized along K in the naive implementation, by the backward's ``Wd``.  ``requantized``: the
+    token-direction copies the weight gradients read are taken from the forward's copies, ``x_t = qdq(qdq(x),
+    transposed=True)`` in both and, in the naive implementation, ``hidden_t = qdq(qdq(hidden), transposed=True)``
+    (the oracle's ``hidden_t`` stays the unquantized ``hidden``)."""
     oracle = dtype == ORACLE
-    x_n, x_t = qdq(x), qdq(x, transposed=True)
+    x_n = qdq(x)
+    x_t = qdq(x_n if requantized else x, transposed=True)
     xn = x_n.to(dtype)
     xt = x_t.to(dtype)
     wg, wu, wd = (w.to(dtype) for w in fwd)
@@ -463,7 +483,7 @@ def _mx_expert(x, dys, fwd, bwd, limit, dtype):
         dx = qdq(d_gate) @ wg_b + qdq(d_up) @ wu_b
         dg_t, du_t = qdq(d_gate, transposed=True), qdq(d_up, transposed=True)
         dys_t = qdq(dys, transposed=True)
-        hidden_t = qdq(hidden, transposed=True)
+        hidden_t = qdq(qdq(hidden) if requantized else hidden, transposed=True)
     dws = [dg_t.T @ xt, du_t.T @ xt, dys_t.T @ hidden_t]
     hidden_ds = silu * u_c
     # The score gradient's y_e: the SwiGLU of the gate and up the backward reads by the backward's copy of Wd.

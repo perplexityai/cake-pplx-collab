@@ -191,8 +191,15 @@ backward takes `(data, scales, data_t, scales_t)` for gate and up and the
 transposed `(data_t, scales_t)` pair for down. `quantize_mok_mxfp8_weights`
 produces both sets (E4M3 data, UE8M0 scales for 32-element blocks along the
 reduction dimension, tensor-core scale tiles `[E * rows / 128, cols / 128, 32,
-16]`) with PyTorch operations; this package has no Triton dependency. MXFP8
-weight gradients are BF16 (or the FP32 accumulators).
+16]`) with PyTorch operations; this package has no Triton dependency. Its
+keyword `blocks` (one of `MXFP8_WEIGHT_BLOCKS`) selects the elements that share
+a scale byte: `"1x32"` (default) 32 consecutive elements along each layout's
+reduction dimension; `"32x32"` each 32 x 32 block of a weight, with the
+recipe's byte of the block's largest magnitude, so `data_t` holds the codes of
+`data` transposed and both layouts dequantize to the same values (the tiles
+repeat a block's byte for its 32 rows or columns). The kernels read both as
+ordinary MXFP8 operands. MXFP8 weight gradients are BF16 (or the FP32
+accumulators).
 
 `swiglu_limit` is a per-call runtime value; plain and clamped SwiGLU are
 separate kernel builds. `prepare_mok_bf16(clamped_swiglu=..., fp32_wgrad=...)`
@@ -229,7 +236,7 @@ registration.
 A forward context holds the shared-expert activations and the routed
 activations of the first macrobatch, which stays resident in the forward ring
 (MXFP8 keeps the routed x and activation transposed in MXFP8 and gate/up in
-E4M3). Backward replays later macrobatches inside the fused kernel. No routed
+E4M3; `mxfp8_transposed` selects how the transposed copies are formed). Backward replays later macrobatches inside the fused kernel. No routed
 expert output is saved: with the default
 `router_weight_gradient="quotient"` the router-score gradient is fused into
 SwiGLU backward as `dot(d_hidden, hidden) / score`, as in native MoK. Scores
@@ -514,6 +521,7 @@ across communication-SM splits and under CUDA Graph replay.
   | `router_weight_gradient` (`ROUTER_WEIGHT_GRADIENTS`) | `"quotient"`, `"direct"` | `"after_down"` router-weight gradient. `"quotient"`: `dh = BF16(BF16(w * dy) Wd)`, `d_w = dot(dh, h) / w`, zero at a zero weight. `"direct"`: `dh = BF16(dy Wd)` from the unscaled `dy`, activation gradient `w * dh` in FP32, `d_w = dot(dh, h)` (FP32, fixed order), defined at a zero weight; the down-projection weight gradient reads `BF16(w * dy)` in both, bit for bit the same |
   | `shared_expert` (`SHARED_EXPERT_MODES`) | `"unscaled"`, `"scaled"`, `"none"` | `"scaled"`: `forward` and `backward` take `shared_scale` (FP32 `[tokens]`, the forward's on the backward), `y = BF16(s * BF16(S(x)) + sum_k w_k o_k)` in FP32; `dx` adds `s * dx_shared` (`dx_shared` from the unscaled `dy`); the shared down-projection weight gradient reads `BF16(s * dy)`, the shared gate/up weight gradients `BF16(s * x)`; `backward` returns `d_shared_scale = dot(dh_shared, hidden_shared)` (FP32, fixed order; `dh_shared = BF16(dy Wd_shared)`) as a ninth item, defined at `s = 0`. `s = 1` gives the unscaled values bit for bit. `"none"`: no shared expert, `y = BF16(sum_k w_k o_k)` in FP32 from zero; every call takes `None` for the shared weights, the forward context's shared fields are `None`, and `backward` takes and returns the three routed FP32 accumulators and returns `None` for the three shared weight gradients |
   | `activation` (`ACTIVATIONS`) | `"swiglu"`, `"clamped_swiglu"`, `"situ_glu"` | `"clamped_swiglu"` is `clamped_swiglu=True`; `"situ_glu"`: `beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)`, `situ_beta` and `situ_lb` (finite positive Python floats, rounded to the FP32 kernel values; `2.88539 / beta`, `2.88539 / lb` and `beta * lb` finite in FP32, and `beta * lb` at least `2^-119`, else `ValueError`) on every `forward`, `recompute_forward_context` and `backward`, `swiglu_limit=None` |
+  | `mxfp8_transposed` (`MXFP8_TRANSPOSED_MODES`) | `"source"`, `"requantized"` | The token-direction MXFP8 copies of the routed `x` and SwiGLU activation `h` (the forward context's transposed fields) that the routed weight gradients read. `"source"`: `x_t = Q_tok(x)`, `h_t = Q_tok(h)` from the BF16 values. `"requantized"`: `x_t = Q_tok(DQ(Q_feat(x)))`, `h_t = Q_tok(DQ(Q_feat(h)))`, from the BF16 dequantized values (`DQ(code, byte) = code * 2**(byte - 127)`, exact below `2**128`; an element within 3 % of the BF16 maximum dequantizes to `2**128`, which is infinity in BF16 and gives its token block byte 254 in the `"requantized"` copy: a NaN code for it and code 0 for the block's other elements) of the feature-direction copies the forward GEMMs read, with the recipe's round to nearest; in the forward, `recompute_forward_context` and the backward's replay of later macro batches. Every other output and saved tensor keeps the `"source"` bits; the routed weight gradients read the other copies. MXFP8 routed weights only (`forward`, `recompute_forward_context`, `backward`, `prepare` and `prepare_recompute` refuse BF16 routed weights); `"after_down"` outside the groups; SM100a and SM103a. The adapter compiles the MXFP8 kernels of its SwiGLU variant at construction |
 
   A configuration that uses a layout, the top-k or a mode of a kernel group
   (`MODE_GROUPS`) runs exactly that group's configuration:

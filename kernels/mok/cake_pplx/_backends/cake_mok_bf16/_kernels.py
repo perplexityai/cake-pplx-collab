@@ -90,6 +90,16 @@ SHARED_EXPERT_MODES = ("unscaled", "scaled", "none")
 # ``"situ_glu"``: ``beta * tanh(gate / beta) * sigmoid(gate) * lb * tanh(up / lb)``
 # with per-call ``situ_beta`` and ``situ_lb``.
 ACTIVATIONS = ("swiglu", "clamped_swiglu", "situ_glu")
+# The token-direction MXFP8 copies of the routed activations (``x_t`` and
+# ``h_t``, built in the kernels), which the routed weight gradients read.
+# ``"source"`` (default) quantizes the BF16 activation along the token
+# dimension, ``Q_tok(x)`` and ``Q_tok(h)``. ``"requantized"`` quantizes the BF16
+# dequantized values of the feature-direction copies the forward GEMMs read,
+# ``Q_tok(DQ(Q_feat(x)))`` and ``Q_tok(DQ(Q_feat(h)))``.
+# ``prepare_mok_bf16(mxfp8_transposed=...)`` selects it.
+MXFP8_TRANSPOSED_MODES = ("source", "requantized")
+# Targets with the MXFP8 kernels of ``mxfp8_transposed="requantized"``.
+MXFP8_REQUANTIZED_TARGETS = ("sm_100a", "sm_103a")
 
 
 @dataclass(frozen=True)
@@ -145,11 +155,14 @@ def _role(
     weight_before_down=False,
     direct=False,
     situ_glu=False,
+    qdq=False,
 ):
     """Kernel role name: ``base`` plus the ``_clamped``, ``_fp32``, ``_noctx``,
     ``_wbd`` (router weight before the down projection), ``_direct`` (the
-    direct router-weight gradient) and ``_situ_noshared`` (SiTU-GLU routed
-    experts without a shared expert) suffixes, in that order."""
+    direct router-weight gradient), ``_situ_noshared`` (SiTU-GLU routed
+    experts without a shared expert) and ``_qdq`` (MXFP8 token-direction
+    activation copies requantized from the forward operands) suffixes, in that
+    order."""
     return (
         base
         + ("_clamped" if clamped else "")
@@ -158,6 +171,7 @@ def _role(
         + ("_wbd" if weight_before_down else "")
         + ("_direct" if direct else "")
         + ("_situ_noshared" if situ_glu else "")
+        + ("_qdq" if qdq else "")
     )
 
 
@@ -184,11 +198,13 @@ def check_configuration(
     router_weight_gradient="quotient",
     shared_expert="unscaled",
     activation="swiglu",
+    mxfp8_transposed="source",
 ):
     """Refuse a configuration the package has no kernels for, before any device work.
 
     The types come first, the same in both positions: a position, router-weight
-    gradient, shared-expert mode or activation that is not a ``str``, an EP size,
+    gradient, shared-expert mode, activation or ``mxfp8_transposed`` mode
+    (:data:`MXFP8_TRANSPOSED_MODES`) that is not a ``str``, an EP size,
     local expert count or top-k that is not an ``int`` (a ``bool`` included) and
     a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a ``bool`` raise
     ``TypeError``. Every other refusal raises ``ValueError``. A configuration
@@ -201,8 +217,10 @@ def check_configuration(
     of :data:`BEFORE_DOWN_LAYOUTS` at their top-k, with clamped SwiGLU and FP32
     weight-gradient accumulation; both with the default router-weight gradient
     and shared-expert mode. ``activation="clamped_swiglu"`` is
-    ``clamped_swiglu=True``. Returns the name of the group the configuration
-    runs, or None."""
+    ``clamped_swiglu=True``. ``mxfp8_transposed="requantized"`` applies to MXFP8
+    routed experts, which run with ``"after_down"`` outside the groups only:
+    it raises with ``"before_down"`` or a group's configuration. Returns the
+    name of the group the configuration runs, or None."""
     if not isinstance(router_weight_position, str):
         raise TypeError(
             f"router_weight_position must be one of {ROUTER_WEIGHT_POSITIONS}, "
@@ -223,6 +241,7 @@ def check_configuration(
         ("router_weight_gradient", router_weight_gradient, ROUTER_WEIGHT_GRADIENTS),
         ("shared_expert", shared_expert, SHARED_EXPERT_MODES),
         ("activation", activation, ACTIVATIONS),
+        ("mxfp8_transposed", mxfp8_transposed, MXFP8_TRANSPOSED_MODES),
     )
     for name, value, allowed in modes:
         if not isinstance(value, str):
@@ -235,6 +254,12 @@ def check_configuration(
     for name, value, allowed in modes:
         if value not in allowed:
             raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
+    if mxfp8_transposed != "source" and router_weight_position != "after_down":
+        raise ValueError(
+            f"mxfp8_transposed={mxfp8_transposed!r} applies to MXFP8 routed weights, "
+            "which run with router_weight_position='after_down'; "
+            f"got {router_weight_position!r}"
+        )
     clamped = clamped_swiglu or activation == "clamped_swiglu"
     layout = (ep, local_experts)
     touched = [
@@ -257,6 +282,12 @@ def check_configuration(
             and router_weight_gradient == group.router_weight_gradient
             and fp32_wgrad == group.fp32_wgrad
         ):
+            if mxfp8_transposed != "source":
+                raise ValueError(
+                    f"The {group.description} takes BF16 routed weights; "
+                    f"mxfp8_transposed={mxfp8_transposed!r} applies to MXFP8 routed "
+                    "weights"
+                )
             return name
     if touched:
         got = (
@@ -304,11 +335,12 @@ def check_configuration(
     return None
 
 
-def check_target(router_weight_position, arch, group=None):
-    """Refuse ``"before_down"``, or the :data:`MODE_GROUPS` group ``group``
-    (the name :func:`check_configuration` returns), on a target without its
-    kernels (``arch`` as :func:`jit.target_arch` names it), before any kernel
-    is loaded."""
+def check_target(router_weight_position, arch, group=None, mxfp8_transposed="source"):
+    """Refuse ``"before_down"``, the :data:`MODE_GROUPS` group ``group``
+    (the name :func:`check_configuration` returns), or
+    ``mxfp8_transposed="requantized"``, on a target without its kernels
+    (``arch`` as :func:`jit.target_arch` names it), before any kernel is
+    loaded."""
     if router_weight_position == "before_down" and arch not in BEFORE_DOWN_TARGETS:
         raise ValueError(
             "router_weight_position='before_down' (top-k 6 and the 384-expert layouts) "
@@ -320,6 +352,18 @@ def check_target(router_weight_position, arch, group=None):
         raise ValueError(
             f"{MODE_GROUPS[group].description} has no {arch} build in this "
             f"package; use an {targets} device"
+        )
+    check_requantized_target(mxfp8_transposed != "source", arch)
+
+
+def check_requantized_target(requantized, arch):
+    """Refuse the MXFP8 kernels of ``mxfp8_transposed="requantized"``
+    (``requantized``) on a target without them, before any kernel is loaded."""
+    if requantized and arch not in MXFP8_REQUANTIZED_TARGETS:
+        targets = " or ".join(MXFP8_REQUANTIZED_TARGETS)
+        raise ValueError(
+            f"mxfp8_transposed='requantized' has no {arch} build in this package; "
+            f"use an {targets} device"
         )
 
 
@@ -2849,13 +2893,23 @@ class MoKForwardMXFP8:
     (``multimacro=True`` launches it): the same contract and bitwise the same
     results for any schedule, faster when the schedule holds two macro batches
     (it streams macro batch 0's rows ahead of macro batch 1's combine).
+
+    ``qdq_transposed=True`` (sm_100a and sm_103a) loads the program whose saved
+    token-direction copies are requantized from the forward GEMMs' operands:
+    ``x_t = Q_tok(DQ(Q_feat(x)))`` and ``h_t = Q_tok(DQ(Q_feat(h)))`` instead of
+    ``Q_tok(x)`` and ``Q_tok(h)``; every other output and saved tensor is the
+    default program's, bit for bit.
     """
 
-    def __init__(self, clamped=False):
+    def __init__(self, clamped=False, qdq_transposed=False):
         from .jit import load_kernel, target_arch
 
-        self.clamped = clamped
-        self.module = load_kernel(_role("forward_mxfp8", clamped))
+        if type(qdq_transposed) is not bool:
+            raise TypeError("qdq_transposed must be a boolean")
+        if qdq_transposed:
+            check_requantized_target(True, target_arch())
+        self.clamped, self.qdq_transposed = clamped, qdq_transposed
+        self.module = load_kernel(_role("forward_mxfp8", clamped, qdq=qdq_transposed))
         self.multimacro_module = (
             load_kernel(_role("forward_mxfp8", clamped) + "_multimacro")
             if target_arch() == "sm_107a"
@@ -3067,14 +3121,19 @@ class MoKRecomputeMXFP8:
     """Native-signature MXFP8 context-only recompute; caller owns peer barriers.
 
     Launch-invariant geometry is memoised per geometry; the counters are one
-    zero-filled slab per call.
+    zero-filled slab per call. ``qdq_transposed=True`` (sm_100a and sm_103a)
+    rebuilds the context of the forward's ``qdq_transposed`` program.
     """
 
-    def __init__(self, clamped=False):
-        from .jit import load_kernel
+    def __init__(self, clamped=False, qdq_transposed=False):
+        from .jit import load_kernel, target_arch
 
-        self.clamped = clamped
-        self.module = load_kernel(_role("recompute_mxfp8", clamped))
+        if type(qdq_transposed) is not bool:
+            raise TypeError("qdq_transposed must be a boolean")
+        if qdq_transposed:
+            check_requantized_target(True, target_arch())
+        self.clamped, self.qdq_transposed = clamped, qdq_transposed
+        self.module = load_kernel(_role("recompute_mxfp8", clamped, qdq=qdq_transposed))
         self.layout_module = load_kernel("expert_layout")
         self._peer_tables = {}
         self._geometry = {}
@@ -3251,14 +3310,24 @@ class MoKBackwardMXFP8:
     produces them; the forward context is the MXFP8 forward's.
 
     Launch-invariant geometry is memoised per geometry; the counters are one
-    zero-filled slab per call.
+    zero-filled slab per call. ``qdq_transposed=True`` (sm_100a and sm_103a)
+    replays the later macro batches' token-direction copies as the forward's
+    ``qdq_transposed`` program saves them; its context must come from that
+    program (or its recompute).
     """
 
-    def __init__(self, clamped=False, fp32_wgrad=False):
-        from .jit import load_kernel
+    def __init__(self, clamped=False, fp32_wgrad=False, qdq_transposed=False):
+        from .jit import load_kernel, target_arch
 
+        if type(qdq_transposed) is not bool:
+            raise TypeError("qdq_transposed must be a boolean")
+        if qdq_transposed:
+            check_requantized_target(True, target_arch())
         self.clamped, self.fp32_wgrad = clamped, fp32_wgrad
-        self.module = load_kernel(_role("backward_mxfp8", clamped, fp32_wgrad))
+        self.qdq_transposed = qdq_transposed
+        self.module = load_kernel(
+            _role("backward_mxfp8", clamped, fp32_wgrad, qdq=qdq_transposed)
+        )
         self.zero_module = load_kernel("zero")
         self.layout_module = load_kernel("expert_layout")
         self._peer_tables = {}

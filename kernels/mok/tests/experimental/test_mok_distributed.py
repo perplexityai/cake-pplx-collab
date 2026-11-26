@@ -124,6 +124,20 @@ def test_training_features(record_property, world, part):
     _record(results, record_property, part, [name for name, _ in FEATURE_GAPS[world]])
 
 
+@pytest.mark.parametrize("world", [1, 4], ids=["ep1", "ep4"])
+def test_requantized_training(world):
+    """``mxfp8_transposed="requantized"`` through the adapter (:func:`tests.experimental._mok_dist.requantized_training`);
+    skipped on a target without its kernels."""
+    if torch.cuda.is_available():
+        arch = cake_package("cake_mok_bf16", "jit").target_arch()
+        if arch not in kernels.MXFP8_REQUANTIZED_TARGETS:
+            pytest.skip(f"mxfp8_transposed='requantized' has no {arch} build")
+    results = run_ranks(world, workers.requantized_training)
+    assert [r["case"] for r in results[0]] == [
+        c["name"] for c in workers.REQUANTIZED_CASES
+    ]
+
+
 def test_source_capacity_and_context_ownership():
     run_ranks(4, workers.source_capacity)
 
