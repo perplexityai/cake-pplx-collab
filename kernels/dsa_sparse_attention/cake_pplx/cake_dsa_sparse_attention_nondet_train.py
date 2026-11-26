@@ -27,7 +27,9 @@ stage over both 64-head windows ``[0, 64)`` and ``[64, 128)`` of every token,
 the heads past ``H`` padding -- and otherwise the two-window bridge: the
 64-head kernels on ``[H - 64, H)`` and then ``[0, 64)``, with the heads
 ``[H - 64, 64)`` both windows cover taken from the second (see the backend
-README).  The NoPE entries take 64 heads.
+README).  Their forward runs, where the program ships it (SM100 / SM103), the
+single-pass forward instead: every head of a token in one 2-CTA cluster.  The
+NoPE entries take 64 heads.
 
 Numerical mode: the module name chooses the package, and no entry point takes a
 determinism keyword; ``with_o_lo`` chooses whether the forward writes ``o_lo``
@@ -351,7 +353,9 @@ def cake_dsa_sparse_attention_nondet(
         ``sm_107a``, a tail row (``2 T <= S``, at least 131,072 keys; at most 3
         passes on ``sm_103a``); ``sm_107a`` runs a fixed 2 passes with a
         131,072-key floor; a count above 4 runs one pass; otherwise a single
-        pass runs.  A row of more than one segment (``num_segments > 1``)
+        pass runs.  Above 64 heads the head-window builds take no tail-row
+        passes on ``sm_103a`` (one pass there; one-chunk rows as above).  A
+        row of more than one segment (``num_segments > 1``)
         runs one pass unless ``key_passes`` overrides.  ``key_passes=1``
         forces the single pass; a larger value forces that many passes
         (``<= S``).  The passes carry dQ through
@@ -1014,8 +1018,8 @@ def cake_dsa_sparse_attention_nondet_train_forward(
     (``out + o_lo`` is the output before its BF16 rounding). Pass the three
     unchanged to :func:`cake_dsa_sparse_attention_nondet_train_backward`.
     ``out``, ``lse`` and ``o_lo`` of a head come from one forward kernel launch
-    (with 96 or 128 heads, the head-window forward, or on the two-window
-    bridge the launch of the window that delivers the head). A
+    (with 96 or 128 heads, the single-pass or the head-window forward, or on
+    the two-window bridge the launch of the window that delivers the head). A
     call without query rows returns empty outputs without launching (on SM107
     a call over 96 or 128 heads on CUDA tensors raises ``NotImplementedError``
     instead).

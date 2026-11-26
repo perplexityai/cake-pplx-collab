@@ -455,8 +455,9 @@ def with_o_lo_case(with_o_lo: bool, monkeypatch, backend, jit, *modules, caller=
     not the ones the test module imported.  Every case gets an empty binding cache, and the stages its plans resolve
     (``backend._stage_entry``) are recorded: when the case ends none may belong to the other mode -- under ``False``
     no forward or delta stage that has a ``with_o_lo=False`` twin (``jit.NO_OLO_STAGES``, and the head-window
-    forward ``fwd_hw`` beside its twin ``fwd_hw_no_olo``, ``backend.HEAD_WINDOW_STAGES``), so every plan of the case
-    ran the twins (a plan resolves its forward stage first), under ``True`` no twin."""
+    forward ``fwd_hw`` beside its twin ``fwd_hw_no_olo``, ``backend.HEAD_WINDOW_STAGES``, and the single-pass forward
+    ``fwd_h128`` beside ``fwd_h128_no_olo``, ``backend.SINGLE_PASS_STAGES``), so every plan of the case ran the twins
+    (a plan resolves its forward stage first), under ``True`` no twin."""
     resolved: list = []
     stage_entry = backend._stage_entry
 
@@ -489,6 +490,12 @@ def with_o_lo_case(with_o_lo: bool, monkeypatch, backend, jit, *modules, caller=
         (head_window[stage], head_window[twin])
         for stage, twin in jit.NO_OLO_STAGES.items()
         if stage in head_window and twin in head_window
+    )
+    single_pass = getattr(backend, "SINGLE_PASS_STAGES", {})
+    twins.update(
+        (single_pass[stage], single_pass[twin])
+        for stage, twin in list(twins.items())
+        if stage in single_pass and twin in single_pass
     )
     other = set(twins.values()) if with_o_lo else set(twins)
     wrong = sorted(other.intersection(resolved))
