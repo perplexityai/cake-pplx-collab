@@ -178,27 +178,28 @@ the last of them up to 100 rows per SM (0.2.16 ran the forwards of other
 layouts there, so ``y`` can differ there in its last bits); other layouts,
 such a gate of one head among them, keep the programs of 0.2.16.
 The deterministic package is that of 0.2.16.
-Version 0.2.18 changes no kernel, only forward bands on SM100 and SM103.  A
-gate of more than one head sliced from a wider projection runs the pipelined
+Version 0.2.18 changed no kernel, only forward bands on SM100 and SM103.  A
+gate of more than one head sliced from a wider projection ran the pipelined
 forward that warms rows by their layout from 600 rows per SM on SM100 and from
 630 on SM103 (0.2.17 ran the extra-long forward up to 650 and 699).  Rows that
 are whole tokens of wider tensors (head strides 128, both token strides at
 least ``H * 128`` and one past it, and either packed ``z`` at any number of
 heads, such as ``x`` sliced beside packed ``z``, or packed ``x`` at one head,
 such as a gate of one head sliced from a projection (a gate of more than one
-head keeps the bands above), or both inputs past the row from 4 heads, such as
-``x`` and ``z`` both sliced or padded rows) take bands of their own there,
-which run it from 701 to 1500 rows per SM (0.2.17 ran the 8-thread forward).
+head kept the bands above), or both inputs past the row from 4 heads, such as
+``x`` and ``z`` both sliced or padded rows) took bands of their own there,
+which ran it from 701 to 1500 rows per SM (0.2.17 ran the 8-thread forward).
 Rows of 1 to 3 heads with both inputs past the row (``x`` and ``z`` both
-sliced, padded rows) keep 0.2.17's programs (measured slower at 1 and 2
+sliced, padded rows) kept 0.2.17's programs (measured slower at 1 and 2
 heads: ``x`` and ``z`` both sliced of one head, padded rows of one and of
 two).
 Other layouts (``x`` or ``z`` broadcast over tokens or
 heads, a head stride other than 128, padded head-major planes, a mixed layout)
-and head-major ``x`` and ``z`` keep 0.2.17's programs (the pipelined forward
-was measured slower with ``x`` broadcast over tokens beside ``z`` sliced from a
-projection, ``x`` broadcast over heads, head stride 144, padded head-major
-planes and ``x`` head-major beside ``z`` sliced from a projection).  Where the
+and head-major ``x`` and ``z`` kept 0.2.17's programs (the pipelined forward
+was measured slower on B200 and GB300 with ``x`` broadcast over tokens beside
+``z`` sliced from a projection and with padded head-major planes, and on B200
+with ``x`` broadcast over heads, head stride 144 and ``x`` head-major beside
+``z`` sliced from a projection).  Where the
 pipelined forward runs in the place of 0.2.17's program, ``y`` can differ from
 0.2.17's in its last bits on a few elements; ``dx``, ``dz`` and the weight
 gradient do not change.

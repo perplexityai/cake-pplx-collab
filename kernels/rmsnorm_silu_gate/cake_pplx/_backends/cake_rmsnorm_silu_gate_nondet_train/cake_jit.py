@@ -3545,11 +3545,12 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # Version 0.2.18's measurement against 0.2.17 on the same GPU (B200, GB300)
 # found the forward or the checkpointed step of rows of this table slower with
 # ``fwd_layout_pipe`` from 701 to 1500 rows per SM than with the plain forward
-# (``x`` broadcast over tokens beside ``z`` sliced from a projection, ``x``
-# broadcast over heads, head stride 144, padded head-major planes, ``x``
-# head-major beside ``z`` sliced from a projection, ``x`` and ``z`` both sliced
-# from projections of one head, padded rows of one and of two heads), so 0.2.18
-# kept 0.2.17's programs for every row of this table.  Version 0.2.19 measured
+# (on B200 and GB300: ``x`` broadcast over tokens beside ``z`` sliced from a
+# projection, padded head-major planes, ``x`` and ``z`` both sliced from
+# projections of one head, padded rows of one and of two heads; on B200:
+# ``x`` broadcast over heads, head stride 144, ``x`` head-major beside ``z``
+# sliced from a projection), so 0.2.18 kept 0.2.17's programs for every row of
+# this table.  Version 0.2.19 measured
 # some of these layouts against 0.2.18 again and gives them classes of their own
 # (``SLICED_FEW_LAYOUT``, ``BCASTH_LAYOUT``, ``MIXED_LAYOUT``, ``PADH_LAYOUT``),
 # which run ``fwd_layout_pipe`` only in bands where every measured point passed

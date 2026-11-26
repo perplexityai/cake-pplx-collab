@@ -190,31 +190,33 @@ last bits; other layouts, such a gate of one head among them, keep the
 programs of 0.2.16.
 `cake_jit.module_for_rows` takes the class (keyword `layout`).  The
 deterministic package is that of 0.2.16.
-Version 0.2.18 changes no program, only forward tables on `sm_100a` and
+Version 0.2.18 changed no program, only forward tables on `sm_100a` and
 `sm_103a` (the bands of packed rows, every `sm_107a` table and the backward's
-are those of 0.2.17).  A gate of more than one head sliced from a wider
-projection runs `fwd_layout_pipe` from 600 rows per SM on `sm_100a` and from
+were those of 0.2.17).  A gate of more than one head sliced from a wider
+projection ran `fwd_layout_pipe` from 600 rows per SM on `sm_100a` and from
 630 on `sm_103a` (`cake_jit.PROJECTION_FORWARD_BANDS`; 0.2.17 ran the
 extra-long forward up to 650 and 699).  Rows that are whole tokens of wider
-tensors are a class of their own (`cake_jit.SLICED_LAYOUT`: head strides 128,
-both token strides at least `H * 128` and one past it, and either packed `z` at
-any number of heads, such as `x` sliced beside packed `z`, or packed `x` at one
-head, such as a gate of one head sliced from a projection (gates of more than
-one head are `cake_jit.PROJECTION_LAYOUT`, above), or both inputs past the row
-from `cake_jit.SLICED_MIN_HEADS` (4) heads, such as `x` and `z` both sliced or
-padded rows), whose table (`cake_jit.SLICED_FORWARD_BANDS`) runs
+tensors were a class of their own (in 0.2.18 `cake_jit.SLICED_LAYOUT` at any
+number of heads: head strides 128, both token strides at least `H * 128` and
+one past it, and either packed `z` at any number of heads, such as `x` sliced
+beside packed `z`, or packed `x` at one head, such as a gate of one head
+sliced from a projection (gates of more than one head are
+`cake_jit.PROJECTION_LAYOUT`, above), or both inputs past the row from
+`cake_jit.SLICED_MIN_HEADS` (4) heads, such as `x` and `z` both sliced or
+padded rows), whose table (in 0.2.18 `cake_jit.SLICED_FORWARD_BANDS`) ran
 `fwd_layout_pipe` from 701 to 1500 rows per SM on `sm_100a` and `sm_103a`,
-where 0.2.17 ran the plain forward; on `sm_107a` they run
+where 0.2.17 ran the plain forward; on `sm_107a` they ran
 `cake_jit.STRIDED_FORWARD_BANDS` as in 0.2.17.  Rows of 1 to 3 heads with both
-inputs past the row (`x` and `z` both sliced, padded rows) keep 0.2.17's
+inputs past the row (`x` and `z` both sliced, padded rows) kept 0.2.17's
 programs (measured slower at 1 and 2 heads: `x` and `z` both sliced of one
 head, padded rows of one and of two).  Other layouts (`x` or `z`
 broadcast over tokens or heads, a head stride other than 128, padded
-head-major planes, a mixed layout) and head-major rows keep 0.2.17's programs
-(the pipelined forward was measured slower with `x` broadcast over tokens
-beside `z` sliced from a projection, `x` broadcast over heads, head stride
-144, padded head-major planes and `x` head-major beside `z` sliced from a
-projection).  Where `fwd_layout_pipe` runs in the place of 0.2.17's program,
+head-major planes, a mixed layout) and head-major rows kept 0.2.17's programs
+(the pipelined forward was measured slower on B200 and GB300 with `x`
+broadcast over tokens beside `z` sliced from a projection and with padded
+head-major planes, and on B200 with `x` broadcast over heads, head stride 144
+and `x` head-major beside `z` sliced from a projection).  Where
+`fwd_layout_pipe` runs in the place of 0.2.17's program,
 `y` can differ from 0.2.17's in its last bits on a few elements (the programs
 associate a row's sum of squares differently; where measured, by at most one
 BF16 ulp for a gate sliced from a projection, and the same bits on whole-token
@@ -645,10 +647,10 @@ of two heads, and neither was slower for either form of 4, 8 and 16 heads, so
 0.2.18 kept the plain forward there for such rows of 1 to 3 heads.  Measured
 against 0.2.17 on the same GPU (B200, GB300), the forward or the checkpointed
 step of other rows of `STRIDED_FORWARD_BANDS` was slower with
-`fwd_layout_pipe` there (`x` broadcast over tokens beside `z` sliced from a
-projection, `x` broadcast over heads, head stride 144, padded head-major
-planes, `x` head-major beside `z` sliced from a projection), so 0.2.18 kept
-the plain forward for them.
+`fwd_layout_pipe` there (on B200 and GB300: `x` broadcast over tokens beside
+`z` sliced from a projection, padded head-major planes; on B200: `x`
+broadcast over heads, head stride 144, `x` head-major beside `z` sliced from a
+projection), so 0.2.18 kept the plain forward for them.
 Version 0.2.19 moves the bands of these rows by a measurement against 0.2.18
 on the same GPU (CUDA Graph replays, CUPTI, cold L2, two runs; B200, GB300,
 and VR200 on two nodes with drivers 620.70.06 and 620.43).  A point passes
