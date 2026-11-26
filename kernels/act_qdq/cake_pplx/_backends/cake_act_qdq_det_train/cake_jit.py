@@ -86,15 +86,17 @@ vectors each (tiles of 512 vectors), 16 CTAs per SM and the main program's
 grid rule; it keeps each vector in packed BF16 pairs, so it fits in 64
 registers per thread.  A call runs it in both kinds of call from 868,353
 vectors, past one wave of the main program's CTAs on a VR200 (212 SMs), to
-1,736,704, one wave of its own.  On three VR200 GPUs with L2 flushed before
-each call, it measured 2.4 to 14 % faster than the main program there (the
-median over the GPUs), and from 7 % slower to 2.4 % faster outside that
-range.  Every other call runs the main record
-(:func:`selected_module`).  Every program gives the same bytes.  ``n_vecs``
-is a run-time scalar, so a library serves every shape; a call builds or loads
-only its own program's library on first use.  Build every library of the
-architecture (:func:`specs_for_arch`) before a CUDA graph capture, to keep the
-JIT out of the capture.
+1,736,704, one wave of its own; MXFP4's range starts at 933,888.  On three
+VR200 GPUs with L2 flushed before each call, the kernel measured 2.4 to 14 %
+faster than the main program from 868,353 to 1,736,704 vectors (the median
+over the GPUs), and from 7 % slower to 2.4 % faster outside that range.
+Replayed in a CUDA graph, some MXFP4 calls measured up to 2 % slower than
+with the main program below 933,888 vectors.  Every other call runs the main
+record (:func:`selected_module`).  Every program gives the same bytes.
+``n_vecs`` is a run-time scalar, so a library serves every shape; a call
+builds or loads only its own program's library on first use.  Build every
+library of the architecture (:func:`specs_for_arch`) before a CUDA graph
+capture, to keep the JIT out of the capture.
 
 The interleaved-domain records (``<route>_domain``, SM107 only) are not on any
 route of ``ROUTES``: ``DOMAIN_ROUTES`` names one per route, and only a call
@@ -630,7 +632,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_act_qdq_5ddb470d9d818fe82b6b",
         "scale_out": False,
         "vectors": {
-            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
+            "sm_107a": {"in_place": (933888, 1736704), "out_of_place": (933888, 1736704)},
         },
     },
     # The mid build of MXFP4 with the scales, SM107 only: 64-thread CTAs,
@@ -659,7 +661,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_act_qdq_9f47fc0fe25e824b0f73",
         "scale_out": True,
         "vectors": {
-            "sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)},
+            "sm_107a": {"in_place": (933888, 1736704), "out_of_place": (933888, 1736704)},
         },
     },
     # The mid build of MXFP8 without the scales, SM107 only: 64-thread CTAs,

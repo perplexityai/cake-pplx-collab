@@ -73,7 +73,8 @@ since it forms `n_vecs + 511`; the main program runs above that), and in place f
 large program's range.  The large program's range holds the largest sizes: in place from 4,194,304 vectors (from
 33,554,432 for MXFP8 without the scale output) and out of place from 8,388,608 for MXFP8 with the scale output only, all
 to 2,147,481,600 (2^31 - 2048, since it forms `n_vecs + 2047`; the main program runs above that).  The mid program's
-range, in both kinds of call, is 868,353 to 1,736,704 vectors on `sm_107a`, above the small program's range.
+range, in both kinds of call on `sm_107a`, is 868,353 to 1,736,704 vectors for MXFP8 and 933,888 to 1,736,704 for
+MXFP4, above the small program's range.
 
 A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
 threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
@@ -100,13 +101,15 @@ so those have no large range.  The mid program is the same kernel with 64-thread
 (tiles of 512 vectors), 16 CTAs per SM and the main program's grid rule.  It keeps each vector in packed BF16 pairs, as
 the interleaved-domain MXFP4 and MXFP8 programs do ("Locality domains" below), so it fits in 64 registers per thread.
 On a VR200 (212 SMs) the main program needs a second wave of CTAs from 868,353 vectors, and the mid program fits in one
-wave up to 1,736,704.  On three VR200 GPUs with L2 flushed before each call, it measured faster than the main program at
-every size of its range, in both kinds of call and on every GPU: by 2.4 to 14 % in the median over the GPUs.  Outside
-that range it measured from 7 % slower to 2.4 % faster.  Every program gives the same bytes at every size.  Neither the last dimension, nor the
-rank, nor the row count enters the kernel, so a new shape never rebuilds a library.  A call builds or loads only the
-library of its own program, so build every library of the architecture before a CUDA graph capture: call
-`build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output
-and program (size range and kind of call) that the capture uses.
+wave up to 1,736,704.  On three VR200 GPUs with L2 flushed before each call, the kernel measured faster than the main
+program at every size of that range, in both kinds of call and on every GPU: by 2.4 to 14 % in the median over the GPUs.
+Outside that range it measured from 7 % slower to 2.4 % faster.  Replayed in a CUDA graph, some MXFP4 calls measured up
+to 2 % slower than with the main program from 868,368 to 917,504 vectors, and every call 1.2 % faster or more at each
+size measured from 933,888, so MXFP4's range starts there.  Every program gives the same bytes at every size.  Neither
+the last dimension, nor the rank, nor the row count enters the kernel, so a new shape never rebuilds a library.  A call
+builds or loads only the library of its own program, so build every library of the architecture before a CUDA graph
+capture: call `build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each
+format, scale output and program (size range and kind of call) that the capture uses.
 
 ## Locality domains (`sm_107a`)
 

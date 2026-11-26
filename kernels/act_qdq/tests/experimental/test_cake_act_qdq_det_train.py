@@ -97,10 +97,11 @@ LARGE_VECTORS = {
     )
 }
 # The mid program of each MXFP4 and MXFP8 route, on sm_107a only: on a VR200, from past one wave of the main program's
-# CTAs to one wave of its own.
+# CTAs (MXFP4: from 933,888 vectors) to one wave of its own.
 MID_VECTORS = {
-    kind: {"sm_107a": {"in_place": (868353, 1736704), "out_of_place": (868353, 1736704)}}
-    for kind in ("mxfp4_e8m0_g32", "mxfp4_e8m0_g32_scales", "mxfp8_e8m0_g32", "mxfp8_e8m0_g32_scales")
+    fmt + suffix: {"sm_107a": {"in_place": (low, 1736704), "out_of_place": (low, 1736704)}}
+    for fmt, low in (("mxfp4_e8m0_g32", 933888), ("mxfp8_e8m0_g32", 868353))
+    for suffix in ("", "_scales")
 }
 # Per route, its ranged programs in the route's order (name suffix -> vectors): the small program of every route, the
 # wide one, below which that route's small range ends on sm_100a and sm_103a, the large one and the mid one.
