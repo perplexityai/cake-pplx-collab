@@ -210,14 +210,17 @@ forward; on sm_107a they run ``cake_jit.STRIDED_FORWARD_BANDS`` as in
 0.2.17.  Other layouts (``x`` or ``z`` broadcast over tokens or heads, a
 head stride other than 128, padded head-major planes, a mixed layout) and
 head-major rows keep 0.2.17's programs (the pipelined forward was measured
-slower on those other layouts).  Where ``fwd_layout_pipe`` runs in the place
-of 0.2.17's program, ``y`` can differ from 0.2.17's in its last bits on a
-few elements (the programs associate a row's sum of squares differently;
-where measured, by at most one BF16 ulp for a gate sliced from a projection,
-and the same bits on whole-token rows).  ``dx``, ``dz`` and the weight
-gradient do not change.  Measured against 0.2.17 on the same GPU (B200,
-GB300; a gate of 1, 16, 48 or 64 heads sliced from a projection, ``x`` and
-``z`` of 16 and 48 heads both sliced), neither the forward nor the
+slower with ``x`` broadcast over tokens beside ``z`` sliced from a
+projection, ``x`` broadcast over heads, head stride 144, padded head-major
+planes and ``x`` head-major beside ``z`` sliced from a projection).  Where
+``fwd_layout_pipe`` runs in the place of 0.2.17's program, ``y`` can differ
+from 0.2.17's in its last bits on a few elements (the programs associate a
+row's sum of squares differently; where measured, by at most one BF16 ulp
+for a gate sliced from a projection, and the same bits on whole-token
+rows).  ``dx``, ``dz`` and the weight gradient do not change.  Measured
+against 0.2.17 on the same GPU (B200, GB300; a gate of 1, 16, 48 or 64
+heads sliced from a projection, ``x`` and ``z`` of 16 and 48 heads both
+sliced), neither the forward nor the
 checkpointed training step was slower beyond noise in the moved bands, nor
 the forward than the deterministic package's (the comments of
 ``cake_jit.PROJECTION_FORWARD_BANDS`` and ``cake_jit.SLICED_FORWARD_BANDS``

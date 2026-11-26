@@ -205,13 +205,15 @@ where 0.2.17 ran the plain forward; on `sm_107a` they run
 `cake_jit.STRIDED_FORWARD_BANDS` as in 0.2.17.  Other layouts (`x` or `z`
 broadcast over tokens or heads, a head stride other than 128, padded
 head-major planes, a mixed layout) and head-major rows keep 0.2.17's programs
-(the pipelined forward was measured slower on those other layouts).  Where
-`fwd_layout_pipe` runs in the place of 0.2.17's program, `y` can differ from
-0.2.17's in its last bits on a few elements (the programs associate a row's
-sum of squares differently; where measured, by at most one BF16 ulp for a gate
-sliced from a projection, and the same bits on whole-token rows).  `dx`, `dz`
-and `dw` do not change.  The measurement behind the new bands is under
-"Programs and routes".
+(the pipelined forward was measured slower with `x` broadcast over tokens
+beside `z` sliced from a projection, `x` broadcast over heads, head stride
+144, padded head-major planes and `x` head-major beside `z` sliced from a
+projection).  Where `fwd_layout_pipe` runs in the place of 0.2.17's program,
+`y` can differ from 0.2.17's in its last bits on a few elements (the programs
+associate a row's sum of squares differently; where measured, by at most one
+BF16 ulp for a gate sliced from a projection, and the same bits on whole-token
+rows).  `dx`, `dz` and `dw` do not change.  The measurement behind the new
+bands is under "Programs and routes".
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the

@@ -1924,8 +1924,9 @@ def test_forward_plan_of_every_form_differs_from_0_2_17_only_in_the_moved_bands(
 # of a ``FORWARD_KINDS`` kind (``last * SMs``), ``end // h + tokens`` tokens of
 # ``h`` heads: of one head for ``flat<i>`` (the architecture's
 # ``FORWARD_BANDS``; packed rows: one flat [rows, 128] tensor) and ``other<i>``
-# (its ``STRIDED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from wider
-# projections), of 4 heads for ``projection<i>`` (its
+# (its ``SLICED_FORWARD_BANDS`` where the architecture has one, else
+# ``STRIDED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from wider
+# projections, whole-token rows), of 4 heads for ``projection<i>`` (its
 # ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns of a wider projection, a
 # class of more than one head) and ``headmajor<i>`` (its
 # ``HEAD_MAJOR_FORWARD_BANDS``; 4 divides 148, 152 and 212, so ``end`` is whole
@@ -2025,11 +2026,11 @@ def test_forward_around_its_bands_meets_the_naive_tier(
     (:func:`_forward_class`, from the strides of the inputs as the host gets
     them): the module of the first band of the class's table
     (:func:`_forward_table`: ``FORWARD_BANDS`` for packed rows,
-    ``PROJECTION_FORWARD_BANDS`` or ``HEAD_MAJOR_FORWARD_BANDS`` for rows of
-    those classes where the architecture has the table, else
-    ``STRIDED_FORWARD_BANDS``) with ``rows <= last * SMs`` (the tiny, short,
-    pipelined, mid, long, extra-long and plain forwards, each where the
-    architecture's bands name it), but on packed rows of
+    ``PROJECTION_FORWARD_BANDS``, ``HEAD_MAJOR_FORWARD_BANDS`` or
+    ``SLICED_FORWARD_BANDS`` for rows of those classes where the architecture
+    has the table, else ``STRIDED_FORWARD_BANDS``) with ``rows <= last * SMs``
+    (the tiny, short, pipelined, mid, long, extra-long and plain forwards,
+    each where the architecture's bands name it), but on packed rows of
     ``FORWARD_TINY_GAP`` (16, 17, 32 and 33 rows: its edges) the module of
     its role; the inputs' class is their layout's (:func:`_made_class`).
     ``y`` repeats bit for bit and, on the inputs of every draw of ``judge``,
@@ -2093,13 +2094,14 @@ def test_forward_keeps_the_gate_tail_in_every_band(
     """At the first whole tokens of every forward band of each class's table
     (``FORWARD_KINDS``: ``FORWARD_BANDS`` of packed rows,
     ``PROJECTION_FORWARD_BANDS`` and ``HEAD_MAJOR_FORWARD_BANDS`` of 4 heads,
-    and ``STRIDED_FORWARD_BANDS`` of ``x`` and ``z`` both sliced from wider
-    projections), with every ``z`` in :data:`GATE_TAIL`, the inputs are of the
-    kind's class (:func:`_forward_class`), the forward launches the
-    band's module (``module_for_rows``' module for that class) and, on the
-    inputs of every draw of ``judge`` (``x`` and ``w`` of the draw), ``y`` is
-    judged against the naive implementation: no forward program flushes the
-    gate to 0 where FP32 keeps it."""
+    and ``SLICED_FORWARD_BANDS`` (``STRIDED_FORWARD_BANDS`` where the
+    architecture has none) of ``x`` and ``z`` both sliced from wider
+    projections, whole-token rows), with every ``z`` in :data:`GATE_TAIL`, the
+    inputs are of the kind's class (:func:`_forward_class`), the forward
+    launches the band's module (``module_for_rows``' module for that class)
+    and, on the inputs of every draw of ``judge`` (``x`` and ``w`` of the
+    draw), ``y`` is judged against the naive implementation: no forward
+    program flushes the gate to 0 where FP32 keeps it."""
     sms = _sm_count()
     arch = loader.device_arch(torch.cuda.current_device())
     heads, layout, packed, layout_class = FORWARD_KINDS[kind]

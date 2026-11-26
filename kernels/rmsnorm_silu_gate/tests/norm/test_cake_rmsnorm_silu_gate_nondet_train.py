@@ -5364,8 +5364,9 @@ def _host_forward(monkeypatch, arch: str, sm_count: int) -> list:
 def _host_inputs(T: int, H: int, layout: str):
     """Uninitialised CPU ``x`` and ``z`` of ``make``'s ``layout`` (and
     ``broadcast``, ``x_broadcast``, ``z_broadcast``: contiguous, the named
-    tensors broadcast over tokens; the forms of ``HOST_FORM_CLASSES``), and a
-    weight."""
+    tensors broadcast over tokens; the forms of ``HOST_FORM_CLASSES``; a form
+    that names only ``x`` takes a packed ``z``), and a weight."""
+    z = None
     if layout == "contiguous":
         x, z = torch.empty(T, H, D, dtype=torch.bfloat16), None
     elif layout == "projection":

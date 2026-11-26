@@ -189,9 +189,12 @@ their own there, which run it from 701 to 1500 rows per SM (0.2.17 ran the
 8-thread forward).  Other layouts (``x`` or ``z`` broadcast over tokens or
 heads, a head stride other than 128, padded head-major planes, a mixed layout)
 and head-major ``x`` and ``z`` keep 0.2.17's programs (the pipelined forward
-was measured slower on those other layouts).  Where the pipelined forward runs
-in the place of 0.2.17's program, ``y`` can differ from 0.2.17's in its last
-bits on a few elements; ``dx``, ``dz`` and the weight gradient do not change.
+was measured slower with ``x`` broadcast over tokens beside ``z`` sliced from a
+projection, ``x`` broadcast over heads, head stride 144, padded head-major
+planes and ``x`` head-major beside ``z`` sliced from a projection).  Where the
+pipelined forward runs in the place of 0.2.17's program, ``y`` can differ from
+0.2.17's in its last bits on a few elements; ``dx``, ``dz`` and the weight
+gradient do not change.
 Measured against 0.2.17 on the same GPU (a gate sliced from a projection,
 ``x`` and ``z`` both sliced), neither the forward nor the checkpointed
 training step was slower beyond noise in the moved bands, nor the forward than
