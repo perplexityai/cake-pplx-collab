@@ -158,18 +158,21 @@ tokens for the routed weight gradients (`Q_tok`, blocks of 32 consecutive rows).
 | `"source"` (default) | `Q_tok(x)` | `Q_tok(h)` |
 | `"requantized"` | `Q_tok(DQ(Q_feat(x)))` | `Q_tok(DQ(Q_feat(h)))` |
 
-`DQ(code, byte) = code * 2**(byte - 127)` is the BF16 value the forward GEMMs read (exact); `Q_tok` is the recipe
-above with round to nearest. The kernels form the copies wherever they write them: the forward, the context
-recompute and the backward's replay of later macro batches. The forward output, the feature-direction copies, the
-stored gate and up and every other saved tensor are the default's bytes, and so are `dx`, the score gradient and the
-shared weight gradients; only the routed weight gradients read other operands. With power-of-two scales an E4M3 value
-that is normal at its block's scale keeps four significant bits at any scale, so the two copies hold the same value
-for an element unless it is subnormal at a scale it is quantized at: its feature block's, or its token block's in
-either token-direction copy (the feature rounding can land on a midpoint of the token block's subnormal grid, which
-then rounds to even). Requantizing can also change a token block's scale byte (down, or up by one through an element
+`DQ(code, byte) = code * 2**(byte - 127)` is the BF16 value the forward GEMMs read (exact below `2**128`; an element
+within 3 % of the BF16 maximum dequantizes to `2**128`, which is infinity in BF16); `Q_tok` is the recipe above with
+round to nearest. The kernels form the copies wherever they write them: the forward, the context recompute and the
+backward's replay of later macro batches. The forward output, the feature-direction copies, the stored gate and up
+and every other saved tensor are the default's bytes, and so are `dx`, the score gradient and the shared weight
+gradients; only the routed weight gradients read other operands. With power-of-two scales an E4M3 value that is
+normal at its block's scale keeps four significant bits at any scale, so the two copies hold the same value for an
+element unless it is subnormal at a scale it is quantized at: its feature block's, or its token block's in either
+token-direction copy (the feature rounding can land on a midpoint of the token block's subnormal grid, which then
+rounds to even). Requantizing can also change a token block's scale byte (down, or up by one through an element
 subnormal at its feature block's scale), which moves that block's subnormal range and gives its other values other
-codes. `"requantized"` runs MXFP8 routed weights with `router_weight_position="after_down"` outside the mode groups,
-on `sm_100a` and `sm_103a`, and raises `ValueError` otherwise (before any kernel is loaded or launched).
+codes. Such an infinity gives its token block byte 254 in the `"requantized"` copy: a NaN code for it and code 0 for
+the block's other elements. `"requantized"` runs MXFP8 routed weights with `router_weight_position="after_down"`
+outside the mode groups, on `sm_100a` and `sm_103a`, and raises `ValueError` otherwise (before any kernel is loaded
+or launched).
 
 Measured cost of `"requantized"` against the default. Both arms run the programs this version ships, interleaved on
 the same GPUs, eager, CUDA 13.4 toolkit: the default programs, which an earlier revision of the kernel sources
