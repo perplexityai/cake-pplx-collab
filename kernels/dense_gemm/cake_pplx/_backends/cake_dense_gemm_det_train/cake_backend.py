@@ -2677,7 +2677,7 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # median in the comment, with one bit pattern run to run and within the naive BF16 tier on five seeds.  The batched
 # keys (96-head MLA projections) hold no head count or head stride, so they apply at every head count above one; only
 # 96 heads were measured.  Every other part, token count and row keeps the plan of version 0.3.27.
-# Version 0.3.29 adds a 152-SM sm_100a part (GB200) of 37 exact keys: forwards, input gradients and weight gradients
+# Version 0.3.29 adds a 152-SM sm_100a part (GB200) of 33 exact keys: forwards, input gradients and weight gradients
 # (BF16 and FP32 outputs) at T 16380, 32736 and 32768, each named with its measured program in the comment above it;
 # each rule is the full knob set that names that program, as in version 0.3.28.  Each was measured on one part of the SM
 # count against the plan of version 0.3.28 in 21 paired rounds with cold L2, in eager launches and CUDA graph replays:
@@ -3068,14 +3068,6 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
             "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
             "stt": False, "sw": 0,
         },
-        # 4096 -> 2048 forward, BF16 output, T 32736: kk_n256_ht_cg_pro15, paired median 1.028
-        ('sm_100a', False, False, False, False, False, 2048, 4096, 32736): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
         # 8192 -> 4096 forward, BF16 output, T 32736: kk_n256_m256_ht_cg_or_pro7, paired median 1.046
         ('sm_100a', False, False, False, False, False, 4096, 8192, 32736): {
             "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 256,
@@ -3115,14 +3107,6 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
             "htail": False, "lw": False, "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0,
             "pro": 0, "quad_store": False, "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1,
             "store_ef": False, "store_hint": "none", "stt": False, "sw": 0,
-        },
-        # 4096 -> 16384 input gradient, BF16 output, T 32768: kn_n256_m256_ov_ht_cg_pro7, paired median 1.038
-        ('sm_100a', False, True, False, False, False, 4096, 16384, 32768): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 256,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": True, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
         },
         # 7168 -> 96 input gradient, BF16 output, T 16380: kn_n256_tma1_w8relf, paired median 1.149
         ('sm_100a', False, True, False, False, False, 7168, 96, 16380): {
@@ -3172,27 +3156,11 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
             "sh": 0, "sk_first": False, "sk_slab": 2, "sk_sync": True, "store_ef": False, "store_hint": "none",
             "stt": False, "sw": 0,
         },
-        # 3584 -> 7168 weight gradient, BF16 output, T 16380: nn_n224_m256_pro7, paired median 1.056
-        ('sm_100a', True, True, False, False, False, 3584, 16380, 7168): {
-            "b_swz": 128, "batch_group": 0, "block_n": 224, "cgrp": False, "cta1": False, "cta_rows": 256,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
         # 7168 -> 1536 weight gradient, BF16 output, T 16380: nn_n160_m256_bz64_hne_pro15, paired median 1.372
         ('sm_100a', True, True, False, False, False, 7168, 16380, 1536): {
             "b_swz": 64, "batch_group": 0, "block_n": 160, "cgrp": False, "cta1": False, "cta_rows": 256,
             "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "evict_first"), "htail": False, "lw": False,
             "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
-        # 7168 -> 3584 weight gradient, BF16 output, T 16380: nn_n224_m256_pro7, paired median 1.048
-        ('sm_100a', True, True, False, False, False, 7168, 16380, 3584): {
-            "b_swz": 128, "batch_group": 0, "block_n": 224, "cgrp": False, "cta1": False, "cta_rows": 256,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
             "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
             "stt": False, "sw": 0,
         },
