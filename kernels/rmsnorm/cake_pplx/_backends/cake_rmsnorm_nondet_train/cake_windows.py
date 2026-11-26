@@ -1012,8 +1012,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (1, 128, "cake_rmsnorm_train_a5f2942d61e591f57a76"),
             (128, 512, "cake_rmsnorm_train_809235a3965d337a6877"),
             (512, 6143, "cake_rmsnorm_train_12bbedff93fcaafa475d"),
-            (6143, 32767, "cake_rmsnorm_train_3f26352ef0f1d5e47ecd"),
-            (32767, None, "cake_rmsnorm_train_7ac3bb6464039170699d"),
+            (6143, 32767, "cake_rmsnorm_train_b1339aac23ed13dedce9"),
+            (32767, None, "cake_rmsnorm_train_f8cb729b7ec5f34002ca"),
         ),
         "bwd_w32_h1280": (
             (0, 4, "cake_rmsnorm_train_7905241de01123c84d2d"),
@@ -1021,8 +1021,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (128, 512, "cake_rmsnorm_train_e476d0b2c0bd4285f16d"),
             (512, 4096, "cake_rmsnorm_train_80956d258172dfa76c2a"),
             (4096, 6143, "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4"),
-            (6143, 32767, "cake_rmsnorm_train_b1a35315ca6fcda95b3c"),
-            (32767, None, "cake_rmsnorm_train_7a4606b019405eb9a2ef"),
+            (6143, 32767, "cake_rmsnorm_train_de2f75d431899520db87"),
+            (32767, None, "cake_rmsnorm_train_fdb7fdce98e515b40393"),
         ),
         "bwd_h1536": (
             (0, 4, "cake_rmsnorm_train_db218c92c4c86b9da85a"),
@@ -3789,12 +3789,12 @@ Beside those, leave some SMs free of the resident kernel.
   (4, 16] 8501e95e (one cluster) ? (16, 1536] 744d7429 ?
   (1536, 4095] 561bea88 (det pair) ? (4095, inf) 64423f2d (det pair)
 * ``sm_107a`` ``bwd_h1280``: (0, 1] 8895b022 ? (1, 128] a5f2942d ? (128, 512] 809235a3 ?
-  (512, 6143] 12bbedff (det pair) ? (6143, 32767] 3f26352e (det pair) ?
-  (32767, inf) 7ac3bb64 (det pair)
+  (512, 6143] 12bbedff (det pair) ? (6143, 32767] b1339aac (det pair) ?
+  (32767, inf) f8cb729b (det pair)
 * ``sm_107a`` ``bwd_w32_h1280``: (0, 4] 7905241d (one cluster) ? (4, 128] 8d8ef930 ?
   (128, 512] e476d0b2 ? (512, 4096] 80956d25 (det pair) ?
-  (4096, 6143] c66b8cbd (det pair) ? (6143, 32767] b1a35315 (det pair) ?
-  (32767, inf) 7a4606b0 (det pair)
+  (4096, 6143] c66b8cbd (det pair) ? (6143, 32767] de2f75d4 (det pair) ?
+  (32767, inf) fdb7fdce (det pair)
 * ``sm_107a`` ``bwd_h1536``: (0, 4] db218c92 (one cluster) ?
   (4, 16] c2a523de (one cluster) ? (16, 320] 1207b056 = (320, 1024] 7dc29629 (det pair)
   = (1024, 12288] 88510c60 (det pair) = (12288, 16384] 6a428da2 (det pair) =
