@@ -139,12 +139,18 @@ nothing here reads an environment variable.
 from __future__ import annotations
 
 import math
+import struct
+import threading
 import warnings
+import weakref
+from collections import OrderedDict
 from collections.abc import Mapping
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import cache, lru_cache
-from types import MappingProxyType
+from operator import is_, itemgetter
+from types import CodeType, FunctionType, MappingProxyType
 from typing import Any, cast
 
 import torch
@@ -591,6 +597,23 @@ def _launch(stage, gx, gy, gz, *values):
     if order is not None:
         values = tuple(values[i] for i in order)
     cake_backend.launch_stage(stage, (gx, gy, gz), values, device_index=device_index)
+
+
+def _prepared(stage, gx, gy, gz, *values):
+    """The launch of ``stage`` on ``(gx, gy, gz)`` as :func:`_launch` makes it, resolved for :func:`_fire` (a forward's
+    recording keeps it): ``values`` in call-site order (the first a tensor on the device) put in the record's
+    parameter order."""
+    device_index = _tensor_index(values[0])
+    order = _order(stage, cake_backend.device_arch(device_index))
+    if order is not None:
+        values = tuple(values[i] for i in order)
+    return stage, (gx, gy, gz), values, device_index
+
+
+def _fire(launch) -> None:
+    """Run one launch of :func:`_prepared` (a forward's recording)."""
+    stage, grid, values, device_index = launch
+    cake_backend.launch_stage(stage, grid, values, device_index=device_index)
 
 
 # --------------------------------------------------------------------------- #
@@ -2762,11 +2785,11 @@ def wy_stage(arch: str) -> str:
     return "wy_tc2" if arch in WY_TC2_ARCHS else "wy_tc"
 
 
-def _wy_outputs(kn, v, total_tokens, num_v_heads):
-    w = torch.empty(
+def _wy_outputs(kn, v, total_tokens, num_v_heads, ex):
+    w = ex.empty(
         (total_tokens, num_v_heads, HEAD_DIM), dtype=kn.dtype, device=kn.device
     )
-    u = torch.empty(v.shape, dtype=v.dtype, device=v.device)
+    u = ex.empty(v.shape, dtype=v.dtype, device=v.device)
     return w, u
 
 
@@ -2784,11 +2807,12 @@ def _launch_wy(
     *,
     recompute,
     v_rows,
+    ex,
 ):
-    w, u = _wy_outputs(kn, v, total_tokens, num_v_heads)
+    w, u = _wy_outputs(kn, v, total_tokens, num_v_heads, ex)
     stage = wy_stage(arch)
-    _launch(stage, meta.num_chunks, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start, meta.chunk_len,
-            num_heads, num_v_heads, 1 if recompute else 0, *((v_rows,) if stage == "wy_tc2" else ()))  # fmt: skip
+    ex.launch(stage, meta.num_chunks, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start, meta.chunk_len,
+              num_heads, num_v_heads, 1 if recompute else 0, *((v_rows,) if stage == "wy_tc2" else ()))  # fmt: skip
     return w, u
 
 
@@ -2872,22 +2896,31 @@ def fwd_ho_vh2_engaged(num_segments: int, num_v_heads: int, sm_count: int) -> bo
 _WALKS: dict = {}
 
 
-def _walk(device, segs: SegmentTable, options: ChainOptions) -> torch.Tensor:
+def _walk(device, segs: SegmentTable, options: ChainOptions, ex=None) -> torch.Tensor:
     """The walk of ``fwd_ho`` (CTA group ``b // HV`` runs segment ``walk[b]``): the table's own (longest first) when it
     has one, else the identity, a constant table per (device, segment count) kept between calls under
-    ``host_cache`` (one built inside a CUDA graph capture is not kept)."""
+    ``host_cache`` (one built inside a CUDA graph capture is not kept).  ``ex``: the forward's executor
+    (:data:`_DIRECT` when ``None``): a missing table is built as a cache fill (:meth:`_DirectExecutor.fill`), and the
+    kept one is used through it (on the stream that built it, a use has nothing to wait for); the general path
+    (:data:`_DIRECT`) uses a kept one in place (:func:`_use_table`), with no frame of an executor step."""
     if segs.walk is not None:
         return segs.walk
     num_segments = segs.num_segments
     key = (_device_index(device), int(num_segments))
     hit = _WALKS.get(key) if options.host_cache else None
-    if hit is not None:
+    if hit is not None and (ex is _DIRECT or ex is None):
         _use_table(hit[0], hit[1], key[0])
         return hit[0]
-    walk = torch.arange(int(num_segments), dtype=torch.int32, device=device)
-    if options.host_cache and not torch.cuda.is_current_stream_capturing():
-        _WALKS[key] = (walk, _table_ready(key[0]))
-    return walk
+    ex = ex or _DIRECT
+    if hit is None:
+        with ex.fill():
+            walk = torch.arange(int(num_segments), dtype=torch.int32, device=device)
+            if options.host_cache and not torch.cuda.is_current_stream_capturing():
+                hit = _WALKS[key] = (walk, _table_ready(key[0]))
+        if hit is None:
+            return walk
+    ex.use(key, hit)
+    return hit[0]
 
 
 def _table_rows(state, meta: ChunkMeta):
@@ -2905,20 +2938,21 @@ def _caller_rows(state, meta: ChunkMeta):
 
 
 def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num_v_heads, *, store_final_state, table,
-                   workspaces, options, scale, wy=None):  # fmt: skip
+                   workspaces, options, scale, ex, wy=None):  # fmt: skip
     """The fused forward scan and output on the plan's forward segment table: a split plan first runs the pre-scan
     and the stitch (``reverse = 0``) for the segments' start states.  ``wy`` (``(v, beta32, A)``, with
-    ``meta.fwd_groups``): ``wy_tc`` has not run; it runs here with the scan as two sequence groups (P form)."""
+    ``meta.fwd_groups``): ``wy_tc`` has not run; it runs here with the scan as two sequence groups (P form).  ``ex``:
+    the forward's executor."""
     device = kn.device
-    h = torch.empty(
+    h = ex.empty(
         (meta.num_chunks, num_v_heads, HEAD_DIM, HEAD_DIM),
         dtype=kn.dtype,
         device=device,
     )
-    v_new = torch.empty(u.shape, dtype=u.dtype, device=device)
-    o = torch.empty(u.shape, dtype=u.dtype, device=device)
+    v_new = ex.empty(u.shape, dtype=u.dtype, device=device)
+    o = ex.empty(u.shape, dtype=u.dtype, device=device)
     if store_final_state:
-        final_state = torch.empty(
+        final_state = ex.empty(
             (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM),
             dtype=torch.float32,
             device=device,
@@ -2927,9 +2961,9 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
         final_state = workspaces.take(table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM), torch.float32,
                                       device)  # fmt: skip
     if initial_state is not None:
-        h0 = initial_state.contiguous()
+        h0 = ex.contiguous(initial_state)
         if h0.dtype != torch.float32:
-            h0 = h0.float()
+            h0 = ex.float(h0)
         use_init = 1
     else:
         h0, use_init = final_state, 0
@@ -2949,15 +2983,16 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
         seg_flag = workspaces.take(
             table, "f_seg_flag", (segs.num_segments, num_v_heads), torch.int32, device
         )
-        _launch(pre, segs.num_segments, num_v_heads, 2 * HEAD_DIM // vb, kn, w, u, g_cs, h0, h, v_new, final_state,
-                seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
-                num_heads, num_v_heads, use_init, 0, seg_flag, warmup_thresh_log2(options))  # fmt: skip
+        ex.launch(pre, segs.num_segments, num_v_heads, 2 * HEAD_DIM // vb, kn, w, u, g_cs, h0, h, v_new, final_state,
+                  seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
+                  meta.seq_chunk_start, num_heads, num_v_heads, use_init, 0, seg_flag,
+                  warmup_thresh_log2(options))  # fmt: skip
         seg_start = workspaces.take(table, "f_seg_start", (segs.num_segments, num_v_heads, HEAD_DIM, HEAD_DIM),
                                     torch.float32, device)  # fmt: skip
-        _launch("stitch", meta.num_seqs, num_v_heads, STITCH_VSPLIT, seg_state, h0, seg_start, segs.seq_seg_start,
-                seg_flag, num_v_heads, use_init, 0)  # fmt: skip
+        ex.launch("stitch", meta.num_seqs, num_v_heads, STITCH_VSPLIT, seg_state, h0, seg_start, segs.seq_seg_start,
+                  seg_flag, num_v_heads, use_init, 0)  # fmt: skip
         use_seg = 1
-    walk = _walk(device, segs, options)
+    walk = _walk(device, segs, options, ex)
     if wy is None:
         stage, ctas = "fwd_ho", segs.num_segments * num_v_heads
         if arch in FWD_HO_VH2_ARCHS and fwd_ho_vh2_engaged(
@@ -2966,9 +3001,9 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
             stage = "fwd_ho_vh2"
             if fwd_ho_vh2_splits(arch):
                 ctas = 2 * ctas
-        _launch(stage, ctas, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o, final_state,
-                meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, walk,
-                num_heads, num_v_heads, use_init, 1 if store_final_state else 0, use_seg, float(scale))  # fmt: skip
+        ex.launch(stage, ctas, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o, final_state,
+                  meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, walk,
+                  num_heads, num_v_heads, use_init, 1 if store_final_state else 0, use_seg, float(scale))  # fmt: skip
         return h, v_new, final_state, o
     # P form: the side stream runs wy_tc and fwd_ho of group A (the partial round); the caller's stream runs those of
     # group B (the full rounds) once wy_tc(A) is done, then joins the side stream.  fwd_ho(A) can read w / u rows past
@@ -2983,32 +3018,46 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
     v_args = (v_rows,) if wy_name == "wy_tc2" else ()
 
     def wy_tc(c0, c1):
-        _launch(wy_name, c1 - c0, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start[c0:c1],
-                meta.chunk_len[c0:c1], num_heads, num_v_heads, 0, *v_args)  # fmt: skip
+        ex.launch(wy_name, c1 - c0, num_v_heads, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start[c0:c1],
+                  meta.chunk_len[c0:c1], num_heads, num_v_heads, 0, *v_args)  # fmt: skip
 
     def fwd_ho(s0, s1):
-        _launch("fwd_ho", (s1 - s0) * num_v_heads, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o,
-                final_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
-                meta.seq_chunk_start, walk[s0:s1], num_heads, num_v_heads, use_init, 1 if store_final_state else 0,
-                use_seg, float(scale))  # fmt: skip
+        ex.launch("fwd_ho", (s1 - s0) * num_v_heads, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h, v_new, v_new, o, o,
+                  final_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
+                  meta.seq_chunk_start, walk[s0:s1], num_heads, num_v_heads, use_init, 1 if store_final_state else 0,
+                  use_seg, float(scale))  # fmt: skip
 
-    index = _tensor_index(kn)
-    main = torch.cuda.current_stream(index)
-    side = _side_stream(index, main)
-    fork = torch.cuda.Event()
-    fork.record(main)
+    # the general path (_DIRECT) makes the executor's fork, events and join in place, with no frame of an executor step
+    if ex is _DIRECT:
+        index = _tensor_index(kn)
+        main = torch.cuda.current_stream(index)
+        side = _side_stream(index, main)
+        fork = torch.cuda.Event()
+        fork.record(main)
+        side.wait_event(fork)
+        try:
+            with torch.cuda.stream(side):
+                wy_tc(0, ca)
+                wy_a = torch.cuda.Event()
+                wy_a.record(side)
+                fwd_ho(0, na)
+            main.wait_event(wy_a)
+            wy_tc(ca, meta.num_chunks)
+            fwd_ho(na, n)
+        finally:
+            main.wait_stream(side)  # the join
+        return h, v_new, final_state, o
+    main, side = ex.fork(_tensor_index(kn))
     try:
-        with torch.cuda.stream(side):
-            side.wait_event(fork)
+        with ex.on(side):
             wy_tc(0, ca)
-            wy_a = torch.cuda.Event()
-            wy_a.record(side)
+            wy_a = ex.signal(side)
             fwd_ho(0, na)
-        main.wait_event(wy_a)
+        ex.wait(main, wy_a)
         wy_tc(ca, meta.num_chunks)
         fwd_ho(na, n)
     finally:
-        main.wait_stream(side)  # the join
+        ex.join(main, side)  # the join
     return h, v_new, final_state, o
 
 
@@ -3191,12 +3240,12 @@ def _forward_tape() -> bool:
     return _RECORDS_BACKWARD.get() and not _checkpoint_first_pass()
 
 
-def _tma_operands(q, k):
+def _tma_operands(q, k, ex):
     """q / k as wy_a's tensor maps read them: in place where both are (:func:`_tma_rows`, the head views of a packed
-    row among them), else contiguous rows at a 16-byte aligned base."""
+    row among them), else contiguous rows at a 16-byte aligned base (``ex``: the forward's executor)."""
     if _tma_rows(q) and _tma_rows(k):
         return q, k
-    return _aligned(q, TMA_ALIGN_BYTES), _aligned(k, TMA_ALIGN_BYTES)
+    return ex.aligned(q, TMA_ALIGN_BYTES), ex.aligned(k, TMA_ALIGN_BYTES)
 
 
 def _forward_state(meta: ChunkMeta, kn, v):
@@ -3213,52 +3262,51 @@ def _forward_state(meta: ChunkMeta, kn, v):
 
 
 def _start_state(initial_state, meta: ChunkMeta, output_final_state: bool, num_v_heads: int, table, workspaces,
-                 device):  # fmt: skip
+                 device, ex):  # fmt: skip
     """``(final_state, h0, use_init)`` of a forward on wy_a's A: the final-state output (a zero-row workspace when the
     call outputs none) and the initial state rows in table order (the final-state buffer and 0 without one), FP32 and
     contiguous at a 16-byte aligned base: the split forward's stitch reads them with 16-byte loads, so rows the
     caller passes at another address are copied (the same bits)."""
     f32 = torch.float32
     if output_final_state:
-        final_state = torch.empty(
-            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), dtype=f32, device=device
-        )
+        final_state = ex.empty((meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), dtype=f32, device=device)  # fmt: skip
     else:
         final_state = workspaces.take(
             table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM), f32, device
         )
-    initial_rows = _table_rows(initial_state, meta)
+    initial_rows = ex.table_rows(initial_state, meta)
     if initial_rows is None:
         return final_state, final_state, 0
-    h0 = initial_rows.contiguous()
+    h0 = ex.contiguous(initial_rows)
     if h0.dtype != f32:
-        h0 = h0.float()
-    return final_state, _aligned(h0, ROW_ALIGN_BYTES), 1
+        h0 = ex.float(h0)
+    return final_state, ex.aligned(h0, ROW_ALIGN_BYTES), 1
 
 
-def _launch_wy_a(q, k, g32, beta32, meta: ChunkMeta, num_heads: int, num_v_heads: int, index: int):  # fmt: skip
+def _launch_wy_a(q, k, g32, beta32, meta: ChunkMeta, num_heads: int, num_v_heads: int, index: int,
+                 ex):  # fmt: skip
     """``wy_a`` over ``meta``'s chunks (one persistent CTA per SM, at most one per (chunk, key head)): A, rstd_q,
     rstd_k, g_cs, qn and kn."""
     total_tokens = q.numel() // (num_heads * HEAD_DIM)
     device, f32, bf16 = q.device, torch.float32, q.dtype
-    qn = torch.empty(q.shape, dtype=bf16, device=device)
-    kn = torch.empty(k.shape, dtype=bf16, device=device)
-    rstd_q = torch.empty((total_tokens, num_heads), dtype=f32, device=device)
-    rstd_k = torch.empty((total_tokens, num_heads), dtype=f32, device=device)
-    g_cs = torch.empty((total_tokens, num_v_heads), dtype=f32, device=device)
-    A = torch.empty((total_tokens, num_v_heads, CHUNK), dtype=bf16, device=device)
+    qn = ex.empty(q.shape, dtype=bf16, device=device)
+    kn = ex.empty(k.shape, dtype=bf16, device=device)
+    rstd_q = ex.empty((total_tokens, num_heads), dtype=f32, device=device)
+    rstd_k = ex.empty((total_tokens, num_heads), dtype=f32, device=device)
+    g_cs = ex.empty((total_tokens, num_v_heads), dtype=f32, device=device)
+    A = ex.empty((total_tokens, num_v_heads, CHUNK), dtype=bf16, device=device)
     sm_count = _device_props(index)[0]
-    _launch("wy_a", min(sm_count, meta.num_chunks * num_heads), 1, 1, k, k, q, g32, beta32, A.view(torch.uint32),
-            rstd_k, rstd_q, g_cs, qn.view(torch.uint32), kn.view(torch.uint32), meta.chunk_start, meta.chunk_len,
-            meta.num_chunks, num_heads, num_v_heads)  # fmt: skip
+    ex.launch("wy_a", min(sm_count, meta.num_chunks * num_heads), 1, 1, k, k, q, g32, beta32,
+              ex.view(A, torch.uint32), rstd_k, rstd_q, g_cs, ex.view(qn, torch.uint32), ex.view(kn, torch.uint32),
+              meta.chunk_start, meta.chunk_len, meta.num_chunks, num_heads, num_v_heads)  # fmt: skip
     return qn, kn, rstd_q, rstd_k, g_cs, A
 
 
-def _forward_tape_tensors(kept, state, device, *, formed=()):
+def _forward_tape_tensors(kept, state, device, *, ex, formed=()):
     """The state tensors of a forward on wy_a's A by :data:`cake_plan.STATE_NAMES`: an allocation for each name the
     tape keeps (``kept``) or the forward forms in memory (``formed``), ``None`` for the rest."""
     return {
-        name: torch.empty(shape, dtype=dtype, device=device)
+        name: ex.empty(shape, dtype=dtype, device=device)
         if name in kept or name in formed
         else None
         for name, (shape, dtype) in zip(cake_plan.STATE_NAMES, state, strict=True)
@@ -3277,7 +3325,7 @@ def _forward_result(fwd: dict[str, Any], kept, forward: str) -> dict[str, Any]:
 
 
 def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output_final_state, normalize_qk, options,
-               tape) -> dict[str, Any]:  # fmt: skip
+               tape, ex) -> dict[str, Any]:  # fmt: skip
     """The forward of :func:`fwd_a_route`'s calls: ``wy_a`` then ``fwd_ho_a``; the tape of
     :func:`cake_gdn_det_train_forward` (``None`` for the state it does not keep: u always)."""
     num_heads, num_v_heads = q.shape[-2], v.shape[-2]
@@ -3285,17 +3333,17 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
     device = q.device
     index = _tensor_index(q)
     bf16 = q.dtype
-    q, k = _tma_operands(q, k)
+    q, k = _tma_operands(q, k, ex)
     # fwd_ho_a's tensor map reads v in place where the stages that read v by rows do (:func:`_v_rows`), else a copy
     if _v_rows(v) is None:
-        v = _aligned(v, ROW_ALIGN_BYTES)
+        v = ex.aligned(v, ROW_ALIGN_BYTES)
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     qn, kn, rstd_q, rstd_k, g_cs, A = _launch_wy_a(
-        q, k, g32, beta32, meta, num_heads, num_v_heads, index
+        q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
     )
-    state = _forward_tape_tensors(kept, _forward_state(meta, kn, v), device)
-    o = torch.empty(v.shape, dtype=v.dtype, device=device)
-    workspaces = _workspaces(options)
+    state = _forward_tape_tensors(kept, _forward_state(meta, kn, v), device, ex=ex)
+    o = ex.empty(v.shape, dtype=v.dtype, device=device)
+    workspaces = ex.workspaces(options)
     table = workspaces.table(index)
     # fwd_ho_a binds every tape tensor it does not write to a one-row stand-in (its tensor map encodes, nothing stores)
     word = sum(FWD_A_TAPE[name] for name in kept if name in FWD_A_TAPE)
@@ -3308,15 +3356,15 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
     v_new_t = rows if state["v_new"] is None else state["v_new"]
     w_t = rows if state["w"] is None else state["w"]
     final_state, h0, use_init = _start_state(initial_state, meta, output_final_state, num_v_heads, table, workspaces,
-                                             device)  # fmt: skip
+                                             device, ex)  # fmt: skip
     segs = meta.fwd_segments
-    walk = _walk(device, segs, options)
-    _launch("fwd_ho_a", segs.num_segments * num_v_heads, 1, 1, qn, kn, v, A, g_cs, beta32, h0, final_state, h_t, h_t,
-            v_new_t, v_new_t, o, o, final_state, w_t, w_t, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start,
-            segs.seg_seq, meta.seq_chunk_start, walk, num_heads, num_v_heads, use_init,
-            1 if output_final_state else 0, 0, float(scale), word)  # fmt: skip
+    walk = _walk(device, segs, options, ex)
+    ex.launch("fwd_ho_a", segs.num_segments * num_v_heads, 1, 1, qn, kn, v, A, g_cs, beta32, h0, final_state, h_t,
+              h_t, v_new_t, v_new_t, o, o, final_state, w_t, w_t, meta.chunk_start, meta.chunk_len,
+              segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, walk, num_heads, num_v_heads, use_init,
+              1 if output_final_state else 0, 0, float(scale), word)  # fmt: skip
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     fwd: dict[str, Any] = {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3565,7 +3613,7 @@ def _split_workspaces(split: ForwardSplit, num_v_heads: int, table, workspaces, 
     return seg_state, seg_flag, seg_start
 
 
-def _first_wave(split: ForwardSplit, index: int, summary, wave1) -> None:
+def _first_wave(split: ForwardSplit, index: int, summary, wave1, ex) -> None:
     """Wave 1 (``wave1()``) beside the middle pieces' maps (``summary()``, on a side stream joined back before this
     returns, also when a launch raises); both on the caller's stream, the summary first, under ``one_stream`` or where
     either has no piece.  The two write disjoint segments, so the bits are the same either way."""
@@ -3575,51 +3623,61 @@ def _first_wave(split: ForwardSplit, index: int, summary, wave1) -> None:
         if split.num_first:
             wave1()
         return
-    main = torch.cuda.current_stream(index)
-    side = _side_stream(index, main)
-    fork = torch.cuda.Event()
-    fork.record(main)
+    # the general path (_DIRECT) makes the executor's fork and join in place, with no frame of an executor step
+    if ex is _DIRECT:
+        main = torch.cuda.current_stream(index)
+        side = _side_stream(index, main)
+        fork = torch.cuda.Event()
+        fork.record(main)
+        side.wait_event(fork)
+        try:
+            with torch.cuda.stream(side):
+                summary()
+            wave1()
+        finally:
+            main.wait_stream(side)  # the join
+        return
+    main, side = ex.fork(index)
     try:
-        with torch.cuda.stream(side):
-            side.wait_event(fork)
+        with ex.on(side):
             summary()
         wave1()
     finally:
-        main.wait_stream(side)  # the join
+        ex.join(main, side)  # the join
 
 
 def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output_final_state, normalize_qk, options,
-                   tape) -> dict[str, Any]:  # fmt: skip
+                   tape, ex) -> dict[str, Any]:  # fmt: skip
     """The forward of :func:`fwd_split_route`'s calls (:data:`FWD_SPLIT_ARCHS`); the tape of
     :func:`cake_gdn_det_train_forward` (``None`` for the state it does not keep)."""
     split = cast("ForwardSplit", meta.fwd_split)
     if _fwd_split_a(arch, split.length):
         return _forward_split_a(q, k, v, g32, beta32, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                                 output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
-                                tape=tape)  # fmt: skip
+                                tape=tape, ex=ex)  # fmt: skip
     num_heads, num_v_heads = q.shape[-2], v.shape[-2]
     total_tokens = q.numel() // (num_heads * HEAD_DIM)
     device = q.device
     index = _tensor_index(q)
     bf16 = q.dtype
     hv = num_v_heads
-    q, k = _tma_operands(q, k)
+    q, k = _tma_operands(q, k, ex)
     # wy_tc2 reads v by rows at its token pitch (:func:`_v_rows`); any other layout, a contiguous v whose base is not
     # 16-byte aligned among them, is copied into contiguous rows
     v_rows = _v_rows(v)
     if v_rows is None:
-        v, v_rows = _aligned(v, ROW_ALIGN_BYTES), num_v_heads
+        v, v_rows = ex.aligned(v, ROW_ALIGN_BYTES), num_v_heads
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     qn, kn, rstd_q, rstd_k, g_cs, A = _launch_wy_a(
-        q, k, g32, beta32, meta, num_heads, num_v_heads, index
+        q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
     )
     # w and u are formed in memory either way (both waves and the summary read them); h and v_new only on the tape
     state = _forward_tape_tensors(
-        kept, _forward_state(meta, kn, v), device, formed=("w", "u")
+        kept, _forward_state(meta, kn, v), device, formed=("w", "u"), ex=ex
     )
     w, u = state["w"], state["u"]
-    o = torch.empty(v.shape, dtype=v.dtype, device=device)
-    workspaces = _workspaces(options)
+    o = ex.empty(v.shape, dtype=v.dtype, device=device)
+    workspaces = ex.workspaces(options)
     table = workspaces.table(index)
     word = sum(FWD_FUSED_TAPE[name] for name in kept if name in FWD_FUSED_TAPE)
     rows = workspaces.take(table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device)
@@ -3630,32 +3688,33 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         )
     v_new_t = rows if state["v_new"] is None else state["v_new"]
     final_state, h0, use_init = _start_state(initial_state, meta, output_final_state, num_v_heads, table, workspaces,
-                                             device)  # fmt: skip
+                                             device, ex)  # fmt: skip
     seg_state, seg_flag, seg_start = _split_workspaces(
         split, hv, table, workspaces, device
     )
-    _launch("wy_tc2", meta.num_chunks, hv, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start, meta.chunk_len,
-            num_heads, hv, 1, v_rows)  # fmt: skip
+    ex.launch("wy_tc2", meta.num_chunks, hv, 1, kn, v, g_cs, beta32, A, w, u, meta.chunk_start, meta.chunk_len,
+              num_heads, hv, 1, v_rows)  # fmt: skip
 
     def fused(walk, count, ends, use_seg, store_final, split_out):
-        _launch("fwd_fused", count * hv, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h_t, v_new_t, v_new_t, o, o,
-                final_state, meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.seg_seq, ends, walk,
-                num_heads, hv, use_init, store_final, use_seg, float(scale), word, seg_state, seg_flag,
-                split_out)  # fmt: skip
+        ex.launch("fwd_fused", count * hv, 1, 1, qn, kn, w, u, g_cs, h0, seg_start, h_t, v_new_t, v_new_t, o, o,
+                  final_state, meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.seg_seq, ends, walk,
+                  num_heads, hv, use_init, store_final, use_seg, float(scale), word, seg_state, seg_flag,
+                  split_out)  # fmt: skip
 
     def summary():
-        _launch("fwd_summary", split.num_middle * hv, 1, 1, kn, w, u, g_cs, seg_state, seg_state, seg_flag,
-                meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.middle, split.slot, num_heads, hv,
-                *_SUMMARY_LAYOUT)  # fmt: skip
+        ex.launch("fwd_summary", split.num_middle * hv, 1, 1, kn, w, u, g_cs, seg_state, seg_state, seg_flag,
+                  meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.middle, split.slot, num_heads, hv,
+                  *_SUMMARY_LAYOUT)  # fmt: skip
 
     _first_wave(
         split,
         index,
         summary,
         lambda: fused(split.first, split.num_first, split.first_end, 0, 1, 1),
+        ex,
     )
-    _launch("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start, seg_flag, hv,
-            use_init, 0)  # fmt: skip
+    ex.launch("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start, seg_flag, hv,
+              use_init, 0)  # fmt: skip
     fused(
         split.rest,
         split.num_rest,
@@ -3665,7 +3724,7 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         0,
     )
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     fwd: dict[str, Any] = {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3676,8 +3735,14 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
     return _forward_result(fwd, kept, "fwd_split")
 
 
+def _index_copy_heads(state, index, rows) -> None:
+    """``state[:, :, :, :HEAD_DIM].index_copy_(0, index, rows)``: the first pieces' end states into the stitch's
+    segment rows (a view of a slot that a plan cannot hold as a dim-0 range, made inside one eager step)."""
+    state[:, :, :, :HEAD_DIM].index_copy_(0, index, rows)
+
+
 def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output_final_state, normalize_qk,
-                     options, tape) -> dict[str, Any]:  # fmt: skip
+                     options, tape, ex) -> dict[str, Any]:  # fmt: skip
     """The split forward on wy_a's A (:data:`FWD_SPLIT_A_ARCHS`): ``wy_a``, then wave 1 (``fwd_ho_a`` on the first
     pieces, their end states as the final states) beside the middle pieces' maps (``fwd_summary_a``, side stream), the
     copy of those end states into the segment state, the stitch and wave 2 (``fwd_ho_a`` on every other piece from its
@@ -3689,17 +3754,17 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     index = _tensor_index(q)
     f32, bf16 = torch.float32, q.dtype
     hv = num_v_heads
-    q, k = _tma_operands(q, k)
+    q, k = _tma_operands(q, k, ex)
     # fwd_ho_a's and fwd_summary_a's tensor maps read v in place where the stages that read v by rows do, else a copy
     if _v_rows(v) is None:
-        v = _aligned(v, ROW_ALIGN_BYTES)
+        v = ex.aligned(v, ROW_ALIGN_BYTES)
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     qn, kn, rstd_q, rstd_k, g_cs, A = _launch_wy_a(
-        q, k, g32, beta32, meta, num_heads, num_v_heads, index
+        q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
     )
-    state = _forward_tape_tensors(kept, _forward_state(meta, kn, v), device)
-    o = torch.empty(v.shape, dtype=v.dtype, device=device)
-    workspaces = _workspaces(options)
+    state = _forward_tape_tensors(kept, _forward_state(meta, kn, v), device, ex=ex)
+    o = ex.empty(v.shape, dtype=v.dtype, device=device)
+    workspaces = ex.workspaces(options)
     table = workspaces.table(index)
     word = sum(FWD_A_TAPE[name] for name in kept if name in FWD_A_TAPE)
     rows = workspaces.take(table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device)
@@ -3711,7 +3776,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     v_new_t = rows if state["v_new"] is None else state["v_new"]
     w_t = rows if state["w"] is None else state["w"]
     final_state, h0, use_init = _start_state(initial_state, meta, output_final_state, num_v_heads, table, workspaces,
-                                             device)  # fmt: skip
+                                             device, ex)  # fmt: skip
     state_shape = (meta.num_seqs, hv, HEAD_DIM, HEAD_DIM)
     # wave 1 stores the first pieces' end states as final states: the final-state output, or a buffer of every
     # sequence's rows
@@ -3725,19 +3790,19 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     )
 
     def wave(walk, count, ends, init, use_seg, store_final, final):
-        _launch("fwd_ho_a", count * hv, 1, 1, qn, kn, v, A, g_cs, beta32, h0, seg_start, h_t, h_t, v_new_t, v_new_t,
-                o, o, final, w_t, w_t, meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.seg_seq, ends,
-                walk, num_heads, hv, init, store_final, use_seg, float(scale), word)  # fmt: skip
+        ex.launch("fwd_ho_a", count * hv, 1, 1, qn, kn, v, A, g_cs, beta32, h0, seg_start, h_t, h_t, v_new_t, v_new_t,
+                  o, o, final, w_t, w_t, meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.seg_seq, ends,
+                  walk, num_heads, hv, init, store_final, use_seg, float(scale), word)  # fmt: skip
 
     def summary():
-        _launch("fwd_summary_a", split.num_middle * hv, 1, 1, kn, v, A, g_cs, beta32, seg_state, seg_state, seg_flag,
-                meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.middle, split.slot, num_heads, hv,
-                *_SUMMARY_LAYOUT)  # fmt: skip
+        ex.launch("fwd_summary_a", split.num_middle * hv, 1, 1, kn, v, A, g_cs, beta32, seg_state, seg_state, seg_flag,
+                  meta.chunk_start, meta.chunk_len, split.seg_chunk_start, split.middle, split.slot, num_heads, hv,
+                  *_SUMMARY_LAYOUT)  # fmt: skip
 
     if split.num_first:
         # the first pieces' segments hold their end states (flag 0: a state, not a map) for the stitch; the segments
         # of first_index are distinct, so the fill is a plain store
-        seg_flag.index_fill_(0, split.first_index, 0)
+        ex.index_fill_(seg_flag, 0, split.first_index, 0)
     _first_wave(
         split,
         index,
@@ -3745,17 +3810,21 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
         lambda: wave(
             split.first, split.num_first, split.first_end, use_init, 0, 1, first_final
         ),
+        ex,
     )
     if split.num_first:
         ends = (
             first_final
             if split.first_seq is None
-            else first_final.index_select(0, split.first_seq)
+            else ex.index_select(first_final, 0, split.first_seq)
         )
         # one distinct segment row per first piece: a plain copy, the same bits under any order
-        seg_state[:, :, :, :HEAD_DIM].index_copy_(0, split.first_index, ends)
-    _launch("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start, seg_flag, hv,
-            use_init, 0)  # fmt: skip
+        if ex is _DIRECT:  # the general path makes the eager step in place
+            seg_state[:, :, :, :HEAD_DIM].index_copy_(0, split.first_index, ends)
+        else:
+            ex.index_copy_heads(seg_state, split.first_index, ends)
+    ex.launch("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start, seg_flag, hv,
+              use_init, 0)  # fmt: skip
     wave(
         split.rest,
         split.num_rest,
@@ -3766,7 +3835,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
         final_state,
     )
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     fwd: dict[str, Any] = {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3786,6 +3855,16 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
     other call the prep forward.  The forwards on wy_a's A put in the tape only the state the architecture's tape level
     keeps (:func:`cake_plan.tape_state`; ``None`` for the rest, u always), and none when ``tape`` is ``False`` (a call
     that records no backward); the backward rebuilds what the tape lacks.  The prep forward's tape carries all four."""
+    return _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                          output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
+                          tape=tape, ex=_DIRECT)  # fmt: skip
+
+
+def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output_final_state, normalize_qk, options,
+                   tape, ex) -> dict[str, Any]:  # fmt: skip
+    """:func:`cake_gdn_det_train_forward` with its allocations, views, eager copies, launches, stream switches and
+    cached-table uses through the executor ``ex`` (:data:`_DIRECT`, or a :class:`_FwdRecorder` that also records
+    them as a :class:`_ForwardPlan`), in the same order."""
     options = options or ChainOptions()
     if not q.is_cuda:
         # a host q reaches the first launch's operand checks, which refuse it; the buffers taken before them would
@@ -3804,47 +3883,48 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
     # copied; the forwards on wy_a's A then read g and beta as contiguous rows at a 16-byte aligned base
     split = fwd_split_route(meta, arch, q, k, v, beta, normalize_qk, options)
     if split or fwd_a_route(meta, arch, q, k, v, beta, normalize_qk, options):
-        g_rows = _aligned(g if g.dtype == torch.float32 else g.float(), ROW_ALIGN_BYTES)
-        beta_rows = _aligned(beta, ROW_ALIGN_BYTES)
+        g32 = g if g.dtype == torch.float32 else ex.float(g)
+        g_rows = ex.aligned(g32, ROW_ALIGN_BYTES)
+        beta_rows = ex.aligned(beta, ROW_ALIGN_BYTES)
         run = _forward_split if split else _forward_a
         return run(q, k, v, g_rows, beta_rows, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                    output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
-                   tape=tape)  # fmt: skip
+                   tape=tape, ex=ex)  # fmt: skip
     device = q.device
     # q and k stay views when prep_tma reads them in place (a packed row's head views; inside the rule's plain band
     # too, :data:`VIEWS_TAKE_PREP_TMA`); v stays a view when the stages that read it take its row pitch (wy_tc reads
     # contiguous rows only); an operand whose address the loads cannot take is copied
     in_place = _tma_rows(q) and _tma_rows(k)
     if not in_place:
-        q, k = _aligned(q, PREP_ALIGN_BYTES), _aligned(k, PREP_ALIGN_BYTES)
+        q, k = ex.aligned(q, PREP_ALIGN_BYTES), ex.aligned(k, PREP_ALIGN_BYTES)
     views = VIEWS_TAKE_PREP_TMA and _view_rows(q) and _view_rows(k)
     prep = _prep_stage(q, k, meta.num_chunks, num_heads, arch, options, views=views)
     if prep != "prep_tma" and in_place:
-        q, k = q.contiguous(), k.contiguous()
+        q, k = ex.contiguous(q), ex.contiguous(k)
     v_rows = _v_rows(v) if wy_stage(arch) == "wy_tc2" else None
     if v_rows is None:
-        v = _aligned(v, ROW_ALIGN_BYTES)
+        v = ex.aligned(v, ROW_ALIGN_BYTES)
         v_rows = num_v_heads
-    g32 = g.contiguous()
+    g32 = ex.contiguous(g)
     if g32.dtype != torch.float32:
-        g32 = g32.float()
-    beta = beta.contiguous()
+        g32 = ex.float(g32)
+    beta = ex.contiguous(beta)
     beta_bf16 = beta.dtype == torch.bfloat16
     if beta_bf16:
-        beta32 = torch.empty(
+        beta32 = ex.empty(
             (total_tokens, num_v_heads), dtype=torch.float32, device=device
         )
     else:
-        beta32 = beta if beta.dtype == torch.float32 else beta.float()
-    qn = torch.empty(q.shape, dtype=q.dtype, device=device)
-    kn = torch.empty(k.shape, dtype=k.dtype, device=device)
-    rstd_q = torch.empty((total_tokens, num_heads), dtype=torch.float32, device=device)
-    rstd_k = torch.empty((total_tokens, num_heads), dtype=torch.float32, device=device)
-    g_cs = torch.empty((total_tokens, num_v_heads), dtype=torch.float32, device=device)
-    _launch(prep + ("_bf16beta" if beta_bf16 else ""), meta.num_chunks, num_heads if prep == "prep_tma" else num_v_heads,
-            1, q, k, g32, beta, beta32, qn, kn, rstd_q, rstd_k, g_cs, meta.chunk_start, meta.chunk_len, num_heads,
-            num_v_heads, 1 if normalize_qk else 0)  # fmt: skip
-    A = torch.empty((total_tokens, num_v_heads, CHUNK), dtype=q.dtype, device=device)
+        beta32 = beta if beta.dtype == torch.float32 else ex.float(beta)
+    qn = ex.empty(q.shape, dtype=q.dtype, device=device)
+    kn = ex.empty(k.shape, dtype=k.dtype, device=device)
+    rstd_q = ex.empty((total_tokens, num_heads), dtype=torch.float32, device=device)
+    rstd_k = ex.empty((total_tokens, num_heads), dtype=torch.float32, device=device)
+    g_cs = ex.empty((total_tokens, num_v_heads), dtype=torch.float32, device=device)
+    ex.launch(prep + ("_bf16beta" if beta_bf16 else ""), meta.num_chunks,
+              num_heads if prep == "prep_tma" else num_v_heads, 1, q, k, g32, beta, beta32, qn, kn, rstd_q, rstd_k,
+              g_cs, meta.chunk_start, meta.chunk_len, num_heads, num_v_heads, 1 if normalize_qk else 0)  # fmt: skip
+    A = ex.empty((total_tokens, num_v_heads, CHUNK), dtype=q.dtype, device=device)
     if meta.fwd_groups is None:
         w, u = _launch_wy(
             arch,
@@ -3859,19 +3939,20 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
             total_tokens,
             recompute=False,
             v_rows=v_rows,
+            ex=ex,
         )
         wy = None
     else:  # wy_tc runs with fwd_ho as two sequence groups
-        w, u = _wy_outputs(kn, v, total_tokens, num_v_heads)
+        w, u = _wy_outputs(kn, v, total_tokens, num_v_heads, ex)
         wy = (v, beta32, A, v_rows)
-    workspaces = _workspaces(options)
+    workspaces = ex.workspaces(options)
     table = workspaces.table(_tensor_index(kn))
-    h, v_new, final_state, o = _launch_fwd_ho(arch, qn, kn, w, u, g_cs, _table_rows(initial_state, meta), meta,
-                                              num_heads, num_v_heads, store_final_state=output_final_state,
+    h, v_new, final_state, o = _launch_fwd_ho(arch, qn, kn, w, u, g_cs, ex.table_rows(initial_state, meta),
+                                              meta, num_heads, num_v_heads, store_final_state=output_final_state,
                                               table=table, workspaces=workspaces, options=options, scale=scale,
-                                              wy=wy)  # fmt: skip
+                                              wy=wy, ex=ex)  # fmt: skip
     if output_final_state:
-        final_state = _caller_rows(final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     return {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3879,6 +3960,952 @@ def cake_gdn_det_train_forward(q, k, v, g, beta, *, meta, arch, scale=None, init
         "final_state": final_state if output_final_state else None, "initial_state": initial_state, "h": h,
         "v_new": v_new, "options": options, "mode": _TAPE_MODE, "forward": "fwd_ho",
     }  # fmt: skip
+
+
+# --------------------------------------------------------------------------- #
+# the forward's executor and its recorded plan
+# --------------------------------------------------------------------------- #
+# The forward's host work (the route's checks, its allocations and copies, every launch's arguments in its record's
+# parameter order) is the same for every call of one class: one layout on one stream, one tape mode (a checkpoint's
+# first pass and its recompute are two), one set of arguments, and inputs of one shape, strides, dtype and 16-byte
+# base alignment each, the same ones being one object.  The autograd functions record it once per class, as the
+# straight step sequence of a :class:`_ForwardPlan` (the general path run through a :class:`_FwdRecorder`), and replay
+# that sequence afterwards (:func:`_replay_forward`): the inputs and the tensors the call allocates, views and computes
+# eagerly fill its slots, and so do the pooled workspaces of the stream, which each replay takes from the pool again as
+# the general path takes them (a hit, or a miss that allocates and evicts); every other operand is a constant of the
+# plan (a chunk table of the layout's ``ChunkMeta``, the cached walk, a scalar).  A replay makes the general path's
+# allocations, workspace takes, eager calls, launches and event records and waits in its order on its streams, with the
+# same arguments: the same kernels and the same bits.  The plan holds no tensor of a call and no pooled workspace (an
+# eviction leaves it in place), a replay lets each tensor of the call go after its last step (:func:`_drop_steps`), no
+# later than the general path does, so it needs no more device memory, and the plans of a layout leave with its
+# ``ChunkMeta`` (:func:`_drop_meta_plans`).
+# ``FWD_PLAN = False`` keeps every forward on the general path.
+FWD_PLAN = True
+# The record gate (``FWD_PLAN_GATE``; it picks among the three paths, which give the same bits, by host time only): a
+# forward builds its plan key only from the ``FWD_PLAN_REPEAT``-th forward of its layout in its tape mode that the gate
+# counts, and records only while the record credit holds one recording.  Each replay adds ``1 / FWD_PLAN_PAYBACK``
+# recording to the credit, each gated call ``1 / FWD_PLAN_TRICKLE``, a recording takes one, and the credit starts at
+# and holds at most ``FWD_PLAN_BUDGET``.  So for any sequence of calls of one thread, recordings <= BUDGET + replays /
+# PAYBACK + calls / TRICKLE, and with PAYBACK at least the host time of a recording over the host time a replay saves,
+# the recordings cost no more host time than the replays save (the additions take no lock: an addition of one thread
+# that overlaps the spend of another can undo that spend, one recording more per such overlap).  While the credit holds
+# less than one recording, a gated call of a layout with no plan kept on it (:data:`_PLAN_KEYS`) adds its share and
+# takes the general path in :func:`_function_forward` without calling :func:`_fwd_gate` (it could neither replay nor
+# record, and the gate's call, its code and entries cold in the caches, takes a few us of host time): such a call
+# makes no entry and does not count toward its layout's ``FWD_PLAN_REPEAT`` forwards.  A layout used once never builds
+# a key.  A key whose calls cannot be planned keeps its layout and tape mode on the general path without a key; the
+# gate's entry is the layout and tape mode's, which all their call classes share.  ``FWD_PLAN_GATE = False``: every
+# key records at its first call.
+FWD_PLAN_GATE = True
+FWD_PLAN_REPEAT = 2
+FWD_PLAN_PAYBACK = 32
+FWD_PLAN_BUDGET = 4
+FWD_PLAN_TRICKLE = 4096
+# (id(meta), tape) -> [weakref(meta), its forwards so far (at most FWD_PLAN_REPEAT), its state]; the oldest entry
+# leaves first at _FWD_SEEN_LIMIT entries (two tape modes per cached layout).  A first sighting puts its entry in and
+# lets the oldest go with one call each (OrderedDict.popitem), so it takes no lock: threads that sight layouts at once
+# can let one entry more go, or count one forward of a layout twice
+_FWD_SEEN: OrderedDict = OrderedDict()
+_FWD_SEEN_LIMIT = 512
+# a layout and tape mode with no plan yet, with one, and whose key cannot be planned
+_UNPLANNED, _PLANNED, _REFUSED = range(3)
+# the record credit in integer units: a gated call adds FWD_PLAN_PAYBACK, a replay FWD_PLAN_TRICKLE, a recording
+# takes FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+_FWD_CREDIT = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+# plan key (:func:`_function_forward`) -> :class:`_ForwardPlan`; the oldest entry leaves first, and the plans of a
+# layout leave with its ChunkMeta (:func:`_drop_meta_plans`)
+_FWD_PLANS: dict = {}
+_FWD_PLANS_LIMIT = 512  # two tape modes per cached layout (_META_FRONT_LIMIT = 256)
+# id(meta) -> {plan key: None} of the plans recorded on that ChunkMeta
+_PLAN_KEYS: dict = {}
+# the insert and eviction of the plan cache (threads that record at once)
+_PLANS_LOCK = threading.Lock()
+# the steps of a plan: a launch, an allocation, a dim-0 range of a slot, the fork of the side stream, a stream switch,
+# the join, a dtype view of a slot, an eager call, an event recorded on one stream of the fork and a wait for it, the
+# use of a cached walk, the end of some slots (the replay lets them go), a workspace of the stream's pool (taken again
+# by each replay)
+_OP_LAUNCH, _OP_EMPTY, _OP_NARROW, _OP_FORK, _OP_STREAM, _OP_JOIN = range(6)
+_OP_VIEW, _OP_CALL, _OP_SIGNAL, _OP_WAIT, _OP_USE, _OP_DROP, _OP_TAKE = range(6, 13)
+# the forward functions a plan stands for (the direct executor's steps reach some of them only through ``_DIRECT``): a
+# plan replays only while they and the module globals they read are the recorded objects (:func:`_fwd_plan_globals`)
+_FWD_PLAN_ROOTS = ("_train_forward", "_forward_a", "_forward_split", "_forward_split_a", "_launch_wy", "_wy_outputs",
+                   "_launch_wy_a", "_launch_fwd_ho", "_first_wave", "_start_state", "_walk", "_launch", "_prepared",
+                   "_fire", "_side_stream", "_use_table", "_aligned", "_table_rows", "_caller_rows",
+                   "_index_copy_heads", "_workspaces")  # fmt: skip
+_FWD_PLAN_GLOBALS: Any = None  # their getter, made at the first call
+# the entries of the forward's result that :func:`_function_forward` reads, the ones a plan returns
+_FWD_OUTPUTS = ("qn", "kn", "rstd_q", "rstd_k", "v", "g_cs", "beta32", "A", "w", "u", "h", "v_new", "output",
+                "final_state", "mode")  # fmt: skip
+
+
+def _stream_key(device_index: int) -> tuple[int, int]:
+    """(device, handle of its current stream): the key of the stream's pooled workspaces (:meth:`Workspaces.table`,
+    :meth:`Workspaces.stream_key`) and of its side stream."""
+    return device_index, _raw_stream(device_index)
+
+
+# the cache fill context of the direct executor (:meth:`_DirectExecutor.fill`), one object for every call
+_NO_FILL = nullcontext()
+
+
+class _DirectExecutor:
+    """The forward's launches, allocations, views, eager calls, pooled workspaces, stream switches and uses of cached
+    tables as :func:`_train_forward` reaches them.  A step of :data:`_DIRECT`, the general path's executor, costs the
+    host time of the call it stands for: it is that function or tensor method itself, held in an instance slot
+    (``ex.empty(...)`` is one specialized slot load and the call of ``torch.empty``, as ``torch.empty(...)`` is one
+    module attribute load and that call; a class-level ``staticmethod`` would be a descriptor that the interpreter
+    does not specialize), with no Python frame of its own:
+
+    - ``launch(stage, gx, gy, gz, *values)``: :func:`_launch`;
+    - ``empty(shape, dtype=..., device=...)``: ``torch.empty``;
+    - ``view(t, dtype)``: ``t`` viewed as ``dtype`` (the 32-bit words a kernel reads);
+    - ``contiguous(t)``, ``float(t)``, ``index_fill_(t, ...)``, ``index_select(t, ...)``: those ``torch.Tensor``
+      methods (``t.contiguous()``, ...), eager steps of the forward;
+    - ``aligned(t, align)``, ``table_rows(state, meta)``, ``caller_rows(state, meta)``: :func:`_aligned`,
+      :func:`_table_rows`, :func:`_caller_rows`;
+    - ``workspaces(options)``: :func:`_workspaces`, the pool the forward takes its workspaces from
+      (``workspaces.take(table, role, shape, dtype, device)``, the pool's own take).
+
+    The forward's stream fork, side-stream switch, events and join and the use of a cached walk are methods (a step of
+    several calls); the general path makes them in place (``if ex is _DIRECT:``), another executor through them.
+    :data:`_DIRECT` holds its functions from the time the module loads: rebinding ``_launch`` afterwards does not
+    reach the forward's general path (and, ``_launch`` being one of the forward's functions, sends the next call of a
+    plan's key to record again).  A wrapper of ``cake_backend.launch_stage`` sees every launch of the forward: of the
+    general path, of a recording and of a replay.  The recorders (:class:`_SlotRecorder`, :class:`_FwdRecorder`) have
+    methods of these names in place of the slots."""
+
+    __slots__ = ("launch", "empty", "view", "contiguous", "float", "index_fill_", "index_select", "aligned",
+                 "table_rows", "caller_rows", "workspaces")  # fmt: skip
+
+    def __init__(self):
+        self.launch = _launch
+        self.empty = torch.empty
+        self.view = torch.Tensor.view
+        self.contiguous = torch.Tensor.contiguous
+        self.float = torch.Tensor.float
+        self.index_fill_ = torch.Tensor.index_fill_
+        self.index_select = torch.Tensor.index_select
+        self.aligned = _aligned
+        self.table_rows = _table_rows
+        self.caller_rows = _caller_rows
+        self.workspaces = _workspaces
+
+    def fork(self, index):
+        """(the caller's stream, its side stream), the side stream after the caller's work so far."""
+        main = torch.cuda.current_stream(index)
+        side = _side_stream(index, main)
+        fork = torch.cuda.Event()
+        fork.record(main)
+        side.wait_event(fork)
+        return main, side
+
+    def on(self, side):
+        return torch.cuda.stream(side)
+
+    def join(self, main, side):
+        main.wait_stream(side)
+
+    def signal(self, stream):
+        """An event recorded on ``stream`` now, for a :meth:`wait` of the other stream of the fork."""
+        event = torch.cuda.Event()
+        event.record(stream)
+        return event
+
+    def wait(self, stream, event) -> None:
+        stream.wait_event(event)
+
+    def use(self, key, entry) -> None:
+        """Make the cached walk ``entry`` (``_WALKS[key]``: the walk and its write) safe to read by the current
+        stream's next launches (:func:`_use_table`)."""
+        _use_table(entry[0], entry[1], key[0])
+
+    def fill(self):
+        """The context of a cached table's build (its write and the event after it), which a later call does not
+        repeat."""
+        return _NO_FILL
+
+    def refuse(self, reason: str) -> None:
+        """A step a plan cannot replay (``reason``): the call runs it on the general path."""
+
+
+_DIRECT = _DirectExecutor()
+
+
+def _storages(obj, out: set, depth: int = 0) -> None:
+    """Add the storage addresses of the tensors in ``obj`` (a tensor, a tuple / list or a dataclass of them, nested)."""
+    if isinstance(obj, torch.Tensor):
+        out.add(obj.untyped_storage().data_ptr())
+    elif depth < 4 and isinstance(obj, (tuple, list)):
+        for x in obj:
+            _storages(x, out, depth + 1)
+    elif depth < 4 and is_dataclass(obj) and not isinstance(obj, type):
+        for f in fields(obj):
+            _storages(getattr(obj, f.name), out, depth + 1)
+
+
+# the field names of each dataclass type that :func:`_tensors` walked
+_FIELD_NAMES: dict = {}
+
+
+def _tensors(obj, out: list, depth: int = 0) -> None:
+    """Append the tensors in ``obj`` (a tensor, a tuple / list or a dataclass of them, nested) to ``out``.  A tuple or
+    list whose first entry is an int, float or str (``seq_lens``, ``order``, ``scan_config``) is passed over whole, so
+    the walk takes no time per sequence of the layout (a step that read a tensor of such a tuple would refuse the
+    recording)."""
+    if isinstance(obj, torch.Tensor):
+        out.append(obj)
+    elif depth < 4 and isinstance(obj, (tuple, list)):
+        if obj and not isinstance(obj[0], (int, float, str)):
+            for x in obj:
+                _tensors(x, out, depth + 1)
+    elif depth < 4 and is_dataclass(obj) and not isinstance(obj, type):
+        names = _FIELD_NAMES.get(type(obj))
+        if names is None:
+            names = _FIELD_NAMES[type(obj)] = tuple(f.name for f in fields(obj))
+        for name in names:
+            _tensors(getattr(obj, name), out, depth + 1)
+
+
+def _reached_globals(roots) -> set[str]:
+    """The module globals that the functions ``roots`` read, themselves or through this module's functions they reach
+    (found from their code)."""
+    g = globals()
+    names, seen = set(), set()
+    todo = [g[name].__code__ for name in roots]
+    while todo:
+        code = todo.pop()
+        if code in seen:
+            continue
+        seen.add(code)
+        todo.extend(c for c in code.co_consts if isinstance(c, CodeType))
+        for name in code.co_names:
+            if name not in g:
+                continue
+            names.add(name)
+            fn = getattr(g[name], "__wrapped__", g[name])
+            if isinstance(fn, FunctionType) and fn.__globals__ is g:
+                todo.append(fn.__code__)
+    return names
+
+
+def _fwd_plan_globals() -> tuple:
+    """``cake_backend.device_arch``, the forward's functions (:data:`_FWD_PLAN_ROOTS`) and the module globals they read
+    (through this module's functions, found once from their code), one flat tuple: a plan replays only while each is
+    the object it was recorded with.  The plan compares them by identity: some are table caches (``_WALKS``: a dict of
+    tensors, which ``==`` would read)."""
+    global _FWD_PLAN_GLOBALS
+    if _FWD_PLAN_GLOBALS is None:
+        names = {*_FWD_PLAN_ROOTS, *_reached_globals(_FWD_PLAN_ROOTS)}
+        _FWD_PLAN_GLOBALS = itemgetter(*sorted(names))
+    try:
+        return (cake_backend.device_arch, *_FWD_PLAN_GLOBALS(globals()))
+    except KeyError:  # a global of the forward was deleted: a new object, which no plan holds (none replays)
+        return (object(),)
+
+
+def _keep_plan(plans: dict, limit: int, key, plan) -> None:
+    """``plans[key] = plan``, the oldest entry leaving first at ``limit`` entries; under one lock, since threads that
+    record at once would evict one entry twice."""
+    with _PLANS_LOCK:
+        plans.pop(key, None)
+        if len(plans) >= limit:
+            del plans[next(iter(plans))]
+        plans[key] = plan
+
+
+def _keep_fwd_plan(key, meta: ChunkMeta, plan) -> None:
+    """Keep the forward plan ``plan`` of ``key``, recorded on the layout ``meta`` (:func:`_drop_meta_plans`)."""
+    _keep_plan(_FWD_PLANS, _FWD_PLANS_LIMIT, key, plan)
+    with _PLANS_LOCK:
+        _PLAN_KEYS.setdefault(id(meta), {})[key] = None
+
+
+def _drop_meta_plans(meta: ChunkMeta) -> None:
+    """Drop the forward plans recorded on ``meta``, which left the layout cache: a plan keeps the tables of no layout
+    longer than the cache does.  A key that left the plan cache earlier, or whose entry is a plan of another
+    ChunkMeta under the same ``id`` (one that died), is passed over."""
+    if id(meta) not in _PLAN_KEYS:
+        return
+    with _PLANS_LOCK:
+        for key in _PLAN_KEYS.pop(id(meta), ()):
+            plan = _FWD_PLANS.get(key)
+            if plan is not None and plan.meta is meta:
+                del _FWD_PLANS[key]
+
+
+def _fwd_gate(meta: ChunkMeta, tape: bool):
+    """The record gate's entry of the call's layout and tape mode when the call builds its plan key (to replay or to
+    record), else ``None``: an early forward of the layout in that mode, a layout and mode whose key cannot be planned,
+    or no plan yet and less credit than one recording.  Each call adds its share to the credit.  A first sighting of a
+    layout and mode (a fresh layout) makes its entry and nothing else: one probe and one insert of :data:`_FWD_SEEN`
+    (and one eviction once it is full), no lock and no plan key.  :func:`_function_forward` calls it only when the
+    credit with the call's share holds one recording or the layout has a plan kept on it (:data:`FWD_PLAN_GATE`)."""
+    global _FWD_CREDIT
+    full = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    credit = _FWD_CREDIT + FWD_PLAN_PAYBACK
+    _FWD_CREDIT = credit = credit if credit < full else full
+    key = (id(meta), tape)
+    seen = _FWD_SEEN.get(key)
+    if seen is not None and seen[0]() is meta:
+        if seen[1] < FWD_PLAN_REPEAT:
+            seen[1] += 1
+            if seen[1] < FWD_PLAN_REPEAT:
+                return None
+    else:
+        # a new layout, or the id of one that died (its entry goes): the newest entry, this forward its first.  A layout
+        # whose entry left with a plan kept on it starts planned (its next forward builds its key once: a replay, or a
+        # recording as an unplanned one would make, else unplanned)
+        if seen is not None:
+            _FWD_SEEN.pop(key, None)
+        elif len(_FWD_SEEN) >= _FWD_SEEN_LIMIT:
+            _FWD_SEEN.popitem(last=False)
+        first = _PLANNED if _PLAN_KEYS and id(meta) in _PLAN_KEYS else _UNPLANNED
+        count = 1 if FWD_PLAN_REPEAT > 0 else 0
+        seen = _FWD_SEEN[key] = [weakref.ref(meta), count, first]
+        if seen[1] < FWD_PLAN_REPEAT:
+            return None
+    state = seen[2]
+    if state == _PLANNED or (
+        state == _UNPLANNED and credit >= FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    ):
+        return seen
+    return None
+
+
+def _fwd_spend() -> bool:
+    """Take one recording from the record credit (``False``: it holds less)."""
+    global _FWD_CREDIT
+    cost = FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    with _PLANS_LOCK:
+        if _FWD_CREDIT < cost:
+            return False
+        _FWD_CREDIT -= cost
+    return True
+
+
+def _fwd_replayed() -> None:
+    """Add a replay's share to the record credit."""
+    global _FWD_CREDIT
+    full = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    credit = _FWD_CREDIT + FWD_PLAN_TRICKLE
+    _FWD_CREDIT = credit if credit < full else full
+
+
+def _slot_layout(slots) -> tuple:
+    """The shape, strides, dtype and 16-byte base alignment of every tensor of ``slots`` (``None`` for another
+    entry): what a recorded plan's steps assume of the inputs beyond their addresses."""
+    return tuple(
+        (t.shape, t.stride(), t.dtype, t.data_ptr() % 16)
+        if isinstance(t, torch.Tensor)
+        else None
+        for t in slots
+    )
+
+
+def _float_bits(x) -> bytes | None:
+    """The 8 bytes of ``x`` as a double (``None`` for ``None``): a key field that tells -0.0 from 0.0 and one NaN from
+    another, which ``==`` does not (a launch argument of -0.0 is not one of 0.0)."""
+    return None if x is None else struct.pack("<d", float(x))
+
+
+def _no_slot() -> None:
+    """The reference of an absent input (``initial_state`` ``None``)."""
+
+
+def _drop_steps(ops, inputs: int, kept) -> tuple:
+    """``ops`` with a :data:`_OP_DROP` step after the last step that reads each slot, which lets the replay's reference
+    to it go: the general path's tensors go when nothing refers to them any more, which is no earlier.  The call's
+    inputs (slots below ``inputs``) and the plan's results (``kept``) stay.  A slot that the side stream reads goes at
+    the next join, not before: the caching allocator could hand its memory to the caller's stream while the side
+    stream still reads it.  A slot made on the side stream stays until the replay returns."""
+    last: dict[int, int] = {}
+    stay = set(kept)
+    side = False
+    side_reads: list[int] = []
+    for j, op in enumerate(ops):
+        code = op[0]
+        if code == _OP_STREAM:
+            side = bool(op[1])
+            continue
+        if code == _OP_JOIN:
+            last.update(dict.fromkeys(side_reads, j))
+            side_reads.clear()
+            continue
+        if code == _OP_LAUNCH:
+            reads, made = [i for _pos, i in op[5]], None
+        elif code == _OP_CALL:
+            reads, made = [i for _pos, i in op[3]], op[4]
+        elif code in (_OP_VIEW, _OP_NARROW):
+            reads, made = [op[2]], op[1]
+        elif code in (_OP_EMPTY, _OP_TAKE):
+            reads, made = [], op[1]
+        else:
+            continue
+        for i in reads:
+            last[i] = j
+        if made is not None:
+            last[made] = j  # a slot no step reads goes right away
+        if side:
+            side_reads += reads
+            if made is not None:
+                stay.add(made)
+    stay.update(side_reads)  # read on the side stream with no join after it
+    drops: dict[int, list[int]] = {}
+    for i, j in last.items():
+        if i >= inputs and i not in stay:
+            drops.setdefault(j, []).append(i)
+    steps = []
+    for j, op in enumerate(ops):
+        steps.append(op)
+        if j in drops:
+            steps.append((_OP_DROP, tuple(sorted(drops[j]))))
+    return tuple(steps)
+
+
+class _SlotRecorder(_DirectExecutor):
+    """A general path that also records its steps.  ``slots``: the call's tensors the plan starts from.  Every tensor
+    a recorded step reads is a slot (one of those, or one a recorded step made: an allocation, a workspace of the
+    stream's pool, :meth:`take`, an eager result), a dim-0 range of a slot, or a constant of the plan or a view of one
+    (:meth:`_constant_tensors`: a chunk table of ``meta``, the cached walk); anything else, or a :meth:`refuse`, leaves
+    the call without a plan.  The recorder refers to the slots weakly: each goes when the general path lets it go, so
+    a recording needs no more device memory than the general path.  It walks the constants once per recording, at the
+    first operand that is not a slot, and their storage addresses once more only at the first view of one."""
+
+    __slots__ = (
+        "slots",
+        "slot_of",
+        "inputs",
+        "ops",
+        "why",
+        "stream",
+        "meta",
+        "streams",
+        "ranges",
+        "const_ids",
+        "const_ptrs",
+        "const_tensors",
+    )
+
+    def __init__(self, slots, index: int, meta: ChunkMeta):
+        self.slots = [_no_slot if t is None else weakref.ref(t) for t in slots]
+        self.slot_of = {id(t): i for i, t in enumerate(slots) if t is not None}
+        self.inputs = len(self.slots)
+        self.ops: list = []
+        self.why: str | None = None
+        self.stream = _stream_key(index)
+        self.meta = meta
+        self.streams = None
+        self.ranges: dict = {}
+        # the constants (:meth:`_constant_tensors`), their ids and their storage addresses, each made when first read
+        self.const_tensors: list | None = None
+        self.const_ids: set | None = None
+        self.const_ptrs: set | None = None
+
+    def refuse(self, reason: str) -> None:
+        if self.why is None:
+            self.why = reason
+
+    def _add(self, t) -> int:
+        self.slots.append(weakref.ref(t))
+        self.slot_of[id(t)] = len(self.slots) - 1
+        return len(self.slots) - 1
+
+    def _slot(self, t):
+        i = self.slot_of.get(id(t))
+        return i if i is not None and self.slots[i]() is t else None
+
+    def _constant_tensors(self) -> list:
+        """The plan's constants: the tables of ``meta`` (a pooled workspace is a slot, :meth:`take`)."""
+        out: list = []
+        _tensors(self.meta, out)
+        return out
+
+    def _ref(self, t):
+        """The slot of ``t`` (a range of a slot gets a slot of its own, filled by a narrow step), ``None`` for a
+        constant or a view of one, ``-1`` for a tensor the plan cannot rebuild.  A constant itself is found by its id
+        before the ranges: it is no range of a slot (the slots are the call's inputs, its allocations, eager results
+        and pooled workspaces, and views of those).  The recorder holds ``meta`` and the walks, so no id of theirs is
+        reused during the recording."""
+        i = self._slot(t)
+        if i is not None:
+            return i
+        # once per recording, at its first operand that is not a slot
+        if self.const_ids is None:
+            self.const_tensors = self._constant_tensors()
+            self.const_ids = {id(c) for c in self.const_tensors}
+        if id(t) in self.const_ids:
+            return None
+        ptr = t.untyped_storage().data_ptr()
+        for i, ref in enumerate(self.slots):
+            s = ref()  # None for a slot that is gone
+            if (
+                not isinstance(s, torch.Tensor)
+                or s.dim() == 0
+                or s.stride(0) <= 0
+                or s.dtype != t.dtype
+                or s.stride() != t.stride()
+                or s.shape[1:] != t.shape[1:]
+                or s.untyped_storage().data_ptr() != ptr
+            ):
+                continue
+            start, rest = divmod(t.storage_offset() - s.storage_offset(), s.stride(0))
+            if rest == 0 and start >= 0 and start + t.shape[0] <= s.shape[0]:
+                key = (i, start, t.shape[0])
+                j = self.ranges.get(key)
+                if j is None:
+                    j = self.ranges[key] = self._add(t)
+                    self.ops.append((_OP_NARROW, j, i, start, t.shape[0]))
+                return j
+        # once per recording, at its first view of a constant
+        if self.const_ptrs is None:
+            self.const_ptrs = {
+                c.untyped_storage().data_ptr() for c in self.const_tensors
+            }
+        return None if ptr in self.const_ptrs else -1
+
+    def _tables(self):
+        return _POOLED.tables.get(self.stream)
+
+    def _operands(self, values, what):
+        """``(template, refs)`` of a step that reads ``values``: ``values`` with each slot or range of a slot as
+        ``None`` and ``(position, slot)`` of each of those; ``None`` after a refusal (``what`` reads a tensor the
+        plan cannot rebuild)."""
+        template, refs = list(values), []
+        for pos, value in enumerate(values):
+            if isinstance(value, torch.Tensor):
+                i = self._ref(value)
+                if i == -1:
+                    self.refuse(
+                        f"{what} reads a tensor that is neither a slot nor a constant"
+                    )
+                    return None
+                if i is not None:
+                    template[pos] = None
+                    refs.append((pos, i))
+        return tuple(template), tuple(refs)
+
+    def launch(self, stage, gx, gy, gz, *values):
+        """Run a launch of :func:`_prepared` and record it (in the order the launches run)."""
+        launch = _prepared(stage, gx, gy, gz, *values)
+        _fire(launch)
+        self._record(launch)
+
+    def _record(self, launch) -> None:
+        if self.why is not None:
+            return
+        stage, grid, ordered, device_index = launch
+        found = self._operands(ordered, stage)
+        if found is not None:
+            self.ops.append((_OP_LAUNCH, stage, grid, device_index, *found))
+
+    def empty(self, shape, dtype, device):
+        t = torch.empty(shape, dtype=dtype, device=device)
+        self.ops.append((_OP_EMPTY, self._add(t), tuple(shape), dtype, device))
+        return t
+
+    def workspaces(self, options):
+        """The call's workspace pool (:func:`_workspaces`), each take from it a :meth:`take` step."""
+        return _RecordedPool(self, _workspaces(options))
+
+    def take(self, pool, table, role, shape, dtype, device):
+        """``pool.take(table, role, shape, dtype, device)`` of the stream's pool: a slot that each replay takes from the
+        pool again, as the general path does (a hit, or a miss that allocates and evicts); a workspace of another pool
+        or table refuses the call."""
+        t = pool.take(table, role, shape, dtype, device)
+        if pool is not _POOLED or table is not self._tables():
+            self.refuse("a workspace outside the stream's pool")
+        else:
+            shape = tuple(shape)
+            self.ops.append(
+                (_OP_TAKE, self._add(t), role, shape, dtype, device, (shape, dtype))
+            )
+        return t
+
+    def fork(self, index):
+        main, side = super().fork(index)
+        if self.streams is not None and self.streams != (main, side):
+            self.refuse("two forks on different streams")
+        self.streams = (main, side)
+        self.ops.append((_OP_FORK,))
+        return main, side
+
+    def join(self, main, side):
+        super().join(main, side)
+        self.ops.append((_OP_JOIN,))
+
+
+class _RecordedPool:
+    """The workspace pool ``pool`` as a recording's forward takes from it (:meth:`_SlotRecorder.workspaces`): its
+    tables, and takes that are the recorder's take steps (:meth:`_SlotRecorder.take`)."""
+
+    __slots__ = ("recorder", "pool")
+
+    def __init__(self, recorder, pool):
+        self.recorder = recorder
+        self.pool = pool
+
+    def table(self, device_index: int) -> dict:
+        return self.pool.table(device_index)
+
+    def take(self, table, role, shape, dtype, device):
+        return self.recorder.take(self.pool, table, role, shape, dtype, device)
+
+
+# A forward's recording watches the stream and event operations of :data:`_WATCHED` (:func:`_watched`): one that the
+# recording thread makes outside the recorder's own steps and cache fills would be missing from the plan, so it leaves
+# the call without one.  The first recording in flight installs the hooks and the last one removes them; a call of
+# another thread, or of this one outside a recording, passes through.
+_WATCHED = ((torch.cuda, "set_stream"), (torch.cuda.Event, "record"), (torch.cuda.Event, "wait"),
+            (torch.cuda.Stream, "wait_event"))  # fmt: skip
+# the recorder of the recording in flight on this thread
+_WATCHING: ContextVar[Any] = ContextVar("cake_gdn_det_watching", default=None)
+_WATCH_LOCK = threading.Lock()
+# the recordings in flight, and (owner, name, original, whether the owner itself held it, the hook) of every hooked
+# attribute
+_WATCH_STATE: dict[str, Any] = {"count": 0, "saved": ()}
+
+
+def _watch_hook(name: str, original):
+    def hook(*args, **kwargs):
+        recorder = _WATCHING.get()
+        if recorder is not None and not recorder.trusted:
+            recorder.refuse(f"{name} outside the forward's executor")
+        return original(*args, **kwargs)
+
+    return hook
+
+
+@contextmanager
+def _watched(recorder):
+    """Run a forward's recording by ``recorder`` with the operations of :data:`_WATCHED` hooked.  Another hook set in
+    place of one of these during the recording (another package's recording) would not report this one's calls: the
+    recording is refused for this call only (``recorder.again``: the key's next call records again), and the last exit
+    leaves such an attribute as it is (it restores only its own hooks)."""
+    with _WATCH_LOCK:
+        if not _WATCH_STATE["count"]:
+            saved = []
+            for owner, name in _WATCHED:
+                original = getattr(owner, name)
+                hook = _watch_hook(name, original)
+                saved.append((owner, name, original, name in vars(owner), hook))
+                setattr(owner, name, hook)
+            _WATCH_STATE["saved"] = tuple(saved)
+        _WATCH_STATE["count"] += 1
+    token = _WATCHING.set(recorder)
+    try:
+        yield
+    finally:
+        _WATCHING.reset(token)
+        with _WATCH_LOCK:
+            saved = _WATCH_STATE["saved"]
+            if any(
+                getattr(owner, name) is not hook
+                for owner, name, _original, _own, hook in saved
+            ):
+                # not kept: the key's next call records again, most likely without the other hook in flight
+                recorder.refuse("a watched function was replaced during the recording")
+                recorder.again = True
+            _WATCH_STATE["count"] -= 1
+            if not _WATCH_STATE["count"]:
+                for owner, name, original, own, hook in saved:
+                    if getattr(owner, name) is not hook:
+                        continue
+                    if own:
+                        setattr(owner, name, original)
+                    else:
+                        delattr(owner, name)
+                _WATCH_STATE["saved"] = ()
+
+
+class _ForwardPlan:
+    """One recorded forward (:class:`_FwdRecorder`): its steps, the number of its slots, the stream it runs on (the
+    caller's, ``main``, and its side stream), the layout's ``ChunkMeta``, the module globals, pool tables (whose
+    workspaces its take steps take again) and cached walks it was recorded with, and the entries of its result
+    (:data:`_FWD_OUTPUTS`, each ``(name, 0, slot)`` or ``(name, 2, value)``).  ``ops`` is ``None`` for a key whose
+    forward cannot be planned: its calls run the general path without recording.  A plan leaves the plan cache with
+    its ``ChunkMeta`` (:func:`_drop_meta_plans`); a pool eviction leaves it in place."""
+
+    __slots__ = ("ops", "size", "stream", "main", "side", "meta", "names", "tables", "walks", "outputs",
+                 "fork_event", "join_event", "events")  # fmt: skip
+
+    def __init__(self, ops, size, stream, main, side, meta, names, tables, walks, signals, outputs):  # fmt: skip
+        self.ops = ops
+        self.size = size
+        self.stream = stream
+        self.main = main
+        self.side = side
+        self.meta = meta
+        self.names = names
+        self.tables = tables
+        self.walks = walks
+        self.outputs = outputs
+        # the fork and the join of a plan with a side stream (recorded right before each wait), and the events one
+        # stream records for the other (:meth:`_DirectExecutor.signal`)
+        self.fork_event = torch.cuda.Event() if main is not None else None
+        self.join_event = torch.cuda.Event() if main is not None else None
+        self.events = tuple(torch.cuda.Event() for _ in range(signals))
+
+    def ready(self, meta: ChunkMeta, stream) -> bool:
+        """Whether this call (of the plan's key) may replay the plan: the layout's ``ChunkMeta``, the pool's tables of
+        the stream, its side stream and the cached walks it uses are the ones of the recording (a cleared cache makes
+        new ones), and so is every module global the forward reads (:func:`_fwd_plan_globals`, by identity)."""
+        if self.meta is not meta or _POOLED.tables.get(stream) is not self.tables:
+            return False
+        if self.side is not None and _SIDE_STREAMS.get(stream) is not self.side:
+            return False
+        if not all(_WALKS.get(key) is entry for key, entry in self.walks):
+            return False
+        names = _fwd_plan_globals()
+        return len(names) == len(self.names) and all(map(is_, names, self.names))
+
+
+class _FwdRecorder(_SlotRecorder):
+    """The forward's general path that also records its steps (:meth:`plan`).  ``slots``: the call's ``q``, ``k``,
+    ``v``, ``g``, ``beta`` and ``initial_state``; the views, the allocations and the eager results of the call are
+    slots too, the cached walks it uses (:meth:`use`) constants.  A cache it fills (:meth:`fill`: the walk's build and
+    the event after it) is not recorded, since a later general-path call does not repeat it.  ``again``: a refusal of
+    this call is not kept, so the key's next call records again (a call that filled a cache, or whose recording another
+    hook of :data:`_WATCHED` overlapped: :func:`_watched`).  ``trusted``: inside one of the recorder's own stream or
+    event steps or a fill, which :func:`_watched` lets pass."""
+
+    __slots__ = ("uses", "events", "trusted", "again")
+
+    def __init__(self, inputs, index: int, meta: ChunkMeta):
+        super().__init__(inputs, index, meta)
+        self.uses: list = []
+        self.events: list = []
+        self.trusted = 0
+        self.again = False
+
+    @contextmanager
+    def _trust(self):
+        self.trusted += 1
+        try:
+            yield
+        finally:
+            self.trusted -= 1
+
+    def _constant_tensors(self) -> list:
+        """The tables of ``meta`` and the cached walks the call used."""
+        out = super()._constant_tensors()
+        out += [entry[0] for _key, entry in self.uses]
+        return out
+
+    def view(self, t, dtype):
+        out = t.view(dtype)
+        i = self._slot(t)
+        if i is not None:  # a view of a constant is a constant
+            self.ops.append((_OP_VIEW, self._add(out), i, dtype))
+        return out
+
+    def call(self, fn, *args):
+        out = fn(*args)
+        self._call(fn, args, out)
+        return out
+
+    def rows(self, fn, t, *args):
+        out = fn(t, *args)
+        if out is not t:  # ``t`` itself: the layout in the key fixes that, no step
+            self._call(fn, (t, *args), out)
+        return out
+
+    def contiguous(self, t):
+        return self.rows(torch.Tensor.contiguous, t)
+
+    def float(self, t):
+        return self.call(torch.Tensor.float, t)
+
+    def index_fill_(self, t, dim, index, value):
+        return self.call(torch.Tensor.index_fill_, t, dim, index, value)
+
+    def index_select(self, t, dim, index):
+        return self.call(torch.Tensor.index_select, t, dim, index)
+
+    def aligned(self, t, align):
+        return self.rows(_aligned, t, align)
+
+    def table_rows(self, state, meta):
+        return self.rows(_table_rows, state, meta)
+
+    def caller_rows(self, state, meta):
+        return self.rows(_caller_rows, state, meta)
+
+    def index_copy_heads(self, state, index, rows) -> None:
+        self.call(_index_copy_heads, state, index, rows)
+
+    def _call(self, fn, args, out) -> None:
+        if self.why is not None:
+            return
+        found = self._operands(args, getattr(fn, "__name__", fn))
+        if found is None:
+            return
+        # a new tensor is a slot; an in-place call returns one of its operands
+        slot = None
+        if isinstance(out, torch.Tensor) and not any(out is value for value in args):
+            slot = self._add(out)
+        self.ops.append((_OP_CALL, fn, *found, slot))
+
+    def fork(self, index):
+        with self._trust():
+            return super().fork(index)
+
+    @contextmanager
+    def on(self, side):
+        self.ops.append((_OP_STREAM, 1))
+        context = torch.cuda.stream(side)
+        with self._trust():
+            context.__enter__()
+        try:
+            yield
+        finally:
+            with self._trust():
+                context.__exit__(None, None, None)
+        self.ops.append((_OP_STREAM, 0))
+
+    def join(self, main, side):
+        with self._trust():
+            super().join(main, side)
+
+    def _role(self, stream) -> int | None:
+        """0 for the caller's stream of the fork, 1 for its side stream, ``None`` for another or before the fork."""
+        for role, s in enumerate(self.streams or ()):
+            if stream is s:
+                return role
+        return None
+
+    def signal(self, stream):
+        with self._trust():
+            event = super().signal(stream)
+        role = self._role(stream)
+        if role is None:
+            self.refuse("an event recorded outside the fork")
+        else:
+            self.ops.append((_OP_SIGNAL, len(self.events), role))
+        self.events.append(event)
+        return event
+
+    def wait(self, stream, event) -> None:
+        with self._trust():
+            super().wait(stream, event)
+        role = self._role(stream)
+        k = next((k for k, e in enumerate(self.events) if e is event), None)
+        if role is None or k is None:
+            self.refuse("an event wait outside the fork")
+        else:
+            self.ops.append((_OP_WAIT, k, role))
+
+    def use(self, key, entry) -> None:
+        with self._trust():
+            super().use(key, entry)
+        self.uses.append((key, entry))
+        self.ops.append((_OP_USE, entry, key[0]))
+        # a walk used after the constants were first read is a constant too
+        if self.const_ids is not None:
+            self.const_tensors.append(entry[0])
+            self.const_ids.add(id(entry[0]))
+        if self.const_ptrs is not None:
+            self.const_ptrs.add(entry[0].untyped_storage().data_ptr())
+
+    @contextmanager
+    def fill(self):
+        self.again = True
+        with self._trust():
+            yield
+
+    def plan(self, fwd: dict) -> _ForwardPlan | None:
+        """The recorded plan of a call whose general path returned ``fwd``, ``None`` when the call refused one."""
+        if self.why is not None:
+            return None
+        outputs = []
+        for name in _FWD_OUTPUTS:
+            value = fwd.get(name)
+            if not isinstance(value, torch.Tensor):
+                outputs.append((name, 2, value))
+                continue
+            i = self._slot(value)
+            if i is None:
+                return None  # an entry that is not a slot of the call
+            outputs.append((name, 0, i))
+        main, side = self.streams or (None, None)
+        kept = [i for _name, kind, i in outputs if kind == 0]
+        ops = _drop_steps(self.ops, self.inputs, kept)
+        return _ForwardPlan(ops, len(self.slots), self.stream, main, side, self.meta, _fwd_plan_globals(),
+                            self._tables(), tuple(self.uses), len(self.events), tuple(outputs))  # fmt: skip
+
+
+def _replay_forward(plan: _ForwardPlan, inputs) -> dict[str, Any]:
+    """Run ``plan`` on the call's ``q``, ``k``, ``v``, ``g``, ``beta`` and ``initial_state`` (``inputs``); returns the
+    entries of the forward's result that :func:`_function_forward` reads (:data:`_FWD_OUTPUTS`).  A stream switch
+    makes the stream's device current, which the general path's stream context restores on its exit: a plan with a
+    side stream makes the caller's current device current again when it returns or raises."""
+    slots = [*inputs]
+    slots += [None] * (plan.size - len(slots))
+    launch_stage = cake_backend.launch_stage
+    tables, pool_take = plan.tables, _POOLED.take
+    main, side = plan.main, plan.side
+    caller = None if main is None else torch.cuda.current_device()
+    forked = False
+    try:
+        for op in plan.ops:
+            code = op[0]
+            if code == _OP_LAUNCH:
+                values = list(op[4])
+                for pos, i in op[5]:
+                    values[pos] = slots[i]
+                launch_stage(op[1], op[2], tuple(values), device_index=op[3])
+            elif code == _OP_EMPTY:
+                slots[op[1]] = torch.empty(op[2], dtype=op[3], device=op[4])
+            elif code == _OP_TAKE:
+                # Workspaces.take inline on a hit (a hit keeps the role's order); a miss takes through the pool, which
+                # allocates and evicts as the general path's take does
+                buffers = tables.get(op[2])
+                t = None if buffers is None else buffers.get(op[6])
+                if t is None:
+                    t = pool_take(tables, op[2], op[3], op[4], op[5])
+                slots[op[1]] = t
+            elif code == _OP_VIEW:
+                slots[op[1]] = slots[op[2]].view(op[3])
+            elif code == _OP_CALL:
+                args = list(op[2])
+                for pos, i in op[3]:
+                    args[pos] = slots[i]
+                out = op[1](*args)
+                if op[4] is not None:
+                    slots[op[4]] = out
+            elif code == _OP_DROP:
+                for i in op[1]:
+                    slots[i] = None
+                # the last launch's values and the last call's arguments and result may hold them too
+                values = args = out = None
+            elif code == _OP_USE:
+                _use_table(op[1][0], op[1][1], op[2])
+            elif code == _OP_FORK:
+                plan.fork_event.record(main)
+                side.wait_event(plan.fork_event)
+                forked = True
+            elif code == _OP_STREAM:
+                torch.cuda.set_stream(side if op[1] else main)
+            elif code == _OP_SIGNAL:
+                plan.events[op[1]].record(side if op[2] else main)
+            elif code == _OP_WAIT:
+                (side if op[2] else main).wait_event(plan.events[op[1]])
+            elif code == _OP_JOIN:
+                plan.join_event.record(side)
+                main.wait_event(plan.join_event)
+                forked = False
+            else:  # a dim-0 range of a slot
+                slots[op[1]] = slots[op[2]].narrow(0, op[3], op[4])
+    except BaseException:
+        if forked:  # back on the caller's stream, after the side stream's work (as the general path's join)
+            torch.cuda.set_stream(main)
+            main.wait_stream(side)
+        raise
+    finally:
+        if caller is not None and caller != plan.stream[0]:
+            torch.cuda.set_device(caller)
+    return {
+        name: slots[value] if kind == 0 else value for name, kind, value in plan.outputs
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -4132,6 +5159,7 @@ def cake_gdn_det_train_backward(
             total_tokens,
             recompute=True,
             v_rows=v_rows,
+            ex=_DIRECT,
         )
     else:
         w, u = forward["w"], forward.get("u")
@@ -4638,15 +5666,91 @@ def _chunk_meta(
     capturing = meta.chunk_start.is_cuda and torch.cuda.is_current_stream_capturing()
     if options.host_cache and not capturing:
         if len(_META_FRONT) >= _META_FRONT_LIMIT:
-            _META_FRONT.pop(next(iter(_META_FRONT)), None)
+            old = _META_FRONT.pop(next(iter(_META_FRONT)), None)
+            if old is not None:  # its forward plans leave with it
+                _drop_meta_plans(old)
         _META_FRONT[key] = meta
     return meta
+
+
+def _planned_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, use_qk_l2norm_in_kernel, options,
+                     meta, arch, index, num_heads, num_v_heads, tape, seen) -> dict[str, Any]:  # fmt: skip
+    """The forward's result (:func:`_train_forward`) of a :func:`_function_forward` call that builds its plan key
+    (``seen``: the record gate's entry of its layout and tape mode, ``None`` with the gate off): a replay of the key's
+    plan (:func:`_replay_forward`), else the general path, which records the key's plan when it has none ready and the
+    record credit holds a recording.  Inside a CUDA graph capture the call runs the general path and builds no key."""
+    gated = seen is not None
+    plan = recorder = None
+    stream = _stream_key(index)
+    # a CUDA graph capture (never on the default stream) runs the general path on its own workspaces
+    if not (stream[1] and torch.cuda.is_current_stream_capturing()):
+        # besides meta's tables and the module globals (ready()), the key holds what the general path's steps
+        # follow: the stream, the tape mode (a checkpoint's first pass and its recompute differ), the arguments,
+        # the inputs' layouts and which inputs are one object (a call with ``k is q`` records q's slot for both,
+        # so a plan of another pattern would read k for q)
+        inputs = (q, k, v, g, beta, initial_state)
+        alias = (None if len({id(t) for t in inputs}) == len(inputs)
+                 else tuple(next(j for j, s in enumerate(inputs) if s is t) for t in inputs))  # fmt: skip
+        # CakeGDNDetPackedFunction's forward sets row_shape
+        packed = getattr(ctx, "row_shape", None) is not None
+        level = cake_plan.tape_state(arch, options.save_state)
+        # (a float argument by its bits: -0.0 == 0.0, yet a replay passes the recorded one to the launches)
+        fkey = (id(meta), stream, arch, options, _float_bits(options.warmup_log2), tape, packed, num_heads,
+                num_v_heads, _float_bits(scale), bool(use_qk_l2norm_in_kernel), bool(output_final_state),
+                _slot_layout(inputs), alias, level)  # fmt: skip
+        plan = _FWD_PLANS.get(fkey)
+        if plan is not None and plan.ops is None:
+            plan = None  # the key's calls keep the general path
+            if gated:
+                seen[2] = _REFUSED
+        elif plan is None or not plan.ready(meta, stream):
+            plan = None
+            if not gated or _fwd_spend():
+                recorder = _FwdRecorder(inputs, index, meta)
+            else:  # no key until the credit holds a recording (for every call class of the entry)
+                seen[2] = _UNPLANNED
+    if plan is not None:
+        fwd = _replay_forward(plan, inputs)
+        if gated:
+            seen[2] = _PLANNED
+            _fwd_replayed()
+        return fwd
+    if recorder is None:
+        return _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                              output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
+                              options=options, tape=tape, ex=_DIRECT)  # fmt: skip
+    with _watched(recorder):
+        fwd = _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                             output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
+                             options=options, tape=tape, ex=recorder)  # fmt: skip
+    recorded = recorder.plan(fwd)
+    # the recorder's (weak) references to the call's tensors
+    recorder.slots.clear()
+    # a refusal of a call that filled a table cache or met another hook is not kept: the key's next call records
+    # again
+    if recorded is not None or not recorder.again:
+        if recorded is None:  # the key's calls keep the general path
+            recorded = _ForwardPlan(
+                None, 0, recorder.stream, None, None, meta, (), None, (), 0, ()
+            )
+        _keep_fwd_plan(fkey, meta, recorded)
+        if gated:
+            seen[2] = _PLANNED if recorded.ops is not None else _REFUSED
+    elif gated:
+        seen[2] = _UNPLANNED
+    return fwd
 
 
 def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu,
                       use_qk_l2norm_in_kernel, options):  # fmt: skip
     """The forward of :class:`CakeGDNDetFunction` and :class:`CakeGDNDetPackedFunction` over q / k / v (the inputs,
-    or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields."""
+    or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields.  A call that has a plan key
+    (a layout of the host table cache with ``host_cache``: a plan's steps take the pooled workspaces of its stream)
+    and that the record gate lets build it (:data:`FWD_PLAN_GATE`: from the ``FWD_PLAN_REPEAT``-th forward of the
+    layout in its tape mode that the gate counts, while the layout has a plan or the record credit holds a recording)
+    replays the key's plan or records it (:func:`_planned_forward`); any other runs the general path
+    (:func:`_train_forward` through :data:`_DIRECT`)."""
+    global _FWD_CREDIT
     batch, seq_len, num_heads, key_dim = q.shape
     num_v_heads = v.shape[2]
     index = _tensor_index(q)
@@ -4665,10 +5769,35 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
         ),
     )
     tape = _forward_tape()
-    fwd = cake_gdn_det_train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale,
-                                     initial_state=initial_state, output_final_state=output_final_state,
-                                     normalize_qk=use_qk_l2norm_in_kernel, options=options,
-                                     tape=tape)  # fmt: skip
+    seen = None
+    # a layout of the host table cache (host-built or equal-length) with host_cache: the forward's plan, once the record
+    # gate lets the call build its key (:func:`_fwd_gate`; an early forward of the layout in its tape mode builds none).
+    # A host q runs the general path, which pools nothing and refuses it at the first launch (the key's layouts do not
+    # name the device: such a call must not replay a plan of device inputs)
+    planned = (
+        FWD_PLAN
+        and options.host_cache
+        and (cu_seqlens is None or cu_seqlens_cpu is not None)
+        and q.is_cuda
+    )
+    if planned and FWD_PLAN_GATE:
+        # with less credit than one recording (with this call's share) and no plan kept on the layout, the gate could
+        # only send the call to the general path: add the call's share here and skip the gate's call (its host time,
+        # cold in the caches of such a call, is a few us).  The call makes no entry and is not counted among the
+        # layout's forwards (FWD_PLAN_GATE)
+        credit = _FWD_CREDIT + FWD_PLAN_PAYBACK
+        if credit < FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE and id(meta) not in _PLAN_KEYS:
+            _FWD_CREDIT = credit
+            planned = False
+        else:
+            planned = (seen := _fwd_gate(meta, tape)) is not None
+    if planned:
+        fwd = _planned_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, use_qk_l2norm_in_kernel,
+                               options, meta, arch, index, num_heads, num_v_heads, tape, seen)  # fmt: skip
+    else:
+        fwd = _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                             output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
+                             options=options, tape=tape, ex=_DIRECT)  # fmt: skip
     # a fixed saved list of 13: the state the architecture's tape level keeps under save_state
     # (cake_plan.tape_state: w, h and v_new under T_full), a placeholder of the same shape, dtype and device for
     # the rest (a checkpoint's first pass compares the two passes' saved lists); the backward reads only the state
