@@ -197,10 +197,11 @@ projection runs `fwd_layout_pipe` from 600 rows per SM on `sm_100a` and from
 630 on `sm_103a` (`cake_jit.PROJECTION_FORWARD_BANDS`; 0.2.17 ran the
 extra-long forward up to 650 and 699).  Rows that are whole tokens of wider
 tensors are a class of their own (`cake_jit.SLICED_LAYOUT`: head strides 128,
-both token strides at least `H * 128` and one past it, and either one input of
-packed rows at any number of heads, such as `x` sliced beside packed `z` or a
-gate of one head sliced from a projection, or both inputs past the row from
-`cake_jit.SLICED_MIN_HEADS` (4) heads, such as `x` and `z` both sliced or
+both token strides at least `H * 128` and one past it, and either packed `z` at
+any number of heads, such as `x` sliced beside packed `z`, or packed `x` at one
+head, such as a gate of one head sliced from a projection (gates of more than
+one head are `cake_jit.PROJECTION_LAYOUT`, above), or both inputs past the row
+from `cake_jit.SLICED_MIN_HEADS` (4) heads, such as `x` and `z` both sliced or
 padded rows), whose table (`cake_jit.SLICED_FORWARD_BANDS`) runs
 `fwd_layout_pipe` from 701 to 1500 rows per SM on `sm_100a` and `sm_103a`,
 where 0.2.17 ran the plain forward; on `sm_107a` they run
@@ -528,10 +529,11 @@ stride past `H * 128`), `HEAD_MAJOR_FORWARD_BANDS` where `x` and `z` are
 head-major (token stride 128, head stride `T * 128`: a `[H, T, 128]` tensor
 viewed as `[T, H, 128]`) on `sm_107a`, `SLICED_FORWARD_BANDS` where the rows
 are whole tokens of wider tensors (head stride 128, both token strides at
-least `H * 128` and one past it; at any number of heads where the other is
-`H * 128`, one input of packed rows: `x` sliced beside packed `z`, such a gate
-of one head; from `SLICED_MIN_HEADS` (4) heads where both are past it: `x` and
-`z` both sliced, padded rows) on `sm_100a` and `sm_103a`, and
+least `H * 128` and one past it; at any number of heads where `z`'s is
+`H * 128` (packed `z`): `x` sliced beside packed `z`; at one head where `x`'s
+is `H * 128` (packed `x`; more heads take `PROJECTION_FORWARD_BANDS`, above): a
+gate of one head; from `SLICED_MIN_HEADS` (4) heads where both are past it: `x`
+and `z` both sliced, padded rows) on `sm_100a` and `sm_103a`, and
 `STRIDED_FORWARD_BANDS` for every other layout (a broadcast over heads, or
 over tokens beside rows that are not packed, another head stride, padded
 head-major planes, a mixed layout, both token strides past the row of 1 to 3

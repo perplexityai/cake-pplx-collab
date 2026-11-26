@@ -183,9 +183,10 @@ gate of more than one head sliced from a wider projection runs the pipelined
 forward that warms rows by their layout from 600 rows per SM on SM100 and from
 630 on SM103 (0.2.17 ran the extra-long forward up to 650 and 699).  Rows that
 are whole tokens of wider tensors (head strides 128, both token strides at
-least ``H * 128`` and one past it, and either one input of packed rows at any
-number of heads, such as ``x`` sliced beside packed ``z`` or a gate of one head
-sliced from a projection, or both inputs past the row from 4 heads, such as
+least ``H * 128`` and one past it, and either packed ``z`` at any number of
+heads, such as ``x`` sliced beside packed ``z``, or packed ``x`` at one head,
+such as a gate of one head sliced from a projection (a gate of more than one
+head keeps the bands above), or both inputs past the row from 4 heads, such as
 ``x`` and ``z`` both sliced or padded rows) take bands of their own there,
 which run it from 701 to 1500 rows per SM (0.2.17 ran the 8-thread forward).
 Rows of 1 to 3 heads with both inputs past the row (``x`` and ``z`` both

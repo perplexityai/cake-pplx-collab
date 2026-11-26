@@ -1969,8 +1969,9 @@ def test_forward_plan_of_every_form_differs_from_0_2_17_only_in_the_moved_bands(
 # whole-token rows from ``SLICED_MIN_HEADS`` heads),
 # ``projection<i>`` (its ``PROJECTION_FORWARD_BANDS``; ``z`` the gate columns
 # of a wider projection, a class of more than one head) and ``headmajor<i>``
-# (its ``HEAD_MAJOR_FORWARD_BANDS``; 4 divides 148, 152 and 212, so ``end`` is
-# whole tokens there); ``token<i>`` takes one token of ``end + 1`` heads
+# (its ``HEAD_MAJOR_FORWARD_BANDS`` where the architecture has one, else
+# ``STRIDED_FORWARD_BANDS``; 4 divides 148, 152 and 212, so ``end`` is whole
+# tokens there); ``token<i>`` takes one token of ``end + 1`` heads
 # (packed rows whose token stride is passed as 0); skipped where the
 # architecture has no such band with an end.
 FORWARD_CASES = [
