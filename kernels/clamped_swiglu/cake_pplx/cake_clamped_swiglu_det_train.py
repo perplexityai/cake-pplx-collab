@@ -95,11 +95,12 @@ Mode rules:
    checkpoint's own forward pass) ``forward`` launches, as in 0.1.7.  Not
    tested under ``torch.compile``.  No double
    backward: differentiating gradients computed with ``create_graph=True``
-   raises ``RuntimeError``.  No call uses a workspace or keeps state between
-   calls, but for the ignored weight of unweighted forward calls: one cached
-   one-element FP32 buffer per device, set to 1, which the forward kernels
-   read and ignore.  An unweighted backward runs a kernel that takes no
-   weight and writes no weight gradient.
+   raises ``RuntimeError``.  No ``locality="off"`` call uses a workspace or
+   keeps state between calls, but for the ignored weight of unweighted
+   forward calls: one cached one-element FP32 buffer per device, set to 1,
+   which the forward kernels read and ignore.  An unweighted backward runs a
+   kernel that takes no weight and writes no weight gradient.  A
+   ``locality="domain"`` call keeps the state listed below.
 
 No call synchronizes the host or the device or reads tensor contents on the
 host; every kernel runs on the current torch stream of the operands' device.
@@ -119,6 +120,35 @@ happens during capture.  A JIT build needs a CUDA toolkit of at least 12.8
 for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for ``sm_107a``.  This module
 imports its backend package on first use and reads no environment variable.
 
+Locality domains (opt-in, ``locality="domain"``; ``"off"`` is the default): an
+R200 (``sm_107a``) has two dies with their own SMs and memory, and default
+memory alternates between them every 4 KB.
+``cake_clamped_swiglu_det_train_domain_empty`` allocates BF16 ``[R, 2304]`` or
+``[R, 4608]`` tensors whose chunks alternate between the dies.  With
+``locality="domain"``, the forward runs a locality-domain twin, whose CTAs
+claim the rows of their own die first, when the first input lies in that
+memory, ``R`` reaches the twin's first rows per SM for the call's class (every
+BF16 operand in the first input's rows, or not) and no output buffer overlaps
+an input; every other call runs the ``"off"`` program.  The backward has no
+twin: with ``"domain"`` it runs the ``"off"`` program.  The twin stores the
+bits of the ``"off"`` programs.  The ``*_domain_plan`` functions say what a
+call runs and why, without launching.  State of the domain route: the helper's
+memory (outside torch's allocator; freeing its last view synchronizes the
+device), the SM table probed by a device's first helper call, and per-die claim
+counters per stream or per CUDA graph capture (a graph instantiated more than
+once shares its counters: replay its copies one at a time).
+Measured costs on R200s of 212 SMs (the backend package's README lists them):
+where the twin runs, its route and launch add 2.0 to 3.6 us of host time to an
+autograd step and 9.0 to 11.3 us to a checkpointed one, so an eager step whose
+host time exceeds its device time ran slower than with ``"off"`` (up to 4.5 %
+at 27,136 rows; checkpointed, up to 6.6 % from 27,136 rows until 49,152 with a
+merged input or 65,536 with two tensors), while its device time was shorter.  A
+forward between two GEMMs on inputs with a gate of -88 in each third of every
+row ran up to 1.7 % slower near the first row counts (23,744 and 27,136 rows),
+and up to 0.9 % slower at 98,304 rows than ``"off"`` on default memory.  Below
+the first row counts a ``"domain"`` forward call takes up to about 0.2 us more
+host time.
+
 Usage::
 
     from cake_pplx.cake_clamped_swiglu_det_train import cake_clamped_swiglu_det
@@ -130,12 +160,18 @@ Usage::
     # steps without autograd, for a caller's own torch.autograd.Function
     h = cake_clamped_swiglu_det_train_forward(gate_up, None, w, limit=10.0)
     d_gate_up, _, d_w = cake_clamped_swiglu_det_train_backward(dh, gate_up, None, w, limit=10.0)
+
+    # R200: operands in memory whose chunks alternate between the dies
+    x = cake_clamped_swiglu_det_train_domain_empty((R, 4608))
+    h = cake_clamped_swiglu_det_train_domain_empty((R, 2304))
+    cake_clamped_swiglu_det_train_forward(x, None, w, limit=10.0, out=h, locality="domain")
 """
 
 from __future__ import annotations
 
 import functools
-from typing import Any, Optional
+from collections.abc import Sequence
+from typing import Any, Optional, Union
 
 import torch
 
@@ -190,6 +226,30 @@ def _held(*arguments: Any) -> torch.Tensor:
     return _held(*arguments)
 
 
+def _forward_locality(*arguments: Any) -> torch.Tensor:
+    """The backend's forward step for a ``locality`` other than ``"off"`` (checked there); the first call imports the
+    backend and binds this global to its own function."""
+    global _forward_locality
+    _forward_locality = _backend()._forward_locality
+    return _forward_locality(*arguments)
+
+
+def _backward_locality(*arguments: Any) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """The backend's backward step for a ``locality`` other than ``"off"`` (checked there); the first call imports the
+    backend and binds this global to its own function."""
+    global _backward_locality
+    _backward_locality = _backend()._backward_locality
+    return _backward_locality(*arguments)
+
+
+def _autograd_locality(*arguments: Any) -> torch.Tensor:
+    """The backend's autograd entry for a ``locality`` other than ``"off"`` (checked there); the first call imports the
+    backend and binds this global to its own function."""
+    global _autograd_locality
+    _autograd_locality = _backend()._autograd_locality
+    return _autograd_locality(*arguments)
+
+
 # The id of the backward graph task running on this thread, -1 outside a backward (torch's checkpoint reads it the
 # same way), and the innermost saved-tensors hooks, a (pack, unpack) pair or None, as the backend reads them.
 # Without either function (another torch) its stand-in answers "in a backward" / "hooks set", so the calls it decides
@@ -234,6 +294,7 @@ def cake_clamped_swiglu_det_train_forward(
     *,
     limit: float,
     out: Optional[torch.Tensor] = None,
+    locality: str = "off",
 ) -> torch.Tensor:
     r"""Clamped SwiGLU forward: ``h = BF16(weight * silu(min(gate, L)) * clamp(up, -L, L))``.
 
@@ -254,7 +315,12 @@ def cake_clamped_swiglu_det_train_forward(
         ``L``, a finite positive Python number, rounded to FP32 (a run-time launch argument).  Required.
     out : torch.Tensor, optional
         Preallocated BF16 ``[R, 2304]`` output: 2-D, unit last stride, a row stride that is a multiple of 8 and at
-        least 2304, a 16-byte aligned base.  It must not overlap any input (not checked).
+        least 2304, a 16-byte aligned base.  It must not overlap any input (not checked with ``locality="off"``).
+    locality : str, optional
+        ``"off"`` (the default) or ``"domain"``: on an R200 (``sm_107a``), run the forward's locality-domain twin when
+        the inputs lie in memory from :func:`cake_clamped_swiglu_det_train_domain_empty` and ``R`` is large enough
+        (:func:`cake_clamped_swiglu_det_train_forward_domain_plan` says why or why not); any other call runs the
+        ``"off"`` program.  The same bits either way.
 
     Returns
     -------
@@ -264,11 +330,12 @@ def cake_clamped_swiglu_det_train_forward(
     Raises
     ------
     TypeError
-        A non-tensor operand; a ``limit`` that is not a Python number (a tensor would need a host read).
+        A non-tensor operand; a ``limit`` that is not a Python number (a tensor would need a host read); a ``locality``
+        that is not a ``str``.
     ValueError
         An operand off CUDA, off the gate's device, of another dtype or shape; a non-finite or non-positive
         ``limit``, or one past FP32 (an integer or a fraction past every Python float too); ``R >= 2**31 - 256``; an
-        ``out`` of another layout.
+        ``out`` of another layout; a ``locality`` other than ``"off"`` and ``"domain"``.
     RuntimeError
         A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``), also with ``R = 0``; a
         local CUDA toolkit below the library's floor when the call JIT-builds it (12.8 for ``sm_100a``, 12.9 for
@@ -284,7 +351,9 @@ def cake_clamped_swiglu_det_train_forward(
     and passed to every call avoids the fill of ``h``.
     """
 
-    return _step_forward(gate_up_or_gate, up, weight, limit, out)
+    if locality == "off":
+        return _step_forward(gate_up_or_gate, up, weight, limit, out)
+    return _forward_locality(gate_up_or_gate, up, weight, limit, out, locality)
 
 
 @cake_api
@@ -298,6 +367,7 @@ def cake_clamped_swiglu_det_train_backward(
     grad_gate_up_or_gate: Optional[torch.Tensor] = None,
     grad_up: Optional[torch.Tensor] = None,
     grad_weight: Optional[torch.Tensor] = None,
+    locality: str = "off",
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     r"""Clamped SwiGLU backward: ``d_gate``, ``d_up`` and the route-weight gradient, from ``gate``, ``up``,
     ``weight`` and ``dh`` (the activation is recomputed; nothing from the forward is needed).
@@ -329,6 +399,10 @@ def cake_clamped_swiglu_det_train_backward(
     grad_weight : torch.Tensor, optional
         Preallocated contiguous FP32 ``[R]`` route-weight gradient (needs ``weight``).  It must not overlap any input
         or another output (not checked).
+    locality : str, optional
+        ``"off"`` (the default) or ``"domain"``.  The backward has no locality-domain twin: either value runs the
+        ``"off"`` program, with the same bits (:func:`cake_clamped_swiglu_det_train_backward_domain_plan` reports
+        reason ``"arch"``).  ``"domain"`` is accepted so that a caller can pass one ``locality`` to both steps.
 
     Returns
     -------
@@ -340,8 +414,8 @@ def cake_clamped_swiglu_det_train_backward(
     Raises
     ------
     TypeError, ValueError, RuntimeError
-        As for the forward; also ``grad_up`` with a merged input, ``grad_weight`` without ``weight``, and output
-        buffers of another shape or layout (outputs are never copied).
+        As for the forward (``locality`` too); also ``grad_up`` with a merged input, ``grad_weight`` without
+        ``weight``, and output buffers of another shape or layout (outputs are never copied).
 
     Notes
     -----
@@ -354,8 +428,12 @@ def cake_clamped_swiglu_det_train_backward(
     NaN first, one fill launch each; preallocated outputs passed to every call avoid the fills of those outputs.
     """
 
-    return _step_backward(
-        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
+    if locality == "off":
+        return _step_backward(
+            grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
+        )
+    return _backward_locality(
+        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, locality
     )
 
 
@@ -366,6 +444,7 @@ def cake_clamped_swiglu_det(
     weight: Optional[torch.Tensor] = None,
     *,
     limit: float,
+    locality: str = "off",
 ) -> torch.Tensor:
     """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the arguments.
 
@@ -380,6 +459,11 @@ def cake_clamped_swiglu_det(
         FP32 ``[R]`` route weight; ``None`` for an unweighted (shared) expert, which has no weight gradient.
     limit : float
         ``L``, a finite positive Python number (FP32 in the kernels).  Required; it gets no gradient.
+    locality : str, optional
+        ``"off"`` (the default) or ``"domain"``: the forward and backward steps with that ``locality``.  Autograd
+        allocates ``h`` and the gradients with ``torch.empty``, so on an R200 the forward runs its twin for inputs in
+        :func:`cake_clamped_swiglu_det_train_domain_empty` memory from the forward's ``anchor`` first rows per SM, and
+        the backward runs its ``"off"`` program (the backward has no twin).  The same bits.
 
     Returns
     -------
@@ -401,9 +485,167 @@ def cake_clamped_swiglu_det(
     gradients computed with ``create_graph=True`` raises ``RuntimeError``.
     """
 
+    if locality != "off":
+        return _autograd_locality(gate_up_or_gate, up, weight, limit, locality)
     if _graph_task() == -1 or _hooks(False) is None:
         return _apply(gate_up_or_gate, up, weight, limit)  # no recomputation to stop: the forward launches in place
     return _held(gate_up_or_gate, up, weight, limit)
+
+
+@cake_api
+def cake_clamped_swiglu_det_train_domain_empty(
+    shape: Sequence[int],
+    *,
+    dtype: torch.dtype = torch.bfloat16,
+    device: Optional[Union[torch.device, str, int]] = None,
+) -> torch.Tensor:
+    """An uninitialized BF16 tensor in memory whose chunks alternate between the two dies of an R200 (``sm_107a``):
+    an operand or output of a ``locality="domain"`` call.
+
+    Parameters
+    ----------
+    shape : sequence of int
+        ``(R, 2304)`` (a gate, an up, ``dh``, ``h`` or a gradient; 2 MB chunks) or ``(R, 4608)`` (a merged gate and
+        up or its gradient; 4 MB chunks), ``R >= 0``.  A chunk holds 455.1 rows of either width, row 0 at the start of
+        a chunk of die 0, so tensors of one ``R`` (and the same row slices of them) change die at the same rows.
+    dtype : torch.dtype, optional
+        ``torch.bfloat16`` only.
+    device : torch.device, str or int, optional
+        The CUDA device; the current one by default.
+
+    Returns
+    -------
+    torch.Tensor
+        A contiguous, uninitialized BF16 tensor of ``shape``.
+
+    Raises
+    ------
+    TypeError
+        A ``dtype`` that is not a ``torch.dtype``.
+    ValueError
+        Another dtype or shape; a device that is not CUDA.
+    torch.cuda.OutOfMemoryError
+        The device has no room (after torch's cached free memory is returned to the driver once), or, on its first
+        call, no room for the claim counters (2 MB in each die).
+    RuntimeError
+        A device other than ``sm_107a``; a CUDA graph capture on any device in this thread; a driver that reports
+        fewer than two locality domains; no cuda-python (``cuda-bindings`` 13.5 or later, the ``locality`` extra).
+
+    Notes
+    -----
+    The memory is mapped outside torch's caching allocator: the ``torch.cuda.memory_*`` counters do not count it, and
+    it cannot be shared with another process.  A device's first call probes its SM table once, maps the claim
+    counters of the twin, zeroes them and synchronizes once.  The tensor lives while any view of it lives; freeing
+    the last view synchronizes the device (during a CUDA graph capture the free waits for the next helper call).
+    """
+
+    return _backend().cake_clamped_swiglu_det_train_domain_empty(shape, dtype=dtype, device=device)
+
+
+@cake_api
+def cake_clamped_swiglu_det_train_domain_release(device: Optional[Union[torch.device, str, int]] = None) -> None:
+    """Free the memory of :func:`cake_clamped_swiglu_det_train_domain_empty` tensors of ``device`` whose last view is
+    gone but that still wait to be freed (the last view died while another call held the module's lock, or during a
+    CUDA graph capture).
+
+    Parameters
+    ----------
+    device : torch.device, str or int, optional
+        The CUDA device; the current one by default.
+
+    Raises
+    ------
+    ValueError
+        A device that is not CUDA.
+    RuntimeError
+        A CUDA graph capture on the device's current stream.
+    """
+
+    _backend().cake_clamped_swiglu_det_train_domain_release(device)
+
+
+@cake_api
+def cake_clamped_swiglu_det_train_forward_domain_plan(
+    gate_up_or_gate: torch.Tensor,
+    up: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
+    *,
+    limit: float,
+    out: Optional[torch.Tensor] = None,
+) -> dict[str, Any]:
+    """What ``cake_clamped_swiglu_det_train_forward(..., locality="domain")`` runs for these arguments, without a
+    launch, an allocation or a copy.
+
+    Parameters
+    ----------
+    gate_up_or_gate, up, weight, limit, out
+        As for :func:`cake_clamped_swiglu_det_train_forward`, checked as it checks them.
+
+    Returns
+    -------
+    dict
+        ``stage`` (``"fwd"``); ``route`` (``"domain"`` for the twin, else ``"plain"``); ``reason`` (``"placed"`` for
+        the twin, else why not: ``"arch"``, ``"size"``, ``"sm_table"``, ``"input_memory"``, ``"input_layout"``,
+        ``"overlap"``, ``"input_phase"``, ``"out_memory"``, ``"no_out"``, in the order they are checked, or
+        ``"empty"`` for ``R = 0``); ``class`` (``"homed"``: every BF16 operand in the rows of the first input,
+        ``"anchor"``: some not; None before the first input is placed); ``program`` (the record that runs, None for no
+        launch); ``first_slot``, ``first_die``, ``chunk_shift``, ``item_rows`` (the twin's, None on the plain route);
+        ``grid``; ``homed`` (per BF16 operand); ``outputs`` (``"caller"`` or ``"empty"`` per output).
+
+    Raises
+    ------
+    TypeError, ValueError, RuntimeError
+        As for :func:`cake_clamped_swiglu_det_train_forward`.
+    """
+
+    return _backend().cake_clamped_swiglu_det_train_forward_domain_plan(
+        gate_up_or_gate, up, weight, limit=limit, out=out
+    )
+
+
+@cake_api
+def cake_clamped_swiglu_det_train_backward_domain_plan(
+    grad_out: torch.Tensor,
+    gate_up_or_gate: torch.Tensor,
+    up: Optional[torch.Tensor] = None,
+    weight: Optional[torch.Tensor] = None,
+    *,
+    limit: float,
+    grad_gate_up_or_gate: Optional[torch.Tensor] = None,
+    grad_up: Optional[torch.Tensor] = None,
+    grad_weight: Optional[torch.Tensor] = None,
+) -> dict[str, Any]:
+    """What ``cake_clamped_swiglu_det_train_backward(..., locality="domain")`` runs for these arguments, without a
+    launch, an allocation or a copy.
+
+    Parameters
+    ----------
+    grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight
+        As for :func:`cake_clamped_swiglu_det_train_backward`, checked as it checks them.
+
+    Returns
+    -------
+    dict
+        The keys of :func:`cake_clamped_swiglu_det_train_forward_domain_plan`, with ``stage`` ``"bwd"`` for a
+        weighted call and ``"bwd_unweighted"`` for an unweighted one.  The backward has no twin: ``route`` is
+        ``"plain"`` and ``reason`` ``"arch"`` (``"empty"`` for ``R = 0``), with the ``"off"`` program and its grid.
+
+    Raises
+    ------
+    TypeError, ValueError, RuntimeError
+        As for :func:`cake_clamped_swiglu_det_train_backward`.
+    """
+
+    return _backend().cake_clamped_swiglu_det_train_backward_domain_plan(
+        grad_out,
+        gate_up_or_gate,
+        up,
+        weight,
+        limit=limit,
+        grad_gate_up_or_gate=grad_gate_up_or_gate,
+        grad_up=grad_up,
+        grad_weight=grad_weight,
+    )
 
 
 def __getattr__(name: str) -> Any:
@@ -425,6 +667,10 @@ __all__ = [
     "CakeClampedSwiGLUDetFunction",  # noqa: F822 - resolved by __getattr__
     "cake_clamped_swiglu_det",
     "cake_clamped_swiglu_det_train_backward",
+    "cake_clamped_swiglu_det_train_backward_domain_plan",
+    "cake_clamped_swiglu_det_train_domain_empty",
+    "cake_clamped_swiglu_det_train_domain_release",
     "cake_clamped_swiglu_det_train_forward",
+    "cake_clamped_swiglu_det_train_forward_domain_plan",
     "is_cake_clamped_swiglu_det_train_supported",
 ]

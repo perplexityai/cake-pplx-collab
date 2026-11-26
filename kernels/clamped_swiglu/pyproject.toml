@@ -14,6 +14,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The locality="domain" path on R200 (sm_107a): cuda-python's driver bindings with the locality-domain names.
+locality = ["cuda-bindings>=13.5"]
 test = ["pytest", "numpy"]
 
 [tool.setuptools.dynamic]

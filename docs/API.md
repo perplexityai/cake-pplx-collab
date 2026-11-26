@@ -1919,9 +1919,13 @@ This family has a det module only, with no nondet or KCP module: every output is
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_clamped_swiglu_det` | `(gate_up_or_gate, up=None, weight=None, *, limit)` | As above | Autograd. Returns contiguous BF16 `h [R, 2304]`, the down projection's input. A merged input's gradient is one `[R, 4608]` tensor; `weight=None` has no weight gradient; `limit` gets none. Saves only its inputs. In a non-reentrant checkpoint's recomputation, launches the forward after autograd saved them (see Caveats, checkpointing). |
-| `cake_clamped_swiglu_det_train_forward` | `(gate_up_or_gate, up=None, weight=None, *, limit, out=None)` | `out` optional preallocated BF16 `[R, 2304]` (the layout rules above, rows not overlapping) | Returns `h` (`out` when given). Not autograd. `R == 0` returns an empty `h` without a launch. |
-| `cake_clamped_swiglu_det_train_backward` | `(grad_out, gate_up_or_gate, up=None, weight=None, *, limit, grad_gate_up_or_gate=None, grad_up=None, grad_weight=None)` | `grad_out` BF16 `[R, 2304]`; optional preallocated outputs: `grad_gate_up_or_gate` (`d_gate [R, 2304]`, or the merged `[R, 4608]` gradient), `grad_up` (two-tensor form only), `grad_weight` contiguous FP32 `[R]` (needs `weight`) | Returns `(d_gate_up, None, d_weight)` for a merged input or `(d_gate, d_up, d_weight)`; `d_weight` is None without `weight`. Not autograd. Unfit output buffers raise `ValueError` (never copied). |
+| `cake_clamped_swiglu_det` | `(gate_up_or_gate, up=None, weight=None, *, limit, locality="off")` | As above; `locality` `"off"` or `"domain"` (see "Locality domains" below) | Autograd. Returns contiguous BF16 `h [R, 2304]`, the down projection's input. A merged input's gradient is one `[R, 4608]` tensor; `weight=None` has no weight gradient; `limit` gets none. Saves only its inputs. In a non-reentrant checkpoint's recomputation, launches the forward after autograd saved them (see Caveats, checkpointing). |
+| `cake_clamped_swiglu_det_train_forward` | `(gate_up_or_gate, up=None, weight=None, *, limit, out=None, locality="off")` | `out` optional preallocated BF16 `[R, 2304]` (the layout rules above, rows not overlapping) | Returns `h` (`out` when given). Not autograd. `R == 0` returns an empty `h` without a launch. `locality` is checked first: a non-string raises `TypeError` and another string `ValueError`. |
+| `cake_clamped_swiglu_det_train_backward` | `(grad_out, gate_up_or_gate, up=None, weight=None, *, limit, grad_gate_up_or_gate=None, grad_up=None, grad_weight=None, locality="off")` | `grad_out` BF16 `[R, 2304]`; optional preallocated outputs: `grad_gate_up_or_gate` (`d_gate [R, 2304]`, or the merged `[R, 4608]` gradient), `grad_up` (two-tensor form only), `grad_weight` contiguous FP32 `[R]` (needs `weight`) | Returns `(d_gate_up, None, d_weight)` for a merged input or `(d_gate, d_up, d_weight)`; `d_weight` is None without `weight`. Not autograd. Unfit output buffers raise `ValueError` (never copied). `locality` as for the forward. |
+| `cake_clamped_swiglu_det_train_domain_empty` | `(shape, *, dtype=torch.bfloat16, device=None)` | `shape` `(R, 2304)` or `(R, 4608)`, `R >= 0`; BF16 only | Returns an uninitialized contiguous BF16 tensor in memory whose chunks alternate between the two dies of an R200 (2 MB chunks for `(R, 2304)`, 4 MB for `(R, 4608)`). `RuntimeError` on another architecture, during a CUDA graph capture on any device in this thread, with fewer than two locality domains or without cuda-python; `torch.cuda.OutOfMemoryError` when the device has no room. |
+| `cake_clamped_swiglu_det_train_domain_release` | `(device=None)` | A CUDA device (the current one by default) | Frees the helper memory of the device whose last view is gone but whose free was deferred (see Freeing below). `RuntimeError` during a CUDA graph capture on the device's current stream. |
+| `cake_clamped_swiglu_det_train_forward_domain_plan` | `(gate_up_or_gate, up=None, weight=None, *, limit, out=None)` | The forward's arguments, checked as the forward checks them | Returns what the forward runs with `locality="domain"`, without a launch, an allocation or a copy: `{"stage", "route", "reason", "class", "program", "first_slot", "first_die", "chunk_shift", "item_rows", "grid", "homed", "outputs"}`. |
+| `cake_clamped_swiglu_det_train_backward_domain_plan` | `(grad_out, gate_up_or_gate, up=None, weight=None, *, limit, grad_gate_up_or_gate=None, grad_up=None, grad_weight=None)` | The backward's arguments, checked as the backward checks them | The backward's plan: the forward plan's keys, `stage` `"bwd"` (weighted) or `"bwd_unweighted"`. The backward has no twin: `route` `"plain"`, `reason` `"arch"`. |
 
 Other public names:
 
@@ -1929,7 +1933,40 @@ Other public names:
 - `CakeClampedSwiGLUDetFunction`: the autograd class, `apply(gate_up_or_gate, up, weight, limit)`. A direct `apply` launches the forward inside the function's `forward`, so a checkpoint always recomputes it.
 - `is_cake_clamped_swiglu_det_train_supported(device)`.
 
-**Options and environment.** `limit` and the optional output buffers are the only keywords. The facade reads no environment variable.
+**Options and environment.** `limit`, `locality` and the optional output buffers are the only keywords. The facade reads no environment variable.
+
+**Locality domains (R200).** An R200 (`sm_107a`) has two dies, each with its own SMs and its own memory. Default memory alternates between the dies every 4 KB, so about half of the bytes each SM reads come from the other die. `cake_clamped_swiglu_det_train_domain_empty` allocates a BF16 `[R, 2304]` tensor in 2 MB chunks, or a merged `[R, 4608]` one in 4 MB chunks, that alternate between the dies (chunk `k` in die `k & 1`). A chunk holds 455.1 rows of either width, and row 0 of every such tensor starts a die-0 chunk, so tensors of one row count (and the same row slices of them) change die at the same rows. `locality="off"` is the default and runs the programs above. With `locality="domain"`, the forward runs its locality-domain twin, whose CTAs claim the rows of their own die first, when all of these hold:
+
+- the device is `sm_107a`;
+- the device has an SM table: its first `domain_empty` call probes each SM's die once, and a failed probe leaves none;
+- the first input (the merged input, or the gate) lies in one allocation of the helper, at a row start of its chunks: any row slice of a helper tensor;
+- no output buffer overlaps an input;
+- `R` reaches the twin's first row count for the call's class, at most `2**27` rows.
+
+The call's class: `"homed"` when every BF16 operand (the up and `out`) lies in the helper's memory in the rows of the first input (tensors of the same row count and the same row slice), `"anchor"` when some operand does not. An `h` the call allocates (`out=None`, and the autograd entry's) is a `torch.empty` tensor in default memory, so its call is of class `"anchor"`. Each class has its own first row count per SM, from measurements (`cake_jit.DOMAIN_FIRST_ROWS_PER_SM`). Every other call runs the `"off"` program and gives the same bits; it never raises for its placement. The twin stores the bits of the `"off"` programs for every input: its CTAs claim rows with 32-bit atomic counters, which choose only which CTA computes a row, never what it computes.
+
+The backward, weighted or unweighted, has no twin: with `locality="domain"` it runs the `"off"` program of its row count, on whatever memory its operands are in, and its plan's `reason` is `"arch"`. The forward plan's `reason` says why (checked in this order; `"empty"` for `R = 0`):
+
+| `reason` | The call runs the `"off"` program because | act_qdq's name |
+|---|---|---|
+| `"placed"` | (the twin runs) | `"placed"` |
+| `"arch"` | the device is not `sm_107a` (and every backward call: no backward stage has a twin) | `"arch"` |
+| `"size"` | `R` is below the twin's first row count (the lower class's, or once the class is known its own), or above `2**27` | `"size"` |
+| `"sm_table"` | the device has no SM table | none |
+| `"input_memory"` | the first input is not in the helper's memory | `"x_memory"` |
+| `"input_layout"` | the first input does not start a row of its chunks, or its row stride is not its allocation's | `"chunk_offset"` |
+| `"overlap"` | an output buffer overlaps an input | `"in_place"` (nearest) |
+| `"input_phase"` | class `"anchor"` without a first row count, and an input (the up) is not in the first input's rows | `"die_parity"` |
+| `"out_memory"` | the same, for an output buffer | `"out_memory"` |
+| `"no_out"` | the same, for an output the call allocates | `"no_out"` |
+
+The placement is read from the package's registry of the helper's allocations, without a driver call. `weight` may lie in any memory. A call that falls back runs the `"off"` program on whatever memory its operands are in.
+
+- **State.** The helper's allocations, the SM table of each device it ran on, and the claim counters: each die's counter lies in that die's memory. The helper's first call on a device maps one 2 MB chunk in each die for them (4 MB, kept for the process), zeroes them and synchronizes once. A claim workspace is 128 bytes in each die's chunk, handed out once: one per (device, stream) for eager calls (per (device, thread) on the per-thread default stream, `cudaStreamPerThread`), 15,360 per device, shared by the twin launches of that stream, and the calls of one CUDA graph capture on one capture stream share one of 1,024 others. Every launch leaves its counters zero, so a workspace needs no fill. Once the eager workspaces are taken, a call on a new stream makes a zeroed workspace in default memory; once the graph workspaces are taken, each captured call takes one from the graph's pool, which the graph zeroes at every replay. Either keeps both counters in default memory, with the same bits. An eager launch that raises drops its workspace for good. After the first call on a stream, a call does not synchronize the host.
+- **Capture.** Allocate the buffers before the capture, and make one eager `"domain"` call per program the capture uses. The helper refuses to allocate during a CUDA graph capture on any device in this thread. It reads torch's current stream of each device: a capture begun with `cudaStreamBeginCapture` on a stream that is not torch's current stream is not detected. The replays of one instantiated graph never overlap, but a capture instantiated more than once, or added to other graphs as a child graph, shares its claim workspace between those copies: run them one at a time.
+- **Freeing.** A buffer lives while any view of it lives. Freeing the last view synchronizes the device. A buffer freed during a CUDA graph capture on any device in this thread (or while another thread allocates) is freed by the next helper call or by `cake_clamped_swiglu_det_train_domain_release`. Keep the buffers alive while a captured graph that uses them can replay. Do not allocate these buffers, or free the last view of one, in one thread while another thread captures a CUDA graph: the driver calls would end that capture. The `torch.cuda.memory_*` counters do not count this memory or the claim counters, and it cannot be shared with another process.
+- **Requirements.** The helper needs cuda-python with the locality-domain names (`cuda-bindings` 13.5 or later; the `locality` extra of `cake-pplx-clamped-swiglu`), a driver that reports the two locality domains, the `sm_107a` libraries (CUDA 13.5) and, for the SM table, a CUDA 13.5 toolkit and driver (the probe is built by the package's JIT at the device's first helper call). The `"off"` route and the `"domain"` route on `sm_100a` and `sm_103a` do not import it.
+- **Costs.** Measured on R200s of 212 SMs, where the first row counts are 23,744 rows (`"homed"`) and 27,136 (`"anchor"`). The twin's route, claims and launch add 2.0 to 3.6 us of host time to an autograd step (forward and backward) and 9.0 to 11.3 us to a checkpointed one (two forwards and a backward), so an eager step whose host time exceeds its device time can take longer than with `"off"`: at 27,136 rows an autograd step took 2.1 to 4.5 % longer, and a checkpointed step 4.8 to 6.6 % longer at 27,136 and 32,768 rows and up to 3.5 % longer at 49,152 rows with two input tensors (none was slower at 49,152 rows with a merged input, or at 65,536, 98,304 and 196,608 rows), while the device time of every measured step from 27,136 rows on was 0.5 to 9.5 % shorter. In a forward between the gate/up and the down projections (model width 2048) on inputs with a gate of -88 in each third of every row, the whole chain took 0.4 to 1.7 % longer than with `"off"` on the same memory at 23,744 and 27,136 rows on GPUs whose dies have 106 SMs each, and 0.3 to 0.9 % longer at 98,304 rows than with `"off"` on default memory (the helper's memory makes that kernel 3 to 5 % slower there); on other inputs the chain at 98,304 rows took up to 1 % less time. Below the first row counts a `"domain"` call runs the `"off"` program with up to about 0.2 us more host time per forward call and about 0.5 to 1 us per checkpointed autograd step.
 
 **Cross-family.** None. The gate/up projections and the down projection around it are moe_grouped_gemm's: the merged `[R, 4608]` form takes the gate/up projection output as is, and `h` is the down projection's input.
 
@@ -1957,6 +1994,25 @@ def swiglu_down(gate_up, weight, w_down):
 
 y = torch.utils.checkpoint.checkpoint(swiglu_down, gate_up, weight, w_down, use_reentrant=False)
 y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down projection's weight gradient
+
+# R200 (sm_107a): operands and outputs in memory whose chunks alternate between the dies,
+# allocated once, before any CUDA graph capture.
+if torch.cuda.get_device_capability() == (10, 7):
+    from cake_pplx.cake_clamped_swiglu_det_train import (
+        cake_clamped_swiglu_det_train_backward,
+        cake_clamped_swiglu_det_train_domain_empty,
+        cake_clamped_swiglu_det_train_forward,
+        cake_clamped_swiglu_det_train_forward_domain_plan,
+    )
+
+    x = cake_clamped_swiglu_det_train_domain_empty((R, 2 * I))
+    x.copy_(gate_up.detach())
+    h = cake_clamped_swiglu_det_train_domain_empty((R, I))
+    w = weight.detach()
+    cake_clamped_swiglu_det_train_forward(x, None, w, limit=10.0, out=h, locality="domain")
+    print(cake_clamped_swiglu_det_train_forward_domain_plan(x, None, w, limit=10.0, out=h))
+    # the backward has no twin: "domain" runs the "off" program (plan reason "arch")
+    dx, _, dw = cake_clamped_swiglu_det_train_backward(torch.randn_like(h), x, None, w, limit=10.0, locality="domain")
 ```
 
 **Caveats.**
@@ -1974,7 +2030,8 @@ y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down 
   | Any region with `use_reentrant=True`, `early_stop=False` (or `set_checkpoint_early_stop(False)`), or a direct `CakeClampedSwiGLUDetFunction.apply` | As above | One, also when its output is dropped |
 
   A call that Dynamo or `torch.jit.trace` records launches inside `forward`; a checkpoint's recomputation runs with Dynamo disabled. Not tested under `torch.compile`.
-- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates no weight gradient. An unweighted forward passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
+- Workspace: none with `locality="off"` (for `"domain"`, see State above). Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates no weight gradient. An unweighted forward passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
+- `locality="domain"` changes only the forward, and only where the caller places the inputs in the helper's memory. `h` lies in default memory unless the caller passes `out`. The backward runs its `"off"` program with either `locality`.
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.

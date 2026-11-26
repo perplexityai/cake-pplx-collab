@@ -81,7 +81,7 @@ Import each module by its full name: the `cake_pplx` namespace does not re-expor
 | `torch` | Required by every family. |
 | `apache-tvm-ffi` | `>=0.1.11,<0.2`, required by every family. |
 | `ninja` | moe_grouped_gemm only. |
-| `cuda-python` | causal_conv1d, dense_gemm, rmsnorm_silu_gate, and act_qdq's `locality="domain"` path (`cuda-bindings` 13.5 or later: the act_qdq `locality` extra). |
+| `cuda-python` | causal_conv1d, dense_gemm, rmsnorm_silu_gate, and the `locality="domain"` paths of act_qdq and clamped_swiglu (`cuda-bindings` 13.5 or later: the `locality` extra of each). |
 | `torch.distributed` with symmetric memory | mok only: an initialized process group whose ranks share one NVLink domain with multicast. |
 
 ## JIT build and cache
