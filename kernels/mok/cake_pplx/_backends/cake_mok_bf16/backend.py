@@ -117,6 +117,12 @@ def _validate_inputs(config, workspace, schedule, x, router_weights, grad_output
         raise ValueError("schedule capacity does not match the workspace")
 
 
+def _intermediate(gate):
+    """Routed intermediate width of a routed gate weight: ``[E, I, H]`` BF16,
+    or an MXFP8 tuple whose first entry is the ``[E, I, H]`` data."""
+    return (gate[0] if isinstance(gate, tuple) else gate).shape[1]
+
+
 def _weight_key(weight):
     """Validation-memo identity of one weight: storage pointer, shape, strides,
     dtype and device (MXFP8 tuples element-wise; ``None`` for an absent
@@ -896,6 +902,26 @@ class MoKFunctional:
                     f"{name} must be None or a (forward, backward) pair of positive, "
                     "even communication-SM counts that leave compute SMs"
                 )
+        rows = config.shape_comm_sms
+        if rows is not None and (
+            type(rows) is not tuple
+            or any(
+                type(row) is not tuple
+                or len(row) != 6
+                or row[0] not in ("bf16", "mxfp8")
+                or any(type(width) is not int or width <= 0 for width in row[1:4])
+                or any(
+                    type(count) is not int or count <= 0 or count % 2 or count >= sms
+                    for count in row[4:]
+                )
+                for row in rows
+            )
+        ):
+            raise ValueError(
+                "shape_comm_sms must be None or a tuple of (precision, hidden, "
+                "intermediate, topk, forward, backward) rows with positive, even "
+                "communication-SM counts that leave compute SMs"
+            )
         if config.imbalance_comm_sms is not None:
             hot = config.imbalance_comm_sms
             if (
@@ -1154,10 +1180,14 @@ class MoKFunctional:
                 )
         return choice
 
-    def _comm_split(self, config, workspace, mxfp8=False):
+    def _comm_split(self, config, workspace, mxfp8=False, intermediate=None):
         """(forward, backward) communication-SM counts for the next launch.
 
-        The fixed split is the row of the launch's routed precision
+        The fixed split is the row of ``config.shape_comm_sms`` for the
+        launch's routed precision and shape (the workspace's hidden width and
+        top-k, the routed intermediate width ``intermediate``; the forward and
+        backward launches pass it, the recompute launch does not) when there
+        is one, else the row of the launch's routed precision
         (``config.mxfp8_comm_sms`` for MXFP8 routed weights,
         ``config.bf16_comm_sms`` for BF16), else ``fwd_num_comm_sms`` /
         ``bwd_num_comm_sms``; the imbalance split replaces it while the load
@@ -1169,6 +1199,17 @@ class MoKFunctional:
             base = tuple(routed)
         else:
             base = (config.fwd_num_comm_sms, config.bwd_num_comm_sms)
+        if config.shape_comm_sms and intermediate is not None:
+            key = (
+                "mxfp8" if mxfp8 else "bf16",
+                workspace.hidden_size,
+                intermediate,
+                workspace.topk,
+            )
+            for row in config.shape_comm_sms:
+                if tuple(row[:4]) == key:
+                    base = tuple(row[4:])
+                    break
         if config.imbalance_comm_sms is None:
             return base
         capturing = torch.cuda.is_current_stream_capturing()
@@ -1452,8 +1493,8 @@ class MoKFunctional:
         else:
             # A launcher of its own, so its plans are keyed apart.
             forward_kernel = self._context_free_forward_kernel(swiglu_limit)
-        fwd_comm_sms, _ = self._comm_split(config, workspace)
         intermediate = routed_gate_weights.shape[1]
+        fwd_comm_sms, _ = self._comm_split(config, workspace, False, intermediate)
         experts = schedule.tokens_per_expert.numel()
         before_down = self.weight_before_down
         rich_comm_sms, rich_threshold, owner_routes = self._source_split(
@@ -1627,7 +1668,9 @@ class MoKFunctional:
             forward_kernel, _ = self._kernels(swiglu_limit, mxfp8)
         else:
             forward_kernel = self._context_free_forward_kernel(swiglu_limit)
-        fwd_comm_sms, _ = self._comm_split(config, workspace, mxfp8)
+        fwd_comm_sms, _ = self._comm_split(
+            config, workspace, mxfp8, _intermediate(routed_gate_weights)
+        )
         program = {"multimacro": self._multimacro(config, workspace)} if mxfp8 else {}
         program.update(situ or {})
         if self.weight_before_down:
@@ -1750,6 +1793,7 @@ class MoKFunctional:
                 shared_rows, mxfp8, router_weights, situ,
             )  # fmt: skip
         kernel = self._recompute_kernel(swiglu_limit, False)
+        # The recompute launch keeps the routed-precision row: no shape row.
         fwd_comm_sms, _ = self._comm_split(config, workspace)
         intermediate = routed_gate_weights.shape[1]
         experts = schedule.tokens_per_expert.numel()
@@ -1989,11 +2033,11 @@ class MoKFunctional:
             )  # fmt: skip
         topk = workspace.topk
         _, backward_kernel = self._kernels(swiglu_limit, False)
-        _, bwd_comm_sms = self._comm_split(config, workspace)
+        intermediate = routed_gate_weights.shape[1]
+        _, bwd_comm_sms = self._comm_split(config, workspace, False, intermediate)
         backward_kernel.check_accumulators(
             (*shared, *weights[3:]), weight_grad_accumulators
         )
-        intermediate = routed_gate_weights.shape[1]
         experts = schedule.tokens_per_expert.numel()
 
         def build():
@@ -2238,7 +2282,9 @@ class MoKFunctional:
                 )
         self._barrier(workspace)
         _, backward_kernel = self._kernels(swiglu_limit, mxfp8)
-        _, bwd_comm_sms = self._comm_split(config, workspace, mxfp8)
+        _, bwd_comm_sms = self._comm_split(
+            config, workspace, mxfp8, _intermediate(routed_gate_weights)
+        )
         program = (
             {} if shared_operands is None else {"shared_operands": shared_operands}
         )

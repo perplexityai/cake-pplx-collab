@@ -718,7 +718,14 @@ skipped by every store.
      With key-range passes the backward runs per token chunk and pass:
      `bwd_compact` over the chunk's tokens (token space), then the pass build
      over the chunk's `2 n` items, ascending from item `2 * token_base`, so the
-     two windows of a token read its one compaction row.
+     two windows of a token read its one compaction row.  From 0.10.0,
+     `bwd_main_hw` issues each dK/dV^T product's K16 MMA instruction (16
+     heads of the window) only when one of its heads is below `H`: at
+     `H = 96` a `W1` item issues 2 of the 4 instructions of each of the 8
+     dK/dV^T products per key tile.  The skipped instructions would only
+     add zeros (`P`, `dS`, `Q` and `dO` are 0 past `H`).  `S` / `dP`, `dQ`
+     and the rope products are unchanged, so `dq` keeps its bits.
+     `bwd_main_natural_hw` and the pass builds issue every instruction.
   4. One `bwd_cast` at the end (none on a direct binding).
 * Key-pass chunks.  Each item has its own FP32 `dq_partial` row (147,456 B),
   so the token chunk is planned at two items per token: the largest multiple

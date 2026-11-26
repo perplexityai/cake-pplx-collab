@@ -53,12 +53,14 @@ RE_EXPORTS = (
     "MXFP8_WEIGHT_BLOCKS",
     "ROUTER_WEIGHT_GRADIENTS",
     "ROUTER_WEIGHT_POSITIONS",
+    "SHAPE_COMM_SMS",
     "SHARED_EXPERT_MODES",
     "SOURCE_SPLIT_COMM_SMS",
     "SOURCE_SPLIT_THRESHOLD",
     "resolve_comm_sms",
     "resolve_imbalance_comm_sms",
     "resolve_imbalance_threshold",
+    "resolve_shape_comm_sms",
     "resolve_source_split_comm_sms",
 )
 

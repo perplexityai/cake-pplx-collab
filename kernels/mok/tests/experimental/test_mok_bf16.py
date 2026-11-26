@@ -1873,6 +1873,142 @@ def test_comm_split_follows_the_routed_precision():
     assert split(None, fixed, None, True) == (20, 24)
 
 
+@pytest.mark.parametrize(
+    "capability,sm_count,precision,ep_size,expected",
+    [
+        ((10, 3), 152, "bf16", 8, {(4096, 1024, 10): (56, 48)}),  # GB300 EP8
+        ((10, 3), 148, "bf16", 8, None),  # B300 keeps its COMM_SMS row
+        ((10, 3), 152, "mxfp8", 8, None),  # no MXFP8 shape row
+        ((10, 3), 148, "mxfp8", 8, None),
+        ((10, 3), 152, "bf16", 4, None),  # other group sizes keep COMM_SMS
+        ((10, 3), 152, "bf16", 16, None),
+        ((10, 3), 148, "bf16", 4, None),
+        ((10, 3), 160, "bf16", 8, None),  # other SM count
+        ((10, 0), 148, "bf16", 8, None),  # B200 keeps the factory split
+        ((10, 0), 152, "bf16", 8, None),  # GB200 keeps the factory split
+        ((10, 7), 212, "bf16", 8, None),
+        ((10, 7), 212, "mxfp8", 8, None),
+    ],
+)
+def test_shape_comm_sms_auto_follows_the_device_and_group(
+    monkeypatch, capability, sm_count, precision, ep_size, expected
+):
+    """Host-only: the shape rows of ``"auto"`` resolve through the per-device,
+    per-precision, per-group-size table; everywhere else there is none
+    (``None``) and every launch keeps the COMM_SMS row or the factory split."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda device=None: capability
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    assert api.resolve_shape_comm_sms(precision, ep_size) == expected
+
+
+def test_shape_comm_sms_rows_are_the_measured_table(monkeypatch):
+    """Host-only: the shape rows are the shipped table (a change here is a
+    shipping change), the resolver returns a new dict and rejects malformed
+    arguments."""
+    from types import SimpleNamespace
+
+    assert api.SHAPE_COMM_SMS == {
+        (10, 3): {152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}}},
+    }
+    with pytest.raises(ValueError, match="precision must be one of"):
+        api.resolve_shape_comm_sms("fp8", 8)
+    with pytest.raises(ValueError, match="ep_size must be a positive"):
+        api.resolve_shape_comm_sms("bf16", 0)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (10, 3))
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=152),
+    )
+    rows = api.resolve_shape_comm_sms("bf16", 8)
+    rows[(4096, 1024, 10)] = (2, 2)
+    assert api.resolve_shape_comm_sms("bf16", 8) == {(4096, 1024, 10): (56, 48)}
+
+
+@pytest.mark.parametrize(
+    "capability,sm_count,ep_size,expected",
+    [
+        ((10, 3), 152, 8, (("bf16", 4096, 1024, 10, 56, 48),)),  # GB300 EP8
+        ((10, 3), 148, 8, None),  # B300
+        ((10, 3), 152, 4, None),
+        ((10, 0), 148, 8, None),  # B200
+        ((10, 0), 152, 8, None),  # GB200
+        ((10, 7), 212, 8, None),
+    ],
+)
+def test_comm_sms_auto_sets_the_shape_rows(
+    monkeypatch, capability, sm_count, ep_size, expected
+):
+    """Host-only: ``"auto"`` puts the device's shape rows of every routed
+    precision into ``MoKConfig.shape_comm_sms`` (``None`` without a row) and
+    keeps the per-precision rows; integer counts leave it ``None``."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda device=None: capability
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: ep_size)
+    monkeypatch.setattr(
+        backend, "create_source_workspace", lambda config, group, **kwargs: "workspace"
+    )
+    kwargs = dict(
+        group=None, device=None, num_local_tokens=512, hidden_size=4096, topk=10
+    )
+    for precision in ("bf16", "mxfp8"):
+        config, _ = api.create_mok_bf16_workspace(precision=precision, **kwargs)
+        assert config.shape_comm_sms == expected
+        assert config.bf16_comm_sms == (
+            api.resolve_comm_sms("bf16", ep_size) or (40, 40)
+        )
+    config, _ = api.create_mok_bf16_workspace(
+        fwd_num_comm_sms=24, bwd_num_comm_sms=28, **kwargs
+    )
+    assert config.shape_comm_sms is None
+
+
+def test_comm_split_follows_the_launch_shape():
+    """Host-only: without an imbalance split, a launch whose routed precision,
+    workspace hidden width and top-k and routed intermediate width match a row
+    of ``shape_comm_sms`` takes that row; any other launch (another width,
+    top-k or precision, or no width given) keeps the routed-precision row."""
+    from types import SimpleNamespace
+
+    split = backend.MoKFunctional._comm_split
+    assert MoKConfig().shape_comm_sms is None
+    rows = MoKConfig(
+        fwd_num_comm_sms=20,
+        bwd_num_comm_sms=24,
+        bf16_comm_sms=(20, 24),
+        mxfp8_comm_sms=(44, 36),
+        shape_comm_sms=(("bf16", 4096, 1024, 10, 56, 48),),
+    )
+    ws = SimpleNamespace(hidden_size=4096, topk=10)
+    assert split(None, rows, ws, False, 1024) == (56, 48)
+    assert split(None, rows, ws, False, 2048) == (20, 24)
+    assert split(None, rows, ws, False) == (20, 24)
+    assert split(None, rows, ws, True, 1024) == (44, 36)
+    assert split(None, rows, SimpleNamespace(hidden_size=4096, topk=8), False, 1024) == (20, 24)
+    assert split(None, rows, SimpleNamespace(hidden_size=6144, topk=10), False, 1024) == (20, 24)
+    fixed = MoKConfig(fwd_num_comm_sms=40, bwd_num_comm_sms=40)
+    assert split(None, fixed, ws, False, 1024) == (40, 40)
+
+
 def test_routed_precision_splits_are_validated():
     """``bf16_comm_sms`` / ``mxfp8_comm_sms`` must each be ``None`` or a
     (forward, backward) tuple of positive, even counts that leave compute SMs;
@@ -1892,6 +2028,13 @@ def test_routed_precision_splits_are_validated():
         ("mxfp8_comm_sms", (15, 40)),
         ("mxfp8_comm_sms", (40, sms)),
         ("mxfp8_comm_sms", (40, 0)),
+        ("shape_comm_sms", [("bf16", 4096, 1024, 10, 56, 48)]),
+        ("shape_comm_sms", (["bf16", 4096, 1024, 10, 56, 48],)),
+        ("shape_comm_sms", (("bf16", 4096, 1024, 10, 56),)),
+        ("shape_comm_sms", (("fp8", 4096, 1024, 10, 56, 48),)),
+        ("shape_comm_sms", (("bf16", 4096, 0, 10, 56, 48),)),
+        ("shape_comm_sms", (("bf16", 4096, 1024, 10, 55, 48),)),
+        ("shape_comm_sms", (("bf16", 4096, 1024, 10, 56, sms),)),
     ):
         config = MoKConfig(fwd_num_comm_sms=8, bwd_num_comm_sms=8, **{name: bad})
         with pytest.raises(ValueError, match=name):
@@ -2764,10 +2907,10 @@ def test_mode_values_and_mode_types_are_refused():
 
 def test_situ_parameters_are_checked():
     """Host only: the per-call SiTU-GLU scalars are finite positive Python numbers whose FP32 values are positive and
-    give finite FP32 kernel constants ``2.88539 / beta``, ``2.88539 / lb`` and ``beta lb``: ``TypeError`` for a
-    ``bool``, a string or a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value, a value past the
-    FP32 range or rounding to 0 there, and a pair whose constants are past the FP32 range.  The check returns the FP32
-    values."""
+    give finite FP32 kernel constants ``2.88539 / beta`` and ``2.88539 / lb`` and a finite FP32 ``beta lb`` (above about
+    ``2^129`` the kernels' ``kk``, about ``8.33 / (beta lb)``, is subnormal): ``TypeError`` for a ``bool``, a string or
+    a tensor, ``ValueError`` for zero, a negative, an infinite or a NaN value, a value past the FP32 range or rounding
+    to 0 there, and a pair whose constants or product are past the FP32 range.  The check returns the FP32 values."""
     assert kernels.check_situ_parameters(4.0, 25.0) == (4.0, 25.0)
     assert kernels.check_situ_parameters(4, 25) == (4.0, 25.0)
     assert kernels.check_situ_parameters(0.1, 3.0) == (
@@ -2795,6 +2938,28 @@ def test_situ_parameters_are_checked():
     ):
         with pytest.raises(ValueError, match=f"{constant} is past the FP32 range"):
             kernels.check_situ_parameters(beta, lb)
+
+
+def test_situ_parameters_refuse_a_product_under_the_bound():
+    """Host only: ``situ_beta * situ_lb`` of the FP32 values is at least ``2^-119`` (``SITU_BETA_LB_MIN``; under about
+    ``2^-119.94`` the kernels' hidden value of tiny gates and ups would be 0).  A product of exactly ``2^-119`` passes,
+    also from a value that FP32 rounds up to it; one FP32 step down in either scalar, and ``1e-20`` with ``1e-17``,
+    raise ``ValueError``."""
+    assert kernels.SITU_BETA_LB_MIN == 2.0**-119
+    under = "situ_beta \\* situ_lb is under 2\\^-119"
+    # One FP32 ulp under a power of two (exact in FP32).
+    below = 1.0 - 2.0**-24
+    for beta, lb in ((2.0**-60, 2.0**-59), (4.0, 2.0**-121), (2.0**-121, 4.0)):
+        assert kernels.check_situ_parameters(beta, lb) == (beta, lb)
+        with pytest.raises(ValueError, match=under):
+            kernels.check_situ_parameters(beta * below, lb)
+        with pytest.raises(ValueError, match=under):
+            kernels.check_situ_parameters(beta, lb * below)
+    # Rounds up to 2^-121 in FP32.
+    rounds_up = 2.0**-121 * (1.0 - 2.0**-30)
+    assert kernels.check_situ_parameters(4.0, rounds_up) == (4.0, 2.0**-121)
+    with pytest.raises(ValueError, match=under):
+        kernels.check_situ_parameters(1e-20, 1e-17)
 
 
 #: The 896-expert top-16 group (``MODE_GROUPS["situ_top16"]``): SiTU-GLU routed experts without a shared expert.

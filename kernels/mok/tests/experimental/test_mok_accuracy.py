@@ -1261,6 +1261,23 @@ SITU_DATA = {
     "zero_gate": ((2.0, None), (2.0, None)),
     "zero_up": ((2.0, None), (2.0, None)),
 }
+#: The tiny SiTU-GLU data kinds: per kind the fraction of tokens whose gate values are tiny and the fraction whose up
+#: values are tiny.  ``x`` is ``randn * 0.125`` with a gate half and an up half of the features: the routed gate
+#: weights read only the gate half and the up weights only the up half (``randn * spread / 0.125 / sqrt(hidden / 2)``),
+#: so a factor on one half of a token's features scales that token's gate or up values alone.  A tiny gate is about
+#: ``beta 2^U`` and a tiny up about ``lb 2^U``, with ``U`` uniform on [-34, -14) per token (independent for gates and
+#: ups): ``|gate| / beta`` and ``|up| / lb`` from about ``2^-14`` down to far below ``2^-24``, the spacing of the FP32
+#: values just below 1.  Every other gate and up value has spread 2.  ``tiny_gate``: every token's gates; ``tiny_up``:
+#: every token's ups; ``tiny_both``: both; ``mixed``: a random quarter of the tokens' gates and an independent
+#: quarter's ups.
+SITU_TINY = {
+    "tiny_gate": (1.0, 0.0),
+    "tiny_up": (0.0, 1.0),
+    "tiny_both": (1.0, 1.0),
+    "mixed": (0.25, 0.25),
+}
+#: ``U`` of a tiny value: uniform on ``[SITU_TINY_LOG2[0], SITU_TINY_LOG2[1])``.
+SITU_TINY_LOG2 = (-34.0, -14.0)
 
 
 def _require_situ_group():
@@ -1295,6 +1312,37 @@ def _situ_weights(kind, experts, hidden, intermediate):
     return [w.bfloat16() for w in (gate, up, down)]
 
 
+def _situ_tiny_inputs(kind, tokens, hidden, experts, intermediate, spread=2.0):
+    """BF16 ``x`` and routed ``(gate, up, down)`` weights of the tiny SiTU-GLU data kind ``kind``
+    (:data:`SITU_TINY`), drawn on the CPU."""
+    low, high = SITU_TINY_LOG2
+
+    def tiny(scale):
+        return (scale * torch.exp2(low + (high - low) * rand(tokens, dtype=torch.float64))).float()
+
+    def factor(fraction, scale):
+        """Per token: the factor on its gate or up half, and the spread of the weights reading that half."""
+        if fraction == 1.0:
+            return tiny(scale), 1.0
+        if fraction == 0.0:
+            return torch.ones(tokens), spread
+        return torch.where(rand(tokens) < fraction, tiny(scale) / spread, torch.ones(tokens)), spread
+
+    gate_fraction, up_fraction = SITU_TINY[kind]
+    half = hidden // 2
+    gate_factor, gate_spread = factor(gate_fraction, SITU_BETA)
+    up_factor, up_spread = factor(up_fraction, SITU_LB)
+    x = randn(tokens, hidden) * 0.125
+    x[:, :half] *= gate_factor[:, None]
+    x[:, half:] *= up_factor[:, None]
+    gate = torch.zeros(experts, intermediate, hidden)
+    up = torch.zeros(experts, intermediate, hidden)
+    gate[:, :, :half] = randn(experts, intermediate, half) * (gate_spread / 0.125 / half**0.5)
+    up[:, :, half:] = randn(experts, intermediate, hidden - half) * (up_spread / 0.125 / (hidden - half) ** 0.5)
+    down = randn(experts, hidden, intermediate) / intermediate**0.5
+    return x.bfloat16(), [w.bfloat16() for w in (gate, up, down)]
+
+
 @pytest.mark.parametrize("tokens,hidden", [(512, 256), (37, 4096), (1, 1032)])
 def test_epilogue_forward_none_accuracy(record_property, tokens, hidden):
     """``y = sum_k w_k routed_k`` at top-16 (the forward epilogue without a shared row: FP32 accumulation from zero in
@@ -1324,9 +1372,9 @@ def _situ_group_adapter_case(kind, *, tokens=256, hidden=512, intermediate=256, 
     ``activation="situ_glu"`` with ``situ_beta`` 4 and ``situ_lb`` 25, ``shared_expert="none"``,
     ``router_weight_gradient="direct"``, FP32 accumulators, several macrobatches) at EP64 ``(64, 14)`` as rank 0 of its
     EP group emulated on one GPU (:mod:`tests.experimental._mok_one_gpu`; every route on this rank, two of each token's
-    16 routes repeating an expert, :func:`one_rank_ids`), on the SiTU-GLU data kind ``kind`` (:data:`SITU_DATA`) drawn
-    on the CPU, every 5th token's first router weight and every weight of token 3 exactly 0.  Judged per draw against
-    the oracle beside the naive implementation of the single-rank layer without a shared expert
+    16 routes repeating an expert, :func:`one_rank_ids`), on the SiTU-GLU data kind ``kind`` (:data:`SITU_DATA` or
+    :data:`SITU_TINY`) drawn on the CPU, every 5th token's first router weight and every weight of token 3 exactly 0.
+    Judged per draw against the oracle beside the naive implementation of the single-rank layer without a shared expert
     (:func:`tests.experimental._mok_naive.layer` with ``shared_w=None``, ``activation=("situ_glu", 4, 25)`` and
     ``direct=True``): ``y``, ``dx``, the router-weight gradients (also alone at the zero weights,
     ``d_scores_zero_weight``) and the three routed weight gradients (each the sum of EP equal copies of every route in
@@ -1353,11 +1401,15 @@ def _situ_group_adapter_case(kind, *, tokens=256, hidden=512, intermediate=256, 
     naive_values = {}
 
     def run(j, _draw):
-        x = randn(tokens, hidden) * 0.125
-        x[:, 0] = 1.0
-        x = x.bfloat16()
-        dy = (randn(tokens, hidden) * 0.125).bfloat16()
-        routed = _situ_weights(kind, experts, hidden, intermediate)
+        if kind in SITU_TINY:
+            dy = (randn(tokens, hidden) * 0.125).bfloat16()
+            x, routed = _situ_tiny_inputs(kind, tokens, hidden, experts, intermediate)
+        else:
+            x = randn(tokens, hidden) * 0.125
+            x[:, 0] = 1.0
+            x = x.bfloat16()
+            dy = (randn(tokens, hidden) * 0.125).bfloat16()
+            routed = _situ_weights(kind, experts, hidden, intermediate)
         scores = rand(tokens, topk) + 0.1
         scores[::5, 0] = 0.0
         scores[3] = 0.0
@@ -1395,12 +1447,12 @@ def _situ_group_adapter_case(kind, *, tokens=256, hidden=512, intermediate=256, 
     return judge, TierJudge(), failures
 
 
-@pytest.mark.parametrize("kind", list(SITU_DATA))
+@pytest.mark.parametrize("kind", list(SITU_DATA) + list(SITU_TINY))
 def test_situ_group_adapter_accuracy(record_property, kind):
     """The adapter's step of the 896-expert top-16 group (SiTU-GLU, ``shared_expert="none"``,
     ``router_weight_gradient="direct"``) at EP64 ``(64, 14)``, emulated on one GPU as rank 0 of the group with every
-    route on this rank, on each SiTU-GLU data kind: ``y``, ``dx``, the router-weight gradients (and those at zero
-    weights alone) and the three routed weight gradients."""
+    route on this rank, on each SiTU-GLU data kind, the tiny ones included: ``y``, ``dx``, the router-weight gradients
+    (and those at zero weights alone) and the three routed weight gradients."""
     _require_situ_group()
     _check(
         record_property,
