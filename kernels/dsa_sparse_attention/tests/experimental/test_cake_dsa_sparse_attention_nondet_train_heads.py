@@ -30,7 +30,9 @@ Host tests (CPU, no device): the launches of the eager entries and the prepared 
 (with and without the head-window builds registered), the head-window plans (their launches, item order, key-pass
 chunks, workspace, operands and fallbacks: the harness registers the builds where the package's registry lacks them)
 and the bridge's windows, their order, the window statistics and the accumulator at 64, 96 and 128 heads -- plus the
-retained state of the autograd entry, validation and the calls without query rows.  Device tests judge every floating output
+retained state of the autograd entry, validation and the calls without query rows.  The bridge's copy steps run
+through wide views of their operands and must copy the bytes a plain copy does (on the CPU, and on the CUDA device
+when there is one).  Device tests judge every floating output
 against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``) on sm_100a / sm_103a / sm_107a (sm_107a runs
 96 and 128 heads on the two-window bridge); a call with no valid key in any row has no accuracy to judge and
 equals the oracle exactly instead (:func:`test_naive_tier_heads`).  ``CAKE_PPLX_DSA_LARGE_TESTS=1`` opts in to the
@@ -2045,6 +2047,161 @@ def test_sm107a_plans_the_bridge(monkeypatch, heads):
         small.q_latent, small.q_rope, small.kv_latent, small.k_rope, small.indices
     )
     hl.check_forward(h.launches, small, out, lse, o_lo, with_o_lo=True)
+
+
+# ---------------------------------------------------------------------------
+# The bridge's copy steps through wide views (CPU, and the CUDA device when there is one)
+# ---------------------------------------------------------------------------
+
+COPY_DEVICES = ("cpu", "cuda")
+
+
+def _copy_device(device: str) -> torch.device:
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires a CUDA device")
+    return torch.device(device)
+
+
+def _random_bytes(shape, dtype, device, generator) -> torch.Tensor:
+    """A ``dtype`` tensor of uniformly random bytes: any bit pattern of its elements and of the wide views' elements,
+    NaN payloads and signaling NaNs included."""
+    count = 1
+    for n in shape:
+        count *= int(n)
+    raw = torch.randint(
+        0, 256, (count * dtype.itemsize,), dtype=torch.uint8, generator=generator
+    )
+    return raw.view(dtype).view(tuple(shape)).to(device)
+
+
+def _same_bytes(a: torch.Tensor, b: torch.Tensor) -> bool:
+    if a.shape != b.shape or a.dtype != b.dtype:
+        return False
+    return torch.equal(
+        a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8)
+    )
+
+
+def _plain_head_step(plan, step, t) -> None:
+    """A head step as the bridge ran it before the wide views (0.7.0 - 0.9.0): a plain ``copy_`` per head slice."""
+    H = plan.num_heads
+    if step.name == "fwd_copy":
+        lo, hi = cake_backend.window_owned_heads(H, step.head0)
+        a, b = lo - step.head0, hi - step.head0
+        t["lse"][:, lo:hi].copy_(t["fwd_lse"][:, a:b])
+        if plan.with_o_lo:
+            t["o_lo"][:, lo:hi].copy_(t["fwd_o_lo"][:, a:b])
+    elif step.name == "dout_copy":
+        t["dout_copy"].copy_(t["dout"])
+    else:
+        for index, head0 in enumerate(plan.head_windows):
+            lo, hi = cake_backend.window_owned_heads(H, head0)
+            a, b = lo - head0, hi - head0
+            t["window_lse"][index, :, a:b].copy_(t["lse"][:, lo:hi])
+            t["window_delta"][index, :, a:b].copy_(t["delta"][:, lo:hi])
+            if a > 0:
+                t["window_lse"][index, :, :a].fill_(float("inf"))
+                t["window_delta"][index, :, :a].zero_()
+
+
+@pytest.mark.parametrize("device", COPY_DEVICES)
+@pytest.mark.parametrize("with_o_lo", (True, False))
+@pytest.mark.parametrize("heads", (96, 128))
+def test_head_steps_copy_the_same_bytes_through_wide_views(
+    monkeypatch, heads, with_o_lo, device
+):
+    """Every copy step of the bridge (both ``"fwd_copy"`` steps, ``"dout_copy"`` of a head-major ``dout`` and
+    ``"window_stats"``) leaves every tensor byte for byte as the plain ``copy_`` of each head slice does: random bytes
+    (any BF16 / FP32 bit pattern, NaN payloads and signaling NaNs of the 8- and 16-byte views), the strided head
+    slices of the ``[T, H]`` outputs and the window scratch; the heads a step does not own keep their bytes.  Each
+    of these copies runs through the 16-byte view."""
+    dev = _copy_device(device)
+    gen = torch.Generator().manual_seed(SEED + heads)
+    T, W = 37, cake_backend.HEAD_WINDOW
+    plan = SimpleNamespace(
+        num_heads=heads,
+        with_o_lo=with_o_lo,
+        head_windows=cake_backend.head_windows(heads),
+    )
+    shapes = {
+        "lse": ((T, heads), torch.float32),
+        "o_lo": ((T, heads, D_LATENT), torch.bfloat16),
+        "fwd_lse": ((T, W), torch.float32),
+        "fwd_o_lo": ((T, W, D_LATENT), torch.bfloat16),
+        "dout_copy": ((T, heads, D_LATENT), torch.bfloat16),
+        "delta": ((T, heads), torch.float32),
+        "window_lse": ((2, T, W), torch.float32),
+        "window_delta": ((2, T, W), torch.float32),
+    }
+    t = {k: _random_bytes(s, d, dev, gen) for k, (s, d) in shapes.items()}
+    # a head-major ``dout`` (token stride 512, head stride T * 512): the one layout the plan copies
+    head_major = _random_bytes((heads, T, D_LATENT), torch.bfloat16, dev, gen)
+    t["dout"] = head_major.transpose(0, 1)
+    assert not cake_backend._dout_rows_dense(t["dout"])
+    ref = {k: v.clone() for k, v in t.items()}
+    used = []
+    wide_copy = cake_backend._wide_copy
+
+    def recording(dst, src):
+        used.append(wide_copy(dst, src))
+        return used[-1]
+
+    monkeypatch.setattr(cake_backend, "_wide_copy", recording)
+    steps = [cake_backend.HeadStep("fwd_copy", h0) for h0 in plan.head_windows]
+    steps += [cake_backend.HeadStep("dout_copy"), cake_backend.HeadStep("window_stats")]
+    for step in steps:
+        cake_backend._head_step(plan, step, t)
+        _plain_head_step(plan, step, ref)
+        for k, v in t.items():
+            assert _same_bytes(v, ref[k]), (step, k)
+    assert used == [torch.complex128] * ((1 + with_o_lo) * 2 + 1 + 4), used
+
+
+@pytest.mark.parametrize("device", COPY_DEVICES)
+def test_wide_copy_takes_the_widest_view_both_operands_allow(device):
+    """:func:`_wide_copy` copies through the widest view of ``complex128`` / ``int64`` / ``int32`` that both
+    operands have (last dimension contiguous and a whole number of elements, strides, storage offset and address
+    multiples of the width) and through a plain ``copy_`` otherwise (no such view, other dtypes or shapes, no
+    elements); in every case the destination's whole buffer ends byte for byte as after a plain ``copy_``."""
+    dev = _copy_device(device)
+    gen = torch.Generator().manual_seed(SEED)
+    bf16, fp32 = torch.bfloat16, torch.float32
+    # (dtype of dst / src, dst view (size, stride, storage offset) into its buffer, src shape, element taken)
+    cases = {
+        "bf16 slice": (bf16, ((8, 64), (96, 1), 32), (8, 64), torch.complex128),
+        "bf16 8-byte offset": (bf16, ((8, 64), (96, 1), 4), (8, 64), torch.int64),
+        "bf16 4-byte offset": (bf16, ((8, 64), (96, 1), 2), (8, 64), torch.int32),
+        "bf16 2-byte offset": (bf16, ((8, 64), (96, 1), 1), (8, 64), None),
+        "bf16 12-byte rows": (bf16, ((8, 6), (6, 1), 0), (8, 6), torch.int32),
+        "bf16 6-byte rows": (bf16, ((8, 3), (3, 1), 0), (8, 3), None),
+        "bf16 last dim strided": (bf16, ((64, 8), (1, 64), 0), (64, 8), None),
+        "fp32 slice": (fp32, ((8, 32), (96, 1), 64), (8, 32), torch.complex128),
+        "fp32 8-byte offset": (fp32, ((8, 32), (96, 1), 2), (8, 32), torch.int64),
+        "fp32 4-byte offset": (fp32, ((8, 32), (96, 1), 1), (8, 32), None),
+        "no elements": (bf16, ((0, 64), (96, 1), 0), (0, 64), None),
+    }
+    for name, (dtype, (size, stride, offset), src_shape, want) in cases.items():
+        base = _random_bytes((1024,), dtype, dev, gen)
+        ref_base = base.clone()
+        src = _random_bytes(src_shape, dtype, dev, gen)
+        dst = torch.as_strided(base, size, stride, offset)
+        torch.as_strided(ref_base, size, stride, offset).copy_(src)
+        assert cake_backend._wide_copy(dst, src) == want, name
+        assert _same_bytes(base, ref_base), name
+    # a conversion (other dtypes) and a broadcast (other shapes) are plain copies
+    for name, (dst, src) in {
+        "dtypes differ": (
+            _random_bytes((8, 64), fp32, dev, gen),
+            torch.randn(8, 64, generator=gen).to(bf16).to(dev),
+        ),
+        "shapes differ": (
+            _random_bytes((8, 64), bf16, dev, gen),
+            _random_bytes((64,), bf16, dev, gen),
+        ),
+    }.items():
+        ref = dst.clone().copy_(src)
+        assert cake_backend._wide_copy(dst, src) is None, name
+        assert _same_bytes(dst, ref), name
 
 
 # ---------------------------------------------------------------------------

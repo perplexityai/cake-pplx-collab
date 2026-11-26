@@ -822,7 +822,11 @@ The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
   step.  The single-pass backward is the optional `dout` copy, `bwd_delta`,
   the statistics copies, two main launches and `bwd_cast`.  The copies are
   torch operations on the current stream: no host synchronization, and the
-  prepared runner stays CUDA-graph capturable.  The runner's launch keys are
+  prepared runner stays CUDA-graph capturable.  Each copies its head slices as
+  the widest elements both operands allow (`cake_backend._wide_copy`: 16-, 8-
+  or 4-byte views of the same bytes when the last dimension, the strides and
+  the addresses are multiples of the width, else a plain copy), so it moves
+  the same bytes in fewer elements.  The runner's launch keys are
   `cake_backend.WindowLaunch(phase, head0, key)` for a window launch (`key`
   the 64-head stage name or pass key) and `cake_backend.HeadStep(name,
   head0)` for a copy step (`"fwd_copy"`, `"dout_copy"`, `"window_stats"`).

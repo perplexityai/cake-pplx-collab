@@ -2321,11 +2321,12 @@ class WindowLaunch:
 
 @dataclass(frozen=True)
 class HeadStep:
-    """A device-copy step of a plan over more than 64 heads (torch copies on the current stream: no kernel of the
-    program, no host synchronization, capturable): ``"fwd_copy"`` after the forward window ``head0`` (the heads it
-    owns of its ``lse`` / ``o_lo`` scratch into the ``[T, H]`` outputs), ``"dout_copy"`` (a ``dout`` the delta cannot
-    read in place, :func:`_dout_rows_dense`, into its dense workspace copy) and ``"window_stats"`` (the per-window
-    ``lse`` / ``delta`` of the backward, the pad heads of ``W1`` at ``+inf`` / ``0``)."""
+    """A device-copy step of a plan over more than 64 heads (torch copies on the current stream, each through the
+    widest element view its operands allow, :func:`_wide_copy`: no kernel of the program, no host synchronization,
+    capturable): ``"fwd_copy"`` after the forward window ``head0`` (the heads it owns of its ``lse`` / ``o_lo``
+    scratch into the ``[T, H]`` outputs), ``"dout_copy"`` (a ``dout`` the delta cannot read in place,
+    :func:`_dout_rows_dense`, into its dense workspace copy) and ``"window_stats"`` (the per-window ``lse`` /
+    ``delta`` of the backward, the pad heads of ``W1`` at ``+inf`` / ``0``)."""
 
     name: str
     head0: int = 0
@@ -2359,24 +2360,63 @@ def _window_values(
     return v
 
 
+# The element types of a head step's copies (:func:`_wide_copy`), widest first.  A head slice of ``o_lo`` / ``lse`` is
+# strided, so torch copies it element by element; as BF16 / FP32 elements that copy moves 2 / 4 bytes per element
+# and reaches a fraction of the memory bandwidth, as 16-byte elements several times more.
+_WIDE_COPY_DTYPES = (torch.complex128, torch.int64, torch.int32)
+
+
+def _wide_view(x: torch.Tensor, dtype: torch.dtype) -> Optional[torch.Tensor]:
+    """``x``'s bytes as ``dtype`` elements (its last dimension shrunk), or ``None`` where that view does not exist:
+    ``dtype`` is not wider than ``x``'s element, the last dimension is not contiguous or not a whole number of
+    ``dtype`` elements, or another stride, the storage offset or the address is not a multiple of one."""
+    size, width = x.element_size(), dtype.itemsize
+    if width <= size or width % size or x.dim() == 0 or x.stride(-1) != 1:
+        return None
+    if (
+        (x.shape[-1] * size) % width
+        or (x.storage_offset() * size) % width
+        or x.data_ptr() % width
+    ):
+        return None
+    if any((stride * size) % width for stride in x.stride()[:-1]):
+        return None
+    return x.view(dtype)
+
+
+def _wide_copy(dst: torch.Tensor, src: torch.Tensor) -> Optional[torch.dtype]:
+    """``dst.copy_(src)`` for two tensors of one dtype and shape through the widest of ``_WIDE_COPY_DTYPES`` that
+    views both (:func:`_wide_view`): the same bytes in fewer, wider elements, a byte copy and so bit for bit the
+    copy ``copy_`` makes (no element is converted or computed).  Returns that element type, or ``None`` after a plain
+    ``copy_`` (other dtypes or shapes, no common view, no elements)."""
+    if dst.dtype == src.dtype and dst.shape == src.shape and dst.numel() > 0:
+        for dtype in _WIDE_COPY_DTYPES:
+            wide_dst, wide_src = _wide_view(dst, dtype), _wide_view(src, dtype)
+            if wide_dst is not None and wide_src is not None:
+                wide_dst.copy_(wide_src)
+                return dtype
+    dst.copy_(src)
+    return None
+
+
 def _head_step(plan: "_Plan", step: HeadStep, t: dict[str, torch.Tensor]) -> None:
     """Run the device-copy ``step`` of ``plan`` over the call's tensors ``t`` (:class:`HeadStep`)."""
     H = plan.num_heads
     if step.name == "fwd_copy":
         lo, hi = window_owned_heads(H, step.head0)
         a, b = lo - step.head0, hi - step.head0
-        t["lse"][:, lo:hi].copy_(t["fwd_lse"][:, a:b])
+        _wide_copy(t["lse"][:, lo:hi], t["fwd_lse"][:, a:b])
         if plan.with_o_lo:
-            t["o_lo"][:, lo:hi].copy_(t["fwd_o_lo"][:, a:b])
+            _wide_copy(t["o_lo"][:, lo:hi], t["fwd_o_lo"][:, a:b])
     elif step.name == "dout_copy":
-        t["dout_copy"].copy_(t["dout"])
+        _wide_copy(t["dout_copy"], t["dout"])
     elif step.name == "window_stats":
         lse, delta = t["lse"], t["delta"]
         for index, head0 in enumerate(plan.head_windows):
             lo, hi = window_owned_heads(H, head0)
             a, b = lo - head0, hi - head0
-            t["window_lse"][index, :, a:b].copy_(lse[:, lo:hi])
-            t["window_delta"][index, :, a:b].copy_(delta[:, lo:hi])
+            _wide_copy(t["window_lse"][index, :, a:b], lse[:, lo:hi])
+            _wide_copy(t["window_delta"][index, :, a:b], delta[:, lo:hi])
             if a > 0:
                 # the pad heads of W1 (W0's): P = 0 and dS = 0, so they add nothing and their dq is overwritten
                 t["window_lse"][index, :, :a].fill_(math.inf)
