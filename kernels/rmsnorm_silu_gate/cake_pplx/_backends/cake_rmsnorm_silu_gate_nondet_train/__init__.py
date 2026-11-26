@@ -194,6 +194,42 @@ in its last bits; other layouts, such a gate of one head among them,
 keep the programs of 0.2.16.  ``cake_jit.module_for_rows``
 takes the class (keyword ``layout``).  The deterministic package is that of
 0.2.16.
+Version 0.2.18 changes no program, only forward tables on sm_100a and
+sm_103a (the bands of packed rows, every sm_107a table and the backward's
+are those of 0.2.17).  A gate of more than one head sliced from a wider
+projection runs ``fwd_layout_pipe`` from 600 rows per SM on sm_100a and
+from 630 on sm_103a (``cake_jit.PROJECTION_FORWARD_BANDS``; 0.2.17 ran the
+extra-long forward up to 650 and 699).  Rows that are whole tokens of wider
+tensors are a class of their own (``cake_jit.SLICED_LAYOUT``: head strides
+128, both token strides at least ``H * 128`` and one past it, and either packed
+``z`` at any number of heads, such as ``x`` sliced beside packed ``z``, or
+packed ``x`` at one head, such as a gate of one head sliced from a projection
+(gates of more than one head are ``cake_jit.PROJECTION_LAYOUT``, above), or
+both inputs past the row from ``cake_jit.SLICED_MIN_HEADS`` (4) heads, such as
+``x`` and ``z`` both sliced or padded rows), whose table
+(``cake_jit.SLICED_FORWARD_BANDS``) runs ``fwd_layout_pipe`` from 701 to
+1500 rows per SM on sm_100a and sm_103a, where 0.2.17 ran the plain
+forward; on sm_107a they run ``cake_jit.STRIDED_FORWARD_BANDS`` as in
+0.2.17.  Rows of 1 to 3 heads with both inputs past the row (``x`` and
+``z`` both sliced, padded rows) keep 0.2.17's programs (measured slower at
+1 and 2 heads: ``x`` and ``z`` both sliced of one head, padded rows of one
+and of two).  Other layouts (``x`` or ``z`` broadcast over tokens or heads, a
+head stride other than 128, padded head-major planes, a mixed layout) and
+head-major rows keep 0.2.17's programs (the pipelined forward was measured
+slower with ``x`` broadcast over tokens beside ``z`` sliced from a
+projection, ``x`` broadcast over heads, head stride 144, padded head-major
+planes and ``x`` head-major beside ``z`` sliced from a projection).  Where
+``fwd_layout_pipe`` runs in the place of 0.2.17's program, ``y`` can differ
+from 0.2.17's in its last bits on a few elements (the programs associate a
+row's sum of squares differently; where measured, by at most one BF16 ulp
+for a gate sliced from a projection, and the same bits on whole-token
+rows).  ``dx``, ``dz`` and the weight gradient do not change.  Measured
+against 0.2.17 on the same GPU (B200, GB300; a gate of 1, 16, 48 or 64
+heads sliced from a projection, ``x`` and ``z`` of 16 and 48 heads both
+sliced), neither the forward nor the
+checkpointed training step was slower beyond noise in the moved bands (the
+comments of ``cake_jit.PROJECTION_FORWARD_BANDS`` and
+``cake_jit.SLICED_FORWARD_BANDS`` give the measurement).
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -424,7 +460,11 @@ Host design (the input layout rules are the deterministic package's):
   ``x`` holds packed rows of more than one head and ``z`` the gate columns of
   a wider projection,
   ``cake_jit.HEAD_MAJOR_FORWARD_BANDS`` where ``x`` and ``z`` are head-major
-  on an architecture with such a table (sm_107a), else
+  on an architecture with such a table (sm_107a),
+  ``cake_jit.SLICED_FORWARD_BANDS`` where the rows are whole tokens of wider
+  tensors (packed ``z`` at any number of heads, packed ``x`` at one head, or
+  both past the row from 4 heads) on an architecture with such a table
+  (sm_100a, sm_103a), else
   ``cake_jit.STRIDED_FORWARD_BANDS``; an ``x`` or ``z`` broadcast over more
   than one token counts as packed rows, but runs the band of other layouts
   where its band of packed rows runs a program that reads them at their linear
@@ -442,7 +482,8 @@ Host design (the input layout rules are the deterministic package's):
   256-thread CTA per block of 16 rows; the plain
   forward (the call role ``fwd``; other
   layouts past 700 rows per SM on sm_100a and sm_103a and past 480 on
-  sm_107a) one 64-thread CTA per block of 8 rows; the other forwards a grid
+  sm_107a, whole-token rows past 1500 on sm_100a and sm_103a) one 64-thread
+  CTA per block of 8 rows; the other forwards a grid
   whose CTA ``b`` walks the blocks ``b``, ``b + grid``, ...,
   loading each next block while it computes the current one, in the fewest
   whole waves that give no CTA more than a few blocks (past one wave the
@@ -478,15 +519,20 @@ Host design (the input layout rules are the deterministic package's):
   up to 8192 and ``fwd_keep_pipe_packed`` past it.  Past the short forward's,
   for a gate of more than one head sliced from a projection: on sm_100a the
   mid forward up to 140, the long forward up to 400, the extra-long forward up
-  to 650, ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 3000
+  to 599, ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 3000
   and the plain forward past it; on sm_103a the mid forward up to 250, the
-  extra-long forward up to 699, ``fwd_layout_pipe`` up to 2000 and the plain
+  extra-long forward up to 629, ``fwd_layout_pipe`` up to 2000 and the plain
   forward past it; on sm_107a ``fwd_layout_keep_pipe`` up to 300, the mid
   forward up to 442, ``fwd_layout_pipe`` up to 2999 and
   ``fwd_layout_keep_pipe`` past it.  For head-major rows on sm_107a:
   ``fwd_layout_keep_pipe`` up to 100, the mid forward up to 480 and the plain
-  forward past it.  For other
-  layouts (such a gate of one head, and head-major rows on sm_100a and
+  forward past it.  For whole-token rows (such as a gate of one head) on
+  sm_100a: the mid forward up to 140, the long forward up to 400, the
+  extra-long forward up to 700, ``fwd_layout_pipe`` up to 1500 and the plain
+  forward past it; on sm_103a the mid forward up to 250, the extra-long
+  forward up to 700, ``fwd_layout_pipe`` up to 1500 and the plain forward
+  past it.  For other
+  layouts (whole-token rows on sm_107a, and head-major rows on sm_100a and
   sm_103a): on sm_100a the mid
   forward up to 140, the long forward up to 400, the extra-long forward up to
   700 and the plain forward past it; on sm_103a the mid forward up to 250, the
@@ -948,7 +994,7 @@ def _forward(
     sms = device_sm_count(index)
     # rows that are not packed run the table of their layout's class: the
     # gate columns of a wider projection of more than one head, head-major
-    # rows, or another layout
+    # rows, whole-token rows of wider tensors, or another layout
     layout = (
         None
         if packed
