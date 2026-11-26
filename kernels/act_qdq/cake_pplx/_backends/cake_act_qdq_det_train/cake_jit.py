@@ -87,11 +87,13 @@ grid rule; it keeps each vector in packed BF16 pairs, so it fits in 64
 registers per thread.  A call runs it in both kinds of call from 868,353
 vectors, past one wave of the main program's CTAs on a VR200 (212 SMs), to
 1,736,704, one wave of its own; MXFP4's range starts at 933,888.  On three
-VR200 GPUs with L2 flushed before each call, the kernel measured 2.4 to 14 %
-faster than the main program from 868,353 to 1,736,704 vectors (the median
-over the GPUs), and from 7 % slower to 2.4 % faster outside that range.
-Replayed in a CUDA graph, some MXFP4 calls measured up to 2 % slower than
-with the main program below 933,888 vectors.  Every other call runs the main
+VR200 GPUs with L2 flushed before each call, eager calls of the kernel
+measured 2.4 to 14 % faster than the main program at each size measured from
+868,353 to 1,736,704 vectors (every 32,768; the median over the GPUs), and
+from 7 % slower to 2.4 % faster outside that range.  Replayed in a CUDA graph,
+some MXFP4 calls measured up to 2 % slower than with the main program below
+933,888 vectors, and MXFP8 calls at 868,416 vectors from 0.8 % slower to
+1.1 % faster.  Every other call runs the main
 record (:func:`selected_module`).  Every program gives the same bytes.
 ``n_vecs`` is a run-time scalar, so a library serves every shape; a call
 builds or loads only its own program's library on first use.  Build every

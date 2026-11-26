@@ -101,11 +101,13 @@ so those have no large range.  The mid program is the same kernel with 64-thread
 (tiles of 512 vectors), 16 CTAs per SM and the main program's grid rule.  It keeps each vector in packed BF16 pairs, as
 the interleaved-domain MXFP4 and MXFP8 programs do ("Locality domains" below), so it fits in 64 registers per thread.
 On a VR200 (212 SMs) the main program needs a second wave of CTAs from 868,353 vectors, and the mid program fits in one
-wave up to 1,736,704.  On three VR200 GPUs with L2 flushed before each call, the kernel measured faster than the main
-program at every size of that range, in both kinds of call and on every GPU: by 2.4 to 14 % in the median over the GPUs.
-Outside that range it measured from 7 % slower to 2.4 % faster.  Replayed in a CUDA graph, some MXFP4 calls measured up
-to 2 % slower than with the main program from 868,368 to 917,504 vectors, and every call within 0.2 % of it or faster at
-each size measured from 933,888, so MXFP4's range starts there.  Every program gives the same bytes at every size.
+wave up to 1,736,704.  On three VR200 GPUs with L2 flushed before each call, eager calls of the kernel measured faster
+than the main program at every size measured in that range (every 32,768 vectors), in both kinds of call and on every
+GPU: by 2.4 to 14 % in the median over the GPUs.  Outside that range they measured from 7 % slower to 2.4 % faster.
+Replayed in a CUDA graph, some MXFP4 calls measured up to 2 % slower than with the main program from 868,368 to 917,504
+vectors, and every call within 0.2 % of it or faster at each size measured from 933,888, so MXFP4's range starts there.
+In a CUDA graph at 868,416 vectors, MXFP8 calls measured from 0.8 % slower to 1.1 % faster, within the 0.8 % slower to
+2.4 % faster that unchanged programs measured in the same runs.  Every program gives the same bytes at every size.
 Neither the last dimension, nor the rank, nor the row count enters the kernel, so a new shape never rebuilds a library.
 A call builds or loads only the library of its own program, so build every library of the architecture before a CUDA
 graph capture: call `build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each
