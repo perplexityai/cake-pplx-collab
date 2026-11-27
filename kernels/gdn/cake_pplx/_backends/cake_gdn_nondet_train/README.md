@@ -338,27 +338,27 @@ one-wave table that the split route cannot take keeps the 0.2.8 programs: the
 fix does not reach those routes.  A zero gradient that the caller gives counts
 as a gradient.  `PV_TF32 = False` turns the rule off.
 
-Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dv` or
-`dg`, and the 0.2.8 programs miss it on the same calls.  On B200, GB300 and
-R200 these are:
+In 0.2.11 the `pv_tf32` scan also writes the low BF16 word of its FP32 `dv2`
+beside the BF16 tape (`dv2_lo`), and the tail adds it on the diagonal before
+the `beta` scale, so `dv` and `dbeta` of these calls take other bits than in
+0.2.10 and every other output keeps its 0.2.10 bits.  A one-wave table that
+the split route cannot take now runs the one-wave walk and its package,
+`tail_g2_f32x` or `tail_g3_f32x` tail in the builds that write and add that
+word (`dhu_tc2_dvl32_modes_dvlo` and the `_dvlo` tails, `MODES_DV_LO`), with
+the same effect on the bits.  `PV_TF32 = False` keeps the 0.2.8 programs on
+every call, this route included.
 
-- with an initial state and a final-state gradient, the `(2, 6)` pack of
-  11,000 + 12,000 + 9,768 tokens and the `(4, 16)` pack of four 4,096-token
-  sequences (one wave, `G = 4`), and on R200 also the `(2, 6)` pack of
-  131,071 + 87,531 + 43,385 tokens: the max-norm error of `dv` meets the tier
-  on 13 of 32 draws, where 16 are needed (0.2.8: 8, 14 and 13 of 32, in that
-  order).  On B200 and GB300 the 131,071-token call keeps the 0.2.8 programs
-  and misses `dv` with them;
+Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dg`, and
+the 0.2.8 programs miss it on the same calls.  On B200, GB300 and R200 these
+are:
+
 - the split forward at `G = 2` with the `(64, 1)` tcgen05 adjoint: the
   largest L2 error of `dg` is 1.007 to 1.008 times the tier's (0.2.8: 1.040
   times);
-- the package tail run in segments at `G = 3` with the tcgen05 adjoint: the
-  largest L2 error of `dv` is 1.016 times the tier's (0.2.8: 1.14 times).  Its
-  largest max-norm error is 1.2 % above that of 0.2.8;
 - the serial tcgen05 adjoint on two streams at `G = 2`: the largest L2 error
   of `dg` is 1.23 times the tier's (0.2.8: 1.28 times).
 
-The last three hold with or without an initial state.  The tests reach these
+Both hold with or without an initial state.  The tests reach these
 routes with plan pins or a patched planner on small layouts.  A call that the
 fix does not reach keeps the 0.2.8 programs, bits and accuracy, including the
 misses of 0.2.8.
@@ -751,5 +751,5 @@ span rises by 0.17-0.21 ms.
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
 - `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
-- Some calls with a final-state gradient miss the BF16 naive tier on `dv` or
-  `dg`; Chain lists them.
+- Some calls with a final-state gradient miss the BF16 naive tier on `dg`;
+  Chain lists them.
