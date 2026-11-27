@@ -249,6 +249,24 @@ pullback (`wy_bwd_dvlo`), adds it on the diagonal before the `beta` scale, so
 `dv` and `dbeta` of these calls take other bits than in 0.2.10 and every other
 output keeps its 0.2.10 bits.
 
+A call with a final-state gradient costs more time in 0.2.11 than in 0.2.10.
+Of 204 timed rows, the table counts those that ran slower than 0.2.10 beyond
+the noise band (none ran faster) and gives the median and the largest ratio
+of the 0.2.11 time to the 0.2.10 time over all 204.  The rows cover both
+packages: 13 layouts with an FP32 `beta` and 4 of them with a BF16 `beta`,
+each with decays log-spaced per value head, an initial state and a
+final-state gradient, under the backward, the forward + backward and the
+checkpointed step, eager and in a CUDA graph (CUPTI GPU time with a cold L2,
+both versions interleaved in each of 12 fresh processes per row).  The
+example is this package's backward in a CUDA graph over 131,071 + 87,531 +
+43,385 tokens at `H = 2`, `HV = 6` with an FP32 `beta`.
+
+| GPU | rows slower | median ratio | largest ratio | example: 0.2.10 / 0.2.11 |
+|---|---|---|---|---|
+| B200 (`sm_100a`) | 159 of 204 | 1.025 | 1.057 | 2.9128 / 3.0204 ms |
+| GB300 (`sm_103a`) | 150 of 204 | 1.023 | 1.052 | 2.6584 / 2.7575 ms |
+| R200 (`sm_107a`) | 175 of 204 | 1.015 | 1.037 | 1.9217 / 1.9643 ms |
+
 Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dg`, and
 the 0.2.8 programs miss it on the same calls.  On B200, GB300 and R200 these
 are:
