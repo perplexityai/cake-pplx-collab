@@ -69,6 +69,11 @@ MODULES: dict[str, dict[str, Any]] = {
             "bwd_redo_prep_fold",
             "bwd_fold_list",
             "fwd_scan",
+            "fwd_h128",
+            "bwd_delta_heads",
+            "bwd_main_hw",
+            "bwd_redo_hw",
+            "bwd_main_pass_hw",
         ],
         # The key-range-pass policy: the non-deterministic package's record values (``cake_backend.KeyPassPolicy``).
         "key_pass_policy": {
@@ -277,6 +282,66 @@ MODULES: dict[str, dict[str, Any]] = {
                 "cooperative": False,
                 "dynamic_smem_bytes": 231680,
                 "use_pdl": True,
+            },
+        },
+        "fwd_h128": {
+            "library": "cake_dsa_h64_det_train_adfe34021dbfb2cffe71",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [512, 1, 1],
+                "cluster": [2, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 215808,
+                "use_pdl": True,
+            },
+        },
+        "bwd_delta_heads": {
+            "library": "cake_dsa_h64_det_train_aac0a985a678f748245c",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [512, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 1536,
+                "use_pdl": False,
+            },
+        },
+        "bwd_main_hw": {
+            "library": "cake_dsa_h64_det_train_f2912bada9840c99c4da",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": False,
+            },
+        },
+        "bwd_redo_hw": {
+            "library": "cake_dsa_h64_det_train_9f1f44a507ca9dc8ce87",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": False,
+            },
+        },
+        "bwd_main_pass_hw": {
+            "library": "cake_dsa_h64_det_train_91a238d5123ae4182d1c",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [640, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": False,
             },
         },
     },
@@ -679,8 +744,27 @@ SCAN_STAGES = {
 NOPE_SINK_FORWARD_STAGE = "nope_fwd_sink"
 NOPE_DSINK_STAGE = "nope_bwd_dsink"
 NOPE_SINK_STAGES = (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
+# The RoPE program's stages over 96 and 128 query heads (``cake_backend.SUPPORTED_HEADS``), registered for
+# ``sm_100a`` and ``sm_103a`` (their entries' ``arches``): stage -> the stage a call over ``64 < H <= 128`` heads runs
+# in its place.  The forward is the non-deterministic package's single-pass forward (one (2, 1, 1) cluster per
+# token, every head of the token: ``out`` / ``lse`` / ``o_lo`` at ``t * H + h``); the delta stage's heads build
+# writes ``delta [T, H]`` and the bound terms over the token's H heads; the main kernel's head-window builds (main,
+# redo, key-range pass) run both 64-head windows of every token in one launch, ``2 T`` work items with the window
+# selector -1.  The other backward stages (key norms, row bound and grid over the T tokens, redo preparation, fold,
+# compaction) serve both head counts unchanged.  The record lists them after its other stages.
+HEAD_COUNT_STAGES = {
+    "fwd": "fwd_h128",
+    "bwd_delta": "bwd_delta_heads",
+    "bwd_main": "bwd_main_hw",
+    "bwd_redo": "bwd_redo_hw",
+    "bwd_main_pass": "bwd_main_pass_hw",
+}
 STAGES_OF = {
-    PROGRAM: STAGES + KEY_PASS_STAGES + _ROPE_ALTERNATES + (SCAN_STAGES["fwd"],),
+    PROGRAM: STAGES
+    + KEY_PASS_STAGES
+    + _ROPE_ALTERNATES
+    + (SCAN_STAGES["fwd"],)
+    + tuple(HEAD_COUNT_STAGES.values()),
     NOPE_PROGRAM: NOPE_STAGES
     + NOPE_KEY_PASS_STAGES
     + _NOPE_ALTERNATES

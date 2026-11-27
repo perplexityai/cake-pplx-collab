@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -3293,6 +3293,12 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                             int _parity_k_full = (int)((unsigned int)(tord_3 + i_3) % 2);
                             mbarrier_wait(k_full_addr, _parity_k_full);
                             if (i_3 == 0) {
+                                int _parity_s_free = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
+                                mbarrier_wait(s_free_addr, _parity_s_free);
+                                int _parity_dkr_drained = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
+                                mbarrier_wait(dkr_drained_addr, _parity_dkr_drained);
+                                int _parity_dkv_b_drained = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
+                                mbarrier_wait(dkv_b_drained_addr, _parity_dkv_b_drained);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
 #if __CUDA_ARCH__ == 1070
                                 int _smem_desc_lo_0 = ((q_k_addr) >> 4) & 0x7FFF;
@@ -3686,8 +3692,8 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                             mbarrier_wait(p_full_addr, _parity_p_full);
                             asm volatile("tcgen05.fence::after_thread_sync;");
                             if (i_3 > 0) {
-                                int _parity_dkv_b_drained = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
-                                mbarrier_wait(dkv_b_drained_addr, _parity_dkv_b_drained);
+                                int _parity_dkv_b_drained_1 = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
+                                mbarrier_wait(dkv_b_drained_addr, _parity_dkv_b_drained_1);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                             }
 #if __CUDA_ARCH__ == 1070
@@ -4255,12 +4261,12 @@ kernel_cake_dsa_h64_det_train_f947d21a4e7b4d35d0a5(const __grid_constant__ CUten
                             tcgen05_commit(dkv_b_full_addr);
                             tcgen05_commit(ds_free_addr);
                             if (blocks_3 > i_3 + 1) {
-                                int _parity_dkr_drained = (int)((unsigned int)(tord_3 + i_3) % 2);
-                                mbarrier_wait(dkr_drained_addr, _parity_dkr_drained);
+                                int _parity_dkr_drained_1 = (int)((unsigned int)(tord_3 + i_3) % 2);
+                                mbarrier_wait(dkr_drained_addr, _parity_dkr_drained_1);
                                 int _parity_k_full_1 = (int)((unsigned int)(tord_3 + i_3) % 2) ^ 1;
                                 mbarrier_wait(k_full_addr, _parity_k_full_1);
-                                int _parity_s_free = (int)((unsigned int)(tord_3 + i_3) % 2);
-                                mbarrier_wait(s_free_addr, _parity_s_free);
+                                int _parity_s_free_1 = (int)((unsigned int)(tord_3 + i_3) % 2);
+                                mbarrier_wait(s_free_addr, _parity_s_free_1);
                                 asm volatile("tcgen05.fence::after_thread_sync;");
 #if __CUDA_ARCH__ == 1070
                                 int _smem_desc_lo_15 = ((q_k_addr) >> 4) & 0x7FFF;

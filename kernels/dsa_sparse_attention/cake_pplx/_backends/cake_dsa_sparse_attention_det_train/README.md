@@ -1,9 +1,11 @@
 # Cake DSA sparse-attention training backend, deterministic (SM100 / SM103 / SM107)
 
 Backend package of `cake_pplx.cake_dsa_sparse_attention_det_train`, the
-deterministic package of the native 64-query-head DeepSeek Sparse Attention
-training kernels (top-k sparse MLA with absorbed queries; 64 heads, 512 latent +
-64 rope query/key dimensions, 512 value dimensions).
+deterministic package of the native DeepSeek Sparse Attention training kernels
+(top-k sparse MLA with absorbed queries; 512 latent + 64 rope query/key
+dimensions, 512 value dimensions).  The rope program takes 64 query heads on
+every architecture and 96 or 128 on `sm_100a` / `sm_103a` (see "96 and 128
+query heads"); the NoPE program takes 64.
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_det_train` are stable
 APIs; this backend package is experimental (no compatibility guarantee for its
@@ -15,9 +17,11 @@ this package").  The `sm_107a`
 libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
 entries).  On `sm_100a` the libraries of the stages `fwd`, `bwd_main`,
 `bwd_main_pass`, `bwd_redo` and `bwd_compact`, each with its `nope_` form,
-and of the NoPE sink build `nope_fwd_sink` need CUDA 12.9 or newer
-(`min_cuda` 12.9); the other `sm_100a` libraries, the sink-gradient stage
-`nope_bwd_dsink` included, need 12.8.  The feature does not participate in automatic backend
+of the head-count builds `fwd_h128`, `bwd_main_hw`, `bwd_main_pass_hw` and
+`bwd_redo_hw`, and of the NoPE sink build `nope_fwd_sink` need CUDA 12.9 or
+newer (`min_cuda` 12.9); the other `sm_100a` libraries, the sink-gradient
+stage `nope_bwd_dsink` and the heads build `bwd_delta_heads` included, need
+12.8.  The feature does not participate in automatic backend
 selection, autotuning or trace-apply.  Its libraries are loaded prebuilt from
 `aot/` when the package ships them and JIT-built through the package's JIT
 shim from `build.json` otherwise (see "Layout of this package").
@@ -365,6 +369,50 @@ non-deterministic package (see its README, "Trainable per-head sink"):
 * A call without query rows (`T = 0`) launches nothing and gives a zero
   `dsink`.
 
+## 96 and 128 query heads
+
+The kernels compute 64 query heads of a token per work item.  A rope call over
+`H` = 96 or 128 heads (`cake_backend.SUPPORTED_HEADS`) runs, on `sm_100a` and
+`sm_103a` (`cake_backend.HEAD_COUNT_ARCHES`), the head-count builds of the
+record (`cake_jit.HEAD_COUNT_STAGES`, `cake_backend.head_count_stages`) in
+place of five stages; a 64-head call launches what it launched before (same
+stages, grids and arguments).  On `sm_107a` such a call raises
+`NotImplementedError` before any launch (also without query rows, on CUDA
+tensors), as the non-deterministic package does; the NoPE program refuses 96
+and 128 heads with `ValueError` naming the rope form.
+
+| 64-head stage | Head-count build | Launch |
+|---|---|---|
+| `fwd` | `fwd_h128` | the non-deterministic package's single-pass forward: one `(2, 1, 1)` cluster per token over every head, `num_queries = T`, `num_heads = H`, persistent grid `single_pass_grid(T, SMs) = 2 * max(1, min(T, SMs // 2))` |
+| `bwd_delta` | `bwd_delta_heads` | `delta [T, H]` (row `t * H + h`, each row the 64-head build's bits) and `qstat [T, 4]` over the token's `H` heads; one CTA of 16 warps per token |
+| `bwd_main` | `bwd_main_hw` | both 64-head windows of every token: `2 T` work items, item `i` = window `i & 1` of token `i >> 1`, `wsel = -1`, one CTA per item |
+| `bwd_redo` | `bwd_redo_hw` | the redo over both windows of every flagged row's pairs, `redo_launch_grid(2 T, SMs)` |
+| `bwd_main_pass` | `bwd_main_pass_hw` | a key-range pass over the `2 T` items, one FP32 dQ partial block (36,864 elements) per item |
+
+The head-window builds read the caller's `[T, H, *]` tensors through tensor
+maps whose head extent is `H`: the rows of `W1 = [64, 128)` past `H` load
+zeros, store nothing and read `lse = +inf`, `delta = 0`, so they add exactly
+0.  `token_base` / `token_step` count items: descending from `2 T - 1` where
+`cake_backend.token_order` descends (one key pass on `sm_103a`), else
+ascending from item 0.  A (token, key) pair adds one contribution per window
+to its row, so the builds skip the overflow counter below `tau / 2`: the
+skipped contributions add at most `N tau`, the slack of the redo
+preparation's flag rule, and the counters certify the int32 range as at 64
+heads.  The key norms, the row bound and its grid (over `T * topk` pair
+slots: the pack / pack27 choice reads `T`), the redo preparation, the fold and
+the compaction run over the `T` tokens unchanged.  The accumulator is an
+integer sum, so dK / dV repeat bit for bit whatever the grid, the window
+order or the key-pass count.
+
+Storage scales with `H`: `o_lo` and dQ hold `H` KiB per query token (the
+dead-storage rules of "Storage and the `o_lo` rule" read that capacity),
+`delta` takes `4 H` B per token, and a key-range-pass backward keeps `2 T`
+dQ partial blocks; the policy's token chunk counts two blocks per token (2,176
+tokens at top-k 2048, 4,224 at 64 heads: `KeyPassPolicy.token_chunk(topk,
+items_per_token)`), and a longer row takes one pass.
+`cake_backend.dsa_train_workspace_size(..., num_heads=H)` sizes a prepared
+runner.
+
 ## Layout of this package
 
 * `cake_jit.py` -- the `MODULES` registry (one record per program, the rope
@@ -411,7 +459,10 @@ Tests: `tests/experimental/test_cake_dsa_sparse_attention_det_train.py` (the
 backend suite: imports only this package; skips without a registered program
 or a compute capability 10.0 / 10.3 / 10.7 device),
 `tests/experimental/test_cake_dsa_sparse_attention_det_train_api.py` (the
-public entry points and the environment variables of the facade) and the
+public entry points and the environment variables of the facade),
+`tests/experimental/test_cake_dsa_sparse_attention_det_train_heads.py` (96 and
+128 query heads: the host plans on the CPU, the naive tier and the bitwise
+repeats on `sm_100a` / `sm_103a`) and the
 CPU-only `tests/experimental/test_cake_dsa_sparse_attention_det_train_names.py`
 and `tests/experimental/test_cake_dsa_sparse_attention_det_train_standalone.py`.
 Accuracy is judged by `tests/cake_naive.py` through

@@ -134,6 +134,8 @@ def test_backward_stage_order_is_fixed():
     alternates |= set(cake_jit.ACCUMULATE_STAGES.values())
     # the forward's scanner-warp build (in place of fwd on the architectures of its entry's arches)
     alternates.add(cake_jit.SCAN_STAGES["fwd"])
+    # the head-count builds (in place of five stages above 64 query heads)
+    alternates |= set(cake_jit.HEAD_COUNT_STAGES.values())
     extra = [s for s in rope if s not in cake_jit.STAGES and s not in alternates]
     assert extra in ([], list(cake_jit.KEY_PASS_STAGES)), extra
     assert not set(cake_jit.KEY_PASS_STAGES) & set(

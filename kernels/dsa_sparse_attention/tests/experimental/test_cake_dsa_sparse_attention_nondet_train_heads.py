@@ -1817,28 +1817,27 @@ def test_validate_rejects_mismatched_head_counts(q_heads, rope_heads, dout_heads
 
 
 @pytest.mark.parametrize("heads", (96, 128))
-def test_nope_and_det_forms_reject_more_heads(heads):
-    """The NoPE form and the deterministic package keep 64 query heads: 96 and 128 are refused with
-    ``ValueError`` saying so (host validation), while the same tensors at 64 heads validate."""
+def test_nope_forms_reject_more_heads_and_det_rope_validates_them(heads):
+    """The NoPE form of both packages keeps 64 query heads: 96 and 128 are refused with ``ValueError`` saying so
+    (host validation), while the same tensors at 64 heads validate.  The deterministic package's RoPE form
+    validates 96 and 128 heads as this one does (its architecture rule and plans:
+    ``test_cake_dsa_sparse_attention_det_train_heads.py``)."""
     kv = torch.zeros(16, D_LATENT, dtype=torch.bfloat16)
     idx = torch.zeros(8, 5, dtype=torch.int32)
-    assert tuple(
-        cake_backend.validate_dsa_nope_inputs(
-            torch.zeros(8, 64, D_LATENT, dtype=torch.bfloat16), kv, idx
-        )
-    ) == (8, 16, 5)
-    with pytest.raises(ValueError, match="64 query heads only"):
-        cake_backend.validate_dsa_nope_inputs(
-            torch.zeros(8, heads, D_LATENT, dtype=torch.bfloat16), kv, idx
-        )
+    for backend in (cake_backend, det_backend):
+        assert tuple(
+            backend.validate_dsa_nope_inputs(
+                torch.zeros(8, 64, D_LATENT, dtype=torch.bfloat16), kv, idx
+            )
+        ) == (8, 16, 5)
+        with pytest.raises(ValueError, match="64 query heads only"):
+            backend.validate_dsa_nope_inputs(
+                torch.zeros(8, heads, D_LATENT, dtype=torch.bfloat16), kv, idx
+            )
     for h in (64, heads):
         inp = hl.host_inputs(8, 16, 5, h)
         args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
-        if h == 64:
-            assert tuple(det_backend.validate_dsa_train_inputs(*args)[:3]) == (8, 16, 5)
-            continue
-        with pytest.raises(ValueError, match="64 query heads only"):
-            det_backend.validate_dsa_train_inputs(*args)
+        assert tuple(det_backend.validate_dsa_train_inputs(*args)[:3]) == (8, 16, 5)
 
 
 @pytest.mark.parametrize("heads", (96, 128))
