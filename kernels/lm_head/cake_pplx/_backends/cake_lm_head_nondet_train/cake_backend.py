@@ -15046,7 +15046,8 @@ def _one_pass_backward(one_pass, x, grad):
         and grad.is_contiguous()
         and not grad.requires_grad
     ):
-        g = grad.view(1)  # already an FP32 scalar on the device: the same one-element view as below
+        # already an FP32 scalar on the device: the same one-element view as below
+        g = grad.view(1)
     else:
         g = grad.detach().reshape(1).to(device=device, dtype=torch.float32)
     DW = torch.empty((V, H), dtype=torch.bfloat16, device=device) if need_dw else None
