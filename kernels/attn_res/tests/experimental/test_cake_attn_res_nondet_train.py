@@ -509,7 +509,9 @@ CASES = (
     (5, 1025, "peaked", "small"),
     (6, 257, "zero_rows", "small"),
     (7, 129, "scaled", "small"),
+    (7, 1025, "peaked", "normproj"),
     (8, 7, "zero_rows", "normproj"),
+    (8, 1025, "scaled", "small"),
     (9, 129, "zero_rows", "small"),
     (9, 1025, "scaled", "small"),
 )

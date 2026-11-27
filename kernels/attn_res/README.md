@@ -21,7 +21,8 @@ The GPU suites and the benchmark ran on B200 and GB200 (`sm_100a`), GB300 (`sm_1
 At 0.1.1, compute-sanitizer passes on GB300 (memcheck, synccheck and initcheck). On VR200 and R200 it passed at 0.1.0
 (memcheck, racecheck, synccheck and initcheck). 0.1.1 adds the `dw` memset to the nondet backward bindings. 0.1.2
 replaces the forwards of 5 to 9 values: one 448-thread CTA serves each token, all 7168 columns, with no cluster, one
-CTA per SM; the other programs are unchanged.
+CTA per SM; the other programs are unchanged. At 5 to 9 values the outputs and the gradients therefore differ from
+0.1.1 in the last bits; within 0.1.2 they repeat bit for bit as before (the nondet `dw` makes no bit promise).
 
 Install this family alone, pinned to a commit:
 
