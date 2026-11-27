@@ -44,7 +44,13 @@ The deterministic column-slab records (``bwd_slab``) and final-reduction records
   the other CTAs exit after their stores, so the column-slab pass's CTAs, which
   need a whole SM, can become resident while the token-owner pass still runs.
   The grid completes only after its last CTA's wait, so the column-slab pass,
-  which waits for this grid, still follows the token-owner pass;
+  which waits for this grid, still follows the token-owner pass.  On sm_100a
+  the 256-thread split also ships in the ``_dep1`` chain
+  (``cake_mhc_train_fn_split_atomic__tv128_dep1``): the records of both chains
+  select by :func:`fn_split_bwd_program`, which names ``dep1`` in the
+  token-count bands of the board's cell of ``FN_SPLIT_CHAIN_OVERRIDES`` (B200
+  with 148 SMs, to 4096 tokens but not from 1665 to 1728) and ``dep``
+  elsewhere;
 * ``cake_mhc_train_bwd_slab_fold__dynr`` (every architecture): the
   deterministic dynamic-schedule column-slab form ``dynr``, which stores the
   FP32 ``dfn`` sums of every (column slab, token chunk) unit into its chunk's
@@ -76,6 +82,19 @@ The deterministic column-slab records (``bwd_slab``) and final-reduction records
   ``BWD_SLAB_ORDER`` of sm_107a is ``"chunk"`` at every token count; only the
   cell of the 212-SM board names ``"slab"`` (from 1877 tokens), so the sm_107a
   ``_os`` records run on that board alone;
+* ``cake_mhc_train_bwd_slab_fold__dynr_late`` (sm_100a, sm_103a) and
+  ``cake_mhc_train_bwd_slab_fold__dynr_os_late`` (sm_100a; program keys
+  ``dynr_late`` / ``dynr_os_late``): the late draw of the two records above.
+  With one unit per CTA (``(H / 64) P <= grid``) each CTA draws its next unit
+  after it loads the current unit's last tile (at once for a unit without
+  tiles), not right after it publishes the current one, so a CTA that starts
+  early takes no unit that a CTA still starting would take; with more units
+  than CTAs it draws one unit ahead as the fold does.  The units, their slots
+  and the fold order are the fold's, so every output is the same bits.
+  :func:`bwd_slab_atomic_program` appends ``_late`` to ``dynr`` / ``dynr_os``
+  where :func:`bwd_slab_draw` (the board's cell of ``BWD_SLAB_DRAW_OVERRIDES``:
+  B200 with 148 SMs and GB300 with 152 SMs) names ``"late"``, also under
+  ``torch.use_deterministic_algorithms(True)``;
 * ``cake_mhc_train_bwd_slab_red__dynr`` and ``cake_mhc_train_bwd_slab_red__dynr_os``
   (sm_107a; program keys ``dynr_red`` / ``dynr_os_red``): the reduction forms of
   the two records above (``BWD_SLAB_DFN``).  They run the same units in the
@@ -126,7 +145,11 @@ reduction record ``cake_mhc_train_bwd_slab_red__dynr_os__h<H>``, under
 ``torch.use_deterministic_algorithms(True)`` its fold record); everywhere else
 on sm_107a the size's ``dynr`` form runs (its reduction record
 ``cake_mhc_train_bwd_slab_red__dynr__h<H>``, under
-``torch.use_deterministic_algorithms(True)`` its fold record).
+``torch.use_deterministic_algorithms(True)`` its fold record).  At 7168 sm_100a
+also ships ``cake_mhc_train_fn_split_atomic__tv128_dep1__h7168`` (the
+``_dep1`` chain, by ``FN_SPLIT_CHAIN_OVERRIDES``) and sm_100a / sm_103a
+``cake_mhc_train_bwd_slab_fold__dynr_late__h7168`` (the late draw, by
+``BWD_SLAB_DRAW_OVERRIDES``); 5120 has neither.
 
 So ``bwd_finish`` is the deterministic token-owner pass (with its group-row
 forms ``_trows_dyn`` inside ``BWD_ROW_BANDS``), the fn split and the column
@@ -216,7 +239,10 @@ under the tables of record), with ``_os`` where
 of the device's board in ``BWD_SLAB_LPT_OVERRIDES`` / ``BWD_SLAB_ORDER_OVERRIDES``
 where one exists: the SM count picks it), and ``_red`` after ``dynr`` /
 ``dynr_os`` where ``BWD_SLAB_DFN`` names ``"red"`` outside
-``torch.use_deterministic_algorithms(True)``; the residual
+``torch.use_deterministic_algorithms(True)``, or ``_late`` after them where
+:func:`bwd_slab_draw` names the late draw (``BWD_SLAB_DRAW_OVERRIDES``); the
+backward fn split's chain is :func:`fn_split_bwd_program` where a form ships
+in both chains (``FN_SPLIT_CHAIN_OVERRIDES``); the residual
 mixing's program of record is per architecture
 too (``FWD_FINISH_PROGRAM`` / :func:`fwd_finish_program`, its
 launch grid :func:`k4_grid_of_record`), and the token-owner band
@@ -238,15 +264,17 @@ The hidden sizes 5120 and 7168 are the deterministic package's (libraries
 architecture under the same rule as hidden 4096: the deterministic ``__h<H>``
 records but the backward fn split, the column slab and the reduction, and a
 ``bwd_finish`` of the deterministic token-owner records, the atomic fn split
-``__h<H>`` and the column slab ``dynr__h<H>`` and ``dynr_os__h<H>``, and
-(sm_107a) the reduction forms ``dynr__h<H>`` and ``dynr_os__h<H>`` of the
-``cake_mhc_train_bwd_slab_red`` records.
+``__h<H>`` and the column slab ``dynr__h<H>`` and ``dynr_os__h<H>`` (at 7168
+also the ``_dep1`` split on sm_100a and the late draw ``dynr_late__h7168`` on
+sm_100a / sm_103a), and (sm_107a) the reduction forms ``dynr__h<H>`` and
+``dynr_os__h<H>`` of the ``cake_mhc_train_bwd_slab_red`` records.
 Every rule takes the hidden size as its last argument and reads its tables
 through ``_tab`` as the deterministic registry's do (``H_TABLES`` spells every
 table for 5120 and 7168: a size it does not spell is an error, never the 4096
 value; the column slab's screen reads ``BWD_SLAB_LPT_HIDDEN`` and its unit
 order ``BWD_SLAB_ORDER`` instead, and a board's cells of
-``BWD_SLAB_LPT_OVERRIDES`` / ``BWD_SLAB_ORDER_OVERRIDES``, whose keys name the
+``BWD_SLAB_LPT_OVERRIDES`` / ``BWD_SLAB_ORDER_OVERRIDES`` /
+``BWD_SLAB_DRAW_OVERRIDES`` / ``FN_SPLIT_CHAIN_OVERRIDES``, whose keys name the
 hidden size), and
 the workspace regions sized by the flattened token (``fnp``, ``fnTp``,
 ``dfn_slot``) are spelled in ``n = 4 H``.
@@ -256,7 +284,8 @@ recorded per module as ``launch.use_pdl``: ``True`` for the kernels whose device
 code waits for the preceding grid (``griddepcontrol.wait``) before reading a
 predecessor's output -- the coefficient pass, the row streams, the token-owner
 pass and the column-slab pass -- and for the backward fn split, which waits for
-the token-owner pass as its last instruction; ``False`` for the forward fn
+the token-owner pass as its last instruction (in a ``_dep1`` record its last
+CTA alone); ``False`` for the forward fn
 splits and the mapping pass, which carry no such wait.  The dependents of a
 kernel that releases its dependents right after its own wait (the collapse and
 the backward prepare after the coefficient pass) or at its start (the
@@ -464,7 +493,58 @@ MODULES: dict[str, dict[str, Any]] = {
             "fnTp": "fnTp",
         },
         "role": "fn_split_bwd",
-        "select_rule": None,
+        "select_rule": {
+            "kind": "program",
+            "program": "dep",
+            "rule": "fn_split_bwd_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_fn_split_atomic__tv128_dep1": {
+        "arches": [
+            "sm_100a",
+        ],
+        "arg_plan": [
+            ["buffer", "fn"],
+            ["buffer", "fnTp"],
+            ["buffer", "dfn"],
+            ["parameter", "accumulate"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas": 256,
+            "kind": "fixed",
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_fn_split_atomic__tv128_dep1",
+        "kernel_symbol": "kernel_cake_mhc_train_fn_split_atomic__tv128_dep1",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fn_split_atomic__tv128_dep1",
+        "logical": {
+            "accumulate": "accumulate",
+            "dfn": "dfn",
+            "fn": "fn",
+            "fnTp": "fnTp",
+        },
+        "role": "fn_split_bwd",
+        "select_rule": {
+            "kind": "program",
+            "program": "dep1",
+            "rule": "fn_split_bwd_program",
+        },
         "workspace_rule": {
             "kind": "regions",
             "workspace": "bwd",
@@ -4477,6 +4557,88 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_bwd_slab_fold__dynr_late": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dY"],
+            ["buffer", "dU"],
+            ["buffer", "dzp"],
+            ["buffer", "fnTp"],
+            ["buffer", "dX"],
+            ["buffer", "tokp"],
+            ["buffer", "dfn"],
+            ["buffer", "param_partial"],
+            ["buffer", "dscale"],
+            ["buffer", "dbase"],
+            ["parameter", "T"],
+            ["parameter", "P"],
+            ["parameter", "rpc"],
+            ["parameter", "chunks"],
+            ["parameter", "accumulate"],
+            ["buffer", "ticket"],
+            ["buffer", "dfn_slot"],
+            ["buffer", "slab_cnt"],
+            ["parameter", "prow"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k7_chunks",
+            "kind": "slab_chunks",
+            "slabs": 64,
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_bwd_slab_fold__dynr_late",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_slab_fold__dynr_late",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 228480,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_bwd_slab_fold__dynr_late",
+        "logical": {
+            "P": "parts",
+            "T": "rows",
+            "X": "x_flat",
+            "accumulate": "accumulate",
+            "chunks": "param_rows",
+            "dU": "du",
+            "dX": "dx_flat",
+            "dY": "dy_flat",
+            "dbase": "dbase",
+            "dfn": "dfn",
+            "dfn_slot": "dfn_slot",
+            "dscale": "dscale",
+            "dzp": "dzp_rows",
+            "fnTp": "fnTp",
+            "param_partial": "param_partial",
+            "prow": "prow",
+            "rpc": "rows_per_chunk",
+            "slab_cnt": "slab_cnt",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_slab",
+        "select_rule": {
+            "kind": "program",
+            "program": "dynr_late",
+            "rule": "bwd_slab_atomic_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
     "cake_mhc_train_bwd_slab_red__dynr": {
         "arches": [
             "sm_107a",
@@ -4711,6 +4873,87 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": {
             "kind": "program",
             "program": "dynr_os",
+            "rule": "bwd_slab_atomic_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_slab_fold__dynr_os_late": {
+        "arches": [
+            "sm_100a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dY"],
+            ["buffer", "dU"],
+            ["buffer", "dzp"],
+            ["buffer", "fnTp"],
+            ["buffer", "dX"],
+            ["buffer", "tokp"],
+            ["buffer", "dfn"],
+            ["buffer", "param_partial"],
+            ["buffer", "dscale"],
+            ["buffer", "dbase"],
+            ["parameter", "T"],
+            ["parameter", "P"],
+            ["parameter", "rpc"],
+            ["parameter", "chunks"],
+            ["parameter", "accumulate"],
+            ["buffer", "ticket"],
+            ["buffer", "dfn_slot"],
+            ["buffer", "slab_cnt"],
+            ["parameter", "prow"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k7_chunks",
+            "kind": "slab_chunks",
+            "slabs": 64,
+        },
+        "hidden": 4096,
+        "kernel": "cake_mhc_train_bwd_slab_fold__dynr_os_late",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_slab_fold__dynr_os_late",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 228480,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_bwd_slab_fold__dynr_os_late",
+        "logical": {
+            "P": "parts",
+            "T": "rows",
+            "X": "x_flat",
+            "accumulate": "accumulate",
+            "chunks": "param_rows",
+            "dU": "du",
+            "dX": "dx_flat",
+            "dY": "dy_flat",
+            "dbase": "dbase",
+            "dfn": "dfn",
+            "dfn_slot": "dfn_slot",
+            "dscale": "dscale",
+            "dzp": "dzp_rows",
+            "fnTp": "fnTp",
+            "param_partial": "param_partial",
+            "prow": "prow",
+            "rpc": "rows_per_chunk",
+            "slab_cnt": "slab_cnt",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_slab",
+        "select_rule": {
+            "kind": "program",
+            "program": "dynr_os_late",
             "rule": "bwd_slab_atomic_program",
         },
         "workspace_rule": {
@@ -6386,7 +6629,58 @@ MODULES: dict[str, dict[str, Any]] = {
             "fnTp": "fnTp",
         },
         "role": "fn_split_bwd",
-        "select_rule": None,
+        "select_rule": {
+            "kind": "program",
+            "program": "dep",
+            "rule": "fn_split_bwd_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168": {
+        "arches": [
+            "sm_100a",
+        ],
+        "arg_plan": [
+            ["buffer", "fn"],
+            ["buffer", "fnTp"],
+            ["buffer", "dfn"],
+            ["parameter", "accumulate"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas": 448,
+            "kind": "fixed",
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_fn_split_atomic__tv128_dep1__h7168",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168",
+        "logical": {
+            "accumulate": "accumulate",
+            "dfn": "dfn",
+            "fn": "fn",
+            "fnTp": "fnTp",
+        },
+        "role": "fn_split_bwd",
+        "select_rule": {
+            "kind": "program",
+            "program": "dep1",
+            "rule": "fn_split_bwd_program",
+        },
         "workspace_rule": {
             "kind": "regions",
             "workspace": "bwd",
@@ -7507,6 +7801,88 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": {
             "kind": "program",
             "program": "dynr",
+            "rule": "bwd_slab_atomic_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_slab_fold__dynr_late__h7168": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dY"],
+            ["buffer", "dU"],
+            ["buffer", "dzp"],
+            ["buffer", "fnTp"],
+            ["buffer", "dX"],
+            ["buffer", "tokp"],
+            ["buffer", "dfn"],
+            ["buffer", "param_partial"],
+            ["buffer", "dscale"],
+            ["buffer", "dbase"],
+            ["parameter", "T"],
+            ["parameter", "P"],
+            ["parameter", "rpc"],
+            ["parameter", "chunks"],
+            ["parameter", "accumulate"],
+            ["buffer", "ticket"],
+            ["buffer", "dfn_slot"],
+            ["buffer", "slab_cnt"],
+            ["parameter", "prow"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k7_chunks",
+            "kind": "slab_chunks",
+            "slabs": 112,
+        },
+        "hidden": 7168,
+        "kernel": "cake_mhc_train_bwd_slab_fold__dynr_late__h7168",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_slab_fold__dynr_late__h7168",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 228480,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_bwd_slab_fold__dynr_late__h7168",
+        "logical": {
+            "P": "parts",
+            "T": "rows",
+            "X": "x_flat",
+            "accumulate": "accumulate",
+            "chunks": "param_rows",
+            "dU": "du",
+            "dX": "dx_flat",
+            "dY": "dy_flat",
+            "dbase": "dbase",
+            "dfn": "dfn",
+            "dfn_slot": "dfn_slot",
+            "dscale": "dscale",
+            "dzp": "dzp_rows",
+            "fnTp": "fnTp",
+            "param_partial": "param_partial",
+            "prow": "prow",
+            "rpc": "rows_per_chunk",
+            "slab_cnt": "slab_cnt",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_slab",
+        "select_rule": {
+            "kind": "program",
+            "program": "dynr_late",
             "rule": "bwd_slab_atomic_program",
         },
         "workspace_rule": {
@@ -10227,11 +10603,15 @@ MODULES: dict[str, dict[str, Any]] = {
 # (their group-row forms ``_trows_dyn`` included, on sm_100a and sm_103a at
 # hidden 4096, 5120 and 7168), the atomic fn split of the architecture
 # (launched after the token-owner pass, as its programmatic dependent; on
-# sm_107a the ``_dep1`` form, whose last CTA alone waits) and the column
+# sm_107a the ``_dep1`` form, whose last CTA alone waits; on sm_100a at 4096 and
+# 7168 the ``_dep`` record followed by its ``_dep1`` record, one per call by
+# ``fn_split_bwd_program``) and the column
 # slab's fold
 # forms (``dynr`` and its slab-fastest copy ``dynr_os``: one per call by
 # ``bwd_slab_atomic_program``; no final-reduction record): both at every hidden
-# size (``__h<H>`` at 5120 and 7168) on every architecture.  On sm_107a each
+# size (``__h<H>`` at 5120 and 7168) on every architecture.  On sm_100a and
+# sm_103a at 4096 and 7168 a fold record is followed by its late-draw record
+# (``_late``: ``BWD_SLAB_DRAW_OVERRIDES``) where the architecture has one.  On sm_107a each
 # fold record is followed by its reduction form (``cake_mhc_train_bwd_slab_red__*``:
 # ``BWD_SLAB_DFN``), which a call with ``accumulation="fp32"`` (the default)
 # selects outside ``torch.use_deterministic_algorithms(True)``.  On
@@ -10252,8 +10632,11 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__dot_ao8_trows_dyn",
             "cake_mhc_train_bwd_token__rt64",
             "cake_mhc_train_fn_split_atomic__tv128_dep",
+            "cake_mhc_train_fn_split_atomic__tv128_dep1",
             "cake_mhc_train_bwd_slab_fold__dynr",
+            "cake_mhc_train_bwd_slab_fold__dynr_late",
             "cake_mhc_train_bwd_slab_fold__dynr_os",
+            "cake_mhc_train_bwd_slab_fold__dynr_os_late",
         ],
         "bwd_prepare_h4096": [
             "cake_mhc_train_bwd_prepare__g2sm_le1024",
@@ -10358,7 +10741,9 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__dot_ao8_trows_dyn__h7168",
             "cake_mhc_train_bwd_token__rt64__h7168",
             "cake_mhc_train_fn_split_atomic__tv128_dep__h7168",
+            "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr__h7168",
+            "cake_mhc_train_bwd_slab_fold__dynr_late__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr_os__h7168",
         ],
         "bwd_prepare_h7168": [
@@ -10442,6 +10827,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__rt64",
             "cake_mhc_train_fn_split_atomic__tv128_dep",
             "cake_mhc_train_bwd_slab_fold__dynr",
+            "cake_mhc_train_bwd_slab_fold__dynr_late",
             "cake_mhc_train_bwd_slab_fold__dynr_os",
         ],
         "bwd_prepare_h4096": [
@@ -10543,6 +10929,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__rt64__h7168",
             "cake_mhc_train_fn_split_atomic__tv128_dep__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr__h7168",
+            "cake_mhc_train_bwd_slab_fold__dynr_late__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr_os__h7168",
         ],
         "bwd_prepare_h7168": [
@@ -11798,6 +12185,99 @@ BWD_SLAB_LPT_OVERRIDES: dict[tuple[str, int, int], Any] = {}
 # ``deterministic_algorithms``): the package reads the mode once per backward_finish / handoff_backward_finish call
 # and keys its route plans on it.
 BWD_SLAB_DFN: dict[str, str] = {"sm_100a": "fold", "sm_103a": "fold", "sm_107a": "red"}
+# BWD_SLAB_DRAW_OVERRIDES: the column slab fold's unit draw per board -- (architecture, SM count, hidden size), the SM
+# count and the hidden size ints, never None -> token-count bands ((t_upper, draw), ..., (None, draw)) of "ahead" or
+# "late", read by bwd_slab_draw at the device's SM count. The dynamic fold (dynr, dynr_os) has every CTA draw its next
+# unit from the ticket right after it publishes the current one ("ahead"). The late draw (the records
+# cake_mhc_train_bwd_slab_fold__dynr_late, __dynr_os_late and __dynr_late__h7168, program keys "dynr_late" /
+# "dynr_os_late") draws it after it loads the current unit's last tile when the launch has one unit per CTA
+# ((H / 64) P <= grid, k7_chunks), and at once for a unit without tiles; with more units than CTAs it draws ahead as
+# the fold does. A CTA that starts early then takes no unit that a CTA still starting would take. The units, their
+# slots and the fold order are the fold's, so the outputs are the fold's bits; a launch still makes n_units + grid
+# draws. bwd_slab_atomic_program appends "_late" to "dynr" / "dynr_os" in a "late" band (never to an lpt or a
+# reduction program), with or without torch.use_deterministic_algorithms(True). The "late" bands of a cell are the
+# 64-token tiles where k7_chunks gives at most one unit per SM on the board; on every other tile the fold draws ahead.
+# The cells hold B200 (sm_100a with 148 SMs) and GB300 (sm_103a with 152 SMs) at hidden 4096 and 7168. Every other
+# board, hidden 5120 and a call without an SM count draw ahead everywhere.
+BWD_SLAB_DRAW_OVERRIDES: dict[
+    tuple[str, int, int], tuple[tuple[int | None, str], ...]
+] = {
+    ("sm_100a", 148, 4096): (
+        (1664, "late"),
+        (1728, "ahead"),
+        (2048, "late"),
+        (2112, "ahead"),
+        (2176, "late"),
+        (2304, "ahead"),
+        (2432, "late"),
+        (2496, "ahead"),
+        (2688, "late"),
+        (2880, "ahead"),
+        (2944, "late"),
+        (3072, "ahead"),
+        (3200, "late"),
+        (3520, "ahead"),
+        (3712, "late"),
+        (5184, "ahead"),
+        (5248, "late"),
+        (None, "ahead"),
+    ),
+    ("sm_100a", 148, 7168): (
+        (576, "late"),
+        (640, "ahead"),
+        (704, "late"),
+        (768, "ahead"),
+        (832, "late"),
+        (960, "ahead"),
+        (1024, "late"),
+        (None, "ahead"),
+    ),
+    ("sm_103a", 152, 4096): (
+        (384, "late"),
+        (448, "ahead"),
+        (768, "late"),
+        (896, "ahead"),
+        (1152, "late"),
+        (1344, "ahead"),
+        (1536, "late"),
+        (1792, "ahead"),
+        (1920, "late"),
+        (None, "ahead"),
+    ),
+    ("sm_103a", 152, 7168): (
+        (192, "late"),
+        (256, "ahead"),
+        (384, "late"),
+        (512, "ahead"),
+        (576, "late"),
+        (None, "ahead"),
+    ),
+}
+# FN_SPLIT_CHAIN_OVERRIDES: the backward fn split's chain per board (keys as BWD_SLAB_DRAW_OVERRIDES) -> token-count
+# bands of "dep" or "dep1", read by fn_split_bwd_program at the device's SM count for the fn split records that
+# ship in both chains (select rule program "dep" / "dep1"). Every CTA of the "dep" split waits for the token-owner
+# pass as its last statement. In the "dep1" split (cake_mhc_train_fn_split_atomic__tv128_dep1, __tv128_dep1__h7168)
+# the last CTA alone waits, so the other CTAs leave their SMs while the token-owner pass runs and the column slab's
+# CTAs can become resident there sooner. The grid still completes after the token-owner pass, and both splits store
+# the same values, so the outputs are the same bits. The cells hold B200 (sm_100a with 148 SMs) at hidden 4096 and
+# 7168: "dep1" up to 4096 tokens, but "dep" from 1665 to 1728 tokens at 4096. Those token counts are the one band up
+# to 4096 tokens at 4096 where the column slab is the fold "dynr" with its own draw ("ahead"); there "dep1" showed
+# no measured gain over "dep" on B200, so they select the same records as a board without a cell. Every other board,
+# hidden 5120 and a call without an SM count run "dep" (sm_107a's fn split at 4096 is "dep1" by its record alone).
+FN_SPLIT_CHAIN_OVERRIDES: dict[
+    tuple[str, int, int], tuple[tuple[int | None, str], ...]
+] = {
+    ("sm_100a", 148, 4096): (
+        (1664, "dep1"),
+        (1728, "dep"),
+        (4096, "dep1"),
+        (None, "dep"),
+    ),
+    ("sm_100a", 148, 7168): (
+        (4096, "dep1"),
+        (None, "dep"),
+    ),
+}
 
 # FWD_FINISH_COL_SPLIT: the residual mixing's sub-tokens per token (half tokens of 2048 columns at H 4096).
 FWD_FINISH_COL_SPLIT = 2
@@ -12345,11 +12825,29 @@ def bwd_slab_order(
     return order
 
 
+def bwd_slab_draw(
+    T, arch, hidden=HIDDEN, *, sm_count=None
+):  # -> the column slab fold's unit draw at T tokens: "ahead" or "late" (the board's BWD_SLAB_DRAW_OVERRIDES cell;
+    # "ahead" on every other board and without an SM count)
+    if hidden not in HIDDEN_SIZES:
+        raise ValueError(f"hidden must be one of {HIDDEN_SIZES}, got {hidden}")
+    board = _board_cell(BWD_SLAB_DRAW_OVERRIDES, arch, sm_count, hidden)
+    if board is None:
+        return "ahead"
+    key, bands = board
+    table = f"BWD_SLAB_DRAW_OVERRIDES[{key!r}]"
+    draw = _band(T, bands, table)
+    if draw not in ("ahead", "late"):
+        raise ValueError(f"{table} names the draw {draw!r}: 'ahead' or 'late'")
+    return draw
+
+
 def bwd_slab_atomic_program(
     T, sm_count, arch, hidden=HIDDEN, *, deterministic_algorithms=False
 ):  # -> "lpt" where lpt_chunks gives a geometry, else "dynr"; "_os" appended where bwd_slab_order is "slab" (both at
     # the device's SM count: its board's cells); "_red" appended to "dynr" where BWD_SLAB_DFN names "red", unless
-    # ``deterministic_algorithms`` (a call under torch.use_deterministic_algorithms(True)), which keeps the fold
+    # ``deterministic_algorithms`` (a call under torch.use_deterministic_algorithms(True)), which keeps the fold;
+    # "_late" appended to the fold "dynr" / "dynr_os" where bwd_slab_draw is "late" (at the device's SM count)
     if hidden not in HIDDEN_SIZES:
         raise ValueError(f"hidden must be one of {HIDDEN_SIZES}, got {hidden}")
     base = "dynr" if lpt_chunks(T, sm_count, arch, hidden=hidden) is None else "lpt"
@@ -12359,7 +12857,34 @@ def bwd_slab_atomic_program(
         and BWD_SLAB_DFN.get(arch) == "red"
         and not deterministic_algorithms
     )
-    return base + ("_os" if order == "slab" else "") + ("_red" if red else "")
+    late = (
+        base == "dynr"
+        and not red
+        and bwd_slab_draw(T, arch, hidden, sm_count=sm_count) == "late"
+    )
+    return (
+        base
+        + ("_os" if order == "slab" else "")
+        + ("_red" if red else "")
+        + ("_late" if late else "")
+    )
+
+
+def fn_split_bwd_program(
+    T, sm_count, arch, hidden=HIDDEN
+):  # -> the backward fn split's chain at T tokens: "dep" or "dep1" (the board's FN_SPLIT_CHAIN_OVERRIDES cell; "dep"
+    # on every other board and without an SM count), the program key of the fn split records that ship in both chains
+    if hidden not in HIDDEN_SIZES:
+        raise ValueError(f"hidden must be one of {HIDDEN_SIZES}, got {hidden}")
+    board = _board_cell(FN_SPLIT_CHAIN_OVERRIDES, arch, sm_count, hidden)
+    if board is None:
+        return "dep"
+    key, bands = board
+    table = f"FN_SPLIT_CHAIN_OVERRIDES[{key!r}]"
+    chain = _band(T, bands, table)
+    if chain not in ("dep", "dep1"):
+        raise ValueError(f"{table} names the chain {chain!r}: 'dep' or 'dep1'")
+    return chain
 
 
 def k6_ctas_per_sm(hidden=HIDDEN, arch=None):  # -> the token owner's ring CTAs per SM (K6_CTAS_PER_SM)
@@ -12902,6 +13427,7 @@ PROGRAM_RULES = (
     "fwd_coef_program",
     "bwd_token_program",
     "bwd_slab_atomic_program",
+    "fn_split_bwd_program",
 )
 
 
@@ -12992,7 +13518,8 @@ def selected_modules(
     round-3 coefficient-pass regimes keyed on the device's SM count; ``chunk_rows_band``:
     ``k6_grid(rows, sm_count, hidden, arch).R`` lies in one of ``ranges`` -- the token-owner
     pass's regimes; ``program``: the named host rule (``fwd_map_program``,
-    ``fwd_coef_program``, ``bwd_token_program`` or ``bwd_slab_atomic_program``)
+    ``fwd_coef_program``, ``bwd_token_program``, ``bwd_slab_atomic_program`` or
+    ``fn_split_bwd_program``)
     at ``(rows, sm_count, arch, hidden)`` equals the record's program key --
     the mapping-pass forms of sm_103a and
     sm_100a outside the fit regime (the ``nsx`` record ``__tk`` also where the
@@ -13001,7 +13528,8 @@ def selected_modules(
     ``tk_ns96_g2_ol2l_ct``) and of sm_107a to 32768 tokens, the
     coefficient-pass forms of record, the token-owner forms of record (their
     group-row forms ``_trows_dyn`` inside ``BWD_ROW_BANDS``) and the column
-    slab's forms;
+    slab's forms and the backward fn splits of the forms that ship in both
+    chains;
     ``run_time_iters``: every call whose
     ``sinkhorn_iters`` is not :data:`SINKHORN_ITERS` -- the run-time-count forms
     of the coefficient pass and the token-owner pass, which then stand in for
@@ -13011,7 +13539,8 @@ def selected_modules(
     record for a role of :data:`RUN_TIME_ITERS_ROLES` runs the count of record
     only: another count is a ``NotImplementedError``.  The rules of record are
     :func:`fn_split_program`, :func:`fwd_map_program`, :func:`fwd_coef_program`,
-    :func:`bwd_token_program` and :func:`bwd_slab_atomic_program` (the
+    :func:`bwd_token_program`, :func:`bwd_slab_atomic_program` and
+    :func:`fn_split_bwd_program` (the
     deterministic package's selection on every route but the column slab's,
     this package's column-slab rule at every hidden size, at the call's SM
     count: on sm_103a at 5120 / 7168, whose route holds the ``dynr__h<H>`` and
@@ -13020,12 +13549,18 @@ def selected_modules(
     reduction record (``dynr`` / ``dynr_red`` and ``dynr_os`` / ``dynr_os_red``
     at every hidden size), it names the reduction form unless ``deterministic_algorithms``
     and ``dynr_os`` / ``dynr_os_red`` only on the boards whose cell of
-    ``BWD_SLAB_ORDER_OVERRIDES`` names ``"slab"``; the fn split of
-    ``bwd_finish`` is one record per architecture and hidden size).  A route
+    ``BWD_SLAB_ORDER_OVERRIDES`` names ``"slab"``; on sm_100a / sm_103a at 4096
+    and 7168 the route holds each fold record beside its late-draw record
+    where the architecture has one, and the rule names it in the ``"late"``
+    bands of ``BWD_SLAB_DRAW_OVERRIDES``; the fn split of ``bwd_finish`` is one
+    record per architecture and hidden size, except on sm_100a at 4096 and
+    7168: there the route holds the ``_dep`` and ``_dep1`` records, and
+    :func:`fn_split_bwd_program` picks one at every token count).  A route
     with column-slab records selects exactly one of them: a call whose
     column-slab program (``BWD_SLAB_LPT``, ``BWD_SLAB_LPT_HIDDEN``,
     ``BWD_SLAB_ORDER``, ``BWD_SLAB_LPT_OVERRIDES``,
-    ``BWD_SLAB_ORDER_OVERRIDES``) has no record on the route is a
+    ``BWD_SLAB_ORDER_OVERRIDES``, ``BWD_SLAB_DRAW_OVERRIDES``) has no record on
+    the route is a
     ``ValueError``, never a backward without the column slab.  With
     ``accumulation="fp32x2"`` (:func:`check_accumulation`) the records of the
     roles of :data:`ACC_WORDS_ROLES` are then replaced by their two-word
@@ -13585,6 +14120,8 @@ __all__ = [
     "BWD_SLAB_ORDER",
     "BWD_SLAB_ORDER_OVERRIDES",
     "BWD_SLAB_DFN",
+    "BWD_SLAB_DRAW_OVERRIDES",
+    "FN_SPLIT_CHAIN_OVERRIDES",
     "BWD_TOKEN_BANDS",
     "BWD_TOKEN_PROGRAM",
     "BWD_TOKEN_REGIMES",
@@ -13615,10 +14152,12 @@ __all__ = [
     "two_word_modules",
     "arch_for_capability",
     "bwd_slab_atomic_program",
+    "bwd_slab_draw",
     "bwd_slab_order",
     "bwd_token_program",
     "device_arch",
     "enable_pdl",
+    "fn_split_bwd_program",
     "fn_split_grid",
     "fn_split_program",
     "fwd_coef_program",
