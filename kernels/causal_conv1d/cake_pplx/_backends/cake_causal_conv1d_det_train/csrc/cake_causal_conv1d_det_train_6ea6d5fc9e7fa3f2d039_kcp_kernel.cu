@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -438,14 +438,24 @@ kernel_cake_causal_conv1d_det_train_6ea6d5fc9e7fa3f2d039_kcp(__nv_bfloat16* __re
                         if (interior != 0) {
                             #pragma unroll
                             for (int u = 0; u < 4; u++) {
+#if defined(_MSC_VER)
+                                uint64_t _smem_raw_11[2];
+                                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_11[0]), "=l"(_smem_raw_11[1]) : "r"(sx0 + u * RS));
+#else
                                 __int128_t _smem_raw_11;
                                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_11) : "r"(sx0 + u * RS));
+#endif
                                 pkx[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_11)[0];
                                 pkx[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_11)[1];
                                 pkx[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_11)[2];
                                 pkx[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_11)[3];
+#if defined(_MSC_VER)
+                                uint64_t _smem_raw_12[2];
+                                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_12[0]), "=l"(_smem_raw_12[1]) : "r"(sx0 + 16384 + u * RS));
+#else
                                 __int128_t _smem_raw_12;
                                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_12) : "r"(sx0 + 16384 + u * RS));
+#endif
                                 pkd[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_12)[0];
                                 pkd[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_12)[1];
                                 pkd[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_12)[2];
@@ -517,361 +527,374 @@ kernel_cake_causal_conv1d_det_train_6ea6d5fc9e7fa3f2d039_kcp(__nv_bfloat16* __re
                             }
                         } else {
                             #pragma unroll
-                            for (int u_1 = 0; u_1 < 4; u_1++) {
-                                if (steps_k > u_1) {
-                                    int tcur = tb + u_1;
-                                    if (rows_k_1 > u_1) {
-                                        __int128_t _smem_raw_20;
-                                        asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_20) : "r"(sx0 + u_1 * RS));
-                                        pkx[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[0];
-                                        pkx[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[1];
-                                        pkx[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[2];
-                                        pkx[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[3];
-                                        __int128_t _smem_raw_21;
-                                        asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_21) : "r"(sx0 + 16384 + u_1 * RS));
-                                        pkd[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[0];
-                                        pkd[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[1];
-                                        pkd[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[2];
-                                        pkd[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[3];
-                                        #pragma unroll
-                                        for (int kk_3 = 0; kk_3 < 4; kk_3++) {
-                                            win[u_1 % 4 * 8 + 2 * kk_3] = __uint_as_float(pkx[kk_3] << 16);
-                                            win[u_1 % 4 * 8 + 2 * kk_3 + 1] = __uint_as_float(pkx[kk_3] & 4294901760u);
-                                            dyf[2 * kk_3] = __uint_as_float(pkd[kk_3] << 16);
-                                            dyf[2 * kk_3 + 1] = __uint_as_float(pkd[kk_3] & 4294901760u);
+                            for (int hp = 0; hp < 1; hp++) {
+                                #pragma unroll
+                                for (int u_1 = 0; u_1 < 4; u_1++) {
+                                    if (steps_k > hp * 4 + u_1) {
+                                        int tcur = tb + (hp * 4 + u_1);
+                                        if (rows_k_1 > hp * 4 + u_1) {
+#if defined(_MSC_VER)
+                                            uint64_t _smem_raw_20[2];
+                                            asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_20[0]), "=l"(_smem_raw_20[1]) : "r"(sx0 + (hp * 4 + u_1) * RS));
+#else
+                                            __int128_t _smem_raw_20;
+                                            asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_20) : "r"(sx0 + (hp * 4 + u_1) * RS));
+#endif
+                                            pkx[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[0];
+                                            pkx[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[1];
+                                            pkx[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[2];
+                                            pkx[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_20)[3];
+#if defined(_MSC_VER)
+                                            uint64_t _smem_raw_21[2];
+                                            asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_21[0]), "=l"(_smem_raw_21[1]) : "r"(sx0 + 16384 + (hp * 4 + u_1) * RS));
+#else
+                                            __int128_t _smem_raw_21;
+                                            asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_21) : "r"(sx0 + 16384 + (hp * 4 + u_1) * RS));
+#endif
+                                            pkd[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[0];
+                                            pkd[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[1];
+                                            pkd[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[2];
+                                            pkd[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_21)[3];
+                                            #pragma unroll
+                                            for (int kk_3 = 0; kk_3 < 4; kk_3++) {
+                                                win[u_1 % 4 * 8 + 2 * kk_3] = __uint_as_float(pkx[kk_3] << 16);
+                                                win[u_1 % 4 * 8 + 2 * kk_3 + 1] = __uint_as_float(pkx[kk_3] & 4294901760u);
+                                                dyf[2 * kk_3] = __uint_as_float(pkd[kk_3] << 16);
+                                                dyf[2 * kk_3 + 1] = __uint_as_float(pkd[kk_3] & 4294901760u);
+                                            }
                                         }
-                                    }
-                                    if (tcur >= doc_end) {
-                                        int trow = tail_row_off[frag * 3];
-                                        if (trow >= 0) {
-                                            long long rowr = (long long)trow * C64 + c64;
-                                            {
-                                                unsigned _ldv8_22_0;
-                                                unsigned _ldv8_22_1;
-                                                unsigned _ldv8_22_2;
-                                                unsigned _ldv8_22_3;
-                                                unsigned _ldv8_22_4;
-                                                unsigned _ldv8_22_5;
-                                                unsigned _ldv8_22_6;
-                                                unsigned _ldv8_22_7;
-                                                asm volatile(
-                                                    "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                                                    : "=r"(_ldv8_22_0), "=r"(_ldv8_22_1), "=r"(_ldv8_22_2), "=r"(_ldv8_22_3), "=r"(_ldv8_22_4), "=r"(_ldv8_22_5), "=r"(_ldv8_22_6), "=r"(_ldv8_22_7) : "l"((const void*)(dpre_tail + (rowr))) : "memory");
-                                                tailf[0 + 0] = __uint_as_float(_ldv8_22_0);
-                                                tailf[0 + 1] = __uint_as_float(_ldv8_22_1);
-                                                tailf[0 + 2] = __uint_as_float(_ldv8_22_2);
-                                                tailf[0 + 3] = __uint_as_float(_ldv8_22_3);
-                                                tailf[0 + 4] = __uint_as_float(_ldv8_22_4);
-                                                tailf[0 + 5] = __uint_as_float(_ldv8_22_5);
-                                                tailf[0 + 6] = __uint_as_float(_ldv8_22_6);
-                                                tailf[0 + 7] = __uint_as_float(_ldv8_22_7);
+                                        if (tcur >= doc_end) {
+                                            int trow = tail_row_off[frag * 3];
+                                            if (trow >= 0) {
+                                                long long rowr = (long long)trow * C64 + c64;
+                                                {
+                                                    unsigned _ldv8_22_0;
+                                                    unsigned _ldv8_22_1;
+                                                    unsigned _ldv8_22_2;
+                                                    unsigned _ldv8_22_3;
+                                                    unsigned _ldv8_22_4;
+                                                    unsigned _ldv8_22_5;
+                                                    unsigned _ldv8_22_6;
+                                                    unsigned _ldv8_22_7;
+                                                    asm volatile(
+                                                        "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
+                                                        : "=r"(_ldv8_22_0), "=r"(_ldv8_22_1), "=r"(_ldv8_22_2), "=r"(_ldv8_22_3), "=r"(_ldv8_22_4), "=r"(_ldv8_22_5), "=r"(_ldv8_22_6), "=r"(_ldv8_22_7) : "l"((const void*)(dpre_tail + (rowr))) : "memory");
+                                                    tailf[0 + 0] = __uint_as_float(_ldv8_22_0);
+                                                    tailf[0 + 1] = __uint_as_float(_ldv8_22_1);
+                                                    tailf[0 + 2] = __uint_as_float(_ldv8_22_2);
+                                                    tailf[0 + 3] = __uint_as_float(_ldv8_22_3);
+                                                    tailf[0 + 4] = __uint_as_float(_ldv8_22_4);
+                                                    tailf[0 + 5] = __uint_as_float(_ldv8_22_5);
+                                                    tailf[0 + 6] = __uint_as_float(_ldv8_22_6);
+                                                    tailf[0 + 7] = __uint_as_float(_ldv8_22_7);
+                                                }
+                                                #pragma unroll
+                                                for (int j_2 = 0; j_2 < 8; j_2++) {
+                                                    #pragma unroll
+                                                    for (int kk_4 = 0; kk_4 < 4; kk_4++) {
+                                                        w4[kk_4] = wr[j_2 * 4 + kk_4];
+                                                    }
+                                                    float _fma_23;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_23) : "f"(w4[2]), "f"(tailf[j_2]), "f"(pend[(u_1 % 4 + 4 - 1) % 4 * 8 + j_2]));
+                                                    pend[(u_1 % 4 + 4 - 1) % 4 * 8 + j_2] = _fma_23;
+                                                    float _fma_24;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_24) : "f"(w4[1]), "f"(tailf[j_2]), "f"(pend[(u_1 % 4 + 4 - 2) % 4 * 8 + j_2]));
+                                                    pend[(u_1 % 4 + 4 - 2) % 4 * 8 + j_2] = _fma_24;
+                                                    float _fma_25;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_25) : "f"(w4[0]), "f"(tailf[j_2]), "f"(pend[(u_1 % 4 + 4 - 3) % 4 * 8 + j_2]));
+                                                    pend[(u_1 % 4 + 4 - 3) % 4 * 8 + j_2] = _fma_25;
+                                                }
+                                            }
+                                            int trow_0 = tail_row_off[frag * 3 + 1];
+                                            if (trow_0 >= 0) {
+                                                long long rowr_1 = (long long)trow_0 * C64 + c64;
+                                                {
+                                                    unsigned _ldv8_26_0;
+                                                    unsigned _ldv8_26_1;
+                                                    unsigned _ldv8_26_2;
+                                                    unsigned _ldv8_26_3;
+                                                    unsigned _ldv8_26_4;
+                                                    unsigned _ldv8_26_5;
+                                                    unsigned _ldv8_26_6;
+                                                    unsigned _ldv8_26_7;
+                                                    asm volatile(
+                                                        "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
+                                                        : "=r"(_ldv8_26_0), "=r"(_ldv8_26_1), "=r"(_ldv8_26_2), "=r"(_ldv8_26_3), "=r"(_ldv8_26_4), "=r"(_ldv8_26_5), "=r"(_ldv8_26_6), "=r"(_ldv8_26_7) : "l"((const void*)(dpre_tail + (rowr_1))) : "memory");
+                                                    tailf[0 + 0] = __uint_as_float(_ldv8_26_0);
+                                                    tailf[0 + 1] = __uint_as_float(_ldv8_26_1);
+                                                    tailf[0 + 2] = __uint_as_float(_ldv8_26_2);
+                                                    tailf[0 + 3] = __uint_as_float(_ldv8_26_3);
+                                                    tailf[0 + 4] = __uint_as_float(_ldv8_26_4);
+                                                    tailf[0 + 5] = __uint_as_float(_ldv8_26_5);
+                                                    tailf[0 + 6] = __uint_as_float(_ldv8_26_6);
+                                                    tailf[0 + 7] = __uint_as_float(_ldv8_26_7);
+                                                }
+                                                #pragma unroll
+                                                for (int j_3 = 0; j_3 < 8; j_3++) {
+                                                    #pragma unroll
+                                                    for (int kk_5 = 0; kk_5 < 4; kk_5++) {
+                                                        w4[kk_5] = wr[j_3 * 4 + kk_5];
+                                                    }
+                                                    float _fma_27;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_27) : "f"(w4[1]), "f"(tailf[j_3]), "f"(pend[(u_1 % 4 + 4 + 1 - 2) % 4 * 8 + j_3]));
+                                                    pend[(u_1 % 4 + 4 + 1 - 2) % 4 * 8 + j_3] = _fma_27;
+                                                    float _fma_28;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_28) : "f"(w4[0]), "f"(tailf[j_3]), "f"(pend[(u_1 % 4 + 4 + 1 - 3) % 4 * 8 + j_3]));
+                                                    pend[(u_1 % 4 + 4 + 1 - 3) % 4 * 8 + j_3] = _fma_28;
+                                                }
+                                            }
+                                            int trow_1 = tail_row_off[frag * 3 + 2];
+                                            if (trow_1 >= 0) {
+                                                long long rowr_2 = (long long)trow_1 * C64 + c64;
+                                                {
+                                                    unsigned _ldv8_29_0;
+                                                    unsigned _ldv8_29_1;
+                                                    unsigned _ldv8_29_2;
+                                                    unsigned _ldv8_29_3;
+                                                    unsigned _ldv8_29_4;
+                                                    unsigned _ldv8_29_5;
+                                                    unsigned _ldv8_29_6;
+                                                    unsigned _ldv8_29_7;
+                                                    asm volatile(
+                                                        "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
+                                                        : "=r"(_ldv8_29_0), "=r"(_ldv8_29_1), "=r"(_ldv8_29_2), "=r"(_ldv8_29_3), "=r"(_ldv8_29_4), "=r"(_ldv8_29_5), "=r"(_ldv8_29_6), "=r"(_ldv8_29_7) : "l"((const void*)(dpre_tail + (rowr_2))) : "memory");
+                                                    tailf[0 + 0] = __uint_as_float(_ldv8_29_0);
+                                                    tailf[0 + 1] = __uint_as_float(_ldv8_29_1);
+                                                    tailf[0 + 2] = __uint_as_float(_ldv8_29_2);
+                                                    tailf[0 + 3] = __uint_as_float(_ldv8_29_3);
+                                                    tailf[0 + 4] = __uint_as_float(_ldv8_29_4);
+                                                    tailf[0 + 5] = __uint_as_float(_ldv8_29_5);
+                                                    tailf[0 + 6] = __uint_as_float(_ldv8_29_6);
+                                                    tailf[0 + 7] = __uint_as_float(_ldv8_29_7);
+                                                }
+                                                #pragma unroll
+                                                for (int j_4 = 0; j_4 < 8; j_4++) {
+                                                    #pragma unroll
+                                                    for (int kk_6 = 0; kk_6 < 4; kk_6++) {
+                                                        w4[kk_6] = wr[j_4 * 4 + kk_6];
+                                                    }
+                                                    float _fma_30;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_30) : "f"(w4[0]), "f"(tailf[j_4]), "f"(pend[(u_1 % 4 + 4 + 2 - 3) % 4 * 8 + j_4]));
+                                                    pend[(u_1 % 4 + 4 + 2 - 3) % 4 * 8 + j_4] = _fma_30;
+                                                }
                                             }
                                             #pragma unroll
-                                            for (int j_2 = 0; j_2 < 8; j_2++) {
-                                                #pragma unroll
-                                                for (int kk_4 = 0; kk_4 < 4; kk_4++) {
-                                                    w4[kk_4] = wr[j_2 * 4 + kk_4];
+                                            for (int m = 1; m < 4; m++) {
+                                                int tm = tcur - m;
+                                                if (tm >= t0 && tm < t_end && tm >= doc_start) {
+                                                    long long rowm = (long long)tm * C64 + c64;
+                                                    unsigned int packed_m[4];
+                                                    #pragma unroll
+                                                    for (int _lp = 0; _lp < 1; _lp++) {
+                                                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 0], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 0]));
+                                                        packed_m[_lp] = *(uint32_t*)&_bf2;
+                                                    }
+                                                    #pragma unroll
+                                                    for (int _lp = 0; _lp < 1; _lp++) {
+                                                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 2], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 2]));
+                                                        packed_m[_lp + 1] = *(uint32_t*)&_bf2;
+                                                    }
+                                                    #pragma unroll
+                                                    for (int _lp = 0; _lp < 1; _lp++) {
+                                                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 4], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 4]));
+                                                        packed_m[_lp + 2] = *(uint32_t*)&_bf2;
+                                                    }
+                                                    #pragma unroll
+                                                    for (int _lp = 0; _lp < 1; _lp++) {
+                                                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 6], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 6]));
+                                                        packed_m[_lp + 3] = *(uint32_t*)&_bf2;
+                                                    }
+                                                    reinterpret_cast<int4*>(dx + (rowm))[0] = reinterpret_cast<int4*>(packed_m)[0];
                                                 }
-                                                float _fma_23;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_23) : "f"(w4[2]), "f"(tailf[j_2]), "f"(pend[(u_1 % 4 + 4 - 1) % 4 * 8 + j_2]));
-                                                pend[(u_1 % 4 + 4 - 1) % 4 * 8 + j_2] = _fma_23;
-                                                float _fma_24;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_24) : "f"(w4[1]), "f"(tailf[j_2]), "f"(pend[(u_1 % 4 + 4 - 2) % 4 * 8 + j_2]));
-                                                pend[(u_1 % 4 + 4 - 2) % 4 * 8 + j_2] = _fma_24;
-                                                float _fma_25;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_25) : "f"(w4[0]), "f"(tailf[j_2]), "f"(pend[(u_1 % 4 + 4 - 3) % 4 * 8 + j_2]));
-                                                pend[(u_1 % 4 + 4 - 3) % 4 * 8 + j_2] = _fma_25;
-                                            }
-                                        }
-                                        int trow_0 = tail_row_off[frag * 3 + 1];
-                                        if (trow_0 >= 0) {
-                                            long long rowr_1 = (long long)trow_0 * C64 + c64;
-                                            {
-                                                unsigned _ldv8_26_0;
-                                                unsigned _ldv8_26_1;
-                                                unsigned _ldv8_26_2;
-                                                unsigned _ldv8_26_3;
-                                                unsigned _ldv8_26_4;
-                                                unsigned _ldv8_26_5;
-                                                unsigned _ldv8_26_6;
-                                                unsigned _ldv8_26_7;
-                                                asm volatile(
-                                                    "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                                                    : "=r"(_ldv8_26_0), "=r"(_ldv8_26_1), "=r"(_ldv8_26_2), "=r"(_ldv8_26_3), "=r"(_ldv8_26_4), "=r"(_ldv8_26_5), "=r"(_ldv8_26_6), "=r"(_ldv8_26_7) : "l"((const void*)(dpre_tail + (rowr_1))) : "memory");
-                                                tailf[0 + 0] = __uint_as_float(_ldv8_26_0);
-                                                tailf[0 + 1] = __uint_as_float(_ldv8_26_1);
-                                                tailf[0 + 2] = __uint_as_float(_ldv8_26_2);
-                                                tailf[0 + 3] = __uint_as_float(_ldv8_26_3);
-                                                tailf[0 + 4] = __uint_as_float(_ldv8_26_4);
-                                                tailf[0 + 5] = __uint_as_float(_ldv8_26_5);
-                                                tailf[0 + 6] = __uint_as_float(_ldv8_26_6);
-                                                tailf[0 + 7] = __uint_as_float(_ldv8_26_7);
                                             }
                                             #pragma unroll
-                                            for (int j_3 = 0; j_3 < 8; j_3++) {
+                                            for (int m_1 = 1; m_1 < 4; m_1++) {
                                                 #pragma unroll
-                                                for (int kk_5 = 0; kk_5 < 4; kk_5++) {
-                                                    w4[kk_5] = wr[j_3 * 4 + kk_5];
+                                                for (int j_5 = 0; j_5 < 8; j_5++) {
+                                                    win[(u_1 % 4 + 4 - m_1) % 4 * 8 + j_5] = 0.0f;
                                                 }
-                                                float _fma_27;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_27) : "f"(w4[1]), "f"(tailf[j_3]), "f"(pend[(u_1 % 4 + 4 + 1 - 2) % 4 * 8 + j_3]));
-                                                pend[(u_1 % 4 + 4 + 1 - 2) % 4 * 8 + j_3] = _fma_27;
-                                                float _fma_28;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_28) : "f"(w4[0]), "f"(tailf[j_3]), "f"(pend[(u_1 % 4 + 4 + 1 - 3) % 4 * 8 + j_3]));
-                                                pend[(u_1 % 4 + 4 + 1 - 3) % 4 * 8 + j_3] = _fma_28;
                                             }
-                                        }
-                                        int trow_1 = tail_row_off[frag * 3 + 2];
-                                        if (trow_1 >= 0) {
-                                            long long rowr_2 = (long long)trow_1 * C64 + c64;
-                                            {
-                                                unsigned _ldv8_29_0;
-                                                unsigned _ldv8_29_1;
-                                                unsigned _ldv8_29_2;
-                                                unsigned _ldv8_29_3;
-                                                unsigned _ldv8_29_4;
-                                                unsigned _ldv8_29_5;
-                                                unsigned _ldv8_29_6;
-                                                unsigned _ldv8_29_7;
-                                                asm volatile(
-                                                    "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                                                    : "=r"(_ldv8_29_0), "=r"(_ldv8_29_1), "=r"(_ldv8_29_2), "=r"(_ldv8_29_3), "=r"(_ldv8_29_4), "=r"(_ldv8_29_5), "=r"(_ldv8_29_6), "=r"(_ldv8_29_7) : "l"((const void*)(dpre_tail + (rowr_2))) : "memory");
-                                                tailf[0 + 0] = __uint_as_float(_ldv8_29_0);
-                                                tailf[0 + 1] = __uint_as_float(_ldv8_29_1);
-                                                tailf[0 + 2] = __uint_as_float(_ldv8_29_2);
-                                                tailf[0 + 3] = __uint_as_float(_ldv8_29_3);
-                                                tailf[0 + 4] = __uint_as_float(_ldv8_29_4);
-                                                tailf[0 + 5] = __uint_as_float(_ldv8_29_5);
-                                                tailf[0 + 6] = __uint_as_float(_ldv8_29_6);
-                                                tailf[0 + 7] = __uint_as_float(_ldv8_29_7);
-                                            }
-                                            #pragma unroll
-                                            for (int j_4 = 0; j_4 < 8; j_4++) {
-                                                #pragma unroll
-                                                for (int kk_6 = 0; kk_6 < 4; kk_6++) {
-                                                    w4[kk_6] = wr[j_4 * 4 + kk_6];
+                                            if (tcur < S) {
+                                                int lo2 = 0;
+                                                int hi2 = num_docs - 1;
+                                                #pragma unroll 1
+                                                for (int step2 = 0; step2 < search_steps; step2++) {
+                                                    int mid2 = lo2 + hi2 + 1 >> 1;
+                                                    if (tcur >= cu[mid2]) {
+                                                        lo2 = mid2;
+                                                    } else {
+                                                        hi2 = mid2 - 1;
+                                                    }
                                                 }
-                                                float _fma_30;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_30) : "f"(w4[0]), "f"(tailf[j_4]), "f"(pend[(u_1 % 4 + 4 + 2 - 3) % 4 * 8 + j_4]));
-                                                pend[(u_1 % 4 + 4 + 2 - 3) % 4 * 8 + j_4] = _fma_30;
-                                            }
-                                        }
-                                        #pragma unroll
-                                        for (int m = 1; m < 4; m++) {
-                                            int tm = tcur - m;
-                                            if (tm >= t0 && tm < t_end && tm >= doc_start) {
-                                                long long rowm = (long long)tm * C64 + c64;
-                                                unsigned int _packed_1[4];
-                                                #pragma unroll
-                                                for (int _lp = 0; _lp < 1; _lp++) {
-                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 0], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 0]));
-                                                    _packed_1[_lp] = *(uint32_t*)&_bf2;
+                                                doc_start = cu[lo2];
+                                                doc_end = cu[lo2 + 1];
+                                                frag = lo2;
+                                                int hrow_2_0 = hist_row_off[frag * 3 + 2];
+                                                if (hrow_2_0 >= 0) {
+                                                    long long rowh_1_3 = (long long)hrow_2_0 * C64 + c64;
+                                                    {
+                                                        const uint4* _vptr_31 = reinterpret_cast<const uint4*>(hist + rowh_1_3);
+                                                        uint4 _vld_31[1];
+                                                        #pragma unroll
+                                                        for (int _blk = 0; _blk < 1; _blk++) {
+                                                            _vld_31[_blk] = _vptr_31[_blk];
+                                                            uint32_t* _vpairs_31 = reinterpret_cast<uint32_t*>(&_vld_31[_blk]);
+                                                            #pragma unroll
+                                                            for (int _pair = 0; _pair < 4; _pair++) {
+                                                                (&win[(u_1 % 4 + 4 - 1) % 4 * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_31[_pair]) << 16);
+                                                                (&win[(u_1 % 4 + 4 - 1) % 4 * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_31[_pair]) & 0xffff0000u);
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                #pragma unroll
-                                                for (int _lp = 0; _lp < 1; _lp++) {
-                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 2], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 2]));
-                                                    _packed_1[_lp + 1] = *(uint32_t*)&_bf2;
+                                                int hrow_2_1 = hist_row_off[frag * 3 + 1];
+                                                if (hrow_2_1 >= 0) {
+                                                    long long rowh_1_4 = (long long)hrow_2_1 * C64 + c64;
+                                                    {
+                                                        const uint4* _vptr_32 = reinterpret_cast<const uint4*>(hist + rowh_1_4);
+                                                        uint4 _vld_32[1];
+                                                        #pragma unroll
+                                                        for (int _blk = 0; _blk < 1; _blk++) {
+                                                            _vld_32[_blk] = _vptr_32[_blk];
+                                                            uint32_t* _vpairs_32 = reinterpret_cast<uint32_t*>(&_vld_32[_blk]);
+                                                            #pragma unroll
+                                                            for (int _pair = 0; _pair < 4; _pair++) {
+                                                                (&win[(u_1 % 4 + 4 - 2) % 4 * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_32[_pair]) << 16);
+                                                                (&win[(u_1 % 4 + 4 - 2) % 4 * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_32[_pair]) & 0xffff0000u);
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                #pragma unroll
-                                                for (int _lp = 0; _lp < 1; _lp++) {
-                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 4], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 4]));
-                                                    _packed_1[_lp + 2] = *(uint32_t*)&_bf2;
+                                                int hrow_2_2 = hist_row_off[frag * 3];
+                                                if (hrow_2_2 >= 0) {
+                                                    long long rowh_1_5 = (long long)hrow_2_2 * C64 + c64;
+                                                    {
+                                                        const uint4* _vptr_33 = reinterpret_cast<const uint4*>(hist + rowh_1_5);
+                                                        uint4 _vld_33[1];
+                                                        #pragma unroll
+                                                        for (int _blk = 0; _blk < 1; _blk++) {
+                                                            _vld_33[_blk] = _vptr_33[_blk];
+                                                            uint32_t* _vpairs_33 = reinterpret_cast<uint32_t*>(&_vld_33[_blk]);
+                                                            #pragma unroll
+                                                            for (int _pair = 0; _pair < 4; _pair++) {
+                                                                (&win[(u_1 % 4 + 4 - 3) % 4 * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_33[_pair]) << 16);
+                                                                (&win[(u_1 % 4 + 4 - 3) % 4 * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_33[_pair]) & 0xffff0000u);
+                                                            }
+                                                        }
+                                                    }
                                                 }
-                                                #pragma unroll
-                                                for (int _lp = 0; _lp < 1; _lp++) {
-                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2 + 6], (pend + (u_1 % 4 + 4 - m) % 4 * 8)[_lp*2+1 + 6]));
-                                                    _packed_1[_lp + 3] = *(uint32_t*)&_bf2;
-                                                }
-                                                reinterpret_cast<int4*>(dx + (rowm))[0] = reinterpret_cast<int4*>(_packed_1)[0];
-                                            }
-                                        }
-                                        #pragma unroll
-                                        for (int m_1 = 1; m_1 < 4; m_1++) {
-                                            #pragma unroll
-                                            for (int j_5 = 0; j_5 < 8; j_5++) {
-                                                win[(u_1 % 4 + 4 - m_1) % 4 * 8 + j_5] = 0.0f;
+                                            } else {
+                                                doc_start = tcur + 4;
+                                                doc_end = tcur + 4;
                                             }
                                         }
                                         if (tcur < S) {
-                                            int lo2 = 0;
-                                            int hi2 = num_docs - 1;
-                                            #pragma unroll 1
-                                            for (int step2 = 0; step2 < search_steps; step2++) {
-                                                int mid2 = lo2 + hi2 + 1 >> 1;
-                                                if (tcur >= cu[mid2]) {
-                                                    lo2 = mid2;
-                                                } else {
-                                                    hi2 = mid2 - 1;
-                                                }
-                                            }
-                                            doc_start = cu[lo2];
-                                            doc_end = cu[lo2 + 1];
-                                            frag = lo2;
-                                            int hrow_2_0 = hist_row_off[frag * 3 + 2];
-                                            if (hrow_2_0 >= 0) {
-                                                long long rowh_1_3 = (long long)hrow_2_0 * C64 + c64;
-                                                {
-                                                    const uint4* _vptr_31 = reinterpret_cast<const uint4*>(hist + rowh_1_3);
-                                                    uint4 _vld_31[1];
-                                                    #pragma unroll
-                                                    for (int _blk = 0; _blk < 1; _blk++) {
-                                                        _vld_31[_blk] = _vptr_31[_blk];
-                                                        uint32_t* _vpairs_31 = reinterpret_cast<uint32_t*>(&_vld_31[_blk]);
-                                                        #pragma unroll
-                                                        for (int _pair = 0; _pair < 4; _pair++) {
-                                                            (&win[(u_1 % 4 + 4 - 1) % 4 * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_31[_pair]) << 16);
-                                                            (&win[(u_1 % 4 + 4 - 1) % 4 * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_31[_pair]) & 0xffff0000u);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            int hrow_2_1 = hist_row_off[frag * 3 + 1];
-                                            if (hrow_2_1 >= 0) {
-                                                long long rowh_1_4 = (long long)hrow_2_1 * C64 + c64;
-                                                {
-                                                    const uint4* _vptr_32 = reinterpret_cast<const uint4*>(hist + rowh_1_4);
-                                                    uint4 _vld_32[1];
-                                                    #pragma unroll
-                                                    for (int _blk = 0; _blk < 1; _blk++) {
-                                                        _vld_32[_blk] = _vptr_32[_blk];
-                                                        uint32_t* _vpairs_32 = reinterpret_cast<uint32_t*>(&_vld_32[_blk]);
-                                                        #pragma unroll
-                                                        for (int _pair = 0; _pair < 4; _pair++) {
-                                                            (&win[(u_1 % 4 + 4 - 2) % 4 * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_32[_pair]) << 16);
-                                                            (&win[(u_1 % 4 + 4 - 2) % 4 * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_32[_pair]) & 0xffff0000u);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            int hrow_2_2 = hist_row_off[frag * 3];
-                                            if (hrow_2_2 >= 0) {
-                                                long long rowh_1_5 = (long long)hrow_2_2 * C64 + c64;
-                                                {
-                                                    const uint4* _vptr_33 = reinterpret_cast<const uint4*>(hist + rowh_1_5);
-                                                    uint4 _vld_33[1];
-                                                    #pragma unroll
-                                                    for (int _blk = 0; _blk < 1; _blk++) {
-                                                        _vld_33[_blk] = _vptr_33[_blk];
-                                                        uint32_t* _vpairs_33 = reinterpret_cast<uint32_t*>(&_vld_33[_blk]);
-                                                        #pragma unroll
-                                                        for (int _pair = 0; _pair < 4; _pair++) {
-                                                            (&win[(u_1 % 4 + 4 - 3) % 4 * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_33[_pair]) << 16);
-                                                            (&win[(u_1 % 4 + 4 - 3) % 4 * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_33[_pair]) & 0xffff0000u);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            doc_start = tcur + 4;
-                                            doc_end = tcur + 4;
-                                        }
-                                    }
-                                    if (tcur < S) {
-                                        if (tcur < t_end) {
-                                            #pragma unroll
-                                            for (int j_6 = 0; j_6 < 8; j_6++) {
+                                            if (tcur < t_end) {
                                                 #pragma unroll
-                                                for (int kk_7 = 0; kk_7 < 4; kk_7++) {
-                                                    w4[kk_7] = wr[j_6 * 4 + kk_7];
+                                                for (int j_6 = 0; j_6 < 8; j_6++) {
+                                                    #pragma unroll
+                                                    for (int kk_7 = 0; kk_7 < 4; kk_7++) {
+                                                        w4[kk_7] = wr[j_6 * 4 + kk_7];
+                                                    }
+                                                    float _fma_35;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_35) : "f"(w4[1]), "f"(win[(u_1 % 4 + 2) % 4 * 8 + j_6]), "f"(mul_f32_rn_noftz(w4[0], win[(u_1 % 4 + 1) % 4 * 8 + j_6])));
+                                                    float _fma_34;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_34) : "f"(w4[2]), "f"(win[(u_1 % 4 + 3) % 4 * 8 + j_6]), "f"(_fma_35));
+                                                    float fma_1;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(fma_1) : "f"(w4[3]), "f"(win[u_1 % 4 * 8 + j_6]), "f"(_fma_34));
+                                                    float e_1 = -fma_1 * 1.442695f;
+                                                    float _exp2_36 = approx_exp2(e_1);
+                                                    float den_1 = 1.0f + _exp2_36;
+                                                    float sg_1 = approx_rcp(den_1);
+                                                    float _fma_37;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_37) : "f"(fma_1), "f"(1.0f - sg_1), "f"(1.0f));
+                                                    dp[j_6] = dyf[j_6] * (sg_1 * _fma_37);
+                                                    #pragma unroll
+                                                    for (int kk_8 = 0; kk_8 < 4; kk_8++) {
+                                                        acc[j_6 * 4 + kk_8] = __fmaf_rn(dp[j_6], win[(u_1 % 4 + 1 + kk_8) % 4 * 8 + j_6], acc[j_6 * 4 + kk_8]);
+                                                    }
+                                                    float _fma_38;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_38) : "f"(w4[0]), "f"(dp[j_6]), "f"(pend[(u_1 % 4 + 1) % 4 * 8 + j_6]));
+                                                    pend[(u_1 % 4 + 1) % 4 * 8 + j_6] = _fma_38;
+                                                    float _fma_39;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_39) : "f"(w4[1]), "f"(dp[j_6]), "f"(pend[(u_1 % 4 + 2) % 4 * 8 + j_6]));
+                                                    pend[(u_1 % 4 + 2) % 4 * 8 + j_6] = _fma_39;
+                                                    float _fma_40;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_40) : "f"(w4[2]), "f"(dp[j_6]), "f"(pend[(u_1 % 4 + 3) % 4 * 8 + j_6]));
+                                                    pend[(u_1 % 4 + 3) % 4 * 8 + j_6] = _fma_40;
+                                                    pend[u_1 % 4 * 8 + j_6] = w4[3] * dp[j_6];
                                                 }
-                                                float _fma_35;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_35) : "f"(w4[1]), "f"(win[(u_1 % 4 + 2) % 4 * 8 + j_6]), "f"(mul_f32_rn_noftz(w4[0], win[(u_1 % 4 + 1) % 4 * 8 + j_6])));
-                                                float _fma_34;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_34) : "f"(w4[2]), "f"(win[(u_1 % 4 + 3) % 4 * 8 + j_6]), "f"(_fma_35));
-                                                float fma_1;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(fma_1) : "f"(w4[3]), "f"(win[u_1 % 4 * 8 + j_6]), "f"(_fma_34));
-                                                float e_1 = -fma_1 * 1.442695f;
-                                                float _exp2_36 = approx_exp2(e_1);
-                                                float den_1 = 1.0f + _exp2_36;
-                                                float sg_1 = approx_rcp(den_1);
-                                                float _fma_37;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_37) : "f"(fma_1), "f"(1.0f - sg_1), "f"(1.0f));
-                                                dp[j_6] = dyf[j_6] * (sg_1 * _fma_37);
+                                            } else {
                                                 #pragma unroll
-                                                for (int kk_8 = 0; kk_8 < 4; kk_8++) {
-                                                    acc[j_6 * 4 + kk_8] = __fmaf_rn(dp[j_6], win[(u_1 % 4 + 1 + kk_8) % 4 * 8 + j_6], acc[j_6 * 4 + kk_8]);
+                                                for (int j_7 = 0; j_7 < 8; j_7++) {
+                                                    #pragma unroll
+                                                    for (int kk_9 = 0; kk_9 < 4; kk_9++) {
+                                                        w4[kk_9] = wr[j_7 * 4 + kk_9];
+                                                    }
+                                                    float _fma_42;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_42) : "f"(w4[1]), "f"(win[(u_1 % 4 + 2) % 4 * 8 + j_7]), "f"(mul_f32_rn_noftz(w4[0], win[(u_1 % 4 + 1) % 4 * 8 + j_7])));
+                                                    float _fma_41;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_41) : "f"(w4[2]), "f"(win[(u_1 % 4 + 3) % 4 * 8 + j_7]), "f"(_fma_42));
+                                                    float fma_2;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(fma_2) : "f"(w4[3]), "f"(win[u_1 % 4 * 8 + j_7]), "f"(_fma_41));
+                                                    float e_2 = -fma_2 * 1.442695f;
+                                                    float _exp2_43 = approx_exp2(e_2);
+                                                    float den_2 = 1.0f + _exp2_43;
+                                                    float sg_2 = approx_rcp(den_2);
+                                                    float _fma_44;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_44) : "f"(fma_2), "f"(1.0f - sg_2), "f"(1.0f));
+                                                    dp[j_7] = dyf[j_7] * (sg_2 * _fma_44);
+                                                    float _fma_45;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_45) : "f"(w4[0]), "f"(dp[j_7]), "f"(pend[(u_1 % 4 + 1) % 4 * 8 + j_7]));
+                                                    pend[(u_1 % 4 + 1) % 4 * 8 + j_7] = _fma_45;
+                                                    float _fma_46;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_46) : "f"(w4[1]), "f"(dp[j_7]), "f"(pend[(u_1 % 4 + 2) % 4 * 8 + j_7]));
+                                                    pend[(u_1 % 4 + 2) % 4 * 8 + j_7] = _fma_46;
+                                                    float _fma_47;
+                                                    asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_47) : "f"(w4[2]), "f"(dp[j_7]), "f"(pend[(u_1 % 4 + 3) % 4 * 8 + j_7]));
+                                                    pend[(u_1 % 4 + 3) % 4 * 8 + j_7] = _fma_47;
+                                                    pend[u_1 % 4 * 8 + j_7] = w4[3] * dp[j_7];
                                                 }
-                                                float _fma_38;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_38) : "f"(w4[0]), "f"(dp[j_6]), "f"(pend[(u_1 % 4 + 1) % 4 * 8 + j_6]));
-                                                pend[(u_1 % 4 + 1) % 4 * 8 + j_6] = _fma_38;
-                                                float _fma_39;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_39) : "f"(w4[1]), "f"(dp[j_6]), "f"(pend[(u_1 % 4 + 2) % 4 * 8 + j_6]));
-                                                pend[(u_1 % 4 + 2) % 4 * 8 + j_6] = _fma_39;
-                                                float _fma_40;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_40) : "f"(w4[2]), "f"(dp[j_6]), "f"(pend[(u_1 % 4 + 3) % 4 * 8 + j_6]));
-                                                pend[(u_1 % 4 + 3) % 4 * 8 + j_6] = _fma_40;
-                                                pend[u_1 % 4 * 8 + j_6] = w4[3] * dp[j_6];
                                             }
-                                        } else {
-                                            #pragma unroll
-                                            for (int j_7 = 0; j_7 < 8; j_7++) {
+                                            int t3 = tcur - 3;
+                                            if (t3 >= t0 && t3 >= doc_start) {
+                                                long long row3_1 = (long long)t3 * C64 + c64;
+                                                unsigned int packed_3[4];
                                                 #pragma unroll
-                                                for (int kk_9 = 0; kk_9 < 4; kk_9++) {
-                                                    w4[kk_9] = wr[j_7 * 4 + kk_9];
+                                                for (int _lp = 0; _lp < 1; _lp++) {
+                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 0], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 0]));
+                                                    packed_3[_lp] = *(uint32_t*)&_bf2;
                                                 }
-                                                float _fma_42;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_42) : "f"(w4[1]), "f"(win[(u_1 % 4 + 2) % 4 * 8 + j_7]), "f"(mul_f32_rn_noftz(w4[0], win[(u_1 % 4 + 1) % 4 * 8 + j_7])));
-                                                float _fma_41;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_41) : "f"(w4[2]), "f"(win[(u_1 % 4 + 3) % 4 * 8 + j_7]), "f"(_fma_42));
-                                                float fma_2;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(fma_2) : "f"(w4[3]), "f"(win[u_1 % 4 * 8 + j_7]), "f"(_fma_41));
-                                                float e_2 = -fma_2 * 1.442695f;
-                                                float _exp2_43 = approx_exp2(e_2);
-                                                float den_2 = 1.0f + _exp2_43;
-                                                float sg_2 = approx_rcp(den_2);
-                                                float _fma_44;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_44) : "f"(fma_2), "f"(1.0f - sg_2), "f"(1.0f));
-                                                dp[j_7] = dyf[j_7] * (sg_2 * _fma_44);
-                                                float _fma_45;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_45) : "f"(w4[0]), "f"(dp[j_7]), "f"(pend[(u_1 % 4 + 1) % 4 * 8 + j_7]));
-                                                pend[(u_1 % 4 + 1) % 4 * 8 + j_7] = _fma_45;
-                                                float _fma_46;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_46) : "f"(w4[1]), "f"(dp[j_7]), "f"(pend[(u_1 % 4 + 2) % 4 * 8 + j_7]));
-                                                pend[(u_1 % 4 + 2) % 4 * 8 + j_7] = _fma_46;
-                                                float _fma_47;
-                                                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_47) : "f"(w4[2]), "f"(dp[j_7]), "f"(pend[(u_1 % 4 + 3) % 4 * 8 + j_7]));
-                                                pend[(u_1 % 4 + 3) % 4 * 8 + j_7] = _fma_47;
-                                                pend[u_1 % 4 * 8 + j_7] = w4[3] * dp[j_7];
+                                                #pragma unroll
+                                                for (int _lp = 0; _lp < 1; _lp++) {
+                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 2], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 2]));
+                                                    packed_3[_lp + 1] = *(uint32_t*)&_bf2;
+                                                }
+                                                #pragma unroll
+                                                for (int _lp = 0; _lp < 1; _lp++) {
+                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 4], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 4]));
+                                                    packed_3[_lp + 2] = *(uint32_t*)&_bf2;
+                                                }
+                                                #pragma unroll
+                                                for (int _lp = 0; _lp < 1; _lp++) {
+                                                    __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 6], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 6]));
+                                                    packed_3[_lp + 3] = *(uint32_t*)&_bf2;
+                                                }
+                                                reinterpret_cast<int4*>(dx + (row3_1))[0] = reinterpret_cast<int4*>(packed_3)[0];
                                             }
-                                        }
-                                        int t3 = tcur - 3;
-                                        if (t3 >= t0 && t3 >= doc_start) {
-                                            long long row3_1 = (long long)t3 * C64 + c64;
-                                            unsigned int _packed_2[4];
-                                            #pragma unroll
-                                            for (int _lp = 0; _lp < 1; _lp++) {
-                                                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 0], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 0]));
-                                                _packed_2[_lp] = *(uint32_t*)&_bf2;
-                                            }
-                                            #pragma unroll
-                                            for (int _lp = 0; _lp < 1; _lp++) {
-                                                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 2], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 2]));
-                                                _packed_2[_lp + 1] = *(uint32_t*)&_bf2;
-                                            }
-                                            #pragma unroll
-                                            for (int _lp = 0; _lp < 1; _lp++) {
-                                                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 4], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 4]));
-                                                _packed_2[_lp + 2] = *(uint32_t*)&_bf2;
-                                            }
-                                            #pragma unroll
-                                            for (int _lp = 0; _lp < 1; _lp++) {
-                                                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2((pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2 + 6], (pend + (u_1 % 4 + 1) % 4 * 8)[_lp*2+1 + 6]));
-                                                _packed_2[_lp + 3] = *(uint32_t*)&_bf2;
-                                            }
-                                            reinterpret_cast<int4*>(dx + (row3_1))[0] = reinterpret_cast<int4*>(_packed_2)[0];
                                         }
                                     }
                                 }
                             }
                         }
                     }
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     #pragma unroll
                     for (int s_1 = 0; s_1 < 2; s_1++) {
                         if (s == s_1) {
                             asm volatile("barrier.sync %0, %1;" :: "r"(1 + s_1), "r"(ct_vec) : "memory");
                         }
                     }
-                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     int kn = k + 2;
                     if (kn < n_stages) {
                         int GWn_2 = ct_vec >> 5;
@@ -1144,14 +1167,24 @@ kernel_cake_causal_conv1d_det_train_6ea6d5fc9e7fa3f2d039_kcp(__nv_bfloat16* __re
                 if (interior_1 != 0) {
                     #pragma unroll
                     for (int u_2 = 0; u_2 < 4; u_2++) {
+#if defined(_MSC_VER)
+                        uint64_t _smem_raw_63[2];
+                        asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_63[0]), "=l"(_smem_raw_63[1]) : "r"(sx0_1 + u_2 * rstride));
+#else
                         __int128_t _smem_raw_63;
                         asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_63) : "r"(sx0_1 + u_2 * rstride));
+#endif
                         pkx_1[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_63)[0];
                         pkx_1[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_63)[1];
                         pkx_1[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_63)[2];
                         pkx_1[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_63)[3];
+#if defined(_MSC_VER)
+                        uint64_t _smem_raw_64[2];
+                        asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_64[0]), "=l"(_smem_raw_64[1]) : "r"(sx0_1 + 2048 + u_2 * rstride));
+#else
                         __int128_t _smem_raw_64;
                         asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_64) : "r"(sx0_1 + 2048 + u_2 * rstride));
+#endif
                         pkd_1[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_64)[0];
                         pkd_1[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_64)[1];
                         pkd_1[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_64)[2];
@@ -1227,14 +1260,24 @@ kernel_cake_causal_conv1d_det_train_6ea6d5fc9e7fa3f2d039_kcp(__nv_bfloat16* __re
                         if (steps_k_1 > u_3) {
                             int tcur_1 = tb_1 + u_3;
                             if (rows_k_4 > u_3) {
+#if defined(_MSC_VER)
+                                uint64_t _smem_raw_72[2];
+                                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_72[0]), "=l"(_smem_raw_72[1]) : "r"(sx0_1 + u_3 * rstride));
+#else
                                 __int128_t _smem_raw_72;
                                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_72) : "r"(sx0_1 + u_3 * rstride));
+#endif
                                 pkx_1[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_72)[0];
                                 pkx_1[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_72)[1];
                                 pkx_1[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_72)[2];
                                 pkx_1[3] = reinterpret_cast<const uint32_t*>(&_smem_raw_72)[3];
+#if defined(_MSC_VER)
+                                uint64_t _smem_raw_73[2];
+                                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_73[0]), "=l"(_smem_raw_73[1]) : "r"(sx0_1 + 2048 + u_3 * rstride));
+#else
                                 __int128_t _smem_raw_73;
                                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_73) : "r"(sx0_1 + 2048 + u_3 * rstride));
+#endif
                                 pkd_1[0] = reinterpret_cast<const uint32_t*>(&_smem_raw_73)[0];
                                 pkd_1[1] = reinterpret_cast<const uint32_t*>(&_smem_raw_73)[1];
                                 pkd_1[2] = reinterpret_cast<const uint32_t*>(&_smem_raw_73)[2];
@@ -1571,8 +1614,8 @@ kernel_cake_causal_conv1d_det_train_6ea6d5fc9e7fa3f2d039_kcp(__nv_bfloat16* __re
                     }
                 }
             }
-            __syncwarp();
             asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            __syncwarp();
             int kn_1 = k_1 + 2;
             if (kn_1 < n_stages_1) {
                 int bslot_1_1 = warp_1 * 2 + slot_1;
