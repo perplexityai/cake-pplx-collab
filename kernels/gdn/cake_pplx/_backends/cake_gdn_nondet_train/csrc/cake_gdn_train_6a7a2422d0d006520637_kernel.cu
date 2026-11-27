@@ -441,6 +441,8 @@ kernel_cake_gdn_train_6a7a2422d0d006520637(__nv_bfloat16* __restrict__ qn, __nv_
     int stT_row = s0 + lane_0 / 16 * 8 + lane_0 % 8;
     int stT_col = rb * 16 + lane_0 / 8 % 2 * 8;
     float acc_s[16];
+    unsigned int lo_a[8] = {0};
+    unsigned int lo_b[8] = {0};
     float acc[32];
     float acc2[16];
     float acc7[16];
@@ -1185,6 +1187,17 @@ kernel_cake_gdn_train_6a7a2422d0d006520637(__nv_bfloat16* __restrict__ qn, __nv_
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     asm volatile("tcgen05.fence::before_thread_sync;");
     __syncthreads();
+    unsigned int lo_ss = s_do_addr + (unsigned int)(52480 + n0 / 64 * 21248);
+    int lo_sr = rb * 16 + lane_0 / 8;
+    asm volatile("cp.async.cg.shared::cta.global [%0], [%1], 16, %2;"
+        :: "r"(lo_ss + (unsigned int)(lo_sr * 128 + (lane_0 % 8 ^ lo_sr & 7) * 16)), "l"(dv2_lo + (((long long)(tok0 + lo_sr) * (long long)num_v_heads + (long long)hv) * 128ll + (long long)(n0 + lane_0 % 8 * 8))), "r"((n_valid > lo_sr) ? 16 : 0));
+    asm volatile("cp.async.cg.shared::cta.global [%0], [%1], 16, %2;"
+        :: "r"(lo_ss + (unsigned int)((lo_sr + 4) * 128 + (lane_0 % 8 ^ lo_sr + 4 & 7) * 16)), "l"(dv2_lo + (((long long)(tok0 + lo_sr + 4) * (long long)num_v_heads + (long long)hv) * 128ll + (long long)(n0 + lane_0 % 8 * 8))), "r"((n_valid > lo_sr + 4) ? 16 : 0));
+    asm volatile("cp.async.cg.shared::cta.global [%0], [%1], 16, %2;"
+        :: "r"(lo_ss + (unsigned int)((lo_sr + 8) * 128 + (lane_0 % 8 ^ lo_sr + 8 & 7) * 16)), "l"(dv2_lo + (((long long)(tok0 + lo_sr + 8) * (long long)num_v_heads + (long long)hv) * 128ll + (long long)(n0 + lane_0 % 8 * 8))), "r"((n_valid > lo_sr + 8) ? 16 : 0));
+    asm volatile("cp.async.cg.shared::cta.global [%0], [%1], 16, %2;"
+        :: "r"(lo_ss + (unsigned int)((lo_sr + 12) * 128 + (lane_0 % 8 ^ lo_sr + 12 & 7) * 16)), "l"(dv2_lo + (((long long)(tok0 + lo_sr + 12) * (long long)num_v_heads + (long long)hv) * 128ll + (long long)(n0 + lane_0 % 8 * 8))), "r"((n_valid > lo_sr + 12) ? 16 : 0));
+    asm volatile("cp.async.commit_group;");
     if (tid_2 < n_valid) {
         int _max_45 = ((n_valid) > (1) ? (n_valid) : (1));
         float g6_last = s_g[_max_45 - 1];
@@ -1201,7 +1214,7 @@ kernel_cake_gdn_train_6a7a2422d0d006520637(__nv_bfloat16* __restrict__ qn, __nv_
         float _exp2_47 = approx_exp2(s_g[tid_2]);
         s_gexp[tid_2] = _exp2_47;
     }
-    asm volatile("cp.async.wait_group 1;");
+    asm volatile("cp.async.wait_group 2;");
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     unsigned long long _mbarrier_arrival_token_48;
     asm volatile(
@@ -1350,7 +1363,7 @@ kernel_cake_gdn_train_6a7a2422d0d006520637(__nv_bfloat16* __restrict__ qn, __nv_
     float db_b = 0.0f;
     float dg_a = 0.0f;
     float dg_b = 0.0f;
-    asm volatile("cp.async.wait_group 0;");
+    asm volatile("cp.async.wait_group 1;");
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     unsigned long long _mbarrier_arrival_token_55;
     asm volatile(
@@ -1406,26 +1419,6 @@ kernel_cake_gdn_train_6a7a2422d0d006520637(__nv_bfloat16* __restrict__ qn, __nv_
             "}\n"
             :: "r"(_smem_desc_lo_57), "r"(_smem_desc_lo_58), "r"((tmem_acc_cols + (128))), "r"(0), "r"(_elected_56) : "memory");
         tcgen05_commit_leader(mw4_addr, _elected_56);
-    }
-    unsigned int lo_a[8] = {0};
-    unsigned int lo_b[8] = {0};
-    long long lo_ia = ((long long)(tok0 + row_a) * (long long)num_v_heads + (long long)hv) * 128ll + (long long)(n0 + col_q);
-    if (row_a < n_valid) {
-        #pragma unroll
-        for (int nbl = 0; nbl < 8; nbl++) {
-            {
-                lo_a[nbl] = *reinterpret_cast<const unsigned int*>(dv2_lo + (lo_ia + (long long)(nbl * 8)) + 0);
-            }
-        }
-    }
-    if (row_b < n_valid) {
-        long long lo_ib = lo_ia + (long long)num_v_heads * 1024ll;
-        #pragma unroll
-        for (int nbl2 = 0; nbl2 < 8; nbl2++) {
-            {
-                lo_b[nbl2] = *reinterpret_cast<const unsigned int*>(dv2_lo + (lo_ib + (long long)(nbl2 * 8)) + 0);
-            }
-        }
     }
     unsigned int _phase_mw1_0 = 0;
     mbarrier_wait(mw1_addr, _phase_mw1_0);
@@ -1501,6 +1494,7 @@ kernel_cake_gdn_train_6a7a2422d0d006520637(__nv_bfloat16* __restrict__ qn, __nv_
             : "memory");
     }
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+    asm volatile("cp.async.wait_group 0;");
     __syncthreads();
     if (warp == 0) {
         uint32_t _elected_60 = elect_sync();
@@ -1612,6 +1606,24 @@ kernel_cake_gdn_train_6a7a2422d0d006520637(__nv_bfloat16* __restrict__ qn, __nv_
             :: "r"(_mma_a_lo_0), "r"(_mma_a_lo_0), "r"((tmem_acc_cols + (1048768))), "r"(0), "r"(_elected_63) : "memory");
         tcgen05_commit_leader(m7_addr, _elected_63);
     }
+    unsigned int lo_rs = s_do_addr + (unsigned int)(52480 + n0 / 64 * 21248);
+    int lo_rr = rb * 16 + lane_0 % 8;
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(lo_a[0]), "=r"(lo_a[1]), "=r"(lo_a[2]), "=r"(lo_a[3])
+        : "r"(lo_rs + (unsigned int)(lo_rr * 128 + (lane_0 / 8 ^ lo_rr & 7) * 16))
+        : "memory");
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(lo_b[0]), "=r"(lo_b[1]), "=r"(lo_b[2]), "=r"(lo_b[3])
+        : "r"(lo_rs + (unsigned int)(lo_rr * 128 + 1024 + (lane_0 / 8 ^ lo_rr & 7) * 16))
+        : "memory");
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(lo_a[4]), "=r"(lo_a[5]), "=r"(lo_a[6]), "=r"(lo_a[7])
+        : "r"(lo_rs + (unsigned int)(lo_rr * 128 + (4 + lane_0 / 8 ^ lo_rr & 7) * 16))
+        : "memory");
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+        : "=r"(lo_b[4]), "=r"(lo_b[5]), "=r"(lo_b[6]), "=r"(lo_b[7])
+        : "r"(lo_rs + (unsigned int)(lo_rr * 128 + 1024 + (4 + lane_0 / 8 ^ lo_rr & 7) * 16))
+        : "memory");
     unsigned int _phase_mw4_0 = 0;
     mbarrier_wait(mw4_addr, _phase_mw4_0);
     _phase_mw4_0 ^= 1;

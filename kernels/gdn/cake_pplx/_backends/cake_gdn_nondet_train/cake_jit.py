@@ -1642,7 +1642,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (384, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 227072,
+            "dynamic_smem_bytes": 222976,
             "use_pdl": True,
         },
         "library": "cake_gdn_train_86de1b9ed96d786c254b",
