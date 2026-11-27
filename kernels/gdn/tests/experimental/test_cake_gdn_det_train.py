@@ -696,6 +696,10 @@ FUSED_TAIL_STAGES = {
     "tail_g3_bf16": 3,
     "tail_g3_f32x": 3,
     "tail_g3_f32x_bf16": 3,
+    "tail_g2_pv_tf32": 2,
+    "tail_g2_bf16_pv_tf32": 2,
+    "tail_g3_f32x_pv_tf32": 3,
+    "tail_g3_f32x_bf16_pv_tf32": 3,
 }
 # The switches of the round-once tail, the FP32 dv_local adjoint and the package tail with their off values: the
 # non-deterministic package's tests set them by name (where this package has them) to hold its tail_g3 on dhu_tc2 to
@@ -735,6 +739,33 @@ def _tc2(heads) -> str:
     """The tcgen05 adjoint scan of ``heads`` on this device (:func:`cake_chain.dhu_tc2_stage`): dhu_tc2_dvl32 for any
     value-head group but two on the architectures of ``DVL32_ARCHS``, else dhu_tc2."""
     return cake_chain.dhu_tc2_stage(_current_arch(), *heads)
+
+
+def _with_dht(stages, heads, beta_dtype, seq_lens, finalize=None) -> list[str]:
+    """``stages`` as a backward with a final-state gradient launches them on this device, with ``PV_TF32`` and the
+    switches as they are set: where they hold the tcgen05 adjoint scan of ``heads`` (:func:`_tc2`), that scan and the
+    tail of the layout (:func:`_device_tail`; dqkwg for the unfused tail) named by their pv_tf32 twins
+    (:func:`cake_chain.pv_tf32_stages`); every other stage as given, and every stage of a register scan or of a route
+    without a pv_tf32 pair."""
+    scan = _tc2(heads)
+    tail = _device_tail(heads, beta_dtype, seq_lens, finalize) or "dqkwg"
+    pv = cake_chain.pv_tf32_stages(_current_arch(), scan, tail)
+    if pv is None or scan not in stages:
+        return list(stages)
+    twins = dict(zip((scan, tail), pv))
+    return [twins.get(stage, stage) for stage in stages]
+
+
+def _assert_pv_twins(on, off, on_stages, off_stages, heads, beta_dtype, seq_lens, finalize=None) -> None:  # fmt: skip
+    """The pv_tf32 rule on a call with a final-state gradient (the checks of
+    test_pv_tf32_runs_only_for_a_final_state_gradient), called with ``PV_TF32`` as shipped: the call (``on``,
+    launching ``on_stages``) launches what it launches with ``PV_TF32`` off (``off``, ``off_stages``) with the tcgen05
+    adjoint scan and the tail as their pv_tf32 twins (:func:`_with_dht`) and keeps the bits of o, dq and the final
+    state; on a route without a pv_tf32 pair it keeps the launches and every bit."""
+    want = _with_dht(off_stages, heads, beta_dtype, seq_lens, finalize)
+    assert list(on_stages) == want, (list(on_stages), list(off_stages))
+    kept = ("o", "final_state", "dq") if want != list(off_stages) else tuple(off)
+    _assert_bitwise(on, off, kept)
 
 
 def _split_maps(heads, seq_lens=(), segment_chunks: int = 0) -> str:
@@ -897,7 +928,7 @@ FWD_A_RECORDS = ("wy_a", "fwd_ho_a", "fwd_fused", "fwd_summary", "fwd_summary_a"
 
 
 def test_registry_records_are_well_formed() -> None:
-    assert len(cake_jit.STAGES) == 49 and len(set(cake_jit.STAGES)) == 49
+    assert len(cake_jit.STAGES) == 58 and len(set(cake_jit.STAGES)) == 58
     assert set(FWD_A_RECORDS) <= set(cake_jit.STAGES)
     assert set(cake_chain.LAUNCH_ARGS) == set(cake_jit.STAGES)
     for arch in ARCHES:
@@ -3297,12 +3328,14 @@ def test_two_streams_match_one_stream(
             side = [stage for stage, stream in launches[start:] if stream != main]
             # the side stream: wy_tc and fwd_ho of the forward's group A, dhu_tc2 (dhu_tc2_dvl32 for G = 3 on
             # DVL32_ARCHS) of the adjoint's group B beside the fused tail of group A (beside the tail of G = 3 off
-            # TWO_STREAM_SERIAL_G3_ARCHS one launch on the caller's stream)
+            # TWO_STREAM_SERIAL_G3_ARCHS one launch on the caller's stream), with the final-state gradient as its
+            # pv_tf32 twin (_with_dht)
             expected = _on_device(
                 ["wy_tc", "fwd_ho"]
                 + (["dhu_tc2"] if _adjoint_two_streams("serial", heads) else []),
                 heads,
             )
+            expected = _with_dht(expected, heads, torch.bfloat16, seq_lens)
             assert side == (expected if streams == 2 else []), (streams, launches[start:])  # fmt: skip
         _assert_bitwise(runs[0], runs[1], names)
         _assert_bitwise(runs[0], runs[2], names)
@@ -3325,10 +3358,13 @@ def test_split_pass2_two_streams_match_one_stream(
     # a split (64, 1) plan's dhu_tc2 pass 2 beside the tail of G = 3 as two groups of segments (the caller's stream:
     # group A, then the fused tail of its chunks; the side stream: group B, joined before the tail of B), beside
     # tail_g2 the one-stream launches of streams=1, against one stream: the same bits on every output, with an initial
-    # state and a final-state gradient.  Against the register pass 2 the same bits on every output where the pass 2
-    # runs on dhu_tc2; on dhu_tc2_dvl32 (G = 3 on DVL32_ARCHS, its R form on tc_stage too), which rounds dv2 once, o
-    # and the final state keep its bits and both pass 2s are judged ("two.*", "reg.*").  On dhu_tc2 the two-stream
-    # call of the longest-first BF16-beta form is judged; the other forms run on the first draw's inputs
+    # state and a final-state gradient, which runs the pv_tf32 twins of the tcgen05 pass 2 and its tail (_with_dht).
+    # The register pass 2 keeps the 0.2.8 programs, as does the two-stream call with PV_TF32 off ("pv-off"), whose
+    # launches "two" makes with the twins in their places (_assert_pv_twins).  Against the register pass 2 the same
+    # bits on every output where the pass 2 runs on dhu_tc2 (the "pv-off" call); on dhu_tc2_dvl32 (G = 3 on
+    # DVL32_ARCHS, its R form on tc_stage too), which rounds dv2 once, o and the final state keep its bits and both
+    # pass 2s are judged ("two.*", "reg.*").  On dhu_tc2 the two-stream call of the longest-first BF16-beta form is
+    # judged; the other forms run on the first draw's inputs
     seq_lens = SPLIT_STREAM_LAYOUT
     _small_device(monkeypatch, device, SPLIT_STREAM_CASES[heads])
     arch = cake_backend.device_arch(cake_chain._device_index(device))
@@ -3336,6 +3372,7 @@ def test_split_pass2_two_streams_match_one_stream(
     launches = _record_streams(monkeypatch)
     names = OUTPUT_NAMES + ("final_state", "dh0")
     tail, tc2 = _device_tail(heads, beta_dtype, seq_lens), _tc2(heads)
+    tc2_pv, tail_pv = _with_dht([tc2, tail], heads, beta_dtype, seq_lens)
     grouped = _adjoint_two_streams("split", heads)
     token_heads = sum(seq_lens) * heads[1]
     if tc2 != "dhu_tc2":
@@ -3352,16 +3389,24 @@ def test_split_pass2_two_streams_match_one_stream(
             ("two", {"streams": 2}),
             ("one", {"streams": 1}),
             ("reg", {"streams": 2, "dhu_scan": "reg"}),
+            ("pv-off", {"streams": 2}),
         ):
             start = len(launches)
-            runs[form] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, lpt=lpt,
-                              **{**SPLIT_STREAM_PINS, **pins})  # fmt: skip
+            with monkeypatch.context() as m:
+                if form == "pv-off":
+                    m.setattr(cake_chain, "PV_TF32", False)
+                runs[form] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, lpt=lpt,
+                                  **{**SPLIT_STREAM_PINS, **pins})  # fmt: skip
+            # the form's tcgen05 pass 2 and tail: their pv_tf32 twins, the 0.2.8 stages beside the register pass 2 and
+            # with PV_TF32 off
+            scan, tl = (tc2, tail) if form in ("reg", "pv-off") else (tc2_pv, tail_pv)
             # beside tail_g2_bf16 the tcgen05 pass 2 of more CTAs than the SMs the planner sees runs as the wavefront
             # pair on the architectures of the rule's split side on a call of enough tokens x value heads (the same
-            # launches in another form, the tail on the side stream); this layout stays below the work floor
+            # launches in another form, the tail on the side stream); this layout stays below the work floor, and a
+            # pv_tf32 call never takes the pair
             pair = (
                 form != "reg"
-                and tail == "tail_g2_bf16"
+                and tl == "tail_g2_bf16"
                 and arch in cake_chain.WAVEFRONT_SPLIT_ARCHS
                 and token_heads >= cake_chain.WAVEFRONT_SPLIT_MIN_TOKEN_HEADS
             )
@@ -3370,21 +3415,23 @@ def test_split_pass2_two_streams_match_one_stream(
             ]
             side = [stage for stage, stream in launches[start:] if stream != main]
             assert "stitch" in stages, stages
-            if form == "two" and grouped:
-                assert side == [tc2], launches[start:]
-                assert stages.count(tc2) == 2 and stages.count(tail) == 2, stages
+            if form in ("two", "pv-off") and grouped:
+                assert side == [scan], launches[start:]
+                assert stages.count(scan) == 2 and stages.count(tl) == 2, stages
             else:
                 want_side = ["tail_g2_bf16_wavefront"] if pair else []
                 assert side == want_side, launches[start:]
-                assert stages.count(tail) == 1, stages
-                assert stages.count(tc2) == (0 if form == "reg" else 1), stages
+                assert stages.count(tl) == 1, stages
+                assert stages.count(scan) == (0 if form == "reg" else 1), stages
         if not grouped:
             assert stage_lists["two"] == stage_lists["one"], stage_lists
         _assert_bitwise(runs["two"], runs["one"], names)
         if tc2 == "dhu_tc2":
-            _assert_bitwise(runs["two"], runs["reg"], names)
+            _assert_bitwise(runs["pv-off"], runs["reg"], names)
         else:
             _assert_bitwise(runs["two"], runs["reg"], ("o", "final_state"))
+        _assert_pv_twins(runs["two"], runs["pv-off"], stage_lists["two"], stage_lists["pv-off"], heads, beta_dtype,
+                         seq_lens)  # fmt: skip
         state = {"initial_state": h0, "dht": dht}
         return {form: runs[form] for form in judged}, inputs, seq_lens, state
 
@@ -3404,7 +3451,9 @@ def test_split_pass2_on_dhu_tc2_matches_the_register_pass2(
     # a split (64, 1) plan's pass 2 on dhu_tc2 from the stitched segment states against the register pass 2 at the
     # same segment table: the same bits on every output, with an initial state and a final-state gradient.  The
     # adjoint rounds dv2 as the register pass 2 does (DVL32_ARCHS empty; the FP32 dv_local adjoint:
-    # test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict)
+    # test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict).  A final-state gradient runs the
+    # pv_tf32 twins of dhu_tc2 and its tail where PV_TF32 is on, so both forms run with it off (the 0.2.8 programs);
+    # with PV_TF32 as shipped the tc form launches the twins in their places (_assert_pv_twins)
     _round_once_off(monkeypatch, ("DVL32_ARCHS",))
     seq_lens = (1500, 77, 640)
     inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=83)
@@ -3417,32 +3466,36 @@ def test_split_pass2_on_dhu_tc2_matches_the_register_pass2(
     )
     launches = _record_streams(monkeypatch)
     names = OUTPUT_NAMES + ("final_state", "dh0")
-    runs = {}
-    for scan in ("tc", "reg"):
-        start = len(launches)
-        runs[scan] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, scan_config=(64, 1),
-                          segment_chunks=6, dhu_scan=scan)  # fmt: skip
-        # the wavefront pair (g2, BF16 beta) is the pass 2 and the tail in another form
-        stages = [
-            stage.removesuffix("_wavefront") for stage, _stream in launches[start:]
-        ]
-        assert "stitch" in stages, stages
-        # the tc form: the fused pre-scan computes the dv_local tiles it reads, no dv_local stage
-        want = (
-            ("dhu_pre_dvl_r64k1", "dhu_tc2")
-            if scan == "tc"
-            else ("dv_local", "dhu_pre_r64k1", "dhu_r64k1")
-        )
-        other = (
-            ("dv_local", "dhu_pre_r64k1", "dhu_r64k1")
-            if scan == "tc"
-            else ("dhu_pre_dvl_r64k1", "dhu_tc2")
-        )
-        assert all(x in stages for x in want) and not any(x in stages for x in other), (
-            scan,
-            stages,
-        )
+    runs, stage_lists = {}, {}
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "PV_TF32", False)
+        for scan in ("tc", "reg"):
+            start = len(launches)
+            runs[scan] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht,
+                              scan_config=(64, 1), segment_chunks=6, dhu_scan=scan)  # fmt: skip
+            # the wavefront pair (g2, BF16 beta) is the pass 2 and the tail in another form
+            stages = stage_lists[scan] = [
+                stage.removesuffix("_wavefront") for stage, _stream in launches[start:]
+            ]
+            assert "stitch" in stages, stages
+            # the tc form: the fused pre-scan computes the dv_local tiles it reads, no dv_local stage
+            want = (
+                ("dhu_pre_dvl_r64k1", "dhu_tc2")
+                if scan == "tc"
+                else ("dv_local", "dhu_pre_r64k1", "dhu_r64k1")
+            )
+            other = (
+                ("dv_local", "dhu_pre_r64k1", "dhu_r64k1")
+                if scan == "tc"
+                else ("dhu_pre_dvl_r64k1", "dhu_tc2")
+            )
+            assert all(x in stages for x in want) and not any(x in stages for x in other), (scan, stages)  # fmt: skip
     _assert_bitwise(runs["tc"], runs["reg"], names)
+    start = len(launches)
+    pv = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, scan_config=(64, 1),
+              segment_chunks=6, dhu_scan="tc")  # fmt: skip
+    pv_stages = [stage for stage, _stream in launches[start:]]
+    _assert_pv_twins(pv, runs["tc"], pv_stages, stage_lists["tc"], heads, beta_dtype, seq_lens)  # fmt: skip
 
 
 @pytest.mark.parametrize(
@@ -3456,7 +3509,9 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     # the final state keep the register pass 2's bits; both pass 2s are judged ("tc.*", "reg.*"; the 640-token
     # sequence splits into two segments).  The tc form's segment maps come from dhu_tc2_dvl32_gm (split_map_stage; the
     # suite's gates end every map within its first chunks), or on sm_107a, where their grid fits one wave, from the
-    # fused pre-scan (_split_maps); both runs take the round-once tail
+    # fused pre-scan (_split_maps); both runs take the round-once tail.  A final-state gradient runs the pv_tf32 twins
+    # of dhu_tc2_dvl32 and the tail where PV_TF32 is on, so both forms run with it off (the 0.2.8 programs); on the
+    # first draw the tc form with PV_TF32 as shipped launches the twins in their places (_assert_pv_twins)
     arch = _current_arch()
     if arch not in cake_chain.DVL32_ARCHS:
         pytest.skip(f"{arch} runs the adjoint without the FP32 dv_local values")
@@ -3474,21 +3529,33 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
         inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=s)
         h0, dht = _state_pair(seq_lens, heads, device, s + 6)
         launches.clear()
-        runs = {}
-        for scan in ("tc", "reg"):
-            start = len(launches)
-            runs[scan] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht,
-                              scan_config=(64, 1), segment_chunks=6, dhu_scan=scan)  # fmt: skip
-            stages = _maps_route(stage for stage, _stream in launches[start:])
-            assert "stitch" in stages and tail in stages, stages
-            assert "dhu_tc2" not in stages, stages
-            want, other = (
-                (tc_stages, tc_other)
-                if scan == "tc"
-                else (reg_stages, tc_stages + SPLIT_MAPS)
-            )
-            assert all(x in stages for x in want) and not any(x in stages for x in other), (scan, stages)  # fmt: skip
+        runs, stage_lists = {}, {}
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "PV_TF32", False)
+            for scan in ("tc", "reg"):
+                start = len(launches)
+                runs[scan] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht,
+                                  scan_config=(64, 1), segment_chunks=6, dhu_scan=scan)  # fmt: skip
+                stages = stage_lists[scan] = _maps_route(
+                    stage for stage, _stream in launches[start:]
+                )
+                assert "stitch" in stages and tail in stages, stages
+                assert "dhu_tc2" not in stages, stages
+                want, other = (
+                    (tc_stages, tc_other)
+                    if scan == "tc"
+                    else (reg_stages, tc_stages + SPLIT_MAPS)
+                )
+                assert all(x in stages for x in want) and not any(
+                    x in stages for x in other
+                ), (scan, stages)
         _assert_bitwise(runs["tc"], runs["reg"], ("o", "final_state"))
+        if j == 0:
+            start = len(launches)
+            pv = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, scan_config=(64, 1),
+                      segment_chunks=6, dhu_scan="tc")  # fmt: skip
+            pv_stages = _maps_route(stage for stage, _stream in launches[start:])
+            _assert_pv_twins(pv, runs["tc"], pv_stages, stage_lists["tc"], heads, beta_dtype, seq_lens)  # fmt: skip
         return runs, inputs, seq_lens, {"initial_state": h0, "dht": dht}
 
     _judge(record_property, draw, names, seed=83)
@@ -3562,12 +3629,16 @@ def test_split_maps_under_slow_gates_naive_tier_verdict(
     # gives the same bits: the stitch reads only the maps and flags that dhu_tc2_dvl32_gm wrote (never a sequence's
     # first map, never the M half of a bounded map).  With ADJOINT_MAP_ARCHS off the fused pre-scan forms the maps: o,
     # dq and the final state keep their bits, and on the first draw a gradient of dk / dv / dg / dbeta takes other bits
-    # (the maps carry state).  Both forms are judged ("maps.*", "prescan.*")
+    # (the maps carry state).  Both forms are judged ("maps.*", "prescan.*").  With the state (a final-state gradient)
+    # the pass 2 runs the pv_tf32 twin of dhu_tc2_dvl32 (_with_dht) on either map form
     seq_lens, heads, beta_dtype, with_state, pins, gates, seed = _slow_map_cell(cell)
     # the maps on every grid (sm_107a keeps the pre-scan on one wave: test_split_maps_launch_their_grid)
     monkeypatch.setattr(cake_chain, "ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS", ())
     names = OUTPUT_NAMES + (("final_state", "dh0") if with_state else ())
     kept = ("o", "dq", "final_state") if with_state else ("o", "dq")
+    pass2 = "dhu_tc2_dvl32"
+    if with_state:
+        pass2 = _with_dht([pass2], heads, beta_dtype, seq_lens)[0]
     stages = _record_launches(monkeypatch)
 
     def draw(j, s):
@@ -3582,7 +3653,7 @@ def test_split_maps_under_slow_gates_naive_tier_verdict(
         maps = _run(inputs, seq_lens, **call)
         got = _maps_route(stages)
         assert "dhu_tc2_dvl32_gm" in got and "dhu_pre_dvl_r64k1" not in got, got
-        assert "stitch" in got and "dhu_tc2_dvl32" in got, got
+        assert "stitch" in got and pass2 in got, got
         # the same pooled workspaces as the first call (same shapes), poisoned: exact, no tolerance
         assert min(_poison_segment_maps(device)) >= 1
         _assert_bitwise(_run(inputs, seq_lens, **call), maps, names)
@@ -4424,7 +4495,10 @@ WAVEFRONT_ROWS = {
 @pytest.mark.parametrize("row", sorted(WAVEFRONT_ROWS))
 def test_wavefront_pair_matches_the_plain_launches(row, device, monkeypatch) -> None:
     # the pair against the separate dhu_tc2 / tail_g2_bf16 launches, with the initial state, its gradient, the final
-    # state and its gradient: bitwise, also with dh / dv2 poisoned between calls; the tail on the side stream
+    # state and its gradient: bitwise, also with dh / dv2 poisoned between calls; the tail on the side stream.  A call
+    # with a final-state gradient takes the pair only with PV_TF32 off (the 0.2.8 programs), so both run with it off;
+    # with PV_TF32 as shipped the call runs the separate launches with the pv_tf32 twins of dhu_tc2 and tail_g2_bf16
+    # (_assert_pv_twins against the separate launches)
     seq_lens, pins, heads, scan = WAVEFRONT_ROWS[row]
     arch = cake_backend.device_arch(cake_chain._device_index(device))
     if (
@@ -4442,27 +4516,34 @@ def test_wavefront_pair_matches_the_plain_launches(row, device, monkeypatch) -> 
     )
     names = OUTPUT_NAMES + ("final_state", "dh0")
     kwargs = dict(initial_state=h0, output_final_state=True, dht=dht, **pins)
-    _wavefront_rule(monkeypatch, off=True)
-    stages = _record_launches(monkeypatch)
-    plain = _run(inputs, seq_lens, **kwargs)
-    assert not WAVEFRONT_STAGES & set(stages) and "dhu_tc2" in stages, stages
-    _wavefront_rule(monkeypatch)
-    main = torch.cuda.current_stream(device).cuda_stream
-    launches = _record_streams(monkeypatch)
-    for poison in (False, True):
-        if poison:
-            assert _poison_adjoint_workspaces(device) >= 2
-        start = len(launches)
-        got = _run(inputs, seq_lens, **kwargs)
-        mine = [s for s, _ in launches[start:]]
-        assert mine.count(scan) == 1 and mine.count("tail_g2_bf16_wavefront") == 1, mine
-        assert not (
-            {"dhu_tc2", "tail_g2_bf16"}
-            | WAVEFRONT_STAGES - {scan, "tail_g2_bf16_wavefront"}
-        ) & set(mine), mine
-        side = [s for s, stream in launches[start:] if stream != main]
-        assert side == ["tail_g2_bf16_wavefront"], launches[start:]
-        _assert_bitwise(got, plain, names)
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "PV_TF32", False)
+        _wavefront_rule(monkeypatch, off=True)
+        stages = _record_launches(monkeypatch)
+        plain = _run(inputs, seq_lens, **kwargs)
+        plain_stages = list(stages)
+        assert not WAVEFRONT_STAGES & set(stages) and "dhu_tc2" in stages, stages
+        _wavefront_rule(monkeypatch)
+        main = torch.cuda.current_stream(device).cuda_stream
+        launches = _record_streams(monkeypatch)
+        for poison in (False, True):
+            if poison:
+                assert _poison_adjoint_workspaces(device) >= 2
+            start = len(launches)
+            got = _run(inputs, seq_lens, **kwargs)
+            mine = [s for s, _ in launches[start:]]
+            assert mine.count(scan) == 1 and mine.count("tail_g2_bf16_wavefront") == 1, mine  # fmt: skip
+            assert not (
+                {"dhu_tc2", "tail_g2_bf16"}
+                | WAVEFRONT_STAGES - {scan, "tail_g2_bf16_wavefront"}
+            ) & set(mine), mine
+            side = [s for s, stream in launches[start:] if stream != main]
+            assert side == ["tail_g2_bf16_wavefront"], launches[start:]
+            _assert_bitwise(got, plain, names)
+    start = len(launches)
+    pv = _run(inputs, seq_lens, **kwargs)
+    pv_stages = [s for s, _ in launches[start:]]
+    _assert_pv_twins(pv, plain, pv_stages, plain_stages, heads, torch.bfloat16, seq_lens)  # fmt: skip
 
 
 def test_wavefront_pair_repeats_bitwise(device, monkeypatch) -> None:
@@ -5120,12 +5201,25 @@ def test_a_capture_takes_its_own_workspaces(heads, device, monkeypatch) -> None:
 def test_wavefront_gradients_accumulate_into_a_nonzero_grad(
     device, monkeypatch
 ) -> None:
+    # the pair under autograd accumulation: the final-state gradient of _check_accumulation takes the pair only with
+    # PV_TF32 off (the 0.2.8 programs); with PV_TF32 as shipped its three calls run the separate launches of the
+    # pv_tf32 twins of dhu_tc2 and tail_g2_bf16 (_with_dht)
+    seq_lens, heads = (300, 77, 640), (2, 4)
     _wavefront_rule(monkeypatch)
     stages = _record_launches(monkeypatch)
-    _check_accumulation(
-        (300, 77, 640), (2, 4), device, pins=WAVEFRONT_PINS, fresh_pins=WAVEFRONT_PINS
-    )
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "PV_TF32", False)
+        _check_accumulation(
+            seq_lens, heads, device, pins=WAVEFRONT_PINS, fresh_pins=WAVEFRONT_PINS
+        )
     assert stages.count("tail_g2_bf16_wavefront") == 3, stages
+    stages.clear()
+    _check_accumulation(
+        seq_lens, heads, device, pins=WAVEFRONT_PINS, fresh_pins=WAVEFRONT_PINS
+    )
+    scan, tail = _with_dht(["dhu_tc2", "tail_g2_bf16"], heads, torch.bfloat16, seq_lens)
+    assert stages.count(scan) == stages.count(tail) == 3, stages
+    assert not WAVEFRONT_STAGES & set(stages), stages
 
 
 def test_wavefront_strided_views_match_the_contiguous_call(device, monkeypatch) -> None:
@@ -5504,10 +5598,10 @@ def test_two_stream_gradients_accumulate_into_a_nonzero_grad(
         pins={**pins, "streams": 2},
     )
     side = [stage for stage, stream in launches if stream != main]
-    # one per accumulated call where the adjoint runs two streams
-    assert side.count(_tc2(heads)) == (2 if _adjoint_two_streams(form, heads) else 0), (
-        launches
-    )
+    # one per accumulated call where the adjoint runs two streams; with the final-state gradient of
+    # _check_accumulation the pv_tf32 twin of the tcgen05 scan (_with_dht)
+    scan = _with_dht([_tc2(heads)], heads, torch.bfloat16, seq_lens)[0]
+    assert side.count(scan) == (2 if _adjoint_two_streams(form, heads) else 0), launches
 
 
 def _check_accumulation(seq_lens, heads, device, *, route="host", fresh_pins=None, pins=None,
@@ -5693,13 +5787,13 @@ def test_checkpoint_matches_and_retains_no_bytes(
     torch.cuda.synchronize()
     requested_after, blocks_after = _allocator_bytes(device)
     # requested bytes: the block count may exceed the output without a retained tensor, since the caching allocator
-    # hands out an unsplit cached block when its remainder is below the split threshold (1 MiB)
+    # hands out an unsplit cached block when its remainder is at most the split threshold (1 MiB)
     retained = requested_after - requested - o.untyped_storage().nbytes()
     unsplit = blocks_after - blocks - (o.untyped_storage().nbytes() + 511) // 512 * 512
     assert retained == 0, (
         f"a checkpointed forward retains {retained} requested bytes beyond its output (blocks +{unsplit})"
     )
-    assert unsplit < 2**20, unsplit
+    assert unsplit <= 2**20, unsplit
     (o.float() * inputs["do"].float()).sum().backward()
     torch.cuda.synchronize()
     got = {"o": o.detach(), **{"d" + n: leaves[n].grad for n in ("q", "k", "v", "g", "beta")}}  # fmt: skip
@@ -5809,7 +5903,9 @@ def test_round_once_route_on_the_device(
     # as dhu_tc2_dvl32 (no dhu_tc2), the tail with the token-row strides of contiguous operands (v / dv HV x 128, dq /
     # dk one stride, H x 128); a group of two keeps tail_g2 and dhu_tc2 (or the wavefront pair).  With an initial state
     # and a final-state gradient the outputs repeat bitwise; the planner's tables are judged, the pinned ones run on
-    # the first draw's inputs
+    # the first draw's inputs.  The final-state gradient runs the tcgen05 adjoint scan and the tail as their pv_tf32
+    # twins (_with_dht; never the wavefront pair) on the forms pinned on that scan and on the planner's tables where
+    # they take it; a register scan keeps the tail.  The stages that must not run are read by their 0.2.8 names
     arch = _current_arch()
     assert arch in cake_chain.F32X_TAIL_ARCHS and arch in cake_chain.DVL32_ARCHS, arch
     seq_lens = ROUND_ONCE_LAYOUT
@@ -5817,6 +5913,8 @@ def test_round_once_route_on_the_device(
     names = OUTPUT_NAMES + ("final_state", "dh0")
     launches = _record_launch_values(monkeypatch)
     tail = _device_tail(heads, beta_dtype, seq_lens)
+    # the forms pinned on the tcgen05 adjoint scan (a device-built split table keeps the register pass 2)
+    tc_pin = pins == "serial-tc" or (pins, route) == ("split-tc", "host")
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=s)
@@ -5825,14 +5923,18 @@ def test_round_once_route_on_the_device(
         launches.clear()
         got = _run(inputs, seq_lens, **kwargs)
         stages = [stage for stage, _values in launches]
+        base = {stage.removesuffix("_pv_tf32") for stage in stages}
+        scan, run_tail = _tc2(heads), tail
+        if tc_pin or any(stage.startswith("dhu_tc2") for stage in stages):
+            scan, run_tail = _with_dht([scan, tail], heads, beta_dtype, seq_lens)
         if heads[1] == 3 * heads[0]:
             suffix = "_bf16" if beta_dtype == torch.bfloat16 else ""
             assert tail == "tail_g3_f32x" + suffix, tail
-            assert stages.count(tail) >= 1 and "dqkwg" not in stages, stages
-            assert not {"tail_g3", "tail_g3_bf16", "dhu_tc2"} & set(stages), stages
+            assert stages.count(run_tail) >= 1 and "dqkwg" not in base, stages
+            assert not {"tail_g3", "tail_g3_bf16", "dhu_tc2"} & base, stages
             assert not any(stage.startswith(("wy_bwd", "finalize")) for stage in stages), stages  # fmt: skip
-            if pins == "serial-tc" or (pins, route) == ("split-tc", "host"):
-                assert "dhu_tc2_dvl32" in stages, stages
+            if tc_pin:
+                assert scan in stages, stages
             h, hv = heads
             for name, want in (
                 ("v_row_stride", hv * HEAD_DIM),
@@ -5840,12 +5942,12 @@ def test_round_once_route_on_the_device(
                 ("dk_row_stride", h * HEAD_DIM),
                 ("dv_row_stride", hv * HEAD_DIM),
             ):
-                values = _launch_parameter(launches, tail, name)
+                values = _launch_parameter(launches, run_tail, name)
                 assert values and set(values) == {want}, (name, values)
         else:
             assert tail.startswith("tail_g2"), tail
-            assert tail in stages or tail + "_wavefront" in stages, stages
-            assert not set(ROUND_ONCE_STAGES) & set(stages), stages
+            assert run_tail in stages, stages
+            assert not set(ROUND_ONCE_STAGES) & base, stages
         _assert_bitwise(_run(inputs, seq_lens, **kwargs), got, names)
         return {"": got}, inputs, seq_lens, {"initial_state": h0, "dht": dht}
 
@@ -5871,7 +5973,9 @@ def test_round_once_switches_restore_the_tail_g3_bits(
     # as before the change.  The tail's switch alone off: tail_g3 on dhu_tc2_dvl32, every output but dq / dk the
     # round-once route's bits.  The adjoint's switch alone off: the round-once tail on dhu_tc2, every output but dq /
     # dk the bits with both off.  Each form repeats bitwise and is judged ("on.*", "tail-off.*", "adjoint-off.*",
-    # "off.*")
+    # "off.*").  A final-state gradient runs the pv_tf32 twins of the adjoint scan and the tail where PV_TF32 is on and
+    # tail_g3 has none, so the forms run with PV_TF32 off (the 0.2.8 programs); on the first draw each form and the
+    # finalize pin with PV_TF32 as shipped launch the twins where their route has a pair (_assert_pv_twins)
     heads = (2, 6)
     _round_once_or_skip(heads, beta_dtype)
     seq_lens = ROUND_ONCE_LAYOUT
@@ -5892,23 +5996,39 @@ def test_round_once_switches_restore_the_tail_g3_bits(
         h0, dht = _state_pair(seq_lens, heads, device, s + 1)
         kwargs = {"route": route, "initial_state": h0, "output_final_state": True, "dht": dht, **ROUND_ONCE_PINS[pins]}  # fmt: skip
         stages.clear()
-        runs = {}
+        runs, launched = {}, {}
+
+        def pv_twins(name, **pin):
+            # the call of ``name`` under its form's switches with PV_TF32 as shipped
+            start = len(stages)
+            pv = _run(inputs, seq_lens, **pin, **kwargs)
+            _assert_pv_twins(pv, runs[name], stages[start:], launched[name], heads, beta_dtype, seq_lens,
+                             pin.get("finalize"))  # fmt: skip
+
         for form, (off, pair) in forms.items():
             with monkeypatch.context() as m:
                 _round_once_off(m, off)
-                start = len(stages)
-                runs[form] = _run(inputs, seq_lens, **kwargs)
-                got = set(stages[start:])
-                assert set(pair) <= got and not (every - set(pair)) & got, (
-                    form,
-                    stages[start:],
-                )
-                _assert_bitwise(_run(inputs, seq_lens, **kwargs), runs[form], names)
-                if form == "off":
+                with monkeypatch.context() as pv_off:
+                    pv_off.setattr(cake_chain, "PV_TF32", False)
                     start = len(stages)
-                    runs["unfused"] = _run(inputs, seq_lens, finalize="finalize", **kwargs)  # fmt: skip
-                    got = set(stages[start:])
-                    assert "finalize" in got and not (every - {"dhu_tc2"}) & got, stages[start:]  # fmt: skip
+                    runs[form] = _run(inputs, seq_lens, **kwargs)
+                    launched[form] = stages[start:]
+                    got = set(launched[form])
+                    assert set(pair) <= got and not (every - set(pair)) & got, (
+                        form,
+                        stages[start:],
+                    )
+                    _assert_bitwise(_run(inputs, seq_lens, **kwargs), runs[form], names)
+                    if form == "off":
+                        start = len(stages)
+                        runs["unfused"] = _run(inputs, seq_lens, finalize="finalize", **kwargs)  # fmt: skip
+                        launched["unfused"] = stages[start:]
+                        got = set(launched["unfused"])
+                        assert "finalize" in got and not (every - {"dhu_tc2"}) & got, stages[start:]  # fmt: skip
+                if j == 0:
+                    pv_twins(form)
+                    if form == "off":
+                        pv_twins("unfused", finalize="finalize")
         _assert_bitwise(runs["off"], runs["unfused"], names)
         _assert_bitwise(runs["tail-off"], runs["on"], NOT_DQ_DK)
         _assert_bitwise(runs["adjoint-off"], runs["off"], NOT_DQ_DK)
@@ -6391,7 +6511,10 @@ def test_package_tail_switches_restore_the_unfused_bits(
     # both switches off on every output (the route before the package tail and the FP32 dv_local adjoint served these
     # groups).  The tail's switch alone off: the unfused tail on dhu_tc2_dvl32, every output but dq / dk the package
     # tail's bits.  The adjoint's switch alone off: the package tail on dhu_tc2, every output but dq / dk the bits with
-    # both off.  Each form repeats bitwise and is judged ("on.*", "tail-off.*", "adjoint-off.*", "off.*")
+    # both off.  Each form repeats bitwise and is judged ("on.*", "tail-off.*", "adjoint-off.*", "off.*").  These are
+    # the bits of the 0.2.8 programs: a final-state gradient runs the pv_tf32 twins of the adjoint scan and the tail
+    # where PV_TF32 is on, so the forms run with it off; on the first draw each form and the finalize pin with PV_TF32
+    # as shipped launch the twins in their places (_assert_pv_twins)
     seq_lens = ROUND_ONCE_LAYOUT
     tail = _package_tail(heads, beta_dtype, seq_lens)
     names = OUTPUT_NAMES + ("final_state", "dh0")
@@ -6410,23 +6533,42 @@ def test_package_tail_switches_restore_the_unfused_bits(
         h0, dht = _state_pair(seq_lens, heads, device, s + 1)
         kwargs = {"route": route, "initial_state": h0, "output_final_state": True, "dht": dht, **ROUND_ONCE_PINS[pins]}  # fmt: skip
         stages.clear()
-        runs = {}
+        runs, launched = {}, {}
+
+        def pv_twins(name, **pin):
+            # the call of ``name`` under its form's switches with PV_TF32 as shipped
+            start = len(stages)
+            pv = _run(inputs, seq_lens, **pin, **kwargs)
+            _assert_pv_twins(pv, runs[name], stages[start:], launched[name], heads, beta_dtype, seq_lens,
+                             pin.get("finalize"))  # fmt: skip
+
         for form, (off, pair) in forms.items():
             with monkeypatch.context() as m:
                 _round_once_off(m, off)
-                start = len(stages)
-                runs[form] = _run(inputs, seq_lens, **kwargs)
-                got = set(stages[start:])
-                assert set(pair) <= got and not (every - set(pair)) & got, (
-                    form,
-                    stages[start:],
-                )
-                _assert_bitwise(_run(inputs, seq_lens, **kwargs), runs[form], names)
-                if form == "off":
+                with monkeypatch.context() as pv_off:
+                    pv_off.setattr(cake_chain, "PV_TF32", False)
                     start = len(stages)
-                    runs["unfused"] = _run(inputs, seq_lens, finalize="finalize", **kwargs)  # fmt: skip
-                    got = set(stages[start:])
-                    assert "finalize" in got and not (every - {"finalize", "dhu_tc2"}) & got, stages[start:]  # fmt: skip
+                    runs[form] = _run(inputs, seq_lens, **kwargs)
+                    launched[form] = stages[start:]
+                    got = set(launched[form])
+                    assert set(pair) <= got and not (every - set(pair)) & got, (
+                        form,
+                        stages[start:],
+                    )
+                    _assert_bitwise(_run(inputs, seq_lens, **kwargs), runs[form], names)
+                    if form == "off":
+                        start = len(stages)
+                        runs["unfused"] = _run(inputs, seq_lens, finalize="finalize", **kwargs)  # fmt: skip
+                        launched["unfused"] = stages[start:]
+                        got = set(launched["unfused"])
+                        assert (
+                            "finalize" in got
+                            and not (every - {"finalize", "dhu_tc2"}) & got
+                        ), stages[start:]
+                if j == 0:
+                    pv_twins(form)
+                    if form == "off":
+                        pv_twins("unfused", finalize="finalize")
         _assert_bitwise(runs["off"], runs["unfused"], names)
         _assert_bitwise(runs["tail-off"], runs["on"], NOT_DQ_DK)
         _assert_bitwise(runs["adjoint-off"], runs["off"], NOT_DQ_DK)
@@ -10918,3 +11060,229 @@ def test_the_record_gate_leaves_an_unready_plan_without_credit(
     assert not plan.ready(plan.meta, plan.stream)
     for got in runs:
         _assert_bitwise(got, want, OUTPUT_NAMES)
+
+
+# --------------------------------------------------------------------------- PV_TF32 per call
+# With cake_chain.PV_TF32 on, only a backward whose final state receives a gradient runs the pv_tf32 adjoint scan and
+# tail (cake_chain.pv_tf32_stages); every other call keeps the 0.2.8 programs, launches and bits.  The call kinds:
+# (initial state, output_final_state, a final-state gradient).  "h0-final" asks for the final state and gives it no
+# gradient: autograd then passes the backward no dht (the forward turns its zero fill off) and the chain reads the
+# zeros that autograd filled in before (cake_chain._grads_of).
+PV_CALLS = {
+    "stateless": (False, False, False),
+    "h0": (True, False, False),
+    "h0-final": (True, True, False),
+    "dht": (False, True, True),
+    "h0-dht": (True, True, True),
+}
+PV_NAMES = OUTPUT_NAMES + ("final_state", "dh0")
+
+
+def _pv_or_skip() -> None:
+    arch = _current_arch()
+    if arch not in cake_chain.PV_TF32_ARCHS:
+        pytest.skip(f"PV_TF32 runs on {cake_chain.PV_TF32_ARCHS}, not {arch}")
+    stages = (*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values())
+    missing = [stage for stage in stages if not cake_chain._available(stage, arch)]
+    if missing:
+        pytest.skip(f"this build has no pv_tf32 record for {missing}")
+
+
+def _same_bits(a: dict, b: dict, names) -> None:
+    """Every output of ``names`` that ``a`` has, bit for bit (dtype, shape and bytes) in ``b``."""
+    differing = [
+        n
+        for n in names
+        if n in a
+        and not (
+            a[n].dtype == b[n].dtype
+            and a[n].shape == b[n].shape
+            and torch.equal(
+                a[n].contiguous().view(torch.uint8), b[n].contiguous().view(torch.uint8)
+            )
+        )
+    ]
+    assert not differing, f"not bitwise equal: {differing}"
+
+
+def _pv_call(inputs, seq_lens, heads, kind, device, seed) -> dict:
+    with_h0, final, grad = PV_CALLS[kind]
+    h0, dht = _state_pair(seq_lens, heads, device, seed)
+    return _run(inputs, seq_lens, initial_state=h0 if with_h0 else None, output_final_state=final,
+                dht=dht if grad else None)  # fmt: skip
+
+
+def test_grads_of_fills_the_zeros_of_autograd_and_reads_the_final_state_grad() -> None:
+    # no device: an output without a gradient comes back as the zeros that autograd's fill made before (its shape,
+    # dtype and device, +0.0), and only a gradient that autograd gave the final state counts, zeros included; a call
+    # without a final state sets no zero_fill (autograd fills its zeros) and takes do and dht as autograd gives them
+    cpu = torch.device("cpu")
+    o_shape, state_shape = (1, 5, 4, HEAD_DIM), (2, 4, HEAD_DIM, HEAD_DIM)
+    with_state = types.SimpleNamespace(
+        zero_fill=(o_shape, torch.bfloat16, cpu, (state_shape, torch.float32))
+    )
+    without_state = types.SimpleNamespace(
+        zero_fill=(o_shape, torch.bfloat16, cpu, None)
+    )
+    do, dht, grad = cake_chain._grads_of(with_state, None, None)
+    assert not grad
+    assert do.shape == o_shape and do.dtype == torch.bfloat16 and do.device == cpu
+    assert dht.shape == state_shape and dht.dtype == torch.float32 and dht.device == cpu
+    assert not do.view(torch.int16).any() and not dht.view(torch.int32).any()
+    given = torch.ones(o_shape, dtype=torch.bfloat16)
+    do, dht, grad = cake_chain._grads_of(without_state, given, None)
+    assert do is given and dht is None and not grad
+    do, dht, grad = cake_chain._grads_of(types.SimpleNamespace(), given, None)
+    assert do is given and dht is None and not grad
+    zeros = torch.zeros(state_shape)
+    do, dht, grad = cake_chain._grads_of(with_state, given, zeros)
+    assert do is given and dht is zeros and grad
+
+
+@pytest.mark.parametrize("case", ["g1", "g2", "g3"])
+def test_pv_tf32_runs_only_for_a_final_state_gradient(
+    case, device, monkeypatch
+) -> None:
+    # PV_TF32 on against off, per call kind on one draw: a call without a final-state gradient launches what the
+    # flag off launches and gives its bits (the 0.2.8 programs); a call with one launches the pv_tf32 scan and tail
+    # in place of the 0.2.8 ones and nothing else differs, o / final_state / dq keep their bits; each repeats its bits
+    _pv_or_skip()
+    heads, seq_lens = FWD_A_CASES[case]
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=41)
+    stages = _record_launches(monkeypatch)
+    swap = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
+    for kind, (_h0, _final, grad) in PV_CALLS.items():
+        runs, launched = {}, {}
+        for flag in (False, True):
+            monkeypatch.setattr(cake_chain, "PV_TF32", flag)
+            stages.clear()
+            runs[flag] = _pv_call(inputs, seq_lens, heads, kind, device, 42)
+            launched[flag] = list(stages)
+        _same_bits(
+            runs[True], _pv_call(inputs, seq_lens, heads, kind, device, 42), PV_NAMES
+        )
+        if grad:
+            assert launched[True] == [swap.get(s, s) for s in launched[False]], (
+                kind,
+                launched,
+            )
+            assert set(swap.values()) & set(launched[True]), (kind, launched[True])
+            _same_bits(runs[True], runs[False], ("o", "final_state", "dq"))
+        else:
+            assert launched[True] == launched[False], (kind, launched)
+            assert not set(swap.values()) & set(launched[True]), (kind, launched[True])
+            _same_bits(runs[True], runs[False], PV_NAMES)
+
+
+def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
+    # PV_TF32 on: every call kind on one layout, interleaved in two orders from an empty host table cache, gives the
+    # launches and bits of the kind's first call; and three backwards over one graph each take their own path: with
+    # the final-state gradient the pv_tf32 programs, without it the 0.2.8 ones (the h0-final call's bits), and with
+    # no gradient for o (do filled with zeros) the dht call's bits on zeros
+    _pv_or_skip()
+    heads, seq_lens = FWD_A_CASES["g2"]
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=43)
+    monkeypatch.setattr(cake_chain, "PV_TF32", True)
+    stages = _record_launches(monkeypatch)
+    first = {}
+    kinds = list(PV_CALLS)
+    for order in (kinds, kinds[::-1]):
+        monkeypatch.setattr(cake_chain, "_META_FRONT", {})
+        for kind in (*order, *order):
+            stages.clear()
+            got = _pv_call(inputs, seq_lens, heads, kind, device, 44)
+            if kind not in first:
+                first[kind] = (got, list(stages))
+                continue
+            assert stages == first[kind][1], kind
+            _same_bits(got, first[kind][0], PV_NAMES)
+    h0, dht = _state_pair(seq_lens, heads, device, 44)
+    leaves = {
+        n: inputs[n].detach().clone().requires_grad_(True)
+        for n in ("q", "k", "v", "g", "beta")
+    }
+    h0_leaf = h0.detach().clone().requires_grad_(True)
+    cu = _cu(seq_lens)
+    o, final = cake_gdn_det(*(leaves[n] for n in ("q", "k", "v", "g", "beta")), scale=1.0 / math.sqrt(HEAD_DIM),
+                            initial_state=h0_leaf, output_final_state=True, use_qk_l2norm_in_kernel=True,
+                            cu_seqlens=torch.tensor(cu, dtype=torch.int64, device=device),
+                            cu_seqlens_cpu=torch.tensor(cu, dtype=torch.int64))  # fmt: skip
+    wrt = [*(leaves[n] for n in ("q", "k", "v", "g", "beta")), h0_leaf]
+    names = ("dq", "dk", "dv", "dg", "dbeta", "dh0")
+    stages.clear()
+    with_grad = dict(
+        zip(
+            names,
+            torch.autograd.grad(
+                [o, final], wrt, [inputs["do"], dht], retain_graph=True
+            ),
+        )
+    )
+    assert set(cake_chain.PV_TF32_SCANS.values()) & set(stages), stages
+    stages.clear()
+    without = dict(
+        zip(names, torch.autograd.grad([o], wrt, [inputs["do"]], retain_graph=True))
+    )
+    assert not set(cake_chain.PV_TF32_SCANS.values()) & set(stages), stages
+    no_do = dict(zip(names, torch.autograd.grad([final], wrt, [dht])))
+    torch.cuda.synchronize()
+    _same_bits(with_grad, first["h0-dht"][0], names)
+    _same_bits(without, first["h0-final"][0], names)
+    zero_do = {**inputs, "do": torch.zeros_like(inputs["do"])}
+    _same_bits(
+        no_do,
+        _run(zero_do, seq_lens, initial_state=h0, output_final_state=True, dht=dht),
+        names,
+    )
+
+
+def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
+    # On by default on every architecture of the package: each pv_tf32 stage is a stage of the registry with
+    # one record per architecture, and its call site is its sibling's with the FP32 dg state operands inserted (the
+    # scan's h, v_new, hdh32_out, e_out after dh_out; the tail's hdh32, e32 after dh)
+    assert cake_chain.PV_TF32 is True and cake_chain.PV_TF32_ARCHS == ARCHES
+    pairs = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
+    assert set(pairs.values()) == {s for s in cake_jit.STAGES if s.endswith("_pv_tf32")}
+    for base, pv in pairs.items():
+        assert pv == base + "_pv_tf32" and base in cake_jit.STAGES, (base, pv)
+        extra = (
+            ("h", "v_new", "hdh32_out", "e_out")
+            if base in cake_chain.PV_TF32_SCANS
+            else ("hdh32", "e32")
+        )
+        after = "dh_out" if base in cake_chain.PV_TF32_SCANS else "dh"
+        args = cake_chain.LAUNCH_ARGS[base]
+        i = args.index(after) + 1
+        assert cake_chain.LAUNCH_ARGS[pv] == (*args[:i], *extra, *args[i:]), pv
+        for arch in ARCHES:
+            assert cake_chain._available(pv, arch), (pv, arch)
+    assert (
+        "tail_g3" not in cake_chain.PV_TF32_TAILS
+        and "tail_g2_bf16_wavefront" not in cake_chain.PV_TF32_TAILS
+    )
+
+
+def test_pv_tf32_stages_fall_back_to_the_other_programs(monkeypatch) -> None:
+    # a route without a pv_tf32 pair keeps its programs instead of raising: a register scan (no tcgen05 scan), a tail
+    # without a pv_tf32 build, the flag off, or an architecture outside PV_TF32_ARCHS
+    for arch in ARCHES:
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "tail") == (
+            "dhu_tc2_dvl32_pv_tf32",
+            "tail_pv_tf32",
+        )
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2", "tail_g2_bf16") == (
+            "dhu_tc2_pv_tf32",
+            "tail_g2_bf16_pv_tf32",
+        )
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "dqkwg") == (
+            "dhu_tc2_dvl32_pv_tf32",
+            "dqkwg_pv_tf32",
+        )
+        assert cake_chain.pv_tf32_stages(arch, None, "tail_g2") is None
+        assert cake_chain.pv_tf32_stages(arch, "dhu_tc2_dvl32", "tail_g3") is None
+        assert (
+            cake_chain.pv_tf32_stages(arch, "dhu_tc2_wavefront", "tail_g2_bf16") is None
+        )
+    assert cake_chain.pv_tf32_stages("sm_90a", "dhu_tc2", "tail_g2") is None
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
+    assert cake_chain.pv_tf32_stages(ARCHES[0], "dhu_tc2", "tail_g2") is None

@@ -320,6 +320,49 @@ call that neither of the two takes runs the third, the prep forward (below).
   most 1.10 x the split one and its sequences x `HV` CTAs fill at least 0.65
   of the SMs; this route then runs it.
 
+In 0.2.10 a backward whose final state receives a gradient (a `dht` given to
+the backward; under autograd, a gradient that autograd gives the final state)
+runs the `pv_tf32` builds of `dhu_tc2_dvl32` and of its tail (the package
+tail, `tail_g2_f32x` and `tail_g3_f32x`, each in both `dbeta` forms) on
+`sm_100a`, `sm_103a` and `sm_107a` (`PV_TF32`, on by default).  `P_v` reads one
+TF32-rounded FP32 copy of `dh`, the scan writes the state terms of `dg` in FP32
+beside `dh`, and the tail reads them in place of its BF16 ones, so `dv` and
+`dg` of most such calls meet the BF16 naive tier where 0.2.8 misses it; the
+calls listed below miss it, as the 0.2.8 programs do.  Such a call costs more
+time.  A call planned on the one-wave split runs its table's split route on
+the tcgen05 pass 2 instead (the pre-scan, the stitch, then the `pv_tf32` walk)
+where that route serves the table.  Every call without a final-state gradient
+keeps the 0.2.8 programs and launches, and only such calls record or replay a
+backward plan.  A register scan, the unfused tail, a pinned tail form or a
+one-wave table that the split route cannot take keeps the 0.2.8 programs: the
+fix does not reach those routes.  A zero gradient that the caller gives counts
+as a gradient.  `PV_TF32 = False` turns the rule off.
+
+Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dv` or
+`dg`, and the 0.2.8 programs miss it on the same calls.  On B200, GB300 and
+R200 these are:
+
+- with an initial state and a final-state gradient, the `(2, 6)` pack of
+  11,000 + 12,000 + 9,768 tokens and the `(4, 16)` pack of four 4,096-token
+  sequences (one wave, `G = 4`), and on R200 also the `(2, 6)` pack of
+  131,071 + 87,531 + 43,385 tokens: the max-norm error of `dv` meets the tier
+  on 13 of 32 draws, where 16 are needed (0.2.8: 8, 14 and 13 of 32, in that
+  order).  On B200 and GB300 the 131,071-token call keeps the 0.2.8 programs
+  and misses `dv` with them;
+- the split forward at `G = 2` with the `(64, 1)` tcgen05 adjoint: the
+  largest L2 error of `dg` is 1.007 to 1.008 times the tier's (0.2.8: 1.040
+  times);
+- the package tail run in segments at `G = 3` with the tcgen05 adjoint: the
+  largest L2 error of `dv` is 1.016 times the tier's (0.2.8: 1.14 times).  Its
+  largest max-norm error is 1.2 % above that of 0.2.8;
+- the serial tcgen05 adjoint on two streams at `G = 2`: the largest L2 error
+  of `dg` is 1.23 times the tier's (0.2.8: 1.28 times).
+
+The last three hold with or without an initial state.  The tests reach these
+routes with plan pins or a patched planner on small layouts.  A call that the
+fix does not reach keeps the 0.2.8 programs, bits and accuracy, including the
+misses of 0.2.8.
+
 In 0.2.5 `wy_a` is built from newer kernel source under the same program
 name: each compute warp owns the ring slots of its parity.  Routes, launch
 records and output bits are those of 0.2.4.
@@ -708,3 +751,5 @@ span rises by 0.17-0.21 ms.
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
 - `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
+- Some calls with a final-state gradient miss the BF16 naive tier on `dv` or
+  `dg`; Chain lists them.

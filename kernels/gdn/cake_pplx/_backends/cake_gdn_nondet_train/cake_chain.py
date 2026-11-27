@@ -381,6 +381,45 @@ LAUNCH_ARGS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _with_after(
+    args: tuple[str, ...], name: str, extra: tuple[str, ...]
+) -> tuple[str, ...]:
+    """``args`` with ``extra`` right after ``name``."""
+    i = args.index(name) + 1
+    return (*args[:i], *extra, *args[i:])
+
+
+# :data:`PV_TF32`: the call sites of the programs built with ``pv_tf32=True``.  The scan reads h and
+# v_new and writes the FP32 dg state terms after ``dh_out``: ``hdh32_out`` [chunks, HV, 2] (sum h * dh at the chunk's
+# end adjoint, then the chunk's sum of e) and ``e_out`` [T, HV] (each token's K1 . kn term); its tails read them after
+# ``dh`` in place of their BF16 sum(h dh) and K1 . kn terms (the package tail's workspace operands then follow the
+# first 20 operands instead of 18).  These records serve stages of their own (the stage + ``_pv_tf32``), so every
+# other record keeps its call site.
+_DHU_TC2_PV_ARGS = _with_after(
+    _DHU_TC2_ARGS, "dh_out", ("h", "v_new", "hdh32_out", "e_out")
+)
+_TAIL_PV_ARGS = _with_after(_TAIL_ARGS, "dh", ("hdh32", "e32"))
+_TAIL_WS_PV_ARGS = (
+    *_TAIL_PV_ARGS[:20],
+    "ws",
+    "ws_count",
+    *_TAIL_PV_ARGS[20:],
+    "ws_tiles",
+)
+_TAIL_F32X_PV_ARGS = _with_after(_TAIL_F32X_ARGS, "dh", ("hdh32", "e32"))
+LAUNCH_ARGS.update(
+    {
+        "dhu_tc2_dvl32_pv_tf32": _DHU_TC2_PV_ARGS,
+        "tail_pv_tf32": _TAIL_WS_PV_ARGS + ("v_row_heads",),
+        "tail_bf16_pv_tf32": _TAIL_WS_PV_ARGS + ("v_row_heads",),
+        "tail_g2_f32x_pv_tf32": _TAIL_F32X_PV_ARGS,
+        "tail_g2_f32x_bf16_pv_tf32": _TAIL_F32X_PV_ARGS,
+        "tail_g3_f32x_pv_tf32": _TAIL_F32X_PV_ARGS,
+        "tail_g3_f32x_bf16_pv_tf32": _TAIL_F32X_PV_ARGS,
+    }
+)
+
+
 # --------------------------------------------------------------------------- #
 # the planner's per-configuration facts, read from the registry's scan records
 # --------------------------------------------------------------------------- #
@@ -1739,6 +1778,66 @@ def sdt_prescan(arch: str) -> str:
     if arch in PRE_DVL32_ARCHS and _available("dhu_pre_dvl32_r64k1", arch):
         return "dhu_pre_dvl32_r64k1"
     return SDT_PRESCAN
+
+
+# --------------------------------------------------------------------------- #
+# The pv_tf32 adjoint scan and tails
+# --------------------------------------------------------------------------- #
+# A backward whose final state receives a gradient (a ``dht`` given to the low-level backward; under autograd, a
+# gradient that autograd gives the final state, :func:`_grads_of`) runs, with PV_TF32 on (the default) and on an
+# architecture of PV_TF32_ARCHS, the programs built with ``pv_tf32=True``: the tcgen05 adjoint scan of PV_TF32_SCANS
+# (P_v on one TF32-rounded FP32 word of dh, the FP32 dg state terms) and the tail of PV_TF32_TAILS, with the FP32
+# workspaces ``b_hdh32`` / ``b_e32`` between them (the scan writes every element the tail reads).  These calls get dv
+# and dg within the BF16 naive tier where the 0.2.8 programs miss it; their programs cost more time.  A call planned
+# on the one-wave adjoint split (whose forms have no pv_tf32 build) runs its table's split route instead: the
+# pre-scan, the stitch and the pv_tf32 walk as pass 2 (:func:`_pv_tf32_split_route`).  Every other call (no state, an
+# initial state alone, a final state that receives no gradient) keeps the 0.2.8 programs and bits, and so does a call
+# whose route has no pv_tf32 pair (pv_tf32_stages): a register scan, an unfused or pinned tail form, or a one-wave
+# table that route cannot take (such a call keeps the 0.2.8 accuracy as well).  The selection rules still price the
+# 0.2.8 scan.  The flag is a module global of the backward, so a recorded backward plan replays only under the value
+# it was recorded with (:func:`_plan_globals`); a call with a final-state gradient neither records nor replays a plan,
+# so a plan never holds the pv_tf32 programs.  PV_TF32 off: every call keeps the 0.2.8 programs.
+PV_TF32: bool = True
+PV_TF32_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
+PV_TF32_SCANS: dict[str, str] = {"dhu_tc2_dvl32": "dhu_tc2_dvl32_pv_tf32"}
+PV_TF32_TAILS: dict[str, str] = {
+    "tail": "tail_pv_tf32",
+    "tail_bf16": "tail_bf16_pv_tf32",
+    "tail_g2_f32x": "tail_g2_f32x_pv_tf32",
+    "tail_g2_f32x_bf16": "tail_g2_f32x_bf16_pv_tf32",
+    "tail_g3_f32x": "tail_g3_f32x_pv_tf32",
+    "tail_g3_f32x_bf16": "tail_g3_f32x_bf16_pv_tf32",
+}
+
+
+def pv_tf32_stages(arch: str, scan: str | None, tail: str) -> tuple[str, str] | None:
+    """The pv_tf32 ``(scan, tail)`` stages of a backward on ``arch`` whose dh / dv2 come from the tcgen05 adjoint scan
+    ``scan`` (``None``: another scan) and whose tail stage is ``tail`` (``dqkwg`` for the unfused tail); ``None`` when
+    :data:`PV_TF32` is off, ``arch`` is not in ``PV_TF32_ARCHS`` or the scan or the tail has no pv_tf32 record there
+    (the call keeps the 0.2.8 programs)."""
+    if not PV_TF32 or arch not in PV_TF32_ARCHS or scan is None:
+        return None
+    pv_scan, pv_tail = PV_TF32_SCANS.get(scan), PV_TF32_TAILS.get(tail)
+    if (
+        pv_scan is None
+        or pv_tail is None
+        or not (_available(pv_scan, arch) and _available(pv_tail, arch))
+    ):
+        return None
+    return pv_scan, pv_tail
+
+
+def _pv_tf32_split_route(arch: str, segs) -> bool:
+    """Whether the split route on the tcgen05 pass 2 serves the adjoint table ``segs`` of a one-wave split on
+    ``arch``: its pre-scan (``sdt_prescan``) and the stitch delivered, the table's segments within the pre-scan's
+    chunks."""
+    _scan, _vb, pre, pre_threads = _scan_stages("dhu", segs.scan_config, arch)
+    return (
+        pre is not None
+        and _available("stitch", arch)
+        and _available(sdt_prescan(arch), arch)
+        and segs.segment_len <= pre_threads
+    )
 
 
 @cache
@@ -5503,7 +5602,9 @@ def cake_gdn_nondet_train_backward(
     ``dk`` / ``dv`` in place when the call's tail is a cluster tail of ``F32X_TAILS`` (a callable is called then,
     right before the tail, and only then); the returned ``dq`` / ``dk`` / ``dv`` are then those tensors (other tails
     return tensors of their own).  With PyTorch's deterministic algorithms enabled it runs as usual: every launch is
-    fixed-order today."""
+    fixed-order today.  A call with ``dht`` runs the pv_tf32 programs where its route has them (:data:`PV_TF32`) and a
+    call without it the 0.2.8 ones; the tape entry ``final_state_grad`` (set by the autograd functions,
+    :func:`_grads_of`) overrides ``dht is not None``."""
     return _backward_chain(
         forward, do, dht, initial_state, dbeta_dtype, grad_qkv, _DIRECT
     )
@@ -5576,6 +5677,23 @@ def _backward_chain(
     segs = meta.bwd_segments
     # the one-wave split of the adjoint walk (:class:`AdjointSplit`): its own launches, then the tail as one launch
     split1 = meta.bwd_split
+    # A call whose final state receives a gradient (the autograd functions' tape entry ``final_state_grad``, else
+    # a dht given) runs the pv_tf32 scan and tail where its route has them (pv_tf32_stages); one planned on the
+    # one-wave split takes its table's split route on the tcgen05 pass 2 when that route serves the table
+    tail_stage = (
+        "dqkwg"
+        if form == "unfused"
+        else form + ("_bf16" if dbeta_dtype == torch.bfloat16 else "")
+    )
+    pv_call = forward.get("final_state_grad", dht is not None)
+    pv_split = (
+        pv_call
+        and split1 is not None
+        and pv_tf32_stages(arch, dhu_tc2_stage(arch), tail_stage) is not None
+        and _pv_tf32_split_route(arch, segs)
+    )
+    if pv_split:
+        split1 = None
     serial = split1 is None and not (
         segs.segment_len > 0 and segs.num_segments > meta.num_seqs
     )
@@ -5583,7 +5701,7 @@ def _backward_chain(
         meta.bwd_tc or _dhu_tc_selected(meta, num_v_heads, index, options)
     )
     # a split plan's pass 2 on dhu_tc2: the fused pre-scan computes the dv_local tiles it reads, no dv_local stage
-    split_tc = (
+    split_tc = pv_split or (
         split1 is None
         and not serial
         and (
@@ -5629,13 +5747,30 @@ def _backward_chain(
         dht32, use_dht = dh0, 0
     scan_stage, vb, pre, pre_threads = _scan_stages("dhu", segs.scan_config, arch)
     tc_stage = dhu_tc2_stage(arch)
+    # the pv_tf32 scan's extra operands after dh_out (h, v_new, hdh32, e) and the tail's after dh (hdh32, e32; a chunk
+    # range reads its rows of hdh32 and the whole e, :func:`rows` below)
+    pv = None
+    if pv_call and split1 is None and (use_tc or split_tc):
+        pv = pv_tf32_stages(arch, tc_stage, tail_stage)
+    hdh32 = e32 = None
+    scan_x: tuple = ()
+    tail_x: tuple = ()
+    if pv is not None:
+        tc_stage, tail_stage = pv
+        hdh32 = workspaces.take(
+            table, "b_hdh32", (meta.num_chunks, num_v_heads, 2), torch.float32, device
+        )
+        e32 = workspaces.take(
+            table, "b_e32", (total_tokens, num_v_heads), torch.float32, device
+        )
+        scan_x, tail_x = (h, v_new, hdh32, e32), (hdh32, e32)
     if split1 is not None:
         _adjoint_split_walk(split1, segs, meta, qn, kn, w, do, g_cs, dht32, use_dht, dh, dv2, dh0, has_initial_state,
                             num_heads, num_v_heads, scale, table, workspaces, index, device, ex,
                             warmup_thresh_log2(options), m_share=forward.get("m_share"))  # fmt: skip
     elif use_tc and groups is None:
         # dv_local fused into the tcgen05 serial scan: the same dh / dv2 / dh0 (seg_state is not read)
-        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0, dh0,
+        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, dh0, dh0,
                   meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
                   num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
     elif segs.segment_len > 0 and segs.num_segments > meta.num_seqs:
@@ -5670,7 +5805,7 @@ def _backward_chain(
     if split_tc and groups is None:
         # pass 2 on the tcgen05 scan: segment ``seg`` starts from dht[seg], the stitched dh_end[seg]; the first segment
         # of a sequence stores its dh0 (the register pass 2's contract)
-        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0, dh0,
+        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, dh0, dh0,
                   meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
                   num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
     elif not (use_tc or split_tc or split1 is not None):
@@ -5694,7 +5829,7 @@ def _backward_chain(
 
             def dhu_tc2(s0, s1):
                 return ex.bind(tc_stage, s1 - s0, num_v_heads, 1, qn, kn, w, do, g_cs,
-                               dht32[s0:s1] if use_dht else dht32, dh, dv2, dh0, dh0, meta.chunk_start,
+                               dht32[s0:s1] if use_dht else dht32, dh, *scan_x, dv2, dh0, dh0, meta.chunk_start,
                                meta.chunk_len, segs.seg_chunk_start[s0:s1 + 1], segs.seg_seq[s0:s1],
                                meta.seq_chunk_start, num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0,
                                scale)  # fmt: skip
@@ -5743,31 +5878,32 @@ def _backward_chain(
                 strides = tuple(_row_stride(t) for t in (v, dq, dk, dv))
             if form in GROUP_TAILS and groups is None:
                 # one launch over the whole table, issued directly: the host path of the deterministic package's tail
-                ex.launch(form + ("_bf16" if dbeta_bf16 else ""), num_chunks * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k,
-                          v_new, do, dv2, h, dh, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, meta.chunk_start,
-                          meta.chunk_len, num_heads, num_v_heads, scale, normalize, *strides)  # fmt: skip
+                ex.launch(tail_stage, num_chunks * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, h, dh,
+                          *tail_x, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, meta.chunk_start, meta.chunk_len,
+                          num_heads, num_v_heads, scale, normalize, *strides)  # fmt: skip
                 return ex.grads(
                     meta, dq, dk, dv, dg, dbeta, dh0 if has_initial_state else None
                 )
 
             def rows(a, b):
-                # the chunk rows [a, b) of the per-chunk tensors: the tensors themselves for the whole table (no slicing
-                # on the host path of a one-launch tail)
+                # the chunk rows [a, b) of the per-chunk tensors (and the pv_tf32 tail's hdh32 rows and whole e): the
+                # tensors themselves for the whole table (no slicing on the host path of a one-launch tail)
                 if (a, b) == (0, num_chunks):
-                    return h, dh, meta.chunk_start, meta.chunk_len
-                return h[a:b], dh[a:b], meta.chunk_start[a:b], meta.chunk_len[a:b]
+                    return h, dh, tail_x, meta.chunk_start, meta.chunk_len
+                x_r = () if pv is None else (hdh32[a:b], e32)
+                return h[a:b], dh[a:b], x_r, meta.chunk_start[a:b], meta.chunk_len[a:b]
 
             if form in GROUP_TAILS:
-                stage = form + ("_bf16" if dbeta_bf16 else "")
+                stage = tail_stage
 
                 def tail(c0, c1):
-                    h_r, dh_r, cs_r, cl_r = rows(c0, c1)
-                    ex.launch(stage, (c1 - c0) * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, h_r, dh_r, g_cs,
-                              v, A, beta32, dq, dk, dg, dv, dbeta, cs_r, cl_r, num_heads, num_v_heads, scale,
-                              normalize, *strides)  # fmt: skip
+                    h_r, dh_r, x_r, cs_r, cl_r = rows(c0, c1)
+                    ex.launch(stage, (c1 - c0) * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, h_r, dh_r,
+                              *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, cs_r, cl_r, num_heads, num_v_heads,
+                              scale, normalize, *strides)  # fmt: skip
 
             else:
-                stage = form + ("_bf16" if dbeta_bf16 else "")
+                stage = tail_stage
                 group = num_v_heads // num_heads
 
                 def tail(c0, c1):
@@ -5787,9 +5923,9 @@ def _backward_chain(
                     )
                     for s0, s1 in ranges:
                         a, b = c0 + s0, c0 + s1
-                        h_r, dh_r, cs_r, cl_r = rows(a, b)
+                        h_r, dh_r, x_r, cs_r, cl_r = rows(a, b)
                         ex.launch(stage, (b - a) * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, h_r, dh_r,
-                                  g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, ws, ws_count, cs_r, cl_r, num_heads,
+                                  *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, ws, ws_count, cs_r, cl_r, num_heads,
                                   num_v_heads, scale, normalize, tiles, v_rows)  # fmt: skip
         except BaseException:
             # the early groups' side stream, joined as the dispatch below would
@@ -5829,8 +5965,8 @@ def _backward_chain(
     dg1 = workspaces.take(
         table, "b_dg1", (total_tokens, num_v_heads), torch.float32, device
     )
-    ex.launch("dqkwg", meta.num_chunks, num_v_heads, 1, qn, kn, v_new, do, dv2, h, dh, g_cs, dq_hv, dk_hv, dw, dg1,
-              meta.chunk_start, meta.chunk_len, num_heads, num_v_heads, scale)  # fmt: skip
+    ex.launch(tail_stage, meta.num_chunks, num_v_heads, 1, qn, kn, v_new, do, dv2, h, dh, *tail_x, g_cs, dq_hv, dk_hv,
+              dw, dg1, meta.chunk_start, meta.chunk_len, num_heads, num_v_heads, scale)  # fmt: skip
     dk2 = workspaces.take(table, "b_dk2", token_hv, qn.dtype, device)
     dv = ex.empty(v.shape, v.dtype, device)
     dbeta = ex.empty(forward.get("beta_shape") or (total_tokens, num_v_heads),
@@ -6350,7 +6486,15 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
     output = fwd["output"]
     if output.dtype != q.dtype:
         output = output.to(q.dtype)
-    return output, (fwd["final_state"] if output_final_state else None)
+    final_state = fwd["final_state"] if output_final_state else None
+    if output_final_state:
+        # autograd passes None for an output that receives no gradient (:func:`_grads_of`), which tells a final state
+        # without a gradient apart from a zero one; the zeros autograd would fill in: their shapes, dtypes and device.
+        # A call without a final state keeps autograd's zero fill and sets no zero_fill (its backward is 0.2.8's)
+        ctx.set_materialize_grads(False)
+        ctx.zero_fill = (output.shape, output.dtype, output.device,
+                         None if final_state is None else (final_state.shape, final_state.dtype))  # fmt: skip
+    return output, final_state
 
 
 def _saved_hooks_active() -> bool:
@@ -6366,12 +6510,32 @@ def _saved_hooks_active() -> bool:
         return top() is not None
 
 
+def _grads_of(ctx, do, dht):
+    """``(do, dht, final_state_grad)`` of an autograd backward: ``final_state_grad`` is whether autograd gave the final
+    state a gradient (the forward turned autograd's zero fill off, so ``dht`` is None for a final state that receives
+    none, also when the caller asked for it), and ``do`` / ``dht`` are the gradients with the zeros that autograd
+    would fill in for an output without one, the chain's 0.2.8 inputs, path and bits (:data:`PV_TF32` runs the pv_tf32
+    programs only with ``final_state_grad``).  A call without a final state (no ``zero_fill``: the forward kept
+    autograd's zero fill) has no final-state gradient and takes ``do`` / ``dht`` as autograd gives them."""
+    zero_fill = getattr(ctx, "zero_fill", None)
+    if zero_fill is None:
+        return do, dht, False
+    o_shape, o_dtype, device, state = zero_fill
+    final_state_grad = dht is not None
+    if do is None:
+        do = torch.zeros(o_shape, dtype=o_dtype, device=device)
+    if dht is None and state is not None:
+        dht = torch.zeros(state[0], dtype=state[1], device=device)
+    return do, dht, final_state_grad
+
+
 def _function_backward(ctx, do, dht, grad_qkv=None):
     """The backward of both autograd functions: the gradients of q, k, v, g, beta and the initial state (``grad_qkv``:
     see :func:`cake_gdn_nondet_train_backward`).  A call with the forward's plan replays it (:func:`_replay`); any
     other runs the general path, which records the plan of the forward's key.  A call inside a CUDA graph capture does
     neither: a plan's launches read the pooled workspaces of its stream, and a capture takes its own
     (:func:`_workspaces`)."""
+    do, dht, final_state_grad = _grads_of(ctx, do, dht)
     saved = ctx.saved_tensors
     layout = getattr(ctx, "meta_layout", None)
     if layout is not None:
@@ -6393,7 +6557,7 @@ def _function_backward(ctx, do, dht, grad_qkv=None):
         dq, dk, dv, dg, dbeta, dh0 = _replay(plan, saved, do, grad_qkv)
     else:
         dq, dk, dv, dg, dbeta, dh0 = _general_backward(
-            ctx, saved, do, dht, grad_qkv, key
+            ctx, saved, do, dht, grad_qkv, key, final_state_grad
         )
     if layout is not None:
         ctx.meta = None
@@ -6405,9 +6569,9 @@ def _function_backward(ctx, do, dht, grad_qkv=None):
     return dq, dk, dv, dg, dbeta, (dh0 if ctx.has_initial_state_input else None)
 
 
-def _general_backward(ctx, saved, do, dht, grad_qkv, key):
+def _general_backward(ctx, saved, do, dht, grad_qkv, key, final_state_grad):
     """The backward chain over the saved tape (:func:`_backward_chain`); records the plan of the forward's ``key``
-    when there is one (a call without a final-state gradient)."""
+    when there is one (a call without a final-state gradient).  ``final_state_grad``: see :func:`_grads_of`."""
     (
         qn,
         kn,
@@ -6424,7 +6588,8 @@ def _general_backward(ctx, saved, do, dht, grad_qkv, key):
     g_shape, beta_shape = ctx.grad_shapes
     tape = {"arch": ctx.arch, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "v": v_flat, "g_cs": g_cs,
             "beta32": beta32, "A": A, "meta": ctx.meta, "scale": ctx.scale, "normalize_qk": ctx.normalize_qk,
-            "g_shape": g_shape, "beta_shape": beta_shape, "options": ctx.options, "mode": ctx.mode}  # fmt: skip
+            "g_shape": g_shape, "beta_shape": beta_shape, "options": ctx.options, "mode": ctx.mode,
+            "final_state_grad": final_state_grad}  # fmt: skip
     kept = cake_plan.tape_state(ctx.arch, ctx.options.save_state)
     tape.update(
         (name, t)
@@ -6554,7 +6719,13 @@ class CakeGDNNondetPackedFunction(torch.autograd.Function):
             seq_len, num_heads, dim = q_shape[1], q_shape[2], q_shape[3]
             width = ctx.row_shape[-1]
             strides = (seq_len * width, width, dim, 1)
-            d_row = torch.empty(ctx.row_shape, dtype=torch.bfloat16, device=do.device)
+            # on the output's device (do is None when the output receives no gradient, :func:`_grads_of`; never
+            # for a call without a final state, which sets no zero_fill)
+            d_row = torch.empty(
+                ctx.row_shape,
+                dtype=torch.bfloat16,
+                device=ctx.zero_fill[2] if do is None else do.device,
+            )
             views = (
                 d_row.as_strided(q_shape, strides, 0),
                 d_row.as_strided(q_shape, strides, num_heads * dim),
