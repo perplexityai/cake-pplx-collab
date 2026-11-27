@@ -10195,8 +10195,8 @@ def test_modes_dv_lo_tables_pair_the_walk_with_its_tails() -> None:
 def test_dv_lo_records_are_their_twins_with_the_low_word() -> None:
     # The records that take dv2's low word: each pv_tf32 record has dv2_lo right after dv2 in its arg plan; each dvlo
     # record is its sibling's (the walk or the tail it is named after) with dv2_lo right after dv2, the same block,
-    # cluster and PDL, a program of its own; the walk stages the low word in 4 KiB more shared memory, the tails in
-    # none; no other record takes dv2_lo
+    # cluster, PDL and dynamic shared memory (the low word takes no shared memory of its own), a program of its own;
+    # no other record takes dv2_lo
     lo_stages = _pv_stages() | _lo_route_stages()
     for name, rec in cake_jit.MODULES.items():
         plan = [arg[1] for arg in rec["arg_plan"]]
@@ -10213,13 +10213,8 @@ def test_dv_lo_records_are_their_twins_with_the_low_word() -> None:
             sib = cake_jit.MODULES[cake_backend.stage_record(base, arch)]
             plan = [arg for arg in rec["arg_plan"] if arg != ["buffer", "dv2_lo"]]
             assert plan == sib["arg_plan"], (lo, arch)
-            launch, twin = dict(rec["launch"]), dict(sib["launch"])
-            extra = 4096 if base == "dhu_tc2_dvl32_modes" else 0
-            assert (
-                launch.pop("dynamic_smem_bytes")
-                == twin.pop("dynamic_smem_bytes") + extra
-            ), (lo, arch)
-            assert launch == twin and rec["library"] != sib["library"], (lo, arch)
+            assert rec["launch"] == sib["launch"], (lo, arch)
+            assert rec["library"] != sib["library"], (lo, arch)
 
 
 def test_modes_dv_lo_stages_follow_the_one_switch(monkeypatch) -> None:
