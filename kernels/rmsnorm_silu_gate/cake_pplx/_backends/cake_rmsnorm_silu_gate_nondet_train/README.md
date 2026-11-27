@@ -244,7 +244,7 @@ call runs the program of 0.2.18):
 | --- | --- | --- | --- |
 | `sm_100a` | whole-token rows of more heads (`SLICED_HEADS_LAYOUT`) | `xlong` up to 700, `layout_pipe` 701-1500, `fwd` past it | `xlong` up to 600, `layout_pipe` 601-2000, `fwd` past it |
 | `sm_100a` | `x` broadcast over the heads (`BCASTH_LAYOUT`) | `fwd` past 700 | `fwd` 701-1249, `layout_pipe` 1250-1500, `fwd` past it |
-| `sm_103a` | gate of more than one head sliced from a projection (`PROJECTION_LAYOUT`) | `xlong` up to 629, `layout_pipe` 630-2000 | `xlong` up to 619, `layout_pipe` 620-2000 |
+| `sm_103a` | gate of more than one head sliced from a projection (`PROJECTION_LAYOUT`) | `xlong` up to 629, `layout_pipe` 630-2000 | `xlong` up to 624, `layout_pipe` 625-2000 |
 | `sm_103a` | whole-token rows of more heads | `xlong` up to 700, `layout_pipe` 701-1500, `fwd` past it | `xlong` up to 649, `layout_pipe` 650-1750, `fwd` past it |
 | `sm_103a` | `x` and `z` both sliced, 2 or 3 heads (`SLICED_FEW_LAYOUT`); `x` broadcast over the heads; padded heads (`PADH_LAYOUT`) | `fwd` past 700 | `layout_pipe` 701-1500, `fwd` past it |
 | `sm_103a` | head-major `x` beside a sliced `z` (`MIXED_LAYOUT`) | `fwd` past 700 | `layout_pipe` 701-1250, `fwd` past it |
@@ -266,7 +266,14 @@ a tensor four times the row width and packed `x` at 599.01, 600, 650 and 700
 rows per SM on B200 and GB300, padded rows of 4 heads at 599.03 on B200, `x`
 broadcast over 16 heads at 999.03 and 1000 on B200, and head-major `x` beside
 a sliced `z` of 2 heads at 1500 on GB300 and at 649.01, 650 and 1000 on the
-VR200 node with driver 620.70.06.  The points, forms and times are under
+VR200 node with driver 620.70.06.  A second release measurement (the same
+protocol, with every band as now but `fwd_layout_pipe` from 620 rows per SM
+for a gate of more than one head sliced from a projection on `sm_103a`) found
+the checkpointed step of such a gate of 64 heads at 619.79 rows per SM on
+GB300 1.0049 of 0.2.18's time with a BF16 `dw`, so that gate runs
+`fwd_layout_pipe` from 625 rows per SM; every form passed from 624.84 (64
+heads) and 624.95 (16 and 48 heads) to 628.95 in both release measurements.
+The points, forms and times are under
 "Programs and routes".  `y` bits: where `fwd_layout_pipe` runs in the place
 of the plain forward on `sm_100a` and `sm_103a`, `y` was the same bits where
 compared; in the place of the extra-long forward `y` can differ in the last
@@ -797,12 +804,17 @@ slower (B200: 1.0190 .. 1.0297 of 0.2.17's time at 560 rows per SM, 1.0041
 for 64 heads in one run at 580; GB300: 1.0081 .. 1.0085 for 48 and 64 heads
 at 600, more below), so each cut lies just below the first point where every
 form passed (whose 64 heads, 599.78 rows per SM on 148 SMs and 629.89 on 152,
-run `fwd_layout_pipe`).  Version 0.2.19 ends that band at 619 rows per SM on
+run `fwd_layout_pipe`).  Version 0.2.19 ends that band at 624 rows per SM on
 `sm_103a` (629 in 0.2.18): measured against 0.2.18 on GB300 as above (the same
 forms), every form passed from 619.79 to 628.95 rows per SM, while 64 heads
-failed at 609.68 and 16 and 48 heads at 600, so the cut lies just below the
-first point where every form passed; the release measurement against 0.2.18
-(the same forms) found every form passing from 619.05 to 628.95 rows per SM.
+failed at 609.68 and 16 and 48 heads at 600; the release measurement against
+0.2.18 (the same forms) found every form passing from 619.05 to 628.95 rows
+per SM, and a second release measurement (the same protocol, with
+`fwd_layout_pipe` from 620 rows per SM there and every other table as it is
+now) found the checkpointed step of 64 heads at 619.79 rows per SM 1.0049 of
+0.2.18's time with a BF16 `dw`; both found every form passing from 624.84 (64
+heads) and 624.95 (16 and 48 heads) to 628.95 rows per SM, so the cut lies
+just below the first point where every form passed in both.
 On `sm_107a` head-major rows ran `fwd_layout_keep_pipe` at 100 rows per SM
 9 % .. 10 % faster alone than the mid forward and made the step 3 % .. 4 %
 faster; the release measurement of 0.2.17 against 0.2.16 (driver 620.70)
@@ -823,7 +835,7 @@ slower.  The bands:
 | class (rows per SM) | `sm_100a` | `sm_103a` | `sm_107a` |
 | --- | --- | --- | --- |
 | packed rows (`FORWARD_BANDS`) | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `keep_pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-65 `tiny` (but 17-32 rows `short`), 66-175 `mid`, 176-280 `xlong`, 281-8192 `pipe_packed`, past 8192 `keep_pipe_packed` |
-| gate of more than one head sliced from a projection (`PROJECTION_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, 2001-3000 `layout_keep_pipe`, past 3000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-619 `xlong`, 620-2000 `layout_pipe`, past 2000 `fwd` | 1-59 `short`, 60-300 `layout_keep_pipe`, 301-442 `mid`, 443-2999 `layout_pipe`, past 2999 `layout_keep_pipe` |
+| gate of more than one head sliced from a projection (`PROJECTION_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, 2001-3000 `layout_keep_pipe`, past 3000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-624 `xlong`, 625-2000 `layout_pipe`, past 2000 `fwd` | 1-59 `short`, 60-300 `layout_keep_pipe`, 301-442 `mid`, 443-2999 `layout_pipe`, past 2999 `layout_keep_pipe` |
 | head-major rows (`HEAD_MAJOR_FORWARD_BANDS`) | as other layouts | as other layouts | 1-59 `short`, 60-100 `layout_keep_pipe`, 101-480 `mid`, past 480 `fwd` |
 | whole-token rows of one head (`SLICED_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
 | whole-token rows of more heads (`SLICED_HEADS_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-600 `xlong`, 601-2000 `layout_pipe`, past 2000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-649 `xlong`, 650-1750 `layout_pipe`, past 1750 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1000 `layout_pipe`, past 1000 `fwd` |

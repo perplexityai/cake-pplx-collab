@@ -250,7 +250,7 @@ one for the architecture, else ``cake_jit.STRIDED_FORWARD_BANDS``.
 ``fwd_layout_pipe`` now runs, in rows per SM: on sm_100a whole-token rows of
 more than one head from 601 to 2000 and ``x`` broadcast over the heads from
 1250 to 1500; on sm_103a a gate of more than one head sliced from a
-projection from 620 (0.2.18: from 630), whole-token rows of more than one
+projection from 625 (0.2.18: from 630), whole-token rows of more than one
 head from 650 to 1750, ``x`` and ``z`` both sliced of 2 or 3 heads, ``x``
 broadcast over the heads and padded heads from 701 to 1500, and head-major
 ``x`` beside a sliced ``z`` from 701 to 1250; on sm_107a whole-token rows of
@@ -279,7 +279,14 @@ padded rows of 4 heads at 599.03 on B200, ``x`` broadcast over 16 heads at
 999.03 and 1000 on B200, and head-major ``x`` beside a sliced ``z`` of 2
 heads at 1500 on GB300 and at 649.01, 650 and 1000 on the VR200 node with
 driver 620.70.06 (the comments of the tables of ``cake_jit`` give the
-points, the forms and the times).  Where ``fwd_layout_pipe`` runs in the
+points, the forms and the times).  A second release measurement (the same
+protocol, with every band as now but ``fwd_layout_pipe`` from 620 rows per
+SM for a gate of more than one head sliced from a projection on sm_103a)
+found the checkpointed step of such a gate of 64 heads at 619.79 rows per SM
+on GB300 1.0049 of 0.2.18's time with a BF16 weight gradient, so that gate
+runs ``fwd_layout_pipe`` from 625 rows per SM; every form passed from 624.84
+(64 heads) and 624.95 (16 and 48 heads) to 628.95 in both release
+measurements.  Where ``fwd_layout_pipe`` runs in the
 place of the plain forward on sm_100a and sm_103a, ``y`` was the same bits
 where compared; in the place of the extra-long forward ``y`` can differ in
 the last bits of a few elements (the programs associate a row's sum of
@@ -587,7 +594,7 @@ Host design (the input layout rules are the deterministic package's):
   mid forward up to 140, the long forward up to 400, the extra-long forward up
   to 599, ``fwd_layout_pipe`` up to 2000, ``fwd_layout_keep_pipe`` up to 3000
   and the plain forward past it; on sm_103a the mid forward up to 250, the
-  extra-long forward up to 619, ``fwd_layout_pipe`` up to 2000 and the plain
+  extra-long forward up to 624, ``fwd_layout_pipe`` up to 2000 and the plain
   forward past it; on sm_107a ``fwd_layout_keep_pipe`` up to 300, the mid
   forward up to 442, ``fwd_layout_pipe`` up to 2999 and
   ``fwd_layout_keep_pipe`` past it.  For head-major rows on sm_107a:

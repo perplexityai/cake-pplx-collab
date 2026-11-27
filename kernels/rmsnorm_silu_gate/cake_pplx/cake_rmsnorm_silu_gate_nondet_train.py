@@ -218,7 +218,7 @@ of one padded head stride with the heads of a token adjacent.  The pipelined
 forward that warms rows by their layout now runs, in rows per SM: on SM100
 whole-token rows of more than one head from 601 to 2000 and ``x`` broadcast
 over the heads from 1250 to 1500; on SM103 a gate of more than one head
-sliced from a projection from 620 (0.2.18: from 630), whole-token rows of
+sliced from a projection from 625 (0.2.18: from 630), whole-token rows of
 more than one head from 650 to 1750, ``x`` and ``z`` both sliced of 2 or 3
 heads, ``x`` broadcast over the heads and padded heads from 701 to 1500, and
 head-major ``x`` beside a sliced ``z`` from 701 to 1250; on SM107
@@ -238,7 +238,14 @@ width and packed ``x`` at 599.01, 600, 650 and 700 rows per SM on B200 and
 GB300, padded rows of 4 heads at 599.03 on B200, ``x`` broadcast over 16
 heads at 999.03 and 1000 on B200, and head-major ``x`` beside a sliced ``z``
 of 2 heads at 1500 on GB300 and at 649.01, 650 and 1000 on the VR200 node
-with driver 620.70.06.  Where the pipelined forward runs in the place of the
+with driver 620.70.06.  A second release measurement (the same protocol,
+with every band as now but the pipelined forward from 620 rows per SM for a
+gate of more than one head sliced from a projection on SM103) found the
+checkpointed step of such a gate of 64 heads at 619.79 rows per SM on GB300
+1.0049 of 0.2.18's time with a BF16 weight gradient, so that gate runs the
+pipelined forward from 625 rows per SM; every form passed from 624.84 (64
+heads) and 624.95 (16 and 48 heads) to 628.95 in both release measurements.
+Where the pipelined forward runs in the place of the
 8-thread forward on SM100 and SM103, ``y`` was the same bits where compared;
 in the place of the extra-long forward ``y`` can differ in the last bits of
 a few elements; on SM107, where the pipelined forward runs in the place of
@@ -279,7 +286,7 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   over the heads, head-major ``x`` beside a sliced ``z`` (SM103) and a
   padded head stride (SM103) have bands of their own, which run pipelined
   forwards that warm rows of any layout in L2 by their layout (the
-  projection's past 599 rows per SM on SM100 and 619 on SM103 and past 59 on
+  projection's past 599 rows per SM on SM100 and 624 on SM103 and past 59 on
   SM107 but from 301 to 442; the head-major one from 60 to 100 rows per SM;
   the whole-token one of one head from 701 to 1500; that of more heads from
   601 to 2000 on SM100, from 650 to 1750 on SM103 and from 650 to 1000 on
