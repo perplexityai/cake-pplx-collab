@@ -59,6 +59,9 @@ STAGES = ("fwd", "bwd", "dw_reduce")
 NMAX = (2, 3, 4, 5, 6, 7, 8, 9)
 # One fwd and one bwd program per value bound, and the one dw_reduce program.
 PERSISTENT_RECORDS = tuple(sorted(f"{stage}_n{k}" for stage in ("fwd", "bwd") for k in NMAX))
+# The forwards of 5 to 9 values launch one CTA per group (no cluster); every other persistent program a cluster of four.
+ONE_CTA_RECORDS = tuple(f"fwd_n{k}" for k in (5, 6, 7, 8, 9))
+FOUR_CTA_RECORDS = tuple(name for name in PERSISTENT_RECORDS if name not in ONE_CTA_RECORDS)
 RECORDS = tuple(sorted((*PERSISTENT_RECORDS, "dw_reduce")))
 ENTRIES = (
     "cake_attn_res_det",
@@ -157,8 +160,9 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
 
 
 def test_the_resident_group_table_is_bounded() -> None:
-    """Every persistent record has its CTAs per SM; every table entry is at most CTAs per SM * SMs / cluster CTAs
-    groups; a device the table does not hold takes the fallback fraction."""
+    """Every persistent record has its CTAs per SM; every table entry is at most CTAs per SM * SMs / 4 groups of a
+    four-CTA record; a device the table does not hold takes the fallback fraction for those records.  A one-CTA record
+    (``fwd_n5`` .. ``fwd_n9``) takes CTAs per SM * SMs groups on every device, in the table or not."""
     assert sorted(cake_jit.CTAS_PER_SM) == sorted(PERSISTENT_RECORDS)
     fraction = cake_jit.UNMEASURED_FRACTION
     for (arch, sms), table in cake_jit.RESIDENT_GROUPS.items():
@@ -170,25 +174,49 @@ def test_the_resident_group_table_is_bounded() -> None:
             # The fallback stays at or under every measured count.
             capped = min(per_sm, cake_jit.UNMEASURED_MAX_CTAS_PER_SM)
             assert int(fraction * capped * sms) // 4 <= held, (arch, sms, per_sm)
-            for name in PERSISTENT_RECORDS:
+            for name in FOUR_CTA_RECORDS:
                 assert 1 <= held <= per_sm * sms // cake_jit.cluster_ctas(name), (arch, sms, per_sm)
     # A cap only lowers a measured device's resident groups of one program; the other programs keep theirs.
     for (arch, sms), caps in cake_jit.GROUP_CAPS.items():
         assert (arch, sms) in cake_jit.RESIDENT_GROUPS, (arch, sms)
         table = cake_jit.RESIDENT_GROUPS[(arch, sms)]
         for name, cap in caps.items():
-            assert name in PERSISTENT_RECORDS, name
+            assert name in FOUR_CTA_RECORDS, name
             assert 1 <= cap < table[cake_jit.CTAS_PER_SM[name]], (arch, sms, name, cap)
             assert cake_jit.resident_groups(name, arch, sms) == cap, (arch, sms, name)
-        for name in set(PERSISTENT_RECORDS) - set(caps):
+        for name in set(FOUR_CTA_RECORDS) - set(caps):
             assert cake_jit.resident_groups(name, arch, sms) == table[cake_jit.CTAS_PER_SM[name]], (arch, sms, name)
+        for name in ONE_CTA_RECORDS:
+            assert cake_jit.resident_groups(name, arch, sms) == cake_jit.CTAS_PER_SM[name] * sms, (arch, sms, name)
     for name in PERSISTENT_RECORDS:
         ctas = cake_jit.cluster_ctas(name)
         per_sm = cake_jit.CTAS_PER_SM[name]
         if ("sm_103a", 160) not in cake_jit.RESIDENT_GROUPS:
             capped = min(per_sm, cake_jit.UNMEASURED_MAX_CTAS_PER_SM)
-            assert cake_jit.resident_groups(name, "sm_103a", 160) == max(1, int(fraction * capped * 160) // ctas)
+            fallback = per_sm * 160 if ctas == 1 else max(1, int(fraction * capped * 160) // ctas)
+            assert cake_jit.resident_groups(name, "sm_103a", 160) == fallback, name
         assert cake_jit.resident_groups(name, "sm_107a", 1) >= 1
+
+
+def test_the_one_cta_forwards_take_one_group_per_sm() -> None:
+    """``fwd_n5`` .. ``fwd_n9`` launch one 448-thread CTA per group, without a cluster, one CTA per SM: on every
+    device, in the tables or not, they take one group per SM, so their grid is ``min(T, SMs)`` CTAs.  Every other
+    persistent program launches clusters of four 224-thread CTAs."""
+    for name in PERSISTENT_RECORDS:
+        launch = cake_jit.MODULES[name]["launch"]
+        if name in ONE_CTA_RECORDS:
+            assert tuple(launch["block"]) == (448, 1, 1) and tuple(launch["cluster"]) == (1, 1, 1), name
+            assert cake_jit.CTAS_PER_SM[name] == 1, name
+        else:
+            assert tuple(launch["block"]) == (224, 1, 1) and tuple(launch["cluster"]) == (4, 1, 1), name
+        assert cake_jit.cluster_ctas(name) == launch["cluster"][0], name
+    for arch in ARCHES:
+        for sms in (1, 148, 152, 160, 208, 212):
+            for name in ONE_CTA_RECORDS:
+                assert cake_jit.GROUP_CAPS.get((arch, sms), {}).get(name) is None, (arch, sms, name)
+                assert cake_jit.resident_groups(name, arch, sms) == sms, (arch, sms, name)
+                for T in (1, 147, 4097, 2**31 - 1):
+                    assert cake_jit.grid(name, T, arch, sms) == (min(T, sms), 1, 1), (arch, sms, name, T)
 
 
 @pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))
@@ -448,11 +476,13 @@ def test_every_record_loads(device) -> None:
 
 def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
     """On this GPU, the grid of every ``fwd`` / ``bwd`` program at a large token count is at most the clusters the
-    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program, and so is the measured table entry of
-    this device, when it has one: the entry holds the least count measured over the boards of its SM count, which can
-    differ by a cluster (two R200 boards of 208 SMs hold 153 and 154 clusters at 3 CTAs per SM).  The grid is that
-    entry, or the program's cap (``cake_jit.GROUP_CAPS``) when the device has one for it.  Skipped only when the query
-    cannot run on this host (no ``cuobjdump``, no driver library); a query that fails for one program fails the test."""
+    driver's ``cuOccupancyMaxActiveClusters`` reports for the loaded program (for ``fwd_n5`` .. ``fwd_n9``, which
+    launch without a cluster, a cluster of one CTA), and so is the measured table entry of this device, when it has
+    one: the entry holds the least count measured over the boards of its SM count, which can differ by a cluster (two
+    R200 boards of 208 SMs hold 153 and 154 clusters at 3 CTAs per SM).  The grid of a four-CTA program is that entry,
+    or the program's cap (``cake_jit.GROUP_CAPS``) when the device has one for it; the grid of a one-CTA program is
+    CTAs per SM * SMs.  Skipped only when the query cannot run on this host (no ``cuobjdump``, no driver library); a
+    query that fails for one program fails the test."""
     why = unreachable()
     if why is not None:
         pytest.skip(f"the occupancy query is not reachable: {why}")
@@ -466,17 +496,21 @@ def test_the_grid_never_exceeds_the_resident_clusters(device) -> None:
         library = cake_build.library_path(cake_backend.library_name(name, arch))
         found, why = max_active_clusters(library, cake_jit.MODULES[name], index)
         grid = cake_backend._groups(name, 2**31 - 1, index)
-        table = cake_jit.RESIDENT_GROUPS.get((arch, sms), {}).get(cake_jit.CTAS_PER_SM[name])
+        ctas = cake_jit.cluster_ctas(name)
+        per_sm = cake_jit.CTAS_PER_SM[name]
+        table = None if ctas == 1 else cake_jit.RESIDENT_GROUPS.get((arch, sms), {}).get(per_sm)
         cap = cake_jit.GROUP_CAPS.get((arch, sms), {}).get(name)
         print(
-            f"OCCUPANCY det {arch} sms={sms} {name} driver={found} grid_groups={grid} table={table} cap={cap} "
-            f"ctas_per_sm={cake_jit.CTAS_PER_SM[name]} ({why})"
+            f"OCCUPANCY det {arch} sms={sms} {name} cluster={ctas} driver={found} grid_groups={grid} table={table} "
+            f"cap={cap} ctas_per_sm={per_sm} ({why})"
         )
         if found is None:
             problems.append(f"{name}: {why}")
             continue
         if grid > found:
             problems.append(f"{name}: grid {grid} groups > {found} resident")
+        if ctas == 1 and grid != min(per_sm * sms, cap or per_sm * sms):
+            problems.append(f"{name}: grid {grid} groups != CTAs per SM {per_sm} * {sms} SMs")
         if table is not None and table > found:
             problems.append(f"{name}: measured table {table} > driver {found}")
         if table is not None and grid != min(table, cap or table):
