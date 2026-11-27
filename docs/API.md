@@ -1589,7 +1589,7 @@ out.float().square().sum().backward()  # every gradient repeats bit for bit
 **Caveats.**
 
 - Latent dim 512 and rope dim 64 are fixed (NoPE uses 512 only). All operands are BF16. The rope forms take 64, 96 or 128 query heads (the det rope form's 96 and 128 on `sm_100a` and `sm_103a`; on `sm_107a` the nondet rope form's 96 and 128 run the single-pass forward and the head-window backward); NoPE takes 64.
-- At 96 and 128 heads the nondet rope form runs the 64-head kernels on two head windows (see Query heads): the backward gathers the keys and drains dK/dV once per window, and the forward does the work of 128 heads at 96 heads.
+- At 96 and 128 heads the rope forms run the single-pass forward and the head-window backward (see Query heads): the nondet module on `sm_100a`, `sm_103a` and `sm_107a`, the det module on `sm_100a` and `sm_103a` (on `sm_107a` the det rope form takes 64 heads). Both compute 128 rows per token, the rows past `H` as zeros: at 96 heads the forward does the work of 128 heads, and the backward runs both 64-head windows of every token (the nondet `bwd_main_hw` skips only the dK/dV products whose 16 heads are all past `H`).
 - The flat forms apply no positional mask; the index rows alone define the key set. The varlen forms mask only with `causal=True`.
 - Out-of-range `dkv_dst_map` values are caught only with `check_dst_map` or the environment variable.
 - In NoPE without `dkv_acc`, the FP32 `dkv` is cast to BF16. To keep FP32, use `dkv_acc` or `cake_backend.backward_nope`.
