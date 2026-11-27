@@ -16,9 +16,11 @@ limitations under the License.
 The resident clusters of a loaded AttnRes program on one CUDA device, as the driver's
 ``cuOccupancyMaxActiveClusters`` reports them: the program's cubin is taken from its library with ``cuobjdump -xelf``
 (the CUDA toolkit the JIT build uses) and loaded into the device's primary context beside the library's own copy; the
-launch is the record's block and dynamic shared memory with the compile-time cluster (a program past 48 KiB of dynamic
-shared memory gets its limit raised first, as its binding raises it before a launch).  Test-only: the packages size
-their grids from measured tables (``cake_jit.RESIDENT_GROUPS``).
+launch is the record's block and dynamic shared memory with the compile-time cluster, or, for a program that launches
+without a cluster (a record of cluster ``(1, 1, 1)``), a cluster-dimension launch attribute of one CTA (a program past
+48 KiB of dynamic shared memory gets its limit raised first, as its binding raises it before a launch).  Test-only:
+the packages size their grids from measured tables (``cake_jit.RESIDENT_GROUPS``) and, for one-CTA groups, from CTAs
+per SM * SMs.
 """
 
 from __future__ import annotations
@@ -49,6 +51,14 @@ class _LaunchConfig(ctypes.Structure):
     ]
 
 
+class _LaunchAttribute(ctypes.Structure):
+    """``CUlaunchAttribute``: the id, padding to 8 bytes, then the 64-byte value union."""
+
+    _fields_ = [("id", ctypes.c_uint), ("pad", ctypes.c_char * 4), ("value", ctypes.c_uint * 16)]
+
+
+# ``CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION``.
+_CLUSTER_DIMENSION_ATTRIBUTE = 4
 # ``CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES`` and the dynamic shared memory a function takes without it.
 _MAX_DYNAMIC_SMEM_ATTRIBUTE = 8
 _DEFAULT_DYNAMIC_SMEM_BYTES = 48 * 1024
@@ -114,8 +124,15 @@ def max_active_clusters(library: Path, record: dict[str, Any], device_index: int
                     )
                     if status:
                         return None, f"cuFuncSetAttribute(max dynamic shared memory {smem}) returned {status}"
-                config = _LaunchConfig(int(launch["cluster"][0]) * 1024, 1, 1, *map(int, launch["block"]))
+                ctas = int(launch["cluster"][0])
+                config = _LaunchConfig(ctas * 1024, 1, 1, *map(int, launch["block"]))
                 config.shared_mem_bytes = smem
+                attribute = _LaunchAttribute(_CLUSTER_DIMENSION_ATTRIBUTE)
+                if ctas == 1:
+                    # No compile-time cluster: the query takes the cluster shape from the launch, one CTA.
+                    attribute.value[0] = attribute.value[1] = attribute.value[2] = 1
+                    config.attrs = ctypes.cast(ctypes.pointer(attribute), ctypes.c_void_p)
+                    config.num_attrs = 1
                 clusters, per_sm = ctypes.c_int(0), ctypes.c_int(0)
                 status = cuda.cuOccupancyMaxActiveClusters(ctypes.byref(clusters), function, ctypes.byref(config))
                 if status:

@@ -13,13 +13,14 @@ dv_j = bf16(p_j dout + ds_j r_j w - (ds_j d_j r_j^3 / 7168) v_j)   dw = sum over
 The backward evaluates `ds_j = p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `c` the value of the largest `p_j` (the
 first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1.
 
-The facade `cake_pplx.cake_attn_res_det_train` is a stable API; this backend package is experimental (no
-compatibility guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin) are the
-supported architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests and the
-compute-sanitizer runs on VR200 and R200. Its libraries are loaded prebuilt from `aot/` when a builder
-compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and launches
-read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX` and the
-`CAKE_PPLX_*` build settings of the root README.
+The facade `cake_pplx.cake_attn_res_det_train` is a stable API; this backend package is experimental (no compatibility
+guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin) are the supported
+architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests on VR200 and R200.
+At 0.1.2, compute-sanitizer passes on VR200 for the new forwards of 5 to 9 values (on kernel-level builds of the same
+sources); the other programs passed there and on R200 at 0.1.0. Its libraries are loaded prebuilt from `aot/` when a
+builder compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and
+launches read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX`
+and the `CAKE_PPLX_*` build settings of the root README.
 
 ## Opt-in
 
@@ -48,13 +49,13 @@ must share no byte with an operand or another output (`ValueError`).
 
 | Stage | Record | Grid | Work |
 | --- | --- | --- | --- |
-| `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d`. `fwd_n2` .. `fwd_n4`: each CTA serves whole tokens (no exchange); `fwd_n5` .. `fwd_n9`: the four CTAs of a cluster split each token's columns |
+| `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d`. `fwd_n2` .. `fwd_n4`: each CTA of a four-CTA cluster serves whole tokens (no exchange); `fwd_n5` .. `fwd_n9`: one 448-thread CTA serves each token, all 7168 columns, no cluster |
 | `bwd` | `bwd_n2` .. `bwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: every `dv_j`; each group writes its own FP32 row of `dw` partial sums into `dw_rows [groups, 7168]` |
 | `dw_reduce` | `dw_reduce` | `(7168 / columns per CTA, 1, 1)` | `dw` = the rows of `dw_rows` summed in one fixed order |
 
 `T = 0` launches no Cake kernel: the backward returns a zero `dw` (a `torch.zeros` fill).
 
-`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB200, GB300, VR200 and R200; on another device a fallback under every measured count). `fwd_n4` takes at most 64 groups on B200, GB200 and GB300 (`cake_jit.GROUP_CAPS`): it runs up to 7 % faster there than at all 71 or 74 resident groups. The kernels take nine value pointers; the host passes the first value in the slots
+`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`). `fwd_n5` .. `fwd_n9` hold one CTA per SM and launch no cluster, so they take one group per SM on every device. The four-CTA programs take counts measured per launch bound on B200, GB200, GB300, VR200 and R200; on another device a fallback under every measured count. `fwd_n4` takes at most 64 groups on B200, GB200 and GB300 (`cake_jit.GROUP_CAPS`): it runs up to 7 % faster there than at all 71 or 74 resident groups. The kernels take nine value pointers; the host passes the first value in the slots
 past `n`, which the kernels never read.
 
 ## Determinism

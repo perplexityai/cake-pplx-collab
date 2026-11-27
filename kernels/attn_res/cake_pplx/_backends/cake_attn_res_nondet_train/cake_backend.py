@@ -52,8 +52,9 @@ Every program serves every token count, so the libraries are a fixed set: no sha
 
 ``fwd`` and ``bwd`` run a persistent grid: as many launch groups as the token count and as the device holds at once,
 or fewer where a measured cap is lower (``fwd_n4`` takes at most 64 groups on B200, GB200 and GB300)
-(:func:`.cake_jit.groups`, from tables of measured counts and caps per architecture and SM count and, on a device
-the tables do not hold, a fallback under every measured count); any grid is correct.  Every launch is a plain
+(:func:`.cake_jit.groups`: a forward of 5 to 9 values, one CTA per group, takes one group per SM on every device;
+the four-CTA programs take tables of measured counts and caps per architecture and SM count and, on a device the
+tables do not hold, a fallback under every measured count); any grid is correct.  Every launch is a plain
 stream-ordered launch on the current torch stream of the operands' device: nothing cooperative.  Nothing here reads an
 environment variable, reads device memory or synchronizes; grids and buffer sizes come from tensor shapes, the
 architecture and the SM count.
