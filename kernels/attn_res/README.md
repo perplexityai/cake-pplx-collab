@@ -18,11 +18,12 @@ nondet backward of `T > 0` tokens alerts; the forward and the det module never d
 [`docs/API.md`](../../docs/API.md#attn_res).
 
 The GPU suites and the benchmark ran on B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`).
-At 0.1.1, compute-sanitizer passes on GB300 (memcheck, synccheck and initcheck). On VR200 and R200 it passed at 0.1.0
-(memcheck, racecheck, synccheck and initcheck). 0.1.1 adds the `dw` memset to the nondet backward bindings. 0.1.2
-replaces the forwards of 5 to 9 values: one 448-thread CTA serves each token, all 7168 columns, with no cluster, one
-CTA per SM; the other programs are unchanged. At 5 to 9 values the outputs and the gradients therefore differ from
-0.1.1 in the last bits; within 0.1.2 they repeat bit for bit as before (the nondet `dw` makes no bit promise).
+At 0.1.2, compute-sanitizer passes on GB300 for every program (memcheck, racecheck, synccheck and initcheck) and on
+VR200 for the new forwards of 5 to 9 values (the same four tools). The other programs passed on VR200 and R200 at
+0.1.0; 0.1.1 then added the `dw` memset to the nondet backward bindings. 0.1.2 replaces the forwards of 5 to 9 values:
+one 448-thread CTA serves each token, all 7168 columns, with no cluster, one CTA per SM; the other programs are
+unchanged. At 5 to 9 values the outputs and the gradients differ slightly from 0.1.1, because the new forwards sum in
+another order; within 0.1.2 they repeat bit for bit as before (the nondet `dw` makes no bit promise).
 
 Install this family alone, pinned to a commit:
 

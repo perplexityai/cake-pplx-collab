@@ -123,7 +123,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 | dsa_sparse_attention | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | kda | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | gated_kv_compression | GPU suites and benchmark run on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5, against the acceptance criteria of issue #76 |
-| attn_res | GPU suites and the benchmark run on NVIDIA B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`), with CUDA 13.5, against the acceptance criteria of issue #262. compute-sanitizer passes on GB300 at 0.1.1 and passed on VR200 and R200 at 0.1.0 |
+| attn_res | GPU suites and the benchmark run on NVIDIA B200 and GB200 (`sm_100a`), GB300 (`sm_103a`), VR200 and R200 (`sm_107a`), with CUDA 13.5, against the acceptance criteria of issue #262. compute-sanitizer passes on GB300 at 0.1.2 for every program and on VR200 for the 0.1.2 forwards of 5 to 9 values; the other programs passed on VR200 and R200 at 0.1.0 |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
 
