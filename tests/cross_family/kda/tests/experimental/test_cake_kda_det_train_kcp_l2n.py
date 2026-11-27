@@ -69,6 +69,7 @@ import torch.multiprocessing as mp
 
 from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
 from tests.experimental.test_cake_kda_det_train_kcp_dist import (
+    _abort_group,
     _init_group,
     _local_slices,
     _partition,
@@ -3339,6 +3340,9 @@ def _spawn_entry(
         report = _run_rank(rank, W, row, rdzv, result_dir, raw_gate, dt_bias_2d)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

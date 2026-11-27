@@ -38,7 +38,11 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from tests.experimental.test_cake_kda_det_train_kcp_dist import _init_group, _rendezvous
+from tests.experimental.test_cake_kda_det_train_kcp_dist import (
+    _abort_group,
+    _init_group,
+    _rendezvous,
+)
 from tests.experimental.test_helpers.cake_host_sync import (
     allocator_counts,
     census,
@@ -1451,6 +1455,9 @@ def _spawn_dist_entry(
         report = RANK_RUNNERS[kind](rank, W, row, rdzv, result_dir)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

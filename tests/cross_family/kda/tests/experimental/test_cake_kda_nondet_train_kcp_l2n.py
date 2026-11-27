@@ -85,6 +85,7 @@ from tests.experimental.test_cake_kda_det_train_kcp_dist import (
 )
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     _Counter,
+    _abort_group,
     _bwd_sequence_first_main,
     _handle_recompute_flags,
     _init_group,
@@ -3943,6 +3944,9 @@ def _spawn_entry(
         report = _run_rank(rank, W, row, rdzv, result_dir, raw_gate, dt_bias_2d)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

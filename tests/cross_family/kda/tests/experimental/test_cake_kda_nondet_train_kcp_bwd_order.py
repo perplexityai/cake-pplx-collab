@@ -61,6 +61,7 @@ import torch.distributed as dist
 from tests.cake_naive import DRAWS, draw_seed
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     GRAPH_EVENTS,
+    _abort_group,
     _bound_rank_threads,
     _bwd_sequence_first_main,
     _cpu_context,
@@ -1153,6 +1154,9 @@ def _spawn_entry_order(
         report = _run_rank_order(rank, W, row, rdzv, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

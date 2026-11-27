@@ -235,9 +235,16 @@ def _run_rank(
         if rank == 0:
             with open(result, "w") as fh:
                 json.dump({"verdicts": {}, "failures": [traceback.format_exc()]}, fh)
+        # abort, not a graceful destroy: the other ranks may wait in a collective this rank never joins (rank 0
+        # judges between them), and destroy_process_group() would wait with them until the group's timeout; the
+        # abort clears the default group, so the ``finally`` skips the destroy and this error reaches the test at once
+        from torch.distributed import distributed_c10d
+
+        distributed_c10d._abort_process_group()
         raise
     finally:
-        dist.destroy_process_group()
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 def judge_kcp(
