@@ -745,7 +745,7 @@ NOPE_SINK_FORWARD_STAGE = "nope_fwd_sink"
 NOPE_DSINK_STAGE = "nope_bwd_dsink"
 NOPE_SINK_STAGES = (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
 # The RoPE program's stages over 96 and 128 query heads (``cake_backend.SUPPORTED_HEADS``), registered for
-# ``sm_100a`` and ``sm_103a`` (their entries' ``arches``): stage -> the stage a call over ``64 < H <= 128`` heads runs
+# ``sm_100a``, ``sm_103a`` and ``sm_107a`` (``arches``): stage -> the stage a call over ``64 < H <= 128`` heads runs
 # in its place.  The forward is the non-deterministic package's single-pass forward (one (2, 1, 1) cluster per
 # token, every head of the token: ``out`` / ``lse`` / ``o_lo`` at ``t * H + h``); the delta stage's heads build
 # writes ``delta [T, H]`` and the bound terms over the token's H heads; the main kernel's head-window builds (main,

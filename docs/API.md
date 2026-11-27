@@ -1433,7 +1433,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 
 ## dsa_sparse_attention
 
-**Computes.** Differentiable top-k sparse MLA attention with absorbed queries (DeepSeek Sparse Attention). The rope forms of both modules take `H` = 64, 96 or 128 query heads (the det module's 96 and 128 on `sm_100a` and `sm_103a`, from 0.11.0); the NoPE form takes 64.
+**Computes.** Differentiable top-k sparse MLA attention with absorbed queries (DeepSeek Sparse Attention). The rope forms of both modules take `H` = 64, 96 or 128 query heads (the det module's 96 and 128 on `sm_100a` and `sm_103a` from 0.11.0 and on `sm_107a` from 0.13.0); the NoPE form takes 64.
 
 - **Rope form:** `O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent`, over the keys that each row's indices select (K = V = latent).
 - **NoPE form:** `O = softmax(softmax_scale * q . kv^T) . kv`.
@@ -1441,7 +1441,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 
 The autograd entries run the forward eagerly and the backward through autograd; the `*_train*_forward` / `*_train*_backward` step entries run them as two explicit calls without autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only. On `sm_107a` a 96- or 128-head nondet rope call runs the single-pass forward and the head-window backward (from 0.12.0; see Query heads). The det module's rope form takes 64 query heads there: a 96- or 128-head det eager, autograd or step call on CUDA tensors raises `NotImplementedError` before any kernel of the package launches, also with T = 0, and so does the det `prepare_dsa_train`. A prepared runner refuses T = 0 with `ValueError` at every head count (it needs a query row).
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` only. On `sm_107a` a 96- or 128-head rope call runs the single-pass forward and the head-window backward: the nondet module's from 0.12.0, the det module's from 0.13.0 (see Query heads). A prepared runner refuses T = 0 with `ValueError` at every head count (it needs a query row).
 
 **Inputs (rope form).**
 
@@ -1468,7 +1468,7 @@ The autograd entries run the forward eagerly and the backward through autograd; 
 - `dout` may be head-major (strides `[512, T*512, 1]`).
 - `sink`: FP32 `[64]` (one value per head), contiguous, on `q`'s device, or `None` (the default: no sink). Only the metadata is checked, so there is no device sync. `-inf` disables the sink of its head. `+inf` and NaN are not supported. Every NoPE entry of both modules takes it, flat and varlen. With a sink, `lse` includes the sink, a row with no valid slot gives `out = 0` and `lse = sink[h]`, and the backward gives `dsink = -sum_t exp(sink - lse[t]) * delta[t]` (FP32 `[64]`, summed over all rows of the call, packed rows included, in a fixed order that does not depend on the SM count): autograd returns it as the `sink` gradient, and the step backwards return it as a third value. A `-inf` head gets exactly 0.
 - `num_segments`: the packed segment count of the key row, a Python `int` >= 1 (default 1; `len(cu_seqlens_k) - 1` for the global rows of a packed batch). The flat entries and step backwards of both forms take it; the varlen entries pass it themselves. It selects the plan only.
-- A call with no query rows (T = 0) launches nothing. The forwards return empty `out` / `lse` / `o_lo` (`None` for `o_lo` with nondet `with_o_lo=False`); on `sm_107a` a det rope call over 96 or 128 heads on CUDA tensors raises `NotImplementedError` instead (see Architectures). The step backwards return an empty `dq`, a zero FP32 `dkv` (`None` with `dkv_acc`) and, with a sink, a zero `dsink`. With a sink, the call still checks the sink's metadata and device.
+- A call with no query rows (T = 0) launches nothing. The forwards return empty `out` / `lse` / `o_lo` (`None` for `o_lo` with nondet `with_o_lo=False`). The step backwards return an empty `dq`, a zero FP32 `dkv` (`None` with `dkv_acc`) and, with a sink, a zero `dsink`. With a sink, the call still checks the sink's metadata and device.
 
 **Query heads (nondet rope form).** The shipped kernels compute 64 query heads per work item, except the single-pass forward. At 64 heads a call launches what it launched in 0.6.1. At 96 and 128 heads the call runs one of these plans per phase (forward, backward); `cake_backend.head_window_plan(H, arch, ...)` names the builds a call runs:
 
@@ -1481,7 +1481,7 @@ The autograd entries run the forward eagerly and the backward through autograd; 
 - **Numerics:** every head is computed with the 64-head kernels' FP32 reductions (the single-pass forward keeps the 64-head forward's per-head numerics: FP32 sums and maxima, lazy rescale), so its accuracy class is the 64-head one. The tests judge `out`, `lse`, `o_lo`, `dq` and the key gradients at 96 and 64 heads (128 on a reduced set) against an FP64 oracle at the naive BF16 tier.
 - **Not yet:** the head-window forward on `sm_107a` (the single-pass forward runs there), and the NoPE form.
 
-**Query heads (det rope form; new in 0.11.0).** On `sm_100a` and `sm_103a` a det call over 96 or 128 heads runs the head-count builds of the registry (`cake_jit.HEAD_COUNT_STAGES`) in place of five stages; a 64-head call launches what it launched in 0.10.0. On `sm_107a` the det module refuses 96 and 128 heads (see Architectures).
+**Query heads (det rope form; new in 0.11.0, `sm_107a` new in 0.13.0).** On `sm_100a`, `sm_103a` and `sm_107a` a det call over 96 or 128 heads runs the head-count builds of the registry (`cake_jit.HEAD_COUNT_STAGES`) in place of five stages; a 64-head call launches what it launched in 0.10.0.
 
 - **Forward:** `fwd_h128`, the nondet single-pass forward (one 2-CTA cluster per token over all its heads, the persistent grid `cake_backend.single_pass_grid(T, SMs)`). It has no atomics, so `out`, `lse` and `o_lo` repeat bit for bit; they are not the 64-head forward's bits (another kernel).
 - **Backward:** `bwd_delta_heads` writes `delta [T, H]` and the bound terms over the token's `H` heads (one CTA of 16 warps per token). The main kernel's head-window builds `bwd_main_hw`, `bwd_redo_hw` and `bwd_main_pass_hw` run both 64-head windows of every token in one launch: `2 T` work items, window selector `wsel = -1`, `lse` / `delta` read at `t * H + h`, the rows past `H` loaded as zeros and never stored. The main and pass builds take one CTA per item; the redo takes `redo_launch_grid(2 T, SMs)`. The key norms, the row bound and its grid (the pack27 choice reads `T * topk`), the redo preparation, the fold and the compaction run over the `T` tokens unchanged. dK / dV are integer sums as at 64 heads, so every output repeats bit for bit for the same inputs, architecture and version; the overflow counters skip below half the 64-head threshold (a pair adds one contribution per window), which keeps the int32 range certified.
@@ -1590,8 +1590,8 @@ out.float().square().sum().backward()  # every gradient repeats bit for bit
 
 **Caveats.**
 
-- Latent dim 512 and rope dim 64 are fixed (NoPE uses 512 only). All operands are BF16. The rope forms take 64, 96 or 128 query heads (the det rope form's 96 and 128 on `sm_100a` and `sm_103a`; on `sm_107a` the nondet rope form's 96 and 128 run the single-pass forward and the head-window backward); NoPE takes 64.
-- At 96 and 128 heads the rope forms run the single-pass forward and the head-window backward (see Query heads): the nondet module on `sm_100a`, `sm_103a` and `sm_107a`, the det module on `sm_100a` and `sm_103a` (on `sm_107a` the det rope form takes 64 heads). Both compute 128 rows per token, the rows past `H` as zeros: at 96 heads the forward does the work of 128 heads, and the backward runs both 64-head windows of every token (the nondet `bwd_main_hw` skips only the dK/dV products whose 16 heads are all past `H`).
+- Latent dim 512 and rope dim 64 are fixed (NoPE uses 512 only). All operands are BF16. The rope forms of both modules take 64, 96 or 128 query heads on `sm_100a`, `sm_103a` and `sm_107a`; NoPE takes 64.
+- At 96 and 128 heads the rope forms run the single-pass forward and the head-window backward (see Query heads): both modules on `sm_100a`, `sm_103a` and `sm_107a`. Both compute 128 rows per token, the rows past `H` as zeros: at 96 heads the forward does the work of 128 heads, and the backward runs both 64-head windows of every token (the nondet `bwd_main_hw` skips only the 16-head MMA instructions whose heads are all past `H`).
 - The flat forms apply no positional mask; the index rows alone define the key set. The varlen forms mask only with `causal=True`.
 - Out-of-range `dkv_dst_map` values are caught only with `check_dst_map` or the environment variable.
 - In NoPE without `dkv_acc`, the FP32 `dkv` is cast to BF16. To keep FP32, use `dkv_acc` or `cake_backend.backward_nope`.
