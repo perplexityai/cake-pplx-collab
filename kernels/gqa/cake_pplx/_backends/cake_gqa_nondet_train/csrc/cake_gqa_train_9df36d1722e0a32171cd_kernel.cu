@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -563,7 +563,6 @@ kernel_cake_gqa_train_9df36d1722e0a32171cd(const __grid_constant__ CUtensorMap Q
                     asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"((sp_addr + (unsigned int)(prow * 128 + (wg * 4 + 1 ^ prow & 7) * 16))), "r"(p16[4]), "r"(p16[5]), "r"(p16[6]), "r"(p16[7]) : "memory");
                     asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"((sp_addr + (unsigned int)(prow * 128 + (wg * 4 + 2 ^ prow & 7) * 16))), "r"(p16[8]), "r"(p16[9]), "r"(p16[10]), "r"(p16[11]) : "memory");
                     asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"((sp_addr + (unsigned int)(prow * 128 + (wg * 4 + 3 ^ prow & 7) * 16))), "r"(p16[12]), "r"(p16[13]), "r"(p16[14]), "r"(p16[15]) : "memory");
-                    mbarrier_arrive(lse_empty_addr + (lc) * 8);
                     mbarrier_wait(dpsum_full_addr + (pc) * 8, _phase_dpsum_full);
                     mbarrier_wait(dp_full_addr + (tc) * 8, _phase_s_full);
                     asm volatile("tcgen05.fence::after_thread_sync;");
@@ -603,6 +602,7 @@ kernel_cake_gqa_train_9df36d1722e0a32171cd(const __grid_constant__ CUtensorMap Q
                     asm volatile(
                         "mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [%0];"
                         :: "r"((ds_full_addr) & 0xFEFFFFFF) : "memory");
+                    mbarrier_arrive(lse_empty_addr + (lc) * 8);
                     mbarrier_arrive(dpsum_empty_addr + (pc) * 8);
                     asm volatile("barrier.sync 1, 256;" ::: "memory");
                     if (warp == 4) {
