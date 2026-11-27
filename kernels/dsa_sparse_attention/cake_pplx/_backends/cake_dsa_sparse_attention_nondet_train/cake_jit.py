@@ -262,7 +262,8 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": True,
             },
         },
-        # The head-window builds (64 < H <= 128 query heads on sm_100a / sm_103a; see the comment above
+        # The head-window builds (64 < H <= 128 query heads: the forwards on sm_100a / sm_103a, the main backward
+        # builds on sm_100a / sm_103a / sm_107a; see the comment above
         # ``HEAD_WINDOW_STAGES``): the arguments of their 64-head stage plus ``num_heads`` and ``wsel``.
         "fwd_hw": {
             "library": "cake_dsa_h64_train_1892b0dda0d2e7a8a2f6",
@@ -279,7 +280,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_main_hw": {
             "library": "cake_dsa_h64_train_1adec2ab3f4f771062dd",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [640, 1, 1],
                 "cluster": [1, 1, 1],
@@ -291,7 +292,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_main_natural_hw": {
             "library": "cake_dsa_h64_train_1adec2ab3f4f771062dd_dkv_natural1",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [640, 1, 1],
                 "cluster": [1, 1, 1],
@@ -303,7 +304,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_main_pass_hw": {
             "library": "cake_dsa_h64_train_f915616be19e792aa7dd",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [640, 1, 1],
                 "cluster": [1, 1, 1],
@@ -315,7 +316,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_main_pass_natural_hw": {
             "library": "cake_dsa_h64_train_f915616be19e792aa7dd_dkv_natural1",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [640, 1, 1],
                 "cluster": [1, 1, 1],
@@ -339,7 +340,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "fwd_h128": {
             "library": "cake_dsa_h64_train_adfe34021dbfb2cffe71",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [512, 1, 1],
                 "cluster": [2, 1, 1],
@@ -351,7 +352,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "fwd_h128_no_olo": {
             "library": "cake_dsa_h64_train_16ec3e9236b227e0d8c9",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [512, 1, 1],
                 "cluster": [2, 1, 1],
@@ -724,8 +725,8 @@ STAGES_OF = {
     program: order + tuple(NO_OLO_STAGES[s] for s in order if s in NO_OLO_STAGES)
     for program, order in _DEFAULT_STAGES_OF.items()
 }
-# The RoPE program's head-window builds: calls over 64 < H <= 128 query heads run them on sm_100a / sm_103a in place
-# of their 64-head stage -- one launch over the 2 T (token, window) items of both 64-head windows, the arguments of the
+# The RoPE program's head-window builds: calls over 64 < H <= 128 query heads run them (the forwards on sm_100a /
+# sm_103a, the main backward builds also on sm_107a) in place of their 64-head stage -- one launch over the 2 T (token, window) items of both 64-head windows, the arguments of the
 # 64-head stage plus the head count ``num_heads`` and the window selector ``wsel`` (``cake_backend.HEAD_WINDOW_STAGES``
 # names the same pairs; the delta, compaction and cast stages serve every head count).  They close the program's
 # order, in the order of their 64-head stages.
@@ -741,7 +742,7 @@ STAGES_OF[PROGRAM] += tuple(
     HEAD_WINDOW_STAGES[s] for s in STAGES_OF[PROGRAM] if s in HEAD_WINDOW_STAGES
 )
 # The RoPE program's single-pass forward over 96 or 128 query heads: calls over 64 < H <= 128 query heads run it on
-# sm_100a / sm_103a in place of the head-window forward -- one (2, 1, 1) cluster per token, with its own kernel's
+# sm_100a / sm_103a / sm_107a in place of the head-window forward -- one (2, 1, 1) cluster per token, with its own kernel's
 # arguments (``num_heads``; ``k_rope`` a tensor map) -- and its ``with_o_lo=False`` build in place of
 # ``fwd_hw_no_olo``.  They close the program's order.
 SINGLE_PASS_STAGES = {
