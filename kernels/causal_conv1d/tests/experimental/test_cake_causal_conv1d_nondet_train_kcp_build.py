@@ -480,21 +480,23 @@ def test_overlapped_backward_records() -> None:
 def test_dyn_plan_meets_the_kernel_requirements(sms) -> None:
     """:func:`kcp_jit.dyn_plan` gives every work plan the main program's ``kernel_requires`` admit: ``L`` lanes of
     ``P`` per tile of 2048 channels, at most 256; one CTA per SM and at least one per lane; units of ``M`` tokens (a
-    multiple of 8, at least 24); ``NL`` units per lane covering the rank's tokens; the claim words' 16-bit counts."""
+    multiple of 8, at least 24); ``NL`` units per lane covering the rank's tokens; the claim words' 16-bit counts.
+    The same with each world size of the context-parallel unit table."""
 
-    for C in (8, 1024, 2048, 2056, 8192, 10240, 32768, 65536):
+    for C in (8, 512, 1024, 2048, 2056, 8192, 10240, 32768, 65536):
         n_tiles = -(-C // kcp_jit.DYN_TILE)
-        for S in (1, 7, 64, 1003, 16384, 32768, 1 << 20, 1 << 23):
-            p = kcp_jit.dyn_plan(S, C, sms)
-            label = (sms, C, S, p)
-            assert p["n_tiles"] == n_tiles and p["L"] == n_tiles * p["P"], label
-            assert 1 <= p["P"] <= 512 and p["L"] <= kcp_jit.DYN_MAX_LANES, label
-            assert p["n_ctas"] == max(p["L"], sms), label
-            assert p["M"] % 8 == 0 and p["M"] >= 24, label
-            assert 1 <= p["NL"] <= 32768 and p["P"] * p["NL"] * p["M"] >= S, label
-            assert (p["L"] + 1) * p["NL"] + p["n_ctas"] <= 65535, label
-            if sms * p["M"] <= S and n_tiles <= sms:
-                assert p["L"] >= sms - n_tiles + 1, label
+        for S in (1, 7, 64, 1003, 2048, 4096, 16384, 32768, 1 << 20, 1 << 23):
+            for ws in (None, 2, 4, 8):
+                p = kcp_jit.dyn_plan(S, C, sms, world_size=ws)
+                label = (sms, C, S, ws, p)
+                assert p["n_tiles"] == n_tiles and p["L"] == n_tiles * p["P"], label
+                assert 1 <= p["P"] <= 512 and p["L"] <= kcp_jit.DYN_MAX_LANES, label
+                assert p["n_ctas"] == max(p["L"], sms), label
+                assert p["M"] % 8 == 0 and p["M"] >= 24, label
+                assert 1 <= p["NL"] <= 32768 and p["P"] * p["NL"] * p["M"] >= S, label
+                assert (p["L"] + 1) * p["NL"] + p["n_ctas"] <= 65535, label
+                if sms * p["M"] <= S and n_tiles <= sms:
+                    assert p["L"] >= sms - n_tiles + 1, label
     for S, C in ((0, 1024), (16, 0), (16, kcp_jit.DYN_MAX_CHANNELS + 8)):
         with pytest.raises(ValueError):
             kcp_jit.dyn_plan(S, C, 148)
@@ -582,6 +584,94 @@ def test_dyn_plan_unit_size() -> None:
     assert all(n > 0 for n in branches.values()), branches
     # a rank too long for any unit up to 128 tokens: the doubling from 256 (32 tiles, 4 lanes each, 256 units)
     assert kcp_jit.dyn_plan(1 << 23, 65536, 148)["M"] == 8192
+
+
+@pytest.mark.cpu_only
+def test_dyn_plan_context_parallel_table() -> None:
+    """With ``world_size``, :func:`kcp_jit.dyn_plan` takes the unit of the context-parallel table
+    (:func:`kcp_jit.dyn_cp_unit`) for calls of at most 512 channels: 32 tokens up to 4096 tokens on the rank at world
+    sizes 2 and 4 and up to 2048 at world size 8; 56 tokens from 16384 tokens at world size 2 when its lanes' runs
+    (``NL * M``) are no longer than the 64-token plan's.  Every other call, a table unit whose plan breaks the claim
+    counts, and ``world_size=None`` get the plan without the table."""
+
+    dyn, cp_unit = kcp_jit.dyn_plan, kcp_jit.dyn_cp_unit
+
+    def plan_for(S, C, sms, M):
+        n_tiles = -(-C // kcp_jit.DYN_TILE)
+        P = max(1, min(sms // n_tiles, -(-S // M), kcp_jit.DYN_MAX_LANES // n_tiles))
+        NL = -(-(-(-S // P)) // M)
+        L = n_tiles * P
+        n_ctas = max(L, sms)
+        if (L + 1) * NL + n_ctas > 65535 or NL > 32768:
+            return None
+        return {"M": M, "NL": NL, "P": P, "L": L, "n_ctas": n_ctas, "n_tiles": n_tiles}
+
+    def run(p):
+        return p["NL"] * p["M"]
+
+    # the table's classes and edges
+    for ws, last in ((2, 4096), (4, 4096), (8, 2048)):
+        for S in (1, 7, last // 2, last):
+            assert cp_unit(ws, S, 512) == 32, (ws, S)
+            assert cp_unit(ws, S, 513) is None, (ws, S)
+        assert cp_unit(ws, last + 1, 512) is None, ws
+    for S in (16383, 16384, 32768, 1 << 20):
+        assert cp_unit(2, S, 512) == (56 if S >= 16384 else None), S
+        assert cp_unit(2, S, 513) is None, S
+        for ws in (1, 3, 4, 8, 16):
+            assert cp_unit(ws, S, 512) is None, (ws, S)
+    for ws in (1, 3, 16):
+        assert cp_unit(ws, 1, 512) is None, ws
+    # the measured rows (C 512): 148-SM B200, 152-SM GB300, 212-SM VR200
+    for sms in (148, 152, 212):
+        assert dyn(4096, 512, sms, world_size=2) == plan_for(4096, 512, sms, 32)
+        assert dyn(4096, 512, sms, world_size=4)["M"] == 32
+        assert dyn(2048, 512, sms, world_size=8)["M"] == 32
+        assert dyn(4096, 512, sms, world_size=8) == dyn(4096, 512, sms)
+        for S in (6144, 8192, 12288):
+            assert dyn(S, 512, sms, world_size=2) == dyn(S, 512, sms)
+        for S in (16384, 32768):
+            assert dyn(S, 512, sms, world_size=2) == plan_for(S, 512, sms, 56)
+        # the lane-run check holds on every measured row from 6144 tokens except 12288 tokens on 212 SMs, where
+        # 56-token units ran slower (220 units for 212 CTAs: runs of 112 tokens against 64)
+        for S in (6144, 8192, 12288, 16384, 32768):
+            longer = run(plan_for(S, 512, sms, 56)) > run(plan_for(S, 512, sms, 64))
+            assert longer == (sms == 212 and S == 12288), (sms, S)
+    # the lane-run check: 18944 tokens on 148 SMs give 56-token runs of 168 tokens against 128, so the plan without the
+    # table (64-token units, every lane busy)
+    assert run(plan_for(18944, 512, 148, 56)) == 168
+    assert run(plan_for(18944, 512, 148, 64)) == 128
+    assert dyn(18944, 512, 148, world_size=2) == dyn(18944, 512, 148)
+    assert dyn(18944, 512, 148)["M"] == 64
+    # the claim-count limit: 56-token units of 2^23 tokens on 148 SMs break it, so the plan without the table
+    assert plan_for(1 << 23, 512, 148, 56) is None
+    assert dyn(1 << 23, 512, 148, world_size=2) == dyn(1 << 23, 512, 148)
+    # every call: the table's plan where it applies (and, for 56 tokens, the lane-run check passes), else the plan
+    # without it
+    edges = (1, 7, 1003, 2048, 2049, 4096, 4097, 12288, 16383, 16384)
+    large = (18944, 24576, 32768, 100000, 1 << 20)
+    taken = {32: 0, 56: 0, "longer": 0, "other": 0}
+    for sms in (132, 148, 152, 188, 212):
+        for C in (8, 256, 512, 513, 2048, 8192):
+            for S in (*edges, *large):
+                today = dyn(S, C, sms)
+                assert dyn(S, C, sms, world_size=None) == today, (sms, C, S)
+                for ws in (1, 2, 3, 4, 8, 16):
+                    p = dyn(S, C, sms, world_size=ws)
+                    label = (sms, C, S, ws, p)
+                    unit = cp_unit(ws, S, C)
+                    want = None if unit is None else plan_for(S, C, sms, unit)
+                    ref = plan_for(S, C, sms, 64)
+                    if unit == 56 and want is not None and run(want) > run(ref):
+                        taken["longer"] += 1
+                        want = None
+                    if want is None:
+                        taken["other"] += 1
+                        assert p == today, label
+                    else:
+                        taken[unit] += 1
+                        assert p == want, label
+    assert all(n > 0 for n in taken.values()), taken
 
 
 @pytest.mark.cpu_only

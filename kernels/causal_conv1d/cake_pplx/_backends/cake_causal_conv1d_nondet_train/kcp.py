@@ -70,9 +70,9 @@ their rows in place in the received pool and run concurrently
 ``dx`` row is written by the program that writes it with one rank, so no bit
 changes.
 
-The plan of the main program is :func:`kcp_jit.dyn_plan` (units of ``M``
-tokens, ``P`` lanes per 2048-channel tile, one CTA per SM).  A call that
-reserves SMs (``bwd_reserve_sms >= 1``), has more than
+The plan of the main program is :func:`kcp_jit.dyn_plan` with the call's
+world size (units of ``M`` tokens, ``P`` lanes per 2048-channel tile, one CTA
+per SM).  A call that reserves SMs (``bwd_reserve_sms >= 1``), has more than
 :data:`kcp_jit.DYN_MAX_CHANNELS` channels or no token runs the one-program
 backward (kind ``kcp_bwd``) after the wait instead: one ordinary launch whose
 CTAs add their FP32 ``dweight`` CTA rows into the zeroed FP32 accumulators
@@ -1023,14 +1023,16 @@ def _dyn_host(
     device: torch.device,
     device_index: int,
     pair: bool = False,
+    world_size: Optional[int] = None,
 ) -> dict[str, Any]:
     """The overlapped backward's host state of a call: the main program's launch plan over :func:`dyn_plan`'s
     ``n_ctas`` CTAs, its work-plan scalars, accumulator layout and tile-word count, the all ``-1`` table it runs with as
     ``tail_row_off`` (and as ``skip_row_off`` when it writes every row), and the tail-row program's launch plan over
     :func:`head_grid` (``None`` when the rank receives no tail row: the main program then writes every row as the
-    single program does).  ``pair``: the main program is the ``kcp_bwd_dyn_pair`` route's (same plan and workspace)."""
+    single program does).  ``pair``: the main program is the ``kcp_bwd_dyn_pair`` route's (same plan and workspace).
+    ``world_size``: the call's context-parallel world size (:func:`dyn_plan`'s context-parallel unit table)."""
     (main,) = route_modules(arch, KCP_BWD_DYN_PAIR if pair else KCP_BWD_DYN)
-    p = dyn_plan(S, C, _loader.sm_count(device_index))
+    p = dyn_plan(S, C, _loader.sm_count(device_index), world_size=world_size)
     halo = None
     if tail_rows > 0:
         (halo_name,) = route_modules(arch, KCP_BWD_HALO)
@@ -2244,6 +2246,7 @@ def _kcp_backward(
             device=device,
             device_index=device_index,
             pair=pair,
+            world_size=int(ctx.world_size),
         )
         dx2 = dx_out.view(S, C)
         common = {
@@ -2429,6 +2432,7 @@ def _bwd_host(
                 device=device,
                 device_index=device_index,
                 pair=pair,
+                world_size=int(ctx.world_size),
             )
         elif S != 0:
             names = selected_modules(arch, KCP_BWD, C=C, S=S)
