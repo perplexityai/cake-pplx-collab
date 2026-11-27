@@ -216,24 +216,36 @@ layouts), ``x`` of one head broadcast over the heads beside packed ``z``,
 head-major ``x`` beside ``z`` sliced from a wider tensor, and ``x`` and ``z``
 of one padded head stride with the heads of a token adjacent.  The pipelined
 forward that warms rows by their layout now runs, in rows per SM: on SM100
-whole-token rows of one head from 600 to 1500 (0.2.18: from 701), of more
-heads from 600 to 2000 and ``x`` broadcast over the heads from 1000 to 1500;
-on SM103 a gate of more than one head sliced from a projection from 620
-(0.2.18: from 630), whole-token rows of one head from 600 to 1500, of more
-heads from 650 to 1750, and the other four layouts from 701 to 1500; on
-SM107 whole-token rows of more than one head and head-major ``x`` beside a
-sliced ``z`` from 650 to 1000 and ``x`` broadcast over the heads from 650 to
-1500.  Every other call runs the program of 0.2.18.  Measured against 0.2.18
-on the same GPU (B200, GB300, and VR200 on two nodes with drivers 620.70.06
-and 620.43; CUDA Graph replays, CUPTI, cold L2, two runs), a band moved only
-where at every measured point the forward was faster than 0.2.18's, no op
-was slower beyond noise and the forward was no slower than the
-deterministic package's.  Where the pipelined forward runs in the place of
-the 8-thread forward on SM100 and SM103, ``y`` was the same bits where
-compared; in the place of the extra-long forward ``y`` can differ in the
-last bits of a few elements; on SM107 ``y`` against the 8-thread forward's
-is not yet compared [PLACEHOLDER-SM107A-Y-BITS].  ``dx``, ``dz`` and the
-weight gradient do not change.
+whole-token rows of more than one head from 601 to 2000 and ``x`` broadcast
+over the heads from 1250 to 1500; on SM103 a gate of more than one head
+sliced from a projection from 620 (0.2.18: from 630), whole-token rows of
+more than one head from 650 to 1750, ``x`` and ``z`` both sliced of 2 or 3
+heads, ``x`` broadcast over the heads and padded heads from 701 to 1500, and
+head-major ``x`` beside a sliced ``z`` from 701 to 1250; on SM107
+whole-token rows of more than one head from 650 to 1000 and ``x`` broadcast
+over the heads from 650 to 1500.  Every other call runs the program of
+0.2.18, whole-token rows of one head among them.  A first measurement
+against 0.2.18 on the same GPU (B200, GB300, and VR200 on two nodes with
+drivers 620.70.06 and 620.43; CUDA Graph replays, CUPTI, cold L2, two runs)
+moved a band only where at every measured point the forward was faster than
+0.2.18's, no op was slower beyond noise and the forward was no slower than
+the deterministic package's.  The release measurement against 0.2.18 on the
+same GPUs (more forms and head counts; four processes) then found an op
+slower beyond noise at some of those points, and 0.2.19 runs 0.2.18's
+programs there: whole-token rows of one head with ``z`` and ``dy`` sliced
+from a tensor four times the row width and packed ``x`` at 599.01, 600, 650
+and 700 rows per SM on B200 and GB300, padded rows of 4 heads at 599.03 on
+B200, ``x`` broadcast over 16 heads at 999.03 and 1000 on B200, and
+head-major ``x`` beside a sliced ``z`` of 2 heads at 1500 on GB300 and at
+649.01, 650 and 1000 on the VR200 node with driver 620.70.06.  Where the
+pipelined forward runs in the place of the 8-thread forward on SM100 and
+SM103, ``y`` was the same bits where compared; in the place of the
+extra-long forward ``y`` can differ in the last bits of a few elements; on
+SM107, where the pipelined forward runs in the place of the 8-thread
+forward, ``y`` differed from that forward's bits in every compared case, its
+accuracy against a float64 reference passed, and ``dx``, ``dz`` and the
+weight gradient were the same bits.  ``dx``, ``dz`` and the weight gradient
+do not change.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -264,17 +276,17 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   head; SM100, SM103) and of more heads (``x`` sliced beside packed ``z``,
   and from 4 heads ``x`` and ``z`` both sliced or padded rows), ``x`` and
   ``z`` both sliced of 2 or 3 heads (SM103), ``x`` of one head broadcast
-  over the heads, head-major ``x`` beside a sliced ``z`` (SM103, SM107) and
-  a padded head stride (SM103) have bands of their own, which run pipelined
+  over the heads, head-major ``x`` beside a sliced ``z`` (SM103) and a
+  padded head stride (SM103) have bands of their own, which run pipelined
   forwards that warm rows of any layout in L2 by their layout (the
   projection's past 599 rows per SM on SM100 and 619 on SM103 and past 59 on
   SM107 but from 301 to 442; the head-major one from 60 to 100 rows per SM;
-  the whole-token one of one head from 600 to 1500; that of more heads from
-  600 to 2000 on SM100, from 650 to 1750 on SM103 and from 650 to 1000 on
-  SM107; the broadcast one from 1000 to 1500 on SM100, from 701 to 1500 on
-  SM103 and from 650 to 1500 on SM107; the mixed one from 701 to 1500 on
-  SM103 and from 650 to 1000 on SM107; those of 2 or 3 sliced heads and of
-  padded heads from 701 to 1500) and otherwise the bands of other layouts
+  the whole-token one of one head from 701 to 1500; that of more heads from
+  601 to 2000 on SM100, from 650 to 1750 on SM103 and from 650 to 1000 on
+  SM107; the broadcast one from 1250 to 1500 on SM100, from 701 to 1500 on
+  SM103 and from 650 to 1500 on SM107; the mixed one from 701 to 1250; those
+  of 2 or 3 sliced heads and of padded heads from 701 to 1500) and otherwise
+  the bands of other layouts
   (the 8-thread forward past their pipelined bands, and on SM107 from 481
   rows per SM up to them); past 100 rows per SM head-major rows run the
   bands of other layouts.  An ``x`` or ``z``
@@ -602,7 +614,7 @@ def cake_rmsnorm_silu_gate_nondet_train_forward(
     tensors (``x`` sliced beside packed ``z``, a gate of one head, and from 4
     heads ``x`` and ``z`` both sliced or padded rows), ``x`` and ``z`` both
     sliced of 2 or 3 heads (SM103), ``x`` of one head broadcast over the
-    heads, head-major ``x`` beside a sliced ``z`` (SM103 / SM107) and a padded
+    heads, head-major ``x`` beside a sliced ``z`` (SM103) and a padded
     head stride (SM103) take bands of their own where the architecture has
     them, with pipelined forwards that warm rows of any layout in L2; the
     programs

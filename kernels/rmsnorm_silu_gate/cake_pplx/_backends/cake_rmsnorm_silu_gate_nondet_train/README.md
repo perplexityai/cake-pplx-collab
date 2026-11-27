@@ -224,7 +224,8 @@ rows).  `dx`, `dz` and `dw` do not change.  The measurement behind the new
 bands is under "Programs and routes".
 Version 0.2.19 changes no program, only forward tables and the classes of
 rows that are not packed (the bands of packed rows, of head-major rows, of
-`cake_jit.STRIDED_FORWARD_BANDS` and the backward's are those of 0.2.18).
+whole-token rows of one head, of `cake_jit.STRIDED_FORWARD_BANDS` and the
+backward's are those of 0.2.18).
 `cake_jit.forward_layout` gives whole-token rows of more than one head a class
 of their own (`cake_jit.SLICED_HEADS_LAYOUT`; `cake_jit.SLICED_LAYOUT` keeps
 the rows of one head) and four layouts of no class in 0.2.18 classes of their
@@ -241,30 +242,39 @@ call runs the program of 0.2.18):
 
 | architecture | class | 0.2.18 | 0.2.19 |
 | --- | --- | --- | --- |
-| `sm_100a` | whole-token rows of one head (`SLICED_LAYOUT`) | `xlong` up to 700, `layout_pipe` 701-1500 | `xlong` up to 599, `layout_pipe` 600-1500 |
-| `sm_100a` | whole-token rows of more heads (`SLICED_HEADS_LAYOUT`) | `xlong` up to 700, `layout_pipe` 701-1500, `fwd` past it | `xlong` up to 599, `layout_pipe` 600-2000, `fwd` past it |
-| `sm_100a` | `x` broadcast over the heads (`BCASTH_LAYOUT`) | `fwd` past 700 | `fwd` 701-999, `layout_pipe` 1000-1500, `fwd` past it |
+| `sm_100a` | whole-token rows of more heads (`SLICED_HEADS_LAYOUT`) | `xlong` up to 700, `layout_pipe` 701-1500, `fwd` past it | `xlong` up to 600, `layout_pipe` 601-2000, `fwd` past it |
+| `sm_100a` | `x` broadcast over the heads (`BCASTH_LAYOUT`) | `fwd` past 700 | `fwd` 701-1249, `layout_pipe` 1250-1500, `fwd` past it |
 | `sm_103a` | gate of more than one head sliced from a projection (`PROJECTION_LAYOUT`) | `xlong` up to 629, `layout_pipe` 630-2000 | `xlong` up to 619, `layout_pipe` 620-2000 |
-| `sm_103a` | whole-token rows of one head | `xlong` up to 700, `layout_pipe` 701-1500 | `xlong` up to 599, `layout_pipe` 600-1500 |
 | `sm_103a` | whole-token rows of more heads | `xlong` up to 700, `layout_pipe` 701-1500, `fwd` past it | `xlong` up to 649, `layout_pipe` 650-1750, `fwd` past it |
-| `sm_103a` | `x` and `z` both sliced, 2 or 3 heads (`SLICED_FEW_LAYOUT`); `x` broadcast over the heads; head-major `x` beside a sliced `z` (`MIXED_LAYOUT`); padded heads (`PADH_LAYOUT`) | `fwd` past 700 | `layout_pipe` 701-1500, `fwd` past it |
-| `sm_107a` | whole-token rows of more heads; head-major `x` beside a sliced `z` | `fwd` past 480 | `fwd` 481-649, `layout_pipe` 650-1000, `fwd` past it |
+| `sm_103a` | `x` and `z` both sliced, 2 or 3 heads (`SLICED_FEW_LAYOUT`); `x` broadcast over the heads; padded heads (`PADH_LAYOUT`) | `fwd` past 700 | `layout_pipe` 701-1500, `fwd` past it |
+| `sm_103a` | head-major `x` beside a sliced `z` (`MIXED_LAYOUT`) | `fwd` past 700 | `layout_pipe` 701-1250, `fwd` past it |
+| `sm_107a` | whole-token rows of more heads | `fwd` past 480 | `fwd` 481-649, `layout_pipe` 650-1000, `fwd` past it |
 | `sm_107a` | `x` broadcast over the heads | `fwd` past 480 | `fwd` 481-649, `layout_pipe` 650-1500, `fwd` past it |
 
-Why: measured against 0.2.18 on the same GPU (B200, GB300, and VR200 on two
-nodes with drivers 620.70.06 and 620.43; CUDA Graph replays, CUPTI, cold L2,
-two runs), a band moved only where at every measured point, in both runs, the
-forward was faster than 0.2.18's, no op (the forward, the backward and the
-checkpointed step of either weight gradient) was slower beyond noise and the
-forward was no slower than the deterministic package's.  The points, forms and
-first failing points are under "Programs and routes".  `y` bits: where
+Why: a first measurement against 0.2.18 on the same GPU (B200, GB300, and
+VR200 on two nodes with drivers 620.70.06 and 620.43; CUDA Graph replays,
+CUPTI, cold L2, two runs) moved a band only where at every measured point, in
+both runs, the forward was faster than 0.2.18's, no op (the forward, the
+backward and the checkpointed step of either weight gradient) was slower
+beyond noise and the forward was no slower than the deterministic package's.
+The release measurement against 0.2.18 on the same GPUs (more forms and head
+counts; CUDA Graph replays, CUPTI, cold L2, four processes) then found an op
+slower than 0.2.18's beyond noise at some of those points, and 0.2.19 runs
+0.2.18's programs there for every form of the class: whole-token rows of one
+head with `z` and `dy` sliced from a tensor four times the row width and
+packed `x` at 599.01, 600, 650 and 700 rows per SM on B200 and GB300, padded
+rows of 4 heads at 599.03 on B200, `x` broadcast over 16 heads at 999.03 and
+1000 on B200, and head-major `x` beside a sliced `z` of 2 heads at 1500 on
+GB300 and at 649.01, 650 and 1000 on the VR200 node with driver 620.70.06.
+The points, forms and times are under "Programs and routes".  `y` bits: where
 `fwd_layout_pipe` runs in the place of the plain forward on `sm_100a` and
 `sm_103a`, `y` was the same bits where compared; in the place of the
 extra-long forward `y` can differ in the last bits of a few elements (the
-programs associate a row's sum of squares differently); on `sm_107a`, `y` of
-`fwd_layout_pipe` against the plain forward's is not yet compared
-[PLACEHOLDER-SM107A-Y-BITS].  `dx`, `dz` and `dw` do not change (no backward
-changes).
+programs associate a row's sum of squares differently); on `sm_107a`, where
+`fwd_layout_pipe` runs in the place of the plain forward, `y` differed from
+the plain forward's bits in every compared case, its accuracy against a
+float64 reference passed, and `dx`, `dz` and `dw` were the same bits.  `dx`,
+`dz` and `dw` do not change (no backward changes).
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -586,7 +596,7 @@ from tensors at least twice the row wide (both token strides at least
 broadcast over more heads (head stride 0, token stride 128) beside packed `z`
 on every architecture; `MIXED_FORWARD_BANDS` where head-major `x` (token
 stride 128, head stride `T * 128`) lies beside `z` of head stride 128 and a
-token stride past `H * 128` on `sm_103a` and `sm_107a`; `PADH_FORWARD_BANDS`
+token stride past `H * 128` on `sm_103a`; `PADH_FORWARD_BANDS`
 where `x` and `z` of more than one head have one head stride past 128 and token
 strides `H` times it (padded heads) on `sm_103a`; and `STRIDED_FORWARD_BANDS`
 for every other layout (a broadcast over tokens beside rows that are not
@@ -594,7 +604,7 @@ packed, another head stride, padded head-major planes, both token strides past
 the row of one head or of padded rows of 2 or 3 heads) and for a class on an
 architecture its table has no entry for (head-major rows on `sm_100a` and
 `sm_103a`, whole-token rows of one head on `sm_107a`, `SLICED_FEW_LAYOUT` on
-`sm_100a` and `sm_107a`, `MIXED_LAYOUT` on `sm_100a`, `PADH_LAYOUT` on
+`sm_100a` and `sm_107a`, `MIXED_LAYOUT` and `PADH_LAYOUT` on
 `sm_100a` and `sm_107a`) and for packed rows from
 `PACKED_ROWS` on.  An `x` or `z` broadcast over more than one token (token
 stride 0) counts as packed rows, but where its band of packed rows runs a
@@ -651,56 +661,94 @@ step of other rows of `STRIDED_FORWARD_BANDS` was slower with
 `z` sliced from a projection, padded head-major planes; on B200: `x`
 broadcast over heads, head stride 144, `x` head-major beside `z` sliced from a
 projection), so 0.2.18 kept the plain forward for them.
-Version 0.2.19 moves the bands of these rows by a measurement against 0.2.18
-on the same GPU (CUDA Graph replays, CUPTI, cold L2, two runs; B200, GB300,
-and VR200 on two nodes with drivers 620.70.06 and 620.43).  A point passes
-where, in both runs, `fwd_layout_pipe` made the forward faster than 0.2.18's,
-no op (the forward, the backward and the checkpointed step of either weight
-gradient) slower than 0.2.18's beyond noise, and the forward no slower than
-the deterministic package's; a band moves only over points that all pass.
+Version 0.2.19 moves the bands of these rows by two measurements against
+0.2.18 on the same GPU (B200, GB300, and VR200 on two nodes with drivers
+620.70.06 and 620.43).  In the first (CUDA Graph replays, CUPTI, cold L2, two
+runs) a point passes where, in both runs, `fwd_layout_pipe` made the forward
+faster than 0.2.18's, no op (the forward, the backward and the checkpointed
+step of either weight gradient) slower than 0.2.18's beyond noise, and the
+forward no slower than the deterministic package's.  The release measurement
+(CUDA Graph replays, CUPTI, cold L2, four processes; more forms and head
+counts) then checked the moved bands: a point passes where no op is slower
+than 0.2.18's beyond noise.  A band moves only over points that pass both.
 
-* Whole-token rows of one head (`SLICED_FORWARD_BANDS`: a gate of one head
-  sliced from a projection, `x` of one head sliced beside packed `z`) passed
-  at 600, 650 and 700 rows per SM on B200 and GB300 (600 the lowest point
-  measured), so `fwd_layout_pipe` runs from 600 (0.2.18: 701) on `sm_100a`
-  and `sm_103a`.
-* Whole-token rows of more heads (`SLICED_HEADS_FORWARD_BANDS`: `x` and `z`
-  both sliced of 16 and 48 heads, padded rows of 16 heads and `x` sliced
-  beside packed `z` of 16 heads, and past 700 rows per SM and on `sm_107a`
-  also 4 heads of the first two forms and 2 heads of the last): on B200 every
-  form passed at 600, 650, 700, 1600, 1750 and 2000 rows per SM, so
-  `fwd_layout_pipe` runs from 600 to 2000 (0.2.18's measurement found the
-  step of `x` and `z` both sliced slower at 2500); on GB300 every form passed
-  at 650, 700, 1600 and 1750, and padded rows of 16 heads failed at 600 in
-  both runs, so it runs from 650 to 1750 (0.2.18's measurement found the step
-  slower at 2000); on VR200 every form passed at 650 and 1000 on both nodes,
-  and at 1500 `x` and `z` both sliced of 4 heads, padded rows of 4 heads and
-  `x` sliced of 2 heads failed on at least one node, so it runs from 650 to
-  1000.
-* `x` and `z` both sliced from projections `2 * H * 128 + 16` elements wide,
-  2 and 3 heads (`SLICED_FEW_FORWARD_BANDS`): both passed at 701, 1000 and
-  1500 rows per SM on GB300, so `sm_103a` runs `fwd_layout_pipe` from 701 to
-  1500; on B200 2 heads failed at 1000 and 1500, so `sm_100a` keeps 0.2.18's
-  programs; VR200 was not measured.
-* `x` of one head broadcast over 16 heads beside packed `z`
-  (`BCASTH_FORWARD_BANDS`): on B200 it passed at 1000, 1250 and 1500 rows per
-  SM, and at 850, 900 and 950 the checkpointed step of either weight gradient
-  was slower than 0.2.18's in both runs, so `fwd_layout_pipe` runs from 1000
-  to 1500; on GB300 it passed at 701, 850, 1000, 1250 and 1500, so it runs
-  from 701 to 1500; on VR200 it passed at 650, 1000 and 1500 on both nodes,
-  so it runs from 650 to 1500.
-* Head-major `x` beside `z` sliced from a wider projection, 16 heads
-  (`MIXED_FORWARD_BANDS`): on GB300 it passed at 701, 850, 1000, 1250 and
-  1500 rows per SM, so `fwd_layout_pipe` runs from 701 to 1500; on VR200 it
-  passed at 650 and 1000 on both nodes, and at 1500 an op was slower than
-  0.2.18's on the 620.70.06 node, so it runs from 650 to 1000; `sm_100a`
-  keeps 0.2.18's programs (0.2.18's measurement found it slower there).
-* 16 heads of head stride 144 (`PADH_FORWARD_BANDS`): on GB300 it passed at
-  701, 850, 1000, 1250 and 1500 rows per SM, so `fwd_layout_pipe` runs from
-  701 to 1500; `sm_100a` keeps 0.2.18's programs (0.2.18's measurement found it
+* Whole-token rows of one head (`SLICED_FORWARD_BANDS`): a gate of one head
+  sliced from a projection and `x` of one head sliced beside packed `z` passed
+  in the first measurement at 600, 650 and 700 rows per SM on B200 and GB300,
+  and in the release measurement at 599.01, 600, 650 and 700 (also a
+  head-major `x` of one head beside such a gate), but there the checkpointed
+  step of `z` and `dy` sliced from a tensor four times the row width, packed
+  `x`, was slower at every point: on B200 1.0065 to 1.0335 of 0.2.18's time
+  with a BF16 `dw` and 1.0057 to 1.0263 with an FP32 one, on GB300 1.0057 to
+  1.0375 with a BF16 `dw` and 1.0174 to 1.0244 with an FP32 one (at 599.01,
+  600 and 650).  So `sm_100a` and `sm_103a` keep 0.2.18's bands
+  (`fwd_layout_pipe` from 701 to 1500).
+* Whole-token rows of more heads (`SLICED_HEADS_FORWARD_BANDS`; in the first
+  measurement `x` and `z` both sliced of 16 and 48 heads, padded rows of 16
+  heads and `x` sliced beside packed `z` of 16 heads, and past 700 rows per SM
+  and on `sm_107a` also 4 heads of the first two forms and 2 heads of the
+  last; in the release measurement `x` and `z` both sliced and padded rows of
+  4, 16 and 48 heads and `x` sliced beside packed `z` of 2, 4, 16 and 48
+  heads): on B200 every form passed in the first at 600, 650, 700, 1600, 1750
+  and 2000 rows per SM, and the release measurement found the checkpointed
+  step of padded rows of 4 heads at 599.03 rows per SM 1.0067 of 0.2.18's time
+  with a BF16 `dw` and every form passing at 600 and from 649.95 to 2000, so
+  the extra-long forward runs up to 600 (no whole number of rows per SM lies
+  between 599.03 and 600) and `fwd_layout_pipe` from 601 to 2000 (0.2.18's
+  measurement found the step of `x` and `z` both sliced slower at 2500); on
+  GB300 every form passed in the first at 650, 700, 1600 and 1750, and padded
+  rows of 16 heads failed at 600 in both runs, so it runs from 650 to 1750
+  (0.2.18's measurement found the step slower at 2000), and the release
+  measurement found every form passing from 649.01 to 1750; on VR200 every
+  form passed in the first at 650 and 1000 on both nodes, and at 1500 `x` and
+  `z` both sliced of 4 heads, padded rows of 4 heads and `x` sliced of 2 heads
+  failed on at least one node, so it runs from 650 to 1000, and the release
+  measurement found every form passing from 649.01 to 1000 on both nodes.
+* `x` and `z` both sliced from projections `2 * H * 128 + 16` elements wide, 2
+  and 3 heads (`SLICED_FEW_FORWARD_BANDS`): both passed on GB300 in the first
+  measurement at 701, 1000 and 1500 rows per SM and in the release measurement
+  from 700.01 to 1500, so `sm_103a` runs `fwd_layout_pipe` from 701 to 1500;
+  on B200 2 heads failed at 1000 and 1500 in the first, so `sm_100a` keeps
+  0.2.18's programs; VR200 was not measured.
+* `x` of one head broadcast over the heads beside packed `z`
+  (`BCASTH_FORWARD_BANDS`; 16 heads in the first measurement, 2, 16 and 48
+  heads in the release measurement): on B200 it passed in the first at 1000,
+  1250 and 1500 rows per SM, and at 850, 900 and 950 the checkpointed step of
+  either weight gradient was slower than 0.2.18's in both runs; the release
+  measurement found the checkpointed step of 16 heads at 999.03 and 1000 rows
+  per SM 1.0083 and 1.0048 of 0.2.18's time with a BF16 `dw` and 1.0058 and
+  1.0036 with an FP32 one, and every form passing at each point from 1249.95
+  (16 and 48 heads) or 1250 (2 heads) up to 1500, so `fwd_layout_pipe` runs
+  from 1250 to 1500; on GB300 it passed in the first at 701, 850, 1000, 1250
+  and 1500 and in the release measurement from 700.01 to 1500, so it runs from
+  701 to 1500; on VR200 it passed in the first at 650, 1000 and 1500 on both
+  nodes and in the release measurement from 649.01 to 1500 on both, so it runs
+  from 650 to 1500.
+* Head-major `x` beside `z` sliced from a wider projection
+  (`MIXED_FORWARD_BANDS`; 16 heads in the first measurement, 2, 16 and 48
+  heads in the release measurement): on GB300 it passed in the first at 701,
+  850, 1000, 1250 and 1500 rows per SM, and the release measurement found the
+  checkpointed step of 2 heads at 1500 rows per SM 1.0038 of 0.2.18's time
+  with a BF16 `dw` and 1.0038 with an FP32 one, and every form passing at each
+  point from 700.01 up to 1249.89 (48 heads) or 1250 (2 and 16 heads), so
+  `fwd_layout_pipe` runs from 701 to 1250; on VR200 it passed in the first at
+  650 and 1000 on both nodes, and at 1500 an op was slower than 0.2.18's on
+  the 620.70.06 node, but the release measurement on that node found 2 heads
+  slower than 0.2.18 at every point it measured (649.01, 650 and 1000 rows per
+  SM: the forward 1.0145 to 1.0317 of 0.2.18's time, the checkpointed step
+  1.0077 to 1.0238 with a BF16 `dw` and 1.0062 to 1.0233 with an FP32 one),
+  where 16 and 48 heads passed (on the 620.43 node every point passed), so
+  `sm_107a` runs `STRIDED_FORWARD_BANDS` for these rows, as in 0.2.18;
+  `sm_100a` keeps 0.2.18's programs (0.2.18's measurement found it slower
+  there).
+* Padded heads, head stride 144 (`PADH_FORWARD_BANDS`; 16 heads in the first
+  measurement, 2, 16 and 48 heads in the release measurement): on GB300 it
+  passed in the first at 701, 850, 1000, 1250 and 1500 rows per SM and in the
+  release measurement from 700.01 to 1500, so `fwd_layout_pipe` runs from 701
+  to 1500; `sm_100a` keeps 0.2.18's programs (0.2.18's measurement found it
   slower there) and `sm_107a` was not measured.
-* On `sm_107a` rows per SM from 481 to 649 were not measured: the classes
-  that run `fwd_layout_pipe` there keep 0.2.18's plain forward below 650.
+* On `sm_107a` rows per SM from 481 to 649 were not measured: the classes that
+  run `fwd_layout_pipe` there keep 0.2.18's plain forward below 650.
 
 Version 0.2.17's pipelined
 forwards with `x` and `z` loaded with the L2's default policy
@@ -751,7 +799,8 @@ run `fwd_layout_pipe`).  Version 0.2.19 ends that band at 619 rows per SM on
 `sm_103a` (629 in 0.2.18): measured against 0.2.18 on GB300 as above (the same
 forms), every form passed from 619.79 to 628.95 rows per SM, while 64 heads
 failed at 609.68 and 16 and 48 heads at 600, so the cut lies just below the
-first point where every form passed.
+first point where every form passed; the release measurement against 0.2.18
+(the same forms) found every form passing from 619.05 to 628.95 rows per SM.
 On `sm_107a` head-major rows ran `fwd_layout_keep_pipe` at 100 rows per SM
 9 % .. 10 % faster alone than the mid forward and made the step 3 % .. 4 %
 faster; the release measurement of 0.2.17 against 0.2.16 (driver 620.70)
@@ -774,11 +823,11 @@ slower.  The bands:
 | packed rows (`FORWARD_BANDS`) | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `keep_pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-65 `tiny` (but 17-32 rows `short`), 66-175 `mid`, 176-280 `xlong`, 281-8192 `pipe_packed`, past 8192 `keep_pipe_packed` |
 | gate of more than one head sliced from a projection (`PROJECTION_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, 2001-3000 `layout_keep_pipe`, past 3000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-619 `xlong`, 620-2000 `layout_pipe`, past 2000 `fwd` | 1-59 `short`, 60-300 `layout_keep_pipe`, 301-442 `mid`, 443-2999 `layout_pipe`, past 2999 `layout_keep_pipe` |
 | head-major rows (`HEAD_MAJOR_FORWARD_BANDS`) | as other layouts | as other layouts | 1-59 `short`, 60-100 `layout_keep_pipe`, 101-480 `mid`, past 480 `fwd` |
-| whole-token rows of one head (`SLICED_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-599 `xlong`, 600-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
-| whole-token rows of more heads (`SLICED_HEADS_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-599 `xlong`, 600-2000 `layout_pipe`, past 2000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-649 `xlong`, 650-1750 `layout_pipe`, past 1750 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1000 `layout_pipe`, past 1000 `fwd` |
+| whole-token rows of one head (`SLICED_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
+| whole-token rows of more heads (`SLICED_HEADS_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-600 `xlong`, 601-2000 `layout_pipe`, past 2000 `fwd` | 1-12 `short`, 13-250 `mid`, 251-649 `xlong`, 650-1750 `layout_pipe`, past 1750 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1000 `layout_pipe`, past 1000 `fwd` |
 | `x` and `z` both sliced, 2 or 3 heads (`SLICED_FEW_FORWARD_BANDS`) | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
-| `x` broadcast over the heads (`BCASTH_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-999 `fwd`, 1000-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1500 `layout_pipe`, past 1500 `fwd` |
-| head-major `x` beside a sliced `z` (`MIXED_FORWARD_BANDS`) | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1000 `layout_pipe`, past 1000 `fwd` |
+| `x` broadcast over the heads (`BCASTH_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, 701-1249 `fwd`, 1250-1500 `layout_pipe`, past 1500 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | 1-59 `short`, 60-480 `mid`, 481-649 `fwd`, 650-1500 `layout_pipe`, past 1500 `fwd` |
+| head-major `x` beside a sliced `z` (`MIXED_FORWARD_BANDS`) | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1250 `layout_pipe`, past 1250 `fwd` | as other layouts |
 | padded heads (`PADH_FORWARD_BANDS`) | as other layouts | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, 701-1500 `layout_pipe`, past 1500 `fwd` | as other layouts |
 | other layouts (`STRIDED_FORWARD_BANDS`) | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
 
