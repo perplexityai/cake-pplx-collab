@@ -284,7 +284,7 @@ protocol, with every band as now but ``fwd_layout_pipe`` from 620 rows per
 SM for a gate of more than one head sliced from a projection on sm_103a)
 found the checkpointed step of such a gate of 64 heads at 619.79 rows per SM
 on GB300 1.0049 of 0.2.18's time with a BF16 weight gradient, so that gate
-runs ``fwd_layout_pipe`` from 625 rows per SM; every form passed from 624.84
+runs ``fwd_layout_pipe`` above 624 rows per SM; every form passed from 624.84
 (64 heads) and 624.95 (16 and 48 heads) to 628.95 in both release
 measurements.  Where ``fwd_layout_pipe`` runs in the
 place of the plain forward on sm_100a and sm_103a, ``y`` was the same bits

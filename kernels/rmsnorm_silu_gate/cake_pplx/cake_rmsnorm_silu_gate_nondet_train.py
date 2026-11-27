@@ -243,7 +243,7 @@ with every band as now but the pipelined forward from 620 rows per SM for a
 gate of more than one head sliced from a projection on SM103) found the
 checkpointed step of such a gate of 64 heads at 619.79 rows per SM on GB300
 1.0049 of 0.2.18's time with a BF16 weight gradient, so that gate runs the
-pipelined forward from 625 rows per SM; every form passed from 624.84 (64
+pipelined forward above 624 rows per SM; every form passed from 624.84 (64
 heads) and 624.95 (16 and 48 heads) to 628.95 in both release measurements.
 Where the pipelined forward runs in the place of the
 8-thread forward on SM100 and SM103, ``y`` was the same bits where compared;
