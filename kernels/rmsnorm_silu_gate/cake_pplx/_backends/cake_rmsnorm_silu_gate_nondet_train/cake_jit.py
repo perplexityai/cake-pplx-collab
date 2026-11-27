@@ -3639,9 +3639,10 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # here and every other table as it is now) found the checkpointed step of 64
 # heads at 619.79 rows per SM 1.0049 of 0.2.18's time with a BF16 weight
 # gradient; both found every form passing from 624.84 (64 heads) and 624.95 (16
-# and 48 heads) to 628.95 rows per SM, so the cut lies just below the first
-# point where every form passed in both.  Past the last pipelined band the
-# plain forward runs.  Host plan only, as the other tables.
+# and 48 heads) to 628.95 rows per SM, so the cut lies just below 624.84, the
+# first point of 64 heads past 619.79 (all other points from 619.05 passed in
+# both).  Past the last pipelined band the plain forward runs.  Host plan only,
+# as the other tables.
 PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),

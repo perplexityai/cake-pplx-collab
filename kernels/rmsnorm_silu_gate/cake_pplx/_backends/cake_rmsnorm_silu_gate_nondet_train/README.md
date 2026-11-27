@@ -814,7 +814,8 @@ per SM, and a second release measurement (the same protocol, with
 now) found the checkpointed step of 64 heads at 619.79 rows per SM 1.0049 of
 0.2.18's time with a BF16 `dw`; both found every form passing from 624.84 (64
 heads) and 624.95 (16 and 48 heads) to 628.95 rows per SM, so the cut lies
-just below the first point where every form passed in both.
+just below 624.84, the first point of 64 heads past 619.79 (all other points
+from 619.05 passed in both).
 On `sm_107a` head-major rows ran `fwd_layout_keep_pipe` at 100 rows per SM
 9 % .. 10 % faster alone than the mid forward and made the step 3 % .. 4 %
 faster; the release measurement of 0.2.17 against 0.2.16 (driver 620.70)
