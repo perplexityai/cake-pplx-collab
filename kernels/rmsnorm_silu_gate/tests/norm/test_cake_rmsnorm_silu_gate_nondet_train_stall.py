@@ -72,7 +72,7 @@ packed rows at their linear offsets (a tiny forward, ``fwd_pipe_packed`` or
 run the mid forward up to 140 rows per SM, the long forward up to 400, the
 extra-long forward up to 599, ``fwd_layout_pipe`` up to 2000,
 ``fwd_layout_keep_pipe`` up to 3000 and the plain forward past it; on SM103
-the mid forward up to 250, the extra-long forward up to 619,
+the mid forward up to 250, the extra-long forward up to 624,
 ``fwd_layout_pipe`` up to 2000 and the plain forward past it; on SM107
 ``fwd_layout_keep_pipe`` up to 300, the mid forward up to 442,
 ``fwd_layout_pipe`` up to 2999 and ``fwd_layout_keep_pipe`` past it.
@@ -1836,7 +1836,7 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # sm_103a "last" runs in its first band (601 to 6000), whose rows are all
 # whole waves.  On projection rows "last" runs in the band of
 # ``fwd_layout_keep_pipe`` on sm_100a (2001 to 3000); the bands of
-# ``fwd_layout_pipe`` (sm_100a 600 to 2000, sm_103a 620 to 2000) lie past the
+# ``fwd_layout_pipe`` (sm_100a 600 to 2000, sm_103a 625 to 2000) lie past the
 # cut and hold their first and last rows only, and so does its band of
 # ``both_sliced`` rows (sm_100a 601 to 2000, sm_103a 650 to 1750, sm_107a 650
 # to 1000: past "first", 576 rows per SM, and below "last", 2304); on sm_107a

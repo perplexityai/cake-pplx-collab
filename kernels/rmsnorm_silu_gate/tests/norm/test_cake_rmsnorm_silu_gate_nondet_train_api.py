@@ -1723,7 +1723,7 @@ def test_forward_plan_differs_from_0_2_18_only_in_the_moved_bands(
     over heads on sm_100a past 1249 up to 1500 and on sm_107a past 649 up to
     1500, head-major ``x`` beside a sliced ``z`` on sm_103a past 700 up to 1250,
     and a gate of more than one head sliced from a projection on sm_103a past
-    619 up to 629.  Every moved band holds rows of the comparison; packed rows,
+    624 up to 629.  Every moved band holds rows of the comparison; packed rows,
     rows of no class, head-major rows, whole-token rows of one head, head-major
     ``x`` beside a sliced ``z`` on sm_100a and sm_107a and every other band run
     what 0.2.18 ran: rows of no class in each moved band the module the moved

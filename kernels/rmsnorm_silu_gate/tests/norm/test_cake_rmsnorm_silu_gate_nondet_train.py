@@ -3384,7 +3384,7 @@ STRIDED_FORWARD_BANDS = {
 # policy; on sm_100a and sm_107a), in the place of parts of the extra-long
 # and the plain forward of STRIDED_FORWARD_BANDS on sm_100a and sm_103a, and
 # of parts of its mid forward and all of its plain forward on sm_107a.
-# The extra-long forward ends at 599 rows per SM on sm_100a and 619 on sm_103a
+# The extra-long forward ends at 599 rows per SM on sm_100a and 624 on sm_103a
 # (version 0.2.19; 0.2.18: 599 and 629; 0.2.17: 650 and 699).
 PROJECTION_FORWARD_BANDS = {
     "sm_100a": (
@@ -3399,7 +3399,7 @@ PROJECTION_FORWARD_BANDS = {
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
-        (619, "fwd_xlong"),
+        (624, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3657,7 +3657,7 @@ V0219_MOVED_BANDS = {
     ("sm_107a", BCASTH_LAYOUT): ((649, 1500, "fwd", "fwd_layout_pipe"),),
     ("sm_103a", MIXED_LAYOUT): ((700, 1250, "fwd", "fwd_layout_pipe"),),
     ("sm_103a", PADH_LAYOUT): ((700, 1500, "fwd", "fwd_layout_pipe"),),
-    ("sm_103a", PROJECTION_LAYOUT): ((619, 629, "fwd_xlong", "fwd_layout_pipe"),),
+    ("sm_103a", PROJECTION_LAYOUT): ((624, 629, "fwd_xlong", "fwd_layout_pipe"),),
 }
 # The ``fwd_layout_pipe`` band ``(lo, hi]`` of rows per SM of each class table
 # but PROJECTION_FORWARD_BANDS and HEAD_MAJOR_FORWARD_BANDS, by class and
@@ -4269,8 +4269,11 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (12 * sm_count + 1, "fwd_mid"),
                 (250 * sm_count + 1, "fwd_xlong"),
                 (619 * sm_count, "fwd_xlong"),
-                (619 * sm_count + 1, "fwd_layout_pipe"),
-                (620 * sm_count, "fwd_layout_pipe"),
+                (619 * sm_count + 1, "fwd_xlong"),
+                (620 * sm_count, "fwd_xlong"),
+                (624 * sm_count, "fwd_xlong"),
+                (624 * sm_count + 1, "fwd_layout_pipe"),
+                (625 * sm_count, "fwd_layout_pipe"),
                 (629 * sm_count, "fwd_layout_pipe"),
                 (629 * sm_count + 1, "fwd_layout_pipe"),
                 (630 * sm_count, "fwd_layout_pipe"),
@@ -4618,7 +4621,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         ("sm_100a", PADH_LAYOUT),
         ("sm_107a", PADH_LAYOUT),
     }
-    per_sm_edges = (12, 59, 140, 250, 400, 480, 599, 600, 619, 629, 649, 700)
+    per_sm_edges = (12, 59, 140, 250, 400, 480, 599, 600, 619, 624, 629, 649, 700)
     per_sm_edges += (999, 1000, 1249, 1250, 1500, 1750, 2000, 2999, 3000)
     for arch, layout in sorted(no_table):
         for per_sm in per_sm_edges:
