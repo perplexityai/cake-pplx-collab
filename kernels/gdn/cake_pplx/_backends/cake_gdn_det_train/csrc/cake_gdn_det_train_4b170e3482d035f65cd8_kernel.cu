@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -1369,6 +1369,7 @@ kernel_cake_gdn_det_train_4b170e3482d035f65cd8(const __grid_constant__ CUtensorM
                 gs_c += 1;
                 if (gs_c == 2) { gs_c = 0; _phase_gates_ready ^= 1; }
                 asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 asm volatile("tcgen05.fence::before_thread_sync;");
                 mbarrier_arrive(vp_ready_addr);
                 tf_c += 1;
