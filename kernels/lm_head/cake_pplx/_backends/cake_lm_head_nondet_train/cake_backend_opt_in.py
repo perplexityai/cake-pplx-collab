@@ -7977,8 +7977,9 @@ def cake_lm_head_nondet_train_logprob(
     without ``num_valid_rows``; ``cake`` backend): :mod:`.cake_backend`'s ``cake_lm_head_nondet_train_logprob_keep`` --
     where a backward can follow, the forward keeps the BF16 logits of the valid rows (``2 * T_v * V`` bytes until the
     backward; ``2 * T * V`` in the hidden valid-row count's ``[T, V]`` buffer) and the backward forms ``dz`` from them
-    instead of recomputing them (bitwise the same ``logp``; ``dX`` the same products, a chunk of more than one dX slice
-    summing its slices in slice order; ``dW`` in the kept
+    instead of recomputing them (bitwise the same ``logp`` as the default entry's chunked path, not its one-row
+    one-pass route, :func:`.cake_backend.set_logprob_one_pass`; ``dX`` the same products, a chunk of more than one dX
+    slice summing its slices in slice order; ``dW`` in the kept
     form's grouping, :func:`.cake_backend.set_kept_logits_form`); where none can, the default entry.  Like ``"budget"`` it is a ``ValueError`` on the reference backend (the backend-level
     ``cake_lm_head_nondet_train_logprob_keep`` runs the default entry there)."""
     if check_num_valid_rows and num_valid_rows is None:

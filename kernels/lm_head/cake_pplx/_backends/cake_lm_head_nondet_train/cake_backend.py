@@ -34,10 +34,12 @@ from the deterministic package's by FP32 rounding of that sum (the ordered
 split-K bullet below).  ``loss``, ``logp``
 and ``lse`` keep their fixed order (a policy call with zero-weight rows sums
 its loss over fewer rows, see the zero-weight bullet below).  A one-pass
-cross-entropy call (:func:`set_one_pass_rows`; by default a one-row loss call)
+cross-entropy call (:func:`set_one_pass_rows`; by default a one- or two-row loss call)
 sums ``lse`` and the loss in a fixed order of its own: its ``loss``, ``logp``,
 ``lse`` and ``dW`` are not the deterministic package's bits (both are judged against the
-naive tier; see the package README, Tests).  Statements below that two forms give "bitwise the
+naive tier; see the package README, Tests); so does a one-row log-probability
+call (:func:`set_logprob_one_pass`), whose ``logp`` and ``dW`` run the same
+one-pass programs.  Statements below that two forms give "bitwise the
 same" output compare the same operations within one run.
 
 Contract
@@ -83,7 +85,11 @@ Contract
   ``lse[T]`` and the valid-row index, so the backward plans its chunks without
   counting the rows again (no host synchronization); the backward recomputes
   each chunk's logits (four GEMMs) with the incoming ``dlogp`` as ``d_t``
-  (masked to valid rows).
+  (masked to valid rows).  A one-row call of the one-pass route
+  (:func:`set_logprob_one_pass`, default on) runs the one-pass programs
+  instead: the forward reads ``W`` once and keeps the row's BF16 logits, and
+  the backward writes ``dX`` and ``dW`` in one launch with ``dlogp`` as the
+  upstream scalar (``+0`` on an ignored row).
 * Memory rule: no logits / dlogits / probability buffer spans more than ``C``
   tokens (a batch smaller than ``C`` is one chunk).  :func:`memory_report`
   states the peak temporary bytes separately from the model weights, the
@@ -371,7 +377,9 @@ HOST_COUNT_MAX_ROWS = 1024
 # additions over other rows, so their bits may differ; both are judged against the naive tier).  Every row ignored:
 # zeros through the kernels (no early return: that needs the count).  Not applied: a call the zero-weight split would
 # serve (:func:`zero_weight_split`), an explicit ``compact_rows=False``, the reference backend, CPU tensors, the
-# low-level ``forward_*`` / ``backward_*`` functions and the kept-logits entry (each keeps its own resolution).
+# low-level ``forward_*`` / ``backward_*`` functions and the kept-logits entry (each keeps its own resolution), and a
+# call of the one-pass routes (:func:`one_pass_rows`, a one-row log-probability call of :func:`set_logprob_one_pass`),
+# which runs unstaged.
 UNCOMPACTED_MAX_ROWS_DEFAULT = 256
 _UNCOMPACTED_MAX_ROWS = {"rows": UNCOMPACTED_MAX_ROWS_DEFAULT}
 # Small-call kept logits (:func:`set_small_t_keep`, default on): the log-probability entry
@@ -381,7 +389,8 @@ _UNCOMPACTED_MAX_ROWS = {"rows": UNCOMPACTED_MAX_ROWS_DEFAULT}
 # held from the forward to the backward, at most 79 MB at ``V = 154880``).  Bitwise the same ``logp``; ``dX`` the same
 # products; bitwise the same ``dW`` for a call of one chunk (``T <= chunk_size``: with more chunks the kept form's one
 # weight-gradient GEMM over every row groups ``dW`` differently from the default Function's chunk loop or
-# vocabulary-major form; both are judged against the naive tier).
+# vocabulary-major form; both are judged against the naive tier).  A one-row call that the one-pass route takes
+# (:func:`set_logprob_one_pass`) runs neither Function's chunk loop.
 SMALL_T_KEEP_MAX_ROWS = 256
 _SMALL_T_KEEP = {"on": True}
 # Small-call row padding (:func:`small_pad_rows`): a small call of ``T < rows`` rows, when ``rows <=
@@ -397,9 +406,10 @@ _SMALL_T_KEEP = {"on": True}
 # forward + backward 1.234 / 1.262 / 1.225 / 0.997 / 1.009), and so does a loss step of at most
 # :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH` rows (one R200 GPU, CUPTI span, 256 staged rows vs 16 at T = 16 and vs the
 # call's own 32 at T = 32: forward + backward 962.5 -> 771.6 us and 1023.7 -> 769.9 us; the forward 1.46-1.59x faster,
-# while the backward alone grows with the rows, 0.87-0.90x, +34 to +48 us: its weight-gradient GEMM reads 256 rows;
-# 256 vs ``T`` rows: T = 128 877.5 -> 715.5 us, while at T = 192 the checkpointed step measured slower, 1073.4 ->
-# 1124.2 us, so longer loss calls keep their rows); B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability
+# while the backward alone grows with the rows, 0.87-0.90x, +34 to +48 us: its weight-gradient GEMM read 256 rows,
+# now the call's ``roundup(T, 16)`` rows, :func:`set_small_pad_dw_entries`; 256 vs ``T`` rows: T = 128 877.5 -> 715.5
+# us, while at T = 192 the checkpointed step measured slower, 1073.4 -> 1124.2 us, so longer loss calls keep their
+# rows); B200 keeps 16 rows everywhere (256 rows: T = 1 log-probability
 # forward + backward 1.095 -> 1.213).  A loss call staged at 256 rows holds its deferred weight gradient's BF16
 # ``[256, V]`` ``dz`` rows from the forward to the backward (79 MB at V = 154880, where a 16-row call holds 5 MB; R200
 # step peak +82.5 MB at T = 2 to 16); the first forward of a call (a binding-cache miss) prepares the binding's
@@ -408,8 +418,9 @@ _SMALL_T_KEEP = {"on": True}
 # are judged against the naive tier).  :func:`set_small_pad_rows` replaces the defaults with one row count for every
 # entry (0 = off).
 # The loss entry's pad applies to the calls the one-pass cross-entropy does not take (:func:`one_pass_rows`; by default
-# a T = 1 cross-entropy call at ``ONE_PASS_HIDDEN`` runs one-pass and is not staged; the loss figures above are of the
-# staged call).
+# a cross-entropy call of T in ``one_pass_rows()`` rows (1 and 2) at ``ONE_PASS_HIDDEN`` runs one-pass and is not
+# staged; the loss figures above are of the staged call), and the log-probability entry's pad to the calls its one-pass
+# route does not take (:func:`set_logprob_one_pass`: by default a one-row call at ``ONE_PASS_HIDDEN``).
 # The valid rows' products are those of the unpadded call (the padded rows add exact zeros).  Every staged tensor of a
 # call is a view of ONE allocation (:func:`_small_call_stage`), so a repeated call meets the same addresses -- and the
 # remembered bindings (:data:`BINDING_CACHE`) -- whenever the caching allocator returns the same block.
@@ -420,6 +431,29 @@ SMALL_PAD_ROWS_LOSS_BY_ARCH: dict[str, int] = {"sm_107a": 256}
 SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH: dict[str, int] = {"sm_107a": 128}
 # None: the per-entry / per-architecture defaults of small_pad_rows()
 _SMALL_PAD_ROWS: dict[str, Optional[int]] = {"rows": None}
+# The weight gradient of a padded small call (:func:`set_small_pad_dw_entries`, :func:`_small_pad_dw_k_rows`): a call
+# of an entry in :func:`small_pad_dw_entries` (a subset of :data:`SMALL_PAD_DW_NAMES`; default
+# :data:`SMALL_PAD_DW_ENTRIES_DEFAULT`) of at most :data:`SMALL_PAD_DW_MAX_ROWS` rows whose ``T`` rows are staged as
+# more rows than ``K = roundup(T, SMALL_PAD_DW_MULTIPLE)`` runs its weight-gradient GEMM over its first ``K`` staged
+# rows: the same program, grid and form, bound on ``K``-row views of the staged ``dz`` and ``X`` rows (the loss
+# entry's deferred ``gemm_dw_cast_bf16``, its K extent read from the views; the kept log-probability backward's
+# ``dW``-only call over the kept rows, :func:`backward_logprob_keep_ordered`).  The rows past ``K`` are padded rows
+# (zero ``X``, ``IGNORE_INDEX`` labels: ``+0`` ``dz``), so ``dW`` sums the same nonzero products (judged against the
+# naive tier).
+# R200 (0.3.4, one GPU, CUPTI): ``gemm_dw_cast_bf16`` 211.4-212.2 us over 16 / 32 rows against 250.3-251.2 us over 256
+# staged rows.  Not applied (the staged rows): ``fuse_dw_cast=False`` (the forward plan's accumulate GEMM), the kept
+# log-probability backward's ``W``-only, ``dx_one_pass`` and chunked forms and its retained-graph recompute, the
+# default log-probability Function (:func:`set_small_t_keep` off) and the temperature entry (their ``dW`` is planned in
+# the recompute binding over the staged rows), and a call of more than :data:`SMALL_PAD_DW_MAX_ROWS` rows (where the
+# loss entry's 256-row staging stops too, :data:`SMALL_PAD_LOSS_MAX_ROWS_BY_ARCH`; with the default pads the calls
+# above it are sm_107a log-probability calls of 129 to 240 rows).  With the default pads the cut fires on sm_107a only.
+# The staged ``[rows, V]`` ``dz`` buffer stays alive with the ``K``-row views (no memory change).
+SMALL_PAD_DW_MULTIPLE = 16
+# the entries the switch takes (its domain) and the entries it starts with (the default)
+SMALL_PAD_DW_NAMES = frozenset({"loss", "logprob"})
+SMALL_PAD_DW_ENTRIES_DEFAULT = frozenset({"loss", "logprob"})
+SMALL_PAD_DW_MAX_ROWS = 128
+_SMALL_PAD_DW: dict[str, frozenset] = {"entries": SMALL_PAD_DW_ENTRIES_DEFAULT}
 SUPPORTED_ABIS = (ABI_CONTRACT,)
 
 # Geometry the kernels of a record were built for (record field ``geometry``;
@@ -3687,6 +3721,46 @@ def set_small_pad_rows(rows: Optional[int]) -> Optional[int]:
     return previous
 
 
+def small_pad_dw_entries() -> frozenset:
+    """Entries whose padded small calls run the weight-gradient GEMM over their ``roundup(T, 16)`` staged rows
+    (:func:`set_small_pad_dw_entries`; default ``SMALL_PAD_DW_ENTRIES_DEFAULT``, ``{"loss", "logprob"}``)."""
+    return _SMALL_PAD_DW["entries"]
+
+
+def set_small_pad_dw_entries(entries) -> frozenset:
+    """Set the entries (an iterable of ``"loss"`` / ``"logprob"``, a subset of ``SMALL_PAD_DW_NAMES``; empty = none)
+    whose padded small calls of at most ``SMALL_PAD_DW_MAX_ROWS`` rows run the weight-gradient GEMM over their first
+    ``roundup(T, SMALL_PAD_DW_MULTIPLE)`` staged rows, for the following calls of this process, and return the previous
+    set."""
+    if not isinstance(entries, (bool, int, str)):
+        entries = tuple(entries)  # one pass over an iterator
+    if isinstance(entries, (bool, int, str)) or not all(
+        isinstance(e, str) for e in entries
+    ):
+        raise ValueError(
+            f"small_pad_dw_entries takes an iterable of entry names, got {entries!r}"
+        )
+    new = frozenset(entries)
+    if new - SMALL_PAD_DW_NAMES:
+        raise ValueError(
+            f"small_pad_dw_entries: unknown entries {sorted(new - SMALL_PAD_DW_NAMES)}"
+        )
+    previous = _SMALL_PAD_DW["entries"]
+    _SMALL_PAD_DW["entries"] = new
+    return previous
+
+
+def _small_pad_dw_k_rows(entry: str, T: int, rows: int) -> int | None:
+    """The staged rows ``K = roundup(T, SMALL_PAD_DW_MULTIPLE)`` the weight gradient of a small call of ``entry``
+    (``"loss"`` / ``"logprob"``) that stages its ``T`` rows as ``rows`` rows reads (:data:`SMALL_PAD_DW_MULTIPLE`),
+    ``None`` (every staged row) when ``K`` is not below ``rows``, ``T`` is above :data:`SMALL_PAD_DW_MAX_ROWS` or the
+    entry is not in :func:`small_pad_dw_entries`.  Host values alone."""
+    if entry not in _SMALL_PAD_DW["entries"] or int(T) > SMALL_PAD_DW_MAX_ROWS:
+        return None
+    k = -(-int(T) // SMALL_PAD_DW_MULTIPLE) * SMALL_PAD_DW_MULTIPLE
+    return k if k < int(rows) else None
+
+
 def _small_call_rows(
     X,
     labels,
@@ -4399,10 +4473,11 @@ def validate_lm_head_inputs(
     this runs on host tensors.  ``T == 0`` is accepted (the eager entry points
     return zeros for it without launching).
     """
-    # The loss entry's one-pass autograd forward (_one_pass_forward with ``checked``, while BINDING_CACHE is enabled)
-    # runs these checks once per (device, V, chunk size) (_ONE_PASS_VALID) for tensors _one_pass_call accepted: a new
-    # check must follow from _one_pass_call's checks or from that key, or be repeated in _one_pass_forward's cached
-    # branch (as the loss_div check is, _ce_loss_div).
+    # The one-pass forward of the loss and log-probability entries (_one_pass_forward with ``checked``, while
+    # BINDING_CACHE is enabled) runs these checks once per (device, V, chunk size) (_ONE_PASS_VALID, one key set for
+    # both entries: their checks differ in the objective arguments alone, which the cached branch checks per entry) for
+    # tensors _one_pass_call accepted: a new check must follow from _one_pass_call's checks or from that key, or be
+    # repeated in _one_pass_forward's cached branch (as the loss entry's loss_div check is, _ce_loss_div).
     if entry not in ENTRIES:
         raise ValueError(f"entry must be one of {ENTRIES}")
     if X.ndim != 2 or X.dtype != torch.bfloat16:
@@ -14705,7 +14780,7 @@ def _loss_backward_split(ctx, grad_loss):
 
 
 # One-pass cross-entropy of the smallest calls (:func:`set_one_pass_rows`; :func:`_one_pass_call` names the calls).  A
-# loss entry call with ``objective="ce"`` of ``T`` rows, ``T`` one of :func:`one_pass_rows` (default ``{1}``) and one
+# loss entry call with ``objective="ce"`` of ``T`` rows, ``T`` one of :func:`one_pass_rows` (default ``{1, 2}``) and one
 # chunk, runs three programs instead of the chunk loop: ``one_pass_fwd_t<T>`` reads ``W`` once and forms the kept BF16
 # logits ``Z [T, V]``, per CTA the online maximum and sum of ``exp(z - m)`` and (with a trainable ``X``) the
 # softmax-weighted sum ``u`` of the head rows (``one_pass_fwd_nodx_t<T>`` without ``u``); ``one_pass_combine`` merges
@@ -14724,6 +14799,24 @@ def _loss_backward_split(ctx, grad_loss):
 # programs; checked before the small-call staging (:func:`_small_call_rows`), which such a call skips.  Under a
 # non-reentrant ``torch.utils.checkpoint`` (gradient placement ``"auto"``) the checkpointed forward runs the forward
 # without ``u`` and the recomputation the full forward, as the chunked path does.
+# Per-row forward (:func:`set_one_pass_split_rows`, default ``{2}``): a call of a row count in
+# :func:`one_pass_split_rows` that forms dX runs ``one_pass_fwd_t1`` and the merge once per row instead of
+# ``one_pass_fwd_t<T>`` and one merge -- GB300 CUPTI: ``one_pass_fwd_t2`` 764.67 us, ``one_pass_fwd_t1`` about 292 us.
+# Row ``t`` reads ``X`` row ``t`` and its own label and writes row ``t`` of the ``T``-row kept block (logits at ``t
+# V``, row results at ``2 t``, ``logp``, loss and label at ``t``, the dX accumulator at ``t H``); the rows reuse one
+# row's partials in stream order (the one-pass programs launch without launch attributes), and the call's loss is the
+# rows' losses summed in row order (one FP32 add per row past the first, into the loss at ``0``).  The forward without
+# dX keeps ``one_pass_fwd_nodx_t<T>`` and the ``T``-row merge, and the backward is the ``T``-row ``one_pass_dw``, so
+# ``dz`` and ``dW`` take the same formula.  Bits: a per-row ``logp``, ``lse`` and dX accumulator are the one-row call's,
+# and ``loss`` sums ``-(l_t / d)`` per row where the ``T``-row merge forms ``-(sum_t l_t / d)``: a checkpointed step
+# under placement ``"auto"`` returns the loss and ``logp`` of its first pass (the forward without dX, the ``T``-row
+# merge; off sm_100a ``one_pass_fwd_t1`` sums each dot product in two accumulators, so ``z`` and ``logp`` can differ in
+# the last bits there too) with the plain step's ``dX`` and ``dW`` (all judged against the naive tier).  A record
+# without the one-row programs runs the ``T``-row forward.  The two switches go together: a row count of
+# :func:`one_pass_rows` above one that is not in :func:`one_pass_split_rows` runs ``one_pass_fwd_t<T>`` with dX, the
+# slow program above; so the defaults list every row count above one of ``ONE_PASS_ROWS_DEFAULT`` in
+# ``ONE_PASS_SPLIT_ROWS_DEFAULT``, and the per-row route is turned off by taking the row count out of
+# ``one_pass_rows`` (``set_one_pass_rows({1})``: two-row calls run the chunked path), not by emptying the split set.
 ONE_PASS_HIDDEN = 6144
 ONE_PASS_FWD_STAGES = {
     1: ("one_pass_fwd_t1", "one_pass_fwd_nodx_t1"),
@@ -14737,8 +14830,33 @@ ONE_PASS_DW_ROWS = 32
 ONE_PASS_DX_THREADS = 256
 # the most forward CTAs ``one_pass_combine`` merges
 ONE_PASS_MAX_PARTS = 256
-ONE_PASS_ROWS_DEFAULT = frozenset({1})
-_ONE_PASS = {"rows": ONE_PASS_ROWS_DEFAULT}
+ONE_PASS_ROWS_DEFAULT = frozenset({1, 2})
+# the row counts whose forward with dX runs per row (one_pass_split_rows): every row count above one of
+# ONE_PASS_ROWS_DEFAULT (see above)
+ONE_PASS_SPLIT_ROWS_DEFAULT = frozenset({2})
+_ONE_PASS = {"rows": ONE_PASS_ROWS_DEFAULT, "split": ONE_PASS_SPLIT_ROWS_DEFAULT}
+# One-pass log-probability call (:func:`set_logprob_one_pass`, default on; :func:`_logprob_one_pass_call` names the
+# calls): a call of the log-probability entry (:func:`cake_lm_head_nondet_train_logprob`) of one row that the loss
+# entry's one-pass rule would take as a cross-entropy call (:func:`_one_pass_call` of ``LOGPROB_ONE_PASS_ROWS``, its
+# own row set: :func:`one_pass_rows` does not apply) runs the one-pass programs before the small-call staging:
+# ``one_pass_fwd_t1`` (``one_pass_fwd_nodx_t1`` with a frozen ``X``) and the merge with the divisor
+# ``LOGPROB_ONE_PASS_DIV`` -- ``d = -1 / -1 = +1`` exactly, so the row results' ``dt`` and the dX accumulator carry
+# ``d logp / dz`` and ``d logp / dx`` (the merge's loss then holds ``logp`` and is not read) -- and the backward's
+# ``one_pass_dw`` with the upstream scalar ``g = dlogp`` on a valid row and ``+0`` on an ignored one
+# (:func:`_logprob_one_pass_scale`): ``dW = bf16(bf16(1[v = y] - p) x g)``, ``dX = bf16(g (W_y - u / s))``, ``W``
+# read twice per step instead of three times.  The returned ``logp`` is a fresh tensor (an in-place change of it
+# works, as on the chunked path); the kept state (``[1, V]`` BF16 logits, row results, label, ``[1, H]`` FP32 dX
+# accumulator, about 0.33 MB at ``V`` 154880) rides on the autograd context's saved tensors, and a non-reentrant
+# ``torch.utils.checkpoint`` (placement ``"auto"``) keeps it in the checkpoint frame
+# (:func:`_logprob_checkpoint_keep`), so the recomputation launches no one-pass program.  An ignored row: ``logp``,
+# ``dX`` and ``dW`` exact zeros whatever ``X`` and ``dlogp`` hold there.  The chunked path's switches do not apply; a
+# temperature, the kept-logits entry with a backward, the opt-in budget and given-count forms and every other call
+# keep their routes.
+LOGPROB_ONE_PASS_DEFAULT = True
+_LOGPROB_ONE_PASS = {"on": LOGPROB_ONE_PASS_DEFAULT}
+LOGPROB_ONE_PASS_ROWS = frozenset({1})
+# the merge divisor of a one-pass log-probability call
+LOGPROB_ONE_PASS_DIV = -1.0
 # Per device index: ``(module_name, record, rows, geometry)`` -- the record, the row counts whose one-pass programs it
 # registers (every forward form of the count, the merge and the backward) and, when it registers any, its geometry
 # (:meth:`Geometry.from_record`, its binding profile checked by :func:`record_abi`; ``None`` otherwise), derived once.
@@ -14753,9 +14871,10 @@ _ONE_PASS_LAYOUTS: dict[
     tuple[int, int, int, int, bool], tuple[int, int, int, int, int, int, int, int]
 ] = {}
 # ``(device index, V, chunk size)`` of the one-pass forwards that passed :func:`validate_lm_head_inputs` for tensors
-# the loss entry's :func:`_one_pass_call` accepted: every check of such a call follows from that answer or from this
-# key except its ``loss_div``, which a later call of the key checks alone (:func:`_one_pass_forward` ``checked``,
-# while :data:`BINDING_CACHE` is enabled).
+# :func:`_one_pass_call` accepted (of the loss entry, or of the log-probability entry through
+# :func:`_logprob_one_pass_call`: the entries' checks differ in the objective arguments alone): every check of such a
+# call follows from that answer or from this key except a loss entry call's ``loss_div``, which a later call of the key
+# checks alone (:func:`_one_pass_forward` ``checked``, while :data:`BINDING_CACHE` is enabled).
 _ONE_PASS_VALID: set[tuple[int, int, int]] = set()
 # The merge's loss divisor is a per-call scalar: its grid (``max(1, T*H/32*with_u)``; grid rules read integer host
 # values only) and its other arguments do not read it, so a step with another ``loss_div`` slots it into the
@@ -14796,7 +14915,7 @@ _ONE_PASS_STREAM = _OnePassStream()
 
 
 def one_pass_rows() -> frozenset:
-    """Row counts of the loss entry's one-pass cross-entropy (:func:`set_one_pass_rows`; default ``{1}``)."""
+    """Row counts of the loss entry's one-pass cross-entropy (:func:`set_one_pass_rows`; default ``{1, 2}``)."""
     return _ONE_PASS["rows"]
 
 
@@ -14815,6 +14934,59 @@ def set_one_pass_rows(rows) -> frozenset:
         )
     previous = _ONE_PASS["rows"]
     _ONE_PASS["rows"] = new
+    return previous
+
+
+def one_pass_split_rows() -> frozenset:
+    """Row counts whose one-pass forward with dX runs per row (:func:`set_one_pass_split_rows`; default ``{2}``)."""
+    return _ONE_PASS["split"]
+
+
+def set_one_pass_split_rows(rows) -> frozenset:
+    """Set the row counts (an iterable of row counts above one with a one-pass forward; empty = none) whose one-pass
+    forward with dX runs ``one_pass_fwd_t1`` and the merge once per row instead of the ``T``-row forward, for the
+    following calls of this process, and return the previous set.  Which calls run one-pass stays
+    :func:`one_pass_rows`'s rule: a row count taken out of this set but left in :func:`one_pass_rows` runs the
+    ``T``-row forward program with dX (GB300 ``one_pass_fwd_t2`` 764.67 us), not the chunked path; to run two-row
+    calls chunked, call ``set_one_pass_rows({1})``."""
+    if not isinstance(rows, (bool, int, str)):
+        rows = tuple(rows)  # one pass over an iterator
+    if isinstance(rows, (bool, int, str)) or not all(
+        isinstance(r, int) and not isinstance(r, bool) for r in rows
+    ):
+        raise ValueError(
+            f"one_pass_split_rows takes an iterable of row counts, got {rows!r}"
+        )
+    new = frozenset(int(r) for r in rows)
+    allowed = {t for t in ONE_PASS_FWD_STAGES if t > 1}
+    if new - allowed:
+        raise ValueError(
+            f"one_pass_split_rows: no per-row forward for {sorted(new - allowed)} rows"
+        )
+    previous = _ONE_PASS["split"]
+    _ONE_PASS["split"] = new
+    return previous
+
+
+def _one_pass_per_row(T: int, need_dx: bool, registered: frozenset) -> bool:
+    """Does a one-pass forward of ``T`` rows run per row (:func:`set_one_pass_split_rows`)?  A forward that forms dX of
+    a row count in :func:`one_pass_split_rows`, on a record that registers the one-row programs (``registered``: the
+    record's row counts, :func:`_one_pass_record`)."""
+    return need_dx and T in _ONE_PASS["split"] and 1 in registered
+
+
+def logprob_one_pass() -> bool:
+    """Does a one-row log-probability call run the one-pass programs (:func:`set_logprob_one_pass`; default on)?"""
+    return _LOGPROB_ONE_PASS["on"]
+
+
+def set_logprob_one_pass(on: bool) -> bool:
+    """Set whether a one-row log-probability entry call that the one-pass rule takes (:func:`_logprob_one_pass_call`)
+    runs the one-pass programs, for the following calls of this process, and return the previous value."""
+    if on is not True and on is not False:  # a bool (bool has no subclasses)
+        raise ValueError(f"logprob_one_pass takes a bool, got {on!r}")
+    previous = _LOGPROB_ONE_PASS["on"]
+    _LOGPROB_ONE_PASS["on"] = on
     return previous
 
 
@@ -14856,10 +15028,13 @@ def _one_pass_call(
     backend,
     compact_rows,
     gemm_tuning,
+    rows: frozenset | None = None,
 ) -> bool:
     """Does this loss entry call run the one-pass cross-entropy (see :data:`ONE_PASS_HIDDEN`)?  Host values alone;
-    malformed inputs answer ``False`` (the entry's validation reports them)."""
-    rows = _ONE_PASS["rows"]
+    malformed inputs answer ``False`` (the entry's validation reports them).  ``rows``: the row counts that run one-pass
+    (``None``: :func:`one_pass_rows`; the log-probability entry's ``LOGPROB_ONE_PASS_ROWS``,
+    :func:`_logprob_one_pass_call`)."""
+    rows = _ONE_PASS["rows"] if rows is None else rows
     if (
         not rows
         or backend != "cake"
@@ -14914,16 +15089,53 @@ def _one_pass_call(
     return T in entry[2]
 
 
+def _logprob_one_pass_call(
+    X,
+    W,
+    labels,
+    *,
+    chunk_size,
+    backend,
+    compact_rows,
+    dw_stream,
+    gemm_tuning,
+) -> bool:
+    """Does this log-probability entry call run the one-pass programs (:data:`LOGPROB_ONE_PASS_DEFAULT`,
+    :func:`set_logprob_one_pass`)?  A call of ``LOGPROB_ONE_PASS_ROWS`` rows that :func:`_one_pass_call` takes as a
+    cross-entropy call, with a valid ``dw_stream`` (an invalid one takes the chunked path, which reports it).  Host
+    values alone; :func:`one_pass_rows` does not apply."""
+    if not _LOGPROB_ONE_PASS["on"]:
+        return False
+    try:
+        dw_stream_mode(dw_stream)
+    except ValueError:
+        return False
+    return _one_pass_call(
+        X,
+        W,
+        labels,
+        objective="ce",
+        infer_logp=None,
+        loss_weights=None,
+        chunk_size=chunk_size,
+        backend=backend,
+        compact_rows=compact_rows,
+        gemm_tuning=gemm_tuning,
+        rows=LOGPROB_ONE_PASS_ROWS,
+    )
+
+
 def _one_pass_layout(
     T: int, V: int, H: int, parts: int, need_dx: bool
 ) -> tuple[int, int, int, int, int, int, int, int]:
     """The byte layout of a one-pass forward's two allocations, every piece at a ``WORKSPACE_ALIGN`` boundary: the kept
-    block -- logits BF16 ``[T * V]``, row results FP32 ``[2 T]``, ``logp`` FP32 ``[T]``, loss FP32 ``[1]``, labels int64
-    ``[T]`` and, with ``need_dx``, the dX accumulator FP32 ``[T * H]`` -- and the FP32 partials (``[2 parts T]`` and,
-    with ``need_dx``, ``[parts T H]``): ``(block bytes, the byte offsets of the row results, logp, loss, labels and dX
-    accumulator, the byte offset of the second partials, partial words)``."""
+    block -- logits BF16 ``[T * V]``, row results FP32 ``[2 T]``, ``logp`` FP32 ``[T]``, loss FP32 ``[T]`` (the call's
+    loss first; the per-row forward keeps the other rows' losses after it, :func:`set_one_pass_split_rows`), labels
+    int64 ``[T]`` and, with ``need_dx``, the dX accumulator FP32 ``[T * H]`` -- and the FP32 partials (``[2 parts T]``
+    and, with ``need_dx``, ``[parts T H]``): ``(block bytes, the byte offsets of the row results, logp, loss, labels and
+    dX accumulator, the byte offset of the second partials, partial words)``."""
     offsets, total = [], 0
-    for nbytes in (2 * T * V, 8 * T, 4 * T, 4, 8 * T, 4 * T * H if need_dx else 0):
+    for nbytes in (2 * T * V, 8 * T, 4 * T, 4 * T, 8 * T, 4 * T * H if need_dx else 0):
         offsets.append(total)
         total += _align(nbytes)
     o_pu = _align(8 * parts * T)
@@ -14995,6 +15207,7 @@ def _one_pass_forward(
     grad_weight_dtype: torch.dtype = torch.bfloat16,
     return_logp: bool = True,
     checked: bool = False,
+    logprob: bool = False,
     **_switches,
 ) -> ForwardResult:
     """The loss entry's forward of a one-pass call (:func:`_one_pass_call`): ``loss``, ``logp`` and, with ``need_dx``,
@@ -15003,14 +15216,17 @@ def _one_pass_forward(
     device's module name and record and the backward's CTA counts: :attr:`ForwardResult.one_pass`) and ``x_last``
     (``X``, when ``need_dw``).  ``checked``: the loss entry's :func:`_one_pass_call` accepted these very tensors, so
     while :data:`BINDING_CACHE` is enabled the validation runs once per (device, V, chunk size)
-    (:data:`_ONE_PASS_VALID`) and a later call checks its ``loss_div`` alone.  The chunked path's switches do not
-    apply."""
+    (:data:`_ONE_PASS_VALID`) and a later call checks its ``loss_div`` alone.  A call of a row count in
+    :func:`one_pass_split_rows` that forms dX runs one row at a time (:func:`_one_pass_per_row`).  ``logprob``: the
+    log-probability entry's call (:func:`_logprob_one_pass_call`; validated as that entry, no ``loss_div``): the merge
+    divides by ``LOGPROB_ONE_PASS_DIV`` and ``logp`` is a fresh tensor, not a view of the kept block.  The chunked
+    path's switches do not apply."""
     device = X.device
     index = int(
         device.index if device.index is not None else torch.cuda.current_device()
     )
     # the record's binding profile is checked and its geometry derived once (_one_pass_record)
-    module_name, record, _rows, geometry = _one_pass_record(index)
+    module_name, record, registered, geometry = _one_pass_record(index)
     # a disabled binding cache validates every call (BindingCache)
     valid = (
         (index, int(W.shape[0]), chunk_size)
@@ -15019,8 +15235,9 @@ def _one_pass_forward(
     )
     if valid is not None and valid in _ONE_PASS_VALID:
         # a call of this device, V and chunk size passed validate_lm_head_inputs and _one_pass_call checked these
-        # tensors: the call's loss divisor is left, checked as validate_lm_head_inputs does
-        loss_div = _ce_loss_div(loss_div)
+        # tensors: the call's loss divisor is left, checked as validate_lm_head_inputs does (a log-probability call has
+        # none)
+        loss_div = LOGPROB_ONE_PASS_DIV if logprob else _ce_loss_div(loss_div)
         T, H, V = int(X.shape[0]), int(X.shape[1]), valid[1]
     else:
         problem = validate_lm_head_inputs(
@@ -15033,10 +15250,11 @@ def _one_pass_forward(
             loss_weights=loss_weights,
             chunk_size=chunk_size,
             grad_weight_dtype=grad_weight_dtype,
+            entry="logprob" if logprob else "loss",
             geometry=geometry,
         )
         T, H, V = problem.num_rows, problem.hidden, problem.vocab
-        loss_div = problem.loss_div
+        loss_div = LOGPROB_ONE_PASS_DIV if logprob else problem.loss_div
         if valid is not None:
             _ONE_PASS_VALID.add(valid)
     split = _ONE_PASS_PARTS.get((index, V))
@@ -15047,6 +15265,8 @@ def _one_pass_forward(
         split = _ONE_PASS_PARTS.setdefault((index, V), (-(-V // rpc), rpc))
     parts, rpc = split
     ldx = int(X.stride(0)) if T > 1 else H
+    # a forward with dX of a row count in one_pass_split_rows: one row at a time (_one_pass_per_row)
+    per_row = _one_pass_per_row(T, need_dx, registered)
     # the kept state (logits, row results, labels, dX accumulator) in one allocation, the partials in another
     key = (T, V, H, parts, need_dx)
     layout = _ONE_PASS_LAYOUTS.get(key)
@@ -15055,6 +15275,16 @@ def _one_pass_forward(
             key, _one_pass_layout(T, V, H, parts, need_dx)
         )
     total, o_rows, o_logp, o_loss, o_lab, o_dxa, o_pu, words = layout
+    # the partials' rows: one row's (the one-row call's partials, reused row after row) or the call's
+    pt = 1 if per_row else T
+    if per_row:
+        row_key = (1, V, H, parts, True)
+        row_layout = _ONE_PASS_LAYOUTS.get(row_key)
+        if row_layout is None:
+            row_layout = _ONE_PASS_LAYOUTS.setdefault(
+                row_key, _one_pass_layout(1, V, H, parts, True)
+            )
+        o_pu, words = row_layout[6:]
     block = torch.empty((total,), dtype=torch.uint8, device=device)
     # the programs' operands are flat: the kept logits [T * V], row results [2 T] and dX accumulator [T * H] as the
     # block's views at their byte offsets (the views a byte slice and its dtype view would be; the backward reads them
@@ -15062,62 +15292,97 @@ def _one_pass_forward(
     f32 = block.view(torch.float32)
     Z = block.view(torch.bfloat16).as_strided((T * V,), (1,), 0)
     ROWS = f32.as_strided((2 * T,), (1,), o_rows // 4)
-    LOGP = f32.as_strided((T,), (1,), o_logp // 4)
+    # a log-probability call returns a fresh logp (the autograd output is no view of the kept block; the block's logp
+    # piece stays unused)
+    LOGP = (
+        torch.empty((T,), dtype=torch.float32, device=device)
+        if logprob
+        else f32.as_strided((T,), (1,), o_logp // 4)
+    )
     LOSS = f32.as_strided((1,), (1,), o_loss // 4)
     LAB = block.view(torch.int64).as_strided((T,), (1,), o_lab // 8)
     DXA = f32.as_strided((T * H,), (1,), o_dxa // 4) if need_dx else None
     scratch = torch.empty((words,), dtype=torch.float32, device=device)
-    PMS = scratch.as_strided((2 * parts * T,), (1,), 0)
-    PU = scratch.as_strided((parts * T * H,), (1,), o_pu // 4) if need_dx else None
-    fwd, fwd_nodx = ONE_PASS_FWD_STAGES[T]
+    PMS = scratch.as_strided((2 * parts * pt,), (1,), 0)
+    PU = scratch.as_strided((parts * pt * H,), (1,), o_pu // 4) if need_dx else None
     W_flat = W.view(-1)  # W is contiguous (validated above, or by _one_pass_call)
-    values: dict[str, Any] = {
-        "W": W_flat,
-        # the rows of X (row pitch ldx) as the flat contiguous span of its storage they cover, the operand the program
-        # reads through its own pitch
-        "X": X.as_strided(((T - 1) * ldx + H,), (1,)),
-        "labels": labels,
-        "Z": Z,
-        "PMS": PMS,
-        "V": V,
-        "ldx": ldx,
-        "rpc": rpc,
-        "parts": parts,
-    }
-    if need_dx:
-        values["PU"] = PU
-    # both launches in one stream context (torch's current stream; a pending small-call staging runs first)
+    # the launches in one stream context (torch's current stream; a pending small-call staging runs first)
     with _ffi_stream_context(index):
         _ONE_PASS_STREAM.held = True
         try:
-            _one_pass_launch(
-                module_name, record, fwd if need_dx else fwd_nodx, values, device, index
-            )
-            _one_pass_launch(
-                module_name,
-                record,
-                ONE_PASS_COMBINE_STAGE,
-                {
-                    "PU": PU if need_dx else PMS,
-                    "PMS": PMS,
+            if per_row:
+                _one_pass_rows_forward(
+                    module_name,
+                    record,
+                    device,
+                    index,
+                    X,
+                    W_flat,
+                    labels,
+                    block,
+                    LOGP,
+                    LOSS,
+                    PMS,
+                    PU,
+                    (o_rows, o_loss, o_lab, o_dxa),
+                    T,
+                    V,
+                    H,
+                    ldx,
+                    rpc,
+                    parts,
+                    float(loss_div),
+                )
+            else:
+                fwd, fwd_nodx = ONE_PASS_FWD_STAGES[T]
+                values: dict[str, Any] = {
                     "W": W_flat,
-                    "Z": Z,
+                    # the rows of X (row pitch ldx) as the flat contiguous span of its storage they cover, the operand
+                    # the program reads through its own pitch
+                    "X": X.as_strided(((T - 1) * ldx + H,), (1,)),
                     "labels": labels,
-                    "DXA": DXA if need_dx else LOGP,
-                    "ROWS": ROWS,
-                    "LOGP": LOGP,
-                    "LOSS": LOSS,
-                    "LAB": LAB,
-                    "parts": parts,
-                    "T": T,
+                    "Z": Z,
+                    "PMS": PMS,
                     "V": V,
-                    "H": H,
-                    "with_u": int(need_dx),
-                    "loss_div": float(loss_div),
-                },
-                device,
-                index,
-            )
+                    "ldx": ldx,
+                    "rpc": rpc,
+                    "parts": parts,
+                }
+                if need_dx:
+                    values["PU"] = PU
+                _one_pass_launch(
+                    module_name,
+                    record,
+                    fwd if need_dx else fwd_nodx,
+                    values,
+                    device,
+                    index,
+                )
+                _one_pass_launch(
+                    module_name,
+                    record,
+                    ONE_PASS_COMBINE_STAGE,
+                    {
+                        "PU": PU if need_dx else PMS,
+                        "PMS": PMS,
+                        "W": W_flat,
+                        "Z": Z,
+                        "labels": labels,
+                        "DXA": DXA if need_dx else LOGP,
+                        "ROWS": ROWS,
+                        "LOGP": LOGP,
+                        "LOSS": LOSS,
+                        "LAB": LAB,
+                        "parts": parts,
+                        "T": T,
+                        "V": V,
+                        "H": H,
+                        "with_u": int(need_dx),
+                        "loss_div": float(loss_div),
+                    },
+                    device,
+                    index,
+                )
         finally:
             _ONE_PASS_STREAM.held = False
     return ForwardResult(
@@ -15145,6 +15410,97 @@ def _one_pass_forward(
             -(-(T * ONE_PASS_HIDDEN // 8) // ONE_PASS_DX_THREADS) if need_dx else 0,
         ),
     )
+
+
+def _one_pass_rows_forward(
+    module_name,
+    record,
+    device,
+    index: int,
+    X,
+    W_flat,
+    labels,
+    block,
+    LOGP,
+    LOSS,
+    PMS,
+    PU,
+    offsets: tuple,
+    T: int,
+    V: int,
+    H: int,
+    ldx: int,
+    rpc: int,
+    parts: int,
+    loss_div: float,
+) -> None:
+    """The launches of a per-row one-pass forward (:func:`set_one_pass_split_rows`), in the stream context its forward
+    holds: per row ``t`` the one-row forward ``one_pass_fwd_t1`` over ``X`` row ``t`` (its own label) into the
+    one-row partials ``PMS`` / ``PU``, then the one-row merge into row ``t`` of the ``T``-row kept ``block`` -- logits
+    at ``t V``, row results at ``2 t``, ``logp`` (``LOGP``), loss and label at ``t``, dX accumulator at ``t H``
+    (``offsets``: the byte offsets of the row results, loss, labels and dX accumulator, :func:`_one_pass_layout`); the
+    next row's forward reuses the partials behind that merge in stream order.  Then the rows' losses are added in row
+    order into the loss at ``0`` (``LOSS``).  Every launch is a one-row call's form (the same form scalars; no new
+    binding)."""
+    o_rows, o_loss, o_lab, o_dxa = offsets
+    f32, bf16, i64 = (
+        block.view(torch.float32),
+        block.view(torch.bfloat16),
+        block.view(torch.int64),
+    )
+    x0, lp0 = X.storage_offset(), LOGP.storage_offset()
+    fwd_row = ONE_PASS_FWD_STAGES[1][0]
+    for t in range(T):
+        lab_t = labels[t : t + 1]
+        Z_t = bf16.as_strided((V,), (1,), t * V)
+        _one_pass_launch(
+            module_name,
+            record,
+            fwd_row,
+            {
+                "W": W_flat,
+                # row t of X (16-byte base: _one_pass_call's base and pitch), read at the one-row call's pitch
+                "X": X.as_strided((H,), (1,), x0 + t * ldx),
+                "labels": lab_t,
+                "Z": Z_t,
+                "PMS": PMS,
+                "PU": PU,
+                "V": V,
+                "ldx": H,
+                "rpc": rpc,
+                "parts": parts,
+            },
+            device,
+            index,
+        )
+        _one_pass_launch(
+            module_name,
+            record,
+            ONE_PASS_COMBINE_STAGE,
+            {
+                "PU": PU,
+                "PMS": PMS,
+                "W": W_flat,
+                "Z": Z_t,
+                "labels": lab_t,
+                "DXA": f32.as_strided((H,), (1,), o_dxa // 4 + t * H),
+                "ROWS": f32.as_strided((2,), (1,), o_rows // 4 + 2 * t),
+                "LOGP": LOGP.as_strided((1,), (1,), lp0 + t),
+                "LOSS": f32.as_strided((1,), (1,), o_loss // 4 + t),
+                "LAB": i64.as_strided((1,), (1,), o_lab // 8 + t),
+                "parts": parts,
+                "T": 1,
+                "V": V,
+                "H": H,
+                "with_u": 1,
+                "loss_div": loss_div,
+            },
+            device,
+            index,
+        )
+    # the call's loss: the rows' losses in row order (one FP32 add per row past the first)
+    for t in range(1, T):
+        LOSS.add_(f32.as_strided((1,), (1,), o_loss // 4 + t))
 
 
 def _one_pass_backward(one_pass, x, grad):
@@ -15216,13 +15572,34 @@ def _one_pass_backward(one_pass, x, grad):
     return DX, DW
 
 
-def _loss_forward(X, W, labels, *, one_pass: bool = False, **kwargs) -> ForwardResult:
+def _loss_forward(
+    X,
+    W,
+    labels,
+    *,
+    one_pass: bool = False,
+    dw_k_rows: int | None = None,
+    **kwargs,
+) -> ForwardResult:
     """The loss entry's forward: the one-pass programs for a call :func:`_one_pass_call` names, else
-    :func:`forward_loss`."""
+    :func:`forward_loss`.  ``dw_k_rows`` (a padded small call's, :func:`_small_pad_dw_k_rows`): the deferred weight
+    gradient of a one-chunk uncompacted plan (no FP32 ``dw_acc``: ``dz_last`` / ``x_last`` are the call's rows from
+    row 0) reads the first ``dw_k_rows`` of its staged rows (the rest are padded rows); a plan of more chunks keeps
+    every row of its last chunk."""
     if one_pass:
         kwargs.pop("_cast_fold", None)  # the one-pass programs have no slab sum
         return _one_pass_forward(X, W, labels, **kwargs)
-    return forward_loss(X, W, labels, **kwargs)
+    result = forward_loss(X, W, labels, **kwargs)
+    if (
+        dw_k_rows is not None
+        and result.x_last is not None
+        and result.dw_acc is None
+        and int(result.dz_last.shape[0]) > dw_k_rows
+    ):
+        # the deferred GEMM's K extent is its views' rows (dw_cast): the same program and grid over fewer rows
+        result.dz_last = result.dz_last[:dw_k_rows]
+        result.x_last = result.x_last[:dw_k_rows]
+    return result
 
 
 class CakeLMHeadNondetLossFunction(torch.autograd.Function):
@@ -15270,6 +15647,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
         hidden_count,
         gemm_tuning,
         one_pass_call,
+        dw_k_rows,
     ):
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
         # the backward's compact dX cast folds label residuals only for a head that is a leaf requiring a gradient
@@ -15307,6 +15685,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
                         hidden_count,
                         gemm_tuning,
                         one_pass_call,
+                        dw_k_rows,
                     )
             ckpt = _checkpoint_pass()
             if ckpt is None:
@@ -15339,6 +15718,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
                         gemm_tuning=gemm_tuning,
                         return_logp=bool(return_logp),
                         one_pass=one_pass,
+                        dw_k_rows=dw_k_rows,
                         _cast_fold=cast_fold,
                     ),
                 )
@@ -15380,6 +15760,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
                 hidden_count=hidden_count,
                 gemm_tuning=gemm_tuning,
                 return_logp=bool(return_logp),
+                dw_k_rows=dw_k_rows,
                 _cast_fold=cast_fold,
             )
         ctx.set_materialize_grads(False)
@@ -15430,7 +15811,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_loss, grad_logp=None):
-        none = (None,) * 18
+        none = (None,) * 19
         if grad_loss is None:
             return none
         if ctx.split is not None:
@@ -15601,6 +15982,7 @@ def backward_logprob_keep_ordered(
     need_dx: bool = True,
     need_dw: bool = True,
     dx_side: bool = False,
+    dw_k_rows: int | None = None,
     **options: Any,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """The one-pass kept backward that keeps dX in the forward's chunks: ``logits`` are the forward's kept views
@@ -15609,7 +15991,10 @@ def backward_logprob_keep_ordered(
     same dX bits wherever those repeat); then ONE fused-cast weight-gradient GEMM over ``K = T_v`` reads every ``dz``
     row of ``kept_rows`` (``dz_ready``: no second ``row_grad``) -- no FP32 ``dW`` accumulator.  ``dx_side``: the dX
     GEMMs run on the side stream so the weight-gradient GEMM overlaps them (:meth:`_KeptBinding._launch_dx_side`).
-    ``options``: the other keywords of :func:`backward_logprob_keep` (``chunk_size`` the forward's)."""
+    ``dw_k_rows`` (a padded small call's, uncompacted, :func:`_small_pad_dw_k_rows`): that weight-gradient GEMM reads
+    the first ``dw_k_rows`` rows of ``X`` / ``labels`` / ``lse`` / ``dlogp`` / ``kept_rows`` (``K = dw_k_rows``; the
+    rows past it are padded rows, ``+0`` ``dz``).  ``options``: the other keywords of :func:`backward_logprob_keep`
+    (``chunk_size`` the forward's)."""
     rows = int(kept_rows.shape[0])
     one = dict(options, chunk_size=max(rows, 1))
     if not need_dx:
@@ -15629,8 +16014,28 @@ def backward_logprob_keep_ordered(
             X, W, labels, lse, dlogp, logits, need_dx=True, need_dw=False, **options
         )
     out: dict[str, Optional[torch.Tensor]] = {}
+    # a padded small call (uncompacted: no row index): the weight gradient over its first dw_k_rows staged rows
+    k = (
+        rows
+        if dw_k_rows is None or options.get("row_index") is not None
+        else min(int(dw_k_rows), rows)
+    )
 
     def weight_gradient() -> None:
+        if k < rows:
+            out["dw"] = backward_logprob_keep(
+                X[:k],
+                W,
+                labels[:k],
+                lse[:k],
+                dlogp[:k],
+                (kept_rows[:k],),
+                need_dx=False,
+                need_dw=True,
+                dz_ready=True,
+                **dict(one, chunk_size=k),
+            )[1]
+            return
         out["dw"] = backward_logprob_keep(
             X,
             W,
@@ -15662,8 +16067,59 @@ def backward_logprob_keep_ordered(
     return dx, out["dw"]
 
 
+def _logprob_one_pass_scale(lab: torch.Tensor, dlogp: torch.Tensor) -> torch.Tensor:
+    """The upstream scalar of a one-pass log-probability backward (:data:`LOGPROB_ONE_PASS_DEFAULT`): ``dlogp``'s FP32
+    bits on a valid row (``lab >= 0``, the kept label), ``+0`` on an ignored one whatever ``dlogp`` holds there, so a
+    non-finite ``dlogp`` of an ignored row reaches no output (``0 * inf`` would).  Two device operations, no
+    synchronization."""
+    return torch.where(lab >= 0, _dlogp_rows(dlogp, int(lab.shape[0])), 0.0)
+
+
+def _logprob_one_pass_forward(ctx, X, W, labels, chunk_size, backend):
+    """The forward of :class:`CakeLMHeadNondetLogprobFunction` on the one-pass route (``one_pass_call``): the one-pass
+    forward (:func:`_one_pass_forward` ``logprob``; without dX for a frozen ``X``) returns a fresh ``logp``, and the
+    autograd context saves ``X`` (when ``W`` is trainable) and the kept state -- the flat logits, row results, label and
+    dX accumulator -- with the rest of the state on ``ctx.one_pass``.  Inside a non-reentrant
+    ``torch.utils.checkpoint`` (placement ``"auto"``) the checkpointed forward keeps that state in the checkpoint frame
+    (:func:`_logprob_checkpoint_keep`) and the recomputation returns a copy of its ``logp`` and saves it, launching
+    nothing; otherwise (placement ``"forward"``, another call, a ``logp`` changed in place) it runs the forward."""
+    need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
+    ctx.set_materialize_grads(False)
+    ckpt = _checkpoint_pass() if _TOP_SAVED_HOOKS(False) is not None else None
+    kept = None
+    if ckpt is not None:
+        inputs = (X, W, labels)
+        key = _logprob_call_key(
+            inputs, (chunk_size, backend, "one_pass", need_dx, need_dw)
+        )
+        kept = None if ckpt.first else _logprob_checkpoint_take(ckpt, key, inputs)
+    if kept is not None:
+        # the recomputation of a checkpointed call: its kept state, no launch
+        logp, state, meta = kept.logp.clone(), kept.saved, kept.extra
+    else:
+        result = _one_pass_forward(
+            X,
+            W,
+            labels,
+            chunk_size=chunk_size,
+            need_dx=need_dx,
+            need_dw=need_dw,
+            checked=True,
+            logprob=True,
+        )
+        logp, state, meta = result.logp, result.one_pass[:4], result.one_pass[4:]
+        if ckpt is not None and ckpt.first:
+            _logprob_checkpoint_keep(ctx, ckpt, key, inputs, logp, state, meta)
+    ctx.save_for_backward(X if need_dw else None, *state)
+    ctx.one_pass = meta
+    return logp
+
+
 class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
-    """Entry (b): the forward saves the row statistic; the backward recomputes the logits."""
+    """Entry (b): the forward saves the row statistic; the backward recomputes the logits.  A one-row call of the
+    one-pass route (``one_pass_call``: the entry's :func:`_logprob_one_pass_call` of these very inputs and options,
+    :func:`set_logprob_one_pass`) runs the one-pass forward instead and saves its kept state; its backward is one
+    ``one_pass_dw`` launch with ``dlogp`` as the upstream scalar (:func:`_logprob_one_pass_forward`)."""
 
     @staticmethod
     def forward(
@@ -15681,6 +16137,7 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
         gemm_tuning,
         logprob_dz,
         logprob_lbl,
+        one_pass_call,
     ):
         if _TOP_SAVED_HOOKS(False) is not None and _selective_checkpoint_modes():
             with _modes_off():  # under a selective checkpoint's modes: popped (see _selective_checkpoint_modes)
@@ -15699,7 +16156,11 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
                     gemm_tuning,
                     logprob_dz,
                     logprob_lbl,
+                    one_pass_call,
                 )
+        if one_pass_call:
+            # a one-row call of the one-pass route: the chunked switches do not apply
+            return _logprob_one_pass_forward(ctx, X, W, labels, chunk_size, backend)
         # every switch is resolved (and validated) once here, before any launch: the backward plans its chunks on the
         # forward's valid-row index under the same switches, the forward and the backward bind with the same GEMM knobs
         compact = _resolve_compact(compact_rows)
@@ -15772,7 +16233,16 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dlogp):
         if dlogp is None:
-            return (None,) * 13
+            return (None,) * 14
+        one_pass = getattr(ctx, "one_pass", None)
+        if one_pass is not None:
+            # the one-pass state (X when W is trainable, the kept logits, row results, label, dX accumulator): one
+            # launch with the masked dlogp as the upstream scalar
+            x, Z, ROWS, LAB, DXA = ctx.saved_tensors
+            dx, dw = _one_pass_backward(
+                (Z, ROWS, LAB, DXA, *one_pass), x, _logprob_one_pass_scale(LAB, dlogp)
+            )
+            return (dx, dw) + (None,) * 12
         X, W, labels, lse, row_index = ctx.saved_tensors
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
         dx, dw = backward_logprob(
@@ -15797,7 +16267,7 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
             _rlab=getattr(ctx, "rlab", None),
         )
         _release_graph_rlab(ctx)
-        return (dx, dw) + (None,) * 11
+        return (dx, dw) + (None,) * 12
 
 
 class CakeLMHeadNondetLogprobTemperatureFunction(torch.autograd.Function):
@@ -16008,6 +16478,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
         hidden_count,
         gemm_tuning,
         logprob_dz,
+        dw_k_rows,
     ):
         if _TOP_SAVED_HOOKS(False) is not None and _selective_checkpoint_modes():
             with _modes_off():  # under a selective checkpoint's modes: popped (see _selective_checkpoint_modes)
@@ -16024,6 +16495,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
                     hidden_count,
                     gemm_tuning,
                     logprob_dz,
+                    dw_k_rows,
                 )
         compact = _resolve_compact(compact_rows)
         hidden = (
@@ -16070,6 +16542,8 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
         ctx.hidden_count = hidden
         ctx.gemm_tuning = tuning
         ctx.logprob_dz = _resolve_logprob_dz(logprob_dz)
+        # a padded small call's weight-gradient rows (_small_pad_dw_k_rows; None: every kept row)
+        ctx.dw_k_rows = dw_k_rows
         # the graph's label residuals (_logprob_graph_rlab): the first backward's row_grad over the kept logits stores
         # every row, a later one (a retained graph) recomputes with the dz arm over the same rows
         ctx.rlab = _logprob_graph_rlab(
@@ -16084,7 +16558,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dlogp):
         if dlogp is None:
-            return (None,) * 11
+            return (None,) * 12
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
         X, W, labels, lse, row_index, *kept = ctx.saved_tensors
         common = dict(
@@ -16131,6 +16605,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
                         rows_buffer,
                         tuple(chunk_views),
                         dx_side=bool(_KEPT_LOGITS_FORM["dx_side"]),
+                        dw_k_rows=ctx.dw_k_rows,
                         **common,
                     )
                 else:
@@ -16149,7 +16624,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
                 **common,
             )
         _release_graph_rlab(ctx)
-        return (dx, dw) + (None,) * 9
+        return (dx, dw) + (None,) * 10
 
 
 def cake_lm_head_nondet_train_loss(
@@ -16171,6 +16646,7 @@ def cake_lm_head_nondet_train_loss(
     dw_stream: Optional[Union[bool, str]] = None,
     hidden_count: Optional[bool] = None,
     gemm_tuning: Optional[dict[str, dict[str, Any]]] = None,
+    _dw_k_rows: int | None = None,
 ):
     """Differentiable chunked LM-head + loss (see the module docstring); returns the FP32 scalar
     ``loss`` and, with ``return_logp``, the detached FP32 ``logp [T]``.
@@ -16215,10 +16691,12 @@ def cake_lm_head_nondet_train_loss(
     does not propagate into the gradients).
 
     A cross-entropy call of a row count in :func:`one_pass_rows` (default one
-    row; ``H = ONE_PASS_HIDDEN``, one chunk, no explicit ``gemm_tuning``) runs
-    the one-pass programs (see :data:`ONE_PASS_HIDDEN`): ``W`` is read once in
-    the forward and ``dW`` written once in the backward; the other switches do
-    not apply to it.
+    and two rows; ``H = ONE_PASS_HIDDEN``, one chunk, no explicit
+    ``gemm_tuning``) runs the one-pass programs (see :data:`ONE_PASS_HIDDEN`):
+    ``W`` is read once in the forward and ``dW`` written once in the backward;
+    the other switches do not apply to it.  A two-row call that forms ``dX``
+    runs the one-row forward and merge once per row
+    (:func:`set_one_pass_split_rows`).
 
     Gradient placement (:func:`set_gradient_placement`, default ``"auto"``): a
     call that no backward can follow (grad mode off, also the first pass of a
@@ -16233,7 +16711,15 @@ def cake_lm_head_nondet_train_loss(
     (``_selective_checkpoint_modes``) and behaves the same way.  The placement
     ``"forward"`` (gradients formed in every forward) runs the same kernels on
     the same operands (one fixed order; no run-to-run bit promise; the
-    K-sliced dX reduction sums its slices in slice order either way).
+    K-sliced dX reduction sums its slices in slice order either way; a
+    one-pass call of :func:`one_pass_split_rows` under ``"auto"`` returns the
+    loss and ``logp`` of its checkpointed forward, which runs the ``T``-row
+    merge, with the per-row recomputation's gradients).
+
+    ``_dw_k_rows`` (internal, :func:`_small_pad_dw_k_rows`): the rows of a
+    padded small call's staged rows that its weight gradient reads; the rows
+    past it must be padded rows.  A compacted call, a call of more than one
+    chunk and an unfused weight gradient ignore it (:func:`_loss_forward`).
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
@@ -16297,6 +16783,8 @@ def cake_lm_head_nondet_train_loss(
                 dw_stream=dw_stream,
                 hidden_count=hidden_count,
                 gemm_tuning=gemm_tuning,
+                # the weight gradient over the call's first roundup(T, 16) staged rows (set_small_pad_dw_entries)
+                _dw_k_rows=_small_pad_dw_k_rows("loss", T, rows),
             )
         if not return_logp:
             return out
@@ -16358,6 +16846,7 @@ def cake_lm_head_nondet_train_loss(
         hidden_count,
         gemm_tuning,
         one_pass,  # this call's one-pass rule (_one_pass_call), decided once
+        _dw_k_rows,
     )
     return (loss, logp.detach()) if return_logp else loss
 
@@ -16385,9 +16874,52 @@ def cake_lm_head_nondet_train_logprob(
     writes the row statistics and the label column's logit only -- and ``logprob_dz`` (default ``True``,
     :func:`logprob_dz_default`) -- the backward's recompute writes ``dz`` from its epilogue, no ``row_grad`` launch
     (both bitwise the same outputs).  Every switch is resolved once in the forward; the backward reuses the
-    forward's valid-row index (no count, no host synchronization) and recomputes under the same values."""
+    forward's valid-row index (no count, no host synchronization) and recomputes under the same values.  A one-row call
+    of the one-pass route (:func:`set_logprob_one_pass`, default on: ``H = ONE_PASS_HIDDEN``, one chunk, compacted
+    rows, no explicit ``gemm_tuning``, a record that registers the one-row programs) runs the one-pass programs before
+    any small-call staging (see :data:`LOGPROB_ONE_PASS_DEFAULT`): ``W`` read once in the forward, ``dX`` and ``dW``
+    written in one backward launch; the other switches do not apply to it."""
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
+    if _logprob_one_pass_call(
+        X,
+        W,
+        labels,
+        chunk_size=chunk_size,
+        backend=backend,
+        compact_rows=compact_rows,
+        dw_stream=dw_stream,
+        gemm_tuning=gemm_tuning,
+    ):
+        # a one-row call of the one-pass route: no small-call staging
+        if torch.is_grad_enabled() and (X.requires_grad or W.requires_grad):
+            return CakeLMHeadNondetLogprobFunction.apply(
+                X,
+                W,
+                labels,
+                int(chunk_size),
+                backend,
+                compact_rows,
+                fuse_dw_cast,
+                dx_finalize,
+                dw_stream,
+                hidden_count,
+                gemm_tuning,
+                logprob_dz,
+                logprob_lbl,
+                True,
+            )
+        # no backward can follow: the forward without dX, no autograd node
+        return _one_pass_forward(
+            X,
+            W,
+            labels,
+            chunk_size=int(chunk_size),
+            need_dx=False,
+            need_dw=False,
+            checked=True,
+            logprob=True,
+        ).logp
     rows = _small_call_rows(X, labels, backend, chunk_size, compact_rows, logprob=True)
     if rows:
         # a small call (UNCOMPACTED_MAX_ROWS_DEFAULT): its staged rows, uncompacted (the staging runs right before the
@@ -16409,6 +16941,9 @@ def cake_lm_head_nondet_train_logprob(
                 gemm_tuning,
                 logprob_dz,
                 logprob_lbl,
+                # the kept backward's weight gradient over the first roundup(T, 16) staged rows
+                # (set_small_pad_dw_entries)
+                _small_pad_dw_k_rows("logprob", T, rows),
             )
         return logp[:T] if rows > T else logp
     return _logprob_call(
@@ -16442,10 +16977,13 @@ def _logprob_call(
     gemm_tuning,
     logprob_dz,
     logprob_lbl,
+    dw_k_rows: int | None = None,
 ) -> torch.Tensor:
     """The autograd Function call of :func:`cake_lm_head_nondet_train_logprob` (its switches resolved by the
     Function), also on a small call's staged rows: the kept-logits Function where a backward can follow a call of at
-    most :data:`SMALL_T_KEEP_MAX_ROWS` rows (:func:`set_small_t_keep`), else the default log-probability Function."""
+    most :data:`SMALL_T_KEEP_MAX_ROWS` rows (:func:`set_small_t_keep`), else the default log-probability Function.
+    ``dw_k_rows`` (a padded small call's, :func:`_small_pad_dw_k_rows`): the kept backward's weight gradient reads that
+    many staged rows (the default Function ignores it)."""
     if (
         _SMALL_T_KEEP["on"]
         and backend == "cake"
@@ -16467,6 +17005,7 @@ def _logprob_call(
             hidden_count,
             gemm_tuning,
             logprob_dz,
+            dw_k_rows,
         )
     return CakeLMHeadNondetLogprobFunction.apply(
         X,
@@ -16482,6 +17021,7 @@ def _logprob_call(
         gemm_tuning,
         logprob_dz,
         logprob_lbl,
+        False,
     )
 
 
@@ -16602,7 +17142,7 @@ def _logprob_temperature_call(
     the Function): the default log-probability Function without a temperature (``None``, or a number whose value is
     ``1.0``), else the temperature Function."""
     if temperature is None or (type(temperature) is float and temperature == 1.0):
-        # the default path: no temperature operation (a scalar 1.0 resolves to none)
+        # the default path: no temperature operation (a scalar 1.0 resolves to none); not the one-pass route
         return CakeLMHeadNondetLogprobFunction.apply(
             X,
             W,
@@ -16617,6 +17157,7 @@ def _logprob_temperature_call(
             gemm_tuning,
             logprob_dz,
             logprob_lbl,
+            False,
         )
     return CakeLMHeadNondetLogprobTemperatureFunction.apply(
         X,
@@ -16660,9 +17201,12 @@ def cake_lm_head_nondet_train_logprob_keep(
     ``row_grad`` instead of recomputing the logits (three GEMMs per chunk instead of four); a later backward through
     a retained graph recomputes.  Elsewhere -- grad mode off (``torch.no_grad``, ``torch.inference_mode``, the first
     pass of a reentrant ``torch.utils.checkpoint``), no input requiring a gradient, the reference backend -- the call
-    is :func:`cake_lm_head_nondet_train_logprob` (the label-column forward).  A forward with a trainable input whose
+    is :func:`cake_lm_head_nondet_train_logprob` (the label-column forward; a one-row call of its one-pass route,
+    :func:`set_logprob_one_pass`, the one-pass forward).  A forward with a trainable input whose
     backward never runs pays the full-logits forward and holds the kept logits until the graph is freed.  Bitwise
-    the same ``logp`` as the default entry; ``dW`` / ``dX`` can round differently from the default entry's (another
+    the same ``logp`` as the default entry's chunked path (a one-row call of the default entry's one-pass route sums
+    ``lse`` in another order; both are judged against the naive tier); ``dW`` / ``dX`` can round differently from the
+    default entry's (another
     summation order: its vocabulary-major backward of the auto rule's calls, its zero-gradient row skip); both are
     judged against the naive tier (a chunk of more than one dX slice sums its slices in slice order, as there).  The
     kept form (:func:`set_kept_logits_form`; defaults ``tail_fold`` and ``one_pass`` on): the forward keeps its chunks'
@@ -16692,6 +17236,7 @@ def cake_lm_head_nondet_train_logprob_keep(
             hidden_count,
             gemm_tuning,
             logprob_dz,
+            None,
         )
     return cake_lm_head_nondet_train_logprob(
         X,

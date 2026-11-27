@@ -36,15 +36,18 @@ split), and its zero-``dlogp`` skip starts at 1946 valid rows on ``sm_107a``
 (the deterministic module's at 4097).  So ``loss`` and ``dW`` bits may differ
 from the deterministic module's (both are judged against the naive tier; see
 the backend README, Tests).  By default a
-one-row cross-entropy loss call at ``H = 6144`` (BF16 contiguous ``W``, one
+one- or two-row cross-entropy loss call at ``H = 6144`` (BF16 contiguous ``W``, one
 chunk, compacted rows, no explicit ``gemm_tuning``, a registered program; the
 conditions of ``cake_backend.set_one_pass_rows``) runs the backend's one-pass
-programs: its ``loss`` / ``logp`` / ``dW`` are summed in their own fixed order
+programs, and so does a one-row log-probability call without a temperature
+under the same conditions (``cake_backend.set_logprob_one_pass``): their
+``loss`` / ``logp`` / ``dW`` are summed in their own fixed order
 and are not the deterministic module's bits (both are judged against the naive tier).  Any
-other one-row call runs the chunked path.  The
+other one- or two-row call runs the chunked path.  The
 backend README lists the output differences ("Zero-weight policy rows",
 "Zero-gradient rows of the log-probability backward" and the
-``set_one_pass_rows`` switch).
+``set_one_pass_rows``, ``set_one_pass_split_rows`` and
+``set_logprob_one_pass`` switches).
 
 Entries: :func:`cake_lm_head_nondet_train_loss`,
 :func:`cake_lm_head_nondet_train_logprob`,
