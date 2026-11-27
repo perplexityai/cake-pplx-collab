@@ -413,6 +413,10 @@ FUSED_TAIL_STAGES = {
     "tail_g2_f32x_bf16_pv_tf32": 2,
     "tail_g3_f32x_pv_tf32": 3,
     "tail_g3_f32x_bf16_pv_tf32": 3,
+    "tail_g2_f32x_dvlo": 2,
+    "tail_g2_f32x_bf16_dvlo": 2,
+    "tail_g3_f32x_dvlo": 3,
+    "tail_g3_f32x_bf16_dvlo": 3,
 }
 
 
@@ -436,6 +440,11 @@ PDL_STAGES = frozenset(
         "tail_g2_f32x_bf16_pv_tf32",
         "tail_g3_f32x_pv_tf32",
         "tail_g3_f32x_bf16_pv_tf32",
+        "dhu_tc2_dvl32_modes_dvlo",
+        "tail_g2_f32x_dvlo",
+        "tail_g2_f32x_bf16_dvlo",
+        "tail_g3_f32x_dvlo",
+        "tail_g3_f32x_bf16_dvlo",
     }
 )
 
@@ -506,12 +515,12 @@ def test_the_wy_stage_follows_the_architecture() -> None:
 def test_the_stages_that_read_v_by_rows_take_its_pitch() -> None:
     # wy_tc2, wy_bwd, the package tail and the fixed-order cluster tails read v in place through its token pitch in
     # heads (their last parameter); the FP32-partial cluster tails take v's token-row stride in elements; a pv_tf32
-    # stage reads v as the stage it is named after
+    # or dvlo stage reads v as the stage it is named after
     in_place = ("wy_tc2", "wy_bwd", "wy_bwd_bf16", "tail", "tail_bf16", "tail_g2", "tail_g2_bf16", "tail_g3",
                 "tail_g3_bf16")  # fmt: skip
     for stage in cake_jit.STAGES:
         args = cake_chain.LAUNCH_ARGS[stage]
-        base = stage.removesuffix("_pv_tf32")
+        base = stage.removesuffix("_dvlo").removesuffix("_pv_tf32")
         assert ("v_row_heads" in args) == (base in in_place), stage
         if base in in_place:
             assert args[-1] == "v_row_heads" and "v" in args, stage
@@ -2091,7 +2100,10 @@ def test_a_refused_host_call_pools_no_buffer_for_the_device(device) -> None:
     for call in _entry_calls().values():
         with pytest.raises(Exception):  # noqa: PT011 - the entry's operand refusal
             call()
-    q, v = (torch.zeros(1, 64, h, HEAD_DIM, dtype=torch.bfloat16, device=device) for h in (1, 2))
+    q, v = (
+        torch.zeros(1, 64, h, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        for h in (1, 2)
+    )
     g, beta = torch.zeros(1, 64, 2, device=device), torch.zeros(1, 64, 2, device=device)
     o, _ = cake_gdn_nondet(q, q, v, g, beta)
     torch.cuda.synchronize()
@@ -5412,7 +5424,7 @@ def test_one_wave_table_on_the_4x4096_hv16_rows(name, monkeypatch) -> None:
 SPLIT_LAYOUT = (700, 1500, 230)
 SPLIT_HEADS = (2, 4)
 SPLIT_SMS = 40
-_SPLIT_STAGES = ("dhu_tc2_dvl32_modes", "dhu_tc2_dvl32_gm")
+_SPLIT_STAGES = ("dhu_tc2_dvl32_modes", "dhu_tc2_dvl32_gm", "dhu_tc2_dvl32_modes_dvlo")
 
 
 def _split_device(monkeypatch, device, *, split: bool, chain: str | None = None) -> str:
@@ -7639,6 +7651,7 @@ M_SHARE_ROWS = {
 # the stages of the split adjoint walk and its composition
 _ADJOINT_WALK_STAGES = (
     "dhu_tc2_dvl32_modes",
+    "dhu_tc2_dvl32_modes_dvlo",
     "dhu_tc2_dvl32_gm",
     "stitch",
     "stitch_mt",
@@ -7798,7 +7811,8 @@ def test_m_share_matches_the_fp64_recurrence(
     # the backward on the forward's maps (wave 1 without the summary, the stitch's transpose_m build): o, the final
     # state and every gradient (the initial state's too) are judged.  The call has a final-state gradient: it takes
     # M-share with PV_TF32 off; with it on (the arm "pv", judged too) the M-share forward is followed by the table's
-    # split route on the pv_tf32 programs (:func:`_assert_pv_split_route`)
+    # split route on the pv_tf32 programs (:func:`_assert_pv_split_route`), or M-share on the dvlo walks and tail where
+    # that route does not serve the table (the arm "lo")
     arch = _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
     heads, seq_lens = FWD_SPLIT_JUDGE_CASES[case]
     assert _m_share_meta(device, heads, seq_lens).m_share
@@ -7831,8 +7845,21 @@ def test_m_share_matches_the_fp64_recurrence(
             stages
         )
         _assert_pv_split_route(stages, twins, arch)
+        # the arm "lo" (judged too): the pv_tf32 split route patched off (a table whose segments exceed the pre-scan's
+        # chunks), so the call keeps M-share's walks and tail as their dvlo twins
+        stages.clear()
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "PV_TF32", True)
+            m.setattr(cake_chain, "_pv_tf32_split_route", lambda _arch, _segs: False)
+            lo = _run(
+                inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht
+            )
+        walk = cake_chain.MODES_DV_LO_WALK
+        assert _adjoint_walk(stages) == [walk, walk, "stitch_mt", walk], stages
+        tail = cake_chain.MODES_DV_LO_TAILS[cake_chain.tail_form(*heads, arch=arch)]
+        assert tail in stages and "dhu_tc2_dvl32_modes" not in stages, stages
         oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
-        return _judged({"": got, "pv": pv}, oracle, STATE_OUTPUTS)
+        return _judged({"": got, "pv": pv, "lo": lo}, oracle, STATE_OUTPUTS)
 
     _judge(record_property, 441, draw)
 
@@ -9937,7 +9964,8 @@ def test_the_forward_and_backward_plan_flags(
 
 # --------------------------------------------------------------------------- PV_TF32 per call
 # With cake_chain.PV_TF32 on, only a backward whose final state receives a gradient runs the pv_tf32 adjoint scan and
-# tail (cake_chain.pv_tf32_stages); every other call keeps the 0.2.8 programs and launches, and only those calls record
+# tail (cake_chain.pv_tf32_stages), or on a one-wave split the pv_tf32 route cannot take the dvlo walk and tail
+# (cake_chain.modes_dv_lo_stages); every other call keeps the 0.2.8 programs and launches, and only those calls record
 # or replay a backward plan.  The package fixes no bits, so the calls compare by their launches (stage, grid, stream,
 # every value's shape, strides and dtype, every scalar: :func:`_logged_launches`).  The call kinds: (initial state,
 # output_final_state, a final-state gradient).  "h0-final" asks for the final state and gives it no gradient: autograd
@@ -9956,10 +9984,32 @@ def _pv_or_skip() -> None:
     arch = cake_backend.device_arch(torch.cuda.current_device())
     if arch not in cake_chain.PV_TF32_ARCHS:
         pytest.skip(f"PV_TF32 runs on {cake_chain.PV_TF32_ARCHS}, not {arch}")
-    stages = (*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values())
+    stages = (*_pv_stages(), *_lo_route_stages())
     missing = [stage for stage in stages if not cake_chain._available(stage, arch)]
     if missing:
-        pytest.skip(f"this build has no pv_tf32 record for {missing}")
+        pytest.skip(f"this build has no pv_tf32 or dvlo record for {missing}")
+
+
+def _pv_stages() -> set[str]:
+    """The pv_tf32 scan and tails."""
+    return {*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values()}
+
+
+def _lo_route_stages() -> set[str]:
+    """The dvlo walk and tails of the one-wave split (:func:`cake_chain.modes_dv_lo_stages`)."""
+    return {cake_chain.MODES_DV_LO_WALK, *cake_chain.MODES_DV_LO_TAILS.values()}
+
+
+def _pv_swap(off_stages) -> dict[str, str]:
+    """The stages a call with a final-state gradient launches, PV_TF32 on, in place of those it launches with the flag
+    off (``off_stages``): the one-wave split's walk and tail by their dvlo twins where it walks the split, else the
+    tcgen05 scan and the tail by their pv_tf32 twins."""
+    if "dhu_tc2_dvl32_modes" in off_stages:
+        return {
+            "dhu_tc2_dvl32_modes": cake_chain.MODES_DV_LO_WALK,
+            **cake_chain.MODES_DV_LO_TAILS,
+        }
+    return {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
 
 
 def _pv_call(inputs, seq_lens, heads, kind, device, seed) -> dict:
@@ -10008,7 +10058,6 @@ def test_pv_tf32_runs_only_for_a_final_state_gradient(
     inputs = _inputs(seq_lens, heads, torch.float32, device, seed=41)
     monkeypatch.setattr(cake_chain, "BWD_PLAN", False)
     log = _logged_launches(monkeypatch)
-    swap = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
     for kind, (_h0, _final, grad) in PV_CALLS.items():
         launched = {}
         for flag in (False, True):
@@ -10016,16 +10065,16 @@ def test_pv_tf32_runs_only_for_a_final_state_gradient(
             log.clear()
             _pv_call(inputs, seq_lens, heads, kind, device, 42)
             launched[flag] = list(log)
+        off = [entry[0] for entry in launched[False]]
+        swap = _pv_swap(off)
         if grad:
             stages = [entry[0] for entry in launched[True]]
-            assert stages == [swap.get(e[0], e[0]) for e in launched[False]], (
-                kind,
-                stages,
-            )
+            assert stages == [swap.get(stage, stage) for stage in off], (kind, stages)
             assert set(swap.values()) & set(stages), (kind, stages)
         else:
             assert launched[True] == launched[False], kind
-            assert not set(swap.values()) & {e[0] for e in launched[True]}, kind
+            twins = _pv_stages() | _lo_route_stages()
+            assert not twins & {e[0] for e in launched[True]}, kind
 
 
 def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
@@ -10040,7 +10089,7 @@ def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
     monkeypatch.setattr(cake_chain, "PV_TF32", True)
     log = _logged_launches(monkeypatch)
     replays = _counted_replays(monkeypatch)
-    pv_stages = {*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values()}
+    pv_stages = _pv_stages() | _lo_route_stages()
     first = {}
     kinds = list(PV_CALLS)
     for order in (kinds, kinds[::-1]):
@@ -10093,7 +10142,7 @@ def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
     # On by default on every architecture of the package: each pv_tf32 stage is a stage of the registry with
     # one record per architecture (the pdl builds where the sibling is one), and its call site is its sibling's with
     # the FP32 dg state operands inserted (the scan's h, v_new, hdh32_out, e_out after dh_out; the tail's hdh32, e32
-    # after dh)
+    # after dh) and dv2's low word dv2_lo after dv2
     assert cake_chain.PV_TF32 is True and cake_chain.PV_TF32_ARCHS == ARCHES
     pairs = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
     assert set(pairs.values()) == {s for s in cake_jit.STAGES if s.endswith("_pv_tf32")}
@@ -10108,9 +10157,268 @@ def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
         after = "dh_out" if base in cake_chain.PV_TF32_SCANS else "dh"
         args = cake_chain.LAUNCH_ARGS[base]
         i = args.index(after) + 1
-        assert cake_chain.LAUNCH_ARGS[pv] == (*args[:i], *extra, *args[i:]), pv
+        args = (*args[:i], *extra, *args[i:])
+        i = args.index("dv2") + 1
+        assert cake_chain.LAUNCH_ARGS[pv] == (*args[:i], "dv2_lo", *args[i:]), pv
         for arch in ARCHES:
             assert cake_chain._available(pv, arch), (pv, arch)
+
+
+def test_modes_dv_lo_tables_pair_the_walk_with_its_tails() -> None:
+    # On by default with PV_TF32 on every architecture of the package: the one-wave split's walk and each tail the
+    # rule takes there (the cluster tails of a group of two or three, the package tail; both dbeta forms) have a dvlo
+    # twin, a stage of the registry with one record per architecture (pdl where the sibling is), whose call site is
+    # its sibling's with dv2_lo after dv2; the dvlo stages are those and no other
+    assert cake_chain.MODES_DV_LO is True
+    pairs = {
+        "dhu_tc2_dvl32_modes": cake_chain.MODES_DV_LO_WALK,
+        **cake_chain.MODES_DV_LO_TAILS,
+    }
+    assert set(pairs.values()) == {s for s in cake_jit.STAGES if s.endswith("_dvlo")}
+    assert set(cake_chain.MODES_DV_LO_TAILS) == set(cake_chain.PV_TF32_TAILS)
+    for arch in ARCHES:
+        for group in (1, 2, 3, 4):
+            form = cake_chain.tail_form(2, 2 * group, arch=arch)
+            for bf16 in ("", "_bf16"):
+                assert form + bf16 in cake_chain.MODES_DV_LO_TAILS, (arch, group, form)
+    for base, lo in pairs.items():
+        assert lo == base + "_dvlo" and base in cake_jit.STAGES, (base, lo)
+        assert (lo in PDL_STAGES) is (base in PDL_STAGES), lo
+        assert FUSED_TAIL_STAGES.get(lo) == FUSED_TAIL_STAGES.get(base), lo
+        args = cake_chain.LAUNCH_ARGS[base]
+        i = args.index("dv2") + 1
+        assert cake_chain.LAUNCH_ARGS[lo] == (*args[:i], "dv2_lo", *args[i:]), lo
+        for arch in ARCHES:
+            assert cake_chain._available(lo, arch), (lo, arch)
+
+
+def test_dv_lo_records_are_their_twins_with_the_low_word() -> None:
+    # The records that take dv2's low word: each pv_tf32 record has dv2_lo right after dv2 in its arg plan; each dvlo
+    # record is its sibling's (the walk or the tail it is named after) with dv2_lo right after dv2, the same block,
+    # cluster and PDL, a program of its own; the walk stages the low word in 4 KiB more shared memory, the tails in
+    # none; no other record takes dv2_lo
+    lo_stages = _pv_stages() | _lo_route_stages()
+    for name, rec in cake_jit.MODULES.items():
+        plan = [arg[1] for arg in rec["arg_plan"]]
+        assert ("dv2_lo" in plan) is (rec["stage"] in lo_stages), name
+        if "dv2_lo" in plan:
+            assert plan[plan.index("dv2") + 1] == "dv2_lo", name
+    pairs = {
+        "dhu_tc2_dvl32_modes": cake_chain.MODES_DV_LO_WALK,
+        **cake_chain.MODES_DV_LO_TAILS,
+    }
+    for base, lo in pairs.items():
+        for arch in ARCHES:
+            rec = cake_jit.MODULES[cake_backend.stage_record(lo, arch)]
+            sib = cake_jit.MODULES[cake_backend.stage_record(base, arch)]
+            plan = [arg for arg in rec["arg_plan"] if arg != ["buffer", "dv2_lo"]]
+            assert plan == sib["arg_plan"], (lo, arch)
+            launch, twin = dict(rec["launch"]), dict(sib["launch"])
+            extra = 4096 if base == "dhu_tc2_dvl32_modes" else 0
+            assert (
+                launch.pop("dynamic_smem_bytes")
+                == twin.pop("dynamic_smem_bytes") + extra
+            ), (lo, arch)
+            assert launch == twin and rec["library"] != sib["library"], (lo, arch)
+
+
+def test_modes_dv_lo_stages_follow_the_one_switch(monkeypatch) -> None:
+    # the dvlo route of the one-wave split for each tail with a twin; None for a tail without one (the unfused tail,
+    # the fixed-order cluster tails), outside PV_TF32_ARCHS, with MODES_DV_LO off, and with PV_TF32 off (one switch:
+    # PV_TF32 off restores the 0.2.8 programs on every call)
+    for arch in ARCHES:
+        for tail, lo in cake_chain.MODES_DV_LO_TAILS.items():
+            assert cake_chain.modes_dv_lo_stages(arch, tail) == (
+                cake_chain.MODES_DV_LO_WALK,
+                lo,
+            )
+        for tail in ("dqkwg", "tail_g2", "tail_g3_bf16"):
+            assert cake_chain.modes_dv_lo_stages(arch, tail) is None, tail
+    assert cake_chain.modes_dv_lo_stages("sm_90a", "tail") is None
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "MODES_DV_LO", False)
+        assert cake_chain.modes_dv_lo_stages(ARCHES[0], "tail") is None
+    monkeypatch.setattr(cake_chain, "PV_TF32", False)
+    assert cake_chain.modes_dv_lo_stages(ARCHES[0], "tail") is None
+
+
+# --------------------------------------------------------------------------- dv2's low word on every tape launch
+# A call with a final-state gradient on a pv_tf32 route, or on the one-wave split's dvlo route, passes dv2's low word
+# (b_dv2_lo) right after dv2 to every launch that writes the dv2 tape (the pv_tf32 scan, the dvlo walks) or reads it
+# (the pv_tf32 or dvlo tail).  The cases (heads, layout, pins, route): the serial tcgen05 scan beside the one-launch
+# cluster tail of a group of three and beside the package tail of a group of one, the one-wave split's dvlo route at a
+# group of three, two and one (SPLIT_LAYOUT on the small device of _split_device; the pv_tf32 split route patched off,
+# as on a table whose segments exceed the pre-scan's chunks), and under M-share at a group of three.
+LO_LAYOUT = (300, 77, 640, 1)
+LO_PAIR_CASES = {
+    "pv-serial-g3": ((2, 6), LO_LAYOUT, {"segment_chunks": 0, "dhu_scan": "tc"}, "pv"),
+    "pv-serial-g1": ((2, 2), LO_LAYOUT, {"segment_chunks": 0, "dhu_scan": "tc"}, "pv"),
+    "modes-g3": ((2, 6), SPLIT_LAYOUT, {}, "modes"),
+    "modes-g2": (SPLIT_HEADS, SPLIT_LAYOUT, {}, "modes"),
+    "modes-g1": ((2, 2), SPLIT_LAYOUT, {}, "modes"),
+    "m-share-g3": (*FWD_SPLIT_JUDGE_CASES["g3"], {}, "m_share"),
+}
+
+
+def _lo_stages() -> set[str]:
+    """The stages whose records take dv2's low word: the pv_tf32 scan and tails and the dvlo walk and tails."""
+    return _pv_stages() | _lo_route_stages()
+
+
+def _record_launch_values(monkeypatch) -> list[tuple[str, tuple]]:
+    """The (stage, values in the record's parameter order) of every launch from here on, in order."""
+    launches: list[tuple[str, tuple]] = []
+    launch = cake_backend.launch_stage
+
+    def recording(stage, grid, values, **kwargs):
+        launches.append((stage, tuple(values)))
+        return launch(stage, grid, values, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "launch_stage", recording)
+    return launches
+
+
+def _lo_launches(launches) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
+    """``(stage, dv2_lo, dv2)`` of every launch of :func:`_lo_stages` in ``launches``, in order; every launch's record
+    takes dv2_lo exactly when its stage is one of them."""
+    arch = cake_backend.device_arch(torch.cuda.current_device())
+    out = []
+    for stage, values in launches:
+        names = cake_backend.parameters(cake_backend.stage_record(stage, arch))
+        assert ("dv2_lo" in names) == (stage in _lo_stages()), (stage, names)
+        if "dv2_lo" in names:
+            out.append(
+                (stage, values[names.index("dv2_lo")], values[names.index("dv2")])
+            )
+    return out
+
+
+def _lo_route(m, device, heads, route) -> str:
+    """The route switches of a case of LO_PAIR_CASES on ``m``; returns the device's architecture."""
+    if route == "pv":
+        return cake_backend.device_arch(cake_chain._device_index(device))
+    if route == "modes":
+        arch = _split_device(m, device, split=True)
+    else:
+        arch = _force_m_share(m, device, FWD_SPLIT_JUDGE_MIN_PIECE)
+    m.setattr(cake_chain, "_pv_tf32_split_route", lambda _arch, _segs: False)
+    return arch
+
+
+@pytest.mark.parametrize("case", sorted(LO_PAIR_CASES))
+def test_dv_lo_rides_every_launch_of_the_dv2_tape(case, device, monkeypatch) -> None:
+    # A call with a final-state gradient: the launches that write the dv2 tape (the pv_tf32 scan, or every walk of the
+    # one-wave split) and the tail that reads it take one BF16 tensor of dv2's shape as dv2_lo (not dv2 itself), the
+    # first of them a writer; the split's summaries, its composition, the pre-scans and the forward take none.  A call
+    # without a final-state gradient, or with PV_TF32 off, launches no stage that takes it (and on the split route
+    # MODES_DV_LO off neither).
+    _pv_or_skip()
+    heads, seq_lens, pins, route = LO_PAIR_CASES[case]
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=47)
+    h0, dht = _states(seq_lens, heads[1], device, 48)
+    with monkeypatch.context() as m:
+        arch = _lo_route(m, device, heads, route)
+        launches = _record_launch_values(m)
+        _run(
+            inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, **pins
+        )
+        lo = _lo_launches(launches)
+        stages = [stage for stage, _values in launches]
+        form = cake_chain.tail_form(*heads, arch=arch)
+        if route == "pv":
+            writers = {cake_chain.PV_TF32_SCANS[cake_chain.dhu_tc2_stage(arch)]}
+            reader = cake_chain.PV_TF32_TAILS[form]
+        else:
+            writers = {cake_chain.MODES_DV_LO_WALK}
+            reader = cake_chain.MODES_DV_LO_TAILS[form]
+            assert "dhu_tc2_dvl32_modes" not in stages, stages
+            assert cake_chain.PV_TF32_SCANS["dhu_tc2_dvl32"] not in stages, stages
+        assert lo and lo[0][0] in writers, stages
+        assert {stage for stage, *_x in lo} == {*writers, reader}, stages
+        assert stages.count(reader) >= 1 and form not in stages, stages
+        word = lo[0][1]
+        assert word.dtype == torch.bfloat16 and word.is_contiguous(), word.dtype
+        for stage, value, tape in lo:
+            assert value.data_ptr() == word.data_ptr() and value.shape == tape.shape, (
+                stage
+            )
+            assert value.data_ptr() != tape.data_ptr(), stage
+        first = stages.index(lo[0][0])
+        for stage, values in launches[first:]:
+            if stage not in _lo_stages():
+                tensors = [x for x in values if isinstance(x, torch.Tensor)]
+                assert all(x.data_ptr() != word.data_ptr() for x in tensors), stage
+        offs = [("no-dht", "PV_TF32", True, None), ("off", "PV_TF32", False, dht)]
+        if route != "pv":
+            offs.append(("modes-off", "MODES_DV_LO", False, dht))
+        for label, flag, value, given in offs:
+            with monkeypatch.context() as off:
+                off.setattr(cake_chain, flag, value)
+                launches.clear()
+                _run(
+                    inputs,
+                    seq_lens,
+                    initial_state=h0,
+                    output_final_state=True,
+                    dht=given,
+                    **pins,
+                )
+                assert not _lo_launches(launches), (
+                    label,
+                    [stage for stage, _v in launches],
+                )
+
+
+# The one-wave split's dvlo route judged: SPLIT_LAYOUT on the small device of _split_device with the pv_tf32 split route
+# patched off (as on a table whose segments exceed the pre-scan's chunks), an initial state and a final-state gradient,
+# at a value-head group of one, two, three and four (the package tail, the cluster tails of two and three) in both
+# dbeta forms: the dvlo route ("lo") and the 0.2.8 split (MODES_DV_LO off, "split"), each judged on every output
+MODES_LO_HEADS = {"g1": (2, 2), "g2": SPLIT_HEADS, "g3": (2, 6), "g4": (1, 4)}
+
+
+@pytest.mark.parametrize(
+    "beta_dtype", [torch.float32, torch.bfloat16], ids=["fp32beta", "bf16beta"]
+)
+@pytest.mark.parametrize("group", sorted(MODES_LO_HEADS))
+def test_modes_dv_lo_route_naive_tier_verdict(
+    group, beta_dtype, device, monkeypatch, record_property
+) -> None:
+    _pv_or_skip()
+    heads, seq_lens = MODES_LO_HEADS[group], SPLIT_LAYOUT
+    index = cake_chain._device_index(device)
+    bf16 = "_bf16" if beta_dtype == torch.bfloat16 else ""
+
+    def forms(inputs, h0, dht, j):
+        runs = {}
+        for label, lo_on in (("lo", True), ("split", False)):
+            with monkeypatch.context() as m:
+                arch = _split_device(m, device, split=True)
+                m.setattr(
+                    cake_chain, "_pv_tf32_split_route", lambda _arch, _segs: False
+                )
+                m.setattr(cake_chain, "MODES_DV_LO", lo_on)
+                if j == 0:
+                    cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
+                    meta = cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1],
+                                                  cake_chain.make_options(), heads[1] // heads[0])  # fmt: skip
+                    assert meta.bwd_split is not None, (group, meta.bwd_segments)
+                stages = _record_launches(m)
+                runs[label] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+            form = cake_chain.tail_form(*heads, arch=arch) + bf16
+            walk, tail = "dhu_tc2_dvl32_modes", form
+            if lo_on:
+                walk, tail = (
+                    cake_chain.MODES_DV_LO_WALK,
+                    cake_chain.MODES_DV_LO_TAILS[form],
+                )
+            assert stages.count(walk) >= 2 and tail in stages, (label, stages)
+            assert "dhu_tc2_dvl32_gm" in stages, (label, stages)
+            lo = {stage for stage in stages if stage in _lo_stages()}
+            assert lo == ({walk, tail} if lo_on else set()), (label, stages)
+        return runs
+
+    _judge_forms(record_property, 7301, seq_lens, heads, device, forms, beta_dtype=beta_dtype, names=STATE_OUTPUTS,
+                 states=True)  # fmt: skip
 
 
 def test_pv_tf32_stages_fall_back_to_the_other_programs(monkeypatch) -> None:
