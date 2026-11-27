@@ -169,12 +169,15 @@ class _PaddingRows:
 @dataclass(slots=True, eq=False)
 class _SchedulePlan:
     """Schedule launches of one adapter on one workspace (see
-    ``MoKFunctional._schedule_plan``)."""
+    ``MoKFunctional._schedule_plan``). A fused plan (``fused``) gathers the
+    caller's int64 expert ids with ``gather_i64`` and has no route buffer
+    (``routes`` None)."""
 
-    routes: torch.Tensor
+    routes: torch.Tensor | None
     gather: object
     barrier: object
     scheduler: object
+    fused: bool = False
 
 
 def count_routed_load(routes, ep_size, local_experts):
@@ -823,30 +826,38 @@ class MoKFunctional:
             )
         else:
             with _ffi_stream():
-                # The same copies and launches as ``_schedule_launches``, in
-                # the same order, through the workspace's prebuilt plan.
-                routes = plan.routes
-                if count == workspace.num_local_tokens:
-                    routes.copy_(top_experts)
+                if plan.fused:
+                    # ``gather_i64`` gathers the low 32 bits of the caller's
+                    # ids and -1 past them: the words the route buffer's copy
+                    # (and -1 fill) and the gather below give.
+                    plan.gather.launch((top_experts, count * workspace.topk))
                 else:
-                    routes.fill_(-1)
-                    routes[:count].copy_(top_experts)
-                if plan.gather is None:
-                    self.communication.all_gather_top_experts(
-                        routes,
-                        workspace.all_gather_top_experts_buffer,
-                        workspace.all_gather_top_experts_buffer_multicast_ptr,
-                        workspace.ep_rank,
-                    )
-                else:
-                    plan.gather.launch(())
+                    # The same copies and launches as ``_schedule_launches``,
+                    # in the same order, through the workspace's prebuilt plan.
+                    routes = plan.routes
+                    if count == workspace.num_local_tokens:
+                        routes.copy_(top_experts)
+                    else:
+                        routes.fill_(-1)
+                        routes[:count].copy_(top_experts)
+                    if plan.gather is None:
+                        self.communication.all_gather_top_experts(
+                            routes,
+                            workspace.all_gather_top_experts_buffer,
+                            workspace.all_gather_top_experts_buffer_multicast_ptr,
+                            workspace.ep_rank,
+                        )
+                    else:
+                        plan.gather.launch(())
                 if plan.barrier is not None:
                     plan.barrier.launch(())
+                # A fused plan writes the layout in its count launch.
                 rank, token, num_tokens, counts, layout = self.scheduler.launch_planned(
                     plan.scheduler
                 )
                 self._observe_load(workspace, config, num_tokens)
-                self.scheduler.layout_planned(plan.scheduler, counts, rank, layout)
+                if not plan.fused:
+                    self.scheduler.layout_planned(plan.scheduler, counts, rank, layout)
                 owner_routes = self.scheduler.owner_loads() if split else None
                 self.scheduler.release_counts()
         if owner is not None:
@@ -992,7 +1003,15 @@ class MoKFunctional:
         template eagerly, so that capture runs ``_schedule_launches``. The
         plan's tensors are normal tensors also when the first build runs under
         ``torch.inference_mode()``, so later builds in or outside inference
-        mode can write the route buffer."""
+        mode can write the route buffer.
+
+        On a 384-expert layout whose fused count kernel the package ships for
+        the device (``MoKScheduler.count_fused``), with a communication object
+        that plans ``gather_i64`` (EP > 1), the plan is fused: no route buffer;
+        ``gather_i64`` reads the caller's int64 ids, then the barrier, the
+        scheduler's ``count_fused`` launch (counts, padding, layout and the
+        ``-1`` sentinel) and its rows launch. Its words equal the unfused
+        plan's."""
         key = ("schedule", self.scheduler, self.communication)
         plans = workspace.launch_plans
         plan = plans.get(key)
@@ -1000,6 +1019,31 @@ class MoKFunctional:
             if torch.cuda.is_current_stream_capturing():
                 return None
             with torch.inference_mode(False):
+                fused = None
+                planner64 = getattr(self.communication, "gather_i64_plan", None)
+                if (
+                    planner64 is not None
+                    and getattr(self.scheduler, "count_fused", None) is not None
+                ):
+                    fused = planner64(
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.all_gather_top_experts_buffer_multicast_ptr,
+                        workspace.ep_rank,
+                    )
+                if fused is not None:
+                    plan = plans[key] = _SchedulePlan(
+                        routes=None,
+                        gather=fused,
+                        barrier=self._barrier_plan(workspace),
+                        scheduler=self.scheduler.plan(
+                            workspace.all_gather_top_experts_buffer,
+                            workspace.schedule_capacity,
+                            workspace.ep_rank,
+                            fused=True,
+                        ),
+                        fused=True,
+                    )
+                    return plan
                 routes = torch.empty(
                     (workspace.num_local_tokens, workspace.topk),
                     dtype=torch.int32,
@@ -1064,19 +1108,25 @@ class MoKFunctional:
     def _load_entry(self, workspace, create):
         entry = self._load_state.get(id(workspace))
         if entry is None and create:
-            entry = {
-                "host": [
+            # Normal tensors also when the first observation runs under
+            # ``torch.inference_mode()``: every later observation copies into
+            # these slots in place, in or outside inference mode.
+            with torch.inference_mode(False):
+                host = [
                     torch.empty(workspace.ep_size, dtype=torch.int32, pin_memory=True)
                     for _ in range(2)
-                ],
+                ]
+                tokens_host = [
+                    torch.empty(1, dtype=torch.int32, pin_memory=True) for _ in range(2)
+                ]
+            entry = {
+                "host": host,
                 "events": [torch.cuda.Event() for _ in range(2)],
                 "slot": 0,
                 "pending": None,
                 "loads": (),
                 "split": None,
-                "tokens_host": [
-                    torch.empty(1, dtype=torch.int32, pin_memory=True) for _ in range(2)
-                ],
+                "tokens_host": tokens_host,
                 "tokens_observed": [False, False],
                 "tokens": None,
                 "multimacro": False,
