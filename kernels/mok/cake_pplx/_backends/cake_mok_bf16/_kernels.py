@@ -38,6 +38,9 @@ SCHEDULER_LAYOUTS = (
 # The 384-routed-expert layouts: top-k 6 with the router weight before the down
 # projection only.
 SCHEDULER_LAYOUTS_384 = ((4, 96), (8, 48), (16, 24), (32, 12), (64, 6))
+# Chunks per source rank of the fused count kernel (``count_fused``): its launch
+# is ``EP * _FUSED_CHUNKS`` CTAs, one per chunk.
+_FUSED_CHUNKS = 32
 # The 512-routed-expert layouts: top-k 10 with the per-token shared-expert scale
 # and the direct router-weight gradient only (``MODE_GROUPS["scaled_top10"]``).
 SCHEDULER_LAYOUTS_512 = ((8, 64),)
@@ -3713,6 +3716,15 @@ class MoKBackwardMXFP8:
         )
 
 
+def _ships(role):
+    """Whether the package ships kernel ``role`` for the current device's target
+    (a ``sources.json`` record that names the target)."""
+    from . import jit
+
+    record = jit._registry().get(role)
+    return record is not None and jit.target_arch() in record["arches"]
+
+
 class MoKCommunication:
     """Prepared launchers over the caller-owned symmetric buffers."""
 
@@ -3724,6 +3736,8 @@ class MoKCommunication:
         self.chunk_bytes = chunk_bytes
         self.gather_module = load_kernel("gather")
         self.barrier_module = load_kernel("barrier")
+        # Loaded by the first :meth:`gather_i64_plan` (the 384-expert layouts).
+        self.gather_i64_module = None
 
     def _check_gather(self, routes, gathered, multicast_address, rank):
         """The checks of :meth:`all_gather_top_experts`; returns the EP size."""
@@ -3793,6 +3807,47 @@ class MoKCommunication:
             (),
         )
 
+    def gather_i64_plan(self, gathered, multicast_address, rank):
+        """The all-gather of a schedule's expert ids read straight from the
+        caller's int64 ids (the ``gather_i64`` kernel), validated once for a
+        caller-owned ``gathered`` buffer (int32 ``[EP, rows, top_k]``) that
+        outlives the plan: a :class:`_Plan` to launch with
+        ``plan.launch((local_ids, valid))`` inside ``_ffi_stream()``, or None at
+        EP 1. ``local_ids`` is this call's contiguous CUDA int64
+        ``[count, top_k]`` (``count <= rows``) and ``valid`` its
+        ``count * top_k``: the kernel stores the low 32 bits of each id (the bits
+        an int64 -> int32 copy keeps) and ``-1`` in the slots past ``valid``,
+        the words :meth:`all_gather_top_experts` gathers from a route buffer
+        filled that way. Build the plan outside CUDA Graph capture (it loads the
+        kernel on first use)."""
+        import torch
+
+        from .jit import load_kernel
+
+        if (
+            not isinstance(gathered, torch.Tensor)
+            or gathered.ndim != 3
+            or not len(gathered)
+        ):
+            raise ValueError(
+                "Gathered buffer must be contiguous CUDA int32 [EP, rows, top_k]"
+            )
+        rows = gathered[0]
+        if self._check_gather(rows, gathered, multicast_address, rank) == 1:
+            return None
+        if self.gather_i64_module is None:
+            self.gather_i64_module = load_kernel("gather_i64")
+        return _Plan(
+            self.gather_i64_module,
+            (rows.numel() * 4 // self.chunk_bytes, 1, 1),
+            dict(
+                multicast_address=multicast_address,
+                rank=rank,
+                numel=rows.numel(),
+            ),
+            ("local_ids", "valid"),
+        )
+
     def barrier_all(self, counter, peer_pointers, multicast_address, target):
         import torch
 
@@ -3860,13 +3915,20 @@ class _SchedulerPlan:
     """A validated schedule build (see :meth:`MoKScheduler.plan`): the count,
     pad, rows and layout launches bound to their launch-invariant arguments,
     the int32 element ranges of one schedule buffer and the template of its
-    initialized prefix."""
+    initialized prefix; or, for a fused plan, the ``count_fused`` and rows
+    launches, the fused launch's scratch (``partials``, ``done``) and the
+    split sizes of the schedule buffer (``count``, ``pad``, ``layout`` and
+    ``template`` None)."""
 
     __slots__ = (
         "count",
         "pad",
         "rows",
         "layout",
+        "count_fused",
+        "partials",
+        "done",
+        "split",
         "template",
         "capacity",
         "slab",
@@ -3898,6 +3960,15 @@ class MoKScheduler:
     (``peer_token``, ``peer_rank``, the counter slab and the layout), and one
     copy from the plan's template writes the ``-1`` sentinel and the zero
     counters that ``__call__`` writes with a fill and a zero slab.
+
+    On the 384-expert layouts, when the package ships the ``count_fused``
+    kernel of the layout for the device (:attr:`count_fused`, else None), a
+    fused plan (``plan(..., fused=True)``) replaces the template copy and the
+    count, pad and layout launches with one ``count_fused`` launch that writes
+    the same words (the counts and owner-rank bins, ``tokens_per_expert``,
+    ``num_tokens``, the layout and the ``-1`` sentinel of ``peer_rank``)
+    before the rows launch; :meth:`launch_planned` then returns the layout
+    written. ``__call__`` and :meth:`layout` keep the separate launches.
     """
 
     def __init__(self, world_size: int, local_experts: int):
@@ -3911,6 +3982,14 @@ class MoKScheduler:
         self.pad = load_kernel(f"pad_{world_size}")
         self.rows = load_kernel(f"rows_{world_size}_{local_experts}")
         self.layout_module = load_kernel("expert_layout")
+        fused = f"count_fused_{world_size}_{local_experts}"
+        self.count_fused = (
+            load_kernel(fused)
+            if (world_size, local_experts) in SCHEDULER_LAYOUTS_384
+            and _ships(fused)
+            and _ships("gather_i64")
+            else None
+        )
         self._counts = None
 
     def _check(self, topk_all, schedule_capacity, rank):
@@ -3998,7 +4077,7 @@ class MoKScheduler:
         every fused launch of it."""
         return expert_layout(self.layout_module, tokens_per_expert, capacity, peer_rank)
 
-    def plan(self, topk_all, schedule_capacity: int, rank: int):
+    def plan(self, topk_all, schedule_capacity: int, rank: int, *, fused=False):
         """:meth:`__call__` and :meth:`layout` validated once for a caller-owned
         gathered-routes buffer ``topk_all`` that outlives the plan, a schedule
         capacity and a rank (a workspace's): a :class:`_SchedulerPlan` for
@@ -4011,9 +4090,21 @@ class MoKScheduler:
         aligned ``num_tokens`` / ``tokens_per_expert`` group) and the layout
         starts 512-B aligned. Build the plan outside CUDA Graph capture (its
         template is written here).
+
+        ``fused=True`` (a scheduler with :attr:`count_fused` only) plans the
+        ``count_fused`` and rows launches over the same buffer layout instead:
+        no template (the fused launch writes every word the template, the
+        count, pad and layout launches write), and its scratch, made here:
+        ``partials`` (int32 ``[EP * 32, local experts + EP]``, every word
+        stored before it is read in each launch) and ``done`` (a zeroed
+        word that every launch returns to zero).
         """
         import torch
 
+        if fused and self.count_fused is None:
+            raise ValueError(
+                "This scheduler layout or device has no fused count kernel"
+            )
         world, local_tokens, top_k = self._check(topk_all, schedule_capacity, rank)
         experts = self.local_experts
         pieces, keep, slab_total = _slab_pieces((experts * world + world, (1, experts)))
@@ -4026,13 +4117,17 @@ class MoKScheduler:
         layout_start = offset + (-offset % 128)
         layout_end = layout_start + 3 * experts + schedule_capacity // 256
         kwargs = dict(device=topk_all.device, dtype=torch.int32)
+        sizes = dict(local_tokens=local_tokens, top_k=top_k, rank=rank)
+        if fused:
+            return self._fused_plan(
+                topk_all, schedule_capacity, views, layout_start, layout_end, sizes
+            )
         template = torch.cat(
             (
                 torch.full((schedule_capacity,), -1, **kwargs),
                 torch.zeros(slab_total, **kwargs),
             )
         )
-        sizes = dict(local_tokens=local_tokens, top_k=top_k, rank=rank)
         return _SchedulerPlan(
             count=_Plan(
                 self.count,
@@ -4064,6 +4159,10 @@ class MoKScheduler:
                 dict(experts=experts),
                 ("counts", "schedule_rank", "layout"),
             ),
+            count_fused=None,
+            partials=None,
+            done=None,
+            split=None,
             template=template,
             capacity=schedule_capacity,
             slab=tuple(views),
@@ -4072,15 +4171,94 @@ class MoKScheduler:
             device=topk_all.device,
         )
 
+    def _fused_plan(self, topk_all, capacity, views, layout_start, layout_end, sizes):
+        """The fused :meth:`plan`: the ``count_fused`` and rows launches, their
+        scratch and the sizes of one split of the schedule buffer into
+        ``[peer_token, peer_rank, counts, num_tokens, tokens_per_expert,
+        layout]`` (the views of the unfused plan, padding pieces between)."""
+        import torch
+
+        world, experts = self.world_size, self.local_experts
+        device = topk_all.device
+        partials = torch.empty(
+            world * _FUSED_CHUNKS * (experts + world), dtype=torch.int32, device=device
+        )
+        done = torch.zeros(1, dtype=torch.int32, device=device)
+        pieces, keep, at = [], [], 0
+        for start, end in ((0, capacity), (capacity, 2 * capacity), *views,
+                           (layout_start, layout_end)):  # fmt: skip
+            if start > at:
+                pieces.append(start - at)
+                keep.append(False)
+            pieces.append(end - start)
+            keep.append(True)
+            at = end
+        kept = tuple(i for i, k in enumerate(keep) if k)
+        return _SchedulerPlan(
+            count=None,
+            pad=None,
+            rows=_Plan(
+                self.rows,
+                (experts * world, 1, 1),
+                dict(topk_all=topk_all, capacity=capacity, **sizes),
+                (
+                    "counts",
+                    "tokens_per_expert",
+                    "num_tokens",
+                    "schedule_peer_rank",
+                    "schedule_peer_token_idx",
+                ),
+            ),
+            layout=None,
+            count_fused=_Plan(
+                self.count_fused,
+                (world * _FUSED_CHUNKS, 1, 1),
+                dict(
+                    topk_all=topk_all,
+                    partials=partials,
+                    done=done.view(torch.uint32),
+                    capacity=capacity,
+                    **sizes,
+                ),
+                (
+                    "counts",
+                    "tokens_per_expert",
+                    "num_tokens",
+                    "schedule_peer_rank",
+                    "layout",
+                ),
+            ),
+            partials=partials,
+            done=done,
+            split=(tuple(pieces), operator.itemgetter(*kept)),
+            template=None,
+            capacity=capacity,
+            slab=tuple(views),
+            layout_range=(layout_start, layout_end),
+            total=layout_end,
+            device=device,
+        )
+
     def launch_planned(self, plan):
         """:meth:`__call__` of a :meth:`plan` inside ``_ffi_stream()``: the
         count, pad and rows launches over one new schedule buffer. Returns
         ``(peer_rank, peer_token, num_tokens, tokens_per_expert, layout)``,
         views of that buffer (``layout`` not yet written; see
-        :meth:`layout_planned`). :meth:`owner_loads` reads this call's counts
-        until :meth:`release_counts`."""
+        :meth:`layout_planned`). A fused plan launches ``count_fused`` and
+        rows instead and returns the layout written. :meth:`owner_loads` reads
+        this call's counts until :meth:`release_counts`."""
         import torch
 
+        if plan.count_fused is not None:
+            buffer = torch.empty(plan.total, dtype=torch.int32, device=plan.device)
+            sizes, pick = plan.split
+            peer_token, peer_rank, counts, num_tokens, per_expert, layout = pick(
+                torch.split(buffer, sizes)
+            )
+            plan.count_fused.launch((counts, per_expert, num_tokens, peer_rank, layout))
+            plan.rows.launch((counts, per_expert, num_tokens, peer_rank, peer_token))
+            self._counts = counts
+            return peer_rank, peer_token, num_tokens, per_expert, layout
         capacity = plan.capacity
         buffer = torch.empty(plan.total, dtype=torch.int32, device=plan.device)
         buffer[capacity : capacity + plan.template.numel()].copy_(plan.template)

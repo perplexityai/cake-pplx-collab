@@ -58,18 +58,18 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 ## Builds
 
-`build.json` lists 267 builds of 102 kernels: 65 kernels for each of `sm_100a`, `sm_103a` and `sm_107a` (the
-router-weight-before-down fused kernels, the top-k 6 epilogue and the scheduler kernels of the 384-expert layouts
-included), two more for `sm_107a` only, and 35 more for `sm_100a` and `sm_103a` only (the kernels of the two mode
-groups and the eight requantized MXFP8 kernels).
+`build.json` lists 285 builds of 108 kernels: 71 kernels for each of `sm_100a`, `sm_103a` and `sm_107a` (the
+router-weight-before-down fused kernels, the top-k 6 epilogue, the scheduler kernels of the 384-expert layouts and
+their fused schedule kernels included), two more for `sm_107a` only, and 35 more for `sm_100a` and `sm_103a` only
+(the kernels of the two mode groups and the eight requantized MXFP8 kernels).
 
 | Group | Kernels |
 |---|---|
 | BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); router weight before the down projection: clamped forward (with or without the saved context), clamped recompute, clamped backward with FP32 weight gradients |
 | MXFP8 fused | forward, context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); `sm_107a` only: the multi-macrobatch forward (plain, clamped); `sm_100a` and `sm_103a` only: the same eight kernels with requantized token-direction copies (`mxfp8_transposed="requantized"`) |
-| Scheduler | count and rows per scheduler layout, pad per EP size |
+| Scheduler | count and rows per scheduler layout, pad per EP size; per 384-expert layout, the fused count (counts, padding, peer-rank sentinel and expert layout in one launch) |
 | Layout | the expert layout, zero |
-| Communication | barrier, gather |
+| Communication | barrier, gather, gather of int64 expert IDs |
 | Epilogues | forward (weighted sum), top-k 2 and 8; backward (unweighted sum, also the router-weight-before-down forward's), top-k 2, 6 and 8 |
 
 The locality-domain (`_domain`) builds of the MoK kernels, which split work over the two dies of an

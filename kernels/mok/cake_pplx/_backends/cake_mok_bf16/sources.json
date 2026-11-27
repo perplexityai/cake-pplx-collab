@@ -4369,5 +4369,148 @@
       "grid_y",
       "grid_z"
     ]
+  },
+  "gather_i64": {
+    "library": "cake_mok_gather_i64",
+    "arches": [
+      "sm_100a",
+      "sm_103a",
+      "sm_107a"
+    ],
+    "arguments": [
+      "local_ids",
+      "multicast_address",
+      "rank",
+      "numel",
+      "valid",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_fused_4_96": {
+    "library": "cake_mok_count_fused_4_96",
+    "arches": [
+      "sm_100a",
+      "sm_103a",
+      "sm_107a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "layout",
+      "partials",
+      "done",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_fused_8_48": {
+    "library": "cake_mok_count_fused_8_48",
+    "arches": [
+      "sm_100a",
+      "sm_103a",
+      "sm_107a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "layout",
+      "partials",
+      "done",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_fused_16_24": {
+    "library": "cake_mok_count_fused_16_24",
+    "arches": [
+      "sm_100a",
+      "sm_103a",
+      "sm_107a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "layout",
+      "partials",
+      "done",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_fused_32_12": {
+    "library": "cake_mok_count_fused_32_12",
+    "arches": [
+      "sm_100a",
+      "sm_103a",
+      "sm_107a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "layout",
+      "partials",
+      "done",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
+  },
+  "count_fused_64_6": {
+    "library": "cake_mok_count_fused_64_6",
+    "arches": [
+      "sm_100a",
+      "sm_103a",
+      "sm_107a"
+    ],
+    "arguments": [
+      "topk_all",
+      "counts",
+      "tokens_per_expert",
+      "num_tokens",
+      "schedule_peer_rank",
+      "layout",
+      "partials",
+      "done",
+      "local_tokens",
+      "top_k",
+      "capacity",
+      "rank",
+      "grid_x",
+      "grid_y",
+      "grid_z"
+    ]
   }
 }

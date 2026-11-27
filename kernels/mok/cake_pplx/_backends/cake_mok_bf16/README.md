@@ -334,7 +334,10 @@ count / rows kernels of the 384-expert layouts are generated for SM100a,
 SM103a and SM107a. The forward and recompute take two arguments more than their
 clamped roles (`weight_peers`, the uint64 table of the ranks' router-weight
 buffers, and `row_weights`, the per-call FP32 `[macro_size]` ring); the
-backward takes the clamped FP32 backward's arguments.
+backward takes the clamped FP32 backward's arguments. The fused schedule
+kernels of the 384-expert layouts (`gather_i64` and `count_fused_<EP>_<E>`,
+see "Unequal source inputs") are generated for the same targets, each with
+its own launch binding.
 
 The 512-expert top-10 group's kernels (`MODE_GROUPS["scaled_top10"]`) are
 generated for SM100a and SM103a only: the direct-gradient backward
@@ -436,6 +439,24 @@ fill it replaces, in one launch. A source that autograd records, or one that
 overlaps the workspace, takes the copy and the fill. Every call still writes
 the padding rows of the workspace's source, combine and gradient buffers; it
 never relies on their earlier contents.
+
+On the 384-expert layouts (top-k 6, router weight before the down projection)
+the plan is fused: `gather_i64` gathers the caller's int64 expert IDs directly
+(their low 32 bits, the bits an int64 to int32 copy keeps, and `-1` past the
+source count), with no route buffer; after the barrier, one `count_fused`
+launch writes the counts and owner-rank totals, `tokens_per_expert`,
+`num_tokens`, the expert layout and the `-1` sentinel of `peer_rank`, so the
+schedule needs no template copy and no pad or layout launch before the rows
+launch. A schedule build is then four stream operations instead of eight.
+Every schedule word, `owner_routes` included, equals the unfused launches'
+bit for bit. The real rows of the layout come from the counts: the rows
+launch writes exactly the counted routes of each expert from its padded
+start, which is the count the unfused layout launch finds. The fused launch
+keeps per-chunk partial counts and a completion word in plan scratch made
+with the plan, outside CUDA Graph capture; every launch stores each partial
+before reading it and returns the completion word to zero. A schedule whose
+padded rows exceed the capacity still stops in the rows launch, and the fused
+launch writes no layout word past the capacity.
 
 ## Repeatability
 

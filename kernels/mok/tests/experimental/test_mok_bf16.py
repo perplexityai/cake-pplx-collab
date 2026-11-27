@@ -676,6 +676,262 @@ def test_build_schedule_plan_built_under_inference_mode():
     assert _same(first, unplanned) and _same(second, unplanned) and _same(third, unplanned)
 
 
+#: int64 expert ids outside the int32 range and at its edges: ``gather_i64`` keeps their low 32 bits, as the route
+#: buffer's int64 -> int32 copy does.
+FAR_IDS = (2**32 + 5, -(2**33) + 7, 2**31, -(2**31) - 1, 2**31 - 1, -(2**31), 2**40 - 1, -(2**40), 2**63 - 1, -(2**63))
+
+
+@pytest.mark.parametrize("count", [512, 333, 0], ids=["full", "partial", "empty"])
+def test_gather_i64_plan_matches_the_route_buffer_gather(count):
+    """The ``gather_i64`` plan stores the words of the route buffer's int64 -> int32 copy (and ``-1`` fill past the
+    source count) followed by the int32 gather plan, bit for bit: ids outside the int32 range included, a partial and
+    an empty source count, into the gathered slice of its rank only (one GPU: a unicast address in place of the
+    multicast alias, at ranks 0 and EP - 1). EP 1 has no plan (its gather is a copy)."""
+    _require_role("gather_i64")
+    ep, rows, topk = 4, 512, 6
+    communication = kernels.MoKCommunication()
+    generator = torch.Generator(device="cuda").manual_seed(4421 + count)
+    ids = randint(-(2**40), 2**40, (count, topk), device="cuda", generator=generator)
+    far = torch.tensor(FAR_IDS, device="cuda", dtype=torch.int64)
+    n = min(far.numel(), ids.numel())
+    ids.view(-1)[torch.arange(n, device="cuda") * max(1, ids.numel() // max(1, n))] = far[:n]
+    routes = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+    routes[:count].copy_(ids)
+    for rank in (0, ep - 1):
+        expected = torch.full((ep, rows, topk), 0x5A5A, dtype=torch.int32, device="cuda")
+        base = communication.gather_plan(routes, expected, expected.data_ptr(), rank)
+        gathered = torch.full_like(expected, 0x5A5A)
+        plan = communication.gather_i64_plan(gathered, gathered.data_ptr(), rank)
+        for _ in range(2):
+            with kernels._ffi_stream():
+                base.launch(())
+                plan.launch((ids, count * topk))
+            torch.cuda.synchronize()
+            assert torch.equal(gathered, expected), rank
+            assert torch.equal(gathered[rank], routes)
+    single = torch.zeros((1, rows, topk), dtype=torch.int32, device="cuda")
+    assert communication.gather_i64_plan(single, single.data_ptr(), 0) is None
+
+
+#: Route patterns of :func:`test_fused_scheduler_plan_matches_the_unplanned_launches` (the geometries of the
+#: ``count_fused`` kernel tests): a uniform top-6 router with a masked tail and below -1 and out-of-range ids, a hot
+#: rank at 1.5 and 3 times its share, ragged source ranks with an empty one, top-k 1 routes all masked, all to one
+#: expert, in multiples of 256 rows per expert and one row per expert, and 256 x 6 = 1536 slots per source rank (not a
+#: multiple of the kernels' 1024 threads).
+FUSED_ROUTE_PATTERNS = (
+    "uniform",
+    "hot1.5",
+    "hot3",
+    "ragged",
+    "all_masked",
+    "one_expert",
+    "multiple_256",
+    "one_row",
+    "odd_slots",
+)
+#: The real rows of each source rank of the ``ragged`` pattern (512 rows per source rank), repeated over the ranks.
+FUSED_RAGGED = (0, 512, 37, 300, 255, 1, 511, 256)
+
+
+def _fused_routes(pattern, ep, experts, rank):
+    """The gathered routes (contiguous int32 ``[EP, tokens, top-k]``) of a :data:`FUSED_ROUTE_PATTERNS` entry, as seen
+    by ``rank``, from a fixed seed."""
+    total, own = ep * experts, rank * experts
+    if pattern in ("all_masked", "one_expert", "multiple_256", "one_row"):
+        # Top-k 1 route patterns: every route masked; every route to this rank's local expert 1; 256-row token blocks
+        # to one local expert each (block b of every source rank to local expert b % local experts); local expert
+        # e's one route from token e of source rank 0, every other route masked.
+        tokens = 256 * experts if pattern == "multiple_256" else 256
+        ids = torch.full((ep, tokens, 1), -1, dtype=torch.int32, device="cuda")
+        if pattern == "one_expert":
+            ids.fill_(own + 1)
+        elif pattern == "multiple_256":
+            blocks = torch.arange(tokens, device="cuda", dtype=torch.int32) // 256 % experts
+            ids.copy_((own + blocks).view(1, tokens, 1).expand_as(ids))
+        elif pattern == "one_row":
+            ids[0, :experts, 0] = own + torch.arange(experts, device="cuda", dtype=torch.int32)
+        return ids
+    topk = _scheduler_topk(ep, experts)
+    tokens = 256 if pattern == "odd_slots" else 512
+    generator = torch.Generator(device="cuda").manual_seed(2297)
+    keys = rand(ep * tokens, total, device="cuda", generator=generator)
+    if pattern.startswith("hot"):
+        # Draws without replacement weighted by expert (the top-k largest u ** (1 / weight)): this rank's experts
+        # weigh 1.5 or 3 times the others', so the rank receives about that many times its share of the routes.
+        weight = torch.ones(total, device="cuda")
+        weight[own : own + experts] = float(pattern[3:])
+        ids = (keys ** (1 / weight)).argsort(-1, descending=True)[:, :topk]
+    else:
+        ids = keys.argsort(-1)[:, :topk]
+    ids = ids.int().reshape(ep, tokens, topk).contiguous()
+    if pattern == "uniform":
+        ids[0, tokens - 37 :] = -1
+        ids[ep - 1, :8, 0] = torch.tensor(
+            [-2, -1000, total, total + experts - 1, -3, total + 7, -1, total + 1], device="cuda", dtype=torch.int32
+        )
+    elif pattern == "ragged":
+        for peer in range(ep):
+            ids[peer, FUSED_RAGGED[peer % len(FUSED_RAGGED)] :] = -1
+    return ids
+
+
+@pytest.mark.parametrize("pattern", FUSED_ROUTE_PATTERNS)
+@pytest.mark.parametrize("ep,experts", kernels.SCHEDULER_LAYOUTS_384)
+def test_fused_scheduler_plan_matches_the_unplanned_launches(ep, experts, pattern):
+    """On the 384-expert layouts the scheduler's fused plan (``count_fused`` then rows, no template copy, no pad or
+    layout launch) gives the unplanned launches' schedule bit for bit, twice from one plan: peer ranks on every row
+    (the ``-1`` sentinel included), the peer token of every real row, the row count, the padded counts, the owner-rank
+    bins and the written layout prefix, on every route pattern of :data:`FUSED_ROUTE_PATTERNS` (masked, below -1 and
+    out-of-range ids included) at ranks 0, EP / 2 and EP - 1. Its ``done`` word is 0 after every launch, and its views
+    sit where the unfused plan's do."""
+    _require_role(f"count_fused_{ep}_{experts}")
+    scheduler = MoKScheduler(ep, experts)
+    assert scheduler.count_fused is not None
+    for rank in sorted({0, ep // 2, ep - 1}):
+        ids = _fused_routes(pattern, ep, experts, rank)
+        _, tokens, topk = ids.shape
+        capacity = ep * tokens * topk + experts * 256
+        peers, slots, total, counts = scheduler(ids, capacity, rank)
+        owner = scheduler.owner_loads().clone()
+        layout = scheduler.layout(counts, capacity, peers)
+        scheduler.release_counts()
+        written = 3 * experts + int(total.item()) // 256
+        real = peers >= 0
+        plan = scheduler.plan(ids, capacity, rank, fused=True)
+        unfused = scheduler.plan(ids, capacity, rank)
+        assert plan.template is None and plan.count is None and plan.pad is None and plan.layout is None
+        assert (plan.slab, plan.layout_range, plan.total) == (unfused.slab, unfused.layout_range, unfused.total)
+        for _ in range(2):
+            with kernels._ffi_stream():
+                planned = scheduler.launch_planned(plan)
+                planned_owner = scheduler.owner_loads().clone()
+            scheduler.release_counts()
+            p_peers, p_slots, p_total, p_counts, p_layout = planned
+            assert torch.equal(p_peers, peers) and torch.equal(p_total, total)
+            assert torch.equal(p_counts, counts) and torch.equal(planned_owner, owner)
+            assert torch.equal(p_slots[real], slots[real])
+            assert torch.equal(p_layout[:written], layout[:written])
+            assert plan.done.item() == 0
+            base = p_peers.untyped_storage().data_ptr()
+            assert all(view.untyped_storage().data_ptr() == base for view in planned)
+            assert p_total.data_ptr() % 128 == 0 and p_counts.data_ptr() == p_total.data_ptr() + 4
+            assert p_layout.data_ptr() % 512 == 0 and p_layout.numel() == 3 * experts + capacity // 256
+
+
+class _OneGpuGroupI64(OneGpuGroup):
+    """:class:`OneGpuGroup` with the package's ``gather_i64`` plan: the kernel stores this rank's gathered slice through
+    a unicast address (one GPU), then every other slice copies it (every rank's ids are this rank's, as
+    :class:`OneGpuGroup` gathers them)."""
+
+    def __init__(self):
+        self.communication = kernels.MoKCommunication()
+
+    def gather_i64_plan(self, gathered, multicast_address, rank):
+        plan = self.communication.gather_i64_plan(gathered, gathered.data_ptr(), rank)
+
+        class Launch:
+            @staticmethod
+            def launch(values):
+                plan.launch(values)
+                own = gathered[rank : rank + 1]
+                gathered[:rank].copy_(own.expand_as(gathered[:rank]))
+                gathered[rank + 1 :].copy_(own.expand_as(gathered[rank + 1 :]))
+
+        return Launch()
+
+
+def _schedule_words(schedule, experts):
+    """:func:`_schedule_fields` and the owner-rank route totals (``None`` with the source split off)."""
+    return (*_schedule_fields(schedule, experts), schedule.owner_routes)
+
+
+def _same_words(a, b):
+    """Each pair of words equal, or both ``None``."""
+    return all(
+        (x is None and y is None) or (x is not None and y is not None and torch.equal(x, y))
+        for x, y in zip(a, b, strict=True)
+    )
+
+
+@pytest.mark.parametrize("split", [False, True], ids=["split-off", "split-on"])
+@pytest.mark.parametrize("count", [1024, 777], ids=["full", "partial"])
+@pytest.mark.parametrize("ep,experts", kernels.SCHEDULER_LAYOUTS_384)
+def test_build_schedule_fused_plan_matches_the_unplanned_launches(ep, experts, count, split):
+    """``build_schedule`` of a 384-expert layout through the workspace's fused schedule plan (``gather_i64`` on the
+    caller's int64 ids, the barrier, ``count_fused`` and rows) gives the unplanned launches' schedule bit for bit,
+    ``owner_routes`` included, with the source split on and off, on full and partial source counts (one-GPU emulation
+    of rank 0, :class:`_OneGpuGroupI64`): the first build under ``torch.inference_mode()`` (the plan's tensors stay
+    normal), the next outside it and a third inside it, and two replays of a CUDA Graph that captured a fused build. A
+    fresh workspace's first build during capture runs the unplanned launches and builds no plan; its replay gives the
+    same schedule."""
+    _require_role(f"count_fused_{ep}_{experts}")
+    _require_role("gather_i64")
+    topk, hidden = 6, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+    )
+    assert functional.scheduler.count_fused is not None
+    functional.communication = _OneGpuGroupI64()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4, source_split_comm_sms=4 if split else None)
+    generator = torch.Generator(device=device).manual_seed(5501 + count + ep)
+    ids = rand(count, ep * experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
+    ids[: count // 7, topk - 1] = -1  # masked routes
+    workspace, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    key = ("schedule", functional.scheduler, functional.communication)
+
+    def build(ws):
+        return _schedule_words(functional.build_schedule(ws, config, ids, num_local_experts=experts), experts)
+
+    with torch.inference_mode():
+        first = build(workspace)
+    plan = workspace.storage.launch_plans[key]
+    assert plan.fused and plan.routes is None
+    assert not plan.scheduler.partials.is_inference() and not plan.scheduler.done.is_inference()
+    second = build(workspace)
+    with torch.inference_mode():
+        third = build(workspace)
+    assert workspace.storage.launch_plans[key] is plan
+    rank, token, total, counts, layout, owner = functional._schedule_launches(
+        workspace.storage, config, ids, count, split
+    )
+    unplanned = _schedule_words(
+        workspace_module.MoKSchedule(
+            peer_rank=rank,
+            peer_token_idx=token,
+            num_tokens=total,
+            tokens_per_expert=counts,
+            layout=layout,
+            owner_routes=owner,
+        ),
+        experts,
+    )
+    assert (owner is not None) == split
+    assert _same_words(first, unplanned) and _same_words(second, unplanned) and _same_words(third, unplanned)
+    assert plan.scheduler.done.item() == 0
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+    for _ in range(2):
+        graph.replay()
+        torch.cuda.synchronize()
+        assert _same_words(_schedule_words(captured, experts), unplanned)
+        assert plan.scheduler.done.item() == 0
+
+    fresh, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = functional.build_schedule(fresh, config, ids, num_local_experts=experts)
+    assert key not in fresh.storage.launch_plans
+    graph.replay()
+    torch.cuda.synchronize()
+    assert _same_words(_schedule_words(captured, experts), unplanned)
+
+
 @pytest.mark.parametrize("ep,experts", [(4, 4), (8, 32)])
 def test_scheduler_owner_loads_match_count_routed_load_with_invalid_ids(ep, experts):
     """The owner-rank bins drop padding (-1), more negative ids and ids at or
@@ -935,6 +1191,44 @@ def test_observe_load_keeps_a_completed_observation():
     expected = backend.count_routed_load(skewed, ep_size, experts).tolist()
     assert list(entry["loads"]) == expected
     assert functional._comm_split(config, workspace) == (6, 6)
+
+
+def test_observe_load_first_observation_under_inference_mode():
+    """A workspace's first observation under ``torch.inference_mode()`` creates
+    its pinned slots as normal tensors, so the next observation outside
+    inference mode copies into them in place, a third one inside it does too,
+    and the adopted loads follow the routed load."""
+    require_gpu()
+    from types import SimpleNamespace
+
+    ep_size, experts = 4, 4
+    functional = backend.MoKFunctional(ep_size, experts, 2)
+    config = MoKConfig(
+        fwd_num_comm_sms=4,
+        bwd_num_comm_sms=4,
+        imbalance_comm_sms=(6, 6),
+        imbalance_threshold=1.5,
+    )
+    routes = (
+        torch.arange(ep_size * 256 * 2, device="cuda", dtype=torch.int32)
+        % (ep_size * experts)
+    ).view(ep_size, 256, 2)
+    capacity = ep_size * 256 * 2 + experts * 256
+    workspace = SimpleNamespace(ep_rank=0, ep_size=ep_size)
+    functional.scheduler(routes, capacity, 0)
+    with torch.inference_mode():
+        functional._observe_load(workspace, config)
+    entry = functional._load_entry(workspace, create=False)
+    assert not any(t.is_inference() for t in entry["host"] + entry["tokens_host"])
+    torch.cuda.synchronize()
+    functional._observe_load(workspace, config)
+    torch.cuda.synchronize()
+    with torch.inference_mode():
+        functional._observe_load(workspace, config)
+    torch.cuda.synchronize()
+    functional._observe_load(workspace, config)
+    expected = backend.count_routed_load(routes, ep_size, experts).tolist()
+    assert list(entry["loads"]) == expected
 
 
 def _layout_reference(counts, peers):
@@ -2102,7 +2396,12 @@ def test_comm_split_log_prints_each_split_change(capsys):
 # The router weight before the down projection: host checks (no GPU), then the kernels on SM100a, SM103a and SM107a
 # ---------------------------------------------------------------------------------------------------------------------
 
-#: The roles only the router-weight-before-down mode, top-k 6 and the 384-expert layouts load.
+#: The roles only the router-weight-before-down mode, top-k 6 and the 384-expert layouts load (the fused schedule's
+#: ``gather_i64`` and ``count_fused`` included).
+FUSED_SCHEDULE_ROLES = (
+    "gather_i64",
+    *(f"count_fused_{ep}_{experts}" for ep, experts in kernels.SCHEDULER_LAYOUTS_384),
+)
 BEFORE_DOWN_ROLES = (
     "forward_clamped_wbd",
     "forward_clamped_noctx_wbd",
@@ -2114,6 +2413,7 @@ BEFORE_DOWN_ROLES = (
         for ep, experts in kernels.SCHEDULER_LAYOUTS_384
         for kind in ("count", "rows")
     ),
+    *FUSED_SCHEDULE_ROLES,
 )
 #: The two layouts the requester runs and the worst-case geometry it asked to fit.
 BOUND_LAYOUTS = [(64, 6), (8, 48)]
@@ -2291,6 +2591,7 @@ def test_before_down_roles_are_registry_records():
             names |= {f"count_{ep}_{experts}", f"rows_{ep}_{experts}", f"pad_{ep}"}
     names |= {f"epilogue_backward_{k}" for k in kernels.EPILOGUE_TOPKS}
     names |= {f"epilogue_forward_{k}" for k in kernels.WEIGHTED_EPILOGUE_TOPKS}
+    names |= set(FUSED_SCHEDULE_ROLES)
     assert names <= set(registry), sorted(names - set(registry))
     assert set(BEFORE_DOWN_ROLES) <= names
     for name in BEFORE_DOWN_ROLES:
@@ -2301,6 +2602,79 @@ def test_before_down_roles_are_registry_records():
     assert set(kernels.BEFORE_DOWN_LAYOUTS) <= set(SCHEDULER_LAYOUTS)
     assert registry["backward_clamped_fp32_wbd"]["arguments"] == registry["backward_clamped_fp32"]["arguments"]
     assert registry["epilogue_backward_6"]["arguments"] == registry["epilogue_backward_8"]["arguments"]
+
+
+def test_fused_schedule_launches_pass_exactly_the_registry_arguments(monkeypatch):
+    """Host only (stub kernels, no launch): a 384-expert layout's scheduler loads its ``count_fused`` kernel, and a
+    fused plan hands ``count_fused`` and rows exactly their registry records' arguments over one schedule buffer split
+    at the unfused plan's views: no template, the ``partials`` scratch (int32 ``EP * 32 * (local experts + EP)``) and
+    the zeroed ``done`` word as a uint32 view; the owner-rank bins are the counts' tail. ``gather_i64_plan`` binds the
+    gathered buffer's geometry and takes the caller's int64 ids and their valid slot count per call; EP 1 has no
+    plan. A layout without a fused kernel refuses a fused plan."""
+    calls = _stub_loader(monkeypatch)
+    monkeypatch.setattr(kernels, "_ffi_stream", contextlib.nullcontext)
+    monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_103a")
+    ep, experts, topk, tokens, rank = 8, 48, 6, 512, 3
+    capacity = ep * tokens * topk + experts * 256
+    gathered = torch.zeros(ep, tokens, topk, dtype=torch.int32)
+    monkeypatch.setattr(MoKScheduler, "_check", lambda self, ids, size, r: (ep, tokens, topk))
+    scheduler = MoKScheduler(ep, experts)
+    assert scheduler.count_fused is not None
+    plan = scheduler.plan(gathered, capacity, rank, fused=True)
+    unfused = scheduler.plan(gathered, capacity, rank)
+    assert plan.template is None and (plan.count, plan.pad, plan.layout) == (None, None, None)
+    assert (plan.slab, plan.layout_range, plan.total) == (unfused.slab, unfused.layout_range, unfused.total)
+    assert plan.partials.dtype == torch.int32 and plan.partials.numel() == ep * 32 * (experts + ep)
+    assert plan.done.dtype == torch.int32 and plan.done.tolist() == [0]
+    calls.clear()
+    peer_rank, peer_token, num_tokens, per_expert, layout = scheduler.launch_planned(plan)
+    assert [role for role, _ in calls] == [f"count_fused_{ep}_{experts}", f"rows_{ep}_{experts}"]
+    fused, rows = calls[0][1], calls[1][1]
+    (c0, c1), (n0, n1), (e0, e1) = plan.slab
+    start, end = plan.layout_range
+    base = peer_rank.untyped_storage().data_ptr()
+    for view, at, size in (
+        (peer_token, 0, capacity),
+        (peer_rank, capacity, capacity),
+        (fused["counts"], c0, c1 - c0),
+        (num_tokens, n0, n1 - n0),
+        (per_expert, e0, e1 - e0),
+        (layout, start, end - start),
+    ):
+        assert view.untyped_storage().data_ptr() == base
+        assert (view.storage_offset(), view.numel()) == (at, size)
+    assert fused["topk_all"] is gathered and fused["partials"] is plan.partials
+    assert fused["done"].dtype == torch.uint32 and fused["done"].data_ptr() == plan.done.data_ptr()
+    assert fused["schedule_peer_rank"] is peer_rank and fused["layout"] is layout
+    assert fused["tokens_per_expert"] is per_expert and fused["num_tokens"] is num_tokens
+    assert (fused["local_tokens"], fused["top_k"], fused["capacity"], fused["rank"]) == (tokens, topk, capacity, rank)
+    assert (fused["grid_x"], fused["grid_y"], fused["grid_z"]) == (ep * 32, 1, 1)
+    assert rows["counts"] is fused["counts"] and rows["schedule_peer_rank"] is peer_rank
+    assert rows["schedule_peer_token_idx"] is peer_token and rows["tokens_per_expert"] is per_expert
+    assert scheduler.owner_loads().data_ptr() == fused["counts"][experts * ep :].data_ptr()
+    scheduler.release_counts()
+
+    communication = kernels.MoKCommunication()
+    monkeypatch.setattr(kernels.MoKCommunication, "_check_gather", lambda self, routes, out, address, r: len(out))
+    gather = communication.gather_i64_plan(gathered, 4096, rank)
+    ids = torch.zeros(100, topk, dtype=torch.int64)
+    gather.launch((ids, 100 * topk))
+    role, arguments = calls[-1]
+    assert role == "gather_i64" and arguments["local_ids"] is ids
+    assert {name: value for name, value in arguments.items() if name != "local_ids"} == {
+        "multicast_address": 4096,
+        "rank": rank,
+        "numel": tokens * topk,
+        "valid": 100 * topk,
+        "grid_x": tokens * topk * 4 // 2048,
+        "grid_y": 1,
+        "grid_z": 1,
+    }
+    assert communication.gather_i64_plan(torch.zeros(1, tokens, topk, dtype=torch.int32), 4096, 0) is None
+    other = MoKScheduler(8, 32)
+    assert other.count_fused is None
+    with pytest.raises(ValueError, match="no fused count kernel"):
+        other.plan(gathered, capacity, rank, fused=True)
 
 
 def test_before_down_launchers_pass_exactly_the_registry_arguments(monkeypatch):
