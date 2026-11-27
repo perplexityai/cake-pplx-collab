@@ -44,9 +44,10 @@ deterministic registry's records, routes and record scalars of this package's
   ``<program>_late``) ``cake_mhc_train_bwd_slab_fold__dynr_late`` (sm_100a,
   sm_103a), ``cake_mhc_train_bwd_slab_fold__dynr_os_late`` (sm_100a) and
   ``cake_mhc_train_bwd_slab_fold__dynr_late__h7168`` (sm_100a, sm_103a), and
-  the ``"dep1"`` fn splits of sm_100a ``cake_mhc_train_fn_split_atomic__tv128_dep1``
-  and ``__tv128_dep1__h7168`` (``FN_SPLIT_CHAIN_OVERRIDES``: each split of a form
-  that ships in both chains selects its chain by ``fn_split_bwd_program``); the
+  the ``"dep1"`` fn splits ``cake_mhc_train_fn_split_atomic__tv128_dep1`` and
+  ``__tv128_dep1__h7168`` (sm_100a, sm_103a) and ``__tv128_dep1__h5120``
+  (sm_100a) (``FN_SPLIT_CHAIN_OVERRIDES``: each split of a form that ships in
+  both chains selects its chain by ``fn_split_bwd_program``); the
   two-word column slab ``cake_mhc_train_bwd_slab_fold__dynr_pair`` (hidden 4096,
   all three; in no route: only ``accumulation="fp32x2"`` selects it, beside the
   copied two-word records of the mapping pass and the token owner); on sm_107a
@@ -101,8 +102,10 @@ deterministic registry's records, routes and record scalars of this package's
   rule (``FN_SPLIT_CHAIN_OVERRIDES``, ``fn_split_bwd_program``): the draw
   cells of B200 (148 SMs) and GB300 (152 SMs) at 4096 and 7168, whose ``"late"``
   bands are the 64-token tiles where ``k7_chunks`` gives at most one unit per SM,
-  and the chain cells of B200 at 4096 and 7168 (``"dep1"`` to 4096 tokens, at
-  4096 but from 1665 to 1728), each
+  and the chain cells of B200 at 4096, 5120 and 7168 (``"dep1"`` to 4096 tokens
+  at 4096, but not from 1665 to 1728, and at 7168; from 2048 to 4096 tokens at
+  5120) and of GB300 at 4096 and 7168 (``"dep1"`` from 4096 to 8192 tokens at
+  4096, from 1024 to 49152 tokens at 7168), each
   changing the selection of its own board alone; its geometries, its token-count bands (the unit order of
   record, and the banded calibration form under a test table), its board cells
   (those of record: the order cells of sm_107a with 212 SMs at every hidden
@@ -231,16 +234,25 @@ OWN = {
     "cake_mhc_train_bwd_slab_fold__dynr_late": ("sm_100a", "sm_103a"),
     "cake_mhc_train_bwd_slab_fold__dynr_os_late": ("sm_100a",),
     "cake_mhc_train_bwd_slab_fold__dynr_late__h7168": ("sm_100a", "sm_103a"),
-    # The "dep1" fn splits of sm_100a at 4096 and 7168 (FN_SPLIT_CHAIN_OVERRIDES: CHAIN_CELLS), beside the "dep" ones.
-    "cake_mhc_train_fn_split_atomic__tv128_dep1": ("sm_100a",),
-    "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168": ("sm_100a",),
+    # The "dep1" fn splits of the (architecture, hidden size) pairs with a "dep1" band in a chain cell
+    # (FN_SPLIT_CHAIN_OVERRIDES: CHAIN_CELLS): sm_100a at every hidden size, sm_103a at 4096 and 7168, beside the
+    # "dep" ones.
+    "cake_mhc_train_fn_split_atomic__tv128_dep1": ("sm_100a", "sm_103a"),
+    "cake_mhc_train_fn_split_atomic__tv128_dep1__h5120": ("sm_100a",),
+    "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168": ("sm_100a", "sm_103a"),
 }
 # The (architecture, hidden size) pairs whose atomic fn split is the "dep1" form (only the last CTA waits for the
 # token-owner pass); the "dep" form elsewhere.
 SPLIT_CHAIN = {("sm_107a", HIDDEN): "dep1"}
 # The (architecture, hidden size) pairs whose route holds the "dep" fn split and its "dep1" copy, one per call by
 # fn_split_bwd_program (each record's select rule names its chain).
-SPLIT_BOTH = (("sm_100a", HIDDEN), ("sm_100a", 7168))
+SPLIT_BOTH = (
+    ("sm_100a", HIDDEN),
+    ("sm_100a", 5120),
+    ("sm_100a", 7168),
+    ("sm_103a", HIDDEN),
+    ("sm_103a", 7168),
+)
 SPLIT_RULE = "fn_split_bwd_program"
 # The late-draw copies of the fold's two records (program keys ``dynr_late`` / ``dynr_os_late``).
 SLAB_LATE = "cake_mhc_train_bwd_slab_fold__dynr_late"
@@ -248,8 +260,9 @@ SLAB_OS_LATE = "cake_mhc_train_bwd_slab_fold__dynr_os_late"
 # The board cells of record of the fold's draw (BWD_SLAB_DRAW_OVERRIDES) and of the fn split's chain
 # (FN_SPLIT_CHAIN_OVERRIDES), keyed (arch, SM count, hidden): B200 (sm_100a with 148 SMs) and GB300 (sm_103a with 152
 # SMs) draw late at 4096 and 7168 on the 64-token tiles where k7_chunks gives at most one unit per SM (one unit per
-# CTA), minus the tiles of DRAW_DROPPED; B200 runs the "dep1" split at 4096 and 7168 up to 4096 tokens, minus the
-# token ranges of CHAIN_DROPPED (at 4096: 1665 to 1728).
+# CTA), minus the tiles of DRAW_DROPPED; the chain cells run the "dep1" split in the token-count spans of
+# RELAY_SPANS, minus the token ranges of CHAIN_DROPPED (B200 at 4096: 1665 to 1728): B200 at 4096 and 7168 up to 4096
+# tokens and at 5120 from 2048 to 4096, GB300 at 4096 from 4096 to 8192 and at 7168 from 1024 to 49152.
 DRAW_CELLS = {
     ("sm_100a", 148, 4096): (
         (1664, "late"), (1728, "ahead"), (2048, "late"), (2112, "ahead"), (2176, "late"), (2304, "ahead"),
@@ -275,8 +288,23 @@ CHAIN_CELLS = {
         (4096, "dep1"),
         (None, "dep"),
     ),
+    ("sm_100a", 148, 5120): ((2047, "dep"), (4096, "dep1"), (None, "dep")),
     ("sm_100a", 148, 7168): ((4096, "dep1"), (None, "dep")),
+    ("sm_103a", 152, 4096): ((4095, "dep"), (8192, "dep1"), (None, "dep")),
+    ("sm_103a", 152, 7168): ((1023, "dep"), (49152, "dep1"), (None, "dep")),
 }
+# The "dep1" span (first, last token count, both included) of each chain cell, the cell's CHAIN_DROPPED ranges inside
+# it kept at "dep"; every token count outside a span runs "dep".
+RELAY_SPANS = {
+    ("sm_100a", 148, 4096): (1, 4096),
+    ("sm_100a", 148, 5120): (2048, 4096),
+    ("sm_100a", 148, 7168): (1, 4096),
+    ("sm_103a", 152, 4096): (4096, 8192),
+    ("sm_103a", 152, 7168): (1024, 49152),
+}
+# The token counts the relay sweep reads: every token count up to RELAY_SWEEP, then both ends of every 64-token tile
+# up to DRAW_SPAN.
+RELAY_SWEEP = 65536
 # The 64-token tiles ``(first, last)`` of a draw cell, and the token ranges of a chain cell, that a cell keeps at the
 # fold's draw / at "dep" although the unit count would allow the late draw / the relay applies: no draw tile; at 4096
 # the B200 chain cell keeps "dep" from 1665 to 1728 tokens (the fold "dynr" with its own draw there).
@@ -1166,11 +1194,14 @@ def test_own_records_keep_the_deterministic_launch() -> None:
             assert record["select_rule"] is None, name
         assert record["workspace_rule"] == {"kind": "regions", "workspace": "bwd"}
         assert name not in nd.RECORD_SCALARS, name
-    # the "dep1" copy of a fn split: its "dep" record under its own name and chain, on sm_100a
+    # the "dep1" copy of a fn split: its "dep" record under its own name and chain, on the architectures of the
+    # SPLIT_BOTH pairs of its size
     for arch, hidden in SPLIT_BOTH:
         dep, dep1 = _atomic_splits(arch, hidden)
         record, reference = nd.MODULES[dep1], nd.MODULES[dep]
-        assert tuple(record["arches"]) == (arch,) and arch in reference["arches"], dep1
+        arches = tuple(a for a in nd.ARCHES if (a, hidden) in SPLIT_BOTH)
+        assert tuple(record["arches"]) == arches, (dep1, record["arches"])
+        assert set(arches) <= set(reference["arches"]), dep1
         assert record == {
             **reference,
             "arches": record["arches"],
@@ -3463,23 +3494,51 @@ def test_draw_cells_follow_the_unit_count() -> None:
         assert late, key
 
 
+def _relay_want(key: tuple, T: int) -> str:
+    """The chain of the cell ``key`` at ``T`` by :data:`RELAY_SPANS`: ``"dep1"`` inside the span but the cell's
+    :data:`CHAIN_DROPPED` ranges, ``"dep"`` everywhere else."""
+    first, last = RELAY_SPANS[key]
+    kept = any(lo <= T <= hi for lo, hi in CHAIN_DROPPED.get(key, ()))
+    return "dep1" if first <= T <= last and not kept else "dep"
+
+
 @pytest.mark.cpu_only
 def test_relay_cells() -> None:
-    """The chain cells of record hold the relay's bands: ``"dep1"`` on B200 (sm_100a with 148 SMs) at hidden 4096 and
-    7168 up to 4096 tokens, but the cell's :data:`CHAIN_DROPPED` token ranges (at 4096 from 1665 to 1728), and
-    ``"dep"`` above; no other board or hidden size has a cell."""
-    assert set(nd.FN_SPLIT_CHAIN_OVERRIDES) == {
-        ("sm_100a", 148, hidden) for hidden in (HIDDEN, 7168)
-    }
-    assert {(arch, hidden) for arch, _sm, hidden in nd.FN_SPLIT_CHAIN_OVERRIDES} == set(SPLIT_BOTH)
+    """The chain cells of record hold the relay's bands (:data:`RELAY_SPANS`): ``"dep1"`` on B200 (sm_100a with 148
+    SMs) up to 4096 tokens at hidden 4096 and 7168 (at 4096 but the cell's :data:`CHAIN_DROPPED` range, 1665 to 1728
+    tokens) and from 2048 to 4096 tokens at 5120, on GB300 (sm_103a with 152 SMs) from 4096 to 8192 tokens at 4096
+    and from 1024 to 49152 tokens at 7168; ``"dep"`` at every other token count; no other board or hidden size has a
+    cell.  Both ends of every span and kept range, with their outside neighbours, read their chain in the cell and
+    from ``fn_split_bwd_program`` at the board's SM count, so a moved edge fails here."""
+    assert set(nd.FN_SPLIT_CHAIN_OVERRIDES) == set(RELAY_SPANS)
+    assert {
+        (arch, hidden) for arch, _sm, hidden in nd.FN_SPLIT_CHAIN_OVERRIDES
+    } == set(SPLIT_BOTH)
     for key, cell in nd.FN_SPLIT_CHAIN_OVERRIDES.items():
+        arch, sm, hidden = key
+        first, last = RELAY_SPANS[key]
         dropped = CHAIN_DROPPED.get(key, ())
+        assert all(first < lo <= hi < last for lo, hi in dropped), key
         edges = {t + side for t, _ in cell if t is not None for side in (0, 1)}
-        ends = {t for r in dropped for t in r}
-        for T in sorted({1, 2, 4095, 4096, 4097, 8192, 65536, *edges, *ends}):
-            kept = any(lo <= T <= hi for lo, hi in dropped)
-            want = "dep1" if T <= 4096 and not kept else "dep"
+        ends = {
+            t + side
+            for r in ((first, last), *dropped)
+            for t in r
+            for side in (-1, 0, 1)
+        }
+        points = {1, 2, 4095, 4096, 4097, 8192, 8193, 49152, 49153, 65536}
+        points |= edges | ends
+        for T in sorted(t for t in points if t > 0):
+            want = _relay_want(key, T)
             assert _band_at(T, cell) == want, (key, T)
+            assert nd.fn_split_bwd_program(T, sm, arch, hidden) == want, (key, T)
+        assert _band_at(first, cell) == _band_at(last, cell) == "dep1", key
+        assert _band_at(last + 1, cell) == "dep", key
+        assert first == 1 or _band_at(first - 1, cell) == "dep", key
+        for lo, hi in dropped:
+            assert _band_at(lo - 1, cell) == "dep1", (key, lo)
+            assert _band_at(hi + 1, cell) == "dep1", (key, hi)
+            assert _band_at(lo, cell) == _band_at(hi, cell) == "dep", (key, lo, hi)
 
 
 @pytest.mark.cpu_only
@@ -3488,7 +3547,8 @@ def test_late_and_relay_records_ship_where_the_cells_route_them() -> None:
     meet the record's unit order on the same board (:func:`_order_cell`: ``dynr_late`` a ``"chunk"`` band,
     ``dynr_os_late`` a ``"slab"`` band), and its route holds it on each of them; a size without such a cell has no
     late-draw record.  A fn split's ``"dep1"`` copy ships on exactly the architectures of its size's chain cells with
-    a ``"dep1"`` band."""
+    a ``"dep1"`` band, and the ``bwd_finish`` routes of each of them (and its pre-handoff route at 5120) hold it right
+    after its ``"dep"`` split."""
     for hidden in HIDDEN_SIZES:
         for name, want_order in (
             (_slab_late(hidden), "chunk"),
@@ -3516,14 +3576,49 @@ def test_late_and_relay_records_ship_where_the_cells_route_them() -> None:
     }
     assert relay == set(SPLIT_BOTH)
     for arch, hidden in SPLIT_BOTH:
-        dep1 = _atomic_splits(arch, hidden)[1]
-        assert tuple(nd.MODULES[dep1]["arches"]) == (arch,), dep1
-        assert dep1 in nd.route_modules(arch, hidden, "bwd_finish"), dep1
+        dep, dep1 = _atomic_splits(arch, hidden)
+        arches = {a for a, h in relay if h == hidden}
+        assert set(nd.MODULES[dep1]["arches"]) == arches, (dep1, sorted(arches))
+        kinds = ["bwd_finish"]
+        if hidden in nd.handoff_hidden_sizes(arch):
+            kinds.append("bwd_finish_handoff")
+        for kind in kinds:
+            route = list(nd.route_modules(arch, hidden, kind))
+            assert route[route.index(dep) + 1] == dep1, (arch, hidden, kind)
 
 
 # The boards the draw / chain cells are checked against: the boards of record, GB200 (sm_100a with 152 SMs), B300
 # (sm_103a with 148 SMs) and R200 with 212 SMs.
 CELL_BOARDS = (*det.RULES_BOARDS, ("sm_100a", 152), ("sm_103a", 148), ("sm_107a", 212))
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    ("arch", "sm"), (*CELL_BOARDS, *((arch, None) for arch in det.ARCHES))
+)
+def test_relay_sweep(arch: str, sm: int | None) -> None:
+    """On every board of :data:`CELL_BOARDS` and without an SM count, at every hidden size the architecture routes,
+    ``fn_split_bwd_program`` names ``"dep1"`` exactly at the token counts of the board's chain cell that
+    :func:`_relay_want` gives ``"dep1"`` (:data:`RELAY_SPANS` without :data:`CHAIN_DROPPED`), and ``"dep"`` at every
+    other token count and on every board without a cell: every token count up to :data:`RELAY_SWEEP`, then both ends
+    of every 64-token tile up to :data:`DRAW_SPAN`.  Where the rule names ``"dep1"``, the ``bwd_finish`` route of the
+    size holds the ``"dep1"`` split."""
+    tiles = range(RELAY_SWEEP // 64 + 1, DRAW_SPAN // 64 + 1)
+    token_counts = (
+        *range(1, RELAY_SWEEP + 1),
+        *(T for tile in tiles for T in (64 * tile - 63, 64 * tile)),
+    )
+    for hidden in _arch_sizes(arch):
+        key = (arch, sm, hidden)
+        relay = 0
+        for T in token_counts:
+            want = _relay_want(key, T) if key in RELAY_SPANS else "dep"
+            assert nd.fn_split_bwd_program(T, sm, arch, hidden) == want, (key, T)
+            relay += want == "dep1"
+        assert bool(relay) == (key in RELAY_SPANS), (key, relay)
+        if relay:
+            route = nd.route_modules(arch, hidden, "bwd_finish")
+            assert _atomic_splits(arch, hidden)[1] in route, key
 
 
 @pytest.mark.cpu_only
