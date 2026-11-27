@@ -999,8 +999,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # "packed_rows": 0, "prefetch_ahead": 1, "prefetch_wave": 1, "rsqrt_ftz":
     # 1, "split_gate": 1, "split_layout_prefetch": 1, "store_width": 128,
     # "sum_pairs": 1, "threads": 128, "w_late": 1}); the grid rule of a program
-    # of rows of any layout; PROJECTION_FORWARD_BANDS, SLICED_HEADS_FORWARD_BANDS,
-    # BCASTH_FORWARD_BANDS and MIXED_FORWARD_BANDS give it its rows.
+    # of rows of any layout; PROJECTION_FORWARD_BANDS, SLICED_HEADS_FORWARD_BANDS
+    # and BCASTH_FORWARD_BANDS give it its rows.
     "cake_rmsnorm_silu_gate_train_0a7f917d9c7922f9c2d2": {
         "arches": [
             "sm_107a",
@@ -3523,7 +3523,7 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # row of one head, or of 2 or 3 heads with a token stride below twice the row,
 # as padded rows; or a class without a table for the architecture:
 # ``HEAD_MAJOR_LAYOUT`` on sm_100a and sm_103a, ``SLICED_LAYOUT`` on sm_107a,
-# ``SLICED_FEW_LAYOUT`` on sm_100a and sm_107a, ``MIXED_LAYOUT`` on sm_100a,
+# ``SLICED_FEW_LAYOUT`` on sm_100a and sm_107a, ``MIXED_LAYOUT`` and
 # ``PADH_LAYOUT`` on sm_100a and sm_107a; a broadcast over tokens that its band
 # of packed rows does not run, below), or of packed rows from ``PACKED_ROWS``
 # on, as ``FORWARD_BANDS`` (the tiny forwards read packed rows only).  The cuts
@@ -3633,8 +3633,10 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # than 0.2.18's, no op slower than 0.2.18's beyond noise and the forward no
 # slower than the deterministic package's), while 64 heads failed at 609.68 and
 # 16 and 48 heads at 600, so the cut lies just below the first point where every
-# form passed.  Past the last pipelined band the plain forward runs.  Host plan
-# only, as the other tables.
+# form passed; the release measurement of 0.2.19 against 0.2.18 on GB300 (the
+# comment of ``SLICED_FORWARD_BANDS``; the same forms) found every form passing
+# from 619.05 to 628.95 rows per SM.  Past the last pipelined band the plain
+# forward runs.  Host plan only, as the other tables.
 PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3707,29 +3709,39 @@ HEAD_MAJOR_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # weight gradient) on B200 and 0.9514 to 0.9857 on GB300; at 2000 rows per SM
 # the step of a gate of one head took 1.0132 to 1.0147 of 0.2.17's time on B200
 # and 1.0047 to 1.0051 on GB300, so the band ends at 1500, a measured point.
-# Version 0.2.19 runs ``fwd_layout_pipe`` from 600 rows per SM, where 0.2.18
-# ran the extra-long forward up to 700.  Its measurement against 0.2.18 on the
-# same GPU (CUDA Graph replays, CUPTI, cold L2, two runs) passes a point where
-# in both runs the forward is faster than 0.2.18's, no op (the forward, the
-# backward and the checkpointed step of either weight gradient) is slower than
-# 0.2.18's beyond noise, and the forward is not slower than the deterministic
-# package's: on B200 and GB300 a gate of one head sliced from a projection and
-# ``x`` of one head sliced beside packed ``z`` passed at 600, 650 and 700 rows
-# per SM (600 the lowest point measured), so the extra-long forward's band
-# ends at 599.  Host plan only, as the other tables.
+# Version 0.2.19 keeps these bands, those of 0.2.18.  It chose its bands by a
+# first measurement against 0.2.18 on the same GPU (CUDA Graph replays, CUPTI,
+# cold L2, two runs), which passes a point where in both runs the forward is
+# faster than 0.2.18's, no op (the forward, the backward and the checkpointed
+# step of either weight gradient) is slower than 0.2.18's beyond noise, and the
+# forward is not slower than the deterministic package's, and checked them by
+# its release measurement against 0.2.18 on the same GPU (CUDA Graph replays,
+# CUPTI, cold L2, four processes), which passes a point where no op is slower
+# than 0.2.18's beyond noise; 0.2.19 moves a band only over points that passed
+# both.  On B200 and GB300 the first measurement passed a gate of one head
+# sliced from a projection and ``x`` of one head sliced beside packed ``z`` at
+# 600, 650 and 700 rows per SM, and so did the release measurement at 599.01,
+# 600, 650 and 700 (and a head-major ``x`` of one head beside such a gate), but
+# it found the checkpointed step of ``z`` and ``dy`` sliced from a tensor four
+# times the row width, packed ``x``, slower with ``fwd_layout_pipe`` at every
+# one of these points: on B200 1.0065 to 1.0335 of 0.2.18's time with a BF16
+# weight gradient and 1.0057 to 1.0263 with an FP32 one, on GB300 1.0057 to
+# 1.0375 with a BF16 weight gradient and 1.0174 to 1.0244 with an FP32 one (at
+# 599.01, 600 and 650), so the extra-long forward still runs up to 700 rows per
+# SM.  Host plan only, as the other tables.
 SLICED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
-        (599, "fwd_xlong"),
+        (700, "fwd_xlong"),
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
-        (599, "fwd_xlong"),
+        (700, "fwd_xlong"),
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3749,28 +3761,37 @@ SLICED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # with ``fwd_layout_pipe`` was slower for ``x`` and ``z`` both sliced of one
 # head and for padded rows of one and of two heads, and neither was slower for
 # either form of 4, 8 and 16 heads (2 and 3 heads sliced from projections:
-# ``SLICED_FEW_LAYOUT``).  Version 0.2.19 moves the cuts of
-# ``fwd_layout_pipe`` by its measurement against 0.2.18 (the comment of
-# ``SLICED_FORWARD_BANDS``; ``x`` and ``z`` both sliced of 16 and 48 heads,
-# padded rows of 16 heads and ``x`` sliced beside packed ``z`` of 16 heads, and
-# past 700 rows per SM and on sm_107a also 4 heads of the first two forms and 2
-# heads of the last).  On sm_100a every form passed at 600, 650, 700, 1600,
-# 1750 and 2000 rows per SM, so it runs from 600 to 2000 (0.2.18: 701 to 1500;
-# 0.2.18's measurement found the step of ``x`` and ``z`` both sliced slower at
-# 2500).  On sm_103a every form passed at 650, 700, 1600 and 1750, and padded
-# rows of 16 heads failed at 600 in both runs, so it runs from 650 to 1750
-# (0.2.18's measurement found the step slower at 2000).  On sm_107a (two VR200
-# nodes, drivers 620.70.06 and 620.43) every form passed at 650 and 1000 on
-# both, and at 1500 ``x`` and ``z`` both sliced of 4 heads, padded rows of 4
-# heads and ``x`` sliced of 2 heads failed on at least one, so it runs from 650
-# to 1000; rows per SM from 481 to 649 were not measured and run the plain
-# forward, as in 0.2.18.  Host plan only, as the other tables.
+# ``SLICED_FEW_LAYOUT``).  Version 0.2.19 moves the cuts of ``fwd_layout_pipe``
+# by its two measurements against 0.2.18 (the comment of
+# ``SLICED_FORWARD_BANDS``; in the first ``x`` and ``z`` both sliced of 16 and
+# 48 heads, padded rows of 16 heads and ``x`` sliced beside packed ``z`` of 16
+# heads, and past 700 rows per SM and on sm_107a also 4 heads of the first two
+# forms and 2 heads of the last; in the release measurement ``x`` and ``z`` both
+# sliced and padded rows of 4, 16 and 48 heads and ``x`` sliced beside packed
+# ``z`` of 2, 4, 16 and 48 heads).  On sm_100a every form passed in the first at
+# 600, 650, 700, 1600, 1750 and 2000 rows per SM; the release measurement found
+# the checkpointed step of padded rows of 4 heads at 599.03 rows per SM 1.0067
+# of 0.2.18's time with a BF16 weight gradient and every form passing at 600 and
+# from 649.95 to 2000, so the extra-long forward runs up to 600 (no whole number
+# of rows per SM lies between 599.03 and 600) and ``fwd_layout_pipe`` from 601
+# to 2000 (0.2.18: 701 to 1500; 0.2.18's measurement found the step of ``x`` and
+# ``z`` both sliced slower at 2500).  On sm_103a every form passed in the first
+# at 650, 700, 1600 and 1750, and padded rows of 16 heads failed at 600 in both
+# runs, so it runs from 650 to 1750 (0.2.18's measurement found the step slower
+# at 2000); the release measurement found every form passing from 649.01 to
+# 1750.  On sm_107a (two VR200 nodes, drivers 620.70.06 and 620.43) every form
+# passed in the first at 650 and 1000 on both, and at 1500 ``x`` and ``z`` both
+# sliced of 4 heads, padded rows of 4 heads and ``x`` sliced of 2 heads failed
+# on at least one, so it runs from 650 to 1000; the release measurement found
+# every form passing from 649.01 to 1000 on both; rows per SM from 481 to 649
+# were not measured and run the plain forward, as in 0.2.18.  Host plan only, as
+# the other tables.
 SLICED_HEADS_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
-        (599, "fwd_xlong"),
+        (600, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3800,9 +3821,10 @@ SLICED_HEADS_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # ``SLICED_FORWARD_BANDS``; ``x`` and ``z`` both sliced from projections
 # ``2 * H * 128 + 16`` elements wide, 2 and 3 heads) at 701, 1000 and 1500 rows
 # per SM, ``fwd_layout_pipe`` passed for both head counts on GB300, so sm_103a
-# runs it from 701 to 1500; on B200 2 heads failed at 1000 and 1500, so
-# sm_100a keeps 0.2.18's programs; sm_107a was not measured.  Host plan only,
-# as the other tables.
+# runs it from 701 to 1500, and the release measurement found both passing from
+# 700.01 to 1500; on B200 2 heads failed at 1000 and 1500, so sm_100a keeps
+# 0.2.18's programs; sm_107a was not measured.  Host plan only, as the other
+# tables.
 SLICED_FEW_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_103a": (
         (12, "fwd_short"),
@@ -3818,22 +3840,29 @@ SLICED_FEW_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # head stride 0 and token stride 128, ``z`` of head stride 128 and token stride
 # ``H * 128``), by architecture, by rows per SM as ``FORWARD_BANDS``.  Version
 # 0.2.18 ran these rows by ``STRIDED_FORWARD_BANDS``.  Measured against 0.2.18
-# (the comment of ``SLICED_FORWARD_BANDS``; 16 heads): on sm_100a
-# ``fwd_layout_pipe`` passed at 1000, 1250 and 1500 rows per SM, and at 850, 900
-# and 950 the checkpointed step of either weight gradient was slower than
-# 0.2.18's in both runs, so it runs from 1000 to 1500 and the plain forward runs
-# from 701 to 999, as in 0.2.18; on sm_103a it passed at 701, 850, 1000, 1250
-# and 1500, so it runs from 701 to 1500; on sm_107a (two VR200 nodes, drivers
-# 620.70.06 and 620.43) it passed at 650, 1000 and 1500 on both, so it
-# runs from 650 to 1500 (rows per SM from 481 to 649 were not measured and run
-# the plain forward, as in 0.2.18).  Host plan only, as the other tables.
+# (the comment of ``SLICED_FORWARD_BANDS``; 16 heads in the first measurement,
+# 2, 16 and 48 heads in the release measurement): on sm_100a ``fwd_layout_pipe``
+# passed in the first at 1000, 1250 and 1500 rows per SM, and at 850, 900 and
+# 950 the checkpointed step of either weight gradient was slower than 0.2.18's
+# in both runs; the release measurement found the checkpointed step of 16 heads
+# at 999.03 and 1000 rows per SM 1.0083 and 1.0048 of 0.2.18's time with a BF16
+# weight gradient and 1.0058 and 1.0036 with an FP32 one, and every form passing
+# at each point from 1249.95 (16 and 48 heads) or 1250 (2 heads) up to 1500, so
+# it runs from 1250 to 1500 and the plain forward runs from 701 to 1249, as in
+# 0.2.18; on sm_103a it passed in the first at 701, 850, 1000, 1250 and 1500,
+# and in the release measurement from 700.01 to 1500, so it runs from 701 to
+# 1500; on sm_107a (two VR200 nodes, drivers 620.70.06 and 620.43) it passed in
+# the first at 650, 1000 and 1500 on both, and in the release measurement from
+# 649.01 to 1500 on both, so it runs from 650 to 1500 (rows per SM from 481 to
+# 649 were not measured and run the plain forward, as in 0.2.18).  Host plan
+# only, as the other tables.
 BCASTH_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
         (700, "fwd_xlong"),
-        (999, "fwd"),
+        (1249, "fwd"),
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3858,29 +3887,31 @@ BCASTH_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # more than one head, ``x`` of token stride 128 and head stride ``T * 128``,
 # ``z`` of head stride 128 and a token stride past ``H * 128``), by
 # architecture, by rows per SM as ``FORWARD_BANDS``; an architecture without a
-# table here (sm_100a) runs ``STRIDED_FORWARD_BANDS``, as 0.2.18 ran these rows
-# everywhere.  Measured against 0.2.18 (the comment of
-# ``SLICED_FORWARD_BANDS``; 16 heads, ``z`` sliced from a wider projection): on
-# sm_103a ``fwd_layout_pipe`` passed at 701, 850, 1000, 1250 and 1500 rows per
-# SM, so it runs from 701 to 1500; on sm_107a (two VR200 nodes, drivers
-# 620.70.06 and 620.43) it passed at 650 and 1000 on both, and at 1500 an op
-# was slower than 0.2.18's on the 620.70.06 node, so it runs from 650 to 1000
-# (rows per SM from 481 to 649 were not measured and run the plain forward, as
-# in 0.2.18); on sm_100a 0.2.18's measurement found the forward or the step
-# with it slower.  Host plan only, as the other tables.
+# table here (sm_100a, sm_107a) runs ``STRIDED_FORWARD_BANDS``, as 0.2.18 ran
+# these rows everywhere.  Measured against 0.2.18 (the comment of
+# ``SLICED_FORWARD_BANDS``; ``z`` sliced from a wider projection, 16 heads in
+# the first measurement, 2, 16 and 48 heads in the release measurement): on
+# sm_103a ``fwd_layout_pipe`` passed in the first at 701, 850, 1000, 1250 and
+# 1500 rows per SM, and the release measurement found the checkpointed step of 2
+# heads at 1500 rows per SM 1.0038 of 0.2.18's time with a BF16 weight gradient
+# and 1.0038 with an FP32 one, and every form passing at each point from 700.01
+# up to 1249.89 (48 heads) or 1250 (2 and 16 heads), so it runs from 701 to
+# 1250; on sm_107a (two VR200 nodes, drivers 620.70.06 and 620.43) it passed in
+# the first at 650 and 1000 on both, and at 1500 an op was slower than 0.2.18's
+# on the 620.70.06 node, but the release measurement on that node found 2 heads
+# slower than 0.2.18 at every point it measured (649.01, 650 and 1000 rows per
+# SM: the forward 1.0145 to 1.0317 of 0.2.18's time, the checkpointed step
+# 1.0077 to 1.0238 with a BF16 weight gradient and 1.0062 to 1.0233 with an FP32
+# one), where 16 and 48 heads passed (on the 620.43 node every point passed), so
+# sm_107a runs ``STRIDED_FORWARD_BANDS``, as in 0.2.18; on sm_100a 0.2.18's
+# measurement found the forward or the step with it slower.  Host plan only, as
+# the other tables.
 MIXED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
         (700, "fwd_xlong"),
-        (1500, "fwd_layout_pipe"),
-        (None, "fwd"),
-    ),
-    "sm_107a": (
-        (59, "fwd_short"),
-        (480, "fwd_mid"),
-        (649, "fwd"),
-        (1000, "fwd_layout_pipe"),
+        (1250, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
 }
@@ -3894,9 +3925,10 @@ MIXED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # ``STRIDED_FORWARD_BANDS``, as 0.2.18 ran these rows everywhere.  Measured
 # against 0.2.18 (the comment of ``SLICED_FORWARD_BANDS``; 16 heads of head
 # stride 144): on sm_103a ``fwd_layout_pipe`` passed at 701, 850, 1000, 1250
-# and 1500 rows per SM, so it runs from 701 to 1500; on sm_100a 0.2.18's
-# measurement found the forward or the step with it slower; sm_107a was not
-# measured.  Host plan only, as the other tables.
+# and 1500 rows per SM, and the release measurement (2, 16 and 48 heads) found
+# every form passing from 700.01 to 1500, so it runs from 701 to 1500; on
+# sm_100a 0.2.18's measurement found the forward or the step with it slower;
+# sm_107a was not measured.  Host plan only, as the other tables.
 PADH_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_103a": (
         (12, "fwd_short"),
