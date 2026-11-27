@@ -1962,13 +1962,15 @@ def test_forward_plan_of_every_form_differs_from_0_2_18_only_in_the_moved_bands(
     every architecture; ``x`` and ``z`` both sliced of 2 or 3 heads, padded
     heads and a head-major ``x`` beside a sliced ``z`` of more than one head on
     sm_103a; ``x`` broadcast over heads on every architecture; a gate of more
-    than one head sliced from a projection on sm_103a.  Whole-token rows of one
-    head (a gate of one head sliced from a projection, ``x`` of one head sliced
-    beside packed ``z``, a head-major ``x`` of one head beside such a gate),
-    padded rows of 1 to 3 heads, ``x`` and ``z`` both sliced of one head, padded
-    heads of one head, broadcasts over tokens, padded head-major planes,
-    head-major rows and every other architecture of a class run what 0.2.18
-    ran."""
+    than one head sliced from a projection on sm_103a (a band moves a form
+    where it holds a whole token of the form: on 1 and 2 SMs the projection
+    band, 625 to 629 rows per SM, holds none of 16 heads).  Whole-token rows of
+    one head (a gate of one head sliced from a projection, ``x`` of one head
+    sliced beside packed ``z``, a head-major ``x`` of one head beside such a
+    gate), padded rows of 1 to 3 heads, ``x`` and ``z`` both sliced of one
+    head, padded heads of one head, broadcasts over tokens, padded head-major
+    planes, head-major rows and every other architecture of a class run what
+    0.2.18 ran."""
     cases = []
     for form, classes in FORM_CLASSES.items():
         for heads, cls in zip(FORM_HEADS, classes, strict=True):
@@ -2033,13 +2035,27 @@ def test_forward_plan_of_every_form_differs_from_0_2_18_only_in_the_moved_bands(
         routes = loader.ROUTES[arch]
         assert (was, name) == (routes[old_role], routes[new_role]), case
         moved.add((arch, form, heads, lo, hi))
-    want_moved = {
-        (arch, form, heads, lo, hi)
-        for form, classes in FORM_CLASSES.items()
-        for heads, cls in zip(FORM_HEADS, classes, strict=True)
-        for arch in loader.ARCHES
-        for lo, hi, _, _ in suite.V0219_MOVED_BANDS.get((arch, cls), ())
-    }
+    # every band of the form's class moves the form where it holds a whole
+    # token of it (the fewest whole tokens past its start end in it): on 1 and
+    # 2 SMs the sm_103a projection band (625 to 629 rows per SM) holds none of
+    # 16 heads
+    want_moved, tokenless = set(), set()
+    for form, classes in FORM_CLASSES.items():
+        for heads, cls in zip(FORM_HEADS, classes, strict=True):
+            for arch in loader.ARCHES:
+                for lo, hi, _, _ in suite.V0219_MOVED_BANDS.get((arch, cls), ()):
+                    first = -(-(lo * sm_count + 1) // heads) * heads
+                    band = (arch, form, heads, lo, hi)
+                    if first <= hi * sm_count:
+                        want_moved.add(band)
+                    else:
+                        tokenless.add(band)
+    want_tokenless = set()
+    if sm_count in (1, 2):
+        want_tokenless = {
+            ("sm_103a", form, 16, 624, 629) for form in ("projection", "projw4")
+        }
+    assert tokenless == want_tokenless, sorted(tokenless ^ want_tokenless)
     assert want_moved, sm_count
     assert moved == want_moved, sorted(moved ^ want_moved)
 
