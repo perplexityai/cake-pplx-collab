@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -415,6 +415,7 @@ kernel_cake_gdn_train_800e136c794a61da90b1(const __grid_constant__ CUtensorMap k
                         }
                     }
                 }
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(st_free_r_addr + (gfl_c) * 8);
                 int b_row = 32 * pw + lane_1;
                 float bd_gi = s_gt[hb + b_row];
@@ -3141,6 +3142,7 @@ kernel_cake_gdn_train_800e136c794a61da90b1(const __grid_constant__ CUtensorMap k
                         mq1 = mr_s;
                     }
                 }
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(st_free_r_addr + (mf_c) * 8);
                 mf_c += 1;
                 if (mf_c == 2) { mf_c = 0; _phase_st_full ^= 1; }
@@ -3447,6 +3449,7 @@ kernel_cake_gdn_train_800e136c794a61da90b1(const __grid_constant__ CUtensorMap k
                         rk1 = rr_s;
                     }
                 }
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(st_free_r_addr + (rf_c) * 8);
                 rf_c += 1;
                 if (rf_c == 2) { rf_c = 0; _phase_st_full_1 ^= 1; }
