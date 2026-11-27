@@ -1022,7 +1022,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (512, 4096, "cake_rmsnorm_train_80956d258172dfa76c2a"),
             (4096, 6143, "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4"),
             (6143, 32767, "cake_rmsnorm_train_de2f75d431899520db87"),
-            (32767, None, "cake_rmsnorm_train_fdb7fdce98e515b40393"),
+            (32767, None, "cake_rmsnorm_train_c5386a35eeb7cfbd1658"),
         ),
         "bwd_h1536": (
             (0, 4, "cake_rmsnorm_train_db218c92c4c86b9da85a"),
@@ -3794,7 +3794,7 @@ Beside those, leave some SMs free of the resident kernel.
 * ``sm_107a`` ``bwd_w32_h1280``: (0, 4] 7905241d (one cluster) ? (4, 128] 8d8ef930 ?
   (128, 512] e476d0b2 ? (512, 4096] 80956d25 (det pair) ?
   (4096, 6143] c66b8cbd (det pair) ? (6143, 32767] de2f75d4 (det pair) ?
-  (32767, inf) fdb7fdce (det pair)
+  (32767, inf) c5386a35 (det pair)
 * ``sm_107a`` ``bwd_h1536``: (0, 4] db218c92 (one cluster) ?
   (4, 16] c2a523de (one cluster) ? (16, 320] 1207b056 = (320, 1024] 7dc29629 (det pair)
   = (1024, 12288] 88510c60 (det pair) = (12288, 16384] 6a428da2 (det pair) =

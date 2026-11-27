@@ -705,7 +705,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (512, 4096, "cake_rmsnorm_det_train_80956d258172dfa76c2a"),
             (4096, 6143, "cake_rmsnorm_det_train_c66b8cbd5626e2c1f2b4"),
             (6143, 32767, "cake_rmsnorm_det_train_de2f75d431899520db87"),
-            (32767, None, "cake_rmsnorm_det_train_fdb7fdce98e515b40393"),
+            (32767, None, "cake_rmsnorm_det_train_c5386a35eeb7cfbd1658"),
         ),
         "bwd_h1536": (
             (0, 1, "cake_rmsnorm_det_train_c3b1b46a2c6d1f9b3724"),
@@ -2069,7 +2069,7 @@ its own windows.
   (512, 6143] 12bbedff ? (6143, 32767] b1339aac ? (32767, inf) f8cb729b
 * ``sm_107a`` ``bwd_w32_h1280``: (0, 1] 103805d9 ? (1, 128] 8d8ef930 ?
   (128, 512] e476d0b2 ? (512, 4096] 80956d25 ? (4096, 6143] c66b8cbd ?
-  (6143, 32767] de2f75d4 ? (32767, inf) fdb7fdce
+  (6143, 32767] de2f75d4 ? (32767, inf) c5386a35
 * ``sm_107a`` ``bwd_h1536``: (0, 1] c3b1b46a ? (1, 576] 1207b056 ? (576, 1024] 7dc29629
   = (1024, 12288] 88510c60 = (12288, 16384] 6a428da2 = (16384, 45056] 56d26996 =
   (45056, inf) 411e270c

@@ -261,7 +261,7 @@ digits of the program name.
 | `bwd_w32_h1280` | (512, 4096] | 80956d25 | plain | row-strided slots | 849ee5d8 (chain, column-split) |
 | `bwd_w32_h1280` | (4096, 6143] | c66b8cbd | plain | row-strided slots | 382c8727 (chain, column-split) |
 | `bwd_w32_h1280` | (6143, 32767] | de2f75d4 | plain | row-strided slots, 1 SMs left out | 849ee5d8 (chain, column-split) |
-| `bwd_w32_h1280` | (32767, inf) | fdb7fdce | plain | row-strided slots, 1 SMs left out | e35c9369 (chain, column-split) |
+| `bwd_w32_h1280` | (32767, inf) | c5386a35 | plain | row-strided slots, 1 SMs left out | e35c9369 (chain, column-split) |
 | `bwd_h1536` | (0, 1] | c3b1b46a | column task | - | - |
 | `bwd_h1536` | (1, 576] | 1207b056 | column task | - | - |
 | `bwd_h1536` | (576, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 628248fe (tree) |
