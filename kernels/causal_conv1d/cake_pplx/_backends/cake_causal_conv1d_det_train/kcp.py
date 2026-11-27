@@ -113,10 +113,10 @@ partial rows and their reduction are the same.  The exchange, its wait and the c
 launches one more program when the rank receives tail rows.  On sm_103a and sm_107a the multi entry overlaps its
 first tensor this way and launches the other tensors' programs after the wait, so it too adds one program, not one
 per tensor; on sm_100a it waits first (``MULTI_BWD_OVERLAP_ARCHS``).  Inside a CUDA Graph capture on sm_100a
-(``CAPTURE_WAIT_ARCHS``, the reason at that constant) a single call with ``C x S`` of at least ``CAPTURE_WAIT_ELEMS``
-takes the waiting form too: the replayed graph waits for the exchange before the split program and runs no tail-row
-program; the grid is the same, and ``dx`` and ``dweight`` are bitwise the overlapped form's.  A smaller call
-overlaps in a capture as well.
+(``CAPTURE_WAIT_ARCHS``, the reason at that constant) a single call with at least ``CAPTURE_WAIT_CHANNELS`` channels
+and ``C x S`` of at least ``CAPTURE_WAIT_ELEMS`` takes the waiting form too: the replayed graph waits for the exchange
+before the split program and runs no tail-row program; the grid is the same, and ``dx`` and ``dweight`` are bitwise
+the overlapped form's.  A call with fewer channels or a smaller ``C x S`` overlaps in a capture as well.
 ``cooperative=True`` waits before its launch as before
 (a cooperative grid waits for the communication kernel anyway).  The private test knob ``bwd_overlap`` (``1``
 shipped, ``0`` = wait before the main program) selects the previous order for the A/B record.
@@ -250,9 +250,10 @@ FWD_RESERVE_SMS = 1
 # 16384 rows and one C = 10240 tensor of 32768 rows per rank) 10 reserved SMs give the replayed backward one speed and
 # 17.8-25.2 % less time (177-364 us vs 219-481 us), the replayed checkpointed step 1.6-2.7 % less, and eager calls
 # within 0.8 %.  5 reserved SMs were as fast but kept two speeds on some rows.  sm_100a waits in a capture of a large
-# call instead (``CAPTURE_WAIT_ARCHS``, ``CAPTURE_WAIT_ELEMS``; there a shorter grid made eager backward calls up to
-# 5.1 % slower), and sm_107a's replayed backward has one speed with one reserved SM.  The ``dweight`` bits on sm_103a
-# differ from a one-SM reservation's (another set of partial rows); they are reproducible as before.
+# call instead (``CAPTURE_WAIT_ARCHS``, ``CAPTURE_WAIT_CHANNELS``, ``CAPTURE_WAIT_ELEMS``; there a shorter grid made
+# eager backward calls up to 5.1 % slower), and sm_107a's replayed backward has one speed with one reserved SM.  The
+# ``dweight`` bits on sm_103a differ from a one-SM reservation's (another set of partial rows); they are reproducible
+# as before.
 SPLIT_RESERVE_SMS: dict[str, int] = {"sm_103a": 10}
 GRAPH_MODES = (
     "off",
@@ -345,17 +346,21 @@ def _bwd_kind(cooperative: bool) -> str:
     return KCP_BWD if cooperative else KCP_BWD_SPLIT
 
 
-def _overlapped(cooperative: bool, work: Optional[Any], arch: str, elems: int) -> bool:
+def _overlapped(
+    cooperative: bool, work: Optional[Any], arch: str, C: int, S: int
+) -> bool:
     """Whether a backward call with tokens runs the overlapped backward (the module docstring): the ``kcp_bwd_split``
     form with an exchange in flight (``work``, more than one rank) and the shipped ``bwd_overlap`` knob, but not
     inside a CUDA Graph capture on the architectures of :data:`CAPTURE_WAIT_ARCHS` (``arch``, the device's) of a call
-    whose ``C x S`` (``elems``) is at least :data:`CAPTURE_WAIT_ELEMS`."""
+    with at least :data:`CAPTURE_WAIT_CHANNELS` channels (``C``) whose ``C x S`` is at least
+    :data:`CAPTURE_WAIT_ELEMS`."""
 
     if cooperative or work is None or _TEST_KNOBS["bwd_overlap"] != 1:
         return False
     return not (
         arch in CAPTURE_WAIT_ARCHS
-        and elems >= CAPTURE_WAIT_ELEMS
+        and C >= CAPTURE_WAIT_CHANNELS
+        and C * S >= CAPTURE_WAIT_ELEMS
         and torch.cuda.is_current_stream_capturing()
     )
 
@@ -731,23 +736,29 @@ BWD_OVERLAP_DEFAULT = 1
 # exchange's wait).  On sm_100a the overlapped multi backward measured no robust gain over the waiting one (B200,
 # 3 x C = 8192 at CP4 and CP8: -0.9% to +0.8% per shape; CP4 zigzag 0.5% slower with only the knob changed), so its
 # multi entry waits first.  The single call overlaps on every architecture, except in a capture of a call of at least
-# CAPTURE_WAIT_ELEMS on CAPTURE_WAIT_ARCHS.
+# CAPTURE_WAIT_CHANNELS channels and CAPTURE_WAIT_ELEMS on CAPTURE_WAIT_ARCHS.
 MULTI_BWD_OVERLAP_ARCHS = frozenset(("sm_103a", "sm_107a"))
-# The architectures whose single call takes the waiting backward inside a CUDA Graph capture when its C x S is at
-# least CAPTURE_WAIT_ELEMS (:func:`_overlapped`; eager calls and smaller calls overlap).  On sm_100a (B200, CP2 / CP4 /
-# CP8; one C = 8192 tensor of 16384 rows and one C = 10240 tensor of 32768 rows per rank) the replayed overlapped
-# backward has two speeds (248-604 us), and the replayed waiting one has one speed and 17.9-35.2 % less time
-# (201-394 us).  Its replayed checkpointed step is 1.1 % faster to 4.7 % slower than the overlapped form's fast state
-# and faster than its slow state (CP2, C = 10240: 871.8 us vs 853.4 / 1004.9 us).  Smaller calls lose with the waiting
-# form, whose wait puts the exchange back on the backward's path: one C = 512 tensor of 4096 rows, one C = 1024 tensor
-# of 16384 rows and one C = 4096 tensor of 16384 rows per rank (CP2 / CP4 / CP8) replayed 0.6-14.6 % slower backward
-# and 2.6-10.5 % slower checkpointed steps (4096 x 16384: 3.8-17.4 us more backward).  So the capture waits from
-# C x S = 8192 x 16384, the smallest measured call where it won, and smaller calls keep the overlapped form, as in a
-# capture of 0.2.21 below its gather threshold (the same send slice and programs).  The grid and the bits do not
-# change.  On sm_103a the waiting form left the replayed checkpointed step up to 3.1 % slower, so sm_103a reserves SMs
-# instead (SPLIT_RESERVE_SMS).  On sm_107a the replayed overlapped backward has one speed (C = 10240, 32768 rows per
-# rank, CP2 and CP4: 234-242 us; eager 234-240 us), so it overlaps in a capture too.
+# The architectures whose single call takes the waiting backward inside a CUDA Graph capture when it has at least
+# CAPTURE_WAIT_CHANNELS channels and its C x S is at least CAPTURE_WAIT_ELEMS (:func:`_overlapped`; eager calls and
+# the other calls overlap).  On sm_100a (B200, CP2 / CP4 / CP8; one C = 8192 tensor of 16384 rows and one C = 10240
+# tensor of 32768 rows per rank) the replayed overlapped backward has two speeds (248-604 us), and the replayed
+# waiting one has one speed and 17.9-35.2 % less time (201-394 us).  Its replayed checkpointed step is 1.1 % faster to
+# 4.7 % slower than the overlapped form's fast state and faster than its slow state (CP2, C = 10240: 871.8 us vs
+# 853.4 / 1004.9 us).  Smaller calls lose with the waiting form, whose wait puts the exchange back on the backward's
+# path: one C = 512 tensor of 4096 rows, one C = 1024 tensor of 16384 rows and one C = 4096 tensor of 16384 rows per
+# rank (CP2 / CP4 / CP8) replayed 0.6-14.6 % slower backward and 2.6-10.5 % slower checkpointed steps (4096 x 16384:
+# 3.8-17.4 us more backward).  So the capture waits from C x S = 8192 x 16384, the smallest measured call where it
+# won, and smaller calls keep the overlapped form, as in a capture of 0.2.21 below its gather threshold (the same send
+# slice and programs).  At the same C x S the channel count decides: one C = 4096 tensor of 32768 rows per rank
+# replayed a 1.5-8.4 % slower waiting backward (197.7-199.5 us vs 182.4-195.2 us), and one C = 6144 tensor of 32768
+# rows per rank a one-speed waiting backward with 22.2-23.4 % less time than the two-speed overlapped one
+# (263.5-265.4 us vs 340.7-344.1 us).  So the capture waits only from C = 6144, the smallest measured C where it won,
+# and calls with fewer channels keep the overlapped form of 0.2.21.  The grid and the bits do not change.  On sm_103a
+# the waiting form left the replayed checkpointed step up to 3.1 % slower, so sm_103a reserves SMs instead
+# (SPLIT_RESERVE_SMS).  On sm_107a the replayed overlapped backward has one speed (C = 10240, 32768 rows per rank, CP2
+# and CP4: 234-242 us; eager 234-240 us), so it overlaps in a capture too.
 CAPTURE_WAIT_ARCHS = frozenset(("sm_100a",))
+CAPTURE_WAIT_CHANNELS = 6144
 CAPTURE_WAIT_ELEMS = 8192 * 16384
 # The two-launch forward (the module docstring's "Two-launch forward"): the knob values of ``fwd_main`` (the main
 # program: 1 = the single-rank ``fwd`` route program, 0 = the ``kcp_fwd`` program) and ``fwd_overlap`` (1 = the main
@@ -1808,7 +1819,7 @@ def _kcp_backward(
         "tail_row_off": tail_row_off,
         **_scalars(scalars),
     }
-    overlap = _overlapped(cooperative, work, arch, C * S)
+    overlap = _overlapped(cooperative, work, arch, C, S)
     if overlap:
         # the overlapped backward: the main programs read no received row while the exchange is in flight
         values["tail_row_off"] = torch.full(
@@ -2177,7 +2188,7 @@ def _kcp_backward_trim(
             work.wait()
         dw_out.zero_()
         return dx_out, dw_out
-    overlap = _overlapped(cooperative, work, e["arch"], C * S)
+    overlap = _overlapped(cooperative, work, e["arch"], C, S)
     _bwd_main(
         e,
         x_flat,
@@ -2640,7 +2651,7 @@ def _kcp_backward_multi(
             dw.zero_()
         return dx_out, dw_out
     overlap = (
-        _overlapped(cooperative, work, e0["arch"], calls[0][1] * calls[0][0])
+        _overlapped(cooperative, work, e0["arch"], calls[0][1], calls[0][0])
         and e0["arch"] in MULTI_BWD_OVERLAP_ARCHS
     )
     if overlap:

@@ -145,12 +145,12 @@ def test_bwd_overlap_knob_is_validated(monkeypatch) -> None:
     assert conv_kcp.BWD_OVERLAPS == (0, 1) and conv_kcp.BWD_OVERLAP_DEFAULT == 1
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     work = object()
-    big = conv_kcp.CAPTURE_WAIT_ELEMS
+    big = (10240, 32768)
     try:
         for arch in ("sm_100a", "sm_103a", "sm_107a"):
-            assert conv_kcp._overlapped(False, work, arch, big) is True
-            assert conv_kcp._overlapped(True, work, arch, big) is False
-            assert conv_kcp._overlapped(False, None, arch, big) is False
+            assert conv_kcp._overlapped(False, work, arch, *big) is True
+            assert conv_kcp._overlapped(True, work, arch, *big) is False
+            assert conv_kcp._overlapped(False, None, arch, *big) is False
         assert conv_kcp._bwd_variant(False) is False
         assert conv_kcp._bwd_variant(True) is True
         assert conv_kcp._set_test_knobs({"bwd_overlap": 0}) == {
@@ -161,7 +161,7 @@ def test_bwd_overlap_knob_is_validated(monkeypatch) -> None:
             "fwd_overlap": None,
         }
         for arch in ("sm_100a", "sm_103a", "sm_107a"):
-            assert conv_kcp._overlapped(False, work, arch, big) is False
+            assert conv_kcp._overlapped(False, work, arch, *big) is False
         assert conv_kcp._bwd_variant(False) == (False, ("bwd_overlap", 0))
         for bad in ({"bwd_overlap": 2}, {"bwd_overlap": True}, {"bwd_overlap": "1"}):
             with pytest.raises(ValueError):
@@ -173,34 +173,47 @@ def test_bwd_overlap_knob_is_validated(monkeypatch) -> None:
 
 @pytest.mark.cpu_only
 def test_capture_waits_on_sm100a(monkeypatch) -> None:
-    """``CAPTURE_WAIT_ARCHS`` and ``CAPTURE_WAIT_ELEMS``: inside a CUDA Graph capture the single call's split backward
-    takes the waiting form on sm_100a only, and only when its ``C x S`` is at least 8192 x 16384; a smaller call,
-    a call outside a capture, and a call in a capture on sm_103a and sm_107a overlap.  The cooperative form, a call
-    without an exchange and the ``bwd_overlap`` knob ``0`` wait in and out of a capture, and the graph-key variant
-    does not depend on the capture.  The multi entry's architectures are unchanged."""
+    """``CAPTURE_WAIT_ARCHS``, ``CAPTURE_WAIT_CHANNELS`` and ``CAPTURE_WAIT_ELEMS``: inside a CUDA Graph capture the
+    single call's split backward takes the waiting form on sm_100a only, and only when it has at least 6144 channels
+    and its ``C x S`` is at least 8192 x 16384; a call with fewer channels or a smaller ``C x S``, a call outside a
+    capture, and a call in a capture on sm_103a and sm_107a overlap.  The cooperative form, a call without an exchange
+    and the ``bwd_overlap`` knob ``0`` wait in and out of a capture, and the graph-key variant does not depend on the
+    capture.  The multi entry's architectures are unchanged."""
     assert conv_kcp.CAPTURE_WAIT_ARCHS == frozenset(("sm_100a",))
+    assert conv_kcp.CAPTURE_WAIT_CHANNELS == 6144
     assert conv_kcp.CAPTURE_WAIT_ELEMS == 8192 * 16384
     assert conv_kcp.MULTI_BWD_OVERLAP_ARCHS == frozenset(("sm_103a", "sm_107a"))
     work = object()
     limit = conv_kcp.CAPTURE_WAIT_ELEMS
-    sizes = (512 * 4096, 4096 * 16384, limit - 1, limit, 4096 * 32768, 10240 * 32768)
+    shapes = (
+        (512, 4096),
+        (4096, 16384),
+        (8192, limit // 8192 - 1),
+        (8192, limit // 8192),
+        (4096, 32768),
+        (6143, 32768),
+        (6144, limit // 6144),
+        (6144, limit // 6144 + 1),
+        (6144, 32768),
+        (10240, 32768),
+    )
     for capturing in (False, True):
         monkeypatch.setattr(
             torch.cuda, "is_current_stream_capturing", lambda _c=capturing: _c
         )
         for arch in ("sm_100a", "sm_103a", "sm_107a"):
-            for elems in sizes:
-                want = not (capturing and arch == "sm_100a" and elems >= limit)
-                got = conv_kcp._overlapped(False, work, arch, elems)
-                assert got is want, (capturing, arch, elems)
-                assert conv_kcp._overlapped(True, work, arch, elems) is False
-                assert conv_kcp._overlapped(False, None, arch, elems) is False
+            for C, S in shapes:
+                wait = capturing and arch == "sm_100a" and C >= 6144 and C * S >= limit
+                got = conv_kcp._overlapped(False, work, arch, C, S)
+                assert got is (not wait), (capturing, arch, C, S)
+                assert conv_kcp._overlapped(True, work, arch, C, S) is False
+                assert conv_kcp._overlapped(False, None, arch, C, S) is False
         assert conv_kcp._bwd_variant(False) is False
         try:
             conv_kcp._set_test_knobs({"bwd_overlap": 0})
             for arch in ("sm_100a", "sm_103a", "sm_107a"):
-                for elems in sizes:
-                    assert conv_kcp._overlapped(False, work, arch, elems) is False
+                for C, S in shapes:
+                    assert conv_kcp._overlapped(False, work, arch, C, S) is False
         finally:
             conv_kcp._set_test_knobs(None)
 

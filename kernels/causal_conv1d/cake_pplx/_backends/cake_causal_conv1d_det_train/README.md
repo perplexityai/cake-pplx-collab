@@ -170,13 +170,15 @@ tensor this way and runs the other tensors' programs after the wait, so it
 also adds one program per call; on sm_100a, where this measured no gain, the
 multi entry waits first (`MULTI_BWD_OVERLAP_ARCHS`).  From 0.2.22, inside a
 CUDA Graph capture on sm_100a (`kcp.CAPTURE_WAIT_ARCHS`) a single call with
-`C x S` of at least `kcp.CAPTURE_WAIT_ELEMS` (8192 x 16384) also waits for the
-exchange before its split program and runs no tail-row program: replayed, the
-overlapped backward had two speeds there and the waiting one has one speed and
-less time.  Smaller calls keep the overlapped form in a capture, because the
-wait made their replayed backward slower (the comment at `CAPTURE_WAIT_ARCHS`
-in `kcp.py`).  The grid, `dx` and `dweight` are the same in both forms; eager
-calls still overlap.  `cooperative=True` waits before its launch.
+at least `kcp.CAPTURE_WAIT_CHANNELS` (6144) channels and `C x S` of at least
+`kcp.CAPTURE_WAIT_ELEMS` (8192 x 16384) also waits for the exchange before its
+split program and runs no tail-row program: replayed, the overlapped backward
+had two speeds there and the waiting one has one speed and less time.  Calls
+with fewer channels or a smaller `C x S` keep the overlapped form in a capture,
+because the wait made their replayed backward slower (the comment at
+`CAPTURE_WAIT_ARCHS` in `kcp.py`).  The grid, `dx` and `dweight` are the same
+in both forms; eager calls still overlap.  `cooperative=True` waits before its
+launch.
 
 ### Two-launch forward
 
@@ -226,7 +228,9 @@ One `all_to_all_single` per direction and call:
   capture of a call with `C x S` of at least 8192 x 16384 on sm_100a and
   sm_103a, to keep the replayed checkpointed step's overlapped backward out of
   its slow state.  From 0.2.22 that backward has one speed there, the split
-  grid and the capture's waiting form above, and the capture sends the slice.)
+  grid and the capture's waiting form above (with fewer than 6144 channels the
+  measured overlapped backward had one speed too), and the capture sends the
+  slice.)
 - Backward: the head program writes the FP32 derivative of each continuing
   fragment's first tokens (the halo adjoints; a token feeds at most three
   predecessor fragments) into the send layout; the exchange delivers them to
