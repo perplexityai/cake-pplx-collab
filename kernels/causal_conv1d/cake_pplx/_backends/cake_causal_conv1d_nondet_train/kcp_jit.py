@@ -1022,6 +1022,21 @@ DYN_UNIT = 64
 DYN_IDLE_UNIT = 56
 DYN_UNIT_COST_TENTHS = 32
 DYN_TAIL_COST_TENTHS = 3
+# The context-parallel unit table (:func:`dyn_cp_unit`; a call whose world size is known): a call of at most
+# ``DYN_CP_MAX_CHANNELS`` channels takes ``DYN_CP_SHORT_UNIT``-token units when its rank has at most
+# ``DYN_CP_SHORT_TOKENS[world_size]`` tokens, and with world size ``DYN_CP_LONG_WORLD`` ``DYN_CP_LONG_UNIT``-token
+# units from ``DYN_CP_LONG_TOKENS`` tokens on, unless those make a lane's run (``NL * M`` tokens) longer than the
+# ``DYN_UNIT`` plan's.  Measured against the plan without the table on B200, GB300 and VR200 (backward and
+# checkpointed backward; contiguous, zigzag, three-tensor and CUDA Graph replay calls; world sizes 2 and 4, and 8
+# on B200): faster or equal on every measured row of the table.  56-token units ran 6-28% slower at 12288 tokens on
+# VR200 (220 units for 212 CTAs: 112-token runs against 64), which the lane-run check keeps out, and 32-token units
+# at world size 8 ran 2% slower at 4096 tokens (one checkpointed zigzag row on B200), so the table stops at 2048 there.
+DYN_CP_MAX_CHANNELS = 512
+DYN_CP_SHORT_UNIT = 32
+DYN_CP_SHORT_TOKENS = {2: 4096, 4: 4096, 8: 2048}
+DYN_CP_LONG_UNIT = 56
+DYN_CP_LONG_WORLD = 2
+DYN_CP_LONG_TOKENS = 16384
 
 
 def route_applies(*, device_capability: Sequence[int], kind: str) -> bool:
@@ -1185,7 +1200,27 @@ def dyn_applies(C: int, S: int) -> bool:
     return int(S) >= 1 and int(C) <= DYN_MAX_CHANNELS
 
 
-def dyn_plan(S: int, C: int, sms: int) -> dict[str, int]:
+def dyn_cp_unit(world_size: int, S: int, C: int) -> int | None:
+    """The context-parallel unit table's unit size for a call of ``C`` channels and ``S`` tokens on its rank with
+    ``world_size`` ranks: :data:`DYN_CP_SHORT_UNIT` up to ``DYN_CP_SHORT_TOKENS[world_size]`` tokens,
+    :data:`DYN_CP_LONG_UNIT` from :data:`DYN_CP_LONG_TOKENS` tokens with world size :data:`DYN_CP_LONG_WORLD`, both
+    for at most :data:`DYN_CP_MAX_CHANNELS` channels; ``None`` otherwise (the plan of :func:`dyn_plan` without the
+    table)."""
+
+    world_size, S, C = int(world_size), int(S), int(C)
+    if C > DYN_CP_MAX_CHANNELS:
+        return None
+    short = DYN_CP_SHORT_TOKENS.get(world_size)
+    if short is not None and S <= short:
+        return DYN_CP_SHORT_UNIT
+    if world_size == DYN_CP_LONG_WORLD and S >= DYN_CP_LONG_TOKENS:
+        return DYN_CP_LONG_UNIT
+    return None
+
+
+def dyn_plan(
+    S: int, C: int, sms: int, *, world_size: int | None = None
+) -> dict[str, int]:
     """The overlapped main program's work plan on a device of ``sms`` SMs: ``P`` lanes per tile of
     :data:`DYN_TILE` channels (as many as give every SM's CTA a lane, at most one per unit of tokens and
     :data:`DYN_MAX_LANES` lanes in all), each of ``NL`` units of ``M`` tokens, ``L`` lanes, ``n_ctas = max(L, sms)``
@@ -1199,7 +1234,11 @@ def dyn_plan(S: int, C: int, sms: int) -> dict[str, int]:
     :data:`DYN_UNIT` to twice it whose plan fits the lanes' 16-bit claim counts at the least lane cost ``NL * M``
     tokens plus ``NL`` units of :data:`DYN_UNIT_COST_TENTHS` plus the tail's ``M`` tokens of
     :data:`DYN_TAIL_COST_TENTHS` (the smaller ``M`` on a tie); when none fits, ``M`` doubles from
-    ``4 * DYN_UNIT`` until a plan fits.  A pure function of ``(S, C, sms)``; ``dx`` does not depend on it."""
+    ``4 * DYN_UNIT`` until a plan fits.  With ``world_size`` (the call's context-parallel world size), a unit of
+    the context-parallel table (:func:`dyn_cp_unit`) comes first: its plan is taken when it fits the claim counts
+    and, for :data:`DYN_CP_LONG_UNIT`, when its lanes' runs (``NL * M`` tokens) are no longer than those of the
+    :data:`DYN_UNIT` plan; otherwise, and with ``world_size=None``, the plan above.  A pure function of
+    ``(S, C, sms, world_size)``; ``dx`` does not depend on it."""
 
     S, C, sms = int(S), int(C), int(sms)
     if S < 1 or C < 1 or C > DYN_MAX_CHANNELS:
@@ -1222,6 +1261,15 @@ def dyn_plan(S: int, C: int, sms: int) -> dict[str, int]:
         """The plan's CTAs without a lane of their own that has tokens."""
         return p["n_ctas"] - p["n_tiles"] * min(p["P"], -(-S // (p["NL"] * p["M"])))
 
+    cp_unit = None if world_size is None else dyn_cp_unit(world_size, S, C)
+    if cp_unit is not None:
+        cp = plan_for(cp_unit)
+        if cp is not None and cp_unit == DYN_CP_LONG_UNIT:
+            ref = plan_for(DYN_UNIT)
+            if ref is None or cp["NL"] * cp["M"] > ref["NL"] * ref["M"]:
+                cp = None
+        if cp is not None:
+            return cp
     base = plan_for(DYN_UNIT)
     if base is not None and -(-S // (base["NL"] * DYN_UNIT)) < base["P"]:
         # measured on GB300, GB200 and VR200: with idle lanes, 64-token units beat the larger units the cost picks;
@@ -1356,6 +1404,12 @@ __all__ = [
     "ARCHES",
     "ARCH_BY_CAPABILITY",
     "CHANNEL_MULTIPLE",
+    "DYN_CP_LONG_TOKENS",
+    "DYN_CP_LONG_UNIT",
+    "DYN_CP_LONG_WORLD",
+    "DYN_CP_MAX_CHANNELS",
+    "DYN_CP_SHORT_TOKENS",
+    "DYN_CP_SHORT_UNIT",
     "DYN_KIND",
     "DYN_PAIR_KIND",
     "DYN_MAX_CHANNELS",
@@ -1383,6 +1437,7 @@ __all__ = [
     "channel_split",
     "device_arch",
     "dyn_applies",
+    "dyn_cp_unit",
     "dyn_plan",
     "dyn_workspace_layout",
     "head_grid",

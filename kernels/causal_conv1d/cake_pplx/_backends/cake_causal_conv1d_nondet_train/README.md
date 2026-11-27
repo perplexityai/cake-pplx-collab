@@ -208,6 +208,23 @@ tokens per rank gets 104 on a 148-SM B200 and 64 on GB300, GB200 and VR200;
 8192 channels of 16384 tokens get 64 on B200, GB300 and GB200, and 56 on the
 212-SM VR200 (16 idle CTAs instead of 4).
 
+The call's context-parallel world size selects a unit table first
+(`kcp_jit.dyn_cp_unit`). It covers calls of at most 512 channels:
+
+| World size | Tokens on the rank | `M` |
+| --- | --- | --- |
+| 2 | at most 4096 | 32 |
+| 2 | at least 16384 | 56, unless its lanes' runs (`NL x M` tokens) are longer than with 64-token units |
+| 4 | at most 4096 | 32 |
+| 8 | at most 2048 | 32 |
+
+Every other call, and a table unit whose plan does not fit the claim counts,
+gets the plan above. On B200, GB300 and VR200 the table's units ran faster
+than or equal to the plan above on every measured row of the table (world
+sizes 2 and 4; world size 8 on B200). 56-token units ran 6-28% slower with
+12288 tokens on the 212-SM VR200, where 220 units for 212 CTAs make 112-token
+runs instead of 64; the lane-run check keeps such plans out of the table.
+
 Under any of these conditions, the one-program backward (`kcp_bwd`) runs after the wait instead:
 
 - `bwd_reserve_sms >= 1`
