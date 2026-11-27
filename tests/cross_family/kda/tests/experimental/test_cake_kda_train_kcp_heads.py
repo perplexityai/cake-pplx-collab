@@ -65,6 +65,7 @@ from tests.experimental.test_cake_kda_det_train_kcp_dist import (
     _programs_exported as _det_programs_exported,
 )
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
+    _abort_group,
     _bound_rank_threads,
     _init_group,
     _rendezvous,
@@ -328,6 +329,9 @@ def _spawn_entry(rank: int, pkg: str, W: int, row, rdzv: str, result_dir: str) -
         report = _run_rank(pkg, rank, W, row, rdzv, result_dir)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -526,6 +530,9 @@ def _layout_rank(rank: int, pkg: str, W: int, rdzv: str, result_dir: str) -> Non
             with open(os.path.join(result_dir, f"layouts-{pkg}.json"), "w") as fh:
                 json.dump(report, fh, indent=1, default=str)
         dist.barrier()
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()

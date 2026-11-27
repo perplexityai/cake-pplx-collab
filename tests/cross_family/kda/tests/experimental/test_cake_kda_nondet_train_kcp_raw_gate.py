@@ -66,6 +66,7 @@ from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
 from tests.experimental.test_cake_kda_det_train_raw_gate_accuracy import torch_gate
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     _Counter,
+    _abort_group,
     _bwd_sequence_first_main,
     _handle_recompute_flags,
     _init_group,
@@ -1324,6 +1325,9 @@ def _spawn_entry(rank: int, W: int, row, rdzv: str | None, result_dir: str) -> N
             raise AssertionError(
                 f"rank {rank}: {report['row']} exact checks failed: {report['flags']}"
             )
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

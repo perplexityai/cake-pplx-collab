@@ -52,6 +52,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from tests.experimental.test_cake_kda_det_train_kcp_dist import (
+    _abort_group,
     _init_group,
     _local_slices,
     _partition,
@@ -1104,6 +1105,9 @@ def _spawn_entry(rank: int, W: int, row, rdzv: str | None, result_dir: str) -> N
             raise AssertionError(
                 f"rank {rank}: {report['row']} exact checks failed: {report['flags']}"
             )
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()
@@ -1314,6 +1318,9 @@ def _protocol_spawn_entry(
             raise AssertionError(
                 f"rank {rank}: {_row_id(row)}: the raw route's partials or reduced sums are not bitwise repeatable"
             )
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

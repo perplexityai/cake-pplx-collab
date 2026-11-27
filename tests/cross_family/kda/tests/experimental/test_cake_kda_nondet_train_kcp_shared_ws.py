@@ -49,6 +49,7 @@ import torch.multiprocessing as mp
 
 from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
 from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
+    _abort_group,
     _init_group,
     _rendezvous,
 )
@@ -2240,6 +2241,9 @@ def _spawn_dist_entry(
         report = RANK_RUNNERS[kind](rank, W, row, rdzv, result_dir)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

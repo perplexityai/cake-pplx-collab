@@ -80,6 +80,7 @@ from tests.experimental.test_cake_kda_nondet_train_kcp_dist import (
     CKPT_ROWS,
     GRAPH_EVENTS,
     SCALE,
+    _abort_group,
     _bound_rank_threads,
     _bwd_sequence_first_main,
     _init_group,
@@ -779,6 +780,9 @@ def _spawn_entry_handoff(
         report = _run_rank_handoff(rank, W, row, rdzv, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -1305,6 +1309,9 @@ def _spawn_entry_handoff_mode(
         report = _run_rank_handoff_mode(rank, W, row, rdzv, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -2093,6 +2100,9 @@ def _spawn_entry_rows(
         report = _run_rank_rows(rank, W, row, rdzv, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

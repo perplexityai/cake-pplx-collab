@@ -46,7 +46,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from tests.experimental.test_cake_kda_nondet_train_kcp_dist import _rendezvous
+from tests.experimental.test_cake_kda_nondet_train_kcp_dist import _abort_group, _rendezvous
 from tests.cake_naive import draw_seed
 from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
     BWD_GRADS,
@@ -1342,6 +1342,9 @@ def _spawn_lean_entry(
         report = _run_lean_rank(rank, W, row, rdzv, result_dir, lean_passes)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()

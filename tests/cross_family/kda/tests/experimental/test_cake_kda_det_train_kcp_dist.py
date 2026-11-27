@@ -494,6 +494,9 @@ def _spawn_entry(rank: int, W: int, row, rdzv: str | None, result_dir: str) -> N
         report = _run_rank(rank, W, row, rdzv, result_dir)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()
@@ -538,6 +541,18 @@ def _init_group(rank: int, W: int, device: torch.device, rdzv: str | None) -> No
             device_id=device,
             **_group_timeout(),
         )
+
+
+def _abort_group() -> None:
+    """Abort this rank's NCCL group without waiting, from a spawn entry's ``except``: a rank that raises leaves the
+    other ranks waiting in a collective it never joins (rank 0's judge runs between collectives), and the graceful
+    ``destroy_process_group()`` of the entry's ``finally`` would wait with them until the group's timeout, so the
+    spawning test saw only their watchdog abort instead of this rank's error.  The abort clears the default group, so
+    the ``finally`` skips its cleanup and the error reaches the test at once."""
+    if dist.is_initialized():
+        from torch.distributed import distributed_c10d
+
+        distributed_c10d._abort_process_group()
 
 
 def _skip_unless_runnable(W: int) -> None:
@@ -860,6 +875,9 @@ def _spawn_upload_entry(
         report = _run_upload_rank(rank, W, row, rdzv, result_dir)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()
@@ -1897,6 +1915,9 @@ def _spawn_entry_ckpt(
         report = _run_rank_ckpt(rank, W, row, rdzv, result_dir, rank)
         if not report["pass"]:
             raise AssertionError(f"rank {rank}: {report}")
+    except BaseException:
+        _abort_group()
+        raise
     finally:
         if dist.is_initialized():
             dist.destroy_process_group()
