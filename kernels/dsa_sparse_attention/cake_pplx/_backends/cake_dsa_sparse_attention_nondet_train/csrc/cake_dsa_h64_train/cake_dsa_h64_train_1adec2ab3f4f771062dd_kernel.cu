@@ -80,21 +80,43 @@ __device__ __forceinline__ void mbarrier_init(int mbar_addr, int count) {
 
 
 
+#if __CUDA_ARCH__ == 1070
+// CTA-local pipelines have short, resident producer/consumer edges.  Omitting
+// suspendTimeHint keeps a miss on the lightweight TRYWAIT retry path; the
+// explicit loop still makes this helper blocking until acquire succeeds.
+__device__ __forceinline__ void mbarrier_wait(int mbar_addr, int phase) {
+#else
 __device__ __forceinline__ void mbarrier_wait_hint(
         int mbar_addr, int phase, uint32_t suspend_time_hint) {
+#endif
     asm volatile(
         "{\n\t"
         ".reg .pred P1;\n\t"
+#if __CUDA_ARCH__ == 1070
+        "LAB_WAIT:\n\t"
+#else
         ".reg .u32 WAIT_ADDR;\n\t"
         "mov.u32 WAIT_ADDR, %0;\n\t"
         "LAB_WAIT_HINT:\n\t"
+#endif
         "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64"
+#if __CUDA_ARCH__ == 1070
+        " P1, [%0], %1;\n\t"
+        "@P1 bra.uni DONE;\n\t"
+        "bra.uni LAB_WAIT;\n\t"
+        "DONE:\n\t"
+#else
         " P1, [WAIT_ADDR], %1, %2;\n\t"
         "@P1 bra.uni DONE_HINT;\n\t"
         "bra.uni LAB_WAIT_HINT;\n\t"
         "DONE_HINT:\n\t"
+#endif
         "}\n"
+#if __CUDA_ARCH__ == 1070
+        :: "r"(mbar_addr), "r"(phase) : "memory");
+#else
         :: "r"(mbar_addr), "r"(phase), "r"(suspend_time_hint) : "memory");
+#endif
 }
 
 
@@ -336,10 +358,18 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
 
     // ---- Role: gather ----
     if (warp <= 3) {
+#if __CUDA_ARCH__ == 1070
+        asm volatile("setmaxnreg.dec.sync.aligned.u32 24;");
+#else
         asm volatile("setmaxnreg.dec.sync.aligned.u32 32;");
+#endif
         { // gather_main
             int pw = warp;
+#if __CUDA_ARCH__ == 1070
+            mbarrier_wait(blocks_ready_addr, 0);
+#else
             mbarrier_wait_hint(blocks_ready_addr, 0, 10000000);
+#endif
             int blocks = blocks_word[0];
             if (elect_sync()) {
                 #pragma unroll 1
@@ -347,7 +377,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                     int slot = i % 2;
                     int _stage_idx_full = (int)((unsigned int)i % 2);
                     int _parity_idx_full = (int)((unsigned int)i / 2 % 2);
+#if __CUDA_ARCH__ == 1070
+                    mbarrier_wait(idx_full_addr + (_stage_idx_full) * 8, _parity_idx_full);
+#else
                     mbarrier_wait_hint(idx_full_addr + (_stage_idx_full) * 8, _parity_idx_full, 10000000);
+#endif
                     int rows[16];
                     rows[0] = tile_idx[slot * 80 + pw * 4];
                     rows[1] = tile_idx[slot * 80 + pw * 4 + 1];
@@ -365,9 +399,97 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                     rows[13] = tile_idx[slot * 80 + 48 + pw * 4 + 1];
                     rows[14] = tile_idx[slot * 80 + 48 + pw * 4 + 2];
                     rows[15] = tile_idx[slot * 80 + 48 + pw * 4 + 3];
+#if DKV_NATURAL == 0
+#if __CUDA_ARCH__ == 1070
+                    int pad = rows[0];
+                    int _max_0 = ((pad) > (rows[1]) ? (pad) : (rows[1]));
+                    pad = _max_0;
+                    int _max_1 = ((pad) > (rows[2]) ? (pad) : (rows[2]));
+                    pad = _max_1;
+                    int _max_2 = ((pad) > (rows[3]) ? (pad) : (rows[3]));
+                    pad = _max_2;
+                    int _max_3 = ((pad) > (rows[4]) ? (pad) : (rows[4]));
+                    pad = _max_3;
+                    int _max_4 = ((pad) > (rows[5]) ? (pad) : (rows[5]));
+                    pad = _max_4;
+                    int _max_5 = ((pad) > (rows[6]) ? (pad) : (rows[6]));
+                    pad = _max_5;
+                    int _max_6 = ((pad) > (rows[7]) ? (pad) : (rows[7]));
+                    pad = _max_6;
+                    int _max_7 = ((pad) > (rows[8]) ? (pad) : (rows[8]));
+                    pad = _max_7;
+                    int _max_8 = ((pad) > (rows[9]) ? (pad) : (rows[9]));
+                    pad = _max_8;
+                    int _max_9 = ((pad) > (rows[10]) ? (pad) : (rows[10]));
+                    pad = _max_9;
+                    int _max_10 = ((pad) > (rows[11]) ? (pad) : (rows[11]));
+                    pad = _max_10;
+                    int _max_11 = ((pad) > (rows[12]) ? (pad) : (rows[12]));
+                    pad = _max_11;
+                    int _max_12 = ((pad) > (rows[13]) ? (pad) : (rows[13]));
+                    pad = _max_12;
+                    int _max_13 = ((pad) > (rows[14]) ? (pad) : (rows[14]));
+                    pad = _max_13;
+                    int _max_14 = ((pad) > (rows[15]) ? (pad) : (rows[15]));
+                    pad = _max_14;
+                    if (rows[0] < 0) {
+                        rows[0] = pad;
+                    }
+                    if (rows[1] < 0) {
+                        rows[1] = pad;
+                    }
+                    if (rows[2] < 0) {
+                        rows[2] = pad;
+                    }
+                    if (rows[3] < 0) {
+                        rows[3] = pad;
+                    }
+                    if (rows[4] < 0) {
+                        rows[4] = pad;
+                    }
+                    if (rows[5] < 0) {
+                        rows[5] = pad;
+                    }
+                    if (rows[6] < 0) {
+                        rows[6] = pad;
+                    }
+                    if (rows[7] < 0) {
+                        rows[7] = pad;
+                    }
+                    if (rows[8] < 0) {
+                        rows[8] = pad;
+                    }
+                    if (rows[9] < 0) {
+                        rows[9] = pad;
+                    }
+                    if (rows[10] < 0) {
+                        rows[10] = pad;
+                    }
+                    if (rows[11] < 0) {
+                        rows[11] = pad;
+                    }
+                    if (rows[12] < 0) {
+                        rows[12] = pad;
+                    }
+                    if (rows[13] < 0) {
+                        rows[13] = pad;
+                    }
+                    if (rows[14] < 0) {
+                        rows[14] = pad;
+                    }
+                    if (rows[15] < 0) {
+                        rows[15] = pad;
+                    }
+#else
+#endif
+#endif
                     mbarrier_arrive(idx_free_addr + ((int)((unsigned int)i % 2)) * 8);
                     int _parity_k_free = (int)((unsigned int)i % 2) ^ 1;
+#if __CUDA_ARCH__ == 1070
+                    mbarrier_wait(k_free_addr, _parity_k_free);
+#else
                     mbarrier_wait_hint(k_free_addr, _parity_k_free, 10000000);
+#endif
                     mbarrier_arrive_expect_tx(k_full_addr, 18432);
                     asm volatile(
                         "cp.async.bulk.tensor.2d.shared::cta.global.tile::gather4"
@@ -527,9 +649,17 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
             int lane_0 = lane;
             int w = warp - 4;
             int lane_base = (tid & 96) << 16;
+#if __CUDA_ARCH__ == 1070
+            mbarrier_wait(blocks_ready_addr, 0);
+#else
             mbarrier_wait_hint(blocks_ready_addr, 0, 10000000);
+#endif
             int blocks_1 = blocks_word[0];
+#if __CUDA_ARCH__ == 1070
+            mbarrier_wait(stats_full_addr, 0);
+#else
             mbarrier_wait_hint(stats_full_addr, 0, 10000000);
+#endif
             int h0 = w * 16 + lane_0 / 4;
             float lse0 = stats[h0];
             float lse1 = stats[h0 + 8];
@@ -545,12 +675,20 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 int slot_1 = i_1 % 2;
                 int _stage_idx_full_1 = (int)((unsigned int)i_1 % 2);
                 int _parity_idx_full_1 = (int)((unsigned int)i_1 / 2 % 2);
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(idx_full_addr + (_stage_idx_full_1) * 8, _parity_idx_full_1);
+#else
                 mbarrier_wait_hint(idx_full_addr + (_stage_idx_full_1) * 8, _parity_idx_full_1, 10000000);
+#endif
                 unsigned int v0 = validity32[slot_1 * 80 + 64];
                 unsigned int v1 = validity32[slot_1 * 80 + 65];
                 mbarrier_arrive(idx_free_addr + ((int)((unsigned int)i_1 % 2)) * 8);
                 int _parity_s_full = (int)((unsigned int)i_1 % 2);
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(s_full_addr, _parity_s_full);
+#else
                 mbarrier_wait_hint(s_full_addr, _parity_s_full, 10000000);
+#endif
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 float s[32];
                 asm volatile(
@@ -708,7 +846,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 mbarrier_arrive(s_free_addr);
                 asm volatile("barrier.sync 1, 128;" ::: "memory");
                 int _parity_p_free = (int)((unsigned int)i_1 % 2) ^ 1;
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(p_free_addr, _parity_p_free);
+#else
                 mbarrier_wait_hint(p_free_addr, _parity_p_free, 10000000);
+#endif
                 unsigned int p_bf16[16];
                 #pragma unroll
                 for (int _lp = 0; _lp < 16; _lp++) {
@@ -738,7 +880,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(p_full_addr);
                 int _parity_dp_full = (int)((unsigned int)i_1 % 2);
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(dp_full_addr, _parity_dp_full);
+#else
                 mbarrier_wait_hint(dp_full_addr, _parity_dp_full, 10000000);
+#endif
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 float dp[32];
                 asm volatile(
@@ -784,7 +930,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 mbarrier_arrive(dp_free_addr);
                 asm volatile("barrier.sync 1, 128;" ::: "memory");
                 int _parity_ds_free = (int)((unsigned int)i_1 % 2) ^ 1;
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(ds_free_addr, _parity_ds_free);
+#else
                 mbarrier_wait_hint(ds_free_addr, _parity_ds_free, 10000000);
+#endif
                 unsigned int ds_bf16[16];
                 #pragma unroll
                 for (int _lp = 0; _lp < 16; _lp++) {
@@ -814,7 +964,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(ds_full_addr);
             }
+#if __CUDA_ARCH__ == 1070
+            mbarrier_wait(dq_done_addr, 0);
+#else
             mbarrier_wait_hint(dq_done_addr, 0, 10000000);
+#endif
             asm volatile("tcgen05.fence::after_thread_sync;");
             float dq_1_0[32];
             asm volatile(
@@ -1207,13 +1361,35 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
     }
     // ---- Role: reduce ----
     if (warp >= 8 && warp <= 15) {
+#if DKV_NATURAL == 1
         asm volatile("setmaxnreg.inc.sync.aligned.u32 112;");
+#else
+#if __CUDA_ARCH__ == 1070
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 104;");
+#else
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 112;");
+#endif
+#endif
         { // reduce_main
             int lane_0_1 = lane;
+#if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+            int w2 = tid >> 5 & 3;
+            int wg = (tid >> 5) - 8 >> 2;
+#else
             int w2 = (warp - 8) % 4;
             int wg = (warp - 8) / 4;
+#endif
+#else
+            int w2 = (warp - 8) % 4;
+            int wg = (warp - 8) / 4;
+#endif
             int lane_base_1 = (tid & 96) << 16;
+#if __CUDA_ARCH__ == 1070
+            mbarrier_wait(blocks_ready_addr, 0);
+#else
             mbarrier_wait_hint(blocks_ready_addr, 0, 10000000);
+#endif
             int blocks_2 = blocks_word[0];
             int lpos = 32 * w2 + 4 * (lane_0_1 / 4);
             int rpos = 16 * w2 + 2 * (lane_0_1 / 4);
@@ -1228,7 +1404,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 int slot_2 = i_2 % 2;
                 int _stage_idx_full_2 = (int)((unsigned int)i_2 % 2);
                 int _parity_idx_full_2 = (int)((unsigned int)i_2 / 2 % 2);
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(idx_full_addr + (_stage_idx_full_2) * 8, _parity_idx_full_2);
+#else
                 mbarrier_wait_hint(idx_full_addr + (_stage_idx_full_2) * 8, _parity_idx_full_2, 10000000);
+#endif
                 int keys[8];
                 keys[0] = tile_idx[slot_2 * 80 + wg * 32 + 2 * (lane_0_1 % 4)];
                 keys[1] = tile_idx[slot_2 * 80 + wg * 32 + 2 * (lane_0_1 % 4) + 1];
@@ -1277,7 +1457,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 }
 #endif
                 int _parity_dkv_a_full = (int)((unsigned int)i_2 % 2);
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(dkv_a_full_addr, _parity_dkv_a_full);
+#else
                 mbarrier_wait_hint(dkv_a_full_addr, _parity_dkv_a_full, 10000000);
+#endif
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 float a0[32];
                 float a1[32];
@@ -1306,7 +1490,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 mbarrier_arrive(dkv_a_drained_addr);
                 float rk[16];
                 int _parity_dkr_full = (int)((unsigned int)i_2 % 2);
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(dkr_full_addr, _parity_dkr_full);
+#else
                 mbarrier_wait_hint(dkr_full_addr, _parity_dkr_full, 10000000);
+#endif
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 asm volatile(
                     "tcgen05.ld.sync.aligned.16x256b.x4.b32"
@@ -1525,7 +1713,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
 #endif
                 }
                 int _parity_dkv_b_full = (int)((unsigned int)i_2 % 2);
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(dkv_b_full_addr, _parity_dkv_b_full);
+#else
                 mbarrier_wait_hint(dkv_b_full_addr, _parity_dkv_b_full, 10000000);
+#endif
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 asm volatile(
                     "tcgen05.ld.sync.aligned.16x256b.x4.b32"
@@ -1739,7 +1931,19 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
     }
     // ---- Warpgroup: 4 ----
     if (warp >= 16 && warp <= 19) {
+#if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 104;");
+#else
         asm volatile("setmaxnreg.dec.sync.aligned.u32 96;");
+#endif
+#else
+#if __CUDA_ARCH__ == 1070
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 120;");
+#else
+        asm volatile("setmaxnreg.dec.sync.aligned.u32 96;");
+#endif
+#endif
         // ---- Role: mma ----
         if (warp == 16) {
             { // mma_main
@@ -1749,17 +1953,34 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 int item_head_1 = ((wsel < 0) ? (item_1 & 1) * 64 : wsel * 64);
                 int real_heads = num_heads - item_head_1;
 #endif
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(blocks_ready_addr, 0);
+#else
                 mbarrier_wait_hint(blocks_ready_addr, 0, 10000000);
+#endif
                 int blocks_3 = blocks_word[0];
+#if __CUDA_ARCH__ == 1070
+                mbarrier_wait(qdo_full_addr, 0);
+#else
                 mbarrier_wait_hint(qdo_full_addr, 0, 10000000);
+#endif
                 if (elect_sync()) {
                     #pragma unroll 1
                     for (int i_3 = 0; i_3 < blocks_3; i_3++) {
                         if (i_3 == 0) {
+#if __CUDA_ARCH__ == 1070
+                            mbarrier_wait(k_full_addr, 0);
+#else
                             mbarrier_wait_hint(k_full_addr, 0, 10000000);
+#endif
                             asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_0 = ((qdo_k_addr) >> 4) & 0x7FFF;
+                            int _smem_desc_lo_1 = ((v_k_addr) >> 4) & 0x7FFF;
+#else
                             int _smem_desc_lo_0 = ((qdo_k_addr) >> 4) & 0x3FFF;
                             int _smem_desc_lo_1 = ((v_k_addr) >> 4) & 0x3FFF;
+#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -1934,8 +2155,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_0), "r"(_smem_desc_lo_1), "r"(tmem_tmem), "r"(0) : "memory");
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_2 = ((qr_k_addr) >> 4) & 0x7FFF;
+                            int _smem_desc_lo_3 = ((kr_k_addr) >> 4) & 0x7FFF;
+#else
                             int _smem_desc_lo_2 = ((qr_k_addr) >> 4) & 0x3FFF;
                             int _smem_desc_lo_3 = ((kr_k_addr) >> 4) & 0x3FFF;
+#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -1974,15 +2200,28 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                             tcgen05_commit(dp_full_addr);
                         }
                         int _parity_p_full = (int)((unsigned int)i_3 % 2);
+#if __CUDA_ARCH__ == 1070
+                        mbarrier_wait(p_full_addr, _parity_p_full);
+#else
                         mbarrier_wait_hint(p_full_addr, _parity_p_full, 10000000);
+#endif
                         asm volatile("tcgen05.fence::after_thread_sync;");
                         if (i_3 > 0) {
                             int _parity_dkv_b_drained = (int)((unsigned int)(int)(unsigned int)(i_3 - 1) % 2);
+#if __CUDA_ARCH__ == 1070
+                            mbarrier_wait(dkv_b_drained_addr, _parity_dkv_b_drained);
+#else
                             mbarrier_wait_hint(dkv_b_drained_addr, _parity_dkv_b_drained, 10000000);
+#endif
                             asm volatile("tcgen05.fence::after_thread_sync;");
                         }
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_4 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_5 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_4 = ((((qdo_mn_addr + 2048) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_5 = (((p_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2003,13 +2242,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_4), "r"(_smem_desc_lo_5), "r"((tmem_tmem + (64))), "r"(0) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_6 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_7 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_6 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_7 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_6 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_7 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_6 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                             int _smem_desc_lo_7 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2031,14 +2280,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_6), "r"(_smem_desc_lo_7), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_8 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_9 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_8 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_9 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_8 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_9 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_8 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                             int _smem_desc_lo_9 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2060,14 +2319,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_8), "r"(_smem_desc_lo_9), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_10 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_11 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_10 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_11 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_10 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_11 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_10 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                             int _smem_desc_lo_11 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2091,8 +2360,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
 #if DKV_NATURAL == 0
                         }
 #endif
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_12 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_13 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_12 = ((((qdo_mn_addr + 2048) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_13 = (((p_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2113,13 +2387,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_12), "r"(_smem_desc_lo_13), "r"((tmem_tmem + (128))), "r"(0) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_14 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_15 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_14 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_15 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_14 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_15 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_14 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                             int _smem_desc_lo_15 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2141,14 +2425,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_14), "r"(_smem_desc_lo_15), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_16 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_17 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_16 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_17 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_16 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_17 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_16 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                             int _smem_desc_lo_17 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2170,14 +2464,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_16), "r"(_smem_desc_lo_17), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_18 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_19 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_18 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_19 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_18 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_19 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_18 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                             int _smem_desc_lo_19 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2202,10 +2506,19 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         }
 #endif
                         int _parity_ds_full = (int)((unsigned int)i_3 % 2);
+#if __CUDA_ARCH__ == 1070
+                        mbarrier_wait(ds_full_addr, _parity_ds_full);
+#else
                         mbarrier_wait_hint(ds_full_addr, _parity_ds_full, 10000000);
+#endif
                         asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                        int _mma_a_lo_1 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (0) * 1024;
+                        int _mma_b_lo_1 = (((ds_mn_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _mma_a_lo_1 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (0) * 1024;
                         int _mma_b_lo_1 = (((ds_mn_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2240,7 +2553,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_mma_a_lo_1), "r"(_mma_b_lo_1), "r"((tmem_tmem + (192))), "r"(((i_3 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_20 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (1) * 1024;
+#else
                         int _smem_desc_lo_20 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (1) * 1024;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2275,7 +2592,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_20), "r"(_mma_b_lo_1), "r"((tmem_tmem + (256))), "r"(((i_3 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_21 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (2) * 1024;
+#else
                         int _smem_desc_lo_21 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (2) * 1024;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2310,7 +2631,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_21), "r"(_mma_b_lo_1), "r"((tmem_tmem + (320))), "r"(((i_3 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_22 = ((((k_mn_addr) >> 4) & 0x7FFF) | 0x2000000) + (3) * 1024;
+#else
                         int _smem_desc_lo_22 = ((((k_mn_addr) >> 4) & 0x3FFF) | 0x2000000) + (3) * 1024;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2345,7 +2670,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_22), "r"(_mma_b_lo_1), "r"((tmem_tmem + (384))), "r"(((i_3 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_23 = (((kr_mn_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_23 = (((kr_mn_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2381,8 +2710,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_23), "r"(_mma_b_lo_1), "r"((tmem_tmem + (448))), "r"(((i_3 == 0) ? 0 : 1)) : "memory");
                         tcgen05_commit(k_free_addr);
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_24 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_25 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_24 = ((((qdo_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_25 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2403,13 +2737,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_24), "r"(_smem_desc_lo_25), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_26 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_27 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_26 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_27 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_26 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_27 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_26 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                             int _smem_desc_lo_27 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2431,14 +2775,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_26), "r"(_smem_desc_lo_27), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_28 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_29 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_28 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_29 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_28 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_29 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_28 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                             int _smem_desc_lo_29 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2460,14 +2814,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_28), "r"(_smem_desc_lo_29), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_30 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                        int _smem_desc_lo_31 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_30 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                         int _smem_desc_lo_31 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_30 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (0) * 2048;
+                            int _smem_desc_lo_31 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_30 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (0) * 2048;
                             int _smem_desc_lo_31 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2491,8 +2855,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
 #if DKV_NATURAL == 0
                         }
 #endif
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_32 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_33 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_32 = ((((qdo_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_33 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2513,13 +2882,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_32), "r"(_smem_desc_lo_33), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_34 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_35 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_34 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_35 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_34 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_35 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_34 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                             int _smem_desc_lo_35 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2541,14 +2920,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_34), "r"(_smem_desc_lo_35), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_36 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_37 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_36 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_37 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_36 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_37 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_36 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                             int _smem_desc_lo_37 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2570,14 +2959,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_36), "r"(_smem_desc_lo_37), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_38 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                        int _smem_desc_lo_39 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_38 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                         int _smem_desc_lo_39 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_38 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (1) * 2048;
+                            int _smem_desc_lo_39 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_38 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (1) * 2048;
                             int _smem_desc_lo_39 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2602,8 +3001,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         }
 #endif
                         tcgen05_commit(dkv_a_full_addr);
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_40 = (((qr_mn_addr) >> 4) & 0x7FFF) | 0x2000000;
+                        int _smem_desc_lo_41 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_40 = (((qr_mn_addr) >> 4) & 0x3FFF) | 0x2000000;
                         int _smem_desc_lo_41 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2640,10 +3044,19 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         :: "r"(_smem_desc_lo_40), "r"(_smem_desc_lo_41), "r"(tmem_tmem), "r"(0) : "memory");
                         tcgen05_commit(dkr_full_addr);
                         int _parity_dkv_a_drained = (int)((unsigned int)i_3 % 2);
+#if __CUDA_ARCH__ == 1070
+                        mbarrier_wait(dkv_a_drained_addr, _parity_dkv_a_drained);
+#else
                         mbarrier_wait_hint(dkv_a_drained_addr, _parity_dkv_a_drained, 10000000);
+#endif
                         asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_42 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_43 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_42 = ((((qdo_mn_addr + 2048) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_43 = (((p_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2664,13 +3077,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_42), "r"(_smem_desc_lo_43), "r"((tmem_tmem + (64))), "r"(0) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_44 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_45 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_44 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_45 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_44 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_45 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_44 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                             int _smem_desc_lo_45 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2692,14 +3115,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_44), "r"(_smem_desc_lo_45), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_46 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_47 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_46 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_47 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_46 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_47 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_46 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                             int _smem_desc_lo_47 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2721,14 +3154,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_46), "r"(_smem_desc_lo_47), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_48 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_49 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_48 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_49 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_48 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_49 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_48 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                             int _smem_desc_lo_49 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2752,8 +3195,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
 #if DKV_NATURAL == 0
                         }
 #endif
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_50 = ((((qdo_mn_addr + 2048) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_51 = (((p_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_50 = ((((qdo_mn_addr + 2048) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_51 = (((p_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2774,13 +3222,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_50), "r"(_smem_desc_lo_51), "r"((tmem_tmem + (128))), "r"(0) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_52 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_53 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_52 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_53 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_52 = ((((qdo_mn_addr + 6144) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_53 = (((p_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_52 = ((((qdo_mn_addr + 6144) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                             int _smem_desc_lo_53 = (((p_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2802,14 +3260,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_52), "r"(_smem_desc_lo_53), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_54 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_55 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_54 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_55 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_54 = ((((qdo_mn_addr + 10240) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_55 = (((p_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_54 = ((((qdo_mn_addr + 10240) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                             int _smem_desc_lo_55 = (((p_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2831,14 +3299,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_54), "r"(_smem_desc_lo_55), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_56 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_57 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_56 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_57 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_56 = ((((qdo_mn_addr + 14336) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_57 = (((p_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_56 = ((((qdo_mn_addr + 14336) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                             int _smem_desc_lo_57 = (((p_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2863,8 +3341,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         }
 #endif
                         tcgen05_commit(p_free_addr);
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_58 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_59 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_58 = ((((qdo_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_59 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2885,13 +3368,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_58), "r"(_smem_desc_lo_59), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_60 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_61 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_60 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_61 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_60 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_61 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_60 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                             int _smem_desc_lo_61 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2913,14 +3406,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_60), "r"(_smem_desc_lo_61), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_62 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_63 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_62 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_63 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_62 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_63 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_62 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                             int _smem_desc_lo_63 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2942,14 +3445,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_62), "r"(_smem_desc_lo_63), "r"((tmem_tmem + (64))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_64 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                        int _smem_desc_lo_65 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_64 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                         int _smem_desc_lo_65 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_64 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (2) * 2048;
+                            int _smem_desc_lo_65 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_64 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (2) * 2048;
                             int _smem_desc_lo_65 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -2973,8 +3486,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
 #if DKV_NATURAL == 0
                         }
 #endif
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_66 = ((((qdo_mn_addr) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_67 = (((ds_k_addr) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_66 = ((((qdo_mn_addr) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_67 = (((ds_k_addr) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -2995,13 +3513,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_66), "r"(_smem_desc_lo_67), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_68 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_69 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_68 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_69 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         if (real_heads > 16) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_68 = ((((qdo_mn_addr + 4096) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_69 = (((ds_k_addr + 32) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_68 = ((((qdo_mn_addr + 4096) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                             int _smem_desc_lo_69 = (((ds_k_addr + 32) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -3023,14 +3551,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_68), "r"(_smem_desc_lo_69), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_70 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_71 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_70 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_71 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 32) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_70 = ((((qdo_mn_addr + 8192) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_71 = (((ds_k_addr + 64) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_70 = ((((qdo_mn_addr + 8192) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                             int _smem_desc_lo_71 = (((ds_k_addr + 64) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -3052,14 +3590,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "}\n"
                         :: "r"(_smem_desc_lo_70), "r"(_smem_desc_lo_71), "r"((tmem_tmem + (128))), "r"(1) : "memory");
 #if DKV_NATURAL == 1
+#if __CUDA_ARCH__ == 1070
+                        int _smem_desc_lo_72 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                        int _smem_desc_lo_73 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                         int _smem_desc_lo_72 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                         int _smem_desc_lo_73 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                         asm volatile(
 #else
                         }
                         if (real_heads > 48) {
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_72 = ((((qdo_mn_addr + 12288) >> 4) & 0x7FFF) | 0x4000000) + (3) * 2048;
+                            int _smem_desc_lo_73 = (((ds_k_addr + 96) >> 4) & 0x7FFF) | 0x2000000;
+#else
                             int _smem_desc_lo_72 = ((((qdo_mn_addr + 12288) >> 4) & 0x3FFF) | 0x4000000) + (3) * 2048;
                             int _smem_desc_lo_73 = (((ds_k_addr + 96) >> 4) & 0x3FFF) | 0x2000000;
+#endif
                             asm volatile(
 #endif
                         "{\n\t"
@@ -3087,16 +3635,37 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         tcgen05_commit(ds_free_addr);
                         if (blocks_3 > i_3 + 1) {
                             int _parity_dkr_drained = (int)((unsigned int)i_3 % 2);
+#if __CUDA_ARCH__ == 1070
+                            mbarrier_wait(dkr_drained_addr, _parity_dkr_drained);
+#else
                             mbarrier_wait_hint(dkr_drained_addr, _parity_dkr_drained, 10000000);
+#endif
                             int _parity_k_full = (int)((unsigned int)(int)(unsigned int)(i_3 + 1) % 2);
+#if __CUDA_ARCH__ == 1070
+                            mbarrier_wait(k_full_addr, _parity_k_full);
+#else
                             mbarrier_wait_hint(k_full_addr, _parity_k_full, 10000000);
+#endif
                             int _parity_s_free = (int)((unsigned int)(int)(unsigned int)(i_3 + 1) % 2) ^ 1;
+#if __CUDA_ARCH__ == 1070
+                            mbarrier_wait(s_free_addr, _parity_s_free);
+#else
                             mbarrier_wait_hint(s_free_addr, _parity_s_free, 10000000);
+#endif
                             int _parity_dp_free = (int)((unsigned int)i_3 % 2);
+#if __CUDA_ARCH__ == 1070
+                            mbarrier_wait(dp_free_addr, _parity_dp_free);
+#else
                             mbarrier_wait_hint(dp_free_addr, _parity_dp_free, 10000000);
+#endif
                             asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_74 = ((qdo_k_addr) >> 4) & 0x7FFF;
+                            int _smem_desc_lo_75 = ((v_k_addr) >> 4) & 0x7FFF;
+#else
                             int _smem_desc_lo_74 = ((qdo_k_addr) >> 4) & 0x3FFF;
                             int _smem_desc_lo_75 = ((v_k_addr) >> 4) & 0x3FFF;
+#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -3271,8 +3840,13 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         "tcgen05.mma.cta_group::1.kind::f16 [%2], da, db, id, p1;\n\t"
                         "}\n"
                         :: "r"(_smem_desc_lo_74), "r"(_smem_desc_lo_75), "r"(tmem_tmem), "r"(0) : "memory");
+#if __CUDA_ARCH__ == 1070
+                            int _smem_desc_lo_76 = ((qr_k_addr) >> 4) & 0x7FFF;
+                            int _smem_desc_lo_77 = ((kr_k_addr) >> 4) & 0x7FFF;
+#else
                             int _smem_desc_lo_76 = ((qr_k_addr) >> 4) & 0x3FFF;
                             int _smem_desc_lo_77 = ((kr_k_addr) >> 4) & 0x3FFF;
+#endif
                             asm volatile(
                         "{\n\t"
                         ".reg .pred p0, p1;\n\t"
@@ -3426,10 +4000,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                 if (has_topk_length != 0) {
 #if DKV_NATURAL == 1
                     int _max_1 = ((topk_length[item_token_2]) > (0) ? (topk_length[item_token_2]) : (0));
+                    int _min_0 = ((_max_1) < (topk) ? (_max_1) : (topk));
+#else
+#if __CUDA_ARCH__ == 1070
+                    int _max_1_1 = ((topk_length[item_token_3]) > (0) ? (topk_length[item_token_3]) : (0));
+                    int _min_0 = ((_max_1_1) < (topk) ? (_max_1_1) : (topk));
 #else
                     int _max_1 = ((topk_length[item_token_3]) > (0) ? (topk_length[item_token_3]) : (0));
-#endif
                     int _min_0 = ((_max_1) < (topk) ? (_max_1) : (topk));
+#endif
+#endif
                     active = _min_0;
                 }
 #if DKV_NATURAL == 1
@@ -3439,16 +4019,43 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
 #endif
                 int aligned4 = (int)(((idx_stride | indices_offset) & 3) == 0);
                 int last_valid = -1;
+#if __CUDA_ARCH__ == 1070
+                for (int grp = (active + 512 - 1) / 512 - 1; grp >= 0; grp--) {
+#else
                 for (int blk = (active + 127) / 128 - 1; blk >= 0; blk--) {
                     int pos = blk * 128 + lane_0_3 * 4;
+#endif
                     int best = -1;
+#if __CUDA_ARCH__ == 1070
+                    int vals[16];
+                    int upos_0 = grp * 4 * 128 + lane_0_3 * 4;
+                    vals[0] = -1;
+                    vals[1] = -1;
+                    vals[2] = -1;
+                    vals[3] = -1;
+                    if (upos_0 < active) {
+#else
                     if (pos < active) {
+#endif
                         if (aligned4 != 0) {
+#if __CUDA_ARCH__ == 1070
+#else
                             int _vec_load_0[4];
+#endif
                             {
+#if __CUDA_ARCH__ == 1070
+                                const int4* _ivptr_2 = reinterpret_cast<const int4*>(indices + (row_base + (long long)upos_0) + 0);
+#else
                                 const int4* _ivptr_2 = reinterpret_cast<const int4*>(indices + (row_base + (long long)pos) + 0);
+#endif
                                 int4 _ivld_2;
                                 _ivld_2 = *_ivptr_2;
+#if __CUDA_ARCH__ == 1070
+                                (vals + 0)[0 + 0] = _ivld_2.x;
+                                (vals + 0)[0 + 1] = _ivld_2.y;
+                                (vals + 0)[0 + 2] = _ivld_2.z;
+                                (vals + 0)[0 + 3] = _ivld_2.w;
+#else
                                 _vec_load_0[0 + 0] = _ivld_2.x;
                                 _vec_load_0[0 + 1] = _ivld_2.y;
                                 _vec_load_0[0 + 2] = _ivld_2.z;
@@ -3465,8 +4072,19 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                             }
                             if (_vec_load_0[3] >= 0 && _vec_load_0[3] < num_kv && active > pos + 3) {
                                 best = pos + 3;
+#endif
                             }
                         } else {
+#if __CUDA_ARCH__ == 1070
+                            int _min_3 = ((upos_0) < (topk - 1) ? (upos_0) : (topk - 1));
+                            vals[0] = indices[row_base + (long long)_min_3];
+                            int _min_4 = ((upos_0 + 1) < (topk - 1) ? (upos_0 + 1) : (topk - 1));
+                            vals[1] = indices[row_base + (long long)_min_4];
+                            int _min_5 = ((upos_0 + 2) < (topk - 1) ? (upos_0 + 2) : (topk - 1));
+                            vals[2] = indices[row_base + (long long)_min_5];
+                            int _min_6 = ((upos_0 + 3) < (topk - 1) ? (upos_0 + 3) : (topk - 1));
+                            vals[3] = indices[row_base + (long long)_min_6];
+#else
                             int sv_3_0 = indices[row_base + (long long)pos];
                             if (sv_3_0 >= 0 && sv_3_0 < num_kv && active > pos) {
                                 best = pos;
@@ -3483,11 +4101,151 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                             if (sv_3_3 >= 0 && sv_3_3 < num_kv && active > pos + 3) {
                                 best = pos + 3;
                             }
+#endif
                         }
                     }
+#if __CUDA_ARCH__ == 1070
+                    int upos_1 = (grp * 4 + 1) * 128 + lane_0_3 * 4;
+                    vals[4] = -1;
+                    vals[5] = -1;
+                    vals[6] = -1;
+                    vals[7] = -1;
+                    if (upos_1 < active) {
+                        if (aligned4 != 0) {
+                            {
+                                const int4* _ivptr_7 = reinterpret_cast<const int4*>(indices + (row_base + (long long)upos_1) + 0);
+                                int4 _ivld_7;
+                                _ivld_7 = *_ivptr_7;
+                                (vals + 4)[0 + 0] = _ivld_7.x;
+                                (vals + 4)[0 + 1] = _ivld_7.y;
+                                (vals + 4)[0 + 2] = _ivld_7.z;
+                                (vals + 4)[0 + 3] = _ivld_7.w;
+                            }
+                        } else {
+                            int _min_8 = ((upos_1) < (topk - 1) ? (upos_1) : (topk - 1));
+                            vals[4] = indices[row_base + (long long)_min_8];
+                            int _min_9 = ((upos_1 + 1) < (topk - 1) ? (upos_1 + 1) : (topk - 1));
+                            vals[5] = indices[row_base + (long long)_min_9];
+                            int _min_10 = ((upos_1 + 2) < (topk - 1) ? (upos_1 + 2) : (topk - 1));
+                            vals[6] = indices[row_base + (long long)_min_10];
+                            int _min_11 = ((upos_1 + 3) < (topk - 1) ? (upos_1 + 3) : (topk - 1));
+                            vals[7] = indices[row_base + (long long)_min_11];
+                        }
+                    }
+                    int upos_2 = (grp * 4 + 2) * 128 + lane_0_3 * 4;
+                    vals[8] = -1;
+                    vals[9] = -1;
+                    vals[10] = -1;
+                    vals[11] = -1;
+                    if (upos_2 < active) {
+                        if (aligned4 != 0) {
+                            {
+                                const int4* _ivptr_12 = reinterpret_cast<const int4*>(indices + (row_base + (long long)upos_2) + 0);
+                                int4 _ivld_12;
+                                _ivld_12 = *_ivptr_12;
+                                (vals + 8)[0 + 0] = _ivld_12.x;
+                                (vals + 8)[0 + 1] = _ivld_12.y;
+                                (vals + 8)[0 + 2] = _ivld_12.z;
+                                (vals + 8)[0 + 3] = _ivld_12.w;
+                            }
+                        } else {
+                            int _min_13 = ((upos_2) < (topk - 1) ? (upos_2) : (topk - 1));
+                            vals[8] = indices[row_base + (long long)_min_13];
+                            int _min_14 = ((upos_2 + 1) < (topk - 1) ? (upos_2 + 1) : (topk - 1));
+                            vals[9] = indices[row_base + (long long)_min_14];
+                            int _min_15 = ((upos_2 + 2) < (topk - 1) ? (upos_2 + 2) : (topk - 1));
+                            vals[10] = indices[row_base + (long long)_min_15];
+                            int _min_16 = ((upos_2 + 3) < (topk - 1) ? (upos_2 + 3) : (topk - 1));
+                            vals[11] = indices[row_base + (long long)_min_16];
+                        }
+                    }
+                    int upos_3 = (grp * 4 + 3) * 128 + lane_0_3 * 4;
+                    vals[12] = -1;
+                    vals[13] = -1;
+                    vals[14] = -1;
+                    vals[15] = -1;
+                    if (upos_3 < active) {
+                        if (aligned4 != 0) {
+                            {
+                                const int4* _ivptr_17 = reinterpret_cast<const int4*>(indices + (row_base + (long long)upos_3) + 0);
+                                int4 _ivld_17;
+                                _ivld_17 = *_ivptr_17;
+                                (vals + 12)[0 + 0] = _ivld_17.x;
+                                (vals + 12)[0 + 1] = _ivld_17.y;
+                                (vals + 12)[0 + 2] = _ivld_17.z;
+                                (vals + 12)[0 + 3] = _ivld_17.w;
+                            }
+                        } else {
+                            int _min_18 = ((upos_3) < (topk - 1) ? (upos_3) : (topk - 1));
+                            vals[12] = indices[row_base + (long long)_min_18];
+                            int _min_19 = ((upos_3 + 1) < (topk - 1) ? (upos_3 + 1) : (topk - 1));
+                            vals[13] = indices[row_base + (long long)_min_19];
+                            int _min_20 = ((upos_3 + 2) < (topk - 1) ? (upos_3 + 2) : (topk - 1));
+                            vals[14] = indices[row_base + (long long)_min_20];
+                            int _min_21 = ((upos_3 + 3) < (topk - 1) ? (upos_3 + 3) : (topk - 1));
+                            vals[15] = indices[row_base + (long long)_min_21];
+                        }
+                    }
+                    int upos2_0 = grp * 4 * 128 + lane_0_3 * 4;
+                    if (vals[0] >= 0 && vals[0] < num_kv && active > upos2_0) {
+                        best = upos2_0;
+                    }
+                    if (vals[1] >= 0 && vals[1] < num_kv && active > upos2_0 + 1) {
+                        best = upos2_0 + 1;
+                    }
+                    if (vals[2] >= 0 && vals[2] < num_kv && active > upos2_0 + 2) {
+                        best = upos2_0 + 2;
+                    }
+                    if (vals[3] >= 0 && vals[3] < num_kv && active > upos2_0 + 3) {
+                        best = upos2_0 + 3;
+                    }
+                    int upos2_1 = (grp * 4 + 1) * 128 + lane_0_3 * 4;
+                    if (vals[4] >= 0 && vals[4] < num_kv && active > upos2_1) {
+                        best = upos2_1;
+                    }
+                    if (vals[5] >= 0 && vals[5] < num_kv && active > upos2_1 + 1) {
+                        best = upos2_1 + 1;
+                    }
+                    if (vals[6] >= 0 && vals[6] < num_kv && active > upos2_1 + 2) {
+                        best = upos2_1 + 2;
+                    }
+                    if (vals[7] >= 0 && vals[7] < num_kv && active > upos2_1 + 3) {
+                        best = upos2_1 + 3;
+                    }
+                    int upos2_2 = (grp * 4 + 2) * 128 + lane_0_3 * 4;
+                    if (vals[8] >= 0 && vals[8] < num_kv && active > upos2_2) {
+                        best = upos2_2;
+                    }
+                    if (vals[9] >= 0 && vals[9] < num_kv && active > upos2_2 + 1) {
+                        best = upos2_2 + 1;
+                    }
+                    if (vals[10] >= 0 && vals[10] < num_kv && active > upos2_2 + 2) {
+                        best = upos2_2 + 2;
+                    }
+                    if (vals[11] >= 0 && vals[11] < num_kv && active > upos2_2 + 3) {
+                        best = upos2_2 + 3;
+                    }
+                    int upos2_3 = (grp * 4 + 3) * 128 + lane_0_3 * 4;
+                    if (vals[12] >= 0 && vals[12] < num_kv && active > upos2_3) {
+                        best = upos2_3;
+                    }
+                    if (vals[13] >= 0 && vals[13] < num_kv && active > upos2_3 + 1) {
+                        best = upos2_3 + 1;
+                    }
+                    if (vals[14] >= 0 && vals[14] < num_kv && active > upos2_3 + 2) {
+                        best = upos2_3 + 2;
+                    }
+                    if (vals[15] >= 0 && vals[15] < num_kv && active > upos2_3 + 3) {
+                        best = upos2_3 + 3;
+                    }
+                    int _warp_redux_22;
+                    asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_22) : "r"(best));
+                    best = _warp_redux_22;
+#else
                     int _warp_redux_3;
                     asm volatile("redux.sync.max.s32 %0, %1, 0xFFFFFFFF;" : "=r"(_warp_redux_3) : "r"(best));
                     best = _warp_redux_3;
+#endif
                     if (best >= 0) {
                         last_valid = best;
                         break;
@@ -3510,6 +4268,16 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         if (whole_tile != 0) {
                             int _vec_load_1[8];
                             {
+#if __CUDA_ARCH__ == 1070
+                                uint32_t _iv_23_0;
+                                uint32_t _iv_23_1;
+                                uint32_t _iv_23_2;
+                                uint32_t _iv_23_3;
+                                uint32_t _iv_23_4;
+                                uint32_t _iv_23_5;
+                                uint32_t _iv_23_6;
+                                uint32_t _iv_23_7;
+#else
                                 uint32_t _iv_4_0;
                                 uint32_t _iv_4_1;
                                 uint32_t _iv_4_2;
@@ -3518,7 +4286,19 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                                 uint32_t _iv_4_5;
                                 uint32_t _iv_4_6;
                                 uint32_t _iv_4_7;
+#endif
                                 asm volatile("ld.global.nc.L1::evict_first.L2::evict_normal.L2::256B.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
+#if __CUDA_ARCH__ == 1070
+                                    : "=r"(_iv_23_0), "=r"(_iv_23_1), "=r"(_iv_23_2), "=r"(_iv_23_3), "=r"(_iv_23_4), "=r"(_iv_23_5), "=r"(_iv_23_6), "=r"(_iv_23_7) : "l"((const void*)(indices + (row_base + (long long)position) + (0))) : "memory");
+                                _vec_load_1[0 + 0] = (int32_t)_iv_23_0;
+                                _vec_load_1[0 + 1] = (int32_t)_iv_23_1;
+                                _vec_load_1[0 + 2] = (int32_t)_iv_23_2;
+                                _vec_load_1[0 + 3] = (int32_t)_iv_23_3;
+                                _vec_load_1[0 + 4] = (int32_t)_iv_23_4;
+                                _vec_load_1[0 + 5] = (int32_t)_iv_23_5;
+                                _vec_load_1[0 + 6] = (int32_t)_iv_23_6;
+                                _vec_load_1[0 + 7] = (int32_t)_iv_23_7;
+#else
                                     : "=r"(_iv_4_0), "=r"(_iv_4_1), "=r"(_iv_4_2), "=r"(_iv_4_3), "=r"(_iv_4_4), "=r"(_iv_4_5), "=r"(_iv_4_6), "=r"(_iv_4_7) : "l"((const void*)(indices + (row_base + (long long)position) + (0))) : "memory");
                                 _vec_load_1[0 + 0] = (int32_t)_iv_4_0;
                                 _vec_load_1[0 + 1] = (int32_t)_iv_4_1;
@@ -3528,6 +4308,7 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                                 _vec_load_1[0 + 5] = (int32_t)_iv_4_5;
                                 _vec_load_1[0 + 6] = (int32_t)_iv_4_6;
                                 _vec_load_1[0 + 7] = (int32_t)_iv_4_7;
+#endif
                             }
                             values[0] = _vec_load_1[0];
                             values[1] = _vec_load_1[1];
@@ -3589,7 +4370,11 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap q_latent, const __grid_c
                         }
                         int _stage_idx_free = (int)((unsigned int)i_4 % 2);
                         int _parity_idx_free = (int)((unsigned int)i_4 / 2 % 2) ^ 1;
+#if __CUDA_ARCH__ == 1070
+                        mbarrier_wait(idx_free_addr + (_stage_idx_free) * 8, _parity_idx_free);
+#else
                         mbarrier_wait_hint(idx_free_addr + (_stage_idx_free) * 8, _parity_idx_free, 10000000);
+#endif
                         int ok_7_0 = (int)(values[0] >= 0 && values[0] < num_kv);
                         if (ok_7_0 != 0) {
                             mask = mask | 1;

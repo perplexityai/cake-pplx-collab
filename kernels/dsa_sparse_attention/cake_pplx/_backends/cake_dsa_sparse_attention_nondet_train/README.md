@@ -5,11 +5,12 @@ non-deterministic package of the DeepSeek Sparse Attention training kernels
 (top-k sparse MLA with absorbed queries; GLM-5.2 geometry: 64 heads, 512
 latent + 64 rope query/key dimensions, 512 value dimensions, top-k 2048).
 The kernels are native 64-query-head programs; the rope form also serves 96
-and 128 query heads on `sm_100a` and `sm_103a`, through head-window builds
+and 128 query heads: on `sm_100a` and `sm_103a` through head-window builds
 that run both 64-head windows of every token in one launch, or else on two
 64-head windows of the 64-head kernels, and its forward there through the
-single-pass forward, every head of a token in one 2-CTA cluster (see "Query
-heads above 64 (head windows)").
+single-pass forward, every head of a token in one 2-CTA cluster; on `sm_107a`
+(from 0.12.0) the forward through the single-pass forward and the backward
+through the head-window builds (see "Query heads above 64 (head windows)").
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_nondet_train` are
 stable APIs; this backend package is experimental (no compatibility guarantee
@@ -99,8 +100,8 @@ out = cake_dsa_sparse_attention_nondet_varlen(
 ```
 
 * `q_latent [T, H, 512]`, `q_rope [T, H, 64]` BF16, `H` = 64, 96 or 128 query
-  heads (96 and 128 on `sm_100a` / `sm_103a`, see "Query heads above 64 (head
-  windows)"; another `H` raises `ValueError`); `kv_latent [S, 512]` (K = V)
+  heads (see "Query heads above 64 (head windows)"; another `H` raises
+  `ValueError`); `kv_latent [S, 512]` (K = V)
   and `k_rope [S, 64]` BF16.  Strided views are consumed in place -- see
   "Packed and strided inputs" below.
 * `indices [T, topk]` int32 (any row stride) hold **global** key rows; `-1` or `>= S` marks an
@@ -489,9 +490,7 @@ token chunk and pass, `bwd_cast`)
 -- plus the two fills of the FP32 dK/dV accumulators; a direct binding (see
 "Direct accumulation from the main stage") launches the natural-layout variant
 of the main stage instead and has neither the fills nor the cast.  A call without query rows
-(`T == 0`) returns empty outputs and zero gradients without launching (on
-`sm_107a` a call over more than 64 heads on CUDA tensors raises
-`NotImplementedError` instead, see "Query heads above 64 (head windows)");
+(`T == 0`) returns empty outputs and zero gradients without launching;
 `S == 0` is rejected.
 
 Host cost through the autograd wrapper: the `Function.backward` runs on
@@ -587,10 +586,10 @@ per-pass FP32 dQ-partial round trip and pipeline fill outweigh the L2 benefit
 `sm_103a`; `sm_107a`'s two passes are under the cap).  A record without
 `rules` (the first release) is the `sm_100a` rule everywhere.  Above 64
 heads the head-window builds plan with the rule of the architecture and the
-overrides of `cake_backend.HEAD_WINDOW_KEY_PASS_RULES`: on `sm_103a` no tail
-rows, so every tail row (more than one 4,224-token chunk, `2 T <= S`, 131,072
-or more keys, one segment) runs one pass there, the 16,380-token rows of
-524,160 and 1,048,320 keys among them (see "Query heads above 64 (head
+overrides of `cake_backend.HEAD_WINDOW_KEY_PASS_RULES`: on `sm_103a` and `sm_107a` no
+tail rows, so every tail row (more than one 4,224-token chunk, `2 T <= S`,
+131,072 or more keys, one segment) runs one pass there, the 16,380-token rows
+of 524,160 and 1,048,320 keys among them (see "Query heads above 64 (head
 windows)").  The tokens of a multi-pass backward run in chunks of 4224 (every
 chunk through every pass, `token_base` = the chunk's first token; 2,176 with
 the head-window builds above 64 heads, see "Query heads above 64 (head
@@ -627,8 +626,8 @@ and `128` run, per phase (forward, backward), one of these plans:
 
 | plan | where | forward | backward main stage |
 |---|---|---|---|
-| single-pass forward (0.9.0) | the program ships `fwd_h128` for the device's architecture (forward only) | one `fwd_h128` launch over the `T` tokens | - |
-| head-window builds | the program ships the phase's build for the device's architecture | one `fwd_hw` launch | one launch of its `*_hw` build (per token chunk and pass with key passes) |
+| single-pass forward (0.9.0; `sm_107a` from 0.12.0) | the program ships `fwd_h128` for the device's architecture (forward only) | one `fwd_h128` launch over the `T` tokens | - |
+| head-window builds (backward on `sm_107a` from 0.12.0) | the program ships the phase's build for the device's architecture | one `fwd_hw` launch | one launch of its `*_hw` build (per token chunk and pass with key passes) |
 | two-window bridge | otherwise (0.7.0) | two window launches and their copies | statistics copies, then one launch per window (per token chunk and pass) |
 
 `cake_backend.head_window_plan(H, arch, ...)` returns the stages a call runs in
@@ -636,9 +635,16 @@ place of the bridge (`None` for a phase on the bridge): the forward's is the
 single-pass forward where it ships, else the head-window forward.  A phase
 takes a build only where the registry carries it for the architecture, among
 the record's stages and the program's stage order, with its generated launcher
-and grid (`cake_backend.single_pass_stage`, `cake_backend.head_window_stage`);
-the builds ship for `sm_100a` and `sm_103a`.  A partial registry mixes the plans
-per phase.
+and grid (`cake_backend.single_pass_stage`, `cake_backend.head_window_stage`),
+and only on the phase's architectures: the head-window forward on
+`cake_backend.WINDOW_ARCHES` (`sm_100a`, `sm_103a`), the head-window main
+backward on `cake_backend.BACKWARD_WINDOW_ARCHES` and the single-pass forward
+on `cake_backend.SINGLE_PASS_ARCHES` (both `sm_100a`, `sm_103a`, `sm_107a`).
+The builds ship for those architectures.  A partial registry mixes the plans
+per phase.  On `sm_107a` a call over 96 or 128 heads therefore runs the
+single-pass forward and the head-window backward (from 0.12.0; the bridge in
+both phases before); the head-window forward never runs there, whatever the
+registry declares.
 
 ### Single-pass forward
 
@@ -714,7 +720,8 @@ skipped by every store.
      the `delta` rows directly and storing every head's `dq` once.  Its
      `token_base` / `token_step` count items and keep both items of a token
      adjacent: ascending from item 0, or descending from item `2 T - 1` where
-     the 64-head plan walks its tokens descending (`sm_103a`, single pass).
+     the 64-head plan walks its tokens descending (`sm_103a` and `sm_107a`,
+     single pass).
      With key-range passes the backward runs per token chunk and pass:
      `bwd_compact` over the chunk's tokens (token space), then the pass build
      over the chunk's `2 n` items, ascending from item `2 * token_base`, so the
@@ -732,9 +739,13 @@ skipped by every store.
   of 128 tokens whose `2 x 147,456 + 4 * topk + 4` B per token fit the
   640 MiB budget -- 2,176 tokens at top-k 2048 (4,224 at 64 heads).  The pass
   count follows the record's rule as at 64 heads, with the head-window
-  overrides `cake_backend.HEAD_WINDOW_KEY_PASS_RULES` (only `sm_103a`: no
-  tail-row passes; `head_window_key_passes_rule` says where they apply: above
-  64 heads where the single-pass head-window main build ships).  On GB300 the
+  overrides `cake_backend.HEAD_WINDOW_KEY_PASS_RULES` (`sm_103a` and
+  `sm_107a`: no tail-row passes; `head_window_key_passes_rule` says where they
+  apply: above 64 heads where the single-pass head-window main build ships).
+  On VR200 (`sm_107a`) the single pass of the head-window build is 10-12 %
+  faster than the record's two passes on the main-stage kernels at
+  `T = 16,380`, `S = 524,160` / `1,048,320` (96 and 128 heads, top-k 2048).
+  On GB300 the
   single pass of the head-window build is 15-20 % faster than the record's
   three passes on every tail row timed (top-k 2048, 96 and 128 heads:
   `T = 16,380` with `S = 147,420` to `1,048,320`, `T = 8,448` and `4,352` with
@@ -762,8 +773,8 @@ skipped by every store.
 * Numerics.  The builds give every head the same 32-row rescale groups as the
   bridge, so `out`, `lse`, `o_lo` and `dq` equal the bridge's bit for bit at
   the same key-pass count (on the `sm_103a` tail rows the head-window plan runs
-  one pass where the bridge runs three, and its `dq` sums the keys in the
-  single pass's order);
+  one pass where the bridge runs three, on the `sm_107a` tail rows one where
+  it runs two, and its `dq` sums the keys in the single pass's order);
   dK / dV add the same terms through FP32 atomics in another order.  The
   single-pass forward is another kernel: its `out`, `lse` and `o_lo`, and the
   `dq` of a backward over them, are its own bits.
@@ -822,7 +833,11 @@ The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
   step.  The single-pass backward is the optional `dout` copy, `bwd_delta`,
   the statistics copies, two main launches and `bwd_cast`.  The copies are
   torch operations on the current stream: no host synchronization, and the
-  prepared runner stays CUDA-graph capturable.  The runner's launch keys are
+  prepared runner stays CUDA-graph capturable.  Each copies its head slices as
+  the widest elements both operands allow (`cake_backend._wide_copy`: 16-, 8-
+  or 4-byte views of the same bytes when the last dimension, the strides and
+  the addresses are multiples of the width, else a plain copy), so it moves
+  the same bytes in fewer elements.  The runner's launch keys are
   `cake_backend.WindowLaunch(phase, head0, key)` for a window launch (`key`
   the 64-head stage name or pass key) and `cake_backend.HeadStep(name,
   head0)` for a copy step (`"fwd_copy"`, `"dout_copy"`, `"window_stats"`).
@@ -860,12 +875,19 @@ The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
   (`ValueError`; the NoPE query check names the rope form, the sink check
   says the sink form serves 64 query heads only).  The deterministic
   package's rope form serves 96 and 128 heads on `sm_100a` / `sm_103a` from
-  0.11.0, with its own builds.  On `sm_107a` an eager, autograd or step call with more than 64
-  heads raises `NotImplementedError` before any kernel of the package
-  launches -- also without query rows, on a CUDA tensor -- and so does
-  `prepare_dsa_train`, until the window stages are validated there (a
-  prepared runner refuses `T = 0` with `ValueError` at every head count).
-  This holds whatever builds the registry declares for `sm_107a`.
+  0.11.0, with its own builds.  An architecture outside
+  `cake_backend.HEAD_ARCHES` raises `NotImplementedError` for more than 64
+  heads before any kernel of the package launches (also without query rows,
+  on a CUDA tensor).  A prepared runner refuses `T = 0` with `ValueError` at
+  every head count.
+* On `sm_107a` (from 0.12.0) the forward runs the single-pass forward and the
+  backward the head-window main builds, with the `sm_107a` direct-accumulation
+  rule and the single-pass descending token order of the 64-head plan and the
+  key-pass rule with the head-window override (no tail-row passes).  A phase
+  whose build the registry does not ship for `sm_107a` runs the two-window
+  bridge on the 64-head stages that ship there (the forward on `fwd_scan` /
+  `fwd_scan_no_olo`) with the 64-head rules; the head-window forward never
+  runs there.
 
 ## NoPE (zero-rope) program
 
@@ -1314,8 +1336,10 @@ and `bwd_delta_no_olo` (see "Without the output residual").  The rope form
 serves 96 and 128 query heads on `sm_100a` and `sm_103a`, through the
 head-window builds (`fwd_hw`, `fwd_hw_no_olo` and the four `bwd_main*_hw`
 builds, for those two architectures) where the record carries them and else
-through the two-window bridge; `sm_107a` serves 64 heads until its window
-stages are validated (see "Query heads above 64 (head windows)").
+through the two-window bridge; on `sm_107a` (from 0.12.0) through the
+single-pass forward (`fwd_h128`, `fwd_h128_no_olo`) and the four
+`bwd_main*_hw` builds, which the record carries for `sm_107a` too (see
+"Query heads above 64 (head windows)").
 
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
 only this package; skips without a registered program or a compute capability

@@ -1167,11 +1167,11 @@ def check_backward_hw(
     arch: str = "sm_100a",
 ) -> dict:
     """The backward launches of one call above 64 heads and its ``dq`` under the head-window contract (module
-    docstring): the ``"dout_copy"`` aside, one delta launch over the ``T * H`` rows, then the main stage's
-    head-window build -- one launch over the ``2 T`` items (descending from item ``2 T - 1`` where the 64-head plan
-    walks its tokens descending: ``sm_103a``), or per token chunk and pass a compaction over the chunk's tokens and
-    the pass build over its items --, reading the call's ``lse`` and the delta's ``[T, H]`` rows, adding into one
-    accumulator, then one cast (none when direct).  Returns ``{"count", "sum"}`` as :func:`check_backward`."""
+    docstring): the ``"dout_copy"`` aside, one delta launch over the ``T * H`` rows, then the main stage's head-window
+    build -- one launch over the ``2 T`` items (descending from item ``2 T - 1`` where the 64-head plan walks its tokens
+    descending: ``sm_103a``, ``sm_107a``), or per token chunk and pass a compaction over the chunk's tokens and the pass
+    build over its items --, reading the call's ``lse`` and the delta's ``[T, H]`` rows, adding into one accumulator,
+    then one cast (none when direct).  Returns ``{"count", "sum"}`` as :func:`check_backward`."""
     H, T = inp.heads, inp.total_q
     assert H != WINDOW
     delta_l = [rec for rec in launches if family(rec.stage) == "delta"]
@@ -1193,7 +1193,7 @@ def check_backward_hw(
     if passes == 1:
         (rec,) = mains
         assert rec.grid == (2 * T, 1, 1), rec.grid
-        descending = arch in ("sm_103a",)
+        descending = arch in ("sm_103a", "sm_107a")
         order = (2 * T - 1, -1) if descending else (0, 1)
         assert (int(rec.values["token_base"]), int(rec.values["token_step"])) == order
     else:

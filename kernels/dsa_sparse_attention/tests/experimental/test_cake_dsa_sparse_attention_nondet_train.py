@@ -12114,7 +12114,11 @@ def test_head_window_builds_are_registered():
     libraries = {e["name"]: e for e in cake_build.manifest()["libraries"]}
     missing = []
     for base, hw in builds.items():
-        assert cake_jit.stage_arches(hw) == ("sm_100a", "sm_103a"), hw
+        # the forward builds ship for sm_100a / sm_103a, the main backward builds for sm_107a too
+        arches = ("sm_100a", "sm_103a")
+        if not base.startswith("fwd"):
+            arches += ("sm_107a",)
+        assert cake_jit.stage_arches(hw) == arches, hw
         assert record[hw]["ffi_entry"] == record[base]["ffi_entry"], hw
         assert record[hw]["library"] != record[base]["library"], hw
         assert set(record[hw]["launch"]) == set(record[base]["launch"]), hw
@@ -12198,8 +12202,9 @@ def test_single_pass_forward_builds_are_registered():
     for stage in cake_jit.registered_stages():
         if stage not in tail:
             assert record[stage]["launch"]["cluster"] == [1, 1, 1], stage
+    arches = ("sm_100a", "sm_103a", "sm_107a")
     for stage in tail:
-        assert cake_jit.stage_arches(stage) == ("sm_100a", "sm_103a"), stage
+        assert cake_jit.stage_arches(stage) == arches, stage
         assert record[stage]["ffi_entry"] == "run", stage
         assert cake_launch.LAUNCH[stage] is cake_launch.LAUNCH["fwd_h128"], stage
         assert tuple(cake_launch.STAGE_ARGS[stage]) == SINGLE_PASS_ARGS, stage

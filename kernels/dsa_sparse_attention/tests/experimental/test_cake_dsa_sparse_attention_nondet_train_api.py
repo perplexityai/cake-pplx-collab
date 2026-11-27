@@ -3201,38 +3201,71 @@ def test_public_entries_refuse_other_head_counts(heads, monkeypatch):
 
 
 @pytest.mark.parametrize("heads", (96, 128))
-def test_public_entries_refuse_more_heads_on_sm107a(monkeypatch, heads):
-    """On ``sm_107a`` (host, the architecture stood in) every public entry refuses a ``heads``-head call with the
-    ``NotImplementedError`` of the backend before any kernel of the package launches: the flat and packed (its
-    torch index route) autograd entries and the step forward / backward pair, with query rows and without."""
+def test_public_entries_run_the_bridge_on_sm107a(monkeypatch, heads):
+    """On ``sm_107a`` (host, the architecture stood in) with the head-window and single-pass builds hidden (a registry
+    that does not ship them there) every public entry serves a ``heads``-head call through the two-window bridge: the
+    flat and packed (its torch index route) autograd entries and the step forward / backward pair launch the 64-head
+    stages on ``[H - 64, H)`` and then ``[0, 64)`` (no head-window or single-pass build), and return outputs and
+    gradients of the call's shapes; without query rows they return empty outputs and launch nothing.  The plan of the
+    shipped registry there (the single-pass forward and the head-window backward):
+    ``test_cake_dsa_sparse_attention_nondet_train_heads.py``."""
     from tests.experimental.test_helpers import (
         cake_dsa_sparse_attention_host_launches as hl,
     )
 
-    h = hl.HostLaunches(monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a")
+    h = hl.HostLaunches(
+        monkeypatch, cake_backend, cake_jit, cake_launch, "sm_107a", head_windows=False
+    )
     monkeypatch.setattr(
         cake_backend, "nope_index_prep_available", lambda device=None: False
     )
-    refused = "sm_107a serves 64 query heads only"
     for T in (8, 0):
         inp = hl.host_inputs(T, 64, 16, heads)
         args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.indices)
-        leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
         cu_q = torch.tensor([0, T // 2, T], dtype=torch.int32)
         cu_k = torch.tensor([0, 24, 64], dtype=torch.int32)
-        with pytest.raises(NotImplementedError, match=refused):
-            cake_dsa_sparse_attention_nondet(*leaves, inp.indices)
-        with pytest.raises(NotImplementedError, match=refused):
-            cake_dsa_sparse_attention_nondet_varlen(
-                *leaves, inp.indices % 24, cu_q, cu_k, causal=True
-            )
-        with pytest.raises(NotImplementedError, match=refused):
-            public_api.cake_dsa_sparse_attention_nondet_train_forward(*args)
-        with pytest.raises(NotImplementedError, match=refused):
-            public_api.cake_dsa_sparse_attention_nondet_train_backward(
-                *args, inp.q_latent, -inp.q_latent, inp.lse, inp.dout
-            )
-    assert not h.launches
+        for name in ("flat", "varlen", "step"):
+            cake_backend.BINDING_CACHE._entries.clear()
+            leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
+            h.bind(leaves[0], leaves[1], inp.dout)
+            mark = h.mark()
+            if name == "step":
+                out, lse, o_lo = (
+                    public_api.cake_dsa_sparse_attention_nondet_train_forward(*args)
+                )
+                assert tuple(lse.shape) == (T, heads)
+                assert tuple(o_lo.shape) == (T, heads, D_LATENT)
+                grads = public_api.cake_dsa_sparse_attention_nondet_train_backward(
+                    *args, out, o_lo, lse, inp.dout
+                )
+                assert [tuple(g.shape) for g in grads] == [
+                    (T, heads, D_LATENT),
+                    (T, heads, D_ROPE),
+                    (64, D_LATENT),
+                    (64, D_ROPE),
+                ]
+            else:
+                if name == "flat":
+                    out = cake_dsa_sparse_attention_nondet(*leaves, inp.indices)
+                else:
+                    out = cake_dsa_sparse_attention_nondet_varlen(
+                        *leaves, inp.indices % 24, cu_q, cu_k, causal=True
+                    )
+                grads = torch.autograd.grad(out, leaves, inp.dout)
+                assert [tuple(g.shape) for g in grads] == [
+                    tuple(t.shape) for t in leaves
+                ]
+            assert tuple(out.shape) == (T, heads, D_LATENT)
+            launches = h.launches[mark:]
+            if T == 0:
+                assert not launches, name
+                continue
+            assert not any(rec.hw or rec.sp for rec in launches), name
+            for family in ("fwd", "main"):
+                found = [
+                    rec.window for rec in launches if hl.family(rec.stage) == family
+                ]
+                assert found == [heads - 64, 0], (name, family, found)
 
 
 @pytest.mark.parametrize("heads", (96, 128))
@@ -3240,10 +3273,8 @@ def test_public_entries_at_more_heads(with_o_lo, heads, record_property):
     """At ``heads`` query heads and scale ``192**-0.5``, on a packed batch of two causal documents: the flat
     autograd entry on the global rows, the varlen autograd entry on the document-relative rows and the step forward
     / backward pair -- ``out``, ``lse`` (step), ``o_lo`` (step) and every gradient of each judged on the same
-    draw (96 and 128 heads ship on ``sm_100a`` / ``sm_103a``)."""
+    draw (on ``sm_107a`` through the single-pass forward and the head-window backward)."""
     _require_program(backward=True)
-    if cake_backend.arch_for(torch.device("cuda")) == "sm_107a":
-        pytest.skip("96 and 128 query heads ship on sm_100a / sm_103a; sm_107a follows")
 
     def case(s, j):
         inp = make_inputs([200, 312], [700, 1500], seed=s, topk=512, heads=heads)

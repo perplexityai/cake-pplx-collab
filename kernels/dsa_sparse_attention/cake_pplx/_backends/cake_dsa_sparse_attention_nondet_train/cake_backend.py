@@ -145,23 +145,28 @@ D_QK = D_LATENT + D_ROPE
 #   - a call without query rows (``T = 0``) returns its empty outputs before any plan (no launch), as at 64 heads:
 #     the head-window launches always cover at least one token.
 #
-# * The single-pass forward (0.9.0), where the program ships it for the device's architecture (``SINGLE_PASS_STAGES``,
-#   :func:`single_pass_stage`; ``sm_100a`` / ``sm_103a``), replaces the head-window forward (and the bridge's): one
-#   launch of ``fwd_h128`` (``fwd_h128_no_olo`` under ``with_o_lo=False``) computes every query head of a token in one
-#   ``(2, 1, 1)`` cluster -- 128 rows split over the pair's two CTAs, the rows past ``H`` zero-filled by the query
-#   loads and never stored -- and writes ``out``, ``lse`` and ``o_lo`` at ``t * H + h`` directly, like the head-window
-#   forward (no window scratch, no copy).  Its arguments are its own: ``num_queries = T`` tokens (not items),
-#   ``num_heads = H``, ``k_rope`` a tensor map (no window selector, no ``k_rope`` stride / offset scalars).  Its grid
-#   is persistent, ``2 * max(1, min(T, SMs // 2))`` CTAs (:func:`single_pass_grid`): cluster ``c`` of ``C`` runs the
-#   tokens ``c, c + C, ...`` in a fixed per-token order, and with ``derive_length`` stores each token's derived
-#   length.  Its ``out`` / ``lse`` / ``o_lo`` are not the 64-head windows' bits (another kernel); the naive BF16 tier
-#   judges them.  The backward plans are unchanged.
+# * The single-pass forward (0.9.0; ``sm_107a`` from 0.12.0), where the program ships it for the device's architecture
+#   (``SINGLE_PASS_STAGES``, :func:`single_pass_stage`; ``SINGLE_PASS_ARCHES``), replaces the head-window forward
+#   (and the bridge's): one launch of ``fwd_h128`` (``fwd_h128_no_olo`` under ``with_o_lo=False``) computes every query
+#   head of a token in one ``(2, 1, 1)`` cluster -- 128 rows split over the pair's two CTAs, the rows past ``H``
+#   zero-filled by the query loads and never stored -- and writes ``out``, ``lse`` and ``o_lo`` at ``t * H + h``
+#   directly, like the head-window forward (no window scratch, no copy).  Its arguments are its own: ``num_queries = T``
+#   tokens (not items), ``num_heads = H``, ``k_rope`` a tensor map (no window selector, no ``k_rope`` stride / offset
+#   scalars).  Its grid is persistent, ``2 * max(1, min(T, SMs // 2))`` CTAs (:func:`single_pass_grid`): cluster ``c``
+#   of ``C`` runs the tokens ``c, c + C, ...`` in a fixed per-token order, and with ``derive_length`` stores each
+#   token's derived length.  Its ``out`` / ``lse`` / ``o_lo`` are not the 64-head windows' bits (another kernel); the
+#   naive BF16 tier judges them.  The backward plans are unchanged.
 #
-# * The two-window bridge (0.7.0), where the program lacks the phase's head-window build: the 64-head kernels on head
-#   windows (``head_windows``), ``W1 = [H - 64, H)`` first and then ``W0 = [0, 64)`` (96: ``[32, 96)`` then
-#   ``[0, 64)``; 128: ``[64, 128)`` then ``[0, 64)``).  The window's query, ``out``, ``dout`` and ``dq`` operands are
-#   head slices of the caller's tensors (the tensor maps carry the strides); its ``lse`` / ``o_lo`` / stats operands
-#   are contiguous ``[T, 64]`` scratch:
+# * The head-window plan is chosen per phase: its forward builds ship on ``WINDOW_ARCHES`` (``sm_100a`` / ``sm_103a``),
+#   its main backward builds on ``BACKWARD_WINDOW_ARCHES`` (``sm_107a`` too, from 0.12.0).  On ``sm_107a`` a call over
+#   96 or 128 heads therefore runs the single-pass forward and the head-window backward: the backward reads the
+#   ``[T, H]`` ``out`` / ``lse`` / ``o_lo`` the single-pass forward writes, as on ``sm_100a`` / ``sm_103a``.
+#
+# * The two-window bridge (0.7.0), where the program lacks the phase's head-window build (on ``sm_107a`` before
+#   0.12.0, both phases): the 64-head kernels on head windows (``head_windows``), ``W1 = [H - 64, H)`` first and then
+#   ``W0 = [0, 64)`` (96: ``[32, 96)`` then ``[0, 64)``; 128: ``[64, 128)`` then ``[0, 64)``).  The window's query,
+#   ``out``, ``dout`` and ``dq`` operands are head slices of the caller's tensors (the tensor maps carry the strides);
+#   its ``lse`` / ``o_lo`` / stats operands are contiguous ``[T, 64]`` scratch:
 #
 #   - forward: each window writes ``out[:, window]`` in place and its ``lse`` / ``o_lo`` into one scratch, from which
 #     a device copy moves the heads the window owns into the ``[T, H]`` outputs -- ``[64, H)`` for ``W1``, ``[0, 64)``
@@ -180,12 +185,24 @@ D_QK = D_LATENT + D_ROPE
 # 32-row rescale groups as the bridge, so ``out``, ``lse``, ``o_lo`` and ``dq`` keep the bridge's bits; ``dK`` / ``dV``
 # add the same terms with FP32 atomics in another order.  The single-pass forward is another kernel: its ``out``,
 # ``lse`` and ``o_lo`` (and so the backward's ``delta`` and ``dq``) are its own bits, run-to-run identical.  The
-# NoPE program serves 64 heads only (the deterministic package's RoPE form serves 96 and 128 with its own builds); on
-# ``sm_107a`` the windows are not yet served (64 heads only).
+# NoPE program serves 64 heads only (the deterministic package's RoPE form serves 96 and 128 with its own builds).  On
+# ``sm_107a`` (in ``HEAD_ARCHES``, ``SINGLE_PASS_ARCHES`` and ``BACKWARD_WINDOW_ARCHES``, not in ``WINDOW_ARCHES``) a
+# call over 96 or 128 heads runs the single-pass forward and the head-window main backward where the registry ships
+# them for ``sm_107a``; a phase whose build it does not ship there runs the two-window bridge on the 64-head stages
+# that ship there (the forward's scanner-warp build ``fwd_scan``).  The head-window forward is never planned there.
 SUPPORTED_HEADS = (64, 96, 128)
 HEAD_WINDOW = NUM_HEADS
-# The architectures whose stages serve the head windows of ``H > 64`` (``sm_107a``: 64 heads only for now).
+# The architectures that serve ``H > 64`` (:func:`_check_window_arch`), each with the head-window and single-pass
+# builds where the program ships them for it and the two-window bridge elsewhere.
+HEAD_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+# The architectures whose head-window forward builds (``fwd_hw``, ``fwd_hw_no_olo``) serve ``H > 64``: the kernels have
+# no head-window forward for ``sm_107a`` (its forward is the single-pass build), so a registry declaring one there does
+# not plan it.
 WINDOW_ARCHES = ("sm_100a", "sm_103a")
+# The architectures whose head-window main backward builds (``bwd_main*_hw``) serve ``H > 64``.
+BACKWARD_WINDOW_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+# The architectures whose single-pass forward builds (``fwd_h128``, ``fwd_h128_no_olo``) serve ``H > 64``.
+SINGLE_PASS_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 # The head-window builds (see the comment above ``SUPPORTED_HEADS``): stage -> its head-window stage.  The forward
 # builds (and their ``with_o_lo=False`` twins) and the four main backward forms (permuted / natural-layout
 # accumulation, single pass / key-range passes) of the RoPE program; the delta, compaction and cast stages serve both
@@ -201,6 +218,9 @@ HEAD_WINDOW_STAGES = {
     "bwd_main_pass_natural": "bwd_main_pass_natural_hw",
 }
 _HEAD_WINDOW_BUILDS = frozenset(HEAD_WINDOW_STAGES.values())
+# The forward stages of ``HEAD_WINDOW_STAGES`` (gated by ``WINDOW_ARCHES``; the main backward stages by
+# ``BACKWARD_WINDOW_ARCHES``).
+_FORWARD_WINDOW_STAGES = frozenset(("fwd", "fwd_no_olo"))
 # The work items per token of a head-window launch (both windows) and its ``wsel`` (-1: both windows of every token).
 HEAD_WINDOW_ITEMS = 2
 HEAD_WINDOW_BOTH = -1
@@ -235,12 +255,16 @@ def window_owned_heads(num_heads: int, head0: int) -> tuple[int, int]:
 
 def head_window_stage(stage: str, arch: Optional[str]) -> Optional[str]:
     """The head-window build of the RoPE program's ``stage`` (``HEAD_WINDOW_STAGES``) that serves ``arch``, or
-    ``None`` when there is none: ``stage`` has no head-window build, ``arch`` is outside ``WINDOW_ARCHES``, or the
+    ``None`` when there is none: ``stage`` has no head-window build, ``arch`` is outside the phase's architectures
+    (``WINDOW_ARCHES`` for the forward stages, ``BACKWARD_WINDOW_ARCHES`` for the main backward stages), or the
     registry does not register the build (a record entry among the record's stages, shipping for ``arch``) with its
     generated launcher and grid (``cake_launch``).  ``None`` plans the two-window bridge for that phase (see the
     comment above ``SUPPORTED_HEADS``)."""
     hw = HEAD_WINDOW_STAGES.get(stage)
-    if hw is None or arch not in WINDOW_ARCHES:
+    arches = (
+        WINDOW_ARCHES if stage in _FORWARD_WINDOW_STAGES else BACKWARD_WINDOW_ARCHES
+    )
+    if hw is None or arch not in arches:
         return None
     if hw not in cake_jit.record() or hw not in cake_jit.registered_stages():
         return None
@@ -254,12 +278,12 @@ def head_window_stage(stage: str, arch: Optional[str]) -> Optional[str]:
 def single_pass_stage(stage: str, arch: Optional[str]) -> Optional[str]:
     """The single-pass forward build (``SINGLE_PASS_STAGES``) that runs the RoPE program's forward ``stage`` (``fwd``
     or ``fwd_no_olo``) over more than 64 query heads on ``arch``, or ``None`` when there is none: ``arch`` is outside
-    ``WINDOW_ARCHES``, or the registry does not register the build (a record entry among the record's stages,
+    ``SINGLE_PASS_ARCHES``, or the registry does not register the build (a record entry among the record's stages,
     shipping for ``arch``) with its generated launcher and grid (``cake_launch``).  It does not need the head-window
     forward it replaces to ship."""
     hw = HEAD_WINDOW_STAGES.get(stage)
     single = SINGLE_PASS_STAGES.get(hw) if hw is not None else None
-    if single is None or arch not in WINDOW_ARCHES:
+    if single is None or arch not in SINGLE_PASS_ARCHES:
         return None
     if single not in cake_jit.record() or single not in cake_jit.registered_stages():
         return None
@@ -402,7 +426,7 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # heads (the one-chunk test reads the 64-head chunk) under the rule of the
 # architecture with the head-window overrides of
 # ``HEAD_WINDOW_KEY_PASS_RULES`` applied (see there: no tail-row passes on
-# ``sm_103a``).  The passes split the whole key row
+# ``sm_103a`` and ``sm_107a``).  The passes split the whole key row
 # ``[0, S)`` into equal ranges,
 # which matches an index row whose keys spread over the whole row (one
 # document); in a packed multi-segment row every token's keys lie inside its
@@ -449,9 +473,16 @@ _R1_RULE: dict[str, int] = dict.fromkeys(KEY_PASS_RULE_FIELDS, 0)
 # token chunk stay 5-15 % slower than one at S = 524,160 / 1,048,320.  [est] The three passes keep each pass's FP32 dKV
 # accumulator slice (S / 3 x 2,304 B) nearer the L2 budget; with head windows the extra launches, the FP32 dQ-partial
 # round trip and the compaction of every pass cost more than that locality gains, also where the slice is close to the
-# 100 MiB budget (113 MB at S = 147,420).  One-chunk rows keep the record's rule; the 64-head plans and the two-window
-# bridge are unchanged.
-HEAD_WINDOW_KEY_PASS_RULES: dict[str, dict[str, int]] = {"sm_103a": {"tail_rows": 0}}
+# 100 MiB budget (113 MB at S = 147,420).  ``sm_107a``: no tail-row passes either.  Its record rule plans two fixed
+# passes on the tail rows from 131,072 keys; on VR200 the head-window build's single pass beats the two passes of the
+# key-range-pass build by 10-12 % on the main-stage kernels at T = 16,380, S = 524,160 / 1,048,320 (96 and 128 heads,
+# top-k 2048; every round of eight).  The single-pass plan runs ``bwd_main_natural_hw`` where the two-pass plan ran
+# ``bwd_main_pass_natural_hw``, so ``dq`` takes the one-pass FP32 summation order (the naive BF16 tier judges it).
+# One-chunk rows keep the record's rule; the 64-head plans and the two-window bridge are unchanged.
+HEAD_WINDOW_KEY_PASS_RULES: dict[str, dict[str, int]] = {
+    "sm_103a": {"tail_rows": 0},
+    "sm_107a": {"tail_rows": 0},
+}
 
 
 @dataclass(frozen=True)
@@ -1303,11 +1334,11 @@ def num_query_heads(q_latent: torch.Tensor) -> int:
 
 
 def _check_window_arch(num_heads: int, arch: Optional[str]) -> None:
-    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``WINDOW_ARCHES`` (``sm_107a`` serves 64
-    query heads until its window stages are validated)."""
-    if int(num_heads) != NUM_HEADS and arch not in WINDOW_ARCHES:
+    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``HEAD_ARCHES`` (:func:`head_window_plan`
+    chooses the plan per phase)."""
+    if int(num_heads) != NUM_HEADS and arch not in HEAD_ARCHES:
         raise NotImplementedError(
-            f"{int(num_heads)} query heads are served on {list(WINDOW_ARCHES)}; "
+            f"{int(num_heads)} query heads are served on {list(HEAD_ARCHES)}; "
             f"{arch if arch is not None else 'this device'} serves {NUM_HEADS} query heads only"
         )
 
@@ -2315,11 +2346,12 @@ class WindowLaunch:
 
 @dataclass(frozen=True)
 class HeadStep:
-    """A device-copy step of a plan over more than 64 heads (torch copies on the current stream: no kernel of the
-    program, no host synchronization, capturable): ``"fwd_copy"`` after the forward window ``head0`` (the heads it
-    owns of its ``lse`` / ``o_lo`` scratch into the ``[T, H]`` outputs), ``"dout_copy"`` (a ``dout`` the delta cannot
-    read in place, :func:`_dout_rows_dense`, into its dense workspace copy) and ``"window_stats"`` (the per-window
-    ``lse`` / ``delta`` of the backward, the pad heads of ``W1`` at ``+inf`` / ``0``)."""
+    """A device-copy step of a plan over more than 64 heads (torch copies on the current stream, each through the
+    widest element view its operands allow, :func:`_wide_copy`: no kernel of the program, no host synchronization,
+    capturable): ``"fwd_copy"`` after the forward window ``head0`` (the heads it owns of its ``lse`` / ``o_lo``
+    scratch into the ``[T, H]`` outputs), ``"dout_copy"`` (a ``dout`` the delta cannot read in place,
+    :func:`_dout_rows_dense`, into its dense workspace copy) and ``"window_stats"`` (the per-window ``lse`` /
+    ``delta`` of the backward, the pad heads of ``W1`` at ``+inf`` / ``0``)."""
 
     name: str
     head0: int = 0
@@ -2353,24 +2385,63 @@ def _window_values(
     return v
 
 
+# The element types of a head step's copies (:func:`_wide_copy`), widest first.  A head slice of ``o_lo`` / ``lse`` is
+# strided, so torch copies it element by element; as BF16 / FP32 elements that copy moves 2 / 4 bytes per element
+# and reaches a fraction of the memory bandwidth, as 16-byte elements several times more.
+_WIDE_COPY_DTYPES = (torch.complex128, torch.int64, torch.int32)
+
+
+def _wide_view(x: torch.Tensor, dtype: torch.dtype) -> Optional[torch.Tensor]:
+    """``x``'s bytes as ``dtype`` elements (its last dimension shrunk), or ``None`` where that view does not exist:
+    ``dtype`` is not wider than ``x``'s element, the last dimension is not contiguous or not a whole number of
+    ``dtype`` elements, or another stride, the storage offset or the address is not a multiple of one."""
+    size, width = x.element_size(), dtype.itemsize
+    if width <= size or width % size or x.dim() == 0 or x.stride(-1) != 1:
+        return None
+    if (
+        (x.shape[-1] * size) % width
+        or (x.storage_offset() * size) % width
+        or x.data_ptr() % width
+    ):
+        return None
+    if any((stride * size) % width for stride in x.stride()[:-1]):
+        return None
+    return x.view(dtype)
+
+
+def _wide_copy(dst: torch.Tensor, src: torch.Tensor) -> Optional[torch.dtype]:
+    """``dst.copy_(src)`` for two tensors of one dtype and shape through the widest of ``_WIDE_COPY_DTYPES`` that
+    views both (:func:`_wide_view`): the same bytes in fewer, wider elements, a byte copy and so bit for bit the
+    copy ``copy_`` makes (no element is converted or computed).  Returns that element type, or ``None`` after a plain
+    ``copy_`` (other dtypes or shapes, no common view, no elements)."""
+    if dst.dtype == src.dtype and dst.shape == src.shape and dst.numel() > 0:
+        for dtype in _WIDE_COPY_DTYPES:
+            wide_dst, wide_src = _wide_view(dst, dtype), _wide_view(src, dtype)
+            if wide_dst is not None and wide_src is not None:
+                wide_dst.copy_(wide_src)
+                return dtype
+    dst.copy_(src)
+    return None
+
+
 def _head_step(plan: "_Plan", step: HeadStep, t: dict[str, torch.Tensor]) -> None:
     """Run the device-copy ``step`` of ``plan`` over the call's tensors ``t`` (:class:`HeadStep`)."""
     H = plan.num_heads
     if step.name == "fwd_copy":
         lo, hi = window_owned_heads(H, step.head0)
         a, b = lo - step.head0, hi - step.head0
-        t["lse"][:, lo:hi].copy_(t["fwd_lse"][:, a:b])
+        _wide_copy(t["lse"][:, lo:hi], t["fwd_lse"][:, a:b])
         if plan.with_o_lo:
-            t["o_lo"][:, lo:hi].copy_(t["fwd_o_lo"][:, a:b])
+            _wide_copy(t["o_lo"][:, lo:hi], t["fwd_o_lo"][:, a:b])
     elif step.name == "dout_copy":
-        t["dout_copy"].copy_(t["dout"])
+        _wide_copy(t["dout_copy"], t["dout"])
     elif step.name == "window_stats":
         lse, delta = t["lse"], t["delta"]
         for index, head0 in enumerate(plan.head_windows):
             lo, hi = window_owned_heads(H, head0)
             a, b = lo - head0, hi - head0
-            t["window_lse"][index, :, a:b].copy_(lse[:, lo:hi])
-            t["window_delta"][index, :, a:b].copy_(delta[:, lo:hi])
+            _wide_copy(t["window_lse"][index, :, a:b], lse[:, lo:hi])
+            _wide_copy(t["window_delta"][index, :, a:b], delta[:, lo:hi])
             if a > 0:
                 # the pad heads of W1 (W0's): P = 0 and dS = 0, so they add nothing and their dq is overwritten
                 t["window_lse"][index, :, :a].fill_(math.inf)
@@ -4132,7 +4203,7 @@ def _no_query_rows(q_latent: torch.Tensor) -> bool:
 
 def _check_empty_window_arch(q_latent: torch.Tensor) -> None:
     """The architecture rule of :func:`_check_window_arch` for a call without query rows: a CUDA ``q_latent`` of more
-    than 64 heads on an architecture outside ``WINDOW_ARCHES`` raises ``NotImplementedError`` as a call with query
+    than 64 heads on an architecture outside ``HEAD_ARCHES`` raises ``NotImplementedError`` as a call with query
     rows does (a host-side query: no launch, no synchronization).  64 heads and host tensors are not checked: those
     calls keep the device-free empty path of 0.6.1."""
     H = num_query_heads(q_latent)
