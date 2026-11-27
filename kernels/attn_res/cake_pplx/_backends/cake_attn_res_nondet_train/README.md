@@ -16,11 +16,11 @@ first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp
 The facade `cake_pplx.cake_attn_res_nondet_train` is a stable API; this backend package is experimental (no
 compatibility guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin) are the
 supported architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests on
-VR200 and R200; their compute-sanitizer runs there were at 0.1.0, and 0.1.1 adds the `dw` memset to the backward
-bindings (the kernels are unchanged). Its libraries are loaded prebuilt from `aot/` when a builder
-compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and launches
-read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX` and the
-`CAKE_PPLX_*` build settings of the root README.
+VR200 and R200; their compute-sanitizer runs there were at 0.1.0, before 0.1.1 added the `dw` memset to the backward
+bindings and 0.1.2 replaced the forward programs of 5 to 9 values. Its libraries are loaded prebuilt from `aot/` when
+a builder compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and
+launches read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX`
+and the `CAKE_PPLX_*` build settings of the root README.
 
 ## Opt-in
 
@@ -49,12 +49,12 @@ must share no byte with an operand or another output (`ValueError`).
 
 | Stage | Record | Grid | Work |
 | --- | --- | --- | --- |
-| `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d`. `fwd_n2` .. `fwd_n4`: each CTA serves whole tokens (no exchange); `fwd_n5` .. `fwd_n9`: the four CTAs of a cluster split each token's columns |
+| `fwd` | `fwd_n2` .. `fwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: `r`, `d`, the softmax `p` and `out`; writes `p`, `r`, `d`. `fwd_n2` .. `fwd_n4`: each CTA of a four-CTA cluster serves whole tokens (no exchange); `fwd_n5` .. `fwd_n9`: one 448-thread CTA serves each token, all 7168 columns, no cluster |
 | `bwd` | `bwd_n2` .. `bwd_n9` | `(cluster CTAs * groups, 1, 1)`, persistent | per token: every `dv_j`. Each CTA keeps its tokens' `dw` sums in registers and adds them into the zeroed `dw` once, after its token loop, with `red.global.add.v4.f32` (four columns per instruction) |
 
 `T = 0` launches no Cake kernel: the backward returns a zero `dw` (a `torch.zeros` fill).
 
-`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`: counts measured per launch bound on B200, GB200, GB300, VR200 and R200; on another device a fallback under every measured count). `fwd_n4` takes at most 64 groups on B200, GB200 and GB300 (`cake_jit.GROUP_CAPS`): it runs up to 7 % faster there than at all 71 or 74 resident groups. The kernels take nine value pointers; the host passes the first value in the slots
+`groups = min(T, resident groups)`, the groups the device holds at once (`cake_jit.resident_groups`). `fwd_n5` .. `fwd_n9` hold one CTA per SM and launch no cluster, so they take one group per SM on every device. The four-CTA programs take counts measured per launch bound on B200, GB200, GB300, VR200 and R200; on another device a fallback under every measured count. `fwd_n4` takes at most 64 groups on B200, GB200 and GB300 (`cake_jit.GROUP_CAPS`): it runs up to 7 % faster there than at all 71 or 74 resident groups. The kernels take nine value pointers; the host passes the first value in the slots
 past `n`, which the kernels never read.
 
 The zeroing of `dw` is part of the backward launch: `run` takes `dw` again as its `zero_region` argument and zeroes it
